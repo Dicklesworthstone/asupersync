@@ -7,6 +7,8 @@
 //! - **Versioning**: Format version in header for forward compatibility
 //! - **Streaming**: Events can be read incrementally without loading all into memory
 //! - **Compression**: Optional LZ4 compression for reduced storage (feature-gated)
+//! - **Integrity**: Version 3 authenticates metadata and canonical event frames
+//!   with SHA-256 before accepting a complete trace
 //!
 //! # File Format
 //!
@@ -22,13 +24,23 @@
 //! +-------------------+
 //! | Meta len (4 bytes)|  u32 little-endian
 //! +-------------------+
+//! | Meta SHA-256 (32) |  digest of the MessagePack metadata bytes (v3)
+//! +-------------------+
 //! | Metadata (msgpack)|  TraceMetadata
 //! +-------------------+
 //! | Event count (8 b) |  u64 little-endian
 //! +-------------------+
+//! | Event SHA-256 (32)|  digest of canonical `len || msgpack` frames (v3)
+//! +-------------------+
 //! | Events (msgpack)  |  [ReplayEvent] length-prefixed (optionally compressed)
 //! +-------------------+
 //! ```
+//!
+//! Readers accept the legacy v1/v2 layouts and the current v3 layout. Writers
+//! always emit v3. [`migrate_trace_file`] copies a legacy trace into a distinct,
+//! non-existing v3 destination while preserving the source as a rollback
+//! anchor. [`recover_trace_prefix`] returns only a contiguous, bounded prefix
+//! and an explicit partial/limit receipt; it never skips a corrupt record.
 //!
 //! # Compression
 //!
@@ -61,9 +73,11 @@
 use super::recorder::{DEFAULT_MAX_FILE_SIZE, LimitAction, LimitKind, LimitReached};
 use super::replay::{REPLAY_SCHEMA_VERSION, ReplayEvent, TraceMetadata};
 use crate::tracing_compat::{error, warn};
-use std::fs::File;
+use sha2::{Digest, Sha256};
+use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // =============================================================================
 // Constants
@@ -73,14 +87,28 @@ use std::path::Path;
 pub const TRACE_MAGIC: &[u8; 11] = b"ASUPERTRACE";
 
 /// Current file format version.
-/// Version 2 adds compression byte after flags.
-pub const TRACE_FILE_VERSION: u16 = 2;
+///
+/// Version 2 added the compression byte after flags. Version 3 adds SHA-256
+/// digests for the metadata and the canonical uncompressed event-frame stream.
+pub const TRACE_FILE_VERSION: u16 = 3;
 
 /// Flag: Events are LZ4 compressed.
 pub const FLAG_COMPRESSED: u16 = 0x0001;
 
-/// Header size (magic + version + flags + compression + meta_len).
-pub const HEADER_SIZE: usize = 11 + 2 + 2 + 1 + 4;
+/// Flag: metadata and event-stream SHA-256 digests are present.
+pub const FLAG_CHECKSUMMED: u16 = 0x0002;
+
+/// Width of each persisted SHA-256 digest.
+pub const TRACE_CHECKSUM_LEN: usize = 32;
+
+/// Header size through the metadata digest for the current format.
+///
+/// The metadata bytes, event count, event digest, and event frames follow.
+pub const HEADER_SIZE: usize = 11 + 2 + 2 + 1 + 4 + TRACE_CHECKSUM_LEN;
+
+/// Header size through metadata length for v2 files.
+pub const LEGACY_HEADER_SIZE: usize = 11 + 2 + 2 + 1 + 4;
+const SUPPORTED_FLAGS: u16 = FLAG_COMPRESSED | FLAG_CHECKSUMMED;
 
 /// Default chunk size for streaming compression (64KB).
 pub const DEFAULT_COMPRESSION_CHUNK_SIZE: usize = 64 * 1024;
@@ -145,6 +173,22 @@ fn validate_event_len(len: usize) -> TraceFileResult<()> {
     }
 
     Ok(())
+}
+
+fn sha256(bytes: &[u8]) -> [u8; TRACE_CHECKSUM_LEN] {
+    Sha256::digest(bytes).into()
+}
+
+fn verify_checksum(
+    section: &'static str,
+    expected: &[u8; TRACE_CHECKSUM_LEN],
+    actual: &[u8; TRACE_CHECKSUM_LEN],
+) -> TraceFileResult<()> {
+    if expected == actual {
+        Ok(())
+    } else {
+        Err(TraceFileError::ChecksumMismatch { section })
+    }
 }
 
 fn truncated_or_io(err: io::Error) -> TraceFileError {
@@ -309,7 +353,7 @@ pub enum TraceFileError {
     InvalidMagic,
 
     /// Unsupported file format version.
-    #[error("unsupported file version: expected <= {expected}, found {found}")]
+    #[error("unsupported file version: expected 1..={expected}, found {found}")]
     UnsupportedVersion {
         /// Maximum supported version.
         expected: u16,
@@ -384,6 +428,28 @@ pub enum TraceFileError {
         /// Maximum allowed.
         max: u64,
     },
+
+    /// A persisted integrity digest does not match the decoded bytes.
+    #[error("{section} checksum mismatch")]
+    ChecksumMismatch {
+        /// Logical section whose digest failed.
+        section: &'static str,
+    },
+
+    /// Migration input and output resolve to the same path.
+    #[error("trace migration input and output must differ")]
+    MigrationInputOutputSame,
+
+    /// Migration destination already exists and will not be overwritten.
+    #[error("trace migration destination already exists")]
+    MigrationDestinationExists,
+
+    /// The source already uses the current trace container version.
+    #[error("trace already uses current file version {version}")]
+    MigrationAlreadyCurrent {
+        /// Current container version.
+        version: u16,
+    },
 }
 
 impl From<rmp_serde::encode::Error> for TraceFileError {
@@ -432,6 +498,8 @@ pub struct TraceWriter {
     writer: BufWriter<File>,
     event_count: u64,
     event_count_pos: u64,
+    event_digest_pos: u64,
+    event_hasher: Sha256,
     finished: bool,
     metadata_state: TraceWriterMetadataState,
     config: TraceFileConfig,
@@ -464,12 +532,18 @@ impl TraceWriter {
         config: TraceFileConfig,
     ) -> TraceFileResult<Self> {
         let file = File::create(path)?;
+        Ok(Self::from_file(file, config))
+    }
+
+    fn from_file(file: File, config: TraceFileConfig) -> Self {
         let writer = BufWriter::new(file);
 
-        Ok(Self {
+        Self {
             writer,
             event_count: 0,
             event_count_pos: 0,
+            event_digest_pos: 0,
+            event_hasher: Sha256::new(),
             finished: false,
             metadata_state: TraceWriterMetadataState::Pending,
             config,
@@ -479,7 +553,7 @@ impl TraceWriter {
             halted: false,
             #[cfg(feature = "trace-compression")]
             event_buffer: Vec::new(),
-        })
+        }
     }
 
     fn should_write(&self) -> bool {
@@ -565,22 +639,25 @@ impl TraceWriter {
         }
     }
 
-    fn update_event_count(&mut self) -> TraceFileResult<()> {
+    fn update_integrity_header(&mut self) -> TraceFileResult<()> {
         self.writer.seek(SeekFrom::Start(self.event_count_pos))?;
         self.writer.write_all(&self.event_count.to_le_bytes())?;
+        self.writer.seek(SeekFrom::Start(self.event_digest_pos))?;
+        let digest: [u8; TRACE_CHECKSUM_LEN] = self.event_hasher.clone().finalize().into();
+        self.writer.write_all(&digest)?;
         self.writer.flush()?;
         Ok(())
     }
 
-    fn update_event_count_best_effort(&mut self) {
-        if let Err(err) = self.update_event_count() {
+    fn update_integrity_header_best_effort(&mut self) {
+        if let Err(err) = self.update_integrity_header() {
             if matches!(
                 &err,
                 TraceFileError::Io(io_err) if Self::is_disk_full(io_err)
             ) {
                 warn!("trace event count update skipped: disk full");
             }
-            warn!("trace event count update skipped: {err}");
+            warn!("trace integrity header update skipped: {err}");
         }
     }
 
@@ -616,13 +693,21 @@ impl TraceWriter {
 
         // Serialize metadata to get its length
         let meta_bytes = rmp_serde::to_vec(metadata)?;
+        if meta_bytes.len() > MAX_META_LEN {
+            return Err(TraceFileError::OversizedField {
+                field: "meta_len",
+                actual: meta_bytes.len() as u64,
+                max: MAX_META_LEN as u64,
+            });
+        }
 
         // Determine flags
-        let flags = if self.config.compression.is_compressed() {
-            FLAG_COMPRESSED
-        } else {
-            0
-        };
+        let flags = FLAG_CHECKSUMMED
+            | if self.config.compression.is_compressed() {
+                FLAG_COMPRESSED
+            } else {
+                0
+            };
 
         // Once header emission starts, a failure leaves the file in a partial
         // state. Poison the writer so callers do not append events to a broken
@@ -646,11 +731,14 @@ impl TraceWriter {
             ))
         })?;
         self.write_bytes(&meta_len.to_le_bytes())?;
+        self.write_bytes(&sha256(&meta_bytes))?;
         self.write_bytes(&meta_bytes)?;
 
-        // Reserve the event-count header slot; finish() backpatches it.
+        // Reserve event-count and event-digest slots; finish() backpatches both.
         self.event_count_pos = HEADER_SIZE as u64 + u64::from(meta_len);
         self.write_bytes(&0u64.to_le_bytes())?;
+        self.event_digest_pos = self.event_count_pos + 8;
+        self.write_bytes(&[0u8; TRACE_CHECKSUM_LEN])?;
         self.metadata_state = TraceWriterMetadataState::Written;
 
         Ok(())
@@ -691,6 +779,7 @@ impl TraceWriter {
 
         // Serialize event with length prefix
         let event_bytes = rmp_serde::to_vec(event)?;
+        validate_event_len(event_bytes.len())?;
         let len = u32::try_from(event_bytes.len()).map_err(|_| {
             TraceFileError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -718,6 +807,9 @@ impl TraceWriter {
                 return Ok(());
             }
         }
+
+        self.event_hasher.update(len.to_le_bytes());
+        self.event_hasher.update(&event_bytes);
 
         #[cfg(feature = "trace-compression")]
         if self.config.compression.is_compressed() {
@@ -790,15 +882,15 @@ impl TraceWriter {
 
         if self.halted {
             let _ = self.writer.flush();
-            self.update_event_count_best_effort();
+            self.update_integrity_header_best_effort();
             return Ok(());
         }
 
         // Flush buffered data
         self.writer.flush()?;
 
-        // Seek back and update event count
-        self.update_event_count()?;
+        // Seek back and update event count and stream digest.
+        self.update_integrity_header()?;
 
         Ok(())
     }
@@ -821,7 +913,7 @@ impl Drop for TraceWriter {
             // Best-effort: try to flush but don't panic
             let _ = self.writer.flush();
             if self.metadata_state == TraceWriterMetadataState::Written {
-                self.update_event_count_best_effort();
+                self.update_integrity_header_best_effort();
             }
         }
     }
@@ -852,11 +944,14 @@ impl Drop for TraceWriter {
 #[derive(Debug)]
 pub struct TraceReader {
     reader: BufReader<File>,
+    file_version: u16,
     metadata: TraceMetadata,
     event_count: u64,
     events_read: u64,
     events_start_pos: u64,
     compression: CompressionMode,
+    expected_event_digest: Option<[u8; TRACE_CHECKSUM_LEN]>,
+    event_hasher: Sha256,
     /// Buffer for decompressed event data.
     #[cfg(feature = "trace-compression")]
     decompressed_buffer: Vec<u8>,
@@ -893,7 +988,7 @@ impl TraceReader {
         let mut version_bytes = [0u8; 2];
         reader.read_exact(&mut version_bytes)?;
         let version = u16::from_le_bytes(version_bytes);
-        if version > TRACE_FILE_VERSION {
+        if !(1..=TRACE_FILE_VERSION).contains(&version) {
             return Err(TraceFileError::UnsupportedVersion {
                 expected: TRACE_FILE_VERSION,
                 found: version,
@@ -905,11 +1000,25 @@ impl TraceReader {
         reader.read_exact(&mut flags_bytes)?;
         let flags = u16::from_le_bytes(flags_bytes);
         let is_compressed = flags & FLAG_COMPRESSED != 0;
+        let supported_flags = if version >= 3 {
+            SUPPORTED_FLAGS
+        } else {
+            FLAG_COMPRESSED
+        };
+        if flags & !supported_flags != 0 || (version >= 3 && flags & FLAG_CHECKSUMMED == 0) {
+            return Err(TraceFileError::UnsupportedFlags(flags));
+        }
 
         // Read compression byte (only in version 2+)
         let compression = if version >= 2 {
             let mut comp_byte = [0u8; 1];
             reader.read_exact(&mut comp_byte)?;
+            if !is_compressed && comp_byte[0] != 0 {
+                return Err(TraceFileError::UnsupportedCompression(comp_byte[0]));
+            }
+            if is_compressed && comp_byte[0] == 0 {
+                return Err(TraceFileError::UnsupportedFlags(flags));
+            }
             match CompressionMode::from_byte(comp_byte[0]) {
                 Some(mode) => mode,
                 None if comp_byte[0] == 1 && is_compressed => {
@@ -927,6 +1036,9 @@ impl TraceReader {
             }
             CompressionMode::None
         };
+        if compression.is_compressed() != is_compressed {
+            return Err(TraceFileError::UnsupportedFlags(flags));
+        }
 
         // Check if we can handle compression
         #[cfg(not(feature = "trace-compression"))]
@@ -948,9 +1060,22 @@ impl TraceReader {
             });
         }
 
+        let expected_metadata_digest = if version >= 3 {
+            let mut digest = [0u8; TRACE_CHECKSUM_LEN];
+            reader.read_exact(&mut digest).map_err(truncated_or_io)?;
+            Some(digest)
+        } else {
+            None
+        };
+
         // Read metadata
         let mut meta_bytes = vec![0u8; meta_len];
-        reader.read_exact(&mut meta_bytes)?;
+        reader
+            .read_exact(&mut meta_bytes)
+            .map_err(truncated_or_io)?;
+        if let Some(expected) = expected_metadata_digest {
+            verify_checksum("metadata", &expected, &sha256(&meta_bytes))?;
+        }
         let metadata: TraceMetadata = rmp_serde::from_slice(&meta_bytes)?;
 
         // Validate schema version
@@ -966,21 +1091,31 @@ impl TraceReader {
         reader.read_exact(&mut event_count_bytes)?;
         let event_count = u64::from_le_bytes(event_count_bytes);
 
-        // Calculate events start position (header size depends on version)
-        let header_size = if version >= 2 {
-            HEADER_SIZE
+        let expected_event_digest = if version >= 3 {
+            let mut digest = [0u8; TRACE_CHECKSUM_LEN];
+            reader.read_exact(&mut digest).map_err(truncated_or_io)?;
+            Some(digest)
         } else {
-            HEADER_SIZE - 1
+            None
         };
-        let events_start_pos = header_size as u64 + meta_len as u64 + 8;
+        let events_start_pos = reader.stream_position()?;
+
+        if event_count == 0 {
+            if let Some(expected) = expected_event_digest {
+                verify_checksum("event stream", &expected, &sha256(&[]))?;
+            }
+        }
 
         Ok(Self {
             reader,
+            file_version: version,
             metadata,
             event_count,
             events_read: 0,
             events_start_pos,
             compression,
+            expected_event_digest,
+            event_hasher: Sha256::new(),
             #[cfg(feature = "trace-compression")]
             decompressed_buffer: Vec::new(),
             #[cfg(feature = "trace-compression")]
@@ -992,6 +1127,12 @@ impl TraceReader {
     #[must_use]
     pub fn is_compressed(&self) -> bool {
         self.compression.is_compressed()
+    }
+
+    /// Returns the persisted container version.
+    #[must_use]
+    pub const fn file_version(&self) -> u16 {
+        self.file_version
     }
 
     /// Returns the compression mode of the trace file.
@@ -1028,6 +1169,8 @@ impl TraceReader {
             reader: self.reader,
             remaining: self.event_count,
             compression: self.compression,
+            expected_event_digest: self.expected_event_digest,
+            event_hasher: self.event_hasher,
             #[cfg(feature = "trace-compression")]
             decompressed_buffer: self.decompressed_buffer,
             #[cfg(feature = "trace-compression")]
@@ -1076,6 +1219,11 @@ impl TraceReader {
             .map_err(truncated_or_io)?;
 
         let event: ReplayEvent = rmp_serde::from_slice(&event_bytes)?;
+        self.event_hasher.update(len_bytes);
+        self.event_hasher.update(&event_bytes);
+        if self.events_read.saturating_add(1) == self.event_count {
+            self.verify_event_stream_checksum()?;
+        }
         self.events_read += 1;
 
         Ok(Some(event))
@@ -1106,10 +1254,23 @@ impl TraceReader {
         }
         let event_bytes = &self.decompressed_buffer[self.buffer_pos..self.buffer_pos + len];
         let event: ReplayEvent = rmp_serde::from_slice(event_bytes)?;
+        self.event_hasher.update(len_bytes);
+        self.event_hasher.update(event_bytes);
+        if self.events_read.saturating_add(1) == self.event_count {
+            self.verify_event_stream_checksum()?;
+        }
         self.buffer_pos += len;
 
         self.events_read += 1;
         Ok(Some(event))
+    }
+
+    fn verify_event_stream_checksum(&self) -> TraceFileResult<()> {
+        if let Some(expected) = self.expected_event_digest {
+            let actual: [u8; TRACE_CHECKSUM_LEN] = self.event_hasher.clone().finalize().into();
+            verify_checksum("event stream", &expected, &actual)?;
+        }
+        Ok(())
     }
 
     /// Refills the decompressed buffer from the next compressed chunk.
@@ -1172,6 +1333,7 @@ impl TraceReader {
     pub fn rewind(&mut self) -> TraceFileResult<()> {
         self.reader.seek(SeekFrom::Start(self.events_start_pos))?;
         self.events_read = 0;
+        self.event_hasher = Sha256::new();
 
         #[cfg(feature = "trace-compression")]
         {
@@ -1215,6 +1377,8 @@ pub struct TraceEventIterator {
     remaining: u64,
     #[cfg_attr(not(feature = "trace-compression"), allow(dead_code))]
     compression: CompressionMode,
+    expected_event_digest: Option<[u8; TRACE_CHECKSUM_LEN]>,
+    event_hasher: Sha256,
     /// Buffer for decompressed event data.
     #[cfg(feature = "trace-compression")]
     decompressed_buffer: Vec<u8>,
@@ -1266,6 +1430,9 @@ impl TraceEventIterator {
 
         match rmp_serde::from_slice(&event_bytes) {
             Ok(event) => {
+                self.event_hasher.update(len_bytes);
+                self.event_hasher.update(&event_bytes);
+                self.verify_final_checksum()?;
                 self.remaining -= 1;
                 Ok(event)
             }
@@ -1302,12 +1469,25 @@ impl TraceEventIterator {
 
         match rmp_serde::from_slice(event_bytes) {
             Ok(event) => {
+                self.event_hasher.update(len_bytes);
+                self.event_hasher.update(event_bytes);
+                self.verify_final_checksum()?;
                 self.buffer_pos += len;
                 self.remaining -= 1;
                 Ok(event)
             }
             Err(e) => Err(TraceFileError::from(e)),
         }
+    }
+
+    fn verify_final_checksum(&self) -> TraceFileResult<()> {
+        if self.remaining == 1 {
+            if let Some(expected) = self.expected_event_digest {
+                let actual: [u8; TRACE_CHECKSUM_LEN] = self.event_hasher.clone().finalize().into();
+                verify_checksum("event stream", &expected, &actual)?;
+            }
+        }
+        Ok(())
     }
 
     /// Refills the decompressed buffer from the next compressed chunk.
@@ -1422,6 +1602,237 @@ pub fn read_trace(path: impl AsRef<Path>) -> TraceFileResult<(TraceMetadata, Vec
     Ok((metadata, events))
 }
 
+/// Result of a bounded attempt to recover a valid event prefix.
+#[derive(Debug)]
+pub struct TraceRecovery {
+    /// Persisted container version.
+    pub file_version: u16,
+    /// Decoded metadata from the trace header.
+    pub metadata: TraceMetadata,
+    /// Event count declared in the trace header.
+    pub declared_events: u64,
+    /// Events decoded in order before corruption, truncation, or the caller's
+    /// bound. For v3, only `Complete` authenticates the whole event stream.
+    pub recovered_events: Vec<ReplayEvent>,
+    /// Terminal recovery state.
+    pub status: TraceRecoveryStatus,
+}
+
+/// Terminal state for bounded trace-prefix recovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TraceRecoveryStatus {
+    /// Every declared event and the v3 event-stream checksum were verified.
+    Complete,
+    /// A corrupt or truncated record ended recovery.
+    Partial {
+        /// Index of the first event that could not be recovered.
+        next_event: u64,
+        /// Stable human-readable source error.
+        error: String,
+    },
+    /// The caller-provided event bound ended recovery.
+    LimitReached {
+        /// Maximum number of events admitted into memory.
+        max_events: usize,
+    },
+}
+
+/// Recovers at most `max_events` decodable events from the start of a trace.
+///
+/// Header corruption remains a hard error because no trustworthy metadata or
+/// framing exists. Event-stream corruption returns an explicit partial receipt
+/// and never skips ahead or silently drops an event. Because v3 uses one digest
+/// for the complete canonical event stream, a partial or limit-reached v3
+/// receipt is not checksum admission and must not be treated as deterministic
+/// replay proof.
+pub fn recover_trace_prefix(
+    path: impl AsRef<Path>,
+    max_events: usize,
+) -> TraceFileResult<TraceRecovery> {
+    let mut reader = TraceReader::open(path)?;
+    let file_version = reader.file_version();
+    let metadata = reader.metadata().clone();
+    let declared_events = reader.event_count();
+    let mut recovered_events = Vec::with_capacity(
+        usize::try_from(declared_events)
+            .unwrap_or(usize::MAX)
+            .min(max_events),
+    );
+
+    while recovered_events.len() < max_events {
+        match reader.read_event() {
+            Ok(Some(event)) => recovered_events.push(event),
+            Ok(None) => {
+                return Ok(TraceRecovery {
+                    file_version,
+                    metadata,
+                    declared_events,
+                    recovered_events,
+                    status: TraceRecoveryStatus::Complete,
+                });
+            }
+            Err(error) => {
+                return Ok(TraceRecovery {
+                    file_version,
+                    metadata,
+                    declared_events,
+                    status: TraceRecoveryStatus::Partial {
+                        next_event: recovered_events.len() as u64,
+                        error: error.to_string(),
+                    },
+                    recovered_events,
+                });
+            }
+        }
+    }
+
+    let status = if recovered_events.len() as u64 == declared_events {
+        TraceRecoveryStatus::Complete
+    } else {
+        TraceRecoveryStatus::LimitReached { max_events }
+    };
+    Ok(TraceRecovery {
+        file_version,
+        metadata,
+        declared_events,
+        recovered_events,
+        status,
+    })
+}
+
+/// Receipt for a non-overwriting legacy-container migration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceFileMigrationReceipt {
+    /// Source container version.
+    pub source_version: u16,
+    /// Destination container version.
+    pub target_version: u16,
+    /// Number of events copied without semantic transformation.
+    pub events_copied: u64,
+}
+
+static MIGRATION_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+struct MigrationTempPath {
+    path: PathBuf,
+}
+
+impl MigrationTempPath {
+    fn create(output: &Path) -> io::Result<(File, Self)> {
+        let parent = output.parent().unwrap_or_else(|| Path::new("."));
+        let file_name = output.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "trace migration output has no file name",
+            )
+        })?;
+        let file_name = file_name.to_string_lossy();
+
+        for _ in 0..64 {
+            let sequence = MIGRATION_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = parent.join(format!(
+                ".{file_name}.asupersync-migrate-{}-{sequence}",
+                std::process::id()
+            ));
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => return Ok((file, Self { path })),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not allocate a unique trace migration staging path",
+        ))
+    }
+
+    fn publish(self, output: &Path) -> io::Result<()> {
+        std::fs::hard_link(&self.path, output)?;
+        Ok(())
+    }
+}
+
+impl Drop for MigrationTempPath {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_file(&self.path)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            warn!(
+                path = %self.path.display(),
+                error = %error,
+                "failed to remove trace migration staging file"
+            );
+        }
+    }
+}
+
+/// Rewrites a complete v1/v2 trace into the current checksummed container.
+///
+/// The source is never modified, the destination must not exist, and all
+/// events are streamed in their original order. The destination is assembled
+/// and synced at a sibling staging path, then atomically published with a hard
+/// link so a malformed source or write failure cannot expose a partial target.
+/// Keeping the source provides the explicit rollback anchor.
+pub fn migrate_trace_file(
+    input: impl AsRef<Path>,
+    output: impl AsRef<Path>,
+) -> TraceFileResult<TraceFileMigrationReceipt> {
+    let input = input.as_ref();
+    let output = output.as_ref();
+    if input == output {
+        return Err(TraceFileError::MigrationInputOutputSame);
+    }
+    if output.exists() {
+        return Err(TraceFileError::MigrationDestinationExists);
+    }
+
+    let mut reader = TraceReader::open(input)?;
+    let source_version = reader.file_version();
+    if source_version == TRACE_FILE_VERSION {
+        return Err(TraceFileError::MigrationAlreadyCurrent {
+            version: source_version,
+        });
+    }
+    let metadata = reader.metadata().clone();
+    let compression = reader.compression();
+    let (output_file, staged_path) = MigrationTempPath::create(output)?;
+    let mut writer = TraceWriter::from_file(
+        output_file,
+        TraceFileConfig::new()
+            .with_compression(compression)
+            .with_max_file_size(0)
+            .on_limit(LimitAction::Fail),
+    );
+    writer.write_metadata(&metadata)?;
+
+    let mut events_copied = 0u64;
+    while let Some(event) = reader.read_event()? {
+        writer.write_event(&event)?;
+        events_copied = events_copied.saturating_add(1);
+    }
+    writer.finish()?;
+    File::open(&staged_path.path)?.sync_all()?;
+    staged_path.publish(output).map_err(|error| {
+        if error.kind() == io::ErrorKind::AlreadyExists {
+            TraceFileError::MigrationDestinationExists
+        } else {
+            TraceFileError::Io(error)
+        }
+    })?;
+
+    Ok(TraceFileMigrationReceipt {
+        source_version,
+        target_version: TRACE_FILE_VERSION,
+        events_copied,
+    })
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -1469,6 +1880,52 @@ mod tests {
         ]
     }
 
+    fn write_v2_trace(
+        path: &std::path::Path,
+        metadata: &TraceMetadata,
+        events: &[ReplayEvent],
+        declared_events: u64,
+    ) {
+        let mut file = std::fs::File::create(path).expect("create v2 trace");
+        file.write_all(TRACE_MAGIC).expect("write magic");
+        file.write_all(&2u16.to_le_bytes()).expect("write version");
+        file.write_all(&0u16.to_le_bytes()).expect("write flags");
+        file.write_all(&[0]).expect("write compression");
+        let metadata_bytes = rmp_serde::to_vec(metadata).expect("serialize metadata");
+        file.write_all(&(metadata_bytes.len() as u32).to_le_bytes())
+            .expect("write metadata length");
+        file.write_all(&metadata_bytes).expect("write metadata");
+        file.write_all(&declared_events.to_le_bytes())
+            .expect("write event count");
+        for event in events {
+            let event_bytes = rmp_serde::to_vec(event).expect("serialize event");
+            file.write_all(&(event_bytes.len() as u32).to_le_bytes())
+                .expect("write event length");
+            file.write_all(&event_bytes).expect("write event");
+        }
+        file.flush().expect("flush v2 trace");
+    }
+
+    fn write_v1_trace(path: &std::path::Path, metadata: &TraceMetadata, events: &[ReplayEvent]) {
+        let mut file = std::fs::File::create(path).expect("create v1 trace");
+        file.write_all(TRACE_MAGIC).expect("write magic");
+        file.write_all(&1u16.to_le_bytes()).expect("write version");
+        file.write_all(&0u16.to_le_bytes()).expect("write flags");
+        let metadata_bytes = rmp_serde::to_vec(metadata).expect("serialize metadata");
+        file.write_all(&(metadata_bytes.len() as u32).to_le_bytes())
+            .expect("write metadata length");
+        file.write_all(&metadata_bytes).expect("write metadata");
+        file.write_all(&(events.len() as u64).to_le_bytes())
+            .expect("write event count");
+        for event in events {
+            let event_bytes = rmp_serde::to_vec(event).expect("serialize event");
+            file.write_all(&(event_bytes.len() as u32).to_le_bytes())
+                .expect("write event length");
+            file.write_all(&event_bytes).expect("write event");
+        }
+        file.flush().expect("flush v1 trace");
+    }
+
     fn write_header_with_raw_compression(
         file: &mut std::fs::File,
         flags: u16,
@@ -1478,8 +1935,7 @@ mod tests {
         let meta_bytes = rmp_serde::to_vec(&metadata).expect("serialize metadata");
 
         file.write_all(TRACE_MAGIC).expect("write magic");
-        file.write_all(&TRACE_FILE_VERSION.to_le_bytes())
-            .expect("write version");
+        file.write_all(&2u16.to_le_bytes()).expect("write version");
         file.write_all(&flags.to_le_bytes()).expect("write flags");
         file.write_all(&[compression_byte])
             .expect("write compression");
@@ -1511,7 +1967,7 @@ mod tests {
         );
         let compression_byte = bytes[TRACE_MAGIC.len() + 4];
         let meta_len = u32::from_le_bytes(
-            bytes[TRACE_MAGIC.len() + 5..HEADER_SIZE]
+            bytes[TRACE_MAGIC.len() + 5..LEGACY_HEADER_SIZE]
                 .try_into()
                 .expect("metadata length bytes"),
         );
@@ -1663,6 +2119,260 @@ mod tests {
         for (orig, read) in events.iter().zip(read_events.iter()) {
             assert_eq!(orig, read);
         }
+    }
+
+    #[test]
+    fn current_trace_header_carries_metadata_and_event_digests() {
+        let temp = NamedTempFile::new().expect("create temp file");
+        let metadata = TraceMetadata::new(42);
+        let events = sample_events();
+        write_trace(temp.path(), &metadata, &events).expect("write trace");
+
+        let bytes = std::fs::read(temp.path()).expect("read trace");
+        let version = u16::from_le_bytes(
+            bytes[TRACE_MAGIC.len()..TRACE_MAGIC.len() + 2]
+                .try_into()
+                .expect("version bytes"),
+        );
+        let flags = u16::from_le_bytes(
+            bytes[TRACE_MAGIC.len() + 2..TRACE_MAGIC.len() + 4]
+                .try_into()
+                .expect("flags bytes"),
+        );
+        assert_eq!(version, TRACE_FILE_VERSION);
+        assert_eq!(flags & FLAG_CHECKSUMMED, FLAG_CHECKSUMMED);
+        assert_eq!(
+            TraceReader::open(temp.path())
+                .expect("open current trace")
+                .load_all()
+                .expect("verify current trace"),
+            events
+        );
+    }
+
+    #[test]
+    fn zero_file_version_and_mismatched_compression_byte_fail_closed() {
+        let temp = NamedTempFile::new().expect("create temp file");
+        write_trace(temp.path(), &TraceMetadata::new(42), &sample_events()).expect("write trace");
+        let baseline = std::fs::read(temp.path()).expect("read trace");
+
+        let mut zero_version = baseline.clone();
+        zero_version[TRACE_MAGIC.len()..TRACE_MAGIC.len() + 2].copy_from_slice(&0u16.to_le_bytes());
+        std::fs::write(temp.path(), zero_version).expect("write zero-version trace");
+        assert!(matches!(
+            TraceReader::open(temp.path()),
+            Err(TraceFileError::UnsupportedVersion { found: 0, .. })
+        ));
+
+        let mut mismatched_compression = baseline;
+        mismatched_compression[TRACE_MAGIC.len() + 4] = 1;
+        std::fs::write(temp.path(), mismatched_compression)
+            .expect("write mismatched compression byte");
+        assert!(matches!(
+            TraceReader::open(temp.path()),
+            Err(TraceFileError::UnsupportedCompression(1))
+        ));
+    }
+
+    #[test]
+    fn metadata_checksum_mismatch_fails_before_decode() {
+        let temp = NamedTempFile::new().expect("create temp file");
+        write_trace(temp.path(), &TraceMetadata::new(42), &sample_events()).expect("write trace");
+
+        let mut bytes = std::fs::read(temp.path()).expect("read trace");
+        bytes[LEGACY_HEADER_SIZE] ^= 0x01;
+        std::fs::write(temp.path(), bytes).expect("corrupt metadata digest");
+
+        let error = match TraceReader::open(temp.path()) {
+            Ok(_) => panic!("checksum must fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            TraceFileError::ChecksumMismatch {
+                section: "metadata"
+            }
+        ));
+    }
+
+    #[test]
+    fn event_stream_checksum_mismatch_is_fail_closed() {
+        let temp = NamedTempFile::new().expect("create temp file");
+        let metadata = TraceMetadata::new(42);
+        let events = sample_events();
+        write_trace(temp.path(), &metadata, &events).expect("write trace");
+
+        let mut bytes = std::fs::read(temp.path()).expect("read trace");
+        let meta_len = rmp_serde::to_vec(&metadata)
+            .expect("serialize metadata")
+            .len();
+        let event_digest_offset = HEADER_SIZE + meta_len + 8;
+        bytes[event_digest_offset] ^= 0x01;
+        std::fs::write(temp.path(), bytes).expect("corrupt event digest");
+
+        let error = TraceReader::open(temp.path())
+            .expect("header remains valid")
+            .load_all()
+            .expect_err("event digest must fail");
+        assert!(matches!(
+            error,
+            TraceFileError::ChecksumMismatch {
+                section: "event stream"
+            }
+        ));
+    }
+
+    #[test]
+    fn v2_reader_and_non_overwriting_migration_preserve_semantics_and_source() {
+        let source = NamedTempFile::new().expect("create source");
+        let output_dir = tempfile::tempdir().expect("create output dir");
+        let output = output_dir.path().join("migrated.trace");
+        let metadata = TraceMetadata::new(7).with_description("legacy-v2");
+        let events = sample_events();
+        write_v2_trace(source.path(), &metadata, &events, events.len() as u64);
+        let source_bytes = std::fs::read(source.path()).expect("read source baseline");
+
+        let legacy_reader = TraceReader::open(source.path()).expect("open v2");
+        assert_eq!(legacy_reader.file_version(), 2);
+        assert_eq!(legacy_reader.load_all().expect("read v2"), events);
+
+        let receipt = migrate_trace_file(source.path(), &output).expect("migrate v2");
+        assert_eq!(receipt.source_version, 2);
+        assert_eq!(receipt.target_version, TRACE_FILE_VERSION);
+        assert_eq!(receipt.events_copied, events.len() as u64);
+        assert_eq!(
+            std::fs::read(source.path()).expect("read source after migration"),
+            source_bytes,
+            "migration must preserve the rollback source byte-for-byte"
+        );
+
+        let migrated = TraceReader::open(&output).expect("open migrated trace");
+        assert_eq!(migrated.file_version(), TRACE_FILE_VERSION);
+        assert_eq!(migrated.metadata(), &metadata);
+        assert_eq!(migrated.load_all().expect("read migrated trace"), events);
+    }
+
+    #[test]
+    fn v1_reader_and_migration_preserve_semantics_and_source() {
+        let source = NamedTempFile::new().expect("create source");
+        let output_dir = tempfile::tempdir().expect("create output dir");
+        let output = output_dir.path().join("migrated.trace");
+        let metadata = TraceMetadata::new(5).with_description("legacy-v1");
+        let events = sample_events();
+        write_v1_trace(source.path(), &metadata, &events);
+        let source_bytes = std::fs::read(source.path()).expect("read source baseline");
+
+        let reader = TraceReader::open(source.path()).expect("open v1");
+        assert_eq!(reader.file_version(), 1);
+        assert_eq!(reader.load_all().expect("read v1"), events);
+
+        let receipt = migrate_trace_file(source.path(), &output).expect("migrate v1");
+        assert_eq!(receipt.source_version, 1);
+        assert_eq!(receipt.target_version, TRACE_FILE_VERSION);
+        assert_eq!(receipt.events_copied, events.len() as u64);
+        assert_eq!(
+            std::fs::read(source.path()).expect("read source after migration"),
+            source_bytes
+        );
+        assert_eq!(
+            TraceReader::open(&output)
+                .expect("open migrated trace")
+                .load_all()
+                .expect("read migrated trace"),
+            events
+        );
+    }
+
+    #[test]
+    fn migration_refuses_same_or_existing_destination_without_overwrite() {
+        let source = NamedTempFile::new().expect("create source");
+        let destination = NamedTempFile::new().expect("create destination");
+        let destination_before = b"do not overwrite".to_vec();
+        std::fs::write(destination.path(), &destination_before).expect("seed destination");
+        write_v2_trace(source.path(), &TraceMetadata::new(17), &sample_events(), 3);
+
+        assert!(matches!(
+            migrate_trace_file(source.path(), source.path()),
+            Err(TraceFileError::MigrationInputOutputSame)
+        ));
+        assert!(matches!(
+            migrate_trace_file(source.path(), destination.path()),
+            Err(TraceFileError::MigrationDestinationExists)
+        ));
+        assert_eq!(
+            std::fs::read(destination.path()).expect("read destination"),
+            destination_before
+        );
+    }
+
+    #[test]
+    fn a7_migration_failure_never_publishes_partial_output_or_leaves_staging_file() {
+        let directory = tempfile::tempdir().expect("create migration directory");
+        let source = directory.path().join("truncated-v2.trace");
+        let destination = directory.path().join("must-not-exist.trace");
+        write_v2_trace(&source, &TraceMetadata::new(19), &sample_events(), 3);
+        let source_before = std::fs::read(&source).expect("read complete v2 source");
+        std::fs::write(&source, &source_before[..source_before.len() - 1])
+            .expect("truncate final event");
+        let truncated_source = std::fs::read(&source).expect("read truncated source");
+
+        assert!(migrate_trace_file(&source, &destination).is_err());
+        assert!(
+            !destination.exists(),
+            "failed migration must not publish a partial destination"
+        );
+        assert_eq!(
+            std::fs::read(&source).expect("read rollback source"),
+            truncated_source,
+            "failed migration must preserve its rollback source"
+        );
+
+        let staging_prefix = ".must-not-exist.trace.asupersync-migrate-";
+        let staging_paths = std::fs::read_dir(directory.path())
+            .expect("read migration directory")
+            .map(|entry| entry.expect("read directory entry").file_name())
+            .filter(|name| name.to_string_lossy().starts_with(staging_prefix))
+            .collect::<Vec<_>>();
+        assert!(
+            staging_paths.is_empty(),
+            "failed migration left staging paths: {staging_paths:?}"
+        );
+    }
+
+    #[test]
+    fn bounded_recovery_returns_verified_v2_prefix_and_terminal_error() {
+        let source = NamedTempFile::new().expect("create source");
+        let metadata = TraceMetadata::new(9);
+        let events = sample_events();
+        write_v2_trace(source.path(), &metadata, &events[..2], 3);
+
+        let recovery = recover_trace_prefix(source.path(), 10).expect("recover prefix");
+        assert_eq!(recovery.file_version, 2);
+        assert_eq!(recovery.declared_events, 3);
+        assert_eq!(recovery.recovered_events, events[..2]);
+        assert!(matches!(
+            recovery.status,
+            TraceRecoveryStatus::Partial { next_event: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn bounded_recovery_never_exceeds_caller_event_limit() {
+        let source = NamedTempFile::new().expect("create source");
+        let events = sample_events();
+        write_v2_trace(
+            source.path(),
+            &TraceMetadata::new(11),
+            &events,
+            events.len() as u64,
+        );
+
+        let recovery = recover_trace_prefix(source.path(), 2).expect("recover bounded prefix");
+        assert_eq!(recovery.recovered_events, events[..2]);
+        assert_eq!(
+            recovery.status,
+            TraceRecoveryStatus::LimitReached { max_events: 2 }
+        );
     }
 
     #[test]
@@ -1994,7 +2704,7 @@ mod tests {
         let meta_len = rmp_serde::to_vec(&metadata)
             .expect("serialize metadata")
             .len() as u64;
-        let header_bytes = HEADER_SIZE as u64 + meta_len + 8;
+        let header_bytes = HEADER_SIZE as u64 + meta_len + 8 + TRACE_CHECKSUM_LEN as u64;
 
         let config = TraceFileConfig::new().with_max_file_size(header_bytes);
         let mut writer = TraceWriter::create_with_config(path, config).expect("create writer");
@@ -2113,6 +2823,35 @@ mod tests {
             for (orig, read) in events.iter().zip(read_events.iter()) {
                 assert_eq!(orig, read);
             }
+        }
+
+        #[test]
+        fn compressed_event_stream_checksum_mismatch_is_fail_closed() {
+            let temp = NamedTempFile::new().expect("create temp file");
+            let metadata = TraceMetadata::new(42);
+            let events = sample_events();
+            let config = TraceFileConfig::new().with_compression(CompressionMode::Lz4 { level: 1 });
+            write_trace_with_config(temp.path(), &metadata, &events, config)
+                .expect("write compressed trace");
+
+            let mut bytes = std::fs::read(temp.path()).expect("read trace");
+            let metadata_len = rmp_serde::to_vec(&metadata)
+                .expect("serialize metadata")
+                .len();
+            let event_digest_offset = HEADER_SIZE + metadata_len + 8;
+            bytes[event_digest_offset] ^= 0x01;
+            std::fs::write(temp.path(), bytes).expect("corrupt event digest");
+
+            let error = TraceReader::open(temp.path())
+                .expect("header remains valid")
+                .load_all()
+                .expect_err("compressed event checksum must fail");
+            assert!(matches!(
+                error,
+                TraceFileError::ChecksumMismatch {
+                    section: "event stream"
+                }
+            ));
         }
 
         #[test]

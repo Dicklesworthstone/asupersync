@@ -1,0 +1,287 @@
+{
+  "schema_version": 1,
+  "artifact_id": "typed-format-final-signoff-v1",
+  "bead_id": "asupersync-5z2scg.3.5",
+  "epic_id": "asupersync-5z2scg.3",
+  "program_id": "asupersync-ir2uf0",
+  "title": "Typed-format generic and persisted parity terminal decision",
+  "policy_as_of_date_utc": "2026-07-26",
+  "capability_ids": [
+    "CAP-PERSISTED-TRACE-SNAPSHOT",
+    "CAP-SERDE-GENERIC"
+  ],
+  "authority": {
+    "accepted_adr_id": "DEP-ADR-001",
+    "accepted_adr_path": "docs/adr/dep_plan_adr_001_serde_generic_formats.md",
+    "accepted_decision": "ADDITIVE_COEXISTENCE",
+    "terminal_role": "A5 may authorize a per-codec dependency exit only after complete SAME_OR_BETTER evidence. Any missing or narrower generic, persisted, diagnostic, resource, fuzz, downstream, migration, replay, CLI, graph, or rollback evidence requires KEEP.",
+    "registry_path": "artifacts/typed_format_registry_v1.json",
+    "cutover_policy_path": "artifacts/dependency_cutover_policy_v1.json"
+  },
+  "terminal_verdict": {
+    "outcome": "KEEP_INCUMBENTS_WITH_SCOPED_PERSISTED_PARITY",
+    "phase5_terminal_receipt": true,
+    "dependency_exit_allowed": false,
+    "format_variant_removal_allowed": false,
+    "public_surface_narrowing_allowed": false,
+    "production_manifest_changed": false,
+    "generic_evidence": "COMPLETE_FOR_KEEP_NOT_REPLACE",
+    "persisted_evidence": "PASS_SCOPED_PINNED_V039_AND_CURRENT_SCHEMAS",
+    "rollback_evidence": "PASS_SCOPED_SEPARATE_SOURCE_AND_ATOMIC_TARGET",
+    "reason": "The owned typed-symbol, snapshot, trace, replay, migration, and CLI paths are additive and have scoped current plus pinned-v0.3.9 evidence. They do not replace the unrestricted downstream Serde data model or every historical artifact family. The pure-Rust MessagePack and Bincode incumbents therefore remain the correct production backends."
+  },
+  "child_receipts": [
+    {
+      "bead_id": "asupersync-5z2scg.3.1",
+      "role": "inventory and fail-closed typed-format registry",
+      "content_commits": [
+        "0ef6a75080b324f6658c777a41be8978d79bd151"
+      ],
+      "required_status": "closed"
+    },
+    {
+      "bead_id": "asupersync-5z2scg.3.2",
+      "role": "deterministic bounded typed-symbol schema",
+      "content_commits": [
+        "69820fa5628aca49662b9e29e3b3fe555b63ba54"
+      ],
+      "required_status": "closed"
+    },
+    {
+      "bead_id": "asupersync-5z2scg.3.3",
+      "role": "versioned runtime snapshot codec and reversible migration",
+      "content_commits": [
+        "065615aa1"
+      ],
+      "required_status": "closed"
+    },
+    {
+      "bead_id": "asupersync-5z2scg.3.4",
+      "role": "checksummed trace and deterministic replay migration",
+      "content_commits": [
+        "07fcdbdf9"
+      ],
+      "required_status": "closed"
+    },
+    {
+      "bead_id": "asupersync-5z2scg.3.6",
+      "role": "independent arbitrary-Serde MessagePack and Bincode KEEP evidence",
+      "content_commits": [
+        "c1e2ce4db12303e95ec8a993869a623331081f87"
+      ],
+      "required_status": "closed"
+    },
+    {
+      "bead_id": "asupersync-5z2scg.3.7",
+      "role": "published-v0.3.9 artifact migration, replay, CLI, atomicity, and rollback E2E",
+      "content_commits": [
+        "6c2dbe127",
+        "f6b6d7c81"
+      ],
+      "required_status": "closed"
+    }
+  ],
+  "source_contracts": [
+    {
+      "path": "artifacts/typed_format_registry_v1.json",
+      "sha256": "19b6356724c2bcaa88daf9dec291509f2d4421beca9e4f72fa2765b4b83765d9",
+      "role": "canonical row-level inventory, pins, corpora, consumers, and A6 decisions"
+    },
+    {
+      "path": "docs/adr/dep_plan_adr_001_serde_generic_formats.md",
+      "sha256": "27506abf3ba0e99114f33b944edd1d100b4d953f1de7acd104c781d9104dc4f8",
+      "role": "accepted additive-coexistence design authority"
+    },
+    {
+      "path": "artifacts/dependency_cutover_policy_v1.json",
+      "sha256": "9a786ff93cc198a91b74d5e52f60ede00a2fac190977841482959aad6891cf5b",
+      "role": "program cutover state machine and fail-closed KEEP authority"
+    },
+    {
+      "path": "src/types/typed_symbol.rs",
+      "sha256": "17b6b91d57dd8ac132dd3b92962715ef4ea59d2b6d9cf4cf51fb0a384435e1f1",
+      "role": "generic codec and typed-symbol implementation"
+    },
+    {
+      "path": "src/lab/snapshot_restore.rs",
+      "sha256": "f778ae73629550c16b789cad5674cdd93a4ca45bc3377fc0ae0881b542dc3d6a",
+      "role": "versioned runtime snapshot implementation"
+    },
+    {
+      "path": "src/trace/file.rs",
+      "sha256": "67d22662b847644524e088edf08d05eeeb59aa670c99be725d016ed825d456d9",
+      "role": "bounded trace file, migration, atomic publication, and rollback source"
+    },
+    {
+      "path": "src/trace/replay.rs",
+      "sha256": "a5dd73ff157b0526d37b21a21de80cd67a6599da2c1e76c581bf0d0930380145",
+      "role": "versioned deterministic replay representation"
+    },
+    {
+      "path": "tests/runtime_snapshot_codec_e2e.rs",
+      "sha256": "0535cc98b2bb4e541afb3076455fd0506d4f4ef8d9b869499652cb2d682228c5",
+      "role": "snapshot full, incremental, malformed, migration, atomicity, and rollback E2E"
+    },
+    {
+      "path": "tests/replay_e2e_suite.rs",
+      "sha256": "82688207ec088f7ef45254e3623f13ab98690540fb014ad66f0955bc9f16ca08",
+      "role": "trace migration, replay, streaming, determinism, and bounded sweep E2E"
+    },
+    {
+      "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
+      "sha256": "2b7b408f39508d2604d3d384a5184eb66b24d59b3945f39e0231492a5b6cc2bc",
+      "role": "standalone arbitrary-Serde and custom-codec downstream fixture"
+    },
+    {
+      "path": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock",
+      "sha256": "6d442849149134f242eb99aad3a795c850cb05e9c0f549f29f72a02493734d47",
+      "role": "locked downstream incumbent dependency graph"
+    },
+    {
+      "path": "tests/fixtures/typed-format-historical-corpus/v0.3.9.json",
+      "sha256": "65f93b017abc9abf9d9d6b67b966c7acbd63233950114f3b4229944687d6532e",
+      "role": "immutable published-v0.3.9 artifact manifest"
+    },
+    {
+      "path": "tests/typed_format_cross_version_e2e.rs",
+      "sha256": "6a5ce2b2e97b11e65e434e5b50c7c818172d059dae84711a62dd58f67bd77270",
+      "role": "current reader, migration, replay, CLI, malformed, cancellation, disk, atomicity, and rollback E2E"
+    },
+    {
+      "path": "tests/typed_format_registry_contract.rs",
+      "sha256": "e959c9c7dcede4722c5134e12b1838439301c0c6a2e9b2e1b864eb588726ca60",
+      "role": "row-level registry, pin, corpus, consumer, and documentation verifier"
+    }
+  ],
+  "registry_reconciliation": {
+    "format_profile_count": 4,
+    "persisted_surface_count": 13,
+    "downstream_consumer_count": 6,
+    "corpus_count": 5,
+    "generic_dependency_decision_count": 2,
+    "source_pin_count": 48,
+    "production_backend_file_count": 3,
+    "historical_surface_count": 7,
+    "current_only_surface_count": 5,
+    "baseline_surface_count": 1,
+    "unknown_blocker_count": 0,
+    "rule": "Every registered format, surface, consumer, corpus, decision, and source pin remains present. Every persisted surface has a non-empty evidence state and explicit no-claim boundary; current-only or baseline evidence is never promoted to historical proof."
+  },
+  "per_codec_decisions": [
+    {
+      "format": "MessagePack",
+      "incumbent_package": "rmp-serde",
+      "manifest_requirement": "rmp-serde = \"1.3\"",
+      "locked_version": "1.3.1",
+      "locked_checksum": "72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155",
+      "disposition": "KEEP",
+      "dependency_exit_allowed": false,
+      "public_variant_required": true,
+      "exact_current_golden_bytes": 71,
+      "replacement_blockers": [
+        "No owned implementation proves the complete unrestricted downstream Serde data model and diagnostics.",
+        "Raw SerdeCodec has no global byte or recursion cap; finite container bounds cannot be substituted for the incumbent contract.",
+        "Current and pinned-v0.3.9 evidence does not cover arbitrary historical releases, third-party payloads, or unordered-map byte canonicality.",
+        "The registered decoder families do not have one complete replacement-grade differential and bounded-fuzz packet."
+      ]
+    },
+    {
+      "format": "Bincode",
+      "incumbent_package": "bincode-next",
+      "manifest_requirement": "bincode = { package = \"bincode-next\", version = \"3.1.1\", features = [\"serde\"] }",
+      "locked_version": "3.1.1",
+      "locked_checksum": "1d6626829353ae29293be5c86f42de5f0468bc758af074b0c7d08f07e538ccbc",
+      "required_configuration": "bincode::config::legacy()",
+      "disposition": "KEEP",
+      "dependency_exit_allowed": false,
+      "public_variant_required": true,
+      "exact_current_golden_bytes": 102,
+      "replacement_blockers": [
+        "No owned implementation proves the complete unrestricted downstream Serde data model and diagnostics.",
+        "The accepted legacy configuration is a persisted-byte contract and cannot be exchanged for a new dialect.",
+        "Bincode is non-self-describing and its accepted model excludes deserialize_any; a finite project schema cannot replace the generic extension.",
+        "Current and pinned-v0.3.9 evidence does not cover arbitrary historical releases, third-party payloads, unordered-map byte canonicality, or every decoder under bounded differential fuzzing."
+      ]
+    }
+  ],
+  "capability_decisions": [
+    {
+      "capability_id": "CAP-SERDE-GENERIC",
+      "outcome": "KEEP_INCUMBENT",
+      "same_or_better_for_exit": false,
+      "preserved_surfaces": [
+        "SerializationFormat::MessagePack",
+        "SerializationFormat::Bincode",
+        "SerializationFormat::Json",
+        "SerializationFormat::Custom",
+        "SerdeCodec",
+        "downstream Serializer<T> and Deserializer<T> injection"
+      ],
+      "no_claim_boundary": "The finite fixtures prove the complete accepted owned test model and one non-Serde custom codec, not arbitrary downstream types, visitors, historical payloads, resource policies, or ergonomics."
+    },
+    {
+      "capability_id": "CAP-PERSISTED-TRACE-SNAPSHOT",
+      "outcome": "PASS_SCOPED_ADDITIVE_OWNERSHIP_KEEP_BACKENDS",
+      "same_or_better_for_exit": false,
+      "preserved_surfaces": [
+        "typed-symbol versions and format discriminants",
+        "ASUPSNAP full and incremental artifacts",
+        "ASUPERTRACE ordinary and streaming readers",
+        "ReplayTrace schema 1",
+        "distributed SNAP version 2",
+        "current trace CLI paths",
+        "separate migration output and retained rollback source"
+      ],
+      "no_claim_boundary": "The evidence covers current schemas and the exact published-v0.3.9 corpus. It does not prove every historical release, arbitrary third-party artifacts, every JSON family across releases, performance improvement, or dependency exit."
+    }
+  ],
+  "fuzz_and_gap_disposition": {
+    "bounded_fuzz_assets": [
+      "fuzz/fuzz_targets/typed_symbol_parser.rs",
+      "fuzz/fuzz_targets/fuzz_trace_file_parsing.rs",
+      "fuzz/fuzz_targets/trace_streaming.rs",
+      "fuzz/fuzz_targets/replay_event_deserialization.rs",
+      "fuzz/fuzz_targets/trace_integrity.rs",
+      "fuzz/fuzz_targets/lab_snapshot_restorable_validate.rs",
+      "fuzz/fuzz_targets/distributed_snapshot.rs"
+    ],
+    "current_corpus_ids": [
+      "CORPUS-TYPED-SYMBOL-FUZZ",
+      "CORPUS-DISTRIBUTED-SNAPSHOT-SEEDS"
+    ],
+    "replacement_grade_complete": false,
+    "disposition": "EXPLICIT_KEEP_BLOCKER",
+    "reason": "The registered bounded fuzz assets exercise the highest-risk binary admission paths, while several semantic JSON families remain focused-test/current-corpus only. That gap is explicit and prevents REPLACE; it is not silently counted as green."
+  },
+  "canonical_scenario": {
+    "scenario_id": "dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e",
+    "runner": "scripts/run_dependency_sovereignty_e2e.sh",
+    "replay_command": "RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh --scenario dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e",
+    "expected_outcome": "PASSED",
+    "steps": [
+      "locked standalone arbitrary-Serde and Custom downstream fixture",
+      "locked published-v0.3.9/current dual-version fixture",
+      "typed registry, runtime snapshot, replay, cross-version CLI, and terminal signoff contracts"
+    ]
+  },
+  "rollback_contract": {
+    "manifest_rollback_required": false,
+    "reason": "No dependency, feature, public format, or production backend changes.",
+    "artifact_rule": "Migration always writes a distinct atomic target, leaves the source untouched, refuses an existing destination, and removes failed staging files.",
+    "operator_action": "Continue using the incumbent MessagePack and legacy-config Bincode backends. If a future replacement is proposed, create a new terminal receipt against fresh registry, corpus, graph, and downstream evidence."
+  },
+  "validation": {
+    "contract_test": "tests/typed_format_final_signoff_contract.rs",
+    "doc_path": "docs/typed_format_final_signoff.md",
+    "focused_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path artifacts/typed_format_final_signoff_v1.json --overlay-path docs/typed_format_final_signoff.md --overlay-path docs/typed_format_registry.md --overlay-path tests/typed_format_final_signoff_contract.rs --overlay-path scripts/run_dependency_sovereignty_e2e.sh -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_typed_format_final_signoff cargo test -p asupersync --test typed_format_final_signoff_contract -- --nocapture",
+    "proof_scope": "Terminal packet schema, child closure, content pins, registry row reconciliation, exact live manifest and lock pins, public format and generic extension preservation, independent per-codec KEEP decisions, explicit fuzz gaps, canonical scenario registration, rollback contract, and no-claim boundaries.",
+    "no_claim_boundary": "This contract validates evidence and decision structure. The canonical scenario separately executes the cited downstream, migration, replay, CLI, malformed, cancellation, disk, atomicity, and rollback paths. Neither proof authorizes dependency removal, format removal, release readiness, broad workspace health, performance, arbitrary historical compatibility, or local Cargo fallback."
+  },
+  "no_claim_boundaries": [
+    "No dependency, format variant, public API, feature, protocol, diagnostic, or artifact reader is removed.",
+    "No claim extends beyond current schemas and the exact pinned published-v0.3.9 corpus.",
+    "No unordered-map byte canonicality, borrowed-output support, deserialize_any support, or global raw-codec resource bound is claimed.",
+    "No performance improvement, no regression, release readiness, broad workspace health, live RCH fleet availability, or local Cargo fallback is claimed.",
+    "No permission to delete files or discard rollback artifacts is granted."
+  ]
+}

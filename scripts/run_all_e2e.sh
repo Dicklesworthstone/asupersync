@@ -344,6 +344,7 @@ declare -A SUITES=(
     [phase6]="run_phase6_e2e.sh"
     [server-stack]="run_server_stack_e2e.sh"
     [agent-dx]="run_agent_dx_e2e.sh"
+    [api-v2-journey]="run_api_v2_e2e.sh"
 )
 
 # Canonical artifact roots for manifest indexing.
@@ -379,6 +380,7 @@ declare -A SUITE_ARTIFACT_ROOTS=(
     [phase6]="target/phase6-e2e"
     [server-stack]="target/e2e-results/server_stack"
     [agent-dx]="target/e2e-results/agent_dx"
+    [api-v2-journey]="target/e2e-results/api_v2"
 )
 
 # Summary file patterns used to discover suite artifacts deterministically.
@@ -414,6 +416,7 @@ declare -A SUITE_SUMMARY_GLOBS=(
     [phase6]="summary_*.json"
     [server-stack]="summary.json"
     [agent-dx]="summary.json"
+    [api-v2-journey]="summary.json"
 )
 
 # Artifact directory patterns used when summary path is not emitted.
@@ -481,6 +484,7 @@ declare -A SUITE_CANONICAL_SCENARIO_ID=(
     [doctor-e2e-proof-lane]="E2E-SUITE-DOCTOR-E2E-PROOF-LANE"
     [phase6]="E2E-SUITE-PHASE6"
     [agent-dx]="E2E-SUITE-AGENT-DX-AFFORDANCE"
+    [api-v2-journey]="E2E-SUITE-API-V2-USER-JOURNEY"
 )
 
 RAPTORQ_REQUIRED_SCENARIOS=(
@@ -503,6 +507,7 @@ SUITE_ORDER=(
     doctor-replay-launcher doctor-orchestration-state-machine doctor-scenario-coverage-packs doctor-stress-soak
     doctor-frankensuite-export doctor-e2e-proof-lane
     phase6
+    api-v2-journey
 )
 
 verify_matrix_gate() {

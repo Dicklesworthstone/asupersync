@@ -3199,6 +3199,30 @@ fn cancelled_error(cx: &Cx) -> PgError {
     PgError::Cancelled(cancelled_reason(cx))
 }
 
+/// Classify a zero-byte read from the peer.
+///
+/// `read_exact`'s in-poll cancel guard runs at the top of each poll, but the
+/// `n == 0` check happens after the poll returns. Cancellation is set from
+/// another thread (the deadline monitor, `cancel_with`), so it can land in that
+/// window: the guard sees a live `cx`, the peer's hangup is observed, and the
+/// EOF is reported as `Outcome::Err` even though a cancel was already pending.
+/// Per the severity lattice (`Ok < Err < Cancelled < Panicked`), `Cancelled`
+/// dominates and the caller should see 499, not 5xx (br-asupersync-xwanb4).
+///
+/// The downgrade is gated on cancellation *actually* being pending, mirroring
+/// the established idiom in `src/transport/router.rs`. A peer that genuinely
+/// hung up early with no cancel outstanding still reports `UnexpectedEof`; this
+/// is not a license to suppress errors that happened before any cancel.
+fn eof_or_cancelled(cx: &Cx) -> PgError {
+    if cx.checkpoint().is_err() {
+        return cancelled_error(cx);
+    }
+    PgError::Io(io::Error::new(
+        io::ErrorKind::UnexpectedEof,
+        "unexpected end of stream",
+    ))
+}
+
 const POSTGRES_PROTOCOL_VERSION_3_0: i32 = 196_608;
 const MAX_BACKEND_MESSAGE_LEN: i32 = 64 * 1024 * 1024;
 // Authentication messages are control-plane traffic. Keeping their wire bodies
@@ -6498,10 +6522,7 @@ impl PgConnection {
 
             let n = read_buf.filled().len();
             if n == 0 {
-                return Err(PgError::Io(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "unexpected end of stream",
-                )));
+                return Err(eof_or_cancelled(cx));
             }
             pos += n;
         }
@@ -12414,6 +12435,67 @@ mod tests {
         assert_eq!(buf, [0]);
 
         wake_writer.join().expect("wake writer should exit cleanly");
+    }
+
+    // ================================================================
+    // br-asupersync-xwanb4: the `n == 0` branch of `read_exact` sits
+    // after the in-poll cancel guard, so a cancel set from another
+    // thread can land between them and be reported as `Err`.
+    //
+    // That interleaving is a genuine race and is not deterministically
+    // reachable through `read_exact` itself (pre-setting the cancel
+    // makes the guard fire first, which would green these tests without
+    // ever executing the branch under test). `eof_or_cancelled` is
+    // extracted precisely so the decision can be pinned directly.
+    // ================================================================
+
+    /// A cancel that races the peer's hangup reports `Cancelled`, not
+    /// `UnexpectedEof`. `outcome_from_error` keys off the variant, so before
+    /// this the client saw a server error (5xx) for its own deadline cancel.
+    #[test]
+    fn eof_during_pending_cancel_reports_cancelled() {
+        let cx = crate::cx::Cx::for_testing();
+        cx.cancel_fast(CancelKind::User);
+
+        match eof_or_cancelled(&cx) {
+            PgError::Cancelled(reason) => assert_eq!(reason.kind, CancelKind::User),
+            other => panic!("expected Cancelled, got: {other:?}"),
+        }
+    }
+
+    /// The paired NEGATIVE test, mirroring the asymmetry that
+    /// `src/transport/router.rs` already encodes: a peer that genuinely hung up
+    /// with no cancel outstanding must still report `UnexpectedEof`. The
+    /// severity lattice does not license suppressing an error that happened
+    /// before any cancel was requested.
+    #[test]
+    fn eof_without_cancel_stays_unexpected_eof() {
+        let cx = crate::cx::Cx::for_testing();
+
+        match eof_or_cancelled(&cx) {
+            PgError::Io(err) => assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof),
+            other => panic!("expected Io(UnexpectedEof), got: {other:?}"),
+        }
+    }
+
+    /// End-to-end: a cancelled EOF actually aggregates as `Outcome::Cancelled`,
+    /// and an uncancelled one stays `Outcome::Err`.
+    #[test]
+    fn eof_classification_reaches_the_right_outcome() {
+        let cancelled = crate::cx::Cx::for_testing();
+        cancelled.cancel_fast(CancelKind::Timeout);
+        let outcome: Outcome<(), PgError> = outcome_from_error(eof_or_cancelled(&cancelled));
+        assert!(
+            matches!(outcome, Outcome::Cancelled(_)),
+            "cancelled EOF must aggregate as Cancelled, got: {outcome:?}"
+        );
+
+        let live = crate::cx::Cx::for_testing();
+        let outcome: Outcome<(), PgError> = outcome_from_error(eof_or_cancelled(&live));
+        assert!(
+            matches!(outcome, Outcome::Err(_)),
+            "uncancelled EOF must stay Err, got: {outcome:?}"
+        );
     }
 
     #[test]

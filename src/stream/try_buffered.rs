@@ -4,7 +4,7 @@
 //! [`Buffered`](super::Buffered): it runs up to `limit` futures concurrently,
 //! yields their outputs in source order, and stops at the first `Err`.
 
-use super::Stream;
+use super::{Stream, StreamTelemetrySnapshot};
 use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
@@ -151,6 +151,32 @@ where
     #[inline]
     pub fn into_inner(self) -> S {
         self.stream
+    }
+
+    /// Returns an opt-in redacted telemetry snapshot for this combinator.
+    ///
+    /// The caller supplies `combinator_id` so the runtime needs no ambient
+    /// registration. See [`StreamTelemetrySnapshot`] for field semantics and
+    /// the determinism contract. `closed` is true once no further futures will
+    /// be admitted: the source is exhausted *or* the stream already yielded
+    /// its terminal `Err`.
+    #[inline]
+    #[must_use]
+    pub fn telemetry_snapshot(&self, combinator_id: u64) -> StreamTelemetrySnapshot {
+        StreamTelemetrySnapshot {
+            combinator_id,
+            combinator_kind: "try_buffered",
+            limit: self.limit,
+            in_flight: self.in_flight.len(),
+            available: self.limit.saturating_sub(self.in_flight.len()),
+            ready_results: self
+                .in_flight
+                .iter()
+                .filter(|entry| entry.output.is_some())
+                .count(),
+            waker_epoch: self.poll_epoch,
+            closed: self.done || self.failed,
+        }
     }
 }
 
@@ -694,5 +720,89 @@ mod tests {
                 "try_buffered_conformance::all_pending_buffer_does_not_busy_poll"
             );
         }
+    }
+
+    /// AC5 lifecycle proof for `TryBuffered`: the snapshot exposes head-of-line
+    /// pressure (a completed `Err` parked behind a pending `Ok`), and `closed`
+    /// turns true on the terminal `Err` even though the source was never
+    /// exhausted.
+    #[test]
+    fn telemetry_snapshot_reports_parked_results_and_terminal_err() {
+        init_test("telemetry_snapshot_reports_parked_results_and_terminal_err");
+        // Source order: a delayed Ok, then an immediate Err. The Err completes
+        // first but must wait behind the Ok, which is exactly the parked-result
+        // state the snapshot needs to make visible.
+        let mut stream = TryBuffered::new(
+            iter(vec![
+                DelayedResult::new(1, Ok(1)),
+                DelayedResult::new(0, Err("boom")),
+            ]),
+            2,
+        );
+
+        let fresh = stream.telemetry_snapshot(11);
+        let expected_fresh = StreamTelemetrySnapshot {
+            combinator_id: 11,
+            combinator_kind: "try_buffered",
+            limit: 2,
+            in_flight: 0,
+            available: 2,
+            ready_results: 0,
+            waker_epoch: 0,
+            closed: false,
+        };
+        crate::assert_with_log!(
+            fresh == expected_fresh,
+            "fresh combinator reports empty pressure",
+            expected_fresh,
+            fresh
+        );
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // First poll: both admitted; the Err completes and parks behind the
+        // still-pending Ok.
+        let first = Pin::new(&mut stream).poll_next(&mut cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Pending),
+            "first poll is pending on the head-of-line future",
+            "Poll::Pending",
+            first
+        );
+        let parked = stream.telemetry_snapshot(11);
+        crate::assert_with_log!(
+            parked.in_flight == 2 && parked.ready_results == 1 && !parked.closed,
+            "the completed Err is parked behind head-of-line order",
+            (2usize, 1usize, false),
+            (parked.in_flight, parked.ready_results, parked.closed)
+        );
+
+        // The Ok resolves and is yielded in source order.
+        let second = Pin::new(&mut stream).poll_next(&mut cx);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(Some(Ok(1)))),
+            "the head-of-line Ok is yielded first",
+            "Poll::Ready(Some(Ok(1)))",
+            second
+        );
+
+        // The parked Err becomes the terminal item; the snapshot must report
+        // the combinator closed although the source was never polled to None.
+        let third = Pin::new(&mut stream).poll_next(&mut cx);
+        crate::assert_with_log!(
+            matches!(third, Poll::Ready(Some(Err("boom")))),
+            "the parked Err terminates the stream",
+            "Poll::Ready(Some(Err(\"boom\")))",
+            third
+        );
+        let terminal = stream.telemetry_snapshot(11);
+        crate::assert_with_log!(
+            terminal.closed && terminal.in_flight == 0 && terminal.available == 2,
+            "terminal-Err snapshot is closed and empty",
+            (true, 0usize, 2usize),
+            (terminal.closed, terminal.in_flight, terminal.available)
+        );
+        crate::test_complete!("telemetry_snapshot_reports_parked_results_and_terminal_err");
     }
 }

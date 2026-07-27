@@ -101,6 +101,50 @@ snapshot readers apply their own framing and allocation limits. A proposed
 replacement must not infer one format-wide resource contract from a bounded
 container.
 
+## A6 generic MessagePack/Bincode decision
+
+`asupersync-5z2scg.3.6` evaluates the two binary generic dependencies
+independently. Both receive a measured `KEEP` decision:
+
+| Format | Exact incumbent | Decision | Measured ownership surface | Current exact golden |
+|---|---|---|---:|---:|
+| MessagePack | `rmp-serde 1.3.1` | `KEEP` | 3,207 Rust lines under the crate's `src` tree; direct closure `rmp` and `serde` | 71 bytes |
+| Bincode | `bincode-next 3.1.1` with `bincode::config::legacy()` | `KEEP` | 18,992 Rust lines under `src`, including a 1,564-line owned Serde bridge; derive/encoding closure `bincode_derive-next`, `pastey`, `rapidhash`, `serde`, `unty-next`, and `virtue-next` | 102 bytes |
+
+The standalone locked downstream fixture exercises the complete accepted owned
+Serde model for both formats: unit and unit structs; newtype, tuple, tuple
+struct, and ordinary structs; every enum variant shape; booleans; every signed
+and unsigned integer width including 128-bit values; exact-bit `f32` and `f64`
+boundaries including negative zero, infinity, and NaN; chars, Unicode strings,
+Serde byte buffers, options, sequences, string-key and numeric-key maps, nested
+containers, and owned recursion. It also preserves a forced custom-serializer
+reason, rejects one-byte truncation, proves recovery on the next decode, records
+the incumbent behavior of accepting trailing bytes, and round-trips a 1 MiB
+owned byte buffer plus 128 recursive levels.
+
+The current `ConsumerRecord::boundary_fixture()` bytes are pinned as:
+
+- MessagePack:
+  `95cfffffffffffffffff81a7426f756e646564cfffffffffffffffff82a0a0a7756e69636f6465ac4772c3bcc39f6520f09fa6809600017fcc80ccfeccffd38000000000000000`
+- Bincode legacy:
+  `ffffffffffffffff02000000ffffffffffffffff0200000000000000000000000000000000000000000000000700000000000000756e69636f64650c000000000000004772c3bcc39f6520f09fa680060000000000000000017f80feff010000000000000080`
+
+These goldens freeze the current downstream payload under the exact lockfile;
+they are not prior-release trace, replay, typed-symbol, or distributed-snapshot
+artifacts. `SerdeCodec` requires `DeserializeOwned`, so borrowed output is
+outside the public contract. Bincode is not self-describing, so
+`deserialize_any` is outside its accepted model. Neither backend canonicalizes
+unordered-map iteration, and raw `SerdeCodec` has no global byte or depth cap;
+the enclosing persisted containers continue to own those limits.
+
+Full replacement would require differential, property, fuzz, diagnostic,
+resource, and downstream ergonomic parity across this entire general-purpose
+surface. A finite project-schema codec cannot satisfy that gate. The measured
+ownership cost is disproportionate, so the pure-Rust incumbents and their public
+`SerializationFormat::{MessagePack,Bincode}` variants remain. A6 changes no
+production source, dependency, public variant, discriminant, persisted format,
+or migration policy.
+
 ## Typed-symbol envelope
 
 The exact typed-symbol header is 27 bytes:
@@ -145,30 +189,77 @@ back. Unknown format bytes, type IDs, and schema hashes have distinct errors.
 non-Serde downstream types through both the single-symbol convenience and
 multi-symbol pipelines.
 
+Published v0.3.9 used a different, build-sensitive Rust `TypeId`-based header
+identity. The A7 compatibility boundary does not weaken current default
+admission. `TypedSymbol::try_from_legacy_symbol` requires an exact
+`LegacyTypedSymbolIdentity` tuple—version, type id, and schema hash—from a
+trusted release-provenanced manifest. Copying those values from untrusted input
+would be self-attestation and is explicitly outside the contract. After
+admission, callers decode the generic MessagePack or Bincode payload and write a
+separate current stable-header artifact while retaining the v0.3.9 source as the
+rollback anchor.
+
 ## Persisted surface map
 
 ### Trace and replay
 
-The trace stack uses an owned `ASUPERTRACE` container at file version `2` with
-MessagePack metadata/events and optional LZ4 chunks. The current bounds are:
+The trace stack uses an owned `ASUPERTRACE` container at file version `3` with
+MessagePack metadata/events, optional LZ4 chunks, and two SHA-256 integrity
+fields. The metadata digest covers its exact MessagePack bytes. The event
+digest covers the canonical uncompressed sequence of each little-endian length
+prefix followed by its MessagePack event bytes, so ordinary and compressed
+readers validate the same logical stream. The current bounds are:
 
 - metadata: 1 MiB;
 - event: 16 MiB;
 - compressed or declared uncompressed chunk: 64 MiB;
 - event preallocation: 10,000,000.
 
-The container reader rejects future file versions but admits older container
-versions. Embedded replay metadata must exactly match replay schema version
-`1`. The compatibility module has migration architecture, but its minimum
-supported replay schema currently equals the current schema. There is no
-committed prior-release trace, raw replay blob, or streaming trace byte corpus.
-Accordingly, historical readability and migration remain
-`UNKNOWN_BLOCKING`.
+Writers emit only v3. The ordinary, streaming, and integrity readers reject
+future or malformed versions and admit the supported v1/v2 container layouts.
+The raw-record compatibility inspector admits uncompressed v1/v2/v3 framing
+and deliberately rejects compressed input; ordinary `TraceReader` remains the
+compression-capable admission path. Embedded replay metadata must exactly match
+replay schema version `1`; ordinary reads reject unknown events without
+skipping. Diagnostic code can explicitly inspect a rejected raw record through
+`CompatReader::read_event_compat`, but that path is not replay admission.
+
+`migrate_trace_file` and `asupersync trace migrate INPUT OUTPUT` stream a
+legacy v1/v2 trace into a sibling staging file, sync it, and atomically publish
+a distinct, non-existing v3 destination. They preserve event order and count,
+keep the source untouched as the rollback anchor, reject an already-current
+source, and fail if any event lacks a lossless mapping. Truncation, checksum
+failure, output collision, or path/disk failure cannot expose a partial
+destination; staging is cleaned after a failed soft operation.
+`recover_trace_prefix` has an explicit caller event bound and returns
+`Complete`, `Partial`, or `LimitReached`; corruption is a terminal receipt and
+is never skipped. A partial/limited v3 receipt contains only a structurally
+decoded prefix: because v3 authenticates the complete canonical event stream,
+only `Complete` is checksum admission.
+
+The A7 corpus comes from the published `asupersync 0.3.9` writer pinned by tag,
+commit, Cargo registry source, and crates.io checksum. It includes an exact
+four-event v2 trace, a 4,096-event v2 trace captured as a digest plus locked
+writer recipe, and an exact replay-schema-1 MessagePack blob. The committed
+typed-symbol headers are immutable captures: their v0.3.9 `TypeId` and
+`DefaultHasher` fields are exact evidence for that capture but cannot be
+regenerated byte-for-byte in another build. The locked fixture instead masks
+only those two documented header fields, proves the remaining framing and
+payload stable, and separately admits and decodes the exact committed bytes
+with their recorded provenance tuples. All other corpus artifacts regenerate
+exactly. The current
+ordinary and streaming readers consume the published trace; migration produces
+v3 with unchanged event semantics; replay is deterministic; and the current
+`info`, `events`, `verify`, `diff`, `migrate`, `export --format ndjson`, and
+`compress` CLI paths all execute over the retained fixtures. Malformed headers,
+truncation, unknown versions, current checksum corruption, existing output, and
+path/disk failure fail closed.
 
 Trace consumers include the ordinary, compatibility, streaming, and integrity
-readers; replay/integrity E2E tests; fuzz targets; and trace CLI commands in
-`src/bin/asupersync.rs`. A reachable reader is not proof that historical bytes
-were exercised.
+readers; replay/integrity E2E tests; checksum-bearing current-v3 and structured
+legacy-v2 fuzz inputs; and trace CLI commands in `src/bin/asupersync.rs`. The A7
+evidence proves only the exact pinned v0.3.9 artifacts and recorded semantics,
+not every earlier release, arbitrary third-party files, or performance.
 
 ### Distributed snapshots
 
@@ -180,9 +271,10 @@ SHA-256 content integrity and a versioned authentication domain.
 The reader enforces owned length bounds and rejects arena indices above
 1,000,000 or generations above 10,000 before reconstructing handles.
 
-Current fuzz seeds and textual Insta snapshots are registered. The textual
-snapshots are semantic evidence, not raw complete `SNAP` or Bincode byte
-goldens. No prior-version reader or version-provenanced raw artifact exists.
+Current fuzz seeds and textual Insta snapshots remain registered. The A7 corpus
+adds a raw published-v0.3.9 empty `SNAP` v2 artifact that the current reader
+decodes and reserializes exactly. That boundary case does not prove authenticated
+non-empty state or other release versions.
 
 ### JSON artifacts
 
@@ -207,8 +299,10 @@ rule. Schema 2 canonicalizes regions, tasks, task obligation IDs, obligations,
 and recent events before hashing and encoding; lifecycle histories retain
 recorded order. Migration is explicit and reversible: the original source stays
 as the rollback anchor and the migrated target is installed separately through
-the cancel-safe atomic write boundary. The byte golden and migration E2E are
-current-corpus evidence, not an external historical corpus. See
+the cancel-safe atomic write boundary. A7 commits the published-v0.3.9 raw
+schema-1 JSON snapshot and proves current decoding, explicit schema-2 promotion,
+checksum/version failures, cancellation before atomic commit, disk/path failure,
+target preservation, and rollback-source preservation. See
 [`runtime_snapshot_codec.md`](./runtime_snapshot_codec.md).
 
 YAML remains an adjacent accepted lab-scenario surface. This registry does not
@@ -229,7 +323,7 @@ aggregate is the SHA-256 of sorted lines:
 | distributed-snapshot fuzz seeds | 5 | 278 | current malformed/boundary corpus only |
 | distributed-snapshot Insta snapshots | 8 | 32,955 | semantic current snapshots |
 | crashpack-to-repro fixtures | 10 | 21,599 | semantic current fixtures |
-| historical trace/replay/stream corpus | 0 | 0 | missing, blocking |
+| published v0.3.9 typed-format corpus | 1 | 6,617 | immutable version-provenanced capture plus locked reproducibility recipe and build-sensitive typed-header boundary |
 
 A current corpus without an emitting release, dependency version, schema
 version, and external/downstream provenance cannot be promoted to a historical
@@ -237,22 +331,38 @@ compatibility corpus.
 
 ## Blocking evidence owners
 
-The registry intentionally keeps three blockers open:
+A6 closes the arbitrary-Serde MessagePack/Bincode evidence gap with independent
+`KEEP` receipts, current payload goldens, and the locked downstream fixture.
+A7 closes its two historical-evidence blockers with the published v0.3.9 corpus,
+locked dual-version writer/reader fixture, and the canonical no-mock current CLI
+journey. The external historical-artifact consumer is therefore
+`HISTORICAL_CORPUS_VERIFIED` for `asupersync-5z2scg.3.7`.
 
-1. `asupersync-5z2scg.3.6` owns version-provenanced byte goldens for typed
-   symbols, MessagePack trace/replay, Bincode legacy payloads, and full
-   distributed snapshots.
-2. `asupersync-5z2scg.3.7` owns no-mock cross-version readers and CLI E2E over
-   committed historical artifacts.
-3. `asupersync-5z2scg.3.3` still owns broad arbitrary-Serde
-   data-model/resource evidence. Its standalone Custom injection fixture is now
-   current-corpus evidence, but does not prove generic replacement parity.
+This is evidence closure, not cutover authority. The registry still records
+`persisted_cutover_state: BLOCKED_PENDING_EVIDENCE`; A5 owns the aggregate
+same-or-better decision and may still emit `KEEP`. The A7 corpus proves only its
+exact pinned release, artifacts, boundary payloads, semantics, and tool paths.
 
-The external historical-artifact consumer row also remains
-`UNKNOWN_BLOCKING`; `.3.7` must close that consumer evidence gap before
-historical-readability claims.
+These scoped evidence receipts are not permission to delete an affected surface.
 
-These are evidence gaps, not permission to delete the affected surface.
+## A5 terminal decision
+
+`asupersync-5z2scg.3.5` joins the A1-A4/A6/A7 receipts in the checked
+[`typed-format terminal signoff`](./typed_format_final_signoff.md). Its verdict
+is `KEEP_INCUMBENTS_WITH_SCOPED_PERSISTED_PARITY`.
+
+Both generic binary backends remain independent `KEEP` decisions:
+`rmp-serde 1.3.1` continues to own MessagePack, and `bincode-next 3.1.1` with
+`bincode::config::legacy()` continues to own Bincode. The owned typed-symbol,
+snapshot, trace, replay, migration, and CLI work is additive. It does not
+replace unrestricted downstream Serde or authorize removing either incumbent.
+
+The exact published-v0.3.9 corpus and current-schema tests satisfy the scoped
+persisted compatibility decision. Current-only JSON families, arbitrary old
+releases, third-party payloads, unordered-map bytes, and the absence of one
+replacement-grade differential/fuzz packet across every decoder remain
+explicit no-claim boundaries. Those gaps require `KEEP`; they are not silently
+counted as green.
 
 ## Validation
 
@@ -262,23 +372,33 @@ Run it through the remote clean-overlay lane:
 
 ```bash
 RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay \
-  --overlay-path src/lab/snapshot_restore.rs \
-  --overlay-path src/lab/mod.rs \
-  --overlay-path tests/runtime_snapshot_codec_e2e.rs \
+  --overlay-path tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs \
+  --overlay-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock \
+  --overlay-path src/types/typed_symbol.rs \
+  --overlay-path src/types/mod.rs \
+  --overlay-path src/trace/file.rs \
+  --overlay-path tests/fixtures/typed-format-cross-version-consumer/Cargo.toml \
+  --overlay-path tests/fixtures/typed-format-cross-version-consumer/Cargo.lock \
+  --overlay-path tests/fixtures/typed-format-cross-version-consumer/src/lib.rs \
+  --overlay-path tests/fixtures/typed-format-cross-version-consumer/src/bin/capture.rs \
+  --overlay-path tests/fixtures/typed-format-historical-corpus/v0.3.9.json \
+  --overlay-path tests/typed_format_cross_version_e2e.rs \
+  --overlay-path scripts/run_dependency_sovereignty_e2e.sh \
   --overlay-path artifacts/typed_format_registry_v1.json \
-  --overlay-path docs/runtime_snapshot_codec.md \
   --overlay-path docs/typed_format_registry.md \
   --overlay-path tests/typed_format_registry_contract.rs \
   -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
   RUSTFLAGS='-D warnings -C debuginfo=0' \
-  CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_typed_format_registry_a1" \
+  CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_typed_format_registry_a7" \
   cargo test -p asupersync --test typed_format_registry_contract -- --nocapture
 ```
 
 This proves registry structure, accepted-ADR mapping, live dependency pins,
 scan counts, direct backend paths, source pins, corpus aggregates, public
-generic invariants, persisted-row completeness, downstream ownership,
-fail-closed unknowns, and documentation markers.
+generic invariants, independent binary-format `KEEP` receipts, exact current
+payload goldens and fixture markers, persisted-row completeness, downstream
+ownership, published-v0.3.9 provenance/byte-manifest structure, resolved A7
+blockers, and documentation markers.
 
 It does not execute serialization round trips, fuzzing, migration, historical
 readers, CLI E2E, broad workspace tests, benchmarks, release checks, dependency

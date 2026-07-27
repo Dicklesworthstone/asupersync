@@ -35,7 +35,7 @@ expression: trace_file_layout_summary(path)
       "type": "TaskCompleted"
     }
   ],
-  "flags_hex": "0x0000",
+  "flags_hex": "0x0002",
   "magic": "ASUPERTRACE",
   "meta_len": 48,
   "metadata": {
@@ -45,5 +45,5 @@ expression: trace_file_layout_summary(path)
     "seed": 42,
     "version": 1
   },
-  "version": 2
+  "version": 3
 }

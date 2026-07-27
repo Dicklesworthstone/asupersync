@@ -1,0 +1,15 @@
+[package]
+name = "typed-format-cross-version-consumer"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+asupersync-current = { package = "asupersync", path = "../../..", default-features = false }
+asupersync-v039 = { package = "asupersync", version = "=0.3.9", default-features = false }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+sha2 = "=0.11.0"
+tempfile = "=3.27.0"

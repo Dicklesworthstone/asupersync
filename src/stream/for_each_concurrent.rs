@@ -34,6 +34,26 @@
 //! When the work is pure and cheap and no obligation is involved,
 //! [`buffer_unordered`](super::StreamExt::buffer_unordered) remains the lighter
 //! choice — it needs none of those bounds.
+//!
+//! # Observability
+//!
+//! Unlike the buffering combinators, these functions expose no
+//! [`StreamTelemetrySnapshot`](super::StreamTelemetrySnapshot) accessor — a
+//! deliberate decision, not an omission. They are async functions: the caller
+//! holds no combinator object to snapshot while the call runs, and the two
+//! ways to manufacture one (returning a handle instead of a plain future, or
+//! threading a caller-supplied observer callback through the signature) would
+//! reshape the public API of every call site to serve a diagnostic.
+//!
+//! The in-flight items do not need that instrument, because they are **region
+//! tasks** — already visible to the runtime's own observability surfaces. Task
+//! inspection reports their obligation holdings, poll counts, and cancellation
+//! status; the lab oracles account for every member in quiescence and leak
+//! checks; and each member's terminal [`Outcome`] is observed by the drive
+//! loop rather than dropped. The buffering combinators need a snapshot API
+//! precisely because their in-flight futures are *not* tasks and would
+//! otherwise be invisible; these functions sit on the other side of that
+//! trade.
 
 use super::{Stream, StreamExt};
 use crate::combinator::JoinSet;

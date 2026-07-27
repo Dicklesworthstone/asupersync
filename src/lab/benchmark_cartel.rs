@@ -451,7 +451,10 @@ impl BenchmarkCartel {
         let delta_percent = ((current_mean - baseline_mean) / baseline_mean) * 100.0;
 
         // Simple statistical significance test (t-test approximation)
-        let pooled_std = (baseline.measurements.std_dev_ns + current.measurements.std_dev_ns) / 2.0;
+        let pooled_std = f64::midpoint(
+            baseline.measurements.std_dev_ns,
+            current.measurements.std_dev_ns,
+        );
         let standard_error = pooled_std * (2.0 / baseline.measurements.sample_count as f64).sqrt();
         let t_statistic = (current_mean - baseline_mean) / standard_error;
         let p_value = self.approximate_p_value(t_statistic);
@@ -513,7 +516,7 @@ impl BenchmarkCartel {
     /// Get current git commit hash for baseline validation
     fn get_current_commit_hash() -> Result<String> {
         let output = std::process::Command::new("git")
-            .args(&["rev-parse", "HEAD"])
+            .args(["rev-parse", "HEAD"])
             .output()
             .map_err(|e| Error::internal(format!("failed to get current commit hash: {e}")))?;
 
@@ -588,7 +591,7 @@ impl BenchmarkCartel {
             ))
         })? {
             let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "json") {
+            if path.extension().is_some_and(|ext| ext == "json") {
                 if let Ok(content) = tokio::fs::read_to_string(&path).await {
                     if let Ok(result) = serde_json::from_str::<BenchmarkResult>(&content) {
                         // br-asupersync-q92qqo: Validate baseline compatibility
@@ -690,7 +693,8 @@ impl BenchmarkCartel {
 
 /// Utility functions for benchmark analysis
 pub mod analysis {
-    use super::*;
+    use super::BenchmarkResult;
+    use std::collections::HashMap;
 
     /// Compare two sets of benchmark results
     pub fn compare_result_sets(

@@ -8,9 +8,26 @@
 //! Kafka broker and does not validate producer sequence numbers. Production
 //! operations must fail closed unless the real Kafka backend feature is enabled.
 
+// Every consumer of these three names lives in a `#[cfg(not(feature =
+// "kafka"))]` test below, so the imports are gated to match their users rather
+// than deleted. That is deliberate: the gate is what records the fact that with
+// `--features kafka` this target has NO producer coverage at all. The only
+// tests that survive the feature are the two `println!`-only audit fns, which
+// assert nothing.
+//
+// The duplicate-offset property this file is named for was removed in 17e1226da
+// and has since been RE-HOMED IN-CRATE as
+// `messaging::kafka::tests::deterministic_broker_does_not_deduplicate_idempotent_retries`
+// (br-asupersync-d8aiqa). It cannot live here: integration tests compile as
+// downstream consumers, where `send()` deliberately fails closed with
+// `FeatureDisabled` rather than reaching the deterministic broker, which is
+// precisely what the three tests below assert. The property therefore has to
+// run where the harness is actually reachable.
 #[cfg(not(feature = "kafka"))]
 use asupersync::messaging::kafka::KafkaError;
+#[cfg(not(feature = "kafka"))]
 use asupersync::messaging::kafka::{KafkaProducer, ProducerConfig};
+#[cfg(not(feature = "kafka"))]
 use asupersync::test_utils::run_test_with_cx;
 
 #[cfg(not(feature = "kafka"))]

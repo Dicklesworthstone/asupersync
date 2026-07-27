@@ -1,0 +1,572 @@
+{
+  "schema_version": 1,
+  "artifact_id": "lz4-surface-artifact-inventory-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-0h6myr.4.1",
+  "capability_id": "CAP-TRACE-LZ4",
+  "baseline_revision": "a4a92df81109afa362814c4e0638afcbe16424d0",
+  "generated_at": "2026-07-26T19:32:05Z",
+  "authority": {
+    "registry_disposition": "KEEP_UNTIL_PARITY",
+    "registry_evidence_state": "BASELINE_PLANNED",
+    "registry_cutover_state": "KEEP_INCUMBENT",
+    "cutover_policy_class": "VERSIONED_DATA",
+    "gate_decision": "REPLACE_EXPERIMENT_AUTHORIZED",
+    "next_stage": "asupersync-0h6myr.4.2",
+    "reviewed_by": "GreenCove",
+    "review_basis": "complete source, manifest, lockfile, artifact, consumer, feature, ledger, test, fuzz, benchmark, and CLI inventory at the pinned baseline revision",
+    "production_source_change_allowed_in_this_bead": false,
+    "dependency_exit_allowed": false,
+    "partial_cutover_allowed": false,
+    "meaning": "A2 may implement an isolated safe codec against the frozen trace block contract. lz4_flex remains the production and oracle implementation until A5 independently authorizes a serialized cutover."
+  },
+  "policy": {
+    "zero_unknown_required": true,
+    "unknown_rows": 0,
+    "source_hashes_required": true,
+    "all_gaps_routed": true,
+    "representative_measurements_are_planning_only": true,
+    "historical_artifact_evidence_required_before_cutover": true,
+    "external_vectors_required_before_cutover": true,
+    "fuzz_required_before_cutover": true,
+    "real_replay_e2e_required_before_cutover": true,
+    "performance_gate_required_before_cutover": true
+  },
+  "dependency_graph": {
+    "root_normal_edge": {
+      "manifest": "Cargo.toml",
+      "dependency": "lz4_flex",
+      "requirement": "0.14",
+      "resolved": "0.14.0",
+      "optional": true,
+      "enabling_feature": "trace-compression"
+    },
+    "root_dev_edge": {
+      "manifest": "Cargo.toml",
+      "dependency": "lz4_flex",
+      "requirement": "0.14",
+      "resolved": "0.14.0",
+      "optional": false
+    },
+    "fuzz_edge": {
+      "manifest": "fuzz/Cargo.toml",
+      "dependency": "lz4_flex",
+      "requirement": "0.13",
+      "resolution_state": "UNPINNED_EXCLUDED_WORKSPACE",
+      "local_ignored_lock_observation": "0.13.1",
+      "relationship": "independent excluded fuzz workspace",
+      "parity_state": "VERSION_DRIFT_RISK"
+    },
+    "marginal_ledger": {
+      "source": "artifacts/dependency_marginal_ledger_v1.json",
+      "normal_measurement_count": 12,
+      "dev_measurement_count": 4,
+      "profiles": [
+        "cli",
+        "trace-compression",
+        "workspace-dev-build-audit"
+      ],
+      "targets": [
+        "aarch64-apple-darwin",
+        "wasm32-unknown-unknown",
+        "x86_64-pc-windows-msvc",
+        "x86_64-unknown-linux-gnu"
+      ],
+      "trace_and_cli_marginal_package_version_count": 2,
+      "trace_and_cli_marginal_package_versions": [
+        "lz4_flex@0.14.0",
+        "twox-hash@2.1.3"
+      ],
+      "workspace_audit_marginal_package_version_count": 0,
+      "unsafe_exposure_class": "SAFE-OWN",
+      "marginal_native_code": "none",
+      "interpretation": "The isolated trace-compression and cli profiles have a two-package marginal. The full dev audit has zero marginal because verification edges retain the incumbent; zero in that profile is not permission to remove the production edge."
+    }
+  },
+  "source_pins": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "b6789b10b8e984a98004cde19952c6b73418afdde30aa61e1c5a6a45377f17bb",
+      "role": "root normal/dev dependency and feature authority"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "c670712ab8713897bacc9591c170db2d030df83011dc7b9d092f16099f1540dd",
+      "role": "root resolved dependency graph"
+    },
+    {
+      "path": "src/trace/file.rs",
+      "sha256": "67d22662b847644524e088edf08d05eeeb59aa670c99be725d016ed825d456d9",
+      "role": "CAP-TRACE-LZ4 production format, writer, readers, migration, errors, and limits"
+    },
+    {
+      "path": "src/bin/asupersync.rs",
+      "sha256": "7578b320c1e911375597851aa1821ec1ed871313545b5b159b0df7daa12761df",
+      "role": "trace info, compress, migrate, and replay CLI journeys"
+    },
+    {
+      "path": "src/atp/manifest.rs",
+      "sha256": "c870f9ff6fcda07065bb4bd58cb2a329152afb98230ea97a86af11fc020edd50",
+      "role": "cross-campaign ATP LZ4 manifest sizing consumer"
+    },
+    {
+      "path": "src/net/atp/compress/mod.rs",
+      "sha256": "6139dd59ad79e882b316d752897239cc0e87f400a6b3840851b559c17116071f",
+      "role": "cross-campaign ATP LZ4 compression service"
+    },
+    {
+      "path": "src/net/atp/compress/algorithms.rs",
+      "sha256": "71f2c518b20eceaafcedef6217a938ce8e56703fdea9110049e8a705a1204fdc",
+      "role": "cross-campaign ATP LZ4 adapter"
+    },
+    {
+      "path": "fuzz/Cargo.toml",
+      "sha256": "1a90bcc6869fcca866b6572f6c571b42dcdbcea43960211901ed21bdad83f21f",
+      "role": "excluded fuzz dependency declaration"
+    },
+    {
+      "path": "tests/trace_compression_conformance.rs",
+      "sha256": "34b3d1595cf732579f5611af8fdb0de64f747e7da4125119fcd3554694035082",
+      "role": "currently registered evidence fixture; semantic event filtering, not LZ4 byte-codec coverage"
+    },
+    {
+      "path": "benches/tracing_overhead.rs",
+      "sha256": "0dd60303455c98225e71f76152e7e656e01f35f036561f2870168028bfee65dc",
+      "role": "10,000-event trace read/write Criterion baseline"
+    },
+    {
+      "path": "artifacts/dependency_capability_registry_v1.json",
+      "sha256": "82a73ec1c14fbe317611f6d592af480d75d002cbe9333045ab74840bcaf1c081",
+      "role": "capability and owner authority"
+    },
+    {
+      "path": "artifacts/dependency_capability_baseline_v1.json",
+      "sha256": "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8",
+      "role": "baseline evidence authority"
+    },
+    {
+      "path": "artifacts/dependency_cutover_policy_v1.json",
+      "sha256": "9a786ff93cc198a91b74d5e52f60ede00a2fac190977841482959aad6891cf5b",
+      "role": "versioned-data cutover policy"
+    },
+    {
+      "path": "artifacts/dependency_marginal_ledger_v1.json",
+      "sha256": "9382d8357e59b49b01775f3efad2db95f2186c63bc432b5616ba20f3b9a218a9",
+      "role": "package, trust, target, and unsafe marginal measurements"
+    }
+  ],
+  "production_api_census": [
+    {
+      "call_site_id": "LZ4-CS-TRACE-WRITE",
+      "path": "src/trace/file.rs",
+      "symbol": "lz4_flex::compress_prepend_size",
+      "occurrences": 1,
+      "capability_owner": "CAP-TRACE-LZ4",
+      "behavior": "Compresses the buffered canonical event-frame bytes as one size-prepended LZ4 block."
+    },
+    {
+      "call_site_id": "LZ4-CS-TRACE-READ",
+      "path": "src/trace/file.rs",
+      "symbol": "lz4_flex::decompress_size_prepended",
+      "occurrences": 1,
+      "capability_owner": "CAP-TRACE-LZ4",
+      "behavior": "Refills TraceReader's decompressed event buffer after compressed and advertised output-size guards."
+    },
+    {
+      "call_site_id": "LZ4-CS-TRACE-ITER",
+      "path": "src/trace/file.rs",
+      "symbol": "lz4_flex::decompress_size_prepended",
+      "occurrences": 1,
+      "capability_owner": "CAP-TRACE-LZ4",
+      "behavior": "Refills TraceEventIterator's independent decompressed event buffer under the same guards."
+    },
+    {
+      "call_site_id": "LZ4-CS-ATP-MANIFEST-SIZE",
+      "path": "src/atp/manifest.rs",
+      "symbol": "lz4_flex::compress_prepend_size",
+      "occurrences": 1,
+      "capability_owner": "CAP-HTTP-COMPRESSION",
+      "behavior": "Computes the actual LZ4-compressed manifest content length for policy selection.",
+      "campaign_boundary": "inventory only; not migration authority for CAP-TRACE-LZ4"
+    },
+    {
+      "call_site_id": "LZ4-CS-ATP-COMPRESS",
+      "path": "src/net/atp/compress/mod.rs",
+      "symbol": "lz4_flex::compress_prepend_size",
+      "occurrences": 1,
+      "capability_owner": "CAP-HTTP-COMPRESSION",
+      "behavior": "Compresses ATP payload bytes with a size-prepended LZ4 block.",
+      "campaign_boundary": "inventory only; not migration authority for CAP-TRACE-LZ4"
+    },
+    {
+      "call_site_id": "LZ4-CS-ATP-DECOMPRESS",
+      "path": "src/net/atp/compress/mod.rs",
+      "symbol": "lz4_flex::decompress_size_prepended",
+      "occurrences": 1,
+      "capability_owner": "CAP-HTTP-COMPRESSION",
+      "behavior": "Decompresses ATP payload bytes and checks the caller-supplied expected size after allocation.",
+      "campaign_boundary": "inventory only; not migration authority for CAP-TRACE-LZ4"
+    },
+    {
+      "call_site_id": "LZ4-CS-ATP-ADAPTER-COMPRESS",
+      "path": "src/net/atp/compress/algorithms.rs",
+      "symbol": "lz4_flex::compress_prepend_size",
+      "occurrences": 1,
+      "capability_owner": "CAP-HTTP-COMPRESSION",
+      "behavior": "Implements the generic ATP CompressionAdapter LZ4 encoder.",
+      "campaign_boundary": "inventory only; not migration authority for CAP-TRACE-LZ4"
+    },
+    {
+      "call_site_id": "LZ4-CS-ATP-ADAPTER-DECOMPRESS",
+      "path": "src/net/atp/compress/algorithms.rs",
+      "symbol": "lz4_flex::decompress_size_prepended",
+      "occurrences": 1,
+      "capability_owner": "CAP-HTTP-COMPRESSION",
+      "behavior": "Implements the generic ATP CompressionAdapter LZ4 decoder with a post-decode size check.",
+      "campaign_boundary": "inventory only; not migration authority for CAP-TRACE-LZ4"
+    }
+  ],
+  "verification_api_census": [
+    {
+      "surface_id": "LZ4-TEST-INLINE-TRACE-BOMB",
+      "paths": [
+        "src/trace/file.rs"
+      ],
+      "api": "compress_prepend_size",
+      "purpose": "Construct advertised-size overflow fixtures for both reader implementations.",
+      "resolved_version": "0.14.0"
+    },
+    {
+      "surface_id": "LZ4-TEST-INLINE-ATP",
+      "paths": [
+        "src/net/atp/compress/mod.rs"
+      ],
+      "api": "compress_prepend_size",
+      "purpose": "Construct a valid ATP compressed payload for mismatch/error coverage.",
+      "resolved_version": "0.14.0"
+    },
+    {
+      "surface_id": "LZ4-FUZZ-TRACE-FILE",
+      "paths": [
+        "fuzz/fuzz_targets/trace_file_parsing.rs"
+      ],
+      "api": "decompress_size_prepended",
+      "purpose": "Compare trace parsing against direct incumbent decoding.",
+      "version_requirement": "0.13",
+      "admission": "useful oracle seed, but the excluded workspace has no tracked lockfile and is not current replacement proof"
+    },
+    {
+      "surface_id": "LZ4-FUZZ-CODEC",
+      "paths": [
+        "fuzz/fuzz_targets/trace_compression.rs"
+      ],
+      "api": "raw and size-prepended block compress/decompress",
+      "purpose": "Exercise direct incumbent block APIs, corrupt input, bounds, and recompression.",
+      "version_requirement": "0.13",
+      "admission": "useful oracle seed, but the excluded workspace has no tracked lockfile and is not current replacement proof"
+    },
+    {
+      "surface_id": "LZ4-BENCH-TRACE",
+      "paths": [
+        "benches/tracing_overhead.rs"
+      ],
+      "api": "public TraceWriter and TraceReader",
+      "purpose": "Compare uncompressed and LZ4 read/write time for 10,000 deterministic events.",
+      "resolved_version": "0.14.0"
+    }
+  ],
+  "trace_format_contract": {
+    "magic": "ASUPERTRACE",
+    "current_version": 3,
+    "readable_versions": [
+      1,
+      2,
+      3
+    ],
+    "version_history": [
+      {
+        "version": 1,
+        "compression_byte_present": false,
+        "compressed_allowed": false,
+        "checksums_present": false
+      },
+      {
+        "version": 2,
+        "compression_byte_present": true,
+        "compressed_allowed": true,
+        "checksums_present": false
+      },
+      {
+        "version": 3,
+        "compression_byte_present": true,
+        "compressed_allowed": true,
+        "checksums_present": true
+      }
+    ],
+    "compressed_flag": "0x0001",
+    "checksummed_flag": "0x0002",
+    "compression_byte": 1,
+    "codec_container": "LZ4_SIZE_PREPENDED_BLOCK",
+    "chunk_encoding": [
+      "u32 little-endian compressed byte length",
+      "lz4_flex size-prepended block whose first four bytes are the u32 little-endian uncompressed byte length",
+      "canonical concatenated event frames in the decompressed payload"
+    ],
+    "lz4_frame_format_supported": false,
+    "dictionary_supported": false,
+    "block_checksum_supported": false,
+    "content_checksum_supported": false,
+    "content_size_field": "the lz4_flex size-prepended block's four-byte uncompressed length",
+    "trace_checksum_scope": "Version 3 stores SHA-256 over metadata and the canonical uncompressed event-frame stream, independent of compressed bytes.",
+    "compatibility_policy": "Any experimental owned encoder must reproduce bytes accepted by the incumbent decoder. Any experimental decoder must read every retained v2/v3 compressed trace. Frame, dictionary, and LZ4-native checksum support are not silently added to or inferred from the trace format."
+  },
+  "public_and_operator_surfaces": [
+    {
+      "surface_id": "LZ4-PUB-MODE",
+      "path": "src/trace/file.rs",
+      "surface": "CompressionMode::{None,Lz4 { level },Auto}",
+      "state": "ACTIVE_WITH_TRACE_COMPRESSION",
+      "compatibility": "variant names, header mapping, and Debug/equality behavior are accepted public surface"
+    },
+    {
+      "surface_id": "LZ4-PUB-CONFIG",
+      "path": "src/trace/file.rs",
+      "surface": "TraceFileConfig::with_compression and public chunk_size",
+      "state": "ACTIVE",
+      "compatibility": "chunk boundary changes alter persisted bytes even when replay semantics remain equal"
+    },
+    {
+      "surface_id": "LZ4-CLI-COMPRESS",
+      "path": "src/bin/asupersync.rs",
+      "surface": "asupersync trace compress INPUT OUTPUT --level -1..=16",
+      "state": "ACTIVE",
+      "compatibility": "output-exists refusal, source preservation, structured fields, level validation, and target compression label"
+    },
+    {
+      "surface_id": "LZ4-CLI-INFO-REPLAY-MIGRATE",
+      "path": "src/bin/asupersync.rs",
+      "surface": "trace info, replay, diff, export, and migrate consume compressed traces through TraceReader",
+      "state": "ACTIVE",
+      "compatibility": "all reader journeys and diagnostic codes remain downstream obligations"
+    },
+    {
+      "surface_id": "LZ4-FEATURE-OFF",
+      "path": "src/trace/file.rs",
+      "surface": "compressed trace open without trace-compression",
+      "state": "ACTIVE",
+      "compatibility": "must return CompressionNotAvailable rather than decode, misclassify, or silently skip"
+    }
+  ],
+  "observed_semantic_gaps": [
+    {
+      "gap_id": "LZ4-GAP-01",
+      "finding": "CompressionMode::Lz4 carries level -1..=16, but the writer always calls compress_prepend_size and never passes or interprets level.",
+      "owner": "asupersync-0h6myr.4.4",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "LZ4-GAP-02",
+      "finding": "CompressionMode::Auto is documented as a 1 MiB threshold, but is_compressed is unconditional and AUTO_COMPRESSION_THRESHOLD has no runtime use.",
+      "owner": "asupersync-0h6myr.4.4",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "LZ4-GAP-03",
+      "finding": "Compression byte 1 collapses Lz4 and Auto; reading a compressed artifact always reconstructs Lz4 { level: 1 }, so neither requested level nor Auto intent is persisted.",
+      "owner": "asupersync-0h6myr.4.4",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "LZ4-GAP-04",
+      "finding": "The registry calls the capability block/frame, but the trace implementation accepts and emits only size-prepended LZ4 blocks inside the ASUPERTRACE container.",
+      "owner": "asupersync-0h6myr.4.1",
+      "state": "ROUTED_BY_FORMAT_FREEZE"
+    },
+    {
+      "gap_id": "LZ4-GAP-05",
+      "finding": "EVD-TRACE-LZ4 points to tests/trace_compression_conformance.rs, which tests semantic event filtering rather than the persisted LZ4 byte codec.",
+      "owner": "asupersync-0h6myr.4.3",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "LZ4-GAP-06",
+      "finding": "The excluded fuzz manifest requests lz4_flex 0.13 while production resolves 0.14.0; its ignored lockfile is not clean-HEAD proof.",
+      "owner": "asupersync-0h6myr.4.3",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "LZ4-GAP-07",
+      "finding": "No retained historical compressed trace corpus is registered, despite v2/v3 backward-read and migration claims.",
+      "owner": "asupersync-0h6myr.4.4",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "LZ4-GAP-08",
+      "finding": "The declared lz4_trace_replay, lz4_cross_version_artifact, and lz4_malformed_limits scenarios are not registered canonical E2E scenarios.",
+      "owner": "asupersync-0h6myr.4.4",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "LZ4-GAP-09",
+      "finding": "The advertised output length is capped before decode, but each reader allocates both the compressed chunk and a decompressed Vec; no combined peak-memory measurement is retained.",
+      "owner": "asupersync-0h6myr.4.4",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "LZ4-GAP-10",
+      "finding": "ATP has five production lz4_flex encode/decode/size consumers outside CAP-TRACE-LZ4; removing the root edge cannot be authorized from trace evidence alone.",
+      "owner": "asupersync-0h6myr.5.7",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "LZ4-GAP-11",
+      "finding": "ATP decoders compare expected size only after lz4_flex allocates and decodes the advertised size-prepended block.",
+      "owner": "asupersync-0h6myr.5.6",
+      "state": "ROUTED"
+    }
+  ],
+  "resource_envelope": {
+    "default_uncompressed_chunk_bytes": 65536,
+    "documented_auto_threshold_bytes": 1048576,
+    "max_compressed_chunk_bytes": 67108864,
+    "max_advertised_decompressed_chunk_bytes": 67108864,
+    "max_single_event_bytes": 16777216,
+    "max_metadata_bytes": 1048576,
+    "max_event_preallocation_count": 10000000,
+    "writer_behavior": "Buffers canonical event frames to chunk_size, then allocates the incumbent compressed Vec before writing.",
+    "reader_behavior": "Allocates the bounded compressed Vec, validates the four-byte advertised output length, then replaces decompressed_buffer with the incumbent output Vec.",
+    "peak_memory_state": "BOUND_DECLARED_MEASUREMENT_PENDING",
+    "cutover_requirement": "A4 must retain a measured combined peak and prove no expansion, allocation, integer, truncation, or recovery regression at all boundaries."
+  },
+  "representative_measurements": {
+    "criterion_trace_10000_events": {
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_BENCH_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_lz4_a1_bench\" cargo bench -p asupersync --bench tracing_overhead --features trace-compression,criterion-benches -- trace_",
+      "source_revision": "a4a92df81109afa362814c4e0638afcbe16424d0",
+      "rch_worker": "ovh-a",
+      "rch_job_id": "29948224668172532",
+      "target": "x86_64-unknown-linux-gnu",
+      "rustc": "rustc 1.98.0-nightly (c397dae80 2026-07-02)",
+      "cargo": "cargo 1.98.0-nightly (a335d47ff 2026-06-26)",
+      "sample_count": 100,
+      "write_uncompressed_median_ns": 1127400,
+      "write_lz4_median_ns": 1066600,
+      "read_uncompressed_median_ns": 1617000,
+      "read_lz4_median_ns": 1676700,
+      "write_lz4_to_uncompressed_time_ratio_ppm": 946071,
+      "read_lz4_to_uncompressed_time_ratio_ppm": 1036920,
+      "write_lz4_events_per_second": 9376524,
+      "read_lz4_events_per_second": 5964096,
+      "cpu_model": "UNAVAILABLE",
+      "rss_bytes": "UNAVAILABLE",
+      "limitations": [
+        "single worker and single run",
+        "10,000 identical TaskScheduled events",
+        "Criterion measures whole trace read/write, not isolated codec cost",
+        "no file-size ratio emitted by the existing benchmark",
+        "no CPU pinning, frequency, NUMA, cache, or RSS receipt",
+        "not a threshold, regression gate, or performance-improvement claim"
+      ]
+    },
+    "deterministic_payload_probe": {
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path artifacts/lz4_surface_artifact_inventory_v1.json --overlay-path docs/lz4_surface_artifact_inventory.md --overlay-path tests/lz4_surface_artifact_inventory_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_lz4_a1_probe\" cargo test -p asupersync --test lz4_surface_artifact_inventory_contract representative_payload_ratios_are_reproducible -- --nocapture",
+      "source_revision": "a4a92df81109afa362814c4e0638afcbe16424d0",
+      "rch_worker": "ovh-a",
+      "rch_job_id": "29948224668172536",
+      "iterations": 64,
+      "state": "CAPTURED_PLANNING_ONLY",
+      "payloads": [
+        {
+          "payload_id": "empty",
+          "input_bytes": 0,
+          "compressed_bytes": 5,
+          "ratio_ppm": 0,
+          "observed_input_bytes_per_second": 0
+        },
+        {
+          "payload_id": "repeated_256k",
+          "input_bytes": 262144,
+          "compressed_bytes": 1043,
+          "ratio_ppm": 3978,
+          "observed_input_bytes_per_second": 270519311
+        },
+        {
+          "payload_id": "structured_trace_like",
+          "input_bytes": 240020,
+          "compressed_bytes": 49895,
+          "ratio_ppm": 207878,
+          "observed_input_bytes_per_second": 72373310
+        },
+        {
+          "payload_id": "splitmix_256k",
+          "input_bytes": 262144,
+          "compressed_bytes": 263177,
+          "ratio_ppm": 1003940,
+          "observed_input_bytes_per_second": 1454930935
+        }
+      ],
+      "limitations": [
+        "synthetic deterministic in-memory payloads",
+        "single worker and single capture",
+        "throughput includes repeated allocation and is not a stable benchmark",
+        "exact byte counts are reproducible; timing is observational only",
+        "not representative historical trace or peak-memory evidence"
+      ]
+    }
+  },
+  "evidence_routes": [
+    {
+      "evidence_id": "LZ4-EVD-A1-INVENTORY",
+      "owner": "asupersync-0h6myr.4.1",
+      "state": "COMPLETE",
+      "covers": "source, API, format, artifact, consumer, feature, dependency, ledger, resource, measurement, gap, and authority inventory"
+    },
+    {
+      "evidence_id": "LZ4-EVD-A2-CODEC",
+      "owner": "asupersync-0h6myr.4.2",
+      "state": "PLANNED",
+      "covers": "strictly safe size-prepended block encoder/decoder with exact resource and error contract"
+    },
+    {
+      "evidence_id": "LZ4-EVD-A3-CORPUS",
+      "owner": "asupersync-0h6myr.4.3",
+      "state": "PLANNED",
+      "covers": "independent vectors, differential/property tests, current-version fuzz, and minimized corpus"
+    },
+    {
+      "evidence_id": "LZ4-EVD-A4-REPLAY-PERF",
+      "owner": "asupersync-0h6myr.4.4",
+      "state": "PLANNED",
+      "covers": "trace integration, retained historical artifacts, CLI/replay/migration E2E, resource measurements, and go/no-go"
+    },
+    {
+      "evidence_id": "LZ4-EVD-A5-CUTOVER",
+      "owner": "asupersync-0h6myr.4.5",
+      "state": "PLANNED",
+      "covers": "serialized conditional production and manifest cutover or terminal KEEP"
+    }
+  ],
+  "rollback_triggers": [
+    "a source pin changes without a refreshed call-site and format audit",
+    "a new lz4_flex API call appears outside the inventoried production or verification surfaces",
+    "the trace magic, version, flags, compression byte, chunk length, size prefix, checksum scope, or migration behavior changes",
+    "an owned experiment accepts a frame, dictionary, checksum, or block variant outside the frozen trace contract",
+    "level or Auto semantics change without byte, CLI, artifact, and diagnostic compatibility evidence",
+    "the compressed or advertised decompressed resource guards weaken",
+    "the excluded fuzz oracle remains version-range-drifted and unlocked at the A3 gate",
+    "a historical artifact, CLI, replay, migration, ATP, or feature-off journey loses evidence",
+    "any production or manifest cutover is attempted before A5"
+  ],
+  "no_claim_boundaries": [
+    "This artifact changes no runtime, codec, trace, CLI, ATP, feature, manifest, or dependency behavior.",
+    "REPLACE_EXPERIMENT_AUTHORIZED permits only isolated A2 implementation and comparison; it is not cutover approval.",
+    "The current trace format uses size-prepended LZ4 blocks, not the LZ4 frame format.",
+    "The Criterion sample does not prove performance improvement, no regression, cross-host behavior, throughput at scale, memory use, or production suitability.",
+    "The declared resource constants are not a measured combined peak-memory receipt.",
+    "Fresh roundtrip and inline malformed tests do not prove arbitrary historical artifact compatibility.",
+    "The existing semantic trace-compression conformance test is not LZ4 byte-codec evidence.",
+    "The version-range-drifted, unlocked excluded fuzz targets are not current replacement-grade fuzz proof.",
+    "CAP-TRACE-LZ4 evidence does not authorize migrating or removing ATP, Kafka, HTTP-compression, or any other LZ4 capability.",
+    "This artifact does not prove broad workspace health, release readiness, live RCH fleet availability, or permission to delete files.",
+    "It does not authorize removing lz4_flex, changing Cargo.toml or Cargo.lock, or partially switching any production call site."
+  ]
+}

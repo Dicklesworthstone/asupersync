@@ -186,12 +186,23 @@ impl AsyncConnectionManager for InstantAsyncManager {
     type Connection = ();
     type Error = std::io::Error;
 
-    async fn connect(&self, _cx: &Cx) -> Outcome<Self::Connection, Self::Error> {
-        Outcome::Ok(())
+    // The trait returns `impl Future<..> + Send`, not `async fn`, so these
+    // await-free bodies do not need to be `async` at all. Returning a ready
+    // future satisfies the signature exactly and keeps `unused_async` quiet
+    // without an `#[allow]`.
+    fn connect(
+        &self,
+        _cx: &Cx,
+    ) -> impl std::future::Future<Output = Outcome<Self::Connection, Self::Error>> + Send {
+        std::future::ready(Outcome::Ok(()))
     }
 
-    async fn is_valid(&self, _cx: &Cx, _conn: &mut Self::Connection) -> bool {
-        true
+    fn is_valid(
+        &self,
+        _cx: &Cx,
+        _conn: &mut Self::Connection,
+    ) -> impl std::future::Future<Output = bool> + Send {
+        std::future::ready(true)
     }
 }
 

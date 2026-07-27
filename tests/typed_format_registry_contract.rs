@@ -27,7 +27,28 @@ const DECISION_REGISTRY_PATH: &str = "artifacts/dependency_api_adr_registry_v1.j
 const DECISION_DOC_PATH: &str = "docs/adr/dep_plan_adr_001_serde_generic_formats.md";
 const DECISION_ID: &str = "DEP-ADR-001";
 const BEAD_ID: &str = "asupersync-5z2scg.3.1";
+const A6_BEAD_ID: &str = "asupersync-5z2scg.3.6";
+const A7_BEAD_ID: &str = "asupersync-5z2scg.3.7";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
+const CONSUMER_MANIFEST_PATH: &str =
+    "tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml";
+const CONSUMER_LOCK_PATH: &str =
+    "tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock";
+const CONSUMER_SOURCE_PATH: &str =
+    "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs";
+const HISTORICAL_CONSUMER_MANIFEST_PATH: &str =
+    "tests/fixtures/typed-format-cross-version-consumer/Cargo.toml";
+const HISTORICAL_CONSUMER_LOCK_PATH: &str =
+    "tests/fixtures/typed-format-cross-version-consumer/Cargo.lock";
+const HISTORICAL_CONSUMER_SOURCE_PATH: &str =
+    "tests/fixtures/typed-format-cross-version-consumer/src/lib.rs";
+const HISTORICAL_CORPUS_PATH: &str = "tests/fixtures/typed-format-historical-corpus/v0.3.9.json";
+const HISTORICAL_E2E_PATH: &str = "tests/typed_format_cross_version_e2e.rs";
+const V039_COMMIT: &str = "e7e0af2fe0fc5037a087296e22e5eb57a2c1d50a";
+const V039_CRATE_CHECKSUM: &str =
+    "1cbadf37dce3015a059ffe058804d958026e8b276d665116015e3126d2673cfe";
+const MESSAGEPACK_GOLDEN: &str = "95cfffffffffffffffff81a7426f756e646564cfffffffffffffffff82a0a0a7756e69636f6465ac4772c3bcc39f6520f09fa6809600017fcc80ccfeccffd38000000000000000";
+const BINCODE_GOLDEN: &str = "ffffffffffffffff02000000ffffffffffffffff0200000000000000000000000000000000000000000000000700000000000000756e69636f64650c000000000000004772c3bcc39f6520f09fa680060000000000000000017f80feff010000000000000080";
 const EXPECTED_ROOT_COUNT: usize = 13;
 const EXPECTED_FORMAT_COUNT: usize = 4;
 const EXPECTED_PERSISTED_SURFACE_COUNT: usize = 13;
@@ -110,6 +131,18 @@ fn sha256_hex(bytes: &[u8]) -> String {
         write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
     }
     output
+}
+
+fn decode_hex(encoded: &str) -> Vec<u8> {
+    assert_eq!(encoded.len() % 2, 0, "hex length must be even");
+    encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair).expect("hex must be ASCII");
+            u8::from_str_radix(pair, 16).expect("hex byte")
+        })
+        .collect()
 }
 
 fn visit_files(dir: &Path, files: &mut Vec<PathBuf>) {
@@ -263,6 +296,39 @@ fn validate_registry_shape(value: &Value) -> Result<(), String> {
         return Err("compatibility allow-list drifted".to_owned());
     }
 
+    let allowed_evidence_states: BTreeSet<&str> = value
+        .get("allowed_evidence_states")
+        .and_then(Value::as_array)
+        .ok_or("allowed_evidence_states must be an array")?
+        .iter()
+        .map(|entry| entry.as_str().ok_or("evidence state must be a string"))
+        .collect::<Result<_, _>>()?;
+    if allowed_evidence_states
+        != BTreeSet::from([
+            "BASELINE_EXISTING",
+            "CURRENT_CORPUS_ONLY",
+            "HISTORICAL_CORPUS_VERIFIED",
+            "UNKNOWN_BLOCKING",
+        ])
+    {
+        return Err("evidence-state allow-list drifted".to_owned());
+    }
+
+    let allowed_dispositions: BTreeSet<&str> = value
+        .get("allowed_dependency_dispositions")
+        .and_then(Value::as_array)
+        .ok_or("allowed_dependency_dispositions must be an array")?
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .ok_or("dependency disposition must be a string")
+        })
+        .collect::<Result<_, _>>()?;
+    if allowed_dispositions != BTreeSet::from(["KEEP", "REPLACE"]) {
+        return Err("dependency disposition allow-list drifted".to_owned());
+    }
+
     let profiles = value
         .get("format_profiles")
         .and_then(Value::as_array)
@@ -332,6 +398,150 @@ fn validate_registry_shape(value: &Value) -> Result<(), String> {
         );
     }
 
+    let decisions = value
+        .get("generic_dependency_decisions")
+        .and_then(Value::as_array)
+        .ok_or("generic_dependency_decisions must be an array")?;
+    if decisions.len() != 2 {
+        return Err("generic_dependency_decisions must contain two rows".to_owned());
+    }
+    let observed_decisions: BTreeSet<&str> = decisions
+        .iter()
+        .filter_map(|decision| decision.get("format").and_then(Value::as_str))
+        .collect();
+    if observed_decisions != BTreeSet::from(["Bincode", "MessagePack"]) {
+        return Err("generic dependency decision roster drifted".to_owned());
+    }
+    for decision in decisions {
+        let format = text(decision, "format");
+        for key in [
+            "bead_id",
+            "capability_id",
+            "disposition",
+            "incumbent_package",
+            "incumbent_version",
+            "incumbent_checksum",
+            "public_surface",
+            "configuration",
+            "rationale",
+            "replacement_gate",
+            "evidence_state",
+            "no_claim_boundary",
+            "proof_command",
+        ] {
+            nonempty_text(decision, key)?;
+        }
+        if text(decision, "bead_id") != A6_BEAD_ID
+            || text(decision, "capability_id") != "CAP-SERDE-GENERIC"
+        {
+            return Err(format!("{format} decision authority drifted"));
+        }
+        let disposition = text(decision, "disposition");
+        if !allowed_dispositions.contains(disposition) {
+            return Err(format!(
+                "{format} has an unregistered dependency disposition"
+            ));
+        }
+        if disposition == "KEEP" && !text(decision, "replacement_gate").contains("REPLACE") {
+            return Err(format!(
+                "{format} KEEP decision must retain the REPLACE gate"
+            ));
+        }
+        if disposition == "REPLACE"
+            && decision
+                .get("replacement_parity")
+                .and_then(Value::as_array)
+                .is_none_or(Vec::is_empty)
+        {
+            return Err(format!(
+                "{format} REPLACE decision requires replacement_parity evidence"
+            ));
+        }
+        for key in [
+            "fixture_paths",
+            "fixture_tests",
+            "accepted_data_model",
+            "accepted_exclusions",
+            "errors_and_limits",
+            "dependency_closure",
+        ] {
+            if decision
+                .get(key)
+                .and_then(Value::as_array)
+                .is_none_or(Vec::is_empty)
+            {
+                return Err(format!("{format}.{key} must be a nonempty array"));
+            }
+        }
+        if array(decision, "accepted_data_model").len() < 7 {
+            return Err(format!("{format} accepted data model was narrowed"));
+        }
+        if text(decision, "evidence_state") != "CURRENT_CORPUS_ONLY" {
+            return Err(format!(
+                "{format} generic evidence must remain current-corpus only"
+            ));
+        }
+        let golden = decision
+            .get("exact_payload_golden")
+            .and_then(Value::as_object)
+            .ok_or_else(|| format!("{format}.exact_payload_golden must be an object"))?;
+        let fixture = golden
+            .get("fixture")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("{format} golden fixture must be a string"))?;
+        let hex = golden
+            .get("hex")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("{format} golden hex must be a string"))?;
+        let byte_count = golden
+            .get("byte_count")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("{format} golden byte_count must be an integer"))?;
+        if fixture != "ConsumerRecord::boundary_fixture()"
+            || hex.is_empty()
+            || hex.len() != usize::try_from(byte_count).expect("golden byte count fits usize") * 2
+            || !hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(format!("{format} exact payload golden is malformed"));
+        }
+        let measurement = decision
+            .get("source_measurement")
+            .and_then(Value::as_object)
+            .ok_or_else(|| format!("{format}.source_measurement must be an object"))?;
+        if measurement
+            .get("method")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+            || measurement
+                .get("crate_src_rust_lines")
+                .and_then(Value::as_u64)
+                .is_none_or(|lines| lines == 0)
+        {
+            return Err(format!("{format} source measurement is incomplete"));
+        }
+        let proof_command = text(decision, "proof_command");
+        for marker in [
+            "RCH_REQUIRE_REMOTE=1 rch exec",
+            "--base HEAD",
+            "--clean-overlay",
+            CONSUMER_SOURCE_PATH,
+            CONSUMER_LOCK_PATH,
+            "--locked",
+        ] {
+            if !proof_command.contains(marker) {
+                return Err(format!("{format} proof command missing {marker}"));
+            }
+        }
+        if !text(decision, "no_claim_boundary")
+            .to_ascii_lowercase()
+            .contains("does not prove")
+        {
+            return Err(format!(
+                "{format} decision must state a negative no-claim boundary"
+            ));
+        }
+    }
+
     let public = value
         .get("public_generic_surfaces")
         .and_then(Value::as_array)
@@ -393,10 +603,28 @@ fn validate_registry_shape(value: &Value) -> Result<(), String> {
     if observed_persisted != expected_persisted {
         return Err("persisted surface roster drifted".to_owned());
     }
-    let corpus_ids: BTreeSet<&str> = value
+    let corpora = value
         .get("corpora")
         .and_then(Value::as_array)
-        .ok_or("corpora must be an array")?
+        .ok_or("corpora must be an array")?;
+    for corpus in corpora {
+        for key in ["corpus_id", "compatibility_class", "state", "provenance"] {
+            nonempty_text(corpus, key)?;
+        }
+        if !allowed_compatibility.contains(text(corpus, "compatibility_class")) {
+            return Err(format!(
+                "{} has an unregistered compatibility class",
+                text(corpus, "corpus_id")
+            ));
+        }
+        if !allowed_evidence_states.contains(text(corpus, "state")) {
+            return Err(format!(
+                "{} has an unregistered evidence state",
+                text(corpus, "corpus_id")
+            ));
+        }
+    }
+    let corpus_ids: BTreeSet<&str> = corpora
         .iter()
         .filter_map(|corpus| corpus.get("corpus_id").and_then(Value::as_str))
         .collect();
@@ -420,6 +648,12 @@ fn validate_registry_shape(value: &Value) -> Result<(), String> {
         if !allowed_compatibility.contains(text(surface, "compatibility_class")) {
             return Err(format!(
                 "{} has an unregistered compatibility class",
+                text(surface, "surface_id")
+            ));
+        }
+        if !allowed_evidence_states.contains(text(surface, "state")) {
+            return Err(format!(
+                "{} has an unregistered evidence state",
                 text(surface, "surface_id")
             ));
         }
@@ -464,17 +698,8 @@ fn validate_registry_shape(value: &Value) -> Result<(), String> {
         .get("unknown_blockers")
         .and_then(Value::as_array)
         .ok_or("unknown_blockers must be an array")?;
-    let expected_blockers = BTreeSet::from([
-        "BLOCK-ARBITRARY-SERDE-COVERAGE",
-        "BLOCK-CROSS-VERSION-READERS",
-        "BLOCK-HISTORICAL-BYTES",
-    ]);
-    let observed_blockers: BTreeSet<&str> = blockers
-        .iter()
-        .filter_map(|blocker| blocker.get("blocker_id").and_then(Value::as_str))
-        .collect();
-    if observed_blockers != expected_blockers {
-        return Err("unknown blocker roster drifted".to_owned());
+    if !blockers.is_empty() {
+        return Err("A7 historical blockers must remain resolved".to_owned());
     }
     for blocker in blockers {
         for key in ["blocker_id", "owner_bead", "missing_evidence", "effect"] {
@@ -498,12 +723,40 @@ fn validate_registry_shape(value: &Value) -> Result<(), String> {
         .get("downstream_consumers")
         .and_then(Value::as_array)
         .ok_or("downstream_consumers must be an array")?;
+    for consumer in consumers {
+        for key in ["consumer_id", "owner", "evidence", "state"] {
+            nonempty_text(consumer, key)?;
+        }
+        if !allowed_evidence_states.contains(text(consumer, "state")) {
+            return Err(format!(
+                "{} has an unregistered evidence state",
+                text(consumer, "consumer_id")
+            ));
+        }
+        if array(consumer, "formats").is_empty() {
+            return Err(format!(
+                "{} must retain at least one format",
+                text(consumer, "consumer_id")
+            ));
+        }
+    }
+    let standalone = find_by_id(consumers, "consumer_id", "CONSUMER-STANDALONE-BASELINE");
+    if text(standalone, "state") != "CURRENT_CORPUS_ONLY"
+        || string_set(standalone, "paths")
+            != BTreeSet::from([
+                CONSUMER_MANIFEST_PATH.to_owned(),
+                CONSUMER_LOCK_PATH.to_owned(),
+                CONSUMER_SOURCE_PATH.to_owned(),
+            ])
+        || !text(standalone, "evidence").contains("complete accepted owned Serde model")
+        || !text(standalone, "evidence").contains("1 MiB")
+        || !text(standalone, "evidence").contains("128 recursive levels")
+    {
+        return Err("the locked A6 downstream consumer receipt must stay exact".to_owned());
+    }
     let custom_consumer = find_by_id(consumers, "consumer_id", "CONSUMER-REAL-CUSTOM-CODEC");
     if text(custom_consumer, "state") != "CURRENT_CORPUS_ONLY"
-        || string_set(custom_consumer, "paths")
-            != BTreeSet::from([
-                "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs".to_owned(),
-            ])
+        || string_set(custom_consumer, "paths") != BTreeSet::from([CONSUMER_SOURCE_PATH.to_owned()])
     {
         return Err("the real Custom consumer receipt must stay exact".to_owned());
     }
@@ -512,8 +765,20 @@ fn validate_registry_shape(value: &Value) -> Result<(), String> {
         "consumer_id",
         "CONSUMER-EXTERNAL-HISTORICAL-ARTIFACTS",
     );
-    if text(external, "state") != "UNKNOWN_BLOCKING" {
-        return Err("external historical artifact consumers must remain blocking".to_owned());
+    if text(external, "owner") != A7_BEAD_ID
+        || text(external, "state") != "HISTORICAL_CORPUS_VERIFIED"
+        || string_set(external, "paths")
+            != BTreeSet::from([
+                HISTORICAL_CONSUMER_MANIFEST_PATH.to_owned(),
+                HISTORICAL_CONSUMER_LOCK_PATH.to_owned(),
+                HISTORICAL_CONSUMER_SOURCE_PATH.to_owned(),
+                HISTORICAL_CORPUS_PATH.to_owned(),
+                HISTORICAL_E2E_PATH.to_owned(),
+            ])
+        || !text(external, "evidence").contains("published crates.io")
+        || !text(external, "evidence").contains("atomic output")
+    {
+        return Err("the A7 historical consumer receipt must stay exact".to_owned());
     }
 
     Ok(())
@@ -664,6 +929,143 @@ fn dependency_manifest_and_lock_pins_are_live() {
 }
 
 #[test]
+fn binary_generic_keep_receipts_and_downstream_fixture_are_exact() {
+    let registry = registry();
+    let decisions = array(&registry, "generic_dependency_decisions");
+    assert_eq!(decisions.len(), 2);
+
+    let expected_paths = BTreeSet::from([
+        CONSUMER_MANIFEST_PATH.to_owned(),
+        CONSUMER_LOCK_PATH.to_owned(),
+        CONSUMER_SOURCE_PATH.to_owned(),
+    ]);
+    let expected_tests = BTreeSet::from([
+        "binary_format_bytes_are_explicit_downstream_goldens".to_owned(),
+        "binary_formats_cover_the_complete_owned_serde_model".to_owned(),
+        "binary_formats_preserve_errors_trailing_bytes_recovery_and_large_owned_values".to_owned(),
+    ]);
+
+    for decision in decisions {
+        assert_eq!(text(decision, "bead_id"), A6_BEAD_ID);
+        assert_eq!(text(decision, "capability_id"), "CAP-SERDE-GENERIC");
+        assert_eq!(text(decision, "disposition"), "KEEP");
+        assert_eq!(text(decision, "evidence_state"), "CURRENT_CORPUS_ONLY");
+        assert_eq!(string_set(decision, "fixture_paths"), expected_paths);
+        assert_eq!(string_set(decision, "fixture_tests"), expected_tests);
+        assert!(
+            text(decision, "replacement_gate").contains("differential")
+                && text(decision, "replacement_gate").contains("property")
+                && text(decision, "replacement_gate").contains("fuzz")
+                && text(decision, "replacement_gate").contains("ergonomic"),
+            "{} replacement gate was weakened",
+            text(decision, "format")
+        );
+
+        let golden = decision
+            .get("exact_payload_golden")
+            .and_then(Value::as_object)
+            .expect("exact_payload_golden must be an object");
+        let measurement = decision
+            .get("source_measurement")
+            .and_then(Value::as_object)
+            .expect("source_measurement must be an object");
+        match text(decision, "format") {
+            "MessagePack" => {
+                assert_eq!(text(decision, "incumbent_package"), "rmp-serde");
+                assert_eq!(text(decision, "incumbent_version"), "1.3.1");
+                assert_eq!(
+                    text(decision, "incumbent_checksum"),
+                    "72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155"
+                );
+                assert_eq!(golden.get("byte_count").and_then(Value::as_u64), Some(71));
+                assert_eq!(
+                    golden.get("hex").and_then(Value::as_str),
+                    Some(MESSAGEPACK_GOLDEN)
+                );
+                assert_eq!(
+                    measurement
+                        .get("crate_src_rust_lines")
+                        .and_then(Value::as_u64),
+                    Some(3_207)
+                );
+                assert_eq!(
+                    string_set(decision, "dependency_closure"),
+                    BTreeSet::from(["rmp".to_owned(), "serde".to_owned()])
+                );
+            }
+            "Bincode" => {
+                assert_eq!(text(decision, "incumbent_package"), "bincode-next");
+                assert_eq!(text(decision, "incumbent_version"), "3.1.1");
+                assert_eq!(
+                    text(decision, "incumbent_checksum"),
+                    "1d6626829353ae29293be5c86f42de5f0468bc758af074b0c7d08f07e538ccbc"
+                );
+                assert!(text(decision, "configuration").contains("config::legacy()"));
+                assert_eq!(golden.get("byte_count").and_then(Value::as_u64), Some(102));
+                assert_eq!(
+                    golden.get("hex").and_then(Value::as_str),
+                    Some(BINCODE_GOLDEN)
+                );
+                assert_eq!(
+                    measurement
+                        .get("crate_src_rust_lines")
+                        .and_then(Value::as_u64),
+                    Some(18_992)
+                );
+                assert_eq!(
+                    measurement
+                        .get("serde_bridge_rust_lines")
+                        .and_then(Value::as_u64),
+                    Some(1_564)
+                );
+                assert!(
+                    array(decision, "accepted_exclusions").iter().any(|entry| {
+                        entry
+                            .as_str()
+                            .is_some_and(|value| value.contains("deserialize_any"))
+                    }),
+                    "Bincode decision must fence deserialize_any"
+                );
+            }
+            format => panic!("unexpected generic dependency decision {format}"),
+        }
+
+        let errors_and_limits = array(decision, "errors_and_limits")
+            .iter()
+            .map(|entry| entry.as_str().expect("error/limit entry must be a string"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        for marker in ["truncation", "Trailing bytes", "1 MiB", "128", "no global"] {
+            assert!(
+                errors_and_limits.contains(marker),
+                "{} decision missing error/limit marker {marker}",
+                text(decision, "format")
+            );
+        }
+    }
+
+    let source = read_repo_file(CONSUMER_SOURCE_PATH);
+    for marker in [
+        "struct ConsumerSerdeModel",
+        "serializer.serialize_bytes(&self.0)",
+        "deserializer.deserialize_byte_buf(ConsumerBytesVisitor)",
+        "fn binary_formats_cover_the_complete_owned_serde_model()",
+        "fn binary_format_bytes_are_explicit_downstream_goldens()",
+        "fn binary_formats_preserve_errors_trailing_bytes_recovery_and_large_owned_values()",
+        "consumer-forced encode failure",
+        "1024 * 1024",
+        "ConsumerNested::with_depth(128)",
+        MESSAGEPACK_GOLDEN,
+        BINCODE_GOLDEN,
+    ] {
+        assert!(
+            source.contains(marker),
+            "A6 downstream fixture missing marker: {marker}"
+        );
+    }
+}
+
+#[test]
 fn lexical_scan_profile_covers_every_registered_root() {
     let registry = registry();
     let scan = registry
@@ -796,12 +1198,16 @@ fn public_generic_and_container_invariants_match_source() {
     let trace = read_repo_file("src/trace/file.rs");
     for expected in [
         "pub const TRACE_MAGIC: &[u8; 11] = b\"ASUPERTRACE\";",
-        "pub const TRACE_FILE_VERSION: u16 = 2;",
+        "pub const TRACE_FILE_VERSION: u16 = 3;",
+        "pub const FLAG_CHECKSUMMED: u16 = 0x0002;",
+        "pub const TRACE_CHECKSUM_LEN: usize = 32;",
         "pub const MAX_META_LEN: usize = 1024 * 1024;",
         "pub const MAX_EVENT_PREALLOC: usize = 10_000_000;",
         "pub const MAX_EVENT_LEN: usize = 16 * 1024 * 1024;",
         "pub const MAX_COMPRESSED_CHUNK_LEN: usize = 64 * 1024 * 1024;",
         "if metadata.version != REPLAY_SCHEMA_VERSION",
+        "pub fn recover_trace_prefix(",
+        "pub fn migrate_trace_file(",
     ] {
         assert!(
             trace.contains(expected),
@@ -813,6 +1219,8 @@ fn public_generic_and_container_invariants_match_source() {
     assert!(replay.contains("pub const REPLAY_SCHEMA_VERSION: u32 = 1;"));
     let compat = read_repo_file("src/trace/compat.rs");
     assert!(compat.contains("pub const MIN_SUPPORTED_SCHEMA_VERSION: u32 = 1;"));
+    assert!(compat.contains("pub fn read_event_compat("));
+    assert!(compat.contains("without silently skipping"));
     let crashpack = read_repo_file("src/trace/crashpack.rs");
     assert!(crashpack.contains("pub const CRASHPACK_SCHEMA_VERSION: u32 = 1;"));
     assert!(crashpack.contains("pub const MINIMUM_SUPPORTED_SCHEMA_VERSION: u32 = 1;"));
@@ -888,7 +1296,7 @@ fn every_registered_source_path_exists_and_source_pins_match() {
 }
 
 #[test]
-fn corpus_receipts_and_missing_historical_corpus_are_fail_closed() {
+fn corpus_receipts_and_published_v039_provenance_are_fail_closed() {
     let registry = registry();
     let corpora = array(&registry, "corpora");
     assert_eq!(corpora.len(), 5);
@@ -897,20 +1305,6 @@ fn corpus_receipts_and_missing_historical_corpus_are_fail_closed() {
         let corpus_id = text(corpus, "corpus_id");
         let state = text(corpus, "state");
         let path = corpus.get("path");
-        if state == "UNKNOWN_BLOCKING" {
-            assert!(
-                path.is_none_or(Value::is_null),
-                "{corpus_id} missing corpus must not invent a path"
-            );
-            assert_eq!(corpus.get("file_count").and_then(Value::as_u64), Some(0));
-            assert_eq!(corpus.get("byte_count").and_then(Value::as_u64), Some(0));
-            assert!(
-                text(corpus, "provenance").starts_with("No committed"),
-                "{corpus_id} must state the missing evidence"
-            );
-            continue;
-        }
-
         let path = path
             .and_then(Value::as_str)
             .unwrap_or_else(|| panic!("{corpus_id} must have a path"));
@@ -934,15 +1328,136 @@ fn corpus_receipts_and_missing_historical_corpus_are_fail_closed() {
             corpus.get("aggregate_algorithm").and_then(Value::as_str),
             Some("SHA-256 of sorted lines '<file_sha256>  <repo_relative_path>\\n'")
         );
-        assert!(
-            text(corpus, "provenance").contains("Current")
-                || text(corpus, "provenance").contains("current"),
-            "{corpus_id} must not imply historical provenance"
-        );
+        if corpus_id == "CORPUS-HISTORICAL-V039" {
+            assert_eq!(state, "HISTORICAL_CORPUS_VERIFIED");
+            assert_eq!(path, "tests/fixtures/typed-format-historical-corpus");
+            assert!(text(corpus, "provenance").contains(V039_COMMIT));
+            assert!(text(corpus, "provenance").contains(V039_CRATE_CHECKSUM));
+        } else {
+            assert_ne!(state, "HISTORICAL_CORPUS_VERIFIED");
+            assert!(
+                text(corpus, "provenance").contains("Current")
+                    || text(corpus, "provenance").contains("current"),
+                "{corpus_id} must not imply historical provenance"
+            );
+        }
     }
 
-    let missing = find_by_id(corpora, "corpus_id", "CORPUS-HISTORICAL-TRACE-MISSING");
-    assert_eq!(text(missing, "compatibility_class"), "UNKNOWN_BLOCKING");
+    let historical = find_by_id(corpora, "corpus_id", "CORPUS-HISTORICAL-V039");
+    assert_eq!(text(historical, "compatibility_class"), "EXACT_BYTES");
+    assert_eq!(
+        historical.get("file_count").and_then(Value::as_u64),
+        Some(1)
+    );
+
+    let manifest = parse_repo_json(HISTORICAL_CORPUS_PATH);
+    assert_eq!(
+        text(&manifest, "schema_version"),
+        "typed-format-historical-corpus-v1"
+    );
+    assert_eq!(text(&manifest, "bead_id"), A7_BEAD_ID);
+    let source_release = manifest
+        .get("source_release")
+        .and_then(Value::as_object)
+        .expect("source_release must be an object");
+    assert_eq!(
+        source_release.get("version").and_then(Value::as_str),
+        Some("0.3.9")
+    );
+    assert_eq!(
+        source_release.get("git_tag").and_then(Value::as_str),
+        Some("v0.3.9")
+    );
+    assert_eq!(
+        source_release.get("git_commit").and_then(Value::as_str),
+        Some(V039_COMMIT)
+    );
+    assert_eq!(
+        source_release
+            .get("crate_checksum_sha256")
+            .and_then(Value::as_str),
+        Some(V039_CRATE_CHECKSUM)
+    );
+
+    let artifacts = array(&manifest, "artifacts");
+    assert_eq!(artifacts.len(), 7);
+    let artifact_ids: BTreeSet<&str> = artifacts
+        .iter()
+        .filter_map(|artifact| artifact.get("artifact_id").and_then(Value::as_str))
+        .collect();
+    assert_eq!(
+        artifact_ids,
+        BTreeSet::from([
+            "distributed-snapshot-v2",
+            "replay-blob-v039",
+            "runtime-snapshot-v1",
+            "trace-v2-boundary",
+            "trace-v2-large",
+            "typed-symbol-v039-bincode",
+            "typed-symbol-v039-messagepack",
+        ])
+    );
+    for artifact in artifacts {
+        for key in [
+            "artifact_id",
+            "surface_id",
+            "format",
+            "sha256",
+            "semantic_fingerprint",
+        ] {
+            nonempty_text(artifact, key)
+                .unwrap_or_else(|error| panic!("historical artifact invalid: {error}"));
+        }
+        let byte_len = artifact
+            .get("byte_len")
+            .and_then(Value::as_u64)
+            .expect("historical artifact byte_len");
+        assert!(byte_len > 0);
+        if let Some(hex) = artifact.get("bytes_hex").and_then(Value::as_str) {
+            assert_eq!(
+                hex.len(),
+                usize::try_from(byte_len).expect("byte length fits usize") * 2
+            );
+            assert_eq!(
+                sha256_hex(&decode_hex(hex)),
+                text(artifact, "sha256"),
+                "{} exact bytes drifted",
+                text(artifact, "artifact_id")
+            );
+        } else {
+            assert_eq!(text(artifact, "artifact_id"), "trace-v2-large");
+            assert_eq!(
+                artifact["extra"]["committed_representation"].as_str(),
+                Some("digest-and-published-writer-recipe")
+            );
+            assert_eq!(artifact["extra"]["event_count"].as_u64(), Some(4096));
+        }
+    }
+
+    let fixture_manifest = read_repo_file(HISTORICAL_CONSUMER_MANIFEST_PATH);
+    assert!(fixture_manifest.contains("version = \"=0.3.9\""));
+    assert!(fixture_manifest.contains("[workspace]"));
+    let fixture_lock = read_repo_file(HISTORICAL_CONSUMER_LOCK_PATH);
+    assert!(fixture_lock.contains("name = \"asupersync\""));
+    assert!(fixture_lock.contains("version = \"0.3.9\""));
+    assert!(fixture_lock.contains(V039_CRATE_CHECKSUM));
+    let fixture_source = read_repo_file(HISTORICAL_CONSUMER_SOURCE_PATH);
+    for marker in [
+        "asupersync_v039",
+        "asupersync_current",
+        "LegacyTypedSymbolIdentity",
+        "OpaqueCodec",
+        "trace-v2-large",
+        "../../typed-format-historical-corpus/v0.3.9.json",
+        "generated_bytes[6..14].fill(0)",
+        "generated_bytes[15..23].fill(0)",
+        "committed provenance tuple admits exact historical bytes",
+    ] {
+        assert!(
+            fixture_source.contains(marker),
+            "historical writer fixture missing {marker}"
+        );
+    }
 }
 
 #[test]
@@ -968,10 +1483,19 @@ fn documentation_and_validation_boundary_are_discoverable() {
         "RCH_REQUIRE_REMOTE=1 rch exec --",
         "--base HEAD",
         "--clean-overlay",
-        "--overlay-path src/lab/snapshot_restore.rs",
-        "--overlay-path tests/runtime_snapshot_codec_e2e.rs",
+        "--overlay-path tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
+        "--overlay-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock",
+        "--overlay-path src/types/typed_symbol.rs",
+        "--overlay-path src/types/mod.rs",
+        "--overlay-path src/trace/file.rs",
+        "--overlay-path tests/fixtures/typed-format-cross-version-consumer/Cargo.toml",
+        "--overlay-path tests/fixtures/typed-format-cross-version-consumer/Cargo.lock",
+        "--overlay-path tests/fixtures/typed-format-cross-version-consumer/src/lib.rs",
+        "--overlay-path tests/fixtures/typed-format-cross-version-consumer/src/bin/capture.rs",
+        "--overlay-path tests/fixtures/typed-format-historical-corpus/v0.3.9.json",
+        "--overlay-path tests/typed_format_cross_version_e2e.rs",
+        "--overlay-path scripts/run_dependency_sovereignty_e2e.sh",
         "--overlay-path artifacts/typed_format_registry_v1.json",
-        "--overlay-path docs/runtime_snapshot_codec.md",
         "--overlay-path docs/typed_format_registry.md",
         "--overlay-path tests/typed_format_registry_contract.rs",
         "--test typed_format_registry_contract",
@@ -1000,15 +1524,32 @@ fn documentation_and_validation_boundary_are_discoverable() {
         "EXACT_BYTES",
         "SEMANTIC",
         "UNKNOWN_BLOCKING",
+        "HISTORICAL_CORPUS_VERIFIED",
         "SerializationFormat::Custom",
         "bincode::config::legacy()",
         "ASUPERTRACE",
+        "SHA-256",
+        "trace migrate",
+        "recover_trace_prefix",
         "RestorableSnapshot",
         "ASUPSNAP",
         "ASUP-E404",
         "runtime_snapshot_codec.md",
         "asupersync-5z2scg.3.6",
         "asupersync-5z2scg.3.7",
+        "Published v0.3.9",
+        "LegacyTypedSymbolIdentity",
+        "4,096-event",
+        "atomic",
+        "## A6 generic MessagePack/Bincode decision",
+        "3,207",
+        "18,992",
+        "1,564",
+        "DeserializeOwned",
+        "deserialize_any",
+        "trailing bytes",
+        "1 MiB",
+        "128 recursive levels",
         "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay",
         "does not execute serialization round trips",
     ] {
@@ -1109,17 +1650,59 @@ fn malformed_registry_fixtures_fail_closed() {
             .contains("Custom")
     );
 
-    let mut ownerless_blocker = baseline;
+    let mut invalid_disposition = baseline.clone();
     find_by_id_mut(
-        ownerless_blocker["unknown_blockers"]
+        invalid_disposition["generic_dependency_decisions"]
             .as_array_mut()
-            .expect("unknown_blockers must be an array"),
-        "blocker_id",
-        "BLOCK-HISTORICAL-BYTES",
-    )["owner_bead"] = Value::from("");
+            .expect("generic_dependency_decisions must be an array"),
+        "format",
+        "MessagePack",
+    )["disposition"] = Value::from("DISCARD");
     assert!(
-        validate_registry_shape(&ownerless_blocker)
-            .expect_err("ownerless blocker must fail")
-            .contains("owner_bead")
+        validate_registry_shape(&invalid_disposition)
+            .expect_err("unregistered dependency disposition must fail")
+            .contains("disposition")
+    );
+
+    let mut missing_golden = baseline.clone();
+    find_by_id_mut(
+        missing_golden["generic_dependency_decisions"]
+            .as_array_mut()
+            .expect("generic_dependency_decisions must be an array"),
+        "format",
+        "Bincode",
+    )["exact_payload_golden"] = Value::Null;
+    assert!(
+        validate_registry_shape(&missing_golden)
+            .expect_err("missing binary golden must fail")
+            .contains("exact_payload_golden")
+    );
+
+    let mut unjustified_replacement = baseline.clone();
+    find_by_id_mut(
+        unjustified_replacement["generic_dependency_decisions"]
+            .as_array_mut()
+            .expect("generic_dependency_decisions must be an array"),
+        "format",
+        "MessagePack",
+    )["disposition"] = Value::from("REPLACE");
+    assert!(
+        validate_registry_shape(&unjustified_replacement)
+            .expect_err("REPLACE without parity evidence must fail")
+            .contains("replacement_parity")
+    );
+
+    let mut invalid_historical_state = baseline;
+    find_by_id_mut(
+        invalid_historical_state["downstream_consumers"]
+            .as_array_mut()
+            .expect("downstream_consumers must be an array"),
+        "consumer_id",
+        "CONSUMER-EXTERNAL-HISTORICAL-ARTIFACTS",
+    )["state"] = Value::from("ASSUMED_COMPATIBLE");
+    assert!(
+        validate_registry_shape(&invalid_historical_state)
+            .expect_err("unregistered historical evidence state must fail")
+            .contains("evidence state")
     );
 }

@@ -83,7 +83,8 @@ use asupersync::observability::{
 use asupersync::sync::{AcquireError, Semaphore};
 use asupersync::trace::{
     CompressionMode, IssueSeverity, ReplayEvent, TRACE_FILE_VERSION, TRACE_MAGIC, TraceFileConfig,
-    TraceFileError, TraceReader, TraceWriter, VerificationOptions, verify_trace,
+    TraceFileError, TraceReader, TraceWriter, VerificationOptions, migrate_trace_file,
+    verify_trace,
 };
 use asupersync::types::Budget;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
@@ -2776,6 +2777,9 @@ enum TraceCommand {
     /// Rewrite a trace file with LZ4 compression
     Compress(TraceCompressArgs),
 
+    /// Rewrite a legacy v1/v2 trace into the checksummed current container
+    Migrate(TraceMigrateArgs),
+
     /// Export trace events to JSON
     Export(TraceExportArgs),
 }
@@ -3335,6 +3339,15 @@ struct TraceCompressArgs {
     level: i32,
 }
 
+#[derive(Args, Debug)]
+struct TraceMigrateArgs {
+    /// Legacy source trace file path; retained as the rollback anchor
+    input: PathBuf,
+
+    /// New destination path; must not already exist
+    output: PathBuf,
+}
+
 #[derive(Debug, serde::Serialize)]
 struct TraceInfo {
     file: String,
@@ -3536,6 +3549,32 @@ impl Outputtable for TraceCompressOutput {
             format!("Target compression: {}", self.target_compression),
             format!("Events: {}", self.event_count),
             format!("Size: {}", format_bytes(self.size_bytes)),
+        ]
+        .join("\n")
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct TraceMigrateOutput {
+    input: String,
+    output: String,
+    source_version: u16,
+    target_version: u16,
+    events_copied: u64,
+    rollback_source_preserved: bool,
+}
+
+impl Outputtable for TraceMigrateOutput {
+    fn human_format(&self) -> String {
+        [
+            format!("Input: {}", self.input),
+            format!("Output: {}", self.output),
+            format!(
+                "Container version: {} -> {}",
+                self.source_version, self.target_version
+            ),
+            format!("Events copied: {}", self.events_copied),
+            "Rollback source: preserved".to_string(),
         ]
         .join("\n")
     }
@@ -5470,6 +5509,13 @@ fn run_trace(args: TraceArgs, output: &mut Output) -> Result<(), CliError> {
             output
                 .write(&out)
                 .map_err(output_write_error("compression results"))?;
+            Ok(())
+        }
+        TraceCommand::Migrate(args) => {
+            let out = trace_migrate(&args.input, &args.output)?;
+            output
+                .write(&out)
+                .map_err(output_write_error("migration results"))?;
             Ok(())
         }
         TraceCommand::Export(args) => {
@@ -12284,6 +12330,28 @@ fn trace_compress(
     })
 }
 
+fn trace_migrate(input: &Path, output: &Path) -> Result<TraceMigrateOutput, CliError> {
+    let receipt = migrate_trace_file(input, output).map_err(|error| {
+        let error_path = if matches!(
+            &error,
+            TraceFileError::MigrationDestinationExists | TraceFileError::MigrationInputOutputSame
+        ) {
+            output
+        } else {
+            input
+        };
+        trace_file_error(error_path, error)
+    })?;
+    Ok(TraceMigrateOutput {
+        input: input.display().to_string(),
+        output: output.display().to_string(),
+        source_version: receipt.source_version,
+        target_version: receipt.target_version,
+        events_copied: receipt.events_copied,
+        rollback_source_preserved: true,
+    })
+}
+
 fn replay_event_time_nanos(event: &ReplayEvent) -> Option<u64> {
     match event {
         ReplayEvent::TimeAdvanced { to_nanos, .. } => Some(*to_nanos),
@@ -12389,7 +12457,7 @@ fn trace_file_error(path: &Path, err: TraceFileError) -> CliError {
         }
         TraceFileError::UnsupportedVersion { expected, found } => {
             CliError::new("unsupported_version", "Unsupported trace file version")
-                .detail(format!("Expected <= {expected}, found {found}"))
+                .detail(format!("Expected 1..={expected}, found {found}"))
         }
         TraceFileError::UnsupportedFlags(flags) => {
             CliError::new("unsupported_flags", "Unsupported trace file flags")
@@ -12438,6 +12506,24 @@ fn trace_file_error(path: &Path, err: TraceFileError) -> CliError {
             CliError::new("oversized_field", "Trace field exceeds allowed limit")
                 .detail(format!("{field}: {actual} bytes (max {max})"))
         }
+        TraceFileError::ChecksumMismatch { section } => {
+            CliError::new("checksum_mismatch", "Trace checksum mismatch")
+                .detail(format!("Section: {section}"))
+        }
+        TraceFileError::MigrationInputOutputSame => CliError::new(
+            "invalid_migration_paths",
+            "Trace migration input and output must differ",
+        ),
+        TraceFileError::MigrationDestinationExists => CliError::new(
+            "migration_destination_exists",
+            "Trace migration destination already exists",
+        )
+        .detail("Choose a new output path; migration never overwrites an existing file"),
+        TraceFileError::MigrationAlreadyCurrent { version } => CliError::new(
+            "migration_not_needed",
+            "Trace already uses the current container version",
+        )
+        .detail(format!("Current version: {version}")),
     }
     .context("path", path.display().to_string())
 }
@@ -13165,6 +13251,48 @@ mod tests {
         assert_eq!(args.input, PathBuf::from("input.trace"));
         assert_eq!(args.output, PathBuf::from("output.trace"));
         assert_eq!(args.level, 4);
+    }
+
+    #[test]
+    fn trace_migrate_args_preserve_distinct_source_and_destination() {
+        let cli = Cli::try_parse_from([
+            "asupersync",
+            "trace",
+            "migrate",
+            "legacy-v2.trace",
+            "current-v3.trace",
+        ])
+        .expect("parse trace migrate args");
+
+        let Command::Trace(TraceArgs {
+            command: TraceCommand::Migrate(args),
+        }) = cli.command
+        else {
+            panic!("expected trace migrate command");
+        };
+
+        assert_eq!(args.input, PathBuf::from("legacy-v2.trace"));
+        assert_eq!(args.output, PathBuf::from("current-v3.trace"));
+    }
+
+    #[test]
+    fn trace_migration_and_checksum_errors_remain_machine_readable() {
+        let destination = Path::new("current-v3.trace");
+        let exists = trace_file_error(destination, TraceFileError::MigrationDestinationExists);
+        assert_eq!(exists.error_type, "migration_destination_exists");
+        assert_eq!(
+            exists.context.get("path"),
+            Some(&serde_json::json!("current-v3.trace"))
+        );
+
+        let checksum = trace_file_error(
+            Path::new("damaged.trace"),
+            TraceFileError::ChecksumMismatch {
+                section: "event stream",
+            },
+        );
+        assert_eq!(checksum.error_type, "checksum_mismatch");
+        assert!(checksum.detail.contains("event stream"));
     }
 
     #[test]

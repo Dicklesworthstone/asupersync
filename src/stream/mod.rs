@@ -49,6 +49,11 @@
 //! - [`Chunks`]: Groups items into fixed-size batches
 //! - [`ReadyChunks`]: Returns immediately available items
 //!
+//! The three future-buffering combinators expose deterministic pressure
+//! telemetry via `telemetry_snapshot(id)`, returning a
+//! [`StreamTelemetrySnapshot`] in the same idiom as
+//! [`SyncTelemetrySnapshot`](crate::sync::SyncTelemetrySnapshot).
+//!
 //! ## Terminal Operations
 //! - [`Collect`]: Collects all items into a collection
 //! - [`StreamExt::collect_into`]: Collects into a caller-supplied collection, reusing its allocation
@@ -87,6 +92,46 @@
 //!     assert_eq!(sum, 12); // (2*2) + (4*2) = 12
 //! }
 //! ```
+
+/// Redacted, deterministic pressure telemetry for future-buffering stream
+/// combinators.
+///
+/// The caller supplies `combinator_id`, so the runtime does not need ambient
+/// global registration — the same rule as
+/// [`SyncTelemetrySnapshot`](crate::sync::SyncTelemetrySnapshot). Snapshots
+/// report only aggregate pressure and lifecycle state, never item values.
+///
+/// # Determinism
+///
+/// Every field is derived from combinator state that the polling schedule fully
+/// determines. Under the lab runtime, the same seed therefore produces the same
+/// sequence of snapshots at the same observation points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamTelemetrySnapshot {
+    /// Caller-provided stable combinator identifier.
+    pub combinator_id: u64,
+    /// Combinator kind: `"buffered"`, `"buffer_unordered"`, or `"try_buffered"`.
+    pub combinator_kind: &'static str,
+    /// Maximum number of futures the combinator will run concurrently.
+    pub limit: usize,
+    /// Futures currently admitted and not yet yielded.
+    pub in_flight: usize,
+    /// Slots immediately available for new admissions.
+    pub available: usize,
+    /// Completed results parked behind head-of-line ordering: futures that
+    /// have resolved but whose output cannot be yielded yet because an earlier
+    /// future is still pending. Structurally zero for `buffer_unordered`,
+    /// which yields completions immediately.
+    pub ready_results: usize,
+    /// Monotonic count of distinct polling-task wakers observed. Rapid growth
+    /// is the waker-churn signal: the combinator is being moved between tasks
+    /// or executors instead of being polled from a stable home.
+    pub waker_epoch: u64,
+    /// Whether the combinator will admit no further futures: the source is
+    /// exhausted, or (for `try_buffered`) the stream already yielded its
+    /// terminal `Err`.
+    pub closed: bool,
+}
 
 mod any_all;
 mod broadcast_stream;

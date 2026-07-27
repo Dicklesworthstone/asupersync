@@ -1044,7 +1044,9 @@ fn trace_native_repair_accounting(
     );
 }
 
-async fn send_native_proof_until_close<T: serde::Serialize>(
+// `Sync` on the proof payload keeps the returned future `Send`: `&T` is only `Send`
+// when `T: Sync`, and every caller already passes a plain serializable record.
+async fn send_native_proof_until_close<T: serde::Serialize + Sync>(
     cx: &Cx,
     link: &mut QuicLink,
     control: &mut NativeQuicFrameTransport,

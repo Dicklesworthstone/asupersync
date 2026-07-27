@@ -1,0 +1,132 @@
+{
+  "artifacts": [
+    {
+      "artifact_id": "typed-symbol-v039-messagepack",
+      "byte_len": 59,
+      "bytes_hex": "5453594d010091d248db0862d533011809a7d6efa69fab2000000093cd0309b07075626c69736865642d76302e332e39970001027fcc80ccfeccff",
+      "extra": {
+        "current_migrated_byte_len": 59,
+        "current_migrated_sha256": "2b5f310cfb268f62cab613ec97f9eca893ef58ee37709006518d6a773f8717bd",
+        "legacy_schema_hash": 12366786650811336984,
+        "legacy_type_id": 3734999256151937681
+      },
+      "format": "MessagePack",
+      "semantic_fingerprint": "7126edf43f6eac5ebfbff7734d7e159465123504e0ddced4a7bf4ce55ce0c94a",
+      "sha256": "df3b53408dc6f7b8c970ad9a1647d16dbd50077059ae09c953398218673318c0",
+      "source_version": 1,
+      "surface_id": "PERSIST-TYPED-SYMBOL"
+    },
+    {
+      "artifact_id": "typed-symbol-v039-bincode",
+      "byte_len": 74,
+      "bytes_hex": "5453594d0100fd9ad9e4093b12900287e6a6b7dfb914bb2f000000090300000000000010000000000000007075626c69736865642d76302e332e3907000000000000000001027f80feff",
+      "extra": {
+        "current_migrated_byte_len": 74,
+        "current_migrated_sha256": "e47f2ec62a705f1997a540a0670258af0d5f8be0c951d0d4a825a461b2436982",
+        "legacy_schema_hash": 13480603955136751239,
+        "legacy_type_id": 10381425004722625277
+      },
+      "format": "Bincode",
+      "semantic_fingerprint": "7126edf43f6eac5ebfbff7734d7e159465123504e0ddced4a7bf4ce55ce0c94a",
+      "sha256": "ccda1723543fac39e1929a48389c96c0c8b5871dfae66539ceef1ac36b937700",
+      "source_version": 1,
+      "surface_id": "PERSIST-TYPED-SYMBOL"
+    },
+    {
+      "artifact_id": "replay-blob-v039",
+      "byte_len": 102,
+      "bytes_hex": "929501ce000309a700ce00a70309d9267075626c69736865642d76302e332e392d63726f73732d76657273696f6e2d666978747572659492a7526e6753656564ce000309a792a8526e6756616c75650192a8526e6756616c75650292a8526e6756616c756503",
+      "extra": {
+        "event_count": 4
+      },
+      "format": "MessagePack",
+      "semantic_fingerprint": "c8848dd7e64fe9f4c43382422c3c6167b466b39b86f1dbe79c689c5b086480aa",
+      "sha256": "17768976da44c6ad632e738c944cc5a5481f137a95cae57b6780502faf40726f",
+      "source_version": 1,
+      "surface_id": "PERSIST-REPLAY-BLOB"
+    },
+    {
+      "artifact_id": "trace-v2-boundary",
+      "byte_len": 144,
+      "bytes_hex": "41535550455254524143450200000000350000009501ce000309a700ce00a70309d9267075626c69736865642d76302e332e392d63726f73732d76657273696f6e2d6669787475726504000000000000000e00000092a7526e6753656564ce000309a70b00000092a8526e6756616c7565010b00000092a8526e6756616c7565020b00000092a8526e6756616c756503",
+      "extra": {
+        "event_count": 4,
+        "migrated_sha256": "4b1e77b39128a2af1fff7a0dd8d211bb09a89bba0c13945293261a2f939241f5",
+        "rollback_source_preserved": true,
+        "target_version": 3
+      },
+      "format": "ASUPERTRACE",
+      "semantic_fingerprint": "c8848dd7e64fe9f4c43382422c3c6167b466b39b86f1dbe79c689c5b086480aa",
+      "sha256": "eaa71d12bf61e6f238189863704cfb693bc9fd1424d1ffe59e67b262e0c0da98",
+      "source_version": 2,
+      "surface_id": "PERSIST-TRACE-FILE"
+    },
+    {
+      "artifact_id": "trace-v2-large",
+      "byte_len": 69332,
+      "bytes_hex": null,
+      "extra": {
+        "committed_representation": "digest-and-published-writer-recipe",
+        "event_count": 4096,
+        "migrated_sha256": "d9065a420ffa151b6a134fec7a7ce2c375f3640362dd4aa1b0be88ee75143254",
+        "rollback_source_preserved": true,
+        "target_version": 3
+      },
+      "format": "ASUPERTRACE",
+      "semantic_fingerprint": "0b93dacf6707e44497e6b92c1da71435db0f37dab22cef8507b7256d831fa073",
+      "sha256": "44890668ca211adb0c1a7d9be9fc0fbd2028ce5446b8d14939884b6801d07704",
+      "source_version": 2,
+      "surface_id": "PERSIST-TRACE-FILE"
+    },
+    {
+      "artifact_id": "runtime-snapshot-v1",
+      "byte_len": 250,
+      "bytes_hex": "7b0a202022736e617073686f74223a207b0a202020202274696d657374616d70223a203737372c0a2020202022726567696f6e73223a205b5d2c0a20202020227461736b73223a205b5d2c0a20202020226f626c69676174696f6e73223a205b5d2c0a2020202022726563656e745f6576656e7473223a205b5d2c0a202020202266696e616c697a65725f686973746f7279223a205b5d2c0a20202020226c6f7365725f647261696e5f686973746f7279223a205b5d0a20207d2c0a202022736368656d615f76657273696f6e223a20312c0a202022636f6e74656e745f68617368223a20313037363630363331383734363435313538360a7d",
+      "extra": {
+        "rollback_source_preserved": true,
+        "target_schema_version": 2
+      },
+      "format": "JSON",
+      "semantic_fingerprint": "45d41789bd6f5a8210820176f63b5aee3893b4e881feddfe89c1fc38d09326e2",
+      "sha256": "f82711d65eed8144713ae57fb146106fe343f16e361b500bdb205d90326c3430",
+      "source_version": 1,
+      "surface_id": "PERSIST-LAB-SNAPSHOT-HASH"
+    },
+    {
+      "artifact_id": "distributed-snapshot-v2",
+      "byte_len": 111,
+      "bytes_hex": "534e41500200000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "extra": {
+        "authentication": "stored zero tag; secure consumers must use from_bytes_with_key",
+        "current_reserialization_exact": true
+      },
+      "format": "SNAP+Bincode",
+      "semantic_fingerprint": "04b0e169cb30ae393c84df9eb56ae37a5e422f83440579c42ef805e8da6b45a7",
+      "sha256": "69a8255ac17eadfb8d7a14438bb58e5402adae3429a53e25f81ecae5e8ec5619",
+      "source_version": 2,
+      "surface_id": "PERSIST-DISTRIBUTED-SNAPSHOT"
+    }
+  ],
+  "bead_id": "asupersync-5z2scg.3.7",
+  "current_reader": {
+    "crate_source": "path:../../..",
+    "trace_target_version": 3,
+    "typed_symbol_admission": "explicit trusted LegacyTypedSymbolIdentity"
+  },
+  "no_claim_boundaries": [
+    "Proves only the exact published-writer artifacts and current readers exercised here.",
+    "Does not prove arbitrary third-party type identity portability across old Rust toolchains.",
+    "Does not authorize dependency, format, feature, or API removal.",
+    "Does not prove performance or broad workspace health."
+  ],
+  "schema_version": "typed-format-historical-corpus-v1",
+  "source_release": {
+    "cargo_source": "registry+https://github.com/rust-lang/crates.io-index",
+    "crate": "asupersync",
+    "crate_checksum_sha256": "1cbadf37dce3015a059ffe058804d958026e8b276d665116015e3126d2673cfe",
+    "git_commit": "e7e0af2fe0fc5037a087296e22e5eb57a2c1d50a",
+    "git_tag": "v0.3.9",
+    "version": "0.3.9",
+    "writer_fixture": "tests/fixtures/typed-format-cross-version-consumer"
+  }
+}

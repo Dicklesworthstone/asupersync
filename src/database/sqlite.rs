@@ -5928,7 +5928,7 @@ mod tests {
                     .unwrap()
                     .filter_map(|entry| entry.ok())
                     .filter(|entry| {
-                        entry.path().extension().map_or(false, |ext| {
+                        entry.path().extension().is_some_and(|ext| {
                             ext == "journal" || ext == "wal" || ext == "shm"
                         })
                     })

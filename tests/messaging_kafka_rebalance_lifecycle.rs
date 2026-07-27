@@ -22,9 +22,7 @@
 #[cfg(feature = "kafka")]
 mod rebalance_lifecycle {
     use asupersync::{
-        messaging::kafka_consumer::{
-            ConsumerConfig, KafkaConsumer, RebalanceResult, TopicPartitionOffset,
-        },
+        messaging::kafka_consumer::{ConsumerConfig, KafkaConsumer, TopicPartitionOffset},
         test_utils::run_test_with_cx,
     };
 

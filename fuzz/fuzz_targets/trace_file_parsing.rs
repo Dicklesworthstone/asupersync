@@ -12,8 +12,10 @@
 //! - Flags (2): u16 little-endian (bit 0 = compression)
 //! - Compression (1): u8 (0=none, 1=LZ4)
 //! - Metadata length (4): u32 little-endian
+//! - Metadata SHA-256 (32, v3): digest of encoded metadata
 //! - Metadata (variable): MessagePack-encoded TraceMetadata
 //! - Event count (8): u64 little-endian
+//! - Event-stream SHA-256 (32, v3): digest of canonical uncompressed frames
 //! - Events (variable): Length-prefixed MessagePack-encoded ReplayEvent structs
 
 use libfuzzer_sys::fuzz_target;
