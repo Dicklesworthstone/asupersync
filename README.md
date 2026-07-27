@@ -61,62 +61,22 @@ controlled schedules deterministic and replayable.
 
 ## Quick Example
 
-Current API note: runtime-wired code spawns through `Cx::spawn` for the current
-region, or `Cx::spawn_in` for an explicit scope's region. The remaining
-`Scope::spawn_registered` API is the synchronous boot/test path for call sites
-that already hold `&mut RuntimeState`.
+The attribute macro builds and drives the production runtime, so the first
+program needs no runtime concepts:
 
 ```rust
-use asupersync::{Cx, Error, LabConfig, LabRuntime, Outcome};
-use asupersync::runtime::{RuntimeBuilder, SpawnError};
+use asupersync::main;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = RuntimeBuilder::current_thread().build()?;
-    let result = runtime.block_on(runtime.handle().spawn(async {
-        let cx = Cx::current().expect("runtime task Cx");
-        main_task(&cx).await
-    }));
-    result?;
-    Ok(())
-}
-
-// Structured concurrency: spawned tasks are owned by the current region and
-// joined before the parent task finishes.
-async fn main_task(cx: &Cx) -> Result<(), SpawnError> {
-    let mut worker_a = cx.spawn(|task_cx| async move { worker_a(&task_cx).await })?;
-    let mut worker_b = cx.spawn(|task_cx| async move { worker_b(&task_cx).await })?;
-
-    let a = worker_a.join(cx).await.expect("worker_a joins");
-    let b = worker_b.join(cx).await.expect("worker_b joins");
-    assert!(matches!(a, Outcome::Ok(())));
-    assert!(matches!(b, Outcome::Ok(())));
-    Ok(())
-}
-
-// Cancellation is a protocol, not a flag.
-async fn worker_a(cx: &Cx) -> Outcome<(), Error> {
-    cx.checkpoint()?;
-    // Do cancel-safe work here, e.g. reserve()/send() on a channel.
-    Outcome::ok(())
-}
-
-async fn worker_b(cx: &Cx) -> Outcome<(), Error> {
-    cx.checkpoint()?;
-    Outcome::ok(())
-}
-
-// Lab runtime: deterministic testing uses explicit run reports.
-#[test]
-fn test_cancellation_protocol_invariants() {
-    let mut lab = LabRuntime::new(LabConfig::new(42));
-
-    // Enqueue work into `lab.state` / `lab.scheduler`, then drive to quiescence.
-    let report = lab.run_until_quiescent_with_report();
-
-    assert!(report.oracle_report.all_passed());
-    assert!(report.invariant_violations.is_empty());
+#[main]
+async fn main() {
+    println!("hello from asupersync");
 }
 ```
+
+This exact program is [`examples/onramp_level0.rs`](./examples/onramp_level0.rs).
+Continue with the four-level [graduated on-ramp](./docs/onramp.md) to add the
+prelude, capability context, outcomes, budgets, structured fan-out, two-phase
+effects, and deterministic lab oracles.
 
 ---
 
@@ -128,11 +88,12 @@ If you already know tokio, this section maps the primitives you use daily to the
 
 | tokio | asupersync | Key difference |
 |-------|-----------|----------------|
-| `tokio::spawn(fut)` | `cx.spawn(\|cx\| async move { fut.await })` or `cx.spawn_in(&scope, \|cx\| fut)` | Task is owned by a region; cannot orphan. Factory receives its own `Cx`. |
-| `JoinHandle<T>` | `TaskHandle<T>` | `.join(&cx).await` returns `Result<T, JoinError>`. JoinError is Cancelled or Panicked. |
+| `tokio::spawn(fut)` | `cx.spawn(\|cx\| async move { fut.await })` or `cx.spawn_in(&scope, \|cx\| fut)` | Task is owned by a region; the factory receives its own `Cx`. See [`onramp_level2.rs`](./examples/onramp_level2.rs). |
+| `JoinHandle<T>` | `TaskHandle<T>` | `.join(cx).await` returns `Result<T, JoinError>`; cancellation and panic remain distinct. |
+| `tokio::task::JoinSet<T>` | `JoinSet<T, E, P>` | `JoinSet::in_cx(cx)` or `JoinSet::new(&scope)` owns dynamic fan-out in one region; `join_next`, `join_all`, and `cancel_all` always retain drain ownership. |
 | `tokio::spawn_blocking(f)` | `spawn_blocking(f)` | Same idea. Runs closure on a blocking pool thread. |
-| `tokio::select!` | `Select::new(a, b).await` | Returns `Either::Left(a)` / `Either::Right(b)`. Futures must be `Unpin`. Use `Scope::race` for auto-drain of losers. |
-| `tokio::join!` | `scope.join_all(cx, futs).await` | All branches always complete (no abandonment). Outcomes aggregate via severity lattice. |
+| `tokio::select!` | `race!(cx, { a, b })` or `cx.race_drained(...)` | Returns only after the winner is selected and every loser is protocol-cancelled and drained. See [`macros_race.rs`](./examples/macros_race.rs). |
+| `tokio::join!` | `join!(a, b)`; use `JoinSet::join_all(cx)` for dynamic arity | Inline branches complete together; spawned dynamic members remain region-owned and are collected in spawn order. See [`macros_basic.rs`](./examples/macros_basic.rs). |
 | `tokio::time::sleep(dur)` | `sleep(now, dur)` | Takes current `Time` instead of reading the clock implicitly. Works with virtual time in lab runtime. |
 | `tokio::time::timeout(dur, fut)` | `timeout(now, dur, fut)` | Returns `Result<T, Elapsed>`. Also see the `Timeout` combinator type for richer outcome handling. |
 | `tokio::time::interval(dur)` | `interval(now, dur)` | Same `MissedTickBehavior` options (Burst, Delay, Skip). |
@@ -2037,6 +1998,8 @@ Open an issue at https://github.com/Dicklesworthstone/asupersync/issues
 | [`asupersync_v4_formal_semantics.md`](./asupersync_v4_formal_semantics.md) | **Operational Semantics**: Small-step rules, TLA+ sketch |
 | [`docs/design/api_skeleton_v4.rs`](./docs/design/api_skeleton_v4.rs) | **API Skeleton**: Rust types and signatures |
 | [`docs/integration.md`](./docs/integration.md) | **Integration Docs**: Architecture, API orientation, tutorials, Browser Edition docs IA/navigation contract, support matrix, and fail-closed boundary guidance |
+| [`docs/onramp.md`](./docs/onramp.md) | **Graduated On-Ramp**: four compile-backed levels from `#[asupersync::main]` through lab obligation oracles |
+| [`examples/README.md`](./examples/README.md) | **Examples Index**: every runnable example, operator artifact, and deterministic scenario fixture |
 | [`docs/lab_live_differential_scope_matrix.md`](./docs/lab_live_differential_scope_matrix.md) | **Lab-vs-Live Differential Scope Matrix**: admitted semantic surfaces, rollout ladder, and eligibility gates for future external-boundary work |
 | [`docs/lab_live_time_normalization_policy.md`](./docs/lab_live_time_normalization_policy.md) | **Time + Scheduler-Noise Policy**: scenario-clock rules, qualified-time semantics, and the boundary between semantic timing claims and provenance-only timing |
 | [`docs/lab_live_virtualized_surface_matrix.md`](./docs/lab_live_virtualized_surface_matrix.md) | **Phase 2 Virtualized Surface Matrix**: timer/virtual-transport coverage rows, required logs, invalid-experiment signals, and promotion floors |
