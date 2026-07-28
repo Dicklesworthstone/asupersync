@@ -6907,6 +6907,252 @@ fn task_table_backed_execute_retires_external_record_and_validator() {
     );
 }
 
+/// E1.2 subsystem 3b (br-asupersync-sched-hot-path-perf-bt4y5f.2.2): the
+/// panic-completion arm (E1.1 rows T20/T21) flows through the same ordered
+/// completion backing as ready completion. A panicking last task of a closing
+/// region must advance the region to Finalizing and mint the async finalizer
+/// into the DISPATCH table (external shard), never the embedded arena.
+#[test]
+fn task_table_backed_panic_completion_mints_ready_finalizer_externally() {
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    let region = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .create_root_region(Budget::INFINITE);
+    let task_id = {
+        let mut state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            state.register_async_finalizer(region, async {}),
+            "async finalizer registered"
+        );
+        state
+            .create_task(region, Budget::INFINITE, async {
+                panic!("deliberate test panic: 3b ordered completion");
+            })
+            .expect("create task")
+            .0
+    };
+    let task_table = Arc::new(ContendedMutex::new("task_table", TaskTable::new()));
+    move_runtime_task_to_shard(&state, &task_table, task_id);
+    {
+        // Close the region so the panicking task is its last live work; its
+        // completion is what advances the region into Finalizing.
+        let state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let region_record = state.regions.get(region.arena_index()).expect("region");
+        assert!(region_record.begin_close(None), "region enters Closing");
+    }
+
+    let mut scheduler = ThreeLaneScheduler::new_with_options_and_task_table(
+        1,
+        &state,
+        Some(Arc::clone(&task_table)),
+        DEFAULT_CANCEL_STREAK_LIMIT,
+        false,
+        32,
+    );
+    let mut worker = scheduler.take_workers().remove(0);
+    worker.execute(task_id);
+
+    let finalizer_id = {
+        let tt = task_table
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            tt.task(task_id).is_none(),
+            "panicked record is detached from the external shard"
+        );
+        let live: Vec<TaskId> = tt
+            .iter()
+            .filter(|(_, record)| !record.state.is_terminal())
+            .map(|(idx, _)| TaskId::from_arena(idx))
+            .collect();
+        assert_eq!(
+            live.len(),
+            1,
+            "exactly the minted finalizer task is live in the external shard"
+        );
+        live[0]
+    };
+    let state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(
+        state.task(finalizer_id).is_none(),
+        "embedded table must not mint the external finalizer task"
+    );
+    assert!(
+        state
+            .regions
+            .get(region.arena_index())
+            .is_some_and(|r| r.state() == crate::record::region::RegionState::Finalizing),
+        "panic completion advanced the closing region to Finalizing"
+    );
+}
+
+/// E1.2 subsystem 3b: the unified fallback (E1.1 rows T18/T21) drains ready
+/// finalizers through the shared gated seam. The `has_finalizing_regions`
+/// gate replaced an unconditional drain on this arm; this pins that the
+/// gating cannot lose the drain when the completing task is what makes the
+/// region finalizable.
+#[test]
+fn unified_ready_completion_still_drains_ready_finalizers() {
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    let region = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .create_root_region(Budget::INFINITE);
+    let task_id = {
+        let mut state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            state.register_async_finalizer(region, async {}),
+            "async finalizer registered"
+        );
+        let task_id = state
+            .create_task(region, Budget::INFINITE, async {})
+            .expect("create task")
+            .0;
+        let region_record = state.regions.get(region.arena_index()).expect("region");
+        assert!(region_record.begin_close(None), "region enters Closing");
+        task_id
+    };
+
+    let mut scheduler = ThreeLaneScheduler::new_with_options_and_task_table(
+        1,
+        &state,
+        None,
+        DEFAULT_CANCEL_STREAK_LIMIT,
+        false,
+        32,
+    );
+    let mut worker = scheduler.take_workers().remove(0);
+    worker.execute(task_id);
+
+    let mut state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let live: Vec<TaskId> = state
+        .tasks_iter()
+        .filter(|(_, record)| !record.state.is_terminal())
+        .map(|(idx, _)| TaskId::from_arena(idx))
+        .collect();
+    assert_eq!(
+        live.len(),
+        1,
+        "unified completion minted exactly the finalizer task in the embedded arena"
+    );
+    assert!(
+        state.get_stored_future(live[0]).is_some(),
+        "embedded finalizer future stored for dispatch"
+    );
+    assert!(
+        state
+            .regions
+            .get(region.arena_index())
+            .is_some_and(|r| r.state() == crate::record::region::RegionState::Finalizing),
+        "ready completion advanced the closing region to Finalizing"
+    );
+}
+
+/// E1.2 subsystem 3b: the unwind-cleanup guard (E1.1 row T16) routes through
+/// `complete_task_after_unwind_ordered`. It must synthesize a panic terminal
+/// state on the external record, detach it, retire validator state, mint
+/// ready finalizers externally, and structurally suppress observers (the
+/// artifacts type has no observer to dispatch).
+#[test]
+fn unwind_guard_completion_detaches_external_record_and_mints_finalizer() {
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    let region = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .create_root_region(Budget::INFINITE);
+    let task_id = {
+        let mut state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            state.register_async_finalizer(region, async {}),
+            "async finalizer registered"
+        );
+        state
+            .create_task(region, Budget::INFINITE, async {})
+            .expect("create task")
+            .0
+    };
+    let task_table = Arc::new(ContendedMutex::new("task_table", TaskTable::new()));
+    move_runtime_task_to_shard(&state, &task_table, task_id);
+    {
+        let state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let region_record = state.regions.get(region.arena_index()).expect("region");
+        assert!(region_record.begin_close(None), "region enters Closing");
+    }
+
+    let mut scheduler = ThreeLaneScheduler::new_with_options_and_task_table(
+        1,
+        &state,
+        Some(Arc::clone(&task_table)),
+        DEFAULT_CANCEL_STREAK_LIMIT,
+        false,
+        32,
+    );
+    let worker = scheduler.take_workers().remove(0);
+
+    let artifacts = worker.complete_task_after_unwind_ordered(task_id);
+    assert!(
+        artifacts.detached_record.as_ref().is_some_and(|record| {
+            matches!(
+                record.state,
+                crate::record::task::TaskState::Completed(crate::types::Outcome::Panicked(_))
+            )
+        }),
+        "unwind completion synthesizes a Panicked terminal state on the detached external record"
+    );
+    artifacts.dispatch_post_lock(&worker);
+
+    let finalizer_id = {
+        let tt = task_table
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            tt.task(task_id).is_none(),
+            "unwind completion detaches the external record"
+        );
+        let live: Vec<TaskId> = tt
+            .iter()
+            .filter(|(_, record)| !record.state.is_terminal())
+            .map(|(idx, _)| TaskId::from_arena(idx))
+            .collect();
+        assert_eq!(
+            live.len(),
+            1,
+            "unwind completion mints the finalizer into the external shard"
+        );
+        live[0]
+    };
+    let state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(
+        state.task(finalizer_id).is_none(),
+        "embedded table must not mint the external finalizer task"
+    );
+    assert!(
+        state
+            .cancel_protocol_validator()
+            .lock()
+            .task_state(task_id)
+            .is_none(),
+        "unwind completion retires validator state for the external record"
+    );
+}
+
 #[test]
 fn task_table_backed_handle_cancel_routes_and_completes_in_external_shard() {
     let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));

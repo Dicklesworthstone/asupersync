@@ -5266,6 +5266,37 @@ impl RuntimeState {
         retired_cancel_wakers: TaskCompletionRetirements,
         remove_embedded_record: bool,
     ) -> TaskCompletionEffects {
+        // E1.2 subsystem 3b (br-asupersync-sched-hot-path-perf-bt4y5f.2.2):
+        // the cross-cutting completion tail, decomposed into shard-phase
+        // table ops in canonical shard order. C (leak audit) → B (finalizer
+        // barrier) → C (orphan abort) → A (record retire) → B (region unlink
+        // + advance, itself a B→A→C composite) → D (epoch telemetry).
+        // A future sharded-backing completion arm composes exactly these
+        // phases under `ShardGuard::for_task_completed`-ordered guards.
+        self.audit_completion_obligation_leaks(task_id, owner, completion);
+        self.retire_completed_finalizer_barrier(task_id, owner);
+        self.abort_orphaned_obligations_for_holder(task_id);
+        self.retire_completed_task_record(task_id, remove_embedded_record);
+        self.unlink_completed_task_from_region(task_id, owner, close_outcome);
+
+        let mut observer = observer;
+        observer.attach_epoch_telemetry(self.take_epoch_telemetry());
+        TaskCompletionEffects {
+            waiters,
+            observer,
+            retired_cancel_wakers,
+        }
+    }
+
+    /// Completion phase (Shard C): audits obligations still held by a task
+    /// that completed without cancellation and routes them through leak
+    /// handling (which may escalate per policy).
+    fn audit_completion_obligation_leaks(
+        &mut self,
+        task_id: TaskId,
+        owner: RegionId,
+        completion: TaskCompletionKind,
+    ) {
         if !matches!(completion, TaskCompletionKind::Cancelled) {
             let leaks = self.collect_obligation_leaks_for_holder(task_id);
             if !leaks.is_empty() {
@@ -5277,7 +5308,12 @@ impl RuntimeState {
                 });
             }
         }
+    }
 
+    /// Completion phase (Shard B): clears the per-region async-finalizer
+    /// barrier when the completed task was a tracked finalizer task, and
+    /// records the finalizer run in region lifecycle history.
+    fn retire_completed_finalizer_barrier(&mut self, task_id: TaskId, owner: RegionId) {
         if let Some(finalizer_id) = self.async_finalizer_tasks.remove(&task_id) {
             let should_clear_barrier = self
                 .active_async_finalizers
@@ -5319,26 +5355,44 @@ impl RuntimeState {
 
             self.record_finalizer_run(owner, finalizer_id);
         }
+    }
 
-        // Abort any pending obligations held by this task to prevent
-        // orphaned obligations from blocking region close (deadlock).
-        // Uses the holder secondary index for O(obligations_per_task) instead of O(arena_capacity).
+    /// Completion phase (Shard C): aborts pending obligations still held by
+    /// the completed task so orphaned obligations cannot block region close
+    /// (deadlock). Uses the holder secondary index for
+    /// O(obligations_per_task) instead of O(arena_capacity).
+    fn abort_orphaned_obligations_for_holder(&mut self, task_id: TaskId) {
         let orphaned = self.obligations.sorted_pending_ids_for_holder(task_id);
         for ob_id in orphaned {
             let _ = self.abort_obligation(ob_id, ObligationAbortReason::Cancel);
         }
+    }
 
-        // Embedded tables still own their record here. External-shard callers
-        // already detached it before taking the RuntimeState lock.
+    /// Completion phase (Shard A): retires the embedded task record, or
+    /// notes the external retirement for epoch tracking.
+    ///
+    /// Embedded tables still own their record here. External-shard callers
+    /// already detached it before taking the RuntimeState lock; external
+    /// completion atomically retired its validator state with the terminal
+    /// transition before entering the common tail.
+    fn retire_completed_task_record(&mut self, task_id: TaskId, remove_embedded_record: bool) {
         if remove_embedded_record {
             self.recycle_task(task_id);
         } else {
-            // External completion atomically retired its validator state with
-            // the terminal transition before entering this common tail.
             self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
         }
+    }
 
-        // Remove task from owning region to prevent memory leak
+    /// Completion phase (Shard B): removes the completed task from its owner
+    /// region, records the close outcome, and advances region state if
+    /// possible (e.g. if this was the last task). Region advancement is
+    /// itself a B→A→C composite.
+    fn unlink_completed_task_from_region(
+        &mut self,
+        task_id: TaskId,
+        owner: RegionId,
+        close_outcome: Option<Outcome<(), Error>>,
+    ) {
         if let Some(region) = self.regions.get(owner.arena_index()) {
             if let Some(outcome) = close_outcome {
                 region.record_close_outcome(outcome);
@@ -5346,16 +5400,7 @@ impl RuntimeState {
             region.remove_task(task_id);
         }
 
-        // Advance region state if possible (e.g. if this was the last task)
         self.advance_region_state(owner);
-
-        let mut observer = observer;
-        observer.attach_epoch_telemetry(self.take_epoch_telemetry());
-        TaskCompletionEffects {
-            waiters,
-            observer,
-            retired_cancel_wakers,
-        }
     }
 
     // =========================================================================

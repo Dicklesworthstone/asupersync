@@ -4057,6 +4057,69 @@ enum DeferredCancelLaneError {
     PinnedWorkerUnavailable(usize),
 }
 
+/// Ready finalizer tasks reserved into the global injector, awaiting the
+/// post-lock enqueue-evidence/wake/spawn-effect half of publication.
+type ReadyFinalizerPublication = (
+    smallvec::SmallVec<[TaskId; 2]>,
+    smallvec::SmallVec<[crate::runtime::state::TaskSpawnEffects; 2]>,
+);
+
+/// How a polled task's record reaches its terminal state at the ordered
+/// completion boundary (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 /
+/// E1.2 subsystem 3b).
+enum PolledCompletion {
+    /// `Poll::Ready` outcome: reconcile checkpoint-cancel phases through
+    /// [`ThreeLaneWorker::complete_polled_record`].
+    Ready(crate::types::Outcome<(), crate::error::Error>),
+    /// Panic outcome (caught unwind or unwind-guard synthesis): complete the
+    /// record only if it has not already reached a terminal state. The
+    /// checkpoint-cancel acknowledgement is deliberately not consulted — a
+    /// panic wins over cancellation reconciliation.
+    Panicked(crate::types::Outcome<(), crate::error::Error>),
+}
+
+/// Owned effects a polled-task ordered completion hands back for post-lock
+/// dispatch. Everything here is callback-free to move; dispatch order is
+/// fixed by [`Self::dispatch_post_lock`].
+struct PolledCompletionArtifacts {
+    completion_observer: crate::runtime::state::TaskCompletionObserver,
+    cancel_wakes: crate::types::task_context::CancelWakeEffects,
+    detached_record: Option<crate::record::task::TaskRecord>,
+    finalizer_publication: ReadyFinalizerPublication,
+}
+
+impl PolledCompletionArtifacts {
+    /// Dispatches completion effects after every runtime lock is released:
+    /// detached-record destruction, finalizer publication, then the observer
+    /// and cancellation wakes (which may run foreign callbacks).
+    fn dispatch_post_lock(self, worker: &ThreeLaneWorker) {
+        ThreeLaneWorker::retire_detached_task_record(self.detached_record);
+        worker.finish_ready_finalizer_publication(self.finalizer_publication);
+        self.completion_observer.dispatch();
+        self.cancel_wakes.dispatch();
+    }
+}
+
+/// Owned effects an unwind-guard ordered completion hands back for post-lock
+/// dispatch. Observers are structurally absent: unwind cleanup must never
+/// invoke user metrics providers or tracing subscribers.
+struct UnwindCompletionArtifacts {
+    cancel_waker_retirements: crate::runtime::state::TaskCompletionRetirements,
+    detached_record: Option<crate::record::task::TaskRecord>,
+    finalizer_publication: ReadyFinalizerPublication,
+}
+
+impl UnwindCompletionArtifacts {
+    /// Dispatches unwind-cleanup effects after the state lock is released:
+    /// finalizer publication, cancellation-Waker retirement, then detached
+    /// record destruction.
+    fn dispatch_post_lock(self, worker: &ThreeLaneWorker) {
+        worker.finish_ready_finalizer_publication(self.finalizer_publication);
+        self.cancel_waker_retirements.retire();
+        ThreeLaneWorker::retire_detached_task_record(self.detached_record);
+    }
+}
+
 impl ThreeLaneWorker {
     /// Returns the current time in nanoseconds for fairness monitoring.
     ///
@@ -6946,75 +7009,13 @@ impl ThreeLaneWorker {
             fn drop(&mut self) {
                 if !self.completed && std::thread::panicking() {
                     let cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        // Mark and detach through the same authoritative table
-                        // used to begin this poll. Never ask embedded RuntimeState
-                        // to complete a record owned by the external shard.
-                        let mut detached_record = if self.worker.task_table.is_some() {
-                            self.worker.with_task_table(|tt| {
-                                let _ = tt.update_task(self.task_id, |record| {
-                                    if !record.state.is_terminal() {
-                                        record.complete(crate::types::Outcome::Panicked(
-                                            crate::types::outcome::PanicPayload::new(
-                                                "task panicked during scheduler bookkeeping",
-                                            ),
-                                        ));
-                                    }
-                                });
-                                tt.remove_task(self.task_id)
-                            })
-                        } else {
-                            self.worker.with_task_table(|tt| {
-                                let _ = tt.update_task(self.task_id, |record| {
-                                    if !record.state.is_terminal() {
-                                        record.complete(crate::types::Outcome::Panicked(
-                                            crate::types::outcome::PanicPayload::new(
-                                                "task panicked during scheduler bookkeeping",
-                                            ),
-                                        ));
-                                    }
-                                });
-                            });
-                            None
-                        };
-
-                        let mut state = self
-                            .worker
-                            .state
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        let completion = match detached_record.as_mut() {
-                            Some(record) => state.task_completed_from_external_record(record),
-                            None => state.task_completed(self.task_id),
-                        };
-                        let (waiters, cancel_waker_retirements) =
-                            completion.into_waiters_and_retirements_without_observers();
-                        // E1.2 (br-asupersync-sched-hot-path-perf-bt4y5f.2.2):
-                        // scheduled finalizer tasks must mint into the table
-                        // worker dispatch consults. Lock order is unified
-                        // state (B) then external table (A); the table is
-                        // locked only when finalizer work exists.
-                        let finalizers = if state.has_finalizing_regions() {
-                            let mut finalizer_tasks = self.worker.task_table.as_ref().map_or(
-                                crate::runtime::state::AdmissionTaskTarget::Embedded,
-                                |tt| {
-                                    crate::runtime::state::AdmissionTaskTarget::External(
-                                        tt.lock()
-                                            .unwrap_or_else(std::sync::PoisonError::into_inner),
-                                    )
-                                },
-                            );
-                            state.drain_ready_async_finalizers_in(&mut finalizer_tasks)
-                        } else {
-                            smallvec::SmallVec::new()
-                        };
-                        self.worker.wake_dependents_locked(&state, waiters);
-                        let finalizer_publication =
-                            self.worker.publish_ready_finalizers(finalizers);
-                        drop(state);
-                        self.worker
-                            .finish_ready_finalizer_publication(finalizer_publication);
-                        cancel_waker_retirements.retire();
-                        ThreeLaneWorker::retire_detached_task_record(detached_record);
+                        // E1.2 subsystem 3b: route through the single ordered
+                        // completion backing (E1.1 row T16). Observer
+                        // suppression and the ack-free panic transition live
+                        // inside the seam.
+                        let artifacts =
+                            self.worker.complete_task_after_unwind_ordered(self.task_id);
+                        artifacts.dispatch_post_lock(self.worker);
                     }));
                     if let Err(payload) = cleanup {
                         // This guard already runs during an unwind. Contain a
@@ -7257,110 +7258,13 @@ impl ThreeLaneWorker {
                 // Map Outcome<(), ()> to Outcome<(), Error> for record.complete()
                 let task_outcome = outcome
                     .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
-                let (completion_observer, cancel_wakes, detached_record, finalizer_publication) =
-                    if self.task_table.is_some() {
-                        // The sharded table owns the authoritative record. Reconcile
-                        // the checkpoint receipt and terminal outcome there, then
-                        // detach the record before taking RuntimeState. This avoids
-                        // both the wrong-table completion bug and shard/state lock
-                        // nesting around validator, region, and observer work.
-                        let (cancel_ack, mut cancel_wakes, mut detached_record) = self
-                            .with_task_table(|tt| {
-                                let effects = Self::consume_cancel_ack_from_table(tt, task_id);
-                                let (cancel_ack, cancel_wakes) = effects.into_parts();
-                                let _ = tt.update_task(task_id, |record| {
-                                    Self::complete_polled_record(
-                                        record,
-                                        task_outcome,
-                                        cancel_ack.is_some(),
-                                    );
-                                });
-                                let detached_record = tt.remove_task(task_id);
-                                (cancel_ack, cancel_wakes, detached_record)
-                            });
-
-                        let mut state = self
-                            .state
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        if let Some(receipt) = cancel_ack.as_ref()
-                            && let Some(validation_result) = state
-                                .external_checkpoint_cancel_materialization_violation(
-                                    task_id, receipt, true,
-                                )
-                        {
-                            cancel_wakes.push_cancel_protocol_violation(
-                                "external-shard checkpoint cancellation materialization",
-                                validation_result,
-                            );
-                        }
-                        let completion = match detached_record.as_mut() {
-                            Some(record) => state.task_completed_from_external_record(record),
-                            None => state.task_completed(task_id),
-                        };
-                        let (waiters, completion_observer) = completion.into_parts();
-                        // E1.2 (br-asupersync-sched-hot-path-perf-bt4y5f.2.2):
-                        // this branch dispatches against the external table, so
-                        // scheduled finalizer tasks must mint there. Lock order
-                        // is unified state (B) then external table (A); the
-                        // table is locked only when finalizer work exists, so
-                        // the common no-finalizer completion never takes A.
-                        let finalizers = if state.has_finalizing_regions() {
-                            let mut finalizer_tasks = self.task_table.as_ref().map_or(
-                                crate::runtime::state::AdmissionTaskTarget::Embedded,
-                                |tt| {
-                                    crate::runtime::state::AdmissionTaskTarget::External(
-                                        tt.lock()
-                                            .unwrap_or_else(std::sync::PoisonError::into_inner),
-                                    )
-                                },
-                            );
-                            state.drain_ready_async_finalizers_in(&mut finalizer_tasks)
-                        } else {
-                            smallvec::SmallVec::new()
-                        };
-                        self.wake_dependents_locked(&state, waiters);
-                        let finalizer_publication = self.publish_ready_finalizers(finalizers);
-                        drop(state);
-                        (
-                            completion_observer,
-                            cancel_wakes,
-                            detached_record,
-                            finalizer_publication,
-                        )
-                    } else {
-                        let mut state = self
-                            .state
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        let (cancel_ack, cancel_wakes) =
-                            Self::consume_cancel_ack_locked(&mut state, task_id).into_parts();
-                        let _ = state.update_task(task_id, |record| {
-                            Self::complete_polled_record(
-                                record,
-                                task_outcome,
-                                cancel_ack.is_some(),
-                            );
-                        });
-                        let (waiters, completion_observer) =
-                            state.task_completed(task_id).into_parts();
-                        let finalizers = state.drain_ready_async_finalizers();
-                        self.wake_dependents_locked(&state, waiters);
-                        let finalizer_publication = self.publish_ready_finalizers(finalizers);
-                        drop(state);
-                        (
-                            completion_observer,
-                            cancel_wakes,
-                            None,
-                            finalizer_publication,
-                        )
-                    };
+                // E1.2 subsystem 3b: route through the single ordered
+                // completion backing (E1.1 rows T17/T18).
+                let artifacts = self
+                    .complete_polled_task_ordered(task_id, PolledCompletion::Ready(task_outcome));
                 guard.completed = true;
                 wake_state.clear();
-                Self::retire_detached_task_record(detached_record);
-                self.finish_ready_finalizer_publication(finalizer_publication);
-                completion_observer.dispatch();
-                cancel_wakes.dispatch();
+                artifacts.dispatch_post_lock(self);
             }
             Ok(Poll::Pending) => {
                 // Store task back: use task table for hot-path when sharded.
@@ -7491,100 +7395,15 @@ impl ThreeLaneWorker {
                 std::mem::forget(payload);
                 let panic_payload = crate::types::outcome::PanicPayload::new(panic_message);
                 let panic_outcome = crate::types::Outcome::Panicked(panic_payload);
-                let (completion_observer, cancel_wakes, detached_record, finalizer_publication) =
-                    if self.task_table.is_some() {
-                        let (cancel_ack, mut cancel_wakes, mut detached_record) = self
-                            .with_task_table(|tt| {
-                                let effects = Self::consume_cancel_ack_from_table(tt, task_id);
-                                let (cancel_ack, cancel_wakes) = effects.into_parts();
-                                let _ = tt.update_task(task_id, |record| {
-                                    if !record.state.is_terminal() {
-                                        record.complete(panic_outcome);
-                                    }
-                                });
-                                let detached_record = tt.remove_task(task_id);
-                                (cancel_ack, cancel_wakes, detached_record)
-                            });
-                        let mut state = self
-                            .state
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        if let Some(receipt) = cancel_ack.as_ref()
-                            && let Some(validation_result) = state
-                                .external_checkpoint_cancel_materialization_violation(
-                                    task_id, receipt, true,
-                                )
-                        {
-                            cancel_wakes.push_cancel_protocol_violation(
-                                "external-shard checkpoint cancellation materialization",
-                                validation_result,
-                            );
-                        }
-                        let completion = match detached_record.as_mut() {
-                            Some(record) => state.task_completed_from_external_record(record),
-                            None => state.task_completed(task_id),
-                        };
-                        let (waiters, completion_observer) = completion.into_parts();
-                        // E1.2 (br-asupersync-sched-hot-path-perf-bt4y5f.2.2):
-                        // this branch dispatches against the external table, so
-                        // scheduled finalizer tasks must mint there. Lock order
-                        // is unified state (B) then external table (A); the
-                        // table is locked only when finalizer work exists, so
-                        // the common no-finalizer completion never takes A.
-                        let finalizers = if state.has_finalizing_regions() {
-                            let mut finalizer_tasks = self.task_table.as_ref().map_or(
-                                crate::runtime::state::AdmissionTaskTarget::Embedded,
-                                |tt| {
-                                    crate::runtime::state::AdmissionTaskTarget::External(
-                                        tt.lock()
-                                            .unwrap_or_else(std::sync::PoisonError::into_inner),
-                                    )
-                                },
-                            );
-                            state.drain_ready_async_finalizers_in(&mut finalizer_tasks)
-                        } else {
-                            smallvec::SmallVec::new()
-                        };
-                        self.wake_dependents_locked(&state, waiters);
-                        let finalizer_publication = self.publish_ready_finalizers(finalizers);
-                        drop(state);
-                        (
-                            completion_observer,
-                            cancel_wakes,
-                            detached_record,
-                            finalizer_publication,
-                        )
-                    } else {
-                        let mut state = self
-                            .state
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        let (_cancel_ack, cancel_wakes) =
-                            Self::consume_cancel_ack_locked(&mut state, task_id).into_parts();
-                        let _ = state.update_task(task_id, |record| {
-                            if !record.state.is_terminal() {
-                                record.complete(panic_outcome);
-                            }
-                        });
-                        let (waiters, completion_observer) =
-                            state.task_completed(task_id).into_parts();
-                        let finalizers = state.drain_ready_async_finalizers();
-                        self.wake_dependents_locked(&state, waiters);
-                        let finalizer_publication = self.publish_ready_finalizers(finalizers);
-                        drop(state);
-                        (
-                            completion_observer,
-                            cancel_wakes,
-                            None,
-                            finalizer_publication,
-                        )
-                    };
+                // E1.2 subsystem 3b: route through the single ordered
+                // completion backing (E1.1 rows T20/T21).
+                let artifacts = self.complete_polled_task_ordered(
+                    task_id,
+                    PolledCompletion::Panicked(panic_outcome),
+                );
                 guard.completed = true;
                 wake_state.clear();
-                Self::retire_detached_task_record(detached_record);
-                self.finish_ready_finalizer_publication(finalizer_publication);
-                completion_observer.dispatch();
-                cancel_wakes.dispatch();
+                artifacts.dispatch_post_lock(self);
             }
         }
         drop(guard);
@@ -7592,6 +7411,210 @@ impl ThreeLaneWorker {
             self.adaptive_on_dispatch();
         } else {
             self.abort_adaptive_epoch();
+        }
+    }
+
+    /// Applies a polled task's terminal transition to its authoritative record.
+    ///
+    /// Single record-completion arm shared by every ordered completion path
+    /// (ready, polled panic, unwind guard) so external-table and unified
+    /// completions cannot drift (E1.2 subsystem 3b).
+    fn apply_polled_completion(
+        record: &mut crate::record::task::TaskRecord,
+        completion: PolledCompletion,
+        cancel_ack: bool,
+    ) {
+        match completion {
+            PolledCompletion::Ready(outcome) => {
+                Self::complete_polled_record(record, outcome, cancel_ack);
+            }
+            PolledCompletion::Panicked(outcome) => {
+                if !record.state.is_terminal() {
+                    record.complete(outcome);
+                }
+            }
+        }
+    }
+
+    /// Drains region-ready async finalizers into the dispatch task table.
+    ///
+    /// Canonical B → A: the caller already holds the unified state lock (B);
+    /// the external table (A) is locked only when finalizer work exists, so
+    /// the common no-finalizer completion never takes A, and scope exit
+    /// releases A before B. Scheduled finalizer tasks mint into the table
+    /// worker dispatch consults (E1.2; the single B/A finalizer-drain seam).
+    fn drain_ready_finalizers_locked(
+        &self,
+        state: &mut RuntimeState,
+    ) -> smallvec::SmallVec<[(TaskId, u8, crate::runtime::state::TaskSpawnEffects); 2]> {
+        if !state.has_finalizing_regions() {
+            return smallvec::SmallVec::new();
+        }
+        let mut finalizer_tasks = self.task_table.as_ref().map_or(
+            crate::runtime::state::AdmissionTaskTarget::Embedded,
+            |tt| {
+                crate::runtime::state::AdmissionTaskTarget::External(
+                    tt.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+                )
+            },
+        );
+        state.drain_ready_async_finalizers_in(&mut finalizer_tasks)
+    }
+
+    /// Ordered completion backing for a polled task (E1.2 subsystem 3b; the
+    /// `ShardGuard::for_task_completed`-equivalent seam for E1.1 rows
+    /// T17/T18/T20/T21).
+    ///
+    /// This is the ONLY place the polled ready/panic completion order is
+    /// expressed; sharded construction (3c) converts this one seam instead of
+    /// per-site blocks. The canonical sequence:
+    ///
+    /// 1. External table only (A): consume the checkpoint-cancel ack, apply
+    ///    the terminal transition, detach the record — then release A before
+    ///    taking the unified state, so validator/region/observer work never
+    ///    nests inside the shard lock.
+    /// 2. Unified state (B/C tables + validator/instrumentation today):
+    ///    external ack materialization validation, cross-cutting completion
+    ///    (`task_completed` / `task_completed_from_external_record`),
+    ///    finalizer discovery via [`Self::drain_ready_finalizers_locked`]
+    ///    (B → A when minting), dependent wakes, publication reservation.
+    /// 3. Post-lock: the returned artifacts dispatch observers/wakes via
+    ///    [`PolledCompletionArtifacts::dispatch_post_lock`].
+    fn complete_polled_task_ordered(
+        &self,
+        task_id: TaskId,
+        completion: PolledCompletion,
+    ) -> PolledCompletionArtifacts {
+        if self.task_table.is_some() {
+            // The sharded table owns the authoritative record. Reconcile the
+            // checkpoint receipt and terminal outcome there, then detach the
+            // record before taking RuntimeState. This avoids both the
+            // wrong-table completion bug and shard/state lock nesting around
+            // validator, region, and observer work.
+            let (cancel_ack, mut cancel_wakes, mut detached_record) = self.with_task_table(|tt| {
+                let effects = Self::consume_cancel_ack_from_table(tt, task_id);
+                let (cancel_ack, cancel_wakes) = effects.into_parts();
+                let ack_materialized = cancel_ack.is_some();
+                let _ = tt.update_task(task_id, |record| {
+                    Self::apply_polled_completion(record, completion, ack_materialized);
+                });
+                let detached_record = tt.remove_task(task_id);
+                (cancel_ack, cancel_wakes, detached_record)
+            });
+
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(receipt) = cancel_ack.as_ref()
+                && let Some(validation_result) = state
+                    .external_checkpoint_cancel_materialization_violation(task_id, receipt, true)
+            {
+                cancel_wakes.push_cancel_protocol_violation(
+                    "external-shard checkpoint cancellation materialization",
+                    validation_result,
+                );
+            }
+            let completion_effects = match detached_record.as_mut() {
+                Some(record) => state.task_completed_from_external_record(record),
+                None => state.task_completed(task_id),
+            };
+            let (waiters, completion_observer) = completion_effects.into_parts();
+            let finalizers = self.drain_ready_finalizers_locked(&mut state);
+            self.wake_dependents_locked(&state, waiters);
+            let finalizer_publication = self.publish_ready_finalizers(finalizers);
+            drop(state);
+            PolledCompletionArtifacts {
+                completion_observer,
+                cancel_wakes,
+                detached_record,
+                finalizer_publication,
+            }
+        } else {
+            // Unified fallback: one state acquisition covers ack consumption,
+            // the terminal transition, cross-cutting completion, finalizer
+            // discovery, and dependent wakes.
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (cancel_ack, cancel_wakes) =
+                Self::consume_cancel_ack_locked(&mut state, task_id).into_parts();
+            let ack_materialized = cancel_ack.is_some();
+            let _ = state.update_task(task_id, |record| {
+                Self::apply_polled_completion(record, completion, ack_materialized);
+            });
+            let (waiters, completion_observer) = state.task_completed(task_id).into_parts();
+            let finalizers = self.drain_ready_finalizers_locked(&mut state);
+            self.wake_dependents_locked(&state, waiters);
+            let finalizer_publication = self.publish_ready_finalizers(finalizers);
+            drop(state);
+            PolledCompletionArtifacts {
+                completion_observer,
+                cancel_wakes,
+                detached_record: None,
+                finalizer_publication,
+            }
+        }
+    }
+
+    /// Ordered completion backing for the unwind-cleanup guard (E1.1 row T16).
+    ///
+    /// Shares the record-transition and finalizer-drain arms with
+    /// [`Self::complete_polled_task_ordered`] but differs by protocol, not by
+    /// accident: no checkpoint-cancel ack is consumed (the panic supersedes
+    /// cancellation reconciliation) and observers are structurally suppressed
+    /// (`into_waiters_and_retirements_without_observers`) because this path
+    /// runs during a worker unwind.
+    fn complete_task_after_unwind_ordered(&self, task_id: TaskId) -> UnwindCompletionArtifacts {
+        let panic_outcome = crate::types::Outcome::Panicked(
+            crate::types::outcome::PanicPayload::new("task panicked during scheduler bookkeeping"),
+        );
+        // Mark and detach through the same authoritative table used to begin
+        // this poll. Never ask embedded RuntimeState to complete a record
+        // owned by the external shard.
+        let mut detached_record = if self.task_table.is_some() {
+            self.with_task_table(|tt| {
+                let _ = tt.update_task(task_id, |record| {
+                    Self::apply_polled_completion(
+                        record,
+                        PolledCompletion::Panicked(panic_outcome),
+                        false,
+                    );
+                });
+                tt.remove_task(task_id)
+            })
+        } else {
+            self.with_task_table(|tt| {
+                let _ = tt.update_task(task_id, |record| {
+                    Self::apply_polled_completion(
+                        record,
+                        PolledCompletion::Panicked(panic_outcome),
+                        false,
+                    );
+                });
+            });
+            None
+        };
+
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let completion = match detached_record.as_mut() {
+            Some(record) => state.task_completed_from_external_record(record),
+            None => state.task_completed(task_id),
+        };
+        let (waiters, cancel_waker_retirements) =
+            completion.into_waiters_and_retirements_without_observers();
+        let finalizers = self.drain_ready_finalizers_locked(&mut state);
+        self.wake_dependents_locked(&state, waiters);
+        let finalizer_publication = self.publish_ready_finalizers(finalizers);
+        drop(state);
+        UnwindCompletionArtifacts {
+            cancel_waker_retirements,
+            detached_record,
+            finalizer_publication,
         }
     }
 
@@ -7654,23 +7677,10 @@ impl ThreeLaneWorker {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            // E1.2 (br-asupersync-sched-hot-path-perf-bt4y5f.2.2): scheduled
-            // finalizer tasks must mint into the table worker dispatch
-            // consults. Lock order is unified state (B) then external table
-            // (A), taken only when finalizer work exists; scope exit
-            // releases A before B.
-            if !state.has_finalizing_regions() {
-                return false;
-            }
-            let mut finalizer_tasks = self.task_table.as_ref().map_or(
-                crate::runtime::state::AdmissionTaskTarget::Embedded,
-                |tt| {
-                    crate::runtime::state::AdmissionTaskTarget::External(
-                        tt.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
-                    )
-                },
-            );
-            state.drain_ready_async_finalizers_in(&mut finalizer_tasks)
+            // E1.2 subsystem 3b: the B → A finalizer drain flows through the
+            // single seam shared with every ordered completion path (E1.1
+            // row T22).
+            self.drain_ready_finalizers_locked(&mut state)
         };
         if tasks.is_empty() {
             return false;
