@@ -348,10 +348,11 @@ fn each_task_has_own_arc_cxinner_for_sibling_isolation() {
 
 #[test]
 fn inline_test_cancel_request_propagates_to_descendants() {
-    // Pin: state.rs has an inline test that asserts
+    // Pin: the runtime-state test mod (split to the sibling
+    // state_tests.rs by br-asupersync-diczyk) has a test that asserts
     // region cancel propagates to descendants. Without
     // this, propagation regressions can pass CI.
-    let source = read("src/runtime/state.rs");
+    let source = read("src/runtime/state_tests.rs");
 
     assert!(
         source.contains("fn cancel_request_propagates_to_descendants()"),
@@ -363,7 +364,9 @@ fn inline_test_cancel_request_propagates_to_descendants() {
 
 #[test]
 fn inline_test_cancel_request_marks_tasks() {
-    let source = read("src/runtime/state.rs");
+    // The 0.3.10 packaging split (br-asupersync-diczyk) moved state.rs's
+    // inline #[cfg(test)] mod byte-exact to the sibling state_tests.rs.
+    let source = read("src/runtime/state_tests.rs");
 
     assert!(
         source.contains("fn cancel_request_marks_tasks()"),

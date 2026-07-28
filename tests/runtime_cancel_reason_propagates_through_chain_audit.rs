@@ -362,7 +362,8 @@ fn task_cancel_requested_state_carries_chained_reason() {
 
 #[test]
 fn inline_test_cancel_request_builds_cause_chains_retained() {
-    let source = read("src/runtime/state.rs");
+    // Split to the sibling state_tests.rs by br-asupersync-diczyk (0.3.10).
+    let source = read("src/runtime/state_tests.rs");
 
     assert!(
         source.contains("fn cancel_request_builds_cause_chains()"),
@@ -374,7 +375,8 @@ fn inline_test_cancel_request_builds_cause_chains_retained() {
 
 #[test]
 fn inline_test_chain_depth_limit_retained() {
-    let source = read("src/runtime/state.rs");
+    // Split to the sibling state_tests.rs by br-asupersync-diczyk (0.3.10).
+    let source = read("src/runtime/state_tests.rs");
 
     assert!(
         source.contains("fn cancel_request_respects_chain_depth_limit()"),
@@ -385,7 +387,8 @@ fn inline_test_chain_depth_limit_retained() {
 
 #[test]
 fn inline_test_truncates_large_tree_retained() {
-    let source = read("src/runtime/state.rs");
+    // Split to the sibling state_tests.rs by br-asupersync-diczyk (0.3.10).
+    let source = read("src/runtime/state_tests.rs");
 
     assert!(
         source.contains("fn cancel_request_truncates_large_tree()"),

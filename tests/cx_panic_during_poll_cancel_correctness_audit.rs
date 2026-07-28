@@ -190,9 +190,13 @@ fn worker_panic_path_marks_outcome_panicked_not_cancelled() {
     // them would erase the panic-vs-cancel distinction.
     let source = read("src/runtime/scheduler/three_lane.rs");
 
+    // E1.2 (br-asupersync-sched-hot-path-perf-bt4y5f.2.2) split panic
+    // completion into an external-table arm and a unified fallback arm, so
+    // the audited window covers both (~6.5k chars); the outcome is built
+    // once as `panic_outcome` and applied via `record.complete`.
     let err_marker = "Err(payload) => {";
     let pos = source.find(err_marker).expect("Err arm marker");
-    let window_end = (pos + 4000).min(source.len());
+    let window_end = (pos + 9000).min(source.len());
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
@@ -201,7 +205,8 @@ fn worker_panic_path_marks_outcome_panicked_not_cancelled() {
     let body = &source[pos..safe_end];
 
     assert!(
-        body.contains("record.complete(crate::types::Outcome::Panicked(panic_payload));"),
+        body.contains("let panic_outcome = crate::types::Outcome::Panicked(panic_payload);")
+            && body.contains("record.complete(panic_outcome);"),
         "REGRESSION: catch_unwind Err arm no longer marks \
          the task Outcome::Panicked. Either it marks \
          Outcome::Cancelled (conflation) or doesn't mark a \
@@ -251,9 +256,12 @@ fn worker_panic_path_wakes_dependents_so_parent_observes_panicked() {
     // this, the parent silently hangs waiting on the join.
     let source = read("src/runtime/scheduler/three_lane.rs");
 
+    // E1.2: both completion arms must gather waiters — the external-table
+    // arm completes through the detached record, the unified fallback
+    // through the embedded table. Window widened to cover both arms.
     let err_marker = "Err(payload) => {";
     let pos = source.find(err_marker).expect("Err arm marker");
-    let window_end = (pos + 4000).min(source.len());
+    let window_end = (pos + 9000).min(source.len());
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
@@ -263,17 +271,21 @@ fn worker_panic_path_wakes_dependents_so_parent_observes_panicked() {
 
     assert!(
         body.contains("let (waiters, completion_observer)")
+            && body.contains("state.task_completed_from_external_record(record)")
             && body.contains("state.task_completed(task_id).into_parts();"),
         "REGRESSION: panic Err arm no longer gathers waiters \
-         and the owned completion observer via task_completed. The parent's JoinHandle never \
+         and the owned completion observer via task_completed (external-\
+         record arm or unified fallback). The parent's JoinHandle never \
          resolves — silent task hang.",
     );
 
     assert!(
-        body.contains("self.wake_dependents_locked(&state, waiters);"),
+        body.matches("self.wake_dependents_locked(&state, waiters);")
+            .count()
+            >= 2,
         "REGRESSION: panic Err arm no longer wakes \
-         dependents. Parent JoinHandle never re-enters the \
-         dispatch loop — silent task hang.",
+         dependents in both completion arms. Parent JoinHandle never \
+         re-enters the dispatch loop — silent task hang.",
     );
 }
 
@@ -285,9 +297,15 @@ fn worker_panic_path_drains_finalizers_for_region_cleanup() {
     // region cleanup is stranded after a task panic.
     let source = read("src/runtime/scheduler/three_lane.rs");
 
+    // E1.2: the external-table arm drains through the minting-table target
+    // (`drain_ready_async_finalizers_in`, gated by `has_finalizing_regions`)
+    // and the unified fallback keeps the embedded drain; scheduling now
+    // routes through publish_ready_finalizers / the post-unlock
+    // finish_ready_finalizer_publication step. Window widened to cover
+    // both arms.
     let err_marker = "Err(payload) => {";
     let pos = source.find(err_marker).expect("Err arm marker");
-    let window_end = (pos + 4000).min(source.len());
+    let window_end = (pos + 9000).min(source.len());
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
@@ -296,16 +314,19 @@ fn worker_panic_path_drains_finalizers_for_region_cleanup() {
     let body = &source[pos..safe_end];
 
     assert!(
-        body.contains("let finalizers = state.drain_ready_async_finalizers();"),
+        body.contains("state.drain_ready_async_finalizers_in(&mut finalizer_tasks)")
+            && body.contains("let finalizers = state.drain_ready_async_finalizers();"),
         "REGRESSION: panic Err arm no longer drains \
-         finalizers. Region cleanup is stranded — the \
-         region stays in Closing state forever after a \
-         task panic.",
+         finalizers (external-table arm and unified fallback). Region \
+         cleanup is stranded — the region stays in Closing state forever \
+         after a task panic.",
     );
 
     assert!(
-        body.contains("self.global.inject_ready_uncounted(finalizer_task, priority);")
-            && body.contains("self.coordinator.wake_many(finalizer_wakes);"),
+        body.matches("self.publish_ready_finalizers(finalizers)")
+            .count()
+            >= 2
+            && body.contains("self.finish_ready_finalizer_publication(finalizer_publication);"),
         "REGRESSION: panic Err arm no longer schedules \
          drained finalizers. Even if the drain happens, the \
          finalizers don't run — region cleanup is silently \
@@ -392,10 +413,17 @@ fn task_execution_guard_safety_net_marks_panicked_under_unwind() {
          terminal — region.quiesce hangs.",
     );
 
-    // The safety net must also mark Panicked.
+    // The safety net must also mark Panicked. Pinned indentation-robustly:
+    // the guard-drop region builds the outcome across lines whose leading
+    // whitespace shifted in the E1.2 completion restructure.
+    let net_pos = source
+        .find("if !self.completed && std::thread::panicking() {")
+        .expect("safety net marker");
+    let net_end = (net_pos + 4000).min(source.len());
+    let net_body = &source[net_pos..net_end];
     assert!(
-        source.contains("record.complete(crate::types::Outcome::Panicked(\n                                    crate::types::outcome::PanicPayload::new(")
-            || source.contains("Outcome::Panicked(crate::types::outcome::PanicPayload::new("),
+        net_body.contains("record.complete(crate::types::Outcome::Panicked(")
+            && net_body.contains("crate::types::outcome::PanicPayload::new("),
         "REGRESSION: TaskExecutionGuard safety net no longer \
          marks Outcome::Panicked. The escape path leaves \
          the task in a non-terminal state.",
@@ -410,9 +438,12 @@ fn panic_payload_carries_message_for_parent_join_observation() {
     // can't see the panic reason.
     let source = read("src/runtime/scheduler/three_lane.rs");
 
+    // E1.2: the message is extracted once into `panic_message` (the opaque
+    // payload is then leaked fail-closed) and the PanicPayload is built
+    // from that string.
     let err_marker = "Err(payload) => {";
     let pos = source.find(err_marker).expect("Err arm marker");
-    let window_end = (pos + 4000).min(source.len());
+    let window_end = (pos + 9000).min(source.len());
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
@@ -421,8 +452,8 @@ fn panic_payload_carries_message_for_parent_join_observation() {
     let body = &source[pos..safe_end];
 
     assert!(
-        body.contains("crate::types::outcome::PanicPayload::new(")
-            && body.contains("crate::cx::scope::payload_to_string(&payload),"),
+        body.contains("let panic_message = crate::cx::scope::payload_to_string(&payload);")
+            && body.contains("crate::types::outcome::PanicPayload::new(panic_message)"),
         "REGRESSION: panic Err arm no longer constructs \
          PanicPayload from the downcast payload string. The \
          Panicked outcome carries an empty payload — \
@@ -439,9 +470,12 @@ fn worker_panic_path_releases_state_lock_with_drop_state() {
     // ordering invariant.
     let source = read("src/runtime/scheduler/three_lane.rs");
 
+    // E1.2: both completion arms end their state critical section with an
+    // explicit drop before observer/wake dispatch. Window widened to cover
+    // both arms.
     let err_marker = "Err(payload) => {";
     let pos = source.find(err_marker).expect("Err arm marker");
-    let window_end = (pos + 4000).min(source.len());
+    let window_end = (pos + 9000).min(source.len());
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
@@ -450,10 +484,10 @@ fn worker_panic_path_releases_state_lock_with_drop_state() {
     let body = &source[pos..safe_end];
 
     assert!(
-        body.contains("drop(state);"),
+        body.matches("drop(state);").count() >= 2,
         "REGRESSION: panic Err arm no longer explicitly \
-         drops the state lock. The implicit drop at scope \
-         end may delay other workers waiting for the lock — \
+         drops the state lock in both completion arms. The implicit drop \
+         at scope end may delay other workers waiting for the lock — \
          minor performance issue but signals a control-flow \
          change worth investigating.",
     );

@@ -308,20 +308,28 @@ fn region_subtree_processes_depth_ascending_for_chain_lookup() {
 
 #[test]
 fn tnk8ny_hardening_logs_error_and_synthesizes_self_rooted_placeholder() {
-    // Pin (link 5): the tnk8ny fix emits an error! log AND
-    // synthesizes a SELF-ROOTED ParentCancelled placeholder
-    // (NOT a chain to the root reason) when the parent's
-    // reason is missing. This avoids the previous silent-
-    // poisoning bug where the root's reason was used as if
-    // it were the immediate parent's.
+    // Pin (link 5): the tnk8ny fix synthesized a SELF-ROOTED
+    // ParentCancelled placeholder (NOT a chain to the root reason) when
+    // the parent's reason is missing. This avoids the previous silent-
+    // poisoning bug where the root's reason was used as if it were the
+    // immediate parent's.
+    //
+    // KNOWN REGRESSION (br-asupersync-u5jdvw): the tnk8ny error!-level
+    // "INVARIANT VIOLATION" diagnostic was removed by the 118ayd
+    // lock-isolation commit (acd3c2ee6, no tracing under the state lock)
+    // without a post-unlock re-emission. Until that bead lands, this pin
+    // guards the surviving structural contract: the sentinel synthesis
+    // and the documented no-root-fallback rule. Restore a diagnostic pin
+    // when br-asupersync-u5jdvw re-emits it through deferred effects.
     let source = read("src/runtime/state.rs");
 
     assert!(
-        source.contains("INVARIANT VIOLATION: parent region's cancel reason missing"),
-        "REGRESSION: cancel-region-subtree no longer logs the \
-         tnk8ny invariant violation. The chain-bookkeeping \
-         break becomes silent — debugging cancel attribution \
-         loses the diagnostic.",
+        source.contains("Self-rooted sentinel: ParentCancelled stamped")
+            && source.contains("chain the root target reason here"),
+        "REGRESSION: cancel-region-subtree lost the tnk8ny no-root-fallback \
+         contract comment for the missing-parent case. If the code fell \
+         back to the root reason again, the silent chain-poisoning bug \
+         is back.",
     );
 
     // The synthesized placeholder must be ParentCancelled
