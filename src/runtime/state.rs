@@ -3044,6 +3044,10 @@ impl RuntimeState {
     ///
     /// This helper allows `create_task` and `spawn_local` to share the same setup logic
     /// while storing the future in different places (global vs thread-local).
+    /// Embedded convenience over [`Self::create_task_infrastructure_in`],
+    /// mirroring [`Self::admit_spawn_request`]: state-threaded callers mint
+    /// into the embedded table, while scheduler-driven finalizer admission
+    /// passes an explicit table target instead.
     #[allow(clippy::type_complexity)]
     pub(crate) fn create_task_infrastructure<T>(
         &mut self,
@@ -3051,6 +3055,48 @@ impl RuntimeState {
         region: RegionId,
         budget: Budget,
         cleanup_task: bool,
+    ) -> Result<
+        (
+            TaskId,
+            crate::runtime::TaskHandle<T>,
+            crate::cx::Cx,
+            crate::channel::oneshot::Sender<Result<T, crate::runtime::task_handle::JoinError>>,
+            TaskSpawnEffects,
+        ),
+        SpawnError,
+    >
+    where
+        T: Send + 'static,
+    {
+        self.create_task_infrastructure_in(
+            caller_cx,
+            region,
+            budget,
+            cleanup_task,
+            &mut AdmissionTaskTarget::Embedded,
+        )
+    }
+
+    /// Task-infrastructure creation with an explicit task-table target
+    /// (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2).
+    ///
+    /// When the scheduler runs against an external sharded [`TaskTable`],
+    /// runtime-created tasks that its workers will dispatch — async
+    /// finalizer tasks in particular — must mint their record, link their
+    /// `Cx`, and read their spawn-trace logical tick from that external
+    /// table, the one worker poll paths actually consult. Region
+    /// admission/rollback bookkeeping, validator, epoch, and observability
+    /// stay on `self`. Callers hold the unified state lock first and pass
+    /// the already-locked table guard, matching the canonical B → A shard
+    /// order.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn create_task_infrastructure_in<T>(
+        &mut self,
+        caller_cx: &crate::cx::Cx,
+        region: RegionId,
+        budget: Budget,
+        cleanup_task: bool,
+        tasks: &mut AdmissionTaskTarget<'_>,
     ) -> Result<
         (
             TaskId,
@@ -3074,25 +3120,27 @@ impl RuntimeState {
 
         // Create the TaskRecord
         let now = self.current_runtime_time();
-        let idx = self.insert_pooled_task_with(|idx, record| {
-            // br-asupersync-j1e7zy: mutate the recycled record in place
-            // instead of `*record = TaskRecord::new_with_time(...)`. The
-            // assignment form drops the `wake_state` Arc and `waiters`
-            // SmallVec freshly created by `Recyclable::reset` only to
-            // allocate identical replacements, defeating the purpose of
-            // the pool. `Recyclable::reset` (and the miss-path
-            // `TaskRecord::new` fallback) already leave every field at its
-            // default, so we only set the per-task identity and budget.
-            record.id = TaskId::from_arena(idx);
-            record.owner = region;
-            record.created_at = now;
-            record.deadline = budget.deadline;
-            record.polls_remaining = budget.poll_quota;
-            #[cfg(feature = "tracing-integration")]
-            {
-                record.created_instant = crate::time::wall_now();
-            }
-        });
+        let idx = tasks
+            .resolve(&mut self.tasks)
+            .insert_pooled_task_with(|idx, record| {
+                // br-asupersync-j1e7zy: mutate the recycled record in place
+                // instead of `*record = TaskRecord::new_with_time(...)`. The
+                // assignment form drops the `wake_state` Arc and `waiters`
+                // SmallVec freshly created by `Recyclable::reset` only to
+                // allocate identical replacements, defeating the purpose of
+                // the pool. `Recyclable::reset` (and the miss-path
+                // `TaskRecord::new` fallback) already leave every field at its
+                // default, so we only set the per-task identity and budget.
+                record.id = TaskId::from_arena(idx);
+                record.owner = region;
+                record.created_at = now;
+                record.deadline = budget.deadline;
+                record.polls_remaining = budget.poll_quota;
+                #[cfg(feature = "tracing-integration")]
+                {
+                    record.created_instant = crate::time::wall_now();
+                }
+            });
         let task_id = TaskId::from_arena(idx);
 
         // Register task with cancel protocol validator
@@ -3129,8 +3177,16 @@ impl RuntimeState {
                 region_record.add_task(task_id)
             };
             if let Err(err) = admission {
-                // Rollback task creation
-                self.recycle_task(task_id);
+                // Rollback task creation. Target-aware mirror of
+                // `Self::recycle_task`: recycle the record in whichever
+                // table minted it, then retire the validator state and
+                // advance the task-table epoch exactly as the embedded
+                // path does.
+                tasks
+                    .resolve(&mut self.tasks)
+                    .remove_and_recycle_task(task_id);
+                self.cancel_protocol_validator.lock().remove_task(task_id);
+                self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
                 return Err(match err {
                     AdmissionError::Closed => SpawnError::RegionClosed(region),
                     AdmissionError::LimitReached { limit, live, .. } => {
@@ -3143,8 +3199,13 @@ impl RuntimeState {
                 });
             }
         } else {
-            // Rollback task creation
-            self.recycle_task(task_id);
+            // Rollback task creation (target-aware mirror of
+            // `Self::recycle_task`, as above).
+            tasks
+                .resolve(&mut self.tasks)
+                .remove_and_recycle_task(task_id);
+            self.cancel_protocol_validator.lock().remove_task(task_id);
+            self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
             return Err(SpawnError::RegionNotFound(region));
         }
 
@@ -3179,15 +3240,27 @@ impl RuntimeState {
         cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
         let cx_weak = std::sync::Arc::downgrade(&cx.inner);
 
-        // Link the shared state to the TaskRecord
-        self.update_task(task_id, |record| {
-            record.set_cx_inner(cx.inner.clone());
-            record.set_cx(cx.clone());
-        });
+        // Link the shared state to the TaskRecord in the minting table.
+        tasks
+            .resolve(&mut self.tasks)
+            .update_task(task_id, |record| {
+                record.set_cx_inner(cx.inner.clone());
+                record.set_cx(cx.clone());
+            });
 
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
-        let spawn_effects =
-            self.prepare_task_spawn_effects(task_id, region, budget, TaskSpawnSource::Direct, now);
+        // The spawn-trace logical tick must come from the minting table;
+        // an embedded-table read would silently report `None` for
+        // external-mode records (br-asupersync-sched-hot-path-perf-bt4y5f.2.2).
+        let logical_time = Self::logical_time_from_table(tasks.resolve_ref(&self.tasks), task_id);
+        let spawn_effects = self.prepare_task_spawn_effects_with_logical_time(
+            task_id,
+            region,
+            budget,
+            TaskSpawnSource::Direct,
+            now,
+            logical_time,
+        );
 
         // Create the TaskHandle
         let handle = crate::runtime::TaskHandle::new(task_id, result_rx, cx_weak);
@@ -5286,6 +5359,36 @@ impl RuntimeState {
     pub fn drain_ready_async_finalizers(
         &mut self,
     ) -> SmallVec<[(TaskId, u8, TaskSpawnEffects); 2]> {
+        self.drain_ready_async_finalizers_in(&mut AdmissionTaskTarget::Embedded)
+    }
+
+    /// Whether any region is currently in the finalizing set.
+    ///
+    /// Completion paths that would otherwise lock an external task table
+    /// (Shard A) purely to offer it as the finalizer minting target use
+    /// this to keep the common no-finalizer case free of that
+    /// acquisition; [`Self::drain_ready_async_finalizers_in`] performs the
+    /// same check internally, so the guard is an optimization, not a
+    /// correctness requirement.
+    #[inline]
+    #[must_use]
+    pub(crate) fn has_finalizing_regions(&self) -> bool {
+        !self.finalizing_regions.is_empty()
+    }
+
+    /// Finalizer drain with an explicit task-table target
+    /// (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2).
+    ///
+    /// Scheduler callers that dispatch against an external sharded
+    /// [`TaskTable`] must pass its already-locked guard (taken after the
+    /// unified state lock, canonical B → A) so scheduled finalizer tasks
+    /// mint into the table their workers resolve injected `TaskId`s
+    /// against. Embedded callers pass [`AdmissionTaskTarget::Embedded`]
+    /// through [`Self::drain_ready_async_finalizers`].
+    pub(crate) fn drain_ready_async_finalizers_in(
+        &mut self,
+        tasks: &mut AdmissionTaskTarget<'_>,
+    ) -> SmallVec<[(TaskId, u8, TaskSpawnEffects); 2]> {
         if self.finalizing_regions.is_empty() {
             return SmallVec::new();
         }
@@ -5314,7 +5417,7 @@ impl RuntimeState {
                 Finalizer::Sync(finalizer) => Box::pin(async move { finalizer() }),
                 Finalizer::Async(future) => future,
             };
-            match self.spawn_finalizer_task(region_id, finalizer_id, future) {
+            match self.spawn_finalizer_task_in(region_id, finalizer_id, future, tasks) {
                 Ok((task_id, priority, spawn_effects)) => {
                     scheduled.push((task_id, priority, spawn_effects));
                 }
@@ -5522,11 +5625,18 @@ impl RuntimeState {
         true
     }
 
-    fn spawn_finalizer_task(
+    /// Spawns one async-finalizer task, minting into the caller's task-table
+    /// target (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2): the
+    /// record, stored future, and wake-notify must live in the table the
+    /// dispatching scheduler's workers actually consult, or the injected
+    /// `TaskId` can never be resolved (external mode) — while the finalizer
+    /// barrier maps and region protocol bookkeeping stay on `self`.
+    fn spawn_finalizer_task_in(
         &mut self,
         region_id: RegionId,
         finalizer_id: u64,
         future: BoxedAsyncFinalizer,
+        tasks: &mut AdmissionTaskTarget<'_>,
     ) -> Result<(TaskId, u8, TaskSpawnEffects), BoxedAsyncFinalizer> {
         // EDGE CASE VALIDATION: Check async finalizer barrier consistency before spawning
         // This prevents concurrent async finalizers from the same region, which violates LIFO ordering
@@ -5567,7 +5677,7 @@ impl RuntimeState {
 
         let system_cx = self.create_system_cx();
         let Ok((task_id, _handle, cx, result_tx, spawn_effects)) =
-            self.create_task_infrastructure::<()>(&system_cx, region_id, budget, true)
+            self.create_task_infrastructure_in::<()>(&system_cx, region_id, budget, true, tasks)
         else {
             // EDGE CASE VALIDATION: Log task creation failure for debugging
             // This helps identify resource exhaustion scenarios that could block finalizer execution
@@ -5600,12 +5710,14 @@ impl RuntimeState {
             }
         };
 
-        self.tasks
+        tasks
+            .resolve(&mut self.tasks)
             .store_spawned_task(task_id, StoredTask::new_with_id(wrapped_future, task_id));
 
         // Mark the task as notified since it will be immediately injected into
-        // the ready queue by the caller (drain_ready_async_finalizers).
-        if let Some(record) = self.task(task_id) {
+        // the ready queue by the caller (drain_ready_async_finalizers). The
+        // record lives in whichever table admission minted it in.
+        if let Some(record) = tasks.resolve_ref(&self.tasks).task(task_id) {
             record.wake_state.notify();
         }
 

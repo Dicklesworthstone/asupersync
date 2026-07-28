@@ -4252,6 +4252,153 @@ fn drain_ready_async_finalizers_runs_async_cleanup_even_with_zero_task_limit() {
     );
 }
 
+/// E1.2 (br-asupersync-sched-hot-path-perf-bt4y5f.2.2): with an external
+/// task-table target, the scheduled finalizer task's record, `Cx` wiring,
+/// and stored future all mint into the external table — the one an
+/// external-mode scheduler's workers resolve injected `TaskId`s against —
+/// while the finalizer barrier and region bookkeeping stay on the unified
+/// state. The embedded table must never see the task.
+#[test]
+fn drain_ready_async_finalizers_in_external_target_mints_externally() {
+    init_test("drain_ready_async_finalizers_in_external_target_mints_externally");
+    let mut state = RuntimeState::new();
+    let region = state.create_root_region(Budget::INFINITE);
+    let registered = state.register_async_finalizer(region, async {});
+    crate::assert_with_log!(registered, "registered", true, registered);
+
+    let region_record = state
+        .regions
+        .get_mut(region.arena_index())
+        .expect("region missing");
+    region_record.begin_close(None);
+    region_record.begin_finalize();
+    state.finalizing_regions.push(region);
+
+    let external = ContendedMutex::new(
+        "external-tasks",
+        crate::runtime::task_table::TaskTable::new(),
+    );
+    let scheduled = {
+        let mut target = AdmissionTaskTarget::External(
+            external
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        state.drain_ready_async_finalizers_in(&mut target)
+    };
+    crate::assert_with_log!(
+        scheduled.len() == 1,
+        "async finalizer task scheduled through the external target",
+        1usize,
+        scheduled.len()
+    );
+    let task_id = scheduled[0].0;
+    crate::assert_with_log!(
+        state.task(task_id).is_none(),
+        "embedded table must not mint the external finalizer task",
+        true,
+        state.task(task_id).is_none()
+    );
+    crate::assert_with_log!(
+        state.get_stored_future(task_id).is_none(),
+        "embedded table must not store the external finalizer future",
+        true,
+        state.get_stored_future(task_id).is_none()
+    );
+    {
+        let mut tt = external
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let record_minted = tt.task(task_id).is_some_and(|record| record.cx.is_some());
+        crate::assert_with_log!(
+            record_minted,
+            "finalizer record minted externally with Cx wired",
+            true,
+            record_minted
+        );
+        let future_stored = tt.get_stored_future(task_id).is_some();
+        crate::assert_with_log!(
+            future_stored,
+            "finalizer future stored under the arena id in the external table",
+            true,
+            future_stored
+        );
+    }
+    crate::assert_with_log!(
+        state.active_async_finalizers.get(&region) == Some(&task_id),
+        "finalizer barrier bookkeeping stays on the unified state",
+        format!("{task_id:?}"),
+        format!("{:?}", state.active_async_finalizers.get(&region))
+    );
+    crate::test_complete!("drain_ready_async_finalizers_in_external_target_mints_externally");
+}
+
+/// E1.2 (br-asupersync-sched-hot-path-perf-bt4y5f.2.2): when region
+/// admission fails after the record was minted externally,
+/// `create_task_infrastructure_in` rollback recycles the record from the
+/// external table — no orphan record may survive in either table.
+#[test]
+fn create_task_infrastructure_in_external_rollback_recycles_externally() {
+    init_test("create_task_infrastructure_in_external_rollback_recycles_externally");
+    let mut state = RuntimeState::new();
+    let region = state.create_root_region(Budget::INFINITE);
+    let set_limits = state.set_region_limits(
+        region,
+        RegionLimits {
+            max_tasks: Some(0),
+            ..RegionLimits::unlimited()
+        },
+    );
+    crate::assert_with_log!(set_limits, "limits set", true, set_limits);
+
+    let external = ContendedMutex::new(
+        "external-tasks",
+        crate::runtime::task_table::TaskTable::new(),
+    );
+    let system_cx = state.create_system_cx();
+    let result = {
+        let mut target = AdmissionTaskTarget::External(
+            external
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        state.create_task_infrastructure_in::<()>(
+            &system_cx,
+            region,
+            Budget::new(),
+            false,
+            &mut target,
+        )
+    };
+    let denied_at_capacity = matches!(
+        &result,
+        Err(SpawnError::RegionAtCapacity { region: r, .. }) if *r == region
+    );
+    crate::assert_with_log!(
+        denied_at_capacity,
+        "non-cleanup task denied by the zero-task-limit region",
+        true,
+        denied_at_capacity
+    );
+    let external_empty = external
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_empty();
+    crate::assert_with_log!(
+        external_empty,
+        "rollback must recycle the externally minted record",
+        true,
+        external_empty
+    );
+    crate::assert_with_log!(
+        state.tasks_is_empty(),
+        "embedded table untouched by external rollback",
+        true,
+        state.tasks_is_empty()
+    );
+    crate::test_complete!("create_task_infrastructure_in_external_rollback_recycles_externally");
+}
+
 #[test]
 fn drain_ready_async_finalizers_blocks_lower_finalizers_while_async_barrier_runs() {
     init_test("drain_ready_async_finalizers_blocks_lower_finalizers_while_async_barrier_runs");

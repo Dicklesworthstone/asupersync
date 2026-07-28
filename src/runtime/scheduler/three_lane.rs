@@ -1628,12 +1628,15 @@ impl ThreeLaneScheduler {
     /// admitted records, their `Cx` wiring, and their stored futures directly
     /// into this external table
     /// (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2), taken under
-    /// the unified state lock in the canonical B → A order.
-    /// RuntimeState-created async-finalizer tasks and direct
-    /// `create_task` callers still mint into the embedded table, so this
-    /// seam does not yet claim end-to-end execution of asynchronous
-    /// finalizers through the external table, and mixing embedded-minted
-    /// task ids with external-table dispatch remains outside its contract.
+    /// the unified state lock in the canonical B → A order. Async-finalizer
+    /// tasks scheduled by this scheduler's own completion and
+    /// `schedule_ready_finalizers` paths mint into the external table the
+    /// same way, so every task this scheduler injects into its own lanes is
+    /// resolvable by its workers. Direct `create_task` callers and the
+    /// legacy builder spawn fallback still mint into the embedded table;
+    /// dispatching those embedded-minted task ids through an external-table
+    /// scheduler remains outside this seam's contract until the sharded
+    /// construction work converts them (B09/B10 in the E1.1 inventory).
     ///
     /// br-asupersync-niczb3: `worker_count == 0` is silently clamped
     /// to `1` here so existing infallible callers do not regress.
@@ -6852,7 +6855,25 @@ impl ThreeLaneWorker {
                         };
                         let (waiters, cancel_waker_retirements) =
                             completion.into_waiters_and_retirements_without_observers();
-                        let finalizers = state.drain_ready_async_finalizers();
+                        // E1.2 (br-asupersync-sched-hot-path-perf-bt4y5f.2.2):
+                        // scheduled finalizer tasks must mint into the table
+                        // worker dispatch consults. Lock order is unified
+                        // state (B) then external table (A); the table is
+                        // locked only when finalizer work exists.
+                        let finalizers = if state.has_finalizing_regions() {
+                            let mut finalizer_tasks = self.worker.task_table.as_ref().map_or(
+                                crate::runtime::state::AdmissionTaskTarget::Embedded,
+                                |tt| {
+                                    crate::runtime::state::AdmissionTaskTarget::External(
+                                        tt.lock()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner),
+                                    )
+                                },
+                            );
+                            state.drain_ready_async_finalizers_in(&mut finalizer_tasks)
+                        } else {
+                            smallvec::SmallVec::new()
+                        };
                         self.worker.wake_dependents_locked(&state, waiters);
                         let finalizer_publication =
                             self.worker.publish_ready_finalizers(finalizers);
@@ -7145,7 +7166,26 @@ impl ThreeLaneWorker {
                             None => state.task_completed(task_id),
                         };
                         let (waiters, completion_observer) = completion.into_parts();
-                        let finalizers = state.drain_ready_async_finalizers();
+                        // E1.2 (br-asupersync-sched-hot-path-perf-bt4y5f.2.2):
+                        // this branch dispatches against the external table, so
+                        // scheduled finalizer tasks must mint there. Lock order
+                        // is unified state (B) then external table (A); the
+                        // table is locked only when finalizer work exists, so
+                        // the common no-finalizer completion never takes A.
+                        let finalizers = if state.has_finalizing_regions() {
+                            let mut finalizer_tasks = self.task_table.as_ref().map_or(
+                                crate::runtime::state::AdmissionTaskTarget::Embedded,
+                                |tt| {
+                                    crate::runtime::state::AdmissionTaskTarget::External(
+                                        tt.lock()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner),
+                                    )
+                                },
+                            );
+                            state.drain_ready_async_finalizers_in(&mut finalizer_tasks)
+                        } else {
+                            smallvec::SmallVec::new()
+                        };
                         self.wake_dependents_locked(&state, waiters);
                         let finalizer_publication = self.publish_ready_finalizers(finalizers);
                         drop(state);
@@ -7352,7 +7392,26 @@ impl ThreeLaneWorker {
                             None => state.task_completed(task_id),
                         };
                         let (waiters, completion_observer) = completion.into_parts();
-                        let finalizers = state.drain_ready_async_finalizers();
+                        // E1.2 (br-asupersync-sched-hot-path-perf-bt4y5f.2.2):
+                        // this branch dispatches against the external table, so
+                        // scheduled finalizer tasks must mint there. Lock order
+                        // is unified state (B) then external table (A); the
+                        // table is locked only when finalizer work exists, so
+                        // the common no-finalizer completion never takes A.
+                        let finalizers = if state.has_finalizing_regions() {
+                            let mut finalizer_tasks = self.task_table.as_ref().map_or(
+                                crate::runtime::state::AdmissionTaskTarget::Embedded,
+                                |tt| {
+                                    crate::runtime::state::AdmissionTaskTarget::External(
+                                        tt.lock()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner),
+                                    )
+                                },
+                            );
+                            state.drain_ready_async_finalizers_in(&mut finalizer_tasks)
+                        } else {
+                            smallvec::SmallVec::new()
+                        };
                         self.wake_dependents_locked(&state, waiters);
                         let finalizer_publication = self.publish_ready_finalizers(finalizers);
                         drop(state);
@@ -7462,7 +7521,23 @@ impl ThreeLaneWorker {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.drain_ready_async_finalizers()
+            // E1.2 (br-asupersync-sched-hot-path-perf-bt4y5f.2.2): scheduled
+            // finalizer tasks must mint into the table worker dispatch
+            // consults. Lock order is unified state (B) then external table
+            // (A), taken only when finalizer work exists; scope exit
+            // releases A before B.
+            if !state.has_finalizing_regions() {
+                return false;
+            }
+            let mut finalizer_tasks = self.task_table.as_ref().map_or(
+                crate::runtime::state::AdmissionTaskTarget::Embedded,
+                |tt| {
+                    crate::runtime::state::AdmissionTaskTarget::External(
+                        tt.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+                    )
+                },
+            );
+            state.drain_ready_async_finalizers_in(&mut finalizer_tasks)
         };
         if tasks.is_empty() {
             return false;

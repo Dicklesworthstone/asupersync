@@ -42,9 +42,10 @@
 //!      create the orphan.
 //!
 //!   5. **The legitimate during-cancel spawn path** is
-//!      `RuntimeState::spawn_finalizer_task` (state.rs:3000-3060)
-//!      which uses `create_task_infrastructure(region_id, budget,
-//!      true)` where `true` is `is_cleanup`. This routes through
+//!      `RuntimeState::spawn_finalizer_task_in`
+//!      which uses `create_task_infrastructure_in(region_id, budget,
+//!      true, tasks)` where `true` is `is_cleanup` and `tasks` is the
+//!      minting-table target (E1.2). This routes through
 //!      `add_cleanup_task` instead of `add_task`. Cleanup tasks
 //!      ARE allowed in Finalizing state — that's the whole point
 //!      of finalizers. But cleanup admission is NOT exposed as a
@@ -52,7 +53,7 @@
 //!      registry.
 //!
 //!   In-crate test `cancel_request_should_prevent_new_spawns`
-//!   (state.rs:7911) explicitly pins this: after
+//!   (state_tests.rs) explicitly pins this: after
 //!   `state.cancel_request(region, ...)`,
 //!   `region_state.can_spawn()` returns false AND
 //!   `state.create_task(region, ...)` returns
@@ -180,23 +181,29 @@ fn create_task_maps_admission_closed_to_spawn_error_region_closed() {
          failures — and the rollback path may not fire.",
     );
 
-    // The rollback (recycle_task) MUST happen before the
-    // error return.
+    // The rollback MUST happen before the error return. Since E1.2
+    // (br-asupersync-sched-hot-path-perf-bt4y5f.2.2) the rollback is the
+    // target-aware mirror of `recycle_task`: the record is recycled from
+    // whichever task table minted it (`remove_and_recycle_task`), and the
+    // cancel-protocol validator entry is retired alongside it.
     let admission_pos = source
         .find("AdmissionError::Closed => SpawnError::RegionClosed(region),")
         .expect("admission match arm");
     let pre_admission = &source[..admission_pos];
 
-    // The chars preceding the match arm should contain the
-    // rollback `recycle_task` call. recycle_task removes the
-    // partial task record and returns the slot to the pool.
+    // The chars preceding the match arm should contain the rollback
+    // recycle call. remove_and_recycle_task removes the partial task
+    // record and returns the slot to the pool.
     let rollback_window_start = pre_admission.len().saturating_sub(500);
     let rollback_window = &pre_admission[rollback_window_start..];
 
     assert!(
-        rollback_window.contains("self.recycle_task(task_id)"),
-        "REGRESSION: create_task no longer calls \
-         self.recycle_task(task_id) before returning \
+        rollback_window.contains(".remove_and_recycle_task(task_id)")
+            && rollback_window
+                .contains("self.cancel_protocol_validator.lock().remove_task(task_id)"),
+        "REGRESSION: the admission-failure path no longer recycles \
+         the partially minted task record (and retires its validator \
+         entry) before returning \
          SpawnError::RegionClosed. Without rollback, a \
          partial task record is left in the task table — \
          observable as a leaked task in diagnostics.\n\n\
@@ -229,9 +236,10 @@ fn spawn_error_region_closed_variant_carries_region_id() {
 #[test]
 fn spawn_finalizer_task_uses_cleanup_admission_path() {
     // Pin: the legitimate during-cancel spawn path is
-    // spawn_finalizer_task (state.rs:3000). It calls
-    // create_task_infrastructure(region_id, budget, true)
-    // where `true` is the is_cleanup flag. The cleanup path
+    // spawn_finalizer_task_in. It calls
+    // create_task_infrastructure_in(region_id, budget, true, tasks)
+    // where `true` is the is_cleanup flag and `tasks` is the
+    // minting-table target (E1.2). The cleanup path
     // routes through add_cleanup_task (allowed in Finalizing)
     // instead of add_task.
     //
@@ -239,17 +247,19 @@ fn spawn_finalizer_task_uses_cleanup_admission_path() {
     // user spawns NEVER get this treatment.
     let source = read("src/runtime/state.rs");
 
-    let fn_marker = "fn spawn_finalizer_task(";
-    let start = source.find(fn_marker).expect("spawn_finalizer_task fn");
+    let fn_marker = "fn spawn_finalizer_task_in(";
+    let start = source.find(fn_marker).expect("spawn_finalizer_task_in fn");
     let body_end = source[start..]
         .find("\n    }\n")
-        .expect("spawn_finalizer_task close");
+        .expect("spawn_finalizer_task_in close");
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("self.create_task_infrastructure::<()>(&system_cx, region_id, budget, true)"),
-        "REGRESSION: spawn_finalizer_task no longer calls \
-         create_task_infrastructure with is_cleanup=true. \
+        body.contains(
+            "self.create_task_infrastructure_in::<()>(&system_cx, region_id, budget, true, tasks)"
+        ),
+        "REGRESSION: spawn_finalizer_task_in no longer calls \
+         create_task_infrastructure_in with is_cleanup=true. \
          Without the cleanup flag, finalizer admission goes \
          through the same Open-only gate as user spawns — \
          finalizers would fail to spawn during region close, \
@@ -260,11 +270,17 @@ fn spawn_finalizer_task_uses_cleanup_admission_path() {
 #[test]
 fn cancel_request_should_prevent_new_spawns_test_exists_in_crate() {
     // Pin: the in-crate test
-    // `cancel_request_should_prevent_new_spawns` (state.rs:7911)
-    // is the existing regression pin for this audit. A
-    // regression that removed it would let a behavioral
-    // regression slip through CI.
-    let source = read("src/runtime/state.rs");
+    // `cancel_request_should_prevent_new_spawns` is the existing
+    // regression pin for this audit. A regression that removed it
+    // would let a behavioral regression slip through CI.
+    //
+    // The 0.3.10 release split the state.rs inline test mega-module
+    // into the `state_tests.rs` sibling (br-asupersync-diczyk), so the
+    // pinned test now lives there as a top-level `#[test]` fn. This
+    // audit read `src/runtime/state.rs` until then and was red from
+    // the split until E1.2 subsystem 2 repointed it
+    // (br-asupersync-sched-hot-path-perf-bt4y5f.2.2).
+    let source = read("src/runtime/state_tests.rs");
 
     assert!(
         source.contains("fn cancel_request_should_prevent_new_spawns()"),
@@ -278,7 +294,7 @@ fn cancel_request_should_prevent_new_spawns_test_exists_in_crate() {
     // create_task returns Err(SpawnError::RegionClosed(_)).
     let test_marker = "fn cancel_request_should_prevent_new_spawns()";
     let start = source.find(test_marker).expect("test fn");
-    let body_end = source[start..].find("\n    }\n").expect("test close");
+    let body_end = source[start..].find("\n}\n").expect("test close");
     let body = &source[start..start + body_end];
 
     assert!(
