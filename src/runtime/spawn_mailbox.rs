@@ -1513,12 +1513,22 @@ impl fmt::Debug for SpawnMailbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::state::{AdmissionTaskTarget, LocalSpawnAdmission};
     use crate::trace::event::{TraceData, TraceEventKind};
     use crate::types::Outcome;
     use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::thread;
+
+    /// Embedded-table admission for the owner-pinned local lane, matching
+    /// the production drain entry (`admit_local_spawn_request_in`).
+    fn admit_local_embedded(
+        state: &mut RuntimeState,
+        request: LocalSpawnRequest,
+    ) -> LocalSpawnAdmission {
+        state.admit_local_spawn_request_in(request, &mut AdmissionTaskTarget::Embedded)
+    }
 
     fn test_region() -> RegionId {
         RegionId::from_arena(ArenaIndex::new(0, 1))
@@ -2712,6 +2722,139 @@ mod tests {
             vec![Kind::TaskSpawnEnqueued, Kind::Spawn, Kind::TaskAdmitted],
             "admission trace ordering"
         );
+    }
+
+    /// E1.2 (br-asupersync-sched-hot-path-perf-bt4y5f.2.2): external-table
+    /// admission mints the record, its `Cx` wiring, and the stored future in
+    /// the external sharded table; the embedded table never sees the task,
+    /// while region bookkeeping (Shard B) stays on the unified state.
+    #[test]
+    fn admit_spawn_request_external_table_mints_externally() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let handle = state
+            .region(root)
+            .expect("root region exists")
+            .pending_spawn_handle();
+
+        let external = crate::sync::ContendedMutex::new(
+            "external-tasks",
+            crate::runtime::task_table::TaskTable::new(),
+        );
+
+        let mailbox = SpawnMailbox::with_trace(state.trace_handle());
+        let provisional = mailbox.allocate_task_id();
+        let req = SpawnRequest::new(provisional, root, Budget::new(), noop_task(provisional))
+            .with_pending_reservation(handle.reserve());
+        mailbox.enqueue(req, Time::ZERO);
+
+        let parts = mailbox.dequeue().expect("queued").into_parts();
+        let admission = {
+            let mut target = crate::runtime::state::AdmissionTaskTarget::External(
+                external
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+            state.admit_spawn_request_in(parts, &mut target)
+        };
+        let SpawnAdmission::Admitted {
+            task_id,
+            cancel_publication,
+            spawn_effects,
+            ..
+        } = admission
+        else {
+            panic!("expected admission to succeed");
+        };
+
+        assert_eq!(handle.count(), 0, "credit released after admission");
+        assert_eq!(
+            state.region(root).expect("root exists").task_count(),
+            1,
+            "region bookkeeping stays on the unified state (Shard B)"
+        );
+        assert!(
+            state.task(task_id).is_none(),
+            "embedded table must not mint the external task"
+        );
+        assert!(
+            state.get_stored_future(task_id).is_none(),
+            "embedded table must not store the external future"
+        );
+        {
+            let mut tt = external
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(
+                tt.task(task_id).is_some_and(|record| record.cx.is_some()),
+                "record minted externally with Cx wired"
+            );
+            assert!(
+                tt.get_stored_future(task_id).is_some(),
+                "future stored under the arena id in the external table"
+            );
+        }
+        let cancel_wakes = cancel_publication.publish(|_| {});
+        spawn_effects.dispatch();
+        cancel_wakes.dispatch();
+    }
+
+    /// E1.2 (br-asupersync-sched-hot-path-perf-bt4y5f.2.2): when region
+    /// admission fails after the record was minted externally, rollback
+    /// recycles the record from the external table — no orphan record may
+    /// survive in either table.
+    #[test]
+    fn admit_spawn_request_external_table_rollback_recycles_externally() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        state.region(root).expect("root region exists").set_limits(
+            crate::record::region::RegionLimits {
+                max_tasks: Some(0),
+                ..crate::record::region::RegionLimits::UNLIMITED
+            },
+        );
+        let handle = state
+            .region(root)
+            .expect("root region exists")
+            .pending_spawn_handle();
+
+        let external = crate::sync::ContendedMutex::new(
+            "external-tasks",
+            crate::runtime::task_table::TaskTable::new(),
+        );
+
+        let mailbox = SpawnMailbox::new();
+        let provisional = mailbox.allocate_task_id();
+        let req = SpawnRequest::new(provisional, root, Budget::new(), noop_task(provisional))
+            .with_pending_reservation(handle.reserve());
+        mailbox.enqueue(req, Time::ZERO);
+
+        let parts = mailbox.dequeue().expect("queued").into_parts();
+        let admission = {
+            let mut target = crate::runtime::state::AdmissionTaskTarget::External(
+                external
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+            state.admit_spawn_request_in(parts, &mut target)
+        };
+        let SpawnAdmission::Denied { parts, error } = admission else {
+            panic!("expected capacity denial");
+        };
+        assert!(
+            matches!(&error, SpawnError::RegionAtCapacity { region, .. } if *region == root),
+            "expected RegionAtCapacity, got {error:?}"
+        );
+        assert!(
+            external
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "rollback must recycle the externally minted record"
+        );
+        assert!(state.tasks_is_empty(), "embedded table untouched");
+        parts.resolve_failed(error);
+        assert_eq!(handle.count(), 0, "credit balanced after denial");
     }
 
     /// RegionClosed denial: admission returns the parts; resolving them
@@ -3943,7 +4086,7 @@ mod tests {
             "one local request queued"
         );
         let request = requests.pop().expect("request present");
-        let admission = lab.state.admit_local_spawn_request(request);
+        let admission = admit_local_embedded(&mut lab.state, request);
         let crate::runtime::state::LocalSpawnAdmission::Admitted {
             task_id,
             priority: _,
@@ -4022,9 +4165,7 @@ mod tests {
             cancel_publication,
             spawn_effects,
             ..
-        } = lab
-            .state
-            .admit_local_spawn_request(requests.pop().expect("local request"))
+        } = admit_local_embedded(&mut lab.state, requests.pop().expect("local request"))
         else {
             panic!("expected local admission");
         };
@@ -4136,7 +4277,7 @@ mod tests {
             stored,
             cancel_publication,
             spawn_effects,
-        } = lab.state.admit_local_spawn_request(request)
+        } = admit_local_embedded(&mut lab.state, request)
         else {
             panic!("expected local admission");
         };
@@ -4385,7 +4526,7 @@ mod tests {
         assert_eq!(drain_local_spawn_lane(16, &mut requests), 1);
         let request = requests.pop().expect("request present");
         let crate::runtime::state::LocalSpawnAdmission::Denied { request, error } =
-            lab.state.admit_local_spawn_request(request)
+            admit_local_embedded(&mut lab.state, request)
         else {
             panic!("expected closing-region denial");
         };
@@ -4636,7 +4777,7 @@ mod tests {
             mut stored,
             cancel_publication,
             spawn_effects,
-        } = state.admit_local_spawn_request(request)
+        } = admit_local_embedded(&mut state, request)
         else {
             panic!("admission must succeed for an open region");
         };
@@ -4708,7 +4849,7 @@ mod tests {
         let local_tasks_before = crate::runtime::local::local_task_count();
 
         let crate::runtime::state::LocalSpawnAdmission::Denied { request, error } =
-            state.admit_local_spawn_request(request)
+            admit_local_embedded(&mut state, request)
         else {
             panic!("reused local slot must be denied");
         };
@@ -4785,7 +4926,7 @@ mod tests {
         };
 
         let crate::runtime::state::LocalSpawnAdmission::Denied { request, error } =
-            state.admit_local_spawn_request(request)
+            admit_local_embedded(&mut state, request)
         else {
             panic!("admission must deny for a closing region");
         };

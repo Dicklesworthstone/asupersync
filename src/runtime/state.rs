@@ -985,7 +985,49 @@ pub enum SpawnAdmission {
     },
 }
 
-/// Outcome of [`RuntimeState::admit_local_spawn_request`]
+/// Task-table target for mailbox spawn admission
+/// (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2).
+///
+/// The scheduler can run its hot path against an external sharded
+/// [`TaskTable`] (Shard A). Admission must then mint the task record, wire
+/// its `Cx`, and store its future in that external table — the one worker
+/// poll paths consult — while region liveness/quota (Shard B), validator,
+/// epoch, and observability bookkeeping stay on [`RuntimeState`].
+///
+/// `External` carries the already-locked table guard so a whole admission
+/// batch runs under one acquisition. Callers hold the unified state lock
+/// first and then lock the table, matching the canonical B → A shard
+/// order; no path may lock the external table and then the unified state.
+pub(crate) enum AdmissionTaskTarget<'g> {
+    /// Mint into the embedded `RuntimeState::tasks` table (unified shape).
+    Embedded,
+    /// Mint into an external scheduler-owned task table (sharded shape).
+    External(crate::sync::ContendedMutexGuard<'g, TaskTable>),
+}
+
+impl AdmissionTaskTarget<'_> {
+    /// Resolves the target to a mutable table, borrowing the embedded
+    /// table only in the `Embedded` arm so callers can keep using `self`
+    /// around each table operation.
+    #[inline]
+    fn resolve<'s>(&'s mut self, embedded: &'s mut TaskTable) -> &'s mut TaskTable {
+        match self {
+            Self::Embedded => embedded,
+            Self::External(guard) => &mut *guard,
+        }
+    }
+
+    /// Read-only variant of [`Self::resolve`].
+    #[inline]
+    fn resolve_ref<'s>(&'s self, embedded: &'s TaskTable) -> &'s TaskTable {
+        match self {
+            Self::Embedded => embedded,
+            Self::External(guard) => guard,
+        }
+    }
+}
+
+/// Outcome of [`RuntimeState::admit_local_spawn_request_in`]
 /// (br-asupersync-i9y5wb / A2.2a).
 ///
 /// Mirrors [`SpawnAdmission`] for the owner-pinned local lane; the
@@ -3301,6 +3343,24 @@ impl RuntimeState {
         &mut self,
         parts: crate::runtime::spawn_mailbox::SpawnRequestParts,
     ) -> SpawnAdmission {
+        self.admit_spawn_request_in(parts, &mut AdmissionTaskTarget::Embedded)
+    }
+
+    /// Mailbox spawn admission with an explicit task-table target
+    /// (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2).
+    ///
+    /// When the scheduler runs against an external sharded [`TaskTable`],
+    /// admission must create the task record, wire its `Cx`, and store its
+    /// future in that external table — the table every worker poll path
+    /// actually consults — while region liveness, quota, validator, and
+    /// epoch bookkeeping stay on `self`. The caller holds the unified
+    /// state lock and passes the already-locked external table guard, so
+    /// the acquisition order is the canonical B → A.
+    pub(crate) fn admit_spawn_request_in(
+        &mut self,
+        parts: crate::runtime::spawn_mailbox::SpawnRequestParts,
+        tasks: &mut AdmissionTaskTarget<'_>,
+    ) -> SpawnAdmission {
         if parts
             .admitted_slot
             .as_ref()
@@ -3313,23 +3373,24 @@ impl RuntimeState {
         }
         let region = parts.region;
         let budget = parts.budget;
-        let (task_id, cx, now) = match self.admit_spawn_record(region, budget) {
+        let (task_id, cx, now) = match self.admit_spawn_record_in(region, budget, tasks) {
             Ok(admitted) => admitted,
             Err(error) => return SpawnAdmission::Denied { parts, error },
         };
-        self.finish_send_spawn_admission(parts, task_id, &cx, now)
+        self.finish_send_spawn_admission_in(parts, task_id, &cx, now, tasks)
     }
 
     /// Payload-agnostic core of mailbox spawn admission, shared by the
     /// Send mailbox path ([`Self::admit_spawn_request`]) and the
-    /// owner-pinned local lane ([`Self::admit_local_spawn_request`],
+    /// owner-pinned local lane ([`Self::admit_local_spawn_request_in`],
     /// br-asupersync-i9y5wb / A2.2a): region liveness, task-record
     /// creation, cancel-protocol registration, region quota admission
     /// (with rollback), and the admission-built capability context.
-    fn admit_spawn_record(
+    fn admit_spawn_record_in(
         &mut self,
         region: RegionId,
         budget: Budget,
+        tasks: &mut AdmissionTaskTarget<'_>,
     ) -> Result<(TaskId, crate::cx::Cx, Time), SpawnError> {
         // Region liveness first: missing or non-Open regions deny without
         // touching the task table.
@@ -3341,17 +3402,19 @@ impl RuntimeState {
         }
 
         let now = self.current_runtime_time();
-        let idx = self.insert_pooled_task_with(|idx, record| {
-            record.id = TaskId::from_arena(idx);
-            record.owner = region;
-            record.created_at = now;
-            record.deadline = budget.deadline;
-            record.polls_remaining = budget.poll_quota;
-            #[cfg(feature = "tracing-integration")]
-            {
-                record.created_instant = crate::time::wall_now();
-            }
-        });
+        let idx = tasks
+            .resolve(&mut self.tasks)
+            .insert_pooled_task_with(|idx, record| {
+                record.id = TaskId::from_arena(idx);
+                record.owner = region;
+                record.created_at = now;
+                record.deadline = budget.deadline;
+                record.polls_remaining = budget.poll_quota;
+                #[cfg(feature = "tracing-integration")]
+                {
+                    record.created_instant = crate::time::wall_now();
+                }
+            });
         let task_id = TaskId::from_arena(idx);
 
         {
@@ -3380,7 +3443,15 @@ impl RuntimeState {
             .expect("region checked above")
             .add_task(task_id);
         if let Err(err) = admission {
-            self.recycle_task(task_id);
+            // Target-aware mirror of `Self::recycle_task`: recycle the record
+            // in whichever table minted it, then retire the validator state
+            // and advance the task-table epoch exactly as the embedded path
+            // does.
+            tasks
+                .resolve(&mut self.tasks)
+                .remove_and_recycle_task(task_id);
+            self.cancel_protocol_validator.lock().remove_task(task_id);
+            self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
             let error = match err {
                 AdmissionError::Closed => SpawnError::RegionClosed(region),
                 AdmissionError::LimitReached { limit, live, .. } => SpawnError::RegionAtCapacity {
@@ -3428,22 +3499,25 @@ impl RuntimeState {
             crate::types::task_context::RunnablePublication::Unpublished;
         cx.set_trace_buffer(self.trace_handle());
         cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
-        self.update_task(task_id, |record| {
-            record.set_cx_inner(cx.inner.clone());
-            record.set_cx(cx.clone());
-        });
+        tasks
+            .resolve(&mut self.tasks)
+            .update_task(task_id, |record| {
+                record.set_cx_inner(cx.inner.clone());
+                record.set_cx(cx.clone());
+            });
 
         Ok((task_id, cx, now))
     }
 
     /// Send-path admission tail: stores the payload centrally under the
     /// canonical arena id and publishes the admitted identity.
-    fn finish_send_spawn_admission(
+    fn finish_send_spawn_admission_in(
         &mut self,
         parts: crate::runtime::spawn_mailbox::SpawnRequestParts,
         task_id: TaskId,
         cx: &crate::cx::Cx,
         now: Time,
+        tasks: &mut AdmissionTaskTarget<'_>,
     ) -> SpawnAdmission {
         let region = parts.region;
         let budget = parts.budget;
@@ -3469,7 +3543,9 @@ impl RuntimeState {
                 )
             }
         };
-        self.tasks.store_spawned_task(task_id, stored);
+        tasks
+            .resolve(&mut self.tasks)
+            .store_spawned_task(task_id, stored);
         let cx_inner = std::sync::Arc::downgrade(&cx.inner);
         if let Some(slot) = admitted_slot.as_ref() {
             slot.publish_reserved(crate::runtime::spawn_mailbox::AdmittedTask::pending(
@@ -3481,8 +3557,15 @@ impl RuntimeState {
             crate::runtime::spawn_mailbox::AdmissionPublication::new(cx_inner, admitted_slot);
 
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
-        let spawn_effects =
-            self.prepare_task_spawn_effects(task_id, region, budget, TaskSpawnSource::Mailbox, now);
+        let logical_time = Self::logical_time_from_table(tasks.resolve_ref(&self.tasks), task_id);
+        let spawn_effects = self.prepare_task_spawn_effects_with_logical_time(
+            task_id,
+            region,
+            budget,
+            TaskSpawnSource::Mailbox,
+            now,
+            logical_time,
+        );
 
         // Successor state (task list + stored future) is visible; release
         // the pending-spawn credit last.
@@ -3506,9 +3589,16 @@ impl RuntimeState {
     /// store it in its thread-local task slot and schedule it on the
     /// non-stealable local queue after releasing the state lock. Denials are
     /// returned for out-of-lock resolution exactly like the Send path.
-    pub(crate) fn admit_local_spawn_request(
+    /// Owner-pinned local spawn admission with an explicit task-table target
+    /// (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2). See
+    /// [`Self::admit_spawn_request_in`] for the external-table contract.
+    /// Embedded callers pass [`AdmissionTaskTarget::Embedded`]; there is no
+    /// separate embedded wrapper because the scheduler drain is the only
+    /// production caller.
+    pub(crate) fn admit_local_spawn_request_in(
         &mut self,
         request: crate::runtime::spawn_mailbox::LocalSpawnRequest,
+        tasks: &mut AdmissionTaskTarget<'_>,
     ) -> LocalSpawnAdmission {
         let Some(worker_id) = crate::runtime::scheduler::three_lane::current_worker_id() else {
             return LocalSpawnAdmission::Denied {
@@ -3528,13 +3618,15 @@ impl RuntimeState {
         }
         let region = request.region;
         let budget = request.budget;
-        let (task_id, cx, now) = match self.admit_spawn_record(region, budget) {
+        let (task_id, cx, now) = match self.admit_spawn_record_in(region, budget, tasks) {
             Ok(admitted) => admitted,
             Err(error) => return LocalSpawnAdmission::Denied { request, error },
         };
-        self.update_task(task_id, |record| {
-            record.pin_to_worker(worker_id);
-        });
+        tasks
+            .resolve(&mut self.tasks)
+            .update_task(task_id, |record| {
+                record.pin_to_worker(worker_id);
+            });
 
         let crate::runtime::spawn_mailbox::LocalSpawnRequest {
             factory,
@@ -3560,8 +3652,15 @@ impl RuntimeState {
             crate::runtime::spawn_mailbox::AdmissionPublication::new(cx_inner, admitted_slot);
 
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
-        let spawn_effects =
-            self.prepare_task_spawn_effects(task_id, region, budget, TaskSpawnSource::Local, now);
+        let logical_time = Self::logical_time_from_table(tasks.resolve_ref(&self.tasks), task_id);
+        let spawn_effects = self.prepare_task_spawn_effects_with_logical_time(
+            task_id,
+            region,
+            budget,
+            TaskSpawnSource::Local,
+            now,
+            logical_time,
+        );
 
         // The task is already visible in the region's task list
         // (admission core ran `add_task`), so the pending credit can be
@@ -3709,19 +3808,52 @@ impl RuntimeState {
         source: TaskSpawnSource,
         spawned_at: Time,
     ) -> TaskSpawnEffects {
+        self.prepare_task_spawn_effects_with_logical_time(
+            task_id,
+            region,
+            budget,
+            source,
+            spawned_at,
+            self.logical_time_for_task(task_id),
+        )
+    }
+
+    /// Core of [`Self::prepare_task_spawn_effects`] with the logical time
+    /// supplied by the caller. External-table admission paths must read the
+    /// spawned task's logical tick from the table that actually holds the
+    /// record (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2);
+    /// the embedded wrapper above preserves the historical read from
+    /// `self.tasks`.
+    pub(crate) fn prepare_task_spawn_effects_with_logical_time(
+        &self,
+        task_id: TaskId,
+        region: RegionId,
+        budget: Budget,
+        source: TaskSpawnSource,
+        spawned_at: Time,
+        logical_time: Option<LogicalTime>,
+    ) -> TaskSpawnEffects {
         let mut effects = TaskSpawnEffects::new(
             Arc::clone(&self.metrics),
             self.trace_handle(),
             task_id,
             region,
             spawned_at,
-            self.logical_time_for_task(task_id),
+            logical_time,
             budget,
             source,
             &self.task_spawn_observer_panics,
         );
         effects.attach_epoch_telemetry(self.take_epoch_telemetry());
         effects
+    }
+
+    /// Reads a task's logical tick from an explicit table. Mirror of
+    /// [`Self::logical_time_for_task`] for external-table admission.
+    fn logical_time_from_table(tasks: &TaskTable, task_id: TaskId) -> Option<LogicalTime> {
+        let record = tasks.task(task_id)?;
+        let cx = record.cx.as_ref()?;
+        Some(cx.logical_tick())
     }
 
     fn prepare_task_completion_observer(

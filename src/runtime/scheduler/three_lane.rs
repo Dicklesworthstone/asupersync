@@ -1623,11 +1623,17 @@ impl ThreeLaneScheduler {
     /// instead of the full RuntimeState. Cross-cutting operations
     /// (`task_completed`, `drain_ready_async_finalizers`) still use RuntimeState.
     /// This constructor is currently a direct integration seam used by tests
-    /// and fuzzing; `RuntimeBuilder` still gates the sharded state shape, and
-    /// mailbox admission does not yet migrate newly admitted records into this
-    /// external table. RuntimeState-created async-finalizer tasks likewise
-    /// remain embedded, so this seam does not claim end-to-end execution of
-    /// asynchronous finalizers through the external table.
+    /// and fuzzing; `RuntimeBuilder` still gates the sharded state shape.
+    /// Mailbox admission (Send and owner-pinned local lanes) mints newly
+    /// admitted records, their `Cx` wiring, and their stored futures directly
+    /// into this external table
+    /// (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2), taken under
+    /// the unified state lock in the canonical B → A order.
+    /// RuntimeState-created async-finalizer tasks and direct
+    /// `create_task` callers still mint into the embedded table, so this
+    /// seam does not yet claim end-to-end execution of asynchronous
+    /// finalizers through the external table, and mixing embedded-minted
+    /// task ids with external-table dispatch remains outside its contract.
     ///
     /// br-asupersync-niczb3: `worker_count == 0` is silently clamped
     /// to `1` here so existing infallible callers do not regress.
@@ -5305,8 +5311,20 @@ impl ThreeLaneWorker {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // E1.2 (br-asupersync-sched-hot-path-perf-bt4y5f.2.2): admission
+            // mints records in the table worker poll paths consult. Lock
+            // order is unified state (B) then external table (A); scope exit
+            // releases A before B.
+            let mut admission_tasks = self.task_table.as_ref().map_or(
+                crate::runtime::state::AdmissionTaskTarget::Embedded,
+                |tt| {
+                    crate::runtime::state::AdmissionTaskTarget::External(
+                        tt.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+                    )
+                },
+            );
             for request in requests {
-                match state.admit_spawn_request(request.into_parts()) {
+                match state.admit_spawn_request_in(request.into_parts(), &mut admission_tasks) {
                     crate::runtime::state::SpawnAdmission::Admitted {
                         task_id,
                         priority,
@@ -5406,8 +5424,18 @@ impl ThreeLaneWorker {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // E1.2 (br-asupersync-sched-hot-path-perf-bt4y5f.2.2): same
+            // B → A acquisition order as `drain_spawn_admissions`.
+            let mut admission_tasks = self.task_table.as_ref().map_or(
+                crate::runtime::state::AdmissionTaskTarget::Embedded,
+                |tt| {
+                    crate::runtime::state::AdmissionTaskTarget::External(
+                        tt.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+                    )
+                },
+            );
             for request in requests {
-                match state.admit_local_spawn_request(request) {
+                match state.admit_local_spawn_request_in(request, &mut admission_tasks) {
                     crate::runtime::state::LocalSpawnAdmission::Admitted {
                         task_id,
                         priority,
@@ -5416,11 +5444,21 @@ impl ThreeLaneWorker {
                         spawn_effects,
                     } => {
                         // Admission already pinned the record to this
-                        // worker (`admit_local_spawn_request` requires the
+                        // worker (`admit_local_spawn_request_in` requires the
                         // owner thread); publish the wake state so the
-                        // first schedule is not coalesced away.
-                        if let Some(record) = state.task_mut(task_id) {
-                            record.wake_state.notify();
+                        // first schedule is not coalesced away. The record
+                        // lives in whichever table admission minted it in.
+                        match &mut admission_tasks {
+                            crate::runtime::state::AdmissionTaskTarget::Embedded => {
+                                if let Some(record) = state.task_mut(task_id) {
+                                    record.wake_state.notify();
+                                }
+                            }
+                            crate::runtime::state::AdmissionTaskTarget::External(tt) => {
+                                if let Some(record) = tt.task_mut(task_id) {
+                                    record.wake_state.notify();
+                                }
+                            }
                         }
                         admitted.push((
                             task_id,
