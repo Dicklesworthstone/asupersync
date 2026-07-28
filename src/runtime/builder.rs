@@ -2832,9 +2832,9 @@ impl RuntimeBuilder {
         #[cfg(target_arch = "wasm32")]
         let reactor = reactor;
         // br-asupersync-8fuxnt: Sharded shape is API-reachable but not
-        // yet routed through ThreeLaneScheduler. Reject at build time
-        // with a message that names the tracking bead so callers see the
-        // exact next-step requirement instead of silently falling back.
+        // yet routed through Runtime::new. Reject at build time with a
+        // message that names the tracking bead so callers see the exact
+        // next-step requirement instead of silently falling back.
         if matches!(
             config.runtime_state_shape,
             crate::runtime::config::RuntimeStateShape::Sharded
@@ -2842,15 +2842,22 @@ impl RuntimeBuilder {
             return Err(
                 Error::new(crate::error::ErrorKind::ConfigError).with_message(
                     "RuntimeBuilder::with_sharded_state(true) is gated pending the \
-                 scheduler-side integration tracked in br-asupersync-8fuxnt. \
-                 ThreeLaneScheduler construction now takes pre-extracted \
-                 E/D handles and acquires no unified-state mutex \
-                 (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 subsystem 3a), \
-                 but worker dispatch, spawn admission, completion, and \
-                 finalizer paths still lock `Arc<ContendedMutex<RuntimeState>>` \
-                 and must gain ShardGuard-backed equivalents (E1.1 rows \
-                 T03-T23/W02-W09) before this shape can be wired through \
-                 Runtime::new. The unified backing path (default \
+                 builder-side integration tracked in br-asupersync-8fuxnt. \
+                 The scheduler side is ready: \
+                 `ThreeLaneScheduler::new_with_sharded_state` dispatches \
+                 against ShardedState's Arc-shared shard A, and the \
+                 admission, finalizer-minting, zero-acquisition \
+                 construction, and ordered-completion seams all operate on \
+                 that external table \
+                 (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 subsystems \
+                 1-3c). Still blocking Runtime::new wire-up: the builder \
+                 inventory rows B01-B13 (notably the legacy spawn fallback \
+                 B09/B10, live-task counter B12, and deadline snapshot B01 \
+                 still create/read tasks in the embedded RuntimeState \
+                 table), whole-state snapshot semantics under an aliased \
+                 shard A (E1.1 rows T06/T07/T14 read the embedded table), \
+                 and the unified|sharded replay-fingerprint proof (parent \
+                 AC 3). The unified backing path (default \
                  `RuntimeStateShape::Unified`) remains fully supported."
                         .to_string(),
                 ),
@@ -3051,11 +3058,14 @@ impl RuntimeBuilder {
     ///
     /// br-asupersync-8fuxnt: opting in to
     /// [`RuntimeStateShape::Sharded`] is currently gated at
-    /// [`Self::build()`] pending the scheduler-side wire-up. Calling
+    /// [`Self::build()`] pending the builder-side wire-up. Calling
     /// `with_sharded_state(true)` and then `build()` will return a
-    /// `ConfigError` whose message names this bead. The setter exists
-    /// today so consumers can target the API surface; behavior flips on
-    /// once the scheduler accepts an `&Arc<ShardedState>` constructor.
+    /// `ConfigError` whose message names this bead. The scheduler side
+    /// is ready (`ThreeLaneScheduler::new_with_sharded_state` dispatches
+    /// against ShardedState's Arc-shared shard A; E1.2 subsystems 1-3c);
+    /// behavior flips on once the builder inventory rows B01-B13,
+    /// snapshot semantics, and the unified|sharded replay-fingerprint
+    /// proof land.
     #[must_use]
     pub fn with_sharded_state(mut self, enabled: bool) -> Self {
         self.config.runtime_state_shape = if enabled {
@@ -3990,15 +4000,18 @@ impl RuntimeInner {
         // + builder::build above), but Runtime::new still hard-codes the
         // unified RuntimeState path. Selecting `Sharded` returns a
         // ConfigError at build() time with a pointer to the tracking bead so
-        // callers see the concrete next blocker. E1.2 subsystem 3a
-        // (br-asupersync-sched-hot-path-perf-bt4y5f.2.2) removed the
-        // constructor-internal unified-state acquisitions — construction now
-        // takes a pre-extracted `SchedulerConstructionHandles` bundle and
-        // performs zero state-mutex acquisitions — but worker dispatch,
-        // spawn admission, completion, and finalizer paths still lock the
-        // unified state, so the `Sharded` branch cannot route to
-        // `ShardedState::new(...)` until those are converted (E1.1 rows
-        // T03-T23 / W02-W09).
+        // callers see the concrete next blocker. The scheduler side is ready
+        // (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 subsystems 1-3c):
+        // `ThreeLaneScheduler::new_with_sharded_state` dispatches against
+        // ShardedState's Arc-shared shard A, with admission, finalizer
+        // minting, zero-acquisition construction, and the ordered completion
+        // backing all operating on that table. What still blocks routing
+        // this branch to `ShardedState::new(...)`: the builder inventory
+        // rows B01-B13 (the legacy spawn fallback B09/B10, live-task counter
+        // B12, and deadline snapshot B01 still create/read tasks in the
+        // embedded RuntimeState table), whole-state snapshot semantics under
+        // an aliased shard A (E1.1 rows T06/T07/T14), and the
+        // unified|sharded replay-fingerprint proof (parent AC 3).
         let runtime_state = Self::initialize_runtime_state(
             &config,
             reactor,

@@ -1601,6 +1601,33 @@ impl SchedulerConstructionHandles {
             pending_cancel_dispatch_ready: guard.pending_cancel_dispatch_ready_handle(),
         }
     }
+
+    /// Extracts the construction handle bundle for a `ShardedState`-backed
+    /// scheduler (E1.2 subsystem 3c,
+    /// br-asupersync-sched-hot-path-perf-bt4y5f.2.2).
+    ///
+    /// The E/D halves come from shard E's lock-free config accessors — no
+    /// shard lock (A/B/C) is acquired. The deferred-cancel readiness flag is
+    /// the T02 residual: the deferred-dispatch queue still lives in the
+    /// unified `RuntimeState`, so the flag is cloned out in the same single
+    /// brief state acquisition [`Self::extract_from_unified`] performs.
+    #[must_use]
+    pub fn extract_from_sharded(
+        shards: &crate::runtime::sharded_state::ShardedState,
+        state: &Arc<ContendedMutex<RuntimeState>>,
+    ) -> Self {
+        let pending_cancel_dispatch_ready = {
+            let guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.pending_cancel_dispatch_ready_handle()
+        };
+        Self {
+            io_driver: shards.io_driver_handle(),
+            timer_driver: shards.timer_driver_handle(),
+            pending_cancel_dispatch_ready,
+        }
+    }
 }
 
 impl ThreeLaneScheduler {
@@ -1727,6 +1754,42 @@ impl ThreeLaneScheduler {
             worker_count,
             state,
             task_table,
+            handles,
+            cancel_streak_limit,
+            enable_governor,
+            governor_interval,
+        );
+        scheduler.install_pending_cancel_dispatch_coordinator(state);
+        scheduler
+    }
+
+    /// Creates a scheduler that dispatches against `ShardedState`'s shard-A
+    /// task table (E1.2 subsystem 3c,
+    /// br-asupersync-sched-hot-path-perf-bt4y5f.2.2).
+    ///
+    /// The external-table seam receives an alias of shard A
+    /// ([`crate::runtime::sharded_state::ShardedState::task_shard_handle`]),
+    /// so every seam landed in E1.2 subsystems 1-3b — mailbox-admission
+    /// minting, finalizer minting, the zero-acquisition construction
+    /// handles, and the ordered completion backing — operates directly on
+    /// shard A. Construction acquires no shard lock (A/B/C): the E/D handles
+    /// come from shard E's lock-free accessors, and the single brief unified
+    /// acquisition is the T02 deferred-cancel residual. The unified `state`
+    /// remains the region/obligation lifecycle owner (B/C) until the
+    /// remaining E1.2 rows convert it.
+    pub fn new_with_sharded_state(
+        worker_count: usize,
+        state: &Arc<ContendedMutex<RuntimeState>>,
+        shards: &crate::runtime::sharded_state::ShardedState,
+        cancel_streak_limit: usize,
+        enable_governor: bool,
+        governor_interval: u32,
+    ) -> Self {
+        let handles = SchedulerConstructionHandles::extract_from_sharded(shards, state);
+        let scheduler = Self::new_with_options_task_table_and_handles(
+            worker_count,
+            state,
+            Some(shards.task_shard_handle()),
             handles,
             cancel_streak_limit,
             enable_governor,

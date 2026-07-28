@@ -138,7 +138,16 @@ pub struct ShardedState {
     // ── Shard A: Tasks (HOT) ───────────────────────────────────────────
     /// Task table: arena + stored futures.
     /// Locked for every poll cycle; keep lock hold time minimal.
-    pub tasks: ContendedMutex<TaskTable>,
+    ///
+    /// Arc-shared (E1.2 subsystem 3c,
+    /// br-asupersync-sched-hot-path-perf-bt4y5f.2.2): the scheduler's
+    /// external-table seam takes `Arc<ContendedMutex<TaskTable>>`, so shard A
+    /// lives behind an `Arc` and [`Self::task_shard_handle`] hands the
+    /// scheduler an alias of this exact shard instead of a second table.
+    /// `ShardGuard` acquisition is unchanged — the guard locks through the
+    /// `Arc` deref, so scheduler dispatch and guard-ordered lifecycle work
+    /// contend on the same mutex.
+    pub tasks: Arc<ContendedMutex<TaskTable>>,
 
     // ── Shard B: Regions (WARM) ────────────────────────────────────────
     /// Region table: ownership tree, child counts, state transitions.
@@ -213,7 +222,7 @@ impl ShardedState {
         config: ShardedConfig,
     ) -> Self {
         Self {
-            tasks: ContendedMutex::new("tasks", TaskTable::new()),
+            tasks: Arc::new(ContendedMutex::new("tasks", TaskTable::new())),
             regions: ContendedMutex::new("regions", RegionTable::new()),
             root_region: AtomicU64::new(ROOT_REGION_NONE),
             obligations: ContendedMutex::new("obligations", ObligationTable::new()),
@@ -270,6 +279,19 @@ impl ShardedState {
             Ordering::Acquire,
         );
         result.is_ok()
+    }
+
+    /// Returns the shard-A task-table handle for scheduler aliasing
+    /// (E1.2 subsystem 3c, br-asupersync-sched-hot-path-perf-bt4y5f.2.2).
+    ///
+    /// The returned `Arc` is the SAME shard the [`ShardGuard`] builders
+    /// lock, so a scheduler constructed with it dispatches against shard A
+    /// directly: records minted through the scheduler's admission/finalizer
+    /// seams are visible to guard-ordered lifecycle work and vice versa.
+    #[inline]
+    #[must_use]
+    pub fn task_shard_handle(&self) -> Arc<ContendedMutex<TaskTable>> {
+        Arc::clone(&self.tasks)
     }
 
     /// Returns a clone of the trace handle.

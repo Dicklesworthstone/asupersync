@@ -1863,12 +1863,16 @@ impl ArenaLocalityReport {
 /// reduces lock contention on multi-worker schedulers by splitting the
 /// unified RuntimeState into independently-locked Tasks/Regions/Obligations
 /// shards. The shape switch is wired through this enum so consumers can
-/// opt in once the scheduler-side integration lands.
+/// opt in once the builder-side integration lands.
 ///
 /// Default is `Unified` — the historical single-mutex backing store —
-/// to preserve current behavior. `Sharded` opt-in is gated at build
-/// time until the `ThreeLaneScheduler` accepts an `&Arc<ShardedState>`
-/// constructor (see br-asupersync-8fuxnt acceptance criteria).
+/// to preserve current behavior. The scheduler side is ready
+/// (`ThreeLaneScheduler::new_with_sharded_state` dispatches against
+/// ShardedState's Arc-shared shard A; E1.2 subsystems 1-3c under
+/// br-asupersync-sched-hot-path-perf-bt4y5f.2.2); `Sharded` opt-in stays
+/// gated at build time until the builder inventory rows B01-B13, snapshot
+/// semantics, and the unified|sharded replay-fingerprint proof land (see
+/// br-asupersync-8fuxnt acceptance criteria).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RuntimeStateShape {
     /// Single-lock unified RuntimeState. Default; matches all behavior
@@ -1876,7 +1880,7 @@ pub enum RuntimeStateShape {
     #[default]
     Unified,
     /// Independently-locked Tasks/Regions/Obligations shards. Production
-    /// runtime path is currently gated on the matching scheduler
+    /// runtime path is currently gated on the remaining builder-side
     /// integration (br-asupersync-8fuxnt); the build will return a
     /// ConfigError until that lands.
     Sharded,
@@ -2017,8 +2021,9 @@ pub struct RuntimeConfig {
     ///
     /// Default `Unified` matches all pre-br-asupersync-8fuxnt behavior.
     /// `Sharded` selection is currently gated at `RuntimeBuilder::build()`
-    /// pending the scheduler-side integration (also tracked under
-    /// br-asupersync-8fuxnt).
+    /// pending the remaining builder-side integration (also tracked under
+    /// br-asupersync-8fuxnt); the scheduler-side seams landed under
+    /// br-asupersync-sched-hot-path-perf-bt4y5f.2.2 subsystems 1-3c.
     pub runtime_state_shape: RuntimeStateShape,
     /// Security configuration for authorization.
     pub security: SecurityConfig,

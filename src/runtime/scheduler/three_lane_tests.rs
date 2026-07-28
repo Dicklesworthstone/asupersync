@@ -7153,6 +7153,153 @@ fn unwind_guard_completion_detaches_external_record_and_mints_finalizer() {
     );
 }
 
+/// Builds a `ShardedState` for scheduler-aliasing tests (E1.2 subsystem 3c).
+fn sharded_scheduler_state() -> crate::runtime::sharded_state::ShardedState {
+    crate::runtime::sharded_state::ShardedState::new(
+        crate::trace::TraceBufferHandle::new(1024),
+        Arc::new(crate::observability::metrics::NoOpMetrics),
+        crate::runtime::sharded_state::ShardedConfig {
+            io_driver: None,
+            timer_driver: None,
+            logical_clock_mode: crate::trace::distributed::LogicalClockMode::Lamport,
+            cancel_attribution: crate::types::CancelAttributionConfig::default(),
+            entropy_source: Arc::new(crate::util::OsEntropy),
+            blocking_pool: None,
+            obligation_leak_response: crate::runtime::config::ObligationLeakResponse::Log,
+            leak_escalation: None,
+            observability: None,
+        },
+    )
+}
+
+/// E1.2 subsystem 3c (br-asupersync-sched-hot-path-perf-bt4y5f.2.2): a
+/// scheduler constructed via `new_with_sharded_state` dispatches against
+/// `ShardedState`'s shard A itself — records the scheduler completes are
+/// detached from the exact table `ShardGuard`-ordered lifecycle work locks,
+/// not from a scheduler-private copy.
+#[test]
+fn sharded_state_scheduler_dispatch_aliases_shard_a() {
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    let region = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .create_root_region(Budget::INFINITE);
+    let task_id = {
+        let mut state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .create_task(region, Budget::INFINITE, async {})
+            .expect("create task")
+            .0
+    };
+    let shards = sharded_scheduler_state();
+    let shard_a = shards.task_shard_handle();
+    move_runtime_task_to_shard(&state, &shard_a, task_id);
+
+    {
+        let guard = crate::runtime::sharded_state::ShardGuard::for_task_completed(&shards);
+        assert!(
+            guard
+                .tasks
+                .as_ref()
+                .is_some_and(|tt| tt.task(task_id).is_some()),
+            "record moved through the scheduler handle is visible via ShardGuard on shard A"
+        );
+    }
+
+    let mut scheduler = ThreeLaneScheduler::new_with_sharded_state(
+        1,
+        &state,
+        &shards,
+        DEFAULT_CANCEL_STREAK_LIMIT,
+        false,
+        32,
+    );
+    let mut worker = scheduler.take_workers().remove(0);
+    worker.execute(task_id);
+
+    {
+        let guard = crate::runtime::sharded_state::ShardGuard::for_task_completed(&shards);
+        assert!(
+            guard
+                .tasks
+                .as_ref()
+                .is_some_and(|tt| tt.task(task_id).is_none()),
+            "ordered completion detached the record from shard A itself"
+        );
+    }
+    let state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(
+        state.task(task_id).is_none(),
+        "embedded RuntimeState table never owned the record"
+    );
+    assert!(
+        matches!(
+            state.region_close_outcome(region),
+            Some(crate::types::Outcome::Ok(()))
+        ),
+        "cross-cutting completion bookkeeping still ran on the unified lifecycle owner"
+    );
+}
+
+/// E1.2 subsystem 3c: `new_with_sharded_state` acquires no shard lock
+/// (A/B/C) during construction — the E/D handles come from shard E's
+/// lock-free accessors. The single brief unified-state acquisition (the T02
+/// deferred-cancel residual) is permitted and pinned by the doc contract.
+#[test]
+fn sharded_construction_acquires_no_shard_locks() {
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    let shards = Arc::new(sharded_scheduler_state());
+
+    // Hold ALL THREE shard locks (canonical B→A→C) across the whole
+    // construction; any shard acquisition inside would deadlock.
+    let held = crate::runtime::sharded_state::ShardGuard::all(&shards);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let state_for_thread = Arc::clone(&state);
+    let shards_for_thread = Arc::clone(&shards);
+    let builder_thread = thread::spawn(move || {
+        let scheduler = ThreeLaneScheduler::new_with_sharded_state(
+            2,
+            &state_for_thread,
+            &shards_for_thread,
+            16,
+            false,
+            32,
+        );
+        tx.send(scheduler).expect("send constructed scheduler");
+    });
+
+    let scheduler = rx.recv_timeout(Duration::from_secs(30)).expect(
+        "3c regression: sharded construction blocked, which means it acquired \
+         a shard lock (A/B/C) while the test held ShardGuard::all",
+    );
+    drop(held);
+    builder_thread
+        .join()
+        .expect("builder thread must not panic");
+
+    // The scheduler's dispatch table IS shard A (Arc identity, not a copy).
+    assert!(
+        scheduler
+            .task_table
+            .as_ref()
+            .is_some_and(|tt| Arc::ptr_eq(tt, &shards.tasks)),
+        "scheduler task table must alias ShardedState.tasks"
+    );
+    // The convenience path installed the parked-worker coordinator.
+    let guard = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(
+        guard.has_pending_cancel_dispatch_coordinator(),
+        "new_with_sharded_state must install the pending-cancel dispatch coordinator"
+    );
+}
+
 #[test]
 fn task_table_backed_handle_cancel_routes_and_completes_in_external_shard() {
     let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
