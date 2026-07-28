@@ -7300,6 +7300,101 @@ fn sharded_construction_acquires_no_shard_locks() {
     );
 }
 
+/// E1.2 subsystem 3d (E1.1 rows T06/T07/T14): the ordered Lyapunov snapshot
+/// reads task counters from the dispatch table when the worker runs against
+/// an external shard — governor/adaptive/evidence surfaces must describe the
+/// tasks the scheduler actually dispatches, not the empty embedded table.
+#[test]
+fn lyapunov_snapshot_reads_dispatch_table_tasks() {
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    let region = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .create_root_region(Budget::INFINITE);
+    let task_id = {
+        let mut state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .create_task(region, Budget::INFINITE, async {})
+            .expect("create task")
+            .0
+    };
+    let task_table = Arc::new(ContendedMutex::new("task_table", TaskTable::new()));
+    move_runtime_task_to_shard(&state, &task_table, task_id);
+
+    let mut scheduler = ThreeLaneScheduler::new_with_options_and_task_table(
+        1,
+        &state,
+        Some(Arc::clone(&task_table)),
+        DEFAULT_CANCEL_STREAK_LIMIT,
+        false,
+        32,
+    );
+    let worker = scheduler.take_workers().remove(0);
+
+    let guard = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(
+        guard.live_task_count(),
+        0,
+        "the embedded table no longer owns the moved task"
+    );
+    let snapshot = worker.lyapunov_snapshot_locked(&guard);
+    assert_eq!(
+        snapshot.live_tasks, 1,
+        "dispatch-table worker snapshot must count the externally-owned live task"
+    );
+}
+
+/// E1.2 subsystem 3d (E1.1 row T14): wait-graph extraction from an explicit
+/// task table sees externally-owned live tasks and their waiter edges.
+#[test]
+fn wait_graph_snapshot_from_tasks_reads_external_table() {
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    let region = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .create_root_region(Budget::INFINITE);
+    let (task_id, waiter_id) = {
+        let mut state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let task_id = state
+            .create_task(region, Budget::INFINITE, async {})
+            .expect("create task")
+            .0;
+        let waiter_id = state
+            .create_task(region, Budget::INFINITE, async {})
+            .expect("create waiter")
+            .0;
+        let registered = state
+            .update_task(task_id, |record| record.waiters.push(waiter_id))
+            .is_some();
+        assert!(registered, "register waiter");
+        (task_id, waiter_id)
+    };
+    let task_table = Arc::new(ContendedMutex::new("task_table", TaskTable::new()));
+    move_runtime_task_to_shard(&state, &task_table, task_id);
+
+    let table = task_table
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let snapshots = wait_graph_snapshot_from_tasks(&table);
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "external wait-graph extraction sees exactly the live external task"
+    );
+    assert_eq!(snapshots[0].id, task_id);
+    assert_eq!(
+        snapshots[0].waiters.as_slice(),
+        &[waiter_id],
+        "waiter edges ride the external record"
+    );
+}
+
 #[test]
 fn task_table_backed_handle_cancel_routes_and_completes_in_external_shard() {
     let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));

@@ -4338,6 +4338,65 @@ fn drain_ready_async_finalizers_in_external_target_mints_externally() {
 /// `create_task_infrastructure_in` rollback recycles the record from the
 /// external table — no orphan record may survive in either table.
 #[test]
+fn create_task_with_deferred_spawn_effects_in_external_mints_externally() {
+    init_test("create_task_with_deferred_spawn_effects_in_external_mints_externally");
+    let mut state = RuntimeState::new();
+    let region = state.create_root_region(Budget::INFINITE);
+    let external = ContendedMutex::new(
+        "external-tasks",
+        crate::runtime::task_table::TaskTable::new(),
+    );
+
+    let (task_id, _handle, _spawn_effects) = {
+        let mut target = AdmissionTaskTarget::External(
+            external
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        state
+            .create_task_with_deferred_spawn_effects_in(
+                region,
+                Budget::INFINITE,
+                async { 1_u8 },
+                &mut target,
+            )
+            .expect("external deferred-effects spawn")
+    };
+
+    crate::assert_with_log!(
+        state.task(task_id).is_none(),
+        "embedded table must not mint the external fallback task",
+        true,
+        state.task(task_id).is_none()
+    );
+    crate::assert_with_log!(
+        state.get_stored_future(task_id).is_none(),
+        "embedded table must not store the external fallback future",
+        true,
+        state.get_stored_future(task_id).is_none()
+    );
+    {
+        let mut tt = external
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let record_minted = tt.task(task_id).is_some_and(|record| record.cx.is_some());
+        crate::assert_with_log!(
+            record_minted,
+            "fallback record minted externally with Cx wired",
+            true,
+            record_minted
+        );
+        let future_stored = tt.remove_stored_future(task_id).is_some();
+        crate::assert_with_log!(
+            future_stored,
+            "fallback future stored in the external table",
+            true,
+            future_stored
+        );
+    }
+}
+
+#[test]
 fn create_task_infrastructure_in_external_rollback_recycles_externally() {
     init_test("create_task_infrastructure_in_external_rollback_recycles_externally");
     let mut state = RuntimeState::new();

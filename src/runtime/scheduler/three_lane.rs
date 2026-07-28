@@ -1237,11 +1237,19 @@ struct WaitGraphSignalReport {
 }
 
 fn wait_graph_snapshot_from_state(state: &RuntimeState) -> Vec<WaitGraphTaskSnapshot> {
+    wait_graph_snapshot_from_tasks(&state.tasks)
+}
+
+/// Wait-graph extraction from an explicit task table (E1.2 subsystem 3d;
+/// E1.1 row T14). Workers dispatching against an external shard pass that
+/// table (locked B → A) so the spectral monitor sees the live tasks the
+/// scheduler actually runs, not the embedded table.
+fn wait_graph_snapshot_from_tasks(tasks: &TaskTable) -> Vec<WaitGraphTaskSnapshot> {
     // br-asupersync-1ckzhy: minimize allocations under state lock by
     // avoiding filter_map chains and using direct iteration.
     let mut snapshots = Vec::new();
 
-    for (_, task) in state.tasks_iter() {
+    for (_, task) in tasks.iter() {
         if !task.state.is_terminal() {
             let wait_edges = task
                 .waiters
@@ -1761,6 +1769,17 @@ impl ThreeLaneScheduler {
         );
         scheduler.install_pending_cancel_dispatch_coordinator(state);
         scheduler
+    }
+
+    /// Returns the external dispatch task table, if this scheduler runs
+    /// against one (E1.2 subsystem 3d).
+    ///
+    /// Runtime-level surfaces that create or count tasks (legacy spawn
+    /// fallback, liveness/diagnostic reads) consult this so their task
+    /// operations target the table worker dispatch resolves against.
+    #[must_use]
+    pub(crate) fn dispatch_task_table(&self) -> Option<Arc<ContendedMutex<TaskTable>>> {
+        self.task_table.clone()
     }
 
     /// Creates a scheduler that dispatches against `ShardedState`'s shard-A
@@ -4492,7 +4511,7 @@ impl ThreeLaneWorker {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            StateSnapshot::from_runtime_state(&state)
+            self.lyapunov_snapshot_locked(&state)
         };
         let ready_queue_depth = self.ready_queue_depth_signal();
         #[allow(clippy::cast_possible_truncation)]
@@ -4539,13 +4558,28 @@ impl ThreeLaneWorker {
         task_component + obligation_component + region_component + deadline_component
     }
 
+    /// Ordered minimal Lyapunov snapshot (E1.2 subsystem 3d; E1.1 rows
+    /// T06/T07/T14): the caller holds the unified state lock; task counters
+    /// come from the dispatch table (B → A canonical, A released before B)
+    /// when this worker runs against an external shard, otherwise from the
+    /// embedded table.
+    fn lyapunov_snapshot_locked(&self, state: &RuntimeState) -> StateSnapshot {
+        match &self.task_table {
+            Some(tt) => {
+                let table = tt.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                StateSnapshot::from_runtime_state_with_tasks(state, &table)
+            }
+            None => StateSnapshot::from_runtime_state(state),
+        }
+    }
+
     fn capture_adaptive_snapshot(&self) -> AdaptiveEpochSnapshot {
         let snapshot = {
             let state = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            StateSnapshot::from_runtime_state(&state)
+            self.lyapunov_snapshot_locked(&state)
         };
         AdaptiveEpochSnapshot {
             potential: Self::potential_from_snapshot(&snapshot),
@@ -6267,18 +6301,33 @@ impl ThreeLaneWorker {
 
         // Take a snapshot under the state lock.
         // br-asupersync-1ckzhy: minimize allocation and iteration time under lock.
+        // br-asupersync-y5n8au + br-asupersync-1ckzhy: extract minimal wait graph
+        // data under lock, defer expensive BTree/Tarjan analysis until after drop.
+        // E1.2 subsystem 3d (E1.1 row T14): with an external dispatch table,
+        // both the Lyapunov counters and the wait graph read the table the
+        // workers actually dispatch against — one A acquisition nested in
+        // canonical B → A order, released before B.
         let state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let snapshot = StateSnapshot::from_runtime_state(&state);
-
-        // br-asupersync-y5n8au + br-asupersync-1ckzhy: extract minimal wait graph
-        // data under lock, defer expensive BTree/Tarjan analysis until after drop.
-        let wait_graph_snapshot = if self.spectral_monitor.is_some() {
-            Some(wait_graph_snapshot_from_state(&state))
+        let (snapshot, wait_graph_snapshot) = if let Some(tt) = &self.task_table {
+            let table = tt.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let snapshot = StateSnapshot::from_runtime_state_with_tasks(&state, &table);
+            let wait_graph_snapshot = if self.spectral_monitor.is_some() {
+                Some(wait_graph_snapshot_from_tasks(&table))
+            } else {
+                None
+            };
+            (snapshot, wait_graph_snapshot)
         } else {
-            None
+            let snapshot = StateSnapshot::from_runtime_state(&state);
+            let wait_graph_snapshot = if self.spectral_monitor.is_some() {
+                Some(wait_graph_snapshot_from_state(&state))
+            } else {
+                None
+            };
+            (snapshot, wait_graph_snapshot)
         };
         drop(state);
 

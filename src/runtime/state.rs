@@ -3373,11 +3373,39 @@ impl RuntimeState {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
+        self.create_task_with_deferred_spawn_effects_in(
+            region,
+            budget,
+            future,
+            &mut AdmissionTaskTarget::Embedded,
+        )
+    }
+
+    /// Deferred-effects task creation with an explicit task-table target
+    /// (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2 subsystem 3d,
+    /// E1.1 row B09).
+    ///
+    /// The legacy non-mailbox spawn fallback must mint into the table the
+    /// dispatching scheduler consults. Callers with an external dispatch
+    /// table pass its already-locked guard (taken after the unified state
+    /// lock, canonical B → A); embedded callers go through
+    /// [`Self::create_task_with_deferred_spawn_effects`].
+    pub(crate) fn create_task_with_deferred_spawn_effects_in<F, T>(
+        &mut self,
+        region: RegionId,
+        budget: Budget,
+        future: F,
+        tasks: &mut AdmissionTaskTarget<'_>,
+    ) -> Result<(TaskId, crate::runtime::TaskHandle<T>, TaskSpawnEffects), SpawnError>
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
         use crate::runtime::task_handle::JoinError;
 
         let system_cx = self.create_system_cx();
         let (task_id, handle, cx, result_tx, spawn_effects) =
-            self.create_task_infrastructure(&system_cx, region, budget, false)?;
+            self.create_task_infrastructure_in(&system_cx, region, budget, false, tasks)?;
         let wrapped_future = async move {
             match (CatchUnwind { inner: future }).await {
                 Ok(result) => {
@@ -3397,10 +3425,26 @@ impl RuntimeState {
             }
         };
 
-        self.tasks
+        tasks
+            .resolve(&mut self.tasks)
             .store_spawned_task(task_id, StoredTask::new_with_id(wrapped_future, task_id));
 
         Ok((task_id, handle, spawn_effects))
+    }
+
+    /// Stores a spawned task's future into the minting-table target
+    /// (E1.2 subsystem 3d). Callers that minted a record through
+    /// [`Self::create_task_infrastructure_in`] must store the future in the
+    /// same table so worker dispatch can resolve it.
+    pub(crate) fn store_spawned_task_in(
+        &mut self,
+        tasks: &mut AdmissionTaskTarget<'_>,
+        task_id: TaskId,
+        stored: StoredTask,
+    ) {
+        tasks
+            .resolve(&mut self.tasks)
+            .store_spawned_task(task_id, stored);
     }
 
     /// Admits one spawn-mailbox request into the runtime

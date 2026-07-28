@@ -4227,16 +4227,31 @@ impl RuntimeInner {
             return Ok(JoinHandle::new(join_state));
         }
 
+        let dispatch_table = self.scheduler.dispatch_task_table();
         let (task_id, spawn_effects) = {
             let mut guard = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let (task_id, _handle, spawn_effects) = guard.create_task_with_deferred_spawn_effects(
-                self.root_region,
-                Budget::new(),
-                wrapped,
-            )?;
+            // E1.2 subsystem 3d (E1.1 row B09): the legacy fallback mints
+            // into the table the scheduler dispatches against. Lock order is
+            // unified state (B) then dispatch table (A); scope exit releases
+            // A before B.
+            let mut target = dispatch_table.as_ref().map_or(
+                crate::runtime::state::AdmissionTaskTarget::Embedded,
+                |tt| {
+                    crate::runtime::state::AdmissionTaskTarget::External(
+                        tt.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+                    )
+                },
+            );
+            let (task_id, _handle, spawn_effects) = guard
+                .create_task_with_deferred_spawn_effects_in(
+                    self.root_region,
+                    Budget::new(),
+                    wrapped,
+                    &mut target,
+                )?;
             (task_id, spawn_effects)
         };
 
@@ -4259,19 +4274,32 @@ impl RuntimeInner {
         use crate::runtime::StoredTask;
         use crate::types::Outcome;
 
+        let dispatch_table = self.scheduler.dispatch_task_table();
         let (task_id, spawn_effects) = {
             let mut guard = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // E1.2 subsystem 3d (E1.1 row B10): mint and store into the table
+            // the scheduler dispatches against. Lock order is unified state
+            // (B) then dispatch table (A); A is released before B below.
+            let mut target = dispatch_table.as_ref().map_or(
+                crate::runtime::state::AdmissionTaskTarget::Embedded,
+                |tt| {
+                    crate::runtime::state::AdmissionTaskTarget::External(
+                        tt.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+                    )
+                },
+            );
 
             let system_cx = guard.create_system_cx();
             let (task_id, _handle, cx, _result_tx, spawn_effects) = guard
-                .create_task_infrastructure::<()>(
+                .create_task_infrastructure_in::<()>(
                     &system_cx,
                     self.root_region,
                     Budget::new(),
                     false,
+                    &mut target,
                 )?;
 
             let wrapped = async move {
@@ -4292,7 +4320,12 @@ impl RuntimeInner {
                 }
             };
 
-            guard.store_spawned_task(task_id, StoredTask::new_with_id(wrapped, task_id));
+            guard.store_spawned_task_in(
+                &mut target,
+                task_id,
+                StoredTask::new_with_id(wrapped, task_id),
+            );
+            drop(target);
             drop(guard);
 
             (task_id, spawn_effects)
