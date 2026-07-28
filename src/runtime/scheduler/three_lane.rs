@@ -1541,6 +1541,68 @@ impl ScheduleIntent {
     }
 }
 
+/// Construction-time handles extracted from the runtime state ahead of
+/// scheduler construction (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 /
+/// E1.2, inventory rows T01/T02).
+///
+/// The E/D shards (config + instrumentation) are lock-free handles in the
+/// sharded runtime-state model, so scheduler construction must not need a
+/// whole-state mutex acquisition merely to clone them. Callers extract this
+/// bundle once — from the unified state via
+/// [`SchedulerConstructionHandles::extract_from_unified`], or in a future
+/// sharded construction path from `ShardedState`'s lock-free accessors — and
+/// pass it to
+/// [`ThreeLaneScheduler::new_with_options_task_table_and_handles`], which
+/// performs zero `RuntimeState` mutex acquisitions.
+#[derive(Clone)]
+pub struct SchedulerConstructionHandles {
+    /// I/O driver handle used for reactor-integrated parking and polling.
+    pub io_driver: Option<IoDriverHandle>,
+    /// Timer driver handle used for deadline-aware parking.
+    pub timer_driver: Option<TimerDriverHandle>,
+    /// Lock-free readiness hint for deferred cancellation batches parked in
+    /// the runtime state. Workers poll this flag on the empty hot path; the
+    /// flag itself remains owned by the runtime state (the deferred-dispatch
+    /// queue still lives there — see the T02 residual note on
+    /// [`ThreeLaneScheduler::install_pending_cancel_dispatch_coordinator`]).
+    pub pending_cancel_dispatch_ready: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for SchedulerConstructionHandles {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SchedulerConstructionHandles")
+            .field("has_io_driver", &self.io_driver.is_some())
+            .field("has_timer_driver", &self.timer_driver.is_some())
+            .field(
+                "pending_cancel_dispatch_ready",
+                &self
+                    .pending_cancel_dispatch_ready
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .finish()
+    }
+}
+
+impl SchedulerConstructionHandles {
+    /// Extracts the construction handle bundle from a unified runtime state
+    /// in one brief mutex acquisition.
+    ///
+    /// This is the single unified-state read that replaces the two
+    /// constructor-internal acquisitions inventoried as T01 (I/O + timer
+    /// handle clones) and the read half of T02 (readiness-handle clone).
+    #[must_use]
+    pub fn extract_from_unified(state: &Arc<ContendedMutex<RuntimeState>>) -> Self {
+        let guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self {
+            io_driver: guard.io_driver_handle(),
+            timer_driver: guard.timer_driver_handle(),
+            pending_cancel_dispatch_ready: guard.pending_cancel_dispatch_ready_handle(),
+        }
+    }
+}
+
 impl ThreeLaneScheduler {
     #[inline]
     fn initial_local_scheduler_capacity(worker_count: usize) -> usize {
@@ -1644,11 +1706,61 @@ impl ThreeLaneScheduler {
     /// [`try_new_with_options_and_task_table`](Self::try_new_with_options_and_task_table)
     /// which returns `Err(ErrorKind::ConfigError)` for the same
     /// input.
-    #[allow(clippy::too_many_lines)]
     pub fn new_with_options_and_task_table(
         worker_count: usize,
         state: &Arc<ContendedMutex<RuntimeState>>,
         task_table: Option<Arc<ContendedMutex<TaskTable>>>,
+        cancel_streak_limit: usize,
+        enable_governor: bool,
+        governor_interval: u32,
+    ) -> Self {
+        // E1.2 T01/T02: extract the E/D handle bundle in one brief
+        // acquisition, build the scheduler without touching the state mutex,
+        // then install the parked-worker notifier. Behavior-identical to the
+        // previous constructor-internal acquisitions: the readiness flag is
+        // the same state-owned Arc, and worker threads cannot be running
+        // before this constructor returns, so installing the coordinator
+        // after construction cannot lose a wake (pre-install enqueues leave
+        // the readiness flag set, which workers check before parking).
+        let handles = SchedulerConstructionHandles::extract_from_unified(state);
+        let scheduler = Self::new_with_options_task_table_and_handles(
+            worker_count,
+            state,
+            task_table,
+            handles,
+            cancel_streak_limit,
+            enable_governor,
+            governor_interval,
+        );
+        scheduler.install_pending_cancel_dispatch_coordinator(state);
+        scheduler
+    }
+
+    /// Zero-acquisition core constructor taking pre-extracted E/D handles
+    /// (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2, rows T01/T02).
+    ///
+    /// This constructor performs **no `RuntimeState` mutex acquisitions**:
+    /// the `state` Arc is only cloned into workers for their runtime-table
+    /// fallback paths. That makes construction safe while a caller holds the
+    /// state lock, and it is the construction shape a `ShardedState`-backed
+    /// scheduler needs (E/D live as lock-free handles there).
+    ///
+    /// # Caller contract (liveness)
+    ///
+    /// The caller MUST call
+    /// [`install_pending_cancel_dispatch_coordinator`](Self::install_pending_cancel_dispatch_coordinator)
+    /// (or otherwise install this scheduler's [`WorkerCoordinator`] into the
+    /// state that mints deferred cancellation batches) **before worker
+    /// threads start parking**. Without the coordinator, a deferred cancel
+    /// batch enqueued while every worker is parked would set the readiness
+    /// flag but wake nobody. The convenience constructors do this
+    /// automatically.
+    #[allow(clippy::too_many_lines)]
+    pub fn new_with_options_task_table_and_handles(
+        worker_count: usize,
+        state: &Arc<ContendedMutex<RuntimeState>>,
+        task_table: Option<Arc<ContendedMutex<TaskTable>>>,
+        handles: SchedulerConstructionHandles,
         cancel_streak_limit: usize,
         enable_governor: bool,
         governor_interval: u32,
@@ -1673,13 +1785,12 @@ impl ThreeLaneScheduler {
         let mut local_ready = SmallVec::<[Arc<LocalReadyQueue>; 16]>::with_capacity(worker_count);
         let local_scheduler_capacity = Self::initial_local_scheduler_capacity(worker_count);
 
-        // Get IO driver and timer driver from runtime state
-        let (io_driver, timer_driver) = {
-            let guard = state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            (guard.io_driver_handle(), guard.timer_driver_handle())
-        };
+        // E/D handles arrive pre-extracted (T01): no state acquisition here.
+        let SchedulerConstructionHandles {
+            io_driver,
+            timer_driver,
+            pending_cancel_dispatch_ready,
+        } = handles;
 
         // Create local schedulers first so we can share references for stealing
         for _ in 0..worker_count {
@@ -1697,13 +1808,10 @@ impl ThreeLaneScheduler {
             parkers.push(Parker::new());
         }
         let coordinator = Arc::new(WorkerCoordinator::new(parkers.clone(), io_driver.clone()));
-        let pending_cancel_dispatch_ready = {
-            let mut state = state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.set_pending_cancel_dispatch_coordinator(&coordinator);
-            state.pending_cancel_dispatch_ready_handle()
-        };
+        // T02: the coordinator install into the deferred-cancel minting state
+        // is now the caller's explicit post-construction step
+        // (`install_pending_cancel_dispatch_coordinator`); the readiness flag
+        // arrived in the extracted handle bundle above.
 
         // Create fast queues (O(1) VecDeque) for ready-lane fast path.
         // When a sharded TaskTable is available, back the queues directly
@@ -1904,6 +2012,31 @@ impl ThreeLaneScheduler {
             enable_governor,
             governor_interval,
         ))
+    }
+
+    /// Installs this scheduler's [`WorkerCoordinator`] as the parked-worker
+    /// notifier for deferred cancellation batches minted by `state`
+    /// (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2, row T02).
+    ///
+    /// Must run before worker threads start parking when the scheduler was
+    /// built through
+    /// [`new_with_options_task_table_and_handles`](Self::new_with_options_task_table_and_handles);
+    /// the convenience constructors call it automatically. Idempotent:
+    /// re-installing replaces the stored `Weak` with an equivalent one.
+    ///
+    /// T02 residual (deliberately bounded): the deferred-dispatch queue and
+    /// its readiness flag remain owned by `RuntimeState`. Moving that queue
+    /// into scheduler-owned control state — so a sharded runtime does not
+    /// route cancel batches through a unified table object — is part of the
+    /// remaining sharded-backing conversion, not this seam.
+    pub fn install_pending_cancel_dispatch_coordinator(
+        &self,
+        state: &Arc<ContendedMutex<RuntimeState>>,
+    ) {
+        let mut guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.set_pending_cancel_dispatch_coordinator(&self.coordinator);
     }
 
     /// Sets the maximum number of ready tasks to steal in one batch.

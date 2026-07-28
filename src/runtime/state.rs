@@ -2549,6 +2549,19 @@ impl RuntimeState {
         Arc::clone(&self.pending_cancel_dispatch_ready)
     }
 
+    /// Returns whether a parked-worker notifier has been installed for
+    /// deferred cancellation batches. Construction-seam diagnostics only
+    /// (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2 row T02): the
+    /// zero-acquisition scheduler constructor defers this install to an
+    /// explicit caller step, and tests pin that the convenience
+    /// constructors and the builder actually perform it. Test-gated because
+    /// no production path needs to query install state.
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn has_pending_cancel_dispatch_coordinator(&self) -> bool {
+        self.pending_cancel_dispatch_coordinator.is_some()
+    }
+
     /// Returns whether callback-free cancellation work still awaits owner-side
     /// publication. Used to avoid polling ordinary ready work ahead of a
     /// reentrant cancellation request.

@@ -10937,3 +10937,129 @@ fn test_scheduler_fairness_cancel_preemption_bounds() {
     println!("  - Telemetry accessible for starvation claim verification");
     println!("  - Verified README fairness claims: bounded preemption + telemetry");
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2 subsystem 3a:
+// construction handle extraction (inventory rows T01/T02).
+// ───────────────────────────────────────────────────────────────────────────
+
+/// T01/T02: the zero-acquisition core constructor must complete while another
+/// thread holds the unified runtime-state mutex the whole time. If any code
+/// path inside `new_with_options_task_table_and_handles` acquired that mutex,
+/// construction would block against the held guard and the watchdog receive
+/// below would time out. Also pins that the extracted readiness flag is the
+/// state-owned `Arc` (not a fresh disconnected flag), that every constructed
+/// worker received exactly that flag, and that the core constructor does NOT
+/// install the parked-worker coordinator (that is the caller's explicit step).
+#[test]
+fn construction_with_extracted_handles_acquires_no_unified_state_lock() {
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+
+    // Extraction is the one step allowed to lock; do it before holding.
+    let handles = SchedulerConstructionHandles::extract_from_unified(&state);
+    let extracted_flag = Arc::clone(&handles.pending_cancel_dispatch_ready);
+    {
+        let guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            Arc::ptr_eq(
+                &extracted_flag,
+                &guard.pending_cancel_dispatch_ready_handle()
+            ),
+            "extract_from_unified must hand out the state-owned readiness flag"
+        );
+        assert!(
+            !guard.has_pending_cancel_dispatch_coordinator(),
+            "no coordinator may be installed before scheduler construction"
+        );
+    }
+
+    // Hold the unified state mutex across the whole construction.
+    let held_guard = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let state_for_thread = Arc::clone(&state);
+    let builder_thread = thread::spawn(move || {
+        let scheduler = ThreeLaneScheduler::new_with_options_task_table_and_handles(
+            2,
+            &state_for_thread,
+            None,
+            handles,
+            16,
+            false,
+            32,
+        );
+        tx.send(scheduler).expect("send constructed scheduler");
+    });
+
+    let scheduler = rx.recv_timeout(Duration::from_secs(30)).expect(
+        "T01/T02 regression: the zero-acquisition constructor blocked, which \
+         means it acquired the unified RuntimeState mutex while the test \
+         held it",
+    );
+    drop(held_guard);
+    builder_thread
+        .join()
+        .expect("builder thread must not panic");
+
+    // Every worker's readiness flag is the state-owned Arc.
+    assert_eq!(scheduler.workers.len(), 2);
+    for worker in &scheduler.workers {
+        assert!(
+            Arc::ptr_eq(&worker.pending_cancel_dispatch_ready, &extracted_flag),
+            "worker readiness flag must be the extracted state-owned flag"
+        );
+    }
+
+    // The core constructor must not have installed the coordinator; the
+    // explicit install step must.
+    {
+        let guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            !guard.has_pending_cancel_dispatch_coordinator(),
+            "core constructor must leave coordinator install to the caller"
+        );
+    }
+    scheduler.install_pending_cancel_dispatch_coordinator(&state);
+    {
+        let guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            guard.has_pending_cancel_dispatch_coordinator(),
+            "install_pending_cancel_dispatch_coordinator must install"
+        );
+    }
+}
+
+/// T02: the convenience constructors must keep their historical contract —
+/// after `new_with_options_and_task_table` returns, the parked-worker
+/// coordinator is installed and every worker holds the state-owned readiness
+/// flag, exactly as when the install happened inside the constructor.
+#[test]
+fn convenience_constructor_installs_pending_cancel_dispatch_coordinator() {
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    let scheduler =
+        ThreeLaneScheduler::new_with_options_and_task_table(1, &state, None, 16, false, 32);
+
+    let guard = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(
+        guard.has_pending_cancel_dispatch_coordinator(),
+        "convenience constructor must install the deferred-cancel coordinator"
+    );
+    let state_flag = guard.pending_cancel_dispatch_ready_handle();
+    drop(guard);
+    for worker in &scheduler.workers {
+        assert!(
+            Arc::ptr_eq(&worker.pending_cancel_dispatch_ready, &state_flag),
+            "worker readiness flag must be the state-owned flag"
+        );
+    }
+}

@@ -168,7 +168,9 @@ use crate::runtime::deadline_monitor::{
 use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::reactor::Reactor;
 use crate::runtime::resource_monitor::ResourceMonitor;
-use crate::runtime::scheduler::three_lane::AdaptiveBatchSizingProfile;
+use crate::runtime::scheduler::three_lane::{
+    AdaptiveBatchSizingProfile, SchedulerConstructionHandles,
+};
 use crate::runtime::scheduler::{ThreeLaneScheduler, ThreeLaneWorker};
 use crate::time::TimerDriverHandle;
 use crate::trace::distributed::LogicalClockMode;
@@ -2841,12 +2843,15 @@ impl RuntimeBuilder {
                 Error::new(crate::error::ErrorKind::ConfigError).with_message(
                     "RuntimeBuilder::with_sharded_state(true) is gated pending the \
                  scheduler-side integration tracked in br-asupersync-8fuxnt. \
-                 ThreeLaneScheduler::new_with_options currently takes \
-                 `&Arc<ContendedMutex<RuntimeState>>` and must accept an \
-                 `&Arc<ShardedState>` constructor (or a trait abstraction over \
-                 both) before this shape can be wired through Runtime::new. \
-                 The unified backing path (default `RuntimeStateShape::Unified`) \
-                 remains fully supported."
+                 ThreeLaneScheduler construction now takes pre-extracted \
+                 E/D handles and acquires no unified-state mutex \
+                 (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 subsystem 3a), \
+                 but worker dispatch, spawn admission, completion, and \
+                 finalizer paths still lock `Arc<ContendedMutex<RuntimeState>>` \
+                 and must gain ShardGuard-backed equivalents (E1.1 rows \
+                 T03-T23/W02-W09) before this shape can be wired through \
+                 Runtime::new. The unified backing path (default \
+                 `RuntimeStateShape::Unified`) remains fully supported."
                         .to_string(),
                 ),
             );
@@ -3983,13 +3988,17 @@ impl RuntimeInner {
         // br-asupersync-8fuxnt: RuntimeConfig::runtime_state_shape and
         // RuntimeBuilder::with_sharded_state(bool) are now wired (config.rs
         // + builder::build above), but Runtime::new still hard-codes the
-        // unified RuntimeState path because ThreeLaneScheduler::new_with_options
-        // takes `&Arc<ContendedMutex<RuntimeState>>`. Selecting `Sharded`
-        // returns a ConfigError at build() time with a pointer to the
-        // tracking bead so callers see the concrete next blocker:
-        // ThreeLaneScheduler must accept `&Arc<ShardedState>` (or a trait
-        // abstraction over both backing types) before this branch can
-        // route to `ShardedState::new(...)`.
+        // unified RuntimeState path. Selecting `Sharded` returns a
+        // ConfigError at build() time with a pointer to the tracking bead so
+        // callers see the concrete next blocker. E1.2 subsystem 3a
+        // (br-asupersync-sched-hot-path-perf-bt4y5f.2.2) removed the
+        // constructor-internal unified-state acquisitions — construction now
+        // takes a pre-extracted `SchedulerConstructionHandles` bundle and
+        // performs zero state-mutex acquisitions — but worker dispatch,
+        // spawn admission, completion, and finalizer paths still lock the
+        // unified state, so the `Sharded` branch cannot route to
+        // `ShardedState::new(...)` until those are converted (E1.1 rows
+        // T03-T23 / W02-W09).
         let runtime_state = Self::initialize_runtime_state(
             &config,
             reactor,
@@ -4003,13 +4012,24 @@ impl RuntimeInner {
         ));
         let root_region = Self::initialize_root_region(&config, &state);
 
-        let mut scheduler = ThreeLaneScheduler::new_with_options(
+        // E1.2 T01/T02: one brief builder-time acquisition extracts the E/D
+        // handle bundle (the state is the source of truth for driver handles
+        // — `initialize_runtime_state` and `initialize_root_region` may have
+        // installed reactor-derived or wall-clock drivers the builder's own
+        // parameters never saw). Construction itself then takes no state
+        // lock, and the parked-worker notifier is installed before any
+        // worker thread exists.
+        let construction_handles = SchedulerConstructionHandles::extract_from_unified(&state);
+        let mut scheduler = ThreeLaneScheduler::new_with_options_task_table_and_handles(
             config.worker_threads,
             &state,
+            None,
+            construction_handles,
             config.cancel_lane_max_streak,
             config.enable_governor,
             config.governor_interval,
         );
+        scheduler.install_pending_cancel_dispatch_coordinator(&state);
         scheduler.set_steal_batch_size(config.steal_batch_size);
         scheduler.set_enable_parking(config.enable_parking);
         scheduler.set_global_queue_limit(config.global_queue_limit);
@@ -7451,6 +7471,33 @@ worker_threads = 16
             msg.contains("ThreeLaneScheduler"),
             "rejection message must name the specific blocker \
              (ThreeLaneScheduler signature); got: {msg}"
+        );
+    }
+
+    /// br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2 row T02: the
+    /// scheduler's zero-acquisition constructor defers the parked-worker
+    /// coordinator install to an explicit caller step, so `Runtime::new`
+    /// must perform that step itself. Without it, a deferred cancellation
+    /// batch minted while every worker is parked would set the readiness
+    /// flag but wake nobody. This pins the builder's install call.
+    #[test]
+    fn runtime_new_installs_pending_cancel_dispatch_coordinator() {
+        init_test_logging();
+
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .build()
+            .expect("build single-worker runtime");
+        let installed = runtime
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .has_pending_cancel_dispatch_coordinator();
+        assert!(
+            installed,
+            "Runtime::new must install the deferred-cancel coordinator \
+             before worker threads start parking"
         );
     }
 }

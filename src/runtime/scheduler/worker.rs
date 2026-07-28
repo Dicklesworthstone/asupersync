@@ -163,6 +163,13 @@ impl std::fmt::Debug for Worker {
 
 impl Worker {
     /// Creates a new worker with the provided queues and state.
+    ///
+    /// Extracts the E/D instrumentation handles from `state` in one brief
+    /// acquisition and delegates to [`new_with_handles`](Self::new_with_handles).
+    /// Callers constructing many workers should extract the handles once and
+    /// call `new_with_handles` directly so construction does not serialize on
+    /// the runtime-state mutex per worker
+    /// (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2, row W01).
     pub fn new(
         id: WorkerId,
         stealers: Vec<Stealer>,
@@ -181,7 +188,37 @@ impl Worker {
                 guard.metrics_provider(),
             )
         };
+        Self::new_with_handles(
+            id,
+            stealers,
+            global,
+            state,
+            shutdown,
+            io_driver,
+            trace,
+            timer_driver,
+            metrics,
+        )
+    }
 
+    /// Creates a new worker from pre-extracted instrumentation handles,
+    /// performing zero `RuntimeState` mutex acquisitions
+    /// (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2, row W01).
+    ///
+    /// The `state` Arc is retained for the worker's runtime-table access
+    /// paths but is not locked during construction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_handles(
+        id: WorkerId,
+        stealers: Vec<Stealer>,
+        global: Arc<GlobalQueue>,
+        state: Arc<ContendedMutex<RuntimeState>>,
+        shutdown: Arc<AtomicBool>,
+        io_driver: Option<IoDriverHandle>,
+        trace: TraceBufferHandle,
+        timer_driver: Option<TimerDriverHandle>,
+        metrics: Arc<dyn MetricsProvider>,
+    ) -> Self {
         let panic_isolator =
             PanicIsolator::new(PanicIsolationConfig::default(), Arc::clone(&metrics));
 
