@@ -1527,7 +1527,11 @@ mod tests {
         state: &mut RuntimeState,
         request: LocalSpawnRequest,
     ) -> LocalSpawnAdmission {
-        state.admit_local_spawn_request_in(request, &mut AdmissionTaskTarget::Embedded)
+        state.admit_local_spawn_request_in(
+            request,
+            &mut AdmissionTaskTarget::Embedded,
+            &crate::runtime::state::AdmissionRegionTarget::Embedded,
+        )
     }
 
     fn test_region() -> RegionId {
@@ -2755,7 +2759,11 @@ mod tests {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner),
             );
-            state.admit_spawn_request_in(parts, &mut target)
+            state.admit_spawn_request_in(
+                parts,
+                &mut target,
+                &crate::runtime::state::AdmissionRegionTarget::Embedded,
+            )
         };
         let SpawnAdmission::Admitted {
             task_id,
@@ -2836,7 +2844,11 @@ mod tests {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner),
             );
-            state.admit_spawn_request_in(parts, &mut target)
+            state.admit_spawn_request_in(
+                parts,
+                &mut target,
+                &crate::runtime::state::AdmissionRegionTarget::Embedded,
+            )
         };
         let SpawnAdmission::Denied { parts, error } = admission else {
             panic!("expected capacity denial");

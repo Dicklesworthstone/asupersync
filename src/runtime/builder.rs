@@ -4304,6 +4304,7 @@ impl RuntimeInner {
                     Budget::new(),
                     wrapped,
                     &mut target,
+                    &crate::runtime::state::AdmissionRegionTarget::Embedded,
                 )?;
             (task_id, spawn_effects)
         };
@@ -4353,6 +4354,7 @@ impl RuntimeInner {
                     Budget::new(),
                     false,
                     &mut target,
+                    &crate::runtime::state::AdmissionRegionTarget::Embedded,
                 )?;
 
             let wrapped = async move {

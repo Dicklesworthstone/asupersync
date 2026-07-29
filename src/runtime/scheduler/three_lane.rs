@@ -5620,7 +5620,11 @@ impl ThreeLaneWorker {
                 },
             );
             for request in requests {
-                match state.admit_spawn_request_in(request.into_parts(), &mut admission_tasks) {
+                match state.admit_spawn_request_in(
+                    request.into_parts(),
+                    &mut admission_tasks,
+                    &crate::runtime::state::AdmissionRegionTarget::Embedded,
+                ) {
                     crate::runtime::state::SpawnAdmission::Admitted {
                         task_id,
                         priority,
@@ -5731,7 +5735,11 @@ impl ThreeLaneWorker {
                 },
             );
             for request in requests {
-                match state.admit_local_spawn_request_in(request, &mut admission_tasks) {
+                match state.admit_local_spawn_request_in(
+                    request,
+                    &mut admission_tasks,
+                    &crate::runtime::state::AdmissionRegionTarget::Embedded,
+                ) {
                     crate::runtime::state::LocalSpawnAdmission::Admitted {
                         task_id,
                         priority,

@@ -1054,6 +1054,48 @@ impl AdmissionTaskTarget<'_> {
     }
 }
 
+/// Region-table target for spawn admission
+/// (E2 subsystem 2, br-asupersync-m9wsza) — the shard-B twin of
+/// [`AdmissionTaskTarget`].
+///
+/// Admission touches the region table only through shared references
+/// (liveness, `add_task`/`add_cleanup_task` quota admission via the
+/// record's interior mutability, and the `pending_spawn_handle` read), so
+/// this target resolves read-only. Callers hold the unified state lock
+/// (B) and, when external, the already-locked shard-B guard — canonical
+/// order is preserved because the guard is acquired before any external
+/// shard-A guard.
+///
+/// REACHABILITY (deliberate, recorded in the bead): every caller passes
+/// `Embedded` today. On the Sharded shape, region records are still
+/// minted into the unified embedded table (root-region initialization and
+/// child-region creation), so routing admission reads at ShardedState's
+/// shard B before minting converts would consult an empty table and deny
+/// every spawn. The `External` arm becomes reachable in the slice that
+/// moves region minting onto shard B; landing the seam first keeps that
+/// flip a one-site change, exactly as `AdmissionTaskTarget` staged the
+/// E1.2 conversion.
+pub(crate) enum AdmissionRegionTarget<'g> {
+    /// Read the embedded `RuntimeState::regions` table (unified shape).
+    Embedded,
+    /// Read an external ShardedState shard-B table (sharded shape).
+    #[allow(dead_code)]
+    External(crate::sync::ContendedMutexGuard<'g, RegionTable>),
+}
+
+impl AdmissionRegionTarget<'_> {
+    /// Resolves the target to the region table, borrowing the embedded
+    /// table only in the `Embedded` arm so callers can keep using `self`
+    /// around each table operation.
+    #[inline]
+    fn resolve_ref<'s>(&'s self, embedded: &'s RegionTable) -> &'s RegionTable {
+        match self {
+            Self::Embedded => embedded,
+            Self::External(guard) => guard,
+        }
+    }
+}
+
 /// Outcome of [`RuntimeState::admit_local_spawn_request_in`]
 /// (br-asupersync-i9y5wb / A2.2a).
 ///
@@ -3144,6 +3186,7 @@ impl RuntimeState {
             budget,
             cleanup_task,
             &mut AdmissionTaskTarget::Embedded,
+            &AdmissionRegionTarget::Embedded,
         )
     }
 
@@ -3167,6 +3210,7 @@ impl RuntimeState {
         budget: Budget,
         cleanup_task: bool,
         tasks: &mut AdmissionTaskTarget<'_>,
+        regions: &AdmissionRegionTarget<'_>,
     ) -> Result<
         (
             TaskId,
@@ -3239,8 +3283,10 @@ impl RuntimeState {
             // Continue with creation but log violation
         }
 
-        // Add task to the region's task list
-        if let Some(region_record) = self.regions.get(region.arena_index()) {
+        // Add task to the region's task list (E2/m9wsza: in whichever
+        // region table the target resolves — embedded today, shard B once
+        // region minting converts).
+        if let Some(region_record) = regions.resolve_ref(&self.regions).get(region.arena_index()) {
             let admission = if cleanup_task {
                 region_record.add_cleanup_task(task_id)
             } else {
@@ -3302,7 +3348,8 @@ impl RuntimeState {
         .with_logical_clock(logical_clock)
         .with_spawn_gateway(self.spawn_gateway.clone())
         .with_pending_spawn_counter(
-            self.regions
+            regions
+                .resolve_ref(&self.regions)
                 .get(region.arena_index())
                 .map(crate::record::RegionRecord::pending_spawn_handle),
         );
@@ -3435,6 +3482,7 @@ impl RuntimeState {
             budget,
             future,
             &mut AdmissionTaskTarget::Embedded,
+            &AdmissionRegionTarget::Embedded,
         )
     }
 
@@ -3453,6 +3501,7 @@ impl RuntimeState {
         budget: Budget,
         future: F,
         tasks: &mut AdmissionTaskTarget<'_>,
+        regions: &AdmissionRegionTarget<'_>,
     ) -> Result<(TaskId, crate::runtime::TaskHandle<T>, TaskSpawnEffects), SpawnError>
     where
         F: Future<Output = T> + Send + 'static,
@@ -3462,7 +3511,7 @@ impl RuntimeState {
 
         let system_cx = self.create_system_cx();
         let (task_id, handle, cx, result_tx, spawn_effects) =
-            self.create_task_infrastructure_in(&system_cx, region, budget, false, tasks)?;
+            self.create_task_infrastructure_in(&system_cx, region, budget, false, tasks, regions)?;
         let wrapped_future = async move {
             match (CatchUnwind { inner: future }).await {
                 Ok(result) => {
@@ -3530,7 +3579,11 @@ impl RuntimeState {
         &mut self,
         parts: crate::runtime::spawn_mailbox::SpawnRequestParts,
     ) -> SpawnAdmission {
-        self.admit_spawn_request_in(parts, &mut AdmissionTaskTarget::Embedded)
+        self.admit_spawn_request_in(
+            parts,
+            &mut AdmissionTaskTarget::Embedded,
+            &AdmissionRegionTarget::Embedded,
+        )
     }
 
     /// Mailbox spawn admission with an explicit task-table target
@@ -3547,6 +3600,7 @@ impl RuntimeState {
         &mut self,
         parts: crate::runtime::spawn_mailbox::SpawnRequestParts,
         tasks: &mut AdmissionTaskTarget<'_>,
+        regions: &AdmissionRegionTarget<'_>,
     ) -> SpawnAdmission {
         if parts
             .admitted_slot
@@ -3560,7 +3614,7 @@ impl RuntimeState {
         }
         let region = parts.region;
         let budget = parts.budget;
-        let (task_id, cx, now) = match self.admit_spawn_record_in(region, budget, tasks) {
+        let (task_id, cx, now) = match self.admit_spawn_record_in(region, budget, tasks, regions) {
             Ok(admitted) => admitted,
             Err(error) => return SpawnAdmission::Denied { parts, error },
         };
@@ -3578,10 +3632,12 @@ impl RuntimeState {
         region: RegionId,
         budget: Budget,
         tasks: &mut AdmissionTaskTarget<'_>,
+        regions: &AdmissionRegionTarget<'_>,
     ) -> Result<(TaskId, crate::cx::Cx, Time), SpawnError> {
         // Region liveness first: missing or non-Open regions deny without
         // touching the task table.
-        let Some(region_record) = self.regions.get(region.arena_index()) else {
+        let Some(region_record) = regions.resolve_ref(&self.regions).get(region.arena_index())
+        else {
             return Err(SpawnError::RegionNotFound(region));
         };
         if !region_record.state().can_accept_work() {
@@ -3624,8 +3680,8 @@ impl RuntimeState {
         }
 
         // Region admission (quota + closed re-check under the region lock).
-        let admission = self
-            .regions
+        let admission = regions
+            .resolve_ref(&self.regions)
             .get(region.arena_index())
             .expect("region checked above")
             .add_task(task_id);
@@ -3674,7 +3730,8 @@ impl RuntimeState {
         .with_logical_clock(logical_clock)
         .with_spawn_gateway(self.spawn_gateway.clone())
         .with_pending_spawn_counter(
-            self.regions
+            regions
+                .resolve_ref(&self.regions)
                 .get(region.arena_index())
                 .map(crate::record::RegionRecord::pending_spawn_handle),
         );
@@ -3786,6 +3843,7 @@ impl RuntimeState {
         &mut self,
         request: crate::runtime::spawn_mailbox::LocalSpawnRequest,
         tasks: &mut AdmissionTaskTarget<'_>,
+        regions: &AdmissionRegionTarget<'_>,
     ) -> LocalSpawnAdmission {
         let Some(worker_id) = crate::runtime::scheduler::three_lane::current_worker_id() else {
             return LocalSpawnAdmission::Denied {
@@ -3805,7 +3863,7 @@ impl RuntimeState {
         }
         let region = request.region;
         let budget = request.budget;
-        let (task_id, cx, now) = match self.admit_spawn_record_in(region, budget, tasks) {
+        let (task_id, cx, now) = match self.admit_spawn_record_in(region, budget, tasks, regions) {
             Ok(admitted) => admitted,
             Err(error) => return LocalSpawnAdmission::Denied { request, error },
         };
@@ -5853,8 +5911,15 @@ impl RuntimeState {
         );
 
         let system_cx = self.create_system_cx();
-        let Ok((task_id, _handle, cx, result_tx, spawn_effects)) =
-            self.create_task_infrastructure_in::<()>(&system_cx, region_id, budget, true, tasks)
+        let Ok((task_id, _handle, cx, result_tx, spawn_effects)) = self
+            .create_task_infrastructure_in::<()>(
+                &system_cx,
+                region_id,
+                budget,
+                true,
+                tasks,
+                &AdmissionRegionTarget::Embedded,
+            )
         else {
             // EDGE CASE VALIDATION: Log task creation failure for debugging
             // This helps identify resource exhaustion scenarios that could block finalizer execution

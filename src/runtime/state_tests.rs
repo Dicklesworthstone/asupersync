@@ -4359,6 +4359,7 @@ fn create_task_with_deferred_spawn_effects_in_external_mints_externally() {
                 Budget::INFINITE,
                 async { 1_u8 },
                 &mut target,
+                &AdmissionRegionTarget::Embedded,
             )
             .expect("external deferred-effects spawn")
     };
@@ -4427,6 +4428,7 @@ fn create_task_infrastructure_in_external_rollback_recycles_externally() {
             Budget::new(),
             false,
             &mut target,
+            &AdmissionRegionTarget::Embedded,
         )
     };
     let denied_at_capacity = matches!(
