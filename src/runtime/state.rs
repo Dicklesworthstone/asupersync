@@ -2202,6 +2202,36 @@ impl RuntimeState {
         self.metrics.clone()
     }
 
+    /// Snapshot of the E-shard (config) surface for constructing a
+    /// `ShardedState` whose shard A a dispatch-table scheduler aliases
+    /// (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2 subsystem 3d).
+    ///
+    /// The driver handles must be live — the sharded construction path
+    /// extracts its E/D bundle from this copy. The remaining fields mirror
+    /// this state's config surface but stay dormant until task minting moves
+    /// from the unified lifecycle owner onto `ShardedState` itself; the
+    /// blocking-pool handle in particular is installed on the unified state
+    /// after scheduler construction and is therefore `None` here.
+    pub(crate) fn sharded_construction_config(
+        &self,
+    ) -> crate::runtime::sharded_state::ShardedConfig {
+        crate::runtime::sharded_state::ShardedConfig {
+            io_driver: self.io_driver.clone(),
+            timer_driver: self.timer_driver.clone(),
+            logical_clock_mode: self.logical_clock_mode.clone(),
+            cancel_attribution: self.cancel_attribution,
+            entropy_source: Arc::clone(&self.entropy_source),
+            blocking_pool: self.blocking_pool.clone(),
+            obligation_leak_response: self.obligation_leak_response,
+            leak_escalation: self.leak_escalation,
+            observability: self.observability.as_ref().map(|observability| {
+                crate::runtime::sharded_state::ShardedObservability::new(
+                    observability.config.clone(),
+                )
+            }),
+        }
+    }
+
     /// Returns the number of direct task-completion observer dispatches whose
     /// metrics callback, final provider destructor, or tracing subscriber
     /// panicked.

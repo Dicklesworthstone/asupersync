@@ -318,10 +318,15 @@ trait RuntimeHostServices: Send + Sync {
         workers: Vec<ThreeLaneWorker>,
     ) -> io::Result<Vec<std::thread::JoinHandle<()>>>;
 
+    /// E1.2 subsystem 3d (E1.1 row B01): `dispatch_task_table` is the
+    /// scheduler's external shard-A table when the runtime dispatches
+    /// against one; the monitor must snapshot deadlines from the table the
+    /// workers actually run, in addition to the embedded table.
     fn start_deadline_monitor(
         &self,
         config: &RuntimeConfig,
         state: &Arc<crate::sync::ContendedMutex<RuntimeState>>,
+        dispatch_task_table: Option<Arc<crate::sync::ContendedMutex<crate::runtime::TaskTable>>>,
     ) -> DeadlineMonitorHostService;
 }
 
@@ -386,6 +391,7 @@ impl NativeThreadHostServices {
     fn start_deadline_monitor(
         config: &RuntimeConfig,
         state: &Arc<crate::sync::ContendedMutex<RuntimeState>>,
+        dispatch_task_table: Option<Arc<crate::sync::ContendedMutex<crate::runtime::TaskTable>>>,
     ) -> DeadlineMonitorHostService {
         use crate::runtime::deadline_monitor::DeadlineMonitor;
 
@@ -413,11 +419,25 @@ impl NativeThreadHostServices {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     let now = guard.now;
-                    let tasks = guard
+                    let mut tasks = guard
                         .tasks_iter()
                         .map(|(_, record)| DeadlineTaskSnapshot::from_task_record(record))
                         .collect::<Vec<_>>();
                     drop(guard);
+                    // E1.2 subsystem 3d (E1.1 row B01): a dispatch-table
+                    // runtime's live tasks reside in the external shard-A
+                    // table; snapshot it after the state lock is released
+                    // (sequential B then A, never nested here).
+                    if let Some(table) = dispatch_task_table.as_ref() {
+                        let table = table
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        tasks.extend(
+                            table
+                                .iter()
+                                .map(|(_, record)| DeadlineTaskSnapshot::from_task_record(record)),
+                        );
+                    }
                     monitor.check_snapshots(now, tasks);
                 }
             })
@@ -447,8 +467,9 @@ impl RuntimeHostServices for NativeThreadHostServices {
         &self,
         config: &RuntimeConfig,
         state: &Arc<crate::sync::ContendedMutex<RuntimeState>>,
+        dispatch_task_table: Option<Arc<crate::sync::ContendedMutex<crate::runtime::TaskTable>>>,
     ) -> DeadlineMonitorHostService {
-        Self::start_deadline_monitor(config, state)
+        Self::start_deadline_monitor(config, state, dispatch_task_table)
     }
 }
 
@@ -2842,23 +2863,22 @@ impl RuntimeBuilder {
             return Err(
                 Error::new(crate::error::ErrorKind::ConfigError).with_message(
                     "RuntimeBuilder::with_sharded_state(true) is gated pending the \
-                 builder-side integration tracked in br-asupersync-8fuxnt. \
-                 The scheduler side is ready: \
-                 `ThreeLaneScheduler::new_with_sharded_state` dispatches \
-                 against ShardedState's Arc-shared shard A, and the \
-                 admission, finalizer-minting, zero-acquisition \
-                 construction, and ordered-completion seams all operate on \
-                 that external table \
-                 (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 subsystems \
-                 1-3c). Still blocking Runtime::new wire-up: the builder \
-                 inventory rows B01-B13 (notably the legacy spawn fallback \
-                 B09/B10, live-task counter B12, and deadline snapshot B01 \
-                 still create/read tasks in the embedded RuntimeState \
-                 table), whole-state snapshot semantics under an aliased \
-                 shard A (E1.1 rows T06/T07/T14 read the embedded table), \
-                 and the unified|sharded replay-fingerprint proof (parent \
-                 AC 3). The unified backing path (default \
-                 `RuntimeStateShape::Unified`) remains fully supported."
+                 unified|sharded replay-fingerprint proof tracked under \
+                 br-asupersync-8fuxnt / \
+                 br-asupersync-sched-hot-path-perf-bt4y5f.2.2. The runtime \
+                 side is wired: Runtime construction internally routes the \
+                 Sharded shape to ShardedState + \
+                 ThreeLaneScheduler::new_with_sharded_state (dispatch \
+                 against Arc-shared shard A), and the admission, finalizer, \
+                 completion, spawn-fallback, snapshot, liveness, and \
+                 deadline-monitor surfaces are all dispatch-table-aware \
+                 (E1.2 subsystems 1-3d). Public opt-in stays fail-closed \
+                 until the replay-fingerprint identity proof and ShardGuard \
+                 label-test coverage land (parent ACs 2/3); the in-repo \
+                 proof lanes construct the Sharded shape through the \
+                 internal Runtime constructor. The unified backing path \
+                 (default `RuntimeStateShape::Unified`) remains fully \
+                 supported."
                         .to_string(),
                 ),
             );
@@ -3504,7 +3524,22 @@ impl Runtime {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.is_quiescent()
+        if !guard.is_quiescent() {
+            return false;
+        }
+        // E1.2 subsystem 3d (E1.1 row B02): a dispatch-table runtime's live
+        // tasks reside in the external shard-A table; consult it under the
+        // held state lock (canonical B → A, A released before B).
+        self.inner
+            .scheduler
+            .dispatch_task_table()
+            .is_none_or(|table| {
+                table
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .live_task_count()
+                    == 0
+            })
     }
 
     /// Returns the current number of regions in the draining/finalizing cleanup path.
@@ -3873,6 +3908,14 @@ impl<F: Future> Future for CatchUnwind<F> {
 struct RuntimeInner {
     config: RuntimeConfig,
     state: Arc<crate::sync::ContendedMutex<RuntimeState>>,
+    /// Sharded backing whose Arc-shared shard A the scheduler dispatches
+    /// against when `RuntimeStateShape::Sharded` is selected (E1.2
+    /// subsystem 3d). `None` in the default unified shape. The B/C shards
+    /// stay dormant until task minting moves off the unified lifecycle
+    /// owner; holding the Arc here keeps shard identity stable for
+    /// diagnostics and the replay-fingerprint proof lanes.
+    #[allow(dead_code)] // Retained for shard identity; read by proof/test lanes.
+    sharded_state: Option<Arc<crate::runtime::ShardedState>>,
     scheduler: ThreeLaneScheduler,
     worker_threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
     root_region: crate::types::RegionId,
@@ -3995,23 +4038,16 @@ impl RuntimeInner {
         entropy_source: Option<Arc<dyn EntropySource>>,
         host_services: &dyn RuntimeHostServices,
     ) -> (Self, Vec<ThreeLaneWorker>) {
-        // br-asupersync-8fuxnt: RuntimeConfig::runtime_state_shape and
-        // RuntimeBuilder::with_sharded_state(bool) are now wired (config.rs
-        // + builder::build above), but Runtime::new still hard-codes the
-        // unified RuntimeState path. Selecting `Sharded` returns a
-        // ConfigError at build() time with a pointer to the tracking bead so
-        // callers see the concrete next blocker. The scheduler side is ready
-        // (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 subsystems 1-3c):
-        // `ThreeLaneScheduler::new_with_sharded_state` dispatches against
-        // ShardedState's Arc-shared shard A, with admission, finalizer
-        // minting, zero-acquisition construction, and the ordered completion
-        // backing all operating on that table. What still blocks routing
-        // this branch to `ShardedState::new(...)`: the builder inventory
-        // rows B01-B13 (the legacy spawn fallback B09/B10, live-task counter
-        // B12, and deadline snapshot B01 still create/read tasks in the
-        // embedded RuntimeState table), whole-state snapshot semantics under
-        // an aliased shard A (E1.1 rows T06/T07/T14), and the
-        // unified|sharded replay-fingerprint proof (parent AC 3).
+        // br-asupersync-8fuxnt: RuntimeConfig::runtime_state_shape routes
+        // internally below — the Sharded shape constructs a ShardedState
+        // whose Arc-shared shard A the scheduler dispatches against, and
+        // the admission, finalizer, completion, spawn-fallback, snapshot,
+        // liveness, and deadline-monitor surfaces are dispatch-table-aware
+        // (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 subsystems 1-3d).
+        // PUBLIC opt-in is still rejected at RuntimeBuilder::build() until
+        // the unified|sharded replay-fingerprint identity proof and the
+        // ShardGuard label-test coverage land (parent ACs 2/3); in-repo
+        // proof lanes reach this arm through the internal constructor.
         let runtime_state = Self::initialize_runtime_state(
             &config,
             reactor,
@@ -4025,24 +4061,61 @@ impl RuntimeInner {
         ));
         let root_region = Self::initialize_root_region(&config, &state);
 
+        // E1.2 subsystem 3d: internal sharded construction. The public
+        // builder gate (br-asupersync-8fuxnt) still rejects the Sharded
+        // shape at build(); this arm is reachable through
+        // Runtime::with_config_and_platform for the in-repo replay and
+        // fingerprint proof lanes. The unified state remains the B/C/D
+        // lifecycle owner; the scheduler dispatches against ShardedState's
+        // Arc-shared shard A, which activates the admission, finalizer,
+        // completion, spawn-fallback, and snapshot seams landed in E1.2
+        // subsystems 1-3d.
+        let sharded_state = if matches!(
+            config.runtime_state_shape,
+            crate::runtime::config::RuntimeStateShape::Sharded
+        ) {
+            let guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Some(Arc::new(crate::runtime::ShardedState::new(
+                guard.trace_handle(),
+                guard.metrics_provider(),
+                guard.sharded_construction_config(),
+            )))
+        } else {
+            None
+        };
         // E1.2 T01/T02: one brief builder-time acquisition extracts the E/D
         // handle bundle (the state is the source of truth for driver handles
         // — `initialize_runtime_state` and `initialize_root_region` may have
         // installed reactor-derived or wall-clock drivers the builder's own
         // parameters never saw). Construction itself then takes no state
         // lock, and the parked-worker notifier is installed before any
-        // worker thread exists.
-        let construction_handles = SchedulerConstructionHandles::extract_from_unified(&state);
-        let mut scheduler = ThreeLaneScheduler::new_with_options_task_table_and_handles(
-            config.worker_threads,
-            &state,
-            None,
-            construction_handles,
-            config.cancel_lane_max_streak,
-            config.enable_governor,
-            config.governor_interval,
-        );
-        scheduler.install_pending_cancel_dispatch_coordinator(&state);
+        // worker thread exists. Both arms return with the coordinator
+        // installed (`new_with_sharded_state` installs it internally).
+        let mut scheduler = if let Some(shards) = sharded_state.as_deref() {
+            ThreeLaneScheduler::new_with_sharded_state(
+                config.worker_threads,
+                &state,
+                shards,
+                config.cancel_lane_max_streak,
+                config.enable_governor,
+                config.governor_interval,
+            )
+        } else {
+            let construction_handles = SchedulerConstructionHandles::extract_from_unified(&state);
+            let scheduler = ThreeLaneScheduler::new_with_options_task_table_and_handles(
+                config.worker_threads,
+                &state,
+                None,
+                construction_handles,
+                config.cancel_lane_max_streak,
+                config.enable_governor,
+                config.governor_interval,
+            );
+            scheduler.install_pending_cancel_dispatch_coordinator(&state);
+            scheduler
+        };
         scheduler.set_steal_batch_size(config.steal_batch_size);
         scheduler.set_enable_parking(config.enable_parking);
         scheduler.set_global_queue_limit(config.global_queue_limit);
@@ -4093,7 +4166,8 @@ impl RuntimeInner {
             };
         let workers = scheduler.take_workers();
 
-        let deadline_monitor = host_services.start_deadline_monitor(&config, &state);
+        let deadline_monitor =
+            host_services.start_deadline_monitor(&config, &state, scheduler.dispatch_task_table());
 
         let blocking_pool = Self::create_blocking_pool(&config);
         if let Some(pool) = blocking_pool.as_ref() {
@@ -4107,6 +4181,7 @@ impl RuntimeInner {
             Self {
                 config,
                 state,
+                sharded_state,
                 scheduler,
                 worker_threads: Mutex::new(Vec::new()),
                 root_region,
@@ -4477,12 +4552,24 @@ fn current_runtime_has_live_tasks() -> bool {
     Runtime::current_handle()
         .and_then(|handle| handle.try_inner().ok())
         .is_some_and(|inner| {
-            inner
+            let embedded_live = inner
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .live_task_count()
-                > 0
+                .live_task_count();
+            if embedded_live > 0 {
+                return true;
+            }
+            // E1.2 subsystem 3d (E1.1 row B12): a dispatch-table runtime's
+            // live tasks reside in the external shard-A table (sequential
+            // B then A; the state lock is released above).
+            inner.scheduler.dispatch_task_table().is_some_and(|table| {
+                table
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .live_task_count()
+                    > 0
+            })
         })
 }
 
@@ -4719,9 +4806,12 @@ mod tests {
             &self,
             config: &RuntimeConfig,
             state: &Arc<crate::sync::ContendedMutex<RuntimeState>>,
+            dispatch_task_table: Option<
+                Arc<crate::sync::ContendedMutex<crate::runtime::TaskTable>>,
+            >,
         ) -> DeadlineMonitorHostService {
             self.deadline_monitor_calls.fetch_add(1, Ordering::Relaxed);
-            NativeThreadHostServices::start_deadline_monitor(config, state)
+            NativeThreadHostServices::start_deadline_monitor(config, state, dispatch_task_table)
         }
     }
 
@@ -4771,6 +4861,9 @@ mod tests {
             &self,
             config: &RuntimeConfig,
             _state: &Arc<crate::sync::ContendedMutex<RuntimeState>>,
+            _dispatch_task_table: Option<
+                Arc<crate::sync::ContendedMutex<crate::runtime::TaskTable>>,
+            >,
         ) -> DeadlineMonitorHostService {
             let monitor_config = match config.deadline_monitor {
                 Some(ref monitor) if monitor.enabled => monitor,
@@ -5709,6 +5802,207 @@ mod tests {
         );
     }
 
+    /// E1.2 subsystem 3d (br-asupersync-sched-hot-path-perf-bt4y5f.2.2):
+    /// end-to-end smoke for the internal Sharded construction. Default
+    /// admission is `Direct`, so `RuntimeHandle::spawn` exercises the B09
+    /// legacy fallback — the task must mint into shard A (a task minted
+    /// into the embedded table would never dispatch, and the channel recv
+    /// below would time out). Liveness (B12/B02) must read the dispatch
+    /// table, proven by quiescence parity with a unified twin runtime.
+    #[test]
+    fn sharded_shape_runtime_spawns_via_fallback_and_quiesces() {
+        init_test_logging();
+
+        let build = |shape: crate::runtime::config::RuntimeStateShape| {
+            let mut config = RuntimeConfig::default();
+            config.worker_threads = 2;
+            config.runtime_state_shape = shape;
+            Runtime::with_config_and_platform(
+                config,
+                None,
+                None,
+                None,
+                None,
+                &NativeThreadHostServices::new(),
+            )
+            .expect("runtime constructs")
+        };
+        let run_one_task = |runtime: &Runtime| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let handle = runtime.handle();
+            let join = handle.spawn(async move {
+                tx.send(42_u32).expect("send from sharded worker");
+            });
+            let value = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("spawned task must dispatch (a wrong-table mint never runs)");
+            assert_eq!(value, 42);
+            drop(join);
+        };
+
+        let sharded = build(crate::runtime::config::RuntimeStateShape::Sharded);
+        let table = sharded
+            .inner
+            .scheduler
+            .dispatch_task_table()
+            .expect("sharded runtime dispatches against a task table");
+        let shards = sharded
+            .inner
+            .sharded_state
+            .as_ref()
+            .expect("sharded runtime retains its ShardedState");
+        assert!(
+            Arc::ptr_eq(&table, &shards.tasks),
+            "the dispatch table must be ShardedState's shard A itself"
+        );
+
+        run_one_task(&sharded);
+
+        let unified = build(crate::runtime::config::RuntimeStateShape::Unified);
+        assert!(
+            unified.inner.scheduler.dispatch_task_table().is_none(),
+            "unified twin keeps the embedded table"
+        );
+        run_one_task(&unified);
+
+        // Live-task phase: hold one task blocked on each shape and require
+        // quiescence parity — B02 must see the live shard-A task exactly as
+        // the unified shape sees its embedded one.
+        let hold_one_task = |runtime: &Runtime| {
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let (running_tx, running_rx) = std::sync::mpsc::channel::<()>();
+            let handle = runtime.handle();
+            let join = handle.spawn(async move {
+                running_tx.send(()).expect("signal running");
+                release_rx
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("release signal");
+            });
+            running_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("blocked task reaches running");
+            (release_tx, join)
+        };
+        let (sharded_release, sharded_join) = hold_one_task(&sharded);
+        let (unified_release, unified_join) = hold_one_task(&unified);
+        assert_eq!(
+            sharded.is_quiescent(),
+            unified.is_quiescent(),
+            "B02 quiescence parity while one task is live on each shape"
+        );
+        assert!(
+            !unified.is_quiescent(),
+            "unified shape reports non-quiescent with a live blocked task"
+        );
+        sharded_release.send(()).expect("release sharded task");
+        unified_release.send(()).expect("release unified task");
+        drop(sharded_join);
+        drop(unified_join);
+
+        // Drain both shapes to zero live tasks, then require quiescence
+        // parity: B02 must consult shard A, not the empty embedded table.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let sharded_live = table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .live_task_count();
+            let unified_live = unified
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .live_task_count();
+            if sharded_live == 0 && unified_live == 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "tasks drain to zero (sharded_live={sharded_live}, unified_live={unified_live})"
+            );
+            std::thread::yield_now();
+        }
+        let sharded_embedded_live = sharded
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .live_task_count();
+        assert_eq!(
+            sharded_embedded_live, 0,
+            "the embedded table never owns sharded-shape tasks"
+        );
+        assert_eq!(
+            sharded.is_quiescent(),
+            unified.is_quiescent(),
+            "B02 quiescence parity across shapes after identical workloads"
+        );
+    }
+
+    /// E1.2 subsystem 3d: mailbox admission on the Sharded shape — the s1
+    /// admission seam mints into shard A when workers drain the mailbox.
+    #[test]
+    fn sharded_shape_runtime_spawns_via_mailbox_and_quiesces() {
+        init_test_logging();
+
+        let mut config = RuntimeConfig::default();
+        config.worker_threads = 2;
+        config.runtime_state_shape = crate::runtime::config::RuntimeStateShape::Sharded;
+        config.spawn_admission = crate::runtime::config::SpawnAdmissionMode::Mailbox;
+        let runtime = Runtime::with_config_and_platform(
+            config,
+            None,
+            None,
+            None,
+            None,
+            &NativeThreadHostServices::new(),
+        )
+        .expect("sharded mailbox runtime constructs");
+        let table = runtime
+            .inner
+            .scheduler
+            .dispatch_task_table()
+            .expect("sharded runtime dispatches against a task table");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = runtime.handle();
+        let join = handle.spawn(async move {
+            tx.send(7_u32).expect("send from sharded worker");
+        });
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(10))
+                .expect("mailbox-admitted task must dispatch from shard A"),
+            7
+        );
+        drop(join);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let live = table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .live_task_count();
+            if live == 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "shard A drains to quiescence ({live} live)"
+            );
+            std::thread::yield_now();
+        }
+        let embedded_live = runtime
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .live_task_count();
+        assert_eq!(
+            embedded_live, 0,
+            "the embedded table never owns mailbox-admitted sharded tasks"
+        );
+    }
+
     #[test]
     fn runtime_drop_interrupts_deadline_monitor_wait() {
         init_test_logging();
@@ -5799,7 +6093,7 @@ mod tests {
             let _ = tx.send(reacquired);
         }));
 
-        let service = NativeThreadHostServices::start_deadline_monitor(&config, &state);
+        let service = NativeThreadHostServices::start_deadline_monitor(&config, &state, None);
         let reacquired = rx
             .recv_timeout(Duration::from_secs(1))
             .expect("deadline warning callback should fire");
@@ -5814,6 +6108,90 @@ mod tests {
         assert!(
             reacquired,
             "warning callback must run after dropping the runtime-state lock"
+        );
+    }
+
+    /// E1.2 subsystem 3d (E1.1 row B01): the deadline monitor must snapshot
+    /// deadlines from the dispatch task table — a dispatch-table runtime's
+    /// live tasks are invisible to the embedded scan alone.
+    #[test]
+    fn native_deadline_monitor_scans_dispatch_task_table() {
+        init_test_logging();
+
+        let state = Arc::new(crate::sync::ContendedMutex::new(
+            "runtime_state",
+            RuntimeState::new(),
+        ));
+        let table = Arc::new(crate::sync::ContendedMutex::new(
+            "task_table",
+            crate::runtime::TaskTable::new(),
+        ));
+        {
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let region = guard.create_root_region(Budget::INFINITE);
+            guard.now = Time::from_secs(100);
+            let budget = Budget::new().with_deadline(Time::from_secs(110));
+            let idx = {
+                let mut tt = table
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                tt.insert_task_with(|idx| {
+                    let task_id = crate::types::TaskId::from_arena(idx);
+                    let mut record = TaskRecord::new_with_time(
+                        task_id,
+                        region,
+                        budget,
+                        Time::from_nanos(1_000_000_000),
+                    );
+                    let mut inner = CxInner::new(region, task_id, budget);
+                    inner.checkpoint_state.last_checkpoint = Some(Time::from_nanos(1_000_000_000));
+                    inner.checkpoint_state.checkpoint_count = 1;
+                    record.set_cx_inner(Arc::new(RwLock::new(inner)));
+                    record
+                })
+            };
+            let task_id = crate::types::TaskId::from_arena(idx);
+            guard
+                .regions
+                .get(region.arena_index())
+                .expect("root region exists")
+                .add_task(task_id)
+                .expect("task admission succeeds");
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut config = RuntimeConfig::default();
+        config.thread_name_prefix = "deadline-monitor-shard-test".to_string();
+        config.deadline_monitor = Some(MonitorConfig {
+            check_interval: Duration::from_millis(1),
+            warning_threshold_fraction: 0.2,
+            checkpoint_timeout: Duration::from_millis(1),
+            adaptive: AdaptiveDeadlineConfig::default(),
+            enabled: true,
+        });
+        config.deadline_warning_handler = Some(Arc::new(move |_| {
+            let _ = tx.send(());
+        }));
+
+        let service = NativeThreadHostServices::start_deadline_monitor(
+            &config,
+            &state,
+            Some(Arc::clone(&table)),
+        );
+        let fired = rx.recv_timeout(Duration::from_secs(1));
+
+        if let Some(shutdown) = service.shutdown.as_ref() {
+            let _ = shutdown.send(());
+        }
+        if let Some(thread) = service.thread {
+            thread.join().expect("deadline monitor thread should stop");
+        }
+
+        fired.expect(
+            "deadline warning must fire from the dispatch-table scan — the \
+             embedded table holds no record for this task",
         );
     }
 
