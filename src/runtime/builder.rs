@@ -2852,37 +2852,16 @@ impl RuntimeBuilder {
         };
         #[cfg(target_arch = "wasm32")]
         let reactor = reactor;
-        // br-asupersync-8fuxnt: Sharded shape is API-reachable but not
-        // yet routed through Runtime::new. Reject at build time with a
-        // message that names the tracking bead so callers see the exact
-        // next-step requirement instead of silently falling back.
-        if matches!(
-            config.runtime_state_shape,
-            crate::runtime::config::RuntimeStateShape::Sharded
-        ) {
-            return Err(
-                Error::new(crate::error::ErrorKind::ConfigError).with_message(
-                    "RuntimeBuilder::with_sharded_state(true) is gated pending the \
-                 unified|sharded replay-fingerprint proof tracked under \
-                 br-asupersync-8fuxnt / \
-                 br-asupersync-sched-hot-path-perf-bt4y5f.2.2. The runtime \
-                 side is wired: Runtime construction internally routes the \
-                 Sharded shape to ShardedState + \
-                 ThreeLaneScheduler::new_with_sharded_state (dispatch \
-                 against Arc-shared shard A), and the admission, finalizer, \
-                 completion, spawn-fallback, snapshot, liveness, and \
-                 deadline-monitor surfaces are all dispatch-table-aware \
-                 (E1.2 subsystems 1-3d). Public opt-in stays fail-closed \
-                 until the replay-fingerprint identity proof and ShardGuard \
-                 label-test coverage land (parent ACs 2/3); the in-repo \
-                 proof lanes construct the Sharded shape through the \
-                 internal Runtime constructor. The unified backing path \
-                 (default `RuntimeStateShape::Unified`) remains fully \
-                 supported."
-                        .to_string(),
-                ),
-            );
-        }
+        // br-asupersync-8fuxnt / br-asupersync-sched-hot-path-perf-bt4y5f.2.2:
+        // the Sharded shape is publicly constructible. The former build-time
+        // ConfigError gate flipped once its stated preconditions landed:
+        // replay-fingerprint identity across Unified|Sharded (11-task corpus
+        // x workers={1,2}, order-insensitive canonicalization), ShardGuard
+        // label coverage + loom lane, and dispatch-table-aware admission,
+        // finalizer, completion, spawn-fallback, snapshot, liveness, and
+        // deadline-monitor surfaces (E1.2 subsystems 1-3d + step 4). The
+        // default shape remains `Unified`; the default flip is E1.3
+        // (br-asupersync-sched-hot-path-perf-bt4y5f.2.3) bake evidence.
         Runtime::with_config_and_platform(
             config,
             reactor,
@@ -3076,16 +3055,16 @@ impl RuntimeBuilder {
 
     /// Selects the runtime backing-state shape (Unified vs Sharded).
     ///
-    /// br-asupersync-8fuxnt: opting in to
-    /// [`RuntimeStateShape::Sharded`] is currently gated at
-    /// [`Self::build()`] pending the builder-side wire-up. Calling
-    /// `with_sharded_state(true)` and then `build()` will return a
-    /// `ConfigError` whose message names this bead. The scheduler side
-    /// is ready (`ThreeLaneScheduler::new_with_sharded_state` dispatches
-    /// against ShardedState's Arc-shared shard A; E1.2 subsystems 1-3c);
-    /// behavior flips on once the builder inventory rows B01-B13,
-    /// snapshot semantics, and the unified|sharded replay-fingerprint
-    /// proof land.
+    /// br-asupersync-8fuxnt /
+    /// br-asupersync-sched-hot-path-perf-bt4y5f.2.2: `Sharded` is a
+    /// supported opt-in. `build()` routes it to `ShardedState` +
+    /// `ThreeLaneScheduler::new_with_sharded_state`, so workers dispatch
+    /// against the Arc-shared shard-A task table while the unified state
+    /// remains the region/obligation lifecycle owner. Semantics are
+    /// proven identical across shapes by the replay-fingerprint corpus
+    /// (11 tasks x workers={1,2}); the default remains `Unified` until
+    /// the E1.3 bench/bake evidence lands
+    /// (br-asupersync-sched-hot-path-perf-bt4y5f.2.3).
     #[must_use]
     pub fn with_sharded_state(mut self, enabled: bool) -> Self {
         self.config.runtime_state_shape = if enabled {
@@ -4061,15 +4040,14 @@ impl RuntimeInner {
         ));
         let root_region = Self::initialize_root_region(&config, &state);
 
-        // E1.2 subsystem 3d: internal sharded construction. The public
-        // builder gate (br-asupersync-8fuxnt) still rejects the Sharded
-        // shape at build(); this arm is reachable through
-        // Runtime::with_config_and_platform for the in-repo replay and
-        // fingerprint proof lanes. The unified state remains the B/C/D
-        // lifecycle owner; the scheduler dispatches against ShardedState's
-        // Arc-shared shard A, which activates the admission, finalizer,
-        // completion, spawn-fallback, and snapshot seams landed in E1.2
-        // subsystems 1-3d.
+        // E1.2 subsystem 3d: sharded construction. Reachable both through
+        // the public builder (`with_sharded_state(true)` — the 8fuxnt gate
+        // flipped once the replay-fingerprint identity proof and label/loom
+        // coverage landed) and Runtime::with_config_and_platform. The
+        // unified state remains the B/C/D lifecycle owner; the scheduler
+        // dispatches against ShardedState's Arc-shared shard A, which
+        // activates the admission, finalizer, completion, spawn-fallback,
+        // and snapshot seams landed in E1.2 subsystems 1-3d.
         let sharded_state = if matches!(
             config.runtime_state_shape,
             crate::runtime::config::RuntimeStateShape::Sharded
@@ -8155,29 +8133,76 @@ worker_threads = 16
         );
     }
 
+    /// br-asupersync-8fuxnt / br-asupersync-sched-hot-path-perf-bt4y5f.2.2:
+    /// the public builder gate is FLIPPED — `with_sharded_state(true)` +
+    /// `build()` must construct a working runtime whose workers dispatch
+    /// against ShardedState's shard-A table, with the embedded table never
+    /// owning its tasks. This replaces the former rejection regression
+    /// (`build_with_sharded_state_returns_config_error_pointing_at_tracking_bead`)
+    /// now that the gate's stated preconditions (replay-fingerprint identity
+    /// proof + label/loom coverage) landed.
     #[test]
-    fn build_with_sharded_state_returns_config_error_pointing_at_tracking_bead() {
+    fn build_accepts_sharded_state_and_dispatches_via_shard_a() {
         init_test_logging();
 
-        let result = RuntimeBuilder::new().with_sharded_state(true).build();
-        let err = match result {
-            Err(err) => err,
-            Ok(_) => panic!(
-                "br-asupersync-8fuxnt: RuntimeBuilder::with_sharded_state(true) \
-                 must return an error at build() time until the scheduler-side \
-                 integration lands"
-            ),
-        };
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("br-asupersync-8fuxnt"),
-            "rejection message must name the tracking bead so callers see \
-             the concrete next-step requirement; got: {msg}"
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .with_sharded_state(true)
+            .build()
+            .expect(
+                "the Sharded shape must be publicly constructible after the \
+                 8fuxnt gate flip",
+            );
+        let dispatch = runtime
+            .inner
+            .scheduler
+            .dispatch_task_table()
+            .expect("a public sharded build must dispatch against shard A");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = runtime.handle();
+        let join = handle.spawn(async move {
+            tx.send(7_u32).expect("sharded task send");
+        });
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(10))
+                .expect("public-sharded task must run"),
+            7
         );
+        drop(join);
+
+        // Drain to quiescence: live tasks retire from the shard-A table and
+        // the embedded table never owns a public-sharded task at any point.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let embedded = runtime
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .live_task_count();
+            assert_eq!(
+                embedded, 0,
+                "the embedded table must never own public-sharded tasks"
+            );
+            let shard_a = dispatch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .live_task_count();
+            if shard_a == 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "public sharded runtime drains to zero live tasks \
+                 (shard_a={shard_a})"
+            );
+            std::thread::yield_now();
+        }
         assert!(
-            msg.contains("ThreeLaneScheduler"),
-            "rejection message must name the specific blocker \
-             (ThreeLaneScheduler signature); got: {msg}"
+            runtime.is_quiescent(),
+            "public sharded runtime must report quiescence through the \
+             dispatch-table-aware B02 read"
         );
     }
 

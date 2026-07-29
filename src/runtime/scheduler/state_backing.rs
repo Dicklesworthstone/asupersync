@@ -47,15 +47,20 @@
 //! scheduler call site is changed yet — `ThreeLaneScheduler` still takes
 //! `Arc<ContendedMutex<RuntimeState>>` directly.
 //!
-//! - **30atgp.2** (next): implement `RuntimeStateBacking` for
-//!   `Arc<ShardedState>` by routing each method through
-//!   `ShardGuard::for_*` builders so cross-table atomicity at
-//!   `task_completed` and `drain_ready_async_finalizers` is preserved.
-//! - **30atgp.3** (after): parameterize `ThreeLaneScheduler` over the
-//!   trait, flip the `RuntimeBuilder::with_sharded_state(true)` gate
-//!   in `src/runtime/builder.rs` to construct a real `ShardedState`,
-//!   run the swarm-coordination workload corpus on both shapes per the
-//!   br-asupersync-9kuias acceptance bar.
+//! - **30atgp.2** (superseded in part): rather than a full
+//!   `RuntimeStateBacking` impl for `Arc<ShardedState>`, E1.2
+//!   (br-asupersync-sched-hot-path-perf-bt4y5f.2.2) landed the
+//!   external-dispatch-table route: `ThreeLaneScheduler` accepts an
+//!   optional shard-A `TaskTable` alias
+//!   (`new_with_sharded_state`), and admission/completion/finalizer/
+//!   snapshot seams are dispatch-table-aware while the unified state
+//!   remains the region/obligation lifecycle owner.
+//! - **30atgp.3**: the `RuntimeBuilder::with_sharded_state(true)` gate
+//!   FLIPPED under bt4y5f.2.2 once the unified|sharded
+//!   replay-fingerprint identity proof (11-task corpus x workers={1,2})
+//!   and ShardGuard label/loom coverage landed. The swarm-coordination
+//!   workload corpus comparison on both shapes is E1.3 bench evidence
+//!   (br-asupersync-sched-hot-path-perf-bt4y5f.2.3).
 
 use crate::record::task::TaskRecord;
 use crate::runtime::state::{TaskCompletionEffects, TaskSpawnEffects};
