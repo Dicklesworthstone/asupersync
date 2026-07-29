@@ -6156,9 +6156,10 @@ mod tests {
 
         fn run_corpus_and_fingerprint(
             shape: crate::runtime::config::RuntimeStateShape,
+            worker_threads: usize,
         ) -> Vec<String> {
             let mut config = RuntimeConfig::default();
-            config.worker_threads = 1;
+            config.worker_threads = worker_threads;
             config.runtime_state_shape = shape;
             let runtime = Runtime::with_config_and_platform(
                 config,
@@ -6212,6 +6213,30 @@ mod tests {
             drop(join);
             drain_to_zero_live(&runtime);
 
+            // Phase 3.5: two-phase channel permits on a runtime-linked Cx
+            // (one committed via reserve → send, one aborted via reserve →
+            // drop). NOTE (recorded finding): production mpsc permits are
+            // channel-internal two-phase accounting — they do NOT register
+            // in the RuntimeState obligation table, and no
+            // ObligationReserve/Commit/Abort trace events are emitted from
+            // this surface (the traced registry is used by remote
+            // leases/lab surfaces). The phase still exercises the permit
+            // lifecycle across shapes; the fingerprint's obligation arm
+            // stays wired for future registry-surface corpus extensions.
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            handle.spawn_with_cx(move |cx| async move {
+                let (tx, _rx) = crate::channel::mpsc::channel::<u32>(4);
+                let permit = tx.reserve(&cx).await.expect("reserve commit permit");
+                permit.send(11);
+                let aborted = tx.reserve(&cx).await.expect("reserve abort permit");
+                drop(aborted);
+                done_tx.send(()).expect("obligation phase done");
+            });
+            done_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("obligation phase completed");
+            drain_to_zero_live(&runtime);
+
             // Phase 4: shutdown cancellation. A pending-forever task is live
             // when the runtime drops; both shapes must retire it through the
             // same shutdown semantics. The trace handle is cloned first (the
@@ -6243,8 +6268,32 @@ mod tests {
             // shapes AND across runs. Slot reuse is an allocation detail; a
             // real semantic divergence (task count, completion set, region
             // linkage, a Complete without a Spawn) stays visible.
+            //
+            // The spawn->ordinal map is built in a dedicated pass over ALL
+            // events BEFORE any Complete is resolved (br-asupersync-7amdgn):
+            // production spawn effects dispatch outside runtime locks AFTER
+            // the task is injected, so a fast worker can record a task's
+            // Complete into the shared trace buffer before the spawning
+            // thread records its Spawn — the two events' seq order inverts.
+            // That inversion is a property of the deferred spawn-effects
+            // design on BOTH shapes (whichever side wins the buffer race),
+            // not a semantic divergence; a single forward pass misread such
+            // completes as UNSPAWNED. A Complete whose id appears in NO
+            // Spawn event anywhere in the trace still fails closed via the
+            // UNSPAWNED arm below. The sorted fingerprint never asserted
+            // intra-task event order to begin with.
             let mut canonical: std::collections::HashMap<String, usize> =
                 std::collections::HashMap::new();
+            for event in &events {
+                if let (
+                    crate::trace::TraceEventKind::Spawn,
+                    crate::trace::TraceData::Task { task, .. },
+                ) = (&event.kind, &event.data)
+                {
+                    let next = canonical.len();
+                    canonical.entry(format!("{task:?}")).or_insert(next);
+                }
+            }
             let mut fingerprint: Vec<String> = Vec::new();
             for event in &events {
                 match (&event.kind, &event.data) {
@@ -6252,8 +6301,9 @@ mod tests {
                         crate::trace::TraceEventKind::Spawn,
                         crate::trace::TraceData::Task { task, region },
                     ) => {
-                        let next = canonical.len();
-                        let ordinal = *canonical.entry(format!("{task:?}")).or_insert(next);
+                        let ordinal = canonical
+                            .get(&format!("{task:?}"))
+                            .expect("spawn ids were interned in the first pass");
                         fingerprint.push(format!("Spawn|T{ordinal}|{region:?}"));
                     }
                     (
@@ -6276,6 +6326,29 @@ mod tests {
                     ) => {
                         fingerprint.push(format!("{:?}|{region:?}|{parent:?}", event.kind));
                     }
+                    (
+                        crate::trace::TraceEventKind::ObligationReserve
+                        | crate::trace::TraceEventKind::ObligationCommit
+                        | crate::trace::TraceEventKind::ObligationAbort
+                        | crate::trace::TraceEventKind::ObligationLeak,
+                        crate::trace::TraceData::Obligation {
+                            task,
+                            kind,
+                            abort_reason,
+                            ..
+                        },
+                    ) => {
+                        // Obligation arena ids carry the same slot-reuse
+                        // hazard as task ids; identity rides the holder's
+                        // canonical ordinal + obligation kind instead.
+                        let holder = canonical
+                            .get(&format!("{task:?}"))
+                            .map_or_else(|| format!("UNSPAWNED({task:?})"), |o| format!("T{o}"));
+                        fingerprint.push(format!(
+                            "{:?}|{holder}|{kind:?}|{abort_reason:?}",
+                            event.kind
+                        ));
+                    }
                     _ => {}
                 }
             }
@@ -6283,28 +6356,42 @@ mod tests {
             fingerprint
         }
 
-        let unified =
-            run_corpus_and_fingerprint(crate::runtime::config::RuntimeStateShape::Unified);
-        let sharded =
-            run_corpus_and_fingerprint(crate::runtime::config::RuntimeStateShape::Sharded);
+        let corpus = |worker_threads: usize| {
+            let unified = run_corpus_and_fingerprint(
+                crate::runtime::config::RuntimeStateShape::Unified,
+                worker_threads,
+            );
+            let sharded = run_corpus_and_fingerprint(
+                crate::runtime::config::RuntimeStateShape::Sharded,
+                worker_threads,
+            );
 
-        // Fail-closed guard: an empty fingerprint would make the equality
-        // below vacuous. The corpus mints 9 tasks (6 ok + panic + parent +
-        // child), each with a Spawn event.
-        let unified_spawns = unified
-            .iter()
-            .filter(|line| line.starts_with("Spawn|"))
-            .count();
-        assert!(
-            unified_spawns >= 9,
-            "fingerprint must capture the corpus spawns (got {unified_spawns})"
-        );
-
-        assert_eq!(
-            unified, sharded,
-            "semantic trace fingerprints must be identical across \
-             RuntimeStateShape::Unified and RuntimeStateShape::Sharded"
-        );
+            // Fail-closed guards: an empty fingerprint would make the
+            // equality below vacuous. The corpus mints 11 tasks (6 ok +
+            // panic + parent + child + permit-lifecycle task + shutdown
+            // pending task), each with a Spawn event. The production mpsc
+            // permit phase emits no Obligation* trace events (permits are
+            // channel-internal two-phase accounting, not registry
+            // obligations); the obligation fingerprint arm stays wired for
+            // registry-surface corpus extensions.
+            let unified_spawns = unified
+                .iter()
+                .filter(|line| line.starts_with("Spawn|"))
+                .count();
+            assert!(
+                unified_spawns >= 11,
+                "fingerprint must capture the corpus spawns \
+                 (workers={worker_threads}, got {unified_spawns})"
+            );
+            assert_eq!(
+                unified, sharded,
+                "semantic trace fingerprints must be identical across \
+                 RuntimeStateShape::Unified and RuntimeStateShape::Sharded \
+                 (workers={worker_threads})"
+            );
+        };
+        corpus(1);
+        corpus(2);
     }
 
     /// E1.2 subsystem 3d (E1.1 row B01): the deadline monitor must snapshot
