@@ -10,12 +10,23 @@
 //! the criterion output of the run that just finished in this process, so the
 //! gate result and the measurement come from the same remote environment.
 //!
-//! Semantics are identical to the original embedded `methodology_baselines`
-//! gate: `ASUPERSYNC_PHASE6_BASELINE` names the tracked registry (gate is a
+//! Semantics follow the original embedded `methodology_baselines` gate:
+//! `ASUPERSYNC_PHASE6_BASELINE` names the tracked registry (gate is a
 //! no-op when unset), `ASUPERSYNC_PHASE6_MAX_REGRESSION_PCT` must be exactly
-//! `5`, and any tracked p50 more than 5% slower fails the process. A prefix
-//! that matches zero rows is an error, not a pass: a gated binary whose rows
-//! vanished from the registry must fail closed, never silently skip.
+//! `5`, and a tracked row fails only when its measured p50 exceeds
+//! `max(p50 * 1.05, ci95_upper * 1.02, p50 + 0.6ns)`
+//! (br-asupersync-87h3es). The extra terms exist because same-host ambient
+//! noise (co-tenancy, frequency/power states, alignment) exceeds 5% on
+//! few-ns rows — a 0.5ns absolute shift reads as +100% on a 0.5ns row —
+//! and four same-host runs produced four disjoint failing sets under the
+//! pure relative gate, including a red clean-HEAD control. Recorded CIs
+//! encode the recording run's own volatility, so a candidate inside that
+//! envelope is measurement noise; the absolute floor covers the sub-ns
+//! class whose quick-mode CIs can collapse to `[p50, p50]` and encode no
+//! volatility. Rows without a recorded `ci95_upper_ns` keep the other two
+//! terms; rows with a malformed one fail closed. A prefix that matches
+//! zero rows is an error, not a pass: a gated binary whose rows vanished
+//! from the registry must fail closed, never silently skip.
 
 use std::collections::BTreeSet;
 use std::env;
@@ -27,6 +38,23 @@ use serde::Deserialize;
 const PHASE6_BASELINE_ENV: &str = "ASUPERSYNC_PHASE6_BASELINE";
 const PHASE6_THRESHOLD_ENV: &str = "ASUPERSYNC_PHASE6_MAX_REGRESSION_PCT";
 const PHASE6_MAX_REGRESSION_PCT: f64 = 5.0;
+/// Headroom multiplier applied to a row's recorded `ci95_upper_ns`
+/// (br-asupersync-87h3es). The recorded CI bounds the *median estimate* of
+/// the recording run; a fresh run's median estimate carries its own
+/// estimation error on top, so a candidate a hair above the recorded upper
+/// bound is still indistinguishable from noise. 2% keeps that allowance far
+/// below the 5% relative threshold it complements.
+const PHASE6_CI95_HEADROOM: f64 = 1.02;
+/// Absolute noise floor in nanoseconds (br-asupersync-87h3es). Ambient
+/// same-host effects (co-tenancy, frequency/power states, code alignment)
+/// shift few-ns rows by ~0.5ns between runs regardless of the code under
+/// test: the four-run dossier recorded +0.51ns on a 0.47ns row and +0.47ns
+/// on a 1.42ns row from clean baselines, and a red clean-HEAD control. A
+/// sub-floor delta can also be +100% relative, so the relative and ci95
+/// checks alone misfire on this class; deltas at or below the floor are
+/// never regressions. 0.6ns clears the observed ambient band while a
+/// genuine ~1ns+ slowdown still fails.
+const PHASE6_ABSOLUTE_NOISE_FLOOR_NS: f64 = 0.6;
 
 #[derive(Deserialize)]
 struct TrackedBaseline {
@@ -38,6 +66,15 @@ struct TrackedBaseline {
 struct TrackedBaselineRow {
     operation: String,
     p50_ns: f64,
+    /// Upper bound of the 95% confidence interval recorded with this row.
+    /// When present, the gate fails only above
+    /// `max(p50_ns * 1.05, ci95_upper_ns * PHASE6_CI95_HEADROOM)` — the
+    /// recorded CI is the row's own measured volatility, so a candidate
+    /// inside it is noise by the recording run's own evidence
+    /// (br-asupersync-87h3es). Absent on legacy rows, which keep the pure
+    /// relative gate.
+    #[serde(default)]
+    ci95_upper_ns: Option<f64>,
     /// Host-class tag of the run that recorded this row (`host:<hostname>`).
     /// The RCH fleet is heterogeneous (OVH dedicated vs Contabo VPS classes
     /// differ 30-70% on single-thread micro-cycles) and workers cannot be
@@ -111,6 +148,38 @@ fn current_environment() -> Result<String, String> {
         );
     }
     Ok(format!("host:{name}"))
+}
+
+/// Computes the fail limit for one tracked row (br-asupersync-87h3es): a
+/// measured p50 fails the gate only above
+/// `max(p50 * 1.05, ci95_upper * PHASE6_CI95_HEADROOM, p50 + 0.6ns)`.
+///
+/// The three terms cover distinct noise classes: the relative threshold is
+/// the actual regression policy; the recorded ci95 envelope covers rows
+/// whose recording run measured wide volatility; the absolute floor covers
+/// few-ns rows where ambient host effects move the measurement by ~0.5ns
+/// even when the recording run's CI happened to be tight (a quick-mode CI
+/// can collapse to `[p50, p50]` and encode no volatility at all).
+///
+/// A malformed `ci95_upper_ns` (non-finite, or below the recorded p50 —
+/// which would silently *narrow* the gate) is an error, never a fallback:
+/// a corrupted registry row must fail closed.
+fn row_limit_ns(operation: &str, p50_ns: f64, ci95_upper_ns: Option<f64>) -> Result<f64, String> {
+    let relative_limit_ns = p50_ns * (1.0 + PHASE6_MAX_REGRESSION_PCT / 100.0);
+    let floor_limit_ns = p50_ns + PHASE6_ABSOLUTE_NOISE_FLOOR_NS;
+    let base_limit_ns = relative_limit_ns.max(floor_limit_ns);
+    match ci95_upper_ns {
+        None => Ok(base_limit_ns),
+        Some(upper) => {
+            if !upper.is_finite() || upper < p50_ns {
+                return Err(format!(
+                    "tracked Phase 6 baseline operation {operation:?} has invalid ci95_upper_ns \
+                     ({upper}; must be finite and >= p50_ns)"
+                ));
+            }
+            Ok(base_limit_ns.max(upper * PHASE6_CI95_HEADROOM))
+        }
+    }
 }
 
 /// Runs the Phase 6 p50 gate over the tracked rows owned by `prefix`.
@@ -205,11 +274,14 @@ pub fn run_phase6_p50_gate(prefix: &str) -> Result<(), String> {
             ));
         }
 
+        let limit_ns = row_limit_ns(&row.operation, row.p50_ns, row.ci95_upper_ns)?;
         let delta_pct = (candidate_p50_ns / row.p50_ns - 1.0) * 100.0;
-        if delta_pct > PHASE6_MAX_REGRESSION_PCT {
+        if candidate_p50_ns > limit_ns {
             regressions.push(format!(
-                "{}: {:.2} -> {:.2} (+{:.2}%)",
-                row.operation, row.p50_ns, candidate_p50_ns, delta_pct
+                "{}: {:.2} -> {:.2} (+{:.2}%, limit {:.2}ns = \
+                 max(p50*1.05, ci95_upper*{PHASE6_CI95_HEADROOM}, \
+                 p50+{PHASE6_ABSOLUTE_NOISE_FLOOR_NS}ns))",
+                row.operation, row.p50_ns, candidate_p50_ns, delta_pct, limit_ns
             ));
         }
     }
@@ -238,13 +310,14 @@ pub fn run_phase6_p50_gate(prefix: &str) -> Result<(), String> {
         let skipped = owned_rows - compared_rows;
         println!(
             "[PHASE6] p50 gate passed: {compared_rows} of {owned_rows} tracked rows compared at \
-             5.00% under prefix {prefix:?} ({skipped} skipped as other-host-class); rows under \
-             other prefixes and untracked Criterion rows are outside this gate."
+             max(5.00%, ci95 envelope) under prefix {prefix:?} ({skipped} skipped as \
+             other-host-class); rows under other prefixes and untracked Criterion rows are \
+             outside this gate."
         );
         Ok(())
     } else {
         Err(format!(
-            "p50 regressions (>5.00%):\n  - {}",
+            "p50 regressions (beyond max(5.00%, ci95 envelope)):\n  - {}",
             regressions.join("\n  - ")
         ))
     }

@@ -8,6 +8,7 @@ const README_PATH: &str = "README.md";
 const WORKFLOW_PATH: &str = ".github/workflows/methodology-gates.yml";
 const CONTRACT_PATH: &str = "artifacts/phase6_methodology_gate_enforcement_contract_v1.json";
 const METHODOLOGY_BENCH_PATH: &str = "benches/methodology_baselines.rs";
+const PHASE6_GATE_PATH: &str = "benches/phase6_gate.rs";
 const GOLDEN_BENCH_PATH: &str = "benches/golden_output.rs";
 const GOLDEN_REGISTRY_PATH: &str = "benches/golden_registry.rs";
 const CARGO_TOML_PATH: &str = "Cargo.toml";
@@ -231,6 +232,22 @@ fn direct_main_benchmark_commands_and_comparator_are_executable_and_fail_closed(
         nonempty_string(comparison, "threshold_semantics"),
         "fail_when_strictly_greater"
     );
+    // br-asupersync-87h3es: the comparator's fail limit is
+    // max(p50 * 1.05, ci95_upper * 1.02, p50 + 0.6ns). Ambient same-host
+    // noise exceeds 5% on few-ns rows (and quick-mode CIs can collapse to
+    // [p50, p50], encoding no volatility), so the recorded ci95 envelope
+    // plus an absolute sub-ns floor form the per-row noise allowance; the
+    // artifact must document it so the README/workflow story and the live
+    // comparator cannot drift apart silently.
+    let noise_floor = nonempty_string(comparison, "ci95_noise_floor");
+    assert!(
+        noise_floor.contains("max(p50_ns * 1.05, ci95_upper_ns * 1.02, p50_ns + 0.6ns)"),
+        "ci95_noise_floor must pin the envelope formula, got {noise_floor:?}"
+    );
+    assert!(
+        noise_floor.contains("fail closed"),
+        "ci95_noise_floor must state malformed bounds fail closed, got {noise_floor:?}"
+    );
     assert_eq!(
         nonempty_string(comparison, "missing_tracked_candidate_row"),
         "fail_closed"
@@ -284,7 +301,12 @@ fn direct_main_benchmark_commands_and_comparator_are_executable_and_fail_closed(
         );
     }
 
-    let runner = read_repo_file(METHODOLOGY_BENCH_PATH);
+    // The comparator was extracted from the methodology_baselines binary
+    // into the shared benches/phase6_gate.rs module (bt4y5f.1); the gate
+    // pins moved with it. This block was red at pristine HEAD from the
+    // extraction until br-asupersync-87h3es re-pointed it (stale
+    // source-text pin, same class as the 6t47fx audit-pin sweep).
+    let gate = read_repo_file(PHASE6_GATE_PATH);
     for required in [
         "PHASE6_BASELINE_ENV",
         "PHASE6_THRESHOLD_ENV",
@@ -292,7 +314,23 @@ fn direct_main_benchmark_commands_and_comparator_are_executable_and_fail_closed(
         "operation.replacen('/', \"_\", 1)",
         "baseline.baselines",
         "new/estimates.json",
-        "delta_pct > PHASE6_MAX_REGRESSION_PCT",
+        // br-asupersync-87h3es: the fail decision compares the candidate
+        // against the per-row limit max(p50*1.05, ci95_upper*1.02,
+        // p50+0.6ns) instead of the bare relative delta.
+        "candidate_p50_ns > limit_ns",
+        "fn row_limit_ns",
+        "PHASE6_CI95_HEADROOM: f64 = 1.02",
+        "PHASE6_ABSOLUTE_NOISE_FLOOR_NS: f64 = 0.6",
+    ] {
+        assert!(
+            gate.contains(required),
+            "Phase 6 gate module must preserve {required:?}"
+        );
+    }
+    let runner = read_repo_file(METHODOLOGY_BENCH_PATH);
+    for required in [
+        "mod phase6_gate;",
+        "run_phase6_p50_gate(\"methodology/\")",
         "std::process::exit(2)",
     ] {
         assert!(
