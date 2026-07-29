@@ -6111,6 +6111,185 @@ mod tests {
         );
     }
 
+    /// E1.2 step 4 (parent AC 4 / bead AC 3,
+    /// br-asupersync-sched-hot-path-perf-bt4y5f.2.2): semantics-identical
+    /// proof across `RuntimeStateShape::Unified|Sharded`. A fixed,
+    /// fully-serialized workload corpus (spawn ordering rendezvoused through
+    /// channels so task-identity assignment cannot race worker activity) must
+    /// produce byte-identical canonical semantic trace fingerprints on both
+    /// shapes: the same task identities, spawn/completion lifecycle events,
+    /// and region transitions. Poll/schedule/wake events are excluded by
+    /// design — they encode scheduling, not semantics.
+    #[test]
+    fn unified_and_sharded_shapes_produce_identical_semantic_trace_fingerprints() {
+        init_test_logging();
+
+        fn drain_to_zero_live(runtime: &Runtime) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let embedded = runtime
+                    .inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .live_task_count();
+                let dispatch = runtime
+                    .inner
+                    .scheduler
+                    .dispatch_task_table()
+                    .map_or(0, |table| {
+                        table
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .live_task_count()
+                    });
+                if embedded == 0 && dispatch == 0 {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "corpus drains to zero live tasks (embedded={embedded}, dispatch={dispatch})"
+                );
+                std::thread::yield_now();
+            }
+        }
+
+        fn run_corpus_and_fingerprint(
+            shape: crate::runtime::config::RuntimeStateShape,
+        ) -> Vec<String> {
+            let mut config = RuntimeConfig::default();
+            config.worker_threads = 1;
+            config.runtime_state_shape = shape;
+            let runtime = Runtime::with_config_and_platform(
+                config,
+                None,
+                None,
+                None,
+                None,
+                &NativeThreadHostServices::new(),
+            )
+            .expect("corpus runtime constructs");
+            let handle = runtime.handle();
+
+            // Phase 1: six ok tasks, one at a time (each spawn waits for the
+            // prior completion signal, so arena minting order is total).
+            for i in 0..6_u32 {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let join = handle.spawn(async move {
+                    tx.send(i).expect("corpus send");
+                });
+                assert_eq!(
+                    rx.recv_timeout(Duration::from_secs(10))
+                        .expect("corpus recv"),
+                    i
+                );
+                drop(join);
+            }
+            drain_to_zero_live(&runtime);
+
+            // Phase 2: one panicking task (ordered panic-completion arm).
+            let join = handle.spawn(async {
+                panic!("deliberate corpus panic");
+            });
+            drop(join);
+            drain_to_zero_live(&runtime);
+
+            // Phase 3: worker-side nested spawn (fire-and-forget child).
+            let (tx, rx) = std::sync::mpsc::channel();
+            let join = handle.spawn(async move {
+                let nested = Runtime::current_handle()
+                    .expect("worker thread carries the runtime handle")
+                    .spawn(async move {
+                        tx.send(100_u32).expect("nested send");
+                    });
+                drop(nested);
+            });
+            assert_eq!(
+                rx.recv_timeout(Duration::from_secs(10))
+                    .expect("nested child ran"),
+                100
+            );
+            drop(join);
+            drain_to_zero_live(&runtime);
+
+            let events = runtime
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .trace_handle()
+                .snapshot();
+            // Canonicalize task identity by spawn order: the corpus is fully
+            // serialized, so spawn order is deterministic on both shapes,
+            // while physical arena (slot, generation) assignment depends on
+            // a benign completion/spawn recycle race and differs across
+            // shapes AND across runs. Slot reuse is an allocation detail; a
+            // real semantic divergence (task count, completion set, region
+            // linkage, a Complete without a Spawn) stays visible.
+            let mut canonical: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            let mut fingerprint: Vec<String> = Vec::new();
+            for event in &events {
+                match (&event.kind, &event.data) {
+                    (
+                        crate::trace::TraceEventKind::Spawn,
+                        crate::trace::TraceData::Task { task, region },
+                    ) => {
+                        let next = canonical.len();
+                        let ordinal = *canonical.entry(format!("{task:?}")).or_insert(next);
+                        fingerprint.push(format!("Spawn|T{ordinal}|{region:?}"));
+                    }
+                    (
+                        crate::trace::TraceEventKind::Complete,
+                        crate::trace::TraceData::Task { task, region },
+                    ) => match canonical.get(&format!("{task:?}")) {
+                        Some(ordinal) => {
+                            fingerprint.push(format!("Complete|T{ordinal}|{region:?}"));
+                        }
+                        None => {
+                            fingerprint.push(format!("Complete|UNSPAWNED({task:?})|{region:?}"));
+                        }
+                    },
+                    (
+                        crate::trace::TraceEventKind::RegionCreated
+                        | crate::trace::TraceEventKind::RegionCloseBegin
+                        | crate::trace::TraceEventKind::RegionCloseComplete
+                        | crate::trace::TraceEventKind::RegionCancelled,
+                        crate::trace::TraceData::Region { region, parent },
+                    ) => {
+                        fingerprint.push(format!("{:?}|{region:?}|{parent:?}", event.kind));
+                    }
+                    _ => {}
+                }
+            }
+            fingerprint.sort();
+            fingerprint
+        }
+
+        let unified =
+            run_corpus_and_fingerprint(crate::runtime::config::RuntimeStateShape::Unified);
+        let sharded =
+            run_corpus_and_fingerprint(crate::runtime::config::RuntimeStateShape::Sharded);
+
+        // Fail-closed guard: an empty fingerprint would make the equality
+        // below vacuous. The corpus mints 9 tasks (6 ok + panic + parent +
+        // child), each with a Spawn event.
+        let unified_spawns = unified
+            .iter()
+            .filter(|line| line.starts_with("Spawn|"))
+            .count();
+        assert!(
+            unified_spawns >= 9,
+            "fingerprint must capture the corpus spawns (got {unified_spawns})"
+        );
+
+        assert_eq!(
+            unified, sharded,
+            "semantic trace fingerprints must be identical across \
+             RuntimeStateShape::Unified and RuntimeStateShape::Sharded"
+        );
+    }
+
     /// E1.2 subsystem 3d (E1.1 row B01): the deadline monitor must snapshot
     /// deadlines from the dispatch task table — a dispatch-table runtime's
     /// live tasks are invisible to the embedded scan alone.

@@ -7300,6 +7300,73 @@ fn sharded_construction_acquires_no_shard_locks() {
     );
 }
 
+/// E1.2 step 4 (AC 2 extension): the full dispatch + ordered-completion
+/// pipeline respects canonical lock order against guard-ordered holders. A
+/// worker executing a shard-A task while another thread holds
+/// `ShardGuard::all` (B→A→C) must block on shard A — observed contention,
+/// not a vacuous pass — and complete cleanly once the guard releases. A
+/// lock-order inversion anywhere in the poll/completion/finalizer pipeline
+/// would deadlock the 30s watchdog.
+#[test]
+fn completion_seam_respects_canonical_order_under_shardguard_all_contention() {
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    let region = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .create_root_region(Budget::INFINITE);
+    let task_id = {
+        let mut state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .create_task(region, Budget::INFINITE, async {})
+            .expect("create task")
+            .0
+    };
+    let shards = sharded_scheduler_state();
+    let shard_a = shards.task_shard_handle();
+    move_runtime_task_to_shard(&state, &shard_a, task_id);
+
+    let mut scheduler = ThreeLaneScheduler::new_with_sharded_state(
+        1,
+        &state,
+        &shards,
+        DEFAULT_CANCEL_STREAK_LIMIT,
+        false,
+        32,
+    );
+    let mut worker = scheduler.take_workers().remove(0);
+
+    let held = crate::runtime::sharded_state::ShardGuard::all(&shards);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let executor = thread::spawn(move || {
+        worker.execute(task_id);
+        tx.send(()).expect("send completion signal");
+    });
+
+    assert!(
+        rx.recv_timeout(Duration::from_millis(300)).is_err(),
+        "dispatch must contend on shard A while ShardGuard::all is held \
+         (a pass here means the worker never touched the shard — vacuous)"
+    );
+    drop(held);
+    rx.recv_timeout(Duration::from_secs(30)).expect(
+        "canonical-order completion after guard release — a lock-order \
+         inversion in the dispatch/completion/finalizer pipeline would \
+         deadlock here",
+    );
+    executor.join().expect("executor thread exits cleanly");
+
+    let guard = crate::runtime::sharded_state::ShardGuard::for_task_completed(&shards);
+    assert!(
+        guard
+            .tasks
+            .as_ref()
+            .is_some_and(|tt| tt.task(task_id).is_none()),
+        "ordered completion detached the record from shard A after contention"
+    );
+}
+
 /// E1.2 subsystem 3d (E1.1 rows T06/T07/T14): the ordered Lyapunov snapshot
 /// reads task counters from the dispatch table when the worker runs against
 /// an external shard — governor/adaptive/evidence surfaces must describe the
