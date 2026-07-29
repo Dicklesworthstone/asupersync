@@ -61,3 +61,28 @@ the clean median but reported, never discarded silently.
 
 Raw log: session scratchpad `run_e13_dossier.log` (6 runs, 0 failures,
 worker/dispatch lines preserved). Analysis: `analyze_e13_dossier.py`.
+
+## Addendum: workers=16 investigation round (2026-07-29 ~16:40Z)
+
+Three runs of the contended cells at `ASUPERSYNC_BENCH_WORKERS=16`
+(banner-verified in all 36 runtime constructions) landed on three
+different workers (ovh-a dedicated; hz1; vmi1149989, a small VPS where 16
+workers is heavy oversubscription). Ratios swung 0.58–1.58 with no
+consistent direction across runs or cells — the documented metastable
+oversubscription regime (br-asupersync-sched-hot-path-perf-bt4y5f.5:
+fits-in-cores vs oversubscribed discriminator) dominates the measurement
+on BOTH shapes. The single dedicated-host run was itself mixed (two
+cells ~1.5x sharded-slower, two at parity-or-win): one observation on a
+shared-slot host, not evidence.
+
+AC-3 conclusion: the no-win at workers=4 is CONFIRMED and the 16-worker
+form of the poll-side hypothesis is NOT MEASURABLE on this fleet (no
+worker pinning, one ≥16-core host, shared slots). The default-flip perf
+precondition is therefore not established and cannot be established by
+more benching here. The architecture reading stands: completion crosses
+the unified lock on both shapes (unified state remains the B/C/D
+lifecycle owner), so the shard-A win is bounded until the region/
+obligation shard conversions land. Default flip and unified-path removal
+should wait for those conversions or for a dedicated quiet ≥16-core
+measurement host; the ~12% single-producer/direct win and universal
+parity mean opt-in Sharded costs nothing meanwhile.
