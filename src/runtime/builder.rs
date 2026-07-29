@@ -6239,6 +6239,43 @@ mod tests {
             drop(runtime);
 
             let events = trace.snapshot();
+            // br-asupersync-xh4efw: per-task causal seq contract — a task's
+            // Spawn seq precedes its Complete seq on both shapes and worker
+            // counts. Spawn-effect seqs are allocated at admission (under
+            // the state lock, before injection) precisely so this holds
+            // under the deferred-dispatch race br-asupersync-7amdgn
+            // exposed; the two-pass canonicalization below tolerates any
+            // order, so this assertion is the contract's dedicated proof.
+            {
+                let mut spawn_seqs: std::collections::HashMap<String, u64> =
+                    std::collections::HashMap::new();
+                for event in &events {
+                    if let (
+                        crate::trace::TraceEventKind::Spawn,
+                        crate::trace::TraceData::Task { task, .. },
+                    ) = (&event.kind, &event.data)
+                    {
+                        spawn_seqs.insert(format!("{task:?}"), event.seq);
+                    }
+                }
+                for event in &events {
+                    if let (
+                        crate::trace::TraceEventKind::Complete,
+                        crate::trace::TraceData::Task { task, .. },
+                    ) = (&event.kind, &event.data)
+                    {
+                        if let Some(spawn_seq) = spawn_seqs.get(&format!("{task:?}")) {
+                            assert!(
+                                *spawn_seq < event.seq,
+                                "task {task:?}: Spawn seq {spawn_seq} must precede \
+                                 Complete seq {} (shape={shape:?}, \
+                                 workers={worker_threads})",
+                                event.seq
+                            );
+                        }
+                    }
+                }
+            }
             // Canonicalize task identity by spawn order: the corpus is fully
             // serialized, so spawn order is deterministic on both shapes,
             // while physical arena (slot, generation) assignment depends on

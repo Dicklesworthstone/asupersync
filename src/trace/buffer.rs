@@ -197,11 +197,24 @@ impl TraceBufferHandle {
         self.inner.total_pushed.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Returns a snapshot of buffered events in order (oldest to newest).
+    /// Returns a snapshot of buffered events in seq order (oldest to
+    /// newest).
+    ///
+    /// br-asupersync-xh4efw: insertion order and seq order can differ —
+    /// spawn-effect events allocate their seq at admission (via
+    /// [`next_seq`](Self::next_seq)) but are pushed at deferred dispatch,
+    /// after later-sequenced events may already be in the ring. The
+    /// snapshot sorts by seq so consumers observe the per-task causal
+    /// contract (a task's Spawn seq precedes its Complete seq). Seqs may
+    /// have gaps (an allocated-but-abandoned spawn effect never pushes);
+    /// seq is an ordering key, not a dense index.
     #[must_use]
     pub fn snapshot(&self) -> Vec<TraceEvent> {
         let buffer = self.inner.buffer.lock();
-        buffer.iter().cloned().collect()
+        let mut events: Vec<TraceEvent> = buffer.iter().cloned().collect();
+        drop(buffer);
+        events.sort_by_key(|event| event.seq);
+        events
     }
 
     /// Returns the current number of buffered events.

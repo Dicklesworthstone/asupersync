@@ -813,6 +813,19 @@ struct TaskSpawnEffectsPayload {
     logical_time: Option<LogicalTime>,
     budget: Budget,
     source: TaskSpawnSource,
+    /// Trace seq for the Spawn event, allocated at admission (under the
+    /// state lock, before the task is injected) rather than at dispatch
+    /// (br-asupersync-xh4efw). Deferred dispatch races the worker: the
+    /// task can complete — and record its Complete event — before the
+    /// spawning thread dispatches these effects, so a dispatch-time seq
+    /// put Complete BEFORE Spawn in seq order for the same task
+    /// (observed live, br-asupersync-7amdgn). Consumers such as the
+    /// causal-order verifier assume per-task Spawn < Complete in seq;
+    /// admission-time allocation restores that contract structurally
+    /// (the completion path allocates its seq strictly later).
+    spawn_seq: u64,
+    /// Trace seq for the optional TaskAdmitted event, same contract.
+    admitted_seq: Option<u64>,
 }
 
 impl TaskSpawnEffects {
@@ -827,6 +840,12 @@ impl TaskSpawnEffects {
         source: TaskSpawnSource,
         panic_count: &Arc<AtomicU64>,
     ) -> Self {
+        // br-asupersync-xh4efw: seqs allocated HERE — construction happens
+        // at admission under the state lock, before inject_ready makes the
+        // task runnable — so the Spawn/TaskAdmitted seqs are strictly
+        // smaller than any seq the task's own execution can allocate.
+        let spawn_seq = trace.next_seq();
+        let admitted_seq = source.emits_admitted_trace().then(|| trace.next_seq());
         Self {
             payload: Some(TaskSpawnEffectsPayload {
                 metrics,
@@ -837,6 +856,8 @@ impl TaskSpawnEffects {
                 logical_time,
                 budget,
                 source,
+                spawn_seq,
+                admitted_seq,
             }),
             panic_count: Some(Arc::clone(panic_count)),
             epoch_telemetry: None,
@@ -873,6 +894,8 @@ impl TaskSpawnEffects {
             logical_time,
             budget,
             source,
+            spawn_seq,
+            admitted_seq,
         } = payload;
 
         if let Some(epoch_telemetry) = self.epoch_telemetry.take() {
@@ -880,22 +903,26 @@ impl TaskSpawnEffects {
         }
 
         let callback_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            trace.record_event(|seq| {
-                let event = TraceEvent::spawn(seq, spawned_at, task_id, region_id);
-                match logical_time.clone() {
+            // br-asupersync-xh4efw: push with the admission-allocated seqs
+            // (see TaskSpawnEffectsPayload::spawn_seq). Buffer INSERTION
+            // order can still trail other events; seq order is the
+            // per-task causal contract and snapshot() returns seq order.
+            {
+                let event = TraceEvent::spawn(spawn_seq, spawned_at, task_id, region_id);
+                let event = match logical_time.clone() {
                     Some(logical_time) => event.with_logical_time(logical_time),
                     None => event,
-                }
-            });
+                };
+                trace.push_event(event);
+            }
             metrics.task_spawned(region_id, task_id);
-            if source.emits_admitted_trace() {
-                trace.record_event(|seq| {
-                    let event = TraceEvent::task_admitted(seq, spawned_at, task_id, region_id);
-                    match logical_time {
-                        Some(logical_time) => event.with_logical_time(logical_time),
-                        None => event,
-                    }
-                });
+            if let Some(admitted_seq) = admitted_seq {
+                let event = TraceEvent::task_admitted(admitted_seq, spawned_at, task_id, region_id);
+                let event = match logical_time {
+                    Some(logical_time) => event.with_logical_time(logical_time),
+                    None => event,
+                };
+                trace.push_event(event);
             }
 
             let _span = debug_span!(
