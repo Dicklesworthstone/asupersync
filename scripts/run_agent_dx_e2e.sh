@@ -201,10 +201,25 @@ PY
     return 0
   fi
   local tgt="${TMPDIR:-/tmp}/rch_target_agent_dx_leak"
-  if rch exec -- env CARGO_TARGET_DIR="$tgt" CARGO_INCREMENTAL=0 cargo test -p asupersync --lib display_prefixes_live_asup_codes -- --exact >"$OUT/leak_test.log" 2>&1; then
-    emit_event live_failure_chain passed "obligation-leak failure surfaces ${LEAK_CODE} (canonical test green) and resolves in registry" "$(took "$t0" "$(now_s)")"
+  # br-asupersync-763izv, two defects fixed here:
+  # (1) FAIL-OPEN: the filter used the bare test name with --exact, but the
+  #     canonical test's full name is module-qualified
+  #     (error::tests::display_prefixes_live_asup_codes). --exact therefore
+  #     matched ZERO tests, cargo exits 0 on an empty filter, and the stage
+  #     reported "canonical test green" having run nothing. The filter now
+  #     uses the full path AND the pass is gated on the harness reporting
+  #     exactly one test run — a renamed/moved test fails the stage instead
+  #     of silently emptying it.
+  # (2) OOM: the full lib-test binary link (dev-dep-unified feature graph,
+  #     see br-asupersync-z2kt29) with default test-profile debug info was
+  #     SIGKILLed on standard fleet workers at ~754s wall. Debug info off
+  #     (CARGO_PROFILE_TEST_DEBUG=0 + -C debuginfo=0, the repo's standard
+  #     test trim) fits the link on standard workers.
+  if rch exec -- env CARGO_TARGET_DIR="$tgt" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --lib error::tests::display_prefixes_live_asup_codes -- --exact >"$OUT/leak_test.log" 2>&1 \
+    && grep -q "^test result: ok. 1 passed" "$OUT/leak_test.log"; then
+    emit_event live_failure_chain passed "obligation-leak failure surfaces ${LEAK_CODE} (canonical test ran 1/1 green) and resolves in registry" "$(took "$t0" "$(now_s)")"
   else
-    emit_event live_failure_chain failed "live-emission test failed/blocked (see leak_test.log) — chain unproven" "$(took "$t0" "$(now_s)")"
+    emit_event live_failure_chain failed "live-emission test failed/blocked/zero-ran (see leak_test.log) — chain unproven" "$(took "$t0" "$(now_s)")"
   fi
 }
 
