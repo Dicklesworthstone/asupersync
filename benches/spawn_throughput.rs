@@ -51,6 +51,32 @@ use asupersync::runtime::{JoinError, RegionLimits, SpawnError, TaskHandle};
 use asupersync::types::{CancelKind, CancelReason};
 
 const SPAWNS_PER_ITER: usize = 1_000;
+
+/// E1.3 investigation axis (br-asupersync-sched-hot-path-perf-bt4y5f.2.3):
+/// runtime worker count for the shaped spawn-throughput groups. Default 4
+/// (the historical pin). The unified-vs-sharded contended dossier came
+/// back parity at 4 workers — architecturally consistent with completion
+/// still crossing the unified lock on both shapes — so the no-win
+/// investigation scales the POLLING side. Override with
+/// `ASUPERSYNC_BENCH_WORKERS`; a non-default value prints a loud banner
+/// and the criterion IDs stay unchanged, so cross-run criterion history
+/// is only comparable within one worker-count setting (the dossier
+/// records the env; within-run shape ratios remain the instrument).
+fn bench_worker_threads() -> usize {
+    let workers = std::env::var("ASUPERSYNC_BENCH_WORKERS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&workers| workers >= 1)
+        .unwrap_or(4);
+    if workers != 4 {
+        eprintln!(
+            "spawn_throughput: NON-DEFAULT worker count {workers} \
+             (ASUPERSYNC_BENCH_WORKERS); criterion history across worker \
+             counts is not comparable"
+        );
+    }
+    workers
+}
 const ADVERSARIAL_REQUESTS: usize = 256;
 /// Member count for the `JoinSet` stress row (AC5 of
 /// `br-asupersync-dx-core-api-v2-u1z5hn.5`).
@@ -555,7 +581,7 @@ fn bench_spawn_throughput(c: &mut Criterion) {
             RuntimeStateShape::Sharded,
         ),
     ] {
-        let runtime = build_runtime_shaped(mode, shape, 4);
+        let runtime = build_runtime_shaped(mode, shape, bench_worker_threads());
         let completion = Arc::new(CompletionLatch::new());
         group.bench_function(BenchmarkId::new("single_producer_latched", label), |b| {
             b.iter(|| spawn_burst_single(black_box(&runtime), &completion));
@@ -569,7 +595,7 @@ fn bench_spawn_throughput(c: &mut Criterion) {
                 "the benchmark must divide work evenly across producers"
             );
             let per_producer = SPAWNS_PER_ITER / producers;
-            let runtime = build_runtime_shaped(mode, shape, 4);
+            let runtime = build_runtime_shaped(mode, shape, bench_worker_threads());
             let completion = Arc::new(CompletionLatch::new());
             let ready = Arc::new(Barrier::new(producers + 1));
             let start = Arc::new(Barrier::new(producers + 1));
