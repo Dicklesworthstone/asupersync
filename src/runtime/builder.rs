@@ -6212,13 +6212,30 @@ mod tests {
             drop(join);
             drain_to_zero_live(&runtime);
 
-            let events = runtime
+            // Phase 4: shutdown cancellation. A pending-forever task is live
+            // when the runtime drops; both shapes must retire it through the
+            // same shutdown semantics. The trace handle is cloned first (the
+            // buffer is Arc-shared) so events emitted during shutdown are
+            // captured after the runtime is gone.
+            let trace = runtime
                 .inner
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .trace_handle()
-                .snapshot();
+                .trace_handle();
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let join = handle.spawn(async move {
+                started_tx.send(()).expect("signal pending task started");
+                std::future::pending::<()>().await;
+            });
+            started_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("pending task reached its first poll");
+            drop(join);
+            drop(handle);
+            drop(runtime);
+
+            let events = trace.snapshot();
             // Canonicalize task identity by spawn order: the corpus is fully
             // serialized, so spawn order is deterministic on both shapes,
             // while physical arena (slot, generation) assignment depends on
