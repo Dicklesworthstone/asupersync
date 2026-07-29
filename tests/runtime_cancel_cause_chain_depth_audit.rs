@@ -314,14 +314,23 @@ fn tnk8ny_hardening_logs_error_and_synthesizes_self_rooted_placeholder() {
     // poisoning bug where the root's reason was used as if it were the
     // immediate parent's.
     //
-    // KNOWN REGRESSION (br-asupersync-u5jdvw): the tnk8ny error!-level
-    // "INVARIANT VIOLATION" diagnostic was removed by the 118ayd
-    // lock-isolation commit (acd3c2ee6, no tracing under the state lock)
-    // without a post-unlock re-emission. Until that bead lands, this pin
-    // guards the surviving structural contract: the sentinel synthesis
-    // and the documented no-root-fallback rule. Restore a diagnostic pin
-    // when br-asupersync-u5jdvw re-emits it through deferred effects.
+    // br-asupersync-u5jdvw: the tnk8ny error!-level "INVARIANT VIOLATION"
+    // diagnostic — removed by the 118ayd lock-isolation commit (acd3c2ee6,
+    // no tracing under the state lock) — is re-emitted through the
+    // deferred cancel-observer path: `push_cancel_protocol_violation`
+    // rides the CancelWakeEffects token and logs at error level after the
+    // lock is released. This pin guards both halves: the deferred
+    // emission AND the structural sentinel contract below.
     let source = read("src/runtime/state.rs");
+
+    assert!(
+        source.contains("INVARIANT VIOLATION: parent region's cancel")
+            && source.contains("cancel-region-subtree parent-reason lookup"),
+        "REGRESSION (br-asupersync-u5jdvw): the missing-parent invariant \
+         diagnostic is no longer emitted. It must ride the deferred \
+         cancel-observer path (push_cancel_protocol_violation) so the \
+         operator-facing error! signal survives lock isolation.",
+    );
 
     assert!(
         source.contains("Self-rooted sentinel: ParentCancelled stamped")

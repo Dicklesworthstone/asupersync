@@ -4982,6 +4982,24 @@ impl RuntimeState {
                 let parent_reason = match region_reasons.get(&parent_id) {
                     Some(r) => r.clone(),
                     None => {
+                        // br-asupersync-u5jdvw: the tnk8ny error!-level
+                        // diagnostic was lost when the 118ayd lock
+                        // isolation removed tracing under the state lock.
+                        // Re-emit it through the deferred cancel-observer
+                        // path: this rides `wakes` and logs at error level
+                        // AFTER the lock is released, so the operator
+                        // signal is restored without reintroducing
+                        // under-lock tracing.
+                        wakes.push_cancel_protocol_violation(
+                            "cancel-region-subtree parent-reason lookup",
+                            format!(
+                                "INVARIANT VIOLATION: parent region's cancel \
+                                 reason missing from the traversal map \
+                                 (child={rid:?}, parent={parent_id:?}, \
+                                 root_target={region_id:?}); synthesizing a \
+                                 self-rooted ParentCancelled sentinel"
+                            ),
+                        );
                         // Self-rooted sentinel: ParentCancelled stamped
                         // at the missing parent's region so post-mortem
                         // inspection can find the chain break. Do NOT
