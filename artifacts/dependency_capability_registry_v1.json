@@ -4163,16 +4163,16 @@
     "snapshot_files": [
       {
         "source_path": "src/bin/asupersync.rs",
-        "line_count": 16577,
-        "sha256": "cbf0c69b27ac98921afebed685dc5d0a8855a05c87cf7eb8e28134256a1062f7",
+        "line_count": 16705,
+        "sha256": "7578b320c1e911375597851aa1821ec1ed871313545b5b159b0df7daa12761df",
         "capability_ids": [
           "CAP-CLI-ASUPERSYNC"
         ]
       },
       {
         "source_path": "src/bin/atp.rs",
-        "line_count": 12090,
-        "sha256": "cc9528cfafcb2a0dfec210ad486694c22c628ee04966dd4f6b997e2a28ce9c9e",
+        "line_count": 11912,
+        "sha256": "b77dd1e90ae1ab81bf084feac214b31cc8f17557d6f3c476dcdb1868075eee4b",
         "capability_ids": [
           "CAP-CLI-ATP"
         ]
