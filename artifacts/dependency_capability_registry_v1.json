@@ -4489,9 +4489,9 @@
   },
   "api_surface_snapshot": {
     "source_path": "artifacts/api_surface_map_v1.json",
-    "root_export_count": 298,
+    "root_export_count": 315,
     "entry_point_count": 19,
-    "semantic_sha256": "4d9a10b6fa18667baa3d42b4f04e0be8523dba85c5e3a096959d7197b4fbe616",
+    "semantic_sha256": "1251e67b8086b44f20f478810385b434e40a9bd892621db024562d1e6cbd3ab6",
     "semantic_projection": "kind TAB name TAB comma-joined-feature-flags TAB cfg NEWLINE in artifact order",
     "selector_policy": "every root export must match at least one selector",
     "selectors": [
@@ -4590,7 +4590,8 @@
         "name_prefix": "types::",
         "capability_ids": [
           "CAP-PUBLIC-API-TOPOLOGY",
-          "CAP-BROWSER-RUNTIME"
+          "CAP-BROWSER-RUNTIME",
+          "CAP-SERDE-GENERIC"
         ]
       }
     ]
@@ -4803,8 +4804,8 @@
   ],
   "diagnostic_inventory": {
     "source_path": "docs/error_codes/registry.json",
-    "expected_code_count": 43,
-    "code_projection_sha256": "d239335ceb433f40092c3a449f642466258b9e44ba309781cc63ba7609870a8a",
+    "expected_code_count": 44,
+    "code_projection_sha256": "25b402d84377e5794ff61ed2429a4f48fdbdc4fb00978de75e0c9760103de1a6",
     "capability_ids": [
       "CAP-DIAGNOSTICS"
     ],

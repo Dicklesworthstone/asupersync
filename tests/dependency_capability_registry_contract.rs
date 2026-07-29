@@ -1894,7 +1894,10 @@ fn diagnostics_are_stable_and_fully_mapped() {
         string(diagnostics, "code_projection_sha256"),
         "ASUP diagnostic code inventory drifted"
     );
-    assert_eq!(codes.len(), 43);
+    // 44 = the 43-code zxqaqs.2 seed plus ASUP-E404 (deterministic
+    // snapshot artifact versioning, br-asupersync-5z2scg.3.3, 065615aa1 —
+    // which landed without updating this pin; red at HEAD 07-26..07-29).
+    assert_eq!(codes.len(), 44);
     assert_eq!(
         strings(diagnostics, "capability_ids"),
         ["CAP-DIAGNOSTICS".to_owned()]

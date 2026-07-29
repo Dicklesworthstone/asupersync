@@ -2,7 +2,7 @@
   "counts": {
     "entry_points": 19,
     "modules": 120,
-    "root_exports": 298
+    "root_exports": 315
   },
   "entry_points": [
     {
@@ -1004,7 +1004,7 @@
         "proc-macros"
       ],
       "kind": "module",
-      "line": 451,
+      "line": 456,
       "name": "proc_macros",
       "signature": "pub mod proc_macros",
       "stability": "feature-gated"
@@ -2333,7 +2333,7 @@
         "proc-macros"
       ],
       "kind": "module",
-      "line": 451,
+      "line": 456,
       "name": "proc_macros",
       "signature": "pub mod proc_macros",
       "stability": "feature-gated"
@@ -2854,7 +2854,31 @@
         "proc-macros"
       ],
       "kind": "reexport",
-      "line": 447,
+      "line": 450,
+      "name": "asupersync_macros::ProtoMessage",
+      "signature": "pub use asupersync_macros::ProtoMessage",
+      "stability": "feature-gated"
+    },
+    {
+      "cfg": "#[cfg(feature = \"proc-macros\")]",
+      "doc": "",
+      "feature_flags": [
+        "proc-macros"
+      ],
+      "kind": "reexport",
+      "line": 450,
+      "name": "asupersync_macros::ProtoOneof",
+      "signature": "pub use asupersync_macros::ProtoOneof",
+      "stability": "feature-gated"
+    },
+    {
+      "cfg": "#[cfg(feature = \"proc-macros\")]",
+      "doc": "",
+      "feature_flags": [
+        "proc-macros"
+      ],
+      "kind": "reexport",
+      "line": 450,
       "name": "asupersync_macros::join",
       "signature": "pub use asupersync_macros::join",
       "stability": "feature-gated"
@@ -2866,7 +2890,7 @@
         "proc-macros"
       ],
       "kind": "reexport",
-      "line": 447,
+      "line": 450,
       "name": "asupersync_macros::join_all",
       "signature": "pub use asupersync_macros::join_all",
       "stability": "feature-gated"
@@ -2878,7 +2902,7 @@
         "proc-macros"
       ],
       "kind": "reexport",
-      "line": 447,
+      "line": 450,
       "name": "asupersync_macros::lab_test",
       "signature": "pub use asupersync_macros::lab_test",
       "stability": "feature-gated"
@@ -2890,7 +2914,7 @@
         "proc-macros"
       ],
       "kind": "reexport",
-      "line": 447,
+      "line": 450,
       "name": "asupersync_macros::main",
       "signature": "pub use asupersync_macros::main",
       "stability": "feature-gated"
@@ -2902,7 +2926,7 @@
         "proc-macros"
       ],
       "kind": "reexport",
-      "line": 447,
+      "line": 450,
       "name": "asupersync_macros::race",
       "signature": "pub use asupersync_macros::race",
       "stability": "feature-gated"
@@ -2914,7 +2938,7 @@
         "proc-macros"
       ],
       "kind": "reexport",
-      "line": 447,
+      "line": 450,
       "name": "asupersync_macros::scope",
       "signature": "pub use asupersync_macros::scope",
       "stability": "feature-gated"
@@ -2926,7 +2950,7 @@
         "proc-macros"
       ],
       "kind": "reexport",
-      "line": 447,
+      "line": 450,
       "name": "asupersync_macros::select",
       "signature": "pub use asupersync_macros::select",
       "stability": "feature-gated"
@@ -2938,7 +2962,7 @@
         "proc-macros"
       ],
       "kind": "reexport",
-      "line": 447,
+      "line": 450,
       "name": "asupersync_macros::spawn",
       "signature": "pub use asupersync_macros::spawn",
       "stability": "feature-gated"
@@ -2950,7 +2974,7 @@
         "proc-macros"
       ],
       "kind": "reexport",
-      "line": 447,
+      "line": 450,
       "name": "asupersync_macros::test",
       "signature": "pub use asupersync_macros::test",
       "stability": "feature-gated"
@@ -3981,6 +4005,26 @@
       "feature_flags": [],
       "kind": "reexport",
       "line": 416,
+      "name": "types::DeserializationError",
+      "signature": "pub use types::DeserializationError",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 416,
+      "name": "types::Deserializer",
+      "signature": "pub use types::Deserializer",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 416,
       "name": "types::NextjsBootstrapPhase",
       "signature": "pub use types::NextjsBootstrapPhase",
       "stability": "core"
@@ -4141,6 +4185,46 @@
       "feature_flags": [],
       "kind": "reexport",
       "line": 416,
+      "name": "types::SerdeCodec",
+      "signature": "pub use types::SerdeCodec",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 416,
+      "name": "types::SerializationError",
+      "signature": "pub use types::SerializationError",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 416,
+      "name": "types::SerializationFormat",
+      "signature": "pub use types::SerializationFormat",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 416,
+      "name": "types::Serializer",
+      "signature": "pub use types::Serializer",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 416,
       "name": "types::Severity",
       "signature": "pub use types::Severity",
       "stability": "core"
@@ -4201,6 +4285,36 @@
       "feature_flags": [],
       "kind": "reexport",
       "line": 416,
+      "name": "types::TYPED_SYMBOL_HEADER_LEN",
+      "signature": "pub use types::TYPED_SYMBOL_HEADER_LEN",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 416,
+      "name": "types::TYPED_SYMBOL_MAGIC",
+      "signature": "pub use types::TYPED_SYMBOL_MAGIC",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 416,
+      "name": "types::TYPED_SYMBOL_VERSION",
+      "signature": "pub use types::TYPED_SYMBOL_VERSION",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 416,
       "name": "types::TaskId",
       "signature": "pub use types::TaskId",
       "stability": "core"
@@ -4223,6 +4337,66 @@
       "line": 416,
       "name": "types::TransitionTaskState",
       "signature": "pub use types::TransitionTaskState",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 416,
+      "name": "types::TypeDescriptor",
+      "signature": "pub use types::TypeDescriptor",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 416,
+      "name": "types::TypeMismatchError",
+      "signature": "pub use types::TypeMismatchError",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 416,
+      "name": "types::TypeRegistry",
+      "signature": "pub use types::TypeRegistry",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 416,
+      "name": "types::TypedDecoder",
+      "signature": "pub use types::TypedDecoder",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 416,
+      "name": "types::TypedEncoder",
+      "signature": "pub use types::TypedEncoder",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 416,
+      "name": "types::TypedSymbol",
+      "signature": "pub use types::TypedSymbol",
       "stability": "core"
     },
     {
