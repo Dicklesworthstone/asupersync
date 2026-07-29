@@ -8,6 +8,10 @@
 //! `SpawnAdmissionMode::Mailbox` (lock-free enqueue, worker-side batch
 //! admission). The contended case is the one the mailbox exists for: the
 //! direct path serializes every producer on the `RuntimeState` lock.
+//! The spawn-throughput group additionally crosses the admission axis with
+//! `RuntimeStateShape` (`*_sharded` rows dispatch against ShardedState's
+//! shard-A table) — the E1.3 before/after evidence surface for the
+//! default-flip decision (br-asupersync-sched-hot-path-perf-bt4y5f.2.3).
 //! The join-completion group measures the caller-visible cost of collecting
 //! completed [`TaskHandle`](asupersync::runtime::TaskHandle) values in the same
 //! deterministic batch shape.
@@ -42,7 +46,7 @@ use std::time::{Duration, Instant};
 use asupersync::Cx;
 use asupersync::combinator::JoinSet;
 use asupersync::runtime::builder::{Runtime, RuntimeBuilder, RuntimeHandle};
-use asupersync::runtime::config::SpawnAdmissionMode;
+use asupersync::runtime::config::{RuntimeStateShape, SpawnAdmissionMode};
 use asupersync::runtime::{JoinError, RegionLimits, SpawnError, TaskHandle};
 use asupersync::types::{CancelKind, CancelReason};
 
@@ -120,9 +124,25 @@ impl Drop for ProducerStopGuard<'_> {
 }
 
 fn build_runtime(mode: SpawnAdmissionMode, workers: usize) -> Runtime {
+    build_runtime_shaped(mode, RuntimeStateShape::Unified, workers)
+}
+
+/// E1.3 (br-asupersync-sched-hot-path-perf-bt4y5f.2.3): runtime
+/// construction with an explicit backing-state shape, so the contended
+/// spawn groups can compare `Unified` against `Sharded` (workers
+/// dispatching against ShardedState's shard-A table) on identical
+/// workloads. The default-shape helper above keeps every group that is
+/// not part of the shape comparison byte-identical to its tracked
+/// history.
+fn build_runtime_shaped(
+    mode: SpawnAdmissionMode,
+    shape: RuntimeStateShape,
+    workers: usize,
+) -> Runtime {
     RuntimeBuilder::new()
         .worker_threads(workers)
         .spawn_admission(mode)
+        .with_sharded_state(matches!(shape, RuntimeStateShape::Sharded))
         .build()
         .expect("build benchmark runtime")
 }
@@ -507,11 +527,35 @@ fn bench_spawn_throughput(c: &mut Criterion) {
     group.throughput(Throughput::Elements(SPAWNS_PER_ITER as u64));
     group.sample_size(20);
 
-    for (label, mode) in [
-        ("direct", SpawnAdmissionMode::Direct),
-        ("mailbox", SpawnAdmissionMode::Mailbox),
+    // E1.3 (br-asupersync-sched-hot-path-perf-bt4y5f.2.3): the admission
+    // axis crosses the backing-state shape. The unified labels keep their
+    // historical names so tracked comparisons stay valid; the `_sharded`
+    // rows are the before/after evidence for the default-flip decision —
+    // the contended multi-producer cells are exactly where shard-A
+    // dispatch is supposed to relieve the unified-lock serialization.
+    for (label, mode, shape) in [
+        (
+            "direct",
+            SpawnAdmissionMode::Direct,
+            RuntimeStateShape::Unified,
+        ),
+        (
+            "mailbox",
+            SpawnAdmissionMode::Mailbox,
+            RuntimeStateShape::Unified,
+        ),
+        (
+            "direct_sharded",
+            SpawnAdmissionMode::Direct,
+            RuntimeStateShape::Sharded,
+        ),
+        (
+            "mailbox_sharded",
+            SpawnAdmissionMode::Mailbox,
+            RuntimeStateShape::Sharded,
+        ),
     ] {
-        let runtime = build_runtime(mode, 4);
+        let runtime = build_runtime_shaped(mode, shape, 4);
         let completion = Arc::new(CompletionLatch::new());
         group.bench_function(BenchmarkId::new("single_producer_latched", label), |b| {
             b.iter(|| spawn_burst_single(black_box(&runtime), &completion));
@@ -525,7 +569,7 @@ fn bench_spawn_throughput(c: &mut Criterion) {
                 "the benchmark must divide work evenly across producers"
             );
             let per_producer = SPAWNS_PER_ITER / producers;
-            let runtime = build_runtime(mode, 4);
+            let runtime = build_runtime_shaped(mode, shape, 4);
             let completion = Arc::new(CompletionLatch::new());
             let ready = Arc::new(Barrier::new(producers + 1));
             let start = Arc::new(Barrier::new(producers + 1));
