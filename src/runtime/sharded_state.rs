@@ -152,7 +152,16 @@ pub struct ShardedState {
     // ── Shard B: Regions (WARM) ────────────────────────────────────────
     /// Region table: ownership tree, child counts, state transitions.
     /// Locked for spawn, region create/close, advance_region_state.
-    pub regions: ContendedMutex<RegionTable>,
+    ///
+    /// Arc-shared (E2 subsystem 1, br-asupersync-m9wsza, mirroring the
+    /// 3c shard-A precedent): the B/C lifecycle conversion routes
+    /// region operations through external-table seams the same way E1.2
+    /// routed task operations, so shard B lives behind an `Arc` and
+    /// [`Self::region_shard_handle`] hands lifecycle seams an alias of
+    /// this exact shard. `ShardGuard` acquisition is unchanged — guards
+    /// lock through the `Arc` deref, so seam-routed region work and
+    /// guard-ordered multi-shard work contend on the same mutex.
+    pub regions: Arc<ContendedMutex<RegionTable>>,
 
     /// The root region ID (set once at initialization).
     root_region: AtomicU64,
@@ -160,7 +169,11 @@ pub struct ShardedState {
     // ── Shard C: Obligations (WARM) ────────────────────────────────────
     /// Obligation table: resource tracking and commit/abort.
     /// Locked for obligation create/commit/abort/leak.
-    pub obligations: ContendedMutex<ObligationTable>,
+    ///
+    /// Arc-shared (E2 subsystem 1, br-asupersync-m9wsza): same alias
+    /// seam as shard B above; [`Self::obligation_shard_handle`] is the
+    /// accessor.
+    pub obligations: Arc<ContendedMutex<ObligationTable>>,
 
     /// Cumulative count of obligation leaks (for escalation threshold).
     /// Using AtomicU64 for lock-free increment.
@@ -223,9 +236,9 @@ impl ShardedState {
     ) -> Self {
         Self {
             tasks: Arc::new(ContendedMutex::new("tasks", TaskTable::new())),
-            regions: ContendedMutex::new("regions", RegionTable::new()),
+            regions: Arc::new(ContendedMutex::new("regions", RegionTable::new())),
             root_region: AtomicU64::new(ROOT_REGION_NONE),
-            obligations: ContendedMutex::new("obligations", ObligationTable::new()),
+            obligations: Arc::new(ContendedMutex::new("obligations", ObligationTable::new())),
             leak_count: AtomicU64::new(0),
             trace,
             metrics,
@@ -292,6 +305,30 @@ impl ShardedState {
     #[must_use]
     pub fn task_shard_handle(&self) -> Arc<ContendedMutex<TaskTable>> {
         Arc::clone(&self.tasks)
+    }
+
+    /// Returns an alias of shard B — the region table — for external-seam
+    /// routing (E2 subsystem 1, br-asupersync-m9wsza).
+    ///
+    /// The returned `Arc` is the SAME shard the [`ShardGuard`] builders
+    /// lock: region lifecycle work routed through a seam holding this
+    /// handle and guard-ordered multi-shard work contend on one mutex,
+    /// exactly as [`Self::task_shard_handle`] established for shard A.
+    #[inline]
+    #[must_use]
+    pub fn region_shard_handle(&self) -> Arc<ContendedMutex<RegionTable>> {
+        Arc::clone(&self.regions)
+    }
+
+    /// Returns an alias of shard C — the obligation table — for
+    /// external-seam routing (E2 subsystem 1, br-asupersync-m9wsza).
+    ///
+    /// Same contract as [`Self::region_shard_handle`], for the
+    /// obligation shard.
+    #[inline]
+    #[must_use]
+    pub fn obligation_shard_handle(&self) -> Arc<ContendedMutex<ObligationTable>> {
+        Arc::clone(&self.obligations)
     }
 
     /// Returns a clone of the trace handle.
