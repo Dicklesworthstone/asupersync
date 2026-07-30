@@ -1097,6 +1097,16 @@ impl AdmissionRegionTarget<'_> {
             Self::External(guard) => guard,
         }
     }
+
+    /// Mutable variant of [`Self::resolve_ref`], for the arena-removal op
+    /// on region close in the advance walk (E2 S4b, br-asupersync-m9wsza).
+    #[inline]
+    fn resolve_mut<'s>(&'s mut self, embedded: &'s mut RegionTable) -> &'s mut RegionTable {
+        match self {
+            Self::Embedded => embedded,
+            Self::External(guard) => guard,
+        }
+    }
 }
 
 /// Pre-settle reads for [`RuntimeState::commit_obligation`] /
@@ -1151,6 +1161,17 @@ impl CompletionObligationTarget<'_> {
     /// around each table operation.
     #[inline]
     fn resolve_ref<'s>(&'s self, embedded: &'s ObligationTable) -> &'s ObligationTable {
+        match self {
+            Self::Embedded => embedded,
+            Self::External(guard) => guard,
+        }
+    }
+
+    /// Mutable variant of [`Self::resolve_ref`], for the region-finalized
+    /// fence the advance walk stamps on region close (E2 S4b,
+    /// br-asupersync-m9wsza).
+    #[inline]
+    fn resolve_mut<'s>(&'s mut self, embedded: &'s mut ObligationTable) -> &'s mut ObligationTable {
         match self {
             Self::Embedded => embedded,
             Self::External(guard) => guard,
@@ -6828,12 +6849,49 @@ impl RuntimeState {
     /// self-calls would deadlock on non-reentrant mutexes).
     #[allow(clippy::too_many_lines)]
     pub fn advance_region_state(&mut self, initial_region: RegionId) {
+        self.advance_region_state_in(
+            &mut AdmissionRegionTarget::Embedded,
+            &AdmissionTaskTarget::Embedded,
+            &mut CompletionObligationTarget::Embedded,
+            initial_region,
+        );
+    }
+
+    /// Core of [`Self::advance_region_state`] against explicit table targets
+    /// (E2 S4b, br-asupersync-m9wsza). The region-close progression walk is
+    /// a Shard B surface (record transitions, child unlink, arena removal)
+    /// with one Shard A read (the finalize gate's per-task terminal scan),
+    /// one Shard C mutation (the region-finalized fence), and the
+    /// Finalizing-arm leak path's C reads — all resolved through the
+    /// targets, re-resolving per operation so `self` stays usable between
+    /// table ops. Everything else is unified residue until S5 (validator,
+    /// read-biased snapshot cache, finalizing/finalizer maps and history,
+    /// recently-closed bookkeeping, epoch, trace, metrics) and stays on
+    /// `self`.
+    ///
+    /// REACHABILITY (same law as the admission seams): every caller passes
+    /// `Embedded` today. Region records are still minted into the unified
+    /// embedded table, so routing this walk at ShardedState's shards before
+    /// minting converts would walk an empty table. The `External` arms
+    /// become reachable in the minting slices plus the S4c wiring that runs
+    /// the walk under `ShardGuard::for_task_completed`-ordered guards with
+    /// effects buffered past release.
+    fn advance_region_state_in(
+        &mut self,
+        regions: &mut AdmissionRegionTarget<'_>,
+        tasks: &AdmissionTaskTarget<'_>,
+        obligations: &mut CompletionObligationTarget<'_>,
+        initial_region: RegionId,
+    ) {
         let mut current = Some(initial_region);
 
         while let Some(region_id) = current.take() {
-            // Get state and parent without holding a long borrow on self.regions
+            // Get state and parent without holding a long borrow on the table
             let (state, parent) = {
-                let Some(region) = self.regions.get(region_id.arena_index()) else {
+                let Some(region) = regions
+                    .resolve_ref(&self.regions)
+                    .get(region_id.arena_index())
+                else {
                     break;
                 };
                 (region.state(), region.parent)
@@ -6846,8 +6904,13 @@ impl RuntimeState {
                     // finalization. Non-quiescent Closing/Draining regions stay put while
                     // task cleanup, child close propagation, or finalizer scheduling makes
                     // progress.
-                    let transition_to_finalizing = if self.can_region_finalize(region_id) {
-                        let Some(region) = self.regions.get(region_id.arena_index()) else {
+                    let transition_to_finalizing = if self
+                        .can_region_finalize_in(&*regions, tasks, region_id)
+                    {
+                        let Some(region) = regions
+                            .resolve_ref(&self.regions)
+                            .get(region_id.arena_index())
+                        else {
                             break;
                         };
 
@@ -6909,7 +6972,10 @@ impl RuntimeState {
                     };
 
                     // Check if region needs to transition to Draining (has children but is Closing)
-                    let Some(region) = self.regions.get(region_id.arena_index()) else {
+                    let Some(region) = regions
+                        .resolve_ref(&self.regions)
+                        .get(region_id.arena_index())
+                    else {
                         break;
                     };
                     if region.child_count() > 0
@@ -6950,8 +7016,8 @@ impl RuntimeState {
                     // destructor. Never invoke a user finalizer here. The
                     // scheduler drains the top LIFO entry into a masked task,
                     // then polls it only after releasing the state mutex.
-                    if self
-                        .regions
+                    if regions
+                        .resolve_ref(&self.regions)
                         .get(region_id.arena_index())
                         .is_some_and(|region| !region.finalizers_empty())
                     {
@@ -6963,16 +7029,19 @@ impl RuntimeState {
                     // abort or leak-resolve orphaned obligations and unlink the task from the
                     // region. Finalizing leak detection must therefore wait for full task
                     // cleanup, not just a terminal outcome.
-                    if let Some(region) = self.regions.get(region_id.arena_index()) {
+                    if let Some(region) = regions
+                        .resolve_ref(&self.regions)
+                        .get(region_id.arena_index())
+                    {
                         if region.pending_obligations() > 0 {
                             if region.task_count() == 0 {
-                                let obligations = CompletionObligationTarget::Embedded;
-                                let leaks = self.collect_obligation_leaks(&obligations, |record| {
-                                    record.region == region_id
-                                });
+                                let leaks = self
+                                    .collect_obligation_leaks(&*obligations, |record| {
+                                        record.region == region_id
+                                    });
                                 if !leaks.is_empty() {
                                     self.handle_obligation_leaks(
-                                        &obligations,
+                                        &*obligations,
                                         ObligationLeakError {
                                             task_id: None,
                                             region_id,
@@ -6986,13 +7055,16 @@ impl RuntimeState {
                     }
 
                     // Check if we can complete close
-                    if self.can_region_complete_close(region_id) {
+                    if self.can_region_complete_close_in(&*regions, region_id) {
                         // Every registered finalizer emits its own completion
                         // transition when it actually retires. Closing a region
                         // before that accounting reaches Finalized is a protocol
                         // invariant violation, not an implicit extra completion.
                         let closed = {
-                            let Some(region) = self.regions.get(region_id.arena_index()) else {
+                            let Some(region) = regions
+                                .resolve_ref(&self.regions)
+                                .get(region_id.arena_index())
+                            else {
                                 break;
                             };
                             let validation_result = {
@@ -7043,7 +7115,9 @@ impl RuntimeState {
 
                             // Mark region as finalized in obligation table to prevent
                             // drop-late obligation commits/aborts after region close
-                            self.obligations.mark_region_finalized(region_id);
+                            obligations
+                                .resolve_mut(&mut self.obligations)
+                                .mark_region_finalized(region_id);
 
                             // Emit RegionCloseComplete trace event (pairs
                             // with RegionCloseBegin emitted in cancel_request).
@@ -7061,7 +7135,10 @@ impl RuntimeState {
                             });
 
                             // Emit region_closed metric with lifetime.
-                            if let Some(region) = self.regions.get(region_id.arena_index()) {
+                            if let Some(region) = regions
+                                .resolve_ref(&self.regions)
+                                .get(region_id.arena_index())
+                            {
                                 let lifetime =
                                     Duration::from_nanos(now.duration_since(region.created_at()));
                                 self.metrics.region_closed(region_id, lifetime);
@@ -7070,8 +7147,9 @@ impl RuntimeState {
 
                             if let Some(parent_id) = parent {
                                 // Remove from parent
-                                if let Some(parent_record) =
-                                    self.regions.get(parent_id.arena_index())
+                                if let Some(parent_record) = regions
+                                    .resolve_ref(&self.regions)
+                                    .get(parent_id.arena_index())
                                 {
                                     parent_record.remove_child(region_id);
                                 }
@@ -7079,8 +7157,8 @@ impl RuntimeState {
                                 current = Some(parent_id);
                             }
 
-                            let close_outcome = self
-                                .regions
+                            let close_outcome = regions
+                                .resolve_ref(&self.regions)
                                 .get(region_id.arena_index())
                                 .and_then(|region| region.close_outcome());
                             if self.root_region == Some(region_id) {
@@ -7088,7 +7166,9 @@ impl RuntimeState {
                             }
                             self.remember_closed_region(region_id, close_outcome);
                             // Cleanup: Remove the closed region from the arena to prevent memory leaks
-                            self.regions.remove(region_id.arena_index());
+                            regions
+                                .resolve_mut(&mut self.regions)
+                                .remove(region_id.arena_index());
                             // Drop the region's cancel-protocol state machine too;
                             // otherwise `region_machines` leaks one entry per
                             // region ever opened
