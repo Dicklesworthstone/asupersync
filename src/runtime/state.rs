@@ -1126,6 +1126,56 @@ struct ObligationSettleReads {
     holder_logical_time: Option<LogicalTime>,
 }
 
+/// One deferred-effect payload from an obligation settle
+/// (E2 S4c, br-asupersync-m9wsza): a validator, instrumentation, or
+/// debt-monitor dispatch that must never run while a shard guard is held.
+/// The unified wrappers dispatch each payload inline at its historical
+/// position; the guard-held completion arm buffers them for post-release
+/// dispatch — the twin of [`RegionAdvanceEffect`].
+pub(crate) enum ObligationSettleEffect {
+    /// Cancel-protocol validator transition + verdict logging for a settle
+    /// attempt whose record existed at entry.
+    SettleValidation {
+        obligation: ObligationId,
+        event: ObligationEvent,
+        context: ObligationContext,
+        op_label: &'static str,
+    },
+    /// Span/log, trace event, metrics, and epoch advance for a committed
+    /// obligation.
+    Commit {
+        info: ObligationCommitInfo,
+        now: Time,
+        holder_logical_time: Option<LogicalTime>,
+    },
+    /// Span/log, trace event, metrics, debt-monitor entry, and epoch
+    /// advance for an aborted obligation.
+    Abort {
+        info: ObligationAbortInfo,
+        now: Time,
+        holder_logical_time: Option<LogicalTime>,
+    },
+    /// Trace event, metrics, and response-gated error log for a leaked
+    /// obligation.
+    Leak {
+        info: ObligationLeakInfo,
+        now: Time,
+        holder_logical_time: Option<LogicalTime>,
+    },
+}
+
+/// Sink for [`ObligationSettleEffect`] payloads (E2 S4c,
+/// br-asupersync-m9wsza) — the twin of [`RegionAdvanceEffectsSink`].
+pub(crate) enum ObligationSettleEffectsSink<'b> {
+    /// Dispatch each effect inline at its historical position (unified
+    /// shape — behavior-identical to the pre-seam wrappers).
+    Inline,
+    /// Accumulate payloads for dispatch after shard-guard release
+    /// (sharded shape; wired by the S4c completion arm).
+    #[allow(dead_code)]
+    Buffered(&'b mut Vec<ObligationSettleEffect>),
+}
+
 /// Obligation-table target for the completion C-phases
 /// (E2 S3b, br-asupersync-m9wsza) — the shard-C twin of
 /// [`AdmissionRegionTarget`].
@@ -4655,12 +4705,9 @@ impl RuntimeState {
         &self,
         obligation: ObligationId,
         event: ObligationEvent,
-        context: Option<&ObligationContext>,
+        context: &ObligationContext,
         op_label: &'static str,
     ) {
-        let Some(context) = context else {
-            return;
-        };
         let validation_result =
             self.validate_obligation_protocol_transition(obligation, event, context);
         if matches!(
@@ -4669,6 +4716,58 @@ impl RuntimeState {
         ) {
             log_cancel_protocol_violation(op_label, &validation_result);
             // Continue with the settle but log the violation
+        }
+    }
+
+    /// Dispatches one obligation-settle effect payload (E2 S4c,
+    /// br-asupersync-m9wsza). The unified wrappers route every inline
+    /// dispatch through this method, so the S4c buffered drain replays
+    /// payloads through exactly the code the embedded shape exercises.
+    fn dispatch_obligation_settle_effect(&mut self, effect: ObligationSettleEffect) {
+        match effect {
+            ObligationSettleEffect::SettleValidation {
+                obligation,
+                event,
+                context,
+                op_label,
+            } => {
+                self.dispatch_obligation_settle_validation(obligation, event, &context, op_label);
+            }
+            ObligationSettleEffect::Commit {
+                info,
+                now,
+                holder_logical_time,
+            } => {
+                self.dispatch_obligation_commit_effects(&info, now, holder_logical_time);
+            }
+            ObligationSettleEffect::Abort {
+                info,
+                now,
+                holder_logical_time,
+            } => {
+                self.dispatch_obligation_abort_effects(&info, now, holder_logical_time);
+            }
+            ObligationSettleEffect::Leak {
+                info,
+                now,
+                holder_logical_time,
+            } => {
+                self.dispatch_obligation_leak_effects(&info, now, holder_logical_time);
+            }
+        }
+    }
+
+    /// Routes an obligation-settle effect to its sink: inline dispatch at
+    /// the historical position (unified shape) or buffered for post-release
+    /// dispatch (sharded shape) — E2 S4c.
+    fn emit_obligation_settle_effect(
+        &mut self,
+        sink: &mut ObligationSettleEffectsSink<'_>,
+        effect: ObligationSettleEffect,
+    ) {
+        match sink {
+            ObligationSettleEffectsSink::Inline => self.dispatch_obligation_settle_effect(effect),
+            ObligationSettleEffectsSink::Buffered(buffer) => buffer.push(effect),
         }
     }
 
@@ -4730,16 +4829,31 @@ impl RuntimeState {
         let reads = Self::settle_obligation_reads(&self.obligations, &self.tasks, obligation);
         let result = self.obligations.commit(obligation, now);
 
-        self.dispatch_obligation_settle_validation(
-            obligation,
-            ObligationEvent::Commit,
-            reads.validator_context.as_ref(),
-            "obligation commit",
-        );
+        let mut effects = ObligationSettleEffectsSink::Inline;
+        if let Some(context) = reads.validator_context {
+            self.emit_obligation_settle_effect(
+                &mut effects,
+                ObligationSettleEffect::SettleValidation {
+                    obligation,
+                    event: ObligationEvent::Commit,
+                    context,
+                    op_label: "obligation commit",
+                },
+            );
+        }
         let info = result?;
-        self.dispatch_obligation_commit_effects(&info, now, reads.holder_logical_time);
+        let region = info.region;
+        let duration = info.duration;
+        self.emit_obligation_settle_effect(
+            &mut effects,
+            ObligationSettleEffect::Commit {
+                info,
+                now,
+                holder_logical_time: reads.holder_logical_time,
+            },
+        );
 
-        if let Some(region_record) = self.regions.get(info.region.arena_index()) {
+        if let Some(region_record) = self.regions.get(region.arena_index()) {
             region_record.resolve_obligation();
         }
 
@@ -4752,9 +4866,9 @@ impl RuntimeState {
             .lock()
             .remove_obligation(obligation);
 
-        self.advance_region_state(info.region);
+        self.advance_region_state(region);
 
-        Ok(info.duration)
+        Ok(duration)
     }
 
     /// Deferred instrumentation effects for an aborted obligation: span/log,
@@ -4832,18 +4946,33 @@ impl RuntimeState {
         let reads = Self::settle_obligation_reads(&self.obligations, &self.tasks, obligation);
         let result = self.obligations.abort(obligation, now, reason);
 
-        self.dispatch_obligation_settle_validation(
-            obligation,
-            ObligationEvent::Abort {
-                reason: format!("{reason:?}"),
-            },
-            reads.validator_context.as_ref(),
-            "obligation abort",
-        );
+        let mut effects = ObligationSettleEffectsSink::Inline;
+        if let Some(context) = reads.validator_context {
+            self.emit_obligation_settle_effect(
+                &mut effects,
+                ObligationSettleEffect::SettleValidation {
+                    obligation,
+                    event: ObligationEvent::Abort {
+                        reason: format!("{reason:?}"),
+                    },
+                    context,
+                    op_label: "obligation abort",
+                },
+            );
+        }
         let info = result?;
-        self.dispatch_obligation_abort_effects(&info, now, reads.holder_logical_time);
+        let region = info.region;
+        let duration = info.duration;
+        self.emit_obligation_settle_effect(
+            &mut effects,
+            ObligationSettleEffect::Abort {
+                info,
+                now,
+                holder_logical_time: reads.holder_logical_time,
+            },
+        );
 
-        if let Some(region_record) = self.regions.get(info.region.arena_index()) {
+        if let Some(region_record) = self.regions.get(region.arena_index()) {
             region_record.resolve_obligation();
         }
 
@@ -4858,12 +4987,12 @@ impl RuntimeState {
         // Finalizers run by advance_region_state could acquire new obligations, violating
         // the quiescence invariant and triggering recursive leak handling.
         if self.handling_leaks > 0 {
-            self.deferred_region_advancements.insert(info.region);
+            self.deferred_region_advancements.insert(region);
         } else {
-            self.advance_region_state(info.region);
+            self.advance_region_state(region);
         }
 
-        Ok(info.duration)
+        Ok(duration)
     }
 
     /// Marks an obligation as leaked and emits a trace + error event.
@@ -4879,16 +5008,25 @@ impl RuntimeState {
         // cancel-protocol validator transition to preserve).
         let info = self.obligations.mark_leaked(obligation, now)?;
         let holder_logical_time = Self::logical_time_from_table(&self.tasks, info.holder);
+        let region = info.region;
+        let duration = info.duration;
 
-        self.dispatch_obligation_leak_effects(&info, now, holder_logical_time);
+        self.emit_obligation_settle_effect(
+            &mut ObligationSettleEffectsSink::Inline,
+            ObligationSettleEffect::Leak {
+                info,
+                now,
+                holder_logical_time,
+            },
+        );
 
-        if let Some(region_record) = self.regions.get(info.region.arena_index()) {
+        if let Some(region_record) = self.regions.get(region.arena_index()) {
             region_record.resolve_obligation();
         }
 
-        self.advance_region_state(info.region);
+        self.advance_region_state(region);
 
-        Ok(info.duration)
+        Ok(duration)
     }
 
     /// Deferred instrumentation effects for a leaked obligation: trace
