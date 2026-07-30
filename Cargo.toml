@@ -489,8 +489,11 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_IpHelper",
     "Win32_Networking_WinSock",
+    "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
     "Win32_System_Threading",
 ] }
 
@@ -530,7 +533,7 @@ web-sys = { version = "0.3", features = [
 polling = "3.11"
 socket2 = { version = "0.6", features = ["all"] }
 libc = "0.2"
-nix = { version = "0.31", features = ["fs", "net", "poll", "signal", "socket", "uio", "user"] }
+nix = { version = "0.31", features = ["fs", "net", "poll", "process", "signal", "socket", "uio", "user"] }
 signal-hook = "0.4"
 aes-gcm = "0.11"
 chacha20poly1305 = "0.11"
