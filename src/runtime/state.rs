@@ -37,7 +37,10 @@ use crate::runtime::resource_monitor::{
 };
 use crate::runtime::stored_task::{LocalStoredTask, StoredTask};
 use crate::runtime::task_handle::JoinError;
-use crate::runtime::{BlockingPoolHandle, ObligationTable, RegionTable, TaskTable};
+use crate::runtime::{
+    BlockingPoolHandle, ObligationAbortInfo, ObligationCommitInfo, ObligationTable, RegionTable,
+    TaskTable,
+};
 use crate::time::TimerDriverHandle;
 use crate::trace::distributed::{LogicalClockMode, LogicalTime};
 use crate::trace::event::{TraceData, TraceEventKind};
@@ -1094,6 +1097,23 @@ impl AdmissionRegionTarget<'_> {
             Self::External(guard) => guard,
         }
     }
+}
+
+/// Pre-settle reads for [`RuntimeState::commit_obligation`] /
+/// [`RuntimeState::abort_obligation`], captured by
+/// [`RuntimeState::settle_obligation_reads`] against explicit tables so
+/// sharded-shape callers can take them under held shard guards and dispatch
+/// the deferred settle effects after release (br-asupersync-m9wsza / E2 S3a).
+struct ObligationSettleReads {
+    /// Cancel-protocol validator context from the pre-settle record; present
+    /// whenever the record existed at entry, matching the historical
+    /// validate-if-present behavior.
+    validator_context: Option<ObligationContext>,
+    /// The holder task's logical tick, read from the task table that actually
+    /// owns the record. The embedded wrappers pass `RuntimeState::tasks`;
+    /// external-table callers pass the shard-A table, fixing the sharded-shape
+    /// divergence where obligation trace events silently lost logical time.
+    holder_logical_time: Option<LogicalTime>,
 }
 
 /// Outcome of [`RuntimeState::admit_local_spawn_request_in`]
@@ -4034,7 +4054,22 @@ impl RuntimeState {
     where
         F: FnOnce(u64) -> TraceEvent,
     {
-        let logical_time = self.logical_time_for_task(task_id);
+        self.record_task_trace_event_with_logical_time(self.logical_time_for_task(task_id), build);
+    }
+
+    /// Core of [`Self::record_task_trace_event`] with the task's logical time
+    /// supplied by the caller. Deferred-effect dispatch paths must read the
+    /// logical tick from the table that actually holds the task record
+    /// (br-asupersync-m9wsza / E2 S3a), mirroring
+    /// [`Self::prepare_task_spawn_effects_with_logical_time`]; the wrapper
+    /// above preserves the historical read from `self.tasks`.
+    fn record_task_trace_event_with_logical_time<F>(
+        &self,
+        logical_time: Option<LogicalTime>,
+        build: F,
+    ) where
+        F: FnOnce(u64) -> TraceEvent,
+    {
         self.trace.record_event(move |seq| {
             let event = build(seq);
             if let Some(logical_time) = logical_time {
@@ -4447,36 +4482,75 @@ impl RuntimeState {
         Ok(obligation_id)
     }
 
-    /// Marks an obligation as committed and emits a trace event.
-    ///
-    /// Returns the duration the obligation was held (nanoseconds).
-    #[allow(clippy::result_large_err)]
-    pub fn commit_obligation(&mut self, obligation: ObligationId) -> Result<u64, Error> {
-        let now = self.current_runtime_time();
-        // Validate obligation commit protocol transition
-        if let Some(record) = self.obligations.get(obligation.arena_index()) {
-            let context = ObligationContext {
-                obligation_id: obligation,
-                region_id: record.region,
-                created_at: record.reserved_at,
-                validation_level: CancelValidationLevel::Basic,
-            };
-            let validation_result = self.validate_obligation_protocol_transition(
-                obligation,
-                ObligationEvent::Commit,
-                &context,
-            );
-            if matches!(
-                validation_result,
-                TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
-            ) {
-                log_cancel_protocol_violation("obligation commit", &validation_result);
-                // Continue with commit but log violation
-            }
+    /// Shard-phase reads for an obligation settle (commit/abort): the
+    /// validator context and the holder's logical tick, taken against
+    /// explicit tables (a Shard C read plus a Shard A read). Sharded-shape
+    /// callers run this and the subsequent [`ObligationTable::commit`] /
+    /// [`ObligationTable::abort`] table op under held shard guards and
+    /// dispatch the deferred settle effects only after release
+    /// (br-asupersync-m9wsza / E2 S3a): the validator mutex, tracing,
+    /// metrics, and the debt monitor must never be reached while a shard
+    /// guard is held.
+    fn settle_obligation_reads(
+        obligations: &ObligationTable,
+        tasks: &TaskTable,
+        obligation: ObligationId,
+    ) -> ObligationSettleReads {
+        obligations.get(obligation.arena_index()).map_or(
+            ObligationSettleReads {
+                validator_context: None,
+                holder_logical_time: None,
+            },
+            |record| ObligationSettleReads {
+                validator_context: Some(ObligationContext {
+                    obligation_id: obligation,
+                    region_id: record.region,
+                    created_at: record.reserved_at,
+                    validation_level: CancelValidationLevel::Basic,
+                }),
+                holder_logical_time: Self::logical_time_from_table(tasks, record.holder),
+            },
+        )
+    }
+
+    /// Deferred cancel-protocol validator transition for an obligation
+    /// settle. Historically this ran before the table op; it is dispatched
+    /// after the shard-phase core so the validator mutex is never acquired
+    /// while a shard guard is held (validator stays unified through E2). The
+    /// transition still fires for any settle attempt whose record existed at
+    /// entry — including table-op failures such as a double-commit —
+    /// preserving the historical diagnostic surface.
+    fn dispatch_obligation_settle_validation(
+        &self,
+        obligation: ObligationId,
+        event: ObligationEvent,
+        context: Option<&ObligationContext>,
+        op_label: &'static str,
+    ) {
+        let Some(context) = context else {
+            return;
+        };
+        let validation_result =
+            self.validate_obligation_protocol_transition(obligation, event, context);
+        if matches!(
+            validation_result,
+            TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
+        ) {
+            log_cancel_protocol_violation(op_label, &validation_result);
+            // Continue with the settle but log the violation
         }
+    }
 
-        let info = self.obligations.commit(obligation, now)?;
-
+    /// Deferred instrumentation effects for a committed obligation: span/log,
+    /// trace event (with the pre-captured holder logical time), metrics, and
+    /// the obligation-table epoch advance. Dispatched outside any shard guard
+    /// (br-asupersync-m9wsza / E2 S3a).
+    fn dispatch_obligation_commit_effects(
+        &mut self,
+        info: &ObligationCommitInfo,
+        now: Time,
+        holder_logical_time: Option<LogicalTime>,
+    ) {
         let span = crate::tracing_compat::debug_span!(
             "obligation_commit",
             obligation_id = ?info.id,
@@ -4495,7 +4569,7 @@ impl RuntimeState {
             "obligation committed"
         );
 
-        self.record_task_trace_event(info.holder, |seq| {
+        self.record_task_trace_event_with_logical_time(holder_logical_time, |seq| {
             TraceEvent::obligation_commit(
                 seq,
                 now,
@@ -4510,6 +4584,29 @@ impl RuntimeState {
 
         // Notify epoch tracker of obligation commit
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::ObligationTable);
+    }
+
+    /// Marks an obligation as committed and emits a trace event.
+    ///
+    /// Returns the duration the obligation was held (nanoseconds).
+    #[allow(clippy::result_large_err)]
+    pub fn commit_obligation(&mut self, obligation: ObligationId) -> Result<u64, Error> {
+        let now = self.current_runtime_time();
+        // Shard-phase core (br-asupersync-m9wsza / E2 S3a): pre-settle reads
+        // (Shard C + Shard A) and the Shard C table mutation. Sharded-shape
+        // callers run these against held shard guards and dispatch the
+        // deferred effects below only after release.
+        let reads = Self::settle_obligation_reads(&self.obligations, &self.tasks, obligation);
+        let result = self.obligations.commit(obligation, now);
+
+        self.dispatch_obligation_settle_validation(
+            obligation,
+            ObligationEvent::Commit,
+            reads.validator_context.as_ref(),
+            "obligation commit",
+        );
+        let info = result?;
+        self.dispatch_obligation_commit_effects(&info, now, reads.holder_logical_time);
 
         if let Some(region_record) = self.regions.get(info.region.arena_index()) {
             region_record.resolve_obligation();
@@ -4529,42 +4626,16 @@ impl RuntimeState {
         Ok(info.duration)
     }
 
-    /// Marks an obligation as aborted and emits a trace event.
-    ///
-    /// Returns the duration the obligation was held (nanoseconds).
-    #[allow(clippy::result_large_err)]
-    pub fn abort_obligation(
+    /// Deferred instrumentation effects for an aborted obligation: span/log,
+    /// trace event (with the pre-captured holder logical time), metrics, the
+    /// debt-monitor settlement entry, and the obligation-table epoch advance.
+    /// Dispatched outside any shard guard (br-asupersync-m9wsza / E2 S3a).
+    fn dispatch_obligation_abort_effects(
         &mut self,
-        obligation: ObligationId,
-        reason: ObligationAbortReason,
-    ) -> Result<u64, Error> {
-        let now = self.current_runtime_time();
-        // Validate obligation abort protocol transition
-        if let Some(record) = self.obligations.get(obligation.arena_index()) {
-            let context = ObligationContext {
-                obligation_id: obligation,
-                region_id: record.region,
-                created_at: record.reserved_at,
-                validation_level: CancelValidationLevel::Basic,
-            };
-            let validation_result = self.validate_obligation_protocol_transition(
-                obligation,
-                ObligationEvent::Abort {
-                    reason: format!("{reason:?}"),
-                },
-                &context,
-            );
-            if matches!(
-                validation_result,
-                TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
-            ) {
-                log_cancel_protocol_violation("obligation abort", &validation_result);
-                // Continue with abort but log violation
-            }
-        }
-
-        let info = self.obligations.abort(obligation, now, reason)?;
-
+        info: &ObligationAbortInfo,
+        now: Time,
+        holder_logical_time: Option<LogicalTime>,
+    ) {
         let span = crate::tracing_compat::debug_span!(
             "obligation_abort",
             obligation_id = ?info.id,
@@ -4585,7 +4656,7 @@ impl RuntimeState {
             "obligation aborted"
         );
 
-        self.record_task_trace_event(info.holder, |seq| {
+        self.record_task_trace_event_with_logical_time(holder_logical_time, |seq| {
             TraceEvent::obligation_abort(
                 seq,
                 now,
@@ -4613,6 +4684,33 @@ impl RuntimeState {
 
         // Notify epoch tracker of obligation abort
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::ObligationTable);
+    }
+
+    /// Marks an obligation as aborted and emits a trace event.
+    ///
+    /// Returns the duration the obligation was held (nanoseconds).
+    #[allow(clippy::result_large_err)]
+    pub fn abort_obligation(
+        &mut self,
+        obligation: ObligationId,
+        reason: ObligationAbortReason,
+    ) -> Result<u64, Error> {
+        let now = self.current_runtime_time();
+        // Shard-phase core (br-asupersync-m9wsza / E2 S3a): see
+        // `commit_obligation`.
+        let reads = Self::settle_obligation_reads(&self.obligations, &self.tasks, obligation);
+        let result = self.obligations.abort(obligation, now, reason);
+
+        self.dispatch_obligation_settle_validation(
+            obligation,
+            ObligationEvent::Abort {
+                reason: format!("{reason:?}"),
+            },
+            reads.validator_context.as_ref(),
+            "obligation abort",
+        );
+        let info = result?;
+        self.dispatch_obligation_abort_effects(&info, now, reads.holder_logical_time);
 
         if let Some(region_record) = self.regions.get(info.region.arena_index()) {
             region_record.resolve_obligation();
