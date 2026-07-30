@@ -1116,6 +1116,48 @@ struct ObligationSettleReads {
     holder_logical_time: Option<LogicalTime>,
 }
 
+/// Obligation-table target for the completion C-phases
+/// (E2 S3b, br-asupersync-m9wsza) — the shard-C twin of
+/// [`AdmissionRegionTarget`].
+///
+/// The completion phases touch the obligation table only through shared
+/// references here (`ids_for_holder`/`get` leak collection, the
+/// leak-handler's pending dedup read, and `sorted_pending_ids_for_holder`
+/// orphan enumeration); settle mutations route through the S3a core
+/// ([`RuntimeState::settle_obligation_reads`] plus the table op) with
+/// their effects deferred.
+///
+/// REACHABILITY (deliberate, recorded in the bead): every caller passes
+/// `Embedded` today. On the Sharded shape, obligations are still minted
+/// into the unified embedded table (`create_obligation`), so routing the
+/// completion reads at ShardedState's shard C before minting converts
+/// would consult an empty table and skip every leak audit and orphan
+/// abort. The `External` arm becomes reachable in the slice that moves
+/// obligation minting onto shard C, together with the S4 wiring that runs
+/// the abort/leak-mark mutations against the held C guard instead of the
+/// embedded wrappers. Panic-on-leak escalation must dispatch OUTSIDE any
+/// shard guard on that shape (hazard recorded in the S3 pre-analysis).
+pub(crate) enum CompletionObligationTarget<'g> {
+    /// Read the embedded `RuntimeState::obligations` table (unified shape).
+    Embedded,
+    /// Read an external ShardedState shard-C table (sharded shape).
+    #[allow(dead_code)]
+    External(crate::sync::ContendedMutexGuard<'g, ObligationTable>),
+}
+
+impl CompletionObligationTarget<'_> {
+    /// Resolves the target to the obligation table, borrowing the embedded
+    /// table only in the `Embedded` arm so callers can keep using `self`
+    /// around each table operation.
+    #[inline]
+    fn resolve_ref<'s>(&'s self, embedded: &'s ObligationTable) -> &'s ObligationTable {
+        match self {
+            Self::Embedded => embedded,
+            Self::External(guard) => guard,
+        }
+    }
+}
+
 /// Outcome of [`RuntimeState::admit_local_spawn_request_in`]
 /// (br-asupersync-i9y5wb / A2.2a).
 ///
@@ -4206,14 +4248,21 @@ impl RuntimeState {
             .collect()
     }
 
-    /// Collect obligation leaks for a specific task holder using the secondary index.
-    fn collect_obligation_leaks_for_holder(&self, task_id: TaskId) -> Vec<LeakedObligationInfo> {
+    /// Collect obligation leaks for a specific task holder using the
+    /// secondary index, reading through the completion obligation target
+    /// (E2 S3b, br-asupersync-m9wsza).
+    fn collect_obligation_leaks_for_holder(
+        &self,
+        obligations: &CompletionObligationTarget<'_>,
+        task_id: TaskId,
+    ) -> Vec<LeakedObligationInfo> {
         let now = self.current_runtime_time();
-        self.obligations
+        let table = obligations.resolve_ref(&self.obligations);
+        table
             .ids_for_holder(task_id)
             .iter()
             .filter_map(|id| {
-                let record = self.obligations.get(id.arena_index())?;
+                let record = table.get(id.arena_index())?;
                 if !record.is_pending() {
                     return None;
                 }
@@ -4232,23 +4281,41 @@ impl RuntimeState {
             .collect()
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn handle_obligation_leaks(&mut self, error: ObligationLeakError) {
+        self.handle_obligation_leaks_in(&CompletionObligationTarget::Embedded, error);
+    }
+
+    /// Core of [`Self::handle_obligation_leaks`] with the pending dedup
+    /// read routed through the completion obligation target
+    /// (E2 S3b, br-asupersync-m9wsza). Only that read is target-aware
+    /// today: the leak-mark/recover-abort mutations and policy escalation
+    /// below still run against the embedded wrappers, and on the sharded
+    /// shape the whole handler dispatches outside shard guards —
+    /// panic-on-leak must never fire while a shard guard is held.
+    #[allow(clippy::needless_pass_by_value)]
+    fn handle_obligation_leaks_in(
+        &mut self,
+        obligations: &CompletionObligationTarget<'_>,
+        error: ObligationLeakError,
+    ) {
         if error.leaks.is_empty() {
             return;
         }
 
-        let new_leaks: Vec<LeakedObligationInfo> = error
-            .leaks
-            .iter()
-            .filter(|leak| {
-                self.obligations
-                    .get(leak.id.arena_index())
-                    .is_some_and(ObligationRecord::is_pending)
-                    && !self.in_flight_leak_ids.contains(&leak.id)
-            })
-            .cloned()
-            .collect();
+        let new_leaks: Vec<LeakedObligationInfo> = {
+            let table = obligations.resolve_ref(&self.obligations);
+            error
+                .leaks
+                .iter()
+                .filter(|leak| {
+                    table
+                        .get(leak.id.arena_index())
+                        .is_some_and(ObligationRecord::is_pending)
+                        && !self.in_flight_leak_ids.contains(&leak.id)
+                })
+                .cloned()
+                .collect()
+        };
 
         if new_leaks.is_empty() {
             return;
@@ -5548,9 +5615,10 @@ impl RuntimeState {
         // + advance, itself a B→A→C composite) → D (epoch telemetry).
         // A future sharded-backing completion arm composes exactly these
         // phases under `ShardGuard::for_task_completed`-ordered guards.
-        self.audit_completion_obligation_leaks(task_id, owner, completion);
+        let obligations = CompletionObligationTarget::Embedded;
+        self.audit_completion_obligation_leaks(&obligations, task_id, owner, completion);
         self.retire_completed_finalizer_barrier(task_id, owner);
-        self.abort_orphaned_obligations_for_holder(task_id);
+        self.abort_orphaned_obligations_for_holder(&obligations, task_id);
         self.retire_completed_task_record(task_id, remove_embedded_record);
         self.unlink_completed_task_from_region(task_id, owner, close_outcome);
 
@@ -5568,19 +5636,23 @@ impl RuntimeState {
     /// handling (which may escalate per policy).
     fn audit_completion_obligation_leaks(
         &mut self,
+        obligations: &CompletionObligationTarget<'_>,
         task_id: TaskId,
         owner: RegionId,
         completion: TaskCompletionKind,
     ) {
         if !matches!(completion, TaskCompletionKind::Cancelled) {
-            let leaks = self.collect_obligation_leaks_for_holder(task_id);
+            let leaks = self.collect_obligation_leaks_for_holder(obligations, task_id);
             if !leaks.is_empty() {
-                self.handle_obligation_leaks(ObligationLeakError {
-                    task_id: Some(task_id),
-                    region_id: owner,
-                    completion: Some(completion),
-                    leaks,
-                });
+                self.handle_obligation_leaks_in(
+                    obligations,
+                    ObligationLeakError {
+                        task_id: Some(task_id),
+                        region_id: owner,
+                        completion: Some(completion),
+                        leaks,
+                    },
+                );
             }
         }
     }
@@ -5636,8 +5708,14 @@ impl RuntimeState {
     /// the completed task so orphaned obligations cannot block region close
     /// (deadlock). Uses the holder secondary index for
     /// O(obligations_per_task) instead of O(arena_capacity).
-    fn abort_orphaned_obligations_for_holder(&mut self, task_id: TaskId) {
-        let orphaned = self.obligations.sorted_pending_ids_for_holder(task_id);
+    fn abort_orphaned_obligations_for_holder(
+        &mut self,
+        obligations: &CompletionObligationTarget<'_>,
+        task_id: TaskId,
+    ) {
+        let orphaned = obligations
+            .resolve_ref(&self.obligations)
+            .sorted_pending_ids_for_holder(task_id);
         for ob_id in orphaned {
             let _ = self.abort_obligation(ob_id, ObligationAbortReason::Cancel);
         }
