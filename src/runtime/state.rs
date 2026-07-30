@@ -1126,13 +1126,23 @@ struct ObligationSettleReads {
     holder_logical_time: Option<LogicalTime>,
 }
 
-/// One deferred-effect payload from an obligation settle
+/// One deferred-effect payload from an obligation lifecycle operation
 /// (E2 S4c, br-asupersync-m9wsza): a validator, instrumentation, or
 /// debt-monitor dispatch that must never run while a shard guard is held.
 /// The unified wrappers dispatch each payload inline at its historical
 /// position; the guard-held completion arm buffers them for post-release
 /// dispatch — the twin of [`RegionAdvanceEffect`].
-pub(crate) enum ObligationSettleEffect {
+pub(crate) enum ObligationLifecycleEffect {
+    /// Validator registration + Reserve transition, span/log, trace event,
+    /// metrics, and both epoch advances for a freshly minted obligation.
+    Reserve {
+        obligation: ObligationId,
+        kind: ObligationKind,
+        holder: TaskId,
+        region: RegionId,
+        now: Time,
+        holder_logical_time: Option<LogicalTime>,
+    },
     /// Cancel-protocol validator transition + verdict logging for a settle
     /// attempt whose record existed at entry.
     SettleValidation {
@@ -1164,16 +1174,16 @@ pub(crate) enum ObligationSettleEffect {
     },
 }
 
-/// Sink for [`ObligationSettleEffect`] payloads (E2 S4c,
+/// Sink for [`ObligationLifecycleEffect`] payloads (E2 S4c,
 /// br-asupersync-m9wsza) — the twin of [`RegionAdvanceEffectsSink`].
-pub(crate) enum ObligationSettleEffectsSink<'b> {
+pub(crate) enum ObligationLifecycleEffectsSink<'b> {
     /// Dispatch each effect inline at its historical position (unified
     /// shape — behavior-identical to the pre-seam wrappers).
     Inline,
     /// Accumulate payloads for dispatch after shard-guard release
     /// (sharded shape; wired by the S4c completion arm).
     #[allow(dead_code)]
-    Buffered(&'b mut Vec<ObligationSettleEffect>),
+    Buffered(&'b mut Vec<ObligationLifecycleEffect>),
 }
 
 /// Obligation-table target for the completion C-phases
@@ -4556,12 +4566,54 @@ impl RuntimeState {
         region: RegionId,
         description: Option<String>,
     ) -> Result<ObligationId, Error> {
-        {
-            let Some(region_record) = self.regions.get(region.arena_index()) else {
+        self.create_obligation_in(
+            &AdmissionRegionTarget::Embedded,
+            &AdmissionTaskTarget::Embedded,
+            &mut CompletionObligationTarget::Embedded,
+            &mut ObligationLifecycleEffectsSink::Inline,
+            kind,
+            holder,
+            region,
+            description,
+        )
+    }
+
+    /// Core of [`Self::create_obligation`] against explicit table targets
+    /// (E2 S4c-2a, br-asupersync-m9wsza): the obligation MINTING seam. The
+    /// admission checks are a Shard B read (region existence + quota
+    /// reserve) plus a Shard A read (holder existence/ownership and the
+    /// logical tick for the reserve trace event — fixing the last sharded
+    /// logical-time divergence site); the mint is the Shard C table op;
+    /// validator registration/transition, span/log, trace, metrics, and
+    /// both epoch advances dispatch through the lifecycle sink outside any
+    /// shard guard.
+    ///
+    /// REACHABILITY (same law as the settle/advance seams): every caller
+    /// passes `Embedded` today. The `External` arms become reachable in the
+    /// S4c completion-arm wiring, where minting against ShardedState's
+    /// shard C is what finally lets the completion reads observe the same
+    /// records the mint produced.
+    #[allow(clippy::result_large_err, clippy::too_many_arguments)]
+    #[track_caller]
+    fn create_obligation_in(
+        &mut self,
+        regions: &AdmissionRegionTarget<'_>,
+        tasks: &AdmissionTaskTarget<'_>,
+        obligations: &mut CompletionObligationTarget<'_>,
+        effects: &mut ObligationLifecycleEffectsSink<'_>,
+        kind: ObligationKind,
+        holder: TaskId,
+        region: RegionId,
+        description: Option<String>,
+    ) -> Result<ObligationId, Error> {
+        let holder_logical_time = {
+            let Some(region_record) = regions.resolve_ref(&self.regions).get(region.arena_index())
+            else {
                 return Err(Error::new(ErrorKind::RegionClosed).with_message("region not found"));
             };
 
-            let Some(task_record) = self.task(holder) else {
+            let tasks = tasks.resolve_ref(&self.tasks);
+            let Some(task_record) = tasks.task(holder) else {
                 return Err(Error::new(ErrorKind::TaskNotOwned)
                     .with_message(format!("holder task {holder:?} not found")));
             };
@@ -4585,80 +4637,41 @@ impl RuntimeState {
                     }
                 });
             }
-        }
+
+            Self::logical_time_from_table(tasks, holder)
+        };
 
         let acquired_at = SourceLocation::from_panic_location(std::panic::Location::caller());
         let acquire_backtrace = Self::capture_obligation_backtrace();
         let now = self.current_runtime_time();
 
         // Create the obligation first to get the ID
-        let obligation_id =
-            self.obligations
-                .create(super::obligation_table::ObligationCreateArgs {
-                    kind,
-                    holder,
-                    region,
-                    now,
-                    description,
-                    acquired_at,
-                    acquire_backtrace,
-                });
-
-        // Reserving an obligation increments the owning region's pending count,
-        // so the region-table epoch must advance alongside the obligation table.
-        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::RegionTable);
-
-        // Register obligation with cancel protocol validator
-        {
-            let mut validator = self.cancel_protocol_validator.lock();
-            validator.register_obligation(obligation_id);
-        }
-
-        // Validate obligation creation protocol transition
-        let context = ObligationContext {
-            obligation_id,
-            region_id: region,
-            created_at: now,
-            validation_level: CancelValidationLevel::Basic,
-        };
-        let validation_result = self.validate_obligation_protocol_transition(
-            obligation_id,
-            ObligationEvent::Reserve {
-                token: obligation_id.as_u64().saturating_add(1),
+        let obligation_id = obligations.resolve_mut(&mut self.obligations).create(
+            super::obligation_table::ObligationCreateArgs {
+                kind,
+                holder,
+                region,
+                now,
+                description,
+                acquired_at,
+                acquire_backtrace,
             },
-            &context,
-        );
-        if matches!(
-            validation_result,
-            TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
-        ) {
-            log_cancel_protocol_violation("obligation creation", &validation_result);
-            // Continue with creation but log violation
-        }
-
-        let _guard = crate::tracing_compat::debug_span!(
-            "obligation_reserve",
-            obligation_id = ?obligation_id,
-            kind = ?kind,
-            holder_task = ?holder,
-            region_id = ?region
-        )
-        .entered();
-        crate::tracing_compat::debug!(
-            obligation_id = ?obligation_id,
-            kind = ?kind,
-            holder_task = ?holder,
-            region_id = ?region,
-            "obligation reserved"
         );
 
-        self.record_task_trace_event(holder, |seq| {
-            TraceEvent::obligation_reserve(seq, now, obligation_id, holder, region, kind)
-        });
-        self.metrics.obligation_created(region);
-
-        // Notify epoch tracker of obligation creation
-        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::ObligationTable);
+        // Reserving an obligation increments the owning region's pending
+        // count, so the region-table epoch must advance alongside the
+        // obligation table — both advances live in the reserve effects.
+        self.emit_obligation_lifecycle_effect(
+            effects,
+            ObligationLifecycleEffect::Reserve {
+                obligation: obligation_id,
+                kind,
+                holder,
+                region,
+                now,
+                holder_logical_time,
+            },
+        );
 
         Ok(obligation_id)
     }
@@ -4723,9 +4736,26 @@ impl RuntimeState {
     /// br-asupersync-m9wsza). The unified wrappers route every inline
     /// dispatch through this method, so the S4c buffered drain replays
     /// payloads through exactly the code the embedded shape exercises.
-    fn dispatch_obligation_settle_effect(&mut self, effect: ObligationSettleEffect) {
+    fn dispatch_obligation_lifecycle_effect(&mut self, effect: ObligationLifecycleEffect) {
         match effect {
-            ObligationSettleEffect::SettleValidation {
+            ObligationLifecycleEffect::Reserve {
+                obligation,
+                kind,
+                holder,
+                region,
+                now,
+                holder_logical_time,
+            } => {
+                self.dispatch_obligation_reserve_effects(
+                    obligation,
+                    kind,
+                    holder,
+                    region,
+                    now,
+                    holder_logical_time,
+                );
+            }
+            ObligationLifecycleEffect::SettleValidation {
                 obligation,
                 event,
                 context,
@@ -4733,21 +4763,21 @@ impl RuntimeState {
             } => {
                 self.dispatch_obligation_settle_validation(obligation, event, &context, op_label);
             }
-            ObligationSettleEffect::Commit {
+            ObligationLifecycleEffect::Commit {
                 info,
                 now,
                 holder_logical_time,
             } => {
                 self.dispatch_obligation_commit_effects(&info, now, holder_logical_time);
             }
-            ObligationSettleEffect::Abort {
+            ObligationLifecycleEffect::Abort {
                 info,
                 now,
                 holder_logical_time,
             } => {
                 self.dispatch_obligation_abort_effects(&info, now, holder_logical_time);
             }
-            ObligationSettleEffect::Leak {
+            ObligationLifecycleEffect::Leak {
                 info,
                 now,
                 holder_logical_time,
@@ -4757,17 +4787,91 @@ impl RuntimeState {
         }
     }
 
-    /// Routes an obligation-settle effect to its sink: inline dispatch at
+    /// Deferred validator + instrumentation effects for a freshly minted
+    /// obligation (E2 S4c-2a, br-asupersync-m9wsza): the exact historical
+    /// post-mint sequence — region-table epoch advance (the reserve
+    /// incremented the owning region's pending count), validator
+    /// registration, Reserve protocol transition + verdict logging,
+    /// span/log, trace event (with the pre-captured holder logical time),
+    /// creation metric, and the obligation-table epoch advance. Dispatched
+    /// outside any shard guard.
+    fn dispatch_obligation_reserve_effects(
+        &mut self,
+        obligation: ObligationId,
+        kind: ObligationKind,
+        holder: TaskId,
+        region: RegionId,
+        now: Time,
+        holder_logical_time: Option<LogicalTime>,
+    ) {
+        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::RegionTable);
+
+        // Register obligation with cancel protocol validator
+        {
+            let mut validator = self.cancel_protocol_validator.lock();
+            validator.register_obligation(obligation);
+        }
+
+        // Validate obligation creation protocol transition
+        let context = ObligationContext {
+            obligation_id: obligation,
+            region_id: region,
+            created_at: now,
+            validation_level: CancelValidationLevel::Basic,
+        };
+        let validation_result = self.validate_obligation_protocol_transition(
+            obligation,
+            ObligationEvent::Reserve {
+                token: obligation.as_u64().saturating_add(1),
+            },
+            &context,
+        );
+        if matches!(
+            validation_result,
+            TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
+        ) {
+            log_cancel_protocol_violation("obligation creation", &validation_result);
+            // Continue with creation but log violation
+        }
+
+        let _guard = crate::tracing_compat::debug_span!(
+            "obligation_reserve",
+            obligation_id = ?obligation,
+            kind = ?kind,
+            holder_task = ?holder,
+            region_id = ?region
+        )
+        .entered();
+        crate::tracing_compat::debug!(
+            obligation_id = ?obligation,
+            kind = ?kind,
+            holder_task = ?holder,
+            region_id = ?region,
+            "obligation reserved"
+        );
+
+        self.record_task_trace_event_with_logical_time(holder_logical_time, |seq| {
+            TraceEvent::obligation_reserve(seq, now, obligation, holder, region, kind)
+        });
+        self.metrics.obligation_created(region);
+
+        // Notify epoch tracker of obligation creation
+        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::ObligationTable);
+    }
+
+    /// Routes an obligation-lifecycle effect to its sink: inline dispatch at
     /// the historical position (unified shape) or buffered for post-release
     /// dispatch (sharded shape) — E2 S4c.
-    fn emit_obligation_settle_effect(
+    fn emit_obligation_lifecycle_effect(
         &mut self,
-        sink: &mut ObligationSettleEffectsSink<'_>,
-        effect: ObligationSettleEffect,
+        sink: &mut ObligationLifecycleEffectsSink<'_>,
+        effect: ObligationLifecycleEffect,
     ) {
         match sink {
-            ObligationSettleEffectsSink::Inline => self.dispatch_obligation_settle_effect(effect),
-            ObligationSettleEffectsSink::Buffered(buffer) => buffer.push(effect),
+            ObligationLifecycleEffectsSink::Inline => {
+                self.dispatch_obligation_lifecycle_effect(effect)
+            }
+            ObligationLifecycleEffectsSink::Buffered(buffer) => buffer.push(effect),
         }
     }
 
@@ -4829,11 +4933,11 @@ impl RuntimeState {
         let reads = Self::settle_obligation_reads(&self.obligations, &self.tasks, obligation);
         let result = self.obligations.commit(obligation, now);
 
-        let mut effects = ObligationSettleEffectsSink::Inline;
+        let mut effects = ObligationLifecycleEffectsSink::Inline;
         if let Some(context) = reads.validator_context {
-            self.emit_obligation_settle_effect(
+            self.emit_obligation_lifecycle_effect(
                 &mut effects,
-                ObligationSettleEffect::SettleValidation {
+                ObligationLifecycleEffect::SettleValidation {
                     obligation,
                     event: ObligationEvent::Commit,
                     context,
@@ -4844,9 +4948,9 @@ impl RuntimeState {
         let info = result?;
         let region = info.region;
         let duration = info.duration;
-        self.emit_obligation_settle_effect(
+        self.emit_obligation_lifecycle_effect(
             &mut effects,
-            ObligationSettleEffect::Commit {
+            ObligationLifecycleEffect::Commit {
                 info,
                 now,
                 holder_logical_time: reads.holder_logical_time,
@@ -4946,11 +5050,11 @@ impl RuntimeState {
         let reads = Self::settle_obligation_reads(&self.obligations, &self.tasks, obligation);
         let result = self.obligations.abort(obligation, now, reason);
 
-        let mut effects = ObligationSettleEffectsSink::Inline;
+        let mut effects = ObligationLifecycleEffectsSink::Inline;
         if let Some(context) = reads.validator_context {
-            self.emit_obligation_settle_effect(
+            self.emit_obligation_lifecycle_effect(
                 &mut effects,
-                ObligationSettleEffect::SettleValidation {
+                ObligationLifecycleEffect::SettleValidation {
                     obligation,
                     event: ObligationEvent::Abort {
                         reason: format!("{reason:?}"),
@@ -4963,9 +5067,9 @@ impl RuntimeState {
         let info = result?;
         let region = info.region;
         let duration = info.duration;
-        self.emit_obligation_settle_effect(
+        self.emit_obligation_lifecycle_effect(
             &mut effects,
-            ObligationSettleEffect::Abort {
+            ObligationLifecycleEffect::Abort {
                 info,
                 now,
                 holder_logical_time: reads.holder_logical_time,
@@ -5011,9 +5115,9 @@ impl RuntimeState {
         let region = info.region;
         let duration = info.duration;
 
-        self.emit_obligation_settle_effect(
-            &mut ObligationSettleEffectsSink::Inline,
-            ObligationSettleEffect::Leak {
+        self.emit_obligation_lifecycle_effect(
+            &mut ObligationLifecycleEffectsSink::Inline,
+            ObligationLifecycleEffect::Leak {
                 info,
                 now,
                 holder_logical_time,
