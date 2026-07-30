@@ -4221,12 +4221,22 @@ impl RuntimeState {
         }
     }
 
-    fn collect_obligation_leaks<F>(&self, mut predicate: F) -> Vec<LeakedObligationInfo>
+    /// Collect obligation leaks matching `predicate` by scanning the full
+    /// obligation table, reading through the completion obligation target
+    /// (E2 S4b, br-asupersync-m9wsza) — the full-iter sibling of
+    /// [`Self::collect_obligation_leaks_for_holder`], used by the region
+    /// Finalizing arm where no holder index applies.
+    fn collect_obligation_leaks<F>(
+        &self,
+        obligations: &CompletionObligationTarget<'_>,
+        mut predicate: F,
+    ) -> Vec<LeakedObligationInfo>
     where
         F: FnMut(&ObligationRecord) -> bool,
     {
         let now = self.current_runtime_time();
-        self.obligations
+        obligations
+            .resolve_ref(&self.obligations)
             .iter()
             .filter_map(|(_, record)| {
                 if !record.is_pending() || !predicate(record) {
@@ -4281,19 +4291,15 @@ impl RuntimeState {
             .collect()
     }
 
-    fn handle_obligation_leaks(&mut self, error: ObligationLeakError) {
-        self.handle_obligation_leaks_in(&CompletionObligationTarget::Embedded, error);
-    }
-
-    /// Core of [`Self::handle_obligation_leaks`] with the pending dedup
-    /// read routed through the completion obligation target
-    /// (E2 S3b, br-asupersync-m9wsza). Only that read is target-aware
-    /// today: the leak-mark/recover-abort mutations and policy escalation
-    /// below still run against the embedded wrappers, and on the sharded
-    /// shape the whole handler dispatches outside shard guards —
-    /// panic-on-leak must never fire while a shard guard is held.
+    /// Leak-policy handler with the pending dedup read routed through the
+    /// completion obligation target (E2 S3b/S4b, br-asupersync-m9wsza).
+    /// Only that read is target-aware today: the leak-mark/recover-abort
+    /// mutations and policy escalation below still run against the embedded
+    /// wrappers, and on the sharded shape the whole handler dispatches
+    /// outside shard guards — panic-on-leak must never fire while a shard
+    /// guard is held.
     #[allow(clippy::needless_pass_by_value)]
-    fn handle_obligation_leaks_in(
+    fn handle_obligation_leaks(
         &mut self,
         obligations: &CompletionObligationTarget<'_>,
         error: ObligationLeakError,
@@ -5663,7 +5669,7 @@ impl RuntimeState {
         if !matches!(completion, TaskCompletionKind::Cancelled) {
             let leaks = self.collect_obligation_leaks_for_holder(obligations, task_id);
             if !leaks.is_empty() {
-                self.handle_obligation_leaks_in(
+                self.handle_obligation_leaks(
                     obligations,
                     ObligationLeakError {
                         task_id: Some(task_id),
@@ -6919,15 +6925,20 @@ impl RuntimeState {
                     if let Some(region) = self.regions.get(region_id.arena_index()) {
                         if region.pending_obligations() > 0 {
                             if region.task_count() == 0 {
-                                let leaks = self
-                                    .collect_obligation_leaks(|record| record.region == region_id);
+                                let obligations = CompletionObligationTarget::Embedded;
+                                let leaks = self.collect_obligation_leaks(&obligations, |record| {
+                                    record.region == region_id
+                                });
                                 if !leaks.is_empty() {
-                                    self.handle_obligation_leaks(ObligationLeakError {
-                                        task_id: None,
-                                        region_id,
-                                        completion: None,
-                                        leaks,
-                                    });
+                                    self.handle_obligation_leaks(
+                                        &obligations,
+                                        ObligationLeakError {
+                                            task_id: None,
+                                            region_id,
+                                            completion: None,
+                                            leaks,
+                                        },
+                                    );
                                 }
                             }
                         }
