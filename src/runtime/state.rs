@@ -1179,6 +1179,43 @@ impl CompletionObligationTarget<'_> {
     }
 }
 
+/// One deferred-effect payload from the region-advance walk
+/// (E2 S4b-3, br-asupersync-m9wsza): a validator or instrumentation
+/// dispatch that must never run while a shard guard is held. The unified
+/// shape dispatches each payload inline at its historical walk position;
+/// the guard-held shape (S4c) buffers them for post-release dispatch.
+pub(crate) enum RegionAdvanceEffect {
+    /// Finalize-boundary validator transition (+ verdict logging and
+    /// snapshot-cache invalidation on violation).
+    FinalizeValidation {
+        region_id: RegionId,
+        finalization_event: RegionEvent,
+        context: RegionContext,
+    },
+    /// Close-completion finalized-accounting check.
+    CloseValidation { region_id: RegionId },
+    /// `RegionCloseComplete` trace event + `region_closed` lifetime metric
+    /// for a completed close; `created_at` was captured before the arena
+    /// removal.
+    RegionClosed {
+        region_id: RegionId,
+        parent: Option<RegionId>,
+        created_at: Time,
+    },
+}
+
+/// Sink for [`RegionAdvanceEffect`] payloads emitted by the region-advance
+/// walk (E2 S4b-3, br-asupersync-m9wsza).
+pub(crate) enum RegionAdvanceEffectsSink<'b> {
+    /// Dispatch each effect inline at its historical walk position
+    /// (unified shape — behavior-identical to the pre-seam walk).
+    Inline,
+    /// Accumulate payloads for dispatch after shard-guard release
+    /// (sharded shape; wired by the S4c completion arm).
+    #[allow(dead_code)]
+    Buffered(&'b mut Vec<RegionAdvanceEffect>),
+}
+
 /// Outcome of [`RuntimeState::admit_local_spawn_request_in`]
 /// (br-asupersync-i9y5wb / A2.2a).
 ///
@@ -6937,11 +6974,52 @@ impl RuntimeState {
         self.metrics.region_closed(region_id, lifetime);
     }
 
+    /// Dispatches one region-advance effect payload (E2 S4b-3,
+    /// br-asupersync-m9wsza). The unified walk routes every inline dispatch
+    /// through this method, so the S4c buffered drain replays payloads
+    /// through exactly the code the embedded shape exercises.
+    fn dispatch_region_advance_effect(&self, effect: RegionAdvanceEffect) {
+        match effect {
+            RegionAdvanceEffect::FinalizeValidation {
+                region_id,
+                finalization_event,
+                context,
+            } => {
+                self.dispatch_region_finalize_validation(region_id, finalization_event, &context);
+            }
+            RegionAdvanceEffect::CloseValidation { region_id } => {
+                self.dispatch_region_close_validation(region_id);
+            }
+            RegionAdvanceEffect::RegionClosed {
+                region_id,
+                parent,
+                created_at,
+            } => {
+                self.dispatch_region_closed_effects(region_id, parent, created_at);
+            }
+        }
+    }
+
+    /// Routes a region-advance effect to its sink: inline dispatch at the
+    /// historical walk position (unified shape) or buffered for
+    /// post-release dispatch (sharded shape) — E2 S4b-3.
+    fn emit_region_advance_effect(
+        &self,
+        sink: &mut RegionAdvanceEffectsSink<'_>,
+        effect: RegionAdvanceEffect,
+    ) {
+        match sink {
+            RegionAdvanceEffectsSink::Inline => self.dispatch_region_advance_effect(effect),
+            RegionAdvanceEffectsSink::Buffered(buffer) => buffer.push(effect),
+        }
+    }
+
     pub fn advance_region_state(&mut self, initial_region: RegionId) {
         self.advance_region_state_in(
             &mut AdmissionRegionTarget::Embedded,
             &AdmissionTaskTarget::Embedded,
             &mut CompletionObligationTarget::Embedded,
+            &mut RegionAdvanceEffectsSink::Inline,
             initial_region,
         );
     }
@@ -6970,6 +7048,7 @@ impl RuntimeState {
         regions: &mut AdmissionRegionTarget<'_>,
         tasks: &AdmissionTaskTarget<'_>,
         obligations: &mut CompletionObligationTarget<'_>,
+        effects: &mut RegionAdvanceEffectsSink<'_>,
         initial_region: RegionId,
     ) {
         let mut current = Some(initial_region);
@@ -7034,16 +7113,19 @@ impl RuntimeState {
                             }
                         };
 
-                        // Deferred validator transition: dispatched after the
+                        // Deferred validator transition: emitted after the
                         // table op so the validator mutex is never acquired
-                        // while a shard guard is held (E2 S4b-2); fires for
+                        // while a shard guard is held (E2 S4b-2/3); fires for
                         // any attempt whose record existed at entry —
                         // including a failed begin_finalize — matching the
                         // historical machine trajectory.
-                        self.dispatch_region_finalize_validation(
-                            region_id,
-                            finalization_event,
-                            &context,
+                        self.emit_region_advance_effect(
+                            effects,
+                            RegionAdvanceEffect::FinalizeValidation {
+                                region_id,
+                                finalization_event,
+                                context,
+                            },
                         );
 
                         if let Some((old_state, new_state)) = transition {
@@ -7168,7 +7250,10 @@ impl RuntimeState {
                         // close attempt whose record existed at entry —
                         // including a failed complete_close — matching the
                         // historical machine trajectory.
-                        self.dispatch_region_close_validation(region_id);
+                        self.emit_region_advance_effect(
+                            effects,
+                            RegionAdvanceEffect::CloseValidation { region_id },
+                        );
 
                         if closed.0 {
                             self.note_read_biased_region_snapshot_transition(closed.1, closed.2);
@@ -7186,8 +7271,15 @@ impl RuntimeState {
                                 .mark_region_finalized(region_id);
 
                             // Deferred instrumentation effects: trace event +
-                            // lifetime metric (E2 S4b-2).
-                            self.dispatch_region_closed_effects(region_id, parent, closed.3);
+                            // lifetime metric (E2 S4b-2/3).
+                            self.emit_region_advance_effect(
+                                effects,
+                                RegionAdvanceEffect::RegionClosed {
+                                    region_id,
+                                    parent,
+                                    created_at: closed.3,
+                                },
+                            );
                             self.resource_monitor.clear_region_priority(region_id);
 
                             if let Some(parent_id) = parent {
