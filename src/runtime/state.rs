@@ -5418,22 +5418,45 @@ impl RuntimeState {
     /// Returns `true` if the region has no live work remaining.
     #[must_use]
     pub fn can_region_finalize(&self, region_id: RegionId) -> bool {
-        let Some(region) = self.regions.get(region_id.arena_index()) else {
+        self.can_region_finalize_in(
+            &AdmissionRegionTarget::Embedded,
+            &AdmissionTaskTarget::Embedded,
+            region_id,
+        )
+    }
+
+    /// Core of [`Self::can_region_finalize`] against explicit table targets
+    /// (E2 S4b, br-asupersync-m9wsza): the finalize gate is a Shard B read
+    /// (region record plus children) AND a Shard A read (per-task terminal
+    /// check), so sharded callers must resolve both from held guards —
+    /// `ShardGuard::for_task_completed` holds B→A→C in canonical order.
+    /// Despite the historical `Admission` prefix, both target enums are the
+    /// general embedded|external table seams (spawn admission threaded them
+    /// in S2; region advance reuses them here).
+    fn can_region_finalize_in(
+        &self,
+        regions: &AdmissionRegionTarget<'_>,
+        tasks: &AdmissionTaskTarget<'_>,
+        region_id: RegionId,
+    ) -> bool {
+        let regions = regions.resolve_ref(&self.regions);
+        let Some(region) = regions.get(region_id.arena_index()) else {
             return false;
         };
 
-        // Check all tasks are terminal. An id absent from the embedded table is
-        // not evidence of completion: sharded schedulers keep live records in
-        // an external TaskTable and remove the id from the region only at the
-        // cross-cutting completion boundary.
+        // Check all tasks are terminal. An id absent from the resolved table
+        // is not evidence of completion: sharded schedulers keep live records
+        // in an external TaskTable and remove the id from the region only at
+        // the cross-cutting completion boundary.
+        let tasks = tasks.resolve_ref(&self.tasks);
         let all_tasks_done = region
             .task_ids()
             .iter()
-            .all(|&task_id| self.task(task_id).is_some_and(|t| t.state.is_terminal()));
+            .all(|&task_id| tasks.task(task_id).is_some_and(|t| t.state.is_terminal()));
 
         // Check all child regions are closed
         let all_children_closed = region.child_ids().iter().all(|&child_id| {
-            self.regions
+            regions
                 .get(child_id.arena_index())
                 .is_none_or(|r| r.state().is_terminal())
         });
@@ -6658,7 +6681,25 @@ impl RuntimeState {
     /// `true` if the region can transition to Closed state.
     #[must_use]
     pub fn can_region_complete_close(&self, region_id: RegionId) -> bool {
-        let Some(region) = self.regions.get(region_id.arena_index()) else {
+        self.can_region_complete_close_in(&AdmissionRegionTarget::Embedded, region_id)
+    }
+
+    /// Core of [`Self::can_region_complete_close`] with the region-record
+    /// reads routed through the region-table target (E2 S4b,
+    /// br-asupersync-m9wsza). The finalizer-barrier reads
+    /// (`pending_finalizer_ids`, `active_async_finalizers`,
+    /// `active_manual_finalizers`) are unified residue until S5 and stay on
+    /// `self`; on the sharded shape the caller holds the B guard for the
+    /// region reads while the residue reads still require the unified lock.
+    fn can_region_complete_close_in(
+        &self,
+        regions: &AdmissionRegionTarget<'_>,
+        region_id: RegionId,
+    ) -> bool {
+        let Some(region) = regions
+            .resolve_ref(&self.regions)
+            .get(region_id.arena_index())
+        else {
             return false;
         };
 
