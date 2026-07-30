@@ -1131,7 +1131,7 @@ struct ObligationSettleReads {
 /// debt-monitor dispatch that must never run while a shard guard is held.
 /// The unified wrappers dispatch each payload inline at its historical
 /// position; the guard-held completion arm buffers them for post-release
-/// dispatch — the twin of [`RegionAdvanceEffect`].
+/// dispatch — the twin of [`RegionLifecycleEffect`].
 pub(crate) enum ObligationLifecycleEffect {
     /// Validator registration + Reserve transition, span/log, trace event,
     /// metrics, and both epoch advances for a freshly minted obligation.
@@ -1175,7 +1175,7 @@ pub(crate) enum ObligationLifecycleEffect {
 }
 
 /// Sink for [`ObligationLifecycleEffect`] payloads (E2 S4c,
-/// br-asupersync-m9wsza) — the twin of [`RegionAdvanceEffectsSink`].
+/// br-asupersync-m9wsza) — the twin of [`RegionLifecycleEffectsSink`].
 pub(crate) enum ObligationLifecycleEffectsSink<'b> {
     /// Dispatch each effect inline at its historical position (unified
     /// shape — behavior-identical to the pre-seam wrappers).
@@ -1239,12 +1239,27 @@ impl CompletionObligationTarget<'_> {
     }
 }
 
-/// One deferred-effect payload from the region-advance walk
-/// (E2 S4b-3, br-asupersync-m9wsza): a validator or instrumentation
-/// dispatch that must never run while a shard guard is held. The unified
-/// shape dispatches each payload inline at its historical walk position;
-/// the guard-held shape (S4c) buffers them for post-release dispatch.
-pub(crate) enum RegionAdvanceEffect {
+/// One deferred-effect payload from a region lifecycle operation —
+/// minting (E2 S4c-2b) or the advance walk (E2 S4b-3)
+/// (br-asupersync-m9wsza): a validator or instrumentation dispatch that
+/// must never run while a shard guard is held. The unified shape
+/// dispatches each payload inline at its historical position; the
+/// guard-held shape (S4c) buffers them for post-release dispatch.
+pub(crate) enum RegionLifecycleEffect {
+    /// Validator tracking, trace event, metrics, and epoch advance for a
+    /// freshly minted root region.
+    CreatedRoot { region_id: RegionId, now: Time },
+    /// Pressure-priority registration, validator tracking, trace event,
+    /// metrics, resource-envelope registration, and epoch advance for a
+    /// freshly minted child region.
+    CreatedChild {
+        region_id: RegionId,
+        parent: RegionId,
+        now: Time,
+        priority: RegionPriority,
+        budget: Budget,
+        capability_budget: CapabilityBudget,
+    },
     /// Finalize-boundary validator transition (+ verdict logging and
     /// snapshot-cache invalidation on violation).
     FinalizeValidation {
@@ -1264,16 +1279,16 @@ pub(crate) enum RegionAdvanceEffect {
     },
 }
 
-/// Sink for [`RegionAdvanceEffect`] payloads emitted by the region-advance
+/// Sink for [`RegionLifecycleEffect`] payloads emitted by the region-advance
 /// walk (E2 S4b-3, br-asupersync-m9wsza).
-pub(crate) enum RegionAdvanceEffectsSink<'b> {
+pub(crate) enum RegionLifecycleEffectsSink<'b> {
     /// Dispatch each effect inline at its historical walk position
     /// (unified shape — behavior-identical to the pre-seam walk).
     Inline,
     /// Accumulate payloads for dispatch after shard-guard release
     /// (sharded shape; wired by the S4c completion arm).
     #[allow(dead_code)]
-    Buffered(&'b mut Vec<RegionAdvanceEffect>),
+    Buffered(&'b mut Vec<RegionLifecycleEffect>),
 }
 
 /// Outcome of [`RuntimeState::admit_local_spawn_request_in`]
@@ -3150,23 +3165,48 @@ impl RuntimeState {
         budget: Budget,
         capability_budget: CapabilityBudget,
     ) -> RegionId {
+        self.create_root_region_in(
+            &mut AdmissionRegionTarget::Embedded,
+            &mut RegionLifecycleEffectsSink::Inline,
+            budget,
+            capability_budget,
+        )
+    }
+
+    /// Core of [`Self::create_root_region_with_capability_budget`] against
+    /// an explicit region-table target (E2 S4c-2b, br-asupersync-m9wsza):
+    /// the root-region MINTING seam. The mint is the bare Shard B table op;
+    /// the `root_region` residue field stays in the core (unobservable
+    /// relative order within the critical section), and validator tracking,
+    /// trace, metrics, and the epoch advance dispatch through the lifecycle
+    /// sink outside any shard guard.
+    ///
+    /// REACHABILITY (same law as every seam above): callers pass `Embedded`
+    /// today; the `External` arm becomes reachable with the S4c
+    /// completion-arm wiring, where minting against ShardedState's shard B
+    /// is what lets the completion/advance reads observe the same records.
+    fn create_root_region_in(
+        &mut self,
+        regions: &mut AdmissionRegionTarget<'_>,
+        effects: &mut RegionLifecycleEffectsSink<'_>,
+        budget: Budget,
+        capability_budget: CapabilityBudget,
+    ) -> RegionId {
         debug_assert!(
             self.root_region.is_none(),
             "create_root_region called twice; previous root: {:?}",
             self.root_region
         );
         let now = self.current_runtime_time();
-        let id = self
-            .regions
+        let id = regions
+            .resolve_mut(&mut self.regions)
             .create_root_with_capability_budget(budget, capability_budget, now);
-        self.track_new_region_in_cancel_protocol_validator(id, None, now);
-
         self.root_region = Some(id);
-        self.record_trace_event(|seq| TraceEvent::region_created(seq, now, id, None));
-        self.metrics.region_created(id, None);
 
-        // Notify epoch tracker of region creation
-        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::RegionTable);
+        self.emit_region_lifecycle_effect(
+            effects,
+            RegionLifecycleEffect::CreatedRoot { region_id: id, now },
+        );
 
         id
     }
@@ -3232,34 +3272,62 @@ impl RuntimeState {
         requirements: CapabilityBudgetRequirements,
         priority: RegionPriority,
     ) -> Result<RegionId, RegionCreateError> {
-        self.check_resource_pressure_for_region(priority)?;
-
-        let now = self.current_runtime_time();
-        let id = self.regions.create_child_with_capability_budget(
+        self.create_child_region_in(
+            &mut AdmissionRegionTarget::Embedded,
+            &mut RegionLifecycleEffectsSink::Inline,
             parent,
             budget,
             capability_budget,
             requirements,
-            now,
-        )?;
-        self.resource_monitor
-            .engine()
-            .set_region_priority(id, priority);
-        self.track_new_region_in_cancel_protocol_validator(id, Some(parent), now);
+            priority,
+        )
+    }
 
-        self.record_trace_event(|seq| TraceEvent::region_created(seq, now, id, Some(parent)));
-        self.metrics.region_created(id, Some(parent));
+    /// Core of
+    /// [`Self::create_child_region_with_capability_budget_and_priority`]
+    /// against an explicit region-table target (E2 S4c-2b,
+    /// br-asupersync-m9wsza): the child-region MINTING seam. The
+    /// resource-pressure admission check is unified residue and stays in
+    /// the core; the mint (parent link + capability admission) is the bare
+    /// Shard B table op; pressure-priority registration, validator
+    /// tracking, trace, metrics, envelope registration, and the epoch
+    /// advance dispatch through the lifecycle sink outside any shard
+    /// guard. Same reachability law as the root seam above.
+    #[allow(clippy::too_many_arguments)]
+    fn create_child_region_in(
+        &mut self,
+        regions: &mut AdmissionRegionTarget<'_>,
+        effects: &mut RegionLifecycleEffectsSink<'_>,
+        parent: RegionId,
+        budget: Budget,
+        capability_budget: CapabilityBudget,
+        requirements: CapabilityBudgetRequirements,
+        priority: RegionPriority,
+    ) -> Result<RegionId, RegionCreateError> {
+        self.check_resource_pressure_for_region(priority)?;
 
-        // Register resource envelope with swarm pressure governor
-        if let Ok(envelope) =
-            self.create_resource_envelope_for_region(id, &budget, &capability_budget)
-        {
-            self.swarm_pressure_governor
-                .register_region_envelope(id, envelope);
-        }
+        let now = self.current_runtime_time();
+        let id = regions
+            .resolve_mut(&mut self.regions)
+            .create_child_with_capability_budget(
+                parent,
+                budget,
+                capability_budget,
+                requirements,
+                now,
+            )?;
 
-        // Notify epoch tracker of region creation
-        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::RegionTable);
+        self.emit_region_lifecycle_effect(
+            effects,
+            RegionLifecycleEffect::CreatedChild {
+                region_id: id,
+                parent,
+                now,
+                priority,
+                budget,
+                capability_budget,
+            },
+        );
 
         Ok(id)
     }
@@ -7216,23 +7284,94 @@ impl RuntimeState {
         self.metrics.region_closed(region_id, lifetime);
     }
 
-    /// Dispatches one region-advance effect payload (E2 S4b-3,
-    /// br-asupersync-m9wsza). The unified walk routes every inline dispatch
-    /// through this method, so the S4c buffered drain replays payloads
-    /// through exactly the code the embedded shape exercises.
-    fn dispatch_region_advance_effect(&self, effect: RegionAdvanceEffect) {
+    /// Deferred validator + instrumentation effects for a freshly minted
+    /// root region (E2 S4c-2b, br-asupersync-m9wsza): the exact historical
+    /// post-mint sequence — validator tracking, region-created trace event,
+    /// metrics, and the region-table epoch advance. Dispatched outside any
+    /// shard guard.
+    fn dispatch_region_created_root_effects(&mut self, region_id: RegionId, now: Time) {
+        self.track_new_region_in_cancel_protocol_validator(region_id, None, now);
+        self.record_trace_event(|seq| TraceEvent::region_created(seq, now, region_id, None));
+        self.metrics.region_created(region_id, None);
+
+        // Notify epoch tracker of region creation
+        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::RegionTable);
+    }
+
+    /// Deferred validator + instrumentation effects for a freshly minted
+    /// child region (E2 S4c-2b, br-asupersync-m9wsza): the exact historical
+    /// post-mint sequence — pressure-priority registration, validator
+    /// tracking, region-created trace event, metrics, resource-envelope
+    /// registration with the swarm pressure governor, and the region-table
+    /// epoch advance. Dispatched outside any shard guard.
+    fn dispatch_region_created_child_effects(
+        &mut self,
+        region_id: RegionId,
+        parent: RegionId,
+        now: Time,
+        priority: RegionPriority,
+        budget: Budget,
+        capability_budget: CapabilityBudget,
+    ) {
+        self.resource_monitor
+            .engine()
+            .set_region_priority(region_id, priority);
+        self.track_new_region_in_cancel_protocol_validator(region_id, Some(parent), now);
+
+        self.record_trace_event(|seq| {
+            TraceEvent::region_created(seq, now, region_id, Some(parent))
+        });
+        self.metrics.region_created(region_id, Some(parent));
+
+        // Register resource envelope with swarm pressure governor
+        if let Ok(envelope) =
+            self.create_resource_envelope_for_region(region_id, &budget, &capability_budget)
+        {
+            self.swarm_pressure_governor
+                .register_region_envelope(region_id, envelope);
+        }
+
+        // Notify epoch tracker of region creation
+        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::RegionTable);
+    }
+
+    /// Dispatches one region-lifecycle effect payload (E2 S4b-3 / S4c-2b,
+    /// br-asupersync-m9wsza). The unified shape routes every inline
+    /// dispatch through this method, so the S4c buffered drain replays
+    /// payloads through exactly the code the embedded shape exercises.
+    fn dispatch_region_lifecycle_effect(&mut self, effect: RegionLifecycleEffect) {
         match effect {
-            RegionAdvanceEffect::FinalizeValidation {
+            RegionLifecycleEffect::CreatedRoot { region_id, now } => {
+                self.dispatch_region_created_root_effects(region_id, now);
+            }
+            RegionLifecycleEffect::CreatedChild {
+                region_id,
+                parent,
+                now,
+                priority,
+                budget,
+                capability_budget,
+            } => {
+                self.dispatch_region_created_child_effects(
+                    region_id,
+                    parent,
+                    now,
+                    priority,
+                    budget,
+                    capability_budget,
+                );
+            }
+            RegionLifecycleEffect::FinalizeValidation {
                 region_id,
                 finalization_event,
                 context,
             } => {
                 self.dispatch_region_finalize_validation(region_id, finalization_event, &context);
             }
-            RegionAdvanceEffect::CloseValidation { region_id } => {
+            RegionLifecycleEffect::CloseValidation { region_id } => {
                 self.dispatch_region_close_validation(region_id);
             }
-            RegionAdvanceEffect::RegionClosed {
+            RegionLifecycleEffect::RegionClosed {
                 region_id,
                 parent,
                 created_at,
@@ -7245,14 +7384,14 @@ impl RuntimeState {
     /// Routes a region-advance effect to its sink: inline dispatch at the
     /// historical walk position (unified shape) or buffered for
     /// post-release dispatch (sharded shape) — E2 S4b-3.
-    fn emit_region_advance_effect(
-        &self,
-        sink: &mut RegionAdvanceEffectsSink<'_>,
-        effect: RegionAdvanceEffect,
+    fn emit_region_lifecycle_effect(
+        &mut self,
+        sink: &mut RegionLifecycleEffectsSink<'_>,
+        effect: RegionLifecycleEffect,
     ) {
         match sink {
-            RegionAdvanceEffectsSink::Inline => self.dispatch_region_advance_effect(effect),
-            RegionAdvanceEffectsSink::Buffered(buffer) => buffer.push(effect),
+            RegionLifecycleEffectsSink::Inline => self.dispatch_region_lifecycle_effect(effect),
+            RegionLifecycleEffectsSink::Buffered(buffer) => buffer.push(effect),
         }
     }
 
@@ -7261,7 +7400,7 @@ impl RuntimeState {
             &mut AdmissionRegionTarget::Embedded,
             &AdmissionTaskTarget::Embedded,
             &mut CompletionObligationTarget::Embedded,
-            &mut RegionAdvanceEffectsSink::Inline,
+            &mut RegionLifecycleEffectsSink::Inline,
             initial_region,
         );
     }
@@ -7290,7 +7429,7 @@ impl RuntimeState {
         regions: &mut AdmissionRegionTarget<'_>,
         tasks: &AdmissionTaskTarget<'_>,
         obligations: &mut CompletionObligationTarget<'_>,
-        effects: &mut RegionAdvanceEffectsSink<'_>,
+        effects: &mut RegionLifecycleEffectsSink<'_>,
         initial_region: RegionId,
     ) {
         let mut current = Some(initial_region);
@@ -7361,9 +7500,9 @@ impl RuntimeState {
                         // any attempt whose record existed at entry —
                         // including a failed begin_finalize — matching the
                         // historical machine trajectory.
-                        self.emit_region_advance_effect(
+                        self.emit_region_lifecycle_effect(
                             effects,
-                            RegionAdvanceEffect::FinalizeValidation {
+                            RegionLifecycleEffect::FinalizeValidation {
                                 region_id,
                                 finalization_event,
                                 context,
@@ -7492,9 +7631,9 @@ impl RuntimeState {
                         // close attempt whose record existed at entry —
                         // including a failed complete_close — matching the
                         // historical machine trajectory.
-                        self.emit_region_advance_effect(
+                        self.emit_region_lifecycle_effect(
                             effects,
-                            RegionAdvanceEffect::CloseValidation { region_id },
+                            RegionLifecycleEffect::CloseValidation { region_id },
                         );
 
                         if closed.0 {
@@ -7514,9 +7653,9 @@ impl RuntimeState {
 
                             // Deferred instrumentation effects: trace event +
                             // lifetime metric (E2 S4b-2/3).
-                            self.emit_region_advance_effect(
+                            self.emit_region_lifecycle_effect(
                                 effects,
-                                RegionAdvanceEffect::RegionClosed {
+                                RegionLifecycleEffect::RegionClosed {
                                     region_id,
                                     parent,
                                     created_at: closed.3,
