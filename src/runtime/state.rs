@@ -38,8 +38,8 @@ use crate::runtime::resource_monitor::{
 use crate::runtime::stored_task::{LocalStoredTask, StoredTask};
 use crate::runtime::task_handle::JoinError;
 use crate::runtime::{
-    BlockingPoolHandle, ObligationAbortInfo, ObligationCommitInfo, ObligationTable, RegionTable,
-    TaskTable,
+    BlockingPoolHandle, ObligationAbortInfo, ObligationCommitInfo, ObligationLeakInfo,
+    ObligationTable, RegionTable, TaskTable,
 };
 use crate::time::TimerDriverHandle;
 use crate::trace::distributed::{LogicalClockMode, LogicalTime};
@@ -4808,9 +4808,36 @@ impl RuntimeState {
     #[allow(clippy::result_large_err)]
     pub fn mark_obligation_leaked(&mut self, obligation: ObligationId) -> Result<u64, Error> {
         let now = self.current_runtime_time();
+        // Shard-phase core (br-asupersync-m9wsza / E2 S3): the Shard C
+        // table mutation plus the Shard A logical-time read. Sharded-shape
+        // callers run these against held shard guards and dispatch the
+        // deferred effects below only after release (leak marking has no
+        // cancel-protocol validator transition to preserve).
         let info = self.obligations.mark_leaked(obligation, now)?;
+        let holder_logical_time = Self::logical_time_from_table(&self.tasks, info.holder);
 
-        self.record_task_trace_event(info.holder, |seq| {
+        self.dispatch_obligation_leak_effects(&info, now, holder_logical_time);
+
+        if let Some(region_record) = self.regions.get(info.region.arena_index()) {
+            region_record.resolve_obligation();
+        }
+
+        self.advance_region_state(info.region);
+
+        Ok(info.duration)
+    }
+
+    /// Deferred instrumentation effects for a leaked obligation: trace
+    /// event (with the pre-captured holder logical time), metrics, and the
+    /// response-gated error span/log. Dispatched outside any shard guard
+    /// (br-asupersync-m9wsza / E2 S3).
+    fn dispatch_obligation_leak_effects(
+        &self,
+        info: &ObligationLeakInfo,
+        now: Time,
+        holder_logical_time: Option<LogicalTime>,
+    ) {
+        self.record_task_trace_event_with_logical_time(holder_logical_time, |seq| {
             TraceEvent::obligation_leak(
                 seq,
                 now,
@@ -4860,14 +4887,6 @@ impl RuntimeState {
                 }
             }
         }
-
-        if let Some(region_record) = self.regions.get(info.region.arena_index()) {
-            region_record.resolve_obligation();
-        }
-
-        self.advance_region_state(info.region);
-
-        Ok(info.duration)
     }
 
     /// Gets a mutable reference to a stored future for polling.
