@@ -6848,6 +6848,95 @@ impl RuntimeState {
     /// enable future migration to `ShardGuard`-based locking (where recursive
     /// self-calls would deadlock on non-reentrant mutexes).
     #[allow(clippy::too_many_lines)]
+    /// Deferred cancel-protocol validation for the region finalize boundary
+    /// (E2 S4b-2, br-asupersync-m9wsza): dispatched after the
+    /// `begin_finalize` table op so the validator mutex is never acquired
+    /// while a shard guard is held. Fires for any attempt whose record
+    /// existed at entry — including a failed `begin_finalize` — matching
+    /// the historical machine trajectory. No test pins the old
+    /// pre-transition order (S4b-2 pre-analysis on the bead).
+    fn dispatch_region_finalize_validation(
+        &self,
+        region_id: RegionId,
+        finalization_event: RegionEvent,
+        context: &RegionContext,
+    ) {
+        let validation_result =
+            self.validate_region_protocol_transition(region_id, finalization_event, context);
+        if matches!(
+            validation_result,
+            TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
+        ) {
+            log_cancel_protocol_violation("region finalize transition", &validation_result);
+            // Protocol violation detected - invalidate region snapshot cache
+            // to ensure consistency is re-established via authoritative scan
+            self.read_biased_draining_region_snapshot.invalidate();
+            // Continue with transition but log violation
+        }
+    }
+
+    /// Deferred validator finalized-accounting check for region close
+    /// completion (E2 S4b-2, br-asupersync-m9wsza): dispatched after the
+    /// `complete_close` table op so the validator mutex is never acquired
+    /// while a shard guard is held. Every registered finalizer emits its
+    /// own completion transition when it actually retires; closing a region
+    /// before that accounting reaches Finalized is a protocol invariant
+    /// violation, not an implicit extra completion — the check records it
+    /// into the machine when accounting is not terminal.
+    fn dispatch_region_close_validation(&self, region_id: RegionId) {
+        let validation_result = {
+            let mut validator = self.cancel_protocol_validator.lock();
+            let validator_state = validator.region_state(region_id).cloned();
+            let already_finalized = matches!(
+                validator_state,
+                Some(crate::cancel::protocol_state_machines::RegionState::Finalized)
+            );
+            if already_finalized {
+                TransitionResult::Valid
+            } else {
+                validator.record_region_invariant_violation_without_logging(
+                    region_id,
+                    "runtime region close requires terminal finalizer accounting",
+                    format!("validator state at close: {validator_state:?}"),
+                )
+            }
+        };
+        if matches!(
+            validation_result,
+            TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
+        ) {
+            log_cancel_protocol_violation("region close completion", &validation_result);
+            self.read_biased_draining_region_snapshot.invalidate();
+        }
+    }
+
+    /// Deferred instrumentation effects for a completed region close: the
+    /// `RegionCloseComplete` trace event (pairs with `RegionCloseBegin`
+    /// emitted in `cancel_request`) and the `region_closed` lifetime metric
+    /// (E2 S4b-2, br-asupersync-m9wsza). `created_at` is captured by the
+    /// caller before the arena removal.
+    fn dispatch_region_closed_effects(
+        &self,
+        region_id: RegionId,
+        parent: Option<RegionId>,
+        created_at: Time,
+    ) {
+        let now = self.current_runtime_time();
+        self.record_trace_event(|seq| {
+            TraceEvent::new(
+                seq,
+                now,
+                TraceEventKind::RegionCloseComplete,
+                TraceData::Region {
+                    region: region_id,
+                    parent,
+                },
+            )
+        });
+        let lifetime = Duration::from_nanos(now.duration_since(created_at));
+        self.metrics.region_closed(region_id, lifetime);
+    }
+
     pub fn advance_region_state(&mut self, initial_region: RegionId) {
         self.advance_region_state_in(
             &mut AdmissionRegionTarget::Embedded,
@@ -6914,42 +7003,25 @@ impl RuntimeState {
                             break;
                         };
 
-                        // Validate protocol transition to Finalizing
+                        // Shard-phase reads (br-asupersync-m9wsza / E2 S4b-2):
+                        // validator context and finalization event from the
+                        // pre-transition record. Child draining is not a
+                        // region-protocol event: that validator intentionally
+                        // has no child-count state. Project cancellation or
+                        // normal close exactly once, here at the runtime's
+                        // actual finalization boundary.
                         let context = RegionContext {
                             region_id,
                             parent_region: region.parent,
                             created_at: region.created_at,
                             validation_level: CancelValidationLevel::Basic,
                         };
-                        // Child draining is not a region-protocol event: that
-                        // validator intentionally has no child-count state.
-                        // Project cancellation or normal close exactly once,
-                        // here at the runtime's actual finalization boundary.
                         let finalization_event =
                             region
                                 .cancel_reason()
                                 .map_or(RegionEvent::RequestClose, |reason| RegionEvent::Cancel {
                                     reason: reason.to_string(),
                                 });
-                        let validation_result = self.validate_region_protocol_transition(
-                            region_id,
-                            finalization_event,
-                            &context,
-                        );
-                        if matches!(
-                            validation_result,
-                            TransitionResult::Invalid { .. }
-                                | TransitionResult::InvariantViolation { .. }
-                        ) {
-                            log_cancel_protocol_violation(
-                                "region finalize transition",
-                                &validation_result,
-                            );
-                            // Protocol violation detected - invalidate region snapshot cache
-                            // to ensure consistency is re-established via authoritative scan
-                            self.read_biased_draining_region_snapshot.invalidate();
-                            // Continue with transition but log violation
-                        }
 
                         // Atomic check-and-transition: begin_finalize() internally validates
                         // that child_count() == 0 && task_count() == 0 under proper locking
@@ -6961,6 +7033,19 @@ impl RuntimeState {
                                 None
                             }
                         };
+
+                        // Deferred validator transition: dispatched after the
+                        // table op so the validator mutex is never acquired
+                        // while a shard guard is held (E2 S4b-2); fires for
+                        // any attempt whose record existed at entry —
+                        // including a failed begin_finalize — matching the
+                        // historical machine trajectory.
+                        self.dispatch_region_finalize_validation(
+                            region_id,
+                            finalization_event,
+                            &context,
+                        );
+
                         if let Some((old_state, new_state)) = transition {
                             self.note_read_biased_region_snapshot_transition(old_state, new_state);
                             true
@@ -7060,6 +7145,12 @@ impl RuntimeState {
                         // transition when it actually retires. Closing a region
                         // before that accounting reaches Finalized is a protocol
                         // invariant violation, not an implicit extra completion.
+                        // Shard-phase table op first (br-asupersync-m9wsza /
+                        // E2 S4b-2); the validator finalized-accounting check
+                        // dispatches after, so the validator mutex is never
+                        // acquired while a shard guard is held. `created_at`
+                        // is captured here, before the arena removal below,
+                        // for the deferred region-closed effects.
                         let closed = {
                             let Some(region) = regions
                                 .resolve_ref(&self.regions)
@@ -7067,42 +7158,17 @@ impl RuntimeState {
                             else {
                                 break;
                             };
-                            let validation_result = {
-                                let mut validator = self.cancel_protocol_validator.lock();
-                                let validator_state = validator.region_state(region_id).cloned();
-                                let already_finalized = matches!(
-                                    validator_state,
-                                    Some(
-                                        crate::cancel::protocol_state_machines::RegionState::Finalized
-                                    )
-                                );
-                                if already_finalized {
-                                    TransitionResult::Valid
-                                } else {
-                                    validator.record_region_invariant_violation_without_logging(
-                                        region_id,
-                                        "runtime region close requires terminal finalizer accounting",
-                                        format!("validator state at close: {validator_state:?}"),
-                                    )
-                                }
-                            };
-                            if matches!(
-                                validation_result,
-                                TransitionResult::Invalid { .. }
-                                    | TransitionResult::InvariantViolation { .. }
-                            ) {
-                                log_cancel_protocol_violation(
-                                    "region close completion",
-                                    &validation_result,
-                                );
-                                self.read_biased_draining_region_snapshot.invalidate();
-                            }
-
                             let old_state = region.state();
                             let closed = region.complete_close();
                             let new_state = region.state();
-                            (closed, old_state, new_state)
+                            (closed, old_state, new_state, region.created_at())
                         };
+
+                        // Deferred validator accounting check: fires for any
+                        // close attempt whose record existed at entry —
+                        // including a failed complete_close — matching the
+                        // historical machine trajectory.
+                        self.dispatch_region_close_validation(region_id);
 
                         if closed.0 {
                             self.note_read_biased_region_snapshot_transition(closed.1, closed.2);
@@ -7119,30 +7185,9 @@ impl RuntimeState {
                                 .resolve_mut(&mut self.obligations)
                                 .mark_region_finalized(region_id);
 
-                            // Emit RegionCloseComplete trace event (pairs
-                            // with RegionCloseBegin emitted in cancel_request).
-                            let now = self.current_runtime_time();
-                            self.record_trace_event(|seq| {
-                                TraceEvent::new(
-                                    seq,
-                                    now,
-                                    TraceEventKind::RegionCloseComplete,
-                                    TraceData::Region {
-                                        region: region_id,
-                                        parent,
-                                    },
-                                )
-                            });
-
-                            // Emit region_closed metric with lifetime.
-                            if let Some(region) = regions
-                                .resolve_ref(&self.regions)
-                                .get(region_id.arena_index())
-                            {
-                                let lifetime =
-                                    Duration::from_nanos(now.duration_since(region.created_at()));
-                                self.metrics.region_closed(region_id, lifetime);
-                            }
+                            // Deferred instrumentation effects: trace event +
+                            // lifetime metric (E2 S4b-2).
+                            self.dispatch_region_closed_effects(region_id, parent, closed.3);
                             self.resource_monitor.clear_region_priority(region_id);
 
                             if let Some(parent_id) = parent {
