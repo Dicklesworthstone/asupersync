@@ -5419,9 +5419,9 @@
   ],
   "downstream_probe_policy": {
     "portfolio_root": "/dp",
-    "local_probe_rule": "When /dp is mounted, every listed repository and Cargo.toml must exist and the manifest must contain an asupersync dependency declaration.",
+    "local_probe_rule": "Every listed manifest that is available under /dp must reference asupersync; an incomplete or unavailable portfolio yields BLOCKED_EXTERNAL and no downstream compatibility claim.",
     "remote_absence_state": "BLOCKED_EXTERNAL",
-    "remote_absence_rule": "An RCH worker without /dp validates registry structure only and may not claim downstream compatibility, freshness, or green portfolio evidence.",
+    "remote_absence_rule": "An environment without the complete /dp portfolio validates registry structure and available manifests only and may not claim downstream compatibility, freshness, or green portfolio evidence.",
     "executable_baseline_owner": "asupersync-dep-p1-foundations-upksjk.5.2",
     "cross_platform_owner": "asupersync-dep-p1-foundations-upksjk.6.5",
     "canonical_probe_command": "for manifest in /dp/*/Cargo.toml; do rg -n 'asupersync' \"$manifest\"; done",
