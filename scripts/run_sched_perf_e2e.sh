@@ -89,8 +89,24 @@ PY
 }
 
 run_rch() { # $1=log-file, rest=command; returns rch exit
+  # Infra-retry: transient fleet conditions (SSH timeout RCH-E104,
+  # admission refusals, daemon restarts) get up to 3 attempts with
+  # backoff; genuine test failures and compile errors never retry.
   local lf="$1"; shift
-  RCH_BUILD_TIMEOUT_SEC=5400 RCH_REQUIRE_REMOTE=1 rch exec -- "$@" >"$lf" 2>&1
+  local attempt rc
+  for attempt in 1 2 3; do
+    RCH_BUILD_TIMEOUT_SEC=5400 RCH_REQUIRE_REMOTE=1 rch exec -- "$@" >"$lf" 2>&1
+    rc=$?
+    [ "$rc" -eq 0 ] && return 0
+    if grep -qEi "RCH-E104|no admissible|insufficient_total_slots|insufficient_slots|critical_pressure|retries exhausted|daemon restart" "$lf" \
+       && ! grep -qE "test result: FAILED|^error(\[|:)" "$lf"; then
+      log "rch infra-retry (attempt $attempt, rc=$rc) — backing off 120s"
+      sleep 120
+      continue
+    fi
+    return "$rc"
+  done
+  return "$rc"
 }
 
 # ---------- S1: regression gate ----------
