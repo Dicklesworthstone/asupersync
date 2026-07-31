@@ -20,24 +20,32 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use asupersync::time::{sleep, timeout, interval};
+//! <!-- core-api-doctest: time-primitives -->
+//! ```
+//! use asupersync::{Cx, main};
+//! use asupersync::time::{interval, sleep, timeout};
+//! use asupersync::types::Time;
+//! use std::future::ready;
 //! use std::time::Duration;
 //!
-//! // Sleep for 100 milliseconds
-//! sleep(Duration::from_millis(100)).await;
+//! #[main]
+//! async fn main(cx: &Cx) {
+//!     cx.checkpoint().expect("example starts active");
+//!     let now = Time::from_secs(10);
 //!
-//! // Wrap an operation with a timeout
-//! match timeout(Duration::from_secs(5), async { expensive_operation() }).await {
-//!     Ok(result) => println!("Completed: {result}"),
-//!     Err(_) => println!("Timed out!"),
-//! }
+//!     let sleeper = sleep(now, Duration::from_millis(100));
+//!     assert_eq!(sleeper.deadline(), Time::from_nanos(10_100_000_000));
 //!
-//! // Create an interval timer
-//! let mut ticker = interval(now, Duration::from_millis(100));
-//! for _ in 0..5 {
-//!     let tick = ticker.tick(now);
-//!     process_tick(tick);
+//!     let value = timeout(now, Duration::from_secs(5), ready(42_u8))
+//!         .await
+//!         .expect("ready future beats its timeout");
+//!     assert_eq!(value, 42);
+//!     let elapsed = timeout(now, Duration::from_secs(5), ready(()));
+//!     assert!(elapsed.is_elapsed(Time::from_secs(15)));
+//!
+//!     let mut ticker = interval(now, Duration::from_millis(100));
+//!     assert_eq!(ticker.tick(now), now);
+//!     assert_eq!(ticker.tick(Time::from_nanos(10_100_000_000)), Time::from_nanos(10_100_000_000));
 //! }
 //! ```
 

@@ -6,6 +6,167 @@
     "metadata_only": true,
     "executes_examples": false
   },
+  "rustdoc_coverage": {
+    "missing_doc_code_examples": {
+      "lint": "missing_doc_code_examples",
+      "availability": "unavailable-on-pinned-toolchain",
+      "policy": "report-only",
+      "checked_command": "rustc -W help",
+      "observed_related_lints": [
+        "missing-docs"
+      ],
+      "replacement_gates": [
+        "cargo test -p asupersync --doc",
+        "cargo doc -p asupersync --no-deps"
+      ]
+    },
+    "core_api": [
+      {
+        "symbol": "asupersync::Cx",
+        "source": "src/cx/mod.rs",
+        "marker": "core-api-doctest: cx-scope",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::Scope",
+        "source": "src/cx/mod.rs",
+        "marker": "core-api-doctest: cx-scope",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::Outcome::map",
+        "source": "src/types/mod.rs",
+        "marker": "core-api-doctest: outcome-budget",
+        "failure_handling": true
+      },
+      {
+        "symbol": "asupersync::Budget::meet",
+        "source": "src/types/mod.rs",
+        "marker": "core-api-doctest: outcome-budget",
+        "failure_handling": true
+      },
+      {
+        "symbol": "asupersync::runtime::RuntimeBuilder",
+        "source": "src/runtime/mod.rs",
+        "marker": "core-api-doctest: runtime-builder-task-handle",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::runtime::Runtime",
+        "source": "src/runtime/mod.rs",
+        "marker": "core-api-doctest: runtime-builder-task-handle",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::runtime::TaskHandle",
+        "source": "src/runtime/mod.rs",
+        "marker": "core-api-doctest: runtime-builder-task-handle",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::LabRuntime",
+        "source": "src/lab/mod.rs",
+        "marker": "core-api-doctest: lab-runtime-config",
+        "failure_handling": true
+      },
+      {
+        "symbol": "asupersync::LabConfig",
+        "source": "src/lab/mod.rs",
+        "marker": "core-api-doctest: lab-runtime-config",
+        "failure_handling": true
+      },
+      {
+        "symbol": "asupersync::combinator::JoinSet",
+        "source": "src/combinator/mod.rs",
+        "marker": "core-api-doctest: join-set-race-join",
+        "failure_handling": true
+      },
+      {
+        "symbol": "asupersync::channel::mpsc",
+        "source": "src/channel/mod.rs",
+        "marker": "core-api-doctest: channel-families",
+        "failure_handling": true
+      },
+      {
+        "symbol": "asupersync::channel::oneshot",
+        "source": "src/channel/mod.rs",
+        "marker": "core-api-doctest: channel-families",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::channel::broadcast",
+        "source": "src/channel/mod.rs",
+        "marker": "core-api-doctest: channel-families",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::channel::watch",
+        "source": "src/channel/mod.rs",
+        "marker": "core-api-doctest: channel-families",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::sync::Mutex",
+        "source": "src/sync/mod.rs",
+        "marker": "core-api-doctest: sync-primitives",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::sync::RwLock",
+        "source": "src/sync/mod.rs",
+        "marker": "core-api-doctest: sync-primitives",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::sync::Semaphore",
+        "source": "src/sync/mod.rs",
+        "marker": "core-api-doctest: sync-primitives",
+        "failure_handling": true
+      },
+      {
+        "symbol": "asupersync::time::sleep",
+        "source": "src/time/mod.rs",
+        "marker": "core-api-doctest: time-primitives",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::time::timeout",
+        "source": "src/time/mod.rs",
+        "marker": "core-api-doctest: time-primitives",
+        "failure_handling": true
+      },
+      {
+        "symbol": "asupersync::time::interval",
+        "source": "src/time/mod.rs",
+        "marker": "core-api-doctest: time-primitives",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::stream::StreamExt",
+        "source": "src/stream/mod.rs",
+        "marker": "core-api-doctest: stream-ext",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::combinator::join2_outcomes",
+        "source": "src/combinator/mod.rs",
+        "marker": "core-api-doctest: join-set-race-join",
+        "failure_handling": true
+      },
+      {
+        "symbol": "asupersync::combinator::race2_outcomes",
+        "source": "src/combinator/mod.rs",
+        "marker": "core-api-doctest: join-set-race-join",
+        "failure_handling": true
+      },
+      {
+        "symbol": "asupersync::supervision::SupervisionStrategy",
+        "source": "src/supervision.rs",
+        "marker": "core-api-doctest: supervision-basics",
+        "failure_handling": true
+      }
+    ]
+  },
   "examples": [
     {
       "name": "examples_index",

@@ -7,15 +7,51 @@
 //! - [`select`]: Wait for the first of two futures
 //! - [`timeout`]: Add a deadline to an operation
 //! - [`bracket`](mod@bracket): Acquire/use/release resource safety pattern
-//! - [`retry`]: Retry with exponential backoff
+//! - [`mod@retry`]: Retry with exponential backoff
 //! - [`quorum`]: M-of-N completion semantics for consensus patterns
-//! - [`hedge`]: Latency hedging - start backup after delay, first wins
+//! - [`mod@hedge`]: Latency hedging - start backup after delay, first wins
 //! - [`first_ok`]: Try operations sequentially until one succeeds
 //! - [`pipeline`]: Chain transformations with staged processing
 //! - [`map_reduce`]: Parallel map followed by monoid-based reduction
 //! - [`circuit_breaker`]: Failure detection and prevention
 //! - [`bulkhead`]: Resource isolation and concurrency limiting
 //! - [`rate_limit`]: Throughput control with token bucket algorithm
+//!
+//! # Structured fan-out, join, and race
+//!
+//! <!-- core-api-doctest: join-set-race-join -->
+//! ```
+//! use asupersync::{CancelReason, Cx, Outcome, main};
+//! use asupersync::combinator::{JoinSet, RaceWinner, join2_outcomes, race2_outcomes};
+//!
+//! #[main]
+//! async fn main(cx: &Cx) {
+//!     let mut set = JoinSet::in_cx(cx);
+//!     set.spawn(cx, |_| async { Ok::<u8, &'static str>(2) })
+//!         .expect("spawn successful member");
+//!     set.spawn(cx, |_| async { Err::<u8, &'static str>("member failed") })
+//!         .expect("spawn failing member");
+//!     let members = set.join_all(cx).await;
+//!     assert!(members[0].is_ok());
+//!     assert!(members[1].is_err());
+//!
+//!     let (joined, preserved, _) = join2_outcomes(
+//!         Outcome::<u8, &str>::Ok(3),
+//!         Outcome::<u8, &str>::Err("join failed"),
+//!     );
+//!     assert!(matches!(joined, Outcome::Err("join failed")));
+//!     assert_eq!(preserved, Some(3));
+//!
+//!     let (winner, which, loser) = race2_outcomes(
+//!         RaceWinner::First,
+//!         Outcome::<u8, &str>::Ok(5),
+//!         Outcome::<u8, &str>::Cancelled(CancelReason::race_loser()),
+//!     );
+//!     assert!(matches!(winner, Outcome::Ok(5)));
+//!     assert!(which.is_first());
+//!     assert!(loser.is_cancelled());
+//! }
+//! ```
 
 /// Adaptive latency-hedging controllers.
 pub mod adaptive_hedge;

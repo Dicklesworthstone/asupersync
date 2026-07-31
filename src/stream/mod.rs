@@ -80,10 +80,14 @@
 //!
 //! # Examples
 //!
-//! ```ignore
-//! use asupersync::stream::{iter, StreamExt};
+//! <!-- core-api-doctest: stream-ext -->
+//! ```
+//! use asupersync::{Cx, main};
+//! use asupersync::stream::{StreamExt, iter};
 //!
-//! async fn example() {
+//! #[main]
+//! async fn main(cx: &Cx) {
+//!     cx.checkpoint().expect("example starts active");
 //!     let sum = iter(vec![1, 2, 3, 4, 5])
 //!         .filter(|x| *x % 2 == 0)
 //!         .map(|x| x * 2)

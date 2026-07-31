@@ -6,6 +6,33 @@ use std::path::{Path, PathBuf};
 const METADATA_PATH: &str = "examples/metadata.json";
 const SCHEMA_VERSION: &str = "asupersync.examples.metadata.v1";
 const BEAD_ID: &str = "asupersync-agent-native-dx-zxqaqs.4";
+const MIN_FAILURE_DOCTESTS: usize = 5;
+const CORE_API_SYMBOLS: &[&str] = &[
+    "asupersync::Budget::meet",
+    "asupersync::Cx",
+    "asupersync::LabConfig",
+    "asupersync::LabRuntime",
+    "asupersync::Outcome::map",
+    "asupersync::Scope",
+    "asupersync::channel::broadcast",
+    "asupersync::channel::mpsc",
+    "asupersync::channel::oneshot",
+    "asupersync::channel::watch",
+    "asupersync::combinator::JoinSet",
+    "asupersync::combinator::join2_outcomes",
+    "asupersync::combinator::race2_outcomes",
+    "asupersync::runtime::Runtime",
+    "asupersync::runtime::RuntimeBuilder",
+    "asupersync::runtime::TaskHandle",
+    "asupersync::stream::StreamExt",
+    "asupersync::supervision::SupervisionStrategy",
+    "asupersync::sync::Mutex",
+    "asupersync::sync::RwLock",
+    "asupersync::sync::Semaphore",
+    "asupersync::time::interval",
+    "asupersync::time::sleep",
+    "asupersync::time::timeout",
+];
 
 fn repo_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -136,6 +163,35 @@ fn file_stem(relative: &str) -> String {
         .into_owned()
 }
 
+fn runnable_doctest_body<'a>(source: &'a str, marker: &str) -> &'a str {
+    let marker_line = format!("//! <!-- {marker} -->");
+    assert_eq!(
+        source.matches(&marker_line).count(),
+        1,
+        "doctest marker must occur exactly once: {marker}"
+    );
+    let marker_end = source
+        .find(&marker_line)
+        .unwrap_or_else(|| panic!("missing doctest marker {marker}"))
+        + marker_line.len();
+    let after_marker = &source[marker_end..];
+    const OPEN_FENCE: &str = "\n//! ```\n";
+    assert!(
+        after_marker.starts_with(OPEN_FENCE),
+        "{marker} must be followed immediately by a runnable Rust fence"
+    );
+    let body = &after_marker[OPEN_FENCE.len()..];
+    let close = body
+        .find("\n//! ```")
+        .unwrap_or_else(|| panic!("doctest marker {marker} has no closing fence"));
+    let body = &body[..close];
+    assert!(
+        body.contains("Cx"),
+        "{marker} must show where its capability context comes from"
+    );
+    body
+}
+
 #[test]
 fn metadata_declares_schema_scope_and_owner() {
     let metadata = metadata();
@@ -146,6 +202,79 @@ fn metadata_declares_schema_scope_and_owner() {
     let scope = Value::Object(object(&metadata, "scope").clone());
     assert!(bool_field(&scope, "metadata_only"));
     assert!(!bool_field(&scope, "executes_examples"));
+}
+
+#[test]
+fn core_api_doctest_checklist_is_complete_and_runnable() {
+    let metadata = metadata();
+    let coverage = metadata
+        .get("rustdoc_coverage")
+        .unwrap_or_else(|| panic!("rustdoc_coverage must be present"));
+    let mut symbols = BTreeSet::new();
+    let mut failure_doctests = BTreeSet::new();
+
+    for entry in array(coverage, "core_api") {
+        let symbol = string(entry, "symbol");
+        assert!(symbols.insert(symbol), "duplicate core API symbol {symbol}");
+
+        let source_path = string(entry, "source");
+        assert!(
+            source_path.starts_with("src/") && has_extension(source_path, "rs"),
+            "core API doctest source must be a Rust source file: {source_path}"
+        );
+        let source = read_repo_file(source_path);
+        let marker = string(entry, "marker");
+        let body = runnable_doctest_body(&source, marker);
+        assert!(
+            body.contains("assert"),
+            "{marker} must assert its documented behavior"
+        );
+
+        if bool_field(entry, "failure_handling") {
+            failure_doctests.insert((source_path.to_string(), marker.to_string()));
+        }
+    }
+
+    assert_eq!(
+        symbols,
+        CORE_API_SYMBOLS.iter().copied().collect(),
+        "the committed checklist must cover the complete core API set"
+    );
+    assert!(
+        failure_doctests.len() >= MIN_FAILURE_DOCTESTS,
+        "expected at least {MIN_FAILURE_DOCTESTS} distinct failure-handling doctests, found {}",
+        failure_doctests.len()
+    );
+}
+
+#[test]
+fn unavailable_missing_doc_code_examples_lint_has_report_only_fallbacks() {
+    let metadata = metadata();
+    let coverage = metadata
+        .get("rustdoc_coverage")
+        .unwrap_or_else(|| panic!("rustdoc_coverage must be present"));
+    let report = coverage
+        .get("missing_doc_code_examples")
+        .unwrap_or_else(|| panic!("missing_doc_code_examples report must be present"));
+
+    assert_eq!(string(report, "lint"), "missing_doc_code_examples");
+    assert_eq!(
+        string(report, "availability"),
+        "unavailable-on-pinned-toolchain"
+    );
+    assert_eq!(string(report, "policy"), "report-only");
+    assert_eq!(string(report, "checked_command"), "rustc -W help");
+    assert_eq!(
+        nonempty_string_set(report, "observed_related_lints"),
+        BTreeSet::from(["missing-docs".to_string()])
+    );
+    assert_eq!(
+        nonempty_string_set(report, "replacement_gates"),
+        BTreeSet::from([
+            "cargo doc -p asupersync --no-deps".to_string(),
+            "cargo test -p asupersync --doc".to_string(),
+        ])
+    );
 }
 
 #[test]
