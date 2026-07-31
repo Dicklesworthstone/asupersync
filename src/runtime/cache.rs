@@ -323,7 +323,7 @@ impl ArtifactCache {
 
         // Reject impossible admissions before expiry cleanup or eviction so a
         // failed put cannot destroy otherwise valid cached artifacts.
-        if artifact_size > self.config.max_cache_size_bytes {
+        if artifact_size > self.config.max_cache_size_bytes || self.config.max_artifact_count == 0 {
             return false;
         }
         // Reclaim expired entries and the prior value before calculating byte
@@ -369,7 +369,12 @@ impl ArtifactCache {
     /// Evict artifacts based on the configured eviction policy.
     /// Returns the number of artifacts evicted.
     pub fn evict(&mut self, target_bytes: u64) -> u32 {
-        let mut evicted_count = 0;
+        self.evict_for_capacity(target_bytes, 0)
+    }
+
+    /// Evict until both byte and artifact-count targets have been satisfied.
+    fn evict_for_capacity(&mut self, target_bytes: u64, target_artifacts: usize) -> u32 {
+        let mut evicted_count = 0usize;
         let mut evicted_bytes = 0u64;
 
         // Collect eviction candidates based on policy - clone to avoid borrow checker issues
@@ -400,20 +405,20 @@ impl ArtifactCache {
 
         // Evict until we've freed enough space
         for (id, meta) in candidates {
-            if evicted_bytes >= target_bytes {
+            if evicted_bytes >= target_bytes && evicted_count >= target_artifacts {
                 break;
             }
 
-            evicted_bytes += meta.size_bytes;
+            evicted_bytes = evicted_bytes.saturating_add(meta.size_bytes);
             self.remove_internal(&id);
-            evicted_count += 1;
+            evicted_count = evicted_count.saturating_add(1);
         }
 
         self.statistics.total_evictions = self
             .statistics
             .total_evictions
-            .saturating_add(u64::from(evicted_count));
-        evicted_count
+            .saturating_add(u64::try_from(evicted_count).unwrap_or(u64::MAX));
+        u32::try_from(evicted_count).unwrap_or(u32::MAX)
     }
 
     /// Remove all expired artifacts from the cache.
@@ -468,36 +473,54 @@ impl ArtifactCache {
 
     /// Ensure there's capacity for a new artifact of the given size.
     fn ensure_capacity_for(&mut self, needed_bytes: u64) -> bool {
-        // Check if we have enough space now
+        // The caller removes a same-ID predecessor before reaching this point,
+        // so replacements consume the vacated slot while new IDs may need a
+        // count-based eviction.
+        let max_artifact_count =
+            usize::try_from(self.config.max_artifact_count).unwrap_or(usize::MAX);
+        let artifacts_to_free = self
+            .metadata
+            .len()
+            .saturating_add(1)
+            .saturating_sub(max_artifact_count);
+
+        // Check if we have enough byte and artifact slots now.
         let available_bytes = self
             .config
             .max_cache_size_bytes
             .saturating_sub(self.current_size_bytes);
-        if available_bytes >= needed_bytes {
+        if available_bytes >= needed_bytes && artifacts_to_free == 0 {
             return true;
         }
 
-        // Need to evict some items
+        // Need to evict enough items to satisfy both bounds.
         let bytes_to_free = needed_bytes.saturating_sub(available_bytes);
-        let eviction_threshold = (self.config.max_cache_size_bytes
-            * u64::from(self.config.eviction_threshold_ratio))
-            / 10_000;
-
-        // If we're above eviction threshold, be more aggressive
-        let target_eviction = if self.current_size_bytes > eviction_threshold {
-            bytes_to_free + (self.current_size_bytes / 4) // Free extra 25% for headroom
+        let target_eviction = if bytes_to_free == 0 {
+            0
         } else {
-            bytes_to_free
+            let eviction_threshold = u64::try_from(
+                (u128::from(self.config.max_cache_size_bytes)
+                    * u128::from(self.config.eviction_threshold_ratio))
+                    / 10_000,
+            )
+            .unwrap_or(u64::MAX);
+
+            // If we're above eviction threshold, be more aggressive.
+            if self.current_size_bytes > eviction_threshold {
+                bytes_to_free.saturating_add(self.current_size_bytes / 4)
+            } else {
+                bytes_to_free
+            }
         };
 
-        self.evict(target_eviction);
+        self.evict_for_capacity(target_eviction, artifacts_to_free);
 
-        // Check if we now have enough space
+        // Check if we now have enough space under both configured limits.
         let final_available = self
             .config
             .max_cache_size_bytes
             .saturating_sub(self.current_size_bytes);
-        final_available >= needed_bytes
+        final_available >= needed_bytes && self.metadata.len() < max_artifact_count
     }
 }
 
