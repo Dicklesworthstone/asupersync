@@ -1174,16 +1174,38 @@ pub(crate) enum ObligationLifecycleEffect {
     },
 }
 
-/// Sink for [`ObligationLifecycleEffect`] payloads (E2 S4c,
-/// br-asupersync-m9wsza) — the twin of [`RegionLifecycleEffectsSink`].
-pub(crate) enum ObligationLifecycleEffectsSink<'b> {
+/// One deferred-effect payload from any lifecycle operation on the
+/// completion/cancel/settle paths (E2 S4c-2c-iii, br-asupersync-m9wsza).
+///
+/// The union exists because a single guard-held completion interleaves
+/// obligation-settle effects (per orphan abort) with region-advance
+/// effects (from each abort's advance walk) — and the settle sequencing
+/// also removes the obligation's validator machine between its settle
+/// dispatch and the walk. One buffer preserves that cross-kind push
+/// order exactly; typed per-kind buffers would replay reordered
+/// (corpus-visible trace divergence).
+pub(crate) enum LifecycleEffect {
+    /// An obligation lifecycle payload (reserve/settle/leak).
+    Obligation(ObligationLifecycleEffect),
+    /// A region lifecycle payload (mint/advance).
+    Region(RegionLifecycleEffect),
+    /// Post-settle removal of the obligation's cancel-protocol state
+    /// machine (br-asupersync-cancelvalidator-leak-mdvuf9). The Inline
+    /// wrappers call the validator directly at this slot; the buffered
+    /// drain replays the removal at the same relative position.
+    ValidatorRemoveObligation(ObligationId),
+}
+
+/// Sink for [`LifecycleEffect`] payloads (E2 S4c, br-asupersync-m9wsza;
+/// unified from the earlier per-kind sinks in S4c-2c-iii).
+pub(crate) enum LifecycleEffectsSink<'b> {
     /// Dispatch each effect inline at its historical position (unified
     /// shape — behavior-identical to the pre-seam wrappers).
     Inline,
     /// Accumulate payloads for dispatch after shard-guard release
     /// (sharded shape; wired by the S4c completion arm).
     #[allow(dead_code)]
-    Buffered(&'b mut Vec<ObligationLifecycleEffect>),
+    Buffered(&'b mut Vec<LifecycleEffect>),
 }
 
 /// Obligation-table target for the completion C-phases
@@ -1277,18 +1299,6 @@ pub(crate) enum RegionLifecycleEffect {
         parent: Option<RegionId>,
         created_at: Time,
     },
-}
-
-/// Sink for [`RegionLifecycleEffect`] payloads emitted by the region-advance
-/// walk (E2 S4b-3, br-asupersync-m9wsza).
-pub(crate) enum RegionLifecycleEffectsSink<'b> {
-    /// Dispatch each effect inline at its historical walk position
-    /// (unified shape — behavior-identical to the pre-seam walk).
-    Inline,
-    /// Accumulate payloads for dispatch after shard-guard release
-    /// (sharded shape; wired by the S4c completion arm).
-    #[allow(dead_code)]
-    Buffered(&'b mut Vec<RegionLifecycleEffect>),
 }
 
 /// Outcome of [`RuntimeState::admit_local_spawn_request_in`]
@@ -3212,7 +3222,7 @@ impl RuntimeState {
     ) -> RegionId {
         self.create_root_region_in(
             &mut AdmissionRegionTarget::Embedded,
-            &mut RegionLifecycleEffectsSink::Inline,
+            &mut LifecycleEffectsSink::Inline,
             budget,
             capability_budget,
         )
@@ -3233,7 +3243,7 @@ impl RuntimeState {
     fn create_root_region_in(
         &mut self,
         regions: &mut AdmissionRegionTarget<'_>,
-        effects: &mut RegionLifecycleEffectsSink<'_>,
+        effects: &mut LifecycleEffectsSink<'_>,
         budget: Budget,
         capability_budget: CapabilityBudget,
     ) -> RegionId {
@@ -3319,7 +3329,7 @@ impl RuntimeState {
     ) -> Result<RegionId, RegionCreateError> {
         self.create_child_region_in(
             &mut AdmissionRegionTarget::Embedded,
-            &mut RegionLifecycleEffectsSink::Inline,
+            &mut LifecycleEffectsSink::Inline,
             parent,
             budget,
             capability_budget,
@@ -3342,7 +3352,7 @@ impl RuntimeState {
     fn create_child_region_in(
         &mut self,
         regions: &mut AdmissionRegionTarget<'_>,
-        effects: &mut RegionLifecycleEffectsSink<'_>,
+        effects: &mut LifecycleEffectsSink<'_>,
         parent: RegionId,
         budget: Budget,
         capability_budget: CapabilityBudget,
@@ -4683,7 +4693,7 @@ impl RuntimeState {
             &AdmissionRegionTarget::Embedded,
             &AdmissionTaskTarget::Embedded,
             &mut CompletionObligationTarget::Embedded,
-            &mut ObligationLifecycleEffectsSink::Inline,
+            &mut LifecycleEffectsSink::Inline,
             kind,
             holder,
             region,
@@ -4713,7 +4723,7 @@ impl RuntimeState {
         regions: &AdmissionRegionTarget<'_>,
         tasks: &AdmissionTaskTarget<'_>,
         obligations: &mut CompletionObligationTarget<'_>,
-        effects: &mut ObligationLifecycleEffectsSink<'_>,
+        effects: &mut LifecycleEffectsSink<'_>,
         kind: ObligationKind,
         holder: TaskId,
         region: RegionId,
@@ -4977,14 +4987,61 @@ impl RuntimeState {
     /// dispatch (sharded shape) — E2 S4c.
     fn emit_obligation_lifecycle_effect(
         &mut self,
-        sink: &mut ObligationLifecycleEffectsSink<'_>,
+        sink: &mut LifecycleEffectsSink<'_>,
         effect: ObligationLifecycleEffect,
     ) {
         match sink {
-            ObligationLifecycleEffectsSink::Inline => {
-                self.dispatch_obligation_lifecycle_effect(effect)
+            LifecycleEffectsSink::Inline => self.dispatch_obligation_lifecycle_effect(effect),
+            LifecycleEffectsSink::Buffered(buffer) => {
+                buffer.push(LifecycleEffect::Obligation(effect));
             }
-            ObligationLifecycleEffectsSink::Buffered(buffer) => buffer.push(effect),
+        }
+    }
+
+    /// Routes the post-settle validator-machine removal to the sink
+    /// (E2 S4c-2c-iii): inline it acquires the validator mutex at the
+    /// historical slot between the settle dispatch and the advance walk;
+    /// buffered it replays at the same relative position after guard
+    /// release (the validator mutex must never be taken under shard
+    /// guards — u5jdvw/118ayd discipline).
+    fn emit_obligation_validator_remove(
+        &mut self,
+        sink: &mut LifecycleEffectsSink<'_>,
+        obligation: ObligationId,
+    ) {
+        match sink {
+            LifecycleEffectsSink::Inline => {
+                self.cancel_protocol_validator
+                    .lock()
+                    .remove_obligation(obligation);
+            }
+            LifecycleEffectsSink::Buffered(buffer) => {
+                buffer.push(LifecycleEffect::ValidatorRemoveObligation(obligation));
+            }
+        }
+    }
+
+    /// Replays a drained buffer of deferred lifecycle effects in exact
+    /// push order (E2 S4c-2c-iii, br-asupersync-m9wsza). The guard-held
+    /// completion arm calls this after releasing every shard guard; each
+    /// payload dispatches through the same code the Inline shape
+    /// exercises on every operation.
+    #[allow(dead_code)]
+    pub(crate) fn dispatch_lifecycle_effects(&mut self, effects: Vec<LifecycleEffect>) {
+        for effect in effects {
+            match effect {
+                LifecycleEffect::Obligation(effect) => {
+                    self.dispatch_obligation_lifecycle_effect(effect);
+                }
+                LifecycleEffect::Region(effect) => {
+                    self.dispatch_region_lifecycle_effect(effect);
+                }
+                LifecycleEffect::ValidatorRemoveObligation(obligation) => {
+                    self.cancel_protocol_validator
+                        .lock()
+                        .remove_obligation(obligation);
+                }
+            }
         }
     }
 
@@ -5038,18 +5095,48 @@ impl RuntimeState {
     /// Returns the duration the obligation was held (nanoseconds).
     #[allow(clippy::result_large_err)]
     pub fn commit_obligation(&mut self, obligation: ObligationId) -> Result<u64, Error> {
+        self.commit_obligation_in(
+            &mut AdmissionRegionTarget::Embedded,
+            &AdmissionTaskTarget::Embedded,
+            &mut CompletionObligationTarget::Embedded,
+            &mut LifecycleEffectsSink::Inline,
+            obligation,
+        )
+    }
+
+    /// Core of [`Self::commit_obligation`] against explicit table targets
+    /// with all deferred effects sink-routed (E2 S4c-2c-iii,
+    /// br-asupersync-m9wsza). A guard-held caller resolves C for the
+    /// settle mutation, A for the pre-settle logical-time read, and B for
+    /// the region's obligation-count resolve, buffering the validator
+    /// transition, instrumentation, validator removal, and the advance
+    /// walk's payloads for post-release dispatch in push order.
+    #[allow(clippy::result_large_err)]
+    fn commit_obligation_in(
+        &mut self,
+        regions: &mut AdmissionRegionTarget<'_>,
+        tasks: &AdmissionTaskTarget<'_>,
+        obligations: &mut CompletionObligationTarget<'_>,
+        effects: &mut LifecycleEffectsSink<'_>,
+        obligation: ObligationId,
+    ) -> Result<u64, Error> {
         let now = self.current_runtime_time();
         // Shard-phase core (br-asupersync-m9wsza / E2 S3a): pre-settle reads
         // (Shard C + Shard A) and the Shard C table mutation. Sharded-shape
         // callers run these against held shard guards and dispatch the
         // deferred effects below only after release.
-        let reads = Self::settle_obligation_reads(&self.obligations, &self.tasks, obligation);
-        let result = self.obligations.commit(obligation, now);
+        let reads = Self::settle_obligation_reads(
+            obligations.resolve_ref(&self.obligations),
+            tasks.resolve_ref(&self.tasks),
+            obligation,
+        );
+        let result = obligations
+            .resolve_mut(&mut self.obligations)
+            .commit(obligation, now);
 
-        let mut effects = ObligationLifecycleEffectsSink::Inline;
         if let Some(context) = reads.validator_context {
             self.emit_obligation_lifecycle_effect(
-                &mut effects,
+                effects,
                 ObligationLifecycleEffect::SettleValidation {
                     obligation,
                     event: ObligationEvent::Commit,
@@ -5062,7 +5149,7 @@ impl RuntimeState {
         let region = info.region;
         let duration = info.duration;
         self.emit_obligation_lifecycle_effect(
-            &mut effects,
+            effects,
             ObligationLifecycleEffect::Commit {
                 info,
                 now,
@@ -5070,7 +5157,7 @@ impl RuntimeState {
             },
         );
 
-        if let Some(region_record) = self.regions.get(region.arena_index()) {
+        if let Some(region_record) = regions.resolve_ref(&self.regions).get(region.arena_index()) {
             region_record.resolve_obligation();
         }
 
@@ -5079,11 +5166,9 @@ impl RuntimeState {
         // reserved (br-asupersync-cancelvalidator-leak-mdvuf9). Finalizers run by
         // `advance_region_state` acquire fresh obligation ids, so this removal
         // does not affect them.
-        self.cancel_protocol_validator
-            .lock()
-            .remove_obligation(obligation);
+        self.emit_obligation_validator_remove(effects, obligation);
 
-        self.advance_region_state(region);
+        self.advance_region_state_in(regions, tasks, obligations, effects, region);
 
         Ok(duration)
     }
@@ -5157,16 +5242,44 @@ impl RuntimeState {
         obligation: ObligationId,
         reason: ObligationAbortReason,
     ) -> Result<u64, Error> {
+        self.abort_obligation_in(
+            &mut AdmissionRegionTarget::Embedded,
+            &AdmissionTaskTarget::Embedded,
+            &mut CompletionObligationTarget::Embedded,
+            &mut LifecycleEffectsSink::Inline,
+            obligation,
+            reason,
+        )
+    }
+
+    /// Core of [`Self::abort_obligation`] against explicit table targets
+    /// with all deferred effects sink-routed (E2 S4c-2c-iii,
+    /// br-asupersync-m9wsza) — see [`Self::commit_obligation_in`].
+    #[allow(clippy::result_large_err)]
+    fn abort_obligation_in(
+        &mut self,
+        regions: &mut AdmissionRegionTarget<'_>,
+        tasks: &AdmissionTaskTarget<'_>,
+        obligations: &mut CompletionObligationTarget<'_>,
+        effects: &mut LifecycleEffectsSink<'_>,
+        obligation: ObligationId,
+        reason: ObligationAbortReason,
+    ) -> Result<u64, Error> {
         let now = self.current_runtime_time();
         // Shard-phase core (br-asupersync-m9wsza / E2 S3a): see
         // `commit_obligation`.
-        let reads = Self::settle_obligation_reads(&self.obligations, &self.tasks, obligation);
-        let result = self.obligations.abort(obligation, now, reason);
+        let reads = Self::settle_obligation_reads(
+            obligations.resolve_ref(&self.obligations),
+            tasks.resolve_ref(&self.tasks),
+            obligation,
+        );
+        let result = obligations
+            .resolve_mut(&mut self.obligations)
+            .abort(obligation, now, reason);
 
-        let mut effects = ObligationLifecycleEffectsSink::Inline;
         if let Some(context) = reads.validator_context {
             self.emit_obligation_lifecycle_effect(
-                &mut effects,
+                effects,
                 ObligationLifecycleEffect::SettleValidation {
                     obligation,
                     event: ObligationEvent::Abort {
@@ -5181,7 +5294,7 @@ impl RuntimeState {
         let region = info.region;
         let duration = info.duration;
         self.emit_obligation_lifecycle_effect(
-            &mut effects,
+            effects,
             ObligationLifecycleEffect::Abort {
                 info,
                 now,
@@ -5189,16 +5302,14 @@ impl RuntimeState {
             },
         );
 
-        if let Some(region_record) = self.regions.get(region.arena_index()) {
+        if let Some(region_record) = regions.resolve_ref(&self.regions).get(region.arena_index()) {
             region_record.resolve_obligation();
         }
 
         // The obligation is resolved (aborted); drop its cancel-protocol state
         // machine so `obligation_machines` doesn't leak
         // (br-asupersync-cancelvalidator-leak-mdvuf9).
-        self.cancel_protocol_validator
-            .lock()
-            .remove_obligation(obligation);
+        self.emit_obligation_validator_remove(effects, obligation);
 
         // During leak handling, defer region state advancement to prevent reentrancy.
         // Finalizers run by advance_region_state could acquire new obligations, violating
@@ -5206,7 +5317,7 @@ impl RuntimeState {
         if self.handling_leaks > 0 {
             self.deferred_region_advancements.insert(region);
         } else {
-            self.advance_region_state(region);
+            self.advance_region_state_in(regions, tasks, obligations, effects, region);
         }
 
         Ok(duration)
@@ -5217,19 +5328,44 @@ impl RuntimeState {
     /// Returns the duration the obligation was held (nanoseconds).
     #[allow(clippy::result_large_err)]
     pub fn mark_obligation_leaked(&mut self, obligation: ObligationId) -> Result<u64, Error> {
+        self.mark_obligation_leaked_in(
+            &mut AdmissionRegionTarget::Embedded,
+            &AdmissionTaskTarget::Embedded,
+            &mut CompletionObligationTarget::Embedded,
+            &mut LifecycleEffectsSink::Inline,
+            obligation,
+        )
+    }
+
+    /// Core of [`Self::mark_obligation_leaked`] against explicit table
+    /// targets with all deferred effects sink-routed (E2 S4c-2c-iii,
+    /// br-asupersync-m9wsza) — see [`Self::commit_obligation_in`]; leak
+    /// marking has no cancel-protocol validator transition or removal to
+    /// preserve.
+    #[allow(clippy::result_large_err)]
+    fn mark_obligation_leaked_in(
+        &mut self,
+        regions: &mut AdmissionRegionTarget<'_>,
+        tasks: &AdmissionTaskTarget<'_>,
+        obligations: &mut CompletionObligationTarget<'_>,
+        effects: &mut LifecycleEffectsSink<'_>,
+        obligation: ObligationId,
+    ) -> Result<u64, Error> {
         let now = self.current_runtime_time();
         // Shard-phase core (br-asupersync-m9wsza / E2 S3): the Shard C
         // table mutation plus the Shard A logical-time read. Sharded-shape
         // callers run these against held shard guards and dispatch the
-        // deferred effects below only after release (leak marking has no
-        // cancel-protocol validator transition to preserve).
-        let info = self.obligations.mark_leaked(obligation, now)?;
-        let holder_logical_time = Self::logical_time_from_table(&self.tasks, info.holder);
+        // deferred effects below only after release.
+        let info = obligations
+            .resolve_mut(&mut self.obligations)
+            .mark_leaked(obligation, now)?;
+        let holder_logical_time =
+            Self::logical_time_from_table(tasks.resolve_ref(&self.tasks), info.holder);
         let region = info.region;
         let duration = info.duration;
 
         self.emit_obligation_lifecycle_effect(
-            &mut ObligationLifecycleEffectsSink::Inline,
+            effects,
             ObligationLifecycleEffect::Leak {
                 info,
                 now,
@@ -5237,11 +5373,11 @@ impl RuntimeState {
             },
         );
 
-        if let Some(region_record) = self.regions.get(region.arena_index()) {
+        if let Some(region_record) = regions.resolve_ref(&self.regions).get(region.arena_index()) {
             region_record.resolve_obligation();
         }
 
-        self.advance_region_state(region);
+        self.advance_region_state_in(regions, tasks, obligations, effects, region);
 
         Ok(duration)
     }
@@ -5636,7 +5772,7 @@ impl RuntimeState {
             &mut AdmissionRegionTarget::Embedded,
             &mut AdmissionTaskTarget::Embedded,
             &mut CompletionObligationTarget::Embedded,
-            &mut RegionLifecycleEffectsSink::Inline,
+            &mut LifecycleEffectsSink::Inline,
             region_id,
             reason,
             source_task,
@@ -5662,7 +5798,7 @@ impl RuntimeState {
         regions: &mut AdmissionRegionTarget<'_>,
         tasks: &mut AdmissionTaskTarget<'_>,
         obligations: &mut CompletionObligationTarget<'_>,
-        sink: &mut RegionLifecycleEffectsSink<'_>,
+        sink: &mut LifecycleEffectsSink<'_>,
         region_id: RegionId,
         reason: &CancelReason,
         source_task: Option<TaskId>,
@@ -6170,10 +6306,19 @@ impl RuntimeState {
         // + advance, itself a B→A→C composite) → D (epoch telemetry).
         // A future sharded-backing completion arm composes exactly these
         // phases under `ShardGuard::for_task_completed`-ordered guards.
-        let obligations = CompletionObligationTarget::Embedded;
+        let mut regions = AdmissionRegionTarget::Embedded;
+        let tasks = AdmissionTaskTarget::Embedded;
+        let mut obligations = CompletionObligationTarget::Embedded;
+        let mut effects = LifecycleEffectsSink::Inline;
         self.audit_completion_obligation_leaks(&obligations, task_id, owner, completion);
         self.retire_completed_finalizer_barrier(task_id, owner);
-        self.abort_orphaned_obligations_for_holder(&obligations, task_id);
+        self.abort_orphaned_obligations_for_holder(
+            &mut regions,
+            &tasks,
+            &mut obligations,
+            &mut effects,
+            task_id,
+        );
         self.retire_completed_task_record(task_id, remove_embedded_record);
         self.unlink_completed_task_from_region(task_id, owner, close_outcome);
 
@@ -6265,16 +6410,31 @@ impl RuntimeState {
     /// the completed task so orphaned obligations cannot block region close
     /// (deadlock). Uses the holder secondary index for
     /// O(obligations_per_task) instead of O(arena_capacity).
+    ///
+    /// Each abort runs through the settle core with the caller's targets
+    /// and sink (E2 S4c-2c-iii): a guard-held completion buffers every
+    /// abort's validator/instrumentation payloads and its advance-walk
+    /// payloads in exact interleaved order.
     fn abort_orphaned_obligations_for_holder(
         &mut self,
-        obligations: &CompletionObligationTarget<'_>,
+        regions: &mut AdmissionRegionTarget<'_>,
+        tasks: &AdmissionTaskTarget<'_>,
+        obligations: &mut CompletionObligationTarget<'_>,
+        effects: &mut LifecycleEffectsSink<'_>,
         task_id: TaskId,
     ) {
         let orphaned = obligations
             .resolve_ref(&self.obligations)
             .sorted_pending_ids_for_holder(task_id);
         for ob_id in orphaned {
-            let _ = self.abort_obligation(ob_id, ObligationAbortReason::Cancel);
+            let _ = self.abort_obligation_in(
+                regions,
+                tasks,
+                obligations,
+                effects,
+                ob_id,
+                ObligationAbortReason::Cancel,
+            );
         }
     }
 
@@ -7634,12 +7794,14 @@ impl RuntimeState {
     /// post-release dispatch (sharded shape) — E2 S4b-3.
     fn emit_region_lifecycle_effect(
         &mut self,
-        sink: &mut RegionLifecycleEffectsSink<'_>,
+        sink: &mut LifecycleEffectsSink<'_>,
         effect: RegionLifecycleEffect,
     ) {
         match sink {
-            RegionLifecycleEffectsSink::Inline => self.dispatch_region_lifecycle_effect(effect),
-            RegionLifecycleEffectsSink::Buffered(buffer) => buffer.push(effect),
+            LifecycleEffectsSink::Inline => self.dispatch_region_lifecycle_effect(effect),
+            LifecycleEffectsSink::Buffered(buffer) => {
+                buffer.push(LifecycleEffect::Region(effect));
+            }
         }
     }
 
@@ -7648,7 +7810,7 @@ impl RuntimeState {
             &mut AdmissionRegionTarget::Embedded,
             &AdmissionTaskTarget::Embedded,
             &mut CompletionObligationTarget::Embedded,
-            &mut RegionLifecycleEffectsSink::Inline,
+            &mut LifecycleEffectsSink::Inline,
             initial_region,
         );
     }
@@ -7677,7 +7839,7 @@ impl RuntimeState {
         regions: &mut AdmissionRegionTarget<'_>,
         tasks: &AdmissionTaskTarget<'_>,
         obligations: &mut CompletionObligationTarget<'_>,
-        effects: &mut RegionLifecycleEffectsSink<'_>,
+        effects: &mut LifecycleEffectsSink<'_>,
         initial_region: RegionId,
     ) {
         let mut current = Some(initial_region);
