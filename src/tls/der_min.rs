@@ -372,7 +372,7 @@ impl<'a> Parser<'a> {
             if value <= 127 {
                 return Err(self.error(DerErrorClass::NonminimalLength, length_offset));
             }
-            let required_octets = usize::try_from((64 - value.leading_zeros() + 7) / 8)
+            let required_octets = usize::try_from((64 - value.leading_zeros()).div_ceil(8))
                 .map_err(|_| self.error(DerErrorClass::LengthOverflow, length_offset))?;
             if required_octets != octets {
                 return Err(self.error(DerErrorClass::NonminimalLength, length_offset));
@@ -767,10 +767,10 @@ fn validate_directory_string(parser: &Parser<'_>, tlv: Tlv) -> Result<bool, DerE
             Ok(true)
         }
         TAG_BMP_STRING => {
-            if bytes.is_empty() || bytes.len() % 2 != 0 {
+            if bytes.is_empty() || !bytes.len().is_multiple_of(2) {
                 return Err(parser.error(DerErrorClass::String, tlv.content_start));
             }
-            for chunk in bytes.chunks_exact(2) {
+            for chunk in bytes.as_chunks::<2>().0 {
                 let unit = u16::from_be_bytes([chunk[0], chunk[1]]);
                 if (0xd800..=0xdfff).contains(&unit) {
                     return Err(parser.error(DerErrorClass::String, tlv.content_start));
@@ -779,10 +779,10 @@ fn validate_directory_string(parser: &Parser<'_>, tlv: Tlv) -> Result<bool, DerE
             Ok(true)
         }
         TAG_UNIVERSAL_STRING => {
-            if bytes.is_empty() || bytes.len() % 4 != 0 {
+            if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
                 return Err(parser.error(DerErrorClass::String, tlv.content_start));
             }
-            for chunk in bytes.chunks_exact(4) {
+            for chunk in bytes.as_chunks::<4>().0 {
                 let scalar = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                 if char::from_u32(scalar).is_none() {
                     return Err(parser.error(DerErrorClass::String, tlv.content_start));
@@ -1932,5 +1932,155 @@ mod tests {
                 "pin mutation index {index}"
             );
         }
+    }
+
+    fn first_pem_certificate(pem: &[u8]) -> Vec<u8> {
+        crate::tls::Certificate::from_pem(pem)
+            .expect("certificate fixture must be valid PEM")
+            .into_iter()
+            .next()
+            .expect("certificate fixture must contain one certificate")
+            .as_der()
+            .to_vec()
+    }
+
+    fn x509_parser_accepts_one_complete_certificate(input: &[u8]) -> bool {
+        x509_parser::parse_x509_certificate(input)
+            .is_ok_and(|(remaining, _certificate)| remaining.is_empty())
+    }
+
+    #[test]
+    fn real_certificate_matches_the_complete_x509_parser_overlap() {
+        let certificate =
+            first_pem_certificate(include_bytes!("../../tests/fixtures/tls/server.crt"));
+        let (remaining, parsed) =
+            x509_parser::parse_x509_certificate(&certificate).expect("x509-parser fixture");
+        assert!(remaining.is_empty());
+
+        assert_eq!(
+            extract_spki_der(&certificate).expect("residue SPKI"),
+            parsed.public_key().raw
+        );
+        assert_eq!(
+            inspect_basic_constraints_ca(&certificate).expect("residue BasicConstraints"),
+            BasicConstraintsFact::Absent
+        );
+        assert!(
+            inspect_server_chain_metadata(&certificate)
+                .expect("residue preflight")
+                .subject_identity_present
+        );
+        let pin = inspect_pinned_leaf_shape(&certificate).expect("residue pin facts");
+        assert_eq!(pin.extended_key_usage, ExtensionFact::Absent);
+        assert_eq!(pin.key_usage, ExtensionFact::Absent);
+        assert_eq!(
+            pin.subject_alt_name,
+            ExtensionFact::Present(SubjectAltNameFacts {
+                dns_names: vec![b"localhost".as_slice()],
+                ip_addresses: vec![[127, 0, 0, 1].as_slice()],
+            })
+        );
+
+        for end in 0..certificate.len() {
+            assert!(!x509_parser_accepts_one_complete_certificate(
+                &certificate[..end]
+            ));
+            assert!(extract_spki_der(&certificate[..end]).is_err());
+        }
+    }
+
+    #[test]
+    fn generated_fixture_profiles_document_intentional_strictness() {
+        let fixtures = [
+            (
+                include_bytes!("../../tests/fixtures/x509_adversarial/ca.crt").as_slice(),
+                BasicConstraintsFact::Present { ca: true },
+            ),
+            (
+                include_bytes!("../../tests/fixtures/x509_adversarial/allowed.crt").as_slice(),
+                BasicConstraintsFact::Present { ca: false },
+            ),
+            (
+                include_bytes!("../../tests/fixtures/x509_adversarial/blocked.crt").as_slice(),
+                BasicConstraintsFact::Present { ca: false },
+            ),
+            (
+                include_bytes!("../../tests/fixtures/x509_adversarial/wildcard.crt").as_slice(),
+                BasicConstraintsFact::Present { ca: false },
+            ),
+        ];
+
+        for (pem, basic_constraints) in fixtures {
+            let certificate = first_pem_certificate(pem);
+            assert!(x509_parser_accepts_one_complete_certificate(&certificate));
+            assert!(extract_spki_der(&certificate).is_ok());
+            assert_eq!(
+                inspect_basic_constraints_ca(&certificate).expect("root facts"),
+                basic_constraints
+            );
+            assert!(inspect_server_chain_metadata(&certificate).is_ok());
+            expect_error(
+                inspect_pinned_leaf_shape(&certificate),
+                DerErrorClass::UnknownCritical,
+            );
+        }
+    }
+
+    #[test]
+    fn differential_divergences_are_narrow_and_explained() {
+        let canonical = default_certificate(None);
+        assert!(x509_parser_accepts_one_complete_certificate(&canonical));
+        assert!(extract_spki_der(&canonical).is_ok());
+
+        let mut trailing = canonical.clone();
+        trailing.push(0);
+        assert!(!x509_parser_accepts_one_complete_certificate(&trailing));
+        expect_error(extract_spki_der(&trailing), DerErrorClass::EmptyOrTrailing);
+
+        let san = extension(
+            OID_SUBJECT_ALT_NAME,
+            None,
+            &sequence(vec![tlv(0x82, b"example.com")]),
+        );
+        let duplicate_extension = default_certificate(Some(vec![san.clone(), san]));
+        assert!(x509_parser_accepts_one_complete_certificate(
+            &duplicate_extension
+        ));
+        expect_error(
+            inspect_pinned_leaf_shape(&duplicate_extension),
+            DerErrorClass::DuplicateExtension,
+        );
+
+        let unknown_critical =
+            default_certificate(Some(vec![extension(&[0x2a, 0x03, 0x04], Some(true), &[])]));
+        assert!(x509_parser_accepts_one_complete_certificate(
+            &unknown_critical
+        ));
+        expect_error(
+            inspect_pinned_leaf_shape(&unknown_critical),
+            DerErrorClass::UnknownCritical,
+        );
+
+        let spki = subject_public_key_info(&[1, 2, 3]);
+        let mut malformed_spki = certificate(
+            &[1],
+            default_validity(),
+            common_name(TAG_UTF8_STRING, b"example.com"),
+            spki.clone(),
+            None,
+            &[0, 1],
+        );
+        let spki_offset = malformed_spki
+            .windows(spki.len())
+            .position(|window| window == spki)
+            .expect("SPKI fixture location");
+        malformed_spki[spki_offset] = TAG_SEQUENCE ^ 0x20;
+        assert!(!x509_parser_accepts_one_complete_certificate(
+            &malformed_spki
+        ));
+        expect_error(
+            extract_spki_der(&malformed_spki),
+            DerErrorClass::ConstructedBit,
+        );
     }
 }

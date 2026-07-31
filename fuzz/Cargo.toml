@@ -622,6 +622,14 @@ test = false
 doc = false
 bench = false
 
+# br-asupersync-0h6myr.3.5 — exact-source bounded DER residue fuzzer.
+[[bin]]
+name = "x509_der_residue"
+path = "fuzz_targets/x509_der_residue.rs"
+test = false
+doc = false
+bench = false
+
 # br-asupersync-t374gm — structured fuzzing for certificate pinning
 # validation in CertificatePinSet plus the builder/connector attachment
 # paths behind with_certificate_pins()/with_pin_set().
