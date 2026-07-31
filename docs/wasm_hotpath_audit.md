@@ -176,19 +176,20 @@ that F1 should follow for `Cx::is_cancel_requested()`.
 
 ---
 
-### F8. `Notify::notify_one()` — O(n) waiter scan (LOW)
+### F8. `Notify::notify_one()` — O(1) FIFO selection (OK)
 
-**Location:** `src/sync/notify.rs:169-195`
+**Location:** `src/sync/notify.rs` (`WaiterSlab::take_next_active_waker`)
 
-Linear scan through WaiterSlab entries to find first non-notified waiter.
-Lock dropped before `waker.wake()` (correct pattern).
+The reusable waiter slab carries an intrusive active FIFO, so selecting the
+oldest waiter detaches the FIFO head in O(1). Reusing a low middle slot appends
+that occupant at the tail instead of changing registration order. The lock is
+dropped before `waker.wake()` (correct pattern).
 
-For the common case (1-2 waiters), this is fine. Could become expensive
-with hundreds of waiters. `notify_waiters()` uses `SmallVec<[Waker; 8]>`
-to avoid heap allocation for ≤8 waiters.
+`notify_waiters()` traverses only the active FIFO and uses
+`SmallVec<[Waker; 8]>` to avoid heap allocation for no more than eight waiters.
 
-**Assessment:** Acceptable for typical use. The WaiterSlab is a reasonable
-trade-off vs. an intrusive linked list (simpler, cache-friendlier for small N).
+**Assessment:** Strict FIFO behavior is independent of slab index while slot
+reuse remains bounded by the concurrent waiter high-water mark.
 
 ---
 

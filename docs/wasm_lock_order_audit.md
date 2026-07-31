@@ -68,7 +68,7 @@ at runtime. Three `#[should_panic]` tests verify:
 - Single `parking_lot::Mutex<WaiterSlab>` + `AtomicU64 generation` + `AtomicUsize stored_notifications`
 - `notify_one()`: Lock held while incrementing `stored_notifications` — CORRECT (prevents lost wakeup race)
 - `notify_waiters()`: Wakers collected in `SmallVec<[Waker; 8]>`, lock dropped before `.wake()` — CORRECT
-- `pass_baton()`: Lock held while scanning, dropped before `.wake()` — CORRECT
+- `pass_baton()`: Lock held while selecting, dropped before `.wake()` — CORRECT
 - `Notified::poll()`: Separate lock sections for init vs waiting — no nested acquisition
 
 **Verdict: SAFE. Consistent lock → collect → drop → wake pattern.**
