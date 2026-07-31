@@ -62,6 +62,58 @@ struct WaiterState {
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OnceCellTestHookPoint {
+    BeforeWaiterRegistration,
+    AfterTelemetryStateLoad,
+}
+
+#[cfg(test)]
+struct OnceCellTestHook {
+    target_cell: usize,
+    point: OnceCellTestHookPoint,
+    entered_tx: std::sync::mpsc::Sender<bool>,
+    release_rx: StdMutex<std::sync::mpsc::Receiver<()>>,
+}
+
+#[cfg(test)]
+impl OnceCellTestHook {
+    fn run(&self, cell_addr: usize, point: OnceCellTestHookPoint, waiters_lock_held: bool) {
+        if self.target_cell != cell_addr || self.point != point {
+            return;
+        }
+        self.entered_tx
+            .send(waiters_lock_held)
+            .expect("OnceCell test hook should report entry");
+        self.release_rx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .recv()
+            .expect("OnceCell test hook should be released");
+    }
+}
+
+#[cfg(test)]
+static ONCE_CELL_TEST_HOOK: OnceLock<StdMutex<Option<std::sync::Arc<OnceCellTestHook>>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+fn run_once_cell_test_hook(
+    cell_addr: usize,
+    point: OnceCellTestHookPoint,
+    waiters_lock_held: bool,
+) {
+    let hook = ONCE_CELL_TEST_HOOK
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(hook) = hook {
+        hook.run(cell_addr, point, waiters_lock_held);
+    }
+}
+
+#[cfg(test)]
 struct BlockingWaitHook {
     target_cell: usize,
     entered_tx: std::sync::mpsc::Sender<()>,
@@ -180,11 +232,17 @@ impl<T> OnceCell<T> {
     #[inline]
     #[must_use]
     pub fn telemetry_snapshot(&self, primitive_id: u64) -> crate::sync::SyncTelemetrySnapshot {
-        let state_value = self.state.load(Ordering::Acquire);
         let waiters = match self.waiters.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
+        let state_value = self.state.load(Ordering::Acquire);
+        #[cfg(test)]
+        run_once_cell_test_hook(
+            std::ptr::from_ref(self).cast::<()>() as usize,
+            OnceCellTestHookPoint::AfterTelemetryStateLoad,
+            self.waiters.try_lock().is_err(),
+        );
         let state_label = match state_value {
             UNINIT => "uninitialized",
             INITIALIZING => "initializing",
@@ -538,31 +596,51 @@ impl<T> OnceCell<T> {
     }
 
     fn transition_out_of_initializing(&self, new_state: u8) {
-        let wakers: SmallVec<[Waker; 4]> = {
+        let waiters = {
             let mut guard = match self.waiters.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
             self.state.store(new_state, Ordering::Release);
-            guard.waiters.drain(..).map(|waiter| waiter.waker).collect()
+            std::mem::take(&mut guard.waiters)
         };
         self.cvar.notify_all();
-        for waker in wakers {
-            waker.wake();
+        for waiter in waiters {
+            waiter.waker.wake();
         }
     }
 
     /// Registers a waker for async waiting with waiter-id tracking to prevent
     /// unbounded queue growth.
-    fn register_waker(&self, waker: &Waker, waiter_id: &mut Option<u64>) {
+    fn register_waker_while<F>(
+        &self,
+        waker: &Waker,
+        waiter_id: &mut Option<u64>,
+        should_wait: F,
+    ) -> bool
+    where
+        F: FnOnce(u8) -> bool,
+    {
         // A custom RawWaker clone may allocate or panic. Clone before locking so
         // neither clone callbacks nor unwinding can run through the waiter mutex.
         let mut incoming_waker = Some(waker.clone());
-        let retired_waker = {
+        #[cfg(test)]
+        run_once_cell_test_hook(
+            std::ptr::from_ref(self).cast::<()>() as usize,
+            OnceCellTestHookPoint::BeforeWaiterRegistration,
+            false,
+        );
+        let (registered, retired_waker) = {
             let mut guard = match self.waiters.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
+            if !should_wait(self.state.load(Ordering::Acquire)) {
+                *waiter_id = None;
+                drop(guard);
+                drop(incoming_waker);
+                return false;
+            }
             let mut retired_waker = None;
 
             if let Some(id) = *waiter_id {
@@ -605,13 +683,14 @@ impl<T> OnceCell<T> {
                 *waiter_id = Some(id);
             }
 
-            retired_waker
+            (true, retired_waker)
         };
 
         // Safe Wake payload destructors may re-enter this OnceCell. Both the
         // replaced Waker and an unused pre-clone must retire after unlocking.
         drop(retired_waker);
         drop(incoming_waker);
+        registered
     }
 
     fn remove_waiter_for_cancellation(&self, waiter_id: u64) {
@@ -704,14 +783,18 @@ impl<T> Future for WaitInit<'_, T> {
         let this = self.get_mut();
         let state = this.cell.state.load(Ordering::Acquire);
         if state == INITIALIZING {
-            this.cell.register_waker(cx.waker(), &mut this.waiter_id);
+            let registered =
+                this.cell
+                    .register_waker_while(cx.waker(), &mut this.waiter_id, |current| {
+                        current == INITIALIZING
+                    });
             // Double-check after registering.
-            if this.cell.state.load(Ordering::Acquire) == INITIALIZING {
+            if registered && this.cell.state.load(Ordering::Acquire) == INITIALIZING {
                 Poll::Pending
             } else {
-                // Do not clear waiter_id here. If state changed after register_waker
-                // but before transition_out_of_initializing drained the queue, Drop must remove it to
-                // prevent memory leaks.
+                // If the transition raced after registration, it drained the
+                // queue under the same mutex. A refused registration clears
+                // waiter_id before returning.
                 Poll::Ready(())
             }
         } else {
@@ -800,10 +883,13 @@ impl<T, Caps> std::future::Future for CancelAwareWaitInit<'_, T, Caps> {
 
         this.refresh_cancel_waker(task_cx.waker());
 
-        this.cell
-            .register_waker(task_cx.waker(), &mut this.waiter_id);
+        let registered =
+            this.cell
+                .register_waker_while(task_cx.waker(), &mut this.waiter_id, |state| {
+                    state != INITIALIZED
+                });
 
-        if this.cell.state.load(Ordering::Acquire) == INITIALIZED {
+        if !registered || this.cell.state.load(Ordering::Acquire) == INITIALIZED {
             this.clear_cancel_waker();
             return Poll::Ready(Ok(()));
         }
@@ -847,6 +933,18 @@ mod tests {
     use std::task::{Context, Poll, Waker};
     use std::thread;
 
+    struct OnceCellTestHookGuard;
+
+    impl Drop for OnceCellTestHookGuard {
+        fn drop(&mut self) {
+            let mut guard = ONCE_CELL_TEST_HOOK
+                .get_or_init(|| StdMutex::new(None))
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *guard = None;
+        }
+    }
+
     struct BlockingWaitHookGuard;
 
     impl Drop for BlockingWaitHookGuard {
@@ -863,9 +961,16 @@ mod tests {
     /// (and thus `run_blocking_wait_hook`), preventing cross-test interference
     /// through the global `BLOCKING_WAIT_HOOK` static.
     static BLOCKING_TEST_SERIALIZER: StdMutex<()> = StdMutex::new(());
+    static ONCE_CELL_TEST_HOOK_SERIALIZER: StdMutex<()> = StdMutex::new(());
 
     fn acquire_blocking_test_lock() -> std::sync::MutexGuard<'static, ()> {
         BLOCKING_TEST_SERIALIZER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn acquire_once_cell_test_hook_lock() -> std::sync::MutexGuard<'static, ()> {
+        ONCE_CELL_TEST_HOOK_SERIALIZER
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -882,6 +987,17 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         *guard = Some(hook);
         BlockingWaitHookGuard
+    }
+
+    fn install_once_cell_test_hook(
+        hook: std::sync::Arc<OnceCellTestHook>,
+    ) -> OnceCellTestHookGuard {
+        let mut guard = ONCE_CELL_TEST_HOOK
+            .get_or_init(|| StdMutex::new(None))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = Some(hook);
+        OnceCellTestHookGuard
     }
 
     fn noop_waker() -> Waker {
@@ -944,6 +1060,225 @@ mod tests {
             unlocked_drops: Arc::clone(&unlocked_drops),
         }));
         (waker, drops, unlocked_drops)
+    }
+
+    #[test]
+    fn wait_init_refuses_registration_after_initializer_transition() {
+        init_test("wait_init_refuses_registration_after_initializer_transition");
+        let _hook_lock = acquire_once_cell_test_hook_lock();
+        let cell = Arc::new(OnceCell::new());
+        cell.state.store(INITIALIZING, Ordering::Release);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let _hook_guard = install_once_cell_test_hook(Arc::new(OnceCellTestHook {
+            target_cell: Arc::as_ptr(&cell).cast::<()>() as usize,
+            point: OnceCellTestHookPoint::BeforeWaiterRegistration,
+            entered_tx,
+            release_rx: StdMutex::new(release_rx),
+        }));
+        let transition_cell = Arc::clone(&cell);
+        let transition = thread::spawn(move || {
+            let waiters_lock_held = entered_rx
+                .recv()
+                .expect("registration hook should report entry");
+            assert!(!waiters_lock_held);
+            transition_cell.transition_out_of_initializing(UNINIT);
+            release_tx
+                .send(())
+                .expect("registration hook should be released");
+        });
+
+        let (waker, drops, unlocked_drops) = once_cell_waker_drop_probe(&cell);
+        let mut wait = WaitInit {
+            cell: &cell,
+            waiter_id: None,
+        };
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(Pin::new(&mut wait).poll(&mut task_cx).is_ready());
+        }
+        transition
+            .join()
+            .expect("initializer transition should finish");
+
+        assert!(wait.waiter_id.is_none());
+        let snapshot = cell.telemetry_snapshot(10);
+        assert_eq!(snapshot.state, "uninitialized");
+        assert_eq!(snapshot.waiter_count, 0);
+        assert_eq!(snapshot.cancellation_count, 0);
+        drop(waker);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+        drop(wait);
+        assert_eq!(cell.telemetry_snapshot(10).cancellation_count, 0);
+        crate::test_complete!("wait_init_refuses_registration_after_initializer_transition");
+    }
+
+    #[test]
+    fn cancel_aware_wait_refuses_registration_after_initialization() {
+        init_test("cancel_aware_wait_refuses_registration_after_initialization");
+        let _hook_lock = acquire_once_cell_test_hook_lock();
+        let cell = Arc::new(OnceCell::new());
+        cell.state.store(INITIALIZING, Ordering::Release);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let _hook_guard = install_once_cell_test_hook(Arc::new(OnceCellTestHook {
+            target_cell: Arc::as_ptr(&cell).cast::<()>() as usize,
+            point: OnceCellTestHookPoint::BeforeWaiterRegistration,
+            entered_tx,
+            release_rx: StdMutex::new(release_rx),
+        }));
+        let transition_cell = Arc::clone(&cell);
+        let transition = thread::spawn(move || {
+            let waiters_lock_held = entered_rx
+                .recv()
+                .expect("registration hook should report entry");
+            assert!(!waiters_lock_held);
+            transition_cell
+                .value
+                .set(())
+                .expect("test initializer should set the value");
+            transition_cell.transition_out_of_initializing(INITIALIZED);
+            release_tx
+                .send(())
+                .expect("registration hook should be released");
+        });
+
+        let cx = crate::cx::Cx::for_testing();
+        let (waker, drops, unlocked_drops) = once_cell_waker_drop_probe(&cell);
+        let mut wait = CancelAwareWaitInit {
+            cell: &cell,
+            cx: &cx,
+            waiter_id: None,
+            cancel_waker: None,
+        };
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert_eq!(Pin::new(&mut wait).poll(&mut task_cx), Poll::Ready(Ok(())));
+        }
+        transition
+            .join()
+            .expect("initializer transition should finish");
+
+        assert!(wait.waiter_id.is_none());
+        assert!(wait.cancel_waker.is_none());
+        let snapshot = cell.telemetry_snapshot(11);
+        assert_eq!(snapshot.state, "initialized");
+        assert_eq!(snapshot.waiter_count, 0);
+        assert_eq!(snapshot.cancellation_count, 0);
+        drop(waker);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+        drop(wait);
+        assert_eq!(cell.telemetry_snapshot(11).cancellation_count, 0);
+        crate::test_complete!("cancel_aware_wait_refuses_registration_after_initialization");
+    }
+
+    #[test]
+    fn telemetry_snapshot_linearizes_with_initializer_transition() {
+        init_test("telemetry_snapshot_linearizes_with_initializer_transition");
+        let _hook_lock = acquire_once_cell_test_hook_lock();
+        let cell = Arc::new(OnceCell::new());
+        cell.state.store(INITIALIZING, Ordering::Release);
+        let mut wait = WaitInit {
+            cell: &cell,
+            waiter_id: None,
+        };
+        let mut task_cx = Context::from_waker(Waker::noop());
+        assert!(Pin::new(&mut wait).poll(&mut task_cx).is_pending());
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let hook_guard = install_once_cell_test_hook(Arc::new(OnceCellTestHook {
+            target_cell: Arc::as_ptr(&cell).cast::<()>() as usize,
+            point: OnceCellTestHookPoint::AfterTelemetryStateLoad,
+            entered_tx,
+            release_rx: StdMutex::new(release_rx),
+        }));
+        let snapshot_cell = Arc::clone(&cell);
+        let snapshot_thread = thread::spawn(move || snapshot_cell.telemetry_snapshot(12));
+        let waiters_lock_held = entered_rx
+            .recv()
+            .expect("telemetry hook should report entry");
+
+        if !waiters_lock_held {
+            cell.value
+                .set(())
+                .expect("test initializer should set the value");
+            cell.transition_out_of_initializing(INITIALIZED);
+        }
+        release_tx
+            .send(())
+            .expect("telemetry hook should be released");
+        let snapshot = snapshot_thread
+            .join()
+            .expect("telemetry snapshot should finish");
+        if waiters_lock_held {
+            cell.value
+                .set(())
+                .expect("test initializer should set the value");
+            cell.transition_out_of_initializing(INITIALIZED);
+        }
+
+        let coherent_before = snapshot.state == "initializing"
+            && !snapshot.closed
+            && snapshot.occupied_units == 1
+            && snapshot.available_units == 0
+            && snapshot.waiter_count == 1;
+        let coherent_after = snapshot.state == "initialized"
+            && snapshot.closed
+            && snapshot.occupied_units == 1
+            && snapshot.available_units == 0
+            && snapshot.waiter_count == 0;
+        assert!(
+            coherent_before || coherent_after,
+            "snapshot mixed incompatible state and waiter observations: {snapshot:?}"
+        );
+        assert_eq!(snapshot.cancellation_count, 0);
+        drop(hook_guard);
+        drop(wait);
+        assert_eq!(cell.telemetry_snapshot(12).cancellation_count, 0);
+        crate::test_complete!("telemetry_snapshot_linearizes_with_initializer_transition");
+    }
+
+    #[test]
+    fn initializer_transition_releases_spilled_waiter_storage() {
+        init_test("initializer_transition_releases_spilled_waiter_storage");
+        let cell = Arc::new(OnceCell::new());
+        cell.state.store(INITIALIZING, Ordering::Release);
+        let wake_counter = Arc::new(CountWaker::default());
+        let waker = Waker::from(Arc::clone(&wake_counter));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut waits: Vec<_> = (0..5)
+            .map(|_| WaitInit {
+                cell: &cell,
+                waiter_id: None,
+            })
+            .collect();
+        for wait in &mut waits {
+            assert!(Pin::new(wait).poll(&mut task_cx).is_pending());
+        }
+        {
+            let guard = cell.waiters.lock().expect("waiters lock");
+            assert_eq!(guard.waiters.len(), 5);
+            assert!(guard.waiters.spilled());
+        }
+
+        cell.value
+            .set(())
+            .expect("test initializer should set the value");
+        cell.transition_out_of_initializing(INITIALIZED);
+
+        assert_eq!(wake_counter.count(), 5);
+        {
+            let guard = cell.waiters.lock().expect("waiters lock");
+            assert!(guard.waiters.is_empty());
+            assert!(!guard.waiters.spilled());
+            assert_eq!(guard.cancellation_count, 0);
+        }
+        drop(waits);
+        assert_eq!(cell.telemetry_snapshot(13).cancellation_count, 0);
+        crate::test_complete!("initializer_transition_releases_spilled_waiter_storage");
     }
 
     #[test]
