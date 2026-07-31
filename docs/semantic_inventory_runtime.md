@@ -411,9 +411,9 @@ Source base: `src/` (~377K lines, 499 files)
 
 ### def.budget.combine_semiring
 
-- **Intent**: Budget combine uses product semiring: min on core fields, max (or min) on priority.
-- **Primary citation**: `src/types/budget.rs:322-410` (`fn combine` — componentwise min for deadline/poll_quota/cost_quota/priority).
-- **Alias**: `src/types/budget.rs:412-432` (`fn meet` = `fn combine`).
+- **Intent**: Budget combine uses product semantics: min on deadline/poll/cost constraints and max on priority.
+- **Primary citation**: `src/types/budget.rs` (`Budget::combine_untraced` — min for deadline/poll/cost and max for priority).
+- **Alias**: `src/types/budget.rs` (`Budget::meet` delegates to `Budget::combine`).
 
 ### def.region.state_machine
 

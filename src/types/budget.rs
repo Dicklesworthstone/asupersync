@@ -14,15 +14,21 @@
 //! | Operation | Deadline | Poll/Cost Quota | Priority |
 //! |-----------|----------|-----------------|----------|
 //! | `meet` (∧) | min (earlier wins) | min (tighter wins) | max (higher urgency wins) |
-//! | identity  | None (no deadline) | u32::MAX / None | 128 (neutral) |
+//! | identity  | None (no deadline) | u32::MAX / None | 0 (identity for max) |
 //!
 //! The **meet** operation (`combine`/`meet`) computes the tightest constraints
 //! from two budgets. This is used when nesting regions or combining timeout
 //! requirements:
+//! [`Budget::new`] uses the ordinary scheduling default priority of 128; it is
+//! not the algebraic identity. [`Budget::INFINITE`] uses priority 0 so meeting
+//! it with any budget preserves that budget's priority.
 //!
 //! ```
 //! # use asupersync::Budget;
 //! # use asupersync::types::id::Time;
+//! assert_eq!(Budget::INFINITE.priority, 0);
+//! assert_eq!(Budget::INFINITE.meet(Budget::new()), Budget::new());
+//!
 //! let outer = Budget::new().with_deadline(Time::from_secs(30));
 //! let inner = Budget::new().with_deadline(Time::from_secs(10));
 //!
@@ -2097,7 +2103,7 @@ mod tests {
     //
     // Algebra summary:
     //   (Budget, meet, INFINITE) forms a bounded meet-semilattice where:
-    //   - meet is the pointwise min on (deadline, poll_quota, cost_quota, priority).
+    //   - meet uses min on deadline/poll/cost and max on priority.
     //   - INFINITE is the top element (identity for meet).
     //   - ZERO is the bottom element (absorbing for meet, modulo priority).
     //
@@ -2243,6 +2249,7 @@ mod tests {
         assert_eq!(result.deadline, a.deadline);
         assert_eq!(result.poll_quota, a.poll_quota);
         assert_eq!(result.cost_quota, a.cost_quota);
+        assert_eq!(result.priority, a.priority);
     }
 
     // -- Lemma 5: ZERO is absorbing for quotas --
