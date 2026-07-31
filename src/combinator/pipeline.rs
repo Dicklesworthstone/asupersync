@@ -510,6 +510,11 @@ pub fn pipeline3_outcomes<T, E>(
 /// # Arguments
 /// * `outcomes` - Vector of outcomes from each stage (only includes stages that were executed)
 ///
+/// A short vector is valid only when its final outcome explains why later
+/// stages did not execute (error, cancellation, or panic). If every provided
+/// outcome is successful, omitting later outcomes violates this constructor's
+/// input contract and panics rather than returning a partial result.
+///
 /// # Example
 /// ```
 /// use asupersync::combinator::pipeline::pipeline_n_outcomes;
@@ -563,23 +568,17 @@ pub fn pipeline_n_outcomes<T, E>(
         }
     }
 
-    // All provided outcomes were Ok
-    // Check if we've covered all stages
-    if num_provided == total_stages {
-        // All stages complete - return with final value
-        PipelineResult::completed(
-            last_ok_value.expect("at least one outcome was provided"),
-            total_stages,
-        )
-    } else {
-        // Partial pipeline - all provided stages succeeded but more remain
-        // This is a valid state: caller may be building incrementally
-        // Return completed with stages_executed showing partial completion
-        PipelineResult::completed(
-            last_ok_value.expect("at least one outcome was provided"),
-            num_provided,
-        )
-    }
+    // All provided outcomes were Ok. A short vector cannot represent a
+    // finished pipeline because the next stage has no outcome.
+    assert_eq!(
+        num_provided, total_stages,
+        "all successful outcomes must cover every pipeline stage"
+    );
+
+    PipelineResult::completed(
+        last_ok_value.expect("at least one outcome was provided"),
+        total_stages,
+    )
 }
 
 /// Creates a pipeline result from a vector of outcomes, with the final value provided separately.
@@ -1252,23 +1251,11 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_n_partial_completion() {
+    #[should_panic(expected = "all successful outcomes must cover every pipeline stage")]
+    fn pipeline_n_all_ok_partial_run_is_rejected() {
         // Provide fewer outcomes than total_stages, all Ok
         let outcomes: Vec<Outcome<i32, &str>> = vec![Outcome::Ok(10), Outcome::Ok(20)];
-        let result = pipeline_n_outcomes(outcomes, 5);
-
-        // Should return Completed with stages_completed = num_provided
-        assert!(result.is_completed());
-        if let PipelineResult::Completed {
-            value,
-            stages_completed,
-        } = result
-        {
-            assert_eq!(value, 20);
-            assert_eq!(stages_completed, 2); // Only 2 of 5 stages provided
-        } else {
-            unreachable!("Expected Completed");
-        }
+        let _ = pipeline_n_outcomes(outcomes, 5);
     }
 
     #[test]
@@ -1738,27 +1725,18 @@ mod tests {
             }
         }
 
-        /// LAW-8: Partial completion is reported honestly — all-Ok vec
-        /// shorter than total_stages yields Completed with stages_executed =
-        /// provided, NOT total_stages. Callers building incrementally must
-        /// be able to distinguish "done" from "so far so good".
+        /// LAW-8: Completion is total — an all-Ok vec shorter than
+        /// total_stages is invalid constructor input, never a Completed
+        /// result.
         #[test]
-        fn law_partial_completion_reports_provided_count() {
-            let r =
-                pipeline_n_outcomes::<i32, &'static str>(vec![Outcome::Ok(1), Outcome::Ok(2)], 5);
-            match r {
-                PipelineResult::Completed {
-                    value,
-                    stages_completed,
-                } => {
-                    assert_eq!(value, 2);
-                    assert_eq!(
-                        stages_completed, 2,
-                        "partial run must not report the full total as executed"
-                    );
-                }
-                other => panic!("expected Completed(2, 2), got {other:?}"),
-            }
+        fn law_all_ok_partial_run_is_rejected() {
+            let result = std::panic::catch_unwind(|| {
+                pipeline_n_outcomes::<i32, &'static str>(vec![Outcome::Ok(1), Outcome::Ok(2)], 5)
+            });
+            assert!(
+                result.is_err(),
+                "an incomplete all-Ok run must not produce a PipelineResult"
+            );
         }
     }
 }
