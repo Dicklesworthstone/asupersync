@@ -28,8 +28,12 @@ mod tests {
     use asupersync::runtime::{
         ArtifactCache, ArtifactCacheConfig, CacheStatistics, EvictionPolicy,
     };
+    #[cfg(debug_assertions)]
+    use asupersync::sync::lock_ordering::{self, LockModule, LockRank};
 
     const NOW_NANOS: u64 = 1_000_000_000_000;
+    #[cfg(debug_assertions)]
+    const LOCK_ORDER_HOOK_CHILD: &str = "ASUPERSYNC_LOCK_ORDER_HOOK_CHILD";
 
     #[test]
     fn artifact_cache_zero_count_rejects_zero_byte_artifact_without_mutation() {
@@ -189,5 +193,78 @@ mod tests {
                 expected_victim
             );
         }
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn lock_order_violation_hook_can_reenter_bookkeeping() {
+        if std::env::var_os(LOCK_ORDER_HOOK_CHILD).is_none() {
+            let output = std::process::Command::new(
+                std::env::current_exe().expect("test executable path must be available"),
+            )
+            .env(LOCK_ORDER_HOOK_CHILD, "1")
+            .arg("--exact")
+            .arg("tests::lock_order_violation_hook_can_reenter_bookkeeping")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .output()
+            .expect("lock-order hook child must start");
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success(),
+                "lock-order hook child failed with {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+                output.status
+            );
+            assert!(
+                stdout.contains("1 passed"),
+                "exact child test did not execute\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+            return;
+        }
+
+        lock_ordering::clear_held_locks();
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {
+            // The hook runs synchronously at panic emission. This public helper
+            // needs mutable access to both held-lock bookkeeping cells.
+            lock_ordering::clear_held_locks();
+        }));
+
+        let rank_order = std::panic::catch_unwind(|| {
+            lock_ordering::record_acquire("tasks_test", LockRank::Tasks);
+            lock_ordering::check_acquire("config_test", LockRank::Config);
+        });
+        let cross_module = std::panic::catch_unwind(|| {
+            lock_ordering::record_acquire_with_module(
+                "cancel_token",
+                LockRank::Tasks,
+                LockModule::Cancel,
+            );
+            lock_ordering::check_acquire_with_module(
+                "obligation_tracker",
+                LockRank::Obligations,
+                LockModule::Obligation,
+            );
+        });
+
+        std::panic::set_hook(previous_hook);
+
+        for (case, result) in [("rank-order", rank_order), ("cross-module", cross_module)] {
+            let payload = result.expect_err("lock-order violation must still panic");
+            let message = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&'static str>().copied())
+                .expect("lock-order violation must use a text panic payload");
+            assert!(
+                message.starts_with("[ASUP-E205]"),
+                "{case} child caught the wrong panic: {message}"
+            );
+        }
+
+        assert!(lock_ordering::current_held_ranks().is_empty());
+        assert!(lock_ordering::current_held_locks().is_empty());
     }
 }
