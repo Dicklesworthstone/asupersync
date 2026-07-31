@@ -1471,10 +1471,11 @@ impl MembershipLeaseManager {
 // ===========================================================================
 //
 // The remote side uses an IdempotencyStore to deduplicate spawn requests.
-// Each entry maps an IdempotencyKey to its recorded outcome. Entries expire
-// after a configurable TTL to bound memory usage.
+// Each entry maps an IdempotencyKey to its recorded outcome. In-flight entries
+// remain resident for the operation lifetime; terminal entries expire after a
+// configurable retention TTL to bound memory usage.
 
-/// Recorded outcome of a previously-processed idempotent request.
+/// Recorded state of an admitted idempotent request.
 #[derive(Clone, Debug)]
 pub struct IdempotencyRecord {
     /// The key for this record.
@@ -1485,8 +1486,12 @@ pub struct IdempotencyRecord {
     pub request: IdempotencyRequestFingerprint,
     /// When this record was created.
     pub created_at: Time,
-    /// When this record expires (for eviction).
-    pub expires_at: Time,
+    /// Terminal-result retention deadline.
+    ///
+    /// This is `None` while the operation is in flight. Completion establishes
+    /// the deadline, so a long-running operation cannot outlive its own
+    /// deduplication record.
+    pub expires_at: Option<Time>,
     /// The outcome, if the request has completed.
     pub outcome: Option<RemoteOutcome>,
 }
@@ -1494,9 +1499,10 @@ pub struct IdempotencyRecord {
 /// Decision from the idempotency store when a request arrives.
 #[derive(Clone, Debug)]
 pub enum DedupDecision {
-    /// New request — not seen before. Proceed with execution.
+    /// New request admitted and key reserved. Proceed with canonical execution.
     New,
-    /// Duplicate request — already processed. Return cached result.
+    /// Matching request already admitted. Attach to the canonical task or
+    /// return its cached terminal outcome.
     Duplicate(IdempotencyRecord),
     /// Conflict — same key but different parameters. Reject.
     Conflict,
@@ -1537,14 +1543,19 @@ impl IdempotencyRequestFingerprint {
 
 /// Store for tracking idempotent request deduplication.
 ///
-/// The remote node uses this to ensure exactly-once execution semantics.
+/// The remote node uses this to prevent duplicate execution while an operation
+/// is in flight and during the configured post-terminal retention window. The
+/// guarantee does not survive store reset or terminal-record eviction.
 /// When a `SpawnRequest` arrives:
-/// 1. Check the store for the idempotency key
-/// 2. If new: record and execute
-/// 3. If duplicate: return cached ack/result
+/// 1. Atomically check and record the idempotency key
+/// 2. If new: execute the already-recorded operation
+/// 3. If duplicate: attach to the canonical task or return its cached outcome
 /// 4. If conflict (same key, different params): reject
 ///
-/// Entries are evicted after their TTL expires.
+/// In-flight entries are retained for the operation lifetime. Once an entry is
+/// completed, it is retained for the configured TTL so retries can observe the
+/// canonical outcome. Callers must complete every admitted entry when the
+/// operation reaches a terminal state.
 ///
 /// # Thread Safety
 ///
@@ -1552,7 +1563,7 @@ impl IdempotencyRequestFingerprint {
 /// lab runtime. For production multi-threaded use, wrap in a lock.
 pub struct IdempotencyStore {
     entries: DetHashMap<IdempotencyKey, IdempotencyRecord>,
-    /// Default TTL for new entries.
+    /// Default retention TTL applied when an entry completes.
     default_ttl: Duration,
 }
 
@@ -1568,15 +1579,16 @@ impl IdempotencyStore {
 
     /// Checks whether a request with the given key has been seen before.
     ///
-    /// Expired records fail closed here instead of relying on callers to
-    /// remember a separate `evict_expired()` pass before deduplication.
+    /// Only terminal records can expire. In-flight records, and terminal
+    /// records without a retention deadline, are retained fail-closed instead
+    /// of allowing a second execution.
     ///
-    /// This does NOT insert the key — call [`record`](Self::record) to do that.
-    ///
-    /// Expired records fail closed here instead of relying on callers to
-    /// remember a separate `evict_expired()` pass before deduplication.
+    /// This does not insert the key. Admission paths should normally use
+    /// [`check_and_record`](Self::check_and_record), which makes the decision
+    /// and insertion one indivisible store operation.
     #[must_use]
-    pub fn check(
+    #[cfg(test)]
+    fn check(
         &mut self,
         key: &IdempotencyKey,
         request: &IdempotencyRequestFingerprint,
@@ -1586,7 +1598,7 @@ impl IdempotencyStore {
             return DedupDecision::New;
         };
 
-        if now >= record.expires_at {
+        if record.outcome.is_some() && record.expires_at.is_some_and(|expiry| now >= expiry) {
             let _ = self.entries.remove(key);
             return DedupDecision::New;
         }
@@ -1598,11 +1610,47 @@ impl IdempotencyStore {
         }
     }
 
+    /// Atomically checks a request and records it when it is new.
+    ///
+    /// A [`DedupDecision::New`] result guarantees that the supplied key and
+    /// canonical task ID were inserted before this method returned. Holding the
+    /// store's exclusive borrow across both steps prevents a caller-visible
+    /// check/record gap.
+    #[must_use]
+    pub fn check_and_record(
+        &mut self,
+        key: IdempotencyKey,
+        remote_task_id: RemoteTaskId,
+        request: IdempotencyRequestFingerprint,
+        now: Time,
+    ) -> DedupDecision {
+        use std::collections::hash_map::Entry;
+        match self.entries.entry(key) {
+            Entry::Vacant(entry) => {
+                entry.insert(Self::in_flight_record(key, remote_task_id, request, now));
+                DedupDecision::New
+            }
+            Entry::Occupied(mut entry) => {
+                let expired = entry.get().outcome.is_some()
+                    && entry.get().expires_at.is_some_and(|expiry| now >= expiry);
+                if expired {
+                    entry.insert(Self::in_flight_record(key, remote_task_id, request, now));
+                    DedupDecision::New
+                } else if entry.get().request == request {
+                    DedupDecision::Duplicate(entry.get().clone())
+                } else {
+                    DedupDecision::Conflict
+                }
+            }
+        }
+    }
+
     /// Records a new idempotent request.
     ///
     /// Returns `true` if the entry was inserted (new key).
     /// Returns `false` if the key already existed (no update).
-    pub fn record(
+    #[cfg(test)]
+    fn record(
         &mut self,
         key: IdempotencyKey,
         remote_task_id: RemoteTaskId,
@@ -1612,40 +1660,47 @@ impl IdempotencyStore {
         use std::collections::hash_map::Entry;
         match self.entries.entry(key) {
             Entry::Vacant(e) => {
-                let expires_at = now + self.default_ttl;
-                e.insert(IdempotencyRecord {
-                    key,
-                    remote_task_id,
-                    request,
-                    created_at: now,
-                    expires_at,
-                    outcome: None,
-                });
+                e.insert(Self::in_flight_record(key, remote_task_id, request, now));
                 true
             }
             Entry::Occupied(_) => false,
         }
     }
 
-    /// Updates the outcome of a previously-recorded request.
+    /// Updates the outcome of the canonical task and starts its terminal-result
+    /// retention window at `now`.
     ///
-    /// Returns `true` if the record was found and updated.
-    pub fn complete(&mut self, key: &IdempotencyKey, outcome: RemoteOutcome) -> bool {
+    /// The task ID fences record generations after an expired key is admitted
+    /// again. A delayed completion from the previous generation is rejected.
+    ///
+    /// Returns `true` if the matching canonical record was found and updated.
+    pub fn complete(
+        &mut self,
+        key: &IdempotencyKey,
+        remote_task_id: RemoteTaskId,
+        outcome: RemoteOutcome,
+        now: Time,
+    ) -> bool {
         match self.entries.get_mut(key) {
-            Some(record) => {
+            Some(record) if record.remote_task_id == remote_task_id => {
                 record.outcome = Some(outcome);
+                record.expires_at = Some(now + self.default_ttl);
                 true
             }
-            None => false,
+            _ => false,
         }
     }
 
-    /// Evicts expired entries.
+    /// Evicts terminal entries whose retention deadline has elapsed.
+    ///
+    /// In-flight entries are never evicted by this method.
     ///
     /// Returns the number of entries evicted.
     pub fn evict_expired(&mut self, now: Time) -> usize {
         let before = self.entries.len();
-        self.entries.retain(|_, record| now < record.expires_at);
+        self.entries.retain(|_, record| {
+            record.outcome.is_none() || record.expires_at.is_none_or(|expires_at| now < expires_at)
+        });
         before - self.entries.len()
     }
 
@@ -1659,6 +1714,22 @@ impl IdempotencyStore {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    fn in_flight_record(
+        key: IdempotencyKey,
+        remote_task_id: RemoteTaskId,
+        request: IdempotencyRequestFingerprint,
+        now: Time,
+    ) -> IdempotencyRecord {
+        IdempotencyRecord {
+            key,
+            remote_task_id,
+            request,
+            created_at: now,
+            expires_at: None,
+            outcome: None,
+        }
     }
 }
 
@@ -1988,15 +2059,15 @@ impl Drop for Saga {
 //   4. ResultDelivery — remote node → originator
 //   5. LeaseRenewal  — bidirectional heartbeat/renewal
 //
-// All messages carry the RemoteTaskId for correlation. The protocol is
-// idempotent: duplicate SpawnRequests with the same IdempotencyKey are
+// All messages carry the RemoteTaskId for correlation. While the remote
+// idempotency record is retained, duplicate SpawnRequests with the same key are
 // deduplicated by the remote node.
 
 // ---------------------------------------------------------------------------
 // Idempotency key
 // ---------------------------------------------------------------------------
 
-/// Idempotency key for exactly-once remote spawn semantics.
+/// Idempotency key for bounded remote-spawn deduplication.
 ///
 /// The originator generates a unique key per spawn request. The remote node
 /// uses this to deduplicate retried requests (e.g., after network partition
@@ -2129,9 +2200,11 @@ impl RemoteMessage {
 ///
 /// # Idempotency
 ///
-/// The `idempotency_key` ensures exactly-once execution. If the remote node
-/// receives a duplicate SpawnRequest (same key), it returns the existing
-/// SpawnAck without re-executing.
+/// While its idempotency record is retained, a duplicate `SpawnRequest` with
+/// the same key receives an accepted acknowledgement correlated to its current
+/// delivery attempt and attaches to the canonical execution without
+/// re-executing. The guarantee is scoped to the remote store lifetime and its
+/// configured post-terminal retention window.
 #[derive(Clone, Debug)]
 pub struct SpawnRequest {
     /// Unique identifier for this remote task.
@@ -4511,7 +4584,9 @@ mod tests {
         ));
         assert!(store.complete(
             &success_req.idempotency_key,
-            RemoteOutcome::Success(vec![9, 9, 9])
+            success_id,
+            RemoteOutcome::Success(vec![9, 9, 9]),
+            Time::from_secs(1),
         ));
         match store.check(
             &success_req.idempotency_key,
@@ -5260,6 +5335,95 @@ mod tests {
     }
 
     #[test]
+    fn idempotency_store_in_flight_record_survives_insertion_ttl() {
+        let mut store = IdempotencyStore::new(Duration::from_secs(60));
+        let key = IdempotencyKey::from_raw(2);
+        let canonical_task = RemoteTaskId::from_raw(11);
+        let request = test_request_fingerprint("long-running");
+
+        assert!(matches!(
+            store.check_and_record(key, canonical_task, request.clone(), Time::from_secs(10)),
+            DedupDecision::New
+        ));
+
+        assert_eq!(store.evict_expired(Time::from_secs(10_000)), 0);
+        assert!(matches!(
+            store.check(&key, &request, Time::from_secs(10_000)),
+            DedupDecision::Duplicate(record)
+                if record.remote_task_id == canonical_task
+                    && record.outcome.is_none()
+                    && record.expires_at.is_none()
+        ));
+        assert!(matches!(
+            store.check(
+                &key,
+                &test_request_fingerprint("different-work"),
+                Time::from_secs(10_000),
+            ),
+            DedupDecision::Conflict
+        ));
+    }
+
+    #[test]
+    fn idempotency_store_atomic_admission_fences_replaced_record_generation() {
+        let mut store = IdempotencyStore::new(Duration::from_secs(60));
+        let key = IdempotencyKey::from_raw(3);
+        let request = test_request_fingerprint("reusable");
+        let old_task = RemoteTaskId::from_raw(21);
+        let new_task = RemoteTaskId::from_raw(22);
+
+        assert!(matches!(
+            store.check_and_record(key, old_task, request.clone(), Time::from_secs(10)),
+            DedupDecision::New
+        ));
+        assert!(store.complete(
+            &key,
+            old_task,
+            RemoteOutcome::Success(vec![1]),
+            Time::from_secs(20),
+        ));
+
+        assert!(matches!(
+            store.check_and_record(key, new_task, request.clone(), Time::from_secs(80)),
+            DedupDecision::New
+        ));
+        assert_eq!(store.len(), 1);
+        assert!(matches!(
+            store.check(&key, &request, Time::from_secs(81)),
+            DedupDecision::Duplicate(record)
+                if record.remote_task_id == new_task
+                    && record.outcome.is_none()
+                    && record.expires_at.is_none()
+        ));
+        assert!(!store.complete(
+            &key,
+            old_task,
+            RemoteOutcome::Failed("stale completion".into()),
+            Time::from_secs(82),
+        ));
+        assert!(matches!(
+            store.check(&key, &request, Time::from_secs(82)),
+            DedupDecision::Duplicate(record)
+                if record.remote_task_id == new_task
+                    && record.outcome.is_none()
+                    && record.expires_at.is_none()
+        ));
+        assert!(store.complete(
+            &key,
+            new_task,
+            RemoteOutcome::Success(vec![2]),
+            Time::from_secs(83),
+        ));
+        assert!(matches!(
+            store.check(&key, &request, Time::from_secs(84)),
+            DedupDecision::Duplicate(record)
+                if record.remote_task_id == new_task
+                    && matches!(record.outcome, Some(RemoteOutcome::Success(ref bytes)) if bytes.as_slice() == [2])
+                    && record.expires_at == Some(Time::from_secs(143))
+        ));
+    }
+
+    #[test]
     fn idempotency_store_duplicate_detection() {
         let mut store = IdempotencyStore::new(Duration::from_secs(300));
         let key = IdempotencyKey::from_raw(42);
@@ -5307,16 +5471,22 @@ mod tests {
     fn idempotency_store_complete_outcome() {
         let mut store = IdempotencyStore::new(Duration::from_secs(300));
         let key = IdempotencyKey::from_raw(99);
+        let task_id = RemoteTaskId::next();
 
         store.record(
             key,
-            RemoteTaskId::next(),
+            task_id,
             test_request_fingerprint("work"),
             Time::from_secs(10),
         );
 
         // Complete with success
-        let updated = store.complete(&key, RemoteOutcome::Success(vec![1, 2, 3]));
+        let updated = store.complete(
+            &key,
+            task_id,
+            RemoteOutcome::Success(vec![1, 2, 3]),
+            Time::from_secs(15),
+        );
         assert!(updated);
 
         // Check returns duplicate with outcome
@@ -5334,47 +5504,63 @@ mod tests {
         let key = IdempotencyKey::from_raw(999);
 
         // Complete on unknown key returns false
-        let updated = store.complete(&key, RemoteOutcome::Failed("oops".into()));
+        let updated = store.complete(
+            &key,
+            RemoteTaskId::from_raw(1),
+            RemoteOutcome::Failed("oops".into()),
+            Time::from_secs(10),
+        );
         assert!(!updated);
     }
 
     #[test]
     fn idempotency_store_eviction() {
         let mut store = IdempotencyStore::new(Duration::from_secs(60));
+        let completed_key = IdempotencyKey::from_raw(1);
+        let in_flight_key = IdempotencyKey::from_raw(2);
+        let completed_task = RemoteTaskId::next();
 
-        // Insert at t=10 (expires at t=70)
+        // Completion at t=20 establishes the terminal deadline at t=80.
         store.record(
-            IdempotencyKey::from_raw(1),
-            RemoteTaskId::next(),
+            completed_key,
+            completed_task,
             test_request_fingerprint("a"),
             Time::from_secs(10),
         );
+        assert!(store.complete(
+            &completed_key,
+            completed_task,
+            RemoteOutcome::Success(vec![]),
+            Time::from_secs(20),
+        ));
 
-        // Insert at t=50 (expires at t=110)
+        // This second operation remains in flight and therefore has no
+        // eviction deadline.
         store.record(
-            IdempotencyKey::from_raw(2),
+            in_flight_key,
             RemoteTaskId::next(),
             test_request_fingerprint("b"),
             Time::from_secs(50),
         );
         assert_eq!(store.len(), 2);
 
-        // Evict at t=80: key 1 expired (70), key 2 still live (110)
+        assert_eq!(store.evict_expired(Time::from_secs(79)), 0);
+
+        // The terminal record expires at the boundary; the in-flight record
+        // remains resident.
         let evicted = store.evict_expired(Time::from_secs(80));
         assert_eq!(evicted, 1);
         assert_eq!(store.len(), 1);
 
-        // Key 2 is still there
         let decision = store.check(
-            &IdempotencyKey::from_raw(2),
+            &in_flight_key,
             &test_request_fingerprint("b"),
-            Time::from_secs(80),
+            Time::from_secs(10_000),
         );
         assert!(matches!(decision, DedupDecision::Duplicate(_)));
 
-        // Key 1 is gone
         let decision = store.check(
-            &IdempotencyKey::from_raw(1),
+            &completed_key,
             &test_request_fingerprint("a"),
             Time::from_secs(80),
         );
@@ -5385,12 +5571,19 @@ mod tests {
     fn idempotency_store_check_treats_expired_records_as_new() {
         let mut store = IdempotencyStore::new(Duration::from_secs(60));
         let key = IdempotencyKey::from_raw(3);
+        let task_id = RemoteTaskId::next();
         store.record(
             key,
-            RemoteTaskId::next(),
+            task_id,
             test_request_fingerprint("encode"),
             Time::from_secs(10),
         );
+        assert!(store.complete(
+            &key,
+            task_id,
+            RemoteOutcome::Success(vec![]),
+            Time::from_secs(20),
+        ));
 
         let decision = store.check(
             &key,
@@ -5775,16 +5968,17 @@ mod tests {
         let mut store = IdempotencyStore::new(Duration::from_secs(60));
         let key = IdempotencyKey::from_raw(1);
         let request = test_request_fingerprint("work");
+        let task_id = RemoteTaskId::next();
 
-        // Record at t=10 (expires at t=70)
-        store.record(
-            key,
-            RemoteTaskId::next(),
-            request.clone(),
-            Time::from_secs(10),
-        );
+        // Record at t=10, then complete at t=20 (expires at t=80).
+        store.record(key, task_id, request.clone(), Time::from_secs(10));
         // Complete with success
-        store.complete(&key, RemoteOutcome::Success(vec![42]));
+        store.complete(
+            &key,
+            task_id,
+            RemoteOutcome::Success(vec![42]),
+            Time::from_secs(20),
+        );
         assert_eq!(store.len(), 1);
 
         // Evict at t=80 — should remove the completed entry
@@ -5804,14 +5998,15 @@ mod tests {
         let mut store = IdempotencyStore::new(Duration::from_secs(300));
         let key = IdempotencyKey::from_raw(77);
         let request = test_request_fingerprint("fragile_op");
+        let task_id = RemoteTaskId::next();
 
-        store.record(
-            key,
-            RemoteTaskId::next(),
-            request.clone(),
-            Time::from_secs(10),
+        store.record(key, task_id, request.clone(), Time::from_secs(10));
+        store.complete(
+            &key,
+            task_id,
+            RemoteOutcome::Failed("disk full".into()),
+            Time::from_secs(15),
         );
-        store.complete(&key, RemoteOutcome::Failed("disk full".into()));
 
         let decision = store.check(&key, &request, Time::from_secs(20));
         assert!(
@@ -5837,18 +6032,24 @@ mod tests {
         let mut store = IdempotencyStore::new(Duration::from_secs(300));
         let key = IdempotencyKey::from_raw(88);
         let request = test_request_fingerprint("retry_op");
+        let task_id = RemoteTaskId::next();
 
-        store.record(
-            key,
-            RemoteTaskId::next(),
-            request.clone(),
-            Time::from_secs(10),
-        );
+        store.record(key, task_id, request.clone(), Time::from_secs(10));
 
         // First complete: Failed
-        store.complete(&key, RemoteOutcome::Failed("transient".into()));
+        store.complete(
+            &key,
+            task_id,
+            RemoteOutcome::Failed("transient".into()),
+            Time::from_secs(15),
+        );
         // Second complete: Success (overwrites)
-        store.complete(&key, RemoteOutcome::Success(vec![1, 2, 3]));
+        store.complete(
+            &key,
+            task_id,
+            RemoteOutcome::Success(vec![1, 2, 3]),
+            Time::from_secs(18),
+        );
 
         let decision = store.check(&key, &request, Time::from_secs(20));
         assert!(

@@ -934,7 +934,7 @@ format remain adapter-specific rather than blanket core-runtime claims.
 |-----------|----------|------------------|
 | Named remote spawn | `src/remote.rs` | `spawn_remote` creates a region-owned `RemoteHandle`; attached runtimes send protocol messages, while missing runtimes fail closed to an explicit deterministic fallback |
 | Lease obligations | `src/remote.rs` | Leases are obligation-backed and participate in region close/quiescence |
-| Idempotency store | `src/remote.rs` | Deduplicates spawn retries with TTL-bounded records and conflict detection |
+| Idempotency store | `src/remote.rs` | Deduplicates spawn retries for the in-flight operation lifetime plus a bounded terminal-result retention window, with conflict detection |
 | Session-typed protocol | `src/remote.rs` | Origin/remote state machines validate legal spawn/ack/cancel/result/renewal transitions |
 | Logical-time envelopes | `src/remote.rs` | Protocol messages carry logical clock metadata for causal correlation |
 | Saga compensations | `src/remote.rs` | Forward steps and compensations are tracked as a structured rollback flow for distributed workflows |

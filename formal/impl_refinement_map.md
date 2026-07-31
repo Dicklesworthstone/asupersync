@@ -134,11 +134,10 @@ Current witnesses: `tests/scheduler_lane_fairness.rs::test_steal_only_from_ready
 
 | Spec rule | Rust implementation | Status | Notes |
 |---|---|---|---|
-| `DEDUP-NEW / DEDUP-DUPLICATE / DEDUP-CONFLICT` | `IdempotencyStore::check` (`src/remote.rs:1444`) returns `DedupDecision::{New, Duplicate, Conflict}` | Implemented | Spec models computation match by `cn` (computation name); impl uses `IdempotencyRequestFingerprint` — equivalent. |
-| `RECORD-NEW` | `IdempotencyStore::record` (`src/remote.rs:1471`); inserts only on vacant entry | Implemented | |
-| `RECORD-COMPLETE` | `IdempotencyStore::record_completion` (search nearby) | Implemented (variant) | Outcome cached on existing record; evicted records correctly rejected. |
-| `EVICT` | `check()` evicts on read when `now >= expires_at`; periodic sweep via `IdempotencyStore::evict_expired` | Implemented | "Read-side eviction" is stricter than spec's periodic-only model; safer. |
-| `SAGA-STEP-OK` / `SAGA-STEP-FAIL` / `SAGA-ABORT` / `SAGA-COMPLETE` | `Saga` state machine in `src/remote.rs:1676..1830`; `SagaState` enum at line 1577 | Implemented | LIFO compensation in `Saga::run_compensations` (line 1813). |
+| `ADMIT-NEW / DEDUP-DUPLICATE / DEDUP-CONFLICT` | `IdempotencyStore::check_and_record` (`src/remote.rs`) returns `DedupDecision::{New, Duplicate, Conflict}` | Implemented | One `Entry` transition both decides and reserves a new key. The request fingerprint covers computation plus input. |
+| `RECORD-COMPLETE` | `IdempotencyStore::complete` (`src/remote.rs`) | Implemented | Completion requires the current canonical task ID, records the outcome, and starts the terminal retention TTL from logical completion time; stale generations are rejected. |
+| `EVICT` | Lazy terminal replacement in `check_and_record`; explicit sweep via `IdempotencyStore::evict_expired` | Implemented | The harness sweeps on spawn admission. In-flight records have no deadline and cannot be evicted; only terminal records past their completion-relative deadline are removed. |
+| `SAGA-STEP-OK` / `SAGA-STEP-FAIL` / `SAGA-ABORT` / `SAGA-COMPLETE` | `Saga` and `SagaState` in `src/remote.rs` | Implemented | LIFO compensation in `Saga::run_compensations`. |
 | Compensation reverse-order invariant | `run_compensations` iterates `compensations` in reverse (verified by `tests::saga_*` in `src/obligation/saga.rs`) | Implemented | |
 
 ## 4. Derived combinators
@@ -220,7 +219,7 @@ The cross-examination found no rule whose runtime implementation is fundamentall
 
 2. **`asupersync-4nw2lb`** — RESOLVED. The root copy `asupersync_v4_formal_semantics.md` (1773 LOC) is the canonical formal semantics. The previously-divergent `docs/asupersync_v4_formal_semantics.md` (1577 LOC) was reduced to a redirect stub, and in-tree references in `docs/` were re-pointed to the root path.
 
-3. **`asupersync-fy12my`** — `RECORD-COMPLETE` semantics drift (minor): spec writes `D'[k].outcome = Some(outcome)` unconditionally; impl accepts it only on records that have not expired. The impl is the safer ("fail-closed") variant. Tighten spec wording rather than loosen impl.
+3. **`asupersync-fy12my`** — RESOLVED and subsequently superseded by `asupersync-ugfu3g`. Admission now creates a non-expiring in-flight record, and generation-fenced `RECORD-COMPLETE` atomically records the outcome plus a completion-relative terminal deadline; the spec and implementation map above reflect that lifecycle.
 
 4. **`asupersync-7ntvjs`** — `§3.2.5` canonical cancellation automaton has 12 transition cells; ~8 have direct property-test coverage. Fill in the four missing cells.
 
