@@ -7578,7 +7578,13 @@ impl ThreeLaneWorker {
                 )
             },
         );
-        state.drain_ready_async_finalizers_in(&mut finalizer_tasks)
+        // Region reads stay Embedded until the S4c-2c flip hands this seam a
+        // shard-B guard (br-asupersync-m9wsza); B resolves before A above by
+        // construction because the Embedded arm takes no lock.
+        state.drain_ready_async_finalizers_in(
+            &crate::runtime::state::AdmissionRegionTarget::Embedded,
+            &mut finalizer_tasks,
+        )
     }
 
     /// Ordered completion backing for a polled task (E1.2 subsystem 3b; the

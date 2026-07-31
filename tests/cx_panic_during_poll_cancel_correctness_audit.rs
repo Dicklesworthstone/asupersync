@@ -352,7 +352,8 @@ fn worker_panic_path_drains_finalizers_for_region_cleanup() {
     let drain = &source[drain_pos..safe_drain_end];
     assert!(
         drain.contains("state.has_finalizing_regions()")
-            && drain.contains("state.drain_ready_async_finalizers_in(&mut finalizer_tasks)"),
+            && drain.contains("state.drain_ready_async_finalizers_in(")
+            && drain.contains("&mut finalizer_tasks,"),
         "REGRESSION: the B→A finalizer drain seam no longer routes drained \
          finalizers through the minting-table target. Finalizer tasks mint \
          in a table the dispatching workers never consult — region cleanup \
@@ -576,16 +577,36 @@ fn region_quiescence_advances_after_panicked_task_via_is_terminal() {
          quiescence after task panic depends on this check.",
     );
 
+    // E2 S4b-1a (br-asupersync-m9wsza) split the finalize gate into a
+    // target-threaded core: the public wrapper delegates to
+    // can_region_finalize_in, which owns the per-task terminal check. Pin
+    // both links so the chain public-entry → core → is_terminal() stays
+    // intact regardless of the wrapper/core split.
     let fn_marker = "pub fn can_region_finalize(&self, region_id: RegionId) -> bool {";
     let start = source.find(fn_marker).expect("can_region_finalize fn");
-    let body_end = source[start..]
+    let wrapper_end = source[start..]
         .find("\n    }\n")
         .expect("can_region_finalize close");
-    let body = &source[start..start + body_end];
-
+    let wrapper_body = &source[start..start + wrapper_end];
     assert!(
-        body.contains("t.state.is_terminal()"),
-        "REGRESSION: can_region_finalize no longer uses \
+        wrapper_body.contains("can_region_finalize_in("),
+        "REGRESSION: can_region_finalize no longer delegates to the \
+         target-threaded core. The per-task terminal check below is \
+         pinned on the core; if the wrapper grew its own logic the two \
+         can drift.",
+    );
+
+    let core_marker = "fn can_region_finalize_in(";
+    let core_start = source
+        .find(core_marker)
+        .expect("can_region_finalize_in core");
+    let core_end = source[core_start..]
+        .find("\n    }\n")
+        .expect("can_region_finalize_in close");
+    let core_body = &source[core_start..core_start + core_end];
+    assert!(
+        core_body.contains("t.state.is_terminal()"),
+        "REGRESSION: the finalize gate no longer uses \
          is_terminal() for the per-task check. If it now \
          requires a specific outcome variant (e.g., only Ok \
          counts as terminal), panicked tasks would prevent \

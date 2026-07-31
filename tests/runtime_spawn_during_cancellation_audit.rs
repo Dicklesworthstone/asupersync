@@ -254,16 +254,29 @@ fn spawn_finalizer_task_uses_cleanup_admission_path() {
         .expect("spawn_finalizer_task_in close");
     let body = &source[start..start + body_end];
 
+    // E2 S2 (br-asupersync-m9wsza) added the region-table target param to
+    // create_task_infrastructure_in and rustfmt broke the call across
+    // lines; pin the call and its cleanup flag format-independently: the
+    // call site window must pass literal `true` for `cleanup_task` (the
+    // 4th arg, between `budget` and the `tasks` target).
+    let call_pos = body
+        .find("create_task_infrastructure_in::<()>(")
+        .expect("finalizer task-infrastructure call");
+    let call_window_end = (call_pos + 400).min(body.len());
+    let call_window = &body[call_pos..call_window_end];
+    let budget_pos = call_window.find("budget,").expect("budget arg");
+    let flag_pos = call_window[budget_pos..]
+        .find("true,")
+        .map(|p| p + budget_pos);
+    let tasks_pos = call_window.find("tasks,").expect("tasks target arg");
     assert!(
-        body.contains(
-            "self.create_task_infrastructure_in::<()>(&system_cx, region_id, budget, true, tasks)"
-        ),
+        flag_pos.is_some_and(|p| budget_pos < p && p < tasks_pos),
         "REGRESSION: spawn_finalizer_task_in no longer calls \
-         create_task_infrastructure_in with is_cleanup=true. \
+         create_task_infrastructure_in with cleanup_task=true. \
          Without the cleanup flag, finalizer admission goes \
          through the same Open-only gate as user spawns — \
          finalizers would fail to spawn during region close, \
-         leaving cleanup undone.\n\nfn body:\n{body}",
+         leaving cleanup undone.\n\ncall window:\n{call_window}",
     );
 }
 

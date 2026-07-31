@@ -4284,7 +4284,7 @@ fn drain_ready_async_finalizers_in_external_target_mints_externally() {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
-        state.drain_ready_async_finalizers_in(&mut target)
+        state.drain_ready_async_finalizers_in(&AdmissionRegionTarget::Embedded, &mut target)
     };
     crate::assert_with_log!(
         scheduled.len() == 1,

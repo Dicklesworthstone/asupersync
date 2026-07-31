@@ -2253,14 +2253,42 @@ impl RuntimeState {
         event: RegionEvent,
         operation: &'static str,
     ) {
-        let Some(region) = self.regions.get(region_id.arena_index()) else {
-            return;
-        };
-        let context = RegionContext {
+        self.validate_live_region_protocol_transition_in(
+            &AdmissionRegionTarget::Embedded,
             region_id,
-            parent_region: region.parent,
-            created_at: region.created_at,
-            validation_level: CancelValidationLevel::Basic,
+            event,
+            operation,
+        );
+    }
+
+    /// Core of [`Self::validate_live_region_protocol_transition`] with the
+    /// region-record read routed through the region-table target (E2 S4c-2c-i,
+    /// br-asupersync-m9wsza).
+    ///
+    /// CAUTION (sharded shape): this acquires the cancel-protocol validator
+    /// mutex after the record read. A caller holding shard guards must NOT
+    /// route through here — the guard-held completion arm defers validator
+    /// transitions via effect payloads instead (u5jdvw/118ayd discipline).
+    fn validate_live_region_protocol_transition_in(
+        &self,
+        regions: &AdmissionRegionTarget<'_>,
+        region_id: RegionId,
+        event: RegionEvent,
+        operation: &'static str,
+    ) {
+        let context = {
+            let Some(region) = regions
+                .resolve_ref(&self.regions)
+                .get(region_id.arena_index())
+            else {
+                return;
+            };
+            RegionContext {
+                region_id,
+                parent_region: region.parent,
+                created_at: region.created_at,
+                validation_level: CancelValidationLevel::Basic,
+            }
         };
         let validation_result =
             self.validate_region_protocol_transition(region_id, event, &context);
@@ -6116,7 +6144,9 @@ impl RuntimeState {
                 );
             }
 
-            self.record_finalizer_run(owner, finalizer_id);
+            // E2 S4c-2c-i (br-asupersync-m9wsza): Embedded until the
+            // guard-held completion sibling threads this phase's targets.
+            self.record_finalizer_run(&AdmissionRegionTarget::Embedded, owner, finalizer_id);
         }
     }
 
@@ -6186,7 +6216,10 @@ impl RuntimeState {
     pub fn drain_ready_async_finalizers(
         &mut self,
     ) -> SmallVec<[(TaskId, u8, TaskSpawnEffects); 2]> {
-        self.drain_ready_async_finalizers_in(&mut AdmissionTaskTarget::Embedded)
+        self.drain_ready_async_finalizers_in(
+            &AdmissionRegionTarget::Embedded,
+            &mut AdmissionTaskTarget::Embedded,
+        )
     }
 
     /// Whether any region is currently in the finalizing set.
@@ -6203,17 +6236,24 @@ impl RuntimeState {
         !self.finalizing_regions.is_empty()
     }
 
-    /// Finalizer drain with an explicit task-table target
-    /// (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2).
+    /// Finalizer drain with explicit region- and task-table targets
+    /// (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2 for the task
+    /// side; br-asupersync-m9wsza / E2 S4c-2c-i for the region side).
     ///
     /// Scheduler callers that dispatch against an external sharded
     /// [`TaskTable`] must pass its already-locked guard (taken after the
     /// unified state lock, canonical B → A) so scheduled finalizer tasks
     /// mint into the table their workers resolve injected `TaskId`s
-    /// against. Embedded callers pass [`AdmissionTaskTarget::Embedded`]
-    /// through [`Self::drain_ready_async_finalizers`].
+    /// against. On the sharded shape the `regions` target is the held
+    /// shard-B guard, acquired before the shard-A guard (canonical order).
+    /// Embedded callers pass both `Embedded` arms through
+    /// [`Self::drain_ready_async_finalizers`]. The finalizer barrier maps
+    /// (`active_async_finalizers`, `active_manual_finalizers`,
+    /// `pending_finalizer_ids`) and `finalizing_regions` are unified
+    /// residue until S5 and stay on `self`.
     pub(crate) fn drain_ready_async_finalizers_in(
         &mut self,
+        regions: &AdmissionRegionTarget<'_>,
         tasks: &mut AdmissionTaskTarget<'_>,
     ) -> SmallVec<[(TaskId, u8, TaskSpawnEffects); 2]> {
         if self.finalizing_regions.is_empty() {
@@ -6228,7 +6268,10 @@ impl RuntimeState {
             {
                 continue;
             }
-            if let Some(region) = self.regions.get(region_id.arena_index()) {
+            if let Some(region) = regions
+                .resolve_ref(&self.regions)
+                .get(region_id.arena_index())
+            {
                 if !region.finalizers_empty() {
                     regions_to_process.push(region_id);
                 }
@@ -6236,7 +6279,8 @@ impl RuntimeState {
         }
 
         for region_id in regions_to_process {
-            let Some((finalizer_id, finalizer)) = self.take_next_finalizer_tracked(region_id)
+            let Some((finalizer_id, finalizer)) =
+                self.take_next_finalizer_tracked(regions, region_id)
             else {
                 continue;
             };
@@ -6254,7 +6298,10 @@ impl RuntimeState {
                     // wrapped sync callback is intentionally requeued as an
                     // async finalizer: the wrapper is now its lock-free
                     // execution boundary.
-                    if let Some(region) = self.regions.get(region_id.arena_index()) {
+                    if let Some(region) = regions
+                        .resolve_ref(&self.regions)
+                        .get(region_id.arena_index())
+                    {
                         region.add_finalizer(Finalizer::Async(future));
                     }
                     self.pending_finalizer_ids
@@ -6283,8 +6330,10 @@ impl RuntimeState {
         &mut self,
         region_id: RegionId,
     ) -> bool {
-        if self
-            .regions
+        // E2 S4c-2c-i (br-asupersync-m9wsza): see register_sync_finalizer.
+        let regions = AdmissionRegionTarget::Embedded;
+        if regions
+            .resolve_ref(&self.regions)
             .get(region_id.arena_index())
             .is_none_or(|region| region.state() != crate::record::region::RegionState::Finalizing)
         {
@@ -6295,14 +6344,16 @@ impl RuntimeState {
         {
             return false;
         }
-        let Some((finalizer_id, finalizer)) = self.run_sync_finalizers_tracked(region_id) else {
+        let Some((finalizer_id, finalizer)) = self.run_sync_finalizers_tracked(&regions, region_id)
+        else {
             return false;
         };
         let Finalizer::Async(future) = finalizer else {
             return false;
         };
 
-        self.validate_live_region_protocol_transition(
+        self.validate_live_region_protocol_transition_in(
+            &regions,
             region_id,
             RegionEvent::FinalizerStarted,
             "failed-start inline async finalizer",
@@ -6353,12 +6404,15 @@ impl RuntimeState {
                 {
                     std::mem::forget(payload);
                 }
-                if let Some(region) = self.regions.get(region_id.arena_index()) {
+                if let Some(region) = regions
+                    .resolve_ref(&self.regions)
+                    .get(region_id.arena_index())
+                {
                     region.record_close_outcome(Outcome::Panicked(
                         crate::types::PanicPayload::new(message),
                     ));
                 }
-                self.record_finalizer_run(region_id, finalizer_id);
+                self.record_finalizer_run(&regions, region_id, finalizer_id);
                 return true;
             }
         };
@@ -6379,12 +6433,15 @@ impl RuntimeState {
                 {
                     std::mem::forget(payload);
                 }
-                if let Some(region) = self.regions.get(region_id.arena_index()) {
+                if let Some(region) = regions
+                    .resolve_ref(&self.regions)
+                    .get(region_id.arena_index())
+                {
                     region.record_close_outcome(Outcome::Panicked(
                         crate::types::PanicPayload::new(message),
                     ));
                 }
-                self.record_finalizer_run(region_id, finalizer_id);
+                self.record_finalizer_run(&regions, region_id, finalizer_id);
                 return true;
             }
         };
@@ -6445,10 +6502,13 @@ impl RuntimeState {
             }
         };
 
-        if let Some(region) = self.regions.get(region_id.arena_index()) {
+        if let Some(region) = regions
+            .resolve_ref(&self.regions)
+            .get(region_id.arena_index())
+        {
             region.record_close_outcome(close_outcome);
         }
-        self.record_finalizer_run(region_id, finalizer_id);
+        self.record_finalizer_run(&regions, region_id, finalizer_id);
         true
     }
 
@@ -6591,8 +6651,12 @@ impl RuntimeState {
     where
         F: FnOnce() + Send + 'static,
     {
-        let accepts_finalizers = self
-            .regions
+        // E2 S4c-2c-i (br-asupersync-m9wsza): region-record reads resolve
+        // through the target; the flip slice replaces this local with
+        // shard-table resolution.
+        let regions = AdmissionRegionTarget::Embedded;
+        let accepts_finalizers = regions
+            .resolve_ref(&self.regions)
             .get(region_id.arena_index())
             .is_some_and(|region| !region.state().is_closing() && !region.state().is_terminal());
         if !accepts_finalizers {
@@ -6601,12 +6665,15 @@ impl RuntimeState {
 
         let finalizer_id = self.allocate_finalizer_id();
         {
-            let Some(region) = self.regions.get(region_id.arena_index()) else {
+            let Some(region) = regions
+                .resolve_ref(&self.regions)
+                .get(region_id.arena_index())
+            else {
                 return false;
             };
             region.add_finalizer(Finalizer::Sync(Box::new(f)));
         }
-        self.record_finalizer_registration(finalizer_id, region_id);
+        self.record_finalizer_registration(&regions, finalizer_id, region_id);
 
         // Track finalizer work in debt monitor
         let cancel_reason = CancelReason::user("sync_finalizer_registration");
@@ -6639,8 +6706,10 @@ impl RuntimeState {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let accepts_finalizers = self
-            .regions
+        // E2 S4c-2c-i (br-asupersync-m9wsza): see register_sync_finalizer.
+        let regions = AdmissionRegionTarget::Embedded;
+        let accepts_finalizers = regions
+            .resolve_ref(&self.regions)
             .get(region_id.arena_index())
             .is_some_and(|region| !region.state().is_closing() && !region.state().is_terminal());
         if !accepts_finalizers {
@@ -6649,12 +6718,15 @@ impl RuntimeState {
 
         let finalizer_id = self.allocate_finalizer_id();
         {
-            let Some(region) = self.regions.get(region_id.arena_index()) else {
+            let Some(region) = regions
+                .resolve_ref(&self.regions)
+                .get(region_id.arena_index())
+            else {
                 return false;
             };
             region.add_finalizer(Finalizer::Async(Box::pin(future)));
         }
-        self.record_finalizer_registration(finalizer_id, region_id);
+        self.record_finalizer_registration(&regions, finalizer_id, region_id);
 
         // Track async finalizer work in debt monitor
         let cancel_reason = CancelReason::user("async_finalizer_registration");
@@ -6680,9 +6752,15 @@ impl RuntimeState {
         id
     }
 
-    fn record_finalizer_registration(&mut self, id: u64, region: RegionId) {
+    fn record_finalizer_registration(
+        &mut self,
+        regions: &AdmissionRegionTarget<'_>,
+        id: u64,
+        region: RegionId,
+    ) {
         let now = self.current_runtime_time();
-        self.validate_live_region_protocol_transition(
+        self.validate_live_region_protocol_transition_in(
+            regions,
             region,
             RegionEvent::FinalizerRegistered,
             "finalizer registration",
@@ -6700,8 +6778,14 @@ impl RuntimeState {
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::RegionTable);
     }
 
-    fn record_finalizer_run(&mut self, region: RegionId, id: u64) {
-        self.validate_live_region_protocol_transition(
+    fn record_finalizer_run(
+        &mut self,
+        regions: &AdmissionRegionTarget<'_>,
+        region: RegionId,
+        id: u64,
+    ) {
+        self.validate_live_region_protocol_transition_in(
+            regions,
             region,
             RegionEvent::FinalizerCompleted,
             "finalizer completion",
@@ -6722,9 +6806,15 @@ impl RuntimeState {
             .push(FinalizerHistoryEvent::RegionClosed { region, time: now });
     }
 
-    fn pop_tracked_finalizer(&mut self, region_id: RegionId) -> Option<(u64, Finalizer)> {
+    fn pop_tracked_finalizer(
+        &mut self,
+        regions: &AdmissionRegionTarget<'_>,
+        region_id: RegionId,
+    ) -> Option<(u64, Finalizer)> {
         let finalizer = {
-            let region = self.regions.get(region_id.arena_index())?;
+            let region = regions
+                .resolve_ref(&self.regions)
+                .get(region_id.arena_index())?;
             region.pop_finalizer()
         };
         let finalizer = match finalizer {
@@ -6775,7 +6865,10 @@ impl RuntimeState {
 
         // EDGE CASE VALIDATION: Final consistency check after successful pop
         // Ensures the region and tracking state remain consistent
-        if let Some(region) = self.regions.get(region_id.arena_index()) {
+        if let Some(region) = regions
+            .resolve_ref(&self.regions)
+            .get(region_id.arena_index())
+        {
             let has_more_finalizers = !region.finalizers_empty();
             let has_more_ids = self.pending_finalizer_ids.contains_key(&region_id);
             debug_assert_eq!(
@@ -6806,8 +6899,10 @@ impl RuntimeState {
         {
             return None;
         }
-        let (finalizer_id, finalizer) = self.pop_tracked_finalizer(region_id)?;
-        Some(self.handoff_manual_finalizer(region_id, finalizer_id, finalizer))
+        // E2 S4c-2c-i (br-asupersync-m9wsza): see register_sync_finalizer.
+        let regions = AdmissionRegionTarget::Embedded;
+        let (finalizer_id, finalizer) = self.pop_tracked_finalizer(&regions, region_id)?;
+        Some(self.handoff_manual_finalizer(&regions, region_id, finalizer_id, finalizer))
     }
 
     /// Returns the number of pending finalizers for a region.
@@ -6845,17 +6940,21 @@ impl RuntimeState {
         {
             return None;
         }
-        let (finalizer_id, finalizer) = self.run_sync_finalizers_tracked(region_id)?;
-        Some(self.handoff_manual_finalizer(region_id, finalizer_id, finalizer))
+        // E2 S4c-2c-i (br-asupersync-m9wsza): see register_sync_finalizer.
+        let regions = AdmissionRegionTarget::Embedded;
+        let (finalizer_id, finalizer) = self.run_sync_finalizers_tracked(&regions, region_id)?;
+        Some(self.handoff_manual_finalizer(&regions, region_id, finalizer_id, finalizer))
     }
 
     fn handoff_manual_finalizer(
         &mut self,
+        regions: &AdmissionRegionTarget<'_>,
         region_id: RegionId,
         finalizer_id: u64,
         finalizer: Finalizer,
     ) -> (Finalizer, ManualFinalizerReceipt) {
-        self.validate_live_region_protocol_transition(
+        self.validate_live_region_protocol_transition_in(
+            regions,
             region_id,
             RegionEvent::FinalizerStarted,
             "manual finalizer handoff",
@@ -6916,19 +7015,32 @@ impl RuntimeState {
             return Err(ManualFinalizerReceiptError::NotActive);
         }
 
-        if abandoned && let Some(region) = self.regions.get(receipt.region_id.arena_index()) {
+        // E2 S4c-2c-i (br-asupersync-m9wsza): see register_sync_finalizer.
+        let regions = AdmissionRegionTarget::Embedded;
+        if abandoned
+            && let Some(region) = regions
+                .resolve_ref(&self.regions)
+                .get(receipt.region_id.arena_index())
+        {
             region.record_close_outcome(Outcome::Cancelled(CancelReason::user(
                 "manual finalizer abandoned",
             )));
         }
-        self.record_finalizer_run(receipt.region_id, receipt.finalizer_id);
+        self.record_finalizer_run(&regions, receipt.region_id, receipt.finalizer_id);
         self.active_manual_finalizers.remove(&receipt.region_id);
         receipt.settled = true;
         Ok(())
     }
 
-    fn take_next_finalizer_tracked(&mut self, region_id: RegionId) -> Option<(u64, Finalizer)> {
-        if let Some(region) = self.regions.get(region_id.arena_index()) {
+    fn take_next_finalizer_tracked(
+        &mut self,
+        regions: &AdmissionRegionTarget<'_>,
+        region_id: RegionId,
+    ) -> Option<(u64, Finalizer)> {
+        if let Some(region) = regions
+            .resolve_ref(&self.regions)
+            .get(region_id.arena_index())
+        {
             debug_assert_eq!(
                 region.state(),
                 crate::record::region::RegionState::Finalizing,
@@ -6938,14 +7050,26 @@ impl RuntimeState {
                 region.state()
             );
         }
-        self.pop_tracked_finalizer(region_id)
+        self.pop_tracked_finalizer(regions, region_id)
     }
 
-    fn run_sync_finalizers_tracked(&mut self, region_id: RegionId) -> Option<(u64, Finalizer)> {
+    /// CAUTION (sharded shape): this executes user sync-finalizer callbacks
+    /// inline and acquires the validator mutex per finalizer; callers must
+    /// never route through here while holding shard guards (the drain path
+    /// promotes finalizers to tasks instead — this loop is reached only from
+    /// the state-threaded manual/bootstrap surfaces).
+    fn run_sync_finalizers_tracked(
+        &mut self,
+        regions: &AdmissionRegionTarget<'_>,
+        region_id: RegionId,
+    ) -> Option<(u64, Finalizer)> {
         loop {
             // VALIDATION GAP FIX: Assert region is in Finalizing state before executing finalizers
             // This prevents finalizers from running during invalid state transitions
-            if let Some(region) = self.regions.get(region_id.arena_index()) {
+            if let Some(region) = regions
+                .resolve_ref(&self.regions)
+                .get(region_id.arena_index())
+            {
                 debug_assert_eq!(
                     region.state(),
                     crate::record::region::RegionState::Finalizing,
@@ -6956,11 +7080,12 @@ impl RuntimeState {
                 );
             }
 
-            let (finalizer_id, finalizer) = self.pop_tracked_finalizer(region_id)?;
+            let (finalizer_id, finalizer) = self.pop_tracked_finalizer(regions, region_id)?;
 
             match finalizer {
                 Finalizer::Sync(f) => {
-                    self.validate_live_region_protocol_transition(
+                    self.validate_live_region_protocol_transition_in(
+                        regions,
                         region_id,
                         RegionEvent::FinalizerStarted,
                         "sync finalizer start",
@@ -6968,7 +7093,10 @@ impl RuntimeState {
 
                     // VALIDATION GAP FIX: Re-validate state after popping but before execution
                     // This catches rapid state transitions that might skip finalizers
-                    if let Some(region) = self.regions.get(region_id.arena_index()) {
+                    if let Some(region) = regions
+                        .resolve_ref(&self.regions)
+                        .get(region_id.arena_index())
+                    {
                         if region.state() != crate::record::region::RegionState::Finalizing {
                             // Region state changed unexpectedly - this is a critical validation failure
                             assert_eq!(
@@ -6993,7 +7121,10 @@ impl RuntimeState {
                         // block region close or skip sibling finalizers.
                         let message = payload_to_string(&payload);
                         std::mem::forget(payload);
-                        if let Some(region) = self.regions.get(region_id.arena_index()) {
+                        if let Some(region) = regions
+                            .resolve_ref(&self.regions)
+                            .get(region_id.arena_index())
+                        {
                             region.record_close_outcome(Outcome::Panicked(
                                 crate::types::outcome::PanicPayload::new(message),
                             ));
@@ -7002,7 +7133,10 @@ impl RuntimeState {
 
                     // VALIDATION GAP FIX: Validate state is still consistent after execution
                     // This ensures the finalizer didn't cause invalid state transitions
-                    if let Some(region) = self.regions.get(region_id.arena_index()) {
+                    if let Some(region) = regions
+                        .resolve_ref(&self.regions)
+                        .get(region_id.arena_index())
+                    {
                         debug_assert!(
                             region.state() == crate::record::region::RegionState::Finalizing
                                 || region.state() == crate::record::region::RegionState::Closed,
@@ -7014,11 +7148,14 @@ impl RuntimeState {
                         );
                     }
 
-                    self.record_finalizer_run(region_id, finalizer_id);
+                    self.record_finalizer_run(regions, region_id, finalizer_id);
                 }
                 Finalizer::Async(_) => {
                     // VALIDATION GAP FIX: Validate async finalizers also respect state transitions
-                    if let Some(region) = self.regions.get(region_id.arena_index()) {
+                    if let Some(region) = regions
+                        .resolve_ref(&self.regions)
+                        .get(region_id.arena_index())
+                    {
                         debug_assert_eq!(
                             region.state(),
                             crate::record::region::RegionState::Finalizing,

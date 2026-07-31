@@ -79,24 +79,41 @@ fn infallible_constructor_clamps_worker_count_to_at_least_one() {
     // pre-fix bug).
     let source = read_three_lane_source();
 
+    // E1.2 3a (br-asupersync-sched-hot-path-perf-bt4y5f.2.2) moved
+    // construction into the zero-acquisition core
+    // new_with_options_task_table_and_handles; the old constructor is now
+    // a delegating wrapper. Pin both links: the wrapper delegates to the
+    // core, and the core owns the clamp.
     let fn_marker = "pub fn new_with_options_and_task_table(";
     let start = source
         .find(fn_marker)
         .expect("new_with_options_and_task_table fn");
-    let after = &source[start + fn_marker.len()..];
-    // Take a generous window for the long fn body.
-    let window_end = (start + 4000).min(source.len());
+    let wrapper_end = source[start..]
+        .find("\n    }\n")
+        .expect("new_with_options_and_task_table close");
+    let wrapper_body = &source[start..start + wrapper_end];
+    assert!(
+        wrapper_body.contains("Self::new_with_options_task_table_and_handles("),
+        "REGRESSION: new_with_options_and_task_table no longer delegates \
+         to the zero-acquisition construction core; the clamp pin below \
+         anchors on the core and the two can drift.",
+    );
+
+    let core_marker = "pub fn new_with_options_task_table_and_handles(";
+    let core_start = source
+        .find(core_marker)
+        .expect("new_with_options_task_table_and_handles core");
+    let window_end = (core_start + 4000).min(source.len());
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
         .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
-    let body = &source[start..safe_end];
-    let _ = after;
+    let body = &source[core_start..safe_end];
 
     assert!(
         body.contains("let worker_count = worker_count.max(1);"),
-        "REGRESSION: new_with_options_and_task_table no longer \
+        "REGRESSION: the construction core no longer \
          clamps worker_count to >= 1. Without the clamp, \
          worker_count=0 produces an empty workers Vec; the \
          scheduler accepts spawn calls but never dispatches \
@@ -276,8 +293,10 @@ fn cancel_streak_limit_clamped_to_at_least_one() {
     // adaptive budget calculation.
     let source = read_three_lane_source();
 
-    let fn_marker = "pub fn new_with_options_and_task_table(";
-    let start = source.find(fn_marker).expect("new_with_options fn");
+    // E1.2 3a: the clamps live in the zero-acquisition construction core
+    // (see infallible_constructor_clamps_worker_count_to_at_least_one).
+    let fn_marker = "pub fn new_with_options_task_table_and_handles(";
+    let start = source.find(fn_marker).expect("construction core fn");
     let window_end = (start + 4000).min(source.len());
     let safe_end = source
         .char_indices()

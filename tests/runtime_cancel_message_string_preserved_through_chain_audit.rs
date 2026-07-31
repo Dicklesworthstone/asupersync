@@ -326,12 +326,13 @@ fn truncation_sets_explicit_flag_for_diagnostic_visibility() {
 #[test]
 fn cancel_request_inline_test_pins_message_carries_through() {
     // Pin: the inline test cancel_request_builds_cause_chains
-    // (state.rs:6720) uses
+    // (now in src/runtime/state_tests.rs — the runtime-state test module
+    // was split out of state.rs) uses
     // `CancelReason::deadline().with_message("budget exhausted")`
     // and asserts the message reaches grandchild_task via
     // root_cause(). If the test is removed, message
     // propagation regression can pass CI.
-    let source = read("src/runtime/state.rs");
+    let source = read("src/runtime/state_tests.rs");
 
     assert!(
         source.contains("fn cancel_request_builds_cause_chains()"),
