@@ -1069,15 +1069,13 @@ impl AdmissionTaskTarget<'_> {
 /// order is preserved because the guard is acquired before any external
 /// shard-A guard.
 ///
-/// REACHABILITY (deliberate, recorded in the bead): every caller passes
-/// `Embedded` today. On the Sharded shape, region records are still
-/// minted into the unified embedded table (root-region initialization and
-/// child-region creation), so routing admission reads at ShardedState's
-/// shard B before minting converts would consult an empty table and deny
-/// every spawn. The `External` arm becomes reachable in the slice that
-/// moves region minting onto shard B; landing the seam first keeps that
-/// flip a one-site change, exactly as `AdmissionTaskTarget` staged the
-/// E1.2 conversion.
+/// REACHABILITY (E2 S4c-2c-iv, fork option C — deliberate): every caller
+/// still passes `Embedded`. Region records stay embedded on both shapes
+/// this round because the reference-returning region accessors
+/// (`region`/`region_mut`/`regions_iter` and their ~55 production call
+/// sites in app/cx/scope) cannot resolve a shard mutex; the `External`
+/// arm stays dormant pending the closure-accessor fork decision recorded
+/// on br-asupersync-m9wsza.
 pub(crate) enum AdmissionRegionTarget<'g> {
     /// Read the embedded `RuntimeState::regions` table (unified shape).
     Embedded,
@@ -1203,8 +1201,8 @@ pub(crate) enum LifecycleEffectsSink<'b> {
     /// shape — behavior-identical to the pre-seam wrappers).
     Inline,
     /// Accumulate payloads for dispatch after shard-guard release
-    /// (sharded shape; wired by the S4c completion arm).
-    #[allow(dead_code)]
+    /// (sharded shape; the wrapper-side resolution arms construct this —
+    /// E2 S4c-2c-iv).
     Buffered(&'b mut Vec<LifecycleEffect>),
 }
 
@@ -1219,21 +1217,19 @@ pub(crate) enum LifecycleEffectsSink<'b> {
 /// ([`RuntimeState::settle_obligation_reads`] plus the table op) with
 /// their effects deferred.
 ///
-/// REACHABILITY (deliberate, recorded in the bead): every caller passes
-/// `Embedded` today. On the Sharded shape, obligations are still minted
-/// into the unified embedded table (`create_obligation`), so routing the
-/// completion reads at ShardedState's shard C before minting converts
-/// would consult an empty table and skip every leak audit and orphan
-/// abort. The `External` arm becomes reachable in the slice that moves
-/// obligation minting onto shard C, together with the S4 wiring that runs
-/// the abort/leak-mark mutations against the held C guard instead of the
-/// embedded wrappers. Panic-on-leak escalation must dispatch OUTSIDE any
-/// shard guard on that shape (hazard recorded in the S3 pre-analysis).
+/// REACHABILITY (E2 S4c-2c-iv, fork option C): on `with_sharded_state`
+/// builds, obligations mint into and settle against ShardedState's shard
+/// C — the public lifecycle wrappers resolve the `External` arm from
+/// `RuntimeState::shard_tables`, run the `_in` cores under the held C
+/// guard with a buffered sink, and replay the deferred effects after
+/// release. Directly constructed states (lab, tests) have no shard
+/// bundle and stay `Embedded`. Panic-on-leak escalation currently
+/// unwinds through the held guards on the sharded shape
+/// (poison-tolerated; recorded on `handle_obligation_leaks`).
 pub(crate) enum CompletionObligationTarget<'g> {
     /// Read the embedded `RuntimeState::obligations` table (unified shape).
     Embedded,
     /// Read an external ShardedState shard-C table (sharded shape).
-    #[allow(dead_code)]
     External(crate::sync::ContendedMutexGuard<'g, ObligationTable>),
 }
 
@@ -1745,6 +1741,24 @@ pub struct RuntimeState {
     /// remain outside this notification boundary.
     pending_cancel_dispatch_coordinator:
         Option<std::sync::Weak<crate::runtime::scheduler::three_lane::WorkerCoordinator>>,
+    /// Shard-table handle bundle for `with_sharded_state` builds
+    /// (E2 S4c-2c-iv, br-asupersync-m9wsza).
+    ///
+    /// `None` on the unified shape and for every directly constructed
+    /// state (lab runtime, tests) — all table targets then resolve
+    /// `Embedded` and behavior is byte-identical to the pre-flip runtime.
+    /// The builder installs the bundle right after `ShardedState`
+    /// construction, and the public lifecycle wrappers resolve their
+    /// table targets from it internally (wrapper-side resolution): lock
+    /// the needed shard handles in canonical order (A before C; the
+    /// unified state lock is already held by the caller and precedes
+    /// both), run the `_in` core with a `Buffered` sink, release the
+    /// shard guards, then drain the deferred effects. Region records
+    /// deliberately stay embedded this round (the S4c-2c-iv fork
+    /// decision, option C): reference-returning region accessors cannot
+    /// resolve a shard mutex, so shard B stays dormant pending the
+    /// closure-accessor decision recorded on the bead.
+    shard_tables: Option<Arc<crate::runtime::sharded_state::ShardedState>>,
     /// Response policy when obligation leaks are detected.
     obligation_leak_response: ObligationLeakResponse,
     /// Optional escalation policy for obligation leaks.
@@ -1884,6 +1898,7 @@ impl std::fmt::Debug for RuntimeState {
                 "has_pending_cancel_dispatch_coordinator",
                 &self.pending_cancel_dispatch_coordinator.is_some(),
             )
+            .field("has_shard_tables", &self.shard_tables.is_some())
             .field("obligation_leak_response", &self.obligation_leak_response)
             .field("leak_escalation", &self.leak_escalation)
             .field("leak_count", &self.leak_count)
@@ -1969,6 +1984,7 @@ impl RuntimeState {
             pending_cancel_dispatches: Vec::new(),
             pending_cancel_dispatch_ready: Arc::new(AtomicBool::new(false)),
             pending_cancel_dispatch_coordinator: None,
+            shard_tables: None,
             // br-asupersync-qp2tfx: internal constructors Panic on obligation
             // leak so the lab/test paths surface bugs the same way the
             // user-facing default (Fail, set in br-gi61n1) does.
@@ -2889,6 +2905,27 @@ impl RuntimeState {
         coordinator: &Arc<crate::runtime::scheduler::three_lane::WorkerCoordinator>,
     ) {
         self.pending_cancel_dispatch_coordinator = Some(Arc::downgrade(coordinator));
+    }
+
+    /// Installs the shard-table handle bundle on a `with_sharded_state`
+    /// build (E2 S4c-2c-iv, br-asupersync-m9wsza). After this, the public
+    /// obligation-lifecycle wrappers resolve their C (and A read) targets
+    /// from the bundle; region records stay embedded per the recorded
+    /// fork decision (option C). The builder calls this exactly once,
+    /// before the scheduler starts workers.
+    pub(crate) fn install_shard_tables(
+        &mut self,
+        shards: Arc<crate::runtime::sharded_state::ShardedState>,
+    ) {
+        debug_assert!(
+            self.shard_tables.is_none(),
+            "shard tables installed twice on one RuntimeState"
+        );
+        debug_assert!(
+            self.obligations.is_empty(),
+            "shard tables must install before any obligation mints embedded"
+        );
+        self.shard_tables = Some(shards);
     }
 
     /// Returns the lock-free hint used by scheduler workers to discover
@@ -4540,9 +4577,23 @@ impl RuntimeState {
     /// outside shard guards — panic-on-leak must never fire while a shard
     /// guard is held.
     #[allow(clippy::needless_pass_by_value)]
+    /// Routes discovered obligation leaks through the configured response
+    /// policy against the caller's table targets and sink (E2 S4c-2c-iv,
+    /// br-asupersync-m9wsza): every mutation runs through the `_in` settle
+    /// cores so a caller holding the shard-C guard never re-enters the
+    /// wrapper-side shard resolution (self-deadlock on the C mutex).
+    ///
+    /// HAZARD (recorded): the `Panic` response unwinds while the caller's
+    /// shard guards are held on the sharded shape; the `ContendedMutex`
+    /// poison is tolerated everywhere (`unwrap_or_else(into_inner)`), and
+    /// the fail-fast is deliberate, but a future effects-split may move
+    /// the panic outside the guards entirely.
     fn handle_obligation_leaks(
         &mut self,
-        obligations: &CompletionObligationTarget<'_>,
+        regions: &mut AdmissionRegionTarget<'_>,
+        tasks: &AdmissionTaskTarget<'_>,
+        obligations: &mut CompletionObligationTarget<'_>,
+        effects: &mut LifecycleEffectsSink<'_>,
         error: ObligationLeakError,
     ) {
         if error.leaks.is_empty() {
@@ -4599,7 +4650,8 @@ impl RuntimeState {
             ObligationLeakResponse::Panic => {
                 // Mark leaked first so trace/metrics capture the event before panicking.
                 for &id in &leak_ids {
-                    let _ = self.mark_obligation_leaked(id);
+                    let _ =
+                        self.mark_obligation_leaked_in(regions, tasks, obligations, effects, id);
                 }
                 let msg = error.to_string();
                 // This is a runtime invariant violation. We fail-fast to surface the bug, but we
@@ -4623,7 +4675,8 @@ impl RuntimeState {
             }
             ObligationLeakResponse::Log => {
                 for &id in &leak_ids {
-                    let _ = self.mark_obligation_leaked(id);
+                    let _ =
+                        self.mark_obligation_leaked_in(regions, tasks, obligations, effects, id);
                 }
                 crate::tracing_compat::error!(
                     task_id = ?error.task_id,
@@ -4639,13 +4692,21 @@ impl RuntimeState {
             }
             ObligationLeakResponse::Silent => {
                 for &id in &leak_ids {
-                    let _ = self.mark_obligation_leaked(id);
+                    let _ =
+                        self.mark_obligation_leaked_in(regions, tasks, obligations, effects, id);
                 }
             }
             ObligationLeakResponse::Recover => {
                 for &id in &leak_ids {
                     // Abort instead of marking leaked — performs resource cleanup.
-                    let _ = self.abort_obligation(id, ObligationAbortReason::Error);
+                    let _ = self.abort_obligation_in(
+                        regions,
+                        tasks,
+                        obligations,
+                        effects,
+                        id,
+                        ObligationAbortReason::Error,
+                    );
                 }
                 crate::tracing_compat::warn!(
                     task_id = ?error.task_id,
@@ -4671,7 +4732,7 @@ impl RuntimeState {
         // the quiescence invariant.
         if self.handling_leaks == 0 && !self.deferred_region_advancements.is_empty() {
             for region_id in self.take_deferred_region_advancements() {
-                self.advance_region_state(region_id);
+                self.advance_region_state_in(regions, tasks, obligations, effects, region_id);
             }
         }
     }
@@ -4680,6 +4741,12 @@ impl RuntimeState {
     ///
     /// This records the obligation in the registry and emits a trace event.
     /// Returns an error if the region is closed or admission limits are reached.
+    ///
+    /// On `with_sharded_state` builds (E2 S4c-2c-iv, fork option C) the
+    /// mint targets shard C with the holder checks against shard A, so
+    /// the completion C-phases observe the records the mint produced —
+    /// the reachability law that kept every External arm dormant is
+    /// satisfied by this wrapper.
     #[allow(clippy::result_large_err)]
     #[track_caller]
     pub fn create_obligation(
@@ -4689,16 +4756,45 @@ impl RuntimeState {
         region: RegionId,
         description: Option<String>,
     ) -> Result<ObligationId, Error> {
-        self.create_obligation_in(
-            &AdmissionRegionTarget::Embedded,
-            &AdmissionTaskTarget::Embedded,
-            &mut CompletionObligationTarget::Embedded,
-            &mut LifecycleEffectsSink::Inline,
-            kind,
-            holder,
-            region,
-            description,
-        )
+        match self.shard_tables.clone() {
+            Some(shards) => {
+                let mut deferred = Vec::new();
+                let result = {
+                    let tasks_guard = shards
+                        .tasks
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let obligations_guard = shards
+                        .obligations
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let tasks = AdmissionTaskTarget::External(tasks_guard);
+                    let mut obligations = CompletionObligationTarget::External(obligations_guard);
+                    self.create_obligation_in(
+                        &AdmissionRegionTarget::Embedded,
+                        &tasks,
+                        &mut obligations,
+                        &mut LifecycleEffectsSink::Buffered(&mut deferred),
+                        kind,
+                        holder,
+                        region,
+                        description,
+                    )
+                };
+                self.dispatch_lifecycle_effects(deferred);
+                result
+            }
+            None => self.create_obligation_in(
+                &AdmissionRegionTarget::Embedded,
+                &AdmissionTaskTarget::Embedded,
+                &mut CompletionObligationTarget::Embedded,
+                &mut LifecycleEffectsSink::Inline,
+                kind,
+                holder,
+                region,
+                description,
+            ),
+        }
     }
 
     /// Core of [`Self::create_obligation`] against explicit table targets
@@ -4711,11 +4807,10 @@ impl RuntimeState {
     /// both epoch advances dispatch through the lifecycle sink outside any
     /// shard guard.
     ///
-    /// REACHABILITY (same law as the settle/advance seams): every caller
-    /// passes `Embedded` today. The `External` arms become reachable in the
-    /// S4c completion-arm wiring, where minting against ShardedState's
-    /// shard C is what finally lets the completion reads observe the same
-    /// records the mint produced.
+    /// REACHABILITY (E2 S4c-2c-iv): the public wrapper resolves the
+    /// External C (mint) and A (holder read) arms from
+    /// `RuntimeState::shard_tables` on sharded builds, so the completion
+    /// reads observe the same shard-C records this mint produced.
     #[allow(clippy::result_large_err, clippy::too_many_arguments)]
     #[track_caller]
     fn create_obligation_in(
@@ -5022,11 +5117,10 @@ impl RuntimeState {
     }
 
     /// Replays a drained buffer of deferred lifecycle effects in exact
-    /// push order (E2 S4c-2c-iii, br-asupersync-m9wsza). The guard-held
-    /// completion arm calls this after releasing every shard guard; each
+    /// push order (E2 S4c-2c-iii, br-asupersync-m9wsza). The wrapper-side
+    /// resolution arms call this after releasing every shard guard; each
     /// payload dispatches through the same code the Inline shape
     /// exercises on every operation.
-    #[allow(dead_code)]
     pub(crate) fn dispatch_lifecycle_effects(&mut self, effects: Vec<LifecycleEffect>) {
         for effect in effects {
             match effect {
@@ -5093,15 +5187,46 @@ impl RuntimeState {
     /// Marks an obligation as committed and emits a trace event.
     ///
     /// Returns the duration the obligation was held (nanoseconds).
+    ///
+    /// On `with_sharded_state` builds (E2 S4c-2c-iv, fork option C) the
+    /// wrapper locks shard A (holder logical-time read) then shard C (the
+    /// settle mutation) in canonical order, runs the core with a buffered
+    /// sink, releases both guards, and replays the deferred effects.
     #[allow(clippy::result_large_err)]
     pub fn commit_obligation(&mut self, obligation: ObligationId) -> Result<u64, Error> {
-        self.commit_obligation_in(
-            &mut AdmissionRegionTarget::Embedded,
-            &AdmissionTaskTarget::Embedded,
-            &mut CompletionObligationTarget::Embedded,
-            &mut LifecycleEffectsSink::Inline,
-            obligation,
-        )
+        match self.shard_tables.clone() {
+            Some(shards) => {
+                let mut deferred = Vec::new();
+                let result = {
+                    let tasks_guard = shards
+                        .tasks
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let obligations_guard = shards
+                        .obligations
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let tasks = AdmissionTaskTarget::External(tasks_guard);
+                    let mut obligations = CompletionObligationTarget::External(obligations_guard);
+                    self.commit_obligation_in(
+                        &mut AdmissionRegionTarget::Embedded,
+                        &tasks,
+                        &mut obligations,
+                        &mut LifecycleEffectsSink::Buffered(&mut deferred),
+                        obligation,
+                    )
+                };
+                self.dispatch_lifecycle_effects(deferred);
+                result
+            }
+            None => self.commit_obligation_in(
+                &mut AdmissionRegionTarget::Embedded,
+                &AdmissionTaskTarget::Embedded,
+                &mut CompletionObligationTarget::Embedded,
+                &mut LifecycleEffectsSink::Inline,
+                obligation,
+            ),
+        }
     }
 
     /// Core of [`Self::commit_obligation`] against explicit table targets
@@ -5236,20 +5361,50 @@ impl RuntimeState {
     /// Marks an obligation as aborted and emits a trace event.
     ///
     /// Returns the duration the obligation was held (nanoseconds).
+    ///
+    /// Sharded-shape wrapper resolution mirrors
+    /// [`Self::commit_obligation`].
     #[allow(clippy::result_large_err)]
     pub fn abort_obligation(
         &mut self,
         obligation: ObligationId,
         reason: ObligationAbortReason,
     ) -> Result<u64, Error> {
-        self.abort_obligation_in(
-            &mut AdmissionRegionTarget::Embedded,
-            &AdmissionTaskTarget::Embedded,
-            &mut CompletionObligationTarget::Embedded,
-            &mut LifecycleEffectsSink::Inline,
-            obligation,
-            reason,
-        )
+        match self.shard_tables.clone() {
+            Some(shards) => {
+                let mut deferred = Vec::new();
+                let result = {
+                    let tasks_guard = shards
+                        .tasks
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let obligations_guard = shards
+                        .obligations
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let tasks = AdmissionTaskTarget::External(tasks_guard);
+                    let mut obligations = CompletionObligationTarget::External(obligations_guard);
+                    self.abort_obligation_in(
+                        &mut AdmissionRegionTarget::Embedded,
+                        &tasks,
+                        &mut obligations,
+                        &mut LifecycleEffectsSink::Buffered(&mut deferred),
+                        obligation,
+                        reason,
+                    )
+                };
+                self.dispatch_lifecycle_effects(deferred);
+                result
+            }
+            None => self.abort_obligation_in(
+                &mut AdmissionRegionTarget::Embedded,
+                &AdmissionTaskTarget::Embedded,
+                &mut CompletionObligationTarget::Embedded,
+                &mut LifecycleEffectsSink::Inline,
+                obligation,
+                reason,
+            ),
+        }
     }
 
     /// Core of [`Self::abort_obligation`] against explicit table targets
@@ -5328,13 +5483,39 @@ impl RuntimeState {
     /// Returns the duration the obligation was held (nanoseconds).
     #[allow(clippy::result_large_err)]
     pub fn mark_obligation_leaked(&mut self, obligation: ObligationId) -> Result<u64, Error> {
-        self.mark_obligation_leaked_in(
-            &mut AdmissionRegionTarget::Embedded,
-            &AdmissionTaskTarget::Embedded,
-            &mut CompletionObligationTarget::Embedded,
-            &mut LifecycleEffectsSink::Inline,
-            obligation,
-        )
+        match self.shard_tables.clone() {
+            Some(shards) => {
+                let mut deferred = Vec::new();
+                let result = {
+                    let tasks_guard = shards
+                        .tasks
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let obligations_guard = shards
+                        .obligations
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let tasks = AdmissionTaskTarget::External(tasks_guard);
+                    let mut obligations = CompletionObligationTarget::External(obligations_guard);
+                    self.mark_obligation_leaked_in(
+                        &mut AdmissionRegionTarget::Embedded,
+                        &tasks,
+                        &mut obligations,
+                        &mut LifecycleEffectsSink::Buffered(&mut deferred),
+                        obligation,
+                    )
+                };
+                self.dispatch_lifecycle_effects(deferred);
+                result
+            }
+            None => self.mark_obligation_leaked_in(
+                &mut AdmissionRegionTarget::Embedded,
+                &AdmissionTaskTarget::Embedded,
+                &mut CompletionObligationTarget::Embedded,
+                &mut LifecycleEffectsSink::Inline,
+                obligation,
+            ),
+        }
     }
 
     /// Core of [`Self::mark_obligation_leaked`] against explicit table
@@ -5524,11 +5705,19 @@ impl RuntimeState {
     /// Counts pending obligations.
     ///
     /// O(1) — delegates to `ObligationTable::pending_count()` which maintains
-    /// an incremental counter.
+    /// an incremental counter. On sharded builds the count reads shard C
+    /// (E2 S4c-2c-iv), where obligations actually live.
     #[inline]
     #[must_use]
     pub fn pending_obligation_count(&self) -> usize {
-        self.obligations.pending_count()
+        match self.shard_tables.as_ref() {
+            Some(shards) => shards
+                .obligations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pending_count(),
+            None => self.obligations.pending_count(),
+        }
     }
 
     /// Returns the pending obligation count for a specific kind.
@@ -5539,7 +5728,14 @@ impl RuntimeState {
     #[inline]
     #[must_use]
     pub fn pending_obligation_count_for_kind(&self, kind: crate::record::ObligationKind) -> usize {
-        self.obligations.pending_count_for_kind(kind)
+        match self.shard_tables.as_ref() {
+            Some(shards) => shards
+                .obligations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pending_count_for_kind(kind),
+            None => self.obligations.pending_count_for_kind(kind),
+        }
     }
 
     /// Returns the sum of `reserved_at.as_nanos()` across all pending
@@ -5548,7 +5744,14 @@ impl RuntimeState {
     #[inline]
     #[must_use]
     pub fn pending_obligation_reserved_at_sum_ns(&self) -> u128 {
-        self.obligations.pending_reserved_at_sum_ns()
+        match self.shard_tables.as_ref() {
+            Some(shards) => shards
+                .obligations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pending_reserved_at_sum_ns(),
+            None => self.obligations.pending_reserved_at_sum_ns(),
+        }
     }
 
     #[inline]
@@ -5597,10 +5800,23 @@ impl RuntimeState {
     /// - No region is still in the close lifecycle
     #[must_use]
     pub fn is_quiescent(&self) -> bool {
-        self.is_quiescent_in(
-            &AdmissionRegionTarget::Embedded,
-            &CompletionObligationTarget::Embedded,
-        )
+        // E2 S4c-2c-iv (fork option C): pending obligations live in shard
+        // C on sharded builds — an embedded read would be vacuously zero
+        // and block_on could observe quiescent-while-holding-obligations.
+        match self.shard_tables.as_ref() {
+            Some(shards) => {
+                let obligations_guard = shards
+                    .obligations
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let obligations = CompletionObligationTarget::External(obligations_guard);
+                self.is_quiescent_in(&AdmissionRegionTarget::Embedded, &obligations)
+            }
+            None => self.is_quiescent_in(
+                &AdmissionRegionTarget::Embedded,
+                &CompletionObligationTarget::Embedded,
+            ),
+        }
     }
 
     /// Core of [`Self::is_quiescent`] with the region (Shard B) and
@@ -5768,15 +5984,50 @@ impl RuntimeState {
         reason: &CancelReason,
         source_task: Option<TaskId>,
     ) -> CancellationEffects<Vec<(TaskId, u8)>> {
-        self.cancel_request_in(
-            &mut AdmissionRegionTarget::Embedded,
-            &mut AdmissionTaskTarget::Embedded,
-            &mut CompletionObligationTarget::Embedded,
-            &mut LifecycleEffectsSink::Inline,
-            region_id,
-            reason,
-            source_task,
-        )
+        // E2 S4c-2c-iv (fork option C; closes br-asupersync-mnebts): on
+        // sharded builds the task pass writes through shard A — the
+        // embedded pass silently missed shard-A-resident tasks — and the
+        // no-live-work advance resolves shard C. The walk's trace pushes
+        // and validator acquisitions run while these guards are held;
+        // both are runtime-internal leaf locks (no user callbacks — those
+        // ride the returned effects), matching the settle-core posture.
+        match self.shard_tables.clone() {
+            Some(shards) => {
+                let mut deferred = Vec::new();
+                let result = {
+                    let tasks_guard = shards
+                        .tasks
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let obligations_guard = shards
+                        .obligations
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut tasks = AdmissionTaskTarget::External(tasks_guard);
+                    let mut obligations = CompletionObligationTarget::External(obligations_guard);
+                    self.cancel_request_in(
+                        &mut AdmissionRegionTarget::Embedded,
+                        &mut tasks,
+                        &mut obligations,
+                        &mut LifecycleEffectsSink::Buffered(&mut deferred),
+                        region_id,
+                        reason,
+                        source_task,
+                    )
+                };
+                self.dispatch_lifecycle_effects(deferred);
+                result
+            }
+            None => self.cancel_request_in(
+                &mut AdmissionRegionTarget::Embedded,
+                &mut AdmissionTaskTarget::Embedded,
+                &mut CompletionObligationTarget::Embedded,
+                &mut LifecycleEffectsSink::Inline,
+                region_id,
+                reason,
+                source_task,
+            ),
+        }
     }
 
     /// Core of [`Self::cancel_request`] against explicit table targets
@@ -6304,23 +6555,93 @@ impl RuntimeState {
         // table ops in canonical shard order. C (leak audit) → B (finalizer
         // barrier) → C (orphan abort) → A (record retire) → B (region unlink
         // + advance, itself a B→A→C composite) → D (epoch telemetry).
-        // A future sharded-backing completion arm composes exactly these
-        // phases under `ShardGuard::for_task_completed`-ordered guards.
-        let mut regions = AdmissionRegionTarget::Embedded;
-        let tasks = AdmissionTaskTarget::Embedded;
-        let mut obligations = CompletionObligationTarget::Embedded;
-        let mut effects = LifecycleEffectsSink::Inline;
-        self.audit_completion_obligation_leaks(&obligations, task_id, owner, completion);
-        self.retire_completed_finalizer_barrier(task_id, owner);
-        self.abort_orphaned_obligations_for_holder(
-            &mut regions,
-            &tasks,
-            &mut obligations,
-            &mut effects,
-            task_id,
-        );
-        self.retire_completed_task_record(task_id, remove_embedded_record);
-        self.unlink_completed_task_from_region(task_id, owner, close_outcome);
+        //
+        // E2 S4c-2c-iv (br-asupersync-m9wsza, fork option C): on
+        // `with_sharded_state` builds the obligation table lives in shard
+        // C, so the C-phases run against the held C guard with every
+        // deferred effect buffered; the guard drops before the buffered
+        // validator/trace/metrics/debt payloads replay in push order.
+        // Regions and the completing task's record resolve Embedded: region
+        // records stay embedded this round by design, and the task record
+        // was either detached from shard A before entry (external arm) or
+        // still lives embedded (unified arm) — identical logical-time
+        // observations either way.
+        match self.shard_tables.clone() {
+            Some(shards) => {
+                let mut deferred = Vec::new();
+                {
+                    let obligations_guard = shards
+                        .obligations
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut regions = AdmissionRegionTarget::Embedded;
+                    let tasks = AdmissionTaskTarget::Embedded;
+                    let mut obligations = CompletionObligationTarget::External(obligations_guard);
+                    let mut effects = LifecycleEffectsSink::Buffered(&mut deferred);
+                    self.audit_completion_obligation_leaks(
+                        &mut regions,
+                        &tasks,
+                        &mut obligations,
+                        &mut effects,
+                        task_id,
+                        owner,
+                        completion,
+                    );
+                    self.retire_completed_finalizer_barrier(task_id, owner);
+                    self.abort_orphaned_obligations_for_holder(
+                        &mut regions,
+                        &tasks,
+                        &mut obligations,
+                        &mut effects,
+                        task_id,
+                    );
+                    self.retire_completed_task_record(task_id, remove_embedded_record);
+                    self.unlink_completed_task_from_region_in(
+                        &mut regions,
+                        &tasks,
+                        &mut obligations,
+                        &mut effects,
+                        task_id,
+                        owner,
+                        close_outcome,
+                    );
+                }
+                self.dispatch_lifecycle_effects(deferred);
+            }
+            None => {
+                let mut regions = AdmissionRegionTarget::Embedded;
+                let tasks = AdmissionTaskTarget::Embedded;
+                let mut obligations = CompletionObligationTarget::Embedded;
+                let mut effects = LifecycleEffectsSink::Inline;
+                self.audit_completion_obligation_leaks(
+                    &mut regions,
+                    &tasks,
+                    &mut obligations,
+                    &mut effects,
+                    task_id,
+                    owner,
+                    completion,
+                );
+                self.retire_completed_finalizer_barrier(task_id, owner);
+                self.abort_orphaned_obligations_for_holder(
+                    &mut regions,
+                    &tasks,
+                    &mut obligations,
+                    &mut effects,
+                    task_id,
+                );
+                self.retire_completed_task_record(task_id, remove_embedded_record);
+                self.unlink_completed_task_from_region_in(
+                    &mut regions,
+                    &tasks,
+                    &mut obligations,
+                    &mut effects,
+                    task_id,
+                    owner,
+                    close_outcome,
+                );
+            }
+        }
 
         let mut observer = observer;
         observer.attach_epoch_telemetry(self.take_epoch_telemetry());
@@ -6336,7 +6657,10 @@ impl RuntimeState {
     /// handling (which may escalate per policy).
     fn audit_completion_obligation_leaks(
         &mut self,
-        obligations: &CompletionObligationTarget<'_>,
+        regions: &mut AdmissionRegionTarget<'_>,
+        tasks: &AdmissionTaskTarget<'_>,
+        obligations: &mut CompletionObligationTarget<'_>,
+        effects: &mut LifecycleEffectsSink<'_>,
         task_id: TaskId,
         owner: RegionId,
         completion: TaskCompletionKind,
@@ -6345,7 +6669,10 @@ impl RuntimeState {
             let leaks = self.collect_obligation_leaks_for_holder(obligations, task_id);
             if !leaks.is_empty() {
                 self.handle_obligation_leaks(
+                    regions,
+                    tasks,
                     obligations,
+                    effects,
                     ObligationLeakError {
                         task_id: Some(task_id),
                         region_id: owner,
@@ -6457,20 +6784,24 @@ impl RuntimeState {
     /// region, records the close outcome, and advances region state if
     /// possible (e.g. if this was the last task). Region advancement is
     /// itself a B→A→C composite.
-    fn unlink_completed_task_from_region(
+    fn unlink_completed_task_from_region_in(
         &mut self,
+        regions: &mut AdmissionRegionTarget<'_>,
+        tasks: &AdmissionTaskTarget<'_>,
+        obligations: &mut CompletionObligationTarget<'_>,
+        effects: &mut LifecycleEffectsSink<'_>,
         task_id: TaskId,
         owner: RegionId,
         close_outcome: Option<Outcome<(), Error>>,
     ) {
-        if let Some(region) = self.regions.get(owner.arena_index()) {
+        if let Some(region) = regions.resolve_ref(&self.regions).get(owner.arena_index()) {
             if let Some(outcome) = close_outcome {
                 region.record_close_outcome(outcome);
             }
             region.remove_task(task_id);
         }
 
-        self.advance_region_state(owner);
+        self.advance_region_state_in(regions, tasks, obligations, effects, owner);
     }
 
     // =========================================================================
@@ -7806,13 +8137,45 @@ impl RuntimeState {
     }
 
     pub fn advance_region_state(&mut self, initial_region: RegionId) {
-        self.advance_region_state_in(
-            &mut AdmissionRegionTarget::Embedded,
-            &AdmissionTaskTarget::Embedded,
-            &mut CompletionObligationTarget::Embedded,
-            &mut LifecycleEffectsSink::Inline,
-            initial_region,
-        );
+        // E2 S4c-2c-iv (fork option C): the walk's finalize gate scans the
+        // task table (shard A) and its close fence + Finalizing-arm leak
+        // reads touch the obligation table (shard C) — resolve both on
+        // sharded builds, buffering the walk's deferred effects past the
+        // guard scope.
+        match self.shard_tables.clone() {
+            Some(shards) => {
+                let mut deferred = Vec::new();
+                {
+                    let tasks_guard = shards
+                        .tasks
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let obligations_guard = shards
+                        .obligations
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let tasks = AdmissionTaskTarget::External(tasks_guard);
+                    let mut obligations = CompletionObligationTarget::External(obligations_guard);
+                    self.advance_region_state_in(
+                        &mut AdmissionRegionTarget::Embedded,
+                        &tasks,
+                        &mut obligations,
+                        &mut LifecycleEffectsSink::Buffered(&mut deferred),
+                        initial_region,
+                    );
+                }
+                self.dispatch_lifecycle_effects(deferred);
+            }
+            None => {
+                self.advance_region_state_in(
+                    &mut AdmissionRegionTarget::Embedded,
+                    &AdmissionTaskTarget::Embedded,
+                    &mut CompletionObligationTarget::Embedded,
+                    &mut LifecycleEffectsSink::Inline,
+                    initial_region,
+                );
+            }
+        }
     }
 
     /// Core of [`Self::advance_region_state`] against explicit table targets
@@ -7987,28 +8350,29 @@ impl RuntimeState {
                     // abort or leak-resolve orphaned obligations and unlink the task from the
                     // region. Finalizing leak detection must therefore wait for full task
                     // cleanup, not just a terminal outcome.
-                    if let Some(region) = regions
+                    let region_awaits_leak_audit = regions
                         .resolve_ref(&self.regions)
                         .get(region_id.arena_index())
-                    {
-                        if region.pending_obligations() > 0 {
-                            if region.task_count() == 0 {
-                                let leaks = self
-                                    .collect_obligation_leaks(&*obligations, |record| {
-                                        record.region == region_id
-                                    });
-                                if !leaks.is_empty() {
-                                    self.handle_obligation_leaks(
-                                        &*obligations,
-                                        ObligationLeakError {
-                                            task_id: None,
-                                            region_id,
-                                            completion: None,
-                                            leaks,
-                                        },
-                                    );
-                                }
-                            }
+                        .is_some_and(|region| {
+                            region.pending_obligations() > 0 && region.task_count() == 0
+                        });
+                    if region_awaits_leak_audit {
+                        let leaks = self.collect_obligation_leaks(&*obligations, |record| {
+                            record.region == region_id
+                        });
+                        if !leaks.is_empty() {
+                            self.handle_obligation_leaks(
+                                regions,
+                                tasks,
+                                obligations,
+                                effects,
+                                ObligationLeakError {
+                                    task_id: None,
+                                    region_id,
+                                    completion: None,
+                                    leaks,
+                                },
+                            );
                         }
                     }
 

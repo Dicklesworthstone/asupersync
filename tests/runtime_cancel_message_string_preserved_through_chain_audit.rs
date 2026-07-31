@@ -213,8 +213,9 @@ fn descendant_propagation_does_not_strip_parent_message() {
     // into the child's cause. The string is never stripped.
     let source = read("src/runtime/state.rs");
 
-    let fn_marker = "pub fn cancel_request(";
-    let pos = source.find(fn_marker).expect("cancel_request fn");
+    // E2 S4c-2c-ii/iv (br-asupersync-m9wsza): anchor at the core.
+    let fn_marker = "fn cancel_request_in(";
+    let pos = source.find(fn_marker).expect("cancel_request_in core");
     let body_window = &source[pos..pos + 8000];
 
     assert!(

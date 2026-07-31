@@ -274,14 +274,18 @@ fn runtime_state_cancel_request_walks_region_tree() {
     // E2 S4c-2c-ii (br-asupersync-m9wsza) split cancel_request into a
     // target-threaded core: the public wrapper delegates to
     // cancel_request_in, which owns the region-tree walk. Pin both links.
+    // The wrapper grew the sharded-shape resolution arm in S4c-2c-iv
+    // (shard-guard construction + buffered-effects drain around the core
+    // call), so the delegation pin scans a wider window: both match arms
+    // must still route through the core.
     let fn_marker = "pub fn cancel_request(";
     let pos = source.find(fn_marker).expect("cancel_request fn");
-    let wrapper_window = &source[pos..pos + 1200];
+    let wrapper_window = &source[pos..pos + 4000];
     assert!(
-        wrapper_window.contains("self.cancel_request_in("),
-        "REGRESSION: cancel_request no longer delegates to the \
-         target-threaded core; the walk pins below anchor on the core \
-         and the two can drift.",
+        wrapper_window.matches("self.cancel_request_in(").count() >= 2,
+        "REGRESSION: cancel_request no longer delegates both shape arms \
+         to the target-threaded core; the walk pins below anchor on the \
+         core and the wrapper can drift.",
     );
 
     let core_marker = "fn cancel_request_in(";

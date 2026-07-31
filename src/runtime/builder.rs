@@ -4052,14 +4052,21 @@ impl RuntimeInner {
             config.runtime_state_shape,
             crate::runtime::config::RuntimeStateShape::Sharded
         ) {
-            let guard = state
+            let mut guard = state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            Some(Arc::new(crate::runtime::ShardedState::new(
+            let shards = Arc::new(crate::runtime::ShardedState::new(
                 guard.trace_handle(),
                 guard.metrics_provider(),
                 guard.sharded_construction_config(),
-            )))
+            ));
+            // E2 S4c-2c-iv (br-asupersync-m9wsza, fork option C): hand the
+            // unified state its shard-table bundle in the same lock scope,
+            // before any scheduler/worker exists — obligation lifecycle
+            // wrappers resolve shard C (and the shard-A read side) from it.
+            // Region records deliberately stay embedded this round.
+            guard.install_shard_tables(Arc::clone(&shards));
+            Some(shards)
         } else {
             None
         };
@@ -5981,6 +5988,118 @@ mod tests {
             embedded_live, 0,
             "the embedded table never owns mailbox-admitted sharded tasks"
         );
+    }
+
+    /// E2 S4c-2c-iv (br-asupersync-m9wsza, fork option C): on the Sharded
+    /// shape, obligations mint into and settle against shard C through the
+    /// wrapper-side resolution — the embedded obligation table never owns
+    /// them, the shard-C-reading counters observe the full lifecycle, and
+    /// quiescence honors pending shard-C obligations.
+    #[test]
+    fn sharded_shape_obligations_mint_and_settle_in_shard_c() {
+        init_test_logging();
+
+        let mut config = RuntimeConfig::default();
+        config.worker_threads = 1;
+        config.runtime_state_shape = crate::runtime::config::RuntimeStateShape::Sharded;
+        let runtime = Runtime::with_config_and_platform(
+            config,
+            None,
+            None,
+            None,
+            None,
+            &NativeThreadHostServices::new(),
+        )
+        .expect("sharded runtime constructs");
+        let table = runtime
+            .inner
+            .scheduler
+            .dispatch_task_table()
+            .expect("sharded runtime dispatches against a task table");
+
+        let mut state = runtime
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = state
+            .root_region
+            .expect("sharded runtime construction mints the root region");
+        let region = state
+            .create_child_region(root, crate::types::Budget::INFINITE)
+            .expect("child region under the runtime root");
+
+        // Mint the holder task into shard A the way sharded admission does:
+        // the record lives in the dispatch table, never embedded.
+        let holder = {
+            let mut table_guard = table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let idx = table_guard.insert_task(crate::record::TaskRecord::new(
+                crate::types::TaskId::from_arena(crate::util::ArenaIndex::new(0, 0)),
+                region,
+                crate::types::Budget::INFINITE,
+            ));
+            let id = crate::types::TaskId::from_arena(idx);
+            table_guard.task_mut(id).expect("holder record").id = id;
+            id
+        };
+        state
+            .region(region)
+            .expect("root region")
+            .add_task(holder)
+            .expect("holder admission");
+
+        let obligation = state
+            .create_obligation(
+                crate::record::ObligationKind::SendPermit,
+                holder,
+                region,
+                Some("shard-c residency probe".to_string()),
+            )
+            .expect("sharded obligation mints via wrapper resolution");
+
+        assert!(
+            state.obligation(obligation).is_none(),
+            "the embedded obligation table never owns sharded-shape obligations"
+        );
+        assert!(
+            state.obligations_is_empty(),
+            "embedded obligation table stays empty on the sharded shape"
+        );
+        assert_eq!(
+            state.pending_obligation_count(),
+            1,
+            "the shard-C-reading counter observes the mint"
+        );
+        assert!(
+            !state.is_quiescent(),
+            "quiescence must honor pending shard-C obligations"
+        );
+
+        let duration = state
+            .commit_obligation(obligation)
+            .expect("sharded obligation commits via wrapper resolution");
+        let _ = duration;
+        assert_eq!(
+            state.pending_obligation_count(),
+            0,
+            "the shard-C-reading counter observes the settle"
+        );
+
+        // The full reserve→commit trace pair rode the buffered drain.
+        let events = state.trace.snapshot();
+        let reserves = events
+            .iter()
+            .filter(|e| matches!(e.kind, crate::trace::TraceEventKind::ObligationReserve))
+            .count();
+        let commits = events
+            .iter()
+            .filter(|e| matches!(e.kind, crate::trace::TraceEventKind::ObligationCommit))
+            .count();
+        assert_eq!(reserves, 1, "reserve trace event dispatched post-release");
+        assert_eq!(commits, 1, "commit trace event dispatched post-release");
+        drop(state);
     }
 
     #[test]
