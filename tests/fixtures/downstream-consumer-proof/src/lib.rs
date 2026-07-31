@@ -25,7 +25,9 @@ pub fn public_surface_smoke_value() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use asupersync::runtime::{ArtifactCache, ArtifactCacheConfig, CacheStatistics};
+    use asupersync::runtime::{
+        ArtifactCache, ArtifactCacheConfig, CacheStatistics, EvictionPolicy,
+    };
 
     const NOW_NANOS: u64 = 1_000_000_000_000;
 
@@ -143,5 +145,49 @@ mod tests {
         assert!(!cache.contains("older"));
         assert!(cache.contains("newer"));
         assert_eq!(cache.statistics().total_evictions, 1);
+    }
+
+    fn exact_eviction_victim(policy: EvictionPolicy, first_id: &str, second_id: &str) -> String {
+        let config = ArtifactCacheConfig {
+            max_cache_size_bytes: 2,
+            max_artifact_count: 2,
+            eviction_policy: policy,
+            ..ArtifactCacheConfig::default()
+        };
+        let mut cache = ArtifactCache::new(config);
+
+        assert!(cache.put(first_id.to_string(), vec![1], NOW_NANOS));
+        assert!(cache.put(second_id.to_string(), vec![2], NOW_NANOS));
+        assert_eq!(cache.evict(1), 1);
+
+        match (cache.contains(first_id), cache.contains(second_id)) {
+            (false, true) => first_id.to_string(),
+            (true, false) => second_id.to_string(),
+            state => panic!("exactly one artifact must be evicted, got {state:?}"),
+        }
+    }
+
+    #[test]
+    fn artifact_cache_eviction_ties_have_exact_insertion_independent_victims() {
+        // These IDs have equal length. Lexical ordering selects `alpha`, while
+        // the stable full-ID hash selects `cider`, proving Random does not fall
+        // back to the old length-only ordering.
+        let cases = [
+            (EvictionPolicy::LruWithTtl, "alpha"),
+            (EvictionPolicy::Mru, "alpha"),
+            (EvictionPolicy::LargestFirst, "alpha"),
+            (EvictionPolicy::Random, "cider"),
+        ];
+
+        for (policy, expected_victim) in cases {
+            assert_eq!(
+                exact_eviction_victim(policy, "alpha", "cider"),
+                expected_victim
+            );
+            assert_eq!(
+                exact_eviction_victim(policy, "cider", "alpha"),
+                expected_victim
+            );
+        }
     }
 }

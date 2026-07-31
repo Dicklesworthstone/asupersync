@@ -14,6 +14,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 const ARTIFACT_HOT_WINDOW_NANOS: u64 = 5 * 60 * 1_000_000_000;
+const ARTIFACT_ID_HASH_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const ARTIFACT_ID_HASH_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+fn stable_artifact_id_hash(id: &str) -> u64 {
+    id.as_bytes()
+        .iter()
+        .fold(ARTIFACT_ID_HASH_OFFSET_BASIS, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(ARTIFACT_ID_HASH_PRIME)
+        })
+}
 
 /// Memory pressure snapshot for deterministic lab scenario replay.
 ///
@@ -381,30 +391,51 @@ impl ArtifactCache {
         let mut candidates: Vec<_> = self
             .metadata
             .iter()
-            .map(|(id, meta)| (id.clone(), meta.clone()))
+            .map(|(id, meta)| (id.clone(), meta.clone(), stable_artifact_id_hash(id)))
             .collect();
 
         match self.config.eviction_policy {
             EvictionPolicy::LruWithTtl => {
-                // Sort by last accessed time (oldest first)
-                candidates.sort_by_key(|(_, meta)| meta.last_accessed_nanos);
+                // Sort by last accessed time (oldest first), then by ID so
+                // equal timestamps remain deterministic across hash seeds.
+                candidates.sort_by(|(left_id, left_meta, _), (right_id, right_meta, _)| {
+                    left_meta
+                        .last_accessed_nanos
+                        .cmp(&right_meta.last_accessed_nanos)
+                        .then_with(|| left_id.cmp(right_id))
+                });
             }
             EvictionPolicy::Mru => {
-                // Sort by last accessed time (newest first)
-                candidates.sort_by_key(|(_, meta)| std::cmp::Reverse(meta.last_accessed_nanos));
+                // Sort by last accessed time (newest first), then by ID.
+                candidates.sort_by(|(left_id, left_meta, _), (right_id, right_meta, _)| {
+                    right_meta
+                        .last_accessed_nanos
+                        .cmp(&left_meta.last_accessed_nanos)
+                        .then_with(|| left_id.cmp(right_id))
+                });
             }
             EvictionPolicy::LargestFirst => {
-                // Sort by size (largest first)
-                candidates.sort_by_key(|(_, meta)| std::cmp::Reverse(meta.size_bytes));
+                // Sort by size (largest first), then by ID.
+                candidates.sort_by(|(left_id, left_meta, _), (right_id, right_meta, _)| {
+                    right_meta
+                        .size_bytes
+                        .cmp(&left_meta.size_bytes)
+                        .then_with(|| left_id.cmp(right_id))
+                });
             }
             EvictionPolicy::Random => {
-                // Use deterministic "random" based on hash for lab reproducibility
-                candidates.sort_by_key(|(id, _)| id.len());
+                // Use a stable full-ID hash for reproducible pseudo-random
+                // ordering, with the ID itself as a total collision tie-break.
+                candidates.sort_by(|(left_id, _, left_hash), (right_id, _, right_hash)| {
+                    left_hash
+                        .cmp(right_hash)
+                        .then_with(|| left_id.cmp(right_id))
+                });
             }
         }
 
         // Evict until we've freed enough space
-        for (id, meta) in candidates {
+        for (id, meta, _) in candidates {
             if evicted_bytes >= target_bytes && evicted_count >= target_artifacts {
                 break;
             }
