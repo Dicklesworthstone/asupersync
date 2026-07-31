@@ -1456,7 +1456,13 @@ fn sibling_cancel_defers_wakers_and_excludes_policy_child() {
         let mut guard = state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let effects = guard.cancel_sibling_tasks(root, policy_child, &CancelReason::fail_fast());
+        let effects = guard.cancel_sibling_tasks(
+            &AdmissionRegionTarget::Embedded,
+            &mut AdmissionTaskTarget::Embedded,
+            root,
+            policy_child,
+            &CancelReason::fail_fast(),
+        );
         assert!(
             audits
                 .iter()
@@ -7782,7 +7788,13 @@ fn cancel_sibling_tasks_preserves_triggering_child() {
     // Cancel siblings of task_b (should cancel a, c, d but not b)
     let reason = CancelReason::fail_fast().with_message("sibling failed");
     let (to_cancel, cancel_wakes) = state
-        .cancel_sibling_tasks(region, task_b, &reason)
+        .cancel_sibling_tasks(
+            &AdmissionRegionTarget::Embedded,
+            &mut AdmissionTaskTarget::Embedded,
+            region,
+            task_b,
+            &reason,
+        )
         .into_parts();
 
     // task_b should NOT appear in the cancellation list

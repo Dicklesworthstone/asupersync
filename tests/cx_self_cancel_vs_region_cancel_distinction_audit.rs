@@ -271,12 +271,25 @@ fn runtime_state_cancel_request_walks_region_tree() {
     // proper cause chains.
     let source = read("src/runtime/state.rs");
 
+    // E2 S4c-2c-ii (br-asupersync-m9wsza) split cancel_request into a
+    // target-threaded core: the public wrapper delegates to
+    // cancel_request_in, which owns the region-tree walk. Pin both links.
     let fn_marker = "pub fn cancel_request(";
     let pos = source.find(fn_marker).expect("cancel_request fn");
-    let body_window = &source[pos..pos + 4000];
+    let wrapper_window = &source[pos..pos + 1200];
+    assert!(
+        wrapper_window.contains("self.cancel_request_in("),
+        "REGRESSION: cancel_request no longer delegates to the \
+         target-threaded core; the walk pins below anchor on the core \
+         and the two can drift.",
+    );
+
+    let core_marker = "fn cancel_request_in(";
+    let core_pos = source.find(core_marker).expect("cancel_request_in core");
+    let body_window = &source[core_pos..core_pos + 5000];
 
     assert!(
-        body_window.contains("collect_region_and_descendants_with_depth(region_id)"),
+        body_window.contains("collect_region_and_descendants_with_depth(regions, region_id)"),
         "REGRESSION: cancel_request no longer walks the \
          region tree via collect_region_and_descendants. \
          Region-cancel propagation is broken.",

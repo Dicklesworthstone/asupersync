@@ -2327,14 +2327,31 @@ impl RuntimeState {
         task_id: TaskId,
         event: TaskEvent,
     ) -> Option<TransitionResult> {
-        let Some(task) = self.task(task_id) else {
-            return None;
-        };
-        let context = TaskContext {
-            task_id,
-            region_id: task.owner,
-            spawned_at: task.created_at,
-            validation_level: CancelValidationLevel::Basic,
+        self.live_task_protocol_violation_in(&AdmissionTaskTarget::Embedded, task_id, event)
+    }
+
+    /// Core of [`Self::live_task_protocol_violation`] with the task-record
+    /// read routed through the task-table target (E2 S4c-2c-ii,
+    /// br-asupersync-m9wsza): the embedded read silently skipped validation
+    /// for shard-A-resident tasks on sharded builds.
+    ///
+    /// CAUTION (sharded shape): acquires the validator mutex after the
+    /// record read — guard-held callers must defer via effect payloads
+    /// instead (u5jdvw/118ayd discipline).
+    fn live_task_protocol_violation_in(
+        &self,
+        tasks: &AdmissionTaskTarget<'_>,
+        task_id: TaskId,
+        event: TaskEvent,
+    ) -> Option<TransitionResult> {
+        let context = {
+            let task = tasks.resolve_ref(&self.tasks).task(task_id)?;
+            TaskContext {
+                task_id,
+                region_id: task.owner,
+                spawned_at: task.created_at,
+                validation_level: CancelValidationLevel::Basic,
+            }
         };
         let validation_result = self.validate_task_protocol_transition(task_id, event, &context);
         if matches!(
@@ -5444,13 +5461,36 @@ impl RuntimeState {
     /// - No region is still in the close lifecycle
     #[must_use]
     pub fn is_quiescent(&self) -> bool {
+        self.is_quiescent_in(
+            &AdmissionRegionTarget::Embedded,
+            &CompletionObligationTarget::Embedded,
+        )
+    }
+
+    /// Core of [`Self::is_quiescent`] with the region (Shard B) and
+    /// obligation (Shard C) reads routed through table targets
+    /// (E2 S4c-2c-ii, br-asupersync-m9wsza).
+    ///
+    /// FLIP-CRITICAL: on a sharded build whose region records live in
+    /// shard B, the embedded `regions.iter().all(..)` would be VACUOUSLY
+    /// true over an empty table and `block_on` would observe
+    /// quiescent-while-closing. The sharded wrapper must resolve the real
+    /// tables here before any minting flip. The task-side count and the
+    /// dispatch/io residue checks stay on `self`; sharded task liveness is
+    /// already covered by the builder's dispatch-table check
+    /// (`Runtime::is_quiescent`).
+    fn is_quiescent_in(
+        &self,
+        regions: &AdmissionRegionTarget<'_>,
+        obligations: &CompletionObligationTarget<'_>,
+    ) -> bool {
         // Short-circuit: each check is progressively more expensive, so bail
         // early if any preceding condition is already false.
         self.live_task_count() == 0
-            && self.pending_obligation_count() == 0
+            && obligations.resolve_ref(&self.obligations).pending_count() == 0
             && self.pending_cancel_dispatches.is_empty()
             && self.io_driver.as_ref().is_none_or(IoDriverHandle::is_empty)
-            && self.regions.iter().all(|(_, r)| {
+            && regions.resolve_ref(&self.regions).iter().all(|(_, r)| {
                 r.finalizers_empty() && !r.state().is_closing() && r.pending_spawn_count() == 0
             })
     }
@@ -5472,7 +5512,13 @@ impl RuntimeState {
         action: PolicyAction,
     ) -> CancellationEffects<(PolicyAction, SmallVec<[(TaskId, u8); 4]>)> {
         let sibling_effects = if let PolicyAction::CancelSiblings(reason) = &action {
-            self.cancel_sibling_tasks(region, child, reason)
+            self.cancel_sibling_tasks(
+                &AdmissionRegionTarget::Embedded,
+                &mut AdmissionTaskTarget::Embedded,
+                region,
+                child,
+                reason,
+            )
         } else {
             CancellationEffects::ready(SmallVec::new())
         };
@@ -5484,14 +5530,19 @@ impl RuntimeState {
     /// cancel(region) -> cancel all non-Completed children.
     fn cancel_sibling_tasks(
         &mut self,
+        regions: &AdmissionRegionTarget<'_>,
+        tasks: &mut AdmissionTaskTarget<'_>,
         region: RegionId,
         child: TaskId,
         reason: &CancelReason,
     ) -> CancellationEffects<SmallVec<[(TaskId, u8); 4]>> {
-        let Some(region_record) = self.regions.get(region.arena_index()) else {
-            return CancellationEffects::ready(SmallVec::new());
+        let sibling_candidates = {
+            let Some(region_record) = regions.resolve_ref(&self.regions).get(region.arena_index())
+            else {
+                return CancellationEffects::ready(SmallVec::new());
+            };
+            region_record.task_ids_small()
         };
-        let sibling_candidates = region_record.task_ids_small();
         let mut tasks_to_cancel =
             SmallVec::with_capacity(sibling_candidates.len().saturating_sub(1));
         let mut wakes = CancelWakeEffects::empty();
@@ -5505,9 +5556,11 @@ impl RuntimeState {
                 continue;
             }
             let budget = reason.cleanup_budget();
-            let res = self.update_task(task_id, |task_record| {
-                task_record.request_cancel_with_budget_and_publication(reason.clone(), budget)
-            });
+            let res = tasks
+                .resolve(&mut self.tasks)
+                .update_task(task_id, |task_record| {
+                    task_record.request_cancel_with_budget_and_publication(reason.clone(), budget)
+                });
             let Some(effects) = res else {
                 continue;
             };
@@ -5515,14 +5568,19 @@ impl RuntimeState {
             wakes.merge(task_wakes);
             if newly_cancelled {
                 if let Some(validation_result) =
-                    self.live_task_protocol_violation(task_id, TaskEvent::RequestCancel)
+                    self.live_task_protocol_violation_in(tasks, task_id, TaskEvent::RequestCancel)
                 {
                     wakes.push_cancel_protocol_violation(
                         "sibling task cancellation",
                         format!("{validation_result:?}"),
                     );
                 }
-                self.record_task_trace_event(task_id, |seq| {
+                // Logical time reads the table that owns the record (the
+                // embedded read silently lost logical time for shard-A
+                // tasks — the S3a divergence class).
+                let holder_logical_time =
+                    Self::logical_time_from_table(tasks.resolve_ref(&self.tasks), task_id);
+                self.record_task_trace_event_with_logical_time(holder_logical_time, |seq| {
                     TraceEvent::cancel_request(seq, now, task_id, region, reason.clone())
                 });
             }
@@ -5574,6 +5632,41 @@ impl RuntimeState {
         reason: &CancelReason,
         source_task: Option<TaskId>,
     ) -> CancellationEffects<Vec<(TaskId, u8)>> {
+        self.cancel_request_in(
+            &mut AdmissionRegionTarget::Embedded,
+            &mut AdmissionTaskTarget::Embedded,
+            &mut CompletionObligationTarget::Embedded,
+            &mut RegionLifecycleEffectsSink::Inline,
+            region_id,
+            reason,
+            source_task,
+        )
+    }
+
+    /// Core of [`Self::cancel_request`] against explicit table targets
+    /// (E2 S4c-2c-ii, br-asupersync-m9wsza; also the seam for the
+    /// br-asupersync-mnebts fix — the embedded task pass silently skipped
+    /// shard-A-resident tasks on sharded builds).
+    ///
+    /// CAUTION (sharded shape): the walk emits trace events and acquires the
+    /// validator mutex per region/task, and the no-live-work arm advances
+    /// region state synchronously (finalizers, close waiters). A guard-held
+    /// caller must NOT route through here as-is; the sharded wrapper design
+    /// (S4c-2c-iv) decides between unified-window execution and an
+    /// effects-split restructure before any External target reaches this
+    /// walk. Threading the targets now keeps that flip a wrapper-side
+    /// change.
+    #[allow(clippy::too_many_lines)]
+    fn cancel_request_in(
+        &mut self,
+        regions: &mut AdmissionRegionTarget<'_>,
+        tasks: &mut AdmissionTaskTarget<'_>,
+        obligations: &mut CompletionObligationTarget<'_>,
+        sink: &mut RegionLifecycleEffectsSink<'_>,
+        region_id: RegionId,
+        reason: &CancelReason,
+        source_task: Option<TaskId>,
+    ) -> CancellationEffects<Vec<(TaskId, u8)>> {
         // Use a modest initial capacity instead of scanning the entire task
         // arena for live_task_count(). The Vec will grow if needed, but avoids
         // the O(arena_capacity) scan just for a size hint.
@@ -5586,7 +5679,8 @@ impl RuntimeState {
         let now = reason.timestamp;
 
         // Collect all regions to cancel (target + descendants) with depth information
-        let mut regions_to_cancel = self.collect_region_and_descendants_with_depth(region_id);
+        let mut regions_to_cancel =
+            self.collect_region_and_descendants_with_depth(regions, region_id);
 
         // Sort by depth (ascending) to ensure parents are processed before children.
         // This is required for building proper cause chains.
@@ -5672,7 +5766,10 @@ impl RuntimeState {
                 TraceEvent::region_cancelled(seq, now, rid, region_reason.clone())
             });
 
-            if let Some(region) = self.regions.get_mut(rid.arena_index()) {
+            if let Some(region) = regions
+                .resolve_mut(&mut self.regions)
+                .get_mut(rid.arena_index())
+            {
                 // Use the properly chained reason.
                 // Try to transition to Closing with the reason.
                 // If already Closing/Draining/etc., strengthen the reason instead.
@@ -5716,7 +5813,7 @@ impl RuntimeState {
             let rid = node.id;
             // Need to get tasks list first to avoid borrow conflict
             task_id_buf.clear();
-            if let Some(region) = self.regions.get(rid.arena_index()) {
+            if let Some(region) = regions.resolve_ref(&self.regions).get(rid.arena_index()) {
                 region.copy_task_ids_into(&mut task_id_buf);
             }
 
@@ -5727,29 +5824,38 @@ impl RuntimeState {
                 .unwrap_or_else(|| reason.clone());
 
             for &task_id in &task_id_buf {
-                let Some((effects, task_budget_res)) = self.update_task(task_id, |task| {
-                    let task_budget = task_reason.cleanup_budget();
-                    let effects = task.request_cancel_with_budget_and_publication(
-                        task_reason.clone(),
-                        task_budget,
-                    );
-                    (effects, task_budget)
-                }) else {
+                let Some((effects, task_budget_res)) =
+                    tasks.resolve(&mut self.tasks).update_task(task_id, |task| {
+                        let task_budget = task_reason.cleanup_budget();
+                        let effects = task.request_cancel_with_budget_and_publication(
+                            task_reason.clone(),
+                            task_budget,
+                        );
+                        (effects, task_budget)
+                    })
+                else {
                     continue;
                 };
                 let ((newly_cancelled, changed, publication), task_wakes) = effects.into_parts();
                 wakes.merge(task_wakes);
 
                 if newly_cancelled {
-                    if let Some(validation_result) =
-                        self.live_task_protocol_violation(task_id, TaskEvent::RequestCancel)
-                    {
+                    if let Some(validation_result) = self.live_task_protocol_violation_in(
+                        tasks,
+                        task_id,
+                        TaskEvent::RequestCancel,
+                    ) {
                         wakes.push_cancel_protocol_violation(
                             "region task cancellation",
                             format!("{validation_result:?}"),
                         );
                     }
-                    self.record_task_trace_event(task_id, |seq| {
+                    // Logical time reads the table that owns the record (the
+                    // embedded read silently lost logical time for shard-A
+                    // tasks — the S3a divergence class).
+                    let holder_logical_time =
+                        Self::logical_time_from_table(tasks.resolve_ref(&self.tasks), task_id);
+                    self.record_task_trace_event_with_logical_time(holder_logical_time, |seq| {
                         TraceEvent::cancel_request(seq, now, task_id, rid, task_reason.clone())
                     });
                 }
@@ -5764,13 +5870,17 @@ impl RuntimeState {
         // Finalizing immediately so finalizers are scheduled without waiting for
         // task completion.
         for node in &regions_to_cancel {
-            let Some(region) = self.regions.get(node.id.arena_index()) else {
-                continue;
+            let no_live_work = {
+                let Some(region) = regions
+                    .resolve_ref(&self.regions)
+                    .get(node.id.arena_index())
+                else {
+                    continue;
+                };
+                region.child_count() == 0 && region.task_count() == 0
             };
-            let no_children = region.child_count() == 0;
-            let no_tasks = region.task_count() == 0;
-            if no_children && no_tasks {
-                self.advance_region_state(node.id);
+            if no_live_work {
+                self.advance_region_state_in(regions, tasks, obligations, sink, node.id);
             }
         }
 
@@ -5782,6 +5892,7 @@ impl RuntimeState {
     /// Returns a Vec containing the region and all nested child regions.
     fn collect_region_and_descendants_with_depth(
         &self,
+        regions: &AdmissionRegionTarget<'_>,
         region_id: RegionId,
     ) -> Vec<CancelRegionNode> {
         let mut result = Vec::new();
@@ -5796,7 +5907,7 @@ impl RuntimeState {
                 depth,
             });
 
-            if let Some(region) = self.regions.get(rid.arena_index()) {
+            if let Some(region) = regions.resolve_ref(&self.regions).get(rid.arena_index()) {
                 child_buf.clear();
                 region.copy_child_ids_into(&mut child_buf);
                 for &child_id in &child_buf {
