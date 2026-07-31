@@ -354,6 +354,14 @@ declare -A SUITES=(
     [server-stack]="run_server_stack_e2e.sh"
     [agent-dx]="run_agent_dx_e2e.sh"
     [api-v2-journey]="run_api_v2_e2e.sh"
+    # sched-perf is registered but deliberately absent from SUITE_ORDER
+    # (same posture as server-stack/agent-dx, br-asupersync-1do8g1): its
+    # S1 regression stage is the full Phase-6 methodology_baselines bench
+    # (~20 min via rch when unblocked, and currently blocked fleet-wide by
+    # br-asupersync-zqs4bo). Run standalone or with SCHED_PERF_SKIP_S1=1;
+    # wire into SUITE_ORDER only after S1 is measured inside the per-suite
+    # budget (br-asupersync-sched-hot-path-perf-bt4y5f.8).
+    [sched-perf]="run_sched_perf_e2e.sh"
 )
 
 # Canonical artifact roots for manifest indexing.
@@ -390,6 +398,7 @@ declare -A SUITE_ARTIFACT_ROOTS=(
     [server-stack]="target/e2e-results/server_stack"
     [agent-dx]="target/e2e-results/agent_dx"
     [api-v2-journey]="target/e2e-results/api_v2"
+    [sched-perf]="target/e2e-results/sched_perf"
 )
 
 # Summary file patterns used to discover suite artifacts deterministically.
@@ -426,6 +435,7 @@ declare -A SUITE_SUMMARY_GLOBS=(
     [server-stack]="summary.json"
     [agent-dx]="summary.json"
     [api-v2-journey]="summary.json"
+    [sched-perf]="summary.json"
 )
 
 # Artifact directory patterns used when summary path is not emitted.
@@ -494,6 +504,7 @@ declare -A SUITE_CANONICAL_SCENARIO_ID=(
     [phase6]="E2E-SUITE-PHASE6"
     [agent-dx]="E2E-SUITE-AGENT-DX-AFFORDANCE"
     [api-v2-journey]="E2E-SUITE-API-V2-USER-JOURNEY"
+    [sched-perf]="E2E-SUITE-SCHED-PERF-INVARIANT-FLOOR"
 )
 
 RAPTORQ_REQUIRED_SCENARIOS=(
