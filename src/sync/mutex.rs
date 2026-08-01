@@ -348,7 +348,16 @@ impl<T> Mutex<T> {
                 None
             }
         };
-        // Wake outside the lock
+
+        // The mutex is no longer held, so update thread-local lock-order state
+        // before invoking user-controlled wake code. A synchronous Waker may
+        // re-enter a lower-ranked mutex, and a panicking Waker must not leave a
+        // phantom held rank behind.
+        if let Some(rank) = self.rank {
+            lock_ordering::record_release(self.name, rank);
+        }
+
+        // Wake outside the lock and after recording the rank release.
         if let Some((id, waker)) = granted {
             self.wake_granted(id, waker);
         }
@@ -702,11 +711,6 @@ impl<T> Drop for MutexGuard<'_, T> {
             self.mutex.poison();
         }
         self.mutex.unlock();
-
-        // Record lock release for ordering tracking
-        if let Some(rank) = self.mutex.rank {
-            lock_ordering::record_release(self.mutex.name, rank);
-        }
     }
 }
 
@@ -791,11 +795,6 @@ impl<T, U: ?Sized> Drop for MappedMutexGuard<'_, T, U> {
             self.mutex.poison();
         }
         self.mutex.unlock();
-
-        // Record lock release for ordering tracking
-        if let Some(rank) = self.mutex.rank {
-            lock_ordering::record_release(self.mutex.name, rank);
-        }
     }
 }
 
@@ -946,11 +945,6 @@ impl<T> Drop for OwnedMutexGuard<T> {
             self.mutex.poison();
         }
         self.mutex.unlock();
-
-        // Record lock release for ordering tracking
-        if let Some(rank) = self.mutex.rank {
-            lock_ordering::record_release(self.mutex.name, rank);
-        }
     }
 }
 
@@ -995,11 +989,6 @@ impl<T, U: ?Sized> Drop for OwnedMappedMutexGuard<T, U> {
             self.mutex.poison();
         }
         self.mutex.unlock();
-
-        // Record lock release for ordering tracking
-        if let Some(rank) = self.mutex.rank {
-            lock_ordering::record_release(self.mutex.name, rank);
-        }
     }
 }
 
@@ -4938,6 +4927,183 @@ mod tests {
         fn wake_by_ref(self: &Arc<Self>) {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+    struct RankReentrantWaker {
+        lower_ranked: Arc<Mutex<()>>,
+        acquisitions: Arc<AtomicUsize>,
+    }
+
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+    impl RankReentrantWaker {
+        fn acquire_lower_ranked(&self) {
+            let guard = self
+                .lower_ranked
+                .try_lock()
+                .expect("wake must observe the released higher-ranked mutex");
+            self.acquisitions.fetch_add(1, Ordering::SeqCst);
+            drop(guard);
+        }
+    }
+
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+    impl std::task::Wake for RankReentrantWaker {
+        fn wake(self: Arc<Self>) {
+            self.acquire_lower_ranked();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.acquire_lower_ranked();
+        }
+    }
+
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+    fn ranked_release_pair() -> (Arc<Mutex<(u8, u8)>>, Arc<Mutex<()>>) {
+        (
+            Arc::new(Mutex::with_name("tasks_release_order_test", (0, 0))),
+            Arc::new(Mutex::with_name("regions_release_order_test", ())),
+        )
+    }
+
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+    fn assert_rank_released_before_reentrant_wake<G>(
+        higher_ranked: &Arc<Mutex<(u8, u8)>>,
+        lower_ranked: &Arc<Mutex<()>>,
+        guard: G,
+    ) {
+        let cx = test_cx();
+        let acquisitions = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(RankReentrantWaker {
+            lower_ranked: Arc::clone(lower_ranked),
+            acquisitions: Arc::clone(&acquisitions),
+        }));
+        let mut context = Context::from_waker(&waker);
+        let mut waiter = Box::pin(higher_ranked.lock(&cx));
+        assert!(
+            waiter.as_mut().poll(&mut context).is_pending(),
+            "waiter must park behind the held higher-ranked mutex"
+        );
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(guard)));
+        assert!(
+            result.is_ok(),
+            "reentrant lower-ranked acquisition must not observe a released rank"
+        );
+        assert_eq!(
+            acquisitions.load(Ordering::SeqCst),
+            1,
+            "selected waiter must acquire the lower-ranked mutex exactly once"
+        );
+
+        drop(waiter);
+        lock_ordering::clear_held_locks();
+    }
+
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+    fn assert_panicking_wake_does_not_leave_phantom_rank<G>(
+        higher_ranked: &Arc<Mutex<(u8, u8)>>,
+        lower_ranked: &Arc<Mutex<()>>,
+        guard: G,
+    ) {
+        let cx = test_cx();
+        let panic_waker = Waker::from(Arc::new(BatonPanickingWaker));
+        let mut context = Context::from_waker(&panic_waker);
+        let mut waiter = Box::pin(higher_ranked.lock(&cx));
+        assert!(
+            waiter.as_mut().poll(&mut context).is_pending(),
+            "panicking waiter must park behind the held higher-ranked mutex"
+        );
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(guard)));
+        assert!(
+            result.is_err(),
+            "selected waiter panic must resume from guard drop"
+        );
+
+        let lower_guard = lower_ranked
+            .try_lock()
+            .expect("wake panic must not leave a phantom higher-ranked acquisition");
+        drop(lower_guard);
+
+        drop(waiter);
+        lock_ordering::clear_held_locks();
+    }
+
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+    #[test]
+    fn guard_drop_releases_rank_before_reentrant_wake_for_all_variants() {
+        init_test("guard_drop_releases_rank_before_reentrant_wake_for_all_variants");
+
+        lock_ordering::clear_held_locks();
+        let (higher_ranked, lower_ranked) = ranked_release_pair();
+        let guard = higher_ranked
+            .try_lock()
+            .expect("borrowed guard must acquire");
+        assert_rank_released_before_reentrant_wake(&higher_ranked, &lower_ranked, guard);
+
+        lock_ordering::clear_held_locks();
+        let (higher_ranked, lower_ranked) = ranked_release_pair();
+        let guard = higher_ranked
+            .try_lock()
+            .expect("mapped guard must acquire")
+            .map(|value| &mut value.0);
+        assert_rank_released_before_reentrant_wake(&higher_ranked, &lower_ranked, guard);
+
+        lock_ordering::clear_held_locks();
+        let (higher_ranked, lower_ranked) = ranked_release_pair();
+        let guard = higher_ranked
+            .try_lock_owned()
+            .expect("owned guard must acquire");
+        assert_rank_released_before_reentrant_wake(&higher_ranked, &lower_ranked, guard);
+
+        lock_ordering::clear_held_locks();
+        let (higher_ranked, lower_ranked) = ranked_release_pair();
+        let guard = higher_ranked
+            .try_lock_owned()
+            .expect("owned mapped guard must acquire")
+            .map(|value| &mut value.0);
+        assert_rank_released_before_reentrant_wake(&higher_ranked, &lower_ranked, guard);
+
+        crate::test_complete!("guard_drop_releases_rank_before_reentrant_wake_for_all_variants");
+    }
+
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+    #[test]
+    fn panicking_wake_cannot_leave_phantom_rank_for_all_guard_variants() {
+        init_test("panicking_wake_cannot_leave_phantom_rank_for_all_guard_variants");
+
+        lock_ordering::clear_held_locks();
+        let (higher_ranked, lower_ranked) = ranked_release_pair();
+        let guard = higher_ranked
+            .try_lock()
+            .expect("borrowed guard must acquire");
+        assert_panicking_wake_does_not_leave_phantom_rank(&higher_ranked, &lower_ranked, guard);
+
+        lock_ordering::clear_held_locks();
+        let (higher_ranked, lower_ranked) = ranked_release_pair();
+        let guard = higher_ranked
+            .try_lock()
+            .expect("mapped guard must acquire")
+            .map(|value| &mut value.0);
+        assert_panicking_wake_does_not_leave_phantom_rank(&higher_ranked, &lower_ranked, guard);
+
+        lock_ordering::clear_held_locks();
+        let (higher_ranked, lower_ranked) = ranked_release_pair();
+        let guard = higher_ranked
+            .try_lock_owned()
+            .expect("owned guard must acquire");
+        assert_panicking_wake_does_not_leave_phantom_rank(&higher_ranked, &lower_ranked, guard);
+
+        lock_ordering::clear_held_locks();
+        let (higher_ranked, lower_ranked) = ranked_release_pair();
+        let guard = higher_ranked
+            .try_lock_owned()
+            .expect("owned mapped guard must acquire")
+            .map(|value| &mut value.0);
+        assert_panicking_wake_does_not_leave_phantom_rank(&higher_ranked, &lower_ranked, guard);
+
+        crate::test_complete!("panicking_wake_cannot_leave_phantom_rank_for_all_guard_variants");
     }
 
     /// br-asupersync-mutex-panicking-grantee-freezes-fifo-l4sgpj: a grantee
