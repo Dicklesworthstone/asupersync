@@ -231,7 +231,7 @@ not used (single-threaded lab runtime instead), so this is native-only.
 | F5 | Waker caching | OK | N/A | Already optimal |
 | F6 | Cx::clone() cost | OK | Low | Already optimal (3 Arc incr) |
 | F7 | SymbolCancelToken check | OK | N/A | Already optimal |
-| F8 | Notify waiter scan | LOW | Low | Acceptable for typical N |
+| F8 | Notify FIFO-head selection | OK | Low | O(1), index-independent FIFO |
 | F9 | MPSC try_recv | OK | N/A | Already optimal |
 | F10 | IO token HashSet | LOW | N/A | Native-only |
 
