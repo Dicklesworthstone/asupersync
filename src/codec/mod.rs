@@ -11,6 +11,7 @@ pub mod encoder;
 pub mod framed;
 pub mod framed_read;
 pub mod framed_write;
+pub mod hex;
 pub mod length_delimited;
 pub mod lines;
 pub mod raptorq;

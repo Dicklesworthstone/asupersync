@@ -296,6 +296,36 @@ not be swept into a mechanical migration:
 already-approved kernel: it only encodes, uses unchecked capacity
 multiplication, and provides no owned decode or error behavior.
 
+## A2 kernel disposition
+
+`asupersync-d24mms.9.2` owns the dedicated public `crate::codec::hex` scalar
+kernel. Its resource domain is one symmetric 64 MiB binary ceiling: encoding
+can emit at most 128 MiB of text, while decoding admits at most 128 MiB of
+even-length text and emits at most 64 MiB of binary output. This ceiling is a
+new A2 safety policy, not an incumbent parity fact: the A1 APIs had no codec
+cap. A3 must prove that each migrated consumer has an upstream envelope at or
+below 64 MiB, and must retain the incumbent path for any consumer that cannot
+establish that bound. The encoder checks `2 * N` before allocation, and both
+allocating operations make fallible exact-reservation requests. There is no
+unbounded convenience entry point.
+
+The owned error preserves the incumbent invalid-character byte/index, odd
+length, and destination-length variants and display text. Resource-limit,
+length-overflow, and allocation failures are additional typed errors. Slice
+decoding preserves odd-length then destination-mismatch precedence, validates
+the entire input before its first write, and therefore leaves the whole
+destination unchanged on every error. This is the explicit `BETTER` resolution
+of `HEX-A1-GAP-03`; it makes no constant-time or zeroization claim.
+
+The public ATP `transport_common::hex_encode` and the other manual formatters
+listed above are not the generic kernel. They remain unchanged for A3's
+call-site-by-call-site collision disposition; that is A2's explicit
+`HEX-A1-GAP-10` decision without silently broadening this bead into migration
+work. The fixed resource envelope and checked allocation are A2's owned-kernel
+implementation for `HEX-A1-GAP-11`; they do not establish migration parity for
+an unbounded incumbent consumer. A4 still owns independent vectors and real
+protocol journeys, and A5 alone owns any dependency cutover.
+
 ## Routed gaps
 
 | Gap | Finding | Owner |
