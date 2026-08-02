@@ -14,7 +14,7 @@
 //! 5. **Resource Fairness**: Flow control doesn't cause starvation of any producers
 
 use crate::types::{TaskId, Time};
-use std::collections::{HashMap, HashSet, VecDeque, hash_map::Entry};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque, hash_map::Entry};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Configuration for flow control monitoring.
@@ -428,158 +428,225 @@ pub struct FlowControlStats {
     pub tasks_currently_blocked: u64,
 }
 
-/// Deadlock detection state for cycle detection.
+type DeadlockCycleKey = Vec<(TaskId, u64)>;
+
+#[derive(Debug, Clone, Copy)]
+struct DeadlockGraphEdge {
+    waiting_task: TaskId,
+    channel_id: u64,
+    owner_task: TaskId,
+    live_since: Time,
+}
+
+/// Deadlock detection state that cannot drift from the canonical live records.
+///
+/// Wait and ownership edges are derived for every detection pass from
+/// `active_waits` and `ChannelFlowState::backpressure_consumers`. The only
+/// retained state is the map of continuous live episodes and whether each has
+/// crossed the reporting threshold.
 #[derive(Debug, Clone)]
 struct DeadlockDetector {
-    /// Graph of task->channel dependencies and their live-wait counts.
-    task_to_channel: HashMap<TaskId, HashMap<u64, usize>>,
-    /// Graph of channel->task dependencies (channel owned by task).
-    channel_to_task: HashMap<u64, TaskId>,
-    /// Last time deadlock detection was run.
-    last_detection_time: Option<Time>,
+    live_episodes: BTreeMap<DeadlockCycleKey, DeadlockEpisode>,
+}
+
+#[derive(Debug, Clone)]
+struct DeadlockEpisode {
+    cycle: DeadlockCycle,
+    first_live_at: Time,
+    reported: bool,
 }
 
 impl DeadlockDetector {
     fn new() -> Self {
         Self {
-            task_to_channel: HashMap::new(),
-            channel_to_task: HashMap::new(),
-            last_detection_time: None,
+            live_episodes: BTreeMap::new(),
         }
     }
 
-    /// Detects potential deadlocks using cycle detection.
-    fn detect_deadlocks(&mut self, current_time: Time) -> Vec<FlowControlViolation> {
-        let mut violations = Vec::new();
+    fn detect_deadlocks(
+        &mut self,
+        active_waits: &HashMap<FlowWaitIdentity, Time>,
+        channel_states: &HashMap<u64, ChannelFlowState>,
+        current_time: Time,
+        threshold_s: u64,
+    ) -> Vec<FlowControlViolation> {
+        let adjacency = Self::build_adjacency(active_waits, channel_states);
+        self.live_episodes
+            .retain(|key, _| Self::cycle_key_is_live(key, &adjacency));
 
-        // Use DFS to detect cycles in the task-channel dependency graph
-        let mut visited = HashSet::new();
-        let mut recursion_stack = HashSet::new();
-        let mut current_path = Vec::new();
-
-        for &task in self.task_to_channel.keys() {
-            if !visited.contains(&task) {
-                if let Some(cycle) = self.dfs_detect_cycle(
-                    task,
-                    &mut visited,
-                    &mut recursion_stack,
-                    &mut current_path,
-                ) {
-                    violations.push(FlowControlViolation::PotentialDeadlock {
-                        involved_channels: cycle.channels,
-                        involved_tasks: cycle.tasks,
-                        cycle_description: cycle.description,
-                        detection_time: current_time,
+        for cycle in Self::find_cycles(&adjacency) {
+            match self.live_episodes.entry(cycle.key.clone()) {
+                std::collections::btree_map::Entry::Occupied(mut episode) => {
+                    let episode = episode.get_mut();
+                    episode.first_live_at = episode.first_live_at.min(cycle.live_since);
+                }
+                std::collections::btree_map::Entry::Vacant(episode) => {
+                    let first_live_at = cycle.live_since;
+                    episode.insert(DeadlockEpisode {
+                        cycle,
+                        first_live_at,
+                        reported: false,
                     });
                 }
             }
         }
 
-        self.last_detection_time = Some(current_time);
+        let threshold_ns = threshold_s.saturating_mul(1_000_000_000);
+        let mut violations = Vec::new();
+        for episode in self.live_episodes.values_mut() {
+            let age_ns = current_time
+                .as_nanos()
+                .saturating_sub(episode.first_live_at.as_nanos());
+            if age_ns < threshold_ns || episode.reported {
+                continue;
+            }
+            episode.reported = true;
+            violations.push(FlowControlViolation::PotentialDeadlock {
+                involved_channels: episode.cycle.channels.clone(),
+                involved_tasks: episode.cycle.tasks.clone(),
+                cycle_description: episode.cycle.description.clone(),
+                detection_time: current_time,
+            });
+        }
         violations
     }
 
-    fn dfs_detect_cycle(
-        &self,
-        task: TaskId,
-        visited: &mut HashSet<TaskId>,
-        recursion_stack: &mut HashSet<TaskId>,
-        current_path: &mut Vec<(TaskId, u64)>,
-    ) -> Option<DeadlockCycle> {
-        visited.insert(task);
-        recursion_stack.insert(task);
-
-        if let Some(channels) = self.task_to_channel.get(&task) {
-            for &channel in channels.keys() {
-                current_path.push((task, channel));
-
-                if let Some(&next_task) = self.channel_to_task.get(&channel) {
-                    if recursion_stack.contains(&next_task) {
-                        // Found cycle
-                        let cycle_start_idx = current_path
-                            .iter()
-                            .position(|(t, _)| *t == next_task)
-                            .unwrap_or(0);
-
-                        let cycle_path = &current_path[cycle_start_idx..];
-                        return Some(DeadlockCycle::from_path(cycle_path));
-                    }
-
-                    if !visited.contains(&next_task) {
-                        if let Some(cycle) =
-                            self.dfs_detect_cycle(next_task, visited, recursion_stack, current_path)
-                        {
-                            return Some(cycle);
-                        }
-                    }
-                }
-
-                current_path.pop();
-            }
+    fn build_adjacency(
+        active_waits: &HashMap<FlowWaitIdentity, Time>,
+        channel_states: &HashMap<u64, ChannelFlowState>,
+    ) -> BTreeMap<TaskId, Vec<DeadlockGraphEdge>> {
+        let mut wait_starts = BTreeMap::new();
+        for (identity, timestamp) in active_waits {
+            wait_starts
+                .entry((identity.task_id, identity.channel_id))
+                .and_modify(|first: &mut Time| *first = (*first).min(*timestamp))
+                .or_insert(*timestamp);
         }
 
-        recursion_stack.remove(&task);
-        None
-    }
+        let mut adjacency: BTreeMap<TaskId, Vec<DeadlockGraphEdge>> = BTreeMap::new();
+        for ((waiting_task, channel_id), wait_since) in wait_starts {
+            let Some(channel_state) = channel_states.get(&channel_id) else {
+                continue;
+            };
+            let mut owners: Vec<_> = channel_state
+                .backpressure_consumers
+                .iter()
+                .map(|(&owner_task, &owner_since)| (owner_task, owner_since))
+                .collect();
+            owners.sort_by_key(|(owner_task, _)| *owner_task);
 
-    fn add_dependency(&mut self, task: TaskId, channel: u64) {
-        *self
-            .task_to_channel
-            .entry(task)
-            .or_default()
-            .entry(channel)
-            .or_default() += 1;
-    }
-
-    fn remove_dependency(&mut self, task: TaskId, channel: u64) {
-        if let Some(channels) = self.task_to_channel.get_mut(&task) {
-            if let Some(wait_count) = channels.get_mut(&channel) {
-                *wait_count -= 1;
-                if *wait_count == 0 {
-                    channels.remove(&channel);
-                }
-            }
-            if channels.is_empty() {
-                self.task_to_channel.remove(&task);
+            let edges = adjacency.entry(waiting_task).or_default();
+            for (owner_task, owner_since) in owners {
+                edges.push(DeadlockGraphEdge {
+                    waiting_task,
+                    channel_id,
+                    owner_task,
+                    live_since: wait_since.max(owner_since),
+                });
             }
         }
+        adjacency
     }
 
-    #[allow(dead_code)]
-    fn add_channel_owner(&mut self, channel: u64, owner: TaskId) {
-        self.channel_to_task.insert(channel, owner);
+    fn cycle_key_is_live(
+        key: &DeadlockCycleKey,
+        adjacency: &BTreeMap<TaskId, Vec<DeadlockGraphEdge>>,
+    ) -> bool {
+        !key.is_empty()
+            && key.iter().zip(key.iter().cycle().skip(1)).all(
+                |((waiting_task, channel_id), (next_task, _))| {
+                    adjacency.get(waiting_task).is_some_and(|edges| {
+                        edges.iter().any(|edge| {
+                            edge.channel_id == *channel_id && edge.owner_task == *next_task
+                        })
+                    })
+                },
+            )
     }
 
-    #[allow(dead_code)]
-    fn remove_channel_owner(&mut self, channel: u64) {
-        self.channel_to_task.remove(&channel);
+    fn find_cycles(adjacency: &BTreeMap<TaskId, Vec<DeadlockGraphEdge>>) -> Vec<DeadlockCycle> {
+        let mut visited = HashSet::new();
+        let mut cycles = Vec::new();
+
+        for &root in adjacency.keys() {
+            if visited.contains(&root) {
+                continue;
+            }
+            visited.insert(root);
+            let mut stack_positions = HashMap::from([(root, 0)]);
+            let mut current_path = Vec::new();
+            let mut frames = vec![(root, 0usize)];
+
+            while let Some((task, next_edge)) = frames.last_mut() {
+                let edges = adjacency.get(task).map_or(&[][..], Vec::as_slice);
+                if *next_edge == edges.len() {
+                    let completed_task = *task;
+                    let _ = frames.pop();
+                    let _ = stack_positions.remove(&completed_task);
+                    if !frames.is_empty() {
+                        let _ = current_path.pop();
+                    }
+                    continue;
+                }
+
+                let edge = edges[*next_edge];
+                *next_edge += 1;
+                current_path.push(edge);
+                if let Some(&cycle_start) = stack_positions.get(&edge.owner_task) {
+                    cycles.push(DeadlockCycle::from_path(&current_path[cycle_start..]));
+                } else if !visited.contains(&edge.owner_task) {
+                    visited.insert(edge.owner_task);
+                    let _ = stack_positions.insert(edge.owner_task, current_path.len());
+                    frames.push((edge.owner_task, 0));
+                    continue;
+                }
+                let _ = current_path.pop();
+            }
+        }
+        cycles
     }
 }
 
 #[derive(Debug, Clone)]
 struct DeadlockCycle {
+    key: DeadlockCycleKey,
     tasks: Vec<TaskId>,
     channels: Vec<u64>,
     description: String,
+    live_since: Time,
 }
 
 impl DeadlockCycle {
-    fn from_path(path: &[(TaskId, u64)]) -> Self {
-        let tasks: Vec<TaskId> = path.iter().map(|(t, _)| *t).collect();
-        let channels: Vec<u64> = path.iter().map(|(_, c)| *c).collect();
+    fn from_path(path: &[DeadlockGraphEdge]) -> Self {
+        let mut key: DeadlockCycleKey = path
+            .iter()
+            .map(|edge| (edge.waiting_task, edge.channel_id))
+            .collect();
+        if let Some((canonical_start, _)) = key.iter().enumerate().min_by_key(|(_, edge)| **edge) {
+            key.rotate_left(canonical_start);
+        }
+
+        let tasks: Vec<TaskId> = key.iter().map(|(task, _)| *task).collect();
+        let channels: Vec<u64> = key.iter().map(|(_, channel)| *channel).collect();
 
         let description = format!(
             "Circular dependency: {}",
-            path.iter()
+            key.iter()
                 .map(|(task, channel)| format!("T{:?}→C{}", task, channel))
                 .collect::<Vec<_>>()
                 .join("→")
         );
+        let live_since = path
+            .iter()
+            .map(|edge| edge.live_since)
+            .fold(Time::ZERO, Time::max);
 
         Self {
+            key,
             tasks,
             channels,
             description,
+            live_since,
         }
     }
 }
@@ -682,8 +749,6 @@ impl FlowControlMonitor {
             .or_default() += 1;
         channel_state.add_active_control(identity.control_type());
 
-        self.deadlock_detector
-            .add_dependency(identity.task_id, identity.channel_id);
         true
     }
 
@@ -734,8 +799,6 @@ impl FlowControlMonitor {
             );
         }
 
-        self.deadlock_detector
-            .remove_dependency(identity.task_id, identity.channel_id);
         true
     }
 
@@ -944,7 +1007,12 @@ impl FlowControlMonitor {
     fn check_violations_after_event(&mut self, _event: &FlowControlEvent, current_time: Time) {
         // Check for potential deadlocks
         if self.config.enable_deadlock_prevention {
-            let deadlocks = self.deadlock_detector.detect_deadlocks(current_time);
+            let deadlocks = self.deadlock_detector.detect_deadlocks(
+                &self.active_waits,
+                &self.channel_states,
+                current_time,
+                self.config.deadlock_detection_threshold_s,
+            );
             for violation in deadlocks {
                 self.record_violation(violation, current_time);
             }
@@ -1341,6 +1409,68 @@ mod tests {
     )]
     use super::*;
 
+    fn potential_deadlocks(monitor: &FlowControlMonitor) -> Vec<&FlowControlViolation> {
+        monitor
+            .violations()
+            .iter()
+            .filter_map(|report| {
+                matches!(
+                    &report.violation,
+                    FlowControlViolation::PotentialDeadlock { .. }
+                )
+                .then_some(&report.violation)
+            })
+            .collect()
+    }
+
+    fn deadlock_tick(monitor: &mut FlowControlMonitor, timestamp: Time) {
+        monitor.record_event(FlowControlEvent::BackpressureApplied {
+            channel_id: u64::MAX,
+            consumer_task: TaskId::new_for_test(9_999, 0),
+            queue_depth: 1,
+            timestamp,
+        });
+    }
+
+    fn record_two_task_cycle(
+        monitor: &mut FlowControlMonitor,
+        tasks: [TaskId; 2],
+        channels: [u64; 2],
+        established_edges_at: Time,
+        cycle_completed_at: Time,
+    ) {
+        let [task1, task2] = tasks;
+        let [channel1, channel2] = channels;
+        for event in [
+            FlowControlEvent::BackpressureApplied {
+                channel_id: channel1,
+                consumer_task: task2,
+                queue_depth: 1,
+                timestamp: established_edges_at,
+            },
+            FlowControlEvent::BackpressureApplied {
+                channel_id: channel2,
+                consumer_task: task1,
+                queue_depth: 1,
+                timestamp: established_edges_at,
+            },
+            FlowControlEvent::ProducerBlocked {
+                channel_id: channel1,
+                task_id: task1,
+                reason: FlowControlType::ConsumerBackpressure,
+                timestamp: established_edges_at,
+            },
+            FlowControlEvent::ProducerBlocked {
+                channel_id: channel2,
+                task_id: task2,
+                reason: FlowControlType::ConsumerBackpressure,
+                timestamp: cycle_completed_at,
+            },
+        ] {
+            monitor.record_event(event);
+        }
+    }
+
     #[test]
     fn test_flow_control_monitor_basic_operations() {
         let mut monitor = FlowControlMonitor::with_defaults();
@@ -1407,40 +1537,236 @@ mod tests {
     }
 
     #[test]
-    fn test_deadlock_detection() {
+    fn public_cycle_detects_only_at_threshold() {
         let mut config = FlowControlConfig::default();
-        config.enable_deadlock_prevention = true;
+        config.deadlock_detection_threshold_s = 2;
+        config.starvation_threshold_s = 60;
 
         let mut monitor = FlowControlMonitor::new(config);
-        let now = Time::from_nanos(1000);
-
         let task1 = TaskId::new_for_test(1, 0);
         let task2 = TaskId::new_for_test(2, 0);
         let channel1 = 10;
         let channel2 = 20;
 
-        // Create potential deadlock: task1 blocks on channel1, task2 blocks on channel2
-        monitor.deadlock_detector.add_dependency(task1, channel1);
-        monitor.deadlock_detector.add_channel_owner(channel1, task2);
-        monitor.deadlock_detector.add_dependency(task2, channel2);
-        monitor.deadlock_detector.add_channel_owner(channel2, task1);
+        record_two_task_cycle(
+            &mut monitor,
+            [task1, task2],
+            [channel1, channel2],
+            Time::from_secs(1),
+            Time::from_secs(3),
+        );
 
-        // Trigger deadlock detection
-        let deadlocks = monitor.deadlock_detector.detect_deadlocks(now);
+        assert!(potential_deadlocks(&monitor).is_empty());
+        deadlock_tick(&mut monitor, Time::from_secs(4));
+        assert!(potential_deadlocks(&monitor).is_empty());
+        deadlock_tick(&mut monitor, Time::from_secs(5));
 
-        assert!(!deadlocks.is_empty());
-        match &deadlocks[0] {
+        let deadlocks = potential_deadlocks(&monitor);
+        assert_eq!(deadlocks.len(), 1);
+        match deadlocks[0] {
             FlowControlViolation::PotentialDeadlock {
                 involved_tasks,
                 involved_channels,
+                detection_time,
                 ..
             } => {
+                assert_eq!(*detection_time, Time::from_secs(5));
+                assert_eq!(involved_tasks.len(), 2);
                 assert!(involved_tasks.contains(&task1));
                 assert!(involved_tasks.contains(&task2));
+                assert_eq!(involved_channels.len(), 2);
                 assert!(involved_channels.contains(&channel1));
                 assert!(involved_channels.contains(&channel2));
             }
-            _ => panic!("Expected PotentialDeadlock violation"),
+            _ => unreachable!("filtered to potential deadlocks"),
+        }
+    }
+
+    #[test]
+    fn live_cycle_deduplicates_and_rearms_after_release() {
+        let mut config = FlowControlConfig::default();
+        config.deadlock_detection_threshold_s = 1;
+        config.starvation_threshold_s = 60;
+
+        let mut monitor = FlowControlMonitor::new(config);
+        let task1 = TaskId::new_for_test(1, 0);
+        let task2 = TaskId::new_for_test(2, 0);
+        let channel1 = 10;
+        let channel2 = 20;
+
+        record_two_task_cycle(
+            &mut monitor,
+            [task1, task2],
+            [channel1, channel2],
+            Time::from_secs(1),
+            Time::from_secs(1),
+        );
+
+        deadlock_tick(&mut monitor, Time::from_secs(2));
+        assert_eq!(potential_deadlocks(&monitor).len(), 1);
+        assert_eq!(monitor.stats().deadlocks_detected, 1);
+
+        // Cancellation records lifecycle state but is not a wait release and
+        // does not re-arm or duplicate an already reported live cycle.
+        monitor.record_task_cancel(task1, Time::from_secs(3));
+        assert_eq!(potential_deadlocks(&monitor).len(), 1);
+        deadlock_tick(&mut monitor, Time::from_secs(3));
+        deadlock_tick(&mut monitor, Time::from_secs(4));
+        assert_eq!(potential_deadlocks(&monitor).len(), 1);
+        assert_eq!(monitor.stats().deadlocks_detected, 1);
+
+        monitor.record_event(FlowControlEvent::BackpressureReleased {
+            channel_id: channel1,
+            consumer_task: task2,
+            new_queue_depth: 0,
+            timestamp: Time::from_secs(5),
+        });
+        monitor.record_event(FlowControlEvent::BackpressureApplied {
+            channel_id: channel1,
+            consumer_task: task2,
+            queue_depth: 1,
+            timestamp: Time::from_secs(7),
+        });
+        assert_eq!(potential_deadlocks(&monitor).len(), 1);
+
+        deadlock_tick(&mut monitor, Time::from_secs(8));
+        let deadlocks = potential_deadlocks(&monitor);
+        assert_eq!(deadlocks.len(), 2);
+        match deadlocks[1] {
+            FlowControlViolation::PotentialDeadlock {
+                involved_channels,
+                involved_tasks,
+                detection_time,
+                ..
+            } => {
+                assert_eq!(*detection_time, Time::from_secs(8));
+                assert_eq!(involved_tasks.as_slice(), &[task1, task2]);
+                assert_eq!(involved_channels.as_slice(), &[channel1, channel2]);
+            }
+            _ => unreachable!("filtered to potential deadlocks"),
+        }
+        assert_eq!(monitor.stats().deadlocks_detected, 2);
+    }
+
+    #[test]
+    fn overlapping_waits_preserve_continuous_cycle_age() {
+        let mut config = FlowControlConfig::default();
+        config.deadlock_detection_threshold_s = 3;
+        config.starvation_threshold_s = 60;
+
+        let mut monitor = FlowControlMonitor::new(config);
+        let task1 = TaskId::new_for_test(1, 0);
+        let task2 = TaskId::new_for_test(2, 0);
+        let channel1 = 10;
+        let channel2 = 20;
+        let permit_id = 100;
+
+        record_two_task_cycle(
+            &mut monitor,
+            [task1, task2],
+            [channel1, channel2],
+            Time::from_secs(1),
+            Time::from_secs(1),
+        );
+        monitor.record_event(FlowControlEvent::ReserveBlocked {
+            channel_id: channel1,
+            task_id: task1,
+            permit_id,
+            timestamp: Time::from_secs(2),
+        });
+        monitor.record_event(FlowControlEvent::ProducerUnblocked {
+            channel_id: channel1,
+            task_id: task1,
+            reason: FlowControlType::ConsumerBackpressure,
+            blocked_duration_ms: 2_000,
+            timestamp: Time::from_secs(3),
+        });
+
+        assert!(potential_deadlocks(&monitor).is_empty());
+        deadlock_tick(&mut monitor, Time::from_secs(4));
+        assert_eq!(potential_deadlocks(&monitor).len(), 1);
+        assert_eq!(monitor.stats().deadlocks_detected, 1);
+    }
+
+    #[test]
+    fn multi_owner_channel_checks_all_live_owners() {
+        #[derive(Clone, Copy, Debug)]
+        enum OwnerRelease {
+            None,
+            Decoy,
+            CycleOwner,
+        }
+
+        for release in [
+            OwnerRelease::None,
+            OwnerRelease::Decoy,
+            OwnerRelease::CycleOwner,
+        ] {
+            let mut config = FlowControlConfig::default();
+            config.deadlock_detection_threshold_s = 1;
+            config.starvation_threshold_s = 60;
+
+            let mut monitor = FlowControlMonitor::new(config);
+            let decoy = TaskId::new_for_test(1, 0);
+            let task1 = TaskId::new_for_test(2, 0);
+            let task2 = TaskId::new_for_test(3, 0);
+            let channel1 = 10;
+            let channel2 = 20;
+
+            record_two_task_cycle(
+                &mut monitor,
+                [task1, task2],
+                [channel1, channel2],
+                Time::from_secs(1),
+                Time::from_secs(1),
+            );
+            monitor.record_event(FlowControlEvent::BackpressureApplied {
+                channel_id: channel1,
+                consumer_task: decoy,
+                queue_depth: 1,
+                timestamp: Time::from_secs(1),
+            });
+
+            match release {
+                OwnerRelease::None => {}
+                OwnerRelease::Decoy => {
+                    monitor.record_event(FlowControlEvent::BackpressureReleased {
+                        channel_id: channel1,
+                        consumer_task: decoy,
+                        new_queue_depth: 1,
+                        timestamp: Time::from_secs(1),
+                    });
+                }
+                OwnerRelease::CycleOwner => {
+                    monitor.record_event(FlowControlEvent::BackpressureReleased {
+                        channel_id: channel1,
+                        consumer_task: task2,
+                        new_queue_depth: 1,
+                        timestamp: Time::from_secs(1),
+                    });
+                }
+            }
+            deadlock_tick(&mut monitor, Time::from_secs(2));
+
+            let deadlocks = potential_deadlocks(&monitor);
+            match release {
+                OwnerRelease::None | OwnerRelease::Decoy => {
+                    assert_eq!(deadlocks.len(), 1, "release={release:?}");
+                    match deadlocks[0] {
+                        FlowControlViolation::PotentialDeadlock { involved_tasks, .. } => {
+                            assert!(involved_tasks.contains(&task1));
+                            assert!(involved_tasks.contains(&task2));
+                            assert!(!involved_tasks.contains(&decoy));
+                        }
+                        _ => unreachable!("filtered to potential deadlocks"),
+                    }
+                    assert_eq!(monitor.stats().deadlocks_detected, 1);
+                }
+                OwnerRelease::CycleOwner => {
+                    assert!(deadlocks.is_empty(), "release={release:?}");
+                    assert_eq!(monitor.stats().deadlocks_detected, 0);
+                }
+            }
         }
     }
 
@@ -1723,10 +2049,6 @@ mod tests {
             2
         );
         assert_eq!(
-            monitor.deadlock_detector.task_to_channel[&task_id][&channel_id],
-            2
-        );
-        assert_eq!(
             monitor.task_states[&task_id].first_block_time,
             Some(first_time)
         );
@@ -1751,10 +2073,6 @@ mod tests {
         );
         assert_eq!(
             monitor.channel_states[&channel_id].blocked_tasks[&task_id],
-            1
-        );
-        assert_eq!(
-            monitor.deadlock_detector.task_to_channel[&task_id][&channel_id],
             1
         );
         assert_eq!(
@@ -1803,12 +2121,6 @@ mod tests {
 
         assert!(monitor.task_states[&task_id].blocked_channels.is_empty());
         assert!(monitor.channel_states[&channel_id].blocked_tasks.is_empty());
-        assert!(
-            !monitor
-                .deadlock_detector
-                .task_to_channel
-                .contains_key(&task_id)
-        );
         assert_eq!(monitor.stats().tasks_currently_blocked, 0);
     }
 
@@ -1851,10 +2163,6 @@ mod tests {
             monitor.task_states[&task_id].first_block_time,
             Some(reserve_time)
         );
-        assert_eq!(
-            monitor.deadlock_detector.task_to_channel[&task_id][&channel_id],
-            1
-        );
 
         monitor.record_event(FlowControlEvent::ReserveUnblocked {
             channel_id,
@@ -1890,10 +2198,6 @@ mod tests {
         assert!(!inverse.has_wait(FlowWaitIdentity::reserve(task_id, channel_id, permit_id)));
         assert_eq!(
             inverse.task_states[&task_id].blocked_channels[&channel_id],
-            1
-        );
-        assert_eq!(
-            inverse.deadlock_detector.task_to_channel[&task_id][&channel_id],
             1
         );
 
@@ -1963,10 +2267,6 @@ mod tests {
             );
             assert_eq!(
                 monitor.channel_states[&real_channel].blocked_tasks[&task_id],
-                1
-            );
-            assert_eq!(
-                monitor.deadlock_detector.task_to_channel[&task_id][&real_channel],
                 1
             );
             assert_eq!(monitor.stats().tasks_currently_blocked, 1);
@@ -2057,10 +2357,6 @@ mod tests {
             1
         );
         assert_eq!(
-            monitor.deadlock_detector.task_to_channel[&task_id][&channel_id],
-            1
-        );
-        assert_eq!(
             monitor.task_states[&task_id].first_block_time,
             Some(Time::from_secs(1))
         );
@@ -2085,12 +2381,6 @@ mod tests {
         assert_eq!(monitor.stats().max_block_time_ms, 10);
         assert!(monitor.task_states[&task_id].blocked_channels.is_empty());
         assert!(monitor.channel_states[&channel_id].blocked_tasks.is_empty());
-        assert!(
-            !monitor
-                .deadlock_detector
-                .task_to_channel
-                .contains_key(&task_id)
-        );
         assert!(matches!(
             monitor.violations().back().map(|report| &report.violation),
             Some(FlowControlViolation::FlowControlInconsistency { .. })
