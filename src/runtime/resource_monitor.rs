@@ -943,8 +943,10 @@ pub struct AdmissionAwareLockContentionAtlasRow {
     pub hold_ns: u64,
     pub max_wait_ns: u64,
     pub max_hold_ns: u64,
+    pub wait_percentile_sample_count: u64,
     pub p95_wait_ns: u64,
     pub p999_wait_ns: u64,
+    pub hold_percentile_sample_count: u64,
     pub p95_hold_ns: u64,
     pub p999_hold_ns: u64,
     pub order_edges_exercised: usize,
@@ -1808,8 +1810,10 @@ fn admission_aware_lock_contention_rows(
             hold_ns: metrics.hold_ns,
             max_wait_ns: metrics.max_wait_ns,
             max_hold_ns: metrics.max_hold_ns,
+            wait_percentile_sample_count: metrics.wait_percentile_sample_count,
             p95_wait_ns: metrics.p95_wait_ns,
             p999_wait_ns: metrics.p999_wait_ns,
+            hold_percentile_sample_count: metrics.hold_percentile_sample_count,
             p95_hold_ns: metrics.p95_hold_ns,
             p999_hold_ns: metrics.p999_hold_ns,
             order_edges_exercised: lock_order_atlas
@@ -7117,8 +7121,10 @@ mod tests {
             hold_ns: acquisitions.saturating_mul(2_000),
             max_wait_ns: 9_000,
             max_hold_ns: 12_000,
+            wait_percentile_sample_count: acquisitions,
             p95_wait_ns: 4_000,
             p999_wait_ns: 8_000,
+            hold_percentile_sample_count: acquisitions,
             p95_hold_ns: 6_000,
             p999_hold_ns: 10_000,
             instrumentation_mode: "lock-metrics-test",
@@ -7832,7 +7838,7 @@ mod tests {
     }
 
     #[test]
-    fn admission_aware_runtime_pressure_atlas_serializes_stable_source_projection() {
+    fn percentile_horizon_survives_admission_aware_runtime_pressure_atlas_projection() {
         let mut input = complete_atlas_builder_input(healthy_spectral_snapshot(), false);
         input.replay_backed = true;
         input.dirty_tree_peer_ownership.reverse();
@@ -7876,6 +7882,8 @@ mod tests {
             vec!["regions", "tasks"]
         );
         assert_eq!(atlas.lock_contention[1].acquisitions, 16);
+        assert_eq!(atlas.lock_contention[1].wait_percentile_sample_count, 16);
+        assert_eq!(atlas.lock_contention[1].hold_percentile_sample_count, 16);
         assert_eq!(atlas.lock_contention[1].order_edges_exercised, 1);
         assert_eq!(atlas.lock_contention[1].order_violations, 1);
         assert_eq!(
@@ -7892,6 +7900,14 @@ mod tests {
         );
         assert_eq!(value["overall_label"], "replay_backed");
         assert_eq!(value["coordination_decision"], "proceed");
+        assert_eq!(
+            value["lock_contention"][1]["wait_percentile_sample_count"],
+            16
+        );
+        assert_eq!(
+            value["lock_contention"][1]["hold_percentile_sample_count"],
+            16
+        );
         assert_eq!(
             value["scheduler_pressure"][0]["scheduler_tail_pressure_label"],
             "nominal"

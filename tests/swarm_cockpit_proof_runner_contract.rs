@@ -204,8 +204,10 @@ fn lock_metric_from_trace(trace: &SwarmPressureTraceSummary) -> SwarmContentionL
         p50_wait_ns: 0,
         p95_wait_ns: 0,
         p99_wait_ns: 0,
+        wait_percentile_sample_count: None,
         p95_hold_ns: 0,
         p99_hold_ns: 0,
+        hold_percentile_sample_count: None,
         instrumentation_mode: INSTRUMENTATION_MODE.to_string(),
     }
 }

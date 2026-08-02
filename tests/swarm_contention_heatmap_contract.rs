@@ -63,8 +63,10 @@ fn lock_metric(
         p50_wait_ns: p95_wait_ns / 4,
         p95_wait_ns,
         p99_wait_ns,
+        wait_percentile_sample_count: Some(128),
         p95_hold_ns: 5_000,
         p99_hold_ns: 10_000,
+        hold_percentile_sample_count: Some(128),
         instrumentation_mode: "fixture_lock_metrics".to_string(),
     }
 }
@@ -155,7 +157,7 @@ fn swarm_contention_heatmap_contract_artifact_is_source_backed() {
 }
 
 #[test]
-fn swarm_contention_heatmap_healthy_report_passes_with_stable_text() {
+fn percentile_horizon_heatmap_healthy_report_passes_with_stable_text() {
     let ledger = build_swarm_contention_heatmap(&healthy_input());
     let text = render_swarm_contention_heatmap_text(&ledger);
 
@@ -172,12 +174,93 @@ fn swarm_contention_heatmap_healthy_report_passes_with_stable_text() {
             .iter()
             .any(|row| row.key == "runtime_state")
     );
+    let lock_hotspot = ledger
+        .lock_hotspots
+        .iter()
+        .find(|row| row.key == "runtime_state")
+        .expect("runtime_state lock hotspot");
+    assert_eq!(lock_hotspot.wait_percentile_sample_count, Some(128));
+    assert_eq!(lock_hotspot.hold_percentile_sample_count, Some(128));
+    assert!(
+        lock_hotspot
+            .evidence
+            .contains("wait_percentile_sample_count=128")
+    );
+    assert!(
+        lock_hotspot
+            .evidence
+            .contains("hold_percentile_sample_count=128")
+    );
     assert!(ledger.region_hotspots.iter().any(|row| {
         row.kind == SwarmContentionHotspotKind::Region
             && row.owner_surface.contains("src/lab/swarm_replay.rs")
     }));
     assert!(text.contains("verdict: Pass"));
     assert!(text.contains("top_hotspots:"));
+    assert!(text.contains("wait_percentile_sample_count=128"));
+    assert!(text.contains("hold_percentile_sample_count=128"));
+}
+
+#[test]
+fn percentile_horizon_survives_projection_and_legacy_rows_remain_compatible() {
+    let snapshot = asupersync::sync::LockMetricsSnapshot {
+        name: "retained_suffix_lock",
+        acquisitions: 21,
+        contentions: 3,
+        wait_ns: 420_000,
+        hold_ns: 210_000,
+        max_wait_ns: 90_000,
+        max_hold_ns: 45_000,
+        p95_wait_ns: 70_000,
+        p999_wait_ns: 90_000,
+        wait_percentile_sample_count: 17,
+        p95_hold_ns: 35_000,
+        p999_hold_ns: 45_000,
+        hold_percentile_sample_count: 13,
+        instrumentation_mode: "exact_retained_samples",
+    };
+    let metric = SwarmContentionLockMetric::from_lock_metrics_snapshot(&snapshot);
+    assert_eq!(metric.wait_percentile_sample_count, Some(17));
+    assert_eq!(metric.hold_percentile_sample_count, Some(13));
+
+    let mut input = healthy_input();
+    input.lock_metrics = vec![metric.clone()];
+    let ledger = build_swarm_contention_heatmap(&input);
+    let hotspot = ledger
+        .lock_hotspots
+        .iter()
+        .find(|row| row.key == "retained_suffix_lock")
+        .expect("projected live lock hotspot");
+    assert_eq!(hotspot.wait_percentile_sample_count, Some(17));
+    assert_eq!(hotspot.hold_percentile_sample_count, Some(13));
+
+    let mut legacy_hotspot_json = serde_json::to_value(hotspot).expect("serialize hotspot");
+    let legacy_hotspot_object = legacy_hotspot_json.as_object_mut().expect("hotspot object");
+    legacy_hotspot_object.remove("wait_percentile_sample_count");
+    legacy_hotspot_object.remove("hold_percentile_sample_count");
+    let legacy_hotspot: asupersync::lab::SwarmContentionHotSpot =
+        serde_json::from_value(legacy_hotspot_json).expect("deserialize legacy hotspot");
+    assert_eq!(legacy_hotspot.wait_percentile_sample_count, None);
+    assert_eq!(legacy_hotspot.hold_percentile_sample_count, None);
+    let reserialized_hotspot =
+        serde_json::to_value(legacy_hotspot).expect("re-serialize legacy hotspot");
+    let reserialized_hotspot_object = reserialized_hotspot.as_object().expect("hotspot object");
+    assert!(!reserialized_hotspot_object.contains_key("wait_percentile_sample_count"));
+    assert!(!reserialized_hotspot_object.contains_key("hold_percentile_sample_count"));
+
+    let mut legacy_json = serde_json::to_value(metric).expect("serialize lock metric");
+    let legacy_object = legacy_json.as_object_mut().expect("lock metric object");
+    legacy_object.remove("wait_percentile_sample_count");
+    legacy_object.remove("hold_percentile_sample_count");
+    let legacy_metric: SwarmContentionLockMetric =
+        serde_json::from_value(legacy_json).expect("deserialize legacy lock metric");
+    assert_eq!(legacy_metric.wait_percentile_sample_count, None);
+    assert_eq!(legacy_metric.hold_percentile_sample_count, None);
+    let reserialized =
+        serde_json::to_value(legacy_metric).expect("re-serialize legacy lock metric");
+    let reserialized_object = reserialized.as_object().expect("lock metric object");
+    assert!(!reserialized_object.contains_key("wait_percentile_sample_count"));
+    assert!(!reserialized_object.contains_key("hold_percentile_sample_count"));
 }
 
 #[test]

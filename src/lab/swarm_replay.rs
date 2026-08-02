@@ -1217,10 +1217,16 @@ pub struct SwarmContentionLockMetric {
     pub p95_wait_ns: u64,
     /// p99 wait duration, or the nearest stricter percentile available.
     pub p99_wait_ns: u64,
+    /// Retained wait samples backing the reported percentiles when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_percentile_sample_count: Option<u64>,
     /// p95 hold duration.
     pub p95_hold_ns: u64,
     /// p99 hold duration, or the nearest stricter percentile available.
     pub p99_hold_ns: u64,
+    /// Retained hold samples backing the reported percentiles when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_percentile_sample_count: Option<u64>,
     /// Instrumentation mode from the lock metric source.
     pub instrumentation_mode: String,
 }
@@ -1246,8 +1252,10 @@ impl SwarmContentionLockMetric {
             p50_wait_ns,
             p95_wait_ns: snapshot.p95_wait_ns,
             p99_wait_ns: snapshot.p999_wait_ns,
+            wait_percentile_sample_count: Some(snapshot.wait_percentile_sample_count),
             p95_hold_ns: snapshot.p95_hold_ns,
             p99_hold_ns: snapshot.p999_hold_ns,
+            hold_percentile_sample_count: Some(snapshot.hold_percentile_sample_count),
             instrumentation_mode: snapshot.instrumentation_mode.to_string(),
         }
     }
@@ -1295,6 +1303,12 @@ pub struct SwarmContentionHotSpot {
     pub p95_wait_ns: Option<u64>,
     /// p99 wait duration when available.
     pub p99_wait_ns: Option<u64>,
+    /// Retained wait samples backing the lock percentiles when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_percentile_sample_count: Option<u64>,
+    /// Retained hold samples backing the lock percentiles when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_percentile_sample_count: Option<u64>,
     /// p95 queue depth when available.
     pub queue_depth_p95: Option<u64>,
     /// p99 queue depth when available.
@@ -5089,7 +5103,7 @@ pub fn render_swarm_contention_heatmap_text(ledger: &SwarmContentionHeatmapLedge
     } else {
         for hotspot in &ledger.top_hotspots {
             lines.push(format!(
-                "- key={} kind={:?} severity={:?} score={} p50={} p95={} p99={} q95={} q99={} route={} bead={}",
+                "- key={} kind={:?} severity={:?} score={} p50={} p95={} p99={}{} q95={} q99={} route={} bead={}",
                 hotspot.key,
                 hotspot.kind,
                 hotspot.severity,
@@ -5097,6 +5111,7 @@ pub fn render_swarm_contention_heatmap_text(ledger: &SwarmContentionHeatmapLedge
                 optional_u64_text(hotspot.p50_wait_ns),
                 optional_u64_text(hotspot.p95_wait_ns),
                 optional_u64_text(hotspot.p99_wait_ns),
+                hotspot_percentile_sample_horizon_text(hotspot),
                 optional_u64_text(hotspot.queue_depth_p95),
                 optional_u64_text(hotspot.queue_depth_p99),
                 hotspot.owner_surface,
@@ -5532,11 +5547,12 @@ pub fn render_swarm_operator_cockpit_text(report: &SwarmOperatorCockpitReport) -
     } else {
         for hotspot in report.contention_hotspots.iter().take(3) {
             lines.push(format!(
-                "- key={} kind={:?} severity={:?} score={} route={} bead={}",
+                "- key={} kind={:?} severity={:?} score={}{} route={} bead={}",
                 hotspot.key,
                 hotspot.kind,
                 hotspot.severity,
                 hotspot.impact_score,
+                hotspot_percentile_sample_horizon_text(hotspot),
                 hotspot.owner_surface,
                 hotspot.owner_bead_hint
             ));
@@ -5980,18 +5996,22 @@ fn ranked_lock_hotspots(metrics: &[SwarmContentionLockMetric]) -> Vec<SwarmConte
                 p50_wait_ns: Some(metric.p50_wait_ns),
                 p95_wait_ns: Some(metric.p95_wait_ns),
                 p99_wait_ns: Some(metric.p99_wait_ns),
+                wait_percentile_sample_count: metric.wait_percentile_sample_count,
+                hold_percentile_sample_count: metric.hold_percentile_sample_count,
                 queue_depth_p95: None,
                 queue_depth_p99: None,
                 contentions: Some(metric.contentions),
                 region_or_scope: None,
                 evidence: format!(
-                    "acquisitions={} contentions={} wait_p95={}ns wait_p99={}ns hold_p95={}ns hold_p99={}ns mode={}",
+                    "acquisitions={} contentions={} wait_p95={}ns wait_p99={}ns wait_percentile_sample_count={} hold_p95={}ns hold_p99={}ns hold_percentile_sample_count={} mode={}",
                     metric.acquisitions,
                     metric.contentions,
                     metric.p95_wait_ns,
                     metric.p99_wait_ns,
+                    optional_u64_text(metric.wait_percentile_sample_count),
                     metric.p95_hold_ns,
                     metric.p99_hold_ns,
+                    optional_u64_text(metric.hold_percentile_sample_count),
                     metric.instrumentation_mode
                 ),
                 owner_surface: "src/sync/contended_mutex.rs".to_string(),
@@ -6034,6 +6054,8 @@ fn ranked_scheduler_lane_hotspots(
                 p50_wait_ns: Some(metric.p50_wait_ns),
                 p95_wait_ns: Some(metric.p95_wait_ns),
                 p99_wait_ns: Some(metric.p99_wait_ns),
+                wait_percentile_sample_count: None,
+                hold_percentile_sample_count: None,
                 queue_depth_p95: Some(metric.queue_depth_p95),
                 queue_depth_p99: Some(metric.queue_depth_p99),
                 contentions: Some(metric.steal_attempts.saturating_add(metric.fairness_yields)),
@@ -6084,6 +6106,8 @@ fn trace_contention_hotspots(
                 p50_wait_ns: None,
                 p95_wait_ns: None,
                 p99_wait_ns: None,
+                wait_percentile_sample_count: None,
+                hold_percentile_sample_count: None,
                 queue_depth_p95: Some(region.queue_peak as u64),
                 queue_depth_p99: Some(region.queue_peak as u64),
                 contentions: Some(region.admission_decision_count as u64),
@@ -6118,6 +6142,8 @@ fn trace_contention_hotspots(
                 p50_wait_ns: None,
                 p95_wait_ns: None,
                 p99_wait_ns: None,
+                wait_percentile_sample_count: None,
+                hold_percentile_sample_count: None,
                 queue_depth_p95: Some(queue.queue_depth as u64),
                 queue_depth_p99: Some(queue.queue_depth as u64),
                 contentions: Some(queue.queue_depth as u64),
@@ -6577,6 +6603,20 @@ fn reduction_ratio_bps(original: usize, minimized: usize) -> u16 {
 
 fn optional_u64_text(value: Option<u64>) -> String {
     value.map_or_else(|| "n/a".to_string(), |value| value.to_string())
+}
+
+fn hotspot_percentile_sample_horizon_text(hotspot: &SwarmContentionHotSpot) -> String {
+    if hotspot.wait_percentile_sample_count.is_none()
+        && hotspot.hold_percentile_sample_count.is_none()
+    {
+        String::new()
+    } else {
+        format!(
+            " wait_percentile_sample_count={} hold_percentile_sample_count={}",
+            optional_u64_text(hotspot.wait_percentile_sample_count),
+            optional_u64_text(hotspot.hold_percentile_sample_count)
+        )
+    }
 }
 
 const REPLAY_TRACE_REQUIRED_FIELDS: &[&str] = &[
