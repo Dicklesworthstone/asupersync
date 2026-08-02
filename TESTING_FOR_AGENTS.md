@@ -142,6 +142,26 @@ honoring a wholly valid `RUST_LOG` and falling back to
 subscriber or install a `log` bridge. Do not precede them with
 `init_test_logging`.
 
+Use the named OFF authority when test-helper tracing must remain disabled
+across runtime construction, polling, and cleanup. The scope is synchronous,
+so drive the future inside it rather than returning a future from the closure:
+
+```rust
+asupersync::test_utils::with_test_logging_disabled(|| {
+    asupersync::test_utils::run_test_with_cx(|cx| async move {
+        exercise_quiet_path(&cx).await;
+    });
+});
+```
+
+A raw `tracing::subscriber::NoSubscriber` is the ambient-absence sentinel and
+is not supported as disable intent; helpers will install the safe default over
+it. A nested `with_test_logging(&config, ...)` can explicitly re-enable logging
+and restores OFF afterward. These policies are thread-local, so OS workers need
+an explicitly cloned and entered `tracing::Dispatch`. See
+[`TESTING.md`](./TESTING.md#logging-standards) for nested, propagation, and
+fresh-process global-bridge examples.
+
 ```rust
 #[test]
 fn scenario_id_cancel_path_is_clean() {

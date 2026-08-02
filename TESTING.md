@@ -883,7 +883,9 @@ they install a thread-scoped subscriber for the duration of the helper:
 - a wholly valid `RUST_LOG` is honored;
 - unset `RUST_LOG` uses `warn,asupersync=debug`;
 - empty, non-Unicode, or malformed `RUST_LOG` fails closed to that same safe
-  default and emits a warning;
+  default and emits one bounded, redacted warning each time that fallback
+  policy is applied, with the stable reason `empty`, `non_unicode`, or `parse`;
+  the raw value is never logged;
 - the prior dispatcher is restored during normal return and panic unwinding;
 - no process-global tracing subscriber or `log` logger is installed.
 
@@ -913,6 +915,18 @@ fn my_sync_test() {
 }
 ```
 
+Empty input is invalid, not shorthand for disabled logging. The typed error is
+available without exposing the raw filter:
+
+```rust
+use asupersync::test_utils::{TestLogConfig, TestLogConfigError};
+
+assert!(matches!(
+    TestLogConfig::try_new("  "),
+    Err(TestLogConfigError::Empty)
+));
+```
+
 All-target TRACE is available only as a deliberate local choice:
 
 ```rust
@@ -923,6 +937,43 @@ with_test_logging(&TestLogConfig::trace(), || {
 });
 ```
 
+Use the named OFF scope when a test must suppress tracing without changing
+process globals. Drive async work inside the closure: returning a future would
+restore the prior dispatcher before that future is polled. A nested explicit
+policy temporarily re-enables logging and restores OFF afterward.
+
+```rust
+use asupersync::test_utils::{
+    TestLogConfig, run_test, with_test_logging, with_test_logging_disabled,
+};
+
+let outer = TestLogConfig::try_new("my_crate=debug").unwrap();
+with_test_logging(&outer, || {
+    tracing::debug!(target: "my_crate", "outer-before");
+    with_test_logging_disabled(|| {
+        tracing::debug!(target: "my_crate", "suppressed");
+        with_test_logging(&TestLogConfig::trace(), || {
+            run_test(|| async {
+                tracing::trace!(target: "my_crate", "explicitly enabled");
+            });
+        });
+        tracing::debug!(target: "my_crate", "suppressed-again");
+    });
+    tracing::debug!(target: "my_crate", "outer-after");
+});
+```
+
+The outer sink sees its before/after records but no records from the OFF
+scope. The explicitly enabled inner scope owns its own writer. Policies are
+thread-local and are not inherited by new OS threads; when a worker must share
+a policy, clone the current `tracing::Dispatch` and enter it in that worker with
+`tracing::dispatcher::with_default`.
+
+Do not use `Dispatch::new(NoSubscriber::default())` to express OFF intent.
+`NoSubscriber` is also tracing's ambient-absence sentinel, so runtime helpers
+deliberately interpret it as absence and install the deterministic safe
+default. `with_test_logging_disabled` provides the unambiguous authority.
+
 `log` records from third-party dependencies are not bridged into tracing by
 default. `install_global_test_log_bridge()` is an explicit, irreversible
 process-wide opt-in and must be isolated in a fresh test process. Likewise,
@@ -930,6 +981,18 @@ process-wide opt-in and must be isolated in a fresh test process. Likewise,
 accept a closure. The transitional `init_test_logging*` functions use this
 global path with a safe filter and no implicit `LogTracer`; new tests must use
 the scoped APIs.
+
+```rust
+use asupersync::test_utils::{
+    TestLogConfig, install_global_test_log_bridge, with_test_logging,
+};
+
+// Run this opt-in in a fresh process: the bridge is process-global and first-wins.
+install_global_test_log_bridge().expect("fresh process accepts LogTracer");
+with_test_logging(&TestLogConfig::trace(), || {
+    tracing_log::log::trace!(target: "dependency", "bridged explicitly");
+});
+```
 
 ### Phase Markers
 
