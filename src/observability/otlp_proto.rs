@@ -3,9 +3,9 @@
 //! This module is the implementation side of `protobuf-owned-otlp-schema-v1`.
 //! It deliberately remains crate-private and separate from signal adapters,
 //! transport framing, generated reference messages, and dependency cutover.
-//! The current implementation slice owns the common, resource, metrics, logs,
-//! and metrics-collector families plus the shared resource-accounting
-//! machinery required by later signal models.
+//! The current implementation slice owns the common, resource, metrics, trace,
+//! logs, and metrics-collector families plus the shared resource-accounting
+//! machinery required by later collector models.
 
 use crate::grpc::protobuf::{
     ProtoMessage, ProtobufWireDecoder, ProtobufWireEncoder, ProtobufWireError, ProtobufWireField,
@@ -32,6 +32,7 @@ mod limits_and_error {
     pub(super) const MAX_RESOURCE_GROUPS_PER_REQUEST: usize = 64;
     pub(super) const MAX_SCOPES_PER_RESOURCE_GROUP: usize = 128;
     pub(super) const MAX_METRICS_PER_SCOPE: usize = 4_096;
+    pub(super) const MAX_SPANS_PER_SCOPE: usize = 4_096;
     pub(super) const MAX_LOG_RECORDS_PER_SCOPE: usize = 4_096;
     pub(super) const MAX_DATA_POINTS_PER_METRIC: usize = 1_000;
     pub(super) const MAX_METRIC_METADATA_ENTRIES: usize = 128;
@@ -40,6 +41,8 @@ mod limits_and_error {
     pub(super) const MAX_HISTOGRAM_EXPLICIT_BOUNDS: usize = 4_095;
     pub(super) const MAX_EXPONENTIAL_HISTOGRAM_BUCKETS: usize = 4_096;
     pub(super) const MAX_SUMMARY_QUANTILES: usize = 1_024;
+    pub(super) const MAX_EVENTS_PER_SPAN: usize = 128;
+    pub(super) const MAX_LINKS_PER_SPAN: usize = 128;
 
     pub(super) const MAX_ATTRIBUTE_KEY_BYTES: usize = 1_024;
     pub(super) const MAX_ATTRIBUTE_VALUE_BYTES: usize = 4_096;
@@ -49,6 +52,9 @@ mod limits_and_error {
     pub(super) const MAX_METRIC_NAME_BYTES: usize = 1_024;
     pub(super) const MAX_METRIC_DESCRIPTION_BYTES: usize = 4_096;
     pub(super) const MAX_METRIC_UNIT_BYTES: usize = 256;
+    pub(super) const MAX_SPAN_NAME_BYTES: usize = 1_024;
+    pub(super) const MAX_TRACE_STATE_BYTES: usize = 512;
+    pub(super) const MAX_EVENT_NAME_BYTES: usize = 1_024;
     pub(super) const MAX_LOG_SEVERITY_TEXT_BYTES: usize = 1_024;
     pub(super) const MAX_LOG_EVENT_NAME_BYTES: usize = 1_024;
     pub(super) const MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES: usize = 4_096;
@@ -3111,6 +3117,1024 @@ pub(crate) mod metrics {
     impl_proto_message!(Exemplar);
 }
 
+pub(crate) mod trace {
+    use super::common_and_resource::{InstrumentationScope, KeyValue, Resource};
+    use super::limits_and_error::{
+        MAX_ATTRIBUTES, MAX_EVENT_NAME_BYTES, MAX_EVENTS_PER_SPAN, MAX_LINKS_PER_SPAN,
+        MAX_RESOURCE_GROUPS_PER_REQUEST, MAX_SCHEMA_URL_BYTES, MAX_SCOPES_PER_RESOURCE_GROUP,
+        MAX_SPAN_ID_BYTES, MAX_SPAN_NAME_BYTES, MAX_SPANS_PER_SCOPE, MAX_TOTAL_OWNED_BYTES,
+        MAX_TRACE_ID_BYTES, MAX_TRACE_STATE_BYTES, OtlpModel, ValidationBudget, decode_bytes,
+        decode_string, encode_nested, merge_optional_message, merge_root, preserve_unknown,
+        push_message, validate_root, validate_unique_keys, validate_unknown,
+    };
+    use super::{
+        ProtoMessage, ProtobufWireDecoder, ProtobufWireEncoder, ProtobufWireError,
+        ProtobufWireField, ProtobufWireLimits, UnknownFields,
+    };
+
+    macro_rules! impl_proto_message {
+        ($type:ty) => {
+            impl ProtoMessage for $type {
+                fn encode_fields(
+                    &self,
+                    encoder: &mut ProtobufWireEncoder,
+                ) -> Result<(), ProtobufWireError> {
+                    let remaining_work = encoder.remaining_work()?;
+                    let validation = validate_root(self, remaining_work, true)?;
+                    encoder.charge_schema_work(validation.work_used)?;
+                    self.encode_fields_unchecked(encoder)
+                }
+
+                fn merge_field<'wire>(
+                    &mut self,
+                    field: &ProtobufWireField<'wire>,
+                    decoder: &mut ProtobufWireDecoder<'wire, '_>,
+                ) -> Result<bool, ProtobufWireError> {
+                    self.merge_otlp_field(field, decoder)
+                }
+
+                fn merge_from_bytes(
+                    &mut self,
+                    input: &[u8],
+                    limits: ProtobufWireLimits,
+                ) -> Result<(), ProtobufWireError> {
+                    merge_root(self, input, limits)
+                }
+
+                fn decode_from_bytes(
+                    input: &[u8],
+                    limits: ProtobufWireLimits,
+                ) -> Result<Self, ProtobufWireError> {
+                    let mut staged = Self::default();
+                    merge_root(&mut staged, input, limits)?;
+                    Ok(staged)
+                }
+            }
+        };
+    }
+
+    fn validate_models<M: OtlpModel>(
+        values: &[M],
+        budget: &mut ValidationBudget,
+        collection_limit: usize,
+        resource: &'static str,
+    ) -> Result<(), ProtobufWireError> {
+        budget.repeated(values.len(), collection_limit, resource)?;
+        for value in values {
+            value.validate_otlp(budget, 0)?;
+        }
+        Ok(())
+    }
+
+    fn validate_attributes(
+        attributes: &[KeyValue],
+        budget: &mut ValidationBudget,
+        resource: &'static str,
+        invariant: &'static str,
+    ) -> Result<(), ProtobufWireError> {
+        budget.repeated(attributes.len(), MAX_ATTRIBUTES, resource)?;
+        validate_unique_keys(attributes, budget, invariant)?;
+        for attribute in attributes {
+            attribute.validate_otlp(budget, 0)?;
+        }
+        Ok(())
+    }
+
+    fn is_trace_state_key_char(byte: u8) -> bool {
+        byte.is_ascii_lowercase()
+            || byte.is_ascii_digit()
+            || matches!(byte, b'_' | b'-' | b'*' | b'/')
+    }
+
+    fn is_valid_trace_state_key(key: &str) -> bool {
+        let bytes = key.as_bytes();
+        if let Some(at) = bytes.iter().position(|byte| *byte == b'@') {
+            if bytes[at + 1..].contains(&b'@') {
+                return false;
+            }
+            let tenant = &bytes[..at];
+            let system = &bytes[at + 1..];
+            (1..=241).contains(&tenant.len())
+                && (1..=14).contains(&system.len())
+                && (tenant[0].is_ascii_lowercase() || tenant[0].is_ascii_digit())
+                && tenant[1..].iter().copied().all(is_trace_state_key_char)
+                && system[0].is_ascii_lowercase()
+                && system[1..].iter().copied().all(is_trace_state_key_char)
+        } else {
+            (1..=256).contains(&bytes.len())
+                && bytes[0].is_ascii_lowercase()
+                && bytes[1..].iter().copied().all(is_trace_state_key_char)
+        }
+    }
+
+    fn trim_trace_state_ows(value: &str) -> &str {
+        value.trim_matches(|character| matches!(character, ' ' | '\t'))
+    }
+
+    fn parse_trace_state_member(member: &str) -> Option<(&str, &str)> {
+        let member = trim_trace_state_ows(member);
+        let (raw_key, raw_value) = member.split_once('=')?;
+        if raw_value.contains('=') {
+            return None;
+        }
+        let key = raw_key;
+        let value = raw_value;
+        if !is_valid_trace_state_key(key)
+            || value.is_empty()
+            || value.len() > 256
+            || value.as_bytes().last().is_some_and(u8::is_ascii_whitespace)
+            || !value
+                .bytes()
+                .all(|byte| (0x20..=0x7e).contains(&byte) && !matches!(byte, b',' | b'='))
+        {
+            return None;
+        }
+        Some((key, value))
+    }
+
+    fn validate_trace_state(value: &str, entry_count: usize) -> bool {
+        if value.is_empty() {
+            return entry_count == 0;
+        }
+        if value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_whitespace)
+            || value.as_bytes().last().is_some_and(u8::is_ascii_whitespace)
+        {
+            return false;
+        }
+        if entry_count == 0 || entry_count > 32 {
+            return false;
+        }
+        for (index, member) in value.split(',').enumerate() {
+            let Some((key, _)) = parse_trace_state_member(member) else {
+                return false;
+            };
+            for prior in value.split(',').take(index) {
+                let Some((prior_key, _)) = parse_trace_state_member(prior) else {
+                    return false;
+                };
+                if key == prior_key {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn decode_trace_state(
+        field: &ProtobufWireField<'_>,
+        decoder: &mut ProtobufWireDecoder<'_, '_>,
+        resource: &'static str,
+    ) -> Result<String, ProtobufWireError> {
+        let bytes = field.as_bytes()?;
+        if bytes.len() > MAX_TRACE_STATE_BYTES {
+            return Err(ProtobufWireError::SchemaLimitExceeded {
+                offset: field.value_offset(),
+                resource,
+                observed: bytes.len(),
+                limit: MAX_TRACE_STATE_BYTES,
+            });
+        }
+        // UTF-8 and the hard byte cap are per-occurrence constraints enforced
+        // by decode_string. W3C grammar is a final scalar invariant so a later
+        // valid occurrence can supersede an earlier malformed value.
+        decode_string(field, decoder, MAX_TRACE_STATE_BYTES, resource)
+    }
+
+    fn validate_trace_state_value(
+        value: &str,
+        budget: &mut ValidationBudget,
+        resource: &'static str,
+    ) -> Result<(), ProtobufWireError> {
+        budget.owned_bytes(value.len(), MAX_TRACE_STATE_BYTES, resource)?;
+        if budget.enforces_invariants() {
+            // Admit the delimiter-counting pass before scanning the value.
+            budget.work(value.len())?;
+            let entry_count = if value.is_empty() {
+                0
+            } else {
+                value.split(',').count()
+            };
+            // The grammar check reparses at most 32 bounded members while
+            // comparing keys, so admit its conservative work envelope before
+            // performing any of those scans.
+            if entry_count <= 32 {
+                budget.work(value.len().saturating_mul(entry_count))?;
+            }
+            if !validate_trace_state(value, entry_count) {
+                return Err(ProtobufWireError::SchemaInvariant {
+                    offset: 0,
+                    invariant: "trace state must use the W3C tracestate format",
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn id_is_valid(
+        value: &[u8],
+        exact_length: usize,
+        allow_empty: bool,
+        require_nonzero: bool,
+    ) -> bool {
+        (allow_empty && value.is_empty())
+            || (value.len() == exact_length
+                && (!require_nonzero || value.iter().any(|byte| *byte != 0)))
+    }
+
+    fn decode_id(
+        field: &ProtobufWireField<'_>,
+        decoder: &mut ProtobufWireDecoder<'_, '_>,
+        exact_length: usize,
+        resource: &'static str,
+    ) -> Result<Vec<u8>, ProtobufWireError> {
+        // Width and nonzero requirements are final message invariants. A later
+        // occurrence must be able to replace an earlier short or all-zero
+        // value under protobuf singular-field last-value-wins semantics. The
+        // hard byte cap is still checked before allocation.
+        decode_bytes(field, decoder, exact_length, resource)
+    }
+
+    fn validate_id(
+        value: &[u8],
+        budget: &mut ValidationBudget,
+        exact_length: usize,
+        allow_empty: bool,
+        require_nonzero: bool,
+        resource: &'static str,
+        invariant: &'static str,
+    ) -> Result<(), ProtobufWireError> {
+        if budget.enforces_invariants()
+            && !id_is_valid(value, exact_length, allow_empty, require_nonzero)
+        {
+            return Err(ProtobufWireError::SchemaInvariant {
+                offset: 0,
+                invariant,
+            });
+        }
+        budget.owned_bytes(value.len(), exact_length, resource)
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    #[repr(i32)]
+    pub(crate) enum SpanKind {
+        Unspecified = 0,
+        Internal = 1,
+        Server = 2,
+        Client = 3,
+        Producer = 4,
+        Consumer = 5,
+    }
+
+    impl SpanKind {
+        pub(crate) const fn from_raw(value: i32) -> Option<Self> {
+            match value {
+                0 => Some(Self::Unspecified),
+                1 => Some(Self::Internal),
+                2 => Some(Self::Server),
+                3 => Some(Self::Client),
+                4 => Some(Self::Producer),
+                5 => Some(Self::Consumer),
+                _ => None,
+            }
+        }
+
+        pub(crate) const fn as_raw(self) -> i32 {
+            self as i32
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    #[repr(i32)]
+    pub(crate) enum StatusCode {
+        Unset = 0,
+        Ok = 1,
+        Error = 2,
+    }
+
+    impl StatusCode {
+        pub(crate) const fn from_raw(value: i32) -> Option<Self> {
+            match value {
+                0 => Some(Self::Unset),
+                1 => Some(Self::Ok),
+                2 => Some(Self::Error),
+                _ => None,
+            }
+        }
+
+        pub(crate) const fn as_raw(self) -> i32 {
+            self as i32
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub(crate) struct SpanFlags(u32);
+
+    impl SpanFlags {
+        pub(crate) const DO_NOT_USE: Self = Self(0);
+        pub(crate) const TRACE_FLAGS_MASK: Self = Self(0xff);
+        pub(crate) const CONTEXT_HAS_IS_REMOTE_MASK: Self = Self(0x100);
+        pub(crate) const CONTEXT_IS_REMOTE_MASK: Self = Self(0x200);
+
+        pub(crate) const fn from_bits_retain(bits: u32) -> Self {
+            Self(bits)
+        }
+
+        pub(crate) const fn bits(self) -> u32 {
+            self.0
+        }
+
+        pub(crate) const fn contains(self, mask: Self) -> bool {
+            self.0 & mask.0 == mask.0
+        }
+
+        pub(crate) const fn trace_flags(self) -> u8 {
+            (self.0 & Self::TRACE_FLAGS_MASK.0) as u8
+        }
+
+        pub(crate) const fn context_is_remote(self) -> Option<bool> {
+            if self.contains(Self::CONTEXT_HAS_IS_REMOTE_MASK) {
+                Some(self.contains(Self::CONTEXT_IS_REMOTE_MASK))
+            } else {
+                None
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct TracesData {
+        pub(crate) resource_spans: Vec<ResourceSpans>,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for TracesData {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            for resource_spans in &self.resource_spans {
+                encode_nested(encoder, 1, resource_spans)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                1 => push_message(
+                    &mut self.resource_spans,
+                    field,
+                    decoder,
+                    MAX_RESOURCE_GROUPS_PER_REQUEST,
+                    "trace resource groups",
+                    false,
+                )?,
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            validate_models(
+                &self.resource_spans,
+                budget,
+                MAX_RESOURCE_GROUPS_PER_REQUEST,
+                "trace resource groups",
+            )?;
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(TracesData);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct ResourceSpans {
+        pub(crate) resource: Option<Resource>,
+        pub(crate) scope_spans: Vec<ScopeSpans>,
+        pub(crate) schema_url: String,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for ResourceSpans {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            if let Some(resource) = &self.resource {
+                encode_nested(encoder, 1, resource)?;
+            }
+            for scope_spans in &self.scope_spans {
+                encode_nested(encoder, 2, scope_spans)?;
+            }
+            if !self.schema_url.is_empty() {
+                encoder.write_string(3, &self.schema_url)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                1 => merge_optional_message(&mut self.resource, field, decoder, false)?,
+                2 => push_message(
+                    &mut self.scope_spans,
+                    field,
+                    decoder,
+                    MAX_SCOPES_PER_RESOURCE_GROUP,
+                    "trace scopes per resource group",
+                    false,
+                )?,
+                3 => {
+                    self.schema_url = decode_string(
+                        field,
+                        decoder,
+                        MAX_SCHEMA_URL_BYTES,
+                        "trace resource schema URL bytes",
+                    )?;
+                }
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            if let Some(resource) = &self.resource {
+                resource.validate_otlp(budget, 0)?;
+            }
+            validate_models(
+                &self.scope_spans,
+                budget,
+                MAX_SCOPES_PER_RESOURCE_GROUP,
+                "trace scopes per resource group",
+            )?;
+            budget.owned_bytes(
+                self.schema_url.len(),
+                MAX_SCHEMA_URL_BYTES,
+                "trace resource schema URL bytes",
+            )?;
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(ResourceSpans);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct ScopeSpans {
+        pub(crate) scope: Option<InstrumentationScope>,
+        pub(crate) spans: Vec<Span>,
+        pub(crate) schema_url: String,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for ScopeSpans {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            if let Some(scope) = &self.scope {
+                encode_nested(encoder, 1, scope)?;
+            }
+            for span in &self.spans {
+                encode_nested(encoder, 2, span)?;
+            }
+            if !self.schema_url.is_empty() {
+                encoder.write_string(3, &self.schema_url)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                1 => merge_optional_message(&mut self.scope, field, decoder, false)?,
+                2 => push_message(
+                    &mut self.spans,
+                    field,
+                    decoder,
+                    MAX_SPANS_PER_SCOPE,
+                    "spans per scope",
+                    false,
+                )?,
+                3 => {
+                    self.schema_url = decode_string(
+                        field,
+                        decoder,
+                        MAX_SCHEMA_URL_BYTES,
+                        "trace scope schema URL bytes",
+                    )?;
+                }
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            if let Some(scope) = &self.scope {
+                scope.validate_otlp(budget, 0)?;
+            }
+            validate_models(&self.spans, budget, MAX_SPANS_PER_SCOPE, "spans per scope")?;
+            budget.owned_bytes(
+                self.schema_url.len(),
+                MAX_SCHEMA_URL_BYTES,
+                "trace scope schema URL bytes",
+            )?;
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(ScopeSpans);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct Span {
+        pub(crate) trace_id: Vec<u8>,
+        pub(crate) span_id: Vec<u8>,
+        pub(crate) trace_state: String,
+        pub(crate) parent_span_id: Vec<u8>,
+        pub(crate) name: String,
+        pub(crate) kind: i32,
+        pub(crate) start_time_unix_nano: u64,
+        pub(crate) end_time_unix_nano: u64,
+        pub(crate) attributes: Vec<KeyValue>,
+        pub(crate) dropped_attributes_count: u32,
+        pub(crate) events: Vec<SpanEvent>,
+        pub(crate) dropped_events_count: u32,
+        pub(crate) links: Vec<SpanLink>,
+        pub(crate) dropped_links_count: u32,
+        pub(crate) status: Option<Status>,
+        pub(crate) flags: u32,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for Span {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            if !self.trace_id.is_empty() {
+                encoder.write_bytes(1, &self.trace_id)?;
+            }
+            if !self.span_id.is_empty() {
+                encoder.write_bytes(2, &self.span_id)?;
+            }
+            if !self.trace_state.is_empty() {
+                encoder.write_string(3, &self.trace_state)?;
+            }
+            if !self.parent_span_id.is_empty() {
+                encoder.write_bytes(4, &self.parent_span_id)?;
+            }
+            if !self.name.is_empty() {
+                encoder.write_string(5, &self.name)?;
+            }
+            if self.kind != 0 {
+                encoder.write_enum(6, self.kind)?;
+            }
+            if self.start_time_unix_nano != 0 {
+                encoder.write_fixed64(7, self.start_time_unix_nano)?;
+            }
+            if self.end_time_unix_nano != 0 {
+                encoder.write_fixed64(8, self.end_time_unix_nano)?;
+            }
+            for attribute in &self.attributes {
+                encode_nested(encoder, 9, attribute)?;
+            }
+            if self.dropped_attributes_count != 0 {
+                encoder.write_varint(10, u64::from(self.dropped_attributes_count))?;
+            }
+            for event in &self.events {
+                encode_nested(encoder, 11, event)?;
+            }
+            if self.dropped_events_count != 0 {
+                encoder.write_varint(12, u64::from(self.dropped_events_count))?;
+            }
+            for link in &self.links {
+                encode_nested(encoder, 13, link)?;
+            }
+            if self.dropped_links_count != 0 {
+                encoder.write_varint(14, u64::from(self.dropped_links_count))?;
+            }
+            if let Some(status) = &self.status {
+                encode_nested(encoder, 15, status)?;
+            }
+            if self.flags != 0 {
+                encoder.write_fixed32(16, self.flags)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                1 => {
+                    self.trace_id =
+                        decode_id(field, decoder, MAX_TRACE_ID_BYTES, "span trace ID bytes")?;
+                }
+                2 => {
+                    self.span_id = decode_id(field, decoder, MAX_SPAN_ID_BYTES, "span ID bytes")?;
+                }
+                3 => {
+                    self.trace_state =
+                        decode_trace_state(field, decoder, "span trace state bytes")?;
+                }
+                4 => {
+                    self.parent_span_id =
+                        decode_id(field, decoder, MAX_SPAN_ID_BYTES, "parent span ID bytes")?;
+                }
+                5 => {
+                    self.name =
+                        decode_string(field, decoder, MAX_SPAN_NAME_BYTES, "span name bytes")?;
+                }
+                6 => self.kind = (field.as_varint()? as u32).cast_signed(),
+                7 => self.start_time_unix_nano = field.as_fixed64()?,
+                8 => self.end_time_unix_nano = field.as_fixed64()?,
+                9 => push_message(
+                    &mut self.attributes,
+                    field,
+                    decoder,
+                    MAX_ATTRIBUTES,
+                    "span attributes",
+                    false,
+                )?,
+                10 => self.dropped_attributes_count = field.as_varint()? as u32,
+                11 => push_message(
+                    &mut self.events,
+                    field,
+                    decoder,
+                    MAX_EVENTS_PER_SPAN,
+                    "span events",
+                    false,
+                )?,
+                12 => self.dropped_events_count = field.as_varint()? as u32,
+                13 => push_message(
+                    &mut self.links,
+                    field,
+                    decoder,
+                    MAX_LINKS_PER_SPAN,
+                    "span links",
+                    false,
+                )?,
+                14 => self.dropped_links_count = field.as_varint()? as u32,
+                15 => merge_optional_message(&mut self.status, field, decoder, false)?,
+                16 => self.flags = field.as_fixed32()?,
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            validate_id(
+                &self.trace_id,
+                budget,
+                MAX_TRACE_ID_BYTES,
+                false,
+                true,
+                "span trace ID bytes",
+                "span trace ID must be a nonzero sixteen-byte value",
+            )?;
+            validate_id(
+                &self.span_id,
+                budget,
+                MAX_SPAN_ID_BYTES,
+                false,
+                true,
+                "span ID bytes",
+                "span ID must be a nonzero eight-byte value",
+            )?;
+            validate_trace_state_value(&self.trace_state, budget, "span trace state bytes")?;
+            validate_id(
+                &self.parent_span_id,
+                budget,
+                MAX_SPAN_ID_BYTES,
+                true,
+                false,
+                "parent span ID bytes",
+                "parent span ID must be empty or exactly eight bytes",
+            )?;
+            if budget.enforces_invariants() && self.name.is_empty() {
+                return Err(ProtobufWireError::SchemaInvariant {
+                    offset: 0,
+                    invariant: "span name must not be empty",
+                });
+            }
+            budget.owned_bytes(self.name.len(), MAX_SPAN_NAME_BYTES, "span name bytes")?;
+            if budget.enforces_invariants() && self.start_time_unix_nano == 0 {
+                return Err(ProtobufWireError::SchemaInvariant {
+                    offset: 0,
+                    invariant: "span start_time_unix_nano must be nonzero",
+                });
+            }
+            if budget.enforces_invariants() && self.end_time_unix_nano == 0 {
+                return Err(ProtobufWireError::SchemaInvariant {
+                    offset: 0,
+                    invariant: "span end_time_unix_nano must be nonzero",
+                });
+            }
+            if budget.enforces_invariants() && self.end_time_unix_nano < self.start_time_unix_nano {
+                return Err(ProtobufWireError::SchemaInvariant {
+                    offset: 0,
+                    invariant: "span end_time_unix_nano must not precede start_time_unix_nano",
+                });
+            }
+            validate_attributes(
+                &self.attributes,
+                budget,
+                "span attributes",
+                "span attribute keys must be unique",
+            )?;
+            validate_models(&self.events, budget, MAX_EVENTS_PER_SPAN, "span events")?;
+            validate_models(&self.links, budget, MAX_LINKS_PER_SPAN, "span links")?;
+            if let Some(status) = &self.status {
+                status.validate_otlp(budget, 0)?;
+            }
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(Span);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct SpanEvent {
+        pub(crate) time_unix_nano: u64,
+        pub(crate) name: String,
+        pub(crate) attributes: Vec<KeyValue>,
+        pub(crate) dropped_attributes_count: u32,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for SpanEvent {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            if self.time_unix_nano != 0 {
+                encoder.write_fixed64(1, self.time_unix_nano)?;
+            }
+            if !self.name.is_empty() {
+                encoder.write_string(2, &self.name)?;
+            }
+            for attribute in &self.attributes {
+                encode_nested(encoder, 3, attribute)?;
+            }
+            if self.dropped_attributes_count != 0 {
+                encoder.write_varint(4, u64::from(self.dropped_attributes_count))?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                1 => self.time_unix_nano = field.as_fixed64()?,
+                2 => {
+                    self.name = decode_string(
+                        field,
+                        decoder,
+                        MAX_EVENT_NAME_BYTES,
+                        "span event name bytes",
+                    )?;
+                }
+                3 => push_message(
+                    &mut self.attributes,
+                    field,
+                    decoder,
+                    MAX_ATTRIBUTES,
+                    "span event attributes",
+                    false,
+                )?,
+                4 => self.dropped_attributes_count = field.as_varint()? as u32,
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            if budget.enforces_invariants() && self.name.is_empty() {
+                return Err(ProtobufWireError::SchemaInvariant {
+                    offset: 0,
+                    invariant: "span event name must not be empty",
+                });
+            }
+            budget.owned_bytes(
+                self.name.len(),
+                MAX_EVENT_NAME_BYTES,
+                "span event name bytes",
+            )?;
+            validate_attributes(
+                &self.attributes,
+                budget,
+                "span event attributes",
+                "span event attribute keys must be unique",
+            )?;
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(SpanEvent);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct SpanLink {
+        pub(crate) trace_id: Vec<u8>,
+        pub(crate) span_id: Vec<u8>,
+        pub(crate) trace_state: String,
+        pub(crate) attributes: Vec<KeyValue>,
+        pub(crate) dropped_attributes_count: u32,
+        pub(crate) flags: u32,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for SpanLink {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            if !self.trace_id.is_empty() {
+                encoder.write_bytes(1, &self.trace_id)?;
+            }
+            if !self.span_id.is_empty() {
+                encoder.write_bytes(2, &self.span_id)?;
+            }
+            if !self.trace_state.is_empty() {
+                encoder.write_string(3, &self.trace_state)?;
+            }
+            for attribute in &self.attributes {
+                encode_nested(encoder, 4, attribute)?;
+            }
+            if self.dropped_attributes_count != 0 {
+                encoder.write_varint(5, u64::from(self.dropped_attributes_count))?;
+            }
+            if self.flags != 0 {
+                encoder.write_fixed32(6, self.flags)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                1 => {
+                    self.trace_id = decode_id(
+                        field,
+                        decoder,
+                        MAX_TRACE_ID_BYTES,
+                        "span link trace ID bytes",
+                    )?;
+                }
+                2 => {
+                    self.span_id =
+                        decode_id(field, decoder, MAX_SPAN_ID_BYTES, "span link span ID bytes")?;
+                }
+                3 => {
+                    self.trace_state =
+                        decode_trace_state(field, decoder, "span link trace state bytes")?;
+                }
+                4 => push_message(
+                    &mut self.attributes,
+                    field,
+                    decoder,
+                    MAX_ATTRIBUTES,
+                    "span link attributes",
+                    false,
+                )?,
+                5 => self.dropped_attributes_count = field.as_varint()? as u32,
+                6 => self.flags = field.as_fixed32()?,
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            validate_id(
+                &self.trace_id,
+                budget,
+                MAX_TRACE_ID_BYTES,
+                false,
+                false,
+                "span link trace ID bytes",
+                "span link trace ID must be exactly sixteen bytes",
+            )?;
+            validate_id(
+                &self.span_id,
+                budget,
+                MAX_SPAN_ID_BYTES,
+                false,
+                false,
+                "span link span ID bytes",
+                "span link span ID must be exactly eight bytes",
+            )?;
+            validate_trace_state_value(&self.trace_state, budget, "span link trace state bytes")?;
+            validate_attributes(
+                &self.attributes,
+                budget,
+                "span link attributes",
+                "span link attribute keys must be unique",
+            )?;
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(SpanLink);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct Status {
+        pub(crate) message: String,
+        pub(crate) code: i32,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for Status {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            if !self.message.is_empty() {
+                encoder.write_string(2, &self.message)?;
+            }
+            if self.code != 0 {
+                encoder.write_enum(3, self.code)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                2 => {
+                    self.message = decode_string(
+                        field,
+                        decoder,
+                        MAX_TOTAL_OWNED_BYTES,
+                        "trace status message bytes",
+                    )?;
+                }
+                3 => self.code = (field.as_varint()? as u32).cast_signed(),
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            budget.owned_bytes(
+                self.message.len(),
+                MAX_TOTAL_OWNED_BYTES,
+                "trace status message bytes",
+            )?;
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(Status);
+}
+
 pub(crate) mod logs {
     use super::common_and_resource::{AnyValue, InstrumentationScope, KeyValue, Resource};
     use super::limits_and_error::{
@@ -3914,15 +4938,16 @@ mod tests {
     };
     use super::limits_and_error::{
         MAX_ANY_VALUE_DEPTH, MAX_ANY_VALUE_ITEMS, MAX_ATTRIBUTE_VALUE_BYTES, MAX_ATTRIBUTES,
-        MAX_DATA_POINTS_PER_METRIC, MAX_EXEMPLARS_PER_DATA_POINT,
-        MAX_EXPONENTIAL_HISTOGRAM_BUCKETS, MAX_HISTOGRAM_BUCKET_COUNTS,
-        MAX_HISTOGRAM_EXPLICIT_BOUNDS, MAX_LOG_EVENT_NAME_BYTES, MAX_LOG_RECORDS_PER_SCOPE,
-        MAX_LOG_SEVERITY_TEXT_BYTES, MAX_METRIC_DESCRIPTION_BYTES, MAX_METRIC_METADATA_ENTRIES,
-        MAX_METRIC_NAME_BYTES, MAX_METRIC_UNIT_BYTES, MAX_METRICS_PER_SCOPE,
-        MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES, MAX_RESOURCE_GROUPS_PER_REQUEST,
-        MAX_SCHEMA_URL_BYTES, MAX_SCOPES_PER_RESOURCE_GROUP, MAX_SPAN_ID_BYTES,
-        MAX_SUMMARY_QUANTILES, MAX_TOTAL_ANY_VALUE_NODES, MAX_TOTAL_OWNED_BYTES,
-        MAX_TOTAL_REPEATED_ITEMS, MAX_TRACE_ID_BYTES, ValidationBudget,
+        MAX_DATA_POINTS_PER_METRIC, MAX_EVENT_NAME_BYTES, MAX_EVENTS_PER_SPAN,
+        MAX_EXEMPLARS_PER_DATA_POINT, MAX_EXPONENTIAL_HISTOGRAM_BUCKETS,
+        MAX_HISTOGRAM_BUCKET_COUNTS, MAX_HISTOGRAM_EXPLICIT_BOUNDS, MAX_LINKS_PER_SPAN,
+        MAX_LOG_EVENT_NAME_BYTES, MAX_LOG_RECORDS_PER_SCOPE, MAX_LOG_SEVERITY_TEXT_BYTES,
+        MAX_METRIC_DESCRIPTION_BYTES, MAX_METRIC_METADATA_ENTRIES, MAX_METRIC_NAME_BYTES,
+        MAX_METRIC_UNIT_BYTES, MAX_METRICS_PER_SCOPE, MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES,
+        MAX_RESOURCE_GROUPS_PER_REQUEST, MAX_SCHEMA_URL_BYTES, MAX_SCOPES_PER_RESOURCE_GROUP,
+        MAX_SPAN_ID_BYTES, MAX_SPAN_NAME_BYTES, MAX_SPANS_PER_SCOPE, MAX_SUMMARY_QUANTILES,
+        MAX_TOTAL_ANY_VALUE_NODES, MAX_TOTAL_OWNED_BYTES, MAX_TOTAL_REPEATED_ITEMS,
+        MAX_TRACE_ID_BYTES, MAX_TRACE_STATE_BYTES, ValidationBudget,
     };
     use super::logs::{
         LogRecord, LogRecordFlags, LogsData, ResourceLogs, ScopeLogs, SeverityNumber,
@@ -3932,6 +4957,10 @@ mod tests {
         ExponentialHistogramBuckets, ExponentialHistogramDataPoint, Gauge, Histogram,
         HistogramDataPoint, Metric, MetricData, MetricsData, NumberDataPoint, NumberDataPointValue,
         ResourceMetrics, ScopeMetrics, Sum, Summary, SummaryDataPoint, SummaryValueAtQuantile,
+    };
+    use super::trace::{
+        ResourceSpans, ScopeSpans, Span, SpanEvent, SpanFlags, SpanKind, SpanLink, Status,
+        StatusCode, TracesData,
     };
     use super::{
         ProtoMessage, ProtobufWireEncoder, ProtobufWireError, ProtobufWireLimits, UnknownFields,
@@ -3991,6 +5020,702 @@ mod tests {
             flags: DataPointFlags::NO_RECORDED_VALUE_MASK.bits() | 0x8000_0000,
             unknown_fields: UnknownFields::new(),
         }
+    }
+
+    fn span_event() -> SpanEvent {
+        SpanEvent {
+            time_unix_nano: 15,
+            name: "checkpoint".to_owned(),
+            attributes: vec![attribute("event.kind", "state")],
+            dropped_attributes_count: 1,
+            unknown_fields: UnknownFields::new(),
+        }
+    }
+
+    fn span_link() -> SpanLink {
+        SpanLink {
+            trace_id: vec![0x33; MAX_TRACE_ID_BYTES],
+            span_id: vec![0x44; MAX_SPAN_ID_BYTES],
+            trace_state: "vendor=link".to_owned(),
+            attributes: vec![attribute("link.kind", "batch")],
+            dropped_attributes_count: 2,
+            flags: SpanFlags::CONTEXT_HAS_IS_REMOTE_MASK.bits()
+                | SpanFlags::CONTEXT_IS_REMOTE_MASK.bits()
+                | 0x8000_0001,
+            unknown_fields: UnknownFields::new(),
+        }
+    }
+
+    fn minimal_span() -> Span {
+        Span {
+            trace_id: vec![0x11; MAX_TRACE_ID_BYTES],
+            span_id: vec![0x22; MAX_SPAN_ID_BYTES],
+            name: "runtime.operation".to_owned(),
+            start_time_unix_nano: 10,
+            end_time_unix_nano: 20,
+            ..Span::default()
+        }
+    }
+
+    fn valid_span() -> Span {
+        Span {
+            trace_state: "vendor=span".to_owned(),
+            kind: SpanKind::Internal.as_raw(),
+            attributes: vec![attribute("component", "scheduler")],
+            dropped_attributes_count: 3,
+            dropped_events_count: 4,
+            dropped_links_count: 5,
+            flags: SpanFlags::TRACE_FLAGS_MASK.bits() | 0x8000_0000,
+            ..minimal_span()
+        }
+    }
+
+    #[test]
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants_trace_round_trip_preserves_every_field_family()
+     {
+        let mut span = valid_span();
+        span.parent_span_id = vec![0x55; MAX_SPAN_ID_BYTES];
+        span.kind = -7;
+        span.events = vec![span_event()];
+        span.links = vec![span_link()];
+        span.status = Some(Status {
+            message: "operation failed".to_owned(),
+            code: -9,
+            unknown_fields: UnknownFields::new(),
+        });
+
+        let model = TracesData {
+            resource_spans: vec![ResourceSpans {
+                resource: Some(Resource::default()),
+                scope_spans: vec![ScopeSpans {
+                    scope: Some(InstrumentationScope {
+                        name: "asupersync.runtime".to_owned(),
+                        version: "1".to_owned(),
+                        ..InstrumentationScope::default()
+                    }),
+                    spans: vec![span],
+                    schema_url: "https://opentelemetry.io/schemas/1.37.0".to_owned(),
+                    unknown_fields: UnknownFields::new(),
+                }],
+                schema_url: "https://opentelemetry.io/schemas/1.37.0".to_owned(),
+                unknown_fields: UnknownFields::new(),
+            }],
+            unknown_fields: UnknownFields::new(),
+        };
+
+        let first = model
+            .encode_to_bytes(limits())
+            .expect("encode complete trace family");
+        let decoded =
+            TracesData::decode_from_bytes(&first, limits()).expect("decode complete trace family");
+        assert_eq!(decoded, model);
+        assert_eq!(
+            decoded
+                .encode_to_bytes(limits())
+                .expect("repeat complete trace encoding"),
+            first
+        );
+
+        let decoded_span = &decoded.resource_spans[0].scope_spans[0].spans[0];
+        assert_eq!(SpanKind::from_raw(decoded_span.kind), None);
+        assert_eq!(
+            StatusCode::from_raw(
+                decoded_span
+                    .status
+                    .as_ref()
+                    .expect("status must remain present")
+                    .code
+            ),
+            None
+        );
+        assert_eq!(
+            SpanFlags::from_bits_retain(decoded_span.flags).trace_flags(),
+            0xff
+        );
+        let link_flags = SpanFlags::from_bits_retain(decoded_span.links[0].flags);
+        assert_eq!(link_flags.context_is_remote(), Some(true));
+        assert!(link_flags.contains(SpanFlags::CONTEXT_IS_REMOTE_MASK));
+        assert_eq!(link_flags.bits() & 0x8000_0000, 0x8000_0000);
+        assert_eq!(
+            SpanKind::from_raw(SpanKind::Server.as_raw()),
+            Some(SpanKind::Server)
+        );
+        assert_eq!(
+            StatusCode::from_raw(StatusCode::Error.as_raw()),
+            Some(StatusCode::Error)
+        );
+    }
+
+    #[test]
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix_trace_presence_merge_reserved_and_wire_types()
+     {
+        let mut status_message = ProtobufWireEncoder::new(limits());
+        status_message
+            .write_string(2, "merged")
+            .expect("encode status message");
+        status_message
+            .write_varint(1, 7)
+            .expect("encode reserved status tag");
+        let status_message = status_message.finish().expect("finish status message");
+        let mut status_code = ProtobufWireEncoder::new(limits());
+        status_code
+            .write_enum(3, -11)
+            .expect("encode unknown status code");
+        let status_code = status_code.finish().expect("finish status code");
+
+        let mut merged_span = valid_span()
+            .encode_to_bytes(limits())
+            .expect("encode valid span")
+            .to_vec();
+        let mut additions = ProtobufWireEncoder::new(limits());
+        additions
+            .write_message(15, &status_message)
+            .expect("encode first status occurrence");
+        additions
+            .write_message(15, &status_code)
+            .expect("encode second status occurrence");
+        additions
+            .write_varint(17, 9)
+            .expect("encode unknown span field");
+        merged_span.extend_from_slice(
+            &additions
+                .finish()
+                .expect("finish duplicate status occurrences"),
+        );
+
+        let decoded =
+            Span::decode_from_bytes(&merged_span, limits()).expect("decode merged status");
+        let status = decoded.status.as_ref().expect("status remains present");
+        assert_eq!(status.message, "merged");
+        assert_eq!(status.code, -11);
+        assert_eq!(status.unknown_fields.as_bytes(), [0x08, 0x07]);
+        assert_eq!(decoded.unknown_fields.as_bytes(), [0x88, 0x01, 0x09]);
+        assert_eq!(
+            Span::decode_from_bytes(
+                &decoded
+                    .encode_to_bytes(limits())
+                    .expect("re-encode merged status"),
+                limits(),
+            )
+            .expect("decode canonical merged status"),
+            decoded
+        );
+
+        let mut last_value_wins = ProtobufWireEncoder::new(limits());
+        last_value_wins
+            .write_bytes(1, &[0x01; MAX_TRACE_ID_BYTES - 1])
+            .expect("encode superseded short trace ID");
+        last_value_wins
+            .write_bytes(1, &[0x11; MAX_TRACE_ID_BYTES])
+            .expect("encode final valid trace ID");
+        last_value_wins
+            .write_bytes(2, &[0x22; MAX_SPAN_ID_BYTES])
+            .expect("encode valid span ID");
+        last_value_wins
+            .write_string(3, "Vendor=invalid")
+            .expect("encode superseded malformed trace state");
+        last_value_wins
+            .write_string(3, "vendor=valid")
+            .expect("encode final valid trace state");
+        last_value_wins
+            .write_string(5, "last value wins")
+            .expect("encode span name");
+        last_value_wins
+            .write_fixed64(7, 10)
+            .expect("encode span start");
+        last_value_wins
+            .write_fixed64(8, 20)
+            .expect("encode span end");
+        let last_value_wins = Span::decode_from_bytes(
+            &last_value_wins.finish().expect("finish duplicate ID span"),
+            limits(),
+        )
+        .expect("later valid span ID occurrence must supersede earlier invalid value");
+        assert_eq!(last_value_wins.trace_id, vec![0x11; MAX_TRACE_ID_BYTES]);
+        assert_eq!(last_value_wins.trace_state, "vendor=valid");
+
+        let mut link_last_value_wins = ProtobufWireEncoder::new(limits());
+        link_last_value_wins
+            .write_bytes(1, &[0; MAX_TRACE_ID_BYTES - 1])
+            .expect("encode superseded short link trace ID");
+        link_last_value_wins
+            .write_bytes(1, &[0x33; MAX_TRACE_ID_BYTES])
+            .expect("encode final valid link trace ID");
+        link_last_value_wins
+            .write_bytes(2, &[0x44; MAX_SPAN_ID_BYTES])
+            .expect("encode valid link span ID");
+        let link_last_value_wins = SpanLink::decode_from_bytes(
+            &link_last_value_wins
+                .finish()
+                .expect("finish duplicate link ID"),
+            limits(),
+        )
+        .expect("later valid link ID occurrence must supersede earlier invalid value");
+        assert_eq!(
+            link_last_value_wins.trace_id,
+            vec![0x33; MAX_TRACE_ID_BYTES]
+        );
+
+        let present_empty = Span {
+            status: Some(Status::default()),
+            ..valid_span()
+        };
+        let present_empty_wire = present_empty
+            .encode_to_bytes(limits())
+            .expect("encode present empty status");
+        assert_eq!(
+            Span::decode_from_bytes(&present_empty_wire, limits())
+                .expect("decode present empty status")
+                .status,
+            Some(Status::default())
+        );
+
+        let mut reserved_resource = ProtobufWireEncoder::new(limits());
+        reserved_resource
+            .write_varint(1000, 1)
+            .expect("encode reserved ResourceSpans tag");
+        let reserved_resource = reserved_resource
+            .finish()
+            .expect("finish reserved ResourceSpans tag");
+        let decoded_resource = ResourceSpans::decode_from_bytes(&reserved_resource, limits())
+            .expect("decode reserved ResourceSpans tag");
+        assert_eq!(
+            decoded_resource.unknown_fields.as_bytes(),
+            reserved_resource.as_ref()
+        );
+        assert_eq!(
+            decoded_resource
+                .encode_to_bytes(limits())
+                .expect("re-encode reserved ResourceSpans tag"),
+            reserved_resource
+        );
+
+        let mut wrong_flags = valid_span()
+            .encode_to_bytes(limits())
+            .expect("encode valid span for wrong-wire suffix")
+            .to_vec();
+        let mut wrong_flags_suffix = ProtobufWireEncoder::new(limits());
+        wrong_flags_suffix
+            .write_varint(16, 1)
+            .expect("encode wrong-wire span flags");
+        wrong_flags.extend_from_slice(
+            &wrong_flags_suffix
+                .finish()
+                .expect("finish wrong-wire span flags"),
+        );
+        assert!(matches!(
+            Span::decode_from_bytes(&wrong_flags, limits()),
+            Err(ProtobufWireError::WireTypeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants_trace_collection_limits_are_exact()
+     {
+        TracesData {
+            resource_spans: vec![ResourceSpans::default(); MAX_RESOURCE_GROUPS_PER_REQUEST],
+            unknown_fields: UnknownFields::new(),
+        }
+        .encode_to_bytes(limits())
+        .expect("exact trace resource-group limit");
+        assert!(matches!(
+            TracesData {
+                resource_spans: vec![
+                    ResourceSpans::default();
+                    MAX_RESOURCE_GROUPS_PER_REQUEST + 1
+                ],
+                unknown_fields: UnknownFields::new(),
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "trace resource groups",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_RESOURCE_GROUPS_PER_REQUEST + 1
+                && limit == MAX_RESOURCE_GROUPS_PER_REQUEST
+        ));
+
+        ResourceSpans {
+            scope_spans: vec![ScopeSpans::default(); MAX_SCOPES_PER_RESOURCE_GROUP],
+            ..ResourceSpans::default()
+        }
+        .encode_to_bytes(limits())
+        .expect("exact trace scope limit");
+        assert!(matches!(
+            ResourceSpans {
+                scope_spans: vec![ScopeSpans::default(); MAX_SCOPES_PER_RESOURCE_GROUP + 1],
+                ..ResourceSpans::default()
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "trace scopes per resource group",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_SCOPES_PER_RESOURCE_GROUP + 1
+                && limit == MAX_SCOPES_PER_RESOURCE_GROUP
+        ));
+
+        ScopeSpans {
+            spans: vec![minimal_span(); MAX_SPANS_PER_SCOPE],
+            ..ScopeSpans::default()
+        }
+        .encode_to_bytes(limits())
+        .expect("exact spans-per-scope limit");
+        assert!(matches!(
+            ScopeSpans {
+                spans: vec![minimal_span(); MAX_SPANS_PER_SCOPE + 1],
+                ..ScopeSpans::default()
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "spans per scope",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_SPANS_PER_SCOPE + 1 && limit == MAX_SPANS_PER_SCOPE
+        ));
+
+        let mut exact_events = valid_span();
+        exact_events.events = vec![span_event(); MAX_EVENTS_PER_SPAN];
+        exact_events
+            .encode_to_bytes(limits())
+            .expect("exact span event limit");
+        let mut over_events = valid_span();
+        over_events.events = vec![span_event(); MAX_EVENTS_PER_SPAN + 1];
+        assert!(matches!(
+            over_events.encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "span events",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_EVENTS_PER_SPAN + 1 && limit == MAX_EVENTS_PER_SPAN
+        ));
+
+        let mut exact_links = valid_span();
+        exact_links.links = vec![span_link(); MAX_LINKS_PER_SPAN];
+        exact_links
+            .encode_to_bytes(limits())
+            .expect("exact span link limit");
+        let mut over_links = valid_span();
+        over_links.links = vec![span_link(); MAX_LINKS_PER_SPAN + 1];
+        assert!(matches!(
+            over_links.encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "span links",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_LINKS_PER_SPAN + 1 && limit == MAX_LINKS_PER_SPAN
+        ));
+
+        let exact_attributes = (0..MAX_ATTRIBUTES)
+            .map(|index| attribute(&format!("trace-key-{index}"), "value"))
+            .collect::<Vec<_>>();
+        let mut exact_attribute_span = valid_span();
+        exact_attribute_span.attributes = exact_attributes;
+        exact_attribute_span
+            .encode_to_bytes(limits())
+            .expect("exact span attribute limit");
+        let mut over_attribute_span = valid_span();
+        over_attribute_span.attributes = vec![KeyValue::default(); MAX_ATTRIBUTES + 1];
+        assert!(matches!(
+            over_attribute_span.encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "span attributes",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_ATTRIBUTES + 1 && limit == MAX_ATTRIBUTES
+        ));
+
+        let span_wire = minimal_span()
+            .encode_to_bytes(limits())
+            .expect("encode reusable span fixture");
+        let mut one_over_wire = ProtobufWireEncoder::new(limits());
+        for _ in 0..=MAX_SPANS_PER_SCOPE {
+            one_over_wire
+                .write_message(2, &span_wire)
+                .expect("encode one-over span fixture");
+        }
+        assert!(matches!(
+            ScopeSpans::decode_from_bytes(
+                &one_over_wire.finish().expect("finish one-over spans"),
+                limits(),
+            ),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "spans per scope",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_SPANS_PER_SCOPE + 1 && limit == MAX_SPANS_PER_SCOPE
+        ));
+    }
+
+    #[test]
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants_trace_scalar_limits_and_semantics()
+     {
+        let mut exact = valid_span();
+        exact.name = "n".repeat(MAX_SPAN_NAME_BYTES);
+        exact.trace_state = format!("a{}={}", "b".repeat(254), "v".repeat(256));
+        assert_eq!(exact.trace_state.len(), MAX_TRACE_STATE_BYTES);
+        exact.events = vec![SpanEvent {
+            name: "e".repeat(MAX_EVENT_NAME_BYTES),
+            ..span_event()
+        }];
+        exact
+            .encode_to_bytes(limits())
+            .expect("exact trace string limits");
+
+        let mut over_name = valid_span();
+        over_name.name = "n".repeat(MAX_SPAN_NAME_BYTES + 1);
+        assert!(matches!(
+            over_name.encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "span name bytes",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_SPAN_NAME_BYTES + 1 && limit == MAX_SPAN_NAME_BYTES
+        ));
+        let mut over_state = valid_span();
+        over_state.trace_state = format!("a{}={}", "b".repeat(255), "v".repeat(256));
+        assert_eq!(over_state.trace_state.len(), MAX_TRACE_STATE_BYTES + 1);
+        assert!(matches!(
+            over_state.encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "span trace state bytes",
+                ..
+            })
+        ));
+        for malformed_trace_state in [
+            "Vendor=value".to_owned(),
+            "vendor=one,vendor=two".to_owned(),
+            "vendor=value ".to_owned(),
+            "vendor==value".to_owned(),
+            "vendor =value".to_owned(),
+            "vendor=\tvalue".to_owned(),
+            (0..33)
+                .map(|index| format!("v{index}=value"))
+                .collect::<Vec<_>>()
+                .join(","),
+        ] {
+            let mut malformed = valid_span();
+            malformed.trace_state = malformed_trace_state;
+            assert!(matches!(
+                malformed.encode_to_bytes(limits()),
+                Err(ProtobufWireError::SchemaInvariant {
+                    invariant: "trace state must use the W3C tracestate format",
+                    ..
+                })
+            ));
+        }
+        let mut work_limited = valid_span();
+        work_limited.trace_state = "vendor=value".to_owned();
+        let trace_state_work = work_limited.trace_state.len();
+        assert!(matches!(
+            work_limited.encode_to_bytes(limits().with_max_work(trace_state_work - 1)),
+            Err(ProtobufWireError::WorkLimitExceeded { work, limit, .. })
+                if work == trace_state_work && limit == trace_state_work - 1
+        ));
+        let mut over_event_name = span_event();
+        over_event_name.name = "e".repeat(MAX_EVENT_NAME_BYTES + 1);
+        assert!(matches!(
+            over_event_name.encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "span event name bytes",
+                ..
+            })
+        ));
+        assert!(
+            Status {
+                message: "x".repeat(MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES + 1),
+                ..Status::default()
+            }
+            .encode_to_bytes(limits())
+            .is_ok(),
+            "trace status messages use the recorded shared/generic bound, not the partial-success cap"
+        );
+
+        for invalid_trace_id in [
+            Vec::new(),
+            vec![0; MAX_TRACE_ID_BYTES],
+            vec![1; MAX_TRACE_ID_BYTES - 1],
+            vec![1; MAX_TRACE_ID_BYTES + 1],
+        ] {
+            let mut span = valid_span();
+            span.trace_id = invalid_trace_id;
+            assert!(matches!(
+                span.encode_to_bytes(limits()),
+                Err(ProtobufWireError::SchemaInvariant {
+                    invariant: "span trace ID must be a nonzero sixteen-byte value",
+                    ..
+                })
+            ));
+        }
+        for invalid_span_id in [
+            Vec::new(),
+            vec![0; MAX_SPAN_ID_BYTES],
+            vec![1; MAX_SPAN_ID_BYTES - 1],
+            vec![1; MAX_SPAN_ID_BYTES + 1],
+        ] {
+            let mut span = valid_span();
+            span.span_id = invalid_span_id;
+            assert!(matches!(
+                span.encode_to_bytes(limits()),
+                Err(ProtobufWireError::SchemaInvariant {
+                    invariant: "span ID must be a nonzero eight-byte value",
+                    ..
+                })
+            ));
+        }
+        let mut invalid_parent = valid_span();
+        invalid_parent.parent_span_id = vec![0; MAX_SPAN_ID_BYTES];
+        invalid_parent
+            .encode_to_bytes(limits())
+            .expect("exact-width zero parent span ID follows the pinned width contract");
+        invalid_parent.parent_span_id = vec![1; MAX_SPAN_ID_BYTES - 1];
+        assert!(matches!(
+            invalid_parent.encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "parent span ID must be empty or exactly eight bytes",
+                ..
+            })
+        ));
+        assert!(matches!(
+            SpanLink::default().encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "span link trace ID must be exactly sixteen bytes",
+                ..
+            })
+        ));
+        SpanLink {
+            trace_id: vec![0; MAX_TRACE_ID_BYTES],
+            span_id: vec![0; MAX_SPAN_ID_BYTES],
+            ..SpanLink::default()
+        }
+        .encode_to_bytes(limits())
+        .expect("exact-width zero link IDs follow the pinned width contract");
+
+        let mut empty_name = valid_span();
+        empty_name.name.clear();
+        assert!(matches!(
+            empty_name.encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "span name must not be empty",
+                ..
+            })
+        ));
+        assert!(matches!(
+            SpanEvent::default().encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "span event name must not be empty",
+                ..
+            })
+        ));
+        let mut zero_start = valid_span();
+        zero_start.start_time_unix_nano = 0;
+        assert!(matches!(
+            zero_start.encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "span start_time_unix_nano must be nonzero",
+                ..
+            })
+        ));
+        let mut zero_end = valid_span();
+        zero_end.end_time_unix_nano = 0;
+        assert!(matches!(
+            zero_end.encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "span end_time_unix_nano must be nonzero",
+                ..
+            })
+        ));
+        let mut reversed = valid_span();
+        reversed.start_time_unix_nano = 21;
+        reversed.end_time_unix_nano = 20;
+        assert!(matches!(
+            reversed.encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "span end_time_unix_nano must not precede start_time_unix_nano",
+                ..
+            })
+        ));
+        let mut duplicate_attributes = valid_span();
+        duplicate_attributes.attributes =
+            vec![attribute("duplicate", "one"), attribute("duplicate", "two")];
+        assert!(matches!(
+            duplicate_attributes.encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "span attribute keys must be unique",
+                ..
+            })
+        ));
+
+        let mut invalid_id_wire = ProtobufWireEncoder::new(limits());
+        invalid_id_wire
+            .write_bytes(1, &[1; MAX_TRACE_ID_BYTES - 1])
+            .expect("encode invalid trace ID fixture");
+        assert!(matches!(
+            Span::decode_from_bytes(
+                &invalid_id_wire.finish().expect("finish invalid trace ID"),
+                limits(),
+            ),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "span trace ID must be a nonzero sixteen-byte value",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__lab_lifecycle_trace_failure_state() {
+        let mut malformed = ProtobufWireEncoder::new(limits());
+        malformed
+            .write_string(5, "retained before ID failure")
+            .expect("encode retained span name");
+        malformed
+            .write_bytes(1, &[1; MAX_TRACE_ID_BYTES - 1])
+            .expect("encode invalid trace ID");
+        let malformed = malformed.finish().expect("finish malformed span");
+        assert!(Span::decode_from_bytes(&malformed, limits()).is_err());
+
+        let mut merge_target = Span::default();
+        assert!(merge_target.merge_from_bytes(&malformed, limits()).is_err());
+        assert_eq!(merge_target.name, "retained before ID failure");
+        assert_eq!(merge_target.trace_id, vec![1; MAX_TRACE_ID_BYTES - 1]);
+
+        let mut valid_merge_target = valid_span();
+        assert!(
+            valid_merge_target
+                .merge_from_bytes(&malformed, limits())
+                .is_err()
+        );
+        assert_eq!(valid_merge_target.name, "retained before ID failure");
+        assert_eq!(valid_merge_target.trace_id, vec![1; MAX_TRACE_ID_BYTES - 1]);
+        assert_eq!(valid_merge_target.span_id, vec![0x22; MAX_SPAN_ID_BYTES]);
+    }
+
+    #[test]
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__downstream_consumer_trace_generic_codec() {
+        let model = TracesData {
+            resource_spans: vec![ResourceSpans {
+                scope_spans: vec![ScopeSpans {
+                    spans: vec![valid_span()],
+                    ..ScopeSpans::default()
+                }],
+                ..ResourceSpans::default()
+            }],
+            unknown_fields: UnknownFields::new(),
+        };
+        let mut codec: ProtoCodec<TracesData, TracesData> = ProtoCodec::new();
+        let encoded = codec.encode(&model).expect("generic traces codec encode");
+        assert_eq!(
+            codec.decode(&encoded).expect("generic traces codec decode"),
+            model
+        );
     }
 
     #[test]
