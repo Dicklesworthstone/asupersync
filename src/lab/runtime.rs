@@ -357,7 +357,7 @@ impl LabConfigSummary {
         use std::hash::{Hash, Hasher};
         // DefaultHasher is NOT stable across Rust versions; DetHasher uses a
         // fixed algorithm and seed for cross-version deterministic hashing.
-        let mut h = crate::util::DetHasher::default();
+        let mut h = crate::util::DetHasher::for_lab();
         self.seed.hash(&mut h);
         self.entropy_seed.hash(&mut h);
         self.worker_count.hash(&mut h);

@@ -818,7 +818,7 @@ impl DporExplorer {
                     }
                     self.sleep_set.insert(bp, &trace_events);
 
-                    let mut hasher = crate::util::DetHasher::default();
+                    let mut hasher = crate::util::DetHasher::for_lab();
                     seed.hash(&mut hasher);
                     bp.divergence_index.hash(&mut hasher);
                     bp.race.earlier.hash(&mut hasher);
@@ -1270,7 +1270,7 @@ pub(crate) fn score_trace_topology(
 }
 
 fn derive_seed(seed: u64, class: ClassId, index: u64) -> u64 {
-    let mut hasher = DetHasher::default();
+    let mut hasher = DetHasher::for_lab();
     seed.hash(&mut hasher);
     class.birth.hash(&mut hasher);
     class.death.hash(&mut hasher);

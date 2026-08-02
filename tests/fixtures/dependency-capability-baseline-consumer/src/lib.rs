@@ -706,6 +706,74 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_identity_surfaces_are_stable_without_test_internals() {
+        let seed = 0xA5A5_5A5A_DEAD_BEEF;
+        assert_eq!(
+            asupersync::trace::scoring::seed_fingerprint(seed),
+            asupersync::trace::scoring::seed_fingerprint(seed),
+            "seed fingerprints must not depend on per-call production entropy",
+        );
+
+        let config = asupersync::lab::LabConfig::new(seed);
+        let summary = asupersync::lab::LabConfigSummary::from_config(&config);
+        assert_eq!(
+            summary.config_hash(),
+            summary.config_hash(),
+            "lab configuration identity must be replay-stable",
+        );
+
+        let event = asupersync::trace::event::TraceEvent::new(
+            7,
+            asupersync::types::Time::ZERO,
+            asupersync::trace::event::TraceEventKind::UserTrace,
+            asupersync::trace::event::TraceData::Message("downstream identity".to_owned()),
+        );
+        let events = [event.clone()];
+
+        let mut first_certificate = asupersync::trace::TraceCertificate::new();
+        first_certificate.record_event(&event);
+        let mut second_certificate = asupersync::trace::TraceCertificate::new();
+        second_certificate.record_event(&event);
+        assert_eq!(
+            first_certificate.event_hash(),
+            second_certificate.event_hash(),
+            "trace certificates must be byte-replayable in production builds",
+        );
+
+        assert_eq!(
+            asupersync::trace::trace_fingerprint(&events),
+            asupersync::trace::trace_fingerprint(&events),
+            "canonical trace fingerprints must be replay-stable",
+        );
+        assert_eq!(
+            asupersync::trace::canonicalize(&events).fingerprint(),
+            asupersync::trace::canonicalize(&events).fingerprint(),
+            "Foata fingerprints must be replay-stable",
+        );
+
+        let task = asupersync::types::TaskId::testing_default();
+        let mut first_schedule =
+            asupersync::runtime::scheduler::ScheduleCertificate::new();
+        first_schedule.record(
+            task,
+            asupersync::runtime::scheduler::DispatchLane::Ready,
+            11,
+        );
+        let mut second_schedule =
+            asupersync::runtime::scheduler::ScheduleCertificate::new();
+        second_schedule.record(
+            task,
+            asupersync::runtime::scheduler::DispatchLane::Ready,
+            11,
+        );
+        assert_eq!(
+            first_schedule.hash(),
+            second_schedule.hash(),
+            "schedule certificates must be replay-stable",
+        );
+    }
+
+    #[test]
     fn standalone_lockfile_pins_consumer_resolution() {
         let lock_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock");
         let lock = std::fs::read_to_string(&lock_path).expect("standalone Cargo.lock");
