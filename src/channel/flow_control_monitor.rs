@@ -62,6 +62,9 @@ pub enum FlowControlType {
     WindowBased,
 }
 
+/// Reserve waits are capacity ownership waits when the event carries no finer reason.
+const RESERVE_FLOW_CONTROL: FlowControlType = FlowControlType::CapacityLimit;
+
 /// Flow control events that can affect channel operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlowControlEvent {
@@ -298,6 +301,13 @@ impl FlowWaitIdentity {
             kind: FlowWaitKind::Reserve(permit_id),
         }
     }
+
+    fn control_type(self) -> FlowControlType {
+        match self.kind {
+            FlowWaitKind::Producer(reason) => reason,
+            FlowWaitKind::Reserve(_) => RESERVE_FLOW_CONTROL,
+        }
+    }
 }
 
 /// State tracking for a task's interaction with flow control.
@@ -320,8 +330,8 @@ struct TaskFlowState {
 /// State tracking for a channel's flow control.
 #[derive(Debug, Clone)]
 struct ChannelFlowState {
-    /// Current flow control mechanisms active on this channel.
-    active_controls: HashSet<FlowControlType>,
+    /// Current flow control mechanisms and their live-owner counts.
+    active_controls: HashMap<FlowControlType, usize>,
     /// Tasks currently blocked on this channel and their live-wait counts.
     blocked_tasks: HashMap<TaskId, usize>,
     /// Current capacity/credits available.
@@ -331,8 +341,8 @@ struct ChannelFlowState {
     max_queue_depth: usize,
     /// Whether backpressure is currently applied.
     backpressure_active: bool,
-    /// Consumer tasks applying backpressure.
-    backpressure_consumers: HashSet<TaskId>,
+    /// Consumer tasks applying backpressure and their first observed timestamps.
+    backpressure_consumers: HashMap<TaskId, Time>,
     /// Time when backpressure was first applied.
     backpressure_start_time: Option<Time>,
 }
@@ -350,13 +360,33 @@ fn new_task_flow_state() -> TaskFlowState {
 
 fn new_channel_flow_state() -> ChannelFlowState {
     ChannelFlowState {
-        active_controls: HashSet::new(),
+        active_controls: HashMap::new(),
         blocked_tasks: HashMap::new(),
         available_capacity: None,
         max_queue_depth: 0,
         backpressure_active: false,
-        backpressure_consumers: HashSet::new(),
+        backpressure_consumers: HashMap::new(),
         backpressure_start_time: None,
+    }
+}
+
+impl ChannelFlowState {
+    fn add_active_control(&mut self, control: FlowControlType) {
+        *self.active_controls.entry(control).or_default() += 1;
+    }
+
+    fn remove_active_control(&mut self, control: FlowControlType) -> bool {
+        match self.active_controls.entry(control) {
+            Entry::Occupied(mut active) if *active.get() > 1 => {
+                *active.get_mut() -= 1;
+                true
+            }
+            Entry::Occupied(active) => {
+                active.remove();
+                true
+            }
+            Entry::Vacant(_) => false,
+        }
     }
 }
 
@@ -650,6 +680,7 @@ impl FlowControlMonitor {
             .blocked_tasks
             .entry(identity.task_id)
             .or_default() += 1;
+        channel_state.add_active_control(identity.control_type());
 
         self.deadlock_detector
             .add_dependency(identity.task_id, identity.channel_id);
@@ -696,6 +727,11 @@ impl FlowControlMonitor {
             if remove_task {
                 channel_state.blocked_tasks.remove(&identity.task_id);
             }
+            let removed_control = channel_state.remove_active_control(identity.control_type());
+            debug_assert!(
+                removed_control,
+                "live wait must have a matching active-control owner"
+            );
         }
 
         self.deadlock_detector
@@ -705,6 +741,26 @@ impl FlowControlMonitor {
 
     fn has_wait(&self, identity: FlowWaitIdentity) -> bool {
         self.active_waits.contains_key(&identity)
+    }
+
+    fn typed_active_waits(&self) -> HashMap<(TaskId, u64, FlowControlType), Time> {
+        let mut typed_waits: HashMap<(TaskId, u64, FlowControlType), Time> = HashMap::new();
+        for (&identity, &timestamp) in &self.active_waits {
+            let key = (
+                identity.task_id,
+                identity.channel_id,
+                identity.control_type(),
+            );
+            match typed_waits.entry(key) {
+                Entry::Occupied(mut first_observed) => {
+                    *first_observed.get_mut() = (*first_observed.get()).min(timestamp);
+                }
+                Entry::Vacant(first_observed) => {
+                    first_observed.insert(timestamp);
+                }
+            }
+        }
+        typed_waits
     }
 
     /// Records a flow control event.
@@ -758,11 +814,6 @@ impl FlowControlMonitor {
                     FlowWaitIdentity::producer(*task_id, *channel_id, *reason),
                     *timestamp,
                 );
-                self.channel_states
-                    .entry(*channel_id)
-                    .or_insert_with(new_channel_flow_state)
-                    .active_controls
-                    .insert(*reason);
             }
 
             FlowControlEvent::ProducerUnblocked {
@@ -798,12 +849,21 @@ impl FlowControlMonitor {
                     .or_insert_with(new_channel_flow_state);
 
                 channel_state.backpressure_active = true;
-                channel_state.backpressure_consumers.insert(*consumer_task);
-                channel_state.max_queue_depth = channel_state.max_queue_depth.max(*queue_depth);
-
-                if channel_state.backpressure_start_time.is_none() {
-                    channel_state.backpressure_start_time = Some(*timestamp);
+                match channel_state.backpressure_consumers.entry(*consumer_task) {
+                    Entry::Occupied(mut consumer) => {
+                        *consumer.get_mut() = (*consumer.get()).min(*timestamp);
+                    }
+                    Entry::Vacant(consumer) => {
+                        consumer.insert(*timestamp);
+                        channel_state.add_active_control(FlowControlType::ConsumerBackpressure);
+                    }
                 }
+                channel_state.max_queue_depth = channel_state.max_queue_depth.max(*queue_depth);
+                channel_state.backpressure_start_time = Some(
+                    channel_state
+                        .backpressure_start_time
+                        .map_or(*timestamp, |first| first.min(*timestamp)),
+                );
             }
 
             FlowControlEvent::BackpressureReleased {
@@ -812,11 +872,16 @@ impl FlowControlMonitor {
                 ..
             } => {
                 if let Some(channel_state) = self.channel_states.get_mut(channel_id) {
-                    channel_state.backpressure_consumers.remove(consumer_task);
-
-                    if channel_state.backpressure_consumers.is_empty() {
-                        channel_state.backpressure_active = false;
-                        channel_state.backpressure_start_time = None;
+                    if channel_state
+                        .backpressure_consumers
+                        .remove(consumer_task)
+                        .is_some()
+                    {
+                        channel_state.remove_active_control(FlowControlType::ConsumerBackpressure);
+                        channel_state.backpressure_active =
+                            !channel_state.backpressure_consumers.is_empty();
+                        channel_state.backpressure_start_time =
+                            channel_state.backpressure_consumers.values().copied().min();
                     }
                 }
             }
@@ -938,29 +1003,20 @@ impl FlowControlMonitor {
         let blocking_threshold_ns = self.config.deadlock_detection_threshold_s * 1_000_000_000;
         let mut new_violations = Vec::new();
 
-        for (&task_id, task_state) in &self.task_states {
-            if let Some(first_block_time) = task_state.first_block_time {
-                let blocked_duration_ns = current_time
-                    .as_nanos()
-                    .saturating_sub(first_block_time.as_nanos());
-
-                if blocked_duration_ns >= blocking_threshold_ns {
-                    for &channel_id in task_state.blocked_channels.keys() {
-                        if let Some(channel_state) = self.channel_states.get(&channel_id) {
-                            for &flow_control_type in &channel_state.active_controls {
-                                let violation = FlowControlViolation::IndefiniteBlocking {
-                                    channel_id,
-                                    blocked_task: task_id,
-                                    flow_control_type,
-                                    block_duration_s: blocked_duration_ns / 1_000_000_000,
-                                    timestamp: current_time,
-                                };
-
-                                new_violations.push(violation);
-                            }
-                        }
-                    }
-                }
+        for ((task_id, channel_id, flow_control_type), first_block_time) in
+            self.typed_active_waits()
+        {
+            let blocked_duration_ns = current_time
+                .as_nanos()
+                .saturating_sub(first_block_time.as_nanos());
+            if blocked_duration_ns >= blocking_threshold_ns {
+                new_violations.push(FlowControlViolation::IndefiniteBlocking {
+                    channel_id,
+                    blocked_task: task_id,
+                    flow_control_type,
+                    block_duration_s: blocked_duration_ns / 1_000_000_000,
+                    timestamp: current_time,
+                });
             }
         }
 
@@ -973,12 +1029,15 @@ impl FlowControlMonitor {
         let cancellation_threshold_ns = self.config.deadlock_detection_threshold_s * 1_000_000_000;
         let mut new_violations = Vec::new();
 
-        for (&task_id, task_state) in &self.task_states {
+        for ((task_id, channel_id, flow_control_type), _) in self.typed_active_waits() {
+            let Some(task_state) = self.task_states.get(&task_id) else {
+                continue;
+            };
             let Some(cancel_time) = task_state.cancel_time else {
                 continue;
             };
 
-            if !task_state.is_cancelled || task_state.blocked_channels.is_empty() {
+            if !task_state.is_cancelled {
                 continue;
             }
 
@@ -989,19 +1048,13 @@ impl FlowControlMonitor {
                 continue;
             }
 
-            for &channel_id in task_state.blocked_channels.keys() {
-                if let Some(channel_state) = self.channel_states.get(&channel_id) {
-                    for &flow_control_type in &channel_state.active_controls {
-                        new_violations.push(FlowControlViolation::CancellationUnblockFailure {
-                            channel_id,
-                            cancelled_task: task_id,
-                            flow_control_type,
-                            time_since_cancel_s: time_since_cancel_ns / 1_000_000_000,
-                            timestamp: current_time,
-                        });
-                    }
-                }
-            }
+            new_violations.push(FlowControlViolation::CancellationUnblockFailure {
+                channel_id,
+                cancelled_task: task_id,
+                flow_control_type,
+                time_since_cancel_s: time_since_cancel_ns / 1_000_000_000,
+                timestamp: current_time,
+            });
         }
 
         for violation in new_violations {
@@ -1011,6 +1064,29 @@ impl FlowControlMonitor {
 
     fn check_terminal_identity(&mut self, event: &FlowControlEvent, current_time: Time) {
         match event {
+            FlowControlEvent::BackpressureReleased {
+                channel_id,
+                consumer_task,
+                ..
+            } => {
+                let has_matching_owner = self
+                    .channel_states
+                    .get(channel_id)
+                    .is_some_and(|state| state.backpressure_consumers.contains_key(consumer_task));
+                if !has_matching_owner {
+                    self.record_violation(
+                        FlowControlViolation::FlowControlInconsistency {
+                            channel_id: *channel_id,
+                            expected_state: format!(
+                                "matching backpressure owner task {consumer_task:?}"
+                            ),
+                            actual_state: "backpressure release without matching owner".to_string(),
+                            timestamp: current_time,
+                        },
+                        current_time,
+                    );
+                }
+            }
             FlowControlEvent::ProducerUnblocked {
                 channel_id,
                 task_id,
@@ -2100,5 +2176,287 @@ mod tests {
                 && *flow_control_type == FlowControlType::ConsumerBackpressure
                 && *time_since_cancel_s == 2
         )));
+    }
+
+    #[test]
+    fn producer_control_refcounts_follow_live_waits() {
+        let mut monitor = FlowControlMonitor::with_defaults();
+        let channel_id = 201;
+        let reason = FlowControlType::RateLimit;
+        let first_task = TaskId::new_for_test(21, 0);
+        let second_task = TaskId::new_for_test(22, 0);
+
+        for task_id in [first_task, second_task] {
+            monitor.record_event(FlowControlEvent::ProducerBlocked {
+                channel_id,
+                task_id,
+                reason,
+                timestamp: Time::from_secs(1),
+            });
+        }
+
+        assert_eq!(
+            monitor.channel_states[&channel_id]
+                .active_controls
+                .get(&reason),
+            Some(&2)
+        );
+        assert_eq!(monitor.stats().channels_under_flow_control, 1);
+
+        monitor.record_event(FlowControlEvent::ProducerUnblocked {
+            channel_id,
+            task_id: first_task,
+            reason,
+            blocked_duration_ms: 1,
+            timestamp: Time::from_secs(2),
+        });
+        assert_eq!(
+            monitor.channel_states[&channel_id]
+                .active_controls
+                .get(&reason),
+            Some(&1)
+        );
+        assert_eq!(monitor.stats().channels_under_flow_control, 1);
+
+        monitor.record_event(FlowControlEvent::ProducerUnblocked {
+            channel_id,
+            task_id: second_task,
+            reason,
+            blocked_duration_ms: 1,
+            timestamp: Time::from_secs(2),
+        });
+        assert!(
+            monitor.channel_states[&channel_id]
+                .active_controls
+                .is_empty()
+        );
+        assert_eq!(monitor.stats().channels_under_flow_control, 0);
+
+        monitor.cleanup_old_state(Time::from_secs(400));
+        assert!(!monitor.channel_states.contains_key(&channel_id));
+    }
+
+    #[test]
+    fn backpressure_control_refcounts_follow_consumer_owners() {
+        let mut monitor = FlowControlMonitor::with_defaults();
+        let channel_id = 202;
+        let first_consumer = TaskId::new_for_test(23, 0);
+        let second_consumer = TaskId::new_for_test(24, 0);
+        let unknown_consumer = TaskId::new_for_test(25, 0);
+
+        monitor.record_event(FlowControlEvent::BackpressureApplied {
+            channel_id,
+            consumer_task: first_consumer,
+            queue_depth: 2,
+            timestamp: Time::from_secs(2),
+        });
+        monitor.record_event(FlowControlEvent::BackpressureApplied {
+            channel_id,
+            consumer_task: first_consumer,
+            queue_depth: 3,
+            timestamp: Time::from_secs(1),
+        });
+        monitor.record_event(FlowControlEvent::BackpressureApplied {
+            channel_id,
+            consumer_task: second_consumer,
+            queue_depth: 4,
+            timestamp: Time::from_secs(3),
+        });
+
+        let state = &monitor.channel_states[&channel_id];
+        assert_eq!(
+            state
+                .active_controls
+                .get(&FlowControlType::ConsumerBackpressure),
+            Some(&2)
+        );
+        assert_eq!(state.backpressure_start_time, Some(Time::from_secs(1)));
+
+        monitor.record_event(FlowControlEvent::BackpressureReleased {
+            channel_id,
+            consumer_task: unknown_consumer,
+            new_queue_depth: 3,
+            timestamp: Time::from_secs(4),
+        });
+        assert_eq!(
+            monitor.channel_states[&channel_id]
+                .active_controls
+                .get(&FlowControlType::ConsumerBackpressure),
+            Some(&2)
+        );
+        assert!(matches!(
+            monitor.violations().back().map(|report| &report.violation),
+            Some(FlowControlViolation::FlowControlInconsistency { .. })
+        ));
+
+        monitor.record_event(FlowControlEvent::BackpressureReleased {
+            channel_id,
+            consumer_task: first_consumer,
+            new_queue_depth: 2,
+            timestamp: Time::from_secs(5),
+        });
+        let state = &monitor.channel_states[&channel_id];
+        assert_eq!(
+            state
+                .active_controls
+                .get(&FlowControlType::ConsumerBackpressure),
+            Some(&1)
+        );
+        assert!(state.backpressure_active);
+        assert_eq!(state.backpressure_start_time, Some(Time::from_secs(3)));
+
+        monitor.record_event(FlowControlEvent::BackpressureReleased {
+            channel_id,
+            consumer_task: second_consumer,
+            new_queue_depth: 0,
+            timestamp: Time::from_secs(6),
+        });
+        let state = &monitor.channel_states[&channel_id];
+        assert!(state.active_controls.is_empty());
+        assert!(!state.backpressure_active);
+        assert!(state.backpressure_start_time.is_none());
+        assert_eq!(monitor.stats().channels_under_flow_control, 0);
+    }
+
+    #[test]
+    fn reserve_wait_reports_capacity_for_indefinite_and_cancellation() {
+        let mut config = FlowControlConfig::default();
+        config.deadlock_detection_threshold_s = 1;
+        let mut monitor = FlowControlMonitor::new(config);
+        let task_id = TaskId::new_for_test(26, 0);
+        let channel_id = 203;
+
+        monitor.record_event(FlowControlEvent::ReserveBlocked {
+            channel_id,
+            task_id,
+            permit_id: 5_001,
+            timestamp: Time::from_secs(1),
+        });
+        monitor.record_task_cancel(task_id, Time::from_secs(2));
+        monitor.record_event(FlowControlEvent::BackpressureApplied {
+            channel_id: 999,
+            consumer_task: TaskId::new_for_test(27, 0),
+            queue_depth: 1,
+            timestamp: Time::from_secs(4),
+        });
+
+        assert!(monitor.violations().iter().any(|report| matches!(
+            &report.violation,
+            FlowControlViolation::IndefiniteBlocking {
+                channel_id: violation_channel,
+                blocked_task,
+                flow_control_type: FlowControlType::CapacityLimit,
+                block_duration_s: 3,
+                ..
+            } if *violation_channel == channel_id && *blocked_task == task_id
+        )));
+        assert!(monitor.violations().iter().any(|report| matches!(
+            &report.violation,
+            FlowControlViolation::CancellationUnblockFailure {
+                channel_id: violation_channel,
+                cancelled_task,
+                flow_control_type: FlowControlType::CapacityLimit,
+                time_since_cancel_s: 2,
+                ..
+            } if *violation_channel == channel_id && *cancelled_task == task_id
+        )));
+    }
+
+    #[test]
+    fn typed_wait_violations_do_not_cross_attribute_channel_controls() {
+        let mut config = FlowControlConfig::default();
+        config.deadlock_detection_threshold_s = 1;
+        let mut monitor = FlowControlMonitor::new(config);
+        let channel_id = 204;
+        let rate_limited = TaskId::new_for_test(28, 0);
+        let capacity_limited = TaskId::new_for_test(29, 0);
+
+        monitor.record_event(FlowControlEvent::ProducerBlocked {
+            channel_id,
+            task_id: rate_limited,
+            reason: FlowControlType::RateLimit,
+            timestamp: Time::from_secs(1),
+        });
+        monitor.record_event(FlowControlEvent::ProducerBlocked {
+            channel_id,
+            task_id: capacity_limited,
+            reason: FlowControlType::CapacityLimit,
+            timestamp: Time::from_secs(1),
+        });
+        monitor.record_event(FlowControlEvent::BackpressureApplied {
+            channel_id: 998,
+            consumer_task: TaskId::new_for_test(30, 0),
+            queue_depth: 1,
+            timestamp: Time::from_secs(3),
+        });
+
+        let typed_reports: Vec<_> = monitor
+            .violations()
+            .iter()
+            .filter_map(|report| match report.violation {
+                FlowControlViolation::IndefiniteBlocking {
+                    channel_id: violation_channel,
+                    blocked_task,
+                    flow_control_type,
+                    ..
+                } if violation_channel == channel_id => Some((blocked_task, flow_control_type)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(typed_reports.len(), 2);
+        assert!(typed_reports.contains(&(rate_limited, FlowControlType::RateLimit)));
+        assert!(typed_reports.contains(&(capacity_limited, FlowControlType::CapacityLimit)));
+    }
+
+    #[test]
+    fn removed_producer_reason_does_not_label_later_reserve_wait() {
+        let mut config = FlowControlConfig::default();
+        config.deadlock_detection_threshold_s = 1;
+        let mut monitor = FlowControlMonitor::new(config);
+        let task_id = TaskId::new_for_test(31, 0);
+        let channel_id = 205;
+
+        monitor.record_event(FlowControlEvent::ProducerBlocked {
+            channel_id,
+            task_id,
+            reason: FlowControlType::RateLimit,
+            timestamp: Time::from_secs(1),
+        });
+        monitor.record_event(FlowControlEvent::ProducerUnblocked {
+            channel_id,
+            task_id,
+            reason: FlowControlType::RateLimit,
+            blocked_duration_ms: 1,
+            timestamp: Time::from_secs(2),
+        });
+        monitor.record_event(FlowControlEvent::ReserveBlocked {
+            channel_id,
+            task_id,
+            permit_id: 5_002,
+            timestamp: Time::from_secs(3),
+        });
+        monitor.record_event(FlowControlEvent::BackpressureApplied {
+            channel_id: 997,
+            consumer_task: TaskId::new_for_test(32, 0),
+            queue_depth: 1,
+            timestamp: Time::from_secs(5),
+        });
+
+        let reported_types: Vec<_> = monitor
+            .violations()
+            .iter()
+            .filter_map(|report| match report.violation {
+                FlowControlViolation::IndefiniteBlocking {
+                    channel_id: violation_channel,
+                    blocked_task,
+                    flow_control_type,
+                    ..
+                } if violation_channel == channel_id && blocked_task == task_id => {
+                    Some(flow_control_type)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reported_types, vec![FlowControlType::CapacityLimit]);
     }
 }
