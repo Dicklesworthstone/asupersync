@@ -1,7 +1,7 @@
 //! Fail-closed contract for the finite owned OTLP protobuf schema authority.
 //!
 //! Bead: asupersync-5z2scg.1.3
-//! Fixture: artifacts/protobuf_owned_otlp_schema_v1.json
+//! Fixture: `artifacts/protobuf_owned_otlp_schema_v1.json`
 //!
 //! This test freezes the reviewed v1.10.0 schema inventory, its resource and
 //! evolution policy, live repository pins, operator documentation, and the
@@ -23,8 +23,8 @@ use std::path::PathBuf;
 
 const ARTIFACT_PATH: &str = "artifacts/protobuf_owned_otlp_schema_v1.json";
 const DOC_PATH: &str = "docs/protobuf_owned_otlp_schema.md";
-const ARTIFACT_SHA256: &str = "4638f7e82ec72cc38e0bf8b7c0e297b797438d980ab401334b78088c6caa093b";
-const DOC_SHA256: &str = "abd9d7303e3c4ec17fbbfbe3f28f6a3448b95558f5f9a46a88146f1a814c1694";
+const ARTIFACT_SHA256: &str = "4c3d9775f22dc5e3beea2e65d6aac7af6cff25eb37f5cf1ad834039fe7ae683c";
+const DOC_SHA256: &str = "ad67734ddaabaceb0ff467dbbd37c1848c956d2c1843e5d424ddfc3958f5f453";
 const SCHEMA_SIGNATURE_SHA256: &str =
     "2b9311b5c766da1b2fb88262aeb89e125c41f8ea4d8406e534a2e9b42839256b";
 const ENUM_SIGNATURE_SHA256: &str =
@@ -37,6 +37,31 @@ const REPOSITORY_PIN_SIGNATURE_SHA256: &str =
     "8375779ab9db78b1b832f0aac686e315126553dda3c08a09ff65f0dc0d488510";
 const DOC_BEGIN: &str = "<!-- BEGIN PROTOBUF OWNED OTLP SCHEMA -->";
 const DOC_END: &str = "<!-- END PROTOBUF OWNED OTLP SCHEMA -->";
+
+const EXPECTED_PLANNED_MUTATIONS: [&str; 9] = [
+    "remove one message family",
+    "duplicate or renumber a tag",
+    "change one wire kind or packed bit",
+    "remove unknown fields from one message",
+    "set one count or byte cap to zero/unbounded",
+    "promote fuzz Cargo.lock 0.31.0 to authority",
+    "label wrapper commit as upstream schema commit",
+    "allow post-decode-only resource validation",
+    "authorize public prost removal or transport cutover",
+];
+
+const EXPECTED_NO_CLAIMS: [&str; 10] = [
+    "This packet does not implement, compile, or execute any owned OTLP message type.",
+    "It does not prove any valid, malformed, resource, property, differential, or fuzz vector.",
+    "It does not prove byte parity with opentelemetry-proto, another language, or a live collector.",
+    "It does not wire metrics, traces, logs, partial-success responses, HTTP, gRPC, retry, cancellation, batching, or shutdown.",
+    "It does not establish incumbent parity for the new A3 semantic limits; downstream adapters must prove chunking, rejection, or counted truncation per capability.",
+    "It does not add opentelemetry-proto, tonic, tokio, or another runtime to a production graph.",
+    "It does not change any public API, generic downstream protobuf capability, feature, target, persisted format, or user journey.",
+    "It does not authorize removing prost, opentelemetry, opentelemetry_sdk, or any generated differential oracle.",
+    "It does not authorize production cutover, transport integration, dependency retirement, or tracker closure.",
+    "It does not prove performance, allocation, RSS, throughput, latency, broad workspace health, release readiness, live RCH fleet availability, local Cargo fallback approval, or permission to delete files.",
+];
 
 type ValidationResult<T = ()> = Result<T, String>;
 
@@ -238,7 +263,9 @@ fn require_exact_keys(value: &Value, expected: &[&str], context: &str) -> Valida
         .collect::<BTreeSet<_>>();
     let expected = expected.iter().copied().collect::<BTreeSet<_>>();
     if actual != expected {
-        return Err(format!("{context} keys differ: expected {expected:?}, got {actual:?}"));
+        return Err(format!(
+            "{context} keys differ: expected {expected:?}, got {actual:?}"
+        ));
     }
     Ok(())
 }
@@ -255,6 +282,25 @@ fn require_allowed_keys(value: &Value, allowed: &[&str], context: &str) -> Valid
         return Err(format!("{context} has unknown keys: {actual:?}"));
     }
     Ok(())
+}
+
+fn require_exact_field_keys(field: &Value, context: &str) -> ValidationResult {
+    let metadata_keys = ["element_wire", "oneof", "presence"]
+        .into_iter()
+        .filter(|key| field.get(*key).is_some())
+        .collect::<Vec<_>>();
+    if metadata_keys.len() > 1 {
+        return Err(format!(
+            "{context} must have at most one metadata key, got {metadata_keys:?}"
+        ));
+    }
+
+    let mut expected = vec!["tag", "name", "type", "cardinality", "wire", "packed"];
+    if let Some(metadata_key) = metadata_keys.first() {
+        text(field, metadata_key)?;
+        expected.push(metadata_key);
+    }
+    require_exact_keys(field, &expected, context)
 }
 
 fn string_set(values: &[Value], key: &str) -> ValidationResult<BTreeSet<String>> {
@@ -325,12 +371,11 @@ fn enum_signature(value: &Value) -> ValidationResult<String> {
     let mut rows = Vec::new();
     for enum_row in array(value, "enum_contract")? {
         let name = text(enum_row, "name")?;
-        let unknown_policy = match (
+        let ((Some(unknown_policy), None) | (None, Some(unknown_policy))) = (
             enum_row.get("unknown_values").and_then(Value::as_str),
             enum_row.get("unknown_bits").and_then(Value::as_str),
-        ) {
-            (Some(policy), None) | (None, Some(policy)) => policy,
-            _ => return Err(format!("{name} must have exactly one unknown-value policy")),
+        ) else {
+            return Err(format!("{name} must have exactly one unknown-value policy"));
         };
         rows.push(format!(
             "E\t{name}\t{}\t{unknown_policy}",
@@ -402,6 +447,7 @@ fn repository_pin_signature(value: &Value) -> ValidationResult<String> {
     Ok(digest_rows(rows))
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_identity_and_authority(value: &Value) -> ValidationResult {
     require_exact_keys(
         value,
@@ -552,14 +598,14 @@ fn validate_identity_and_authority(value: &Value) -> ValidationResult {
                 .ok_or_else(|| "reference features must be text".to_owned())
                 .map(str::to_owned)
         })
-        .collect::<ValidationResult<BTreeSet<_>>>()?;
+        .collect::<ValidationResult<Vec<_>>>()?;
     if features
-        != BTreeSet::from([
+        != [
             "gen-tonic-messages".to_owned(),
-            "logs".to_owned(),
-            "metrics".to_owned(),
             "trace".to_owned(),
-        ])
+            "metrics".to_owned(),
+            "logs".to_owned(),
+        ]
     {
         return Err("reference feature authority changed".to_owned());
     }
@@ -593,6 +639,11 @@ fn validate_identity_and_authority(value: &Value) -> ValidationResult {
         "release_url",
         "https://github.com/open-telemetry/opentelemetry-proto/releases/tag/v1.10.0",
     )?;
+    require_text(
+        release,
+        "evidence",
+        "opentelemetry-proto crate 0.32.0 CHANGELOG declares the vendored definitions are v1.10.0",
+    )?;
     if !release
         .get("upstream_commit_sha")
         .is_some_and(Value::is_null)
@@ -603,6 +654,11 @@ fn validate_identity_and_authority(value: &Value) -> ValidationResult {
         release,
         "upstream_commit_claim",
         "NOT_RECORDED_IN_THE_PUBLISHED_RUST_CRATE",
+    )?;
+    require_text(
+        release,
+        "authority_rule",
+        "The v1.10.0 release identity plus every vendored source digest below is binding. The wrapper repository commit is not represented as an upstream schema commit.",
     )?;
     let semantics = authority
         .get("semantic_conventions")
@@ -617,33 +673,81 @@ fn validate_identity_and_authority(value: &Value) -> ValidationResult {
         "default_schema_url",
         "https://opentelemetry.io/schemas/1.37.0",
     )?;
+    require_text(
+        semantics,
+        "relationship",
+        "This is the current semantic-conventions schema URL used by asupersync. It is independent of and must not be confused with the OTLP wire-schema release v1.10.0.",
+    )?;
 
     let excluded = array(authority, "excluded_authorities")?;
     if excluded.len() != 3
         || string_set(excluded, "path")?.len() != excluded.len()
         || string_set(excluded, "path")?
-        != BTreeSet::from([
-            "fuzz/Cargo.lock".to_owned(),
-            "src/observability/otel.rs::otlp_request_builder".to_owned(),
-            "tests/otlp_metrics_request_golden.rs".to_owned(),
-        ])
+            != BTreeSet::from([
+                "fuzz/Cargo.lock".to_owned(),
+                "src/observability/otel.rs::otlp_request_builder".to_owned(),
+                "tests/otlp_metrics_request_golden.rs".to_owned(),
+            ])
     {
         return Err("excluded authority set changed".to_owned());
     }
-    let stale_lock = excluded
-        .iter()
-        .find(|row| row.get("path").and_then(Value::as_str) == Some("fuzz/Cargo.lock"))
-        .ok_or_else(|| "stale fuzz lock exclusion is required".to_owned())?;
-    require_text(stale_lock, "resolved_crate_version", "0.31.0")?;
+    for row in excluded {
+        match text(row, "path")? {
+            "fuzz/Cargo.lock" => {
+                require_exact_keys(
+                    row,
+                    &["path", "sha256", "resolved_crate_version", "reason"],
+                    "excluded stale lock authority",
+                )?;
+                require_text(
+                    row,
+                    "sha256",
+                    "d91db6afd228ec60aa57d5782cbe5ae3bf7170f5e2c37dd15280e7b476e95271",
+                )?;
+                require_text(row, "resolved_crate_version", "0.31.0")?;
+                require_text(
+                    row,
+                    "reason",
+                    "The fuzz manifest requests 0.32 but its lock remains at 0.31.0. It is stale and cannot define A3 schema authority.",
+                )?;
+            }
+            "src/observability/otel.rs::otlp_request_builder" => {
+                require_exact_keys(row, &["path", "reason"], "excluded request builder")?;
+                require_text(
+                    row,
+                    "reason",
+                    "Generated request builders are test/fuzz gated and are differential fixtures, not owned production schema authority.",
+                )?;
+            }
+            "tests/otlp_metrics_request_golden.rs" => {
+                require_exact_keys(row, &["path", "reason"], "excluded JSON fixture")?;
+                require_text(
+                    row,
+                    "reason",
+                    "The JSON-shaped fixture is not protobuf wire evidence.",
+                )?;
+            }
+            path => return Err(format!("unexpected excluded authority {path}")),
+        }
+    }
 
-    for (key, expected_len) in [
-        ("proto_source_pins", 8),
-        ("generated_rust_oracle_pins", 8),
-        ("repository_source_baseline", 5),
+    for (key, expected_len, expected_keys) in [
+        ("proto_source_pins", 8, &["path", "sha256"][..]),
+        ("generated_rust_oracle_pins", 8, &["path", "sha256"][..]),
+        (
+            "repository_source_baseline",
+            5,
+            &["path", "sha256", "role"][..],
+        ),
     ] {
         let pins = array(authority, key)?;
         if pins.len() != expected_len || string_set(pins, "path")?.len() != pins.len() {
-            return Err(format!("authority.{key} must contain {expected_len} unique paths"));
+            return Err(format!(
+                "authority.{key} must contain {expected_len} unique paths"
+            ));
+        }
+        for pin in pins {
+            require_exact_keys(pin, expected_keys, &format!("authority.{key} row"))?;
         }
     }
 
@@ -699,7 +803,9 @@ fn validate_field_shape(
             || wire != "LENGTH_DELIMITED"
             || optional_text(field, "element_wire")? != base_wire
         {
-            return Err(format!("{message_name}.{name} has inconsistent packed metadata"));
+            return Err(format!(
+                "{message_name}.{name} has inconsistent packed metadata"
+            ));
         }
     } else if wire != base_wire {
         return Err(format!(
@@ -709,20 +815,30 @@ fn validate_field_shape(
 
     if cardinality == "repeated" {
         if presence != "-" || oneof != "-" {
-            return Err(format!("{message_name}.{name} repeated metadata is invalid"));
+            return Err(format!(
+                "{message_name}.{name} repeated metadata is invalid"
+            ));
         }
         if base_wire != "LENGTH_DELIMITED" && !packed {
-            return Err(format!("{message_name}.{name} packable repeat must be packed"));
+            return Err(format!(
+                "{message_name}.{name} packable repeat must be packed"
+            ));
         }
     }
     if oneof != "-" && presence != "-" {
-        return Err(format!("{message_name}.{name} cannot be both oneof and present"));
+        return Err(format!(
+            "{message_name}.{name} cannot be both oneof and present"
+        ));
     }
     if presence == "optional" && (cardinality != "singular" || is_message) {
-        return Err(format!("{message_name}.{name} has invalid optional presence"));
+        return Err(format!(
+            "{message_name}.{name} has invalid optional presence"
+        ));
     }
     if is_message && cardinality == "singular" && oneof == "-" && presence != "message" {
-        return Err(format!("{message_name}.{name} must retain message presence"));
+        return Err(format!(
+            "{message_name}.{name} must retain message presence"
+        ));
     }
     if !is_message && presence == "message" {
         return Err(format!("{message_name}.{name} cannot use message presence"));
@@ -730,21 +846,22 @@ fn validate_field_shape(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_schema_registry(value: &Value) -> ValidationResult {
     let families = array(value, "schema_families")?;
     if families.len() != 8
         || string_set(families, "family")?.len() != families.len()
         || string_set(families, "family")?
-        != BTreeSet::from([
-            "collector_logs".to_owned(),
-            "collector_metrics".to_owned(),
-            "collector_trace".to_owned(),
-            "common".to_owned(),
-            "logs".to_owned(),
-            "metrics".to_owned(),
-            "resource".to_owned(),
-            "trace".to_owned(),
-        ])
+            != BTreeSet::from([
+                "collector_logs".to_owned(),
+                "collector_metrics".to_owned(),
+                "collector_trace".to_owned(),
+                "common".to_owned(),
+                "logs".to_owned(),
+                "metrics".to_owned(),
+                "resource".to_owned(),
+                "trace".to_owned(),
+            ])
     {
         return Err("schema families must be the exact finite OTLP set".to_owned());
     }
@@ -793,21 +910,7 @@ fn validate_schema_registry(value: &Value) -> ValidationResult {
             }
             let mut prior_field_tag = None;
             for field in array(message, "fields")? {
-                require_allowed_keys(
-                    field,
-                    &[
-                        "tag",
-                        "name",
-                        "type",
-                        "cardinality",
-                        "wire",
-                        "packed",
-                        "element_wire",
-                        "oneof",
-                        "presence",
-                    ],
-                    "schema field",
-                )?;
+                require_exact_field_keys(field, "schema field")?;
                 field_count += 1;
                 family_field_count += 1;
                 let tag = unsigned(field, "tag")?;
@@ -879,7 +982,9 @@ fn validate_schema_registry(value: &Value) -> ValidationResult {
         ("trace".to_owned(), (7, 35)),
     ]);
     if family_counts != expected_family_counts {
-        return Err(format!("schema family partition changed: {family_counts:?}"));
+        return Err(format!(
+            "schema family partition changed: {family_counts:?}"
+        ));
     }
     for (label, actual, expected) in [
         ("messages", message_count, 43),
@@ -907,7 +1012,13 @@ fn validate_schema_registry(value: &Value) -> ValidationResult {
     for enum_row in enums {
         require_allowed_keys(
             enum_row,
-            &["name", "storage", "unknown_values", "unknown_bits", "values"],
+            &[
+                "name",
+                "storage",
+                "unknown_values",
+                "unknown_bits",
+                "values",
+            ],
             "enum contract",
         )?;
         if enum_row.as_object().is_none_or(|row| row.len() != 4) {
@@ -1004,6 +1115,7 @@ fn validate_exact_numeric_map(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_resource_and_implementation(value: &Value) -> ValidationResult {
     let resources = value
         .get("resource_contract")
@@ -1057,11 +1169,7 @@ fn validate_resource_and_implementation(value: &Value) -> ValidationResult {
         ("max_wire_depth", 100),
         ("max_wire_work_bytes", 16_777_216),
     ] {
-        require_unsigned(
-            generic,
-            key,
-            expected,
-        )?;
+        require_unsigned(generic, key, expected)?;
     }
     let shared = resources
         .get("shared_semantic_budget")
@@ -1231,7 +1339,11 @@ fn validate_resource_and_implementation(value: &Value) -> ValidationResult {
         "recommended_module_gate",
         "all(feature = \"metrics\", not(target_arch = \"wasm32\"))",
     )?;
-    require_text(implementation, "enum_storage", "RAW_NUMERIC_WITH_TYPED_KNOWN_VALUE_HELPERS")?;
+    require_text(
+        implementation,
+        "enum_storage",
+        "RAW_NUMERIC_WITH_TYPED_KNOWN_VALUE_HELPERS",
+    )?;
     require_text(implementation, "known_field_encoding", "ASCENDING_TAG")?;
     require_text(
         implementation,
@@ -1285,6 +1397,7 @@ fn validate_resource_and_implementation(value: &Value) -> ValidationResult {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_evolution_features_and_handoff(value: &Value) -> ValidationResult {
     let wire = value
         .get("wire_contract")
@@ -1327,8 +1440,8 @@ fn validate_evolution_features_and_handoff(value: &Value) -> ValidationResult {
     require_exact_keys(
         scalar_wires,
         &[
-            "bool", "int32", "int64", "uint32", "uint64", "sint32", "enum", "fixed32",
-            "fixed64", "sfixed64", "double", "string", "bytes", "message", "packed",
+            "bool", "int32", "int64", "uint32", "uint64", "sint32", "enum", "fixed32", "fixed64",
+            "sfixed64", "double", "string", "bytes", "message", "packed",
         ],
         "wire_contract.scalar_wire_types",
     )?;
@@ -1394,40 +1507,56 @@ fn validate_evolution_features_and_handoff(value: &Value) -> ValidationResult {
     }
 
     let feature_rows = array(value, "feature_contract")?;
-    if feature_rows.len() != 6
-        || string_set(feature_rows, "profile")?.len() != feature_rows.len()
-        || string_set(feature_rows, "profile")?
-        != BTreeSet::from([
-            "default".to_owned(),
-            "fuzz".to_owned(),
-            "metrics".to_owned(),
-            "metrics,tracing-integration".to_owned(),
-            "no-default-features,metrics".to_owned(),
-            "wasm32".to_owned(),
-        ])
-    {
-        return Err("feature and target matrix changed".to_owned());
-    }
     for row in feature_rows {
         require_exact_keys(row, &["profile", "expectation"], "feature contract")?;
     }
-    if feature_rows
+    let feature_matrix = feature_rows
         .iter()
-        .any(|row| text(row, "expectation").is_ok_and(str::is_empty))
+        .map(|row| Ok((text(row, "profile")?, text(row, "expectation")?)))
+        .collect::<ValidationResult<BTreeMap<_, _>>>()?;
+    if feature_rows.len() != 6
+        || feature_matrix.len() != feature_rows.len()
+        || feature_matrix
+            != BTreeMap::from([
+                (
+                    "default",
+                    "No public API change and no generated OTLP reference dependency added.",
+                ),
+                (
+                    "metrics",
+                    "Private owned schemas compile on native targets without opentelemetry-proto, tonic, or tokio normal edges.",
+                ),
+                (
+                    "metrics,tracing-integration",
+                    "The same owned schema module compiles; generated reference messages remain test/fuzz oracle-only.",
+                ),
+                (
+                    "no-default-features,metrics",
+                    "Private owned schemas compile without assuming the optional proc-macros feature.",
+                ),
+                (
+                    "fuzz",
+                    "The generated oracle remains quarantined; its stale lock must be refreshed by its owner before it can claim v0.32 parity. A3 does not modify the fuzz lock.",
+                ),
+                (
+                    "wasm32",
+                    "Native OTLP finite-schema integration remains excluded unless a later owner supplies a wasm-safe wire boundary and evidence.",
+                ),
+            ])
     {
-        return Err("feature expectations must be nonempty".to_owned());
+        return Err("feature and target matrix changed".to_owned());
     }
 
     let handoff = array(value, "evidence_handoff")?;
     if handoff.len() != 4
         || string_set(handoff, "owner")?.len() != handoff.len()
         || string_set(handoff, "owner")?
-        != BTreeSet::from([
-            "asupersync-5z2scg.1.3".to_owned(),
-            "asupersync-5z2scg.1.4".to_owned(),
-            "asupersync-5z2scg.1.7".to_owned(),
-            "asupersync-5z2scg.2.6".to_owned(),
-        ])
+            != BTreeSet::from([
+                "asupersync-5z2scg.1.3".to_owned(),
+                "asupersync-5z2scg.1.4".to_owned(),
+                "asupersync-5z2scg.1.7".to_owned(),
+                "asupersync-5z2scg.2.6".to_owned(),
+            ])
     {
         return Err("evidence handoff owners changed".to_owned());
     }
@@ -1454,7 +1583,11 @@ fn validate_evolution_features_and_handoff(value: &Value) -> ValidationResult {
                 "IMPLEMENTATION_AND_EXECUTABLE_EVIDENCE_PENDING",
             )?;
         } else {
-            require_exact_keys(row, &["owner", "scope", "current_state"], "downstream handoff")?;
+            require_exact_keys(
+                row,
+                &["owner", "scope", "current_state"],
+                "downstream handoff",
+            )?;
             let expected_state = match owner {
                 "asupersync-5z2scg.1.4" => "BLOCKED_BY_A3",
                 "asupersync-5z2scg.1.7" => "BLOCKED_BY_A3_AND_A4",
@@ -1468,27 +1601,47 @@ fn validate_evolution_features_and_handoff(value: &Value) -> ValidationResult {
         .iter()
         .find(|row| row.get("owner").and_then(Value::as_str) == Some("asupersync-5z2scg.1.3"))
         .ok_or_else(|| "A3 handoff row is required".to_owned())?;
-    let expected_prefixes = BTreeSet::from([
-        "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__downstream_consumer".to_owned(),
-        "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__lab_lifecycle".to_owned(),
-        "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants".to_owned(),
-        "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix".to_owned(),
+    let expected_prefix_scopes = BTreeMap::from([
+        (
+            "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants",
+            "A3 finite schema, field, semantic, and resource invariants only.",
+        ),
+        (
+            "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix",
+            "A3 schema-local encode/decode and limit properties; independent/reference conformance remains A4.",
+        ),
+        (
+            "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__lab_lifecycle",
+            "A3 deterministic shared-budget lifecycle and fresh-decode failure-state checks only; no runtime, task, cancellation, shutdown, or transport claim.",
+        ),
+        (
+            "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__downstream_consumer",
+            "A3 compile/use proof that finite collector shapes are consumable through the existing owned generic codec; no signal adapter, framing, collector, or user-journey claim.",
+        ),
     ]);
+    let expected_prefixes = expected_prefix_scopes
+        .keys()
+        .copied()
+        .collect::<BTreeSet<_>>();
     let prefixes = array(a3, "required_test_prefixes")?
         .iter()
         .map(|row| {
             row.as_str()
                 .ok_or_else(|| "test prefixes must be text".to_owned())
-                .map(str::to_owned)
         })
         .collect::<ValidationResult<BTreeSet<_>>>()?;
+    let prefix_scopes = object(a3, "prefix_scope")?
+        .iter()
+        .map(|(prefix, scope)| {
+            scope
+                .as_str()
+                .ok_or_else(|| format!("prefix scope {prefix} must be text"))
+                .map(|scope| (prefix.as_str(), scope))
+        })
+        .collect::<ValidationResult<BTreeMap<_, _>>>()?;
     if array(a3, "required_test_prefixes")?.len() != 4
         || prefixes != expected_prefixes
-        || object(a3, "prefix_scope")?
-            .keys()
-            .cloned()
-            .collect::<BTreeSet<_>>()
-            != expected_prefixes
+        || prefix_scopes != expected_prefix_scopes
     {
         return Err("A3 prefix registry or bounded scopes changed".to_owned());
     }
@@ -1501,7 +1654,8 @@ fn validate_evolution_features_and_handoff(value: &Value) -> ValidationResult {
         &[
             "artifact_path",
             "docs_path",
-            "future_test_path",
+            "test_path",
+            "test_implementation_state",
             "validator_shape",
             "negative_mutations",
             "proof_state",
@@ -1512,49 +1666,41 @@ fn validate_evolution_features_and_handoff(value: &Value) -> ValidationResult {
     for (key, expected) in [
         ("artifact_path", ARTIFACT_PATH),
         ("docs_path", DOC_PATH),
+        ("test_path", "tests/protobuf_owned_otlp_schema_contract.rs"),
         (
-            "future_test_path",
-            "tests/protobuf_owned_otlp_schema_contract.rs",
+            "proof_state",
+            "STATIC_SOURCE_TYPECHECKED_CANONICAL_CARGO_PENDING",
         ),
-        ("proof_state", "NOT_RUN_BY_THIS_DESIGN_PACKET"),
     ] {
         require_text(planned, key, expected)?;
     }
+    require_text(
+        planned,
+        "test_implementation_state",
+        "PRESENT_DIRECT_RUSTC_AND_CLIPPY_METADATA_PASS_CANONICAL_CARGO_PENDING",
+    )?;
     require_boolean(planned, "no_local_cargo_fallback", true)?;
-    if array(planned, "negative_mutations")?.len() != 9 {
-        return Err("nine planned fail-closed mutations are required".to_owned());
-    }
-
-    let no_claim_rows = array(value, "no_claim_boundaries")?;
-    let unique_no_claims = no_claim_rows
+    let planned_mutations = array(planned, "negative_mutations")?
         .iter()
         .map(|row| {
             row.as_str()
-                .ok_or_else(|| "no-claim boundaries must be text".to_owned())
+                .ok_or_else(|| "planned mutations must be text".to_owned())
         })
-        .collect::<ValidationResult<BTreeSet<_>>>()?;
-    if no_claim_rows.len() != 10 || unique_no_claims.len() != no_claim_rows.len() {
-        return Err("ten unique no-claim boundaries are required".to_owned());
+        .collect::<ValidationResult<Vec<_>>>()?;
+    if planned_mutations != EXPECTED_PLANNED_MUTATIONS {
+        return Err("planned fail-closed mutation registry changed".to_owned());
     }
+
+    let no_claim_rows = array(value, "no_claim_boundaries")?;
     let no_claims = no_claim_rows
         .iter()
         .map(|row| {
             row.as_str()
                 .ok_or_else(|| "no-claim boundaries must be text".to_owned())
         })
-        .collect::<ValidationResult<Vec<_>>>()?
-        .join("\n");
-    for marker in [
-        "does not implement, compile, or execute",
-        "does not prove byte parity",
-        "does not wire metrics, traces, logs",
-        "does not authorize removing prost",
-        "does not authorize production cutover",
-        "local Cargo fallback approval",
-    ] {
-        if !no_claims.contains(marker) {
-            return Err(format!("no-claim boundary missing {marker}"));
-        }
+        .collect::<ValidationResult<Vec<_>>>()?;
+    if no_claims != EXPECTED_NO_CLAIMS {
+        return Err("no-claim boundaries changed".to_owned());
     }
     Ok(())
 }
@@ -1648,7 +1794,7 @@ fn validate_operator_doc(doc: &str, value: &Value) -> ValidationResult {
         "3 unary collector methods",
         "message-valued oneof member merge",
         "non-exhaustive minimum",
-        "one reusable\nfail-closed validator",
+        "one reusable fail-closed validator",
         "No Cargo command is represented as green",
         "local Cargo fallback",
         "or file deletion",
@@ -1666,7 +1812,8 @@ fn validate_operator_doc(doc: &str, value: &Value) -> ValidationResult {
             .strip_prefix("opentelemetry/proto/")
             .ok_or_else(|| "proto source pin path must use canonical prefix".to_owned())?;
         let digest = text(pin, "sha256")?;
-        if !doc.contains(path) || !doc.contains(digest) {
+        let association = format!("| `{path}` | `{digest}` |");
+        if doc.match_indices(&association).count() != 1 {
             return Err(format!("operator document missing source pin {path}"));
         }
     }
@@ -1697,8 +1844,28 @@ fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants__operator_doc_is_
 }
 
 #[test]
+fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix__ambiguous_json_is_rejected() {
+    for raw in [
+        br#"{"decision":{"public_prost_removal_authorized":true,"public_prost_removal_authorized":false}}"#
+            .as_slice(),
+        br#"{"schema_families":[],"schema_families":[]}"#.as_slice(),
+    ] {
+        assert!(
+            parse_unique_json(raw)
+                .expect_err("duplicate JSON key must fail")
+                .contains("duplicate JSON object key")
+        );
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
 fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix__negative_mutations_fail_closed() {
     let canonical = artifact();
+
+    let mut unknown_root_key = canonical.clone();
+    unknown_root_key["production_cutover_override"] = Value::Bool(true);
+    assert_rejected(&unknown_root_key, "unknown root key");
 
     let mut missing_family = canonical.clone();
     missing_family["schema_families"]
@@ -1706,6 +1873,14 @@ fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix__negative_mutation
         .expect("schema families")
         .pop();
     assert_rejected(&missing_family, "missing family");
+
+    let mut duplicate_family = canonical.clone();
+    let family = duplicate_family["schema_families"][0].clone();
+    duplicate_family["schema_families"]
+        .as_array_mut()
+        .expect("schema families")
+        .push(family);
+    assert_rejected(&duplicate_family, "duplicate family");
 
     let mut duplicate_tag = canonical.clone();
     duplicate_tag["schema_families"][0]["messages"][0]["fields"][1]["tag"] = Value::from(1);
@@ -1716,6 +1891,14 @@ fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix__negative_mutation
         Value::String("VARINT".to_owned());
     assert_rejected(&wrong_wire, "wrong wire kind");
 
+    let mut wrong_packed = canonical.clone();
+    wrong_packed["schema_families"][2]["messages"][10]["fields"][4]["packed"] = Value::Bool(false);
+    assert_rejected(&wrong_packed, "wrong packed metadata");
+
+    let mut null_field_metadata = canonical.clone();
+    null_field_metadata["schema_families"][0]["messages"][0]["fields"][0]["presence"] = Value::Null;
+    assert_rejected(&null_field_metadata, "null field metadata");
+
     let mut missing_unknowns = canonical.clone();
     missing_unknowns["schema_families"][0]["messages"][0]["unknown_fields"] = Value::Null;
     assert_rejected(&missing_unknowns, "missing unknown fields");
@@ -1724,19 +1907,86 @@ fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix__negative_mutation
     unbounded["resource_contract"]["collection_limits"]["attributes_per_owner"] = Value::from(0);
     assert_rejected(&unbounded, "zero resource limit");
 
+    let mut missing_limit = canonical.clone();
+    missing_limit["resource_contract"]["collection_limits"]
+        .as_object_mut()
+        .expect("collection limits")
+        .remove("attributes_per_owner");
+    assert_rejected(&missing_limit, "missing resource limit");
+
+    for replacement in [Value::Null, Value::String("unbounded".to_owned())] {
+        let mut mistyped_limit = canonical.clone();
+        mistyped_limit["resource_contract"]["collection_limits"]["attributes_per_owner"] =
+            replacement;
+        assert_rejected(&mistyped_limit, "mistyped resource limit");
+    }
+
+    for section in [
+        "generic_wire_limits",
+        "shared_semantic_budget",
+        "collection_limits",
+        "string_and_bytes_limits",
+    ] {
+        let numeric_limits = canonical["resource_contract"][section]
+            .as_object()
+            .expect("resource limit section")
+            .iter()
+            .filter_map(|(key, value)| value.as_u64().map(|limit| (key.clone(), limit)))
+            .collect::<Vec<_>>();
+        for (key, limit) in numeric_limits {
+            for replacement in [0, limit.checked_add(1).expect("frozen limits are bounded")] {
+                let mut weakened = canonical.clone();
+                weakened["resource_contract"][section][key.as_str()] = Value::from(replacement);
+                assert_rejected(&weakened, &format!("{section}.{key}={replacement}"));
+            }
+        }
+    }
+
     let mut dependency_exit = canonical.clone();
     dependency_exit["decision"]["public_prost_removal_authorized"] = Value::Bool(true);
     assert_rejected(&dependency_exit, "public prost removal");
+
+    let mut public_reexport = canonical.clone();
+    public_reexport["implementation_contract"]
+        .as_object_mut()
+        .expect("implementation contract")
+        .remove("public_reexport");
+    assert_rejected(&public_reexport, "missing public reexport decision");
 
     let mut invented_upstream = canonical.clone();
     invented_upstream["authority"]["wire_schema_release"]["upstream_commit_sha"] =
         Value::String("0000000000000000000000000000000000000000".to_owned());
     assert_rejected(&invented_upstream, "invented upstream commit");
 
+    let mut missing_upstream = canonical.clone();
+    missing_upstream["authority"]["wire_schema_release"]
+        .as_object_mut()
+        .expect("wire schema release")
+        .remove("upstream_commit_sha");
+    assert_rejected(&missing_upstream, "missing explicit upstream null");
+
+    let mut false_authority_rule = canonical.clone();
+    false_authority_rule["authority"]["wire_schema_release"]["authority_rule"] =
+        Value::String("The wrapper commit is the upstream schema commit.".to_owned());
+    assert_rejected(&false_authority_rule, "false upstream authority rule");
+
     let mut promoted_stale_lock = canonical.clone();
     promoted_stale_lock["authority"]["excluded_authorities"][0]["resolved_crate_version"] =
         Value::String("0.32.0".to_owned());
     assert_rejected(&promoted_stale_lock, "stale lock promotion");
+
+    let mut unknown_excluded_key = canonical.clone();
+    unknown_excluded_key["authority"]["excluded_authorities"][0]["production_authority"] =
+        Value::Bool(true);
+    assert_rejected(&unknown_excluded_key, "unknown excluded-authority key");
+
+    let mut duplicate_reference_feature = canonical.clone();
+    duplicate_reference_feature["authority"]["root_workspace_reference"]
+        ["enabled_reference_features"]
+        .as_array_mut()
+        .expect("enabled reference features")
+        .push(Value::String("gen-tonic-messages".to_owned()));
+    assert_rejected(&duplicate_reference_feature, "duplicate reference feature");
 
     let mut post_decode_only = canonical.clone();
     post_decode_only["implementation_contract"]["forbidden_resolution"] =
@@ -1754,6 +2004,48 @@ fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix__negative_mutation
         .expect("prefix scope")
         .remove("ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__lab_lifecycle");
     assert_rejected(&missing_prefix_scope, "missing prefix scope");
+
+    let mut overclaimed_prefix_scope = canonical.clone();
+    overclaimed_prefix_scope["evidence_handoff"][0]["prefix_scope"]["ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__lab_lifecycle"] =
+        Value::String("A3 proves production runtime behavior.".to_owned());
+    assert_rejected(&overclaimed_prefix_scope, "overclaimed prefix scope");
+
+    let mut overclaimed_feature = canonical.clone();
+    overclaimed_feature["feature_contract"][1]["expectation"] =
+        Value::String("Public generated messages and runtime edges are authorized.".to_owned());
+    assert_rejected(&overclaimed_feature, "overclaimed feature expectation");
+
+    let mut duplicate_profile = canonical.clone();
+    let profile = duplicate_profile["feature_contract"][0].clone();
+    duplicate_profile["feature_contract"]
+        .as_array_mut()
+        .expect("feature contract")
+        .push(profile);
+    assert_rejected(&duplicate_profile, "duplicate feature profile");
+
+    let mut duplicate_no_claim = canonical.clone();
+    let first_no_claim = duplicate_no_claim["no_claim_boundaries"][0].clone();
+    duplicate_no_claim["no_claim_boundaries"][1] = first_no_claim;
+    assert_rejected(&duplicate_no_claim, "duplicate no-claim boundary");
+
+    let mut qualified_no_claim = canonical.clone();
+    qualified_no_claim["no_claim_boundaries"][8] = Value::String(
+        "It does not authorize production cutover unless separately requested.".to_owned(),
+    );
+    assert_rejected(&qualified_no_claim, "qualified no-claim boundary");
+
+    let mut duplicate_planned_mutation = canonical.clone();
+    let first_mutation =
+        duplicate_planned_mutation["planned_contract"]["negative_mutations"][0].clone();
+    duplicate_planned_mutation["planned_contract"]["negative_mutations"][1] = first_mutation;
+    assert_rejected(&duplicate_planned_mutation, "duplicate planned mutation");
+
+    let mut duplicate_doc_marker = read_repo_file(DOC_PATH);
+    duplicate_doc_marker.push_str(DOC_BEGIN);
+    assert!(
+        validate_operator_doc(&duplicate_doc_marker, &canonical).is_err(),
+        "duplicate document marker must fail"
+    );
 
     let mut cutover_claim = canonical;
     cutover_claim["no_claim_boundaries"] = Value::Array(Vec::new());

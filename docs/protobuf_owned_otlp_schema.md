@@ -218,12 +218,13 @@ and downstream arbitrary-message capability remain unchanged.
 | Protobuf A7 `asupersync-5z2scg.1.7` | cross-language peers, downstream messages, schema evolution, gRPC shapes, cancellation, restart, and real journeys |
 | OTLP A6 `asupersync-5z2scg.2.6` | request/response framing, partial-success behavior, transport integration, and production dependency-graph proof |
 
-The registered A3 authority prefixes are retained in the machine packet. A
-future `tests/protobuf_owned_otlp_schema_contract.rs` must use one reusable
-fail-closed validator and negative mutations for missing families, duplicate
-tags, wrong wire/packed metadata, missing unknown storage, zero/unbounded
-limits, stale-oracle promotion, post-decode-only budgeting, and accidental
-public or cutover authority.
+The registered A3 authority prefixes are retained in the machine packet.
+`tests/protobuf_owned_otlp_schema_contract.rs` now uses recursive duplicate-key
+rejection plus one reusable fail-closed validator. It freezes normalized exact
+schema, enum, service, and authority-pin projections and includes negative
+mutations for missing or duplicate families, tags, wrong wire/packed metadata,
+missing unknown storage, all 45 numeric limits, stale-oracle promotion,
+post-decode-only budgeting, and accidental public or cutover authority.
 
 Within A3, `__lab_lifecycle` means deterministic shared-budget and fresh-decode
 failure-state checks only; it proves no runtime task, cancellation, shutdown,
@@ -234,8 +235,8 @@ does not cover signal adapters, framing, a live collector, or user journeys.
 The semantic invariants in the artifact are a non-exhaustive minimum. The
 implementation remains bound to every normative requirement in the pinned
 v1.10.0 sources, including histogram count equality and nonnegative summary
-quantile values; a future validator may not treat the listed examples as the
-complete semantic specification.
+quantile values; the contract validator does not treat the listed examples as
+the complete semantic specification.
 
 ## Current validation
 
@@ -244,9 +245,13 @@ This design slice is intentionally static. `jq` parses the artifact and reports
 message, 7 enum/bitmask rows, and 3 services. Independent read-only review
 compares the registry against the vendored v1.10.0 sources.
 
-No Cargo command is represented as green for this packet. The implementation,
-contract test, reference vectors, feature matrix, and downstream journeys are
-still pending.
+The contract test source is present. Direct Rust 2024 metadata type-check with
+`-D warnings` and direct Clippy metadata analysis with pedantic and nursery
+groups pass against the cached dependency metadata. These static checks do not
+execute a test. No Cargo command is represented as green for this packet, and
+canonical execution of the contract remains pending. Finite message
+implementation, reference vectors, the feature matrix, and downstream journeys
+are also pending.
 
 ## No-claim boundary
 
