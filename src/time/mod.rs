@@ -57,6 +57,7 @@ mod interval;
 pub mod intrusive_wheel;
 mod sleep;
 mod timeout_future;
+pub mod utc;
 mod wheel;
 
 pub use budget_ext::{BudgetTimeExt, budget_sleep, budget_timeout};
@@ -71,6 +72,7 @@ pub use elapsed::Elapsed;
 pub use interval::{Interval, MissedTickBehavior, interval, interval_at};
 pub use sleep::{Sleep, sleep, sleep_until, wall_now};
 pub use timeout_future::{TimeoutFuture, timeout, timeout_at};
+pub use utc::format_unix_nanos_rfc3339;
 pub use wheel::{
     CoalescingConfig, TimerDurationExceeded, TimerHandle as WheelTimerHandle, TimerWheel,
     TimerWheelConfig,

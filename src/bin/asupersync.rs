@@ -81,6 +81,7 @@ use asupersync::observability::{
     TASK_CONSOLE_WIRE_SCHEMA_V1, TaskConsoleWireSnapshot, TaskDetailsWire, TaskSummaryWire,
 };
 use asupersync::sync::{AcquireError, Semaphore};
+use asupersync::time::format_unix_nanos_rfc3339;
 use asupersync::trace::{
     CompressionMode, IssueSeverity, ReplayEvent, TRACE_FILE_VERSION, TRACE_MAGIC, TraceFileConfig,
     TraceFileError, TraceReader, TraceWriter, VerificationOptions, migrate_trace_file,
@@ -12432,13 +12433,7 @@ fn format_timestamp(recorded_at_nanos: u64) -> Option<String> {
     if recorded_at_nanos == 0 {
         return None;
     }
-    time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(recorded_at_nanos))
-        .ok()
-        .and_then(|timestamp| {
-            timestamp
-                .format(&time::format_description::well_known::Rfc3339)
-                .ok()
-        })
+    Some(format_unix_nanos_rfc3339(recorded_at_nanos))
 }
 
 fn issue_severity_label(severity: IssueSeverity) -> &'static str {
