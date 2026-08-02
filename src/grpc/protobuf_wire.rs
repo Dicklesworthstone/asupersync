@@ -445,9 +445,13 @@ struct DecodeState {
     limits: ProtobufWireLimits,
     fields_seen: usize,
     work_used: usize,
+    #[cfg(any(test, all(feature = "metrics", not(target_arch = "wasm32"))))]
     semantic_repeated_items: usize,
+    #[cfg(any(test, all(feature = "metrics", not(target_arch = "wasm32"))))]
     semantic_any_value_nodes: usize,
+    #[cfg(any(test, all(feature = "metrics", not(target_arch = "wasm32"))))]
     semantic_any_value_depth: usize,
+    #[cfg(any(test, all(feature = "metrics", not(target_arch = "wasm32"))))]
     semantic_owned_bytes: usize,
 }
 
@@ -490,6 +494,7 @@ impl DecodeState {
         Ok(())
     }
 
+    #[cfg(any(test, all(feature = "metrics", not(target_arch = "wasm32"))))]
     fn charge_semantic(
         current: &mut usize,
         amount: usize,
@@ -541,9 +546,13 @@ impl<'a> ProtobufWireMessage<'a> {
                 limits,
                 fields_seen: 0,
                 work_used: 0,
+                #[cfg(any(test, all(feature = "metrics", not(target_arch = "wasm32"))))]
                 semantic_repeated_items: 0,
+                #[cfg(any(test, all(feature = "metrics", not(target_arch = "wasm32"))))]
                 semantic_any_value_nodes: 0,
+                #[cfg(any(test, all(feature = "metrics", not(target_arch = "wasm32"))))]
                 semantic_any_value_depth: 0,
+                #[cfg(any(test, all(feature = "metrics", not(target_arch = "wasm32"))))]
                 semantic_owned_bytes: 0,
             },
         })
@@ -609,6 +618,7 @@ impl<'a> ProtobufWireDecoder<'a, '_> {
     }
 
     /// Remaining aggregate work available to schema-aware validation.
+    #[cfg(any(test, all(feature = "metrics", not(target_arch = "wasm32"))))]
     pub(crate) fn remaining_work(&self) -> usize {
         self.state
             .limits
@@ -618,6 +628,7 @@ impl<'a> ProtobufWireDecoder<'a, '_> {
 
     /// Seed semantic counters from an already validated merge target before
     /// admitting any new field allocation.
+    #[cfg(any(test, all(feature = "metrics", not(target_arch = "wasm32"))))]
     pub(crate) fn seed_semantic_budgets(
         &mut self,
         repeated_items: usize,
@@ -652,6 +663,7 @@ impl<'a> ProtobufWireDecoder<'a, '_> {
 
     /// Charge schema-specific repeated-item accounting against this message's
     /// shared decode state before reserving or pushing an element.
+    #[cfg(any(test, all(feature = "metrics", not(target_arch = "wasm32"))))]
     pub(crate) fn charge_semantic_repeated_items(
         &mut self,
         amount: usize,
@@ -673,6 +685,7 @@ impl<'a> ProtobufWireDecoder<'a, '_> {
     /// repeated wire occurrence that merges into an existing message-valued
     /// member. Depth is charged for both; aggregate node count only for the
     /// former.
+    #[cfg(any(test, all(feature = "metrics", not(target_arch = "wasm32"))))]
     pub(crate) fn enter_semantic_any_value(
         &mut self,
         new_node: bool,
@@ -710,6 +723,7 @@ impl<'a> ProtobufWireDecoder<'a, '_> {
     }
 
     /// Leave a recursive schema value after its nested merge finishes.
+    #[cfg(any(test, all(feature = "metrics", not(target_arch = "wasm32"))))]
     pub(crate) fn leave_semantic_any_value(&mut self) {
         debug_assert!(self.state.semantic_any_value_depth > 0);
         self.state.semantic_any_value_depth = self.state.semantic_any_value_depth.saturating_sub(1);
@@ -717,6 +731,7 @@ impl<'a> ProtobufWireDecoder<'a, '_> {
 
     /// Charge schema-owned string, bytes, or unknown-field storage before
     /// allocating or copying it.
+    #[cfg(any(test, all(feature = "metrics", not(target_arch = "wasm32"))))]
     pub(crate) fn charge_semantic_owned_bytes(
         &mut self,
         amount: usize,
@@ -734,6 +749,7 @@ impl<'a> ProtobufWireDecoder<'a, '_> {
 
     /// Charge an additional schema-aware scan or copy against the aggregate
     /// wire-work budget.
+    #[cfg(any(test, all(feature = "metrics", not(target_arch = "wasm32"))))]
     pub(crate) fn charge_additional_work(
         &mut self,
         amount: usize,
@@ -1284,6 +1300,7 @@ impl ProtobufWireEncoder {
     /// Returns a typed wire, schema, allocation, depth, field-count, message,
     /// or work error from the nested callback or shared encoder budget. Every
     /// error restores the encoder's exact entry state.
+    #[cfg(any(test, all(feature = "metrics", not(target_arch = "wasm32"))))]
     pub(crate) fn write_nested_message<F>(
         &mut self,
         field_number: u32,
@@ -1454,6 +1471,7 @@ impl ProtobufWireEncoder {
         Ok(())
     }
 
+    #[cfg(any(test, all(feature = "metrics", not(target_arch = "wasm32"))))]
     fn rollback_nested(
         &mut self,
         output_len: usize,
@@ -1536,6 +1554,7 @@ impl ProtobufWireEncoder {
     }
 
     /// Emit packed IEEE-754 doubles without materializing their bit patterns.
+    #[cfg(any(test, all(feature = "metrics", not(target_arch = "wasm32"))))]
     pub(crate) fn write_packed_doubles(
         &mut self,
         field_number: u32,
