@@ -440,7 +440,12 @@ impl<'a> ProtobufWireField<'a> {
     }
 }
 
+// In-progress gRPC scaffolding: several fields/methods in this module have
+// feature-dependent callers and fall dead under downstream workspaces whose
+// feature unification gates those callers off. Allow dead_code at the
+// affected sites (crate-wide policy stays deny) until the callers land.
 #[derive(Debug)]
+#[allow(dead_code)]
 struct DecodeState {
     limits: ProtobufWireLimits,
     fields_seen: usize,
@@ -490,6 +495,7 @@ impl DecodeState {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn charge_semantic(
         current: &mut usize,
         amount: usize,
@@ -595,6 +601,7 @@ pub struct ProtobufWireDecoder<'a, 'budget> {
     state: &'budget mut DecodeState,
 }
 
+#[allow(dead_code)]
 impl<'a> ProtobufWireDecoder<'a, '_> {
     /// Absolute position of the next unread byte.
     #[must_use]
@@ -1284,6 +1291,7 @@ impl ProtobufWireEncoder {
     /// Returns a typed wire, schema, allocation, depth, field-count, message,
     /// or work error from the nested callback or shared encoder budget. Every
     /// error restores the encoder's exact entry state.
+    #[allow(dead_code)]
     pub(crate) fn write_nested_message<F>(
         &mut self,
         field_number: u32,
@@ -1454,6 +1462,7 @@ impl ProtobufWireEncoder {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn rollback_nested(
         &mut self,
         output_len: usize,
@@ -1536,6 +1545,7 @@ impl ProtobufWireEncoder {
     }
 
     /// Emit packed IEEE-754 doubles without materializing their bit patterns.
+    #[allow(dead_code)]
     pub(crate) fn write_packed_doubles(
         &mut self,
         field_number: u32,
