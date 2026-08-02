@@ -4,9 +4,9 @@
   "program_id": "asupersync-ir2uf0",
   "bead_id": "asupersync-5z2scg.1.3",
   "capability_id": "CAP-PROTOBUF-GENERIC",
-  "captured_at_utc": "2026-08-02T12:12:18Z",
-  "state": "AUTHORITY_AND_DESIGN_PINNED_IMPLEMENTATION_PENDING",
-  "summary": "Finite crate-private OTLP metrics, traces, logs, common, resource, and collector message authority for the owned protobuf kernel. This packet pins wire shape, evolution behavior, and enforceable resource policy without claiming implementation or runtime integration.",
+  "captured_at_utc": "2026-08-02T15:26:09Z",
+  "state": "AUTHORITY_PINNED_COMMON_RESOURCE_METRICS_COLLECTOR_METRICS_SLICE_A3_PENDING",
+  "summary": "Finite crate-private OTLP metrics, traces, logs, common, resource, and collector message authority for the owned protobuf kernel. The bounded common/resource/metrics/collector_metrics source slice, unit-test bodies, and terminal native default-plus-metrics library check are present; the remaining 17 messages, unit-test execution, feature matrix, and runtime integration remain pending.",
   "decision": {
     "finite_internal_schema_authorized": true,
     "crate_private_only": true,
@@ -15,8 +15,8 @@
     "public_prost_removal_authorized": false,
     "production_transport_wiring_authorized": false,
     "dependency_cutover_authorized": false,
-    "implementation_state": "NOT_IMPLEMENTED_BY_THIS_PACKET",
-    "evidence_state": "DESIGN_ONLY"
+    "implementation_state": "COMMON_RESOURCE_METRICS_COLLECTOR_METRICS_SLICE_PRESENT_A3_IMPLEMENTATION_PENDING",
+    "evidence_state": "NATIVE_DEFAULT_METRICS_LIBRARY_CHECK_GREEN_TEST_EXECUTION_PENDING"
   },
   "authority": {
     "root_workspace_reference": {
@@ -142,13 +142,23 @@
       },
       {
         "path": "src/grpc/protobuf.rs",
-        "sha256": "a37fb34ab435f1922746140e4263f326fda609b6d99f5d9e620b050430131a18",
+        "sha256": "0360e2f9a2ce86855922f9d523d50f7d4446d5e950276d1181540a22b7e92ad6",
         "role": "owned ProtoMessage and UnknownFields authority"
       },
       {
         "path": "src/grpc/protobuf_wire.rs",
-        "sha256": "1513ff37758292203e9f48dcfb6b002ad1f7c357b0084528ea422945effe7587",
+        "sha256": "ace8921c1480e071c958817c2fd55b77819b34fde2e4fd6a6c61a3fdb15f04dc",
         "role": "schema-neutral wire and generic budget authority"
+      },
+      {
+        "path": "src/observability/mod.rs",
+        "sha256": "c2adba48b64ecfe3808beb2732636237fdd32446a19c45d1e294c75f36a50130",
+        "role": "private native metrics module gate"
+      },
+      {
+        "path": "src/observability/otlp_proto.rs",
+        "sha256": "bdaba2ba4edee619b7ef1a1ec814ccd87a5828840f342a895dccfc86b19addd2",
+        "role": "in-progress bounded common, resource, metrics, and metrics-collector implementation"
       },
       {
         "path": "src/observability/otel.rs",
@@ -935,20 +945,79 @@
       "derive-generated oneof decoding replaces a repeated message-valued member instead of merging the same member as protobuf requires",
       "the proc-macro feature is optional and metrics does not imply it; no-default-features plus metrics must compile",
       "the macro expansion's ::asupersync path is not a production self-alias in the current crate",
-      "generic encoder buffers and UnknownFields use ordinary Vec growth and do not expose typed allocation failure"
+      "compatibility UnknownFields::record and record_raw retain ordinary Vec growth; fallible alternatives exist, but a safe downstream shared nested-writer authoring surface remains pending"
     ],
-    "allowed_resolution": "Use manual finite-message ProtoMessage implementations with one shared OtlpDecodeBudget/OtlpEncodeBudget, or first land reviewed bounded nested/collection primitives in the owned authoring layer. Every path must check count, depth, work, and payload bytes before its corresponding allocation or mutation. Fresh decode may build private staging state and returns no partial model. Any merge API must either stage and commit atomically or explicitly document and test its non-atomic partial-mutation behavior.",
+    "allowed_resolution": "The common/resource/metrics/collector_metrics slice uses manual finite-message ProtoMessage implementations with one shared semantic budget and reviewed bounded nested/collection primitives in the owned authoring layer. Remaining families must preserve that pattern. Every path must check count, depth, work, and payload bytes before its corresponding allocation or mutation. Fresh decode may build private staging state and returns no partial model. Any merge API must either stage and commit atomically or explicitly document and test its non-atomic partial-mutation behavior.",
     "forbidden_resolution": "Derive the current messages and apply validate() only after decode, or encode nested messages into unconstrained temporary buffers, then claim pre-allocation limits.",
     "all_messages_require_unknown_fields_member": true,
     "enum_storage": "RAW_NUMERIC_WITH_TYPED_KNOWN_VALUE_HELPERS",
     "known_field_encoding": "ASCENDING_TAG",
     "unknown_field_encoding": "RAW_UNKNOWN_BYTES_AFTER_KNOWN_FIELDS",
-    "signal_construction_separation": "Adapters from MetricsSnapshot, trace batches, and LogsSnapshot remain separate from the schema types and are owned by downstream integration beads."
+    "signal_construction_separation": "Adapters from MetricsSnapshot, trace batches, and LogsSnapshot remain separate from the schema types and are owned by downstream integration beads.",
+    "implementation_progress": {
+      "implemented_submodules": [
+        "limits_and_error",
+        "common_and_resource",
+        "metrics"
+      ],
+      "implemented_messages": [
+        "opentelemetry.proto.common.v1.AnyValue",
+        "opentelemetry.proto.common.v1.ArrayValue",
+        "opentelemetry.proto.common.v1.KeyValueList",
+        "opentelemetry.proto.common.v1.KeyValue",
+        "opentelemetry.proto.common.v1.InstrumentationScope",
+        "opentelemetry.proto.common.v1.EntityRef",
+        "opentelemetry.proto.resource.v1.Resource",
+        "opentelemetry.proto.metrics.v1.MetricsData",
+        "opentelemetry.proto.metrics.v1.ResourceMetrics",
+        "opentelemetry.proto.metrics.v1.ScopeMetrics",
+        "opentelemetry.proto.metrics.v1.Metric",
+        "opentelemetry.proto.metrics.v1.Gauge",
+        "opentelemetry.proto.metrics.v1.Sum",
+        "opentelemetry.proto.metrics.v1.Histogram",
+        "opentelemetry.proto.metrics.v1.ExponentialHistogram",
+        "opentelemetry.proto.metrics.v1.Summary",
+        "opentelemetry.proto.metrics.v1.NumberDataPoint",
+        "opentelemetry.proto.metrics.v1.HistogramDataPoint",
+        "opentelemetry.proto.metrics.v1.ExponentialHistogramDataPoint",
+        "opentelemetry.proto.metrics.v1.ExponentialHistogramDataPoint.Buckets",
+        "opentelemetry.proto.metrics.v1.SummaryDataPoint",
+        "opentelemetry.proto.metrics.v1.SummaryDataPoint.ValueAtQuantile",
+        "opentelemetry.proto.metrics.v1.Exemplar",
+        "opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest",
+        "opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceResponse",
+        "opentelemetry.proto.collector.metrics.v1.ExportMetricsPartialSuccess"
+      ],
+      "pending_submodules": [
+        "trace",
+        "logs",
+        "collector"
+      ],
+      "implemented_message_count": 26,
+      "pending_message_count": 17,
+      "execution_state": "NATIVE_DEFAULT_METRICS_LIBRARY_CHECK_GREEN_UNIT_TEST_EXECUTION_PENDING",
+      "public_surface_delta": {
+        "kind": "ADDITIVE_SOURCE_COMPATIBLE",
+        "added_methods": [
+          "UnknownFields::try_record",
+          "UnknownFields::try_record_raw",
+          "ProtobufWireEncoder::remaining_work",
+          "ProtobufWireEncoder::charge_schema_work"
+        ],
+        "added_non_exhaustive_error_variants": [
+          "ProtobufWireError::SchemaLimitExceeded",
+          "ProtobufWireError::AllocationFailed",
+          "ProtobufWireError::SchemaInvariant"
+        ],
+        "removed_or_narrowed_capabilities": false,
+        "public_otlp_schema_types_added": false
+      }
+    }
   },
   "feature_contract": [
     {
       "profile": "default",
-      "expectation": "No public API change and no generated OTLP reference dependency added."
+      "expectation": "Additive source-compatible generic protobuf authoring errors and fallible methods are present; no generated OTLP reference dependency or public OTLP schema type is added."
     },
     {
       "profile": "metrics",
@@ -985,9 +1054,9 @@
         "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants": "A3 finite schema, field, semantic, and resource invariants only.",
         "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix": "A3 schema-local encode/decode and limit properties; independent/reference conformance remains A4.",
         "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__lab_lifecycle": "A3 deterministic shared-budget lifecycle and fresh-decode failure-state checks only; no runtime, task, cancellation, shutdown, or transport claim.",
-        "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__downstream_consumer": "A3 compile/use proof that finite collector shapes are consumable through the existing owned generic codec; no signal adapter, framing, collector, or user-journey claim."
+        "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__downstream_consumer": "A3 compile/use proof that the implemented finite metrics and metrics-export request/response shapes are consumable through the existing owned generic codec; no signal adapter, framing, collector contact, transport, or user-journey claim."
       },
-      "current_state": "IMPLEMENTATION_AND_EXECUTABLE_EVIDENCE_PENDING"
+      "current_state": "COMMON_RESOURCE_METRICS_COLLECTOR_METRICS_SLICE_PRESENT_LIBRARY_CHECK_GREEN_TEST_EXECUTION_PENDING"
     },
     {
       "owner": "asupersync-5z2scg.1.4",
@@ -1009,7 +1078,7 @@
     "artifact_path": "artifacts/protobuf_owned_otlp_schema_v1.json",
     "docs_path": "docs/protobuf_owned_otlp_schema.md",
     "test_path": "tests/protobuf_owned_otlp_schema_contract.rs",
-    "test_implementation_state": "PRESENT_DIRECT_RUSTC_AND_CLIPPY_METADATA_PASS_CANONICAL_CARGO_PENDING",
+    "test_implementation_state": "PRESENT_REFRESH_VALIDATION_PENDING",
     "validator_shape": "One reusable strict-JSON and validate_contract() path rejects duplicate object keys, unknown keys, missing or duplicate families, exact-projection drift, duplicate tags, wire mismatches, absent unknown storage, unbounded paths, authority drift, stale-oracle promotion, and accidental public/cutover authority.",
     "negative_mutations": [
       "remove one message family",
@@ -1022,17 +1091,17 @@
       "allow post-decode-only resource validation",
       "authorize public prost removal or transport cutover"
     ],
-    "proof_state": "STATIC_SOURCE_TYPECHECKED_CANONICAL_CARGO_PENDING",
+    "proof_state": "STATIC_VALIDATION_REFRESH_PENDING",
     "no_local_cargo_fallback": true
   },
   "no_claim_boundaries": [
-    "This packet does not implement, compile, or execute any owned OTLP message type.",
-    "It does not prove any valid, malformed, resource, property, differential, or fuzz vector.",
+    "This packet records source, unit-test bodies, and a terminal native default-plus-metrics library check for the private common/resource/metrics/collector_metrics slice; it does not execute the unit tests and does not implement the trace, logs, collector_trace, or collector_logs families.",
+    "It does not represent any valid, malformed, resource, property, differential, or fuzz vector as passing evidence.",
     "It does not prove byte parity with opentelemetry-proto, another language, or a live collector.",
     "It does not wire metrics, traces, logs, partial-success responses, HTTP, gRPC, retry, cancellation, batching, or shutdown.",
     "It does not establish incumbent parity for the new A3 semantic limits; downstream adapters must prove chunking, rejection, or counted truncation per capability.",
     "It does not add opentelemetry-proto, tonic, tokio, or another runtime to a production graph.",
-    "It does not change any public API, generic downstream protobuf capability, feature, target, persisted format, or user journey.",
+    "It adds only the recorded source-compatible generic protobuf authoring methods and non-exhaustive error variants; it adds no public OTLP schema type and removes or narrows no generic downstream capability, feature, target, persisted format, or user journey.",
     "It does not authorize removing prost, opentelemetry, opentelemetry_sdk, or any generated differential oracle.",
     "It does not authorize production cutover, transport integration, dependency retirement, or tracker closure.",
     "It does not prove performance, allocation, RSS, throughput, latency, broad workspace health, release readiness, live RCH fleet availability, local Cargo fallback approval, or permission to delete files."

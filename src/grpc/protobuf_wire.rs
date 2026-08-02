@@ -231,6 +231,40 @@ pub enum ProtobufWireError {
         /// Configured work limit.
         limit: usize,
     },
+    /// A schema-aware aggregate or per-collection limit was exceeded.
+    #[error(
+        "protobuf schema resource {resource} reached {observed}, exceeding limit {limit} at byte {offset}"
+    )]
+    SchemaLimitExceeded {
+        /// Absolute input or output offset where the limit was exceeded.
+        offset: usize,
+        /// Stable schema resource name.
+        resource: &'static str,
+        /// Value that would result from accepting the operation.
+        observed: usize,
+        /// Configured schema limit.
+        limit: usize,
+    },
+    /// A bounded allocation failed after all size checks passed.
+    #[error(
+        "protobuf allocation for {resource} failed at byte {offset} while reserving {additional} additional unit(s)"
+    )]
+    AllocationFailed {
+        /// Absolute input or output offset associated with the allocation.
+        offset: usize,
+        /// Stable name for the buffer or collection being grown.
+        resource: &'static str,
+        /// Additional bytes or elements requested.
+        additional: usize,
+    },
+    /// A schema-level semantic invariant rejected an otherwise valid wire message.
+    #[error("protobuf schema invariant {invariant} failed at byte {offset}")]
+    SchemaInvariant {
+        /// Absolute input or output offset associated with the invariant.
+        offset: usize,
+        /// Stable invariant identifier.
+        invariant: &'static str,
+    },
     /// A group end tag appeared without a corresponding open group.
     #[error("unexpected protobuf end-group for field {field_number} at byte {offset}")]
     UnexpectedEndGroup {
@@ -411,11 +445,21 @@ struct DecodeState {
     limits: ProtobufWireLimits,
     fields_seen: usize,
     work_used: usize,
+    semantic_repeated_items: usize,
+    semantic_any_value_nodes: usize,
+    semantic_any_value_depth: usize,
+    semantic_owned_bytes: usize,
 }
 
 impl DecodeState {
     fn charge_field(&mut self, offset: usize) -> Result<(), ProtobufWireError> {
-        let count = self.fields_seen.saturating_add(1);
+        let Some(count) = self.fields_seen.checked_add(1) else {
+            return Err(ProtobufWireError::FieldCountExceeded {
+                offset,
+                count: usize::MAX,
+                limit: self.limits.max_fields,
+            });
+        };
         if count > self.limits.max_fields {
             return Err(ProtobufWireError::FieldCountExceeded {
                 offset,
@@ -428,7 +472,13 @@ impl DecodeState {
     }
 
     fn charge_work(&mut self, amount: usize, offset: usize) -> Result<(), ProtobufWireError> {
-        let work = self.work_used.saturating_add(amount);
+        let Some(work) = self.work_used.checked_add(amount) else {
+            return Err(ProtobufWireError::WorkLimitExceeded {
+                offset,
+                work: usize::MAX,
+                limit: self.limits.max_work,
+            });
+        };
         if work > self.limits.max_work {
             return Err(ProtobufWireError::WorkLimitExceeded {
                 offset,
@@ -437,6 +487,33 @@ impl DecodeState {
             });
         }
         self.work_used = work;
+        Ok(())
+    }
+
+    fn charge_semantic(
+        current: &mut usize,
+        amount: usize,
+        limit: usize,
+        offset: usize,
+        resource: &'static str,
+    ) -> Result<(), ProtobufWireError> {
+        let Some(observed) = current.checked_add(amount) else {
+            return Err(ProtobufWireError::SchemaLimitExceeded {
+                offset,
+                resource,
+                observed: usize::MAX,
+                limit,
+            });
+        };
+        if observed > limit {
+            return Err(ProtobufWireError::SchemaLimitExceeded {
+                offset,
+                resource,
+                observed,
+                limit,
+            });
+        }
+        *current = observed;
         Ok(())
     }
 }
@@ -464,6 +541,10 @@ impl<'a> ProtobufWireMessage<'a> {
                 limits,
                 fields_seen: 0,
                 work_used: 0,
+                semantic_repeated_items: 0,
+                semantic_any_value_nodes: 0,
+                semantic_any_value_depth: 0,
+                semantic_owned_bytes: 0,
             },
         })
     }
@@ -525,6 +606,140 @@ impl<'a> ProtobufWireDecoder<'a, '_> {
     #[must_use]
     pub fn is_complete(&self) -> bool {
         self.position == self.input.len() && self.groups.is_empty()
+    }
+
+    /// Remaining aggregate work available to schema-aware validation.
+    pub(crate) fn remaining_work(&self) -> usize {
+        self.state
+            .limits
+            .max_work
+            .saturating_sub(self.state.work_used)
+    }
+
+    /// Seed semantic counters from an already validated merge target before
+    /// admitting any new field allocation.
+    pub(crate) fn seed_semantic_budgets(
+        &mut self,
+        repeated_items: usize,
+        repeated_limit: usize,
+        any_value_nodes: usize,
+        any_value_node_limit: usize,
+        owned_bytes: usize,
+        owned_bytes_limit: usize,
+    ) -> Result<(), ProtobufWireError> {
+        DecodeState::charge_semantic(
+            &mut self.state.semantic_repeated_items,
+            repeated_items,
+            repeated_limit,
+            0,
+            "total repeated items",
+        )?;
+        DecodeState::charge_semantic(
+            &mut self.state.semantic_any_value_nodes,
+            any_value_nodes,
+            any_value_node_limit,
+            0,
+            "total AnyValue nodes",
+        )?;
+        DecodeState::charge_semantic(
+            &mut self.state.semantic_owned_bytes,
+            owned_bytes,
+            owned_bytes_limit,
+            0,
+            "total owned string and bytes payload",
+        )
+    }
+
+    /// Charge schema-specific repeated-item accounting against this message's
+    /// shared decode state before reserving or pushing an element.
+    pub(crate) fn charge_semantic_repeated_items(
+        &mut self,
+        amount: usize,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(), ProtobufWireError> {
+        DecodeState::charge_semantic(
+            &mut self.state.semantic_repeated_items,
+            amount,
+            limit,
+            offset,
+            "total repeated items",
+        )
+    }
+
+    /// Enter one recursive schema value before descending into it.
+    ///
+    /// `new_node` distinguishes a newly allocated logical value from a
+    /// repeated wire occurrence that merges into an existing message-valued
+    /// member. Depth is charged for both; aggregate node count only for the
+    /// former.
+    pub(crate) fn enter_semantic_any_value(
+        &mut self,
+        new_node: bool,
+        node_limit: usize,
+        depth_limit: usize,
+        offset: usize,
+    ) -> Result<(), ProtobufWireError> {
+        let Some(depth) = self.state.semantic_any_value_depth.checked_add(1) else {
+            return Err(ProtobufWireError::SchemaLimitExceeded {
+                offset,
+                resource: "AnyValue depth",
+                observed: usize::MAX,
+                limit: depth_limit,
+            });
+        };
+        if depth > depth_limit {
+            return Err(ProtobufWireError::SchemaLimitExceeded {
+                offset,
+                resource: "AnyValue depth",
+                observed: depth,
+                limit: depth_limit,
+            });
+        }
+        if new_node {
+            DecodeState::charge_semantic(
+                &mut self.state.semantic_any_value_nodes,
+                1,
+                node_limit,
+                offset,
+                "total AnyValue nodes",
+            )?;
+        }
+        self.state.semantic_any_value_depth = depth;
+        Ok(())
+    }
+
+    /// Leave a recursive schema value after its nested merge finishes.
+    pub(crate) fn leave_semantic_any_value(&mut self) {
+        debug_assert!(self.state.semantic_any_value_depth > 0);
+        self.state.semantic_any_value_depth = self.state.semantic_any_value_depth.saturating_sub(1);
+    }
+
+    /// Charge schema-owned string, bytes, or unknown-field storage before
+    /// allocating or copying it.
+    pub(crate) fn charge_semantic_owned_bytes(
+        &mut self,
+        amount: usize,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(), ProtobufWireError> {
+        DecodeState::charge_semantic(
+            &mut self.state.semantic_owned_bytes,
+            amount,
+            limit,
+            offset,
+            "total owned string and bytes payload",
+        )
+    }
+
+    /// Charge an additional schema-aware scan or copy against the aggregate
+    /// wire-work budget.
+    pub(crate) fn charge_additional_work(
+        &mut self,
+        amount: usize,
+        offset: usize,
+    ) -> Result<(), ProtobufWireError> {
+        self.state.charge_work(amount, offset)
     }
 
     /// Decode the next field, accepting non-minimal but valid varints.
@@ -605,6 +820,13 @@ impl<'a> ProtobufWireDecoder<'a, '_> {
                         limit: self.state.limits.max_depth,
                     });
                 }
+                self.groups
+                    .try_reserve(1)
+                    .map_err(|_| ProtobufWireError::AllocationFailed {
+                        offset: absolute_start,
+                        resource: "decoder group stack",
+                        additional: 1,
+                    })?;
                 self.groups.push(OpenGroup {
                     field_number,
                     offset: absolute_start,
@@ -829,6 +1051,13 @@ fn encode_varint_to_array(mut value: u64) -> ([u8; 10], usize) {
     (bytes, length + 1)
 }
 
+/// One in-place nested message whose length prefix is pending.
+#[derive(Clone, Copy, Debug)]
+struct OpenMessage {
+    field_number: u32,
+    start: usize,
+}
+
 /// Deterministic, resource-bounded writer for schema-aware owned codecs.
 #[derive(Debug)]
 pub struct ProtobufWireEncoder {
@@ -836,6 +1065,8 @@ pub struct ProtobufWireEncoder {
     limits: ProtobufWireLimits,
     fields_written: usize,
     work_used: usize,
+    nested_messages: Vec<OpenMessage>,
+    group_floor: usize,
     groups: Vec<u32>,
 }
 
@@ -848,6 +1079,8 @@ impl ProtobufWireEncoder {
             limits,
             fields_written: 0,
             work_used: 0,
+            nested_messages: Vec::new(),
+            group_floor: 0,
             groups: Vec::new(),
         }
     }
@@ -876,10 +1109,46 @@ impl ProtobufWireEncoder {
         self.fields_written
     }
 
-    /// Cumulative emitted-byte work.
+    /// Cumulative encoding work, including emitted bytes, schema validation,
+    /// raw-field parsing, and nested payload shifts.
     #[must_use]
     pub const fn work_used(&self) -> usize {
         self.work_used
+    }
+
+    /// Remaining aggregate work available to schema-aware validation after
+    /// reserving the unavoidable prefix and payload-shift work of every open
+    /// nested-message wrapper.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtobufWireError::FieldLimitExceeded`] if an open wrapper's
+    /// current payload already exceeds the configured field limit.
+    pub fn remaining_work(&self) -> Result<usize, ProtobufWireError> {
+        let (_, pending_nested_work) = self.project_nested_wrappers(self.output.len())?;
+        Ok(self
+            .limits
+            .max_work
+            .saturating_sub(self.work_used.saturating_add(pending_nested_work)))
+    }
+
+    /// Charge schema validation performed before emitting fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns the applicable message, field, field-count, work, or allocation
+    /// error before changing the committed work counter.
+    pub fn charge_schema_work(&mut self, amount: usize) -> Result<(), ProtobufWireError> {
+        let Some(prospective_work) = self.work_used.checked_add(amount) else {
+            return Err(ProtobufWireError::WorkLimitExceeded {
+                offset: self.output.len(),
+                work: usize::MAX,
+                limit: self.limits.max_work,
+            });
+        };
+        self.ensure_output(0, self.fields_written, prospective_work)?;
+        self.work_used = prospective_work;
+        Ok(())
     }
 
     /// Borrow the serialized prefix without finishing the encoder.
@@ -987,13 +1256,219 @@ impl ProtobufWireEncoder {
         self.write_length_delimited(field_number, value.as_bytes())
     }
 
-    /// Emit an already encoded nested message.
+    /// Emit an already encoded nested message as an opaque payload.
+    ///
+    /// The wrapper field and payload bytes are bounded, but the encoder cannot
+    /// infer which length-delimited records inside `value` are messages rather
+    /// than byte strings. Schema implementations that require aggregate nested
+    /// field and depth accounting need a reviewed shared-writer path; the safe
+    /// downstream authoring surface for that remains pending.
     pub fn write_message(
         &mut self,
         field_number: u32,
         value: &[u8],
     ) -> Result<(), ProtobufWireError> {
         self.write_length_delimited(field_number, value)
+    }
+
+    /// Encode a nested message directly into this encoder's output while
+    /// sharing field, depth, work, and allocation accounting.
+    ///
+    /// The nested payload is written in place, then its key and length prefix
+    /// are inserted ahead of it. A failed nested write rolls the encoder back
+    /// to its exact entry state, so callers never observe a partial field and
+    /// no unconstrained temporary message buffer is required.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed wire, schema, allocation, depth, field-count, message,
+    /// or work error from the nested callback or shared encoder budget. Every
+    /// error restores the encoder's exact entry state.
+    pub(crate) fn write_nested_message<F>(
+        &mut self,
+        field_number: u32,
+        write_payload: F,
+    ) -> Result<(), ProtobufWireError>
+    where
+        F: FnOnce(&mut Self) -> Result<(), ProtobufWireError>,
+    {
+        let start_len = self.output.len();
+        make_key(field_number, WireType::LengthDelimited, start_len)?;
+        let start_fields = self.fields_written;
+        let start_work = self.work_used;
+        let start_nested_messages = self.nested_messages.len();
+        let start_groups = self.groups.len();
+        let start_group_floor = self.group_floor;
+        let depth = start_nested_messages
+            .saturating_add(start_groups)
+            .saturating_add(1);
+        if depth > self.limits.max_depth {
+            return Err(ProtobufWireError::RecursionLimitExceeded {
+                offset: start_len,
+                depth,
+                limit: self.limits.max_depth,
+            });
+        }
+
+        let open_message = OpenMessage {
+            field_number,
+            start: start_len,
+        };
+        self.ensure_output_with_wrapper(
+            0,
+            self.fields_written,
+            self.work_used,
+            Some(open_message),
+        )?;
+        self.nested_messages
+            .try_reserve(1)
+            .map_err(|_| ProtobufWireError::AllocationFailed {
+                offset: start_len,
+                resource: "encoder nested-message stack",
+                additional: 1,
+            })?;
+        self.nested_messages.push(open_message);
+        self.group_floor = start_groups;
+        let payload_result = write_payload(self);
+        self.group_floor = start_group_floor;
+        if let Err(error) = payload_result {
+            self.rollback_nested(
+                start_len,
+                start_fields,
+                start_work,
+                start_nested_messages,
+                start_groups,
+                start_group_floor,
+            );
+            return Err(error);
+        }
+        if self.groups.len() != start_groups {
+            let expected = self.groups.last().copied().unwrap_or(0);
+            self.rollback_nested(
+                start_len,
+                start_fields,
+                start_work,
+                start_nested_messages,
+                start_groups,
+                start_group_floor,
+            );
+            return Err(ProtobufWireError::EncoderGroupMismatch {
+                offset: start_len,
+                expected,
+                actual: 0,
+            });
+        }
+        let closed = self.nested_messages.pop();
+        debug_assert_eq!(closed.map(|message| message.start), Some(start_len));
+
+        let payload_len = self.output.len() - start_len;
+        let field_limit = self.limits.effective_field_limit();
+        if payload_len > field_limit {
+            self.rollback_nested(
+                start_len,
+                start_fields,
+                start_work,
+                start_nested_messages,
+                start_groups,
+                start_group_floor,
+            );
+            return Err(ProtobufWireError::FieldLimitExceeded {
+                offset: start_len,
+                length: payload_len as u64,
+                limit: field_limit,
+            });
+        }
+
+        let key = match make_key(field_number, WireType::LengthDelimited, start_len) {
+            Ok(key) => key,
+            Err(error) => {
+                self.rollback_nested(
+                    start_len,
+                    start_fields,
+                    start_work,
+                    start_nested_messages,
+                    start_groups,
+                    start_group_floor,
+                );
+                return Err(error);
+            }
+        };
+        let (key_bytes, key_len) = encode_varint_to_array(u64::from(key));
+        let (length_bytes, length_len) = encode_varint_to_array(payload_len as u64);
+        let prefix_len = key_len + length_len;
+        let Some(prospective_fields) = self.fields_written.checked_add(1) else {
+            self.rollback_nested(
+                start_len,
+                start_fields,
+                start_work,
+                start_nested_messages,
+                start_groups,
+                start_group_floor,
+            );
+            return Err(ProtobufWireError::FieldCountExceeded {
+                offset: start_len,
+                count: usize::MAX,
+                limit: self.limits.max_fields,
+            });
+        };
+        let Some(prospective_work) = self
+            .work_used
+            .checked_add(prefix_len)
+            .and_then(|work| work.checked_add(payload_len))
+        else {
+            self.rollback_nested(
+                start_len,
+                start_fields,
+                start_work,
+                start_nested_messages,
+                start_groups,
+                start_group_floor,
+            );
+            return Err(ProtobufWireError::WorkLimitExceeded {
+                offset: start_len,
+                work: usize::MAX,
+                limit: self.limits.max_work,
+            });
+        };
+        if let Err(error) = self.ensure_output(prefix_len, prospective_fields, prospective_work) {
+            self.rollback_nested(
+                start_len,
+                start_fields,
+                start_work,
+                start_nested_messages,
+                start_groups,
+                start_group_floor,
+            );
+            return Err(error);
+        }
+
+        let end = self.output.len();
+        self.output.resize(end + prefix_len, 0);
+        self.output
+            .copy_within(start_len..end, start_len + prefix_len);
+        self.output[start_len..start_len + key_len].copy_from_slice(&key_bytes[..key_len]);
+        self.output[start_len + key_len..start_len + prefix_len]
+            .copy_from_slice(&length_bytes[..length_len]);
+        self.fields_written = prospective_fields;
+        self.work_used = prospective_work;
+        Ok(())
+    }
+
+    fn rollback_nested(
+        &mut self,
+        output_len: usize,
+        fields_written: usize,
+        work_used: usize,
+        nested_messages_len: usize,
+        groups_len: usize,
+        group_floor: usize,
+    ) {
+        self.output.truncate(output_len);
+        self.fields_written = fields_written;
+        self.work_used = work_used;
+        self.nested_messages.truncate(nested_messages_len);
+        self.groups.truncate(groups_len);
+        self.group_floor = group_floor;
     }
 
     /// Emit packed varint payloads (including bool, enum, and ZigZag values).
@@ -1017,7 +1492,6 @@ impl ProtobufWireEncoder {
             let (bytes, length) = encode_varint_to_array(value);
             self.output.extend_from_slice(&bytes[..length]);
         }
-        self.commit_prepared_field();
         Ok(())
     }
 
@@ -1038,7 +1512,6 @@ impl ProtobufWireEncoder {
         for &value in values {
             self.output.extend_from_slice(&value.to_le_bytes());
         }
-        self.commit_prepared_field();
         Ok(())
     }
 
@@ -1059,13 +1532,38 @@ impl ProtobufWireEncoder {
         for &value in values {
             self.output.extend_from_slice(&value.to_le_bytes());
         }
-        self.commit_prepared_field();
+        Ok(())
+    }
+
+    /// Emit packed IEEE-754 doubles without materializing their bit patterns.
+    pub(crate) fn write_packed_doubles(
+        &mut self,
+        field_number: u32,
+        values: &[f64],
+    ) -> Result<(), ProtobufWireError> {
+        let Some(payload_len) = values.len().checked_mul(8) else {
+            return Err(ProtobufWireError::FieldLimitExceeded {
+                offset: self.output.len(),
+                length: u64::MAX,
+                limit: self.limits.effective_field_limit(),
+            });
+        };
+        self.prepare_length_delimited(field_number, payload_len)?;
+        for &value in values {
+            self.output
+                .extend_from_slice(&value.to_bits().to_le_bytes());
+        }
         Ok(())
     }
 
     /// Start a deprecated group while enforcing aggregate depth.
     pub fn start_group(&mut self, field_number: u32) -> Result<(), ProtobufWireError> {
-        let depth = self.groups.len().saturating_add(1);
+        let key = make_key(field_number, WireType::StartGroup, self.output.len())?;
+        let depth = self
+            .nested_messages
+            .len()
+            .saturating_add(self.groups.len())
+            .saturating_add(1);
         if depth > self.limits.max_depth {
             return Err(ProtobufWireError::RecursionLimitExceeded {
                 offset: self.output.len(),
@@ -1073,6 +1571,29 @@ impl ProtobufWireEncoder {
                 limit: self.limits.max_depth,
             });
         }
+        let key_len = encoded_varint_len(u64::from(key));
+        let Some(prospective_fields) = self.fields_written.checked_add(1) else {
+            return Err(ProtobufWireError::FieldCountExceeded {
+                offset: self.output.len(),
+                count: usize::MAX,
+                limit: self.limits.max_fields,
+            });
+        };
+        let Some(prospective_work) = self.work_used.checked_add(key_len) else {
+            return Err(ProtobufWireError::WorkLimitExceeded {
+                offset: self.output.len(),
+                work: usize::MAX,
+                limit: self.limits.max_work,
+            });
+        };
+        self.ensure_output(key_len, prospective_fields, prospective_work)?;
+        self.groups
+            .try_reserve(1)
+            .map_err(|_| ProtobufWireError::AllocationFailed {
+                offset: self.output.len(),
+                resource: "encoder group stack",
+                additional: 1,
+            })?;
         self.write_record(field_number, WireType::StartGroup, &[], None)?;
         self.groups.push(field_number);
         Ok(())
@@ -1081,7 +1602,7 @@ impl ProtobufWireEncoder {
     /// End a deprecated group, requiring the opening field number.
     pub fn end_group(&mut self, field_number: u32) -> Result<(), ProtobufWireError> {
         let expected = self.groups.last().copied().unwrap_or(0);
-        if expected != field_number {
+        if self.groups.len() <= self.group_floor || expected != field_number {
             return Err(ProtobufWireError::EncoderGroupMismatch {
                 offset: self.output.len(),
                 expected,
@@ -1098,12 +1619,53 @@ impl ProtobufWireEncoder {
     /// This is the unknown-field preservation path. Complete groups are
     /// accepted; partial group fragments are rejected.
     pub fn write_raw_fields(&mut self, raw: &[u8]) -> Result<(), ProtobufWireError> {
+        let Some(preflight_work) = self
+            .work_used
+            .checked_add(raw.len())
+            .and_then(|work| work.checked_add(raw.len()))
+        else {
+            return Err(ProtobufWireError::WorkLimitExceeded {
+                offset: self.output.len(),
+                work: usize::MAX,
+                limit: self.limits.max_work,
+            });
+        };
+        self.check_output_with_wrapper(raw.len(), self.fields_written, preflight_work, None)?;
+        let Some(projected_length) = self.output.len().checked_add(raw.len()) else {
+            return Err(ProtobufWireError::MessageLimitExceeded {
+                length: usize::MAX,
+                limit: self.limits.effective_message_limit(),
+            });
+        };
+        let (_, pending_nested_work) = self.project_nested_wrappers(projected_length)?;
+        let Some(reserved_non_parser_work) = self
+            .work_used
+            .checked_add(raw.len())
+            .and_then(|work| work.checked_add(pending_nested_work))
+        else {
+            return Err(ProtobufWireError::WorkLimitExceeded {
+                offset: self.output.len(),
+                work: usize::MAX,
+                limit: self.limits.max_work,
+            });
+        };
+        let pending_wrapper_fields = self.nested_messages.len();
         let validation_limits = ProtobufWireLimits {
             max_message_len: raw.len(),
             max_field_len: self.limits.max_field_len,
-            max_fields: self.limits.max_fields.saturating_sub(self.fields_written),
-            max_depth: self.limits.max_depth.saturating_sub(self.groups.len()),
-            max_work: self.limits.max_work.saturating_sub(self.work_used),
+            max_fields: self
+                .limits
+                .max_fields
+                .saturating_sub(self.fields_written)
+                .saturating_sub(pending_wrapper_fields),
+            max_depth: self
+                .limits
+                .max_depth
+                .saturating_sub(self.nested_messages.len().saturating_add(self.groups.len())),
+            max_work: self
+                .limits
+                .max_work
+                .saturating_sub(reserved_non_parser_work),
         };
         let mut message = ProtobufWireMessage::new(raw, validation_limits)?;
         {
@@ -1111,8 +1673,24 @@ impl ProtobufWireEncoder {
             while decoder.next_field()?.is_some() {}
         }
         let fields = message.fields_seen();
-        let prospective_fields = self.fields_written.saturating_add(fields);
-        let prospective_work = self.work_used.saturating_add(raw.len());
+        let Some(prospective_fields) = self.fields_written.checked_add(fields) else {
+            return Err(ProtobufWireError::FieldCountExceeded {
+                offset: self.output.len(),
+                count: usize::MAX,
+                limit: self.limits.max_fields,
+            });
+        };
+        let Some(prospective_work) = self
+            .work_used
+            .checked_add(message.work_used())
+            .and_then(|work| work.checked_add(raw.len()))
+        else {
+            return Err(ProtobufWireError::WorkLimitExceeded {
+                offset: self.output.len(),
+                work: usize::MAX,
+                limit: self.limits.max_work,
+            });
+        };
         self.ensure_output(raw.len(), prospective_fields, prospective_work)?;
         self.output.extend_from_slice(raw);
         self.fields_written = prospective_fields;
@@ -1127,7 +1705,6 @@ impl ProtobufWireEncoder {
     ) -> Result<(), ProtobufWireError> {
         self.prepare_length_delimited(field_number, value.len())?;
         self.output.extend_from_slice(value);
-        self.commit_prepared_field();
         Ok(())
     }
 
@@ -1153,11 +1730,6 @@ impl ProtobufWireEncoder {
         )
     }
 
-    fn commit_prepared_field(&mut self) {
-        self.work_used = self.output.len();
-        self.fields_written += 1;
-    }
-
     fn write_record(
         &mut self,
         field_number: u32,
@@ -1177,44 +1749,172 @@ impl ProtobufWireEncoder {
                 limit: self.limits.effective_message_limit(),
             });
         };
-        let prospective_fields = self.fields_written.saturating_add(1);
-        let prospective_work = self.work_used.saturating_add(additional);
+        let Some(prospective_fields) = self.fields_written.checked_add(1) else {
+            return Err(ProtobufWireError::FieldCountExceeded {
+                offset: self.output.len(),
+                count: usize::MAX,
+                limit: self.limits.max_fields,
+            });
+        };
+        let Some(prospective_work) = self.work_used.checked_add(additional) else {
+            return Err(ProtobufWireError::WorkLimitExceeded {
+                offset: self.output.len(),
+                work: usize::MAX,
+                limit: self.limits.max_work,
+            });
+        };
         self.ensure_output(additional, prospective_fields, prospective_work)?;
         self.output.extend_from_slice(&key_bytes[..key_len]);
         self.output.extend_from_slice(immediate_payload);
-        if deferred_payload_len.is_none() {
-            self.fields_written = prospective_fields;
-            self.work_used = prospective_work;
-        }
+        self.fields_written = prospective_fields;
+        self.work_used = prospective_work;
         Ok(())
     }
 
     fn ensure_output(
-        &self,
+        &mut self,
         additional: usize,
         prospective_fields: usize,
         prospective_work: usize,
     ) -> Result<(), ProtobufWireError> {
+        self.ensure_output_with_wrapper(additional, prospective_fields, prospective_work, None)
+    }
+
+    fn ensure_output_with_wrapper(
+        &mut self,
+        additional: usize,
+        prospective_fields: usize,
+        prospective_work: usize,
+        additional_wrapper: Option<OpenMessage>,
+    ) -> Result<(), ProtobufWireError> {
+        self.check_output_with_wrapper(
+            additional,
+            prospective_fields,
+            prospective_work,
+            additional_wrapper,
+        )?;
+        self.output
+            .try_reserve(additional)
+            .map_err(|_| ProtobufWireError::AllocationFailed {
+                offset: self.output.len(),
+                resource: "wire output",
+                additional,
+            })?;
+        Ok(())
+    }
+
+    fn check_output_with_wrapper(
+        &self,
+        additional: usize,
+        prospective_fields: usize,
+        prospective_work: usize,
+        additional_wrapper: Option<OpenMessage>,
+    ) -> Result<(), ProtobufWireError> {
         let limit = self.limits.effective_message_limit();
-        let length = self.output.len().saturating_add(additional);
-        if length > limit {
-            return Err(ProtobufWireError::MessageLimitExceeded { length, limit });
+        let Some(length) = self.output.len().checked_add(additional) else {
+            return Err(ProtobufWireError::MessageLimitExceeded {
+                length: usize::MAX,
+                limit,
+            });
+        };
+        let (final_length, pending_nested_work) =
+            self.project_nested_wrappers_with(length, additional_wrapper)?;
+        if final_length > limit {
+            return Err(ProtobufWireError::MessageLimitExceeded {
+                length: final_length,
+                limit,
+            });
         }
-        if prospective_fields > self.limits.max_fields {
+        let Some(admitted_fields) = prospective_fields
+            .checked_add(self.nested_messages.len())
+            .and_then(|fields| fields.checked_add(usize::from(additional_wrapper.is_some())))
+        else {
             return Err(ProtobufWireError::FieldCountExceeded {
                 offset: self.output.len(),
-                count: prospective_fields,
+                count: usize::MAX,
+                limit: self.limits.max_fields,
+            });
+        };
+        if admitted_fields > self.limits.max_fields {
+            return Err(ProtobufWireError::FieldCountExceeded {
+                offset: self.output.len(),
+                count: admitted_fields,
                 limit: self.limits.max_fields,
             });
         }
-        if prospective_work > self.limits.max_work {
+        let Some(admitted_work) = prospective_work.checked_add(pending_nested_work) else {
             return Err(ProtobufWireError::WorkLimitExceeded {
                 offset: self.output.len(),
-                work: prospective_work,
+                work: usize::MAX,
+                limit: self.limits.max_work,
+            });
+        };
+        if admitted_work > self.limits.max_work {
+            return Err(ProtobufWireError::WorkLimitExceeded {
+                offset: self.output.len(),
+                work: admitted_work,
                 limit: self.limits.max_work,
             });
         }
         Ok(())
+    }
+
+    fn project_nested_wrappers(
+        &self,
+        initial_length: usize,
+    ) -> Result<(usize, usize), ProtobufWireError> {
+        self.project_nested_wrappers_with(initial_length, None)
+    }
+
+    fn project_nested_wrappers_with(
+        &self,
+        initial_length: usize,
+        additional_wrapper: Option<OpenMessage>,
+    ) -> Result<(usize, usize), ProtobufWireError> {
+        let field_limit = self.limits.effective_field_limit();
+        let mut final_length = initial_length;
+        let mut pending_nested_work = 0usize;
+        for open in additional_wrapper
+            .iter()
+            .chain(self.nested_messages.iter().rev())
+        {
+            let Some(payload_len) = final_length.checked_sub(open.start) else {
+                return Err(ProtobufWireError::FieldLimitExceeded {
+                    offset: open.start,
+                    length: u64::MAX,
+                    limit: field_limit,
+                });
+            };
+            if payload_len > field_limit {
+                return Err(ProtobufWireError::FieldLimitExceeded {
+                    offset: open.start,
+                    length: payload_len as u64,
+                    limit: field_limit,
+                });
+            }
+            let key = (open.field_number << 3) | WireType::LengthDelimited as u32;
+            let prefix_len =
+                encoded_varint_len(u64::from(key)) + encoded_varint_len(payload_len as u64);
+            let Some(projected_work) = pending_nested_work
+                .checked_add(payload_len)
+                .and_then(|work| work.checked_add(prefix_len))
+            else {
+                return Err(ProtobufWireError::WorkLimitExceeded {
+                    offset: open.start,
+                    work: usize::MAX,
+                    limit: self.limits.max_work,
+                });
+            };
+            pending_nested_work = projected_work;
+            let Some(projected_length) = final_length.checked_add(prefix_len) else {
+                return Err(ProtobufWireError::MessageLimitExceeded {
+                    length: usize::MAX,
+                    limit: self.limits.effective_message_limit(),
+                });
+            };
+            final_length = projected_length;
+        }
+        Ok((final_length, pending_nested_work))
     }
 }
 
@@ -1309,6 +2009,12 @@ mod tests {
         choice: Option<Choice>,
         #[prost(enumeration = "Color", tag = "6")]
         color: i32,
+    }
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct PackedDoubleModel {
+        #[prost(double, repeated, packed = "true", tag = "3")]
+        values: Vec<f64>,
     }
 
     fn generous_limits(size: usize) -> ProtobufWireLimits {
@@ -1530,6 +2236,59 @@ mod tests {
         eprintln!(
             "bead=asupersync-5z2scg.1.1 scenario=packed-repeated-map-oneof-enum-nested fixture=workspace-prost seed=none command=\"{EXACT_RCH_COMMAND}\" artifact=none expected=full-accepted-data-model"
         );
+    }
+
+    #[test]
+    fn packed_doubles_match_prost_bytes_without_projection_storage() {
+        let values = [1.25, -0.0, f64::from_bits(0x7ff8_0000_0000_0042)];
+        let mut encoder = ProtobufWireEncoder::new(generous_limits(64));
+        encoder.write_packed_doubles(3, &values).unwrap();
+        let wire = encoder.finish().unwrap();
+
+        let expected = [
+            0x1a, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf4, 0x3f, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x80, 0x42, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf8, 0x7f,
+        ];
+        assert_eq!(wire.as_ref(), expected);
+        assert_eq!(
+            wire.as_ref(),
+            PackedDoubleModel {
+                values: values.to_vec(),
+            }
+            .encode_to_vec()
+        );
+    }
+
+    #[test]
+    fn packed_doubles_preserve_explicit_empty_record_behavior() {
+        let mut encoder = ProtobufWireEncoder::new(generous_limits(16));
+        encoder.write_packed_doubles(3, &[]).unwrap();
+
+        assert_eq!(encoder.as_bytes(), [0x1a, 0x00]);
+        assert_eq!(encoder.fields_written(), 1);
+        assert_eq!(encoder.work_used(), 2);
+    }
+
+    #[test]
+    fn packed_doubles_reject_limits_without_changing_encoder_state() {
+        let limits = generous_limits(64).with_max_field_len(7);
+        let mut encoder = ProtobufWireEncoder::new(limits);
+        encoder.write_varint(9, 1).unwrap();
+        let original = encoder.as_bytes().to_vec();
+        let original_fields = encoder.fields_written();
+        let original_work = encoder.work_used();
+
+        assert!(matches!(
+            encoder.write_packed_doubles(3, &[1.0]),
+            Err(ProtobufWireError::FieldLimitExceeded {
+                length: 8,
+                limit: 7,
+                ..
+            })
+        ));
+        assert_eq!(encoder.as_bytes(), original);
+        assert_eq!(encoder.fields_written(), original_fields);
+        assert_eq!(encoder.work_used(), original_work);
     }
 
     #[test]
@@ -1769,5 +2528,178 @@ mod tests {
         eprintln!(
             "bead=asupersync-5z2scg.1.1 scenario=field-key-boundaries fixture=zero-and-29-bit-maximum seed=none command=\"{EXACT_RCH_COMMAND}\" artifact=none expected=max-accepted-neighbors-rejected"
         );
+    }
+
+    #[test]
+    fn nested_encoder_rolls_back_groups_and_rejects_cross_boundary_close() {
+        let limits = generous_limits(128);
+        let mut encoder = ProtobufWireEncoder::new(limits);
+        encoder.write_varint(9, 1).unwrap();
+        let original = encoder.as_bytes().to_vec();
+        let original_fields = encoder.fields_written();
+        let original_work = encoder.work_used();
+
+        let error = encoder
+            .write_nested_message(1, |nested| {
+                nested.start_group(2)?;
+                Err(ProtobufWireError::SchemaInvariant {
+                    offset: nested.len(),
+                    invariant: "nested rollback fixture",
+                })
+            })
+            .unwrap_err();
+        assert!(matches!(error, ProtobufWireError::SchemaInvariant { .. }));
+        assert_eq!(encoder.as_bytes(), original);
+        assert_eq!(encoder.fields_written(), original_fields);
+        assert_eq!(encoder.work_used(), original_work);
+
+        let mut unclosed = ProtobufWireEncoder::new(limits);
+        assert!(matches!(
+            unclosed.write_nested_message(1, |nested| nested.start_group(2)),
+            Err(ProtobufWireError::EncoderGroupMismatch { .. })
+        ));
+        assert!(unclosed.is_empty());
+
+        let mut outer = ProtobufWireEncoder::new(limits);
+        outer.start_group(2).unwrap();
+        let outer_prefix = outer.as_bytes().to_vec();
+        assert!(matches!(
+            outer.write_nested_message(1, |nested| nested.end_group(2)),
+            Err(ProtobufWireError::EncoderGroupMismatch { .. })
+        ));
+        assert_eq!(outer.as_bytes(), outer_prefix);
+        outer.end_group(2).unwrap();
+        assert_eq!(outer.finish().unwrap(), [0x13, 0x14].as_slice());
+    }
+
+    #[test]
+    fn nested_encoder_combines_message_group_depth_and_charges_prefix_shift_work() {
+        let depth_one = generous_limits(128).with_max_depth(1);
+        let mut nested_then_group = ProtobufWireEncoder::new(depth_one);
+        assert!(matches!(
+            nested_then_group.write_nested_message(1, |nested| nested.start_group(2)),
+            Err(ProtobufWireError::RecursionLimitExceeded { depth: 2, .. })
+        ));
+        assert!(nested_then_group.is_empty());
+
+        let mut group_then_nested = ProtobufWireEncoder::new(depth_one);
+        group_then_nested.start_group(1).unwrap();
+        assert!(matches!(
+            group_then_nested.write_nested_message(2, |_| Ok(())),
+            Err(ProtobufWireError::RecursionLimitExceeded { depth: 2, .. })
+        ));
+        assert!(matches!(
+            group_then_nested.write_raw_fields(&[0x1b, 0x1c]),
+            Err(ProtobufWireError::RecursionLimitExceeded { .. })
+        ));
+        group_then_nested.end_group(1).unwrap();
+
+        let work_limited = generous_limits(128).with_max_work(50);
+        let mut encoder = ProtobufWireEncoder::new(work_limited);
+        encoder
+            .write_nested_message(1, |nested| nested.write_bytes(1, &[7; 20]))
+            .unwrap();
+        assert_eq!(encoder.len(), 24);
+        assert_eq!(encoder.work_used(), 46);
+        let snapshot = encoder.as_bytes().to_vec();
+        assert!(matches!(
+            encoder.write_bytes(2, &[8; 4]),
+            Err(ProtobufWireError::WorkLimitExceeded { work: 52, .. })
+        ));
+        assert_eq!(encoder.as_bytes(), snapshot);
+        assert_eq!(encoder.work_used(), 46);
+    }
+
+    #[test]
+    fn preflight_and_counter_overflow_remain_fail_closed_at_maximum_limits() {
+        let maximum = ProtobufWireLimits {
+            max_message_len: 128,
+            max_field_len: 128,
+            max_fields: usize::MAX,
+            max_depth: usize::MAX,
+            max_work: usize::MAX,
+        };
+
+        let mut field_overflow = ProtobufWireEncoder::new(maximum);
+        field_overflow.fields_written = usize::MAX;
+        assert!(matches!(
+            field_overflow.write_varint(1, 1),
+            Err(ProtobufWireError::FieldCountExceeded {
+                count: usize::MAX,
+                limit: usize::MAX,
+                ..
+            })
+        ));
+        assert!(field_overflow.is_empty());
+
+        let mut work_overflow = ProtobufWireEncoder::new(maximum);
+        work_overflow.work_used = usize::MAX;
+        assert!(matches!(
+            work_overflow.write_varint(1, 1),
+            Err(ProtobufWireError::WorkLimitExceeded {
+                work: usize::MAX,
+                limit: usize::MAX,
+                ..
+            })
+        ));
+        assert!(work_overflow.is_empty());
+
+        let mut field_message = ProtobufWireMessage::new(&[0x08, 0x01], maximum).unwrap();
+        field_message.state.fields_seen = usize::MAX;
+        assert!(matches!(
+            field_message.decoder().next_field(),
+            Err(ProtobufWireError::FieldCountExceeded {
+                count: usize::MAX,
+                limit: usize::MAX,
+                ..
+            })
+        ));
+
+        let mut work_message = ProtobufWireMessage::new(&[0x08, 0x01], maximum).unwrap();
+        work_message.state.work_used = usize::MAX;
+        assert!(matches!(
+            work_message.decoder().next_field(),
+            Err(ProtobufWireError::WorkLimitExceeded {
+                work: usize::MAX,
+                limit: usize::MAX,
+                ..
+            })
+        ));
+
+        let mut semantic_message = ProtobufWireMessage::new(&[], maximum).unwrap();
+        semantic_message.state.semantic_owned_bytes = usize::MAX;
+        assert!(matches!(
+            semantic_message
+                .decoder()
+                .charge_semantic_owned_bytes(1, usize::MAX, 0),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                observed: usize::MAX,
+                limit: usize::MAX,
+                ..
+            })
+        ));
+
+        let no_fields = maximum.with_max_fields(0);
+        let mut nested = ProtobufWireEncoder::new(no_fields);
+        assert!(matches!(
+            nested.write_nested_message(1, |_| Ok(())),
+            Err(ProtobufWireError::FieldCountExceeded {
+                count: 1,
+                limit: 0,
+                ..
+            })
+        ));
+        assert_eq!(nested.nested_messages.capacity(), 0);
+
+        let mut group = ProtobufWireEncoder::new(no_fields);
+        assert!(matches!(
+            group.start_group(1),
+            Err(ProtobufWireError::FieldCountExceeded {
+                count: 1,
+                limit: 0,
+                ..
+            })
+        ));
+        assert_eq!(group.groups.capacity(), 0);
     }
 }

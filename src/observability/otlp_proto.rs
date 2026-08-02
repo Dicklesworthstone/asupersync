@@ -1,0 +1,5007 @@
+//! Private, bounded OTLP protobuf models.
+//!
+//! This module is the implementation side of `protobuf-owned-otlp-schema-v1`.
+//! It deliberately remains crate-private and separate from signal adapters,
+//! transport framing, generated reference messages, and dependency cutover.
+//! The current implementation slice owns the common, resource, metrics, and
+//! metrics-collector families plus the shared resource-accounting machinery
+//! required by later signal models.
+
+use crate::grpc::protobuf::{
+    ProtoMessage, ProtobufWireDecoder, ProtobufWireEncoder, ProtobufWireError, ProtobufWireField,
+    ProtobufWireLimits, ProtobufWireMessage, UnknownFields, WireType, decode_varint, merge_fields,
+    merge_nested_message, zigzag_decode_i32,
+};
+
+mod limits_and_error {
+    use super::{
+        ProtoMessage, ProtobufWireDecoder, ProtobufWireEncoder, ProtobufWireError,
+        ProtobufWireField, ProtobufWireLimits, ProtobufWireMessage, UnknownFields, WireType,
+        merge_fields, merge_nested_message,
+    };
+
+    pub(super) const MAX_TOTAL_REPEATED_ITEMS: usize = 65_536;
+    pub(super) const MAX_TOTAL_ANY_VALUE_NODES: usize = 4_096;
+    pub(super) const MAX_TOTAL_OWNED_BYTES: usize = 4 * 1024 * 1024;
+
+    pub(super) const MAX_ATTRIBUTES: usize = 128;
+    pub(super) const MAX_ENTITY_REFS: usize = 128;
+    pub(super) const MAX_ENTITY_REF_KEYS: usize = 128;
+    pub(super) const MAX_ANY_VALUE_DEPTH: usize = 16;
+    pub(super) const MAX_ANY_VALUE_ITEMS: usize = 128;
+    pub(super) const MAX_RESOURCE_GROUPS_PER_REQUEST: usize = 64;
+    pub(super) const MAX_SCOPES_PER_RESOURCE_GROUP: usize = 128;
+    pub(super) const MAX_METRICS_PER_SCOPE: usize = 4_096;
+    pub(super) const MAX_DATA_POINTS_PER_METRIC: usize = 1_000;
+    pub(super) const MAX_METRIC_METADATA_ENTRIES: usize = 128;
+    pub(super) const MAX_EXEMPLARS_PER_DATA_POINT: usize = 128;
+    pub(super) const MAX_HISTOGRAM_BUCKET_COUNTS: usize = 4_096;
+    pub(super) const MAX_HISTOGRAM_EXPLICIT_BOUNDS: usize = 4_095;
+    pub(super) const MAX_EXPONENTIAL_HISTOGRAM_BUCKETS: usize = 4_096;
+    pub(super) const MAX_SUMMARY_QUANTILES: usize = 1_024;
+
+    pub(super) const MAX_ATTRIBUTE_KEY_BYTES: usize = 1_024;
+    pub(super) const MAX_ATTRIBUTE_VALUE_BYTES: usize = 4_096;
+    pub(super) const MAX_SCHEMA_URL_BYTES: usize = 2_048;
+    pub(super) const MAX_SCOPE_NAME_BYTES: usize = 1_024;
+    pub(super) const MAX_SCOPE_VERSION_BYTES: usize = 1_024;
+    pub(super) const MAX_METRIC_NAME_BYTES: usize = 1_024;
+    pub(super) const MAX_METRIC_DESCRIPTION_BYTES: usize = 4_096;
+    pub(super) const MAX_METRIC_UNIT_BYTES: usize = 256;
+    pub(super) const MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES: usize = 4_096;
+    pub(super) const MAX_TRACE_ID_BYTES: usize = 16;
+    pub(super) const MAX_SPAN_ID_BYTES: usize = 8;
+
+    pub(super) trait OtlpModel: Default + Send + Sized + 'static {
+        const COUNTS_AS_ANY_VALUE: bool = false;
+
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError>;
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError>;
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError>;
+    }
+
+    #[derive(Debug)]
+    pub(super) struct ValidationBudget {
+        repeated_items: usize,
+        any_value_nodes: usize,
+        owned_bytes: usize,
+        work_used: usize,
+        work_limit: usize,
+        enforce_invariants: bool,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    pub(super) struct ValidationReceipt {
+        pub(super) repeated_items: usize,
+        pub(super) any_value_nodes: usize,
+        pub(super) owned_bytes: usize,
+        pub(super) work_used: usize,
+    }
+
+    impl ValidationBudget {
+        pub(super) const fn new(work_limit: usize, enforce_invariants: bool) -> Self {
+            Self {
+                repeated_items: 0,
+                any_value_nodes: 0,
+                owned_bytes: 0,
+                work_used: 0,
+                work_limit,
+                enforce_invariants,
+            }
+        }
+
+        pub(super) const fn enforces_invariants(&self) -> bool {
+            self.enforce_invariants
+        }
+
+        fn checked_total(
+            current: usize,
+            amount: usize,
+            limit: usize,
+            resource: &'static str,
+        ) -> Result<usize, ProtobufWireError> {
+            let Some(observed) = current.checked_add(amount) else {
+                return Err(ProtobufWireError::SchemaLimitExceeded {
+                    offset: 0,
+                    resource,
+                    observed: usize::MAX,
+                    limit,
+                });
+            };
+            if observed > limit {
+                return Err(ProtobufWireError::SchemaLimitExceeded {
+                    offset: 0,
+                    resource,
+                    observed,
+                    limit,
+                });
+            }
+            Ok(observed)
+        }
+
+        pub(super) fn repeated(
+            &mut self,
+            count: usize,
+            collection_limit: usize,
+            resource: &'static str,
+        ) -> Result<(), ProtobufWireError> {
+            if count > collection_limit {
+                return Err(ProtobufWireError::SchemaLimitExceeded {
+                    offset: 0,
+                    resource,
+                    observed: count,
+                    limit: collection_limit,
+                });
+            }
+            self.repeated_items = Self::checked_total(
+                self.repeated_items,
+                count,
+                MAX_TOTAL_REPEATED_ITEMS,
+                "total repeated items",
+            )?;
+            Ok(())
+        }
+
+        pub(super) fn any_value_node(&mut self, depth: usize) -> Result<(), ProtobufWireError> {
+            if depth > MAX_ANY_VALUE_DEPTH {
+                return Err(ProtobufWireError::SchemaLimitExceeded {
+                    offset: 0,
+                    resource: "AnyValue depth",
+                    observed: depth,
+                    limit: MAX_ANY_VALUE_DEPTH,
+                });
+            }
+            self.any_value_nodes = Self::checked_total(
+                self.any_value_nodes,
+                1,
+                MAX_TOTAL_ANY_VALUE_NODES,
+                "total AnyValue nodes",
+            )?;
+            Ok(())
+        }
+
+        pub(super) fn owned_bytes(
+            &mut self,
+            length: usize,
+            field_limit: usize,
+            resource: &'static str,
+        ) -> Result<(), ProtobufWireError> {
+            if length > field_limit {
+                return Err(ProtobufWireError::SchemaLimitExceeded {
+                    offset: 0,
+                    resource,
+                    observed: length,
+                    limit: field_limit,
+                });
+            }
+            self.owned_bytes = Self::checked_total(
+                self.owned_bytes,
+                length,
+                MAX_TOTAL_OWNED_BYTES,
+                "total owned string and bytes payload",
+            )?;
+            Ok(())
+        }
+
+        pub(super) fn work(&mut self, amount: usize) -> Result<(), ProtobufWireError> {
+            let Some(observed) = self.work_used.checked_add(amount) else {
+                return Err(ProtobufWireError::WorkLimitExceeded {
+                    offset: 0,
+                    work: usize::MAX,
+                    limit: self.work_limit,
+                });
+            };
+            if observed > self.work_limit {
+                return Err(ProtobufWireError::WorkLimitExceeded {
+                    offset: 0,
+                    work: observed,
+                    limit: self.work_limit,
+                });
+            }
+            self.work_used = observed;
+            Ok(())
+        }
+
+        pub(super) const fn receipt(&self) -> ValidationReceipt {
+            ValidationReceipt {
+                repeated_items: self.repeated_items,
+                any_value_nodes: self.any_value_nodes,
+                owned_bytes: self.owned_bytes,
+                work_used: self.work_used,
+            }
+        }
+    }
+
+    pub(super) fn validate_root<M: OtlpModel>(
+        model: &M,
+        work_limit: usize,
+        enforce_invariants: bool,
+    ) -> Result<ValidationReceipt, ProtobufWireError> {
+        let mut budget = ValidationBudget::new(work_limit, enforce_invariants);
+        let depth = usize::from(M::COUNTS_AS_ANY_VALUE);
+        model.validate_otlp(&mut budget, depth)?;
+        Ok(budget.receipt())
+    }
+
+    pub(super) fn merge_root<M>(
+        target: &mut M,
+        input: &[u8],
+        limits: ProtobufWireLimits,
+    ) -> Result<(), ProtobufWireError>
+    where
+        M: OtlpModel + ProtoMessage,
+    {
+        let existing = validate_root(target, limits.max_work, false)?;
+        let mut message = ProtobufWireMessage::new(input, limits)?;
+        {
+            let mut decoder = message.decoder();
+            decoder.seed_semantic_budgets(
+                existing.repeated_items,
+                MAX_TOTAL_REPEATED_ITEMS,
+                existing.any_value_nodes,
+                MAX_TOTAL_ANY_VALUE_NODES,
+                existing.owned_bytes,
+                MAX_TOTAL_OWNED_BYTES,
+            )?;
+            decoder.charge_additional_work(existing.work_used, 0)?;
+            if M::COUNTS_AS_ANY_VALUE {
+                decoder.enter_semantic_any_value(
+                    false,
+                    MAX_TOTAL_ANY_VALUE_NODES,
+                    MAX_ANY_VALUE_DEPTH,
+                    0,
+                )?;
+            }
+            let result = merge_fields(target, &mut decoder);
+            if M::COUNTS_AS_ANY_VALUE {
+                decoder.leave_semantic_any_value();
+            }
+            result?;
+            let remaining_work = decoder.remaining_work();
+            let validated = validate_root(target, remaining_work, true)?;
+            let offset = decoder.position();
+            decoder.charge_additional_work(validated.work_used, offset)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn collection_room(
+        current: usize,
+        additional: usize,
+        limit: usize,
+        offset: usize,
+        resource: &'static str,
+    ) -> Result<(), ProtobufWireError> {
+        let observed = current.saturating_add(additional);
+        if observed > limit {
+            return Err(ProtobufWireError::SchemaLimitExceeded {
+                offset,
+                resource,
+                observed,
+                limit,
+            });
+        }
+        Ok(())
+    }
+
+    pub(super) fn allocation_failed(
+        offset: usize,
+        resource: &'static str,
+        additional: usize,
+    ) -> ProtobufWireError {
+        ProtobufWireError::AllocationFailed {
+            offset,
+            resource,
+            additional,
+        }
+    }
+
+    pub(super) fn decode_string(
+        field: &ProtobufWireField<'_>,
+        decoder: &mut ProtobufWireDecoder<'_, '_>,
+        limit: usize,
+        resource: &'static str,
+    ) -> Result<String, ProtobufWireError> {
+        let bytes = field.as_bytes()?;
+        if bytes.len() > limit {
+            return Err(ProtobufWireError::SchemaLimitExceeded {
+                offset: field.value_offset(),
+                resource,
+                observed: bytes.len(),
+                limit,
+            });
+        }
+        decoder.charge_semantic_owned_bytes(
+            bytes.len(),
+            MAX_TOTAL_OWNED_BYTES,
+            field.value_offset(),
+        )?;
+        let validation_and_copy_work = bytes.len().saturating_mul(2);
+        decoder.charge_additional_work(validation_and_copy_work, field.value_offset())?;
+        let text = field.as_str()?;
+        let mut owned = String::new();
+        owned
+            .try_reserve_exact(text.len())
+            .map_err(|_| allocation_failed(field.value_offset(), resource, text.len()))?;
+        owned.push_str(text);
+        Ok(owned)
+    }
+
+    pub(super) fn decode_bytes(
+        field: &ProtobufWireField<'_>,
+        decoder: &mut ProtobufWireDecoder<'_, '_>,
+        limit: usize,
+        resource: &'static str,
+    ) -> Result<Vec<u8>, ProtobufWireError> {
+        let bytes = field.as_bytes()?;
+        if bytes.len() > limit {
+            return Err(ProtobufWireError::SchemaLimitExceeded {
+                offset: field.value_offset(),
+                resource,
+                observed: bytes.len(),
+                limit,
+            });
+        }
+        decoder.charge_semantic_owned_bytes(
+            bytes.len(),
+            MAX_TOTAL_OWNED_BYTES,
+            field.value_offset(),
+        )?;
+        decoder.charge_additional_work(bytes.len(), field.value_offset())?;
+        let mut owned = Vec::new();
+        owned
+            .try_reserve_exact(bytes.len())
+            .map_err(|_| allocation_failed(field.value_offset(), resource, bytes.len()))?;
+        owned.extend_from_slice(bytes);
+        Ok(owned)
+    }
+
+    pub(super) fn decode_exact_or_empty_bytes(
+        field: &ProtobufWireField<'_>,
+        decoder: &mut ProtobufWireDecoder<'_, '_>,
+        exact_length: usize,
+        resource: &'static str,
+        invariant: &'static str,
+    ) -> Result<Vec<u8>, ProtobufWireError> {
+        let bytes = field.as_bytes()?;
+        if !bytes.is_empty() && bytes.len() != exact_length {
+            return Err(ProtobufWireError::SchemaInvariant {
+                offset: field.value_offset(),
+                invariant,
+            });
+        }
+        decode_bytes(field, decoder, exact_length, resource)
+    }
+
+    pub(super) fn push_string(
+        target: &mut Vec<String>,
+        field: &ProtobufWireField<'_>,
+        decoder: &mut ProtobufWireDecoder<'_, '_>,
+        collection_limit: usize,
+        string_limit: usize,
+        collection_resource: &'static str,
+        string_resource: &'static str,
+    ) -> Result<(), ProtobufWireError> {
+        collection_room(
+            target.len(),
+            1,
+            collection_limit,
+            field.offset(),
+            collection_resource,
+        )?;
+        decoder.charge_semantic_repeated_items(1, MAX_TOTAL_REPEATED_ITEMS, field.offset())?;
+        let value = decode_string(field, decoder, string_limit, string_resource)?;
+        target
+            .try_reserve(1)
+            .map_err(|_| allocation_failed(field.offset(), collection_resource, 1))?;
+        target.push(value);
+        Ok(())
+    }
+
+    pub(super) fn push_message<'wire, M>(
+        target: &mut Vec<M>,
+        field: &ProtobufWireField<'wire>,
+        decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        collection_limit: usize,
+        collection_resource: &'static str,
+        counts_as_any_value: bool,
+    ) -> Result<(), ProtobufWireError>
+    where
+        M: ProtoMessage,
+    {
+        collection_room(
+            target.len(),
+            1,
+            collection_limit,
+            field.offset(),
+            collection_resource,
+        )?;
+        decoder.charge_semantic_repeated_items(1, MAX_TOTAL_REPEATED_ITEMS, field.offset())?;
+        if counts_as_any_value {
+            decoder.enter_semantic_any_value(
+                true,
+                MAX_TOTAL_ANY_VALUE_NODES,
+                MAX_ANY_VALUE_DEPTH,
+                field.offset(),
+            )?;
+        }
+        let mut value = M::default();
+        let result = merge_nested_message(&mut value, field, decoder);
+        if counts_as_any_value {
+            decoder.leave_semantic_any_value();
+        }
+        result?;
+        target
+            .try_reserve(1)
+            .map_err(|_| allocation_failed(field.offset(), collection_resource, 1))?;
+        target.push(value);
+        Ok(())
+    }
+
+    pub(super) fn merge_optional_message<'wire, M>(
+        target: &mut Option<M>,
+        field: &ProtobufWireField<'wire>,
+        decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        counts_as_any_value: bool,
+    ) -> Result<(), ProtobufWireError>
+    where
+        M: ProtoMessage,
+    {
+        if counts_as_any_value {
+            decoder.enter_semantic_any_value(
+                target.is_none(),
+                MAX_TOTAL_ANY_VALUE_NODES,
+                MAX_ANY_VALUE_DEPTH,
+                field.offset(),
+            )?;
+        }
+        let result = if let Some(value) = target {
+            merge_nested_message(value, field, decoder)
+        } else {
+            let mut value = M::default();
+            merge_nested_message(&mut value, field, decoder).map(|()| {
+                *target = Some(value);
+            })
+        };
+        if counts_as_any_value {
+            decoder.leave_semantic_any_value();
+        }
+        result
+    }
+
+    pub(super) fn encode_nested<M: OtlpModel>(
+        encoder: &mut ProtobufWireEncoder,
+        field_number: u32,
+        value: &M,
+    ) -> Result<(), ProtobufWireError> {
+        encoder.write_nested_message(field_number, |nested| value.encode_fields_unchecked(nested))
+    }
+
+    pub(super) fn preserve_unknown<'wire>(
+        unknown: &mut UnknownFields,
+        field: &ProtobufWireField<'wire>,
+        decoder: &mut ProtobufWireDecoder<'wire, '_>,
+    ) -> Result<(), ProtobufWireError> {
+        let raw = if field.wire_type() == WireType::StartGroup {
+            decoder.skip_group(field)?
+        } else {
+            field.raw()
+        };
+        decoder.charge_semantic_owned_bytes(raw.len(), MAX_TOTAL_OWNED_BYTES, field.offset())?;
+        decoder.charge_additional_work(raw.len(), field.offset())?;
+        unknown.try_record_raw(raw)
+    }
+
+    pub(super) fn validate_unknown(
+        unknown: &UnknownFields,
+        budget: &mut ValidationBudget,
+    ) -> Result<(), ProtobufWireError> {
+        budget.owned_bytes(unknown.len(), MAX_TOTAL_OWNED_BYTES, "unknown field bytes")
+    }
+
+    pub(super) fn validate_unique_keys(
+        keys: &[super::common_and_resource::KeyValue],
+        budget: &mut ValidationBudget,
+        invariant: &'static str,
+    ) -> Result<(), ProtobufWireError> {
+        if !budget.enforces_invariants() {
+            return Ok(());
+        }
+        let key_bytes = keys
+            .iter()
+            .fold(0usize, |total, key| total.saturating_add(key.key.len()));
+        let comparison_work = key_bytes.saturating_mul(keys.len().saturating_sub(1));
+        budget.work(comparison_work)?;
+        for (index, key) in keys.iter().enumerate() {
+            for prior in &keys[..index] {
+                if prior.key == key.key {
+                    return Err(ProtobufWireError::SchemaInvariant {
+                        offset: 0,
+                        invariant,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_entity_ref_keys(
+        attributes: &[super::common_and_resource::KeyValue],
+        entity_refs: &[super::common_and_resource::EntityRef],
+        budget: &mut ValidationBudget,
+    ) -> Result<(), ProtobufWireError> {
+        if !budget.enforces_invariants() {
+            return Ok(());
+        }
+        let attribute_key_bytes = attributes.iter().fold(0usize, |total, attribute| {
+            total.saturating_add(attribute.key.len())
+        });
+        let (referenced_key_count, referenced_key_bytes) = entity_refs
+            .iter()
+            .flat_map(|entity_ref| {
+                entity_ref
+                    .id_keys
+                    .iter()
+                    .chain(&entity_ref.description_keys)
+            })
+            .fold((0usize, 0usize), |(count, bytes), key| {
+                (count.saturating_add(1), bytes.saturating_add(key.len()))
+            });
+        let comparison_work = attribute_key_bytes
+            .saturating_mul(referenced_key_count)
+            .saturating_add(referenced_key_bytes.saturating_mul(attributes.len()));
+        budget.work(comparison_work)?;
+
+        for entity_ref in entity_refs {
+            for key in entity_ref
+                .id_keys
+                .iter()
+                .chain(&entity_ref.description_keys)
+            {
+                if !attributes.iter().any(|attribute| attribute.key == *key) {
+                    return Err(ProtobufWireError::SchemaInvariant {
+                        offset: 0,
+                        invariant: "EntityRef keys must reference Resource attributes",
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) mod common_and_resource {
+    use super::limits_and_error::{
+        MAX_ANY_VALUE_ITEMS, MAX_ATTRIBUTE_KEY_BYTES, MAX_ATTRIBUTE_VALUE_BYTES, MAX_ATTRIBUTES,
+        MAX_ENTITY_REF_KEYS, MAX_ENTITY_REFS, MAX_SCHEMA_URL_BYTES, MAX_SCOPE_NAME_BYTES,
+        MAX_SCOPE_VERSION_BYTES, MAX_TOTAL_OWNED_BYTES, OtlpModel, ValidationBudget, decode_bytes,
+        decode_string, encode_nested, merge_optional_message, merge_root, preserve_unknown,
+        push_message, push_string, validate_entity_ref_keys, validate_root, validate_unique_keys,
+        validate_unknown,
+    };
+    use super::{
+        ProtoMessage, ProtobufWireDecoder, ProtobufWireEncoder, ProtobufWireError,
+        ProtobufWireField, ProtobufWireLimits, UnknownFields, merge_nested_message,
+    };
+
+    macro_rules! impl_proto_message {
+        ($type:ty) => {
+            impl ProtoMessage for $type {
+                fn encode_fields(
+                    &self,
+                    encoder: &mut ProtobufWireEncoder,
+                ) -> Result<(), ProtobufWireError> {
+                    let remaining_work = encoder.remaining_work()?;
+                    let validation = validate_root(self, remaining_work, true)?;
+                    encoder.charge_schema_work(validation.work_used)?;
+                    self.encode_fields_unchecked(encoder)
+                }
+
+                fn merge_field<'wire>(
+                    &mut self,
+                    field: &ProtobufWireField<'wire>,
+                    decoder: &mut ProtobufWireDecoder<'wire, '_>,
+                ) -> Result<bool, ProtobufWireError> {
+                    self.merge_otlp_field(field, decoder)
+                }
+
+                fn merge_from_bytes(
+                    &mut self,
+                    input: &[u8],
+                    limits: ProtobufWireLimits,
+                ) -> Result<(), ProtobufWireError> {
+                    // The merge API is explicitly non-atomic. Its validated
+                    // existing budget is seeded before any new allocation, so
+                    // a failed merge may retain accepted prefix fields but can
+                    // never grow the model beyond its aggregate bounds.
+                    merge_root(self, input, limits)
+                }
+
+                fn decode_from_bytes(
+                    input: &[u8],
+                    limits: ProtobufWireLimits,
+                ) -> Result<Self, ProtobufWireError> {
+                    let mut staged = Self::default();
+                    merge_root(&mut staged, input, limits)?;
+                    Ok(staged)
+                }
+            }
+        };
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    pub(crate) enum AnyValueValue {
+        String(String),
+        Bool(bool),
+        Int(i64),
+        Double(f64),
+        Array(ArrayValue),
+        KeyValueList(KeyValueList),
+        Bytes(Vec<u8>),
+        StringIndex(i32),
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct AnyValue {
+        pub(crate) value: Option<AnyValueValue>,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for AnyValue {
+        const COUNTS_AS_ANY_VALUE: bool = true;
+
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            match &self.value {
+                Some(AnyValueValue::String(value)) => encoder.write_string(1, value)?,
+                Some(AnyValueValue::Bool(value)) => encoder.write_bool(2, *value)?,
+                Some(AnyValueValue::Int(value)) => encoder.write_int64(3, *value)?,
+                Some(AnyValueValue::Double(value)) => encoder.write_double(4, *value)?,
+                Some(AnyValueValue::Array(value)) => encode_nested(encoder, 5, value)?,
+                Some(AnyValueValue::KeyValueList(value)) => encode_nested(encoder, 6, value)?,
+                Some(AnyValueValue::Bytes(value)) => encoder.write_bytes(7, value)?,
+                Some(AnyValueValue::StringIndex(value)) => encoder.write_int32(8, *value)?,
+                None => {}
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                1 => {
+                    self.value = Some(AnyValueValue::String(decode_string(
+                        field,
+                        decoder,
+                        MAX_ATTRIBUTE_VALUE_BYTES,
+                        "AnyValue string bytes",
+                    )?));
+                }
+                2 => self.value = Some(AnyValueValue::Bool(field.as_varint()? != 0)),
+                3 => self.value = Some(AnyValueValue::Int(field.as_varint()?.cast_signed())),
+                4 => {
+                    self.value = Some(AnyValueValue::Double(f64::from_bits(field.as_fixed64()?)));
+                }
+                5 => match &mut self.value {
+                    Some(AnyValueValue::Array(value)) => {
+                        merge_nested_message(value, field, decoder)?;
+                    }
+                    _ => {
+                        let mut value = ArrayValue::default();
+                        merge_nested_message(&mut value, field, decoder)?;
+                        self.value = Some(AnyValueValue::Array(value));
+                    }
+                },
+                6 => match &mut self.value {
+                    Some(AnyValueValue::KeyValueList(value)) => {
+                        merge_nested_message(value, field, decoder)?;
+                    }
+                    _ => {
+                        let mut value = KeyValueList::default();
+                        merge_nested_message(&mut value, field, decoder)?;
+                        self.value = Some(AnyValueValue::KeyValueList(value));
+                    }
+                },
+                7 => {
+                    self.value = Some(AnyValueValue::Bytes(decode_bytes(
+                        field,
+                        decoder,
+                        MAX_ATTRIBUTE_VALUE_BYTES,
+                        "AnyValue bytes payload",
+                    )?));
+                }
+                8 => {
+                    self.value = Some(AnyValueValue::StringIndex(
+                        (field.as_varint()? as u32).cast_signed(),
+                    ));
+                }
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            budget.any_value_node(any_value_depth.max(1))?;
+            match &self.value {
+                Some(AnyValueValue::String(value)) => budget.owned_bytes(
+                    value.len(),
+                    MAX_ATTRIBUTE_VALUE_BYTES,
+                    "AnyValue string bytes",
+                )?,
+                Some(AnyValueValue::Array(value)) => {
+                    value.validate_otlp(budget, any_value_depth.max(1))?;
+                }
+                Some(AnyValueValue::KeyValueList(value)) => {
+                    value.validate_otlp(budget, any_value_depth.max(1))?;
+                }
+                Some(AnyValueValue::Bytes(value)) => budget.owned_bytes(
+                    value.len(),
+                    MAX_ATTRIBUTE_VALUE_BYTES,
+                    "AnyValue bytes payload",
+                )?,
+                Some(
+                    AnyValueValue::Bool(_)
+                    | AnyValueValue::Int(_)
+                    | AnyValueValue::Double(_)
+                    | AnyValueValue::StringIndex(_),
+                )
+                | None => {}
+            }
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(AnyValue);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct ArrayValue {
+        pub(crate) values: Vec<AnyValue>,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for ArrayValue {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            for value in &self.values {
+                encode_nested(encoder, 1, value)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            if field.field_number() == 1 {
+                push_message(
+                    &mut self.values,
+                    field,
+                    decoder,
+                    MAX_ANY_VALUE_ITEMS,
+                    "AnyValue array items",
+                    true,
+                )?;
+            } else {
+                preserve_unknown(&mut self.unknown_fields, field, decoder)?;
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            budget.repeated(
+                self.values.len(),
+                MAX_ANY_VALUE_ITEMS,
+                "AnyValue array items",
+            )?;
+            for value in &self.values {
+                value.validate_otlp(budget, any_value_depth.saturating_add(1))?;
+            }
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(ArrayValue);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct KeyValueList {
+        pub(crate) values: Vec<KeyValue>,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for KeyValueList {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            for value in &self.values {
+                encode_nested(encoder, 1, value)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            if field.field_number() == 1 {
+                push_message(
+                    &mut self.values,
+                    field,
+                    decoder,
+                    MAX_ANY_VALUE_ITEMS,
+                    "AnyValue kvlist items",
+                    false,
+                )?;
+            } else {
+                preserve_unknown(&mut self.unknown_fields, field, decoder)?;
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            budget.repeated(
+                self.values.len(),
+                MAX_ANY_VALUE_ITEMS,
+                "AnyValue kvlist items",
+            )?;
+            validate_unique_keys(&self.values, budget, "AnyValue kvlist keys must be unique")?;
+            for value in &self.values {
+                value.validate_otlp(budget, any_value_depth)?;
+            }
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(KeyValueList);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct KeyValue {
+        pub(crate) key: String,
+        pub(crate) value: Option<AnyValue>,
+        pub(crate) key_strindex: i32,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for KeyValue {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            if !self.key.is_empty() {
+                encoder.write_string(1, &self.key)?;
+            }
+            if let Some(value) = &self.value {
+                encode_nested(encoder, 2, value)?;
+            }
+            if self.key_strindex != 0 {
+                encoder.write_int32(3, self.key_strindex)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                1 => {
+                    self.key = decode_string(
+                        field,
+                        decoder,
+                        MAX_ATTRIBUTE_KEY_BYTES,
+                        "attribute key bytes",
+                    )?;
+                }
+                2 => merge_optional_message(&mut self.value, field, decoder, true)?,
+                3 => self.key_strindex = (field.as_varint()? as u32).cast_signed(),
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            if budget.enforces_invariants() && !self.key.is_empty() && self.key_strindex != 0 {
+                return Err(ProtobufWireError::SchemaInvariant {
+                    offset: 0,
+                    invariant: "KeyValue key and key_strindex are mutually exclusive",
+                });
+            }
+            budget.owned_bytes(
+                self.key.len(),
+                MAX_ATTRIBUTE_KEY_BYTES,
+                "attribute key bytes",
+            )?;
+            if let Some(value) = &self.value {
+                let depth = if any_value_depth == 0 {
+                    1
+                } else {
+                    any_value_depth.saturating_add(1)
+                };
+                value.validate_otlp(budget, depth)?;
+            }
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(KeyValue);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct InstrumentationScope {
+        pub(crate) name: String,
+        pub(crate) version: String,
+        pub(crate) attributes: Vec<KeyValue>,
+        pub(crate) dropped_attributes_count: u32,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for InstrumentationScope {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            if !self.name.is_empty() {
+                encoder.write_string(1, &self.name)?;
+            }
+            if !self.version.is_empty() {
+                encoder.write_string(2, &self.version)?;
+            }
+            for attribute in &self.attributes {
+                encode_nested(encoder, 3, attribute)?;
+            }
+            if self.dropped_attributes_count != 0 {
+                encoder.write_varint(4, u64::from(self.dropped_attributes_count))?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                1 => {
+                    self.name = decode_string(
+                        field,
+                        decoder,
+                        MAX_SCOPE_NAME_BYTES,
+                        "instrumentation scope name bytes",
+                    )?;
+                }
+                2 => {
+                    self.version = decode_string(
+                        field,
+                        decoder,
+                        MAX_SCOPE_VERSION_BYTES,
+                        "instrumentation scope version bytes",
+                    )?;
+                }
+                3 => push_message(
+                    &mut self.attributes,
+                    field,
+                    decoder,
+                    MAX_ATTRIBUTES,
+                    "instrumentation scope attributes",
+                    false,
+                )?,
+                4 => self.dropped_attributes_count = field.as_varint()? as u32,
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            budget.owned_bytes(
+                self.name.len(),
+                MAX_SCOPE_NAME_BYTES,
+                "instrumentation scope name bytes",
+            )?;
+            budget.owned_bytes(
+                self.version.len(),
+                MAX_SCOPE_VERSION_BYTES,
+                "instrumentation scope version bytes",
+            )?;
+            budget.repeated(
+                self.attributes.len(),
+                MAX_ATTRIBUTES,
+                "instrumentation scope attributes",
+            )?;
+            validate_unique_keys(
+                &self.attributes,
+                budget,
+                "instrumentation scope attribute keys must be unique",
+            )?;
+            for attribute in &self.attributes {
+                attribute.validate_otlp(budget, 0)?;
+            }
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(InstrumentationScope);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct EntityRef {
+        pub(crate) schema_url: String,
+        pub(crate) r#type: String,
+        pub(crate) id_keys: Vec<String>,
+        pub(crate) description_keys: Vec<String>,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for EntityRef {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            if !self.schema_url.is_empty() {
+                encoder.write_string(1, &self.schema_url)?;
+            }
+            if !self.r#type.is_empty() {
+                encoder.write_string(2, &self.r#type)?;
+            }
+            for key in &self.id_keys {
+                encoder.write_string(3, key)?;
+            }
+            for key in &self.description_keys {
+                encoder.write_string(4, key)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                1 => {
+                    self.schema_url = decode_string(
+                        field,
+                        decoder,
+                        MAX_SCHEMA_URL_BYTES,
+                        "entity schema URL bytes",
+                    )?;
+                }
+                2 => {
+                    self.r#type =
+                        decode_string(field, decoder, MAX_TOTAL_OWNED_BYTES, "entity type bytes")?;
+                }
+                3 => push_string(
+                    &mut self.id_keys,
+                    field,
+                    decoder,
+                    MAX_ENTITY_REF_KEYS,
+                    MAX_ATTRIBUTE_KEY_BYTES,
+                    "entity id keys",
+                    "entity id key bytes",
+                )?,
+                4 => push_string(
+                    &mut self.description_keys,
+                    field,
+                    decoder,
+                    MAX_ENTITY_REF_KEYS,
+                    MAX_ATTRIBUTE_KEY_BYTES,
+                    "entity description keys",
+                    "entity description key bytes",
+                )?,
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            if budget.enforces_invariants() && self.r#type.is_empty() {
+                return Err(ProtobufWireError::SchemaInvariant {
+                    offset: 0,
+                    invariant: "EntityRef type must be nonempty",
+                });
+            }
+            if budget.enforces_invariants() && self.id_keys.is_empty() {
+                return Err(ProtobufWireError::SchemaInvariant {
+                    offset: 0,
+                    invariant: "EntityRef id_keys must not be empty",
+                });
+            }
+            budget.owned_bytes(
+                self.schema_url.len(),
+                MAX_SCHEMA_URL_BYTES,
+                "entity schema URL bytes",
+            )?;
+            budget.owned_bytes(
+                self.r#type.len(),
+                MAX_TOTAL_OWNED_BYTES,
+                "entity type bytes",
+            )?;
+            budget.repeated(self.id_keys.len(), MAX_ENTITY_REF_KEYS, "entity id keys")?;
+            for key in &self.id_keys {
+                budget.owned_bytes(key.len(), MAX_ATTRIBUTE_KEY_BYTES, "entity id key bytes")?;
+            }
+            budget.repeated(
+                self.description_keys.len(),
+                MAX_ENTITY_REF_KEYS,
+                "entity description keys",
+            )?;
+            for key in &self.description_keys {
+                budget.owned_bytes(
+                    key.len(),
+                    MAX_ATTRIBUTE_KEY_BYTES,
+                    "entity description key bytes",
+                )?;
+            }
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(EntityRef);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct Resource {
+        pub(crate) attributes: Vec<KeyValue>,
+        pub(crate) dropped_attributes_count: u32,
+        pub(crate) entity_refs: Vec<EntityRef>,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for Resource {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            for attribute in &self.attributes {
+                encode_nested(encoder, 1, attribute)?;
+            }
+            if self.dropped_attributes_count != 0 {
+                encoder.write_varint(2, u64::from(self.dropped_attributes_count))?;
+            }
+            for entity_ref in &self.entity_refs {
+                encode_nested(encoder, 3, entity_ref)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                1 => push_message(
+                    &mut self.attributes,
+                    field,
+                    decoder,
+                    MAX_ATTRIBUTES,
+                    "resource attributes",
+                    false,
+                )?,
+                2 => self.dropped_attributes_count = field.as_varint()? as u32,
+                3 => push_message(
+                    &mut self.entity_refs,
+                    field,
+                    decoder,
+                    MAX_ENTITY_REFS,
+                    "resource entity refs",
+                    false,
+                )?,
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            budget.repeated(self.attributes.len(), MAX_ATTRIBUTES, "resource attributes")?;
+            validate_unique_keys(
+                &self.attributes,
+                budget,
+                "resource attribute keys must be unique",
+            )?;
+            for attribute in &self.attributes {
+                attribute.validate_otlp(budget, 0)?;
+            }
+            budget.repeated(
+                self.entity_refs.len(),
+                MAX_ENTITY_REFS,
+                "resource entity refs",
+            )?;
+            for entity_ref in &self.entity_refs {
+                entity_ref.validate_otlp(budget, 0)?;
+            }
+            validate_entity_ref_keys(&self.attributes, &self.entity_refs, budget)?;
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(Resource);
+}
+
+pub(crate) mod metrics {
+    use super::common_and_resource::{InstrumentationScope, KeyValue, Resource};
+    use super::limits_and_error::{
+        MAX_ATTRIBUTES, MAX_DATA_POINTS_PER_METRIC, MAX_EXEMPLARS_PER_DATA_POINT,
+        MAX_EXPONENTIAL_HISTOGRAM_BUCKETS, MAX_HISTOGRAM_BUCKET_COUNTS,
+        MAX_HISTOGRAM_EXPLICIT_BOUNDS, MAX_METRIC_DESCRIPTION_BYTES, MAX_METRIC_METADATA_ENTRIES,
+        MAX_METRIC_NAME_BYTES, MAX_METRIC_UNIT_BYTES, MAX_METRICS_PER_SCOPE,
+        MAX_RESOURCE_GROUPS_PER_REQUEST, MAX_SCHEMA_URL_BYTES, MAX_SCOPES_PER_RESOURCE_GROUP,
+        MAX_SPAN_ID_BYTES, MAX_SUMMARY_QUANTILES, MAX_TOTAL_REPEATED_ITEMS, MAX_TRACE_ID_BYTES,
+        OtlpModel, ValidationBudget, allocation_failed, collection_room,
+        decode_exact_or_empty_bytes, decode_string, encode_nested, merge_optional_message,
+        merge_root, preserve_unknown, push_message, validate_root, validate_unique_keys,
+        validate_unknown,
+    };
+    use super::{
+        ProtoMessage, ProtobufWireDecoder, ProtobufWireEncoder, ProtobufWireError,
+        ProtobufWireField, ProtobufWireLimits, UnknownFields, WireType, decode_varint,
+        merge_nested_message, zigzag_decode_i32,
+    };
+
+    macro_rules! impl_proto_message {
+        ($type:ty) => {
+            impl ProtoMessage for $type {
+                fn encode_fields(
+                    &self,
+                    encoder: &mut ProtobufWireEncoder,
+                ) -> Result<(), ProtobufWireError> {
+                    let remaining_work = encoder.remaining_work()?;
+                    let validation = validate_root(self, remaining_work, true)?;
+                    encoder.charge_schema_work(validation.work_used)?;
+                    self.encode_fields_unchecked(encoder)
+                }
+
+                fn merge_field<'wire>(
+                    &mut self,
+                    field: &ProtobufWireField<'wire>,
+                    decoder: &mut ProtobufWireDecoder<'wire, '_>,
+                ) -> Result<bool, ProtobufWireError> {
+                    self.merge_otlp_field(field, decoder)
+                }
+
+                fn merge_from_bytes(
+                    &mut self,
+                    input: &[u8],
+                    limits: ProtobufWireLimits,
+                ) -> Result<(), ProtobufWireError> {
+                    merge_root(self, input, limits)
+                }
+
+                fn decode_from_bytes(
+                    input: &[u8],
+                    limits: ProtobufWireLimits,
+                ) -> Result<Self, ProtobufWireError> {
+                    let mut staged = Self::default();
+                    merge_root(&mut staged, input, limits)?;
+                    Ok(staged)
+                }
+            }
+        };
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    #[repr(i32)]
+    pub(crate) enum AggregationTemporality {
+        Unspecified = 0,
+        Delta = 1,
+        Cumulative = 2,
+    }
+
+    impl AggregationTemporality {
+        pub(crate) const fn from_raw(value: i32) -> Option<Self> {
+            match value {
+                0 => Some(Self::Unspecified),
+                1 => Some(Self::Delta),
+                2 => Some(Self::Cumulative),
+                _ => None,
+            }
+        }
+
+        pub(crate) const fn as_raw(self) -> i32 {
+            self as i32
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub(crate) struct DataPointFlags(u32);
+
+    impl DataPointFlags {
+        pub(crate) const DO_NOT_USE: Self = Self(0);
+        pub(crate) const NO_RECORDED_VALUE_MASK: Self = Self(1);
+
+        pub(crate) const fn from_bits_retain(bits: u32) -> Self {
+            Self(bits)
+        }
+
+        pub(crate) const fn bits(self) -> u32 {
+            self.0
+        }
+
+        pub(crate) const fn contains(self, mask: Self) -> bool {
+            self.0 & mask.0 == mask.0
+        }
+    }
+
+    fn packed_varint(
+        input: &[u8],
+        absolute_offset: usize,
+    ) -> Result<(u64, usize), ProtobufWireError> {
+        decode_varint(input).map_err(|error| match error {
+            ProtobufWireError::UnexpectedEof {
+                offset,
+                needed,
+                remaining,
+            } => ProtobufWireError::UnexpectedEof {
+                offset: absolute_offset.saturating_add(offset),
+                needed,
+                remaining,
+            },
+            ProtobufWireError::VarintOverflow { offset } => ProtobufWireError::VarintOverflow {
+                offset: absolute_offset.saturating_add(offset),
+            },
+            other => other,
+        })
+    }
+
+    fn push_repeated_fixed64<T, F>(
+        target: &mut Vec<T>,
+        field: &ProtobufWireField<'_>,
+        decoder: &mut ProtobufWireDecoder<'_, '_>,
+        collection_limit: usize,
+        resource: &'static str,
+        map: F,
+    ) -> Result<(), ProtobufWireError>
+    where
+        F: Fn(u64) -> T,
+    {
+        match field.wire_type() {
+            WireType::Fixed64 => {
+                collection_room(target.len(), 1, collection_limit, field.offset(), resource)?;
+                decoder.charge_semantic_repeated_items(
+                    1,
+                    MAX_TOTAL_REPEATED_ITEMS,
+                    field.offset(),
+                )?;
+                let value = map(field.as_fixed64()?);
+                target
+                    .try_reserve(1)
+                    .map_err(|_| allocation_failed(field.offset(), resource, 1))?;
+                target.push(value);
+            }
+            WireType::LengthDelimited => {
+                let bytes = field.as_bytes()?;
+                let (chunks, remainder) = bytes.as_chunks::<8>();
+                if !remainder.is_empty() {
+                    return Err(ProtobufWireError::SchemaInvariant {
+                        offset: field.value_offset(),
+                        invariant: "packed fixed64 payload length must be divisible by eight",
+                    });
+                }
+                let count = chunks.len();
+                collection_room(
+                    target.len(),
+                    count,
+                    collection_limit,
+                    field.offset(),
+                    resource,
+                )?;
+                decoder.charge_semantic_repeated_items(
+                    count,
+                    MAX_TOTAL_REPEATED_ITEMS,
+                    field.offset(),
+                )?;
+                decoder.charge_additional_work(bytes.len(), field.value_offset())?;
+                target
+                    .try_reserve(count)
+                    .map_err(|_| allocation_failed(field.offset(), resource, count))?;
+                target.extend(chunks.iter().map(|chunk| map(u64::from_le_bytes(*chunk))));
+            }
+            actual => {
+                return Err(ProtobufWireError::WireTypeMismatch {
+                    offset: field.offset(),
+                    expected: WireType::Fixed64,
+                    actual,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn push_repeated_varints(
+        target: &mut Vec<u64>,
+        field: &ProtobufWireField<'_>,
+        decoder: &mut ProtobufWireDecoder<'_, '_>,
+        collection_limit: usize,
+        resource: &'static str,
+    ) -> Result<(), ProtobufWireError> {
+        match field.wire_type() {
+            WireType::Varint => {
+                collection_room(target.len(), 1, collection_limit, field.offset(), resource)?;
+                decoder.charge_semantic_repeated_items(
+                    1,
+                    MAX_TOTAL_REPEATED_ITEMS,
+                    field.offset(),
+                )?;
+                let value = field.as_varint()?;
+                target
+                    .try_reserve(1)
+                    .map_err(|_| allocation_failed(field.offset(), resource, 1))?;
+                target.push(value);
+            }
+            WireType::LengthDelimited => {
+                let bytes = field.as_bytes()?;
+                let parse_work = bytes.len().saturating_mul(2);
+                decoder.charge_additional_work(parse_work, field.value_offset())?;
+                let mut consumed = 0usize;
+                let mut count = 0usize;
+                while consumed < bytes.len() {
+                    let (_, length) = packed_varint(
+                        &bytes[consumed..],
+                        field.value_offset().saturating_add(consumed),
+                    )?;
+                    consumed = consumed.saturating_add(length);
+                    count = count.saturating_add(1);
+                }
+                collection_room(
+                    target.len(),
+                    count,
+                    collection_limit,
+                    field.offset(),
+                    resource,
+                )?;
+                decoder.charge_semantic_repeated_items(
+                    count,
+                    MAX_TOTAL_REPEATED_ITEMS,
+                    field.offset(),
+                )?;
+                target
+                    .try_reserve(count)
+                    .map_err(|_| allocation_failed(field.offset(), resource, count))?;
+                consumed = 0;
+                while consumed < bytes.len() {
+                    let (value, length) = packed_varint(
+                        &bytes[consumed..],
+                        field.value_offset().saturating_add(consumed),
+                    )?;
+                    target.push(value);
+                    consumed += length;
+                }
+            }
+            actual => {
+                return Err(ProtobufWireError::WireTypeMismatch {
+                    offset: field.offset(),
+                    expected: WireType::Varint,
+                    actual,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_models<M: OtlpModel>(
+        values: &[M],
+        budget: &mut ValidationBudget,
+        collection_limit: usize,
+        resource: &'static str,
+    ) -> Result<(), ProtobufWireError> {
+        budget.repeated(values.len(), collection_limit, resource)?;
+        for value in values {
+            value.validate_otlp(budget, 0)?;
+        }
+        Ok(())
+    }
+
+    fn validate_attributes(
+        attributes: &[KeyValue],
+        budget: &mut ValidationBudget,
+        resource: &'static str,
+        invariant: &'static str,
+    ) -> Result<(), ProtobufWireError> {
+        budget.repeated(attributes.len(), MAX_ATTRIBUTES, resource)?;
+        validate_unique_keys(attributes, budget, invariant)?;
+        for attribute in attributes {
+            attribute.validate_otlp(budget, 0)?;
+        }
+        Ok(())
+    }
+
+    fn validate_temporality(
+        value: i32,
+        budget: &ValidationBudget,
+    ) -> Result<(), ProtobufWireError> {
+        if budget.enforces_invariants()
+            && AggregationTemporality::from_raw(value) == Some(AggregationTemporality::Unspecified)
+        {
+            return Err(ProtobufWireError::SchemaInvariant {
+                offset: 0,
+                invariant: "aggregation temporality must not be unspecified",
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_point_time(
+        time_unix_nano: u64,
+        budget: &ValidationBudget,
+    ) -> Result<(), ProtobufWireError> {
+        if budget.enforces_invariants() && time_unix_nano == 0 {
+            return Err(ProtobufWireError::SchemaInvariant {
+                offset: 0,
+                invariant: "metric data point time_unix_nano must be nonzero",
+            });
+        }
+        Ok(())
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct MetricsData {
+        pub(crate) resource_metrics: Vec<ResourceMetrics>,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for MetricsData {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            for resource_metrics in &self.resource_metrics {
+                encode_nested(encoder, 1, resource_metrics)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            if field.field_number() == 1 {
+                push_message(
+                    &mut self.resource_metrics,
+                    field,
+                    decoder,
+                    MAX_RESOURCE_GROUPS_PER_REQUEST,
+                    "metric resource groups",
+                    false,
+                )?;
+            } else {
+                preserve_unknown(&mut self.unknown_fields, field, decoder)?;
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            validate_models(
+                &self.resource_metrics,
+                budget,
+                MAX_RESOURCE_GROUPS_PER_REQUEST,
+                "metric resource groups",
+            )?;
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(MetricsData);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct ResourceMetrics {
+        pub(crate) resource: Option<Resource>,
+        pub(crate) scope_metrics: Vec<ScopeMetrics>,
+        pub(crate) schema_url: String,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for ResourceMetrics {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            if let Some(resource) = &self.resource {
+                encode_nested(encoder, 1, resource)?;
+            }
+            for scope_metrics in &self.scope_metrics {
+                encode_nested(encoder, 2, scope_metrics)?;
+            }
+            if !self.schema_url.is_empty() {
+                encoder.write_string(3, &self.schema_url)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                1 => merge_optional_message(&mut self.resource, field, decoder, false)?,
+                2 => push_message(
+                    &mut self.scope_metrics,
+                    field,
+                    decoder,
+                    MAX_SCOPES_PER_RESOURCE_GROUP,
+                    "metric scopes per resource group",
+                    false,
+                )?,
+                3 => {
+                    self.schema_url = decode_string(
+                        field,
+                        decoder,
+                        MAX_SCHEMA_URL_BYTES,
+                        "metric resource schema URL bytes",
+                    )?;
+                }
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            if let Some(resource) = &self.resource {
+                resource.validate_otlp(budget, 0)?;
+            }
+            validate_models(
+                &self.scope_metrics,
+                budget,
+                MAX_SCOPES_PER_RESOURCE_GROUP,
+                "metric scopes per resource group",
+            )?;
+            budget.owned_bytes(
+                self.schema_url.len(),
+                MAX_SCHEMA_URL_BYTES,
+                "metric resource schema URL bytes",
+            )?;
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(ResourceMetrics);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct ScopeMetrics {
+        pub(crate) scope: Option<InstrumentationScope>,
+        pub(crate) metrics: Vec<Metric>,
+        pub(crate) schema_url: String,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for ScopeMetrics {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            if let Some(scope) = &self.scope {
+                encode_nested(encoder, 1, scope)?;
+            }
+            for metric in &self.metrics {
+                encode_nested(encoder, 2, metric)?;
+            }
+            if !self.schema_url.is_empty() {
+                encoder.write_string(3, &self.schema_url)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                1 => merge_optional_message(&mut self.scope, field, decoder, false)?,
+                2 => push_message(
+                    &mut self.metrics,
+                    field,
+                    decoder,
+                    MAX_METRICS_PER_SCOPE,
+                    "metrics per scope",
+                    false,
+                )?,
+                3 => {
+                    self.schema_url = decode_string(
+                        field,
+                        decoder,
+                        MAX_SCHEMA_URL_BYTES,
+                        "metric scope schema URL bytes",
+                    )?;
+                }
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            if let Some(scope) = &self.scope {
+                scope.validate_otlp(budget, 0)?;
+            }
+            validate_models(
+                &self.metrics,
+                budget,
+                MAX_METRICS_PER_SCOPE,
+                "metrics per scope",
+            )?;
+            budget.owned_bytes(
+                self.schema_url.len(),
+                MAX_SCHEMA_URL_BYTES,
+                "metric scope schema URL bytes",
+            )?;
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(ScopeMetrics);
+
+    #[derive(Clone, Debug, PartialEq)]
+    pub(crate) enum MetricData {
+        Gauge(Gauge),
+        Sum(Sum),
+        Histogram(Histogram),
+        ExponentialHistogram(ExponentialHistogram),
+        Summary(Summary),
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct Metric {
+        pub(crate) name: String,
+        pub(crate) description: String,
+        pub(crate) unit: String,
+        pub(crate) data: Option<MetricData>,
+        pub(crate) metadata: Vec<KeyValue>,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for Metric {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            if !self.name.is_empty() {
+                encoder.write_string(1, &self.name)?;
+            }
+            if !self.description.is_empty() {
+                encoder.write_string(2, &self.description)?;
+            }
+            if !self.unit.is_empty() {
+                encoder.write_string(3, &self.unit)?;
+            }
+            match &self.data {
+                Some(MetricData::Gauge(value)) => encode_nested(encoder, 5, value)?,
+                Some(MetricData::Sum(value)) => encode_nested(encoder, 7, value)?,
+                Some(MetricData::Histogram(value)) => encode_nested(encoder, 9, value)?,
+                Some(MetricData::ExponentialHistogram(value)) => {
+                    encode_nested(encoder, 10, value)?;
+                }
+                Some(MetricData::Summary(value)) => encode_nested(encoder, 11, value)?,
+                None => {}
+            }
+            for metadata in &self.metadata {
+                encode_nested(encoder, 12, metadata)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                1 => {
+                    self.name =
+                        decode_string(field, decoder, MAX_METRIC_NAME_BYTES, "metric name bytes")?;
+                }
+                2 => {
+                    self.description = decode_string(
+                        field,
+                        decoder,
+                        MAX_METRIC_DESCRIPTION_BYTES,
+                        "metric description bytes",
+                    )?;
+                }
+                3 => {
+                    self.unit =
+                        decode_string(field, decoder, MAX_METRIC_UNIT_BYTES, "metric unit bytes")?;
+                }
+                5 => match &mut self.data {
+                    Some(MetricData::Gauge(value)) => {
+                        merge_nested_message(value, field, decoder)?;
+                    }
+                    _ => {
+                        let mut value = Gauge::default();
+                        merge_nested_message(&mut value, field, decoder)?;
+                        self.data = Some(MetricData::Gauge(value));
+                    }
+                },
+                7 => match &mut self.data {
+                    Some(MetricData::Sum(value)) => {
+                        merge_nested_message(value, field, decoder)?;
+                    }
+                    _ => {
+                        let mut value = Sum::default();
+                        merge_nested_message(&mut value, field, decoder)?;
+                        self.data = Some(MetricData::Sum(value));
+                    }
+                },
+                9 => match &mut self.data {
+                    Some(MetricData::Histogram(value)) => {
+                        merge_nested_message(value, field, decoder)?;
+                    }
+                    _ => {
+                        let mut value = Histogram::default();
+                        merge_nested_message(&mut value, field, decoder)?;
+                        self.data = Some(MetricData::Histogram(value));
+                    }
+                },
+                10 => match &mut self.data {
+                    Some(MetricData::ExponentialHistogram(value)) => {
+                        merge_nested_message(value, field, decoder)?;
+                    }
+                    _ => {
+                        let mut value = ExponentialHistogram::default();
+                        merge_nested_message(&mut value, field, decoder)?;
+                        self.data = Some(MetricData::ExponentialHistogram(value));
+                    }
+                },
+                11 => match &mut self.data {
+                    Some(MetricData::Summary(value)) => {
+                        merge_nested_message(value, field, decoder)?;
+                    }
+                    _ => {
+                        let mut value = Summary::default();
+                        merge_nested_message(&mut value, field, decoder)?;
+                        self.data = Some(MetricData::Summary(value));
+                    }
+                },
+                12 => push_message(
+                    &mut self.metadata,
+                    field,
+                    decoder,
+                    MAX_METRIC_METADATA_ENTRIES,
+                    "metric metadata entries",
+                    false,
+                )?,
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            budget.owned_bytes(self.name.len(), MAX_METRIC_NAME_BYTES, "metric name bytes")?;
+            budget.owned_bytes(
+                self.description.len(),
+                MAX_METRIC_DESCRIPTION_BYTES,
+                "metric description bytes",
+            )?;
+            budget.owned_bytes(self.unit.len(), MAX_METRIC_UNIT_BYTES, "metric unit bytes")?;
+            match &self.data {
+                Some(MetricData::Gauge(value)) => value.validate_otlp(budget, 0)?,
+                Some(MetricData::Sum(value)) => value.validate_otlp(budget, 0)?,
+                Some(MetricData::Histogram(value)) => value.validate_otlp(budget, 0)?,
+                Some(MetricData::ExponentialHistogram(value)) => {
+                    value.validate_otlp(budget, 0)?;
+                }
+                Some(MetricData::Summary(value)) => value.validate_otlp(budget, 0)?,
+                None => {}
+            }
+            budget.repeated(
+                self.metadata.len(),
+                MAX_METRIC_METADATA_ENTRIES,
+                "metric metadata entries",
+            )?;
+            validate_unique_keys(
+                &self.metadata,
+                budget,
+                "metric metadata keys must be unique",
+            )?;
+            for metadata in &self.metadata {
+                metadata.validate_otlp(budget, 0)?;
+            }
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(Metric);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct Gauge {
+        pub(crate) data_points: Vec<NumberDataPoint>,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for Gauge {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            for point in &self.data_points {
+                encode_nested(encoder, 1, point)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            if field.field_number() == 1 {
+                push_message(
+                    &mut self.data_points,
+                    field,
+                    decoder,
+                    MAX_DATA_POINTS_PER_METRIC,
+                    "gauge data points",
+                    false,
+                )?;
+            } else {
+                preserve_unknown(&mut self.unknown_fields, field, decoder)?;
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            validate_models(
+                &self.data_points,
+                budget,
+                MAX_DATA_POINTS_PER_METRIC,
+                "gauge data points",
+            )?;
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(Gauge);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct Sum {
+        pub(crate) data_points: Vec<NumberDataPoint>,
+        pub(crate) aggregation_temporality: i32,
+        pub(crate) is_monotonic: bool,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for Sum {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            for point in &self.data_points {
+                encode_nested(encoder, 1, point)?;
+            }
+            if self.aggregation_temporality != 0 {
+                encoder.write_enum(2, self.aggregation_temporality)?;
+            }
+            if self.is_monotonic {
+                encoder.write_bool(3, true)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                1 => push_message(
+                    &mut self.data_points,
+                    field,
+                    decoder,
+                    MAX_DATA_POINTS_PER_METRIC,
+                    "sum data points",
+                    false,
+                )?,
+                2 => {
+                    self.aggregation_temporality = (field.as_varint()? as u32).cast_signed();
+                }
+                3 => self.is_monotonic = field.as_varint()? != 0,
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            validate_models(
+                &self.data_points,
+                budget,
+                MAX_DATA_POINTS_PER_METRIC,
+                "sum data points",
+            )?;
+            validate_temporality(self.aggregation_temporality, budget)?;
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(Sum);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct Histogram {
+        pub(crate) data_points: Vec<HistogramDataPoint>,
+        pub(crate) aggregation_temporality: i32,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for Histogram {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            for point in &self.data_points {
+                encode_nested(encoder, 1, point)?;
+            }
+            if self.aggregation_temporality != 0 {
+                encoder.write_enum(2, self.aggregation_temporality)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                1 => push_message(
+                    &mut self.data_points,
+                    field,
+                    decoder,
+                    MAX_DATA_POINTS_PER_METRIC,
+                    "histogram data points",
+                    false,
+                )?,
+                2 => {
+                    self.aggregation_temporality = (field.as_varint()? as u32).cast_signed();
+                }
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            validate_models(
+                &self.data_points,
+                budget,
+                MAX_DATA_POINTS_PER_METRIC,
+                "histogram data points",
+            )?;
+            validate_temporality(self.aggregation_temporality, budget)?;
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(Histogram);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct ExponentialHistogram {
+        pub(crate) data_points: Vec<ExponentialHistogramDataPoint>,
+        pub(crate) aggregation_temporality: i32,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for ExponentialHistogram {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            for point in &self.data_points {
+                encode_nested(encoder, 1, point)?;
+            }
+            if self.aggregation_temporality != 0 {
+                encoder.write_enum(2, self.aggregation_temporality)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                1 => push_message(
+                    &mut self.data_points,
+                    field,
+                    decoder,
+                    MAX_DATA_POINTS_PER_METRIC,
+                    "exponential histogram data points",
+                    false,
+                )?,
+                2 => {
+                    self.aggregation_temporality = (field.as_varint()? as u32).cast_signed();
+                }
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            validate_models(
+                &self.data_points,
+                budget,
+                MAX_DATA_POINTS_PER_METRIC,
+                "exponential histogram data points",
+            )?;
+            validate_temporality(self.aggregation_temporality, budget)?;
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(ExponentialHistogram);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct Summary {
+        pub(crate) data_points: Vec<SummaryDataPoint>,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for Summary {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            for point in &self.data_points {
+                encode_nested(encoder, 1, point)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            if field.field_number() == 1 {
+                push_message(
+                    &mut self.data_points,
+                    field,
+                    decoder,
+                    MAX_DATA_POINTS_PER_METRIC,
+                    "summary data points",
+                    false,
+                )?;
+            } else {
+                preserve_unknown(&mut self.unknown_fields, field, decoder)?;
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            validate_models(
+                &self.data_points,
+                budget,
+                MAX_DATA_POINTS_PER_METRIC,
+                "summary data points",
+            )?;
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(Summary);
+
+    #[derive(Clone, Debug, PartialEq)]
+    pub(crate) enum NumberDataPointValue {
+        Double(f64),
+        Int(i64),
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct NumberDataPoint {
+        pub(crate) start_time_unix_nano: u64,
+        pub(crate) time_unix_nano: u64,
+        pub(crate) value: Option<NumberDataPointValue>,
+        pub(crate) exemplars: Vec<Exemplar>,
+        pub(crate) attributes: Vec<KeyValue>,
+        pub(crate) flags: u32,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for NumberDataPoint {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            if self.start_time_unix_nano != 0 {
+                encoder.write_fixed64(2, self.start_time_unix_nano)?;
+            }
+            if self.time_unix_nano != 0 {
+                encoder.write_fixed64(3, self.time_unix_nano)?;
+            }
+            if let Some(NumberDataPointValue::Double(value)) = &self.value {
+                encoder.write_double(4, *value)?;
+            }
+            for exemplar in &self.exemplars {
+                encode_nested(encoder, 5, exemplar)?;
+            }
+            if let Some(NumberDataPointValue::Int(value)) = &self.value {
+                encoder.write_fixed64(6, value.cast_unsigned())?;
+            }
+            for attribute in &self.attributes {
+                encode_nested(encoder, 7, attribute)?;
+            }
+            if self.flags != 0 {
+                encoder.write_varint(8, u64::from(self.flags))?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                2 => self.start_time_unix_nano = field.as_fixed64()?,
+                3 => self.time_unix_nano = field.as_fixed64()?,
+                4 => {
+                    self.value = Some(NumberDataPointValue::Double(f64::from_bits(
+                        field.as_fixed64()?,
+                    )));
+                }
+                5 => push_message(
+                    &mut self.exemplars,
+                    field,
+                    decoder,
+                    MAX_EXEMPLARS_PER_DATA_POINT,
+                    "number data point exemplars",
+                    false,
+                )?,
+                6 => {
+                    self.value = Some(NumberDataPointValue::Int(field.as_fixed64()?.cast_signed()));
+                }
+                7 => push_message(
+                    &mut self.attributes,
+                    field,
+                    decoder,
+                    MAX_ATTRIBUTES,
+                    "number data point attributes",
+                    false,
+                )?,
+                8 => self.flags = field.as_varint()? as u32,
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            if budget.enforces_invariants() && self.value.is_none() {
+                return Err(ProtobufWireError::SchemaInvariant {
+                    offset: 0,
+                    invariant: "number data point must contain a recognized value",
+                });
+            }
+            validate_point_time(self.time_unix_nano, budget)?;
+            validate_models(
+                &self.exemplars,
+                budget,
+                MAX_EXEMPLARS_PER_DATA_POINT,
+                "number data point exemplars",
+            )?;
+            validate_attributes(
+                &self.attributes,
+                budget,
+                "number data point attributes",
+                "number data point attribute keys must be unique",
+            )?;
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(NumberDataPoint);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct HistogramDataPoint {
+        pub(crate) start_time_unix_nano: u64,
+        pub(crate) time_unix_nano: u64,
+        pub(crate) count: u64,
+        pub(crate) sum: Option<f64>,
+        pub(crate) bucket_counts: Vec<u64>,
+        pub(crate) explicit_bounds: Vec<f64>,
+        pub(crate) exemplars: Vec<Exemplar>,
+        pub(crate) attributes: Vec<KeyValue>,
+        pub(crate) flags: u32,
+        pub(crate) min: Option<f64>,
+        pub(crate) max: Option<f64>,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for HistogramDataPoint {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            if self.start_time_unix_nano != 0 {
+                encoder.write_fixed64(2, self.start_time_unix_nano)?;
+            }
+            if self.time_unix_nano != 0 {
+                encoder.write_fixed64(3, self.time_unix_nano)?;
+            }
+            if self.count != 0 {
+                encoder.write_fixed64(4, self.count)?;
+            }
+            if let Some(sum) = self.sum {
+                encoder.write_double(5, sum)?;
+            }
+            if !self.bucket_counts.is_empty() {
+                encoder.write_packed_fixed64(6, &self.bucket_counts)?;
+            }
+            if !self.explicit_bounds.is_empty() {
+                encoder.write_packed_doubles(7, &self.explicit_bounds)?;
+            }
+            for exemplar in &self.exemplars {
+                encode_nested(encoder, 8, exemplar)?;
+            }
+            for attribute in &self.attributes {
+                encode_nested(encoder, 9, attribute)?;
+            }
+            if self.flags != 0 {
+                encoder.write_varint(10, u64::from(self.flags))?;
+            }
+            if let Some(min) = self.min {
+                encoder.write_double(11, min)?;
+            }
+            if let Some(max) = self.max {
+                encoder.write_double(12, max)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                2 => self.start_time_unix_nano = field.as_fixed64()?,
+                3 => self.time_unix_nano = field.as_fixed64()?,
+                4 => self.count = field.as_fixed64()?,
+                5 => self.sum = Some(f64::from_bits(field.as_fixed64()?)),
+                6 => push_repeated_fixed64(
+                    &mut self.bucket_counts,
+                    field,
+                    decoder,
+                    MAX_HISTOGRAM_BUCKET_COUNTS,
+                    "histogram bucket counts",
+                    |value| value,
+                )?,
+                7 => push_repeated_fixed64(
+                    &mut self.explicit_bounds,
+                    field,
+                    decoder,
+                    MAX_HISTOGRAM_EXPLICIT_BOUNDS,
+                    "histogram explicit bounds",
+                    f64::from_bits,
+                )?,
+                8 => push_message(
+                    &mut self.exemplars,
+                    field,
+                    decoder,
+                    MAX_EXEMPLARS_PER_DATA_POINT,
+                    "histogram exemplars",
+                    false,
+                )?,
+                9 => push_message(
+                    &mut self.attributes,
+                    field,
+                    decoder,
+                    MAX_ATTRIBUTES,
+                    "histogram attributes",
+                    false,
+                )?,
+                10 => self.flags = field.as_varint()? as u32,
+                11 => self.min = Some(f64::from_bits(field.as_fixed64()?)),
+                12 => self.max = Some(f64::from_bits(field.as_fixed64()?)),
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            validate_point_time(self.time_unix_nano, budget)?;
+            budget.repeated(
+                self.bucket_counts.len(),
+                MAX_HISTOGRAM_BUCKET_COUNTS,
+                "histogram bucket counts",
+            )?;
+            budget.repeated(
+                self.explicit_bounds.len(),
+                MAX_HISTOGRAM_EXPLICIT_BOUNDS,
+                "histogram explicit bounds",
+            )?;
+            let numeric_work = self
+                .bucket_counts
+                .len()
+                .saturating_add(self.explicit_bounds.len());
+            budget.work(numeric_work)?;
+            if budget.enforces_invariants() {
+                let shape_matches = if self.bucket_counts.is_empty() {
+                    self.explicit_bounds.is_empty()
+                } else {
+                    self.explicit_bounds
+                        .len()
+                        .checked_add(1)
+                        .is_some_and(|expected| self.bucket_counts.len() == expected)
+                };
+                if !shape_matches {
+                    return Err(ProtobufWireError::SchemaInvariant {
+                        offset: 0,
+                        invariant: "histogram buckets must match explicit bounds",
+                    });
+                }
+                if self
+                    .explicit_bounds
+                    .windows(2)
+                    .any(|pair| pair[0].partial_cmp(&pair[1]) != Some(std::cmp::Ordering::Less))
+                {
+                    return Err(ProtobufWireError::SchemaInvariant {
+                        offset: 0,
+                        invariant: "histogram explicit bounds must be strictly increasing",
+                    });
+                }
+                if !self.bucket_counts.is_empty() {
+                    let Some(bucket_total) = self
+                        .bucket_counts
+                        .iter()
+                        .try_fold(0u64, |total, value| total.checked_add(*value))
+                    else {
+                        return Err(ProtobufWireError::SchemaInvariant {
+                            offset: 0,
+                            invariant: "histogram bucket count sum must fit u64",
+                        });
+                    };
+                    if bucket_total != self.count {
+                        return Err(ProtobufWireError::SchemaInvariant {
+                            offset: 0,
+                            invariant: "histogram count must equal bucket count sum",
+                        });
+                    }
+                }
+                if self.count == 0 && self.sum.is_some_and(|sum| sum != 0.0) {
+                    return Err(ProtobufWireError::SchemaInvariant {
+                        offset: 0,
+                        invariant: "histogram sum must be zero when count is zero",
+                    });
+                }
+            }
+            validate_models(
+                &self.exemplars,
+                budget,
+                MAX_EXEMPLARS_PER_DATA_POINT,
+                "histogram exemplars",
+            )?;
+            validate_attributes(
+                &self.attributes,
+                budget,
+                "histogram attributes",
+                "histogram attribute keys must be unique",
+            )?;
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(HistogramDataPoint);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct ExponentialHistogramBuckets {
+        pub(crate) offset: i32,
+        pub(crate) bucket_counts: Vec<u64>,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for ExponentialHistogramBuckets {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            if self.offset != 0 {
+                encoder.write_sint32(1, self.offset)?;
+            }
+            if !self.bucket_counts.is_empty() {
+                encoder.write_packed_varints(2, &self.bucket_counts)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                1 => self.offset = zigzag_decode_i32(field.as_varint()? as u32),
+                2 => push_repeated_varints(
+                    &mut self.bucket_counts,
+                    field,
+                    decoder,
+                    MAX_EXPONENTIAL_HISTOGRAM_BUCKETS,
+                    "exponential histogram buckets per sign",
+                )?,
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            budget.repeated(
+                self.bucket_counts.len(),
+                MAX_EXPONENTIAL_HISTOGRAM_BUCKETS,
+                "exponential histogram buckets per sign",
+            )?;
+            budget.work(self.bucket_counts.len())?;
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(ExponentialHistogramBuckets);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct ExponentialHistogramDataPoint {
+        pub(crate) attributes: Vec<KeyValue>,
+        pub(crate) start_time_unix_nano: u64,
+        pub(crate) time_unix_nano: u64,
+        pub(crate) count: u64,
+        pub(crate) sum: Option<f64>,
+        pub(crate) scale: i32,
+        pub(crate) zero_count: u64,
+        pub(crate) positive: Option<ExponentialHistogramBuckets>,
+        pub(crate) negative: Option<ExponentialHistogramBuckets>,
+        pub(crate) flags: u32,
+        pub(crate) exemplars: Vec<Exemplar>,
+        pub(crate) min: Option<f64>,
+        pub(crate) max: Option<f64>,
+        pub(crate) zero_threshold: f64,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for ExponentialHistogramDataPoint {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            for attribute in &self.attributes {
+                encode_nested(encoder, 1, attribute)?;
+            }
+            if self.start_time_unix_nano != 0 {
+                encoder.write_fixed64(2, self.start_time_unix_nano)?;
+            }
+            if self.time_unix_nano != 0 {
+                encoder.write_fixed64(3, self.time_unix_nano)?;
+            }
+            if self.count != 0 {
+                encoder.write_fixed64(4, self.count)?;
+            }
+            if let Some(sum) = self.sum {
+                encoder.write_double(5, sum)?;
+            }
+            if self.scale != 0 {
+                encoder.write_sint32(6, self.scale)?;
+            }
+            if self.zero_count != 0 {
+                encoder.write_fixed64(7, self.zero_count)?;
+            }
+            if let Some(positive) = &self.positive {
+                encode_nested(encoder, 8, positive)?;
+            }
+            if let Some(negative) = &self.negative {
+                encode_nested(encoder, 9, negative)?;
+            }
+            if self.flags != 0 {
+                encoder.write_varint(10, u64::from(self.flags))?;
+            }
+            for exemplar in &self.exemplars {
+                encode_nested(encoder, 11, exemplar)?;
+            }
+            if let Some(min) = self.min {
+                encoder.write_double(12, min)?;
+            }
+            if let Some(max) = self.max {
+                encoder.write_double(13, max)?;
+            }
+            if self.zero_threshold != 0.0 {
+                encoder.write_double(14, self.zero_threshold)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                1 => push_message(
+                    &mut self.attributes,
+                    field,
+                    decoder,
+                    MAX_ATTRIBUTES,
+                    "exponential histogram attributes",
+                    false,
+                )?,
+                2 => self.start_time_unix_nano = field.as_fixed64()?,
+                3 => self.time_unix_nano = field.as_fixed64()?,
+                4 => self.count = field.as_fixed64()?,
+                5 => self.sum = Some(f64::from_bits(field.as_fixed64()?)),
+                6 => self.scale = zigzag_decode_i32(field.as_varint()? as u32),
+                7 => self.zero_count = field.as_fixed64()?,
+                8 => merge_optional_message(&mut self.positive, field, decoder, false)?,
+                9 => merge_optional_message(&mut self.negative, field, decoder, false)?,
+                10 => self.flags = field.as_varint()? as u32,
+                11 => push_message(
+                    &mut self.exemplars,
+                    field,
+                    decoder,
+                    MAX_EXEMPLARS_PER_DATA_POINT,
+                    "exponential histogram exemplars",
+                    false,
+                )?,
+                12 => self.min = Some(f64::from_bits(field.as_fixed64()?)),
+                13 => self.max = Some(f64::from_bits(field.as_fixed64()?)),
+                14 => self.zero_threshold = f64::from_bits(field.as_fixed64()?),
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            validate_point_time(self.time_unix_nano, budget)?;
+            validate_attributes(
+                &self.attributes,
+                budget,
+                "exponential histogram attributes",
+                "exponential histogram attribute keys must be unique",
+            )?;
+            if let Some(positive) = &self.positive {
+                positive.validate_otlp(budget, 0)?;
+            }
+            if let Some(negative) = &self.negative {
+                negative.validate_otlp(budget, 0)?;
+            }
+            if budget.enforces_invariants() {
+                let bucket_total = self
+                    .positive
+                    .iter()
+                    .chain(self.negative.iter())
+                    .flat_map(|buckets| buckets.bucket_counts.iter())
+                    .try_fold(self.zero_count, |total, value| total.checked_add(*value));
+                let Some(bucket_total) = bucket_total else {
+                    return Err(ProtobufWireError::SchemaInvariant {
+                        offset: 0,
+                        invariant: "exponential histogram bucket total must fit u64",
+                    });
+                };
+                if bucket_total != self.count {
+                    return Err(ProtobufWireError::SchemaInvariant {
+                        offset: 0,
+                        invariant: "exponential histogram count must equal bucket total",
+                    });
+                }
+                if self.count == 0 && self.sum.is_some_and(|sum| sum != 0.0) {
+                    return Err(ProtobufWireError::SchemaInvariant {
+                        offset: 0,
+                        invariant: "exponential histogram sum must be zero when count is zero",
+                    });
+                }
+            }
+            validate_models(
+                &self.exemplars,
+                budget,
+                MAX_EXEMPLARS_PER_DATA_POINT,
+                "exponential histogram exemplars",
+            )?;
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(ExponentialHistogramDataPoint);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct SummaryValueAtQuantile {
+        pub(crate) quantile: f64,
+        pub(crate) value: f64,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for SummaryValueAtQuantile {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            if self.quantile != 0.0 {
+                encoder.write_double(1, self.quantile)?;
+            }
+            if self.value != 0.0 {
+                encoder.write_double(2, self.value)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                1 => self.quantile = f64::from_bits(field.as_fixed64()?),
+                2 => self.value = f64::from_bits(field.as_fixed64()?),
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            if budget.enforces_invariants()
+                && (!self.quantile.is_finite() || !(0.0..=1.0).contains(&self.quantile))
+            {
+                return Err(ProtobufWireError::SchemaInvariant {
+                    offset: 0,
+                    invariant: "summary quantile must be finite and between zero and one",
+                });
+            }
+            if budget.enforces_invariants() && self.value < 0.0 {
+                return Err(ProtobufWireError::SchemaInvariant {
+                    offset: 0,
+                    invariant: "summary quantile value must not be negative",
+                });
+            }
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(SummaryValueAtQuantile);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct SummaryDataPoint {
+        pub(crate) start_time_unix_nano: u64,
+        pub(crate) time_unix_nano: u64,
+        pub(crate) count: u64,
+        pub(crate) sum: f64,
+        pub(crate) quantile_values: Vec<SummaryValueAtQuantile>,
+        pub(crate) attributes: Vec<KeyValue>,
+        pub(crate) flags: u32,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for SummaryDataPoint {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            if self.start_time_unix_nano != 0 {
+                encoder.write_fixed64(2, self.start_time_unix_nano)?;
+            }
+            if self.time_unix_nano != 0 {
+                encoder.write_fixed64(3, self.time_unix_nano)?;
+            }
+            if self.count != 0 {
+                encoder.write_fixed64(4, self.count)?;
+            }
+            if self.sum != 0.0 {
+                encoder.write_double(5, self.sum)?;
+            }
+            for quantile in &self.quantile_values {
+                encode_nested(encoder, 6, quantile)?;
+            }
+            for attribute in &self.attributes {
+                encode_nested(encoder, 7, attribute)?;
+            }
+            if self.flags != 0 {
+                encoder.write_varint(8, u64::from(self.flags))?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                2 => self.start_time_unix_nano = field.as_fixed64()?,
+                3 => self.time_unix_nano = field.as_fixed64()?,
+                4 => self.count = field.as_fixed64()?,
+                5 => self.sum = f64::from_bits(field.as_fixed64()?),
+                6 => push_message(
+                    &mut self.quantile_values,
+                    field,
+                    decoder,
+                    MAX_SUMMARY_QUANTILES,
+                    "summary quantiles",
+                    false,
+                )?,
+                7 => push_message(
+                    &mut self.attributes,
+                    field,
+                    decoder,
+                    MAX_ATTRIBUTES,
+                    "summary attributes",
+                    false,
+                )?,
+                8 => self.flags = field.as_varint()? as u32,
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            validate_point_time(self.time_unix_nano, budget)?;
+            budget.repeated(
+                self.quantile_values.len(),
+                MAX_SUMMARY_QUANTILES,
+                "summary quantiles",
+            )?;
+            budget.work(self.quantile_values.len())?;
+            if budget.enforces_invariants()
+                && self
+                    .quantile_values
+                    .windows(2)
+                    .any(|pair| pair[0].quantile >= pair[1].quantile)
+            {
+                return Err(ProtobufWireError::SchemaInvariant {
+                    offset: 0,
+                    invariant: "summary quantiles must be strictly increasing",
+                });
+            }
+            for quantile in &self.quantile_values {
+                quantile.validate_otlp(budget, 0)?;
+            }
+            if budget.enforces_invariants() && self.count == 0 && self.sum != 0.0 {
+                return Err(ProtobufWireError::SchemaInvariant {
+                    offset: 0,
+                    invariant: "summary sum must be zero when count is zero",
+                });
+            }
+            validate_attributes(
+                &self.attributes,
+                budget,
+                "summary attributes",
+                "summary attribute keys must be unique",
+            )?;
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(SummaryDataPoint);
+
+    #[derive(Clone, Debug, PartialEq)]
+    pub(crate) enum ExemplarValue {
+        Double(f64),
+        Int(i64),
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct Exemplar {
+        pub(crate) time_unix_nano: u64,
+        pub(crate) value: Option<ExemplarValue>,
+        pub(crate) span_id: Vec<u8>,
+        pub(crate) trace_id: Vec<u8>,
+        pub(crate) filtered_attributes: Vec<KeyValue>,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for Exemplar {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            if self.time_unix_nano != 0 {
+                encoder.write_fixed64(2, self.time_unix_nano)?;
+            }
+            if let Some(ExemplarValue::Double(value)) = &self.value {
+                encoder.write_double(3, *value)?;
+            }
+            if !self.span_id.is_empty() {
+                encoder.write_bytes(4, &self.span_id)?;
+            }
+            if !self.trace_id.is_empty() {
+                encoder.write_bytes(5, &self.trace_id)?;
+            }
+            if let Some(ExemplarValue::Int(value)) = &self.value {
+                encoder.write_fixed64(6, value.cast_unsigned())?;
+            }
+            for attribute in &self.filtered_attributes {
+                encode_nested(encoder, 7, attribute)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                2 => self.time_unix_nano = field.as_fixed64()?,
+                3 => {
+                    self.value = Some(ExemplarValue::Double(f64::from_bits(field.as_fixed64()?)));
+                }
+                4 => {
+                    self.span_id = decode_exact_or_empty_bytes(
+                        field,
+                        decoder,
+                        MAX_SPAN_ID_BYTES,
+                        "exemplar span ID bytes",
+                        "exemplar span ID must be empty or exactly eight bytes",
+                    )?;
+                }
+                5 => {
+                    self.trace_id = decode_exact_or_empty_bytes(
+                        field,
+                        decoder,
+                        MAX_TRACE_ID_BYTES,
+                        "exemplar trace ID bytes",
+                        "exemplar trace ID must be empty or exactly sixteen bytes",
+                    )?;
+                }
+                6 => {
+                    self.value = Some(ExemplarValue::Int(field.as_fixed64()?.cast_signed()));
+                }
+                7 => push_message(
+                    &mut self.filtered_attributes,
+                    field,
+                    decoder,
+                    MAX_ATTRIBUTES,
+                    "exemplar filtered attributes",
+                    false,
+                )?,
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            if budget.enforces_invariants() && self.value.is_none() {
+                return Err(ProtobufWireError::SchemaInvariant {
+                    offset: 0,
+                    invariant: "exemplar must contain a recognized value",
+                });
+            }
+            if budget.enforces_invariants()
+                && !self.span_id.is_empty()
+                && self.span_id.len() != MAX_SPAN_ID_BYTES
+            {
+                return Err(ProtobufWireError::SchemaInvariant {
+                    offset: 0,
+                    invariant: "exemplar span ID must be empty or exactly eight bytes",
+                });
+            }
+            if budget.enforces_invariants()
+                && !self.trace_id.is_empty()
+                && self.trace_id.len() != MAX_TRACE_ID_BYTES
+            {
+                return Err(ProtobufWireError::SchemaInvariant {
+                    offset: 0,
+                    invariant: "exemplar trace ID must be empty or exactly sixteen bytes",
+                });
+            }
+            budget.owned_bytes(
+                self.span_id.len(),
+                MAX_SPAN_ID_BYTES,
+                "exemplar span ID bytes",
+            )?;
+            budget.owned_bytes(
+                self.trace_id.len(),
+                MAX_TRACE_ID_BYTES,
+                "exemplar trace ID bytes",
+            )?;
+            budget.repeated(
+                self.filtered_attributes.len(),
+                MAX_ATTRIBUTES,
+                "exemplar filtered attributes",
+            )?;
+            for attribute in &self.filtered_attributes {
+                attribute.validate_otlp(budget, 0)?;
+            }
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(Exemplar);
+}
+
+pub(crate) mod collector {
+    pub(crate) mod metrics {
+        use super::super::limits_and_error::{
+            MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES, MAX_RESOURCE_GROUPS_PER_REQUEST, OtlpModel,
+            ValidationBudget, decode_string, encode_nested, merge_optional_message, merge_root,
+            preserve_unknown, push_message, validate_root, validate_unknown,
+        };
+        use super::super::metrics::ResourceMetrics;
+        use super::super::{
+            ProtoMessage, ProtobufWireDecoder, ProtobufWireEncoder, ProtobufWireError,
+            ProtobufWireField, ProtobufWireLimits, UnknownFields,
+        };
+
+        macro_rules! impl_proto_message {
+            ($type:ty) => {
+                impl ProtoMessage for $type {
+                    fn encode_fields(
+                        &self,
+                        encoder: &mut ProtobufWireEncoder,
+                    ) -> Result<(), ProtobufWireError> {
+                        let remaining_work = encoder.remaining_work()?;
+                        let validation = validate_root(self, remaining_work, true)?;
+                        encoder.charge_schema_work(validation.work_used)?;
+                        self.encode_fields_unchecked(encoder)
+                    }
+
+                    fn merge_field<'wire>(
+                        &mut self,
+                        field: &ProtobufWireField<'wire>,
+                        decoder: &mut ProtobufWireDecoder<'wire, '_>,
+                    ) -> Result<bool, ProtobufWireError> {
+                        self.merge_otlp_field(field, decoder)
+                    }
+
+                    fn merge_from_bytes(
+                        &mut self,
+                        input: &[u8],
+                        limits: ProtobufWireLimits,
+                    ) -> Result<(), ProtobufWireError> {
+                        merge_root(self, input, limits)
+                    }
+
+                    fn decode_from_bytes(
+                        input: &[u8],
+                        limits: ProtobufWireLimits,
+                    ) -> Result<Self, ProtobufWireError> {
+                        let mut staged = Self::default();
+                        merge_root(&mut staged, input, limits)?;
+                        Ok(staged)
+                    }
+                }
+            };
+        }
+
+        #[derive(Clone, Debug, Default, PartialEq)]
+        pub(crate) struct ExportMetricsServiceRequest {
+            pub(crate) resource_metrics: Vec<ResourceMetrics>,
+            pub(crate) unknown_fields: UnknownFields,
+        }
+
+        impl OtlpModel for ExportMetricsServiceRequest {
+            fn encode_fields_unchecked(
+                &self,
+                encoder: &mut ProtobufWireEncoder,
+            ) -> Result<(), ProtobufWireError> {
+                for resource_metrics in &self.resource_metrics {
+                    encode_nested(encoder, 1, resource_metrics)?;
+                }
+                self.unknown_fields.encode(encoder)
+            }
+
+            fn merge_otlp_field<'wire>(
+                &mut self,
+                field: &ProtobufWireField<'wire>,
+                decoder: &mut ProtobufWireDecoder<'wire, '_>,
+            ) -> Result<bool, ProtobufWireError> {
+                match field.field_number() {
+                    1 => push_message(
+                        &mut self.resource_metrics,
+                        field,
+                        decoder,
+                        MAX_RESOURCE_GROUPS_PER_REQUEST,
+                        "metric resource groups",
+                        false,
+                    )?,
+                    _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+                }
+                Ok(true)
+            }
+
+            fn validate_otlp(
+                &self,
+                budget: &mut ValidationBudget,
+                _any_value_depth: usize,
+            ) -> Result<(), ProtobufWireError> {
+                budget.repeated(
+                    self.resource_metrics.len(),
+                    MAX_RESOURCE_GROUPS_PER_REQUEST,
+                    "metric resource groups",
+                )?;
+                for resource_metrics in &self.resource_metrics {
+                    resource_metrics.validate_otlp(budget, 0)?;
+                }
+                validate_unknown(&self.unknown_fields, budget)
+            }
+        }
+
+        impl_proto_message!(ExportMetricsServiceRequest);
+
+        #[derive(Clone, Debug, Default, PartialEq)]
+        pub(crate) struct ExportMetricsServiceResponse {
+            pub(crate) partial_success: Option<ExportMetricsPartialSuccess>,
+            pub(crate) unknown_fields: UnknownFields,
+        }
+
+        impl OtlpModel for ExportMetricsServiceResponse {
+            fn encode_fields_unchecked(
+                &self,
+                encoder: &mut ProtobufWireEncoder,
+            ) -> Result<(), ProtobufWireError> {
+                if let Some(partial_success) = &self.partial_success {
+                    encode_nested(encoder, 1, partial_success)?;
+                }
+                self.unknown_fields.encode(encoder)
+            }
+
+            fn merge_otlp_field<'wire>(
+                &mut self,
+                field: &ProtobufWireField<'wire>,
+                decoder: &mut ProtobufWireDecoder<'wire, '_>,
+            ) -> Result<bool, ProtobufWireError> {
+                match field.field_number() {
+                    1 => merge_optional_message(&mut self.partial_success, field, decoder, false)?,
+                    _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+                }
+                Ok(true)
+            }
+
+            fn validate_otlp(
+                &self,
+                budget: &mut ValidationBudget,
+                _any_value_depth: usize,
+            ) -> Result<(), ProtobufWireError> {
+                if let Some(partial_success) = &self.partial_success {
+                    partial_success.validate_otlp(budget, 0)?;
+                }
+                validate_unknown(&self.unknown_fields, budget)
+            }
+        }
+
+        impl_proto_message!(ExportMetricsServiceResponse);
+
+        #[derive(Clone, Debug, Default, PartialEq)]
+        pub(crate) struct ExportMetricsPartialSuccess {
+            pub(crate) rejected_data_points: i64,
+            pub(crate) error_message: String,
+            pub(crate) unknown_fields: UnknownFields,
+        }
+
+        impl OtlpModel for ExportMetricsPartialSuccess {
+            fn encode_fields_unchecked(
+                &self,
+                encoder: &mut ProtobufWireEncoder,
+            ) -> Result<(), ProtobufWireError> {
+                if self.rejected_data_points != 0 {
+                    encoder.write_int64(1, self.rejected_data_points)?;
+                }
+                if !self.error_message.is_empty() {
+                    encoder.write_string(2, &self.error_message)?;
+                }
+                self.unknown_fields.encode(encoder)
+            }
+
+            fn merge_otlp_field<'wire>(
+                &mut self,
+                field: &ProtobufWireField<'wire>,
+                decoder: &mut ProtobufWireDecoder<'wire, '_>,
+            ) -> Result<bool, ProtobufWireError> {
+                match field.field_number() {
+                    1 => self.rejected_data_points = field.as_varint()?.cast_signed(),
+                    2 => {
+                        self.error_message = decode_string(
+                            field,
+                            decoder,
+                            MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES,
+                            "partial-success error message bytes",
+                        )?;
+                    }
+                    _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+                }
+                Ok(true)
+            }
+
+            fn validate_otlp(
+                &self,
+                budget: &mut ValidationBudget,
+                _any_value_depth: usize,
+            ) -> Result<(), ProtobufWireError> {
+                if budget.enforces_invariants() && self.rejected_data_points < 0 {
+                    return Err(ProtobufWireError::SchemaInvariant {
+                        offset: 0,
+                        invariant: "partial-success rejected data-point count must be nonnegative",
+                    });
+                }
+                budget.owned_bytes(
+                    self.error_message.len(),
+                    MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES,
+                    "partial-success error message bytes",
+                )?;
+                validate_unknown(&self.unknown_fields, budget)
+            }
+        }
+
+        impl_proto_message!(ExportMetricsPartialSuccess);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::grpc::codec::Codec;
+    use crate::grpc::protobuf::ProtoCodec;
+
+    use super::collector::metrics::{
+        ExportMetricsPartialSuccess, ExportMetricsServiceRequest, ExportMetricsServiceResponse,
+    };
+    use super::common_and_resource::{
+        AnyValue, AnyValueValue, ArrayValue, EntityRef, InstrumentationScope, KeyValue, Resource,
+    };
+    use super::limits_and_error::{
+        MAX_ANY_VALUE_DEPTH, MAX_ANY_VALUE_ITEMS, MAX_ATTRIBUTE_VALUE_BYTES,
+        MAX_DATA_POINTS_PER_METRIC, MAX_EXEMPLARS_PER_DATA_POINT,
+        MAX_EXPONENTIAL_HISTOGRAM_BUCKETS, MAX_HISTOGRAM_BUCKET_COUNTS,
+        MAX_HISTOGRAM_EXPLICIT_BOUNDS, MAX_METRIC_DESCRIPTION_BYTES, MAX_METRIC_METADATA_ENTRIES,
+        MAX_METRIC_NAME_BYTES, MAX_METRIC_UNIT_BYTES, MAX_METRICS_PER_SCOPE,
+        MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES, MAX_RESOURCE_GROUPS_PER_REQUEST,
+        MAX_SCOPES_PER_RESOURCE_GROUP, MAX_SPAN_ID_BYTES, MAX_SUMMARY_QUANTILES,
+        MAX_TOTAL_ANY_VALUE_NODES, MAX_TOTAL_OWNED_BYTES, MAX_TOTAL_REPEATED_ITEMS,
+        MAX_TRACE_ID_BYTES, ValidationBudget,
+    };
+    use super::metrics::{
+        AggregationTemporality, DataPointFlags, Exemplar, ExemplarValue, ExponentialHistogram,
+        ExponentialHistogramBuckets, ExponentialHistogramDataPoint, Gauge, Histogram,
+        HistogramDataPoint, Metric, MetricData, MetricsData, NumberDataPoint, NumberDataPointValue,
+        ResourceMetrics, ScopeMetrics, Sum, Summary, SummaryDataPoint, SummaryValueAtQuantile,
+    };
+    use super::{
+        ProtoMessage, ProtobufWireEncoder, ProtobufWireError, ProtobufWireLimits, UnknownFields,
+    };
+
+    fn limits() -> ProtobufWireLimits {
+        ProtobufWireLimits::default()
+    }
+
+    fn string_value(value: &str) -> AnyValue {
+        AnyValue {
+            value: Some(AnyValueValue::String(value.to_owned())),
+            unknown_fields: UnknownFields::new(),
+        }
+    }
+
+    fn nested_array(depth: usize) -> AnyValue {
+        let mut value = string_value("leaf");
+        for _ in 1..depth {
+            value = AnyValue {
+                value: Some(AnyValueValue::Array(ArrayValue {
+                    values: vec![value],
+                    unknown_fields: UnknownFields::new(),
+                })),
+                unknown_fields: UnknownFields::new(),
+            };
+        }
+        value
+    }
+
+    fn attribute(key: &str, value: &str) -> KeyValue {
+        KeyValue {
+            key: key.to_owned(),
+            value: Some(string_value(value)),
+            ..KeyValue::default()
+        }
+    }
+
+    fn exemplar(value: ExemplarValue) -> Exemplar {
+        Exemplar {
+            time_unix_nano: 17,
+            value: Some(value),
+            span_id: vec![0x22; MAX_SPAN_ID_BYTES],
+            trace_id: vec![0x11; MAX_TRACE_ID_BYTES],
+            filtered_attributes: vec![attribute("sample", "kept")],
+            unknown_fields: UnknownFields::new(),
+        }
+    }
+
+    fn number_point(value: NumberDataPointValue) -> NumberDataPoint {
+        NumberDataPoint {
+            start_time_unix_nano: 10,
+            time_unix_nano: 20,
+            value: Some(value),
+            exemplars: Vec::new(),
+            attributes: vec![attribute("route", "/")],
+            flags: DataPointFlags::NO_RECORDED_VALUE_MASK.bits() | 0x8000_0000,
+            unknown_fields: UnknownFields::new(),
+        }
+    }
+
+    #[test]
+    fn collector_metrics_round_trip_preserves_presence_unknowns_and_merge_semantics() {
+        let request = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics::default()],
+            unknown_fields: UnknownFields::new(),
+        };
+        let request_wire = request
+            .encode_to_bytes(limits())
+            .expect("encode metrics export request");
+        assert_eq!(
+            ExportMetricsServiceRequest::decode_from_bytes(&request_wire, limits())
+                .expect("decode metrics export request"),
+            request
+        );
+        assert_eq!(
+            request
+                .encode_to_bytes(limits())
+                .expect("repeat metrics export request encoding"),
+            request_wire
+        );
+
+        let response = ExportMetricsServiceResponse {
+            partial_success: Some(ExportMetricsPartialSuccess {
+                rejected_data_points: 2,
+                error_message: "two points were rejected".to_owned(),
+                unknown_fields: UnknownFields::new(),
+            }),
+            unknown_fields: UnknownFields::new(),
+        };
+        let response_wire = response
+            .encode_to_bytes(limits())
+            .expect("encode metrics export response");
+        assert_eq!(
+            ExportMetricsServiceResponse::decode_from_bytes(&response_wire, limits())
+                .expect("decode metrics export response"),
+            response
+        );
+        assert_eq!(
+            response
+                .encode_to_bytes(limits())
+                .expect("repeat metrics export response encoding"),
+            response_wire
+        );
+
+        let empty_partial = ExportMetricsServiceResponse {
+            partial_success: Some(ExportMetricsPartialSuccess::default()),
+            unknown_fields: UnknownFields::new(),
+        };
+        let empty_wire = empty_partial
+            .encode_to_bytes(limits())
+            .expect("encode present empty partial success");
+        assert_eq!(empty_wire.as_ref(), &[0x0a, 0x00]);
+        assert_eq!(
+            ExportMetricsServiceResponse::decode_from_bytes(&empty_wire, limits())
+                .expect("decode present empty partial success"),
+            empty_partial
+        );
+
+        let mut count_fragment = ProtobufWireEncoder::new(limits());
+        count_fragment
+            .write_int64(1, 3)
+            .expect("encode rejected count fragment");
+        let count_fragment = count_fragment.finish().expect("finish count fragment");
+        let mut message_fragment = ProtobufWireEncoder::new(limits());
+        message_fragment
+            .write_string(2, "retry")
+            .expect("encode partial-success message fragment");
+        message_fragment
+            .write_varint(3, 7)
+            .expect("encode nested unknown field");
+        let message_fragment = message_fragment.finish().expect("finish message fragment");
+        let mut merged_wire = ProtobufWireEncoder::new(limits());
+        merged_wire
+            .write_message(1, &count_fragment)
+            .expect("encode first partial-success occurrence");
+        merged_wire
+            .write_message(1, &message_fragment)
+            .expect("encode second partial-success occurrence");
+        merged_wire
+            .write_varint(2, 9)
+            .expect("encode response unknown field");
+        let merged = ExportMetricsServiceResponse::decode_from_bytes(
+            &merged_wire.finish().expect("finish merge fixture"),
+            limits(),
+        )
+        .expect("decode merged partial success");
+        let partial = merged
+            .partial_success
+            .expect("partial-success presence must survive merge");
+        assert_eq!(partial.rejected_data_points, 3);
+        assert_eq!(partial.error_message, "retry");
+        assert_eq!(partial.unknown_fields.as_bytes(), [0x18, 0x07]);
+        assert_eq!(merged.unknown_fields.as_bytes(), [0x10, 0x09]);
+        let canonical_merged = ExportMetricsServiceResponse {
+            partial_success: Some(partial),
+            unknown_fields: merged.unknown_fields,
+        };
+        let canonical_merged_wire = canonical_merged
+            .encode_to_bytes(limits())
+            .expect("re-emit merged response unknown fields");
+        assert!(canonical_merged_wire.ends_with(&[0x10, 0x09]));
+        assert!(
+            canonical_merged_wire
+                .windows(2)
+                .any(|pair| pair == [0x18, 0x07])
+        );
+        assert_eq!(
+            ExportMetricsServiceResponse::decode_from_bytes(&canonical_merged_wire, limits())
+                .expect("decode canonical merged response"),
+            canonical_merged
+        );
+    }
+
+    #[test]
+    fn collector_metrics_limits_and_partial_success_invariants_are_exact() {
+        let exact_request = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics::default(); MAX_RESOURCE_GROUPS_PER_REQUEST],
+            unknown_fields: UnknownFields::new(),
+        };
+        exact_request
+            .encode_to_bytes(limits())
+            .expect("encode exact metrics export group limit");
+        assert!(matches!(
+            ExportMetricsServiceRequest {
+                resource_metrics: vec![
+                    ResourceMetrics::default();
+                    MAX_RESOURCE_GROUPS_PER_REQUEST + 1
+                ],
+                unknown_fields: UnknownFields::new(),
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "metric resource groups",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_RESOURCE_GROUPS_PER_REQUEST + 1
+                && limit == MAX_RESOURCE_GROUPS_PER_REQUEST
+        ));
+
+        let mut exact_request_wire = ProtobufWireEncoder::new(limits());
+        for _ in 0..MAX_RESOURCE_GROUPS_PER_REQUEST {
+            exact_request_wire
+                .write_message(1, &[])
+                .expect("encode exact request group fixture");
+        }
+        ExportMetricsServiceRequest::decode_from_bytes(
+            &exact_request_wire.finish().expect("finish exact request"),
+            limits(),
+        )
+        .expect("decode exact metrics export group limit");
+        let mut over_request_wire = ProtobufWireEncoder::new(limits());
+        for _ in 0..=MAX_RESOURCE_GROUPS_PER_REQUEST {
+            over_request_wire
+                .write_message(1, &[])
+                .expect("encode one-over request group fixture");
+        }
+        assert!(matches!(
+            ExportMetricsServiceRequest::decode_from_bytes(
+                &over_request_wire.finish().expect("finish one-over request"),
+                limits(),
+            ),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "metric resource groups",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_RESOURCE_GROUPS_PER_REQUEST + 1
+                && limit == MAX_RESOURCE_GROUPS_PER_REQUEST
+        ));
+
+        let exact_message = "x".repeat(MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES);
+        ExportMetricsPartialSuccess {
+            rejected_data_points: 0,
+            error_message: exact_message.clone(),
+            unknown_fields: UnknownFields::new(),
+        }
+        .encode_to_bytes(limits())
+        .expect("encode exact partial-success message limit");
+        assert!(matches!(
+            ExportMetricsPartialSuccess {
+                rejected_data_points: 0,
+                error_message: "x".repeat(MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES + 1),
+                unknown_fields: UnknownFields::new(),
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "partial-success error message bytes",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES + 1
+                && limit == MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES
+        ));
+
+        let mut exact_message_wire = ProtobufWireEncoder::new(limits());
+        exact_message_wire
+            .write_string(2, &exact_message)
+            .expect("encode exact partial-success decode fixture");
+        ExportMetricsPartialSuccess::decode_from_bytes(
+            &exact_message_wire.finish().expect("finish exact message"),
+            limits(),
+        )
+        .expect("decode exact partial-success message limit");
+        let mut over_message_wire = ProtobufWireEncoder::new(limits());
+        over_message_wire
+            .write_string(2, &"x".repeat(MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES + 1))
+            .expect("encode one-over partial-success decode fixture");
+        assert!(matches!(
+            ExportMetricsPartialSuccess::decode_from_bytes(
+                &over_message_wire.finish().expect("finish one-over message"),
+                limits(),
+            ),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "partial-success error message bytes",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES + 1
+                && limit == MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES
+        ));
+
+        assert!(matches!(
+            ExportMetricsPartialSuccess {
+                rejected_data_points: -1,
+                error_message: String::new(),
+                unknown_fields: UnknownFields::new(),
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "partial-success rejected data-point count must be nonnegative",
+                ..
+            })
+        ));
+        let mut negative_wire = ProtobufWireEncoder::new(limits());
+        negative_wire
+            .write_int64(1, -1)
+            .expect("encode negative rejected count fixture");
+        assert!(matches!(
+            ExportMetricsPartialSuccess::decode_from_bytes(
+                &negative_wire.finish().expect("finish negative count"),
+                limits(),
+            ),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "partial-success rejected data-point count must be nonnegative",
+                ..
+            })
+        ));
+
+        let mut invalid_merge_wire = ProtobufWireEncoder::new(limits());
+        invalid_merge_wire
+            .write_int64(1, -1)
+            .expect("encode invalid merge count");
+        invalid_merge_wire
+            .write_string(2, "retained before validation failure")
+            .expect("encode invalid merge message");
+        let mut merge_target = ExportMetricsPartialSuccess::default();
+        assert!(
+            merge_target
+                .merge_from_bytes(
+                    &invalid_merge_wire.finish().expect("finish invalid merge"),
+                    limits(),
+                )
+                .is_err()
+        );
+        assert_eq!(merge_target.rejected_data_points, -1);
+        assert_eq!(
+            merge_target.error_message,
+            "retained before validation failure"
+        );
+
+        for accepted in [
+            ExportMetricsPartialSuccess {
+                rejected_data_points: 0,
+                error_message: "warning without rejection".to_owned(),
+                unknown_fields: UnknownFields::new(),
+            },
+            ExportMetricsPartialSuccess {
+                rejected_data_points: 1,
+                error_message: String::new(),
+                unknown_fields: UnknownFields::new(),
+            },
+        ] {
+            let encoded = accepted
+                .encode_to_bytes(limits())
+                .expect("encode accepted partial-success shape");
+            assert_eq!(
+                ExportMetricsPartialSuccess::decode_from_bytes(&encoded, limits())
+                    .expect("decode accepted partial-success shape"),
+                accepted
+            );
+        }
+    }
+
+    #[test]
+    fn common_resource_round_trip_is_deterministic() {
+        let resource = Resource {
+            attributes: vec![
+                KeyValue {
+                    key: "service.name".to_owned(),
+                    value: Some(string_value("asupersync")),
+                    key_strindex: 0,
+                    unknown_fields: UnknownFields::new(),
+                },
+                KeyValue {
+                    key: "service.version".to_owned(),
+                    value: Some(string_value("0.1.0")),
+                    key_strindex: 0,
+                    unknown_fields: UnknownFields::new(),
+                },
+            ],
+            dropped_attributes_count: 2,
+            entity_refs: vec![EntityRef {
+                schema_url: "https://opentelemetry.io/schemas/1.37.0".to_owned(),
+                r#type: "service".to_owned(),
+                id_keys: vec!["service.name".to_owned()],
+                description_keys: vec!["service.version".to_owned()],
+                unknown_fields: UnknownFields::new(),
+            }],
+            unknown_fields: UnknownFields::new(),
+        };
+
+        let first = resource.encode_to_bytes(limits()).expect("encode resource");
+        let second = resource.encode_to_bytes(limits()).expect("repeat encode");
+        assert_eq!(first, second);
+        assert_eq!(
+            Resource::decode_from_bytes(&first, limits()).expect("decode resource"),
+            resource
+        );
+    }
+
+    #[test]
+    fn any_value_same_message_oneof_member_merges_and_other_member_replaces() {
+        let two_arrays = [
+            0x2a, 0x05, 0x0a, 0x03, 0x0a, 0x01, b'a', 0x2a, 0x05, 0x0a, 0x03, 0x0a, 0x01, b'b',
+        ];
+        let merged = AnyValue::decode_from_bytes(&two_arrays, limits()).expect("merge arrays");
+        let Some(AnyValueValue::Array(array)) = merged.value else {
+            panic!("expected merged array member");
+        };
+        assert_eq!(array.values, vec![string_value("a"), string_value("b")]);
+
+        let mut replaced_bytes = two_arrays.to_vec();
+        replaced_bytes.extend_from_slice(&[0x0a, 0x01, b'z']);
+        let replaced =
+            AnyValue::decode_from_bytes(&replaced_bytes, limits()).expect("replace oneof");
+        assert_eq!(replaced.value, Some(AnyValueValue::String("z".to_owned())));
+    }
+
+    #[test]
+    fn common_limits_accept_exact_boundaries_and_reject_one_over() {
+        let exact_string = AnyValue {
+            value: Some(AnyValueValue::String("x".repeat(MAX_ATTRIBUTE_VALUE_BYTES))),
+            unknown_fields: UnknownFields::new(),
+        };
+        exact_string
+            .encode_to_bytes(limits())
+            .expect("exact string limit");
+
+        let over_string = AnyValue {
+            value: Some(AnyValueValue::String(
+                "x".repeat(MAX_ATTRIBUTE_VALUE_BYTES + 1),
+            )),
+            unknown_fields: UnknownFields::new(),
+        };
+        assert!(matches!(
+            over_string.encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "AnyValue string bytes",
+                ..
+            })
+        ));
+
+        let exact_items = ArrayValue {
+            values: vec![AnyValue::default(); MAX_ANY_VALUE_ITEMS],
+            unknown_fields: UnknownFields::new(),
+        };
+        exact_items
+            .encode_to_bytes(limits())
+            .expect("exact item limit");
+        let over_items = ArrayValue {
+            values: vec![AnyValue::default(); MAX_ANY_VALUE_ITEMS + 1],
+            unknown_fields: UnknownFields::new(),
+        };
+        assert!(matches!(
+            over_items.encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "AnyValue array items",
+                ..
+            })
+        ));
+
+        let mut exact_string_wire = ProtobufWireEncoder::new(limits());
+        exact_string_wire
+            .write_bytes(1, &vec![b'x'; MAX_ATTRIBUTE_VALUE_BYTES])
+            .expect("encode exact decode fixture");
+        AnyValue::decode_from_bytes(
+            &exact_string_wire.finish().expect("finish exact fixture"),
+            limits(),
+        )
+        .expect("decode exact string limit");
+
+        let mut over_string_wire = ProtobufWireEncoder::new(limits());
+        over_string_wire
+            .write_bytes(1, &vec![b'x'; MAX_ATTRIBUTE_VALUE_BYTES + 1])
+            .expect("encode one-over decode fixture");
+        assert!(matches!(
+            AnyValue::decode_from_bytes(
+                &over_string_wire.finish().expect("finish one-over fixture"),
+                limits(),
+            ),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "AnyValue string bytes",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_ATTRIBUTE_VALUE_BYTES + 1
+                && limit == MAX_ATTRIBUTE_VALUE_BYTES
+        ));
+
+        let mut exact_items_wire = ProtobufWireEncoder::new(limits());
+        for _ in 0..MAX_ANY_VALUE_ITEMS {
+            exact_items_wire
+                .write_message(1, &[])
+                .expect("encode exact item fixture");
+        }
+        ArrayValue::decode_from_bytes(
+            &exact_items_wire.finish().expect("finish exact items"),
+            limits(),
+        )
+        .expect("decode exact item limit");
+
+        let mut over_items_wire = ProtobufWireEncoder::new(limits());
+        for _ in 0..=MAX_ANY_VALUE_ITEMS {
+            over_items_wire
+                .write_message(1, &[])
+                .expect("encode one-over item fixture");
+        }
+        assert!(matches!(
+            ArrayValue::decode_from_bytes(
+                &over_items_wire.finish().expect("finish one-over items"),
+                limits(),
+            ),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "AnyValue array items",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_ANY_VALUE_ITEMS + 1 && limit == MAX_ANY_VALUE_ITEMS
+        ));
+    }
+
+    #[test]
+    fn recursive_any_value_depth_is_exact_and_fail_closed() {
+        let exact = nested_array(MAX_ANY_VALUE_DEPTH)
+            .encode_to_bytes(limits())
+            .expect("exact AnyValue depth");
+        AnyValue::decode_from_bytes(&exact, limits()).expect("decode exact AnyValue depth");
+        assert!(matches!(
+            nested_array(MAX_ANY_VALUE_DEPTH + 1).encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "AnyValue depth",
+                ..
+            })
+        ));
+
+        let mut nested_wire = Vec::new();
+        for _ in 1..=MAX_ANY_VALUE_DEPTH {
+            let mut array = ProtobufWireEncoder::new(limits());
+            array
+                .write_message(1, &nested_wire)
+                .expect("wrap array value");
+            let array = array.finish().expect("finish array wrapper");
+            let mut any_value = ProtobufWireEncoder::new(limits());
+            any_value
+                .write_message(5, &array)
+                .expect("wrap AnyValue array");
+            nested_wire = any_value
+                .finish()
+                .expect("finish AnyValue wrapper")
+                .to_vec();
+        }
+        assert!(matches!(
+            AnyValue::decode_from_bytes(&nested_wire, limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "AnyValue depth",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_ANY_VALUE_DEPTH + 1 && limit == MAX_ANY_VALUE_DEPTH
+        ));
+    }
+
+    #[test]
+    fn unknown_group_is_preserved_verbatim() {
+        let group = [0x5b, 0x60, 0x01, 0x5c];
+        let decoded = Resource::decode_from_bytes(&group, limits()).expect("decode unknown group");
+        assert_eq!(decoded.unknown_fields.as_bytes(), group);
+        assert_eq!(
+            decoded.encode_to_bytes(limits()).expect("re-encode group"),
+            group.as_slice()
+        );
+    }
+
+    #[test]
+    fn fresh_decode_returns_no_partial_model_and_merge_documents_partial_mutation() {
+        let malformed = [0x0a, 0x02, b'o', b'k', 0x12];
+        assert!(AnyValue::decode_from_bytes(&malformed, limits()).is_err());
+
+        let mut existing = AnyValue::default();
+        assert!(existing.merge_from_bytes(&malformed, limits()).is_err());
+        assert_eq!(existing.value, Some(AnyValueValue::String("ok".to_owned())));
+
+        let payload_len = MAX_TOTAL_OWNED_BYTES - 5;
+        let mut raw_encoder =
+            ProtobufWireEncoder::new(ProtobufWireLimits::for_message_size(MAX_TOTAL_OWNED_BYTES));
+        raw_encoder
+            .write_bytes(15, &vec![0; payload_len])
+            .expect("encode exact aggregate-owned-byte fixture");
+        let raw = raw_encoder.finish().expect("finish aggregate fixture");
+        assert_eq!(raw.len(), MAX_TOTAL_OWNED_BYTES);
+        let mut unknown_fields = UnknownFields::new();
+        unknown_fields
+            .try_record_raw(&raw)
+            .expect("record exact aggregate fixture");
+        let mut resource = Resource {
+            unknown_fields,
+            ..Resource::default()
+        };
+        let original_unknown_len = resource.unknown_fields.len();
+        assert!(matches!(
+            resource.merge_from_bytes(&[0x78, 0x01], limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "total owned string and bytes payload",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_TOTAL_OWNED_BYTES + 2 && limit == MAX_TOTAL_OWNED_BYTES
+        ));
+        assert_eq!(resource.unknown_fields.len(), original_unknown_len);
+    }
+
+    #[test]
+    fn malformed_utf8_and_duplicate_attribute_keys_are_typed_errors() {
+        assert!(matches!(
+            AnyValue::decode_from_bytes(&[0x0a, 0x01, 0xff], limits()),
+            Err(ProtobufWireError::InvalidUtf8 { .. })
+        ));
+
+        let duplicate = Resource {
+            attributes: vec![
+                KeyValue {
+                    key: "duplicate".to_owned(),
+                    ..KeyValue::default()
+                },
+                KeyValue {
+                    key: "duplicate".to_owned(),
+                    ..KeyValue::default()
+                },
+            ],
+            ..Resource::default()
+        };
+        assert!(matches!(
+            duplicate.encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "resource attribute keys must be unique",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn pinned_common_and_resource_invariants_fail_closed() {
+        let conflicting_key = KeyValue {
+            key: "service.name".to_owned(),
+            key_strindex: 1,
+            ..KeyValue::default()
+        };
+        assert!(matches!(
+            conflicting_key.encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "KeyValue key and key_strindex are mutually exclusive",
+                ..
+            })
+        ));
+        assert!(matches!(
+            KeyValue::decode_from_bytes(&[0x0a, 0x01, b'k', 0x18, 0x01], limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "KeyValue key and key_strindex are mutually exclusive",
+                ..
+            })
+        ));
+
+        assert!(matches!(
+            EntityRef::default().encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "EntityRef type must be nonempty",
+                ..
+            })
+        ));
+        let missing_id = EntityRef {
+            r#type: "service".to_owned(),
+            ..EntityRef::default()
+        };
+        assert!(matches!(
+            missing_id.encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "EntityRef id_keys must not be empty",
+                ..
+            })
+        ));
+
+        let missing_attribute = Resource {
+            entity_refs: vec![EntityRef {
+                r#type: "service".to_owned(),
+                id_keys: vec!["service.name".to_owned()],
+                ..EntityRef::default()
+            }],
+            ..Resource::default()
+        };
+        assert!(matches!(
+            missing_attribute.encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "EntityRef keys must reference Resource attributes",
+                ..
+            })
+        ));
+
+        let comparison_heavy = Resource {
+            attributes: vec![
+                KeyValue {
+                    key: "a".to_owned(),
+                    ..KeyValue::default()
+                },
+                KeyValue {
+                    key: "b".to_owned(),
+                    ..KeyValue::default()
+                },
+            ],
+            ..Resource::default()
+        };
+        let mut encoder = ProtobufWireEncoder::new(limits().with_max_work(1));
+        assert!(matches!(
+            comparison_heavy.encode_fields(&mut encoder),
+            Err(ProtobufWireError::WorkLimitExceeded {
+                work: 2,
+                limit: 1,
+                ..
+            })
+        ));
+        assert!(encoder.is_empty());
+    }
+
+    #[test]
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants_metrics_round_trip() {
+        let mut metric_unknown = UnknownFields::new();
+        metric_unknown
+            .try_record_raw(&[0x78, 0x01])
+            .expect("record metric unknown field");
+
+        let mut gauge_point = number_point(NumberDataPointValue::Double(3.5));
+        gauge_point.exemplars = vec![exemplar(ExemplarValue::Int(-7))];
+        let gauge = Metric {
+            name: "runtime.queue.depth".to_owned(),
+            description: "current queue depth".to_owned(),
+            unit: "{task}".to_owned(),
+            data: Some(MetricData::Gauge(Gauge {
+                data_points: vec![gauge_point],
+                unknown_fields: UnknownFields::new(),
+            })),
+            metadata: vec![attribute("stability", "stable")],
+            unknown_fields: metric_unknown,
+        };
+
+        let sum = Metric {
+            name: "runtime.tasks".to_owned(),
+            data: Some(MetricData::Sum(Sum {
+                data_points: vec![number_point(NumberDataPointValue::Int(9))],
+                aggregation_temporality: 77,
+                is_monotonic: true,
+                unknown_fields: UnknownFields::new(),
+            })),
+            ..Metric::default()
+        };
+
+        let histogram = Metric {
+            name: "runtime.latency".to_owned(),
+            unit: "ms".to_owned(),
+            data: Some(MetricData::Histogram(Histogram {
+                data_points: vec![HistogramDataPoint {
+                    start_time_unix_nano: 10,
+                    time_unix_nano: 20,
+                    count: 3,
+                    sum: Some(7.0),
+                    bucket_counts: vec![1, 2],
+                    explicit_bounds: vec![2.5],
+                    exemplars: vec![exemplar(ExemplarValue::Double(2.0))],
+                    attributes: vec![attribute("worker", "a")],
+                    flags: 0x8000_0001,
+                    min: Some(1.0),
+                    max: Some(4.0),
+                    unknown_fields: UnknownFields::new(),
+                }],
+                aggregation_temporality: AggregationTemporality::Delta.as_raw(),
+                unknown_fields: UnknownFields::new(),
+            })),
+            ..Metric::default()
+        };
+
+        let exponential = Metric {
+            name: "runtime.payload".to_owned(),
+            data: Some(MetricData::ExponentialHistogram(ExponentialHistogram {
+                data_points: vec![ExponentialHistogramDataPoint {
+                    attributes: vec![attribute("class", "small")],
+                    start_time_unix_nano: 10,
+                    time_unix_nano: 20,
+                    count: 4,
+                    sum: Some(8.0),
+                    scale: -2,
+                    zero_count: 1,
+                    positive: Some(ExponentialHistogramBuckets {
+                        offset: -1,
+                        bucket_counts: vec![1, 2],
+                        unknown_fields: UnknownFields::new(),
+                    }),
+                    negative: None,
+                    flags: 0x4000_0000,
+                    exemplars: Vec::new(),
+                    min: Some(-1.0),
+                    max: Some(5.0),
+                    zero_threshold: 0.25,
+                    unknown_fields: UnknownFields::new(),
+                }],
+                aggregation_temporality: AggregationTemporality::Cumulative.as_raw(),
+                unknown_fields: UnknownFields::new(),
+            })),
+            ..Metric::default()
+        };
+
+        let summary = Metric {
+            name: "runtime.summary".to_owned(),
+            data: Some(MetricData::Summary(Summary {
+                data_points: vec![SummaryDataPoint {
+                    start_time_unix_nano: 10,
+                    time_unix_nano: 20,
+                    count: 2,
+                    sum: 3.0,
+                    quantile_values: vec![
+                        SummaryValueAtQuantile {
+                            quantile: 0.0,
+                            value: 1.0,
+                            unknown_fields: UnknownFields::new(),
+                        },
+                        SummaryValueAtQuantile {
+                            quantile: 1.0,
+                            value: 2.0,
+                            unknown_fields: UnknownFields::new(),
+                        },
+                    ],
+                    attributes: vec![attribute("kind", "bounded")],
+                    flags: 0x2000_0000,
+                    unknown_fields: UnknownFields::new(),
+                }],
+                unknown_fields: UnknownFields::new(),
+            })),
+            ..Metric::default()
+        };
+
+        let model = MetricsData {
+            resource_metrics: vec![ResourceMetrics {
+                resource: Some(Resource {
+                    attributes: vec![attribute("service.name", "asupersync")],
+                    ..Resource::default()
+                }),
+                scope_metrics: vec![ScopeMetrics {
+                    scope: Some(InstrumentationScope {
+                        name: "asupersync".to_owned(),
+                        version: "0.1.0".to_owned(),
+                        ..InstrumentationScope::default()
+                    }),
+                    metrics: vec![gauge, sum, histogram, exponential, summary],
+                    schema_url: "https://opentelemetry.io/schemas/1.37.0".to_owned(),
+                    unknown_fields: UnknownFields::new(),
+                }],
+                schema_url: "https://opentelemetry.io/schemas/1.37.0".to_owned(),
+                unknown_fields: UnknownFields::new(),
+            }],
+            unknown_fields: UnknownFields::new(),
+        };
+
+        let first = model.encode_to_bytes(limits()).expect("encode metrics");
+        let second = model
+            .encode_to_bytes(limits())
+            .expect("repeat metrics encode");
+        assert_eq!(first, second);
+        assert_eq!(
+            MetricsData::decode_from_bytes(&first, limits()).expect("decode metrics"),
+            model
+        );
+        assert_eq!(AggregationTemporality::from_raw(77), None);
+        let flags = DataPointFlags::from_bits_retain(0x8000_0001);
+        assert!(flags.contains(DataPointFlags::NO_RECORDED_VALUE_MASK));
+        assert_eq!(flags.bits(), 0x8000_0001);
+        assert_eq!(DataPointFlags::DO_NOT_USE.bits(), 0);
+    }
+
+    #[test]
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix_metrics_oneofs_merge() {
+        let first_gauge = Gauge {
+            data_points: vec![number_point(NumberDataPointValue::Double(1.0))],
+            unknown_fields: UnknownFields::new(),
+        }
+        .encode_to_bytes(limits())
+        .expect("encode first gauge");
+        let second_gauge = Gauge {
+            data_points: vec![number_point(NumberDataPointValue::Int(2))],
+            unknown_fields: UnknownFields::new(),
+        }
+        .encode_to_bytes(limits())
+        .expect("encode second gauge");
+        let mut metric_wire = ProtobufWireEncoder::new(limits());
+        metric_wire
+            .write_message(5, &first_gauge)
+            .expect("first gauge member");
+        metric_wire
+            .write_message(5, &second_gauge)
+            .expect("second gauge member");
+        let merged = Metric::decode_from_bytes(
+            &metric_wire.finish().expect("finish merged metric"),
+            limits(),
+        )
+        .expect("decode merged gauge");
+        let Some(MetricData::Gauge(gauge)) = merged.data else {
+            panic!("expected gauge data");
+        };
+        assert_eq!(gauge.data_points.len(), 2);
+
+        let mut replacement_wire = ProtobufWireEncoder::new(limits());
+        replacement_wire
+            .write_message(5, &first_gauge)
+            .expect("gauge member");
+        replacement_wire
+            .write_message(11, &[])
+            .expect("summary replacement");
+        let replaced = Metric::decode_from_bytes(
+            &replacement_wire.finish().expect("finish replacement"),
+            limits(),
+        )
+        .expect("decode replacement");
+        assert!(matches!(replaced.data, Some(MetricData::Summary(_))));
+
+        let mut number_wire = ProtobufWireEncoder::new(limits());
+        number_wire
+            .write_fixed64(3, 1)
+            .expect("required point time");
+        number_wire.write_double(4, 1.5).expect("double member");
+        number_wire
+            .write_fixed64(6, (-9i64).cast_unsigned())
+            .expect("integer replacement");
+        let number = NumberDataPoint::decode_from_bytes(
+            &number_wire.finish().expect("finish number point"),
+            limits(),
+        )
+        .expect("decode number point");
+        assert_eq!(number.value, Some(NumberDataPointValue::Int(-9)));
+
+        let mut exemplar_wire = ProtobufWireEncoder::new(limits());
+        exemplar_wire
+            .write_fixed64(3, 1.5f64.to_bits())
+            .expect("exemplar double");
+        exemplar_wire
+            .write_fixed64(6, (-11i64).cast_unsigned())
+            .expect("exemplar integer replacement");
+        let exemplar = Exemplar::decode_from_bytes(
+            &exemplar_wire.finish().expect("finish exemplar"),
+            limits(),
+        )
+        .expect("decode exemplar");
+        assert_eq!(exemplar.value, Some(ExemplarValue::Int(-11)));
+    }
+
+    #[test]
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants_metrics_limits() {
+        MetricsData {
+            resource_metrics: vec![ResourceMetrics::default(); MAX_RESOURCE_GROUPS_PER_REQUEST],
+            unknown_fields: UnknownFields::new(),
+        }
+        .encode_to_bytes(limits())
+        .expect("exact metric resource group limit");
+        assert!(matches!(
+            MetricsData {
+                resource_metrics: vec![
+                    ResourceMetrics::default();
+                    MAX_RESOURCE_GROUPS_PER_REQUEST + 1
+                ],
+                unknown_fields: UnknownFields::new(),
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "metric resource groups",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_RESOURCE_GROUPS_PER_REQUEST + 1
+                && limit == MAX_RESOURCE_GROUPS_PER_REQUEST
+        ));
+
+        ResourceMetrics {
+            scope_metrics: vec![ScopeMetrics::default(); MAX_SCOPES_PER_RESOURCE_GROUP],
+            ..ResourceMetrics::default()
+        }
+        .encode_to_bytes(limits())
+        .expect("exact metric scope limit");
+        assert!(matches!(
+            ResourceMetrics {
+                scope_metrics: vec![ScopeMetrics::default(); MAX_SCOPES_PER_RESOURCE_GROUP + 1],
+                ..ResourceMetrics::default()
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "metric scopes per resource group",
+                ..
+            })
+        ));
+
+        ScopeMetrics {
+            metrics: vec![Metric::default(); MAX_METRICS_PER_SCOPE],
+            ..ScopeMetrics::default()
+        }
+        .encode_to_bytes(limits())
+        .expect("exact metrics per scope limit");
+        assert!(matches!(
+            ScopeMetrics {
+                metrics: vec![Metric::default(); MAX_METRICS_PER_SCOPE + 1],
+                ..ScopeMetrics::default()
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "metrics per scope",
+                ..
+            })
+        ));
+
+        let minimal_point = NumberDataPoint {
+            time_unix_nano: 1,
+            value: Some(NumberDataPointValue::Int(0)),
+            ..NumberDataPoint::default()
+        };
+        Gauge {
+            data_points: vec![minimal_point.clone(); MAX_DATA_POINTS_PER_METRIC],
+            unknown_fields: UnknownFields::new(),
+        }
+        .encode_to_bytes(limits())
+        .expect("exact data point limit");
+        assert!(matches!(
+            Gauge {
+                data_points: vec![minimal_point; MAX_DATA_POINTS_PER_METRIC + 1],
+                unknown_fields: UnknownFields::new(),
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "gauge data points",
+                ..
+            })
+        ));
+
+        let minimal_exemplar = Exemplar {
+            value: Some(ExemplarValue::Int(0)),
+            ..Exemplar::default()
+        };
+        NumberDataPoint {
+            time_unix_nano: 1,
+            value: Some(NumberDataPointValue::Int(0)),
+            exemplars: vec![minimal_exemplar.clone(); MAX_EXEMPLARS_PER_DATA_POINT],
+            ..NumberDataPoint::default()
+        }
+        .encode_to_bytes(limits())
+        .expect("exact exemplar limit");
+        assert!(matches!(
+            NumberDataPoint {
+                time_unix_nano: 1,
+                value: Some(NumberDataPointValue::Int(0)),
+                exemplars: vec![minimal_exemplar; MAX_EXEMPLARS_PER_DATA_POINT + 1],
+                ..NumberDataPoint::default()
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "number data point exemplars",
+                ..
+            })
+        ));
+
+        let exact_histogram = HistogramDataPoint {
+            time_unix_nano: 1,
+            bucket_counts: vec![0; MAX_HISTOGRAM_BUCKET_COUNTS],
+            explicit_bounds: (0..MAX_HISTOGRAM_EXPLICIT_BOUNDS)
+                .map(|value| {
+                    f64::from(u32::try_from(value).expect("bounded histogram index fits u32"))
+                })
+                .collect(),
+            ..HistogramDataPoint::default()
+        };
+        exact_histogram
+            .encode_to_bytes(limits())
+            .expect("exact histogram bucket limits");
+        assert!(matches!(
+            HistogramDataPoint {
+                time_unix_nano: 1,
+                bucket_counts: vec![0; MAX_HISTOGRAM_BUCKET_COUNTS + 1],
+                ..HistogramDataPoint::default()
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "histogram bucket counts",
+                ..
+            })
+        ));
+        assert!(matches!(
+            HistogramDataPoint {
+                time_unix_nano: 1,
+                explicit_bounds: vec![0.0; MAX_HISTOGRAM_EXPLICIT_BOUNDS + 1],
+                ..HistogramDataPoint::default()
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "histogram explicit bounds",
+                ..
+            })
+        ));
+
+        ExponentialHistogramBuckets {
+            bucket_counts: vec![0; MAX_EXPONENTIAL_HISTOGRAM_BUCKETS],
+            ..ExponentialHistogramBuckets::default()
+        }
+        .encode_to_bytes(limits())
+        .expect("exact exponential bucket limit");
+        assert!(matches!(
+            ExponentialHistogramBuckets {
+                bucket_counts: vec![0; MAX_EXPONENTIAL_HISTOGRAM_BUCKETS + 1],
+                ..ExponentialHistogramBuckets::default()
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "exponential histogram buckets per sign",
+                ..
+            })
+        ));
+
+        let exact_quantiles = (0..MAX_SUMMARY_QUANTILES)
+            .map(|index| SummaryValueAtQuantile {
+                quantile: f64::from(u32::try_from(index).expect("bounded quantile index fits u32"))
+                    / f64::from(
+                        u32::try_from(MAX_SUMMARY_QUANTILES - 1)
+                            .expect("bounded quantile count fits u32"),
+                    ),
+                value: 0.0,
+                unknown_fields: UnknownFields::new(),
+            })
+            .collect();
+        SummaryDataPoint {
+            time_unix_nano: 1,
+            count: 1,
+            quantile_values: exact_quantiles,
+            ..SummaryDataPoint::default()
+        }
+        .encode_to_bytes(limits())
+        .expect("exact summary quantile limit");
+        assert!(matches!(
+            SummaryDataPoint {
+                time_unix_nano: 1,
+                count: 1,
+                quantile_values: vec![SummaryValueAtQuantile::default(); MAX_SUMMARY_QUANTILES + 1],
+                ..SummaryDataPoint::default()
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "summary quantiles",
+                ..
+            })
+        ));
+
+        let exact_metadata = (0..MAX_METRIC_METADATA_ENTRIES)
+            .map(|index| KeyValue {
+                key: format!("key-{index}"),
+                ..KeyValue::default()
+            })
+            .collect();
+        Metric {
+            metadata: exact_metadata,
+            ..Metric::default()
+        }
+        .encode_to_bytes(limits())
+        .expect("exact metric metadata limit");
+        assert!(matches!(
+            Metric {
+                metadata: vec![KeyValue::default(); MAX_METRIC_METADATA_ENTRIES + 1],
+                ..Metric::default()
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "metric metadata entries",
+                ..
+            })
+        ));
+
+        Metric {
+            name: "n".repeat(MAX_METRIC_NAME_BYTES),
+            description: "d".repeat(MAX_METRIC_DESCRIPTION_BYTES),
+            unit: "u".repeat(MAX_METRIC_UNIT_BYTES),
+            ..Metric::default()
+        }
+        .encode_to_bytes(limits())
+        .expect("exact metric string limits");
+        for (metric, resource) in [
+            (
+                Metric {
+                    name: "n".repeat(MAX_METRIC_NAME_BYTES + 1),
+                    ..Metric::default()
+                },
+                "metric name bytes",
+            ),
+            (
+                Metric {
+                    description: "d".repeat(MAX_METRIC_DESCRIPTION_BYTES + 1),
+                    ..Metric::default()
+                },
+                "metric description bytes",
+            ),
+            (
+                Metric {
+                    unit: "u".repeat(MAX_METRIC_UNIT_BYTES + 1),
+                    ..Metric::default()
+                },
+                "metric unit bytes",
+            ),
+        ] {
+            assert!(matches!(
+                metric.encode_to_bytes(limits()),
+                Err(ProtobufWireError::SchemaLimitExceeded {
+                    resource: observed_resource,
+                    ..
+                }) if observed_resource == resource
+            ));
+        }
+
+        let mut over_resources_wire = ProtobufWireEncoder::new(limits());
+        for _ in 0..=MAX_RESOURCE_GROUPS_PER_REQUEST {
+            over_resources_wire
+                .write_message(1, &[])
+                .expect("write resource group fixture");
+        }
+        assert!(matches!(
+            MetricsData::decode_from_bytes(
+                &over_resources_wire
+                    .finish()
+                    .expect("finish resource groups"),
+                limits(),
+            ),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "metric resource groups",
+                ..
+            })
+        ));
+
+        let mut over_buckets_wire = ProtobufWireEncoder::new(limits());
+        over_buckets_wire
+            .write_packed_fixed64(6, &vec![0; MAX_HISTOGRAM_BUCKET_COUNTS + 1])
+            .expect("write bucket fixture");
+        assert!(matches!(
+            HistogramDataPoint::decode_from_bytes(
+                &over_buckets_wire.finish().expect("finish buckets"),
+                limits(),
+            ),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "histogram bucket counts",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants_metrics_semantics() {
+        assert!(matches!(
+            Sum::default().encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "aggregation temporality must not be unspecified",
+                ..
+            })
+        ));
+        Sum {
+            aggregation_temporality: 99,
+            ..Sum::default()
+        }
+        .encode_to_bytes(limits())
+        .expect("unknown temporality remains forward-compatible");
+
+        assert!(matches!(
+            NumberDataPoint::default().encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "number data point must contain a recognized value",
+                ..
+            })
+        ));
+        assert!(matches!(
+            NumberDataPoint {
+                value: Some(NumberDataPointValue::Int(0)),
+                ..NumberDataPoint::default()
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "metric data point time_unix_nano must be nonzero",
+                ..
+            })
+        ));
+        assert!(matches!(
+            Exemplar::default().encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "exemplar must contain a recognized value",
+                ..
+            })
+        ));
+
+        for invalid in [
+            Exemplar {
+                value: Some(ExemplarValue::Int(0)),
+                span_id: vec![0; MAX_SPAN_ID_BYTES - 1],
+                ..Exemplar::default()
+            },
+            Exemplar {
+                value: Some(ExemplarValue::Int(0)),
+                trace_id: vec![0; MAX_TRACE_ID_BYTES - 1],
+                ..Exemplar::default()
+            },
+        ] {
+            assert!(matches!(
+                invalid.encode_to_bytes(limits()),
+                Err(ProtobufWireError::SchemaInvariant { .. })
+            ));
+        }
+
+        let mut short_id_wire = ProtobufWireEncoder::new(limits());
+        short_id_wire
+            .write_fixed64(6, 0)
+            .expect("recognized exemplar value");
+        short_id_wire
+            .write_bytes(4, &[0; MAX_SPAN_ID_BYTES - 1])
+            .expect("short span ID fixture");
+        assert!(matches!(
+            Exemplar::decode_from_bytes(
+                &short_id_wire.finish().expect("finish short ID fixture"),
+                limits(),
+            ),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "exemplar span ID must be empty or exactly eight bytes",
+                ..
+            })
+        ));
+
+        let duplicate_attributes = NumberDataPoint {
+            time_unix_nano: 1,
+            value: Some(NumberDataPointValue::Int(0)),
+            attributes: vec![attribute("duplicate", "a"), attribute("duplicate", "b")],
+            ..NumberDataPoint::default()
+        };
+        assert!(matches!(
+            duplicate_attributes.encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "number data point attribute keys must be unique",
+                ..
+            })
+        ));
+
+        for invalid in [
+            HistogramDataPoint {
+                time_unix_nano: 1,
+                bucket_counts: vec![1],
+                explicit_bounds: vec![1.0],
+                ..HistogramDataPoint::default()
+            },
+            HistogramDataPoint {
+                time_unix_nano: 1,
+                count: 2,
+                bucket_counts: vec![1, 2],
+                explicit_bounds: vec![1.0],
+                ..HistogramDataPoint::default()
+            },
+            HistogramDataPoint {
+                time_unix_nano: 1,
+                count: 2,
+                bucket_counts: vec![1, 1, 0],
+                explicit_bounds: vec![2.0, 1.0],
+                ..HistogramDataPoint::default()
+            },
+            HistogramDataPoint {
+                time_unix_nano: 1,
+                sum: Some(1.0),
+                ..HistogramDataPoint::default()
+            },
+        ] {
+            assert!(matches!(
+                invalid.encode_to_bytes(limits()),
+                Err(ProtobufWireError::SchemaInvariant { .. })
+            ));
+        }
+
+        assert!(matches!(
+            ExponentialHistogramDataPoint {
+                time_unix_nano: 1,
+                count: 2,
+                zero_count: 1,
+                ..ExponentialHistogramDataPoint::default()
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "exponential histogram count must equal bucket total",
+                ..
+            })
+        ));
+        assert!(matches!(
+            ExponentialHistogramDataPoint {
+                time_unix_nano: 1,
+                sum: Some(1.0),
+                ..ExponentialHistogramDataPoint::default()
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "exponential histogram sum must be zero when count is zero",
+                ..
+            })
+        ));
+        assert!(matches!(
+            ExponentialHistogramDataPoint {
+                time_unix_nano: 1,
+                count: u64::MAX,
+                zero_count: u64::MAX,
+                positive: Some(ExponentialHistogramBuckets {
+                    bucket_counts: vec![1],
+                    ..ExponentialHistogramBuckets::default()
+                }),
+                ..ExponentialHistogramDataPoint::default()
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "exponential histogram bucket total must fit u64",
+                ..
+            })
+        ));
+
+        for invalid in [
+            SummaryDataPoint {
+                time_unix_nano: 1,
+                count: 1,
+                quantile_values: vec![SummaryValueAtQuantile {
+                    quantile: f64::NAN,
+                    ..SummaryValueAtQuantile::default()
+                }],
+                ..SummaryDataPoint::default()
+            },
+            SummaryDataPoint {
+                time_unix_nano: 1,
+                count: 1,
+                quantile_values: vec![
+                    SummaryValueAtQuantile {
+                        quantile: 0.5,
+                        ..SummaryValueAtQuantile::default()
+                    },
+                    SummaryValueAtQuantile {
+                        quantile: 0.5,
+                        ..SummaryValueAtQuantile::default()
+                    },
+                ],
+                ..SummaryDataPoint::default()
+            },
+            SummaryDataPoint {
+                time_unix_nano: 1,
+                count: 1,
+                quantile_values: vec![SummaryValueAtQuantile {
+                    quantile: 0.5,
+                    value: -1.0,
+                    ..SummaryValueAtQuantile::default()
+                }],
+                ..SummaryDataPoint::default()
+            },
+            SummaryDataPoint {
+                time_unix_nano: 1,
+                sum: 1.0,
+                ..SummaryDataPoint::default()
+            },
+        ] {
+            assert!(matches!(
+                invalid.encode_to_bytes(limits()),
+                Err(ProtobufWireError::SchemaInvariant { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix_metrics_packed_and_reserved() {
+        let mut unpacked = ProtobufWireEncoder::new(limits());
+        unpacked
+            .write_fixed64(3, 1)
+            .expect("required histogram point time");
+        unpacked.write_fixed64(4, 3).expect("histogram count");
+        unpacked.write_fixed64(6, 1).expect("first bucket");
+        unpacked.write_fixed64(6, 2).expect("second bucket");
+        unpacked
+            .write_fixed64(7, 2.5f64.to_bits())
+            .expect("explicit bound");
+        let decoded = HistogramDataPoint::decode_from_bytes(
+            &unpacked.finish().expect("finish unpacked histogram"),
+            limits(),
+        )
+        .expect("decode unpacked fixed64 values");
+        assert_eq!(decoded.bucket_counts, vec![1, 2]);
+        assert_eq!(decoded.explicit_bounds, vec![2.5]);
+        let canonical = decoded
+            .encode_to_bytes(limits())
+            .expect("encode canonical packed histogram");
+        assert!(canonical.windows(2).any(|window| window == [0x32, 0x10]));
+        assert!(canonical.windows(2).any(|window| window == [0x3a, 0x08]));
+
+        let mut packed_buckets = ProtobufWireEncoder::new(limits());
+        packed_buckets
+            .write_packed_varints(2, &[1, 127, 128])
+            .expect("packed exponential buckets");
+        let buckets = ExponentialHistogramBuckets::decode_from_bytes(
+            &packed_buckets.finish().expect("finish packed buckets"),
+            limits(),
+        )
+        .expect("decode packed varints");
+        assert_eq!(buckets.bucket_counts, vec![1, 127, 128]);
+
+        let malformed_fixed = [0x32, 0x01, 0x00];
+        assert!(matches!(
+            HistogramDataPoint::decode_from_bytes(&malformed_fixed, limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "packed fixed64 payload length must be divisible by eight",
+                ..
+            })
+        ));
+        let malformed_varint = [0x12, 0x01, 0x80];
+        assert!(matches!(
+            ExponentialHistogramBuckets::decode_from_bytes(&malformed_varint, limits()),
+            Err(ProtobufWireError::UnexpectedEof { offset: 3, .. })
+        ));
+
+        let mut inconsistent_histogram = ProtobufWireEncoder::new(limits());
+        inconsistent_histogram
+            .write_fixed64(3, 1)
+            .expect("histogram point time");
+        inconsistent_histogram
+            .write_fixed64(4, 3)
+            .expect("histogram point count");
+        inconsistent_histogram
+            .write_packed_fixed64(6, &[1, 1])
+            .expect("histogram point buckets");
+        inconsistent_histogram
+            .write_packed_doubles(7, &[1.0])
+            .expect("histogram point bounds");
+        assert!(matches!(
+            HistogramDataPoint::decode_from_bytes(
+                &inconsistent_histogram
+                    .finish()
+                    .expect("finish inconsistent histogram"),
+                limits(),
+            ),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "histogram count must equal bucket count sum",
+                ..
+            })
+        ));
+
+        let reserved = [0x20, 0x01];
+        let metric = Metric::decode_from_bytes(&reserved, limits()).expect("decode reserved tag");
+        assert_eq!(metric.unknown_fields.as_bytes(), reserved);
+        assert_eq!(
+            metric
+                .encode_to_bytes(limits())
+                .expect("re-encode reserved tag"),
+            reserved.as_slice()
+        );
+    }
+
+    #[test]
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__lab_lifecycle_metrics_failure_state() {
+        let malformed = [0x0a, 0x02, b'o', b'k', 0x2a];
+        assert!(Metric::decode_from_bytes(&malformed, limits()).is_err());
+
+        let mut merge_target = Metric::default();
+        assert!(merge_target.merge_from_bytes(&malformed, limits()).is_err());
+        assert_eq!(merge_target.name, "ok");
+
+        let any_value_tree = |tail_items| {
+            let mut attributes = (0..31)
+                .map(|index| KeyValue {
+                    key: format!("aggregate-{index}"),
+                    value: Some(AnyValue {
+                        value: Some(AnyValueValue::Array(ArrayValue {
+                            values: vec![AnyValue::default(); MAX_ANY_VALUE_ITEMS],
+                            unknown_fields: UnknownFields::new(),
+                        })),
+                        unknown_fields: UnknownFields::new(),
+                    }),
+                    ..KeyValue::default()
+                })
+                .collect::<Vec<_>>();
+            attributes.push(KeyValue {
+                key: "aggregate-tail".to_owned(),
+                value: Some(AnyValue {
+                    value: Some(AnyValueValue::Array(ArrayValue {
+                        values: vec![AnyValue::default(); tail_items],
+                        unknown_fields: UnknownFields::new(),
+                    })),
+                    unknown_fields: UnknownFields::new(),
+                }),
+                ..KeyValue::default()
+            });
+            Resource {
+                attributes,
+                ..Resource::default()
+            }
+        };
+        any_value_tree(96)
+            .encode_to_bytes(limits())
+            .expect("exact aggregate AnyValue-node budget");
+        assert!(matches!(
+            any_value_tree(97).encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "total AnyValue nodes",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_TOTAL_ANY_VALUE_NODES + 1
+                && limit == MAX_TOTAL_ANY_VALUE_NODES
+        ));
+
+        let mut repeated_budget = ValidationBudget::new(usize::MAX, true);
+        repeated_budget
+            .repeated(
+                MAX_TOTAL_REPEATED_ITEMS,
+                MAX_TOTAL_REPEATED_ITEMS,
+                "aggregate repeated-item fixture",
+            )
+            .expect("exact aggregate repeated-item budget");
+        assert!(matches!(
+            repeated_budget.repeated(1, 1, "aggregate repeated-item fixture"),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "total repeated items",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_TOTAL_REPEATED_ITEMS + 1
+                && limit == MAX_TOTAL_REPEATED_ITEMS
+        ));
+
+        let mut full = MetricsData {
+            resource_metrics: vec![ResourceMetrics::default(); MAX_RESOURCE_GROUPS_PER_REQUEST],
+            unknown_fields: UnknownFields::new(),
+        };
+        let mut one_more = ProtobufWireEncoder::new(limits());
+        one_more
+            .write_message(1, &[])
+            .expect("one additional resource group");
+        assert!(matches!(
+            full.merge_from_bytes(
+                &one_more.finish().expect("finish one-more fixture"),
+                limits(),
+            ),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "metric resource groups",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_RESOURCE_GROUPS_PER_REQUEST + 1
+                && limit == MAX_RESOURCE_GROUPS_PER_REQUEST
+        ));
+        assert_eq!(full.resource_metrics.len(), MAX_RESOURCE_GROUPS_PER_REQUEST);
+    }
+
+    #[test]
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__downstream_consumer_collector_metrics_generic_codec()
+     {
+        let model = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics::default()],
+            unknown_fields: UnknownFields::new(),
+        };
+        let mut codec: ProtoCodec<ExportMetricsServiceRequest, ExportMetricsServiceRequest> =
+            ProtoCodec::new();
+        let encoded = codec.encode(&model).expect("generic codec encode");
+        assert_eq!(codec.decode(&encoded).expect("generic codec decode"), model);
+    }
+}

@@ -600,25 +600,58 @@ impl UnknownFields {
         self.raw.extend_from_slice(field.raw());
     }
 
+    /// Records one unrecognized field verbatim with a fallible allocation.
+    ///
+    /// Schema layers that promise typed resource failures should prefer this
+    /// method to [`record`](Self::record). The existing infallible method is
+    /// retained for authoring compatibility.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtobufWireError::AllocationFailed`] when the raw field
+    /// buffer cannot reserve the required bytes. The caller remains responsible
+    /// for applying its logical message or schema byte ceiling first.
+    pub fn try_record(&mut self, field: &ProtobufWireField<'_>) -> Result<(), ProtobufWireError> {
+        self.try_record_raw(field.raw())
+    }
+
     /// Records a complete group, consuming it from `decoder`.
     ///
     /// # Errors
     ///
     /// Returns [`ProtobufWireError`] when `start` is not the most recently
-    /// returned start-group field or the group is unterminated.
+    /// returned start-group field, the group is unterminated, or preserving
+    /// its bytes cannot reserve storage.
     pub fn record_group<'wire>(
         &mut self,
         start: &ProtobufWireField<'wire>,
         decoder: &mut ProtobufWireDecoder<'wire, '_>,
     ) -> Result<(), ProtobufWireError> {
         let group = decoder.skip_group(start)?;
-        self.raw.extend_from_slice(group);
-        Ok(())
+        self.try_record_raw(group)
     }
 
     /// Appends already validated raw field bytes.
     pub fn record_raw(&mut self, raw: &[u8]) {
         self.raw.extend_from_slice(raw);
+    }
+
+    /// Appends already validated raw field bytes with a fallible allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtobufWireError::AllocationFailed`] when the raw field
+    /// buffer cannot reserve the required bytes.
+    pub fn try_record_raw(&mut self, raw: &[u8]) -> Result<(), ProtobufWireError> {
+        self.raw
+            .try_reserve(raw.len())
+            .map_err(|_| ProtobufWireError::AllocationFailed {
+                offset: self.raw.len(),
+                resource: "unknown field bytes",
+                additional: raw.len(),
+            })?;
+        self.raw.extend_from_slice(raw);
+        Ok(())
     }
 
     /// Re-emits every preserved field into `encoder`.

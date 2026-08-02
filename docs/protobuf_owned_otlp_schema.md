@@ -8,9 +8,12 @@ This document is the operator-readable companion to
 authoritative for exact messages, tags, wire kinds, cardinalities, oneofs,
 reserved tags, enums, limits, ownership, and no-claim boundaries.
 
-The packet is a design authority, not a completion receipt. It makes the next
-implementation step finite and reviewable while keeping the public arbitrary
-`prost::Message` capability and every incumbent OTLP path intact.
+The packet is an authority and partial-source receipt, not a completion receipt.
+The private common/resource/metrics slice, the three metrics-collector
+messages, their unit-test bodies, and a terminal native default-plus-metrics
+library check are present. The remaining 17 messages and unit-test execution
+remain pending. The public arbitrary `prost::Message` capability and every
+incumbent OTLP path stay intact.
 
 ## Outcome
 
@@ -79,6 +82,19 @@ The complete v1.10.0 finite family is inventoried even where current producer
 adapters construct only a subset. That distinction prevents current mapping
 coverage from being confused with wire-schema coverage. Signal adapters and
 transport integration remain downstream work.
+
+The implemented slice is exactly the six common messages (`AnyValue`,
+`ArrayValue`, `KeyValueList`, `KeyValue`, `InstrumentationScope`, and
+`EntityRef`), `Resource`, all 16 metrics messages, and the three
+metrics-collector request, response, and partial-success messages. Its shared
+semantic budget, fallible owned storage, deterministic known-field encoding,
+unknown-field preservation, oneof and singular-message merge behavior,
+packed/unpacked scalar handling, metric equations, partial-success invariants,
+and local boundary/error test bodies are present in
+`src/observability/otlp_proto.rs`. Trace and logs remain unimplemented. The
+aggregate collector submodule also remains pending because collector-trace and
+collector-logs messages are absent, so A3 remains open and A4/A7 remain
+blocked.
 
 Every finite message must own an `UnknownFields` member. Enum-valued fields are
 stored as raw numeric values with typed helpers for known values; unknown values
@@ -178,13 +194,16 @@ fields. The current derive path cannot yet make the A3 resource claim:
   that same member as protobuf requires;
 - `metrics` does not imply the optional proc-macro feature, and the required
   `--no-default-features --features metrics` cell cannot assume it; and
-- generic buffers do not expose typed allocation failure.
+- compatibility `UnknownFields::record` and `record_raw` retain ordinary `Vec`
+  growth; fallible alternatives now exist, but a safe downstream shared nested
+  writer remains pending.
 
-Therefore the finite schema must either use manual `ProtoMessage`
-implementations with one shared encode/decode budget, or first land reviewed
-bounded nested/collection primitives in the authoring layer. Deriving the
-messages and calling `validate()` only after decode is explicitly forbidden as
-evidence for pre-allocation bounds.
+The common/resource/metrics/collector_metrics slice therefore uses manual
+`ProtoMessage` implementations with one shared semantic budget plus reviewed
+bounded nested/collection primitives in the authoring layer. Remaining
+families must preserve that pattern. Deriving the messages and calling
+`validate()` only after decode is explicitly forbidden as evidence for
+pre-allocation bounds.
 
 Fresh decode may use private staging state and return no partial model. Any
 merge API must either stage then commit atomically or explicitly document and
@@ -199,15 +218,19 @@ limits/error concerns should remain separately reviewable within that leaf.
 
 | Profile | Required outcome |
 | --- | --- |
-| default | no public API or production dependency-graph change |
+| default | additive source-compatible generic protobuf authoring errors and fallible methods; no generated OTLP dependency or public OTLP schema type |
 | `metrics` | native private schema compiles without generated OTLP, tonic, or Tokio normal edges |
 | `metrics,tracing-integration` | same owned schema; generated messages remain oracle-only |
 | `--no-default-features --features metrics` | compiles without assuming proc macros |
 | `fuzz` | generated oracle stays quarantined; stale lock cannot claim v0.32 authority |
 | wasm32 | native schema integration remains excluded until separately designed and proved |
 
-The public `ProstCodec<T, U>`, `SymmetricProstCodec<T>`, public error surface,
-and downstream arbitrary-message capability remain unchanged.
+The additive generic authoring surface is explicit: `UnknownFields::try_record`
+and `try_record_raw`, `ProtobufWireEncoder::remaining_work` and
+`charge_schema_work`, plus the non-exhaustive `SchemaLimitExceeded`,
+`AllocationFailed`, and `SchemaInvariant` wire-error variants. No public OTLP
+schema type is added. `ProstCodec<T, U>`, `SymmetricProstCodec<T>`, and existing
+downstream arbitrary-message capabilities are neither removed nor narrowed.
 
 ## Evidence ownership
 
@@ -229,8 +252,9 @@ post-decode-only budgeting, and accidental public or cutover authority.
 Within A3, `__lab_lifecycle` means deterministic shared-budget and fresh-decode
 failure-state checks only; it proves no runtime task, cancellation, shutdown,
 or transport behavior. `__downstream_consumer` means a compile/use check that
-the finite collector shapes pass through the existing owned generic codec; it
-does not cover signal adapters, framing, a live collector, or user journeys.
+the implemented finite metrics and metrics-export request/response shapes pass
+through the existing owned generic codec; it does not cover signal adapters,
+framing, collector contact, transport, or user journeys.
 
 The semantic invariants in the artifact are a non-exhaustive minimum. The
 implementation remains bound to every normative requirement in the pinned
@@ -240,28 +264,36 @@ the complete semantic specification.
 
 ## Current validation
 
-This design slice is intentionally static. `jq` parses the artifact and reports
-8 families, 43 unique message names, 163 fields with no duplicate tag inside a
-message, 7 enum/bitmask rows, and 3 services. Independent read-only review
-compares the registry against the vendored v1.10.0 sources.
+This partial implementation slice has one terminal compiler receipt. Under an
+RCH clean overlay containing only the four owned source paths,
+`cargo check --locked -p asupersync --lib --features metrics -j 4` completed
+with exit code 0 and warnings denied on 2026-08-02. That receipt establishes a
+native default-plus-metrics library typecheck only; it does not compile or run
+the unit-test bodies and is not a broad workspace or feature-matrix result.
 
-The contract test source is present. Direct Rust 2024 metadata type-check with
-`-D warnings` and direct Clippy metadata analysis with pedantic and nursery
-groups pass against the cached dependency metadata. These static checks do not
-execute a test. No Cargo command is represented as green for this packet, and
-canonical execution of the contract remains pending. Finite message
-implementation, reference vectors, the feature matrix, and downstream journeys
-are also pending.
+The artifact records 8 families, 43 unique message names, 163 fields with no
+duplicate tag inside a message, 7 enum/bitmask rows, and 3 services. Independent
+read-only review compares the registry against the vendored v1.10.0 sources.
+The refreshed contract source and common/resource/metrics/collector_metrics
+unit-test bodies are present. Static validation refresh and canonical unit-test
+execution remain pending. The remaining 17 finite messages, reference vectors,
+feature matrix, and downstream journeys are also pending.
 
 ## No-claim boundary
 
-This packet does not implement or compile an owned OTLP type, run a unit or
-property test, prove malformed/resource behavior, prove byte parity, contact a
-collector, or wire any signal or transport. It does not establish incumbent
-parity for the new A3 caps. It adds no generated dependency, tonic, Tokio, or
-runtime to a production graph. It changes no public API, feature, target,
-persisted format, or user journey and authorizes no dependency removal,
-production cutover, tracker closure, performance claim, broad workspace-health
-claim, release-readiness claim, local Cargo fallback, or file deletion.
+This packet records source, unit-test bodies, and a terminal native
+default-plus-metrics library check for the private
+common/resource/metrics/collector_metrics slice. It does not execute the unit
+tests and does not implement trace, logs, collector_trace, or collector_logs.
+It proves no malformed/resource behavior, byte parity, collector contact,
+signal wiring, or transport behavior and establishes no incumbent parity for
+the new A3 caps. It adds no generated dependency, tonic, Tokio, or runtime to a
+production graph.
+Beyond the recorded source-compatible generic authoring methods and
+non-exhaustive errors, it adds no public OTLP schema type and removes or narrows
+no capability, feature, target, persisted format, or user journey. It
+authorizes no dependency removal, production cutover, tracker closure,
+performance claim, broad workspace-health claim, release-readiness claim,
+local Cargo fallback, or file deletion.
 
 <!-- END PROTOBUF OWNED OTLP SCHEMA -->

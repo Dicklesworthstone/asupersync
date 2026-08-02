@@ -6,8 +6,10 @@
 //! This test freezes the reviewed v1.10.0 schema inventory, its resource and
 //! evolution policy, live repository pins, operator documentation, and the
 //! boundary that keeps the public generic protobuf capability and incumbents.
-//! It does not implement an OTLP message, prove wire parity or interoperability,
-//! contact a collector, or authorize production wiring or dependency removal.
+//! It records a partial private common/resource/metrics/collector_metrics source
+//! slice plus a native library typecheck without claiming unit-test execution,
+//! wire parity, interoperability, collector contact, production wiring, or
+//! dependency removal.
 
 #![allow(missing_docs)]
 // The verification matrix owns these exact double-underscore test prefixes.
@@ -23,8 +25,8 @@ use std::path::PathBuf;
 
 const ARTIFACT_PATH: &str = "artifacts/protobuf_owned_otlp_schema_v1.json";
 const DOC_PATH: &str = "docs/protobuf_owned_otlp_schema.md";
-const ARTIFACT_SHA256: &str = "4c3d9775f22dc5e3beea2e65d6aac7af6cff25eb37f5cf1ad834039fe7ae683c";
-const DOC_SHA256: &str = "ad67734ddaabaceb0ff467dbbd37c1848c956d2c1843e5d424ddfc3958f5f453";
+const ARTIFACT_SHA256: &str = "62f92d6e528d0a8dc75612ec5f56e4848f966970641022a018f7baf43e860372";
+const DOC_SHA256: &str = "f3450d05aa8369a6f357e14f119a0447c20e60dc552299b92df41b14231efdee";
 const SCHEMA_SIGNATURE_SHA256: &str =
     "2b9311b5c766da1b2fb88262aeb89e125c41f8ea4d8406e534a2e9b42839256b";
 const ENUM_SIGNATURE_SHA256: &str =
@@ -34,7 +36,7 @@ const SERVICE_SIGNATURE_SHA256: &str =
 const ORACLE_PIN_SIGNATURE_SHA256: &str =
     "f8d06b6ad60ce88a932eb3426a68007013ae428270159c57c1a889e46f333544";
 const REPOSITORY_PIN_SIGNATURE_SHA256: &str =
-    "8375779ab9db78b1b832f0aac686e315126553dda3c08a09ff65f0dc0d488510";
+    "c6ad7e069626b828397521c173b19595094cf69b09320315a53e4656852ec686";
 const DOC_BEGIN: &str = "<!-- BEGIN PROTOBUF OWNED OTLP SCHEMA -->";
 const DOC_END: &str = "<!-- END PROTOBUF OWNED OTLP SCHEMA -->";
 
@@ -51,13 +53,13 @@ const EXPECTED_PLANNED_MUTATIONS: [&str; 9] = [
 ];
 
 const EXPECTED_NO_CLAIMS: [&str; 10] = [
-    "This packet does not implement, compile, or execute any owned OTLP message type.",
-    "It does not prove any valid, malformed, resource, property, differential, or fuzz vector.",
+    "This packet records source, unit-test bodies, and a terminal native default-plus-metrics library check for the private common/resource/metrics/collector_metrics slice; it does not execute the unit tests and does not implement the trace, logs, collector_trace, or collector_logs families.",
+    "It does not represent any valid, malformed, resource, property, differential, or fuzz vector as passing evidence.",
     "It does not prove byte parity with opentelemetry-proto, another language, or a live collector.",
     "It does not wire metrics, traces, logs, partial-success responses, HTTP, gRPC, retry, cancellation, batching, or shutdown.",
     "It does not establish incumbent parity for the new A3 semantic limits; downstream adapters must prove chunking, rejection, or counted truncation per capability.",
     "It does not add opentelemetry-proto, tonic, tokio, or another runtime to a production graph.",
-    "It does not change any public API, generic downstream protobuf capability, feature, target, persisted format, or user journey.",
+    "It adds only the recorded source-compatible generic protobuf authoring methods and non-exhaustive error variants; it adds no public OTLP schema type and removes or narrows no generic downstream capability, feature, target, persisted format, or user journey.",
     "It does not authorize removing prost, opentelemetry, opentelemetry_sdk, or any generated differential oracle.",
     "It does not authorize production cutover, transport integration, dependency retirement, or tracker closure.",
     "It does not prove performance, allocation, RSS, throughput, latency, broad workspace health, release readiness, live RCH fleet availability, local Cargo fallback approval, or permission to delete files.",
@@ -484,7 +486,7 @@ fn validate_identity_and_authority(value: &Value) -> ValidationResult {
         ("capability_id", "CAP-PROTOBUF-GENERIC"),
         (
             "state",
-            "AUTHORITY_AND_DESIGN_PINNED_IMPLEMENTATION_PENDING",
+            "AUTHORITY_PINNED_COMMON_RESOURCE_METRICS_COLLECTOR_METRICS_SLICE_A3_PENDING",
         ),
     ] {
         require_text(value, key, expected)?;
@@ -526,9 +528,13 @@ fn validate_identity_and_authority(value: &Value) -> ValidationResult {
     require_text(
         decision,
         "implementation_state",
-        "NOT_IMPLEMENTED_BY_THIS_PACKET",
+        "COMMON_RESOURCE_METRICS_COLLECTOR_METRICS_SLICE_PRESENT_A3_IMPLEMENTATION_PENDING",
     )?;
-    require_text(decision, "evidence_state", "DESIGN_ONLY")?;
+    require_text(
+        decision,
+        "evidence_state",
+        "NATIVE_DEFAULT_METRICS_LIBRARY_CHECK_GREEN_TEST_EXECUTION_PENDING",
+    )?;
 
     let authority = value
         .get("authority")
@@ -736,7 +742,7 @@ fn validate_identity_and_authority(value: &Value) -> ValidationResult {
         ("generated_rust_oracle_pins", 8, &["path", "sha256"][..]),
         (
             "repository_source_baseline",
-            5,
+            7,
             &["path", "sha256", "role"][..],
         ),
     ] {
@@ -1320,6 +1326,7 @@ fn validate_resource_and_implementation(value: &Value) -> ValidationResult {
             "known_field_encoding",
             "unknown_field_encoding",
             "signal_construction_separation",
+            "implementation_progress",
         ],
         "implementation_contract",
     )?;
@@ -1382,7 +1389,10 @@ fn validate_resource_and_implementation(value: &Value) -> ValidationResult {
         || !gaps
             .iter()
             .any(|gap| gap.contains("oneof decoding replaces"))
-        || !gaps.iter().any(|gap| gap.contains("ordinary Vec growth"))
+        || !gaps.iter().any(|gap| {
+            gap.contains("ordinary Vec growth")
+                && gap.contains("safe downstream shared nested-writer")
+        })
     {
         return Err("all seven current authoring blockers must remain explicit".to_owned());
     }
@@ -1393,6 +1403,146 @@ fn validate_resource_and_implementation(value: &Value) -> ValidationResult {
         if !text(implementation, key)?.contains(marker) {
             return Err(format!("implementation.{key} missing {marker}"));
         }
+    }
+
+    let progress = implementation
+        .get("implementation_progress")
+        .ok_or_else(|| "implementation_progress is required".to_owned())?;
+    require_exact_keys(
+        progress,
+        &[
+            "implemented_submodules",
+            "implemented_messages",
+            "pending_submodules",
+            "implemented_message_count",
+            "pending_message_count",
+            "execution_state",
+            "public_surface_delta",
+        ],
+        "implementation_progress",
+    )?;
+    let implemented_submodules = array(progress, "implemented_submodules")?
+        .iter()
+        .map(|row| {
+            row.as_str()
+                .ok_or_else(|| "implemented submodules must be text".to_owned())
+                .map(str::to_owned)
+        })
+        .collect::<ValidationResult<BTreeSet<_>>>()?;
+    let pending_submodules = array(progress, "pending_submodules")?
+        .iter()
+        .map(|row| {
+            row.as_str()
+                .ok_or_else(|| "pending submodules must be text".to_owned())
+                .map(str::to_owned)
+        })
+        .collect::<ValidationResult<BTreeSet<_>>>()?;
+    if array(progress, "implemented_submodules")?.len() != 3
+        || array(progress, "pending_submodules")?.len() != 3
+        || implemented_submodules
+            != BTreeSet::from([
+                "common_and_resource".to_owned(),
+                "limits_and_error".to_owned(),
+                "metrics".to_owned(),
+            ])
+        || pending_submodules
+            != BTreeSet::from([
+                "collector".to_owned(),
+                "logs".to_owned(),
+                "trace".to_owned(),
+            ])
+    {
+        return Err("partial implementation submodule partition changed".to_owned());
+    }
+
+    let implemented_messages = array(progress, "implemented_messages")?
+        .iter()
+        .map(|row| {
+            row.as_str()
+                .ok_or_else(|| "implemented messages must be text".to_owned())
+                .map(str::to_owned)
+        })
+        .collect::<ValidationResult<BTreeSet<_>>>()?;
+    let mut expected_implemented_messages = BTreeSet::new();
+    for family in array(value, "schema_families")? {
+        if matches!(
+            text(family, "family")?,
+            "common" | "resource" | "metrics" | "collector_metrics"
+        ) {
+            for message in array(family, "messages")? {
+                expected_implemented_messages.insert(text(message, "name")?.to_owned());
+            }
+        }
+    }
+    if array(progress, "implemented_messages")?.len() != 26
+        || implemented_messages != expected_implemented_messages
+    {
+        return Err(
+            "implemented messages must be exactly common, resource, metrics, and collector_metrics"
+                .to_owned(),
+        );
+    }
+    require_unsigned(progress, "implemented_message_count", 26)?;
+    require_unsigned(progress, "pending_message_count", 17)?;
+    require_text(
+        progress,
+        "execution_state",
+        "NATIVE_DEFAULT_METRICS_LIBRARY_CHECK_GREEN_UNIT_TEST_EXECUTION_PENDING",
+    )?;
+
+    let public_delta = progress
+        .get("public_surface_delta")
+        .ok_or_else(|| "public_surface_delta is required".to_owned())?;
+    require_exact_keys(
+        public_delta,
+        &[
+            "kind",
+            "added_methods",
+            "added_non_exhaustive_error_variants",
+            "removed_or_narrowed_capabilities",
+            "public_otlp_schema_types_added",
+        ],
+        "public_surface_delta",
+    )?;
+    require_text(public_delta, "kind", "ADDITIVE_SOURCE_COMPATIBLE")?;
+    require_boolean(public_delta, "removed_or_narrowed_capabilities", false)?;
+    require_boolean(public_delta, "public_otlp_schema_types_added", false)?;
+    let added_methods = array(public_delta, "added_methods")?
+        .iter()
+        .map(|row| {
+            row.as_str()
+                .ok_or_else(|| "added methods must be text".to_owned())
+                .map(str::to_owned)
+        })
+        .collect::<ValidationResult<BTreeSet<_>>>()?;
+    if array(public_delta, "added_methods")?.len() != 4
+        || added_methods
+            != BTreeSet::from([
+                "ProtobufWireEncoder::charge_schema_work".to_owned(),
+                "ProtobufWireEncoder::remaining_work".to_owned(),
+                "UnknownFields::try_record".to_owned(),
+                "UnknownFields::try_record_raw".to_owned(),
+            ])
+    {
+        return Err("additive generic protobuf method registry changed".to_owned());
+    }
+    let added_errors = array(public_delta, "added_non_exhaustive_error_variants")?
+        .iter()
+        .map(|row| {
+            row.as_str()
+                .ok_or_else(|| "added error variants must be text".to_owned())
+                .map(str::to_owned)
+        })
+        .collect::<ValidationResult<BTreeSet<_>>>()?;
+    if array(public_delta, "added_non_exhaustive_error_variants")?.len() != 3
+        || added_errors
+            != BTreeSet::from([
+                "ProtobufWireError::AllocationFailed".to_owned(),
+                "ProtobufWireError::SchemaInvariant".to_owned(),
+                "ProtobufWireError::SchemaLimitExceeded".to_owned(),
+            ])
+    {
+        return Err("additive non-exhaustive wire-error registry changed".to_owned());
     }
     Ok(())
 }
@@ -1520,7 +1670,7 @@ fn validate_evolution_features_and_handoff(value: &Value) -> ValidationResult {
             != BTreeMap::from([
                 (
                     "default",
-                    "No public API change and no generated OTLP reference dependency added.",
+                    "Additive source-compatible generic protobuf authoring errors and fallible methods are present; no generated OTLP reference dependency or public OTLP schema type is added.",
                 ),
                 (
                     "metrics",
@@ -1580,7 +1730,7 @@ fn validate_evolution_features_and_handoff(value: &Value) -> ValidationResult {
             require_text(
                 row,
                 "current_state",
-                "IMPLEMENTATION_AND_EXECUTABLE_EVIDENCE_PENDING",
+                "COMMON_RESOURCE_METRICS_COLLECTOR_METRICS_SLICE_PRESENT_LIBRARY_CHECK_GREEN_TEST_EXECUTION_PENDING",
             )?;
         } else {
             require_exact_keys(
@@ -1616,7 +1766,7 @@ fn validate_evolution_features_and_handoff(value: &Value) -> ValidationResult {
         ),
         (
             "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__downstream_consumer",
-            "A3 compile/use proof that finite collector shapes are consumable through the existing owned generic codec; no signal adapter, framing, collector, or user-journey claim.",
+            "A3 compile/use proof that the implemented finite metrics and metrics-export request/response shapes are consumable through the existing owned generic codec; no signal adapter, framing, collector contact, transport, or user-journey claim.",
         ),
     ]);
     let expected_prefixes = expected_prefix_scopes
@@ -1667,17 +1817,14 @@ fn validate_evolution_features_and_handoff(value: &Value) -> ValidationResult {
         ("artifact_path", ARTIFACT_PATH),
         ("docs_path", DOC_PATH),
         ("test_path", "tests/protobuf_owned_otlp_schema_contract.rs"),
-        (
-            "proof_state",
-            "STATIC_SOURCE_TYPECHECKED_CANONICAL_CARGO_PENDING",
-        ),
+        ("proof_state", "STATIC_VALIDATION_REFRESH_PENDING"),
     ] {
         require_text(planned, key, expected)?;
     }
     require_text(
         planned,
         "test_implementation_state",
-        "PRESENT_DIRECT_RUSTC_AND_CLIPPY_METADATA_PASS_CANONICAL_CARGO_PENDING",
+        "PRESENT_REFRESH_VALIDATION_PENDING",
     )?;
     require_boolean(planned, "no_local_cargo_fallback", true)?;
     let planned_mutations = array(planned, "negative_mutations")?
@@ -1795,7 +1942,7 @@ fn validate_operator_doc(doc: &str, value: &Value) -> ValidationResult {
         "message-valued oneof member merge",
         "non-exhaustive minimum",
         "one reusable fail-closed validator",
-        "No Cargo command is represented as green",
+        "cargo check --locked -p asupersync --lib --features metrics -j 4",
         "local Cargo fallback",
         "or file deletion",
         "No-claim boundary",
