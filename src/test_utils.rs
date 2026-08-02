@@ -717,9 +717,9 @@ mod tests {
 
     fn logging_profile() -> &'static str {
         if cfg!(debug_assertions) {
-            "test-debug-assertions"
+            "test"
         } else {
-            "test-no-debug-assertions"
+            "release"
         }
     }
 
@@ -745,48 +745,40 @@ mod tests {
         valid_git_revision(value).map(str::to_string)
     }
 
-    fn logging_git_revision() -> &'static str {
-        static REVISION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
-        REVISION
-            .get_or_init(|| {
-                let repository_revision = repository_git_revision();
-                let strict_receipt = match std::env::var(LOGGING_STRICT_RECEIPT_ENV) {
-                    Ok(value) => {
-                        assert_eq!(value, "1", "strict logging receipt flag must equal 1");
-                        true
-                    }
-                    Err(std::env::VarError::NotPresent) => false,
-                    Err(std::env::VarError::NotUnicode(_)) => {
-                        panic!("strict logging receipt flag must be Unicode")
-                    }
-                };
-                match std::env::var(LOGGING_GIT_REVISION_ENV) {
-                    Ok(value) => {
-                        let requested = valid_git_revision(&value)
-                            .expect("logging git revision override must be a hexadecimal revision");
-                        if let Some(repository_revision) = &repository_revision {
-                            assert_eq!(
-                                requested, repository_revision,
-                                "logging git revision override does not match checked-out HEAD"
-                            );
-                        }
-                        requested.to_string()
-                    }
-                    Err(std::env::VarError::NotPresent) => {
-                        if strict_receipt {
-                            panic!(
-                                "strict logging receipt requires an explicit hexadecimal git revision"
-                            );
-                        }
-                        repository_revision.unwrap_or_else(|| "unavailable".to_string())
-                    }
-                    Err(std::env::VarError::NotUnicode(_)) => {
-                        panic!("logging git revision override must be Unicode")
-                    }
+    fn logging_git_revision() -> String {
+        let repository_revision = repository_git_revision();
+        let strict_receipt = match std::env::var(LOGGING_STRICT_RECEIPT_ENV) {
+            Ok(value) => {
+                assert_eq!(value, "1", "strict logging receipt flag must equal 1");
+                true
+            }
+            Err(std::env::VarError::NotPresent) => false,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                panic!("strict logging receipt flag must be Unicode")
+            }
+        };
+        match std::env::var(LOGGING_GIT_REVISION_ENV) {
+            Ok(value) => {
+                let requested = valid_git_revision(&value)
+                    .expect("logging git revision override must be a hexadecimal revision");
+                if let Some(repository_revision) = &repository_revision {
+                    assert_eq!(
+                        requested, repository_revision,
+                        "logging git revision override does not match checked-out HEAD"
+                    );
                 }
-            })
-            .as_str()
+                requested.to_string()
+            }
+            Err(std::env::VarError::NotPresent) => {
+                if strict_receipt {
+                    panic!("strict logging receipt requires an explicit hexadecimal git revision");
+                }
+                repository_revision.unwrap_or_else(|| "unavailable".to_string())
+            }
+            Err(std::env::VarError::NotUnicode(_)) => {
+                panic!("logging git revision override must be Unicode")
+            }
+        }
     }
 
     fn logging_replay_command(git_revision: &str, features: &[&str]) -> String {
@@ -831,7 +823,9 @@ mod tests {
             "thread-propagation" => "mixed-thread-propagation",
             "public-global-subscriber" => "explicit-global",
             "explicit-log-bridge" => "explicit-global-log-bridge",
-            "globals-untouched" | "preexisting-global" | "panic-restoration" => "ambient-contract",
+            "globals-untouched" => "mixed-safe-default-and-explicit-off",
+            "preexisting-global" => "preexisting-global-trace",
+            "panic-restoration" => "mixed-scoped-panic-restoration",
             _ => "unknown",
         }
     }
@@ -899,7 +893,7 @@ mod tests {
         ])
     }
 
-    fn assert_child_passed(case: &str, output: &Output) -> String {
+    fn assert_child_passed(git_revision: &str, case: &str, output: &Output) -> String {
         let text = combined_output(output);
         let features = active_logging_features();
         let features_text = if features.is_empty() {
@@ -907,15 +901,21 @@ mod tests {
         } else {
             features.join(",")
         };
-        let git_revision = logging_git_revision();
-        let replay_command = logging_replay_command(git_revision, &features);
+        let (receipt_admission, replay_command) = if valid_git_revision(git_revision).is_some() {
+            ("admitted", logging_replay_command(git_revision, &features))
+        } else {
+            (
+                "non-admitted",
+                "unavailable: a hexadecimal git revision is required".to_string(),
+            )
+        };
         let exit_status = output.status.code().unwrap_or(-1);
         let line_count = byte_line_count(&output.stdout) + byte_line_count(&output.stderr);
         let byte_count = output.stdout.len() + output.stderr.len();
         let output_marker_count = observed_output_marker_occurrences(&text);
 
         eprintln!(
-            "ASUPERSYNC_LOGGING_RECEIPT case={case:?} git_revision={git_revision:?} features={features_text:?} profile={:?} filter_classification={:?} exit_status={exit_status} line_count={line_count} byte_count={byte_count} observed_output_marker_occurrences={output_marker_count} capture_scope=\"child-stdout-stderr-probe-markers\" replay_command={replay_command:?}",
+            "ASUPERSYNC_LOGGING_RECEIPT admission={receipt_admission:?} case={case:?} git_revision={git_revision:?} features={features_text:?} profile={:?} profile_scope=\"standard-cargo-test\" filter_classification={:?} exit_status={exit_status} line_count={line_count} byte_count={byte_count} observed_output_marker_occurrences={output_marker_count} capture_scope=\"child-stdout-stderr-probe-markers\" replay_command={replay_command:?}",
             logging_profile(),
             logging_filter_classification(case),
         );
@@ -1358,8 +1358,10 @@ mod tests {
     // Artifact: captured child stdout/stderr.
     #[test]
     fn logging_fresh_process_contract_matrix() {
+        let git_revision = logging_git_revision();
+
         let unset = run_logging_child("unset-rust-log", None);
-        let unset_text = assert_child_passed("unset-rust-log", &unset);
+        let unset_text = assert_child_passed(&git_revision, "unset-rust-log", &unset);
         assert!(
             unset_text.contains(ASUPERSYNC_DEBUG_MARKER),
             "safe default suppressed Asupersync DEBUG:\n{unset_text}"
@@ -1378,7 +1380,7 @@ mod tests {
             "valid-rust-log",
             Some(OsStr::new("warn,tokenizers::normalizer=trace")),
         );
-        let valid_text = assert_child_passed("valid-rust-log", &valid);
+        let valid_text = assert_child_passed(&git_revision, "valid-rust-log", &valid);
         assert!(
             valid_text.contains(TOKENIZERS_TRACE_MARKER),
             "valid RUST_LOG was not honored:\n{valid_text}"
@@ -1394,7 +1396,7 @@ mod tests {
         assert_eq!(valid_text.matches(FALLBACK_MARKER).count(), 0);
 
         let empty = run_logging_child("empty-rust-log", Some(OsStr::new(" \t ")));
-        let empty_text = assert_child_passed("empty-rust-log", &empty);
+        let empty_text = assert_child_passed(&git_revision, "empty-rust-log", &empty);
         assert_single_fallback("empty-rust-log", &empty_text, "empty");
 
         let malformed_raw = format!(
@@ -1402,7 +1404,7 @@ mod tests {
             "secret-filter-value".repeat(64)
         );
         let malformed = run_logging_child("malformed-rust-log", Some(OsStr::new(&malformed_raw)));
-        let malformed_text = assert_child_passed("malformed-rust-log", &malformed);
+        let malformed_text = assert_child_passed(&git_revision, "malformed-rust-log", &malformed);
         assert_single_fallback("malformed-rust-log", &malformed_text, "parse");
         assert!(!malformed_text.contains("secret-filter-value"));
 
@@ -1411,13 +1413,14 @@ mod tests {
             let non_unicode_raw = non_unicode_rust_log();
             let non_unicode =
                 run_logging_child("non-unicode-rust-log", Some(non_unicode_raw.as_os_str()));
-            let non_unicode_text = assert_child_passed("non-unicode-rust-log", &non_unicode);
+            let non_unicode_text =
+                assert_child_passed(&git_revision, "non-unicode-rust-log", &non_unicode);
             assert_single_fallback("non-unicode-rust-log", &non_unicode_text, "non_unicode");
             assert!(!non_unicode_text.contains("secret-prefix"));
         }
 
         let explicit_off = run_logging_child("explicit-off", None);
-        let explicit_off_text = assert_child_passed("explicit-off", &explicit_off);
+        let explicit_off_text = assert_child_passed(&git_revision, "explicit-off", &explicit_off);
         for marker in [ASUPERSYNC_DEBUG_MARKER, TOKENIZERS_TRACE_MARKER] {
             assert!(
                 !explicit_off_text.contains(marker),
@@ -1426,7 +1429,8 @@ mod tests {
         }
 
         let raw_no_subscriber = run_logging_child("raw-no-subscriber", None);
-        let raw_no_subscriber_text = assert_child_passed("raw-no-subscriber", &raw_no_subscriber);
+        let raw_no_subscriber_text =
+            assert_child_passed(&git_revision, "raw-no-subscriber", &raw_no_subscriber);
         for marker in [
             RAW_RUN_TEST_MARKER,
             RAW_RUN_TEST_WITH_CX_MARKER,
@@ -1439,7 +1443,8 @@ mod tests {
         }
 
         let nested_enabled = run_logging_child("off-nested-enabled", None);
-        let nested_enabled_text = assert_child_passed("off-nested-enabled", &nested_enabled);
+        let nested_enabled_text =
+            assert_child_passed(&git_revision, "off-nested-enabled", &nested_enabled);
         assert!(
             nested_enabled_text.contains(TOKENIZERS_TRACE_MARKER),
             "explicit enabled scope did not override OFF:\n{nested_enabled_text}"
@@ -1451,7 +1456,7 @@ mod tests {
 
         let thread_propagation = run_logging_child("thread-propagation", None);
         let thread_propagation_text =
-            assert_child_passed("thread-propagation", &thread_propagation);
+            assert_child_passed(&git_revision, "thread-propagation", &thread_propagation);
         assert!(
             thread_propagation_text.contains(UNPROPAGATED_DEFAULT_MARKER),
             "unpropagated worker did not use the safe default:\n{thread_propagation_text}"
@@ -1462,7 +1467,8 @@ mod tests {
         );
 
         let public_global = run_logging_child("public-global-subscriber", None);
-        let public_global_text = assert_child_passed("public-global-subscriber", &public_global);
+        let public_global_text =
+            assert_child_passed(&git_revision, "public-global-subscriber", &public_global);
         assert!(public_global_text.contains(TOKENIZERS_TRACE_MARKER));
 
         for case in [
@@ -1472,7 +1478,7 @@ mod tests {
             "explicit-log-bridge",
         ] {
             let output = run_logging_child(case, None);
-            let _text = assert_child_passed(case, &output);
+            let _text = assert_child_passed(&git_revision, case, &output);
         }
     }
 
