@@ -33,6 +33,7 @@
 //! - Abdulla et al., "Optimal dynamic partial order reduction" (POPL 2014)
 
 use crate::trace::canonicalize::trace_event_key;
+use crate::trace::distributed::CausalOrder;
 use crate::trace::event::{TraceData, TraceEvent, TraceEventKind};
 use crate::trace::independence::{Resource, accesses_conflict, independent, resource_footprint};
 use crate::types::TaskId;
@@ -125,26 +126,39 @@ impl RaceReport {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-struct TaskVectorClock {
-    entries: BTreeMap<TaskId, u64>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum CausalComponent {
+    Task(TaskId),
+    Event(usize),
 }
 
-impl TaskVectorClock {
-    fn get(&self, task: TaskId) -> u64 {
-        self.entries.get(&task).copied().unwrap_or(0)
+#[derive(Debug, Clone, Default)]
+struct CausalVectorClock {
+    entries: BTreeMap<CausalComponent, u64>,
+}
+
+impl CausalVectorClock {
+    fn get(&self, component: CausalComponent) -> u64 {
+        self.entries.get(&component).copied().unwrap_or(0)
     }
 
-    fn increment(&mut self, task: TaskId) {
-        let entry = self.entries.entry(task).or_insert(0);
+    fn increment(&mut self, component: CausalComponent) {
+        let entry = self.entries.entry(component).or_insert(0);
         *entry += 1;
+    }
+
+    fn merge(&mut self, other: &Self) {
+        for (&component, &counter) in &other.entries {
+            let entry = self.entries.entry(component).or_insert(0);
+            *entry = (*entry).max(counter);
+        }
     }
 
     fn happens_before(&self, other: &Self) -> bool {
         let mut strictly = false;
-        for task in self.entries.keys().chain(other.entries.keys()) {
-            let a = self.get(*task);
-            let b = other.get(*task);
+        for component in self.entries.keys().chain(other.entries.keys()) {
+            let a = self.get(*component);
+            let b = other.get(*component);
             if a > b {
                 return false;
             }
@@ -156,51 +170,72 @@ impl TaskVectorClock {
     }
 }
 
-/// Minimal happens-before graph derived from a trace.
+/// Minimal happens-before relation derived from a trace.
+///
+/// Each event receives a causal vector clock. Events assigned to one task's
+/// program-order stream share a task component, which compresses local order;
+/// other events receive a unique event component. A recorded logical
+/// timestamp whose clock proves `Before` merges the predecessor clock into the
+/// successor. The resulting clocks therefore represent forward-edge
+/// reachability and compose local, non-task, and cross-task edges transitively.
+///
+/// Cross-task order is accepted only when the trace contains causal evidence.
+/// Today that means vector logical clocks: scalar Lamport and hybrid clocks can
+/// rule out some invalid orderings, but a lower scalar value does not prove
+/// happens-before and therefore must not suppress a race report.
 #[derive(Debug, Clone)]
 pub struct HappensBeforeGraph {
-    _events: Vec<TraceEvent>,
-    _edges: Vec<Vec<usize>>,
-    clocks: Vec<Option<TaskVectorClock>>,
+    clocks: Vec<CausalVectorClock>,
 }
 
 impl HappensBeforeGraph {
-    /// Build happens-before edges from task-local order.
+    /// Build happens-before evidence from task-local order and recorded logical
+    /// timestamps.
     #[must_use]
     pub fn from_trace(events: &[TraceEvent]) -> Self {
-        let mut edges = vec![Vec::new(); events.len()];
-        let mut clocks = Vec::with_capacity(events.len());
-        let mut last_by_task: BTreeMap<TaskId, usize> = BTreeMap::new();
-        let mut task_clocks: BTreeMap<TaskId, TaskVectorClock> = BTreeMap::new();
+        let mut clocks: Vec<CausalVectorClock> = Vec::with_capacity(events.len());
+        let mut task_clocks: BTreeMap<TaskId, CausalVectorClock> = BTreeMap::new();
 
         for (idx, event) in events.iter().enumerate() {
-            if let Some(task) = event_task_id(event) {
-                if let Some(prev) = last_by_task.insert(task, idx) {
-                    edges[prev].push(idx);
+            let task = program_order_task_id(event);
+            let mut clock = task
+                .and_then(|task| task_clocks.get(&task).cloned())
+                .unwrap_or_default();
+
+            if let Some(later_time) = event.logical_time.as_ref() {
+                for (earlier_idx, earlier) in events.iter().take(idx).enumerate() {
+                    let Some(earlier_time) = earlier.logical_time.as_ref() else {
+                        continue;
+                    };
+                    if earlier_time.causal_order(later_time) == CausalOrder::Before {
+                        clock.merge(&clocks[earlier_idx]);
+                    }
                 }
-                let mut clock = task_clocks.get(&task).cloned().unwrap_or_default();
-                clock.increment(task);
-                task_clocks.insert(task, clock.clone());
-                clocks.push(Some(clock));
-            } else {
-                clocks.push(None);
             }
+
+            if let Some(task) = task {
+                clock.increment(CausalComponent::Task(task));
+                task_clocks.insert(task, clock.clone());
+            } else {
+                clock.increment(CausalComponent::Event(idx));
+            }
+            clocks.push(clock);
         }
 
-        Self {
-            _events: events.to_vec(),
-            _edges: edges,
-            clocks,
-        }
+        Self { clocks }
     }
 
     /// Returns true if event `a` happens before event `b`.
     #[must_use]
     pub fn happens_before(&self, a: usize, b: usize) -> bool {
-        match (self.clocks.get(a), self.clocks.get(b)) {
-            (Some(Some(ca)), Some(Some(cb))) => ca.happens_before(cb),
-            _ => false,
+        if a >= b {
+            return false;
         }
+
+        matches!(
+            (self.clocks.get(a), self.clocks.get(b)),
+            (Some(clock_a), Some(clock_b)) if clock_a.happens_before(clock_b)
+        )
     }
 }
 
@@ -217,7 +252,7 @@ impl RaceDetector {
     pub fn from_trace(events: &[TraceEvent]) -> Self {
         let hb = HappensBeforeGraph::from_trace(events);
         let footprints: Vec<_> = events.iter().map(resource_footprint).collect();
-        let tasks: Vec<_> = events.iter().map(event_task_id).collect();
+        let tasks: Vec<_> = events.iter().map(race_task_id).collect();
         let mut races = Vec::new();
 
         for i in 0..events.len() {
@@ -318,7 +353,7 @@ pub fn detect_hb_races(events: &[TraceEvent]) -> RaceReport {
     RaceDetector::from_trace(events).into_report()
 }
 
-fn event_task_id(event: &TraceEvent) -> Option<TaskId> {
+fn race_task_id(event: &TraceEvent) -> Option<TaskId> {
     match &event.data {
         TraceData::Task { task, .. }
         | TraceData::Cancel { task, .. }
@@ -329,6 +364,17 @@ fn event_task_id(event: &TraceEvent) -> Option<TaskId> {
             task: Some(task), ..
         } => Some(*task),
         _ => None,
+    }
+}
+
+fn program_order_task_id(event: &TraceEvent) -> Option<TaskId> {
+    match &event.data {
+        // Budget events execute on the request task and therefore participate
+        // in its program order. They intentionally remain excluded from
+        // `race_task_id`: their current resource footprint is global fallback
+        // state, which is not precise enough for race-endpoint attribution.
+        TraceData::Budget { task, .. } => Some(*task),
+        _ => race_task_id(event),
     }
 }
 
@@ -786,6 +832,11 @@ mod tests {
             TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
             TraceEvent::complete(2, Time::ZERO, tid(1), rid(1)),
         ];
+        let hb = HappensBeforeGraph::from_trace(&events);
+        assert!(hb.happens_before(0, 1));
+        assert!(!hb.happens_before(1, 0));
+        assert!(!hb.happens_before(0, 2));
+
         let report = detect_hb_races(&events);
         assert!(report.is_race_free());
     }
