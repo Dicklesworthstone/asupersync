@@ -4,8 +4,8 @@
 //! a convenient `fs`-scoped type for file operations.
 
 use crate::fs::Lines;
-use crate::io::{self, AsyncBufRead, AsyncRead, ReadBuf};
-use std::io::Result;
+use crate::io::{self, AsyncBufRead, AsyncRead, AsyncSeek, ReadBuf};
+use std::io::{Result, SeekFrom};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -37,8 +37,9 @@ impl<R> BufReader<R> {
 
     /// Returns a mutable reference to the underlying reader.
     ///
-    /// Note: reading directly from the inner reader may cause data loss if
-    /// the buffer contains unread data.
+    /// Note: reading from or seeking the inner reader directly may cause data
+    /// loss or make the buffered reader's logical position inconsistent if the
+    /// buffer contains unread data.
     pub fn get_mut(&mut self) -> &mut R {
         self.inner.get_mut()
     }
@@ -91,6 +92,16 @@ impl<R: AsyncRead + Unpin> AsyncBufRead for BufReader<R> {
     }
 }
 
+impl<R: AsyncSeek + Unpin> AsyncSeek for BufReader<R> {
+    fn poll_seek(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        pos: SeekFrom,
+    ) -> Poll<Result<u64>> {
+        Pin::new(&mut self.inner).poll_seek(cx, pos)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -103,6 +114,7 @@ mod tests {
     )]
     use super::*;
     use crate::fs::File;
+    use crate::io::{AsyncReadExt as _, AsyncSeekExt as _};
     use crate::stream::StreamExt as _;
     use tempfile::tempdir;
 
@@ -206,5 +218,32 @@ mod tests {
         };
         assert_eq!(next, b"def");
         crate::test_complete!("test_oversized_consume_delegates_without_replay");
+    }
+
+    #[test]
+    fn test_seek_delegates_with_logical_buffer_position() {
+        init_test("test_seek_delegates_with_logical_buffer_position");
+        futures_lite::future::block_on(async {
+            let temp = tempdir().unwrap();
+            let path = temp.path().join("seek.txt");
+            crate::fs::write(&path, b"abcdef").await.unwrap();
+
+            let file = File::open(&path).await.unwrap();
+            let mut reader = BufReader::with_capacity(4, file);
+            let mut first = [0u8; 1];
+            reader.read_exact(&mut first).await.unwrap();
+            assert_eq!(first, *b"a");
+            assert_eq!(reader.buffer(), b"bcd");
+
+            let logical = reader.stream_position().await.unwrap();
+            assert_eq!(logical, 1);
+            assert!(reader.buffer().is_empty());
+
+            reader.rewind().await.unwrap();
+            let mut contents = Vec::new();
+            reader.read_to_end(&mut contents).await.unwrap();
+            assert_eq!(contents, b"abcdef");
+        });
+        crate::test_complete!("test_seek_delegates_with_logical_buffer_position");
     }
 }

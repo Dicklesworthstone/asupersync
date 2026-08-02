@@ -9,8 +9,8 @@
 //! - `poll_fill_buf` is cancel-safe. The buffer state is consistent.
 //! - Lines/read_line are cancel-safe since they use buffered operations.
 
-use super::{AsyncBufRead, AsyncRead, ReadBuf};
-use std::io;
+use super::{AsyncBufRead, AsyncRead, AsyncSeek, ReadBuf};
+use std::io::{self, SeekFrom};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -67,8 +67,9 @@ impl<R> BufReader<R> {
 
     /// Returns a mutable reference to the underlying reader.
     ///
-    /// Note: Reading directly from the inner reader may cause data loss
-    /// if the buffer contains unread data.
+    /// Note: Reading from or seeking the inner reader directly may cause data
+    /// loss or make the buffered reader's logical position inconsistent if the
+    /// buffer contains unread data.
     pub fn get_mut(&mut self) -> &mut R {
         &mut self.inner
     }
@@ -178,6 +179,64 @@ impl<R: AsyncRead + Unpin> AsyncBufRead for BufReader<R> {
     }
 }
 
+impl<R: AsyncSeek + Unpin> AsyncSeek for BufReader<R> {
+    /// Seeks the underlying reader while accounting for unread buffered bytes.
+    ///
+    /// `SeekFrom::Current` is relative to this reader's logical position, not
+    /// the underlying reader's physical position after read-ahead. A successful
+    /// seek discards the buffer. `Pending` and errors preserve it unless the
+    /// signed-underflow fallback has already completed its first physical seek.
+    fn poll_seek(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        pos: SeekFrom,
+    ) -> Poll<io::Result<u64>> {
+        let this = self.get_mut();
+        let result = if let SeekFrom::Current(offset) = pos {
+            let unread = match i64::try_from(this.cap - this.pos) {
+                Ok(unread) => unread,
+                Err(_) => {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "buffered seek distance exceeds i64",
+                    )));
+                }
+            };
+
+            if let Some(adjusted) = offset.checked_sub(unread) {
+                match Pin::new(&mut this.inner).poll_seek(cx, SeekFrom::Current(adjusted)) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    Poll::Ready(Ok(position)) => position,
+                }
+            } else {
+                // Rewind the read-ahead separately so subtracting it cannot
+                // overflow. Once this succeeds the old buffer is invalid even
+                // if the requested seek later returns Pending or an error.
+                match Pin::new(&mut this.inner).poll_seek(cx, SeekFrom::Current(-unread)) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    Poll::Ready(Ok(_)) => this.discard_buffer(),
+                }
+                match Pin::new(&mut this.inner).poll_seek(cx, SeekFrom::Current(offset)) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    Poll::Ready(Ok(position)) => position,
+                }
+            }
+        } else {
+            match Pin::new(&mut this.inner).poll_seek(cx, pos) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(position)) => position,
+            }
+        };
+
+        this.discard_buffer();
+        Poll::Ready(Ok(result))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -189,8 +248,67 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use crate::io::AsyncSeekExt as _;
 
+    use std::collections::VecDeque;
     use std::task::Waker;
+
+    #[derive(Debug, Clone, Copy)]
+    enum SeekStep {
+        Pending,
+        Ready,
+        Error(io::ErrorKind),
+    }
+
+    #[derive(Debug)]
+    struct SeekableReader {
+        inner: std::io::Cursor<Vec<u8>>,
+        seek_steps: VecDeque<SeekStep>,
+        seek_requests: Vec<SeekFrom>,
+    }
+
+    impl SeekableReader {
+        fn new(data: &[u8]) -> Self {
+            Self::with_steps(data, [])
+        }
+
+        fn with_steps(data: &[u8], steps: impl IntoIterator<Item = SeekStep>) -> Self {
+            Self {
+                inner: std::io::Cursor::new(data.to_vec()),
+                seek_steps: steps.into_iter().collect(),
+                seek_requests: Vec::new(),
+            }
+        }
+    }
+
+    impl AsyncRead for SeekableReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let read = std::io::Read::read(&mut self.inner, buf.unfilled())?;
+            buf.advance(read);
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncSeek for SeekableReader {
+        fn poll_seek(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            pos: SeekFrom,
+        ) -> Poll<io::Result<u64>> {
+            self.seek_requests.push(pos);
+            match self.seek_steps.pop_front().unwrap_or(SeekStep::Ready) {
+                SeekStep::Pending => Poll::Pending,
+                SeekStep::Ready => Poll::Ready(std::io::Seek::seek(&mut self.inner, pos)),
+                SeekStep::Error(kind) => {
+                    Poll::Ready(Err(io::Error::new(kind, "injected seek failure")))
+                }
+            }
+        }
+    }
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
@@ -199,6 +317,30 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn prime_one_byte(reader: &mut BufReader<SeekableReader>) {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut byte = [0u8; 1];
+        let mut read_buf = ReadBuf::new(&mut byte);
+        let poll = Pin::new(&mut *reader).poll_read(&mut cx, &mut read_buf);
+        assert!(matches!(poll, Poll::Ready(Ok(()))));
+        assert_eq!(read_buf.filled(), b"a");
+        assert_eq!(reader.buffer(), b"bcd");
+    }
+
+    fn read_one_byte(reader: &mut BufReader<SeekableReader>) -> u8 {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut byte = [0u8; 1];
+        let mut read_buf = ReadBuf::new(&mut byte);
+        match Pin::new(reader).poll_read(&mut cx, &mut read_buf) {
+            Poll::Ready(Ok(())) => {}
+            other => panic!("expected one ready byte, got {other:?}"),
+        }
+        assert_eq!(read_buf.filled().len(), 1);
+        byte[0]
     }
 
     #[test]
@@ -489,5 +631,134 @@ mod tests {
         crate::assert_with_log!(ready, "poll ready 3", true, ready);
         // Result depends on buffer state
         crate::test_complete!("buf_reader_multiple_reads");
+    }
+
+    #[test]
+    fn seek_start_and_end_discard_buffer_and_restart_reads() {
+        init_test("seek_start_and_end_discard_buffer_and_restart_reads");
+        let mut reader = BufReader::with_capacity(4, SeekableReader::new(b"abcdef"));
+        prime_one_byte(&mut reader);
+
+        let start =
+            futures_lite::future::block_on(reader.seek(SeekFrom::Start(0))).expect("seek to start");
+        assert_eq!(start, 0);
+        assert!(reader.buffer().is_empty());
+        assert_eq!(read_one_byte(&mut reader), b'a');
+        assert_eq!(reader.buffer(), b"bcd");
+
+        let end =
+            futures_lite::future::block_on(reader.seek(SeekFrom::End(-1))).expect("seek from end");
+        assert_eq!(end, 5);
+        assert!(reader.buffer().is_empty());
+        assert_eq!(read_one_byte(&mut reader), b'f');
+        crate::test_complete!("seek_start_and_end_discard_buffer_and_restart_reads");
+    }
+
+    #[test]
+    fn current_seek_uses_logical_position_for_zero_positive_and_negative_offsets() {
+        init_test("current_seek_uses_logical_position_for_zero_positive_and_negative_offsets");
+
+        let mut zero = BufReader::with_capacity(4, SeekableReader::new(b"abcdef"));
+        prime_one_byte(&mut zero);
+        let position = futures_lite::future::block_on(zero.stream_position())
+            .expect("logical stream position");
+        assert_eq!(position, 1);
+        assert_eq!(zero.get_ref().seek_requests, [SeekFrom::Current(-3)]);
+
+        let mut positive = BufReader::with_capacity(4, SeekableReader::new(b"abcdef"));
+        prime_one_byte(&mut positive);
+        let position = futures_lite::future::block_on(positive.seek(SeekFrom::Current(2)))
+            .expect("positive logical seek");
+        assert_eq!(position, 3);
+        assert_eq!(positive.get_ref().seek_requests, [SeekFrom::Current(-1)]);
+
+        let mut negative = BufReader::with_capacity(4, SeekableReader::new(b"abcdef"));
+        prime_one_byte(&mut negative);
+        let position = futures_lite::future::block_on(negative.seek(SeekFrom::Current(-1)))
+            .expect("negative logical seek");
+        assert_eq!(position, 0);
+        assert_eq!(negative.get_ref().seek_requests, [SeekFrom::Current(-4)]);
+        crate::test_complete!(
+            "current_seek_uses_logical_position_for_zero_positive_and_negative_offsets"
+        );
+    }
+
+    #[test]
+    fn pending_seek_retries_adjusted_request_and_preserves_buffer() {
+        init_test("pending_seek_retries_adjusted_request_and_preserves_buffer");
+        let inner = SeekableReader::with_steps(b"abcdef", [SeekStep::Pending, SeekStep::Ready]);
+        let mut reader = BufReader::with_capacity(4, inner);
+        prime_one_byte(&mut reader);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut reader).poll_seek(&mut cx, SeekFrom::Current(0));
+        assert!(matches!(first, Poll::Pending));
+        assert_eq!(reader.buffer(), b"bcd");
+        assert_eq!(reader.get_ref().seek_requests, [SeekFrom::Current(-3)]);
+
+        let second = Pin::new(&mut reader).poll_seek(&mut cx, SeekFrom::Current(0));
+        assert!(matches!(second, Poll::Ready(Ok(1))));
+        assert!(reader.buffer().is_empty());
+        assert_eq!(
+            reader.get_ref().seek_requests,
+            [SeekFrom::Current(-3), SeekFrom::Current(-3)]
+        );
+        crate::test_complete!("pending_seek_retries_adjusted_request_and_preserves_buffer");
+    }
+
+    #[test]
+    fn failed_seek_preserves_buffer_and_read_continuity() {
+        init_test("failed_seek_preserves_buffer_and_read_continuity");
+        let inner =
+            SeekableReader::with_steps(b"abcdef", [SeekStep::Error(io::ErrorKind::InvalidInput)]);
+        let mut reader = BufReader::with_capacity(4, inner);
+        prime_one_byte(&mut reader);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let error = match Pin::new(&mut reader).poll_seek(&mut cx, SeekFrom::Start(0)) {
+            Poll::Ready(Err(error)) => error,
+            other => panic!("expected injected seek error, got {other:?}"),
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(reader.buffer(), b"bcd");
+        assert_eq!(read_one_byte(&mut reader), b'b');
+        assert_eq!(reader.buffer(), b"cd");
+        crate::test_complete!("failed_seek_preserves_buffer_and_read_continuity");
+    }
+
+    #[test]
+    fn current_underflow_uses_two_phase_seek_across_pending() {
+        init_test("current_underflow_uses_two_phase_seek_across_pending");
+        let mut inner =
+            SeekableReader::with_steps(b"", [SeekStep::Ready, SeekStep::Pending, SeekStep::Ready]);
+        inner.inner.set_position(u64::MAX);
+        let mut reader = BufReader::with_capacity(4, inner);
+        reader.buf[..3].copy_from_slice(b"xyz");
+        reader.pos = 0;
+        reader.cap = 3;
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut reader).poll_seek(&mut cx, SeekFrom::Current(i64::MIN));
+        assert!(matches!(first, Poll::Pending));
+        assert!(reader.buffer().is_empty());
+        assert_eq!(
+            reader.get_ref().seek_requests,
+            [SeekFrom::Current(-3), SeekFrom::Current(i64::MIN)]
+        );
+
+        let second = Pin::new(&mut reader).poll_seek(&mut cx, SeekFrom::Current(i64::MIN));
+        assert!(matches!(second, Poll::Ready(Ok(position)) if position == i64::MAX as u64 - 3));
+        assert_eq!(
+            reader.get_ref().seek_requests,
+            [
+                SeekFrom::Current(-3),
+                SeekFrom::Current(i64::MIN),
+                SeekFrom::Current(i64::MIN),
+            ]
+        );
+        crate::test_complete!("current_underflow_uses_two_phase_seek_across_pending");
     }
 }
