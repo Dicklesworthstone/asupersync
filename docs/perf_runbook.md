@@ -73,9 +73,33 @@ therefore enforces like-to-like itself:
   `CARGO_TARGET_DIR` affinity helps), or re-record the rows for the new class.
 - Untagged rows (the legacy `methodology/` set) compare unconditionally —
   original behavior — until br-asupersync-pjivey re-records them with tags.
+- **Multi-host row families** (br-asupersync-zqs4bo): one operation may carry
+  several rows, one per recorded host class — row identity in the registry is
+  `(operation, environment)`, enforced by the gate's duplicate check. Whichever
+  host the fleet lands the run on compares against its own row and skips the
+  siblings, so the gate engages on every recorded host instead of only the
+  original recording box. Do not mix an untagged row into a tagged family for
+  the same operation (the untagged row would compare everywhere and
+  double-gate recorded hosts). Hosts without rows still all-skip and fail
+  closed — that pressure is deliberate: record the host or accept the rerun
+  lottery.
+
+**Worker names are not hostnames.** `workers.toml` names (`ovh-a`, `hz1`,
+`vmi…`) and the OS `hostname` the gate matches against can differ — `ovh-a`'s
+hostname is `fixmydocuments`, `hz1`'s is `hetzner1` (2026-08-02). An
+"environment mismatch" streak therefore does NOT prove the recording host left
+the fleet; check which worker the run landed on (`[RCH] remote <name>` in the
+transcript) before concluding anything (br-asupersync-zqs4bo learned this the
+hard way).
 
 When re-recording baselines on a new host class, update every row of the
-affected prefix in one commit and say so in the message.
+affected prefix in one commit and say so in the message. To ADD a family row
+for a new host, run the owning bench on a quiet fleet (gate env set — the run
+self-identifies its landing hostname in the skip lines and still emits full
+criterion medians), take at least 2 reps on that host, use the rep with the
+median point estimate (its own `[lo mid hi]` becomes
+`ci95_lower_ns`/`p50_ns`/`ci95_upper_ns`), and append the row without touching
+existing ones.
 
 ## Lever procedure (before/after)
 
