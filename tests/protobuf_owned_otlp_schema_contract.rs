@@ -1598,6 +1598,78 @@ fn validate_live_repository_pins(value: &Value) -> ValidationResult {
             return Err(format!("live repository source drifted: {path}"));
         }
     }
+    let stale_lock = array(authority, "excluded_authorities")?
+        .iter()
+        .find(|row| row.get("path").and_then(Value::as_str) == Some("fuzz/Cargo.lock"))
+        .ok_or_else(|| "stale fuzz lock exclusion is required".to_owned())?;
+    let stale_path = text(stale_lock, "path")?;
+    let stale_bytes = read_repo_bytes(stale_path);
+    if sha256_hex(&stale_bytes) != text(stale_lock, "sha256")? {
+        return Err("excluded fuzz lock drifted from its recorded stale state".to_owned());
+    }
+    let stale_text = String::from_utf8(stale_bytes).map_err(|error| error.to_string())?;
+    let stale_packages = stale_text
+        .split("[[package]]")
+        .filter(|block| block.contains("name = \"opentelemetry-proto\""))
+        .collect::<Vec<_>>();
+    if stale_packages.len() != 1 || !stale_packages[0].contains("version = \"0.31.0\"") {
+        return Err("excluded fuzz lock must remain explicitly stale at 0.31.0".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_operator_doc(doc: &str, value: &Value) -> ValidationResult {
+    if sha256_hex(doc.as_bytes()) != DOC_SHA256 {
+        return Err("operator document bytes changed without authority review".to_owned());
+    }
+    if doc.match_indices(DOC_BEGIN).count() != 1 || doc.match_indices(DOC_END).count() != 1 {
+        return Err("operator document markers must occur exactly once".to_owned());
+    }
+    let begin = doc
+        .find(DOC_BEGIN)
+        .ok_or_else(|| "operator document begin marker is required".to_owned())?;
+    let end = doc
+        .find(DOC_END)
+        .ok_or_else(|| "operator document end marker is required".to_owned())?;
+    if begin >= end || !doc[end + DOC_END.len()..].trim().is_empty() {
+        return Err("operator document markers are misordered or followed by claims".to_owned());
+    }
+    for marker in [
+        ARTIFACT_PATH,
+        "tests/protobuf_owned_otlp_schema_contract.rs",
+        "asupersync-5z2scg.1.3",
+        "CAP-PROTOBUF-GENERIC",
+        "opentelemetry-proto` Rust crate `0.32.0",
+        "56d658ba1faf63f7b9c492cfbe6e0ec365440a16132d3270c1065f7b33f1b638",
+        "ec289cb3c6f8260951699c51df968560943c1451",
+        "OTLP proto release `v1.10.0",
+        "https://opentelemetry.io/schemas/1.37.0",
+        "8 families, 43 messages, 163 fields, 7 enum or",
+        "3 unary collector methods",
+        "message-valued oneof member merge",
+        "non-exhaustive minimum",
+        "one reusable\nfail-closed validator",
+        "No Cargo command is represented as green",
+        "local Cargo fallback",
+        "or file deletion",
+        "No-claim boundary",
+    ] {
+        if !doc.contains(marker) {
+            return Err(format!("operator document missing {marker}"));
+        }
+    }
+    let authority = value
+        .get("authority")
+        .ok_or_else(|| "authority is required".to_owned())?;
+    for pin in array(authority, "proto_source_pins")? {
+        let path = text(pin, "path")?
+            .strip_prefix("opentelemetry/proto/")
+            .ok_or_else(|| "proto source pin path must use canonical prefix".to_owned())?;
+        let digest = text(pin, "sha256")?;
+        if !doc.contains(path) || !doc.contains(digest) {
+            return Err(format!("operator document missing source pin {path}"));
+        }
+    }
     Ok(())
 }
 
@@ -1619,22 +1691,9 @@ fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants__canonical_packet
 
 #[test]
 fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants__operator_doc_is_fail_closed() {
+    let value = artifact();
     let doc = read_repo_file(DOC_PATH);
-    assert_eq!(doc.match_indices(DOC_BEGIN).count(), 1);
-    assert_eq!(doc.match_indices(DOC_END).count(), 1);
-    for marker in [
-        "asupersync-5z2scg.1.3",
-        "CAP-PROTOBUF-GENERIC",
-        "opentelemetry-proto` Rust crate `0.32.0",
-        "OTLP proto release `v1.10.0",
-        "8 families, 43 messages, 163 fields",
-        "same message-valued oneof member merge",
-        "non-exhaustive minimum",
-        "No Cargo command is represented as green",
-        "No-claim boundary",
-    ] {
-        assert!(doc.contains(marker), "operator document missing {marker}");
-    }
+    validate_operator_doc(&doc, &value).expect("operator document must validate");
 }
 
 #[test]
