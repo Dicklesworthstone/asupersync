@@ -82,8 +82,8 @@ pub struct SpectralThresholds {
     pub lag1_autocorr_threshold: f64,
     /// Variance growth ratio threshold between recent and earlier windows.
     pub variance_growth_ratio_threshold: f64,
-    /// Absolute Fiedler component distance from zero used to identify nodes
-    /// near the cut transition (`|component| <= threshold`).
+    /// Fraction of the largest absolute Fiedler component used to identify
+    /// nodes near the cut transition.
     pub bottleneck_threshold: f64,
     /// Maximum number of power iteration steps.
     pub max_iterations: usize,
@@ -583,7 +583,7 @@ pub enum HealthClassification {
     Degraded {
         /// Current Fiedler value.
         fiedler: f64,
-        /// Node indices that form the bottleneck (large Fiedler vector components).
+        /// Node indices near the Fiedler-vector cut transition.
         bottleneck_nodes: Vec<usize>,
     },
     /// The graph is nearing disconnection.
@@ -654,12 +654,12 @@ pub fn classify_health(
         return HealthClassification::Healthy { margin: 0.0 };
     }
 
-    // Check for disconnected graph first.
-    if fiedler < thresholds.convergence_tolerance {
-        let (components, _) = laplacian.connected_components();
-        if components > 1 {
-            return HealthClassification::Fragmented { components };
-        }
+    // Graph structure is the exact fragmentation authority. Numerical
+    // decomposition can report a positive residual for a disconnected graph,
+    // so no finite eigenvalue epsilon is a sound substitute for this check.
+    let (components, _) = laplacian.connected_components();
+    if components > 1 {
+        return HealthClassification::Fragmented { components };
     }
 
     if fiedler < thresholds.critical_fiedler {
@@ -689,15 +689,29 @@ pub fn classify_health(
 ///
 /// Nodes with Fiedler components near zero lie near the minimum-cut transition
 /// and represent structural bottlenecks.
+///
+/// The vector is L2-normalized, so an absolute component cutoff changes meaning
+/// with graph size. `threshold` is instead interpreted as a fraction of the
+/// largest component magnitude: `|v_i| <= threshold * max_j |v_j|`.
 #[must_use]
 pub fn identify_bottlenecks(fiedler_vector: &[f64], threshold: f64) -> Vec<usize> {
     let threshold = threshold.abs();
+    let max_abs = fiedler_vector
+        .iter()
+        .fold(0.0_f64, |largest, component| largest.max(component.abs()));
+
+    // An all-zero vector carries no partition signal.
+    if max_abs == 0.0 {
+        return Vec::new();
+    }
+
+    let cutoff = threshold * max_abs;
     // Find the transition region: nodes whose Fiedler vector component is
-    // close to zero are near the cut. We identify these as bottlenecks.
+    // close to zero relative to the partition scale are near the cut.
     fiedler_vector
         .iter()
         .enumerate()
-        .filter(|&(_, v)| v.abs() <= threshold)
+        .filter(|&(_, v)| v.abs() <= cutoff)
         .map(|(i, _)| i)
         .collect()
 }
@@ -2335,6 +2349,27 @@ mod tests {
     }
 
     #[test]
+    fn classify_fragmented_system_despite_numerical_residual() {
+        let lap = DependencyLaplacian::new(4, &[(0, 1), (2, 3)]);
+        let thresholds = SpectralThresholds::default();
+        let decomposition = SpectralDecomposition {
+            eigenvalues: vec![0.0, 2e-5, 2.0],
+            fiedler_value: 2e-5,
+            fiedler_vector: vec![-0.5, -0.5, 0.5, 0.5],
+            spectral_gap: 1e-5,
+            spectral_radius: 2.0,
+            iterations_used: thresholds.max_iterations,
+        };
+
+        let health = classify_health(&decomposition, &lap, &thresholds, false);
+
+        assert!(
+            matches!(health, HealthClassification::Fragmented { components: 2 }),
+            "structural fragmentation must override a positive numerical residual, got {health}"
+        );
+    }
+
+    #[test]
     fn classify_edge_free_graph_as_healthy() {
         let lap = DependencyLaplacian::new(3, &[]);
         let thresholds = SpectralThresholds::default();
@@ -2474,8 +2509,25 @@ mod tests {
     fn identify_bottlenecks_threshold() {
         let fv = vec![-0.5, -0.1, 0.05, 0.1, 0.5];
         let bottlenecks = identify_bottlenecks(&fv, 0.2);
-        // Nodes with |fv[i]| < 0.2: indices 1, 2, 3.
+        // Nodes within 20% of the largest magnitude: indices 1, 2, 3.
         assert_eq!(bottlenecks, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn identify_bottlenecks_is_scale_invariant() {
+        let fiedler = [-0.8, -0.2, 0.0, 0.2, 0.8];
+        let scaled = fiedler.map(|component| component * 1e-300);
+
+        assert_eq!(
+            identify_bottlenecks(&fiedler, 0.3),
+            identify_bottlenecks(&scaled, 0.3)
+        );
+        assert_eq!(identify_bottlenecks(&fiedler, 0.3), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn identify_bottlenecks_all_zero_has_no_partition_signal() {
+        assert!(identify_bottlenecks(&[0.0; 16], 0.4).is_empty());
     }
 
     #[test]
