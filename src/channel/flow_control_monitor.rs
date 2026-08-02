@@ -594,8 +594,7 @@ impl DeadlockDetector {
                 current_path.push(edge);
                 if let Some(&cycle_start) = stack_positions.get(&edge.owner_task) {
                     cycles.push(DeadlockCycle::from_path(&current_path[cycle_start..]));
-                } else if !visited.contains(&edge.owner_task) {
-                    visited.insert(edge.owner_task);
+                } else if visited.insert(edge.owner_task) {
                     let _ = stack_positions.insert(edge.owner_task, current_path.len());
                     frames.push((edge.owner_task, 0));
                     continue;

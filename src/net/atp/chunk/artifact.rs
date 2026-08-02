@@ -1456,7 +1456,7 @@ mod tests {
             ("release v01.002.3-rc_1!", Some("01.002.3-rc_1")),
             ("build7.4 finished", Some("7.4")),
             ("tool-7.4 finished", Some("7.4")),
-            ("nul\0delimited\01.2\0token", Some("1.2")),
+            ("nul\0delimited\x001.2\0token", Some("1.2")),
             ("no version here", None),
             ("1", None),
             (".1.2", None),
@@ -1549,7 +1549,7 @@ mod tests {
                 combinations *= ALPHABET.len();
             }
 
-            for leading in [b'0', b'1'] {
+            for leading in *b"01" {
                 for mut encoded in 0..combinations {
                     let mut bytes = vec![leading; length];
                     for byte in &mut bytes[1..] {
