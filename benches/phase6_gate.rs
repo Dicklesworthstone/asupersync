@@ -84,6 +84,13 @@ struct TrackedBaselineRow {
     /// `methodology/` set) compare unconditionally, preserving the original
     /// gate behavior until they are re-recorded with tags
     /// (br-asupersync-pjivey).
+    ///
+    /// An operation may carry a FAMILY of rows, one per recorded host
+    /// class (br-asupersync-zqs4bo): whichever host the fleet lands the
+    /// run on compares against its own row and skips its siblings. Do
+    /// not mix an untagged row into a tagged family for the same
+    /// operation — the untagged row compares everywhere, double-gating
+    /// the recorded hosts.
     #[serde(default)]
     environment: Option<String>,
 }
@@ -225,10 +232,17 @@ pub fn run_phase6_p50_gate(prefix: &str) -> Result<(), String> {
         if row.operation.is_empty() {
             return Err("tracked Phase 6 baseline contains an empty operation".to_string());
         }
-        if !operations.insert(row.operation.as_str()) {
+        // Multi-host baseline families (br-asupersync-zqs4bo): the same
+        // operation may carry one row per recorded host class — the
+        // environment matching below compares only the landing host's
+        // row and loudly skips the others — so row identity is
+        // (operation, environment), not operation alone. Two rows for
+        // the same operation on the SAME host class are still an
+        // authoring error and fail closed.
+        if !operations.insert((row.operation.as_str(), row.environment.as_deref())) {
             return Err(format!(
-                "tracked Phase 6 baseline contains duplicate operation {:?}",
-                row.operation
+                "tracked Phase 6 baseline contains duplicate operation {:?} for environment {:?}",
+                row.operation, row.environment
             ));
         }
         if !row.operation.starts_with(prefix) {
