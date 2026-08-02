@@ -1,0 +1,1039 @@
+{
+  "schema_version": 1,
+  "artifact_id": "protobuf-owned-otlp-schema-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-5z2scg.1.3",
+  "capability_id": "CAP-PROTOBUF-GENERIC",
+  "captured_at_utc": "2026-08-02T11:19:15Z",
+  "state": "AUTHORITY_AND_DESIGN_PINNED_IMPLEMENTATION_PENDING",
+  "summary": "Finite crate-private OTLP metrics, traces, logs, common, resource, and collector message authority for the owned protobuf kernel. This packet pins wire shape, evolution behavior, and enforceable resource policy without claiming implementation or runtime integration.",
+  "decision": {
+    "finite_internal_schema_authorized": true,
+    "crate_private_only": true,
+    "native_non_wasm_scope": true,
+    "public_generic_protobuf_surface_preserved": true,
+    "public_prost_removal_authorized": false,
+    "production_transport_wiring_authorized": false,
+    "dependency_cutover_authorized": false,
+    "implementation_state": "NOT_IMPLEMENTED_BY_THIS_PACKET",
+    "evidence_state": "DESIGN_ONLY"
+  },
+  "authority": {
+    "root_workspace_reference": {
+      "crate": "opentelemetry-proto",
+      "crate_version": "0.32.0",
+      "crates_io_checksum_sha256": "56d658ba1faf63f7b9c492cfbe6e0ec365440a16132d3270c1065f7b33f1b638",
+      "cargo_lock_path": "Cargo.lock",
+      "cargo_lock_sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+      "wrapper_repository": "https://github.com/open-telemetry/opentelemetry-rust",
+      "wrapper_repository_commit": "ec289cb3c6f8260951699c51df968560943c1451",
+      "path_in_wrapper_repository": "opentelemetry-proto",
+      "enabled_reference_features": [
+        "gen-tonic-messages",
+        "trace",
+        "metrics",
+        "logs"
+      ],
+      "production_role": "TEST_AND_FUZZ_ORACLE_ONLY"
+    },
+    "wire_schema_release": {
+      "repository": "https://github.com/open-telemetry/opentelemetry-proto",
+      "release": "v1.10.0",
+      "release_date": "2026-03-09",
+      "release_url": "https://github.com/open-telemetry/opentelemetry-proto/releases/tag/v1.10.0",
+      "evidence": "opentelemetry-proto crate 0.32.0 CHANGELOG declares the vendored definitions are v1.10.0",
+      "upstream_commit_sha": null,
+      "upstream_commit_claim": "NOT_RECORDED_IN_THE_PUBLISHED_RUST_CRATE",
+      "authority_rule": "The v1.10.0 release identity plus every vendored source digest below is binding. The wrapper repository commit is not represented as an upstream schema commit."
+    },
+    "semantic_conventions": {
+      "default_schema_url": "https://opentelemetry.io/schemas/1.37.0",
+      "relationship": "This is the current semantic-conventions schema URL used by asupersync. It is independent of and must not be confused with the OTLP wire-schema release v1.10.0."
+    },
+    "excluded_authorities": [
+      {
+        "path": "fuzz/Cargo.lock",
+        "sha256": "d91db6afd228ec60aa57d5782cbe5ae3bf7170f5e2c37dd15280e7b476e95271",
+        "resolved_crate_version": "0.31.0",
+        "reason": "The fuzz manifest requests 0.32 but its lock remains at 0.31.0. It is stale and cannot define A3 schema authority."
+      },
+      {
+        "path": "src/observability/otel.rs::otlp_request_builder",
+        "reason": "Generated request builders are test/fuzz gated and are differential fixtures, not owned production schema authority."
+      },
+      {
+        "path": "tests/otlp_metrics_request_golden.rs",
+        "reason": "The JSON-shaped fixture is not protobuf wire evidence."
+      }
+    ],
+    "proto_source_pins": [
+      {
+        "path": "opentelemetry/proto/common/v1/common.proto",
+        "sha256": "833db934b8b08be193940aa412f26a9ed8c564dfa8ea3517dc583f5064142731"
+      },
+      {
+        "path": "opentelemetry/proto/resource/v1/resource.proto",
+        "sha256": "e0a7cdc0ffcfeffaa2606e8611839735ebffaa2d6acdf33e9356f2c48ae692d3"
+      },
+      {
+        "path": "opentelemetry/proto/metrics/v1/metrics.proto",
+        "sha256": "d0a53dda45ad100edbf25675f5b339ce8bf689bdc51816f8cf19b0d51464e1a4"
+      },
+      {
+        "path": "opentelemetry/proto/trace/v1/trace.proto",
+        "sha256": "c3fb1385c90b8bc08a2a462e28b5d0c422c7b524a839f75f75e3cd9f64f36956"
+      },
+      {
+        "path": "opentelemetry/proto/logs/v1/logs.proto",
+        "sha256": "6b2e1eba0c01ae2da47927c63eabfaf3f151ee7ad846f2cdf3b2b71fb61004fe"
+      },
+      {
+        "path": "opentelemetry/proto/collector/metrics/v1/metrics_service.proto",
+        "sha256": "2bb3c6adee5f7609c8a32c5e4b1ec57057320015e298e9cf136699a42abc24d7"
+      },
+      {
+        "path": "opentelemetry/proto/collector/trace/v1/trace_service.proto",
+        "sha256": "03c8cc4e3e101087d884392d6eda32152ad5cd696e6344f50deaa59804a75c7a"
+      },
+      {
+        "path": "opentelemetry/proto/collector/logs/v1/logs_service.proto",
+        "sha256": "0252687fc8f59d139ced709d383e83678e9bd4957bdbe76077242f1c32363fa5"
+      }
+    ],
+    "generated_rust_oracle_pins": [
+      {
+        "path": "opentelemetry.proto.common.v1.rs",
+        "sha256": "b0f800cbe10bc7a4254a2f34eba6caaf9125d6ca54b41d798abd1b39bc9ae5dc"
+      },
+      {
+        "path": "opentelemetry.proto.resource.v1.rs",
+        "sha256": "9ecb813fd561a21cfc4966596d5e241c3b850b39fa00819882f2b3728beaf002"
+      },
+      {
+        "path": "opentelemetry.proto.metrics.v1.rs",
+        "sha256": "9496e22210bddd170beecb72a4ae3c9e8534db07b0edda8c4827f3883e79f818"
+      },
+      {
+        "path": "opentelemetry.proto.trace.v1.rs",
+        "sha256": "af6a286a0143bcdd2520e930cd7478b8d97bccec7b5385bc29f18f422d242109"
+      },
+      {
+        "path": "opentelemetry.proto.logs.v1.rs",
+        "sha256": "9278b0b0539723440aaec45f7299c5afce01cbfd9705de89befe736e2bc74650"
+      },
+      {
+        "path": "opentelemetry.proto.collector.metrics.v1.rs",
+        "sha256": "a010f2eb5b07b86f56e3692b669762547db0dd6bfc59f32c5e4f9c2ff7095ada"
+      },
+      {
+        "path": "opentelemetry.proto.collector.trace.v1.rs",
+        "sha256": "d48090aa60900c1a0e0580bc984196b01a510d1425c9bafb2eb5eef793fd6f93"
+      },
+      {
+        "path": "opentelemetry.proto.collector.logs.v1.rs",
+        "sha256": "face7728c80b098dbfd22a1a92b9e3a24eabbbf9cd556b9e3e491944b2d87248"
+      }
+    ],
+    "repository_source_baseline": [
+      {
+        "path": "Cargo.toml",
+        "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+        "role": "feature and dependency quarantine authority"
+      },
+      {
+        "path": "src/grpc/protobuf.rs",
+        "sha256": "a37fb34ab435f1922746140e4263f326fda609b6d99f5d9e620b050430131a18",
+        "role": "owned ProtoMessage and UnknownFields authority"
+      },
+      {
+        "path": "src/grpc/protobuf_wire.rs",
+        "sha256": "1513ff37758292203e9f48dcfb6b002ad1f7c357b0084528ea422945effe7587",
+        "role": "schema-neutral wire and generic budget authority"
+      },
+      {
+        "path": "src/observability/otel.rs",
+        "sha256": "c6cc312af370ee4485bedeb49aa0d900ed649b813c849179c68f5d03944de311",
+        "role": "current metrics, logs, reference builder, and producer-limit baseline"
+      },
+      {
+        "path": "src/observability/otlp_trace_exporter.rs",
+        "sha256": "186ba75ae2312f04b84304ea175eb5e3debc1b9c211c66990a313825791f1e73",
+        "role": "simplified/testing trace batch shape; not producer-cap authority"
+      }
+    ]
+  },
+  "wire_contract": {
+    "syntax": "proto3",
+    "canonical_known_field_order": "ASCENDING_TAG",
+    "repeated_element_order": "PRESERVE_INPUT_ORDER",
+    "packed_encoder_policy": "EMIT_PACKED_FOR_PACKABLE_REPEATED_SCALARS",
+    "packed_decoder_policy": "ACCEPT_PACKED_AND_UNPACKED_FOR_PACKABLE_REPEATED_SCALARS",
+    "scalar_wire_types": {
+      "bool": "VARINT",
+      "int32": "VARINT",
+      "int64": "VARINT",
+      "uint32": "VARINT",
+      "uint64": "VARINT",
+      "sint32": "VARINT",
+      "enum": "VARINT",
+      "fixed32": "FIXED32",
+      "fixed64": "FIXED64",
+      "sfixed64": "FIXED64",
+      "double": "FIXED64",
+      "string": "LENGTH_DELIMITED",
+      "bytes": "LENGTH_DELIMITED",
+      "message": "LENGTH_DELIMITED",
+      "packed": "LENGTH_DELIMITED"
+    },
+    "singular_scalar_presence": "PROTO3_DEFAULT_VALUE_WITH_LAST_VALUE_WINS_ON_DUPLICATE_TAG",
+    "singular_message_presence": "EXPLICIT_OPTION_AND_PROTOBUF_MERGE_SEMANTICS",
+    "oneof_semantics": "AT_MOST_ONE_IN_MEMORY; REPEATED_SAME_MESSAGE_MEMBER_MERGES; A_DIFFERENT_MEMBER_REPLACES; SCALAR_OR_DIFFERENT_MEMBER_USES_LAST_RECOGNIZED_VALUE",
+    "reserved_tag_policy": "NEVER_EMIT_AS_KNOWN_OR_REUSE; PRESERVE_INCOMING_RAW_FIELD_AS_UNKNOWN",
+    "unknown_field_placement_on_encode": "KNOWN_FIELDS_FIRST_THEN_RAW_UNKNOWNS_IN_ORIGINAL_UNKNOWN_ENCOUNTER_ORDER",
+    "byte_identity_claim": "Known canonical encodings are deterministic. Decode and re-encode preserves every unknown raw field byte but does not claim to preserve its original position among known fields."
+  },
+  "schema_families": [
+    {
+      "family": "common",
+      "messages": [
+        {
+          "name": "opentelemetry.proto.common.v1.AnyValue",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "string_value", "type": "string", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false, "oneof": "value"},
+            {"tag": 2, "name": "bool_value", "type": "bool", "cardinality": "singular", "wire": "VARINT", "packed": false, "oneof": "value"},
+            {"tag": 3, "name": "int_value", "type": "int64", "cardinality": "singular", "wire": "VARINT", "packed": false, "oneof": "value"},
+            {"tag": 4, "name": "double_value", "type": "double", "cardinality": "singular", "wire": "FIXED64", "packed": false, "oneof": "value"},
+            {"tag": 5, "name": "array_value", "type": "opentelemetry.proto.common.v1.ArrayValue", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false, "oneof": "value"},
+            {"tag": 6, "name": "kvlist_value", "type": "opentelemetry.proto.common.v1.KeyValueList", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false, "oneof": "value"},
+            {"tag": 7, "name": "bytes_value", "type": "bytes", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false, "oneof": "value"},
+            {"tag": 8, "name": "string_value_strindex", "type": "int32", "cardinality": "singular", "wire": "VARINT", "packed": false, "oneof": "value"}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.common.v1.ArrayValue",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "values", "type": "opentelemetry.proto.common.v1.AnyValue", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.common.v1.KeyValueList",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "values", "type": "opentelemetry.proto.common.v1.KeyValue", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.common.v1.KeyValue",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "key", "type": "string", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 2, "name": "value", "type": "opentelemetry.proto.common.v1.AnyValue", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false, "presence": "message"},
+            {"tag": 3, "name": "key_strindex", "type": "int32", "cardinality": "singular", "wire": "VARINT", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.common.v1.InstrumentationScope",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "name", "type": "string", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 2, "name": "version", "type": "string", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 3, "name": "attributes", "type": "opentelemetry.proto.common.v1.KeyValue", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 4, "name": "dropped_attributes_count", "type": "uint32", "cardinality": "singular", "wire": "VARINT", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.common.v1.EntityRef",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "schema_url", "type": "string", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 2, "name": "type", "type": "string", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 3, "name": "id_keys", "type": "string", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 4, "name": "description_keys", "type": "string", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false}
+          ]
+        }
+      ]
+    },
+    {
+      "family": "resource",
+      "messages": [
+        {
+          "name": "opentelemetry.proto.resource.v1.Resource",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "attributes", "type": "opentelemetry.proto.common.v1.KeyValue", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 2, "name": "dropped_attributes_count", "type": "uint32", "cardinality": "singular", "wire": "VARINT", "packed": false},
+            {"tag": 3, "name": "entity_refs", "type": "opentelemetry.proto.common.v1.EntityRef", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false}
+          ]
+        }
+      ]
+    },
+    {
+      "family": "metrics",
+      "messages": [
+        {
+          "name": "opentelemetry.proto.metrics.v1.MetricsData",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "resource_metrics", "type": "opentelemetry.proto.metrics.v1.ResourceMetrics", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.metrics.v1.ResourceMetrics",
+          "reserved_tags": [1000],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "resource", "type": "opentelemetry.proto.resource.v1.Resource", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false, "presence": "message"},
+            {"tag": 2, "name": "scope_metrics", "type": "opentelemetry.proto.metrics.v1.ScopeMetrics", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 3, "name": "schema_url", "type": "string", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.metrics.v1.ScopeMetrics",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "scope", "type": "opentelemetry.proto.common.v1.InstrumentationScope", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false, "presence": "message"},
+            {"tag": 2, "name": "metrics", "type": "opentelemetry.proto.metrics.v1.Metric", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 3, "name": "schema_url", "type": "string", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.metrics.v1.Metric",
+          "reserved_tags": [4, 6, 8],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "name", "type": "string", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 2, "name": "description", "type": "string", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 3, "name": "unit", "type": "string", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 5, "name": "gauge", "type": "opentelemetry.proto.metrics.v1.Gauge", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false, "oneof": "data"},
+            {"tag": 7, "name": "sum", "type": "opentelemetry.proto.metrics.v1.Sum", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false, "oneof": "data"},
+            {"tag": 9, "name": "histogram", "type": "opentelemetry.proto.metrics.v1.Histogram", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false, "oneof": "data"},
+            {"tag": 10, "name": "exponential_histogram", "type": "opentelemetry.proto.metrics.v1.ExponentialHistogram", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false, "oneof": "data"},
+            {"tag": 11, "name": "summary", "type": "opentelemetry.proto.metrics.v1.Summary", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false, "oneof": "data"},
+            {"tag": 12, "name": "metadata", "type": "opentelemetry.proto.common.v1.KeyValue", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.metrics.v1.Gauge",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "data_points", "type": "opentelemetry.proto.metrics.v1.NumberDataPoint", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.metrics.v1.Sum",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "data_points", "type": "opentelemetry.proto.metrics.v1.NumberDataPoint", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 2, "name": "aggregation_temporality", "type": "opentelemetry.proto.metrics.v1.AggregationTemporality", "cardinality": "singular", "wire": "VARINT", "packed": false},
+            {"tag": 3, "name": "is_monotonic", "type": "bool", "cardinality": "singular", "wire": "VARINT", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.metrics.v1.Histogram",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "data_points", "type": "opentelemetry.proto.metrics.v1.HistogramDataPoint", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 2, "name": "aggregation_temporality", "type": "opentelemetry.proto.metrics.v1.AggregationTemporality", "cardinality": "singular", "wire": "VARINT", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.metrics.v1.ExponentialHistogram",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "data_points", "type": "opentelemetry.proto.metrics.v1.ExponentialHistogramDataPoint", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 2, "name": "aggregation_temporality", "type": "opentelemetry.proto.metrics.v1.AggregationTemporality", "cardinality": "singular", "wire": "VARINT", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.metrics.v1.Summary",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "data_points", "type": "opentelemetry.proto.metrics.v1.SummaryDataPoint", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.metrics.v1.NumberDataPoint",
+          "reserved_tags": [1],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 2, "name": "start_time_unix_nano", "type": "fixed64", "cardinality": "singular", "wire": "FIXED64", "packed": false},
+            {"tag": 3, "name": "time_unix_nano", "type": "fixed64", "cardinality": "singular", "wire": "FIXED64", "packed": false},
+            {"tag": 4, "name": "as_double", "type": "double", "cardinality": "singular", "wire": "FIXED64", "packed": false, "oneof": "value"},
+            {"tag": 5, "name": "exemplars", "type": "opentelemetry.proto.metrics.v1.Exemplar", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 6, "name": "as_int", "type": "sfixed64", "cardinality": "singular", "wire": "FIXED64", "packed": false, "oneof": "value"},
+            {"tag": 7, "name": "attributes", "type": "opentelemetry.proto.common.v1.KeyValue", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 8, "name": "flags", "type": "uint32", "cardinality": "singular", "wire": "VARINT", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.metrics.v1.HistogramDataPoint",
+          "reserved_tags": [1],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 2, "name": "start_time_unix_nano", "type": "fixed64", "cardinality": "singular", "wire": "FIXED64", "packed": false},
+            {"tag": 3, "name": "time_unix_nano", "type": "fixed64", "cardinality": "singular", "wire": "FIXED64", "packed": false},
+            {"tag": 4, "name": "count", "type": "fixed64", "cardinality": "singular", "wire": "FIXED64", "packed": false},
+            {"tag": 5, "name": "sum", "type": "double", "cardinality": "singular", "wire": "FIXED64", "packed": false, "presence": "optional"},
+            {"tag": 6, "name": "bucket_counts", "type": "fixed64", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": true, "element_wire": "FIXED64"},
+            {"tag": 7, "name": "explicit_bounds", "type": "double", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": true, "element_wire": "FIXED64"},
+            {"tag": 8, "name": "exemplars", "type": "opentelemetry.proto.metrics.v1.Exemplar", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 9, "name": "attributes", "type": "opentelemetry.proto.common.v1.KeyValue", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 10, "name": "flags", "type": "uint32", "cardinality": "singular", "wire": "VARINT", "packed": false},
+            {"tag": 11, "name": "min", "type": "double", "cardinality": "singular", "wire": "FIXED64", "packed": false, "presence": "optional"},
+            {"tag": 12, "name": "max", "type": "double", "cardinality": "singular", "wire": "FIXED64", "packed": false, "presence": "optional"}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.metrics.v1.ExponentialHistogramDataPoint",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "attributes", "type": "opentelemetry.proto.common.v1.KeyValue", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 2, "name": "start_time_unix_nano", "type": "fixed64", "cardinality": "singular", "wire": "FIXED64", "packed": false},
+            {"tag": 3, "name": "time_unix_nano", "type": "fixed64", "cardinality": "singular", "wire": "FIXED64", "packed": false},
+            {"tag": 4, "name": "count", "type": "fixed64", "cardinality": "singular", "wire": "FIXED64", "packed": false},
+            {"tag": 5, "name": "sum", "type": "double", "cardinality": "singular", "wire": "FIXED64", "packed": false, "presence": "optional"},
+            {"tag": 6, "name": "scale", "type": "sint32", "cardinality": "singular", "wire": "VARINT", "packed": false},
+            {"tag": 7, "name": "zero_count", "type": "fixed64", "cardinality": "singular", "wire": "FIXED64", "packed": false},
+            {"tag": 8, "name": "positive", "type": "opentelemetry.proto.metrics.v1.ExponentialHistogramDataPoint.Buckets", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false, "presence": "message"},
+            {"tag": 9, "name": "negative", "type": "opentelemetry.proto.metrics.v1.ExponentialHistogramDataPoint.Buckets", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false, "presence": "message"},
+            {"tag": 10, "name": "flags", "type": "uint32", "cardinality": "singular", "wire": "VARINT", "packed": false},
+            {"tag": 11, "name": "exemplars", "type": "opentelemetry.proto.metrics.v1.Exemplar", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 12, "name": "min", "type": "double", "cardinality": "singular", "wire": "FIXED64", "packed": false, "presence": "optional"},
+            {"tag": 13, "name": "max", "type": "double", "cardinality": "singular", "wire": "FIXED64", "packed": false, "presence": "optional"},
+            {"tag": 14, "name": "zero_threshold", "type": "double", "cardinality": "singular", "wire": "FIXED64", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.metrics.v1.ExponentialHistogramDataPoint.Buckets",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "offset", "type": "sint32", "cardinality": "singular", "wire": "VARINT", "packed": false},
+            {"tag": 2, "name": "bucket_counts", "type": "uint64", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": true, "element_wire": "VARINT"}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.metrics.v1.SummaryDataPoint",
+          "reserved_tags": [1],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 2, "name": "start_time_unix_nano", "type": "fixed64", "cardinality": "singular", "wire": "FIXED64", "packed": false},
+            {"tag": 3, "name": "time_unix_nano", "type": "fixed64", "cardinality": "singular", "wire": "FIXED64", "packed": false},
+            {"tag": 4, "name": "count", "type": "fixed64", "cardinality": "singular", "wire": "FIXED64", "packed": false},
+            {"tag": 5, "name": "sum", "type": "double", "cardinality": "singular", "wire": "FIXED64", "packed": false},
+            {"tag": 6, "name": "quantile_values", "type": "opentelemetry.proto.metrics.v1.SummaryDataPoint.ValueAtQuantile", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 7, "name": "attributes", "type": "opentelemetry.proto.common.v1.KeyValue", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 8, "name": "flags", "type": "uint32", "cardinality": "singular", "wire": "VARINT", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.metrics.v1.SummaryDataPoint.ValueAtQuantile",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "quantile", "type": "double", "cardinality": "singular", "wire": "FIXED64", "packed": false},
+            {"tag": 2, "name": "value", "type": "double", "cardinality": "singular", "wire": "FIXED64", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.metrics.v1.Exemplar",
+          "reserved_tags": [1],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 2, "name": "time_unix_nano", "type": "fixed64", "cardinality": "singular", "wire": "FIXED64", "packed": false},
+            {"tag": 3, "name": "as_double", "type": "double", "cardinality": "singular", "wire": "FIXED64", "packed": false, "oneof": "value"},
+            {"tag": 4, "name": "span_id", "type": "bytes", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 5, "name": "trace_id", "type": "bytes", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 6, "name": "as_int", "type": "sfixed64", "cardinality": "singular", "wire": "FIXED64", "packed": false, "oneof": "value"},
+            {"tag": 7, "name": "filtered_attributes", "type": "opentelemetry.proto.common.v1.KeyValue", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false}
+          ]
+        }
+      ]
+    },
+    {
+      "family": "trace",
+      "messages": [
+        {
+          "name": "opentelemetry.proto.trace.v1.TracesData",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "resource_spans", "type": "opentelemetry.proto.trace.v1.ResourceSpans", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.trace.v1.ResourceSpans",
+          "reserved_tags": [1000],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "resource", "type": "opentelemetry.proto.resource.v1.Resource", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false, "presence": "message"},
+            {"tag": 2, "name": "scope_spans", "type": "opentelemetry.proto.trace.v1.ScopeSpans", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 3, "name": "schema_url", "type": "string", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.trace.v1.ScopeSpans",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "scope", "type": "opentelemetry.proto.common.v1.InstrumentationScope", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false, "presence": "message"},
+            {"tag": 2, "name": "spans", "type": "opentelemetry.proto.trace.v1.Span", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 3, "name": "schema_url", "type": "string", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.trace.v1.Span",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "trace_id", "type": "bytes", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 2, "name": "span_id", "type": "bytes", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 3, "name": "trace_state", "type": "string", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 4, "name": "parent_span_id", "type": "bytes", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 5, "name": "name", "type": "string", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 6, "name": "kind", "type": "opentelemetry.proto.trace.v1.Span.SpanKind", "cardinality": "singular", "wire": "VARINT", "packed": false},
+            {"tag": 7, "name": "start_time_unix_nano", "type": "fixed64", "cardinality": "singular", "wire": "FIXED64", "packed": false},
+            {"tag": 8, "name": "end_time_unix_nano", "type": "fixed64", "cardinality": "singular", "wire": "FIXED64", "packed": false},
+            {"tag": 9, "name": "attributes", "type": "opentelemetry.proto.common.v1.KeyValue", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 10, "name": "dropped_attributes_count", "type": "uint32", "cardinality": "singular", "wire": "VARINT", "packed": false},
+            {"tag": 11, "name": "events", "type": "opentelemetry.proto.trace.v1.Span.Event", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 12, "name": "dropped_events_count", "type": "uint32", "cardinality": "singular", "wire": "VARINT", "packed": false},
+            {"tag": 13, "name": "links", "type": "opentelemetry.proto.trace.v1.Span.Link", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 14, "name": "dropped_links_count", "type": "uint32", "cardinality": "singular", "wire": "VARINT", "packed": false},
+            {"tag": 15, "name": "status", "type": "opentelemetry.proto.trace.v1.Status", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false, "presence": "message"},
+            {"tag": 16, "name": "flags", "type": "fixed32", "cardinality": "singular", "wire": "FIXED32", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.trace.v1.Span.Event",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "time_unix_nano", "type": "fixed64", "cardinality": "singular", "wire": "FIXED64", "packed": false},
+            {"tag": 2, "name": "name", "type": "string", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 3, "name": "attributes", "type": "opentelemetry.proto.common.v1.KeyValue", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 4, "name": "dropped_attributes_count", "type": "uint32", "cardinality": "singular", "wire": "VARINT", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.trace.v1.Span.Link",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "trace_id", "type": "bytes", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 2, "name": "span_id", "type": "bytes", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 3, "name": "trace_state", "type": "string", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 4, "name": "attributes", "type": "opentelemetry.proto.common.v1.KeyValue", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 5, "name": "dropped_attributes_count", "type": "uint32", "cardinality": "singular", "wire": "VARINT", "packed": false},
+            {"tag": 6, "name": "flags", "type": "fixed32", "cardinality": "singular", "wire": "FIXED32", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.trace.v1.Status",
+          "reserved_tags": [1],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 2, "name": "message", "type": "string", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 3, "name": "code", "type": "opentelemetry.proto.trace.v1.Status.StatusCode", "cardinality": "singular", "wire": "VARINT", "packed": false}
+          ]
+        }
+      ]
+    },
+    {
+      "family": "logs",
+      "messages": [
+        {
+          "name": "opentelemetry.proto.logs.v1.LogsData",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "resource_logs", "type": "opentelemetry.proto.logs.v1.ResourceLogs", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.logs.v1.ResourceLogs",
+          "reserved_tags": [1000],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "resource", "type": "opentelemetry.proto.resource.v1.Resource", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false, "presence": "message"},
+            {"tag": 2, "name": "scope_logs", "type": "opentelemetry.proto.logs.v1.ScopeLogs", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 3, "name": "schema_url", "type": "string", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.logs.v1.ScopeLogs",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "scope", "type": "opentelemetry.proto.common.v1.InstrumentationScope", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false, "presence": "message"},
+            {"tag": 2, "name": "log_records", "type": "opentelemetry.proto.logs.v1.LogRecord", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 3, "name": "schema_url", "type": "string", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.logs.v1.LogRecord",
+          "reserved_tags": [4],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "time_unix_nano", "type": "fixed64", "cardinality": "singular", "wire": "FIXED64", "packed": false},
+            {"tag": 2, "name": "severity_number", "type": "opentelemetry.proto.logs.v1.SeverityNumber", "cardinality": "singular", "wire": "VARINT", "packed": false},
+            {"tag": 3, "name": "severity_text", "type": "string", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 5, "name": "body", "type": "opentelemetry.proto.common.v1.AnyValue", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false, "presence": "message"},
+            {"tag": 6, "name": "attributes", "type": "opentelemetry.proto.common.v1.KeyValue", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 7, "name": "dropped_attributes_count", "type": "uint32", "cardinality": "singular", "wire": "VARINT", "packed": false},
+            {"tag": 8, "name": "flags", "type": "fixed32", "cardinality": "singular", "wire": "FIXED32", "packed": false},
+            {"tag": 9, "name": "trace_id", "type": "bytes", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 10, "name": "span_id", "type": "bytes", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false},
+            {"tag": 11, "name": "observed_time_unix_nano", "type": "fixed64", "cardinality": "singular", "wire": "FIXED64", "packed": false},
+            {"tag": 12, "name": "event_name", "type": "string", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false}
+          ]
+        }
+      ]
+    },
+    {
+      "family": "collector_metrics",
+      "messages": [
+        {
+          "name": "opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "resource_metrics", "type": "opentelemetry.proto.metrics.v1.ResourceMetrics", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceResponse",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "partial_success", "type": "opentelemetry.proto.collector.metrics.v1.ExportMetricsPartialSuccess", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false, "presence": "message"}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.collector.metrics.v1.ExportMetricsPartialSuccess",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "rejected_data_points", "type": "int64", "cardinality": "singular", "wire": "VARINT", "packed": false},
+            {"tag": 2, "name": "error_message", "type": "string", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false}
+          ]
+        }
+      ]
+    },
+    {
+      "family": "collector_trace",
+      "messages": [
+        {
+          "name": "opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "resource_spans", "type": "opentelemetry.proto.trace.v1.ResourceSpans", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.collector.trace.v1.ExportTraceServiceResponse",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "partial_success", "type": "opentelemetry.proto.collector.trace.v1.ExportTracePartialSuccess", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false, "presence": "message"}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.collector.trace.v1.ExportTracePartialSuccess",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "rejected_spans", "type": "int64", "cardinality": "singular", "wire": "VARINT", "packed": false},
+            {"tag": 2, "name": "error_message", "type": "string", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false}
+          ]
+        }
+      ]
+    },
+    {
+      "family": "collector_logs",
+      "messages": [
+        {
+          "name": "opentelemetry.proto.collector.logs.v1.ExportLogsServiceRequest",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "resource_logs", "type": "opentelemetry.proto.logs.v1.ResourceLogs", "cardinality": "repeated", "wire": "LENGTH_DELIMITED", "packed": false}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.collector.logs.v1.ExportLogsServiceResponse",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "partial_success", "type": "opentelemetry.proto.collector.logs.v1.ExportLogsPartialSuccess", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false, "presence": "message"}
+          ]
+        },
+        {
+          "name": "opentelemetry.proto.collector.logs.v1.ExportLogsPartialSuccess",
+          "reserved_tags": [],
+          "unknown_fields": "REQUIRED",
+          "fields": [
+            {"tag": 1, "name": "rejected_log_records", "type": "int64", "cardinality": "singular", "wire": "VARINT", "packed": false},
+            {"tag": 2, "name": "error_message", "type": "string", "cardinality": "singular", "wire": "LENGTH_DELIMITED", "packed": false}
+          ]
+        }
+      ]
+    }
+  ],
+  "enum_contract": [
+    {
+      "name": "opentelemetry.proto.metrics.v1.AggregationTemporality",
+      "storage": "RAW_I32",
+      "unknown_values": "PRESERVE",
+      "values": {
+        "AGGREGATION_TEMPORALITY_UNSPECIFIED": 0,
+        "AGGREGATION_TEMPORALITY_DELTA": 1,
+        "AGGREGATION_TEMPORALITY_CUMULATIVE": 2
+      }
+    },
+    {
+      "name": "opentelemetry.proto.metrics.v1.DataPointFlags",
+      "storage": "RAW_U32_BITSET",
+      "unknown_bits": "PRESERVE",
+      "values": {
+        "DATA_POINT_FLAGS_DO_NOT_USE": 0,
+        "DATA_POINT_FLAGS_NO_RECORDED_VALUE_MASK": 1
+      }
+    },
+    {
+      "name": "opentelemetry.proto.trace.v1.Span.SpanKind",
+      "storage": "RAW_I32",
+      "unknown_values": "PRESERVE",
+      "values": {
+        "SPAN_KIND_UNSPECIFIED": 0,
+        "SPAN_KIND_INTERNAL": 1,
+        "SPAN_KIND_SERVER": 2,
+        "SPAN_KIND_CLIENT": 3,
+        "SPAN_KIND_PRODUCER": 4,
+        "SPAN_KIND_CONSUMER": 5
+      }
+    },
+    {
+      "name": "opentelemetry.proto.trace.v1.Status.StatusCode",
+      "storage": "RAW_I32",
+      "unknown_values": "PRESERVE",
+      "values": {
+        "STATUS_CODE_UNSET": 0,
+        "STATUS_CODE_OK": 1,
+        "STATUS_CODE_ERROR": 2
+      }
+    },
+    {
+      "name": "opentelemetry.proto.trace.v1.SpanFlags",
+      "storage": "RAW_U32_BITSET",
+      "unknown_bits": "PRESERVE",
+      "values": {
+        "SPAN_FLAGS_DO_NOT_USE": 0,
+        "SPAN_FLAGS_TRACE_FLAGS_MASK": 255,
+        "SPAN_FLAGS_CONTEXT_HAS_IS_REMOTE_MASK": 256,
+        "SPAN_FLAGS_CONTEXT_IS_REMOTE_MASK": 512
+      }
+    },
+    {
+      "name": "opentelemetry.proto.logs.v1.SeverityNumber",
+      "storage": "RAW_I32",
+      "unknown_values": "PRESERVE",
+      "values": {
+        "SEVERITY_NUMBER_UNSPECIFIED": 0,
+        "SEVERITY_NUMBER_TRACE": 1,
+        "SEVERITY_NUMBER_TRACE2": 2,
+        "SEVERITY_NUMBER_TRACE3": 3,
+        "SEVERITY_NUMBER_TRACE4": 4,
+        "SEVERITY_NUMBER_DEBUG": 5,
+        "SEVERITY_NUMBER_DEBUG2": 6,
+        "SEVERITY_NUMBER_DEBUG3": 7,
+        "SEVERITY_NUMBER_DEBUG4": 8,
+        "SEVERITY_NUMBER_INFO": 9,
+        "SEVERITY_NUMBER_INFO2": 10,
+        "SEVERITY_NUMBER_INFO3": 11,
+        "SEVERITY_NUMBER_INFO4": 12,
+        "SEVERITY_NUMBER_WARN": 13,
+        "SEVERITY_NUMBER_WARN2": 14,
+        "SEVERITY_NUMBER_WARN3": 15,
+        "SEVERITY_NUMBER_WARN4": 16,
+        "SEVERITY_NUMBER_ERROR": 17,
+        "SEVERITY_NUMBER_ERROR2": 18,
+        "SEVERITY_NUMBER_ERROR3": 19,
+        "SEVERITY_NUMBER_ERROR4": 20,
+        "SEVERITY_NUMBER_FATAL": 21,
+        "SEVERITY_NUMBER_FATAL2": 22,
+        "SEVERITY_NUMBER_FATAL3": 23,
+        "SEVERITY_NUMBER_FATAL4": 24
+      }
+    },
+    {
+      "name": "opentelemetry.proto.logs.v1.LogRecordFlags",
+      "storage": "RAW_U32_BITSET",
+      "unknown_bits": "PRESERVE",
+      "values": {
+        "LOG_RECORD_FLAGS_DO_NOT_USE": 0,
+        "LOG_RECORD_FLAGS_TRACE_FLAGS_MASK": 255
+      }
+    }
+  ],
+  "service_contract": [
+    {
+      "service": "opentelemetry.proto.collector.metrics.v1.MetricsService",
+      "method": "Export",
+      "request": "opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest",
+      "response": "opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceResponse",
+      "streaming": "UNARY",
+      "transport_implementation_state": "OUT_OF_SCOPE"
+    },
+    {
+      "service": "opentelemetry.proto.collector.trace.v1.TraceService",
+      "method": "Export",
+      "request": "opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest",
+      "response": "opentelemetry.proto.collector.trace.v1.ExportTraceServiceResponse",
+      "streaming": "UNARY",
+      "transport_implementation_state": "OUT_OF_SCOPE"
+    },
+    {
+      "service": "opentelemetry.proto.collector.logs.v1.LogsService",
+      "method": "Export",
+      "request": "opentelemetry.proto.collector.logs.v1.ExportLogsServiceRequest",
+      "response": "opentelemetry.proto.collector.logs.v1.ExportLogsServiceResponse",
+      "streaming": "UNARY",
+      "transport_implementation_state": "OUT_OF_SCOPE"
+    }
+  ],
+  "evolution_contract": {
+    "every_message_owns_unknown_fields": true,
+    "unknown_field_representation": "EXACT_RAW_FIELD_BYTES_IN_ENCOUNTER_ORDER",
+    "unknown_groups": "PRESERVE_COMPLETE_RAW_GROUPS_WITHIN_SHARED_WIRE_BUDGET",
+    "unknown_enum_values": "RETAIN_RAW_I32_OR_U32_WITHOUT_COERCION",
+    "known_tag_wrong_wire_type": "TYPED_ERROR_NOT_UNKNOWN_FALLBACK",
+    "duplicate_singular_scalar": "LAST_VALUE_WINS",
+    "duplicate_singular_message": "PROTOBUF_MERGE_SEMANTICS",
+    "duplicate_oneof": "REPEATED_SAME_MESSAGE_MEMBER_MERGES; A_DIFFERENT_MEMBER_REPLACES; SCALAR_OR_DIFFERENT_MEMBER_USES_LAST_RECOGNIZED_VALUE",
+    "reserved_tag_reuse": "FORBIDDEN",
+    "field_removal": "MOVE_TAG_AND_NAME_TO_RESERVED_SET",
+    "authority_drift": "FAIL_CLOSED_KEEP_INCUMBENT_AND_REFRESH_ARTIFACT_BEFORE_IMPLEMENTATION_OR_CUTOVER",
+    "string_index_fields": "AnyValue tag 8 and KeyValue tag 3 are modeled exactly because they are present in v1.10.0; adapters outside profiles may leave them at zero but may not repurpose them."
+  },
+  "resource_contract": {
+    "policy_class": "NEW_A3_SCHEMA_POLICY_NOT_INCUMBENT_PARITY",
+    "failure_mode": "TYPED_HARD_REJECT_WITHOUT_RETURNING_A_PARTIAL_MODEL_OR_OUTPUT_FROM_FRESH_DECODE",
+    "merge_failure_atomicity": "A merge API may claim all-or-nothing failure only if it decodes into staging state and commits after complete validation. An in-place incremental merge must instead document and test its partial-mutation-on-error contract.",
+    "producer_truncation_boundary": "Producer adapters may apply stricter truncation or drop policies only when their existing contract defines a dropped counter. The schema codec itself never silently truncates, drops, or treats zero as unbounded.",
+    "generic_wire_limits": {
+      "max_message_bytes": 4194304,
+      "max_length_delimited_field_bytes": 4194304,
+      "max_wire_fields": 65536,
+      "max_wire_depth": 100,
+      "max_wire_work_bytes": 16777216,
+      "source": "ProtobufWireLimits::default() from the 4 MiB gRPC default"
+    },
+    "shared_semantic_budget": {
+      "max_total_repeated_items": 65536,
+      "max_total_any_value_nodes": 4096,
+      "max_total_owned_string_and_bytes_payload": 4194304,
+      "accounting": "All nested messages share one context. Counts are charged before reserve/push; string and bytes lengths are charged before allocation; unknown raw bytes are charged once; checked arithmetic only."
+    },
+    "collection_limits": {
+      "resource_groups_per_request": 64,
+      "scopes_per_resource_group": 128,
+      "metrics_per_scope": 4096,
+      "data_points_per_metric": 1000,
+      "spans_per_scope": 4096,
+      "log_records_per_scope": 4096,
+      "attributes_per_owner": 128,
+      "metric_metadata_entries": 128,
+      "resource_entity_refs": 128,
+      "entity_ref_id_keys": 128,
+      "entity_ref_description_keys": 128,
+      "any_value_depth": 16,
+      "any_value_array_items": 128,
+      "any_value_kvlist_items": 128,
+      "exemplars_per_data_point": 128,
+      "histogram_bucket_counts": 4096,
+      "histogram_explicit_bounds": 4095,
+      "exponential_histogram_buckets_per_sign": 4096,
+      "summary_quantiles": 1024,
+      "events_per_span": 128,
+      "links_per_span": 128
+    },
+    "string_and_bytes_limits": {
+      "attribute_key_bytes": 1024,
+      "attribute_string_or_bytes_value_bytes": 4096,
+      "schema_url_bytes": 2048,
+      "scope_name_bytes": 1024,
+      "scope_version_bytes": 1024,
+      "metric_name_bytes": 1024,
+      "metric_description_bytes": 4096,
+      "metric_unit_bytes": 256,
+      "span_name_bytes": 1024,
+      "trace_state_bytes": 512,
+      "event_name_bytes": 1024,
+      "log_severity_text_bytes": 1024,
+      "log_event_name_bytes": 1024,
+      "partial_success_error_message_bytes": 4096,
+      "trace_id_bytes": 16,
+      "span_id_bytes": 8
+    },
+    "limit_provenance": [
+      "4 MiB message, 65,536 field, depth 100, and 4x work limits are current owned generic-wire defaults.",
+      "128 attributes and 4,096 value bytes are current owned logs limits.",
+      "The 128 span attributes/events values are conformance-test helper defaults only. The simplified/testing OtlpSpan exporter has an unbounded attribute Vec, no events collection, and a distinct 255-character value truncation, so trace attribute/event/link schema caps are new A3 policy relative to that exporter.",
+      "1,000 points per metric aligns with current max_cardinality; 4,096 metrics aligns with current max_metrics.",
+      "128 links is the already-recorded future cap in the span-link cardinality audit; current producer wiring has no link cap and cannot migrate until it chunks or rejects explicitly.",
+      "Resource/scope/record, recursive AnyValue, trace attribute/event/link, exemplar, bucket, quantile, and string-path caps are new A3 policy and require downstream migration proof rather than an incumbent-parity claim."
+    ],
+    "semantic_invariant_completeness": "NON_EXHAUSTIVE_MINIMUM. Implementations remain bound to every normative requirement in the pinned v1.10.0 sources; a validator must not treat this list as the complete semantic specification.",
+    "required_semantic_invariants": [
+      "A span trace_id is exactly 16 bytes and span_id exactly 8 bytes; parent_span_id is empty or exactly 8 bytes.",
+      "Log and exemplar trace_id are empty or exactly 16 bytes; span_id is empty or exactly 8 bytes. Link IDs are exact nonempty widths.",
+      "Span end_time_unix_nano is not earlier than start_time_unix_nano when both are set.",
+      "Attribute keys are unique within each owner collection where the pinned schema requires uniqueness.",
+      "Histogram bucket_counts is empty with empty bounds or has exactly explicit_bounds length plus one; explicit bounds are strictly increasing; count equals the checked sum of bucket_counts.",
+      "Exponential histogram positive and negative bucket arrays each obey their cap and count equals zero_count plus positive and negative buckets when representable.",
+      "Summary quantiles are finite, in the closed interval 0 through 1, strictly increasing, and unique.",
+      "Summary quantile values are not negative.",
+      "Partial-success rejected counts are nonnegative; zero with a nonempty message is accepted as a warning and a positive count with an empty message is accepted.",
+      "Unknown enum values and unknown flag bits survive decode and re-encode even when semantic helpers do not interpret them."
+    ]
+  },
+  "implementation_contract": {
+    "recommended_private_leaf": "src/observability/otlp_proto.rs",
+    "recommended_module_gate": "all(feature = \"metrics\", not(target_arch = \"wasm32\"))",
+    "public_reexport": false,
+    "required_submodules": [
+      "limits_and_error",
+      "common_and_resource",
+      "metrics",
+      "trace",
+      "logs",
+      "collector"
+    ],
+    "current_authoring_gaps": [
+      "derive-generated nested and map encoding starts fresh default wire budgets rather than sharing the parent depth and work context",
+      "derive-generated repeated, packed, and map decoding allocates and pushes without a per-collection pre-allocation count check",
+      "packed and map encoding can collect a complete source collection before the parent message limit rejects it",
+      "derive-generated oneof decoding replaces a repeated message-valued member instead of merging the same member as protobuf requires",
+      "the proc-macro feature is optional and metrics does not imply it; no-default-features plus metrics must compile",
+      "the macro expansion's ::asupersync path is not a production self-alias in the current crate",
+      "generic encoder buffers and UnknownFields use ordinary Vec growth and do not expose typed allocation failure"
+    ],
+    "allowed_resolution": "Use manual finite-message ProtoMessage implementations with one shared OtlpDecodeBudget/OtlpEncodeBudget, or first land reviewed bounded nested/collection primitives in the owned authoring layer. Every path must check count, depth, work, and payload bytes before its corresponding allocation or mutation. Fresh decode may build private staging state and returns no partial model. Any merge API must either stage and commit atomically or explicitly document and test its non-atomic partial-mutation behavior.",
+    "forbidden_resolution": "Derive the current messages and apply validate() only after decode, or encode nested messages into unconstrained temporary buffers, then claim pre-allocation limits.",
+    "all_messages_require_unknown_fields_member": true,
+    "enum_storage": "RAW_NUMERIC_WITH_TYPED_KNOWN_VALUE_HELPERS",
+    "known_field_encoding": "ASCENDING_TAG",
+    "unknown_field_encoding": "RAW_UNKNOWN_BYTES_AFTER_KNOWN_FIELDS",
+    "signal_construction_separation": "Adapters from MetricsSnapshot, trace batches, and LogsSnapshot remain separate from the schema types and are owned by downstream integration beads."
+  },
+  "feature_contract": [
+    {
+      "profile": "default",
+      "expectation": "No public API change and no generated OTLP reference dependency added."
+    },
+    {
+      "profile": "metrics",
+      "expectation": "Private owned schemas compile on native targets without opentelemetry-proto, tonic, or tokio normal edges."
+    },
+    {
+      "profile": "metrics,tracing-integration",
+      "expectation": "The same owned schema module compiles; generated reference messages remain test/fuzz oracle-only."
+    },
+    {
+      "profile": "no-default-features,metrics",
+      "expectation": "Private owned schemas compile without assuming the optional proc-macros feature."
+    },
+    {
+      "profile": "fuzz",
+      "expectation": "The generated oracle remains quarantined; its stale lock must be refreshed by its owner before it can claim v0.32 parity. A3 does not modify the fuzz lock."
+    },
+    {
+      "profile": "wasm32",
+      "expectation": "Native OTLP finite-schema integration remains excluded unless a later owner supplies a wasm-safe wire boundary and evidence."
+    }
+  ],
+  "evidence_handoff": [
+    {
+      "owner": "asupersync-5z2scg.1.3",
+      "scope": "finite message implementation, typed schema/resource errors, local table/boundary tests, bounded schema-budget lifecycle checks, generic-codec consumer checks, and this authority packet",
+      "required_test_prefixes": [
+        "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants",
+        "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix",
+        "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__lab_lifecycle",
+        "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__downstream_consumer"
+      ],
+      "prefix_scope": {
+        "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants": "A3 finite schema, field, semantic, and resource invariants only.",
+        "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix": "A3 schema-local encode/decode and limit properties; independent/reference conformance remains A4.",
+        "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__lab_lifecycle": "A3 deterministic shared-budget lifecycle and fresh-decode failure-state checks only; no runtime, task, cancellation, shutdown, or transport claim.",
+        "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__downstream_consumer": "A3 compile/use proof that finite collector shapes are consumable through the existing owned generic codec; no signal adapter, framing, collector, or user-journey claim."
+      },
+      "current_state": "IMPLEMENTATION_AND_EXECUTABLE_EVIDENCE_PENDING"
+    },
+    {
+      "owner": "asupersync-5z2scg.1.4",
+      "scope": "independent bytes, full differential, malformed, property, minimized failure, and bounded fuzz conformance",
+      "current_state": "BLOCKED_BY_A3"
+    },
+    {
+      "owner": "asupersync-5z2scg.1.7",
+      "scope": "cross-language protobuf and gRPC peers, downstream-authored messages, unknown evolution, streaming, cancellation, restart, and real user journeys",
+      "current_state": "BLOCKED_BY_A3_AND_A4"
+    },
+    {
+      "owner": "asupersync-5z2scg.2.6",
+      "scope": "OTLP request/response framing, partial-success handling, native transport integration, and production graph proof",
+      "current_state": "DOWNSTREAM_NOT_AUTHORIZED_BY_THIS_PACKET"
+    }
+  ],
+  "planned_contract": {
+    "artifact_path": "artifacts/protobuf_owned_otlp_schema_v1.json",
+    "docs_path": "docs/protobuf_owned_otlp_schema.md",
+    "future_test_path": "tests/protobuf_owned_otlp_schema_contract.rs",
+    "validator_shape": "One reusable validate_contract() rejects missing families, duplicate tags, wire mismatches, absent unknown storage, unbounded paths, authority drift, stale-oracle promotion, and accidental public/cutover authority.",
+    "negative_mutations": [
+      "remove one message family",
+      "duplicate or renumber a tag",
+      "change one wire kind or packed bit",
+      "remove unknown fields from one message",
+      "set one count or byte cap to zero/unbounded",
+      "promote fuzz Cargo.lock 0.31.0 to authority",
+      "label wrapper commit as upstream schema commit",
+      "allow post-decode-only resource validation",
+      "authorize public prost removal or transport cutover"
+    ],
+    "proof_state": "NOT_RUN_BY_THIS_DESIGN_PACKET",
+    "no_local_cargo_fallback": true
+  },
+  "no_claim_boundaries": [
+    "This packet does not implement, compile, or execute any owned OTLP message type.",
+    "It does not prove any valid, malformed, resource, property, differential, or fuzz vector.",
+    "It does not prove byte parity with opentelemetry-proto, another language, or a live collector.",
+    "It does not wire metrics, traces, logs, partial-success responses, HTTP, gRPC, retry, cancellation, batching, or shutdown.",
+    "It does not establish incumbent parity for the new A3 semantic limits; downstream adapters must prove chunking, rejection, or counted truncation per capability.",
+    "It does not add opentelemetry-proto, tonic, tokio, or another runtime to a production graph.",
+    "It does not change any public API, generic downstream protobuf capability, feature, target, persisted format, or user journey.",
+    "It does not authorize removing prost, opentelemetry, opentelemetry_sdk, or any generated differential oracle.",
+    "It does not authorize production cutover, transport integration, dependency retirement, or tracker closure.",
+    "It does not prove performance, allocation, RSS, throughput, latency, broad workspace health, release readiness, live RCH fleet availability, local Cargo fallback approval, or permission to delete files."
+  ]
+}
