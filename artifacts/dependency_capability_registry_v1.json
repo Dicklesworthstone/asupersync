@@ -1234,8 +1234,8 @@
       "baseline": {
         "state": "planned",
         "owner_bead": "asupersync-d24mms.11",
-        "fixture": "planned://atp-version-scanner/artifact-corpus",
-        "command": "scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario atp_version_artifacts"
+        "fixture": "tests/atp_cdc_deduplication.rs",
+        "command": "RCH_REQUIRE_REMOTE=1 bash scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario atp_version_artifacts"
       },
       "replacement_bead_ids": [
         "asupersync-d24mms.11"

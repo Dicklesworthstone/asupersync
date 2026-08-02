@@ -66,6 +66,8 @@ Cargo-backed scenarios require:
   RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
     --scenario api-adr-phase3-signoff
   RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+    --scenario atp_version_artifacts
+  RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
     --scenario dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e
   RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
     --scenario lz4_trace_replay
@@ -92,6 +94,8 @@ scenario_ids() {
         aggregate-signoff-contract \
         api-adr-registry-contract \
         api-adr-phase3-signoff \
+        atp_version_artifacts \
+        dep-sovereignty-asupersync_d24mms_11_d22341de8339 \
         dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e \
         dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 \
         lz4_trace_replay \
@@ -102,7 +106,7 @@ scenario_ids() {
 
 scenario_is_known() {
     case "$1" in
-        catalog | runner-contract | registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits | dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd)
+        catalog | runner-contract | registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff | atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339 | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits | dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd)
             return 0
             ;;
         *)
@@ -113,7 +117,7 @@ scenario_is_known() {
 
 scenario_is_cargo() {
     case "$1" in
-        registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits | dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd)
+        registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff | atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339 | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits | dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd)
             return 0
             ;;
         *)
@@ -125,7 +129,7 @@ scenario_is_cargo() {
 scenario_surface() {
     case "$1" in
         catalog) printf 'audit' ;;
-        dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits | dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd) printf 'e2e' ;;
+        atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339 | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits | dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd) printf 'e2e' ;;
         runner-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff) printf 'contract' ;;
         *) printf 'integration' ;;
     esac
@@ -145,6 +149,7 @@ scenario_fixture() {
         aggregate-signoff-contract) printf 'artifacts/dependency_verification_final_signoff_v1.json' ;;
         api-adr-registry-contract) printf 'artifacts/dependency_api_adr_registry_v1.json' ;;
         api-adr-phase3-signoff) printf 'artifacts/dependency_api_adr_phase3_signoff_v1.json' ;;
+        atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339) printf 'tests/atp_cdc_deduplication.rs' ;;
         dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e) printf 'artifacts/typed_format_final_signoff_v1.json' ;;
         dep-sovereignty-asupersync_5z2scg_3_7_94b694387988) printf 'tests/fixtures/typed-format-historical-corpus/v0.3.9.json' ;;
         lz4_trace_replay | lz4_cross_version_artifact) printf 'tests/fixtures/lz4-trace-historical-corpus/v0.3.9.json' ;;
@@ -158,6 +163,7 @@ scenario_profile() {
         catalog | runner-contract) printf 'contract-only' ;;
         feature-platform-consumer-contract) printf 'sparse-feature-platform-consumer' ;;
         aggregate-signoff-contract) printf 'aggregate-signoff' ;;
+        atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339) printf 'atp-artifact-default' ;;
         dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e) printf 'typed-format-terminal-keep' ;;
         dep-sovereignty-asupersync_5z2scg_3_7_94b694387988) printf 'published-v0.3.9-current-cli' ;;
         lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits) printf 'lz4-owned-shadow' ;;
@@ -189,6 +195,9 @@ scenario_capabilities() {
         api-adr-phase3-signoff)
             printf '["CAP-PUBLIC-API-TOPOLOGY","CAP-DEPENDENCY-LEDGER"]'
             ;;
+        atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339)
+            printf '["CAP-ATP-VERSION-SCANNER"]'
+            ;;
         dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988)
             printf '["CAP-PERSISTED-TRACE-SNAPSHOT","CAP-SERDE-GENERIC"]'
             ;;
@@ -203,6 +212,9 @@ scenario_capabilities() {
 
 scenario_features() {
     case "$1" in
+        atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339)
+            printf '["default"]'
+            ;;
         dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988)
             printf '["cli","default","test-internals","trace-compression"]'
             ;;
@@ -226,6 +238,7 @@ scenario_evidence_owner() {
         aggregate-signoff-contract) printf 'asupersync-dep-p1-foundations-upksjk.6.6' ;;
         api-adr-registry-contract) printf 'asupersync-dep-p3-api-adrs-h3jspm.3' ;;
         api-adr-phase3-signoff) printf 'asupersync-dep-p3-api-adrs-h3jspm.13' ;;
+        atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339) printf 'asupersync-d24mms.11' ;;
         dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e) printf 'asupersync-5z2scg.3.5' ;;
         dep-sovereignty-asupersync_5z2scg_3_7_94b694387988) printf 'asupersync-5z2scg.3.7' ;;
         lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits) printf 'asupersync-0h6myr.4.4' ;;
@@ -242,6 +255,7 @@ scenario_step_id() {
         aggregate-signoff-contract) printf 'ver-a6-aggregate-signoff-contract' ;;
         api-adr-registry-contract) printf 'adr-003-api-adr-registry-contract' ;;
         api-adr-phase3-signoff) printf 'adr-013-api-adr-phase3-signoff' ;;
+        atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339) printf 'd24mms-11-artifact-version-reassembly' ;;
         dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e) printf 'typed-formats-a5-terminal-keep-signoff' ;;
         dep-sovereignty-asupersync_5z2scg_3_7_94b694387988) printf 'typed-formats-a7-cross-version-e2e' ;;
         lz4_trace_replay) printf 'lz4-a4-trace-replay' ;;
@@ -290,6 +304,9 @@ scenario_command_display() {
             ;;
         api-adr-phase3-signoff)
             printf '%s' "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated> cargo test -p asupersync --test dependency_api_adr_phase3_signoff_contract -- --nocapture"
+            ;;
+        atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339)
+            printf '%s' "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated> cargo test -p asupersync --lib --test atp_cdc_deduplication toolchain_version_detection -- --nocapture --test-threads=1"
             ;;
         dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e)
             printf '%s' "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated>_generic cargo test --manifest-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml --locked -- --nocapture && RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated>_historical cargo test --manifest-path tests/fixtures/typed-format-cross-version-consumer/Cargo.toml --locked -- --nocapture && RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated> cargo test -p asupersync --features cli,test-internals,trace-compression --test typed_format_registry_contract --test runtime_snapshot_codec_e2e --test replay_e2e_suite --test typed_format_cross_version_e2e --test typed_format_final_signoff_contract -- --nocapture --test-threads=1"
@@ -386,6 +403,22 @@ for scenario_id in "${SELECTED_SCENARIOS[@]}"; do
         printf 'unknown scenario: %s\n' "$scenario_id" >&2
         printf 'use --list for stable scenario IDs\n' >&2
         exit 64
+    fi
+done
+
+REPRO_COMMAND="bash scripts/run_all_e2e.sh --suite dependency-sovereignty"
+if [[ "${#SELECTED_SCENARIOS[@]}" -eq 1 ]]; then
+    REPRO_COMMAND+=" --scenario ${SELECTED_SCENARIOS[0]}"
+elif [[ "${#SELECTED_SCENARIOS[@]}" -ne 2 || "${SELECTED_SCENARIOS[0]}" != "catalog" || "${SELECTED_SCENARIOS[1]}" != "runner-contract" ]]; then
+    REPRO_COMMAND="bash scripts/run_dependency_sovereignty_e2e.sh"
+    for scenario_id in "${SELECTED_SCENARIOS[@]}"; do
+        REPRO_COMMAND+=" --scenario $scenario_id"
+    done
+fi
+for scenario_id in "${SELECTED_SCENARIOS[@]}"; do
+    if scenario_is_cargo "$scenario_id"; then
+        REPRO_COMMAND="RCH_REQUIRE_REMOTE=1 $REPRO_COMMAND"
+        break
     fi
 done
 
@@ -555,7 +588,9 @@ emit_validation_stage() {
     local first_failing_invariant="${13}"
     local replay_pointer="${14}"
     local capability_ids
+    local feature_flags
     capability_ids="$(scenario_capabilities "$scenario_id")"
+    feature_flags="$(scenario_features "$scenario_id")"
     jq -cn \
         --arg schema_version "dependency-sovereignty-validation-stage-v1" \
         --arg run_id "$RUN_ID" \
@@ -585,6 +620,7 @@ emit_validation_stage() {
         --arg first_failing_invariant "$first_failing_invariant" \
         --arg replay_pointer "$replay_pointer" \
         --argjson capability_ids "$capability_ids" \
+        --argjson feature_flags "$feature_flags" \
         '{
           schema_version: $schema_version,
           run_id: $run_id,
@@ -596,7 +632,7 @@ emit_validation_stage() {
           stage: $stage,
           validation_surface: $validation_surface,
           profile_family: $profile_family,
-          feature_flags: [],
+          feature_flags: $feature_flags,
           seed_or_fixture_id: $seed_or_fixture_id,
           config_snapshot_ref: $config_snapshot_ref,
           command: $command,
@@ -773,6 +809,13 @@ execute_scenario() {
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
                 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR="$target_dir" \
                 cargo test -p asupersync --test dependency_api_adr_phase3_signoff_contract -- --nocapture
+            ;;
+        atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339)
+            env RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- \
+                env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
+                RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR="$target_dir" \
+                cargo test -p asupersync --lib --test atp_cdc_deduplication \
+                toolchain_version_detection -- --nocapture --test-threads=1
             ;;
         dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e)
             env RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- \
@@ -1099,7 +1142,7 @@ jq -n \
     --arg ended_ts "$ENDED_TS" \
     --arg status "$STATUS" \
     --arg failure_class "$FAILURE_CLASS" \
-    --arg repro_command "bash scripts/run_all_e2e.sh --suite dependency-sovereignty" \
+    --arg repro_command "$REPRO_COMMAND" \
     --arg artifact_path "$SUMMARY" \
     --arg events_ndjson "$EVENTS" \
     --arg scenarios_ndjson "$SCENARIOS" \
@@ -1200,7 +1243,7 @@ fi
 printf 'Dependency sovereignty suite: %s\n' "$STATUS"
 printf 'Summary: %s\n' "$SUMMARY"
 printf 'Artifacts: %s\n' "$RUN_DIR"
-printf 'Replay: bash scripts/run_all_e2e.sh --suite dependency-sovereignty\n'
+printf 'Replay: %s\n' "$REPRO_COMMAND"
 
 if [[ "$STATUS" != "passed" ]]; then
     exit 1
