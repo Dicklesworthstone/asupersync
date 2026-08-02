@@ -86,6 +86,19 @@
 //!
 //! All randomness is seeded via `lab.seed`.  Given the same YAML + the
 //! same runtime binary, execution is bit-identical.
+//!
+//! [`Scenario::to_json`] is the canonical machine representation for the
+//! typed schema. It emits compact UTF-8 JSON, orders every object key
+//! lexicographically, preserves array order, and uses serde_json's stable
+//! shortest representation for finite numbers. Duration fields use integer
+//! milliseconds, as indicated by their `_ms` suffix. Documents that omit
+//! `schema_version` migrate additively to the current version through the
+//! typed default; canonical output always writes the explicit version and
+//! every typed field.
+//!
+//! YAML remains an accepted authoring format. The canonical encoder only
+//! emits fields owned by the typed schema; free-form values belong in the
+//! explicit `metadata`, participant `properties`, and fault `args` maps.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -98,7 +111,7 @@ use std::collections::{BTreeMap, HashSet};
 pub const SCENARIO_SCHEMA_VERSION: u32 = 1;
 
 /// A complete FrankenLab test scenario.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Scenario {
     /// Schema version (must be 1).
     #[serde(default = "default_schema_version")]
@@ -221,7 +234,7 @@ impl Default for Scenario {
 // ---------------------------------------------------------------------------
 
 /// Lab runtime knobs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LabSection {
     /// PRNG seed for deterministic scheduling.
     #[serde(default = "default_seed")]
@@ -300,7 +313,7 @@ fn default_futurelock_max_idle() -> u64 {
 // ---------------------------------------------------------------------------
 
 /// Chaos injection configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "preset", rename_all = "snake_case")]
 pub enum ChaosSection {
     /// Chaos disabled.
@@ -345,7 +358,7 @@ fn default_delay_max_ms() -> u64 {
 // ---------------------------------------------------------------------------
 
 /// Network simulation configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct NetworkSection {
     /// Preset network conditions.
     #[serde(default)]
@@ -378,7 +391,7 @@ pub enum NetworkPreset {
 }
 
 /// Per-link network condition overrides.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LinkConditions {
     /// Latency model.
     #[serde(default)]
@@ -401,7 +414,7 @@ pub struct LinkConditions {
 }
 
 /// Latency model specification.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "model", rename_all = "snake_case")]
 pub enum LatencySpec {
     /// Fixed latency.
@@ -430,7 +443,7 @@ pub enum LatencySpec {
 // ---------------------------------------------------------------------------
 
 /// A timed fault injection event.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FaultEvent {
     /// Virtual time (milliseconds) at which the fault fires.
     pub at_ms: u64,
@@ -444,7 +457,7 @@ pub struct FaultEvent {
 }
 
 /// Fault action types.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FaultAction {
     /// Network partition between two participants.
@@ -476,7 +489,7 @@ pub enum FaultAction {
 // ---------------------------------------------------------------------------
 
 /// A named participant in the scenario.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Participant {
     /// Unique name within the scenario.
     pub name: String,
@@ -495,7 +508,7 @@ pub struct Participant {
 // ---------------------------------------------------------------------------
 
 /// Cancellation injection configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CancellationSection {
     /// The injection strategy.
     pub strategy: CancellationStrategy,
@@ -510,7 +523,7 @@ pub struct CancellationSection {
 }
 
 /// Cancellation injection strategies.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CancellationStrategy {
     /// No cancellation injection (recording only).
@@ -607,7 +620,7 @@ impl Default for GoldenProjectionSection {
 // ---------------------------------------------------------------------------
 
 /// Reference to an included scenario file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IncludeRef {
     /// Relative path to the included YAML.
     pub path: String,
@@ -1279,13 +1292,40 @@ impl Scenario {
         serde_json::from_str(json)
     }
 
-    /// Serialize this scenario to pretty-printed JSON.
+    /// Serialize this scenario to canonical JSON.
+    ///
+    /// The encoding is compact and recursively orders object keys
+    /// lexicographically. Array order is preserved because it is part of the
+    /// typed scenario meaning. Call [`Self::validate`] before encoding when
+    /// the bytes will be used as replay evidence; semantic validation is kept
+    /// separate so callers can still serialize invalid scenarios for
+    /// diagnostics.
     ///
     /// # Errors
     ///
     /// Returns a `serde_json::Error` if serialization fails.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string_pretty(self)
+        let value = serde_json::to_value(self)?;
+        serde_json::to_string(&canonicalize_json_value(value))
+    }
+}
+
+fn canonicalize_json_value(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(canonicalize_json_value).collect())
+        }
+        serde_json::Value::Object(values) => {
+            let mut entries: Vec<_> = values.into_iter().collect();
+            entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+
+            let mut canonical = serde_json::Map::new();
+            for (key, value) in entries {
+                canonical.insert(key, canonicalize_json_value(value));
+            }
+            serde_json::Value::Object(canonical)
+        }
+        scalar => scalar,
     }
 }
 
@@ -2055,31 +2095,68 @@ mod tests {
     }
 
     #[test]
-    fn json_roundtrip() {
+    fn canonical_contract_full_json_roundtrip() {
         let json = r#"{
             "id": "roundtrip-test",
             "description": "full roundtrip",
             "lab": {"seed": 99, "worker_count": 2},
             "chaos": {"preset": "heavy"},
             "network": {"preset": "wan"},
-            "participants": [{"name": "alice", "role": "sender"}],
-            "faults": [{"at_ms": 100, "action": "partition"}],
+            "participants": [
+                {"name": "alice", "role": "sender"},
+                {"name": "bob", "role": "receiver"}
+            ],
+            "faults": [{
+                "at_ms": 100,
+                "action": "partition",
+                "args": {"from": "alice", "to": "bob"}
+            }],
             "resource_caps": {"max_artifact_bytes": 1024, "max_fault_events": 2},
             "expected_invariants": ["quiescence", "deterministic_replay"],
             "minimization": {"enabled": false, "max_counterexample_events": 8},
             "golden_projection": {"format": "markdown", "canonicalized": true, "redacted": true}
         }"#;
         let s1: Scenario = serde_json::from_str(json).unwrap();
+        assert!(s1.validate().is_empty());
         let serialized = s1.to_json().unwrap();
         let s2: Scenario = Scenario::from_json(&serialized).unwrap();
-        assert_eq!(s1.id, s2.id);
-        assert_eq!(s1.lab.seed, s2.lab.seed);
-        assert_eq!(s1.participants.len(), s2.participants.len());
-        assert_eq!(s1.faults.len(), s2.faults.len());
-        assert_eq!(s1.resource_caps, s2.resource_caps);
-        assert_eq!(s1.expected_invariants, s2.expected_invariants);
-        assert_eq!(s1.minimization, s2.minimization);
-        assert_eq!(s1.golden_projection, s2.golden_projection);
+        assert_eq!(s1, s2);
+    }
+
+    #[test]
+    fn canonical_contract_matches_byte_golden() {
+        let scenario = Scenario::from_json(minimal_json()).unwrap();
+        let canonical = scenario.to_json().unwrap();
+
+        assert_eq!(
+            canonical,
+            r#"{"cancellation":null,"chaos":{"preset":"off"},"description":"minimal test","expected_invariants":["quiescence","losers_drained","no_obligation_leaks","deterministic_replay"],"faults":[],"golden_projection":{"canonicalized":true,"format":"json","redacted":true},"id":"test-scenario","include":[],"lab":{"entropy_seed":null,"futurelock_max_idle_steps":10000,"max_steps":100000,"panic_on_futurelock":true,"panic_on_obligation_leak":true,"replay_recording":false,"seed":42,"trace_capacity":4096,"worker_count":1},"metadata":{},"minimization":{"enabled":false,"max_counterexample_events":null,"max_evaluations":null},"network":{"links":{},"preset":"ideal"},"oracles":["all"],"participants":[],"resource_caps":{"max_artifact_bytes":null,"max_counterexample_events":null,"max_fault_events":null},"schema_version":1}"#
+        );
+    }
+
+    #[test]
+    fn canonical_contract_orders_dynamic_objects_recursively() {
+        let value = serde_json::json!({
+            "z": {"beta": 2, "alpha": 1},
+            "a": [{"delta": 4, "charlie": 3}],
+        });
+        let canonical = canonicalize_json_value(value);
+
+        assert_eq!(
+            serde_json::to_string(&canonical).unwrap(),
+            r#"{"a":[{"charlie":3,"delta":4}],"z":{"alpha":1,"beta":2}}"#
+        );
+    }
+
+    #[test]
+    fn canonical_contract_migrates_missing_version_without_meaning_change() {
+        let implicit = Scenario::from_json(r#"{"id":"legacy-defaulted-version"}"#).unwrap();
+        let explicit =
+            Scenario::from_json(r#"{"schema_version":1,"id":"legacy-defaulted-version"}"#).unwrap();
+
+        assert_eq!(implicit, explicit);
+        assert_eq!(implicit.to_json().unwrap(), explicit.to_json().unwrap());
+        assert!(implicit.validate().is_empty());
     }
 
     #[test]

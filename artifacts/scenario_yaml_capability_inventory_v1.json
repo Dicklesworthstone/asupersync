@@ -66,8 +66,8 @@
     },
     {
       "path": "src/lab/scenario.rs",
-      "sha256": "ce653696f29f9478d1ed3fb1b39a69df5205f0ce6f45de11e7a03bcb0448a180",
-      "line_count": 2175
+      "sha256": "0bf5a96825ec074a040ce73eb10e7ac8c24640c602df6ffdebcca8aced973b70",
+      "line_count": 2252
     },
     {
       "path": "src/lab/scenario_runner.rs",
@@ -101,8 +101,8 @@
     },
     {
       "path": "tests/frankenlab_integration.rs",
-      "sha256": "0fbc880b4d763244186c175ea8afe4d5c395943744ba503f6e414d5ba56ad553",
-      "line_count": 721
+      "sha256": "983fecd9624ff3e0c55155a296cee74acea2143607232cc543ef1f9f56c6b661",
+      "line_count": 786
     },
     {
       "path": "frankenlab/tests/adoption_funnel.rs",
@@ -370,6 +370,43 @@
     },
     "inventory_state": "FROZEN",
     "evidence_state": "EXECUTED"
+  },
+  "canonical_json_contract": {
+    "encoder": "Scenario::to_json",
+    "schema_version": 1,
+    "encoding": "UTF-8",
+    "whitespace": "compact with no trailing newline",
+    "object_order": "recursive lexicographic key order",
+    "array_order": "preserve typed source order",
+    "numbers": {
+      "integers": "exact base-10 JSON integers",
+      "finite_decimals": "serde_json stable shortest representation",
+      "durations": "unsigned integer milliseconds in fields ending with _ms"
+    },
+    "materialized_fields": [
+      "schema_version",
+      "typed defaults",
+      "all typed Scenario fields"
+    ],
+    "migration": {
+      "missing_schema_version": "default to explicit v1 without changing typed meaning",
+      "unsupported_schema_version": "typed parse followed by validation rejection"
+    },
+    "preserved_extension_channels": [
+      "metadata",
+      "participants[].properties",
+      "faults[].args"
+    ],
+    "unknown_field_policy": "accepted and discarded at typed struct boundaries; SCN A3 owns parity and bounds",
+    "focused_evidence": [
+      "canonical_contract_full_json_roundtrip",
+      "canonical_contract_matches_byte_golden",
+      "canonical_contract_orders_dynamic_objects_recursively",
+      "canonical_contract_migrates_missing_version_without_meaning_change",
+      "canonical_contract_preserves_yaml_replay_identity"
+    ],
+    "evidence_state": "EXECUTED",
+    "no_claim": "The library encoder does not implement a CLI dump command, format-selected golden projection, parser replacement, full-corpus parity, or terminal dependency cutover."
   },
   "enum_domains": [
     {
@@ -981,12 +1018,13 @@
       "owner_bead": "asupersync-5z2scg.5.2",
       "responsibility": "define one versioned typed schema and additive canonical JSON representation",
       "required_evidence": [
-        "lossless typed representation",
-        "canonical JSON rules",
-        "unknown/version policy"
+        "full typed equality and round trip",
+        "exact canonical JSON golden and recursive ordering",
+        "missing-version migration and unsupported-version validation policy",
+        "YAML to canonical JSON replay identity preservation"
       ],
-      "evidence_state": "PLANNED",
-      "no_claim": "A schema design alone does not prove YAML parity or permit dependency exit."
+      "evidence_state": "EXECUTED",
+      "no_claim": "The library encoder does not prove full-corpus YAML parity, add a CLI dump command, select golden projection formats, or permit dependency exit."
     },
     {
       "owner_bead": "asupersync-5z2scg.5.3",
@@ -1057,8 +1095,8 @@
     },
     {
       "gap_id": "SCN-GAP-06",
-      "finding": "golden_projection.format is unused and canonicalized is validation-only",
-      "owner_bead": "asupersync-5z2scg.5.2",
+      "finding": "the library canonical JSON encoder exists, but golden_projection.format still does not select an output projection and redaction remains validation-only",
+      "owner_bead": "asupersync-5z2scg.5.4",
       "evidence_state": "BLOCKED_GAP"
     },
     {
@@ -1075,8 +1113,8 @@
     },
     {
       "gap_id": "SCN-GAP-09",
-      "finding": "neither CLI has a Scenario dump command or canonical Scenario JSON output workflow",
-      "owner_bead": "asupersync-5z2scg.5.2",
+      "finding": "the library canonical JSON encoder exists, but neither CLI exposes a Scenario dump or conversion command",
+      "owner_bead": "asupersync-5z2scg.5.4",
       "evidence_state": "BLOCKED_GAP"
     },
     {
