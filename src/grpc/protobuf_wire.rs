@@ -2569,7 +2569,7 @@ mod tests {
         ));
         assert_eq!(outer.as_bytes(), outer_prefix);
         outer.end_group(2).unwrap();
-        assert_eq!(outer.finish().unwrap(), [0x13, 0x14].as_slice());
+        assert_eq!(outer.finish().unwrap().as_ref(), [0x13, 0x14].as_slice());
     }
 
     #[test]

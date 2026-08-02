@@ -291,6 +291,18 @@ The refreshed contract source and complete finite-schema unit-test bodies are
 present. Canonical unit-test execution, reference vectors, feature matrix, and
 downstream journeys remain pending.
 
+A focused unit attempt used
+`cargo test --locked -p asupersync --lib --features metrics -j 4
+'observability::otlp_proto::tests::' -- --nocapture` through an RCH clean
+overlay on `hz2`. The first compile exposed three test-only `Bytes` versus
+`&[u8]` assertion mismatches: two in the owned OTLP module and one in the
+generic protobuf wire module. Those assertions now compare byte slices. The
+single retry compiled past those diagnostics and reached final linking, but it
+was canceled at build age 442 seconds after 279 seconds without compile
+progress while the RCH heartbeat remained fresh (execution
+`0e112512c7953a7d`). No test body executed, so this is compile-diagnostic and
+progress-stale evidence only, not a passing focused-unit receipt.
+
 ## No-claim boundary
 
 This packet records source, unit-test bodies, and a terminal native

@@ -4,7 +4,7 @@
   "program_id": "asupersync-ir2uf0",
   "bead_id": "asupersync-5z2scg.1.3",
   "capability_id": "CAP-PROTOBUF-GENERIC",
-  "captured_at_utc": "2026-08-02T16:54:14Z",
+  "captured_at_utc": "2026-08-02T17:21:25Z",
   "state": "AUTHORITY_PINNED_ALL_FINITE_SCHEMA_SOURCE_PRESENT_A3_EVIDENCE_PENDING",
   "summary": "Finite crate-private OTLP metrics, traces, logs, common, resource, and collector message authority for the owned protobuf kernel. The complete bounded 43-message source slice, unit-test bodies, and terminal native default-plus-metrics library check are present; unit-test execution, reference bytes, the feature matrix, and runtime integration remain pending.",
   "decision": {
@@ -147,7 +147,7 @@
       },
       {
         "path": "src/grpc/protobuf_wire.rs",
-        "sha256": "ace8921c1480e071c958817c2fd55b77819b34fde2e4fd6a6c61a3fdb15f04dc",
+        "sha256": "c296f60bd21ce6c5f8214b395d75d858c198b12381f5e7fe3b07b95061be7812",
         "role": "schema-neutral wire and generic budget authority"
       },
       {
@@ -157,7 +157,7 @@
       },
       {
         "path": "src/observability/otlp_proto.rs",
-        "sha256": "0bc030db490036f3f5be7ade29280bb7b9550f51fefc9b0d47b0ce9153110c6f",
+        "sha256": "2429b5f46dd985fa7c700e6255f0070b0c0c43eaa627377843ac96ef94048ca4",
         "role": "complete bounded common, resource, metrics, trace, logs, and collector implementation"
       },
       {

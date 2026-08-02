@@ -7416,7 +7416,10 @@ mod tests {
         let decoded = Resource::decode_from_bytes(&group, limits()).expect("decode unknown group");
         assert_eq!(decoded.unknown_fields.as_bytes(), group);
         assert_eq!(
-            decoded.encode_to_bytes(limits()).expect("re-encode group"),
+            decoded
+                .encode_to_bytes(limits())
+                .expect("re-encode group")
+                .as_ref(),
             group.as_slice()
         );
     }
@@ -8395,7 +8398,8 @@ mod tests {
         assert_eq!(
             metric
                 .encode_to_bytes(limits())
-                .expect("re-encode reserved tag"),
+                .expect("re-encode reserved tag")
+                .as_ref(),
             reserved.as_slice()
         );
     }
