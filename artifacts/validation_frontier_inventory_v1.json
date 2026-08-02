@@ -784,6 +784,21 @@
       "current_rch_behavior": "mapped_not_rerun_in_vf1"
     },
     {
+      "lane_id": "downstream-consumer-default-kafka-test",
+      "source": "proof_lane_manifest_v1",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_kafka_default CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --test kafka_default_feature_surface -- --nocapture",
+      "intended_guarantee": "Representative downstream Kafka fail-closed execution with only asupersync default features.",
+      "package_or_surface": "asupersync-downstream-consumer-proof",
+      "target_kind": "test_frontier",
+      "features": [],
+      "cfg_test_enabled": "yes",
+      "dev_dependency_edges": "none_expected",
+      "conformance_expected": "not_expected",
+      "normal_edge_tokio_expectation": "forbidden",
+      "resource_envelope_class": "test-frontier-heavy",
+      "current_rch_behavior": "mapped_not_rerun_in_vf1"
+    },
+    {
       "lane_id": "downstream-consumer-metrics-run",
       "source": "proof_lane_manifest_v1",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_metrics CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --features metrics-profile --bin metrics_consumer",
@@ -1130,6 +1145,38 @@
           "outcome": "cancelled_after_stale_progress"
         }
       ]
+    },
+    {
+      "lane_id": "dependency-supply-chain-policy-contract",
+      "source": "proof_lane_manifest_v1",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_supply_chain_policy CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test dependency_supply_chain_policy_contract -- --nocapture",
+      "intended_guarantee": "Dependency supply-chain policy artifact contract.",
+      "package_or_surface": "asupersync",
+      "target_kind": "artifact_contract",
+      "features": [],
+      "cfg_test_enabled": "yes",
+      "dev_dependency_edges": "dev_graph_expected",
+      "conformance_expected": "unknown_needs_vf2",
+      "normal_edge_tokio_expectation": "unknown_needs_vf2",
+      "resource_envelope_class": "artifact-contract-medium",
+      "current_rch_behavior": "mapped_not_rerun_in_vf1"
+    },
+    {
+      "lane_id": "dependency-budget-contract",
+      "source": "proof_lane_manifest_v1",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_budget_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features dependency-ledger --test dependency_budget_contract -- --nocapture",
+      "intended_guarantee": "Dependency budget artifact contract.",
+      "package_or_surface": "asupersync",
+      "target_kind": "artifact_contract",
+      "features": [
+        "dependency-ledger"
+      ],
+      "cfg_test_enabled": "yes",
+      "dev_dependency_edges": "dev_graph_expected",
+      "conformance_expected": "unknown_needs_vf2",
+      "normal_edge_tokio_expectation": "unknown_needs_vf2",
+      "resource_envelope_class": "artifact-contract-medium",
+      "current_rch_behavior": "mapped_not_rerun_in_vf1"
     }
   ],
   "known_regressions_or_blockers": [

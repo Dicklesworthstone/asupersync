@@ -21,9 +21,11 @@
 //! Focused single-module test; small fixed/derived trace corpus, no
 //! `proptest` dependency.
 
+use asupersync::remote::NodeId;
+use asupersync::trace::distributed::{HybridTime, LamportTime, LogicalTime, VectorClock};
 use asupersync::trace::{
-    BacktrackPoint, Race, SleepSet, TraceEvent, detect_hb_races, detect_races, estimated_classes,
-    racing_events, trace_coverage_analysis,
+    BacktrackPoint, HappensBeforeGraph, Race, SleepSet, TraceEvent, detect_hb_races, detect_races,
+    estimated_classes, racing_events, trace_coverage_analysis,
 };
 use asupersync::types::{CancelReason, RegionId, TaskId, Time};
 
@@ -234,6 +236,142 @@ fn hb_races_are_reported_in_stable_trace_order() {
 
     assert_eq!(pairs, sorted, "HB race pairs must be trace-index ordered");
     assert_eq!(pairs, vec![(0, 1), (0, 2), (1, 2)]);
+}
+
+#[test]
+fn recorded_vector_clock_order_prunes_only_the_causal_conflict() {
+    let z = Time::ZERO;
+    let sender = NodeId::new("sender");
+    let receiver = NodeId::new("receiver");
+    let unrelated = NodeId::new("unrelated");
+
+    let mut sent = VectorClock::new();
+    sent.increment(&sender);
+    let mut received = sent.clone();
+    received.increment(&receiver);
+    let mut concurrent = VectorClock::new();
+    concurrent.increment(&unrelated);
+
+    let trace = vec![
+        TraceEvent::cancel_request(1, z, tid(1), rid(1), CancelReason::user("sent"))
+            .with_logical_time(LogicalTime::Vector(sent)),
+        TraceEvent::cancel_request(2, z, tid(2), rid(1), CancelReason::user("received"))
+            .with_logical_time(LogicalTime::Vector(received)),
+        TraceEvent::cancel_request(3, z, tid(3), rid(1), CancelReason::user("concurrent"))
+            .with_logical_time(LogicalTime::Vector(concurrent)),
+    ];
+
+    let hb = HappensBeforeGraph::from_trace(&trace);
+    assert!(hb.happens_before(0, 1));
+    assert!(!hb.happens_before(0, 2));
+    assert!(!hb.happens_before(1, 2));
+
+    let pairs = detect_hb_races(&trace)
+        .races
+        .iter()
+        .map(|race| (race.race.earlier, race.race.later))
+        .collect::<Vec<_>>();
+    assert_eq!(pairs, vec![(0, 2), (1, 2)]);
+}
+
+#[test]
+fn mixed_program_order_and_vector_order_are_transitive() {
+    let z = Time::ZERO;
+    let sender = NodeId::new("sender");
+    let receiver = NodeId::new("receiver");
+    let mut sent = VectorClock::new();
+    sent.increment(&sender);
+    let mut received = sent.clone();
+    received.increment(&receiver);
+
+    let trace = vec![
+        TraceEvent::cancel_request(1, z, tid(1), rid(1), CancelReason::user("local-prefix")),
+        TraceEvent::cancel_request(2, z, tid(1), rid(1), CancelReason::user("sent"))
+            .with_logical_time(LogicalTime::Vector(sent)),
+        TraceEvent::cancel_request(3, z, tid(2), rid(1), CancelReason::user("received"))
+            .with_logical_time(LogicalTime::Vector(received)),
+        TraceEvent::cancel_request(4, z, tid(2), rid(1), CancelReason::user("local-suffix")),
+    ];
+
+    let hb = HappensBeforeGraph::from_trace(&trace);
+    assert!(hb.happens_before(0, 2));
+    assert!(hb.happens_before(0, 3));
+    assert!(hb.happens_before(1, 3));
+    assert!(detect_hb_races(&trace).is_race_free());
+}
+
+#[test]
+fn non_task_events_require_explicit_causal_evidence() {
+    let z = Time::ZERO;
+    let unrelated = [
+        TraceEvent::region_created(1, z, rid(1), None),
+        TraceEvent::spawn(2, z, tid(1), rid(1)),
+    ];
+    assert!(!HappensBeforeGraph::from_trace(&unrelated).happens_before(0, 1));
+
+    let scheduler = NodeId::new("scheduler");
+    let reactor = NodeId::new("reactor");
+    let mut scheduled = VectorClock::new();
+    scheduled.increment(&scheduler);
+    let mut fired = scheduled.clone();
+    fired.increment(&reactor);
+    let ordered = [
+        TraceEvent::timer_scheduled(1, z, 7, Time::from_nanos(10))
+            .with_logical_time(LogicalTime::Vector(scheduled)),
+        TraceEvent::timer_fired(2, Time::from_nanos(10), 7)
+            .with_logical_time(LogicalTime::Vector(fired)),
+    ];
+    assert!(HappensBeforeGraph::from_trace(&ordered).happens_before(0, 1));
+}
+
+#[test]
+fn budget_events_join_the_request_tasks_program_order() {
+    let z = Time::ZERO;
+    let trace = [
+        TraceEvent::budget_installed(1, z, tid(1), rid(1), "h2", None, 64, None, 0, "route"),
+        TraceEvent::poll(2, z, tid(1), rid(1)),
+    ];
+
+    assert!(HappensBeforeGraph::from_trace(&trace).happens_before(0, 1));
+}
+
+#[test]
+fn budget_events_do_not_gain_global_fallback_race_attribution() {
+    let z = Time::ZERO;
+    let trace = [
+        TraceEvent::budget_installed(1, z, tid(1), rid(1), "h2", None, 64, None, 0, "left"),
+        TraceEvent::budget_installed(2, z, tid(2), rid(2), "h2", None, 64, None, 0, "right"),
+    ];
+
+    assert!(detect_hb_races(&trace).is_race_free());
+}
+
+#[test]
+fn scalar_logical_time_never_fabricates_cross_task_happens_before() {
+    let z = Time::ZERO;
+    let scalar_pairs = [
+        (
+            LogicalTime::Lamport(LamportTime::from_raw(1)),
+            LogicalTime::Lamport(LamportTime::from_raw(2)),
+        ),
+        (
+            LogicalTime::Hybrid(HybridTime::new(z, 0)),
+            LogicalTime::Hybrid(HybridTime::new(Time::from_nanos(1), 0)),
+        ),
+    ];
+
+    for (earlier, later) in scalar_pairs {
+        let trace = [
+            TraceEvent::cancel_request(1, z, tid(1), rid(1), CancelReason::user("one"))
+                .with_logical_time(earlier),
+            TraceEvent::cancel_request(2, z, tid(2), rid(1), CancelReason::user("two"))
+                .with_logical_time(later),
+        ];
+
+        let hb = HappensBeforeGraph::from_trace(&trace);
+        assert!(!hb.happens_before(0, 1));
+        assert_eq!(detect_hb_races(&trace).race_count(), 1);
+    }
 }
 
 // ---------------------------------------------------------------------------

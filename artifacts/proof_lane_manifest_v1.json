@@ -411,6 +411,26 @@
         ]
       },
       {
+        "lane_id": "downstream-consumer-default-kafka-test",
+        "lane_class": "run_exact",
+        "expected_graph_roots": [
+          "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+          "tests/kafka_producer_idempotence_audit.rs"
+        ],
+        "expected_heavy_edges": [],
+        "max_expected_crates": 220,
+        "no_claim_boundaries": [
+          "all-root-integration-tests-default-clean",
+          "broad-workspace-health",
+          "conformance-crate",
+          "conformance-dev-dependency-cycle-removal",
+          "kafka-backend-behavior",
+          "performance",
+          "release-readiness",
+          "test-internals-public-api"
+        ]
+      },
+      {
         "lane_id": "downstream-consumer-metrics-run",
         "lane_class": "run_exact",
         "expected_graph_roots": [
@@ -500,6 +520,7 @@
     "unsafe-boundary-ledger-contract",
     "proof-lane-manifest-verifier",
     "downstream-consumer-default-public-api",
+    "downstream-consumer-default-kafka-fail-closed",
     "downstream-consumer-metrics-public-api",
     "downstream-consumer-channel-public-api",
     "downstream-consumer-default-tokio-free",
@@ -2145,6 +2166,43 @@
       }
     },
     {
+      "lane_id": "downstream-consumer-default-kafka-test",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_kafka_default CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --test kafka_default_feature_surface -- --nocapture",
+      "package": "asupersync-downstream-consumer-proof",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "downstream-consumer-default-kafka-fail-closed"
+      ],
+      "covers": "Runs the existing Kafka fail-closed assertions as an integration target of the external downstream fixture with only asupersync default features.",
+      "explicit_not_covered": "removing the root conformance dev-dependency cycle, proving every root integration test default-clean, Kafka backend behavior, conformance crate behavior, test-internals public API, broad workspace health, performance, release-readiness.",
+      "expected_signal": "kafka_default_feature_surface runs 2 tests successfully against the external fixture with only default asupersync features",
+      "source_paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/kafka_producer_idempotence_audit.rs"
+      ],
+      "common_unrelated_blockers": [
+        "external fixture compile drift",
+        "public runtime API drift",
+        "remote worker compile cache pressure"
+      ],
+      "escalation_notes": "Use this lane only for the representative downstream default-feature Kafka fail-closed branch; it does not repair or characterize the root package dev-dependency cycle broadly.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "downstream-consumer-default-kafka-fail-closed"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
       "lane_id": "downstream-consumer-metrics-run",
       "kind": "test_frontier",
       "resource_envelope_class": "test-frontier-heavy",
@@ -3356,6 +3414,13 @@
       "description": "default-public-surface-run is represented by a downstream-consumer proof lane with explicit no-claim boundaries.",
       "lane_ids": [
         "downstream-consumer-default-run"
+      ]
+    },
+    {
+      "guarantee_id": "downstream-consumer-default-kafka-fail-closed",
+      "description": "default-kafka-fail-closed-test runs the representative Kafka boundary as a true external default-feature test without root dev-dependency feature unification.",
+      "lane_ids": [
+        "downstream-consumer-default-kafka-test"
       ]
     },
     {
