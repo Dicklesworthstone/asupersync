@@ -9,9 +9,9 @@ authoritative for exact messages, tags, wire kinds, cardinalities, oneofs,
 reserved tags, enums, limits, ownership, and no-claim boundaries.
 
 The packet is an authority and partial-source receipt, not a completion receipt.
-The private common/resource/metrics slice, the three metrics-collector
+The private common/resource/metrics/logs slice, the three metrics-collector
 messages, their unit-test bodies, and a terminal native default-plus-metrics
-library check are present. The remaining 17 messages and unit-test execution
+library check are present. The remaining 13 messages and unit-test execution
 remain pending. The public arbitrary `prost::Message` capability and every
 incumbent OTLP path stay intact.
 
@@ -85,16 +85,16 @@ transport integration remain downstream work.
 
 The implemented slice is exactly the six common messages (`AnyValue`,
 `ArrayValue`, `KeyValueList`, `KeyValue`, `InstrumentationScope`, and
-`EntityRef`), `Resource`, all 16 metrics messages, and the three
-metrics-collector request, response, and partial-success messages. Its shared
-semantic budget, fallible owned storage, deterministic known-field encoding,
-unknown-field preservation, oneof and singular-message merge behavior,
-packed/unpacked scalar handling, metric equations, partial-success invariants,
-and local boundary/error test bodies are present in
-`src/observability/otlp_proto.rs`. Trace and logs remain unimplemented. The
-aggregate collector submodule also remains pending because collector-trace and
-collector-logs messages are absent, so A3 remains open and A4/A7 remain
-blocked.
+`EntityRef`), `Resource`, all 16 metrics messages, all four logs messages, and
+the three metrics-collector request, response, and partial-success messages.
+Its shared semantic budget, fallible owned storage, deterministic known-field
+encoding, unknown-field preservation, oneof and singular-message merge
+behavior, packed/unpacked scalar handling, metric equations, logs severity and
+flag retention, exact-or-empty log IDs, partial-success invariants, and local
+boundary/error test bodies are present in `src/observability/otlp_proto.rs`.
+Trace remains unimplemented. The aggregate collector submodule also remains
+pending because collector-trace and collector-logs messages are absent, so A3
+remains open and A4/A7 remain blocked.
 
 Every finite message must own an `UnknownFields` member. Enum-valued fields are
 stored as raw numeric values with typed helpers for known values; unknown values
@@ -198,7 +198,7 @@ fields. The current derive path cannot yet make the A3 resource claim:
   growth; fallible alternatives now exist, but a safe downstream shared nested
   writer remains pending.
 
-The common/resource/metrics/collector_metrics slice therefore uses manual
+The common/resource/metrics/logs/collector_metrics slice therefore uses manual
 `ProtoMessage` implementations with one shared semantic budget plus reviewed
 bounded nested/collection primitives in the authoring layer. Remaining
 families must preserve that pattern. Deriving the messages and calling
@@ -251,10 +251,11 @@ post-decode-only budgeting, and accidental public or cutover authority.
 
 Within A3, `__lab_lifecycle` means deterministic shared-budget and fresh-decode
 failure-state checks only; it proves no runtime task, cancellation, shutdown,
-or transport behavior. `__downstream_consumer` means a compile/use check that
-the implemented finite metrics and metrics-export request/response shapes pass
-through the existing owned generic codec; it does not cover signal adapters,
-framing, collector contact, transport, or user journeys.
+or transport behavior. `__downstream_consumer` reserves source-level
+compile/use test bodies for the implemented finite metrics, logs, and
+metrics-export request/response shapes through the existing owned generic
+codec. Those unit tests have not executed, and the scope does not cover signal
+adapters, framing, collector contact, transport, or user journeys.
 
 The semantic invariants in the artifact are a non-exhaustive minimum. The
 implementation remains bound to every normative requirement in the pinned
@@ -264,27 +265,31 @@ the complete semantic specification.
 
 ## Current validation
 
-This partial implementation slice has one terminal compiler receipt. Under an
-RCH clean overlay containing only the four owned source paths,
-`cargo check --locked -p asupersync --lib --features metrics -j 4` completed
-with exit code 0 and warnings denied on 2026-08-02. That receipt establishes a
-native default-plus-metrics library typecheck only; it does not compile or run
-the unit-test bodies and is not a broad workspace or feature-matrix result.
+This 30-message partial implementation slice has one terminal green compiler
+receipt. Under an RCH clean overlay containing only the four owned source
+paths, `cargo check --locked -p asupersync --lib --features metrics -j 4`
+completed with exit code 0 and warnings denied on 2026-08-02 (`hz2`, job
+`j-29958371041869956`). That receipt establishes a native
+default-plus-metrics library typecheck for the
+common/resource/metrics/logs/collector_metrics source only; it does not compile
+or run the unit-test bodies and is not a broad workspace or feature-matrix
+result.
 
 The artifact records 8 families, 43 unique message names, 163 fields with no
 duplicate tag inside a message, 7 enum/bitmask rows, and 3 services. Independent
 read-only review compares the registry against the vendored v1.10.0 sources.
-The refreshed contract source and common/resource/metrics/collector_metrics
-unit-test bodies are present. Static validation refresh and canonical unit-test
-execution remain pending. The remaining 17 finite messages, reference vectors,
-feature matrix, and downstream journeys are also pending.
+The refreshed contract source and
+common/resource/metrics/logs/collector_metrics unit-test bodies are present.
+Static validation refresh and canonical unit-test execution remain pending.
+The remaining 13 finite messages, reference vectors, feature matrix, and
+downstream journeys are also pending.
 
 ## No-claim boundary
 
 This packet records source, unit-test bodies, and a terminal native
 default-plus-metrics library check for the private
-common/resource/metrics/collector_metrics slice. It does not execute the unit
-tests and does not implement trace, logs, collector_trace, or collector_logs.
+common/resource/metrics/logs/collector_metrics slice. It does not execute the
+unit tests and does not implement trace, collector_trace, or collector_logs.
 It proves no malformed/resource behavior, byte parity, collector contact,
 signal wiring, or transport behavior and establishes no incumbent parity for
 the new A3 caps. It adds no generated dependency, tonic, Tokio, or runtime to a

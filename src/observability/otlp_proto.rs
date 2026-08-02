@@ -3,9 +3,9 @@
 //! This module is the implementation side of `protobuf-owned-otlp-schema-v1`.
 //! It deliberately remains crate-private and separate from signal adapters,
 //! transport framing, generated reference messages, and dependency cutover.
-//! The current implementation slice owns the common, resource, metrics, and
-//! metrics-collector families plus the shared resource-accounting machinery
-//! required by later signal models.
+//! The current implementation slice owns the common, resource, metrics, logs,
+//! and metrics-collector families plus the shared resource-accounting
+//! machinery required by later signal models.
 
 use crate::grpc::protobuf::{
     ProtoMessage, ProtobufWireDecoder, ProtobufWireEncoder, ProtobufWireError, ProtobufWireField,
@@ -32,6 +32,7 @@ mod limits_and_error {
     pub(super) const MAX_RESOURCE_GROUPS_PER_REQUEST: usize = 64;
     pub(super) const MAX_SCOPES_PER_RESOURCE_GROUP: usize = 128;
     pub(super) const MAX_METRICS_PER_SCOPE: usize = 4_096;
+    pub(super) const MAX_LOG_RECORDS_PER_SCOPE: usize = 4_096;
     pub(super) const MAX_DATA_POINTS_PER_METRIC: usize = 1_000;
     pub(super) const MAX_METRIC_METADATA_ENTRIES: usize = 128;
     pub(super) const MAX_EXEMPLARS_PER_DATA_POINT: usize = 128;
@@ -48,6 +49,8 @@ mod limits_and_error {
     pub(super) const MAX_METRIC_NAME_BYTES: usize = 1_024;
     pub(super) const MAX_METRIC_DESCRIPTION_BYTES: usize = 4_096;
     pub(super) const MAX_METRIC_UNIT_BYTES: usize = 256;
+    pub(super) const MAX_LOG_SEVERITY_TEXT_BYTES: usize = 1_024;
+    pub(super) const MAX_LOG_EVENT_NAME_BYTES: usize = 1_024;
     pub(super) const MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES: usize = 4_096;
     pub(super) const MAX_TRACE_ID_BYTES: usize = 16;
     pub(super) const MAX_SPAN_ID_BYTES: usize = 8;
@@ -3108,6 +3111,579 @@ pub(crate) mod metrics {
     impl_proto_message!(Exemplar);
 }
 
+pub(crate) mod logs {
+    use super::common_and_resource::{AnyValue, InstrumentationScope, KeyValue, Resource};
+    use super::limits_and_error::{
+        MAX_ATTRIBUTES, MAX_LOG_EVENT_NAME_BYTES, MAX_LOG_RECORDS_PER_SCOPE,
+        MAX_LOG_SEVERITY_TEXT_BYTES, MAX_RESOURCE_GROUPS_PER_REQUEST, MAX_SCHEMA_URL_BYTES,
+        MAX_SCOPES_PER_RESOURCE_GROUP, MAX_SPAN_ID_BYTES, MAX_TRACE_ID_BYTES, OtlpModel,
+        ValidationBudget, decode_exact_or_empty_bytes, decode_string, encode_nested,
+        merge_optional_message, merge_root, preserve_unknown, push_message, validate_root,
+        validate_unique_keys, validate_unknown,
+    };
+    use super::{
+        ProtoMessage, ProtobufWireDecoder, ProtobufWireEncoder, ProtobufWireError,
+        ProtobufWireField, ProtobufWireLimits, UnknownFields,
+    };
+
+    macro_rules! impl_proto_message {
+        ($type:ty) => {
+            impl ProtoMessage for $type {
+                fn encode_fields(
+                    &self,
+                    encoder: &mut ProtobufWireEncoder,
+                ) -> Result<(), ProtobufWireError> {
+                    let remaining_work = encoder.remaining_work()?;
+                    let validation = validate_root(self, remaining_work, true)?;
+                    encoder.charge_schema_work(validation.work_used)?;
+                    self.encode_fields_unchecked(encoder)
+                }
+
+                fn merge_field<'wire>(
+                    &mut self,
+                    field: &ProtobufWireField<'wire>,
+                    decoder: &mut ProtobufWireDecoder<'wire, '_>,
+                ) -> Result<bool, ProtobufWireError> {
+                    self.merge_otlp_field(field, decoder)
+                }
+
+                fn merge_from_bytes(
+                    &mut self,
+                    input: &[u8],
+                    limits: ProtobufWireLimits,
+                ) -> Result<(), ProtobufWireError> {
+                    merge_root(self, input, limits)
+                }
+
+                fn decode_from_bytes(
+                    input: &[u8],
+                    limits: ProtobufWireLimits,
+                ) -> Result<Self, ProtobufWireError> {
+                    let mut staged = Self::default();
+                    merge_root(&mut staged, input, limits)?;
+                    Ok(staged)
+                }
+            }
+        };
+    }
+
+    fn validate_models<M: OtlpModel>(
+        values: &[M],
+        budget: &mut ValidationBudget,
+        collection_limit: usize,
+        resource: &'static str,
+    ) -> Result<(), ProtobufWireError> {
+        budget.repeated(values.len(), collection_limit, resource)?;
+        for value in values {
+            value.validate_otlp(budget, 0)?;
+        }
+        Ok(())
+    }
+
+    fn validate_attributes(
+        attributes: &[KeyValue],
+        budget: &mut ValidationBudget,
+    ) -> Result<(), ProtobufWireError> {
+        budget.repeated(attributes.len(), MAX_ATTRIBUTES, "log record attributes")?;
+        validate_unique_keys(
+            attributes,
+            budget,
+            "log record attribute keys must be unique",
+        )?;
+        for attribute in attributes {
+            attribute.validate_otlp(budget, 0)?;
+        }
+        Ok(())
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    #[repr(i32)]
+    pub(crate) enum SeverityNumber {
+        Unspecified = 0,
+        Trace = 1,
+        Trace2 = 2,
+        Trace3 = 3,
+        Trace4 = 4,
+        Debug = 5,
+        Debug2 = 6,
+        Debug3 = 7,
+        Debug4 = 8,
+        Info = 9,
+        Info2 = 10,
+        Info3 = 11,
+        Info4 = 12,
+        Warn = 13,
+        Warn2 = 14,
+        Warn3 = 15,
+        Warn4 = 16,
+        Error = 17,
+        Error2 = 18,
+        Error3 = 19,
+        Error4 = 20,
+        Fatal = 21,
+        Fatal2 = 22,
+        Fatal3 = 23,
+        Fatal4 = 24,
+    }
+
+    impl SeverityNumber {
+        pub(crate) const fn from_raw(value: i32) -> Option<Self> {
+            match value {
+                0 => Some(Self::Unspecified),
+                1 => Some(Self::Trace),
+                2 => Some(Self::Trace2),
+                3 => Some(Self::Trace3),
+                4 => Some(Self::Trace4),
+                5 => Some(Self::Debug),
+                6 => Some(Self::Debug2),
+                7 => Some(Self::Debug3),
+                8 => Some(Self::Debug4),
+                9 => Some(Self::Info),
+                10 => Some(Self::Info2),
+                11 => Some(Self::Info3),
+                12 => Some(Self::Info4),
+                13 => Some(Self::Warn),
+                14 => Some(Self::Warn2),
+                15 => Some(Self::Warn3),
+                16 => Some(Self::Warn4),
+                17 => Some(Self::Error),
+                18 => Some(Self::Error2),
+                19 => Some(Self::Error3),
+                20 => Some(Self::Error4),
+                21 => Some(Self::Fatal),
+                22 => Some(Self::Fatal2),
+                23 => Some(Self::Fatal3),
+                24 => Some(Self::Fatal4),
+                _ => None,
+            }
+        }
+
+        pub(crate) const fn as_raw(self) -> i32 {
+            self as i32
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub(crate) struct LogRecordFlags(u32);
+
+    impl LogRecordFlags {
+        pub(crate) const DO_NOT_USE: Self = Self(0);
+        pub(crate) const TRACE_FLAGS_MASK: Self = Self(0xff);
+
+        pub(crate) const fn from_bits_retain(bits: u32) -> Self {
+            Self(bits)
+        }
+
+        pub(crate) const fn bits(self) -> u32 {
+            self.0
+        }
+
+        pub(crate) const fn contains(self, mask: Self) -> bool {
+            self.0 & mask.0 == mask.0
+        }
+
+        pub(crate) const fn trace_flags(self) -> u8 {
+            (self.0 & Self::TRACE_FLAGS_MASK.0) as u8
+        }
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct LogsData {
+        pub(crate) resource_logs: Vec<ResourceLogs>,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for LogsData {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            for resource_logs in &self.resource_logs {
+                encode_nested(encoder, 1, resource_logs)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                1 => push_message(
+                    &mut self.resource_logs,
+                    field,
+                    decoder,
+                    MAX_RESOURCE_GROUPS_PER_REQUEST,
+                    "log resource groups",
+                    false,
+                )?,
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            validate_models(
+                &self.resource_logs,
+                budget,
+                MAX_RESOURCE_GROUPS_PER_REQUEST,
+                "log resource groups",
+            )?;
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(LogsData);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct ResourceLogs {
+        pub(crate) resource: Option<Resource>,
+        pub(crate) scope_logs: Vec<ScopeLogs>,
+        pub(crate) schema_url: String,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for ResourceLogs {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            if let Some(resource) = &self.resource {
+                encode_nested(encoder, 1, resource)?;
+            }
+            for scope_logs in &self.scope_logs {
+                encode_nested(encoder, 2, scope_logs)?;
+            }
+            if !self.schema_url.is_empty() {
+                encoder.write_string(3, &self.schema_url)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                1 => merge_optional_message(&mut self.resource, field, decoder, false)?,
+                2 => push_message(
+                    &mut self.scope_logs,
+                    field,
+                    decoder,
+                    MAX_SCOPES_PER_RESOURCE_GROUP,
+                    "log scopes per resource group",
+                    false,
+                )?,
+                3 => {
+                    self.schema_url = decode_string(
+                        field,
+                        decoder,
+                        MAX_SCHEMA_URL_BYTES,
+                        "log resource schema URL bytes",
+                    )?;
+                }
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            if let Some(resource) = &self.resource {
+                resource.validate_otlp(budget, 0)?;
+            }
+            validate_models(
+                &self.scope_logs,
+                budget,
+                MAX_SCOPES_PER_RESOURCE_GROUP,
+                "log scopes per resource group",
+            )?;
+            budget.owned_bytes(
+                self.schema_url.len(),
+                MAX_SCHEMA_URL_BYTES,
+                "log resource schema URL bytes",
+            )?;
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(ResourceLogs);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct ScopeLogs {
+        pub(crate) scope: Option<InstrumentationScope>,
+        pub(crate) log_records: Vec<LogRecord>,
+        pub(crate) schema_url: String,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl OtlpModel for ScopeLogs {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            if let Some(scope) = &self.scope {
+                encode_nested(encoder, 1, scope)?;
+            }
+            for log_record in &self.log_records {
+                encode_nested(encoder, 2, log_record)?;
+            }
+            if !self.schema_url.is_empty() {
+                encoder.write_string(3, &self.schema_url)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                1 => merge_optional_message(&mut self.scope, field, decoder, false)?,
+                2 => push_message(
+                    &mut self.log_records,
+                    field,
+                    decoder,
+                    MAX_LOG_RECORDS_PER_SCOPE,
+                    "log records per scope",
+                    false,
+                )?,
+                3 => {
+                    self.schema_url = decode_string(
+                        field,
+                        decoder,
+                        MAX_SCHEMA_URL_BYTES,
+                        "log scope schema URL bytes",
+                    )?;
+                }
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            if let Some(scope) = &self.scope {
+                scope.validate_otlp(budget, 0)?;
+            }
+            validate_models(
+                &self.log_records,
+                budget,
+                MAX_LOG_RECORDS_PER_SCOPE,
+                "log records per scope",
+            )?;
+            budget.owned_bytes(
+                self.schema_url.len(),
+                MAX_SCHEMA_URL_BYTES,
+                "log scope schema URL bytes",
+            )?;
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(ScopeLogs);
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) struct LogRecord {
+        pub(crate) time_unix_nano: u64,
+        pub(crate) severity_number: i32,
+        pub(crate) severity_text: String,
+        pub(crate) body: Option<AnyValue>,
+        pub(crate) attributes: Vec<KeyValue>,
+        pub(crate) dropped_attributes_count: u32,
+        pub(crate) flags: u32,
+        pub(crate) trace_id: Vec<u8>,
+        pub(crate) span_id: Vec<u8>,
+        pub(crate) observed_time_unix_nano: u64,
+        pub(crate) event_name: String,
+        pub(crate) unknown_fields: UnknownFields,
+    }
+
+    impl LogRecord {
+        pub(crate) fn has_valid_trace_id(&self) -> bool {
+            self.trace_id.len() == MAX_TRACE_ID_BYTES && self.trace_id.iter().any(|byte| *byte != 0)
+        }
+
+        pub(crate) fn has_valid_span_id(&self) -> bool {
+            self.span_id.len() == MAX_SPAN_ID_BYTES && self.span_id.iter().any(|byte| *byte != 0)
+        }
+
+        pub(crate) fn has_valid_span_context(&self) -> bool {
+            self.has_valid_trace_id() && self.has_valid_span_id()
+        }
+
+        pub(crate) fn is_event(&self) -> bool {
+            !self.event_name.is_empty()
+        }
+    }
+
+    impl OtlpModel for LogRecord {
+        fn encode_fields_unchecked(
+            &self,
+            encoder: &mut ProtobufWireEncoder,
+        ) -> Result<(), ProtobufWireError> {
+            if self.time_unix_nano != 0 {
+                encoder.write_fixed64(1, self.time_unix_nano)?;
+            }
+            if self.severity_number != 0 {
+                encoder.write_enum(2, self.severity_number)?;
+            }
+            if !self.severity_text.is_empty() {
+                encoder.write_string(3, &self.severity_text)?;
+            }
+            if let Some(body) = &self.body {
+                encode_nested(encoder, 5, body)?;
+            }
+            for attribute in &self.attributes {
+                encode_nested(encoder, 6, attribute)?;
+            }
+            if self.dropped_attributes_count != 0 {
+                encoder.write_varint(7, u64::from(self.dropped_attributes_count))?;
+            }
+            if self.flags != 0 {
+                encoder.write_fixed32(8, self.flags)?;
+            }
+            if !self.trace_id.is_empty() {
+                encoder.write_bytes(9, &self.trace_id)?;
+            }
+            if !self.span_id.is_empty() {
+                encoder.write_bytes(10, &self.span_id)?;
+            }
+            if self.observed_time_unix_nano != 0 {
+                encoder.write_fixed64(11, self.observed_time_unix_nano)?;
+            }
+            if !self.event_name.is_empty() {
+                encoder.write_string(12, &self.event_name)?;
+            }
+            self.unknown_fields.encode(encoder)
+        }
+
+        fn merge_otlp_field<'wire>(
+            &mut self,
+            field: &ProtobufWireField<'wire>,
+            decoder: &mut ProtobufWireDecoder<'wire, '_>,
+        ) -> Result<bool, ProtobufWireError> {
+            match field.field_number() {
+                1 => self.time_unix_nano = field.as_fixed64()?,
+                2 => self.severity_number = (field.as_varint()? as u32).cast_signed(),
+                3 => {
+                    self.severity_text = decode_string(
+                        field,
+                        decoder,
+                        MAX_LOG_SEVERITY_TEXT_BYTES,
+                        "log severity text bytes",
+                    )?;
+                }
+                5 => merge_optional_message(&mut self.body, field, decoder, true)?,
+                6 => push_message(
+                    &mut self.attributes,
+                    field,
+                    decoder,
+                    MAX_ATTRIBUTES,
+                    "log record attributes",
+                    false,
+                )?,
+                7 => self.dropped_attributes_count = field.as_varint()? as u32,
+                8 => self.flags = field.as_fixed32()?,
+                9 => {
+                    self.trace_id = decode_exact_or_empty_bytes(
+                        field,
+                        decoder,
+                        MAX_TRACE_ID_BYTES,
+                        "log record trace ID bytes",
+                        "log record trace ID must be empty or exactly sixteen bytes",
+                    )?;
+                }
+                10 => {
+                    self.span_id = decode_exact_or_empty_bytes(
+                        field,
+                        decoder,
+                        MAX_SPAN_ID_BYTES,
+                        "log record span ID bytes",
+                        "log record span ID must be empty or exactly eight bytes",
+                    )?;
+                }
+                11 => self.observed_time_unix_nano = field.as_fixed64()?,
+                12 => {
+                    self.event_name = decode_string(
+                        field,
+                        decoder,
+                        MAX_LOG_EVENT_NAME_BYTES,
+                        "log event name bytes",
+                    )?;
+                }
+                _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+            }
+            Ok(true)
+        }
+
+        fn validate_otlp(
+            &self,
+            budget: &mut ValidationBudget,
+            _any_value_depth: usize,
+        ) -> Result<(), ProtobufWireError> {
+            if budget.enforces_invariants()
+                && !self.trace_id.is_empty()
+                && self.trace_id.len() != MAX_TRACE_ID_BYTES
+            {
+                return Err(ProtobufWireError::SchemaInvariant {
+                    offset: 0,
+                    invariant: "log record trace ID must be empty or exactly sixteen bytes",
+                });
+            }
+            if budget.enforces_invariants()
+                && !self.span_id.is_empty()
+                && self.span_id.len() != MAX_SPAN_ID_BYTES
+            {
+                return Err(ProtobufWireError::SchemaInvariant {
+                    offset: 0,
+                    invariant: "log record span ID must be empty or exactly eight bytes",
+                });
+            }
+            budget.owned_bytes(
+                self.severity_text.len(),
+                MAX_LOG_SEVERITY_TEXT_BYTES,
+                "log severity text bytes",
+            )?;
+            if let Some(body) = &self.body {
+                body.validate_otlp(budget, 1)?;
+            }
+            validate_attributes(&self.attributes, budget)?;
+            budget.owned_bytes(
+                self.trace_id.len(),
+                MAX_TRACE_ID_BYTES,
+                "log record trace ID bytes",
+            )?;
+            budget.owned_bytes(
+                self.span_id.len(),
+                MAX_SPAN_ID_BYTES,
+                "log record span ID bytes",
+            )?;
+            budget.owned_bytes(
+                self.event_name.len(),
+                MAX_LOG_EVENT_NAME_BYTES,
+                "log event name bytes",
+            )?;
+            validate_unknown(&self.unknown_fields, budget)
+        }
+    }
+
+    impl_proto_message!(LogRecord);
+}
+
 pub(crate) mod collector {
     pub(crate) mod metrics {
         use super::super::limits_and_error::{
@@ -3337,15 +3913,19 @@ mod tests {
         AnyValue, AnyValueValue, ArrayValue, EntityRef, InstrumentationScope, KeyValue, Resource,
     };
     use super::limits_and_error::{
-        MAX_ANY_VALUE_DEPTH, MAX_ANY_VALUE_ITEMS, MAX_ATTRIBUTE_VALUE_BYTES,
+        MAX_ANY_VALUE_DEPTH, MAX_ANY_VALUE_ITEMS, MAX_ATTRIBUTE_VALUE_BYTES, MAX_ATTRIBUTES,
         MAX_DATA_POINTS_PER_METRIC, MAX_EXEMPLARS_PER_DATA_POINT,
         MAX_EXPONENTIAL_HISTOGRAM_BUCKETS, MAX_HISTOGRAM_BUCKET_COUNTS,
-        MAX_HISTOGRAM_EXPLICIT_BOUNDS, MAX_METRIC_DESCRIPTION_BYTES, MAX_METRIC_METADATA_ENTRIES,
+        MAX_HISTOGRAM_EXPLICIT_BOUNDS, MAX_LOG_EVENT_NAME_BYTES, MAX_LOG_RECORDS_PER_SCOPE,
+        MAX_LOG_SEVERITY_TEXT_BYTES, MAX_METRIC_DESCRIPTION_BYTES, MAX_METRIC_METADATA_ENTRIES,
         MAX_METRIC_NAME_BYTES, MAX_METRIC_UNIT_BYTES, MAX_METRICS_PER_SCOPE,
         MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES, MAX_RESOURCE_GROUPS_PER_REQUEST,
-        MAX_SCOPES_PER_RESOURCE_GROUP, MAX_SPAN_ID_BYTES, MAX_SUMMARY_QUANTILES,
-        MAX_TOTAL_ANY_VALUE_NODES, MAX_TOTAL_OWNED_BYTES, MAX_TOTAL_REPEATED_ITEMS,
-        MAX_TRACE_ID_BYTES, ValidationBudget,
+        MAX_SCHEMA_URL_BYTES, MAX_SCOPES_PER_RESOURCE_GROUP, MAX_SPAN_ID_BYTES,
+        MAX_SUMMARY_QUANTILES, MAX_TOTAL_ANY_VALUE_NODES, MAX_TOTAL_OWNED_BYTES,
+        MAX_TOTAL_REPEATED_ITEMS, MAX_TRACE_ID_BYTES, ValidationBudget,
+    };
+    use super::logs::{
+        LogRecord, LogRecordFlags, LogsData, ResourceLogs, ScopeLogs, SeverityNumber,
     };
     use super::metrics::{
         AggregationTemporality, DataPointFlags, Exemplar, ExemplarValue, ExponentialHistogram,
@@ -3705,6 +4285,494 @@ mod tests {
                 accepted
             );
         }
+    }
+
+    #[test]
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix_logs_all_fields_round_trip() {
+        let record = LogRecord {
+            time_unix_nano: 11,
+            severity_number: SeverityNumber::Warn3.as_raw(),
+            severity_text: "warning".to_owned(),
+            body: Some(string_value("structured body")),
+            attributes: vec![attribute("service.name", "asupersync")],
+            dropped_attributes_count: 2,
+            flags: LogRecordFlags::TRACE_FLAGS_MASK.bits() | 0x8000_0000,
+            trace_id: vec![0x11; MAX_TRACE_ID_BYTES],
+            span_id: vec![0x22; MAX_SPAN_ID_BYTES],
+            observed_time_unix_nano: 12,
+            event_name: "asupersync.runtime.warning".to_owned(),
+            unknown_fields: UnknownFields::new(),
+        };
+        assert!(record.has_valid_trace_id());
+        assert!(record.has_valid_span_id());
+        assert!(record.has_valid_span_context());
+        assert!(record.is_event());
+
+        let model = LogsData {
+            resource_logs: vec![ResourceLogs {
+                resource: Some(Resource {
+                    attributes: vec![attribute("deployment.environment", "test")],
+                    ..Resource::default()
+                }),
+                scope_logs: vec![ScopeLogs {
+                    scope: Some(InstrumentationScope {
+                        name: "asupersync".to_owned(),
+                        version: "0.3.10".to_owned(),
+                        ..InstrumentationScope::default()
+                    }),
+                    log_records: vec![record],
+                    schema_url: "https://opentelemetry.io/schemas/1.37.0".to_owned(),
+                    unknown_fields: UnknownFields::new(),
+                }],
+                schema_url: "https://opentelemetry.io/schemas/1.37.0".to_owned(),
+                unknown_fields: UnknownFields::new(),
+            }],
+            unknown_fields: UnknownFields::new(),
+        };
+        let encoded = model
+            .encode_to_bytes(limits())
+            .expect("encode complete logs model");
+        assert_eq!(
+            LogsData::decode_from_bytes(&encoded, limits()).expect("decode complete logs model"),
+            model
+        );
+        assert_eq!(
+            model
+                .encode_to_bytes(limits())
+                .expect("repeat complete logs encoding"),
+            encoded
+        );
+
+        for raw in 0..=24 {
+            assert_eq!(
+                SeverityNumber::from_raw(raw)
+                    .expect("known severity")
+                    .as_raw(),
+                raw
+            );
+        }
+        assert_eq!(SeverityNumber::from_raw(25), None);
+        assert_eq!(SeverityNumber::from_raw(-1), None);
+
+        let retained_flags = LogRecordFlags::from_bits_retain(0xabcd_ef01);
+        assert_eq!(retained_flags.bits(), 0xabcd_ef01);
+        assert_eq!(retained_flags.trace_flags(), 0x01);
+        assert!(retained_flags.contains(LogRecordFlags::from_bits_retain(1)));
+        assert_eq!(LogRecordFlags::DO_NOT_USE.bits(), 0);
+
+        let zero_timestamps = LogRecord::default();
+        let zero_wire = zero_timestamps
+            .encode_to_bytes(limits())
+            .expect("zero timestamps are structurally valid");
+        assert!(zero_wire.is_empty());
+        assert_eq!(
+            LogRecord::decode_from_bytes(&zero_wire, limits()).expect("decode zero timestamps"),
+            zero_timestamps
+        );
+        assert!(!zero_timestamps.is_event());
+
+        let all_zero_ids = LogRecord {
+            trace_id: vec![0; MAX_TRACE_ID_BYTES],
+            span_id: vec![0; MAX_SPAN_ID_BYTES],
+            ..LogRecord::default()
+        };
+        all_zero_ids
+            .encode_to_bytes(limits())
+            .expect("all-zero exact-width IDs are structurally retained");
+        assert!(!all_zero_ids.has_valid_trace_id());
+        assert!(!all_zero_ids.has_valid_span_id());
+        assert!(!all_zero_ids.has_valid_span_context());
+    }
+
+    #[test]
+    fn logs_merge_reserved_and_forward_values_are_preserved() {
+        let first_body = string_value("first")
+            .encode_to_bytes(limits())
+            .expect("encode first body fragment");
+        let mut second_body = ProtobufWireEncoder::new(limits());
+        second_body
+            .write_varint(15, 7)
+            .expect("encode body unknown field");
+        let second_body = second_body.finish().expect("finish second body fragment");
+
+        let mut record_wire = ProtobufWireEncoder::new(limits());
+        record_wire
+            .write_enum(2, -7)
+            .expect("encode unknown negative severity");
+        record_wire
+            .write_message(5, &first_body)
+            .expect("encode first body occurrence");
+        record_wire
+            .write_message(5, &second_body)
+            .expect("encode second body occurrence");
+        record_wire
+            .write_fixed32(8, 0xabcd_ef01)
+            .expect("encode retained upper flag bits");
+        record_wire
+            .write_varint(4, 1)
+            .expect("encode reserved log-record tag");
+        let record = LogRecord::decode_from_bytes(
+            &record_wire.finish().expect("finish log merge fixture"),
+            limits(),
+        )
+        .expect("decode merged log record");
+        assert_eq!(record.severity_number, -7);
+        assert_eq!(SeverityNumber::from_raw(record.severity_number), None);
+        assert_eq!(record.flags, 0xabcd_ef01);
+        assert_eq!(
+            LogRecordFlags::from_bits_retain(record.flags).trace_flags(),
+            0x01
+        );
+        let body = record
+            .body
+            .as_ref()
+            .expect("merged body must remain present");
+        assert_eq!(
+            body.value.as_ref(),
+            Some(&AnyValueValue::String("first".to_owned()))
+        );
+        assert_eq!(body.unknown_fields.as_bytes(), [0x78, 0x07]);
+        assert_eq!(record.unknown_fields.as_bytes(), [0x20, 0x01]);
+        let canonical = record
+            .encode_to_bytes(limits())
+            .expect("re-encode merged log record");
+        assert!(canonical.ends_with(&[0x20, 0x01]));
+        assert_eq!(
+            LogRecord::decode_from_bytes(&canonical, limits())
+                .expect("decode canonical merged log record"),
+            record
+        );
+
+        let mut reserved_resource = ProtobufWireEncoder::new(limits());
+        reserved_resource
+            .write_varint(1000, 1)
+            .expect("encode reserved resource-logs tag");
+        let reserved_resource = reserved_resource
+            .finish()
+            .expect("finish resource reserved fixture");
+        assert_eq!(reserved_resource.as_ref(), &[0xc0, 0x3e, 0x01]);
+        let decoded_resource = ResourceLogs::decode_from_bytes(&reserved_resource, limits())
+            .expect("decode reserved resource-logs tag");
+        assert_eq!(
+            decoded_resource.unknown_fields.as_bytes(),
+            reserved_resource.as_ref()
+        );
+        assert_eq!(
+            decoded_resource
+                .encode_to_bytes(limits())
+                .expect("re-encode reserved resource-logs tag"),
+            reserved_resource
+        );
+
+        let mut wrong_wire = ProtobufWireEncoder::new(limits());
+        wrong_wire
+            .write_varint(8, 1)
+            .expect("encode wrong-wire flags fixture");
+        assert!(matches!(
+            LogRecord::decode_from_bytes(
+                &wrong_wire.finish().expect("finish wrong-wire flags"),
+                limits(),
+            ),
+            Err(ProtobufWireError::WireTypeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants_logs_limits_are_exact() {
+        LogsData {
+            resource_logs: vec![ResourceLogs::default(); MAX_RESOURCE_GROUPS_PER_REQUEST],
+            unknown_fields: UnknownFields::new(),
+        }
+        .encode_to_bytes(limits())
+        .expect("exact log resource-group limit");
+        assert!(matches!(
+            LogsData {
+                resource_logs: vec![
+                    ResourceLogs::default();
+                    MAX_RESOURCE_GROUPS_PER_REQUEST + 1
+                ],
+                unknown_fields: UnknownFields::new(),
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "log resource groups",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_RESOURCE_GROUPS_PER_REQUEST + 1
+                && limit == MAX_RESOURCE_GROUPS_PER_REQUEST
+        ));
+
+        ResourceLogs {
+            scope_logs: vec![ScopeLogs::default(); MAX_SCOPES_PER_RESOURCE_GROUP],
+            ..ResourceLogs::default()
+        }
+        .encode_to_bytes(limits())
+        .expect("exact log scope limit");
+        assert!(matches!(
+            ResourceLogs {
+                scope_logs: vec![ScopeLogs::default(); MAX_SCOPES_PER_RESOURCE_GROUP + 1],
+                ..ResourceLogs::default()
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "log scopes per resource group",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_SCOPES_PER_RESOURCE_GROUP + 1
+                && limit == MAX_SCOPES_PER_RESOURCE_GROUP
+        ));
+
+        ScopeLogs {
+            log_records: vec![LogRecord::default(); MAX_LOG_RECORDS_PER_SCOPE],
+            ..ScopeLogs::default()
+        }
+        .encode_to_bytes(limits())
+        .expect("exact log-record limit");
+        assert!(matches!(
+            ScopeLogs {
+                log_records: vec![LogRecord::default(); MAX_LOG_RECORDS_PER_SCOPE + 1],
+                ..ScopeLogs::default()
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "log records per scope",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_LOG_RECORDS_PER_SCOPE + 1
+                && limit == MAX_LOG_RECORDS_PER_SCOPE
+        ));
+        let mut over_records_wire = ProtobufWireEncoder::new(limits());
+        for _ in 0..=MAX_LOG_RECORDS_PER_SCOPE {
+            over_records_wire
+                .write_message(2, &[])
+                .expect("encode one-over log record fixture");
+        }
+        assert!(matches!(
+            ScopeLogs::decode_from_bytes(
+                &over_records_wire.finish().expect("finish one-over records"),
+                limits(),
+            ),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "log records per scope",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_LOG_RECORDS_PER_SCOPE + 1
+                && limit == MAX_LOG_RECORDS_PER_SCOPE
+        ));
+
+        let exact_attributes = (0..MAX_ATTRIBUTES)
+            .map(|index| KeyValue {
+                key: format!("key-{index}"),
+                ..KeyValue::default()
+            })
+            .collect::<Vec<_>>();
+        LogRecord {
+            attributes: exact_attributes,
+            ..LogRecord::default()
+        }
+        .encode_to_bytes(limits())
+        .expect("exact log attribute limit");
+        assert!(matches!(
+            LogRecord {
+                attributes: vec![KeyValue::default(); MAX_ATTRIBUTES + 1],
+                ..LogRecord::default()
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "log record attributes",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_ATTRIBUTES + 1 && limit == MAX_ATTRIBUTES
+        ));
+        assert!(matches!(
+            LogRecord {
+                attributes: vec![attribute("duplicate", "one"), attribute("duplicate", "two")],
+                ..LogRecord::default()
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "log record attribute keys must be unique",
+                ..
+            })
+        ));
+
+        ResourceLogs {
+            schema_url: "x".repeat(MAX_SCHEMA_URL_BYTES),
+            ..ResourceLogs::default()
+        }
+        .encode_to_bytes(limits())
+        .expect("exact log resource schema URL limit");
+        assert!(matches!(
+            ResourceLogs {
+                schema_url: "x".repeat(MAX_SCHEMA_URL_BYTES + 1),
+                ..ResourceLogs::default()
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "log resource schema URL bytes",
+                ..
+            })
+        ));
+        assert!(matches!(
+            ScopeLogs {
+                schema_url: "x".repeat(MAX_SCHEMA_URL_BYTES + 1),
+                ..ScopeLogs::default()
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "log scope schema URL bytes",
+                ..
+            })
+        ));
+
+        LogRecord {
+            severity_text: "s".repeat(MAX_LOG_SEVERITY_TEXT_BYTES),
+            event_name: "e".repeat(MAX_LOG_EVENT_NAME_BYTES),
+            ..LogRecord::default()
+        }
+        .encode_to_bytes(limits())
+        .expect("exact log text limits");
+        assert!(matches!(
+            LogRecord {
+                severity_text: "s".repeat(MAX_LOG_SEVERITY_TEXT_BYTES + 1),
+                ..LogRecord::default()
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "log severity text bytes",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_LOG_SEVERITY_TEXT_BYTES + 1
+                && limit == MAX_LOG_SEVERITY_TEXT_BYTES
+        ));
+        assert!(matches!(
+            LogRecord {
+                event_name: "e".repeat(MAX_LOG_EVENT_NAME_BYTES + 1),
+                ..LogRecord::default()
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "log event name bytes",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_LOG_EVENT_NAME_BYTES + 1
+                && limit == MAX_LOG_EVENT_NAME_BYTES
+        ));
+        let mut over_text_wire = ProtobufWireEncoder::new(limits());
+        over_text_wire
+            .write_string(3, &"s".repeat(MAX_LOG_SEVERITY_TEXT_BYTES + 1))
+            .expect("encode one-over log text fixture");
+        assert!(matches!(
+            LogRecord::decode_from_bytes(
+                &over_text_wire.finish().expect("finish one-over log text"),
+                limits(),
+            ),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "log severity text bytes",
+                observed,
+                limit,
+                ..
+            }) if observed == MAX_LOG_SEVERITY_TEXT_BYTES + 1
+                && limit == MAX_LOG_SEVERITY_TEXT_BYTES
+        ));
+
+        for invalid_trace_len in [MAX_TRACE_ID_BYTES - 1, MAX_TRACE_ID_BYTES + 1] {
+            assert!(matches!(
+                LogRecord {
+                    trace_id: vec![1; invalid_trace_len],
+                    ..LogRecord::default()
+                }
+                .encode_to_bytes(limits()),
+                Err(ProtobufWireError::SchemaInvariant {
+                    invariant: "log record trace ID must be empty or exactly sixteen bytes",
+                    ..
+                })
+            ));
+        }
+        for invalid_span_len in [MAX_SPAN_ID_BYTES - 1, MAX_SPAN_ID_BYTES + 1] {
+            assert!(matches!(
+                LogRecord {
+                    span_id: vec![1; invalid_span_len],
+                    ..LogRecord::default()
+                }
+                .encode_to_bytes(limits()),
+                Err(ProtobufWireError::SchemaInvariant {
+                    invariant: "log record span ID must be empty or exactly eight bytes",
+                    ..
+                })
+            ));
+        }
+        let mut invalid_id_wire = ProtobufWireEncoder::new(limits());
+        invalid_id_wire
+            .write_bytes(9, &[1; MAX_TRACE_ID_BYTES - 1])
+            .expect("encode invalid log trace ID fixture");
+        assert!(matches!(
+            LogRecord::decode_from_bytes(
+                &invalid_id_wire.finish().expect("finish invalid log ID"),
+                limits(),
+            ),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "log record trace ID must be empty or exactly sixteen bytes",
+                ..
+            })
+        ));
+
+        LogRecord {
+            body: Some(nested_array(MAX_ANY_VALUE_DEPTH)),
+            ..LogRecord::default()
+        }
+        .encode_to_bytes(limits())
+        .expect("exact log-body AnyValue depth");
+        assert!(matches!(
+            LogRecord {
+                body: Some(nested_array(MAX_ANY_VALUE_DEPTH + 1)),
+                ..LogRecord::default()
+            }
+            .encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaLimitExceeded {
+                resource: "AnyValue depth",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__lab_lifecycle_logs_failure_state() {
+        let mut malformed = ProtobufWireEncoder::new(limits());
+        malformed
+            .write_string(3, "retained before ID failure")
+            .expect("encode retained severity text");
+        malformed
+            .write_bytes(9, &[1; MAX_TRACE_ID_BYTES - 1])
+            .expect("encode invalid trace ID");
+        let malformed = malformed.finish().expect("finish malformed log record");
+        assert!(LogRecord::decode_from_bytes(&malformed, limits()).is_err());
+
+        let mut merge_target = LogRecord::default();
+        assert!(merge_target.merge_from_bytes(&malformed, limits()).is_err());
+        assert_eq!(merge_target.severity_text, "retained before ID failure");
+        assert!(merge_target.trace_id.is_empty());
+    }
+
+    #[test]
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__downstream_consumer_logs_generic_codec() {
+        let model = LogsData {
+            resource_logs: vec![ResourceLogs::default()],
+            unknown_fields: UnknownFields::new(),
+        };
+        let mut codec: ProtoCodec<LogsData, LogsData> = ProtoCodec::new();
+        let encoded = codec.encode(&model).expect("generic logs codec encode");
+        assert_eq!(
+            codec.decode(&encoded).expect("generic logs codec decode"),
+            model
+        );
     }
 
     #[test]

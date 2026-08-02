@@ -4,9 +4,9 @@
   "program_id": "asupersync-ir2uf0",
   "bead_id": "asupersync-5z2scg.1.3",
   "capability_id": "CAP-PROTOBUF-GENERIC",
-  "captured_at_utc": "2026-08-02T15:26:09Z",
-  "state": "AUTHORITY_PINNED_COMMON_RESOURCE_METRICS_COLLECTOR_METRICS_SLICE_A3_PENDING",
-  "summary": "Finite crate-private OTLP metrics, traces, logs, common, resource, and collector message authority for the owned protobuf kernel. The bounded common/resource/metrics/collector_metrics source slice, unit-test bodies, and terminal native default-plus-metrics library check are present; the remaining 17 messages, unit-test execution, feature matrix, and runtime integration remain pending.",
+  "captured_at_utc": "2026-08-02T15:50:08Z",
+  "state": "AUTHORITY_PINNED_COMMON_RESOURCE_METRICS_LOGS_COLLECTOR_METRICS_SLICE_A3_PENDING",
+  "summary": "Finite crate-private OTLP metrics, traces, logs, common, resource, and collector message authority for the owned protobuf kernel. The bounded common/resource/metrics/logs/collector_metrics source slice, unit-test bodies, and terminal native default-plus-metrics library check are present; the remaining 13 messages, unit-test execution, feature matrix, and runtime integration remain pending.",
   "decision": {
     "finite_internal_schema_authorized": true,
     "crate_private_only": true,
@@ -15,8 +15,8 @@
     "public_prost_removal_authorized": false,
     "production_transport_wiring_authorized": false,
     "dependency_cutover_authorized": false,
-    "implementation_state": "COMMON_RESOURCE_METRICS_COLLECTOR_METRICS_SLICE_PRESENT_A3_IMPLEMENTATION_PENDING",
-    "evidence_state": "NATIVE_DEFAULT_METRICS_LIBRARY_CHECK_GREEN_TEST_EXECUTION_PENDING"
+    "implementation_state": "COMMON_RESOURCE_METRICS_LOGS_COLLECTOR_METRICS_SLICE_PRESENT_A3_IMPLEMENTATION_PENDING",
+    "evidence_state": "NATIVE_DEFAULT_METRICS_LIBRARY_CHECK_GREEN_FOR_30_MESSAGE_SLICE_UNIT_TEST_EXECUTION_PENDING"
   },
   "authority": {
     "root_workspace_reference": {
@@ -157,8 +157,8 @@
       },
       {
         "path": "src/observability/otlp_proto.rs",
-        "sha256": "bdaba2ba4edee619b7ef1a1ec814ccd87a5828840f342a895dccfc86b19addd2",
-        "role": "in-progress bounded common, resource, metrics, and metrics-collector implementation"
+        "sha256": "dafab9c6b8aee1325e3e62728242a4f07f5ad4a2e57033b0763ca9cc9a29df6d",
+        "role": "in-progress bounded common, resource, metrics, logs, and metrics-collector implementation"
       },
       {
         "path": "src/observability/otel.rs",
@@ -947,7 +947,7 @@
       "the macro expansion's ::asupersync path is not a production self-alias in the current crate",
       "compatibility UnknownFields::record and record_raw retain ordinary Vec growth; fallible alternatives exist, but a safe downstream shared nested-writer authoring surface remains pending"
     ],
-    "allowed_resolution": "The common/resource/metrics/collector_metrics slice uses manual finite-message ProtoMessage implementations with one shared semantic budget and reviewed bounded nested/collection primitives in the owned authoring layer. Remaining families must preserve that pattern. Every path must check count, depth, work, and payload bytes before its corresponding allocation or mutation. Fresh decode may build private staging state and returns no partial model. Any merge API must either stage and commit atomically or explicitly document and test its non-atomic partial-mutation behavior.",
+    "allowed_resolution": "The common/resource/metrics/logs/collector_metrics slice uses manual finite-message ProtoMessage implementations with one shared semantic budget and reviewed bounded nested/collection primitives in the owned authoring layer. Remaining families must preserve that pattern. Every path must check count, depth, work, and payload bytes before its corresponding allocation or mutation. Fresh decode may build private staging state and returns no partial model. Any merge API must either stage and commit atomically or explicitly document and test its non-atomic partial-mutation behavior.",
     "forbidden_resolution": "Derive the current messages and apply validate() only after decode, or encode nested messages into unconstrained temporary buffers, then claim pre-allocation limits.",
     "all_messages_require_unknown_fields_member": true,
     "enum_storage": "RAW_NUMERIC_WITH_TYPED_KNOWN_VALUE_HELPERS",
@@ -958,7 +958,8 @@
       "implemented_submodules": [
         "limits_and_error",
         "common_and_resource",
-        "metrics"
+        "metrics",
+        "logs"
       ],
       "implemented_messages": [
         "opentelemetry.proto.common.v1.AnyValue",
@@ -984,18 +985,21 @@
         "opentelemetry.proto.metrics.v1.SummaryDataPoint",
         "opentelemetry.proto.metrics.v1.SummaryDataPoint.ValueAtQuantile",
         "opentelemetry.proto.metrics.v1.Exemplar",
+        "opentelemetry.proto.logs.v1.LogsData",
+        "opentelemetry.proto.logs.v1.ResourceLogs",
+        "opentelemetry.proto.logs.v1.ScopeLogs",
+        "opentelemetry.proto.logs.v1.LogRecord",
         "opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest",
         "opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceResponse",
         "opentelemetry.proto.collector.metrics.v1.ExportMetricsPartialSuccess"
       ],
       "pending_submodules": [
         "trace",
-        "logs",
         "collector"
       ],
-      "implemented_message_count": 26,
-      "pending_message_count": 17,
-      "execution_state": "NATIVE_DEFAULT_METRICS_LIBRARY_CHECK_GREEN_UNIT_TEST_EXECUTION_PENDING",
+      "implemented_message_count": 30,
+      "pending_message_count": 13,
+      "execution_state": "NATIVE_DEFAULT_METRICS_LIBRARY_CHECK_GREEN_FOR_30_MESSAGE_SLICE_UNIT_TEST_EXECUTION_PENDING",
       "public_surface_delta": {
         "kind": "ADDITIVE_SOURCE_COMPATIBLE",
         "added_methods": [
@@ -1054,9 +1058,9 @@
         "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants": "A3 finite schema, field, semantic, and resource invariants only.",
         "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix": "A3 schema-local encode/decode and limit properties; independent/reference conformance remains A4.",
         "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__lab_lifecycle": "A3 deterministic shared-budget lifecycle and fresh-decode failure-state checks only; no runtime, task, cancellation, shutdown, or transport claim.",
-        "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__downstream_consumer": "A3 compile/use proof that the implemented finite metrics and metrics-export request/response shapes are consumable through the existing owned generic codec; no signal adapter, framing, collector contact, transport, or user-journey claim."
+        "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__downstream_consumer": "A3 source-level compile/use test bodies for the implemented finite metrics, logs, and metrics-export request/response shapes through the existing owned generic codec; the unit tests have not executed and no signal adapter, framing, collector contact, transport, or user-journey claim is made."
       },
-      "current_state": "COMMON_RESOURCE_METRICS_COLLECTOR_METRICS_SLICE_PRESENT_LIBRARY_CHECK_GREEN_TEST_EXECUTION_PENDING"
+      "current_state": "COMMON_RESOURCE_METRICS_LOGS_COLLECTOR_METRICS_SLICE_PRESENT_LIBRARY_CHECK_GREEN_TEST_EXECUTION_PENDING"
     },
     {
       "owner": "asupersync-5z2scg.1.4",
@@ -1095,7 +1099,7 @@
     "no_local_cargo_fallback": true
   },
   "no_claim_boundaries": [
-    "This packet records source, unit-test bodies, and a terminal native default-plus-metrics library check for the private common/resource/metrics/collector_metrics slice; it does not execute the unit tests and does not implement the trace, logs, collector_trace, or collector_logs families.",
+    "This packet records source, unit-test bodies, and a terminal native default-plus-metrics library check for the private common/resource/metrics/logs/collector_metrics slice; it does not execute the unit tests and does not implement the trace, collector_trace, or collector_logs families.",
     "It does not represent any valid, malformed, resource, property, differential, or fuzz vector as passing evidence.",
     "It does not prove byte parity with opentelemetry-proto, another language, or a live collector.",
     "It does not wire metrics, traces, logs, partial-success responses, HTTP, gRPC, retry, cancellation, batching, or shutdown.",
