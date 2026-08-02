@@ -4923,6 +4923,265 @@ pub(crate) mod collector {
 
         impl_proto_message!(ExportMetricsPartialSuccess);
     }
+
+    macro_rules! impl_collector_proto_message {
+        ($type:ty) => {
+            impl ProtoMessage for $type {
+                fn encode_fields(
+                    &self,
+                    encoder: &mut ProtobufWireEncoder,
+                ) -> Result<(), ProtobufWireError> {
+                    let remaining_work = encoder.remaining_work()?;
+                    let validation = validate_root(self, remaining_work, true)?;
+                    encoder.charge_schema_work(validation.work_used)?;
+                    self.encode_fields_unchecked(encoder)
+                }
+
+                fn merge_field<'wire>(
+                    &mut self,
+                    field: &ProtobufWireField<'wire>,
+                    decoder: &mut ProtobufWireDecoder<'wire, '_>,
+                ) -> Result<bool, ProtobufWireError> {
+                    self.merge_otlp_field(field, decoder)
+                }
+
+                fn merge_from_bytes(
+                    &mut self,
+                    input: &[u8],
+                    limits: ProtobufWireLimits,
+                ) -> Result<(), ProtobufWireError> {
+                    merge_root(self, input, limits)
+                }
+
+                fn decode_from_bytes(
+                    input: &[u8],
+                    limits: ProtobufWireLimits,
+                ) -> Result<Self, ProtobufWireError> {
+                    let mut staged = Self::default();
+                    merge_root(&mut staged, input, limits)?;
+                    Ok(staged)
+                }
+            }
+        };
+    }
+
+    macro_rules! define_collector_family {
+        (
+            $module:ident,
+            $resource_type:ident,
+            $request_type:ident,
+            $response_type:ident,
+            $partial_type:ident,
+            $resource_field:ident,
+            $resource_name:literal,
+            $rejected_field:ident,
+            $rejected_invariant:literal
+        ) => {
+            pub(crate) mod $module {
+                use super::super::limits_and_error::{
+                    MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES, MAX_RESOURCE_GROUPS_PER_REQUEST,
+                    OtlpModel, ValidationBudget, decode_string, encode_nested,
+                    merge_optional_message, merge_root, preserve_unknown, push_message,
+                    validate_root, validate_unknown,
+                };
+                use super::super::$module::$resource_type;
+                use super::super::{
+                    ProtoMessage, ProtobufWireDecoder, ProtobufWireEncoder, ProtobufWireError,
+                    ProtobufWireField, ProtobufWireLimits, UnknownFields,
+                };
+
+                #[derive(Clone, Debug, Default, PartialEq)]
+                pub(crate) struct $request_type {
+                    pub(crate) $resource_field: Vec<$resource_type>,
+                    pub(crate) unknown_fields: UnknownFields,
+                }
+
+                impl OtlpModel for $request_type {
+                    fn encode_fields_unchecked(
+                        &self,
+                        encoder: &mut ProtobufWireEncoder,
+                    ) -> Result<(), ProtobufWireError> {
+                        for resource_group in &self.$resource_field {
+                            encode_nested(encoder, 1, resource_group)?;
+                        }
+                        self.unknown_fields.encode(encoder)
+                    }
+
+                    fn merge_otlp_field<'wire>(
+                        &mut self,
+                        field: &ProtobufWireField<'wire>,
+                        decoder: &mut ProtobufWireDecoder<'wire, '_>,
+                    ) -> Result<bool, ProtobufWireError> {
+                        match field.field_number() {
+                            1 => push_message(
+                                &mut self.$resource_field,
+                                field,
+                                decoder,
+                                MAX_RESOURCE_GROUPS_PER_REQUEST,
+                                $resource_name,
+                                false,
+                            )?,
+                            _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+                        }
+                        Ok(true)
+                    }
+
+                    fn validate_otlp(
+                        &self,
+                        budget: &mut ValidationBudget,
+                        _any_value_depth: usize,
+                    ) -> Result<(), ProtobufWireError> {
+                        budget.repeated(
+                            self.$resource_field.len(),
+                            MAX_RESOURCE_GROUPS_PER_REQUEST,
+                            $resource_name,
+                        )?;
+                        for resource_group in &self.$resource_field {
+                            resource_group.validate_otlp(budget, 0)?;
+                        }
+                        validate_unknown(&self.unknown_fields, budget)
+                    }
+                }
+
+                impl_collector_proto_message!($request_type);
+
+                #[derive(Clone, Debug, Default, PartialEq)]
+                pub(crate) struct $response_type {
+                    pub(crate) partial_success: Option<$partial_type>,
+                    pub(crate) unknown_fields: UnknownFields,
+                }
+
+                impl OtlpModel for $response_type {
+                    fn encode_fields_unchecked(
+                        &self,
+                        encoder: &mut ProtobufWireEncoder,
+                    ) -> Result<(), ProtobufWireError> {
+                        if let Some(partial_success) = &self.partial_success {
+                            encode_nested(encoder, 1, partial_success)?;
+                        }
+                        self.unknown_fields.encode(encoder)
+                    }
+
+                    fn merge_otlp_field<'wire>(
+                        &mut self,
+                        field: &ProtobufWireField<'wire>,
+                        decoder: &mut ProtobufWireDecoder<'wire, '_>,
+                    ) -> Result<bool, ProtobufWireError> {
+                        match field.field_number() {
+                            1 => merge_optional_message(
+                                &mut self.partial_success,
+                                field,
+                                decoder,
+                                false,
+                            )?,
+                            _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+                        }
+                        Ok(true)
+                    }
+
+                    fn validate_otlp(
+                        &self,
+                        budget: &mut ValidationBudget,
+                        _any_value_depth: usize,
+                    ) -> Result<(), ProtobufWireError> {
+                        if let Some(partial_success) = &self.partial_success {
+                            partial_success.validate_otlp(budget, 0)?;
+                        }
+                        validate_unknown(&self.unknown_fields, budget)
+                    }
+                }
+
+                impl_collector_proto_message!($response_type);
+
+                #[derive(Clone, Debug, Default, PartialEq)]
+                pub(crate) struct $partial_type {
+                    pub(crate) $rejected_field: i64,
+                    pub(crate) error_message: String,
+                    pub(crate) unknown_fields: UnknownFields,
+                }
+
+                impl OtlpModel for $partial_type {
+                    fn encode_fields_unchecked(
+                        &self,
+                        encoder: &mut ProtobufWireEncoder,
+                    ) -> Result<(), ProtobufWireError> {
+                        if self.$rejected_field != 0 {
+                            encoder.write_int64(1, self.$rejected_field)?;
+                        }
+                        if !self.error_message.is_empty() {
+                            encoder.write_string(2, &self.error_message)?;
+                        }
+                        self.unknown_fields.encode(encoder)
+                    }
+
+                    fn merge_otlp_field<'wire>(
+                        &mut self,
+                        field: &ProtobufWireField<'wire>,
+                        decoder: &mut ProtobufWireDecoder<'wire, '_>,
+                    ) -> Result<bool, ProtobufWireError> {
+                        match field.field_number() {
+                            1 => self.$rejected_field = field.as_varint()?.cast_signed(),
+                            2 => {
+                                self.error_message = decode_string(
+                                    field,
+                                    decoder,
+                                    MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES,
+                                    "partial-success error message bytes",
+                                )?;
+                            }
+                            _ => preserve_unknown(&mut self.unknown_fields, field, decoder)?,
+                        }
+                        Ok(true)
+                    }
+
+                    fn validate_otlp(
+                        &self,
+                        budget: &mut ValidationBudget,
+                        _any_value_depth: usize,
+                    ) -> Result<(), ProtobufWireError> {
+                        if budget.enforces_invariants() && self.$rejected_field < 0 {
+                            return Err(ProtobufWireError::SchemaInvariant {
+                                offset: 0,
+                                invariant: $rejected_invariant,
+                            });
+                        }
+                        budget.owned_bytes(
+                            self.error_message.len(),
+                            MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES,
+                            "partial-success error message bytes",
+                        )?;
+                        validate_unknown(&self.unknown_fields, budget)
+                    }
+                }
+
+                impl_collector_proto_message!($partial_type);
+            }
+        };
+    }
+
+    define_collector_family!(
+        trace,
+        ResourceSpans,
+        ExportTraceServiceRequest,
+        ExportTraceServiceResponse,
+        ExportTracePartialSuccess,
+        resource_spans,
+        "trace resource groups",
+        rejected_spans,
+        "partial-success rejected span count must be nonnegative"
+    );
+
+    define_collector_family!(
+        logs,
+        ResourceLogs,
+        ExportLogsServiceRequest,
+        ExportLogsServiceResponse,
+        ExportLogsPartialSuccess,
+        resource_logs,
+        "log resource groups",
+        rejected_log_records,
+        "partial-success rejected log-record count must be nonnegative"
+    );
 }
 
 #[cfg(test)]
@@ -4930,8 +5189,14 @@ mod tests {
     use crate::grpc::codec::Codec;
     use crate::grpc::protobuf::ProtoCodec;
 
+    use super::collector::logs::{
+        ExportLogsPartialSuccess, ExportLogsServiceRequest, ExportLogsServiceResponse,
+    };
     use super::collector::metrics::{
         ExportMetricsPartialSuccess, ExportMetricsServiceRequest, ExportMetricsServiceResponse,
+    };
+    use super::collector::trace::{
+        ExportTracePartialSuccess, ExportTraceServiceRequest, ExportTraceServiceResponse,
     };
     use super::common_and_resource::{
         AnyValue, AnyValueValue, ArrayValue, EntityRef, InstrumentationScope, KeyValue, Resource,
@@ -4997,6 +5262,14 @@ mod tests {
             value: Some(string_value(value)),
             ..KeyValue::default()
         }
+    }
+
+    fn unknown_fields(raw: &[u8]) -> UnknownFields {
+        let mut unknown = UnknownFields::new();
+        unknown
+            .try_record_raw(raw)
+            .expect("record bounded unknown-field fixture");
+        unknown
     }
 
     fn exemplar(value: ExemplarValue) -> Exemplar {
@@ -6010,6 +6283,444 @@ mod tests {
                 accepted
             );
         }
+    }
+
+    #[test]
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix_collector_trace_and_logs_round_trip()
+     {
+        let trace_request = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans::default()],
+            unknown_fields: unknown_fields(&[0x10, 0x09]),
+        };
+        let trace_request_wire = trace_request
+            .encode_to_bytes(limits())
+            .expect("encode trace export request");
+        assert_eq!(
+            ExportTraceServiceRequest::decode_from_bytes(&trace_request_wire, limits())
+                .expect("decode trace export request"),
+            trace_request
+        );
+        assert_eq!(
+            trace_request
+                .encode_to_bytes(limits())
+                .expect("repeat trace export request encoding"),
+            trace_request_wire
+        );
+
+        let logs_request = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs::default()],
+            unknown_fields: unknown_fields(&[0x10, 0x0a]),
+        };
+        let logs_request_wire = logs_request
+            .encode_to_bytes(limits())
+            .expect("encode logs export request");
+        assert_eq!(
+            ExportLogsServiceRequest::decode_from_bytes(&logs_request_wire, limits())
+                .expect("decode logs export request"),
+            logs_request
+        );
+        assert_eq!(
+            logs_request
+                .encode_to_bytes(limits())
+                .expect("repeat logs export request encoding"),
+            logs_request_wire
+        );
+
+        let trace_partial = ExportTracePartialSuccess {
+            rejected_spans: 2,
+            error_message: "two spans were rejected".to_owned(),
+            unknown_fields: unknown_fields(&[0x18, 0x07]),
+        };
+        let trace_partial_wire = trace_partial
+            .encode_to_bytes(limits())
+            .expect("encode trace partial success");
+        assert_eq!(
+            ExportTracePartialSuccess::decode_from_bytes(&trace_partial_wire, limits())
+                .expect("decode trace partial success"),
+            trace_partial
+        );
+        let trace_response = ExportTraceServiceResponse {
+            partial_success: Some(trace_partial),
+            unknown_fields: unknown_fields(&[0x10, 0x09]),
+        };
+        let trace_response_wire = trace_response
+            .encode_to_bytes(limits())
+            .expect("encode trace export response");
+        assert_eq!(
+            ExportTraceServiceResponse::decode_from_bytes(&trace_response_wire, limits())
+                .expect("decode trace export response"),
+            trace_response
+        );
+
+        let logs_partial = ExportLogsPartialSuccess {
+            rejected_log_records: 3,
+            error_message: "three log records were rejected".to_owned(),
+            unknown_fields: unknown_fields(&[0x18, 0x08]),
+        };
+        let logs_partial_wire = logs_partial
+            .encode_to_bytes(limits())
+            .expect("encode logs partial success");
+        assert_eq!(
+            ExportLogsPartialSuccess::decode_from_bytes(&logs_partial_wire, limits())
+                .expect("decode logs partial success"),
+            logs_partial
+        );
+        let logs_response = ExportLogsServiceResponse {
+            partial_success: Some(logs_partial),
+            unknown_fields: unknown_fields(&[0x10, 0x0a]),
+        };
+        let logs_response_wire = logs_response
+            .encode_to_bytes(limits())
+            .expect("encode logs export response");
+        assert_eq!(
+            ExportLogsServiceResponse::decode_from_bytes(&logs_response_wire, limits())
+                .expect("decode logs export response"),
+            logs_response
+        );
+
+        let empty_trace_response = ExportTraceServiceResponse {
+            partial_success: Some(ExportTracePartialSuccess::default()),
+            unknown_fields: UnknownFields::new(),
+        };
+        let empty_trace_wire = empty_trace_response
+            .encode_to_bytes(limits())
+            .expect("encode present empty trace partial success");
+        assert_eq!(empty_trace_wire.as_ref(), &[0x0a, 0x00]);
+        assert_eq!(
+            ExportTraceServiceResponse::decode_from_bytes(&empty_trace_wire, limits())
+                .expect("decode present empty trace partial success"),
+            empty_trace_response
+        );
+        let empty_logs_response = ExportLogsServiceResponse {
+            partial_success: Some(ExportLogsPartialSuccess::default()),
+            unknown_fields: UnknownFields::new(),
+        };
+        let empty_logs_wire = empty_logs_response
+            .encode_to_bytes(limits())
+            .expect("encode present empty logs partial success");
+        assert_eq!(empty_logs_wire.as_ref(), &[0x0a, 0x00]);
+        assert_eq!(
+            ExportLogsServiceResponse::decode_from_bytes(&empty_logs_wire, limits())
+                .expect("decode present empty logs partial success"),
+            empty_logs_response
+        );
+
+        let mut trace_count = ProtobufWireEncoder::new(limits());
+        trace_count
+            .write_int64(1, 4)
+            .expect("encode rejected span count fragment");
+        let trace_count = trace_count.finish().expect("finish span count fragment");
+        let mut trace_message = ProtobufWireEncoder::new(limits());
+        trace_message
+            .write_string(2, "retry trace export")
+            .expect("encode trace message fragment");
+        trace_message
+            .write_varint(3, 11)
+            .expect("encode trace partial-success unknown");
+        let trace_message = trace_message
+            .finish()
+            .expect("finish trace message fragment");
+        let mut merged_trace_wire = ProtobufWireEncoder::new(limits());
+        merged_trace_wire
+            .write_message(1, &trace_count)
+            .expect("encode first trace partial-success occurrence");
+        merged_trace_wire
+            .write_message(1, &trace_message)
+            .expect("encode second trace partial-success occurrence");
+        merged_trace_wire
+            .write_varint(2, 12)
+            .expect("encode trace response unknown");
+        let merged_trace = ExportTraceServiceResponse::decode_from_bytes(
+            &merged_trace_wire
+                .finish()
+                .expect("finish trace merge fixture"),
+            limits(),
+        )
+        .expect("decode merged trace partial success");
+        let merged_trace_partial = merged_trace
+            .partial_success
+            .expect("trace partial-success presence must survive merge");
+        assert_eq!(merged_trace_partial.rejected_spans, 4);
+        assert_eq!(merged_trace_partial.error_message, "retry trace export");
+        assert_eq!(merged_trace_partial.unknown_fields.as_bytes(), [0x18, 0x0b]);
+        assert_eq!(merged_trace.unknown_fields.as_bytes(), [0x10, 0x0c]);
+
+        let mut logs_count = ProtobufWireEncoder::new(limits());
+        logs_count
+            .write_int64(1, 5)
+            .expect("encode rejected log-record count fragment");
+        let logs_count = logs_count.finish().expect("finish log count fragment");
+        let mut logs_message = ProtobufWireEncoder::new(limits());
+        logs_message
+            .write_string(2, "retry logs export")
+            .expect("encode logs message fragment");
+        logs_message
+            .write_varint(3, 13)
+            .expect("encode logs partial-success unknown");
+        let logs_message = logs_message.finish().expect("finish logs message fragment");
+        let mut merged_logs_wire = ProtobufWireEncoder::new(limits());
+        merged_logs_wire
+            .write_message(1, &logs_count)
+            .expect("encode first logs partial-success occurrence");
+        merged_logs_wire
+            .write_message(1, &logs_message)
+            .expect("encode second logs partial-success occurrence");
+        merged_logs_wire
+            .write_varint(2, 14)
+            .expect("encode logs response unknown");
+        let merged_logs = ExportLogsServiceResponse::decode_from_bytes(
+            &merged_logs_wire
+                .finish()
+                .expect("finish logs merge fixture"),
+            limits(),
+        )
+        .expect("decode merged logs partial success");
+        let merged_logs_partial = merged_logs
+            .partial_success
+            .expect("logs partial-success presence must survive merge");
+        assert_eq!(merged_logs_partial.rejected_log_records, 5);
+        assert_eq!(merged_logs_partial.error_message, "retry logs export");
+        assert_eq!(merged_logs_partial.unknown_fields.as_bytes(), [0x18, 0x0d]);
+        assert_eq!(merged_logs.unknown_fields.as_bytes(), [0x10, 0x0e]);
+    }
+
+    #[test]
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants_collector_trace_and_logs_limits()
+    {
+        macro_rules! assert_request_limits {
+            ($request:ident, $field:ident, $resource:ident, $resource_name:literal) => {{
+                $request {
+                    $field: vec![$resource::default(); MAX_RESOURCE_GROUPS_PER_REQUEST],
+                    unknown_fields: UnknownFields::new(),
+                }
+                .encode_to_bytes(limits())
+                .expect("encode exact collector request group limit");
+                assert!(matches!(
+                    $request {
+                        $field: vec![
+                            $resource::default();
+                            MAX_RESOURCE_GROUPS_PER_REQUEST + 1
+                        ],
+                        unknown_fields: UnknownFields::new(),
+                    }
+                    .encode_to_bytes(limits()),
+                    Err(ProtobufWireError::SchemaLimitExceeded {
+                        resource,
+                        observed,
+                        limit,
+                        ..
+                    }) if resource == $resource_name
+                        && observed == MAX_RESOURCE_GROUPS_PER_REQUEST + 1
+                        && limit == MAX_RESOURCE_GROUPS_PER_REQUEST
+                ));
+
+                let mut exact_wire = ProtobufWireEncoder::new(limits());
+                for _ in 0..MAX_RESOURCE_GROUPS_PER_REQUEST {
+                    exact_wire
+                        .write_message(1, &[])
+                        .expect("encode exact collector request fixture");
+                }
+                $request::decode_from_bytes(
+                    &exact_wire.finish().expect("finish exact collector request"),
+                    limits(),
+                )
+                .expect("decode exact collector request group limit");
+                let mut over_wire = ProtobufWireEncoder::new(limits());
+                for _ in 0..=MAX_RESOURCE_GROUPS_PER_REQUEST {
+                    over_wire
+                        .write_message(1, &[])
+                        .expect("encode one-over collector request fixture");
+                }
+                assert!(matches!(
+                    $request::decode_from_bytes(
+                        &over_wire.finish().expect("finish one-over collector request"),
+                        limits(),
+                    ),
+                    Err(ProtobufWireError::SchemaLimitExceeded {
+                        resource,
+                        observed,
+                        limit,
+                        ..
+                    }) if resource == $resource_name
+                        && observed == MAX_RESOURCE_GROUPS_PER_REQUEST + 1
+                        && limit == MAX_RESOURCE_GROUPS_PER_REQUEST
+                ));
+            }};
+        }
+
+        assert_request_limits!(
+            ExportTraceServiceRequest,
+            resource_spans,
+            ResourceSpans,
+            "trace resource groups"
+        );
+        assert_request_limits!(
+            ExportLogsServiceRequest,
+            resource_logs,
+            ResourceLogs,
+            "log resource groups"
+        );
+
+        macro_rules! assert_partial_limits {
+            ($partial:ident, $rejected_field:ident, $invariant:literal) => {{
+                let exact_message = "x".repeat(MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES);
+                $partial {
+                    $rejected_field: 0,
+                    error_message: exact_message.clone(),
+                    unknown_fields: UnknownFields::new(),
+                }
+                .encode_to_bytes(limits())
+                .expect("encode exact collector partial-success message limit");
+                assert!(matches!(
+                    $partial {
+                        $rejected_field: 0,
+                        error_message: "x"
+                            .repeat(MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES + 1),
+                        unknown_fields: UnknownFields::new(),
+                    }
+                    .encode_to_bytes(limits()),
+                    Err(ProtobufWireError::SchemaLimitExceeded {
+                        resource: "partial-success error message bytes",
+                        observed,
+                        limit,
+                        ..
+                    }) if observed == MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES + 1
+                        && limit == MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES
+                ));
+
+                let mut exact_wire = ProtobufWireEncoder::new(limits());
+                exact_wire
+                    .write_string(2, &exact_message)
+                    .expect("encode exact collector partial-success message fixture");
+                $partial::decode_from_bytes(
+                    &exact_wire
+                        .finish()
+                        .expect("finish exact collector partial-success message"),
+                    limits(),
+                )
+                .expect("decode exact collector partial-success message limit");
+                let mut over_wire = ProtobufWireEncoder::new(limits());
+                over_wire
+                    .write_string(
+                        2,
+                        &"x".repeat(MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES + 1),
+                    )
+                    .expect("encode one-over collector partial-success message fixture");
+                assert!(matches!(
+                    $partial::decode_from_bytes(
+                        &over_wire
+                            .finish()
+                            .expect("finish one-over collector partial-success message"),
+                        limits(),
+                    ),
+                    Err(ProtobufWireError::SchemaLimitExceeded {
+                        resource: "partial-success error message bytes",
+                        observed,
+                        limit,
+                        ..
+                    }) if observed == MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES + 1
+                        && limit == MAX_PARTIAL_SUCCESS_ERROR_MESSAGE_BYTES
+                ));
+
+                assert!(matches!(
+                    $partial {
+                        $rejected_field: -1,
+                        error_message: String::new(),
+                        unknown_fields: UnknownFields::new(),
+                    }
+                    .encode_to_bytes(limits()),
+                    Err(ProtobufWireError::SchemaInvariant {
+                        invariant: $invariant,
+                        ..
+                    })
+                ));
+
+                for accepted in [
+                    $partial {
+                        $rejected_field: 0,
+                        error_message: "warning without rejection".to_owned(),
+                        unknown_fields: UnknownFields::new(),
+                    },
+                    $partial {
+                        $rejected_field: 1,
+                        error_message: String::new(),
+                        unknown_fields: UnknownFields::new(),
+                    },
+                ] {
+                    let encoded = accepted
+                        .encode_to_bytes(limits())
+                        .expect("encode accepted collector partial-success shape");
+                    assert_eq!(
+                        $partial::decode_from_bytes(&encoded, limits())
+                            .expect("decode accepted collector partial-success shape"),
+                        accepted
+                    );
+                }
+            }};
+        }
+
+        assert_partial_limits!(
+            ExportTracePartialSuccess,
+            rejected_spans,
+            "partial-success rejected span count must be nonnegative"
+        );
+        assert_partial_limits!(
+            ExportLogsPartialSuccess,
+            rejected_log_records,
+            "partial-success rejected log-record count must be nonnegative"
+        );
+    }
+
+    #[test]
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__lab_lifecycle_collector_trace_and_logs_failure_state()
+     {
+        macro_rules! assert_failure_state {
+            ($partial:ident, $rejected_field:ident, $invariant:literal) => {{
+                let mut invalid_wire = ProtobufWireEncoder::new(limits());
+                invalid_wire
+                    .write_int64(1, -1)
+                    .expect("encode invalid collector rejected count");
+                invalid_wire
+                    .write_string(2, "retained before validation failure")
+                    .expect("encode collector failure-state message");
+                let invalid_wire = invalid_wire
+                    .finish()
+                    .expect("finish invalid collector partial success");
+
+                assert!(matches!(
+                    $partial::decode_from_bytes(&invalid_wire, limits()),
+                    Err(ProtobufWireError::SchemaInvariant {
+                        invariant: $invariant,
+                        ..
+                    })
+                ));
+
+                let mut merge_target = $partial::default();
+                assert!(matches!(
+                    merge_target.merge_from_bytes(&invalid_wire, limits()),
+                    Err(ProtobufWireError::SchemaInvariant {
+                        invariant: $invariant,
+                        ..
+                    })
+                ));
+                assert_eq!(merge_target.$rejected_field, -1);
+                assert_eq!(
+                    merge_target.error_message,
+                    "retained before validation failure"
+                );
+            }};
+        }
+
+        assert_failure_state!(
+            ExportTracePartialSuccess,
+            rejected_spans,
+            "partial-success rejected span count must be nonnegative"
+        );
+        assert_failure_state!(
+            ExportLogsPartialSuccess,
+            rejected_log_records,
+            "partial-success rejected log-record count must be nonnegative"
+        );
     }
 
     #[test]
@@ -7786,15 +8497,56 @@ mod tests {
     }
 
     #[test]
-    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__downstream_consumer_collector_metrics_generic_codec()
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__downstream_consumer_collector_requests_generic_codec()
      {
-        let model = ExportMetricsServiceRequest {
+        let metrics_model = ExportMetricsServiceRequest {
             resource_metrics: vec![ResourceMetrics::default()],
             unknown_fields: UnknownFields::new(),
         };
-        let mut codec: ProtoCodec<ExportMetricsServiceRequest, ExportMetricsServiceRequest> =
+        let mut metrics_codec: ProtoCodec<
+            ExportMetricsServiceRequest,
+            ExportMetricsServiceRequest,
+        > = ProtoCodec::new();
+        let encoded = metrics_codec
+            .encode(&metrics_model)
+            .expect("generic metrics collector codec encode");
+        assert_eq!(
+            metrics_codec
+                .decode(&encoded)
+                .expect("generic metrics collector codec decode"),
+            metrics_model
+        );
+
+        let trace_model = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans::default()],
+            unknown_fields: UnknownFields::new(),
+        };
+        let mut trace_codec: ProtoCodec<ExportTraceServiceRequest, ExportTraceServiceRequest> =
             ProtoCodec::new();
-        let encoded = codec.encode(&model).expect("generic codec encode");
-        assert_eq!(codec.decode(&encoded).expect("generic codec decode"), model);
+        let encoded = trace_codec
+            .encode(&trace_model)
+            .expect("generic trace collector codec encode");
+        assert_eq!(
+            trace_codec
+                .decode(&encoded)
+                .expect("generic trace collector codec decode"),
+            trace_model
+        );
+
+        let logs_model = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs::default()],
+            unknown_fields: UnknownFields::new(),
+        };
+        let mut logs_codec: ProtoCodec<ExportLogsServiceRequest, ExportLogsServiceRequest> =
+            ProtoCodec::new();
+        let encoded = logs_codec
+            .encode(&logs_model)
+            .expect("generic logs collector codec encode");
+        assert_eq!(
+            logs_codec
+                .decode(&encoded)
+                .expect("generic logs collector codec decode"),
+            logs_model
+        );
     }
 }

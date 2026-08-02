@@ -6,8 +6,8 @@
 //! This test freezes the reviewed v1.10.0 schema inventory, its resource and
 //! evolution policy, live repository pins, operator documentation, and the
 //! boundary that keeps the public generic protobuf capability and incumbents.
-//! It records a partial private
-//! common/resource/metrics/trace/logs/collector_metrics source slice plus a native
+//! It records the complete private 43-message
+//! common/resource/metrics/trace/logs/collector source slice plus a native
 //! library typecheck without claiming unit-test execution, wire parity,
 //! interoperability, collector contact, production wiring, or dependency
 //! removal.
@@ -26,8 +26,8 @@ use std::path::PathBuf;
 
 const ARTIFACT_PATH: &str = "artifacts/protobuf_owned_otlp_schema_v1.json";
 const DOC_PATH: &str = "docs/protobuf_owned_otlp_schema.md";
-const ARTIFACT_SHA256: &str = "0ab6c7b3853658d622f83f5407e1d0a98af48f991c8bb5422e6cfaeb0cda0dc8";
-const DOC_SHA256: &str = "5914e318b9458220c34b6299085b0a3baa608a7f9c773c782836dabbf327518b";
+const ARTIFACT_SHA256: &str = "b4b31090ed6d5f16d3efb969bf0a8065f92cb294de2d4c4fd341bce3b7ce9366";
+const DOC_SHA256: &str = "e5355f357cf7406bb1cc7229a08b912135052dfd5333807c1228a3afb56d6dcb";
 const SCHEMA_SIGNATURE_SHA256: &str =
     "2b9311b5c766da1b2fb88262aeb89e125c41f8ea4d8406e534a2e9b42839256b";
 const ENUM_SIGNATURE_SHA256: &str =
@@ -37,7 +37,7 @@ const SERVICE_SIGNATURE_SHA256: &str =
 const ORACLE_PIN_SIGNATURE_SHA256: &str =
     "f8d06b6ad60ce88a932eb3426a68007013ae428270159c57c1a889e46f333544";
 const REPOSITORY_PIN_SIGNATURE_SHA256: &str =
-    "a05db7d7060a5976af613294f2ba89b56267bc3ba09e4368d7cdc6081216616f";
+    "d6d42829efc38132787b7a1d786f9bca7836fa8ccae0c1462f3aac4f9e40e66b";
 const DOC_BEGIN: &str = "<!-- BEGIN PROTOBUF OWNED OTLP SCHEMA -->";
 const DOC_END: &str = "<!-- END PROTOBUF OWNED OTLP SCHEMA -->";
 
@@ -54,7 +54,7 @@ const EXPECTED_PLANNED_MUTATIONS: [&str; 9] = [
 ];
 
 const EXPECTED_NO_CLAIMS: [&str; 10] = [
-    "This packet records source, unit-test bodies, and a terminal native default-plus-metrics library check for the private common/resource/metrics/trace/logs/collector_metrics slice; it does not execute the unit tests and does not implement the collector_trace or collector_logs families.",
+    "This packet records source, unit-test bodies, and a terminal native default-plus-metrics library check for the complete private 43-message common/resource/metrics/trace/logs/collector slice; it does not execute the unit tests.",
     "It does not represent any valid, malformed, resource, property, differential, or fuzz vector as passing evidence.",
     "It does not prove byte parity with opentelemetry-proto, another language, or a live collector.",
     "It does not wire metrics, traces, logs, partial-success responses, HTTP, gRPC, retry, cancellation, batching, or shutdown.",
@@ -487,7 +487,7 @@ fn validate_identity_and_authority(value: &Value) -> ValidationResult {
         ("capability_id", "CAP-PROTOBUF-GENERIC"),
         (
             "state",
-            "AUTHORITY_PINNED_COMMON_RESOURCE_METRICS_TRACE_LOGS_COLLECTOR_METRICS_SLICE_A3_PENDING",
+            "AUTHORITY_PINNED_ALL_FINITE_SCHEMA_SOURCE_PRESENT_A3_EVIDENCE_PENDING",
         ),
     ] {
         require_text(value, key, expected)?;
@@ -529,12 +529,12 @@ fn validate_identity_and_authority(value: &Value) -> ValidationResult {
     require_text(
         decision,
         "implementation_state",
-        "COMMON_RESOURCE_METRICS_TRACE_LOGS_COLLECTOR_METRICS_SLICE_PRESENT_A3_IMPLEMENTATION_PENDING",
+        "ALL_43_FINITE_SCHEMA_MESSAGES_PRESENT_A3_EVIDENCE_PENDING",
     )?;
     require_text(
         decision,
         "evidence_state",
-        "NATIVE_DEFAULT_METRICS_LIBRARY_CHECK_GREEN_FOR_37_MESSAGE_SLICE_UNIT_TEST_EXECUTION_PENDING",
+        "NATIVE_DEFAULT_METRICS_LIBRARY_CHECK_GREEN_FOR_43_MESSAGE_SLICE_UNIT_TEST_EXECUTION_PENDING",
     )?;
 
     let authority = value
@@ -1442,19 +1442,20 @@ fn validate_resource_and_implementation(value: &Value) -> ValidationResult {
                 .map(str::to_owned)
         })
         .collect::<ValidationResult<BTreeSet<_>>>()?;
-    if array(progress, "implemented_submodules")?.len() != 5
-        || array(progress, "pending_submodules")?.len() != 1
+    if array(progress, "implemented_submodules")?.len() != 6
+        || !array(progress, "pending_submodules")?.is_empty()
         || implemented_submodules
             != BTreeSet::from([
+                "collector".to_owned(),
                 "common_and_resource".to_owned(),
                 "limits_and_error".to_owned(),
                 "logs".to_owned(),
                 "metrics".to_owned(),
                 "trace".to_owned(),
             ])
-        || pending_submodules != BTreeSet::from(["collector".to_owned()])
+        || !pending_submodules.is_empty()
     {
-        return Err("partial implementation submodule partition changed".to_owned());
+        return Err("complete implementation submodule partition changed".to_owned());
     }
 
     let implemented_messages = array(progress, "implemented_messages")?
@@ -1467,29 +1468,21 @@ fn validate_resource_and_implementation(value: &Value) -> ValidationResult {
         .collect::<ValidationResult<BTreeSet<_>>>()?;
     let mut expected_implemented_messages = BTreeSet::new();
     for family in array(value, "schema_families")? {
-        if matches!(
-            text(family, "family")?,
-            "common" | "resource" | "metrics" | "trace" | "logs" | "collector_metrics"
-        ) {
-            for message in array(family, "messages")? {
-                expected_implemented_messages.insert(text(message, "name")?.to_owned());
-            }
+        for message in array(family, "messages")? {
+            expected_implemented_messages.insert(text(message, "name")?.to_owned());
         }
     }
-    if array(progress, "implemented_messages")?.len() != 37
+    if array(progress, "implemented_messages")?.len() != 43
         || implemented_messages != expected_implemented_messages
     {
-        return Err(
-            "implemented messages must be exactly common, resource, metrics, trace, logs, and collector_metrics"
-                .to_owned(),
-        );
+        return Err("all 43 finite messages must be implemented".to_owned());
     }
-    require_unsigned(progress, "implemented_message_count", 37)?;
-    require_unsigned(progress, "pending_message_count", 6)?;
+    require_unsigned(progress, "implemented_message_count", 43)?;
+    require_unsigned(progress, "pending_message_count", 0)?;
     require_text(
         progress,
         "execution_state",
-        "NATIVE_DEFAULT_METRICS_LIBRARY_CHECK_GREEN_FOR_37_MESSAGE_SLICE_UNIT_TEST_EXECUTION_PENDING",
+        "NATIVE_DEFAULT_METRICS_LIBRARY_CHECK_GREEN_FOR_43_MESSAGE_SLICE_UNIT_TEST_EXECUTION_PENDING",
     )?;
 
     let public_delta = progress
@@ -1732,7 +1725,7 @@ fn validate_evolution_features_and_handoff(value: &Value) -> ValidationResult {
             require_text(
                 row,
                 "current_state",
-                "COMMON_RESOURCE_METRICS_TRACE_LOGS_COLLECTOR_METRICS_SLICE_PRESENT_LIBRARY_CHECK_GREEN_TEST_EXECUTION_PENDING",
+                "ALL_43_FINITE_SCHEMA_MESSAGES_PRESENT_LIBRARY_CHECK_GREEN_TEST_EXECUTION_PENDING",
             )?;
         } else {
             require_exact_keys(
@@ -1768,7 +1761,7 @@ fn validate_evolution_features_and_handoff(value: &Value) -> ValidationResult {
         ),
         (
             "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__downstream_consumer",
-            "A3 source-level compile/use test bodies for the implemented finite metrics, traces, logs, and metrics-export request/response shapes through the existing owned generic codec; the unit tests have not executed and no signal adapter, framing, collector contact, transport, or user-journey claim is made.",
+            "A3 source-level compile/use test bodies for the complete finite metrics, traces, logs, and all three collector request/response shapes through the existing owned generic codec; the unit tests have not executed and no signal adapter, framing, collector contact, transport, or user-journey claim is made.",
         ),
     ]);
     let expected_prefixes = expected_prefix_scopes
@@ -1944,8 +1937,10 @@ fn validate_operator_doc(doc: &str, value: &Value) -> ValidationResult {
         "message-valued oneof member merge",
         "non-exhaustive minimum",
         "one reusable fail-closed validator",
-        "37-message partial implementation slice",
-        "remaining 6 finite collector messages",
+        "complete 43-message finite source slice",
+        "all nine collector request, response, and",
+        "all three collector request/response shapes",
+        "Canonical unit-test execution",
         "W3C tracestate",
         "cargo check --locked -p asupersync --lib --features metrics -j 4",
         "local Cargo fallback",
