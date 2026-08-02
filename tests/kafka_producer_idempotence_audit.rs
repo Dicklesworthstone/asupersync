@@ -1,85 +1,57 @@
-//! Audit test for Kafka producer idempotence behavior.
+//! Downstream-consumer contract for Kafka's default-feature boundary.
 //!
-//! When ProducerConfig.enable_idempotence=true, producers should track
-//! producer-id + sequence-number per partition to prevent duplicates
-//! during retries. This is critical for exactly-once semantics.
+//! The root package's dev-dependency cycle enables internal features for its
+//! ordinary integration tests. This source is therefore also declared as an
+//! integration-test target of `tests/fixtures/downstream-consumer-proof`, whose
+//! dependency on `asupersync` has no dev-dependency cycle and enables only the
+//! root crate's default features. Both tests use public runtime APIs exclusively.
 //!
-//! AUDIT CONTEXT: the crate-local deterministic broker harness is not a
-//! Kafka broker and does not validate producer sequence numbers. Production
-//! operations must fail closed unless the real Kafka backend feature is enabled.
+//! The crate-local deterministic broker is not a Kafka implementation. Without
+//! the `kafka` feature, a downstream producer must return `FeatureDisabled`
+//! rather than silently route traffic to that internal harness.
 
-// Every consumer of these three names lives in a `#[cfg(not(feature =
-// "kafka"))]` test below, so the imports are gated to match their users rather
-// than deleted. That is deliberate: the gate is what records the fact that with
-// `--features kafka` this target has NO producer coverage at all. The only
-// tests that survive the feature are the two `println!`-only audit fns, which
-// assert nothing.
-//
-// The duplicate-offset property this file is named for was removed in 17e1226da
-// and has since been RE-HOMED IN-CRATE as
-// `messaging::kafka::tests::deterministic_broker_does_not_deduplicate_idempotent_retries`
-// (br-asupersync-d8aiqa). It cannot live here: integration tests compile as
-// downstream consumers, where `send()` deliberately fails closed with
-// `FeatureDisabled` rather than reaching the deterministic broker, which is
-// precisely what the three tests below assert. The property therefore has to
-// run where the harness is actually reachable.
+#[cfg(not(feature = "kafka"))]
+use asupersync::Cx;
 #[cfg(not(feature = "kafka"))]
 use asupersync::messaging::kafka::KafkaError;
 #[cfg(not(feature = "kafka"))]
 use asupersync::messaging::kafka::{KafkaProducer, ProducerConfig};
 #[cfg(not(feature = "kafka"))]
-use asupersync::test_utils::run_test_with_cx;
+use asupersync::runtime::RuntimeBuilder;
 
 #[cfg(not(feature = "kafka"))]
 #[test]
-fn deterministic_broker_harness_allows_idempotence_config() {
-    use asupersync::messaging::kafka::lock_deterministic_broker_for_tests;
-
-    let _broker = lock_deterministic_broker_for_tests();
-
-    // Verify that idempotence can be configured (use builder — struct has a
-    // private field for the insecure-transport opt-in).
+fn default_feature_send_fails_closed_instead_of_using_internal_harness() {
     let config = ProducerConfig::default()
         .enable_idempotence(true)
         .retries(3);
-
     assert!(config.enable_idempotence);
 
     let producer = KafkaProducer::new(config).unwrap();
-    let _ = producer; // keep alive for the duration of the test
-    // Producer was created with enable_idempotence=true.
-
-    // The deterministic broker harness is intentionally crate-local test
-    // infrastructure; it does not claim Kafka idempotence semantics.
-}
-
-#[cfg(not(feature = "kafka"))]
-#[test]
-fn default_feature_integration_send_fails_closed_instead_of_using_stub() {
-    run_test_with_cx(|cx| async move {
-        let producer = KafkaProducer::new(
-            ProducerConfig::default().enable_idempotence(true), // Claims to be idempotent
-        )
-        .unwrap();
-
-        let topic = "idempotence-test";
-
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build public current-thread runtime");
+    runtime.block_on(async {
+        let cx = Cx::current().expect("Runtime::block_on installs a public Cx");
         let send_result = producer
-            .send(&cx, topic, Some(b"key1"), b"message1", None)
+            .send(&cx, "idempotence-test", Some(b"key1"), b"message1", None)
             .await;
 
         assert!(
             matches!(send_result, Err(KafkaError::FeatureDisabled)),
-            "default-feature integration tests must fail closed instead of using deterministic test infrastructure"
+            "a downstream default-feature build must not reach internal Kafka test infrastructure"
         );
     });
 }
 
 #[cfg(not(feature = "kafka"))]
 #[test]
-fn default_feature_integration_send_fails_closed_for_all_producers() {
-    run_test_with_cx(|cx| async move {
-        // Create two producers with idempotence enabled
+fn default_feature_send_fails_closed_for_every_producer_instance() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build public current-thread runtime");
+    runtime.block_on(async {
+        let cx = Cx::current().expect("Runtime::block_on installs a public Cx");
         let producer1 = KafkaProducer::new(
             ProducerConfig::default()
                 .enable_idempotence(true)
@@ -94,16 +66,11 @@ fn default_feature_integration_send_fails_closed_for_all_producers() {
         )
         .unwrap();
 
-        let topic = "producer-id-test";
-
-        // Integration tests compile as downstream consumers, so default builds
-        // must not route broker operations to crate-local deterministic test
-        // infrastructure.
         let first_send = producer1
-            .send(&cx, topic, Some(b"key"), b"from-p1", None)
+            .send(&cx, "producer-id-test", Some(b"key"), b"from-p1", None)
             .await;
         let second_send = producer2
-            .send(&cx, topic, Some(b"key"), b"from-p2", None)
+            .send(&cx, "producer-id-test", Some(b"key"), b"from-p2", None)
             .await;
 
         assert!(
@@ -115,73 +82,4 @@ fn default_feature_integration_send_fails_closed_for_all_producers() {
             "producer 2 should hit the default-feature fail-closed boundary"
         );
     });
-}
-
-#[test]
-fn audit_kafka_producer_idempotence_implementation() {
-    println!("\n=== KAFKA PRODUCER IDEMPOTENCE AUDIT ===\n");
-
-    println!("KAFKA IDEMPOTENCE SPECIFICATION:");
-    println!("- Each producer gets unique producer-id from broker");
-    println!("- Client maintains per-partition sequence numbers starting at 0");
-    println!("- Broker deduplicates based on (producer-id, partition, sequence)");
-    println!("- Out-of-sequence messages cause OOSR (OutOfOrderSequence) errors");
-    println!("- Duplicate sequence numbers are silently deduplicated\n");
-
-    println!("IMPLEMENTATION ANALYSIS:");
-    println!("File: src/messaging/kafka.rs");
-    println!("1. ProducerConfig.enable_idempotence (line 1102): ✓ SOUND config field");
-    println!("2. rdkafka integration (line 430): ✓ SOUND passes config to rdkafka");
-    println!("3. Deterministic broker harness: crate-local only, no production idempotence claim");
-    println!("4. Default-feature integration path: ✓ SOUND fail-closed boundary\n");
-
-    println!("DEFECT IDENTIFIED:");
-    println!("✗ CRITICAL: deterministic harness has no producer ID tracking");
-    println!("✗ CRITICAL: deterministic harness has no sequence number validation");
-    println!("✓ SOUND: downstream default-feature sends return FeatureDisabled");
-    println!("✓ SOUND: production idempotence remains delegated to rdkafka\n");
-
-    println!("IMPACT:");
-    println!("- Test/production behavior divergence (tests pass, production may duplicate)");
-    println!("- Untested retry scenarios could cause duplicate payments");
-    println!("- False confidence in exactly-once semantics");
-    println!("- Financial risk in payment/billing systems\n");
-
-    println!("EXACTLY-ONCE SEMANTICS GAP:");
-    println!("Kafka exactly-once requires BOTH:");
-    println!("1. Idempotent producers (prevent duplicates) - delegated to rdkafka");
-    println!("2. Transactional producers (atomic commits) - present behind kafka feature\n");
-
-    println!("RECOMMENDATION:");
-    println!("Keep crate-local harnesses explicit and fail closed in downstream builds:");
-    println!("```rust");
-    println!("struct IdempotentDeterministicBrokerHarness {{");
-    println!("    producer_ids: BTreeMap<String, u64>, // client_id -> producer_id");
-    println!(
-        "    sequences: BTreeMap<(u64, String, i32), u64>, // (producer_id, topic, partition) -> next_seq"
-    );
-    println!(
-        "    dedup_cache: BTreeMap<(u64, String, i32, u64), RecordMetadata>, // recent records"
-    );
-    println!("}}");
-    println!();
-    println!("impl IdempotentDeterministicBrokerHarness {{");
-    println!(
-        "    fn publish_with_idempotence(&mut self, record: DeterministicBrokerRecord, producer_id: u64, sequence: u64) {{"
-    );
-    println!("        let key = (producer_id, record.topic.clone(), record.partition, sequence);");
-    println!("        if let Some(cached) = self.dedup_cache.get(&key) {{");
-    println!("            return cached.clone(); // Deduplicated!");
-    println!("        }}");
-    println!("        // Check sequence ordering, publish if valid...");
-    println!("    }}");
-    println!("}}");
-    println!("```\n");
-
-    println!("PRIORITY: HIGH - Exactly-once semantics critical for financial systems");
-}
-
-#[test]
-fn run_audit() {
-    audit_kafka_producer_idempotence_implementation();
 }

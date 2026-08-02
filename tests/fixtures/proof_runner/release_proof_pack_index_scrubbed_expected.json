@@ -54,10 +54,10 @@
         "mode": "proof-console-report"
       },
       "summary": {
-        "claim_count": 33,
-        "lane_count": 57,
+        "claim_count": 35,
+        "lane_count": 60,
         "green_claim_count": 13,
-        "yellow_claim_count": 20,
+        "yellow_claim_count": 22,
         "red_claim_count": 0,
         "stale_blocker_count": 0,
         "unsupported_broad_claim_count": 0,
@@ -205,6 +205,22 @@
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_default_tokio_tree cargo tree -e normal -p asupersync -i tokio"
     },
     {
+      "lane_id": "dependency-budget-contract",
+      "expected_signal": "dependency_budget_contract tests pass",
+      "guarantee_ids": [
+        "dependency-budget-contract"
+      ],
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_budget_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features dependency-ledger --test dependency_budget_contract -- --nocapture"
+    },
+    {
+      "lane_id": "dependency-supply-chain-policy-contract",
+      "expected_signal": "dependency_supply_chain_policy_contract tests pass",
+      "guarantee_ids": [
+        "dependency-supply-chain-policy-contract"
+      ],
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_supply_chain_policy CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test dependency_supply_chain_policy_contract -- --nocapture"
+    },
+    {
       "lane_id": "dirty-tree-ownership-receipt-contract",
       "expected_signal": "dirty_tree_ownership_receipt_contract tests pass",
       "guarantee_ids": [
@@ -227,6 +243,14 @@
         "downstream-consumer-channel-public-api"
       ],
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_channel CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --features channel-mpsc-select-e2e-profile --bin channel_profile_consumer"
+    },
+    {
+      "lane_id": "downstream-consumer-default-kafka-test",
+      "expected_signal": "kafka_default_feature_surface runs 2 tests successfully against the external fixture with only default asupersync features",
+      "guarantee_ids": [
+        "downstream-consumer-default-kafka-fail-closed"
+      ],
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_kafka_default CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --test kafka_default_feature_surface -- --nocapture"
     },
     {
       "lane_id": "downstream-consumer-default-run",
@@ -527,10 +551,10 @@
   ],
   "summaries": {
     "proof_console": {
-      "claim_count": 33,
-      "lane_count": 57,
+      "claim_count": 35,
+      "lane_count": 60,
       "green_claim_count": 13,
-      "yellow_claim_count": 20,
+      "yellow_claim_count": 22,
       "red_claim_count": 0,
       "stale_blocker_count": 0,
       "unsupported_broad_claim_count": 0,
@@ -577,8 +601,8 @@
   "summary": {
     "source_artifact_count": 6,
     "missing_source_artifact_count": 0,
-    "proof_lane_count": 57,
-    "proof_command_count": 57,
+    "proof_lane_count": 60,
+    "proof_command_count": 60,
     "rch_outcome_count": 0,
     "rch_log_count": 0,
     "rch_outcome_provenance_failure_count": 0

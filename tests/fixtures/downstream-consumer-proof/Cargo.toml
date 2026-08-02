@@ -10,6 +10,11 @@ publish = false
 default = []
 metrics-profile = ["asupersync/metrics"]
 channel-mpsc-select-e2e-profile = ["asupersync/channel-mpsc-select-e2e"]
+kafka = ["asupersync/kafka"]
 
 [dependencies]
 asupersync = { path = "../../.." }
+
+[[test]]
+name = "kafka_default_feature_surface"
+path = "../../kafka_producer_idempotence_audit.rs"

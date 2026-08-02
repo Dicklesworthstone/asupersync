@@ -798,6 +798,7 @@
       },
       "manifest_guarantee_ids": [
         "downstream-consumer-default-public-api",
+        "downstream-consumer-default-kafka-fail-closed",
         "downstream-consumer-metrics-public-api",
         "downstream-consumer-channel-public-api",
         "downstream-consumer-default-tokio-free",
@@ -806,6 +807,7 @@
       ],
       "manifest_lane_ids": [
         "downstream-consumer-default-run",
+        "downstream-consumer-default-kafka-test",
         "downstream-consumer-metrics-run",
         "downstream-consumer-channel-profile-run",
         "downstream-consumer-default-tokio-tree",
@@ -814,6 +816,7 @@
       ],
       "proof_commands": [
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_default CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin default_consumer",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_kafka_default CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --test kafka_default_feature_surface -- --nocapture",
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_metrics CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --features metrics-profile --bin metrics_consumer",
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_channel CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --features channel-mpsc-select-e2e-profile --bin channel_profile_consumer",
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_tokio_tree cargo tree -e normal --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml -i tokio",
@@ -821,7 +824,7 @@
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test downstream_consumer_proof_contract -- --nocapture"
       ],
       "blocked_frontier": null,
-      "notes": "Yellow frontier for the external downstream fixture: run the listed profile lanes for fresh proof. No-claim boundaries: broad-workspace-health, conformance-crate, performance, release-readiness, test-internals-public-api."
+      "notes": "Yellow frontier for the external downstream fixture: run the listed profile lanes for fresh proof. No-claim boundaries: all-root-integration-tests-default-clean, broad-workspace-health, conformance-crate, conformance-dev-dependency-cycle-removal, kafka-backend-behavior, performance, release-readiness, test-internals-public-api."
     },
     {
       "claim_id": "memory-residency-replay-e2e-contract",
