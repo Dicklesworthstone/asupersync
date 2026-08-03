@@ -85,7 +85,7 @@ expression: certificate_snapshot(&cert)
         "step": 7,
         "potential": "0.000000",
         "bound": "0.142857",
-        "description": "1 monotonicity violations out of 7 steps (rate: 0.1429)"
+        "description": "1 monotonicity violations out of 7 steps (rate: 0.1429, empirical limit: 0.2500; total rebound: 8.0000, rebound/net: 0.0533, limit: 1.0000; latest delta: -8.0000, required <= 0.0000, recency gate: pass)"
       },
       {
         "step": 7,
@@ -95,5 +95,5 @@ expression: certificate_snapshot(&cert)
       }
     ]
   },
-  "verdict_display": "Progress Certificate Verdict\n============================\nConverging:         true\nStall detected:     false\nSteps:              8\nV(Σ₀):              150.0000\nV(Σₜ):              0.0000\nMean credit/step:   22.5714\nMax |Δ|:            40.0000\nDrain phase:        quiescent\nConfidence bound:   1.000000\nAzuma bound:        1.000000\nSelected tail:      1.000000\nDelta variance:     247.673469\nEst. remaining:     0.0 steps\nEvidence (3 entries):\n  step=7: V=0.0000, bound=0.000000 — quiescence reached (V ≈ 0)\n  step=7: V=0.0000, bound=0.142857 — 1 monotonicity violations out of 7 steps (rate: 0.1429)\n  step=7: V=0.0000, bound=1.000000 — total progress 150.0000 over 7 steps, mean net progress 21.4286/step, gross credit 22.5714/step, Azuma tail P ≤ 1.000000\n"
+  "verdict_display": "Progress Certificate Verdict\n============================\nConverging:         true\nStall detected:     false\nSteps:              8\nV(Σ₀):              150.0000\nV(Σₜ):              0.0000\nMean credit/step:   22.5714\nMax |Δ|:            40.0000\nDrain phase:        quiescent\nConfidence bound:   1.000000\nAzuma bound:        1.000000\nSelected tail:      1.000000\nDelta variance:     247.673469\nEst. remaining:     0.0 steps\nEvidence (3 entries):\n  step=7: V=0.0000, bound=0.000000 — quiescence reached (V ≈ 0)\n  step=7: V=0.0000, bound=0.142857 — 1 monotonicity violations out of 7 steps (rate: 0.1429, empirical limit: 0.2500; total rebound: 8.0000, rebound/net: 0.0533, limit: 1.0000; latest delta: -8.0000, required <= 0.0000, recency gate: pass)\n  step=7: V=0.0000, bound=1.000000 — total progress 150.0000 over 7 steps, mean net progress 21.4286/step, gross credit 22.5714/step, Azuma tail P ≤ 1.000000\n"
 }

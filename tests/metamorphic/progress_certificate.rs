@@ -164,7 +164,7 @@ proptest! {
 
         // If the verdict reports convergence, validate the observed reduction.
         if converging_verdict.converging {
-            // Should have made significant progress from initial to final potential
+            // The empirical policy requires positive endpoint net progress.
             let progress_made = converging_verdict.initial_potential - converging_verdict.current_potential;
             prop_assert!(progress_made > 0.0,
                 "Converging certificate should show actual progress: initial={}, current={}, progress={}",
@@ -185,14 +185,12 @@ proptest! {
 
         let stalled_verdict = stalled_cert.verdict();
 
-        // Stalled sequences should either not converge or have stall detection
-        if !stalled_verdict.converging {
-            prop_assert!(true); // Expected behavior
-        } else {
-            // If it claims convergence despite stalling, the confidence should be very low
-            prop_assert!(stalled_verdict.confidence_bound < 0.8,
-                "Stalled sequence claiming convergence should have low confidence: {}",
-                stalled_verdict.confidence_bound);
+        // The generator has a noisy tail and may not meet the configured stall
+        // run length. Whenever the explicit stall rule does fire, the separate
+        // empirical status must fail closed; projected confidence is unrelated.
+        if stalled_verdict.stall_detected {
+            prop_assert!(!stalled_verdict.converging,
+                "An explicit stall cannot be classified as empirically converging");
         }
     }
 }
@@ -436,11 +434,13 @@ fn integration_certificate_lifecycle_lab_runtime() {
             assert!(verdict.current_potential >= 0.0);
             assert!(verdict.initial_potential >= verdict.current_potential);
 
-            // As we progress, we should eventually see convergence
+            // As we progress, we should eventually see a favorable empirical
+            // trend. Conditional confidence is a separate diagnostic.
             if step >= 8 {
                 // After sufficient observations
                 if verdict.converging {
-                    assert!(verdict.confidence_bound > 0.0);
+                    assert!(verdict.estimated_remaining_steps.is_some());
+                    assert!(!verdict.stall_detected);
                 }
             }
         }

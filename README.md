@@ -243,7 +243,7 @@ Running → CancelRequested → Cancelling → Finalizing → Completed(Cancelle
 
 Some primitives and proof surfaces publish explicit cancellation responsiveness bounds, such as bounded commit sections, mask-depth limits, scheduler cancel-streak fairness, static plan analysis, and lab cancellation oracles. A blanket per-primitive responsiveness-bound registry is still a design requirement, not a universal runtime guarantee today; budgets are sufficient conditions only for paths with a concrete published bound.
 
-Cancellation progress is continuously observable through `ProgressCertificate`. It tracks potential descent, classifies the current drain regime (`warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`), and emits a conditional range-bounded concentration envelope from Freedman and Azuma candidates. The realized delta variance remains diagnostic-only rather than being reused as predictable variation. This makes the evidence behind "is shutdown actually converging?" inspectable without treating one trace as proof of future drift.
+Cancellation progress is continuously observable through `ProgressCertificate`. It tracks potential descent, classifies the current drain regime (`warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`), and reports range-bounded Freedman and Azuma candidates plus a separate projected conditional calculation. Under the current range-only variation cap, raw Freedman is never tighter than Azuma, so the selected public envelope equals Azuma. At the current same-history horizon, telescoping makes both candidate tails algebraically `1`; they are not evidence of convergence. The `converging` flag is instead an empirical status over the complete accepted finite non-negative observation history represented by running statistics. It requires positive endpoint net progress, no detected stall, bounded rebound count and magnitude, no latest-step rebound, and no dropped invalid sample. Non-finite or materially negative telemetry is dropped; that suppresses the remaining-step estimate and reports `warmup` instead of an actionable terminal phase until reset. The realized delta variance remains diagnostic-only rather than being reused as predictable variation. This makes the evidence behind "is shutdown actually converging?" inspectable without treating one trace as proof of future drift, termination, or bounded drain time.
 
 ### 3. Two-Phase Effects Prevent Data Loss
 
@@ -374,11 +374,11 @@ Cancellation drain progress is monitored over signed net-potential deltas. The r
 P(S_t ≥ x and Q_t ≤ q) ≤ exp(-x² / (2(q + B x / 3)))
 ```
 
-For `t ≥ 1`, `c > 0`, `x > 0`, and `q ≥ 0`, signed progress `Y_i = -Δ_i` gives cumulative centered shortfall `S_t = Σ(E[Y_i | F_{i-1}] - Y_i)` and predictable quadratic variation `Q_t`. The absolute signed step is bounded by `c`, and the centered upper increment is bounded by `B = 2c`. The implementation uses the outcome-independent cap `Q_t ≤ t·c²`, then selects the smaller Azuma/Freedman candidate. A trace that exceeds the configured step range disables concentration claims for that verdict.
+For `t ≥ 1`, `c > 0`, `x > 0`, and `q ≥ 0`, signed progress `Y_i = -Δ_i` gives cumulative centered shortfall `S_t = Σ(E[Y_i | F_{i-1}] - Y_i)` and predictable quadratic variation `Q_t`. The absolute signed step is bounded by `c`, and the centered upper increment is bounded by `B = 2c`. The implementation uses the outcome-independent cap `Q_t ≤ t·c²`. With `B = 2c`, the resulting Freedman denominator is never smaller than Azuma's, so the selected envelope is always Azuma; the explicit raw candidate remains for auditability. A trace that exceeds the configured step range, or whose history is incomplete because an invalid sample was dropped, disables concentration claims for that verdict. At the current same-history horizon, the plug-in mean telescopes to zero deviation, so both public current-horizon candidates are the trivial bound `1`.
 
 Gross downward credit is retained for phase diagnostics only. Its accounted-potential total is pathwise nondecreasing, so the progress certificate does not use it for Ville or optional-stopping evidence. The projected confidence field is conditional on persistence of the empirical plug-in net-progress rate; it is not a proof of future drift.
 
-The same monitor classifies operational drain regime (`warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`) so operators can distinguish "normal long tail" from "true stall".
+The same monitor classifies operational drain regime (`warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`) so operators can distinguish an observed slow tail from a configured stalled run. Its `converging` flag is an empirical status over the complete accepted finite non-negative observation history represented by running statistics. It is guarded by positive endpoint net progress, the stall rule, fixed rebound-count and rebound-magnitude limits, a non-increasing latest step, and the absence of dropped invalid samples; the conditional tails do not gate it. Incomplete telemetry fails actionable outputs closed to `warmup`, no remaining-step estimate, and disabled concentration.
 
 Why it helps: shutdown and fail-fast behavior can be audited with explicit conditional confidence calculations and phase labels, instead of timeout heuristics alone.
 
@@ -1278,7 +1278,7 @@ Asupersync has formal semantics backing its engineering.
 | **Budgets** | Tropical semiring: `(ℝ∪{∞}, min, +)` | Critical path computation, budget propagation |
 | **Obligations** | Linear-logic discipline: resources resolved exactly once (Rust is affine, so enforcement is `#[must_use]` + runtime leak detection, not purely static) | Leaked obligations are loudly detected at region close instead of silently dropped |
 | **Traces** | Mazurkiewicz equivalence (partial orders) | DPOR-style guided exploration (not certified-optimal DPOR), stable replay |
-| **Cancellation** | Two-player game with budgets | Completeness theorem: sufficient budgets guarantee termination |
+| **Cancellation** | Two-player game with budgets | Scoped completeness when modeled responsiveness assumptions hold and budgets are sufficient |
 | **Adaptive scheduling** | EXP3/Hedge no-regret online learning | Dynamic preemption control without fairness blind spots |
 | **Drain certificates** | Signed-step range bounds + empirical phase diagnostics | Conditional, auditable progress evidence for cancellation drain |
 | **Structural diagnostics** | Spectral graph theory + conformal + e-processes | Early warning on wait-graph fragmentation with calibrated alarms |
@@ -1306,7 +1306,7 @@ Asupersync is intentionally "math-forward": it uses advanced math and theory-gra
 
 ### Drain Progress Diagnostics (Freedman + Azuma + Phase Labels)
 
-`src/cancel/progress_certificate.rs` models cancellation drain as a stochastic progress process with auditable evidence, diagnostic variance estimation, and conditional concentration calculations. The public tail selects the stronger of a range-only Freedman candidate and the Azuma baseline; realized variance is never reused as predictable variation. Verdicts include phase classification (`warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`) for operational clarity.
+`src/cancel/progress_certificate.rs` models cancellation drain as a stochastic progress process with auditable evidence, diagnostic variance estimation, and conditional concentration calculations. The range-only raw Freedman candidate is never tighter than the Azuma baseline under the implemented cap, so the selected public envelope equals Azuma; realized variance is never reused as predictable variation. Both public current-horizon candidates are algebraically `1` under the same-history plug-in mean, while `confidence_bound` is a separate conditional projection. Verdicts include phase classification (`warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`) plus an accepted-history empirical `converging` status. Neither the status nor the conditional calculations prove future drift, termination, or bounded drain time.
 
 ### Spectral Bifurcation Warnings on the Wait Graph
 

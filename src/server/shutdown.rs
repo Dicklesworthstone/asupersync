@@ -126,10 +126,11 @@ pub struct ShutdownStats {
 ///
 /// Unlike [`ShutdownStats`], which counts *connections*, this report tracks
 /// in-flight *requests* (region children — see `RegionRecord::child_count`)
-/// and carries the [`ProgressCertificate`] verdict that turns "is the drain
-/// converging?" into a measurable claim. It is the operator-visible surface
-/// for the drain: a structured log line plus a programmatic value that tests
-/// and dashboards can assert against.
+/// and carries the [`ProgressCertificate`] verdict as a measurable
+/// accepted-history diagnostic. It is the operator-visible surface for the
+/// drain: a structured log line plus a programmatic value that tests and
+/// dashboards can inspect without treating the empirical status as a future
+/// completion guarantee.
 ///
 /// The [`Display`](std::fmt::Display) rendering is deterministic (fixed float
 /// precision, duration in whole milliseconds) so it can be golden-tested.
@@ -155,7 +156,11 @@ pub struct GracefulDrainReport {
     pub observations: usize,
     /// Final drain-phase classification from the progress certificate.
     pub final_phase: DrainPhase,
-    /// Whether the certificate judged the drain to be converging.
+    /// Whether the certificate's accepted-history heuristic classified the
+    /// drain as empirically converging.
+    ///
+    /// This is separate from the conditional tail calculations and is not a
+    /// probability, future-drift, termination, or bounded-drain guarantee.
     pub converging: bool,
     /// Conditional lower-tail confidence calculation for quiescence within
     /// twice the plug-in estimated remaining steps.
@@ -210,9 +215,10 @@ impl std::fmt::Display for GracefulDrainReport {
 /// The certificate models the remaining in-flight request count as a Lyapunov
 /// potential that should descend to zero (quiescence). Feed it one observation
 /// per drain tick via [`observe`](Self::observe); the resulting
-/// [`drain_phase`](Self::phase) distinguishes a normal `slow_tail` from a true
-/// `stalled` drain, which is exactly the signal an operator needs to decide
-/// whether to keep waiting or escalate to the hard deadline.
+/// [`drain_phase`](Self::phase) supplies a heuristic distinction between an
+/// observed `slow_tail` and a configured `stalled` run. Operators combine it
+/// with deadlines and telemetry completeness when deciding whether to keep
+/// waiting or escalate; it is not a standalone proof of future behavior.
 ///
 /// This type is intentionally transport-agnostic: the HTTP/server layers
 /// (D2.2+) supply the in-flight count (e.g. `RegionRecord::child_count`) and

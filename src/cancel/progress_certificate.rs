@@ -28,9 +28,23 @@
 //! ```
 //!
 //! The implementation uses the outcome-independent caps `Qₜ ≤ t·c²` and
-//! `B = 2c`, then selects the smaller Azuma/Freedman candidate. It reports a
-//! conditional calculation using an empirical plug-in net-progress rate; the
-//! trace does not establish the future-drift premise.
+//! `B = 2c`. Under those range-only caps, the Freedman denominator is never
+//! smaller than Azuma's, so the selected envelope is always the Azuma
+//! candidate (equal at zero deviation). The explicit Freedman calculation is
+//! retained for auditability, not presented as stronger evidence. Both use an
+//! empirical plug-in net-progress rate; the trace does not establish the
+//! future-drift premise.
+//!
+//! The `converging` verdict is deliberately separate: it reports a favorable
+//! empirical trend in the complete accepted finite non-negative observation history
+//! represented by running statistics, subject to stall plus rebound count,
+//! magnitude, and recency policy. It does not imply future drift, termination,
+//! or a probabilistic guarantee, and none of the conditional tails gate it.
+//! A dropped invalid sample (non-finite or materially negative) makes telemetry
+//! incomplete: the verdict fails
+//! empirical convergence closed, suppresses the remaining-step estimate,
+//! disables concentration, and reports `Warmup` rather than an actionable
+//! terminal phase until reset.
 //!
 //! Gross downward credit `max(0, -Δᵢ)` is bookkeeping for phase diagnostics.
 //! The gross-credit-accounted quantity `V(Σₜ) + Σ max(0, -Δᵢ)` equals
@@ -45,8 +59,9 @@
 //!   martingale monitoring framework for invariant checking.
 //! - [`SymbolCancelToken`](super::symbol_cancel::SymbolCancelToken) —
 //!   cancellation cascade system whose drain we certificate.
-//! - [`Budget`](crate::types::Budget) — poll quota provides a hard
-//!   upper bound that serves as an independent safety net.
+//! - [`Budget`](crate::types::Budget) — poll quotas constrain covered cleanup
+//!   paths with published responsiveness assumptions; they do not create a
+//!   universal wall-clock drain bound for non-cooperative work.
 //!
 //! # Usage
 //!
@@ -73,20 +88,39 @@
 
 use std::fmt;
 
+/// Maximum observed fraction of positive-delta steps accepted by the
+/// empirical `converging` policy.
+///
+/// This is an operator heuristic over the accepted finite non-negative
+/// observation history represented by running statistics, not a probability
+/// or confidence level.
+const MAX_EMPIRICAL_REBOUND_RATE: f64 = 0.25;
+
+/// Maximum gross rebound magnitude relative to net endpoint progress accepted
+/// by the empirical `converging` policy.
+///
+/// This prevents a low-count but near-total rebound from being mislabeled as a
+/// favorable current trend. It is an operator heuristic, not a probability.
+const MAX_EMPIRICAL_REBOUND_TO_NET_RATIO: f64 = 1.0;
+
 // ============================================================================
 // Configuration
 // ============================================================================
 
 /// Configuration for progress certificate monitoring.
 ///
-/// Controls the statistical parameters governing stall detection,
-/// concentration bounds, and certificate confidence levels.
+/// Carries the operational inputs for stall and range diagnostics plus
+/// serialized caller reference metadata.
 #[derive(Debug, Clone)]
 pub struct ProgressConfig {
-    /// Desired threshold for conditional confidence calculations (e.g. 0.95).
+    /// Serialized caller reference threshold for interpreting the projected
+    /// conditional confidence calculation (e.g. 0.95).
     ///
-    /// Must be in `(0, 1)`. The convergence gate compares the selected
-    /// range-bounded tail against `1 - confidence`.
+    /// Must be in `(0, 1)`. This value does not affect `converging`, either
+    /// current-horizon tail, or `confidence_bound`; callers may compare it to
+    /// `confidence_bound` externally subject to the plug-in assumptions.
+    /// Changing only this field changes serialized configuration identity, not
+    /// the computed verdict.
     pub confidence: f64,
 
     /// Upper bound on the absolute potential change in a single step.
@@ -258,18 +292,20 @@ impl fmt::Display for EvidenceEntry {
 ///
 /// Determined automatically from the credit stream using an exponential
 /// moving average to detect transitions between rapid drain and slow
-/// convergence tail. This enables phase-adaptive timeout policies:
-/// during `RapidDrain` the system can use aggressive timeouts, while
-/// `SlowTail` warrants patience and `Stalled` warrants escalation.
+/// convergence tail. These deterministic observed-history labels can inform
+/// phase-adaptive timeout policy, but are not by themselves sufficient proof
+/// that an operator should wait or escalate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DrainPhase {
-    /// Insufficient observations to classify the phase.
+    /// Insufficient observations or incomplete telemetry prevent a reliable
+    /// phase classification.
     Warmup,
     /// Rapid initial drain: high credit per step, potential falling fast.
     RapidDrain,
     /// Slow tail convergence: diminishing returns per step.
     SlowTail,
-    /// No meaningful progress is being made.
+    /// The configured consecutive non-decreasing-step threshold was reached,
+    /// or accepted history has no meaningful gross downward credit.
     Stalled,
     /// Potential is at or near zero; drain is complete.
     Quiescent,
@@ -297,21 +333,31 @@ impl fmt::Display for DrainPhase {
 /// described in the module documentation.
 #[derive(Debug, Clone)]
 pub struct CertificateVerdict {
-    /// Whether the process appears to be converging under the empirical trend,
-    /// stall, and oscillation gates reported in the evidence trail. A range
-    /// violation disables the conditional concentration candidates, but does
-    /// not erase separately observed empirical reduction.
+    /// Whether the complete accepted finite non-negative observation history
+    /// represented by running statistics is empirically trending toward quiescence under the
+    /// signed-progress, stall, and rebound count/magnitude/recency policy
+    /// reported in the evidence trail.
+    ///
+    /// This is not a future-drift, termination, or probability guarantee.
+    /// A range violation disables the conditional concentration candidates but
+    /// does not erase separately observed empirical progress. A dropped
+    /// invalid observation disables both the conditional candidates and this
+    /// status because telemetry is incomplete.
     pub converging: bool,
 
     /// Estimated remaining steps to quiescence via the plug-in net-progress
     /// rate: `V(Σₜ) / mean_net_progress`. `None` if insufficient data or
-    /// non-positive net progress.
+    /// non-positive net progress, or if dropped telemetry made the observation
+    /// history incomplete.
     pub estimated_remaining_steps: Option<f64>,
 
     /// Projected lower-tail confidence calculation for quiescence within
-    /// twice the plug-in remaining-step estimate. It selects the smaller
-    /// range-bounded candidate, is conditional on persistence of the empirical
-    /// net-progress rate, and lies in `[0, 1]`.
+    /// twice the plug-in remaining-step estimate. The selected range-only
+    /// envelope equals the Azuma candidate because the conservative Freedman
+    /// candidate is never tighter under `Qₜ ≤ t·c²` and `B = 2c`. It is
+    /// conditional on persistence of the empirical net-progress rate and lies
+    /// in `[0, 1]`. A configured-range violation or dropped invalid sample
+    /// disables this calculation to `0`.
     pub confidence_bound: f64,
 
     /// Whether a stall was detected (last `stall_threshold` steps all
@@ -321,13 +367,18 @@ pub struct CertificateVerdict {
     /// The conditional Azuma–Hoeffding candidate at the current step.
     ///
     /// This is `exp(-λ² / (2·t·c²))` evaluated at the current
-    /// deviation from expected progress.
+    /// deviation from expected progress. With the current same-history plug-in
+    /// mean and non-negative potential, telescoping gives `λ = 0`, so this
+    /// current-horizon field is algebraically `1`. It is also `1` when a range
+    /// violation or dropped invalid sample disables concentration.
     pub azuma_bound: f64,
 
-    /// Number of observations processed.
+    /// Number of accepted finite non-negative observations processed. Dropped invalid
+    /// samples are reported separately through evidence.
     pub total_steps: usize,
 
-    /// Current potential value.
+    /// Most recent accepted finite non-negative potential value. This may be
+    /// stale when a later invalid sample was dropped; consult evidence before acting.
     pub current_potential: f64,
 
     /// Initial potential value (at step 0).
@@ -352,10 +403,14 @@ pub struct CertificateVerdict {
     /// increment bound. Signed progress lies in `[-b, b]`, so
     /// `Qₜ ≤ t·b²`.
     /// Despite the historical field name, this stores the selected envelope
-    /// `min(raw_freedman, azuma)`, not the raw Freedman candidate. Empirical
-    /// delta variance is diagnostic-only and never enters either bound. Both
-    /// candidates use the verdict's empirical plug-in net-progress rate and
-    /// therefore do not establish persistence of future drift.
+    /// `min(raw_freedman, azuma)`, not the raw Freedman candidate. With the
+    /// range-only cap above, raw Freedman is never tighter, so this field equals
+    /// `azuma_bound`. Empirical delta variance is diagnostic-only and never
+    /// enters either bound. Both candidates use the verdict's empirical plug-in
+    /// net-progress rate and therefore do not establish persistence of future
+    /// drift. At the current same-history horizon, telescoping makes this field
+    /// `1`; the projected `confidence_bound` is the separately extrapolated
+    /// diagnostic.
     pub freedman_bound: f64,
 
     /// Current drain phase classification.
@@ -442,8 +497,11 @@ pub struct ProgressCertificate {
     total_deltas: usize,
     /// Initial potential `V(Σ₀)` for this certificate run.
     initial_potential: Option<f64>,
-    /// Most recent potential value, even if older observations were compacted.
+    /// Most recent accepted finite potential value, even if older observations
+    /// were compacted.
     last_potential: Option<f64>,
+    /// Most recent accepted finite delta, preserved across compaction.
+    last_delta: Option<f64>,
     /// Running sum of deltas `ΣΔᵢ` across all observed steps.
     sum_delta: f64,
     /// Running sum of credits: `Σcᵢ`.
@@ -461,11 +519,11 @@ pub struct ProgressCertificate {
     ///
     /// Uses smoothing factor `alpha = 2 / (window + 1)` with `window = 8`.
     ema_credit: f64,
-    /// Number of non-finite potential samples dropped since the last reset.
+    /// Number of invalid potential samples dropped since the last reset.
     ///
-    /// Invalid telemetry must not be coerced into synthetic progress because
-    /// that can fabricate quiescence from `NaN`/`inf`. We record the anomaly
-    /// for audit and ignore the sample entirely.
+    /// Non-finite or materially negative telemetry must not be coerced into
+    /// synthetic progress because that can fabricate quiescence. We record the
+    /// anomaly for audit and ignore the sample entirely.
     invalid_observation_count: usize,
 }
 
@@ -489,6 +547,7 @@ impl ProgressCertificate {
             total_deltas: 0,
             initial_potential: None,
             last_potential: None,
+            last_delta: None,
             sum_delta: 0.0,
             total_credit: 0.0,
             sum_delta_sq: 0.0,
@@ -509,10 +568,11 @@ impl ProgressCertificate {
     /// Records a potential observation.
     ///
     /// `potential` must be non-negative (Lyapunov functions are ≥ 0).
-    /// Negative values are clamped to zero. Non-finite samples are dropped
-    /// entirely and surfaced later through [`CertificateVerdict::evidence`].
+    /// Finite negative values within the configured epsilon are treated as
+    /// roundoff and clamped to zero. Non-finite or more-negative samples are
+    /// dropped entirely and surfaced through [`CertificateVerdict::evidence`].
     pub fn observe(&mut self, potential: f64) {
-        if !potential.is_finite() {
+        if !potential.is_finite() || potential < -self.config.epsilon {
             self.invalid_observation_count += 1;
             return;
         }
@@ -528,6 +588,7 @@ impl ProgressCertificate {
             self.total_deltas += 1;
             self.sum_delta += delta;
             self.sum_delta_sq += delta * delta;
+            self.last_delta = Some(delta);
         }
 
         let abs_delta = delta.abs();
@@ -650,7 +711,8 @@ impl ProgressCertificate {
     /// increment bound is `B = 2b`. Popoviciu's inequality gives the
     /// predictable cap `Qₜ ≤ t·b²`. Realized sample variance is
     /// diagnostic data, not a valid substitute for `Qₜ` in the same-sample
-    /// tail bound.
+    /// tail bound. This cap makes the raw Freedman denominator at least the
+    /// Azuma denominator, so the raw candidate is never tighter.
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     fn freedman_candidate_bound(&self, t: usize, mean_progress: f64, step_bound: f64) -> f64 {
@@ -692,14 +754,16 @@ impl ProgressCertificate {
     /// compared to the overall mean credit rate:
     ///
     /// - **Quiescent**: potential ≈ 0 (drain complete)
-    /// - **Stalled**: stall run ≥ threshold (no progress)
+    /// - **Stalled**: stall run ≥ threshold, or mean gross credit ≤ epsilon
     /// - **RapidDrain**: EMA credit ≥ 50% of mean credit
     /// - **SlowTail**: EMA credit < 50% of mean credit
-    /// - **Warmup**: insufficient data
+    /// - **Warmup**: insufficient data or incomplete telemetry
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn drain_phase(&self) -> DrainPhase {
-        if self.total_observations < self.config.min_observations {
+        if self.invalid_observation_count > 0
+            || self.total_observations < self.config.min_observations
+        {
             return DrainPhase::Warmup;
         }
         let current = self.last_potential.unwrap_or(0.0);
@@ -727,7 +791,7 @@ impl ProgressCertificate {
     /// Produces a certificate verdict from the current observation history.
     ///
     /// This is the main query interface. The verdict includes:
-    /// - Convergence status (empirical trend analysis)
+    /// - Empirical trend status (separate from the conditional tails)
     /// - Plug-in signed net-progress remaining-step estimate
     /// - Projected confidence calculation (selected Freedman/Azuma envelope)
     /// - Stall detection (sliding window)
@@ -735,7 +799,6 @@ impl ProgressCertificate {
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn verdict(&self) -> CertificateVerdict {
-        const MAX_CONVERGENCE_VIOLATION_RATE: f64 = 0.25;
         let n = self.total_observations;
         let current_potential = self.last_potential.unwrap_or(0.0);
 
@@ -777,10 +840,13 @@ impl ProgressCertificate {
         };
 
         let step_bound_violated = self.max_abs_delta > self.config.max_step_bound;
-        let (azuma, freedman) = if step_bound_violated {
+        let telemetry_complete = self.invalid_observation_count == 0;
+        let concentration_enabled = !step_bound_violated && telemetry_complete;
+        let (azuma, freedman) = if !concentration_enabled {
             // Concentration assumptions must be fixed before observing the
             // trace. Retrospectively widening the configured range to the
-            // largest realized step would not restore a probability bound.
+            // largest realized step would not restore a probability bound,
+            // and dropped invalid telemetry leaves the history incomplete.
             (1.0, 1.0)
         } else {
             let step_bound = self.config.max_step_bound;
@@ -791,12 +857,14 @@ impl ProgressCertificate {
             (azuma, azuma.min(freedman_candidate))
         };
 
-        let estimated_remaining =
-            (mean_net_progress > self.config.epsilon).then(|| v_current / mean_net_progress);
+        let estimated_remaining = (telemetry_complete && mean_net_progress > self.config.epsilon)
+            .then(|| v_current / mean_net_progress);
 
-        // Use the stronger valid signed-progress tail for the projected horizon.
+        // Select the range-only envelope for the projected horizon. Under the
+        // conservative Q cap, this equals Azuma; retaining the explicit raw
+        // Freedman candidate keeps that dominance auditable.
         let confidence_bound = estimated_remaining.map_or(0.0, |t_rem| {
-            if step_bound_violated {
+            if !concentration_enabled {
                 return 0.0;
             }
             if v_current <= self.config.epsilon {
@@ -816,25 +884,29 @@ impl ProgressCertificate {
 
         let stall_detected = self.stall_run >= self.config.stall_threshold;
 
-        // Convergence gate combines concentration and empirical trend, while
-        // rejecting strongly oscillatory traces. Both candidates use signed
-        // net progress and outcome-independent range caps.
+        // `converging` is an empirical status over the complete accepted
+        // finite non-negative observation history represented by running statistics. The
+        // current-horizon candidates cannot gate it: using this history's own
+        // mean net progress gives
+        // t·mean_net_progress = V₀ - Vₜ, hence lambda = max(0, -Vₜ) = 0
+        // for every accepted non-negative potential and both tails equal 1.
+        // The rebound count, magnitude, and recency thresholds are operator
+        // policy, not statistical confidence levels.
         let violation_rate = if steps_with_deltas > 0 {
             self.increase_count as f64 / steps_with_deltas as f64
         } else {
             0.0
         };
-        let reduction_ratio = if v_initial > self.config.epsilon {
-            ((v_initial - v_current) / v_initial).clamp(0.0, 1.0)
-        } else {
-            1.0
-        };
-        let strong_concentration = freedman < (1.0 - self.config.confidence);
-        let strong_empirical_reduction = reduction_ratio >= self.config.confidence;
+        let (_, rebound_to_net) = self.rebound_diagnostics(v_initial, v_current);
+        let latest_step_non_increasing = self
+            .last_delta
+            .is_some_and(|delta| delta <= self.config.epsilon);
         let converging = mean_net_progress > self.config.epsilon
             && !stall_detected
-            && violation_rate <= MAX_CONVERGENCE_VIOLATION_RATE
-            && (strong_concentration || strong_empirical_reduction);
+            && violation_rate <= MAX_EMPIRICAL_REBOUND_RATE
+            && rebound_to_net.is_some_and(|ratio| ratio <= MAX_EMPIRICAL_REBOUND_TO_NET_RATIO)
+            && latest_step_non_increasing
+            && telemetry_complete;
 
         let evidence = self.build_evidence(
             n,
@@ -905,8 +977,8 @@ impl ProgressCertificate {
             });
         }
 
-        // Quiescence achieved.
-        if v_current <= self.config.epsilon {
+        // Quiescence is actionable only when no telemetry was dropped.
+        if self.invalid_observation_count == 0 && v_current <= self.config.epsilon {
             evidence.push(EvidenceEntry {
                 step: last_step,
                 potential: v_current,
@@ -935,13 +1007,33 @@ impl ProgressCertificate {
         if self.increase_count > 0 {
             let violation_rate = self.increase_count as f64 / steps_with_deltas as f64;
             let count = self.increase_count;
+            let (total_rebound, rebound_to_net) = self.rebound_diagnostics(v_initial, v_current);
+            let latest_delta = self.last_delta.unwrap_or(0.0);
+            let recency_status = if latest_delta <= self.config.epsilon {
+                "pass"
+            } else {
+                "fail"
+            };
+            let rebound_detail = rebound_to_net.map_or_else(
+                || format!("total rebound: {total_rebound:.4}; no positive net progress"),
+                |ratio| {
+                    format!(
+                        "total rebound: {total_rebound:.4}, rebound/net: {ratio:.4}, \
+                         limit: {MAX_EMPIRICAL_REBOUND_TO_NET_RATIO:.4}",
+                    )
+                },
+            );
             evidence.push(EvidenceEntry {
                 step: last_step,
                 potential: v_current,
                 bound: violation_rate,
                 description: format!(
                     "{count} monotonicity violations out of {steps_with_deltas} steps \
-                     (rate: {violation_rate:.4})",
+                     (rate: {violation_rate:.4}, empirical limit: \
+                     {MAX_EMPIRICAL_REBOUND_RATE:.4}; {rebound_detail}; latest delta: \
+                     {latest_delta:.4}, required <= {epsilon:.4}, recency gate: \
+                     {recency_status})",
+                    epsilon = self.config.epsilon,
                 ),
             });
         }
@@ -968,10 +1060,11 @@ impl ProgressCertificate {
         self.observations.len()
     }
 
-    /// Returns whether no observations have been recorded.
+    /// Returns whether no accepted observation or dropped-sample diagnostic
+    /// has been recorded since construction or reset.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.observations.is_empty()
+        self.total_observations == 0 && self.invalid_observation_count == 0
     }
 
     /// Returns retained observation history (possibly compacted).
@@ -1040,6 +1133,7 @@ impl ProgressCertificate {
         self.total_deltas = 0;
         self.initial_potential = None;
         self.last_potential = None;
+        self.last_delta = None;
         self.sum_delta = 0.0;
         self.total_credit = 0.0;
         self.sum_delta_sq = 0.0;
@@ -1093,6 +1187,21 @@ impl ProgressCertificate {
         self.martingale_value() / v0
     }
 
+    /// Returns gross upward rebound and its ratio to positive net endpoint
+    /// progress for the accepted observation history.
+    fn rebound_diagnostics(&self, v_initial: f64, v_current: f64) -> (f64, Option<f64>) {
+        let raw_rebound = self.martingale_value() - v_initial;
+        let total_rebound = if raw_rebound.is_finite() {
+            raw_rebound.max(0.0)
+        } else {
+            f64::INFINITY
+        };
+        let net_progress = (v_initial - v_current).max(0.0);
+        let rebound_to_net =
+            (net_progress > self.config.epsilon).then(|| total_rebound / net_progress);
+        (total_rebound, rebound_to_net)
+    }
+
     fn invalid_sample_evidence(
         &self,
         step: usize,
@@ -1103,13 +1212,13 @@ impl ProgressCertificate {
             potential: current_potential,
             bound: 1.0,
             description: format!(
-                "dropped {} non-finite potential sample(s); certificate ignored them instead of treating them as progress",
+                "dropped {} invalid potential sample(s); certificate ignored them instead of treating them as progress",
                 self.invalid_observation_count
             ),
         })
     }
 
-    /// Returns the number of dropped non-finite potential samples.
+    /// Returns the number of dropped invalid potential samples.
     #[must_use]
     pub fn invalid_observation_count(&self) -> usize {
         self.invalid_observation_count
@@ -1297,6 +1406,34 @@ mod tests {
     }
 
     #[test]
+    fn confidence_is_serialized_reference_metadata_not_a_verdict_input() {
+        let low_config = ProgressConfig {
+            confidence: 0.50,
+            ..ProgressConfig::default()
+        };
+        let high_config = ProgressConfig {
+            confidence: 0.99,
+            ..ProgressConfig::default()
+        };
+        let mut low = ProgressCertificate::new(low_config);
+        let mut high = ProgressCertificate::new(high_config);
+
+        for potential in [100.0, 90.0, 80.0, 70.0, 60.0] {
+            low.observe(potential);
+            high.observe(potential);
+        }
+
+        assert_eq!(
+            verdict_fingerprint(&low.verdict()),
+            verdict_fingerprint(&high.verdict()),
+        );
+        let low_snapshot = certificate_snapshot(&low);
+        let high_snapshot = certificate_snapshot(&high);
+        assert_eq!(low_snapshot.config.confidence, "0.500000");
+        assert_eq!(high_snapshot.config.confidence, "0.990000");
+    }
+
+    #[test]
     fn config_invalid_confidence_zero() {
         let c = ProgressConfig {
             confidence: 0.0,
@@ -1432,10 +1569,37 @@ mod tests {
     }
 
     #[test]
-    fn negative_potential_clamped() {
+    fn materially_negative_potential_is_dropped_without_faking_quiescence() {
         let mut cert = ProgressCertificate::with_defaults();
         cert.observe(-5.0);
-        assert!((cert.observations()[0].potential).abs() < 1e-10);
+
+        assert_eq!(cert.len(), 0);
+        assert_eq!(cert.total_observations(), 0);
+        assert_eq!(cert.invalid_observation_count(), 1);
+        assert!(!cert.is_empty());
+        let verdict = cert.verdict();
+        assert_eq!(verdict.drain_phase, DrainPhase::Warmup);
+        assert!(verdict.estimated_remaining_steps.is_none());
+        assert!(
+            verdict
+                .evidence
+                .iter()
+                .all(|entry| !entry.description.contains("quiescence reached"))
+        );
+    }
+
+    #[test]
+    fn tiny_negative_roundoff_is_clamped_to_zero() {
+        let config = ProgressConfig {
+            epsilon: 1e-6,
+            ..ProgressConfig::default()
+        };
+        let mut cert = ProgressCertificate::new(config);
+        cert.observe(-0.5e-6);
+
+        assert_eq!(cert.invalid_observation_count(), 0);
+        assert_eq!(cert.len(), 1);
+        assert_eq!(cert.observations()[0].potential, 0.0);
     }
 
     #[test]
@@ -1444,7 +1608,12 @@ mod tests {
         cert.observe(f64::NAN);
 
         assert!(
-            cert.is_empty(),
+            !cert.is_empty(),
+            "invalid-only state must remain visible to lifecycle reset logic"
+        );
+        assert_eq!(
+            cert.len(),
+            0,
             "invalid sample must not create an observation"
         );
         assert_eq!(cert.total_observations(), 0);
@@ -1457,7 +1626,7 @@ mod tests {
             verdict
                 .evidence
                 .iter()
-                .any(|entry| entry.description.contains("dropped 1 non-finite")),
+                .any(|entry| entry.description.contains("dropped 1 invalid potential")),
             "provisional verdict should surface dropped invalid samples"
         );
     }
@@ -1485,6 +1654,22 @@ mod tests {
 
         let verdict = cert.verdict();
         assert!(
+            !verdict.converging,
+            "incomplete telemetry with dropped invalid samples must fail empirical convergence closed",
+        );
+        assert_eq!(verdict.azuma_bound, 1.0);
+        assert_eq!(verdict.freedman_bound, 1.0);
+        assert_eq!(verdict.confidence_bound, 0.0);
+        assert!(verdict.estimated_remaining_steps.is_none());
+        assert_eq!(verdict.drain_phase, DrainPhase::Warmup);
+        assert!(
+            verdict
+                .evidence
+                .iter()
+                .all(|entry| !entry.description.contains("quiescence reached")),
+            "incomplete telemetry must not claim terminal quiescence"
+        );
+        assert!(
             verdict.current_potential > cert.config().epsilon,
             "ignored invalid samples must not fabricate quiescence"
         );
@@ -1492,9 +1677,31 @@ mod tests {
             verdict
                 .evidence
                 .iter()
-                .any(|entry| entry.description.contains("dropped 2 non-finite")),
+                .any(|entry| entry.description.contains("dropped 2 invalid potential")),
             "verdict should record dropped invalid samples for audit"
         );
+    }
+
+    #[test]
+    fn dropped_sample_after_quiescence_disables_actionable_completion_fields() {
+        let config = ProgressConfig {
+            min_observations: 2,
+            ..ProgressConfig::default()
+        };
+        let mut cert = ProgressCertificate::new(config);
+
+        cert.observe(100.0);
+        cert.observe(0.0);
+        cert.observe(f64::NAN);
+
+        let verdict = cert.verdict();
+        assert_eq!(verdict.current_potential, 0.0);
+        assert!(!verdict.converging);
+        assert_eq!(verdict.azuma_bound, 1.0);
+        assert_eq!(verdict.freedman_bound, 1.0);
+        assert_eq!(verdict.confidence_bound, 0.0);
+        assert!(verdict.estimated_remaining_steps.is_none());
+        assert_eq!(verdict.drain_phase, DrainPhase::Warmup);
     }
 
     // -- Stall detection --
@@ -1595,6 +1802,113 @@ mod tests {
             (verdict.current_potential).abs() < 1e-10,
             "should have reached quiescence"
         );
+    }
+
+    #[test]
+    fn monotone_mid_drain_is_empirically_converging_with_trivial_current_tails() {
+        let config = ProgressConfig {
+            confidence: 0.95,
+            max_step_bound: 10.0,
+            stall_threshold: 5,
+            min_observations: 3,
+            epsilon: 1e-12,
+        };
+        let mut cert = ProgressCertificate::new(config);
+
+        for potential in [100.0, 90.0, 80.0, 70.0, 60.0] {
+            cert.observe(potential);
+        }
+
+        let verdict = cert.verdict();
+        let reduction_ratio =
+            (verdict.initial_potential - verdict.current_potential) / verdict.initial_potential;
+
+        assert!(verdict.converging);
+        assert!(!verdict.stall_detected);
+        assert_eq!(cert.increase_count(), 0);
+        assert!(reduction_ratio < cert.config().confidence);
+        assert_eq!(verdict.azuma_bound, 1.0);
+        assert_eq!(verdict.freedman_bound, 1.0);
+        assert!(verdict.current_potential > cert.config().epsilon);
+    }
+
+    #[test]
+    fn empirical_convergence_rebound_rate_policy_has_an_inclusive_boundary() {
+        let config = ProgressConfig {
+            max_step_bound: 20.0,
+            stall_threshold: 10,
+            min_observations: 4,
+            ..ProgressConfig::default()
+        };
+        let mut at_boundary = ProgressCertificate::new(config.clone());
+        for potential in [100.0, 90.0, 80.0, 85.0, 70.0] {
+            at_boundary.observe(potential);
+        }
+
+        let mut above_boundary = ProgressCertificate::new(config);
+        for potential in [100.0, 90.0, 95.0, 80.0] {
+            above_boundary.observe(potential);
+        }
+
+        assert_eq!(at_boundary.increase_count(), 1);
+        assert!(at_boundary.verdict().converging);
+        assert_eq!(above_boundary.increase_count(), 1);
+        assert!(!above_boundary.verdict().converging);
+    }
+
+    #[test]
+    fn low_count_near_total_rebound_is_not_empirically_converging() {
+        let config = ProgressConfig {
+            max_step_bound: 100.0,
+            stall_threshold: 20,
+            min_observations: 4,
+            ..ProgressConfig::default()
+        };
+        let mut cert = ProgressCertificate::new(config);
+        for potential in [
+            100.0, 90.0, 80.0, 70.0, 60.0, 50.0, 40.0, 30.0, 20.0, 10.0, 0.0, 99.0, 98.0,
+        ] {
+            cert.observe(potential);
+        }
+
+        let verdict = cert.verdict();
+        assert!(verdict.current_potential < verdict.initial_potential);
+        assert!(!verdict.stall_detected);
+        assert_eq!(cert.increase_count(), 1);
+        assert!(!verdict.converging);
+        assert!(verdict.evidence.iter().any(|entry| {
+            entry.description.contains("rebound/net: 49.5000")
+                && entry.description.contains("limit: 1.0000")
+                && entry.description.contains("latest delta: -1.0000")
+                && entry.description.contains("recency gate: pass")
+        }));
+    }
+
+    #[test]
+    fn latest_rebound_rejects_otherwise_favorable_empirical_history() {
+        let config = ProgressConfig {
+            max_step_bound: 20.0,
+            stall_threshold: 10,
+            min_observations: 4,
+            ..ProgressConfig::default()
+        };
+        let mut cert = ProgressCertificate::new(config);
+        for potential in [100.0, 80.0, 60.0, 40.0, 20.0, 10.0, 11.0] {
+            cert.observe(potential);
+        }
+
+        let verdict = cert.verdict();
+        assert!(verdict.estimated_remaining_steps.is_some());
+        assert!(!verdict.stall_detected);
+        assert_eq!(cert.increase_count(), 1);
+        assert!(!verdict.converging);
+        assert!(verdict.evidence.iter().any(|entry| {
+            entry.description.contains("rebound/net: 0.0112")
+                && entry.description.contains("limit: 1.0000")
+                && entry.description.contains("latest delta: 1.0000")
+                && entry.description.contains("required <= 0.0000")
+                && entry.description.contains("recency gate: fail")
+        }));
     }
 
     #[test]
@@ -2068,6 +2382,23 @@ mod tests {
     }
 
     #[test]
+    fn compact_zero_preserves_nonempty_lifecycle_state() {
+        let mut cert = ProgressCertificate::with_defaults();
+        cert.observe(100.0);
+        cert.observe(90.0);
+
+        cert.compact(0);
+
+        assert_eq!(cert.len(), 0, "no audit observations should be retained");
+        assert!(
+            !cert.is_empty(),
+            "compaction must not make a populated certificate appear reset"
+        );
+        assert_eq!(cert.total_observations(), 2);
+        assert_eq!(cert.verdict().total_steps, 2);
+    }
+
+    #[test]
     fn observe_after_compact_keeps_global_step_index() {
         let mut cert = ProgressCertificate::with_defaults();
         for i in 0..6 {
@@ -2104,6 +2435,19 @@ mod tests {
         assert!((cert.total_credit()).abs() < 1e-10);
         assert_eq!(cert.increase_count(), 0);
         assert!((cert.max_abs_delta).abs() < 1e-10);
+    }
+
+    #[test]
+    fn reset_clears_invalid_only_lifecycle_state() {
+        let mut cert = ProgressCertificate::with_defaults();
+        cert.observe(f64::NAN);
+        assert!(!cert.is_empty());
+        assert_eq!(cert.invalid_observation_count(), 1);
+
+        cert.reset();
+
+        assert!(cert.is_empty());
+        assert_eq!(cert.invalid_observation_count(), 0);
     }
 
     // -- Display --
@@ -2613,7 +2957,7 @@ mod tests {
             .iter()
             .any(|e| e.description.contains("tighter than Azuma"));
         assert!(!has_raw_freedman_claim);
-        assert!(verdict.freedman_bound <= verdict.azuma_bound);
+        assert_eq!(verdict.freedman_bound, verdict.azuma_bound);
     }
 
     #[test]
@@ -2834,8 +3178,9 @@ mod tests {
         let mut cert = ProgressCertificate::new(config);
 
         // Create a sequence that drives the potential monotonically to
-        // quiescence so strong empirical reduction triggers the
-        // convergence gate and confidence_bound short-circuits to 1.0.
+        // quiescence. The empirical status observes the favorable accepted
+        // history, while confidence_bound short-circuits to 1.0 only because
+        // quiescence is already observed.
         let mut potentials = vec![1000.0];
         let mut v: f64 = 1000.0;
         // Smooth monotone drop, 10 per step, to V=0 in 100 steps.
@@ -2869,13 +3214,10 @@ mod tests {
         assert_eq!(verdict.confidence_bound, 1.0);
 
         // At the current horizon, the same-trace plug-in net rate yields zero
-        // deviation, so both candidates are the trivial bound 1.0.
-        assert!(
-            verdict.freedman_bound <= verdict.azuma_bound + 1e-10,
-            "range-bounded Freedman should not exceed Azuma: Freedman={:.6}, Azuma={:.6}",
-            verdict.freedman_bound,
-            verdict.azuma_bound
-        );
+        // deviation, so both candidates are the trivial bound 1.0. More
+        // generally, the selected public envelope equals Azuma under the
+        // range-only Freedman cap.
+        assert_eq!(verdict.freedman_bound, verdict.azuma_bound);
         assert!(
             verdict.azuma_bound >= 0.0 && verdict.azuma_bound <= 1.0,
             "Azuma bound must be a valid probability: {:.6}",
@@ -2938,14 +3280,11 @@ mod tests {
                     i
                 );
 
-                // The public field selects the stronger valid signed-progress
-                // tail, so it never exceeds the Azuma baseline.
-                assert!(
-                    verdict.freedman_bound <= verdict.azuma_bound + 1e-10,
-                    "Freedman bound should be ≤ Azuma bound: Freedman={:.6}, Azuma={:.6} at step {}",
-                    verdict.freedman_bound,
-                    verdict.azuma_bound,
-                    i
+                // The range-only raw Freedman candidate is never tighter, so
+                // the selected public envelope is exactly Azuma.
+                assert_eq!(
+                    verdict.freedman_bound, verdict.azuma_bound,
+                    "selected envelope should equal Azuma at step {i}",
                 );
             }
         }
@@ -2983,8 +3322,11 @@ mod tests {
             constant_verdict.confidence_bound,
             uneven_verdict.confidence_bound
         );
-        assert!(constant_verdict.freedman_bound <= constant_verdict.azuma_bound);
-        assert!(uneven_verdict.freedman_bound <= uneven_verdict.azuma_bound);
+        assert_eq!(
+            constant_verdict.freedman_bound,
+            constant_verdict.azuma_bound
+        );
+        assert_eq!(uneven_verdict.freedman_bound, uneven_verdict.azuma_bound);
     }
 
     /// Golden Test #4: Budget exhaustion emits explicit evidence
@@ -3329,7 +3671,7 @@ mod tests {
         let verdict1 = cert1.verdict();
         assert!(verdict1.azuma_bound <= 1.0 && verdict1.azuma_bound >= 0.0);
         assert!(verdict1.freedman_bound <= 1.0 && verdict1.freedman_bound >= 0.0);
-        assert!(verdict1.freedman_bound <= verdict1.azuma_bound);
+        assert_eq!(verdict1.freedman_bound, verdict1.azuma_bound);
 
         // Test Case 2: Large potential with large steps
         let mut cert2 = ProgressCertificate::new(config.clone());
@@ -3341,7 +3683,7 @@ mod tests {
         let verdict2 = cert2.verdict();
         assert!(verdict2.azuma_bound <= 1.0 && verdict2.azuma_bound >= 0.0);
         assert!(verdict2.freedman_bound <= 1.0 && verdict2.freedman_bound >= 0.0);
-        assert!(verdict2.freedman_bound <= verdict2.azuma_bound);
+        assert_eq!(verdict2.freedman_bound, verdict2.azuma_bound);
 
         // Test Case 3: Oscillating sequence
         let mut cert3 = ProgressCertificate::new(config);
@@ -3353,7 +3695,7 @@ mod tests {
         let verdict3 = cert3.verdict();
         assert!(verdict3.azuma_bound <= 1.0 && verdict3.azuma_bound >= 0.0);
         assert!(verdict3.freedman_bound <= 1.0 && verdict3.freedman_bound >= 0.0);
-        assert!(verdict3.freedman_bound <= verdict3.azuma_bound + 1e-10); // Allow tiny numerical error
+        assert_eq!(verdict3.freedman_bound, verdict3.azuma_bound);
     }
 
     #[test]

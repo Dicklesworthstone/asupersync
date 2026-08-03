@@ -1,21 +1,22 @@
 //! # Real Lab Oracle Cancellation Protocol ↔ Cancel Progress Certificate Integration E2E Tests
 //!
-//! This module provides comprehensive integration testing between the lab/oracle/cancellation_protocol
-//! oracle and the cancel/progress_certificate system to verify that cancel-progress certificate
-//! verification correctly detects cancellation protocol violations, specifically out-of-band
-//! wake during pre-mask phase scenarios.
+//! This module provides comprehensive integration testing between the
+//! lab/oracle/cancellation_protocol oracle and the cancel/progress_certificate
+//! system. The oracle owns cancellation-protocol violation detection; the
+//! certificate independently supplies drain-progress and explicit-stall
+//! diagnostics during the same scenarios.
 //!
 //! ## Integration Focus
 //!
 //! The integration tests verify the collaboration between:
 //! - **CancellationProtocolOracle**: Detects protocol violations like CancelAckWhileMasked
 //! - **ProgressCertificate**: Provides empirical drain-progress diagnostics and conditional range-bounded calculations
-//! - **Cross-validation**: Both systems detect and report protocol violations consistently
+//! - **Cross-validation**: Protocol events and certificate observations are both recorded without conflating their verdicts
 //!
 //! ## Test Scenarios
 //!
 //! 1. **Basic Integration**: Verify oracle and certificate work together correctly
-//! 2. **Protocol Violation Detection**: Test CancelAckWhileMasked detection via certificate
+//! 2. **Protocol Violation Detection**: Test oracle-owned CancelAckWhileMasked detection while certificate observations continue
 //! 3. **Mask Depth Tracking**: Verify pre-mask phase violation detection
 //! 4. **Progress Monitoring**: Ensure certificate tracks drain progress during violations
 //! 5. **Comprehensive Integration**: End-to-end verification with multiple violation types
@@ -378,13 +379,12 @@ mod tests {
             result.cancel_ack_while_masked_detected =
                 self.violation_stats.cancel_ack_while_masked_count > 0;
             result.out_of_band_wake_detected = self.violation_stats.out_of_band_wake_count > 0;
+            result.certificate_observations_recorded = !self.certificate_verdicts.is_empty();
 
-            // Verify certificate detected issues
-            result.certificate_issues_detected = !self.certificate_verdicts.is_empty()
-                && self
-                    .certificate_verdicts
-                    .iter()
-                    .any(|v| v.stall_detected || !v.converging);
+            // Verify the certificate detected an explicit stall. A merely
+            // unfavorable empirical trend is not itself a protocol violation.
+            result.certificate_issues_detected = result.certificate_observations_recorded
+                && self.certificate_verdicts.iter().any(|v| v.stall_detected);
 
             // Verify integration consistency
             result.integration_consistent = self.integration_state.consistency_check_passed;
@@ -393,11 +393,13 @@ mod tests {
             result.mask_depth_tracking_accurate =
                 !self.integration_state.pre_mask_phase_tasks.is_empty();
 
-            // Overall verification
+            // Overall protocol verification does not require an independent
+            // progress stall: a cancellation-protocol violation need not stall
+            // the drain, and an unfavorable empirical trend is not a failure.
             result.verification_passed = result.oracle_violations_detected
                 && result.cancel_ack_while_masked_detected
                 && result.out_of_band_wake_detected
-                && result.certificate_issues_detected
+                && result.certificate_observations_recorded
                 && result.integration_consistent;
 
             Ok(result)
@@ -433,7 +435,9 @@ mod tests {
         pub cancel_ack_while_masked_detected: bool,
         /// Whether out-of-band wake violation was detected
         pub out_of_band_wake_detected: bool,
-        /// Whether certificate detected progress issues
+        /// Whether the integrated certificate path recorded at least one verdict
+        pub certificate_observations_recorded: bool,
+        /// Whether the certificate detected an explicit progress stall
         pub certificate_issues_detected: bool,
         /// Whether integration between systems is consistent
         pub integration_consistent: bool,
@@ -449,6 +453,7 @@ mod tests {
                 oracle_violations_detected: false,
                 cancel_ack_while_masked_detected: false,
                 out_of_band_wake_detected: false,
+                certificate_observations_recorded: false,
                 certificate_issues_detected: false,
                 integration_consistent: true,
                 mask_depth_tracking_accurate: false,
@@ -830,6 +835,10 @@ mod tests {
             !verification.out_of_band_wake_detected,
             "Should not detect out-of-band wake in normal flow"
         );
+        assert!(
+            verification.certificate_observations_recorded,
+            "Integrated certificate path should record progress verdicts"
+        );
     }
 
     #[test]
@@ -941,6 +950,14 @@ mod tests {
             .verify_violation_detection()
             .expect("Verification failed");
 
+        assert!(
+            !verification.certificate_observations_recorded,
+            "protocol-only scenario should expose the missing certificate observation path"
+        );
+        assert!(
+            !verification.verification_passed,
+            "integrated verification must fail closed without a certificate verdict"
+        );
         assert!(
             verification.cancel_ack_while_masked_detected,
             "Should detect violation with deep mask nesting"
@@ -1097,6 +1114,10 @@ mod tests {
         assert!(
             verification.integration_consistent,
             "Integration should be consistent"
+        );
+        assert!(
+            verification.certificate_observations_recorded,
+            "Overall verification must include certificate observations"
         );
 
         let protocol_violations = tracker.get_protocol_violations();

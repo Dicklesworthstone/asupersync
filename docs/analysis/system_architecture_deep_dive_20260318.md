@@ -5,7 +5,8 @@ I have conducted an aggressive, multi-module deep dive into some of the most com
 ## 1. Cancel Progress Certificates (`src/cancel/progress_certificate.rs`)
 **Review:** The mechanism utilizes Azuma-Hoeffding and Freedman tails as conditional drain-progress diagnostics; it does not by itself guarantee bounded-time completion.
 **Findings:** 
-- The current implementation derives both tails from signed net progress and configured range caps. Realized `delta_variance` is diagnostic-only, and a range violation disables concentration claims.
+- The current implementation derives both tails from signed net progress and configured range caps. Under the range-only `Q_t ≤ t·c²`, `B = 2c` cap, raw Freedman is never tighter than Azuma, so the selected envelope equals Azuma. Realized `delta_variance` is diagnostic-only, and a range violation or dropped invalid sample (non-finite or materially negative) disables concentration claims. With the same-history plug-in mean, telescoping makes both current-horizon tails the trivial bound `1`.
+- The separate `converging` flag reports a favorable empirical trend over the complete accepted finite non-negative observation history represented by running statistics. It applies stall, rebound-count, rebound-magnitude, latest-step, and dropped-sample checks; incomplete telemetry also suppresses the remaining-step estimate and terminal phase. The conditional calculations do not gate it or prove future drift.
 - The `stall_threshold` tail counter deterministically implements the configured consecutive non-decreasing-step rule and integrates with the `V(Σₜ)` Lyapunov potential.
 - A later fresh-eyes review corrected the earlier same-sample variance substitution and over-strong guarantee wording.
 
