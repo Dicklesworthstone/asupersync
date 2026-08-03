@@ -229,7 +229,12 @@ pub struct EvidenceEntry {
     pub step: usize,
     /// Potential value at this step.
     pub potential: f64,
-    /// The Azuma–Hoeffding bound at this step (upper tail probability).
+    /// Historical unit-interval evidence field.
+    ///
+    /// Its interpretation is carried by [`Self::description`]: entries may
+    /// contain a conditional tail candidate, an observed diagnostic rate, or
+    /// a deterministic terminal marker. It is not uniformly a probability
+    /// bound.
     pub bound: f64,
     /// Human-readable description of the evidence.
     pub description: String,
@@ -346,10 +351,11 @@ pub struct CertificateVerdict {
     /// configured absolute step bound, and `B = 2b` is the centered upper
     /// increment bound. Signed progress lies in `[-b, b]`, so
     /// `Qₜ ≤ t·b²`.
-    /// The raw Freedman candidate is conservatively capped by the Azuma tail;
-    /// empirical delta variance is diagnostic-only and never enters either
-    /// bound. Both candidates use the verdict's empirical plug-in net-progress
-    /// rate and therefore do not establish persistence of future drift.
+    /// Despite the historical field name, this stores the selected envelope
+    /// `min(raw_freedman, azuma)`, not the raw Freedman candidate. Empirical
+    /// delta variance is diagnostic-only and never enters either bound. Both
+    /// candidates use the verdict's empirical plug-in net-progress rate and
+    /// therefore do not establish persistence of future drift.
     pub freedman_bound: f64,
 
     /// Current drain phase classification.
@@ -376,7 +382,7 @@ impl fmt::Display for CertificateVerdict {
         writeln!(f, "Drain phase:        {}", self.drain_phase)?;
         writeln!(f, "Confidence bound:   {:.6}", self.confidence_bound)?;
         writeln!(f, "Azuma bound:        {:.6}", self.azuma_bound)?;
-        writeln!(f, "Freedman bound:     {:.6}", self.freedman_bound)?;
+        writeln!(f, "Selected tail:      {:.6}", self.freedman_bound)?;
         if let Some(var) = self.empirical_variance {
             writeln!(f, "Delta variance:     {var:.6}")?;
         }
@@ -885,10 +891,9 @@ impl ProgressCertificate {
         if step_bound_violated {
             let max_obs = self.max_abs_delta;
             let configured = self.config.max_step_bound;
-            // `bound` is contractually a probability in [0, 1]. Using the
-            // observed step magnitude here would violate that invariant,
-            // so we emit the current Azuma probability bound instead and
-            // surface the step-size information in the description.
+            // Keep the historical evidence value in [0, 1]. Surface the
+            // observed step magnitude in the description rather than mixing
+            // incompatible units in the numeric field.
             evidence.push(EvidenceEntry {
                 step: last_step,
                 potential: v_current,
@@ -914,8 +919,8 @@ impl ProgressCertificate {
         if stall_detected {
             let run = self.stall_run;
             let threshold = self.config.stall_threshold;
-            // `bound` must remain a valid probability; surface the run
-            // length through the description instead.
+            // Keep the historical evidence value in [0, 1] and surface the
+            // run length through the description instead.
             evidence.push(EvidenceEntry {
                 step: last_step,
                 potential: v_current,
@@ -2782,7 +2787,7 @@ mod tests {
 
         let verdict = cert.verdict();
         let text = format!("{verdict}");
-        assert!(text.contains("Freedman bound:"));
+        assert!(text.contains("Selected tail:"));
         assert!(text.contains("Drain phase:"));
     }
 
@@ -3078,7 +3083,7 @@ mod tests {
 
             assert!(
                 evidence.bound >= 0.0 && evidence.bound <= 1.0,
-                "Evidence bound should be valid probability: {:.6}",
+                "Evidence value should remain in the unit interval: {:.6}",
                 evidence.bound
             );
 

@@ -46,7 +46,7 @@ expression: "snapshot_verdict(&[100.0, 68.0, 42.0, 42.0, 41.5, 18.0, 4.0, 0.0], 
     "initial_potential": 100.0,
     "max_observed_step": 32.0,
     "mean_credit": 14.285714,
-    "rendered": "Progress Certificate Verdict\n============================\nConverging:         true\nStall detected:     false\nSteps:              8\nV(Σ₀):              100.0000\nV(Σₜ):              0.0000\nMean credit/step:   14.2857\nMax |Δ|:            32.0000\nDrain phase:        quiescent\nConfidence bound:   1.000000\nAzuma bound:        1.000000\nFreedman bound:     1.000000\nDelta variance:     147.989796\nEst. remaining:     0.0 steps\nEvidence (2 entries):\n  step=7: V=0.0000, bound=0.000000 — quiescence reached (V ≈ 0)\n  step=7: V=0.0000, bound=1.000000 — total progress 100.0000 over 7 steps, mean net progress 14.2857/step, gross credit 14.2857/step, Azuma tail P ≤ 1.000000\n",
+    "rendered": "Progress Certificate Verdict\n============================\nConverging:         true\nStall detected:     false\nSteps:              8\nV(Σ₀):              100.0000\nV(Σₜ):              0.0000\nMean credit/step:   14.2857\nMax |Δ|:            32.0000\nDrain phase:        quiescent\nConfidence bound:   1.000000\nAzuma bound:        1.000000\nSelected tail:      1.000000\nDelta variance:     147.989796\nEst. remaining:     0.0 steps\nEvidence (2 entries):\n  step=7: V=0.0000, bound=0.000000 — quiescence reached (V ≈ 0)\n  step=7: V=0.0000, bound=1.000000 — total progress 100.0000 over 7 steps, mean net progress 14.2857/step, gross credit 14.2857/step, Azuma tail P ≤ 1.000000\n",
     "stall_detected": false,
     "total_steps": 8
   }

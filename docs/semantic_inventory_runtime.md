@@ -88,8 +88,8 @@ Source base: `src/` (~377K lines, 499 files)
 
 ### prog.cancel.drains
 
-- **Intent**: Cancelled tasks eventually complete (drain within bounded budget).
-- **Primary citation**: `src/types/cancel.rs:13-19` (cleanup budget table bounds drain time).
+- **Intent**: Covered cooperative cancellation paths complete when their published responsiveness assumptions hold and sufficient cleanup budget is available; non-cooperative work has no universal drain bound.
+- **Primary citation**: `src/types/cancel.rs:13-19` (per-kind cleanup policy values, not a proof of a universal time bound).
 - **Certificate tracking**: `src/cancel/progress_certificate.rs` (empirical phase/stall diagnostics and conditional signed-step range calculations).
 - **Oracle**: `src/lab/oracle/cancellation_protocol.rs:679` (`fn check` comprehensive invariant checking).
 - **Charter ref**: SEM-INV-003
