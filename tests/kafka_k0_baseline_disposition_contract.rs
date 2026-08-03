@@ -19,9 +19,9 @@ const ARTIFACT_PATH: &str = "artifacts/kafka_k0_baseline_disposition_v1.json";
 const DOC_PATH: &str = "docs/kafka_k0_baseline_disposition.md";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
 const ARTIFACT_SHA256: &str =
-    "0000000000000000000000000000000000000000000000000000000000000000";
+    "010093127dee0aecf9ba63160bb78f525fe34c2e23877855d1f978e0a1fdc24b";
 const DOC_SHA256: &str =
-    "0000000000000000000000000000000000000000000000000000000000000000";
+    "1ad9d98beea995dfcedc1a55400f61c24567e3b881202968c5f1f7adcb68ec75";
 const ARTIFACT_ID: &str = "kafka-k0-baseline-disposition-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const BEAD_ID: &str = "asupersync-dep-p7-kafka-removal-sarszu.1.5";
@@ -400,13 +400,6 @@ fn array<'a>(value: &'a Value, key: &str) -> &'a Vec<Value> {
         .get(key)
         .and_then(Value::as_array)
         .unwrap_or_else(|| panic!("{key} must be an array"))
-}
-
-fn object<'a>(value: &'a Value, key: &str) -> &'a serde_json::Map<String, Value> {
-    value
-        .get(key)
-        .and_then(Value::as_object)
-        .unwrap_or_else(|| panic!("{key} must be an object"))
 }
 
 fn text<'a>(value: &'a Value, key: &str) -> &'a str {
@@ -1851,6 +1844,7 @@ fn validate_aggregate_joins_and_collisions(packet: &Value) -> Result<(), String>
                 "unique_target_count":13,
                 "mapping_count":17,
                 "id_set_sha256":K0_1_PROFILE_ID_SHA256,
+                "mapping_rule":"Bytewise sort unique k0_1_profile_id<TAB>profile_id records and append one LF per row.",
                 "mapping_sha256":K0_3_PROFILE_MAPPING_SHA256,
                 "status":"EXACT_WITH_FOUR_DECLARED_DOUBLE_MAPPINGS",
                 "limitation":"DOWNSTREAM-NO-KAFKA, NATIVE-KAFKA-RELEASE, TEST-INTERNALS-NO-KAFKA, and UNIT-WITH-KAFKA each map to two K0.3 profiles."
@@ -1860,7 +1854,7 @@ fn validate_aggregate_joins_and_collisions(packet: &Value) -> Result<(), String>
                 "join_kind":"TYPED_REFERENCE",
                 "left_locator":"K0.3.source_pins or K0.4.direct_source_pins",
                 "right_locator":"K0.4.fixture_census[].source_pin_id",
-                "left_count":266,
+                "left_count":245,
                 "right_count":67,
                 "unique_target_count":67,
                 "mapping_count":67,
@@ -1886,7 +1880,7 @@ fn validate_aggregate_joins_and_collisions(packet: &Value) -> Result<(), String>
                 "join_id":"KAFKA-K0-5-JOIN-006-ROUTE-OWNERS",
                 "join_kind":"TRACKER_OWNER_REFERENCE",
                 "left_locator":"K0.1-K0.4 routed gap/finding owner edges",
-                "right_locator":".beads/issues.jsonl issue IDs",
+                "right_locator":"unique route-owner IDs matched against .beads/issues.jsonl issue IDs",
                 "left_count":126,
                 "right_count":49,
                 "unique_target_count":49,
@@ -1906,6 +1900,7 @@ fn validate_aggregate_joins_and_collisions(packet: &Value) -> Result<(), String>
                 "group_count":2,
                 "row_count":AUTHORITY_REFERENCE_COUNT,
                 "combined_id_set_sha256":AUTHORITY_REFERENCE_ID_SHA256,
+                "mapping_rule":"For each authority reference, serialize left_child<TAB>left_collection<TAB>id<TAB>K0.3<TAB>right_collection<TAB>id; bytewise sort the records and append one LF per row.",
                 "mapping_sha256":AUTHORITY_REFERENCE_MAPPING_SHA256
             },
             "typed_reference_joins": {
@@ -1952,6 +1947,7 @@ fn validate_aggregate_unknown_disposition(
             "explicit_owned_unknowns",
             "selector_projection",
             "selectors",
+            "indirect_owner_joins",
             "owner_join_rule",
             "promotion_rule",
         ],
@@ -1983,6 +1979,7 @@ fn validate_aggregate_unknown_disposition(
             .ok_or_else(|| "unknown_disposition lacks selector_projection".to_owned())?,
         serde_json::json!({
             "row_count":REDUCED_UNKNOWN_SELECTOR_COUNT,
+            "selection_rule":"Scan every top-level array row in K0.3 and K0.4 and select rows with any direct string-valued field exactly UNKNOWN, BLOCKED, or BLOCKED_EXTERNAL; additionally select every K0.3 owned_unknowns row with synthetic matched state OWNED_UNKNOWN.",
             "tuple_rule":"For each selected row, lexically sort and deduplicate matched states, join them with commas, then bytewise-sort stage<TAB>section<TAB>id<TAB>owner<TAB>matched-states records and append one LF per row.",
             "sha256":REDUCED_UNKNOWN_SELECTOR_SHA256
         }),
@@ -2082,7 +2079,7 @@ fn validate_aggregate_unknown_disposition(
                 "matched_count":5,
                 "id_field":"environment_id",
                 "id_set_sha256":"b38364137fa24dcb19607c1ff137716ac33884e77bf1b2a5e557006364f20bb7",
-                "owner_join":"owned_unknowns and evidence vectors by subject/environment_ids",
+                "owner_join":"owned_unknowns by subject plus executable vectors by environment_ids",
                 "blocking":true
             },
             {
@@ -2106,8 +2103,32 @@ fn validate_aggregate_unknown_disposition(
         ]),
         "UNKNOWN selectors",
     )?;
+    require_equal(
+        unknown
+            .get("indirect_owner_joins")
+            .ok_or_else(|| "unknown_disposition lacks indirect_owner_joins".to_owned())?,
+        serde_json::json!([{
+            "row_id":"KAFKA-K0-3-EVIDENCE-005",
+            "row_locator":"K0.3.evidence_claims",
+            "inventory_handoff_route_id":"KAFKA-K0-3-GAP-007",
+            "inventory_handoff_owner":"asupersync-dep-p7-kafka-removal-sarszu.1.4",
+            "later_route_ids":[
+                "KAFKA-K0-4-GAP-009-FIXTURE",
+                "KAFKA-K0-4-GAP-013-AUTH-FAULT",
+                "KAFKA-K0-4-GAP-014-TERMINAL-REAL-BROKER"
+            ],
+            "later_owner_beads":[
+                "asupersync-dep-p7-kafka-removal-sarszu.2.13.1",
+                "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
+                K13_TERMINAL
+            ],
+            "claim_time_refresh_owner":K14_REFRESH,
+            "state":"OWNED_BLOCKING_MULTI_ROUTE"
+        }]),
+        "indirect UNKNOWN owner joins",
+    )?;
     if text(unknown, "owner_join_rule")
-        != "Every selected row has a direct owner field or the declared environment-to-vector/owned-unknown join, and every resulting owner exists in the routed owner set or an independent terminal gate."
+        != "Every selected row has a direct owner field, the declared environment-to-vector/owned-unknown join, or an explicit indirect_owner_joins row; every resulting owner exists in the routed owner set or an independent terminal gate."
         || text(unknown, "promotion_rule")
             != "UNKNOWN, BLOCKED, NOT_RUN, UNPINNED, planned, static, compile-only, local-model, wire-only, proof-only, opt-in, or silent-skip state cannot become PASS, REAL_BROKER_RECEIPT, ACTUAL_BINARY_RECEIPT, or migration evidence without a new terminal receipt."
     {
@@ -2164,6 +2185,25 @@ fn validate_aggregate_unknown_disposition(
     {
         return Err("K0.3 indirect evidence-to-gap ownership join drifted".to_owned());
     }
+    for (gap_id, owner) in [
+        (
+            "KAFKA-K0-4-GAP-009-FIXTURE",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.13.1",
+        ),
+        (
+            "KAFKA-K0-4-GAP-013-AUTH-FAULT",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
+        ),
+        ("KAFKA-K0-4-GAP-014-TERMINAL-REAL-BROKER", K13_TERMINAL),
+    ] {
+        let route = find_row(array(&children.k0_4, "routed_gaps"), "gap_id", gap_id);
+        if text(route, "owner_bead") != owner || !tracker.contains(owner) {
+            return Err(format!("indirect UNKNOWN route {gap_id} owner drifted"));
+        }
+    }
+    if !tracker.contains(K14_REFRESH) {
+        return Err("indirect UNKNOWN claim-time refresh owner is absent".to_owned());
+    }
     Ok(())
 }
 
@@ -2175,8 +2215,10 @@ fn validate_aggregate_gap_routing(packet: &Value) -> Result<(), String> {
         serde_json::json!({
             "route_row_count":ROUTE_ROW_COUNT,
             "route_stage_counts":{"K0.1":15,"K0.2":23,"K0.3":23,"K0.4":26},
+            "route_projection_rule":"Wrap each child route row as an object with child, collection, id, and row fields; sort by child, collection, and id; recursively sort object keys; emit compact JSON with one LF per record.",
             "route_projection_sha256":ROUTE_FULL_ROW_SHA256,
             "route_edge_count":ROUTE_EDGE_COUNT,
+            "route_edge_projection_rule":"Bytewise sort unique stage<TAB>gap-or-finding-id<TAB>owner records and append one LF per row.",
             "route_edge_projection_sha256":ROUTE_PROJECTION_SHA256,
             "owner_id_count":ROUTE_OWNER_COUNT,
             "owner_id_set_sha256":ROUTE_OWNER_ID_SHA256,
@@ -2456,4 +2498,104 @@ fn validate_docs(doc: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn validate_packet_value(
+    packet: &Value,
+    children: &ChildArtifacts,
+    tracker: &BTreeSet<String>,
+    doc: &str,
+) -> Result<(), String> {
+    validate_packet_identity_and_policy(packet)?;
+    validate_aggregate_child_packet_pins(packet)?;
+    validate_aggregate_coverage_sets(packet)?;
+    validate_aggregate_joins_and_collisions(packet)?;
+    validate_aggregate_unknown_disposition(packet, children, tracker)?;
+    validate_aggregate_gap_routing(packet)?;
+    validate_claims_projection(packet, children)?;
+    validate_disposition_gates_and_receipt(packet)?;
+    validate_docs(doc)?;
+
+    validate_child_identities(children)?;
+    validate_live_child_file_pins()?;
+    validate_source_pin_rollup(children)?;
+    validate_definition_census(children)?;
+    validate_exact_typed_joins(children)?;
+    validate_child_coverage_ids(children)?;
+    validate_lexical_collision_receipt(children)?;
+    validate_gap_routes(children, tracker)?;
+    validate_explicit_unknowns(children, tracker)?;
+    validate_reduced_unknown_selectors(children)?;
+    Ok(())
+}
+
+fn assert_packet_mutation_rejected(
+    packet: &Value,
+    children: &ChildArtifacts,
+    tracker: &BTreeSet<String>,
+    doc: &str,
+    mutate: impl FnOnce(&mut Value),
+) {
+    let mut mutated = packet.clone();
+    mutate(&mut mutated);
+    assert!(
+        validate_packet_value(&mutated, children, tracker, doc).is_err(),
+        "mutated aggregate packet must fail the same value-level validator"
+    );
+}
+
+#[test]
+fn kafka_k0_baseline_disposition_is_exact_and_fail_closed() {
+    let artifact_bytes = read_repo_bytes(ARTIFACT_PATH);
+    let doc_bytes = read_repo_bytes(DOC_PATH);
+    assert_eq!(sha256_hex(&artifact_bytes), ARTIFACT_SHA256);
+    assert_eq!(sha256_hex(&doc_bytes), DOC_SHA256);
+
+    let packet: Value = serde_json::from_slice(&artifact_bytes)
+        .expect("K0.5 aggregate artifact must be valid JSON");
+    let doc = std::str::from_utf8(&doc_bytes).expect("K0.5 documentation must be UTF-8");
+    let children = load_children();
+    let tracker = tracker_ids().expect("tracker JSONL must be readable");
+    validate_packet_value(&packet, &children, &tracker, doc)
+        .expect("the checked-in K0.5 aggregate must satisfy its full static contract");
+
+    assert_packet_mutation_rejected(&packet, &children, &tracker, doc, |mutated| {
+        mutated["inventory_state"] = Value::String("MIGRATION_ELIGIBLE".to_owned());
+    });
+    assert_packet_mutation_rejected(&packet, &children, &tracker, doc, |mutated| {
+        mutated["child_packets"][0]["files"][0]["sha256"] =
+            Value::String("mutated-child-hash".to_owned());
+    });
+    assert_packet_mutation_rejected(&packet, &children, &tracker, doc, |mutated| {
+        mutated["coverage_sets"]["source_pin_rollup"]["row_count"] = Value::from(265);
+    });
+    assert_packet_mutation_rejected(&packet, &children, &tracker, doc, |mutated| {
+        mutated["exact_joins"][3]["mapping_count"] = Value::from(66);
+    });
+    assert_packet_mutation_rejected(&packet, &children, &tracker, doc, |mutated| {
+        mutated["collision_groups"]["unexpected_definition_collisions"] =
+            serde_json::json!(["MUTATED-COLLISION"]);
+    });
+    assert_packet_mutation_rejected(&packet, &children, &tracker, doc, |mutated| {
+        mutated["unknown_disposition"]["selectors"][10]["blocking"] = Value::Bool(false);
+    });
+    assert_packet_mutation_rejected(&packet, &children, &tracker, doc, |mutated| {
+        mutated["gap_routing"]["route_edge_count"] = Value::from(125);
+    });
+    assert_packet_mutation_rejected(&packet, &children, &tracker, doc, |mutated| {
+        mutated["claims_projection"]["aggregate_claims"][4]["state"] =
+            Value::String("PASS".to_owned());
+    });
+    assert_packet_mutation_rejected(&packet, &children, &tracker, doc, |mutated| {
+        mutated["disposition_receipt"]["migration_eligible"] = Value::Bool(true);
+    });
+    assert_packet_mutation_rejected(&packet, &children, &tracker, doc, |mutated| {
+        mutated["coverage_receipt"]["dynamic_execution_claimed"] = Value::Bool(true);
+    });
+
+    let mutated_doc = doc.replacen(DOC_BEGIN, "<!-- MUTATED KAFKA K0.5 MARKER -->", 1);
+    assert!(
+        validate_packet_value(&packet, &children, &tracker, &mutated_doc).is_err(),
+        "documentation mutation must fail the same value-level validator"
+    );
 }

@@ -177,6 +177,10 @@ The reduced selector ledger contains 142 rows: 96 exact K0.3 state rows, 8
 K0.3 `owned_unknowns` rows whose section supplies the unknown state, and 38
 exact K0.4 state rows. Its static reconciliation digest is
 `5c7fb727bc79d4f8be1c979fadda8bcfd261da0953e972a32a89bef27a28b18c`.
+The selector scans every top-level array row in K0.3 and K0.4 for a direct
+string-valued field exactly equal to `UNKNOWN`, `BLOCKED`, or
+`BLOCKED_EXTERNAL`, then adds each K0.3 `owned_unknowns` row with synthetic
+state `OWNED_UNKNOWN`.
 For each selected row, the canonicalizer lexically sorts and deduplicates the
 matched states, joins them with commas, bytewise-sorts the resulting
 `stage<TAB>section<TAB>id<TAB>owner<TAB>matched-states` records, and appends one
@@ -195,9 +199,15 @@ The owner-edge projection bytewise-sorts unique
 `unknown_id<TAB>resolution_owner_bead` rows and appends one LF each.
 
 K0.3 evidence row `KAFKA-K0-3-EVIDENCE-005` and the five blocked K0.4
-environment identities do not carry a direct owner field. Their ownership must
-be obtained through the explicit gap/vector joins. An implementation that
-defaults those rows to unowned, passing, or resolved contradicts this receipt.
+environment identities do not carry a direct owner field. The evidence row
+joins first through K0.3 gap `KAFKA-K0-3-GAP-007` to the included K0.4 packet,
+then through K0.4 gaps `KAFKA-K0-4-GAP-009-FIXTURE`,
+`KAFKA-K0-4-GAP-013-AUTH-FAULT`, and
+`KAFKA-K0-4-GAP-014-TERMINAL-REAL-BROKER` to K13.1, K13.5, and K13.6; K14.1
+retains claim-time refresh. The environment rows join through owned-unknown
+subjects and executable-vector `environment_ids`. An implementation that
+defaults any of these rows to unowned, passing, or resolved contradicts this
+receipt.
 
 ## Route rollup and K0 handoff
 
