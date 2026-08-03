@@ -9,7 +9,7 @@
 //!
 //! The integration tests verify the collaboration between:
 //! - **CancellationProtocolOracle**: Detects protocol violations like CancelAckWhileMasked
-//! - **ProgressCertificate**: Provides martingale-based progress guarantees for drain completion
+//! - **ProgressCertificate**: Provides empirical drain-progress diagnostics and conditional range-bounded calculations
 //! - **Cross-validation**: Both systems detect and report protocol violations consistently
 //!
 //! ## Test Scenarios

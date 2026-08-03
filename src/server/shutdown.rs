@@ -157,7 +157,8 @@ pub struct GracefulDrainReport {
     pub final_phase: DrainPhase,
     /// Whether the certificate judged the drain to be converging.
     pub converging: bool,
-    /// Lower bound on P(quiescence within the estimated remaining steps).
+    /// Conditional lower-tail confidence calculation for quiescence within
+    /// twice the plug-in estimated remaining steps.
     pub confidence_bound: f64,
     /// Estimated remaining steps to quiescence (`None` if undetermined).
     pub estimated_remaining_steps: Option<f64>,

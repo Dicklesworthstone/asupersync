@@ -3099,11 +3099,11 @@ pub struct ThreeLaneWorker {
     adaptive_cancel_policy: Option<AdaptiveCancelStreakPolicy>,
     /// Spectral monitor for topology-aware early warning and overrides.
     spectral_monitor: Option<SpectralHealthMonitor>,
-    /// Martingale-based drain progress certificate.
+    /// Auditable drain progress certificate.
     ///
     /// When the governor is active, the certificate tracks Lyapunov potential
-    /// descent during drain phases and provides statistical convergence
-    /// verdicts (Azuma–Hoeffding + Freedman bounds) with phase classification
+    /// descent during drain phases and reports empirical trend, deterministic
+    /// stall state, conditional range-bounded tails, and phase classification
     /// (Warmup / RapidDrain / SlowTail / Stalled / Quiescent).
     drain_certificate: Option<ProgressCertificate>,
     /// Monotone sequence for deterministic decision IDs and timestamps.

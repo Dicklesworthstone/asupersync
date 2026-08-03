@@ -5,8 +5,9 @@
 //! it propagates correctly to stop generation, abort transmissions, clean up
 //! partial symbol sets, and notify peers.
 //!
-//! [`progress_certificate`] provides martingale-based statistical certificates
-//! that cancellation drain is making progress toward quiescence.
+//! [`progress_certificate`] provides auditable drain-progress diagnostics and
+//! conditional range-bounded calculations alongside deterministic stall and
+//! phase classification.
 
 pub mod progress_certificate;
 pub mod protocol_state_machines;

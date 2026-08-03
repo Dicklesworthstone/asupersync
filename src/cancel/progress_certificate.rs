@@ -1,49 +1,41 @@
-//! Martingale progress certificates for cancellation drain.
+//! Auditable progress diagnostics for cancellation drain.
 //!
 //! # Purpose
 //!
-//! Provides statistically grounded guarantees that cancellation
-//! drain is making progress toward quiescence. Uses supermartingale theory
-//! to prove that a cancelling system will terminate within bounded time,
-//! with explicit certificates that can be audited.
+//! Provides auditable diagnostics for cancellation drain progress toward
+//! quiescence. Under explicit predictable-drift and step-range assumptions,
+//! it evaluates conditional concentration tails; one observed trace does not
+//! itself prove bounded-time termination.
 //!
-//! # Mathematical Foundation
+//! # Mathematical Boundary
 //!
-//! A **supermartingale** is a stochastic process {Mₜ} where
-//! `E[Mₜ₊₁ | Fₜ] ≤ Mₜ`. For cancellation drain, define the progress
-//! process:
-//!
-//! ```text
-//! Mₜ = V(Σₜ) + Σᵢ₌₁ᵗ cᵢ
-//! ```
-//!
-//! where `V(Σₜ)` is the Lyapunov potential at step `t` and `cᵢ ≥ 0` is
-//! the "progress credit" consumed at step `i`.
-//!
-//! **Key theorem (Optional Stopping):** If Mₜ is a supermartingale and
-//! `V(Σₜ) ≥ 0`, then:
+//! Let `Δᵢ = V(Σᵢ) - V(Σᵢ₋₁)` and signed net progress be `Yᵢ = -Δᵢ`.
+//! When `Yᵢ ∈ [-c, c]` and its conditional mean is at least `μ`, the
+//! Azuma–Hoeffding candidate for a progress shortfall is:
 //!
 //! ```text
-//! E[τ] ≤ V(Σ₀) / min_credit
+//! P(V(Σₜ) > V(Σ₀) - t·μ + λ) ≤ exp(-λ² / (2·t·c²))
 //! ```
 //!
-//! where `τ = inf{t : V(Σₜ) = 0}` is the hitting time of quiescence.
+//! The displayed tails use `t ≥ 1`, `c > 0`, and `λ > 0`; the Freedman
+//! event below additionally uses `q ≥ 0`.
 //!
-//! **Azuma–Hoeffding concentration bound:**
+//! For the centered shortfall `Xᵢ = E[Yᵢ | Fᵢ₋₁] - Yᵢ`, let
+//! `Sₜ = ΣXᵢ` and `Qₜ = ΣE[Xᵢ² | Fᵢ₋₁]`. The raw Freedman candidate is:
 //!
 //! ```text
-//! P(V(Σₜ) > V(Σ₀) - t·μ + λ) ≤ exp(-2λ² / (t·c²))
+//! P(Sₜ ≥ λ AND Qₜ ≤ q) ≤ exp(-λ² / (2(q + Bλ/3)))
 //! ```
 //!
-//! where `μ` is mean progress per step and `c` is the max step size.
-//! This gives a **probabilistic certificate**: "with probability ≥ 1-δ,
-//! quiescence is reached within T steps."
+//! The implementation uses the outcome-independent caps `Qₜ ≤ t·c²` and
+//! `B = 2c`, then selects the smaller Azuma/Freedman candidate. It reports a
+//! conditional calculation using an empirical plug-in net-progress rate; the
+//! trace does not establish the future-drift premise.
 //!
-//! **Ville's maximal inequality** (see also `eprocess.rs`):
-//!
-//! ```text
-//! P(sup_{t≥0} Mₜ ≥ C) ≤ M₀ / C
-//! ```
+//! Gross downward credit `max(0, -Δᵢ)` is bookkeeping for phase diagnostics.
+//! The gross-credit-accounted quantity `V(Σₜ) + Σ max(0, -Δᵢ)` equals
+//! `V(Σ₀) + Σ max(Δᵢ, 0)` and is therefore pathwise nondecreasing. It is not
+//! used as a supermartingale, Ville, or optional-stopping certificate.
 //!
 //! # Integration Points
 //!
@@ -91,17 +83,18 @@ use std::fmt;
 /// concentration bounds, and certificate confidence levels.
 #[derive(Debug, Clone)]
 pub struct ProgressConfig {
-    /// Desired confidence level for probabilistic bounds (e.g. 0.95).
+    /// Desired threshold for conditional confidence calculations (e.g. 0.95).
     ///
-    /// Must be in `(0, 1)`. The Azuma–Hoeffding bound targets
-    /// `P(quiescence within T) ≥ confidence`.
+    /// Must be in `(0, 1)`. The convergence gate compares the selected
+    /// range-bounded tail against `1 - confidence`.
     pub confidence: f64,
 
     /// Upper bound on the absolute potential change in a single step.
     ///
     /// This is the `c` in the Azuma–Hoeffding inequality. Must be
     /// positive and finite. If a step exceeds this bound, the
-    /// certificate logs an evidence entry but does not panic.
+    /// certificate logs an evidence entry and disables concentration claims
+    /// for that verdict rather than retroactively widening the assumption.
     pub max_step_bound: f64,
 
     /// Number of consecutive non-decreasing steps before declaring a stall.
@@ -204,7 +197,7 @@ impl ProgressConfig {
 /// A single observation in the progress process.
 ///
 /// Each observation records the Lyapunov potential at one drain step,
-/// together with derived quantities used for martingale analysis.
+/// together with derived quantities used for progress diagnostics.
 #[derive(Debug, Clone)]
 pub struct ProgressObservation {
     /// Zero-based step index.
@@ -216,9 +209,8 @@ pub struct ProgressObservation {
     /// Negative means progress (potential decreased). For the first
     /// observation this is `0.0`.
     pub delta: f64,
-    /// Progress credit consumed at this step: `max(0, -delta)`.
-    ///
-    /// This is the `cₜ` term in the supermartingale decomposition.
+    /// Gross downward credit at this step: `max(0, -delta)`.
+    /// Rebounds are tracked separately through the signed delta stream.
     pub credit: f64,
 }
 
@@ -228,8 +220,9 @@ pub struct ProgressObservation {
 
 /// An auditable evidence entry in a progress certificate.
 ///
-/// Evidence entries form the proof trail that auditors (human or machine)
-/// can inspect to verify certificate claims.
+/// Evidence entries form an audit trail that callers can inspect to verify
+/// exactly which deterministic observations and conditional calculations
+/// contributed to a verdict.
 #[derive(Debug, Clone)]
 pub struct EvidenceEntry {
     /// Step at which this evidence was recorded.
@@ -293,34 +286,36 @@ impl fmt::Display for DrainPhase {
 // Certificate Verdict
 // ============================================================================
 
-/// Certificate verdict with probabilistic bounds.
+/// Certificate verdict with empirical diagnostics and conditional tails.
 ///
-/// Summarises the statistical analysis of a progress trace. All fields
-/// are derived from the observation history using the mathematical
-/// framework described in the module documentation.
+/// Summarises one progress trace under the assumptions and no-claim boundary
+/// described in the module documentation.
 #[derive(Debug, Clone)]
 pub struct CertificateVerdict {
-    /// Whether the process appears to be converging (potential trending
-    /// downward with statistical significance).
+    /// Whether the process appears to be converging under the empirical trend,
+    /// stall, and oscillation gates reported in the evidence trail. A range
+    /// violation disables the conditional concentration candidates, but does
+    /// not erase separately observed empirical reduction.
     pub converging: bool,
 
-    /// Estimated remaining steps to quiescence via the Optional Stopping
-    /// Theorem: `V(Σₜ) / mean_credit`. `None` if insufficient data or
-    /// zero mean credit.
+    /// Estimated remaining steps to quiescence via the plug-in net-progress
+    /// rate: `V(Σₜ) / mean_net_progress`. `None` if insufficient data or
+    /// non-positive net progress.
     pub estimated_remaining_steps: Option<f64>,
 
-    /// Lower bound on P(quiescence within T steps) from the
-    /// Azuma–Hoeffding inequality, where T is the estimated remaining
-    /// steps. In `[0, 1]`.
+    /// Projected lower-tail confidence calculation for quiescence within
+    /// twice the plug-in remaining-step estimate. It selects the smaller
+    /// range-bounded candidate, is conditional on persistence of the empirical
+    /// net-progress rate, and lies in `[0, 1]`.
     pub confidence_bound: f64,
 
     /// Whether a stall was detected (last `stall_threshold` steps all
     /// had non-decreasing potential).
     pub stall_detected: bool,
 
-    /// The Azuma–Hoeffding concentration bound at the current step.
+    /// The conditional Azuma–Hoeffding candidate at the current step.
     ///
-    /// This is `exp(-2λ² / (t·c²))` evaluated at the current
+    /// This is `exp(-λ² / (2·t·c²))` evaluated at the current
     /// deviation from expected progress.
     pub azuma_bound: f64,
 
@@ -333,24 +328,28 @@ pub struct CertificateVerdict {
     /// Initial potential value (at step 0).
     pub initial_potential: f64,
 
-    /// Mean credit (progress) per step.
+    /// Mean gross downward credit per step. Positive potential changes are
+    /// accounted for separately when concentration and remaining-step
+    /// calculations derive the net progress rate.
     pub mean_credit: f64,
 
     /// Maximum single-step absolute change observed.
     pub max_observed_step: f64,
 
-    /// Freedman's inequality bound (variance-adaptive, strictly dominates
-    /// Azuma–Hoeffding when empirical variance is below worst-case).
+    /// Conditional Freedman/Azuma candidate envelope for signed net progress.
     ///
     /// ```text
-    /// P(Sₜ ≥ λ) ≤ exp(-λ² / (2(Vₜ + bλ/3)))
+    /// P(Sₜ ≥ λ) ≤ exp(-λ² / (2(Qₜ + Bλ/3)))
     /// ```
     ///
-    /// where `Vₜ` is the predictable quadratic variation and `b` is the
-    /// max step size. Strictly tighter than `azuma_bound` when the empirical
-    /// variance is below `c²`; in the worst case (`Vₜ = t·c²`) it is slightly
-    /// looser than Azuma because of the additive `bλ/3` Bernstein term, so it
-    /// is not universally `≤ azuma_bound`.
+    /// where `Qₜ` is the predictable quadratic variation, `b` is the
+    /// configured absolute step bound, and `B = 2b` is the centered upper
+    /// increment bound. Signed progress lies in `[-b, b]`, so
+    /// `Qₜ ≤ t·b²`.
+    /// The raw Freedman candidate is conservatively capped by the Azuma tail;
+    /// empirical delta variance is diagnostic-only and never enters either
+    /// bound. Both candidates use the verdict's empirical plug-in net-progress
+    /// rate and therefore do not establish persistence of future drift.
     pub freedman_bound: f64,
 
     /// Current drain phase classification.
@@ -400,20 +399,19 @@ impl fmt::Display for CertificateVerdict {
 // Progress Certificate
 // ============================================================================
 
-/// Running progress certificate with statistical guarantees.
+/// Running progress certificate with auditable conditional diagnostics.
 ///
-/// Tracks a sequence of Lyapunov potential values from successive
-/// cancellation drain steps and maintains the supermartingale
-/// decomposition `Mₜ = V(Σₜ) + Σcᵢ`. At any point, callers can
-/// request a [`CertificateVerdict`] with probabilistic bounds on
-/// time-to-quiescence and stall detection.
+/// Tracks Lyapunov potential values from successive cancellation drain steps.
+/// At any point, callers can request a [`CertificateVerdict`] with empirical
+/// trend and phase diagnostics, a plug-in remaining-step estimate, conditional
+/// range-bounded calculations, and deterministic stall detection.
 ///
-/// # Supermartingale Property
+/// # No-claim Boundary
 ///
-/// If the scheduler is well-behaved (each step makes expected progress),
-/// the compensated process `Mₜ` is a supermartingale. The certificate
-/// verifies this empirically and uses concentration inequalities to
-/// quantify deviations.
+/// The certificate does not infer predictable drift, turn gross credit into a
+/// supermartingale, or prove eventual quiescence from one trace. Published
+/// cooperative-path cleanup budgets remain separate from this diagnostic; the
+/// certificate does not create a bound where none is specified.
 ///
 /// # Bounded Memory
 ///
@@ -579,8 +577,8 @@ impl ProgressCertificate {
 
     /// Computes the Azuma–Hoeffding tail bound.
     ///
-    /// Given `t` steps whose martingale differences are bounded by
-    /// `|Δᵢ| ≤ c` (`step_bound` is that two-sided max), with mean progress
+    /// Given `t` signed net-progress steps `-Δᵢ` in `[-c, c]`
+    /// (`step_bound` is that two-sided max), with predictable mean progress
     /// `mu` per step, the probability that the potential exceeds
     /// `V₀ - t·mu + lambda` is bounded by:
     ///
@@ -588,9 +586,8 @@ impl ProgressCertificate {
     /// P(excess ≥ lambda) ≤ exp(-lambda² / (2·t·c²))
     /// ```
     ///
-    /// This is the standard Azuma–Hoeffding form for bounded differences:
-    /// with `Σ cᵢ² = t·c²`, `P(Sₜ ≥ λ) ≤ exp(-λ² / (2·Σ cᵢ²))`. Equivalently,
-    /// via Hoeffding on a per-step range of `2c`,
+    /// Hoeffding's lemma applied to the conditional range of width `2c`
+    /// gives
     /// `exp(-2λ² / (t·(2c)²)) = exp(-λ² / (2·t·c²))`.
     ///
     /// The earlier `exp(-2λ² / (t·c²))` was a factor-of-4 error in the
@@ -603,7 +600,7 @@ impl ProgressCertificate {
     /// quiescence has NOT been reached by step `t` under the mean-progress
     /// assumption.
     #[must_use]
-    fn azuma_hoeffding_bound(&self, t: usize, mean_credit: f64, step_bound: f64) -> f64 {
+    fn azuma_hoeffding_bound(&self, t: usize, mean_progress: f64, step_bound: f64) -> f64 {
         if t == 0 || step_bound <= 0.0 {
             return 1.0;
         }
@@ -617,7 +614,7 @@ impl ProgressCertificate {
         // already exceeds V₀, the bound is trivially satisfied.
         #[allow(clippy::cast_precision_loss)]
         let t_f = t as f64;
-        let expected_remaining = t_f.mul_add(-mean_credit, initial);
+        let expected_remaining = t_f.mul_add(-mean_progress, initial);
         let lambda = (-expected_remaining).max(0.0);
 
         // Azuma–Hoeffding: P(Sₜ ≥ lambda) ≤ exp(-lambda² / (2·t·c²))
@@ -632,58 +629,42 @@ impl ProgressCertificate {
         }
     }
 
-    /// Computes the Ville's maximal inequality bound.
-    ///
-    /// ```text
-    /// P(sup_{s≥0} Mₛ ≥ C) ≤ M₀ / C
-    /// ```
-    ///
-    /// For the progress supermartingale, `M₀ = V(Σ₀)` and `C` is the
-    /// threshold. We use `C = V₀ · (1 + margin)` to bound the probability
-    /// that the potential ever exceeds its initial value by more than
-    /// `margin` fraction.
-    #[must_use]
-    fn ville_bound(&self, margin: f64) -> f64 {
-        let v0 = self.initial_potential.unwrap_or(0.0);
-        if v0 <= 0.0 {
-            return 0.0;
-        }
-        let threshold = v0 * (1.0 + margin);
-        (v0 / threshold).min(1.0)
-    }
-
-    /// Computes Freedman's inequality bound (variance-adaptive).
+    /// Computes the raw Freedman candidate for signed net progress.
     ///
     /// Freedman's inequality is a variance-sensitive analogue of
     /// Azuma–Hoeffding that replaces the worst-case `t·c²` term with the
-    /// predictable quadratic variation `Vₜ = Σ Var(Xᵢ | Fᵢ₋₁)`:
+    /// predictable quadratic variation `Qₜ = Σ E[Xᵢ² | Fᵢ₋₁]` for
+    /// `Xᵢ = E[-Δᵢ | Fᵢ₋₁] + Δᵢ`. With `Sₜ = ΣXᵢ`:
     ///
     /// ```text
-    /// P(Sₜ ≥ λ AND Vₜ ≤ v) ≤ exp(-λ² / (2(v + bλ/3)))
+    /// P(Sₜ ≥ λ AND Qₜ ≤ q) ≤ exp(-λ² / (2(q + Bλ/3)))
     /// ```
     ///
-    /// where `b` is the max step size. This is strictly tighter than
-    /// Azuma whenever empirical variance is below `c²`, which is the
-    /// common case for well-behaved cancellation drains with occasional
-    /// jitter. The improvement can be orders of magnitude.
+    /// where signed progress `-Δᵢ` lies in `[-b, b]` and the centered upper
+    /// increment bound is `B = 2b`. Popoviciu's inequality gives the
+    /// predictable cap `Qₜ ≤ t·b²`. Realized sample variance is
+    /// diagnostic data, not a valid substitute for `Qₜ` in the same-sample
+    /// tail bound.
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
-    fn freedman_bound(&self, t: usize, mean_credit: f64, step_bound: f64) -> f64 {
+    fn freedman_candidate_bound(&self, t: usize, mean_progress: f64, step_bound: f64) -> f64 {
         if t == 0 || step_bound <= 0.0 {
             return 1.0;
         }
 
         let initial = self.initial_potential.unwrap_or(0.0);
         let t_f = t as f64;
-        let expected_remaining = t_f.mul_add(-mean_credit, initial);
+        let expected_remaining = t_f.mul_add(-mean_progress, initial);
         let lambda = (-expected_remaining).max(0.0);
 
-        // Use empirical variance if available, else fall back to worst-case
-        // (which makes Freedman equivalent to Azuma).
-        let variance = self.delta_variance().unwrap_or(step_bound * step_bound);
-        let predictable_variation = t_f * variance;
+        // Signed progress lies in [-step_bound, step_bound]. Its conditional
+        // variance is therefore at most step_bound², and the centered upper
+        // increment is at most 2·step_bound. Both are fixed independently of
+        // the outcomes whose tail probability we are bounding.
+        let predictable_variation = t_f * step_bound * step_bound;
+        let centered_increment_bound = 2.0 * step_bound;
 
-        let denom = 2.0 * step_bound.mul_add(lambda / 3.0, predictable_variation);
+        let denom = 2.0 * centered_increment_bound.mul_add(lambda / 3.0, predictable_variation);
 
         if !denom.is_finite() || denom <= 0.0 {
             return 1.0;
@@ -740,9 +721,9 @@ impl ProgressCertificate {
     /// Produces a certificate verdict from the current observation history.
     ///
     /// This is the main query interface. The verdict includes:
-    /// - Convergence status (statistical trend analysis)
-    /// - Estimated remaining steps (Optional Stopping Theorem)
-    /// - Confidence bound (Azuma–Hoeffding)
+    /// - Convergence status (empirical trend analysis)
+    /// - Plug-in signed net-progress remaining-step estimate
+    /// - Projected confidence calculation (selected Freedman/Azuma envelope)
     /// - Stall detection (sliding window)
     /// - Full evidence trail
     #[must_use]
@@ -783,37 +764,55 @@ impl ProgressCertificate {
         } else {
             0.0
         };
-
-        let effective_step_bound = if self.max_abs_delta > self.config.max_step_bound {
-            self.max_abs_delta
+        let mean_net_progress = if steps_with_deltas > 0 {
+            -self.sum_delta / steps_with_deltas as f64
         } else {
-            self.config.max_step_bound
+            0.0
         };
-        let azuma =
-            self.azuma_hoeffding_bound(steps_with_deltas, mean_credit, effective_step_bound);
-        let freedman = self.freedman_bound(steps_with_deltas, mean_credit, effective_step_bound);
+
+        let step_bound_violated = self.max_abs_delta > self.config.max_step_bound;
+        let (azuma, freedman) = if step_bound_violated {
+            // Concentration assumptions must be fixed before observing the
+            // trace. Retrospectively widening the configured range to the
+            // largest realized step would not restore a probability bound.
+            (1.0, 1.0)
+        } else {
+            let step_bound = self.config.max_step_bound;
+            let azuma =
+                self.azuma_hoeffding_bound(steps_with_deltas, mean_net_progress, step_bound);
+            let freedman_candidate =
+                self.freedman_candidate_bound(steps_with_deltas, mean_net_progress, step_bound);
+            (azuma, azuma.min(freedman_candidate))
+        };
 
         let estimated_remaining =
-            (mean_credit > self.config.epsilon).then(|| v_current / mean_credit);
+            (mean_net_progress > self.config.epsilon).then(|| v_current / mean_net_progress);
 
-        // Use Freedman (tighter) for confidence bound when available.
+        // Use the stronger valid signed-progress tail for the projected horizon.
         let confidence_bound = estimated_remaining.map_or(0.0, |t_rem| {
+            if step_bound_violated {
+                return 0.0;
+            }
             if v_current <= self.config.epsilon {
                 return 1.0;
             }
-            // Safety factor of 2 for variance.
+            // Project across twice the plug-in remaining-step estimate.
             #[allow(clippy::cast_sign_loss)]
             let extra = (2.0 * t_rem).ceil().max(0.0) as usize;
             let total_t = steps_with_deltas.saturating_add(extra);
-            let tail = self.freedman_bound(total_t, mean_credit, effective_step_bound);
+            let step_bound = self.config.max_step_bound;
+            let azuma = self.azuma_hoeffding_bound(total_t, mean_net_progress, step_bound);
+            let freedman_candidate =
+                self.freedman_candidate_bound(total_t, mean_net_progress, step_bound);
+            let tail = azuma.min(freedman_candidate);
             (1.0 - tail).clamp(0.0, 1.0)
         });
 
         let stall_detected = self.stall_run >= self.config.stall_threshold;
 
         // Convergence gate combines concentration and empirical trend, while
-        // rejecting strongly oscillatory traces. Uses Freedman (variance-
-        // adaptive) instead of raw Azuma for strictly tighter decisions.
+        // rejecting strongly oscillatory traces. Both candidates use signed
+        // net progress and outcome-independent range caps.
         let violation_rate = if steps_with_deltas > 0 {
             self.increase_count as f64 / steps_with_deltas as f64
         } else {
@@ -826,7 +825,7 @@ impl ProgressCertificate {
         };
         let strong_concentration = freedman < (1.0 - self.config.confidence);
         let strong_empirical_reduction = reduction_ratio >= self.config.confidence;
-        let converging = mean_credit > self.config.epsilon
+        let converging = mean_net_progress > self.config.epsilon
             && !stall_detected
             && violation_rate <= MAX_CONVERGENCE_VIOLATION_RATE
             && (strong_concentration || strong_empirical_reduction);
@@ -837,10 +836,10 @@ impl ProgressCertificate {
             v_current,
             steps_with_deltas,
             mean_credit,
+            mean_net_progress,
             azuma,
-            freedman,
             stall_detected,
-            effective_step_bound,
+            step_bound_violated,
         );
 
         CertificateVerdict {
@@ -870,10 +869,10 @@ impl ProgressCertificate {
         v_current: f64,
         steps_with_deltas: usize,
         mean_credit: f64,
+        mean_net_progress: f64,
         azuma: f64,
-        freedman: f64,
         stall_detected: bool,
-        _effective_step_bound: f64,
+        step_bound_violated: bool,
     ) -> Vec<EvidenceEntry> {
         let mut evidence = Vec::new();
         let last_step = n - 1;
@@ -883,7 +882,7 @@ impl ProgressCertificate {
         }
 
         // Step bound exceeded.
-        if self.max_abs_delta > self.config.max_step_bound {
+        if step_bound_violated {
             let max_obs = self.max_abs_delta;
             let configured = self.config.max_step_bound;
             // `bound` is contractually a probability in [0, 1]. Using the
@@ -895,8 +894,8 @@ impl ProgressCertificate {
                 potential: v_current,
                 bound: azuma,
                 description: format!(
-                    "max observed step {max_obs:.4} exceeds configured bound \
-                     {configured:.4}; using observed max for Azuma bound",
+                    "configured step bound {configured:.4} was exceeded by observed step \
+                     {max_obs:.4}; concentration bounds disabled",
                 ),
             });
         }
@@ -942,20 +941,7 @@ impl ProgressCertificate {
             });
         }
 
-        // Ville's bound on worst-case exceedance.
-        let ville = self.ville_bound(0.5);
-        if ville > 0.01 {
-            evidence.push(EvidenceEntry {
-                step: last_step,
-                potential: v_current,
-                bound: ville,
-                description: format!(
-                    "Ville bound: P(potential ever exceeds 1.5\u{00b7}V\u{2080}) \u{2264} {ville:.4}",
-                ),
-            });
-        }
-
-        // Progress summary with both bounds.
+        // Signed progress summary with the Azuma baseline.
         let total_progress = v_initial - v_current;
         evidence.push(EvidenceEntry {
             step: last_step,
@@ -963,27 +949,10 @@ impl ProgressCertificate {
             bound: azuma,
             description: format!(
                 "total progress {total_progress:.4} over {steps_with_deltas} steps, \
-                 mean credit {mean_credit:.4}/step, Azuma tail P \u{2264} {azuma:.6}",
+                 mean net progress {mean_net_progress:.4}/step, gross credit \
+                 {mean_credit:.4}/step, Azuma tail P \u{2264} {azuma:.6}",
             ),
         });
-
-        // Freedman bound (variance-adaptive, dominates Azuma).
-        if (freedman - azuma).abs() > 1e-12 {
-            let improvement = if azuma > 1e-15 {
-                (1.0 - freedman / azuma) * 100.0
-            } else {
-                0.0
-            };
-            evidence.push(EvidenceEntry {
-                step: last_step,
-                potential: v_current,
-                bound: freedman,
-                description: format!(
-                    "Freedman bound P \u{2264} {freedman:.6} \
-                     ({improvement:.1}% tighter than Azuma)",
-                ),
-            });
-        }
 
         evidence
     }
@@ -1021,7 +990,12 @@ impl ProgressCertificate {
         &self.config
     }
 
-    /// Returns the current supermartingale value `Mₜ = V(Σₜ) + Σcᵢ`.
+    /// Returns the gross-credit-accounted potential
+    /// `V(Σₜ) + Σ max(0, -Δᵢ)`.
+    ///
+    /// Despite the historical method name, this is a deterministic gross-flow
+    /// diagnostic. Algebraically it equals `V(Σ₀) + Σ max(Δᵢ, 0)`, so it is
+    /// pathwise nondecreasing and is not used as probability evidence.
     #[must_use]
     pub fn martingale_value(&self) -> f64 {
         let v = self.last_potential.unwrap_or(0.0);
@@ -1071,11 +1045,12 @@ impl ProgressCertificate {
         self.invalid_observation_count = 0;
     }
 
-    /// Returns the empirical variance of the per-step deltas.
+    /// Returns the empirical variance of the per-step deltas for diagnostics.
     ///
     /// Uses the biased estimator `(1/n) Σ(Δᵢ - μ)²` where `n` is
     /// the number of deltas (observations − 1). Returns `None` if
-    /// fewer than 2 observations exist.
+    /// fewer than 2 observations exist. This realized statistic is not used
+    /// as predictable quadratic variation in the concentration bounds.
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn delta_variance(&self) -> Option<f64> {
@@ -1097,16 +1072,13 @@ impl ProgressCertificate {
         })
     }
 
-    /// Checks whether the supermartingale property approximately holds.
+    /// Returns the gross-credit-accounted potential divided by `V(Σ₀)`.
     ///
-    /// Verifies that `Mₜ = V(Σₜ) + Σcᵢ` is non-increasing in
-    /// expectation. Since credits are defined as `max(0, -Δ)`, the
-    /// martingale value should be approximately equal to `V(Σ₀)` if
-    /// the process is a true supermartingale.
-    ///
-    /// Returns the ratio `Mₜ / M₀`. Values ≤ 1.0 confirm the
-    /// supermartingale property; values > 1.0 indicate the process
-    /// has more potential than expected (possible anomaly).
+    /// Despite the historical method name, this is a deterministic rebound
+    /// diagnostic, not a supermartingale test. A value of `1` means no gross
+    /// upward movement has occurred; values above `1` measure accumulated
+    /// rebounds relative to the initial potential. Zero initial potential uses
+    /// the conventional neutral value `1`.
     #[must_use]
     pub fn martingale_ratio(&self) -> f64 {
         let v0 = self.initial_potential.unwrap_or(0.0);
@@ -1430,10 +1402,11 @@ mod tests {
         assert!((cert.total_credit() - 80.0).abs() < 1e-10);
         assert_eq!(cert.increase_count(), 0);
 
-        // Martingale value: V(Σₜ) + Σcᵢ = 20 + 80 = 100 = V(Σ₀)
+        // With no rebound, gross-credit accounting stays at V(Σ₀):
+        // V(Σₜ) + Σcredit = 20 + 80 = 100.
         assert!(
             (cert.martingale_value() - 100.0).abs() < 1e-10,
-            "supermartingale should be conserved under monotone decrease"
+            "gross-credit accounting should stay constant without rebounds"
         );
     }
 
@@ -1448,8 +1421,9 @@ mod tests {
         assert_eq!(cert.increase_count(), 1);
         // Credits: 20 + 0 + 20 = 40
         assert!((cert.total_credit() - 40.0).abs() < 1e-10);
-        // Martingale: 70 + 40 = 110 > 100 (increase pushes M up)
-        assert!(cert.martingale_value() > 100.0);
+        // Gross-credit-accounted potential: 70 + 40 = 110. The 10-point
+        // rebound raises this deterministic diagnostic above V(Σ₀).
+        assert!((cert.martingale_value() - 110.0).abs() < 1e-10);
     }
 
     #[test]
@@ -1700,33 +1674,20 @@ mod tests {
     // -- Azuma–Hoeffding bound --
 
     #[test]
-    fn azuma_bound_decreases_with_more_steps() {
-        // Use step bound matching actual step size for a tight bound.
+    fn azuma_helper_decreases_with_larger_projected_progress() {
         let config = ProgressConfig {
             max_step_bound: 10.0,
             ..ProgressConfig::default()
         };
         let mut cert = ProgressCertificate::new(config);
-
-        // To get a tight bound on the current step, we need total_credit > initial_potential.
-        // We create an oscillatory sequence: start at 100.0, repeatedly jump to 110.0 and drop to 100.0.
         cert.observe(100.0);
-        for _ in 0..200 {
-            cert.observe(110.0); // increase: delta = +10, credit = 0
-            cert.observe(100.0); // decrease: delta = -10, credit = 10
-        }
-        // initial = 100.0.
-        // total_credit = 200 * 10.0 = 2000.0.
-        // t = 400.
-        // mean_credit = 5.0.
-        // expected_remaining = 100.0 - 400 * 5.0 = -1900.0.
-        // lambda = 1900.0.
 
-        let verdict = cert.verdict();
+        let shorter = cert.azuma_hoeffding_bound(40, 5.0, 10.0);
+        let longer = cert.azuma_hoeffding_bound(400, 5.0, 10.0);
         assert!(
-            verdict.azuma_bound < 0.01,
-            "azuma bound should be small with accumulated credit > initial potential, got {:.6}",
-            verdict.azuma_bound,
+            longer < shorter,
+            "larger projected net progress should tighten the helper bound: \
+             shorter={shorter:.6}, longer={longer:.6}",
         );
     }
 
@@ -1736,25 +1697,20 @@ mod tests {
         // guard against reintroducing the factor-of-4 (fourth-power) error.
         let config = ProgressConfig {
             max_step_bound: 10.0,
-            min_observations: 3,
             ..ProgressConfig::default()
         };
         let mut cert = ProgressCertificate::new(config);
 
-        // initial = 100; then 200 net-down oscillations of ±10.
-        // total_deltas t = 400, mean_credit = 5, λ = t·mean − V₀ = 1900,
+        // initial = 100, projected t = 400, mean net progress = 5,
+        // λ = t·mean − V₀ = 1900,
         // c = 10 → exponent = −1900² / (2·400·100) = −45.125.
         cert.observe(100.0);
-        for _ in 0..200 {
-            cert.observe(110.0);
-            cert.observe(100.0);
-        }
-        let verdict = cert.verdict();
+        let actual = cert.azuma_hoeffding_bound(400, 5.0, 10.0);
         let expected = (-1900.0_f64 * 1900.0 / (2.0 * 400.0 * 100.0)).exp();
         assert!(
-            (verdict.azuma_bound - expected).abs() <= 1e-12 * expected.max(1e-300),
+            (actual - expected).abs() <= 1e-12 * expected.max(1e-300),
             "azuma_bound {} should equal standard Hoeffding {expected}",
-            verdict.azuma_bound
+            actual
         );
     }
 
@@ -1786,7 +1742,7 @@ mod tests {
     #[test]
     fn bounds_do_not_overstate_confidence_after_expected_overshoot() {
         // Construct a sequence with a large rebound then sharp drop so the
-        // average-credit extrapolation overshoots below zero while current
+        // net-progress extrapolation overshoots below zero while current
         // potential remains positive.
         let config = ProgressConfig {
             max_step_bound: 250.0,
@@ -1795,9 +1751,9 @@ mod tests {
         };
         let mut cert = ProgressCertificate::new(config);
 
-        // Potentials: 100 -> 200 (increase), 200 -> 0 (large credit), 0 -> 10.
-        // total_credit = 200 over 3 deltas => mean_credit ≈ 66.7.
-        // expected_remaining at t=4 will be < 0.
+        // Potentials: 100 -> 200 (increase), 200 -> 0 (large drop), 0 -> 10.
+        // Signed net progress is (100 - 10) / 3 = 30 per step, so the
+        // projected expected remaining potential at total horizon t=4 is -20.
         cert.observe(100.0);
         cert.observe(200.0);
         cert.observe(0.0);
@@ -1811,13 +1767,13 @@ mod tests {
         );
     }
 
-    // -- Supermartingale property --
+    // -- Gross-credit accounting diagnostics --
 
     #[test]
-    fn martingale_conserved_monotone() {
+    fn gross_credit_accounting_is_constant_without_rebounds() {
         let mut cert = ProgressCertificate::with_defaults();
 
-        // Monotone decrease: Mₜ = V(Σₜ) + Σcᵢ should equal V(Σ₀).
+        // Monotone decrease: V(Σₜ) + gross credit equals V(Σ₀).
         let potentials = [100.0, 85.0, 70.0, 55.0, 40.0, 25.0, 10.0, 0.0];
         for &v in &potentials {
             cert.observe(v);
@@ -1826,57 +1782,46 @@ mod tests {
         let ratio = cert.martingale_ratio();
         assert!(
             (ratio - 1.0).abs() < 1e-10,
-            "martingale ratio should be 1.0 for monotone decrease, got {ratio:.10}"
+            "gross-credit ratio should be 1.0 without rebounds, got {ratio:.10}"
         );
     }
 
     #[test]
-    fn martingale_exceeds_one_with_increases() {
+    fn gross_credit_ratio_records_rebounds() {
         let mut cert = ProgressCertificate::with_defaults();
 
         cert.observe(100.0);
         cert.observe(60.0); // credit = 40
-        cert.observe(80.0); // increase! credit = 0, M jumps up
+        cert.observe(80.0); // increase: credit = 0, diagnostic rises
         cert.observe(50.0); // credit = 30
 
-        // M = 50 + 70 = 120 > 100 = M₀
+        // V(Σₜ) + gross credit = 50 + 70 = 120, exactly accounting for
+        // the 20-point rebound above the initial 100.
         let ratio = cert.martingale_ratio();
         assert!(
-            ratio > 1.0,
-            "martingale ratio should exceed 1.0 with increases, got {ratio:.4}"
+            (ratio - 1.2).abs() < 1e-10,
+            "gross-credit ratio should record the rebound, got {ratio:.4}"
         );
     }
 
-    // -- Ville's bound --
-
     #[test]
-    fn ville_bound_small_for_decreasing() {
-        let mut cert = ProgressCertificate::with_defaults();
-
-        for i in 0..10 {
-            #[allow(clippy::cast_precision_loss)]
-            let v = 100.0 - 10.0 * i as f64;
-            cert.observe(v);
+    fn evidence_omits_unsupported_ville_claim() {
+        let config = ProgressConfig {
+            min_observations: 3,
+            ..ProgressConfig::default()
+        };
+        let mut cert = ProgressCertificate::new(config);
+        for potential in [100.0, 60.0, 80.0, 50.0] {
+            cert.observe(potential);
         }
 
-        // P(sup M ≥ 1.5·V₀) ≤ V₀ / (1.5·V₀) = 2/3
-        let bound = cert.ville_bound(0.5);
+        let verdict = cert.verdict();
         assert!(
-            (bound - 2.0 / 3.0).abs() < 1e-10,
-            "Ville bound should be 2/3 for 50% margin, got {bound:.6}"
-        );
-    }
-
-    #[test]
-    fn ville_bound_zero_for_zero_initial() {
-        let mut cert = ProgressCertificate::with_defaults();
-        cert.observe(0.0);
-        cert.observe(0.0);
-
-        let bound = cert.ville_bound(0.5);
-        assert!(
-            bound.abs() < 1e-10,
-            "Ville bound should be 0 for zero initial potential"
+            verdict
+                .evidence
+                .iter()
+                .all(|entry| !entry.description.contains("Ville bound")),
+            "gross-credit accounting must not emit Ville probability evidence"
         );
     }
 
@@ -2009,12 +1954,34 @@ mod tests {
         let has_exceeded = verdict
             .evidence
             .iter()
-            .any(|e| e.description.contains("exceeds configured bound"));
+            .any(|e| e.description.contains("concentration bounds disabled"));
         assert!(
             has_exceeded,
             "evidence should note exceeded step bound, got: {:?}",
             verdict.evidence
         );
+        assert_eq!(verdict.azuma_bound, 1.0);
+        assert_eq!(verdict.freedman_bound, 1.0);
+        assert_eq!(verdict.confidence_bound, 0.0);
+    }
+
+    #[test]
+    fn observed_quiescence_does_not_restore_invalidated_concentration_claim() {
+        let config = ProgressConfig {
+            max_step_bound: 10.0,
+            min_observations: 3,
+            ..ProgressConfig::default()
+        };
+        let mut cert = ProgressCertificate::new(config);
+        for potential in [100.0, 0.0, 0.0] {
+            cert.observe(potential);
+        }
+
+        let verdict = cert.verdict();
+        assert_eq!(verdict.current_potential, 0.0);
+        assert_eq!(verdict.azuma_bound, 1.0);
+        assert_eq!(verdict.freedman_bound, 1.0);
+        assert_eq!(verdict.confidence_bound, 0.0);
     }
 
     // -- Compact --
@@ -2458,12 +2425,12 @@ mod tests {
         assert!(quiescence_evidence, "evidence should note quiescence");
     }
 
-    // -- Martingale ratio property test --
+    // -- Gross-credit ratio property test --
 
     #[test]
-    fn martingale_ratio_bounded_for_random_walk() {
-        // Feed a downward-biased random walk and verify the martingale
-        // ratio stays reasonable.
+    fn gross_credit_ratio_is_finite_for_bounded_walk() {
+        // Feed a downward-biased bounded walk and verify the deterministic
+        // gross-credit ratio remains finite.
         let mut cert = ProgressCertificate::with_defaults();
         let mut v = 500.0;
         let mut rng: u64 = 12345;
@@ -2480,42 +2447,42 @@ mod tests {
         let ratio = cert.martingale_ratio();
         assert!(
             ratio.is_finite(),
-            "martingale ratio should be finite, got {ratio}"
+            "gross-credit ratio should be finite, got {ratio}"
         );
-        // For a supermartingale, ratio should be ≥ 1 (or very close).
-        // With increases, it can exceed 1 but shouldn't be wildly large.
+        assert!(ratio >= 1.0, "gross-credit ratio cannot decrease below 1");
         assert!(
             ratio < 5.0,
-            "martingale ratio should be bounded, got {ratio:.4}"
+            "bounded walk should have a bounded gross-credit ratio, got {ratio:.4}"
         );
     }
 
-    // -- Optional Stopping estimate --
+    // -- Plug-in signed net-progress estimate --
 
     #[test]
-    fn estimated_remaining_steps_reasonable() {
+    fn estimated_remaining_steps_use_signed_net_progress_after_rebound() {
         let config = ProgressConfig {
             min_observations: 3,
             ..ProgressConfig::default()
         };
         let mut cert = ProgressCertificate::new(config);
 
-        // Constant decrease of 10/step from 100.
-        // After 5 steps, potential is 50. Mean credit = 10.
-        // Estimated remaining = 50/10 = 5.
-        for i in 0..=5 {
-            #[allow(clippy::cast_precision_loss)]
-            let v = 100.0 - 10.0 * i as f64;
-            cert.observe(v);
+        for potential in [100.0, 80.0, 90.0, 60.0] {
+            cert.observe(potential);
         }
 
         let verdict = cert.verdict();
+        let expected_gross_credit = 50.0 / 3.0;
+        assert!((verdict.mean_credit - expected_gross_credit).abs() < 1e-12);
+
+        // Signed net progress is (100 - 60) / 3, so the plug-in remaining
+        // estimate is 60 / (40 / 3) = 4.5. Using gross downward credit would
+        // instead produce 3.6 and understate the rebound-adjusted estimate.
         let est = verdict
             .estimated_remaining_steps
             .expect("should have estimate");
         assert!(
-            (est - 5.0).abs() < 0.1,
-            "estimated remaining should be ≈5, got {est:.4}"
+            (est - 4.5).abs() < 1e-12,
+            "estimated remaining should be 4.5, got {est:.4}"
         );
     }
 
@@ -2535,105 +2502,88 @@ mod tests {
         let verdict = cert.verdict();
         assert!(
             verdict.estimated_remaining_steps.is_none(),
-            "should have no estimate when mean credit is zero"
+            "should have no estimate when net progress is zero"
         );
     }
 
     // -- Freedman bound --
 
     #[test]
-    fn freedman_dominates_azuma() {
-        // Freedman's inequality is always at least as tight as Azuma-Hoeffding.
-        // With low variance (constant steps), Freedman should be MUCH tighter.
+    fn raw_freedman_candidate_is_looser_than_azuma_with_only_a_range_cap() {
         let config = ProgressConfig {
-            max_step_bound: 100.0, // Deliberately loose bound.
-            min_observations: 3,
+            max_step_bound: 10.0,
             ..ProgressConfig::default()
         };
         let mut cert = ProgressCertificate::new(config);
+        cert.observe(100.0);
 
-        // Constant decrease of 10/step from 1000.
-        // Empirical variance = 0, but max_abs_delta = 10.
-        // Azuma uses max(10, 100) = 10 since max_abs_delta overrides.
-        // Freedman uses actual variance ≈ 0 → denominator shrinks → tighter.
-        for i in 0..50 {
-            #[allow(clippy::cast_precision_loss)]
-            let v = 1000.0 - 10.0 * i as f64;
-            cert.observe(v);
-        }
-
-        let verdict = cert.verdict();
+        let azuma = cert.azuma_hoeffding_bound(400, 5.0, 10.0);
+        let freedman = cert.freedman_candidate_bound(400, 5.0, 10.0);
         assert!(
-            verdict.freedman_bound <= verdict.azuma_bound + 1e-15,
-            "Freedman ({:.8}) should be ≤ Azuma ({:.8})",
-            verdict.freedman_bound,
-            verdict.azuma_bound,
+            freedman > azuma,
+            "raw Freedman candidate ({freedman:e}) should be looser than Azuma ({azuma:e})",
         );
     }
 
     #[test]
-    fn freedman_much_tighter_constant_decrease() {
-        // We want a sequence where variance is small compared to max_step_bound^2,
-        // but total_credit > initial_potential so that lambda > 0.
+    fn freedman_ignores_realized_variance() {
         let config = ProgressConfig {
-            max_step_bound: 100.0, // Deliberately loose bound.
+            max_step_bound: 20.0,
             min_observations: 3,
             ..ProgressConfig::default()
         };
-        let mut cert = ProgressCertificate::new(config);
+        let mut constant = ProgressCertificate::new(config.clone());
+        let mut uneven = ProgressCertificate::new(config);
 
-        // initial = 100.0
-        cert.observe(100.0);
-        // We drop by 1.0 twice, then increase by 1.0 once.
-        // Net change: -1.0 per 3 steps. Total credit: 2.0 per 3 steps.
-        // We do this 200 times.
-        let mut v = 100.0;
-        for _ in 0..200 {
-            v -= 1.0;
-            cert.observe(v);
-            v -= 1.0;
-            cert.observe(v);
-            v += 1.0;
-            cert.observe(v);
+        for potential in [100.0, 90.0, 80.0, 70.0, 60.0] {
+            constant.observe(potential);
+        }
+        for potential in [100.0, 95.0, 80.0, 75.0, 60.0] {
+            uneven.observe(potential);
         }
 
-        let verdict = cert.verdict();
-        // With empirical variance much smaller than 100.0^2, Freedman should be much tighter.
-        if verdict.azuma_bound > 1e-10 {
-            let ratio = verdict.freedman_bound / verdict.azuma_bound;
-            assert!(
-                ratio < 1.0,
-                "Freedman/Azuma ratio should be < 1, got {ratio:.6}"
-            );
-        }
-    }
-
-    #[test]
-    fn freedman_equals_azuma_worst_case() {
-        // When variance equals max_step_bound², Freedman matches Azuma.
-        // This happens with alternating large steps.
-        let config = ProgressConfig {
-            min_observations: 3,
-            ..ProgressConfig::default()
-        };
-        let mut cert = ProgressCertificate::new(config);
-
-        // We need E[V_t] < 0 to get a non-trivial bound.
-        cert.observe(100.0);
-        cert.observe(0.0);
-        cert.observe(0.0);
-
-        // With only 2 deltas, both should give similar results.
-        let verdict = cert.verdict();
+        assert_eq!(constant.delta_variance(), Some(0.0));
         assert!(
-            verdict.freedman_bound.is_finite(),
-            "Freedman should be finite"
+            uneven
+                .delta_variance()
+                .is_some_and(|variance| variance > 0.0)
         );
-        assert!(verdict.azuma_bound.is_finite(), "Azuma should be finite");
+
+        let constant_bound = constant.freedman_candidate_bound(20, 10.0, 20.0);
+        let uneven_bound = uneven.freedman_candidate_bound(20, 10.0, 20.0);
+        assert!((constant_bound - uneven_bound).abs() < 1e-15);
+
+        let lambda: f64 = 100.0;
+        let predictable_variation: f64 = 20.0 * 20.0 * 20.0;
+        let centered_increment_bound: f64 = 2.0 * 20.0;
+        let expected = (-lambda * lambda
+            / (2.0 * centered_increment_bound.mul_add(lambda / 3.0, predictable_variation)))
+        .exp();
+        assert!((constant_bound - expected).abs() < 1e-15);
     }
 
     #[test]
-    fn freedman_evidence_entry_present() {
+    fn both_candidates_equal_one_at_zero_deviation() {
+        let config = ProgressConfig {
+            min_observations: 3,
+            ..ProgressConfig::default()
+        };
+        let mut cert = ProgressCertificate::new(config);
+
+        cert.observe(100.0);
+        cert.observe(0.0);
+        cert.observe(0.0);
+
+        let verdict = cert.verdict();
+        let raw_freedman = cert.freedman_candidate_bound(2, 50.0, 100.0);
+        assert_eq!(raw_freedman, 1.0);
+        assert_eq!(verdict.azuma_bound, 1.0);
+        assert_eq!(verdict.freedman_bound, 1.0);
+        assert_eq!(verdict.freedman_bound, verdict.azuma_bound);
+    }
+
+    #[test]
+    fn verdict_does_not_present_raw_freedman_as_stronger_evidence() {
         let config = ProgressConfig {
             max_step_bound: 100.0,
             min_observations: 3,
@@ -2653,11 +2603,40 @@ mod tests {
         }
 
         let verdict = cert.verdict();
-        let has_freedman = verdict
+        let has_raw_freedman_claim = verdict
             .evidence
             .iter()
-            .any(|e| e.description.contains("Freedman"));
-        assert!(has_freedman, "evidence should include Freedman bound entry");
+            .any(|e| e.description.contains("tighter than Azuma"));
+        assert!(!has_raw_freedman_claim);
+        assert!(verdict.freedman_bound <= verdict.azuma_bound);
+    }
+
+    #[test]
+    fn oscillating_gross_credit_does_not_imply_net_convergence() {
+        let config = ProgressConfig {
+            confidence: 0.90,
+            max_step_bound: 10.0,
+            min_observations: 5,
+            stall_threshold: 10,
+            ..ProgressConfig::default()
+        };
+        let mut cert = ProgressCertificate::new(config);
+        let mut potential = 100.0;
+        cert.observe(potential);
+
+        for _ in 0..50 {
+            for delta in [-3.0, -3.0, -3.0, 9.0] {
+                potential += delta;
+                cert.observe(potential);
+            }
+        }
+
+        let verdict = cert.verdict();
+        assert_eq!(verdict.current_potential, verdict.initial_potential);
+        assert!(verdict.mean_credit > 0.0, "gross credit should accumulate");
+        assert!(verdict.estimated_remaining_steps.is_none());
+        assert_eq!(verdict.confidence_bound, 0.0);
+        assert!(!verdict.converging);
     }
 
     // -- Drain phase --
@@ -2836,12 +2815,9 @@ mod tests {
     // Azuma-Hoeffding Tail Bounds Golden Conformance Tests
     // =========================================================================
 
-    /// Golden Test #1: Certificate martingale bound holds with prob 0.95+
+    /// Golden Test #1: observed quiescence is reported deterministically
     #[test]
-    fn golden_certificate_martingale_bound_95_percent() {
-        // Test that the Azuma-Hoeffding bound correctly provides 95% confidence
-        // on martingale concentration using known mathematical properties
-
+    fn golden_observed_quiescence_is_reported() {
         let config = ProgressConfig {
             confidence: 0.95,
             max_step_bound: 20.0,
@@ -2870,36 +2846,28 @@ mod tests {
 
         let verdict = cert.verdict();
 
-        // Verify martingale property: M_t = V(Σ_t) + Σc_i ≈ V(Σ_0)
-        let expected_martingale = verdict.initial_potential;
-        let actual_martingale = cert.martingale_value();
-        let martingale_error = (actual_martingale - expected_martingale).abs();
+        // A monotone trace has no rebounds, so gross-credit accounting remains
+        // exactly at the initial potential.
+        let expected_accounted_potential = verdict.initial_potential;
+        let actual_accounted_potential = cert.martingale_value();
+        let accounting_error = (actual_accounted_potential - expected_accounted_potential).abs();
 
         assert!(
-            martingale_error < 50.0,
-            "Martingale conservation violated: expected ~{:.2}, got {:.2}, error {:.2}",
-            expected_martingale,
-            actual_martingale,
-            martingale_error
+            accounting_error < 1e-10,
+            "gross-credit accounting mismatch: expected {:.2}, got {:.2}, error {:.2}",
+            expected_accounted_potential,
+            actual_accounted_potential,
+            accounting_error
         );
 
-        // Verify Azuma-Hoeffding bound provides 95%+ confidence
-        assert!(
-            verdict.confidence_bound >= 0.95,
-            "Azuma-Hoeffding bound should provide 95%+ confidence, got {:.6}",
-            verdict.confidence_bound
-        );
+        // This is an observed terminal state, not an extrapolated tail claim.
+        assert_eq!(verdict.confidence_bound, 1.0);
 
-        // Verify the tail bound is mathematically consistent. Azuma's
-        // raw tail is only small when accumulated expected progress
-        // strictly exceeds V₀ (i.e. `lambda = t·μ − V₀ > 0`). In the
-        // monotone-decreasing regime of this sequence, `t·μ` tracks the
-        // actual credit accumulation which is bounded by V₀; the
-        // variance-adaptive Freedman bound is the operationally relevant
-        // concentration inequality here.
+        // At the current horizon, the same-trace plug-in net rate yields zero
+        // deviation, so both candidates are the trivial bound 1.0.
         assert!(
             verdict.freedman_bound <= verdict.azuma_bound + 1e-10,
-            "Freedman bound must dominate Azuma: Freedman={:.6}, Azuma={:.6}",
+            "range-bounded Freedman should not exceed Azuma: Freedman={:.6}, Azuma={:.6}",
             verdict.freedman_bound,
             verdict.azuma_bound
         );
@@ -2927,13 +2895,9 @@ mod tests {
         }
     }
 
-    /// Golden Test #2: Sequential updates preserve Azuma bound monotonicity
+    /// Golden Test #2: sequential updates preserve probability invariants
     #[test]
-    fn golden_sequential_updates_preserve_azuma_bound() {
-        // Test that Azuma-Hoeffding bounds behave correctly under sequential updates
-        // The bound should generally improve (decrease) with more observations for
-        // well-behaved processes
-
+    fn golden_sequential_updates_preserve_probability_invariants() {
         let config = ProgressConfig {
             confidence: 0.95,
             max_step_bound: 15.0,
@@ -2954,18 +2918,6 @@ mod tests {
             if cert.len() >= config.min_observations {
                 let verdict = cert.verdict();
 
-                // For well-behaved sequences, Azuma bound should improve with more data
-                // (though it may occasionally increase due to noise)
-                if verdict.converging && cert.len() > 5 {
-                    // Allow some tolerance for noise but expect general improvement
-                    assert!(
-                        verdict.azuma_bound < 0.5,
-                        "At step {}, Azuma bound should be reasonable: {:.6}",
-                        i,
-                        verdict.azuma_bound
-                    );
-                }
-
                 // Bounds should always be valid probabilities
                 assert!(
                     verdict.azuma_bound >= 0.0 && verdict.azuma_bound <= 1.0,
@@ -2981,7 +2933,8 @@ mod tests {
                     i
                 );
 
-                // Freedman bound should dominate Azuma bound (be tighter)
+                // The public field selects the stronger valid signed-progress
+                // tail, so it never exceeds the Azuma baseline.
                 assert!(
                     verdict.freedman_bound <= verdict.azuma_bound + 1e-10,
                     "Freedman bound should be ≤ Azuma bound: Freedman={:.6}, Azuma={:.6} at step {}",
@@ -2993,105 +2946,40 @@ mod tests {
         }
     }
 
-    /// Golden Test #3: Freedman vs Bernstein bound selection and dominance
+    /// Golden Test #3: selected tail ignores realized variance
     #[test]
-    fn golden_freedman_vs_bernstein_bound_selection() {
-        // Test that Freedman's inequality provides tighter bounds than Azuma-Hoeffding
-        // when empirical variance is below the worst-case assumption
-
+    fn golden_selected_tail_ignores_realized_variance() {
         let config = ProgressConfig {
             confidence: 0.90,
-            max_step_bound: 50.0,
+            max_step_bound: 20.0,
             min_observations: 5,
             stall_threshold: 10,
             epsilon: 1e-12,
         };
 
-        // Test Case 1: Low variance sequence (Freedman should dominate).
-        // We oscillate to build accumulated credit well past V₀, giving
-        // a positive lambda so Azuma produces a non-trivial bound that
-        // Freedman can tighten.
-        let mut cert_low_var = ProgressCertificate::new(config.clone());
-        let mut v: f64 = 300.0;
-        cert_low_var.observe(v);
-        // 100 down/up pairs with delta ±8 accumulate ~800 extra credit.
-        for _ in 0..100 {
-            v -= 8.0;
-            cert_low_var.observe(v);
-            v += 8.0;
-            cert_low_var.observe(v);
-        }
-        // Net monotonic tail to keep V falling visibly.
-        for _ in 0..15 {
-            v -= 8.0;
-            cert_low_var.observe(v);
-        }
+        let constant =
+            certificate_from_potentials(config.clone(), &[100.0, 90.0, 80.0, 70.0, 60.0]);
+        let uneven = certificate_from_potentials(config, &[100.0, 95.0, 80.0, 75.0, 60.0]);
+        let constant_verdict = constant.verdict();
+        let uneven_verdict = uneven.verdict();
 
-        let verdict_low_var = cert_low_var.verdict();
-
-        // Freedman should be at least as tight as Azuma.
+        assert_eq!(constant_verdict.empirical_variance, Some(0.0));
         assert!(
-            verdict_low_var.freedman_bound <= verdict_low_var.azuma_bound + 1e-10,
-            "Freedman bound should be ≤ Azuma bound: Freedman={:.6}, Azuma={:.6}",
-            verdict_low_var.freedman_bound,
-            verdict_low_var.azuma_bound
+            uneven_verdict
+                .empirical_variance
+                .is_some_and(|variance| variance > 0.0)
         );
-
-        // For very consistent progress, Freedman should be strictly
-        // better than Azuma when empirical variance is much smaller
-        // than the worst-case step bound squared.
-        let improvement_factor =
-            (verdict_low_var.azuma_bound + 1e-12) / (verdict_low_var.freedman_bound + 1e-12);
-        assert!(
-            improvement_factor >= 1.0,
-            "Freedman should improve over Azuma, ratio: {:.2}",
-            improvement_factor
+        assert_eq!(constant_verdict.mean_credit, uneven_verdict.mean_credit);
+        assert_eq!(
+            constant_verdict.estimated_remaining_steps,
+            uneven_verdict.estimated_remaining_steps
         );
-
-        // Test Case 2: High variance sequence (bounds should be closer)
-        let mut cert_high_var = ProgressCertificate::new(config);
-
-        // Volatile progress with high variance but same mean
-        let high_var_deltas = [
-            -30.0, -5.0, -20.0, -2.0, -15.0, -8.0, -25.0, -1.0, -18.0, -3.0,
-        ];
-        let mut potential = 200.0;
-        cert_high_var.observe(potential);
-
-        for &delta in &high_var_deltas {
-            potential += delta;
-            cert_high_var.observe(potential);
-        }
-
-        let verdict_high_var = cert_high_var.verdict();
-
-        // Even with high variance, Freedman should still dominate
-        assert!(
-            verdict_high_var.freedman_bound <= verdict_high_var.azuma_bound,
-            "Freedman bound should be ≤ Azuma bound even for high variance: Freedman={:.6}, Azuma={:.6}",
-            verdict_high_var.freedman_bound,
-            verdict_high_var.azuma_bound
+        assert_eq!(
+            constant_verdict.confidence_bound,
+            uneven_verdict.confidence_bound
         );
-
-        // Verify empirical variance calculation
-        if let Some(emp_var) = verdict_high_var.empirical_variance {
-            assert!(
-                emp_var > 0.0,
-                "High variance sequence should have positive empirical variance: {:.6}",
-                emp_var
-            );
-        }
-
-        // Compare improvement factors. Freedman never loses to Azuma;
-        // the guard against denormal division uses matching offsets on
-        // both sides so equal bounds cleanly evaluate to 1.0.
-        let high_var_improvement =
-            (verdict_high_var.azuma_bound + 1e-12) / (verdict_high_var.freedman_bound + 1e-12);
-        assert!(
-            high_var_improvement >= 1.0,
-            "Freedman should still improve over Azuma for high variance, ratio: {:.2}",
-            high_var_improvement
-        );
+        assert!(constant_verdict.freedman_bound <= constant_verdict.azuma_bound);
+        assert!(uneven_verdict.freedman_bound <= uneven_verdict.azuma_bound);
     }
 
     /// Golden Test #4: Budget exhaustion emits explicit evidence
@@ -3129,6 +3017,10 @@ mod tests {
         cert.observe(60.0); // Delta = 0
 
         let verdict = cert.verdict();
+
+        assert_eq!(verdict.azuma_bound, 1.0);
+        assert_eq!(verdict.freedman_bound, 1.0);
+        assert_eq!(verdict.confidence_bound, 0.0);
 
         // Verify evidence entries were generated
         assert!(
@@ -3383,14 +3275,14 @@ mod tests {
             reconstructed_verdict.evidence.len()
         );
 
-        // Verify martingale values match
-        let orig_martingale = original_cert.martingale_value();
-        let recon_martingale = replay_cert.martingale_value();
+        // Verify gross-credit-accounted potential matches.
+        let original_accounted = original_cert.martingale_value();
+        let reconstructed_accounted = replay_cert.martingale_value();
         assert!(
-            (orig_martingale - recon_martingale).abs() < 1e-10,
-            "Martingale values should match: orig={:.6}, recon={:.6}",
-            orig_martingale,
-            recon_martingale
+            (original_accounted - reconstructed_accounted).abs() < 1e-10,
+            "gross-credit accounting should match: orig={:.6}, recon={:.6}",
+            original_accounted,
+            reconstructed_accounted
         );
 
         // Verify that the reconstructed certificate produces identical subsequent analysis
