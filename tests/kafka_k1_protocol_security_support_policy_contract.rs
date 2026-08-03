@@ -615,7 +615,7 @@ fn check_policy_cells(artifact: &Value) -> Result<(), String> {
         .map(|row| Ok((number(row, "api_key")?, text(row, "api_name")?)))
         .collect::<Result<Vec<_>, String>>()?;
     api_pairs.sort_unstable();
-    if api_pairs != API_KEYS {
+    if api_pairs.as_slice() != API_KEYS {
         return Err(format!(
             "semantic API-key set differs: expected {API_KEYS:?}, got {api_pairs:?}"
         ));
