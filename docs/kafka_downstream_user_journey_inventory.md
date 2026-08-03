@@ -198,10 +198,13 @@ visible through explicit non-consumer dispositions.
 
 ### Examples and documentation
 
-There is no tracked Kafka or rdkafka use under `examples/`. The reference-app
-template and Wave 2 example evidence both describe a future real-broker recipe;
-the evidence row has an empty example path and an unsupported/pending verdict.
-That is a synthesis gap, not deletion evidence.
+Static review found no Kafka or rdkafka use under `examples/`, and neither the
+examples metadata nor the reference-app inventory supplies RA-06. However,
+`examples/` is absent from the roots used by the current occurrence receipt, so
+the stored path-map hash does not prove that absence. The reference-app template
+and Wave 2 evidence describe only a future real-broker recipe; the evidence row
+has an empty example path and an unsupported/pending verdict. This is an
+unresolved synthesis gap, not deletion evidence.
 
 Current, source-pinned documentation includes the optional-feature status,
 `KEEP_INCUMBENT` policy, `RERUN_REQUIRED` compile profiles, and
@@ -231,6 +234,37 @@ historical claims:
   source anchors, PASS scores, and performance claims do not override the
   current blocked baseline.
 
+The following concrete fixture, policy, golden, and documentation claims must
+remain individually visible rather than disappearing behind a generic
+occurrence digest. These stable IDs are human-review corrections pending the
+same IDs in the machine artifact:
+
+| Stable claim ID | Source and finding | Classification | Owner |
+|---|---|---|---|
+| `KAFKA-K0-3-DOC-CLAIM-014` | `artifacts/dependency_api_adr_registry_v1.json:5069-5085` labels macOS and Windows supported, while current compile/link evidence is `UNKNOWN` | `PLANNED` / `OVERCLAIM` | `asupersync-dep-p7-kafka-removal-sarszu.2.10.5`; refresh `.2.14.1` |
+| `KAFKA-K0-3-DOC-CLAIM-015` | Generic baseline-consumer fixture is mapped by planning but contains no Kafka feature or API use | `PLANNED` / `OVERCLAIM` | `asupersync-dep-p7-kafka-removal-sarszu.2.14.1` |
+| `KAFKA-K0-3-DOC-CLAIM-016` | `tests/golden/PROVENANCE.md:184-190` names an absent retained golden; `src/golden_artifacts_tests.rs:1031-1128` hand-builds two vectors and claims compatibility | `WIRE_CODEC_ONLY` / `OVERCLAIM` | `asupersync-dep-p7-kafka-removal-sarszu.2.12.3` |
+| `KAFKA-K0-3-DOC-CLAIM-017` | `.github/no_mock_policy.json:561-579` keeps two Kafka phase-0-stub waivers active after their 2026-06-30 expiry | `HISTORICAL` / `STALE` | `asupersync-dep-p7-kafka-removal-sarszu.2.10.5` |
+| `KAFKA-K0-3-DOC-CLAIM-018` | `docs/tokio_db_messaging_integration_contract.md:133-166` defines delivery/error intent only | `STATIC_SOURCE` / `PLANNED` | `asupersync-dep-p7-kafka-removal-sarszu.2.10.5` |
+| `KAFKA-K0-3-DOC-CLAIM-019` | `docs/tokio_db_messaging_unit_test_matrix_contract.md:108-117,157-161,242-244` covers config/error tests, not a broker | `DETERMINISTIC_ONLY` / `CURRENT` | `asupersync-dep-p7-kafka-removal-sarszu.2.12.5` |
+| `KAFKA-K0-3-DOC-CLAIM-020` | `docs/tokio_external_validation_benchmark_packs.md:74-76` defines BM-10 without a retained result | `PLANNED` | `asupersync-dep-p7-kafka-removal-sarszu.2.10.5` |
+| `KAFKA-K0-3-DOC-CLAIM-021` | `docs/tokio_replacement_claim_rfc.md:155-188` distinguishes a scheme from results but later asserts unsupported readiness percentages | `HISTORICAL` / `OVERCLAIM` | `asupersync-dep-p7-kafka-removal-sarszu.2.10.5` |
+| `KAFKA-K0-3-DOC-CLAIM-022` | `docs/tokio_functional_parity_contracts.md:297-299` states required producer/consumer/group behavior | `PLANNED` | `asupersync-dep-p7-kafka-removal-sarszu.2.10.5` |
+| `KAFKA-K0-3-DOC-CLAIM-023` | `docs/tokio_nonfunctional_closure_criteria.md:258-260` states planned thresholds | `PLANNED` | `asupersync-dep-p7-kafka-removal-sarszu.2.10.5` |
+| `KAFKA-K0-3-DOC-CLAIM-024` | `docs/tokio_capability_evidence_map.md:229-235` is an older partial inventory | `HISTORICAL` | `asupersync-dep-p7-kafka-removal-sarszu.2.10.5` |
+| `KAFKA-K0-3-DOC-CLAIM-025` | `docs/tokio_interop_target_ranking.md:307-309` is integration planning, not proof | `HISTORICAL` / `PLANNED` | `asupersync-dep-p7-kafka-removal-sarszu.2.10.5` |
+| `KAFKA-K0-3-DOC-CLAIM-026` | `docs/tokio_migration_cookbooks.md:330-373` supplies prose-only mapping, rebalance, and rollback guidance | `STATIC_SOURCE` / `PLANNED` | `asupersync-dep-p7-kafka-removal-sarszu.2.10.5` |
+| `KAFKA-K0-3-DOC-CLAIM-027` | `docs/tokio_replacement_roadmap.md:199-201` is historical planning | `HISTORICAL` | `asupersync-dep-p7-kafka-removal-sarszu.2.10.5` |
+| `KAFKA-K0-3-DOC-CLAIM-028` | `artifacts/adapter_certification_matrix_v1.json:187-227,315` is XFAIL/broker-reference-partial and uses local RecordBatch evidence | `WIRE_CODEC_ONLY` / `BLOCKED` | `asupersync-dep-p7-kafka-removal-sarszu.2.12.3` |
+| `KAFKA-K0-3-DOC-CLAIM-029` | Real-broker README scenario list omits payment and replay cases | `STATIC_SOURCE` / `STALE` | `asupersync-dep-p7-kafka-removal-sarszu.2.10.5` |
+| `KAFKA-K0-3-DOC-CLAIM-030` | Real-broker README shows a CI lane that no tracked workflow wires | `PLANNED` / `OVERCLAIM` | `asupersync-dep-p7-kafka-removal-sarszu.2.10.5` |
+| `KAFKA-K0-3-DOC-CLAIM-031` | Real-broker sample output and performance baseline are illustrative and unretained | `PLANNED` / `OVERCLAIM` | `asupersync-dep-p7-kafka-removal-sarszu.2.10.5` |
+
+The Tokio T6 migration row itself is `STATIC_SOURCE` / `OVERCLAIM`, not a
+current executable journey: its transaction constructor is stale, and the
+public consumer export is `KafkaConsumerConfig`, not the JetStream
+`ConsumerConfig` exported at the same module level.
+
 ## Compilation profiles and platform cells
 
 <!-- KAFKA-K0-3-COMPILE-CELLS -->
@@ -258,20 +292,29 @@ claim follows from this static packet.
 
 <!-- KAFKA-K0-3-JOURNEYS -->
 
-| Journey | Local coverage | Current terminal status |
+The canonical six journey IDs and semantics come from
+`artifacts/dependency_api_adr_registry_v1.json:5110-5135`. The current machine
+packet does not pin or join that authority, so the descriptions below are the
+required canonical semantics rather than evidence that the machine join is
+already complete.
+
+| Journey | Required semantics and local coverage | Current terminal status |
 |---|---|---|
-| Feature-disabled facade | Maintained separate-workspace fixture | `NOT_RUN` / rerun required |
-| Produce and delivery metadata | Local E2E and opt-in broker target | `BLOCKED_EXTERNAL` for broker semantics |
-| Transaction begin/send/commit | Opt-in broker target; stale migration snippet | `BLOCKED_EXTERNAL` |
-| Consumer group, poll, commit, seek, rebalance | Deterministic relations plus opt-in target | `BLOCKED_EXTERNAL` |
-| TLS/SASL secure connect | API and error/source checks | Security cells `BLOCKED_EXTERNAL` |
-| Real-broker retained proof | Runner and target source exist | No immutable receipt |
-| Compression | Config identity only | Codec/wire behavior not established |
-| Rebalance lifecycle | Skip-prone feature test and unwired model | No broker receipt |
-| Error taxonomy | Deterministic type/classifier checks | No broker mapping receipt |
-| Tokio migration | Maintained prose with routed stale calls | No compile receipt |
-| HTTP backpressure to Kafka | Unwired deterministic model | Stale/mock only |
-| Trace correlation | Unwired obsolete source | Stale/mock only |
+| `kfk-journey-feature-disabled` | Producer and consumer types remain compilable without Kafka; both broker-operation families return typed `FeatureDisabled`. The external fixture currently exercises only the producer; `CASE-010` covers the root-internal consumer boundary | `NOT_RUN` / rerun required; no backend claim |
+| `kfk-journey-produce` | Produce records with headers, receive delivery metadata, and preserve idempotence-on-by-default; local E2E plus `CASE-001`, `CASE-002`, `CASE-006` | Broker semantics `BLOCKED_EXTERNAL` |
+| `kfk-journey-transaction` | Configure, begin, send, commit or abort; retain the drop guard against dangling transactions; `CASE-003` plus an invalid migration snippet | `BLOCKED_EXTERNAL` |
+| `kfk-journey-consume-group` | Join a group, receive assignment generation and revocation information, poll, commit the next offset, seek, rebalance, and close; mixed offset relations plus `CASE-002`, `CASE-004`, `CASE-006`, `CASE-007` | `BLOCKED_EXTERNAL` |
+| `kfk-journey-secure-connect` | TLS or SCRAM-over-SSL plus refusal of plaintext non-loopback downgrade; current rows are API and synthetic error checks only | Security cells `BLOCKED_EXTERNAL` |
+| `kfk-journey-real-broker-proof` | Retain immutable, non-skip round-trip, exactly-once, rebalance, recovery, and cleanup evidence against an identified broker | No immutable receipt |
+| `kfk-journey-compression-config` | Config identity only | Codec/wire behavior not established |
+| `kfk-journey-rebalance` | Skip-prone feature test and unwired model | No broker receipt |
+| `kfk-journey-error-taxonomy` | Deterministic type and local-classifier checks | No private-backend mapping receipt |
+| `kfk-journey-migration` | Prose with stale transaction constructor and alias/signature gaps | No compile receipt |
+| `kfk-journey-http-publish` | Unwired deterministic model | Stale/mock only |
+| `kfk-journey-observability` | Unwired obsolete source | Stale/mock only |
+| `kfk-journey-broker-recovery` | `CASE-005` exercises recovery-shaped load but does not restart a broker | `BLOCKED_EXTERNAL` / overclaim routed |
+| `kfk-journey-payment-delivery` | `CASE-006` payment-delivery path | `BLOCKED_EXTERNAL` |
+| `kfk-journey-replay-without-commit` | `CASE-007` closes without commit and expects replay | `BLOCKED_EXTERNAL` |
 
 No journey is promoted beyond the evidence it actually has. In particular,
 `REAL_BROKER_CAPABLE`, `PROOF_ONLY`, `MOCK_OR_SIMULATED`, `WIRE_CODEC_ONLY`,
@@ -283,11 +326,16 @@ and `COMPILE_ONLY` cannot satisfy `REAL_BROKER_RECEIPT`.
 
 | Evidence | Class | Execution | What it establishes |
 |---|---|---|---|
-| K0.3 source census | `STATIC_SOURCE` | Static inspection complete | Local paths, wiring, claims, owners, and blockers |
-| Downstream default fixture | `COMPILE_ONLY` | `NOT_RUN` | Mapped no-feature boundary only |
+| K0.3 pinned-row review | `STATIC_SOURCE` | Static inspection complete | Enumerated paths, wiring, claims, owners, blockers, and reconciliation gaps; not a complete Git-tree proof |
+| Live occurrence receipt | `STATIC_SOURCE` | Receipt recorded | Live paths under declared roots only; not tracked-baseline or examples completeness |
+| Downstream default fixture | `DETERMINISTIC_ONLY` / `COMPILE_ONLY` boundary | `NOT_RUN` | Mapped no-feature producer behavior only |
+| Generic baseline-consumer fixture | `PLANNED` | `NOT_RUN` | Contains no Kafka feature or API use |
 | `kafka_real_broker` target | `REAL_BROKER_CAPABLE` | `NOT_RUN` | Source and wiring exist |
 | Broker parity runner | `PROOF_ONLY` | `NOT_RUN` | Planned orchestration/schema |
 | Real-service fixture matrix | `PLANNED` | `BLOCKED` | Missing immutable version/security fixture |
+| Messaging serialization golden | `WIRE_CODEC_ONLY` | `BLOCKED` | Hand-authored bytes; named retained golden absent |
+| Adapter certification Kafka row | `WIRE_CODEC_ONLY` | `BLOCKED` | XFAIL/broker-reference-partial, not a client journey |
+| Kafka phase-0 no-mock waivers | `HISTORICAL` | Static inspection complete | Active labels are expired and stale |
 | Unwired real-prefixed sources | `MOCK_OR_SIMULATED` | `NOT_RUN` | Historical intent only |
 
 A valid real-broker receipt must identify the exact source revision, execution
@@ -307,7 +355,9 @@ provenance list:
 - registry alias `consumer-portfolio`;
 - maintained FrankenSuite repositories;
 - GitHub and public code indexes;
-- crates.io reverse dependencies and package metadata.
+- crates.io reverse dependencies and package metadata;
+- docs.rs and public package documentation/example indexes;
+- non-crates.io and private package registries.
 
 The machine artifact records exact intended query terms and the capture date.
 An unrun search is never encoded as zero results. Even a later, properly
@@ -321,12 +371,14 @@ executed public search returning zero cannot authorize removal by itself.
 claim time before any migration or cutover decision. The current counts are
 explicitly non-authoritative at that future claim time.
 
-The refresh must cover the repository, workspace, FrankenSuite, identified
-maintained consumers, package indexes, and public code search. It must retain
-exact queries, dates, repository revisions, owners, and immutable provenance;
-resolve aliases or preserve owned `UNKNOWN`; synthesize consumers for unused
-public combinations; rerun maintained compile profiles; and require immutable,
-non-skip broker receipts for broker claims.
+The refresh must cover the exact Git tree, workspace, examples and metadata,
+FrankenSuite, identified maintained consumers, package indexes, docs.rs/public
+documentation and example indexes, private registries, and public code search.
+It must retain exact queries, dates, repository revisions, owners, and
+immutable provenance; resolve aliases or preserve owned `UNKNOWN`; materialize
+atomic test/call-site and path-to-disposition joins; synthesize consumers for
+unused public combinations; rerun maintained compile profiles; and require
+immutable, non-skip broker receipts for broker claims.
 
 Unknowns and regressions block migration. The refresh may not authorize file
 deletion on its own.
@@ -335,14 +387,27 @@ deletion on its own.
 
 <!-- KAFKA-K0-3-NO-CLAIMS -->
 
-This packet proves only the enumerated, source-pinned repository-local static
-inventory at its baseline revision. Its creation session recorded no compiler,
-formatter, test, runtime, broker, fuzz, external-search, or network execution.
+This packet proves only static inspection of its individually enumerated,
+byte-pinned rows at the named baseline coordinate. The current occurrence
+receipt is live-filesystem scoped, omits `examples/`, and does not prove a
+complete baseline Git tree. The current machine packet also aggregates multiple
+tests per file and does not yet pin the canonical journey registry or the
+additional stable cases and claims documented above. Its creation session
+recorded no compiler, formatter, test, runtime, broker, fuzz, external-search,
+or network execution.
 
 It does not prove broker interoperability, supported broker versions,
 authentication, TLS/SASL behavior, cancellation correctness, transaction
 fencing, credential redaction, compression availability, performance, broad
-workspace health, release readiness, or migration eligibility.
+workspace health, release readiness, migration eligibility, tracked-example
+absence, a feature-enabled downstream compile, canonical-journey completeness,
+or per-test execution.
+
+Neither a path-map count or hash, a source filename containing `real`, a wired
+test target, a successful skip, a sample README receipt, a hand-authored golden,
+an XFAIL adapter row, a planned benchmark, nor a compile-only profile is a
+`REAL_BROKER_RECEIPT`. `NOT_RUN`, `UNKNOWN`, stale, missing, and unpinned rows
+remain blockers even when no local or public consumer is discovered.
 
 It provides no permission to remove or narrow a dependency, feature, public
 API, capability, behavior, file, platform, fixture, test, or journey.
