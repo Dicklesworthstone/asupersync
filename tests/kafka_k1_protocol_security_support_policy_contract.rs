@@ -20,11 +20,12 @@ const DOC_PATH: &str = "docs/kafka_k1_protocol_security_support_policy.md";
 const PRODUCER_PATH: &str = "src/messaging/kafka.rs";
 const MANIFEST_PATH: &str = "Cargo.toml";
 const ADR_PATH: &str = "docs/adr/dep_plan_adr_009_kafka_client.md";
+const TRACKER_PATH: &str = ".beads/issues.jsonl";
 
 const ARTIFACT_SHA256: &str =
-    "6275dc59f144df73eed6b64f68f5b9a37707578a3b9fded2ef5aeaa157d0c581";
+    "856cbf7f062b25f5534ecfd3ec2e902c6387af0686763ab10a49980c1ca4926c";
 const DOC_SHA256: &str =
-    "9ee510559ec9c3d314c49afc135516e721a02718dda426fb418e6019dc45293f";
+    "63ebc9204b243e0d1ed79c15e1608caf1308f8e7924c706d3919f0412aac3a43";
 
 const ARTIFACT_ID: &str = "kafka-k1-protocol-security-support-policy-v1";
 const PROGRAM_ID: &str = "dependency-sovereignty-rev5";
@@ -36,6 +37,10 @@ const CAPTURED_DATE_UTC: &str = "2026-08-03";
 const BASELINE_REVISION: &str = "f3a02fe6e6e5d0dca6db91204fcf2da53c22a5c7";
 const INVENTORY_STATE: &str =
     "K1_2_PROTOCOL_BROKER_AND_SECURITY_POLICY_FROZEN_KEEP_INCUMBENT";
+const POLICY_ROW_SHA256: &str =
+    "0bbe6624091452001a43445029329098176bf6849bdb60cc277200d4f38e7d38";
+const NO_CLAIM_SHA256: &str =
+    "0de9d792c3348c6fc5c76e1f54d2dd8fbf9bec3f87e9700de27ca08ce2f2345e";
 
 const DOC_BEGIN: &str = "<!-- BEGIN KAFKA K1.2 PROTOCOL SECURITY SUPPORT POLICY -->";
 const DOC_END: &str = "<!-- END KAFKA K1.2 PROTOCOL SECURITY SUPPORT POLICY -->";
@@ -89,6 +94,13 @@ const INPUT_PATHS: &[&str] = &[
     "tests/kafka_sasl_authentication_audit.rs",
 ];
 
+const AUTHORITY_TOKEN_PATHS: &[&str] = &[
+    "artifacts/kafka_k1_obligation_index_v1.json",
+    "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
+    "artifacts/kafka_incumbent_semantics_matrix_v1.json",
+    "artifacts/kafka_k1_public_api_contract_v1.json",
+];
+
 const CELL_COLLECTIONS: &[(&str, usize, &str)] = &[
     (
         "broker_support_cells",
@@ -127,8 +139,8 @@ const CELL_COLLECTIONS: &[(&str, usize, &str)] = &[
     ),
     (
         "negative_authentication_cells",
-        13,
-        "de444d7e578ce2727334ae83afdc299711e634b682133e6a78b457e682d746e3",
+        15,
+        "aebb51c7541eac7f0caf77d21fce1c483b2b8109f2ee48cb1e0b8f977d3fc9dc",
     ),
     (
         "protocol_binding_groups",
@@ -180,6 +192,11 @@ fn parse_artifact() -> Result<Value, String> {
     .map_err(|error| format!("invalid JSON in {ARTIFACT_PATH}: {error}"))
 }
 
+fn parse_json(root: &Path, path: &str) -> Result<Value, String> {
+    serde_json::from_slice(&read_bytes(root, path)?)
+        .map_err(|error| format!("invalid JSON in {path}: {error}"))
+}
+
 fn sha256_bytes(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -195,6 +212,36 @@ fn sorted_newline_sha256(rows: impl IntoIterator<Item = String>) -> String {
         hasher.update(b"\n");
     }
     format!("{hasher:x}")
+}
+
+fn ordered_newline_sha256(rows: impl IntoIterator<Item = String>) -> String {
+    let mut hasher = Sha256::new();
+    for row in rows {
+        hasher.update(row.as_bytes());
+        hasher.update(b"\n");
+    }
+    format!("{hasher:x}")
+}
+
+fn canonicalize(value: &Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.iter().map(canonicalize).collect()),
+        Value::Object(map) => {
+            let mut keys = map.keys().collect::<Vec<_>>();
+            keys.sort();
+            let mut canonical = Map::new();
+            for key in keys {
+                canonical.insert(key.clone(), canonicalize(&map[key]));
+            }
+            Value::Object(canonical)
+        }
+        _ => value.clone(),
+    }
+}
+
+fn canonical_json(value: &Value) -> Result<String, String> {
+    serde_json::to_string(&canonicalize(value))
+        .map_err(|error| format!("failed to serialize canonical JSON: {error}"))
 }
 
 fn object<'a>(value: &'a Value, key: &str) -> Result<&'a Map<String, Value>, String> {
@@ -322,6 +369,121 @@ fn check_metadata(artifact: &Value) -> Result<(), String> {
     ] {
         expect_bool(authority, key, false)?;
     }
+
+    let ownership = artifact
+        .get("ownership_and_gates")
+        .ok_or_else(|| "ownership_and_gates is missing".to_owned())?;
+    exact_keys(
+        ownership,
+        &[
+            "aggregate_k1_owner",
+            "bounded_primitive_codec_owner",
+            "claim_time_refresh_owner",
+            "connection_security_terminal_owner",
+            "connectivity_owner",
+            "exact_reachable_schema_and_range_owner",
+            "independent_protocol_corpus_owner",
+            "independent_security_review_owner",
+            "independent_terminal_owner",
+            "metadata_routing_owner",
+            "migration_gate",
+            "negotiation_correlation_and_reuse_owner",
+            "pinned_service_harness_owner",
+            "policy_owner",
+            "protocol_terminal_owner",
+            "real_service_terminal_owner",
+            "sasl_owner",
+            "security_fault_real_service_owner",
+            "sole_cutover_owner",
+            "tls_owner",
+            "unowned_cell_count",
+            "versioned_schema_and_flexible_owner",
+        ],
+        "ownership_and_gates",
+    )?;
+    for (key, expected) in [
+        ("policy_owner", BEAD_ID),
+        (
+            "aggregate_k1_owner",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.1.5",
+        ),
+        (
+            "exact_reachable_schema_and_range_owner",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.2.1",
+        ),
+        (
+            "bounded_primitive_codec_owner",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.2.2",
+        ),
+        (
+            "versioned_schema_and_flexible_owner",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.2.3",
+        ),
+        (
+            "negotiation_correlation_and_reuse_owner",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.2.4",
+        ),
+        (
+            "protocol_terminal_owner",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.2.5",
+        ),
+        (
+            "connectivity_owner",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.3.1",
+        ),
+        (
+            "tls_owner",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.3.2",
+        ),
+        (
+            "sasl_owner",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.3.3",
+        ),
+        (
+            "metadata_routing_owner",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.3.4",
+        ),
+        (
+            "connection_security_terminal_owner",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.3.5",
+        ),
+        (
+            "independent_protocol_corpus_owner",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.12.1",
+        ),
+        (
+            "independent_security_review_owner",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
+        ),
+        (
+            "independent_terminal_owner",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+        ),
+        (
+            "pinned_service_harness_owner",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.13.1",
+        ),
+        (
+            "security_fault_real_service_owner",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
+        ),
+        (
+            "real_service_terminal_owner",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+        ),
+        (
+            "claim_time_refresh_owner",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+        ),
+        (
+            "sole_cutover_owner",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.15",
+        ),
+    ] {
+        expect_text(ownership, key, expected)?;
+    }
+    expect_number(ownership, "unowned_cell_count", 0)?;
+    expect_text(ownership, "migration_gate", "BLOCKING_KEEP_INCUMBENT")?;
     Ok(())
 }
 
@@ -474,6 +636,137 @@ fn check_authority_views(artifact: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn collect_tracker_references(value: &Value, references: &mut BTreeSet<String>) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_tracker_references(value, references);
+            }
+        }
+        Value::Object(map) => {
+            for (key, value) in map {
+                if key.ends_with("owner") {
+                    if let Some(owner) = value.as_str() {
+                        references.insert(owner.to_owned());
+                    }
+                }
+                if key == "terminal_gates" {
+                    if let Some(gates) = value.as_array() {
+                        for gate in gates.iter().filter_map(Value::as_str) {
+                            references.insert(gate.to_owned());
+                        }
+                    }
+                }
+                collect_tracker_references(value, references);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn check_tracker_routes(root: &Path, artifact: &Value) -> Result<(), String> {
+    let tracker = read_text(root, TRACKER_PATH)?;
+    let mut tracker_ids = BTreeSet::new();
+    for (index, line) in tracker.lines().enumerate() {
+        let row: Value = serde_json::from_str(line).map_err(|error| {
+            format!(
+                "invalid JSONL in {TRACKER_PATH} line {}: {error}",
+                index + 1
+            )
+        })?;
+        let id = text(&row, "id")?;
+        tracker_ids.insert(id.to_owned());
+    }
+
+    let mut references = BTreeSet::new();
+    collect_tracker_references(artifact, &mut references);
+    if references.len() != 36 {
+        return Err(format!(
+            "owner and terminal reference count mismatch: expected 36, got {}",
+            references.len()
+        ));
+    }
+    for reference in references {
+        if !reference.starts_with("asupersync-dep-p7-kafka-removal-sarszu.2.") {
+            return Err(format!("out-of-program owner or terminal reference {reference}"));
+        }
+        if !tracker_ids.contains(&reference) {
+            return Err(format!("owner or terminal reference is absent from tracker: {reference}"));
+        }
+    }
+    Ok(())
+}
+
+fn collect_authority_tokens(value: &Value, tokens: &mut BTreeSet<String>) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_authority_tokens(value, tokens);
+            }
+        }
+        Value::Object(map) => {
+            for value in map.values() {
+                collect_authority_tokens(value, tokens);
+            }
+        }
+        Value::String(value) => {
+            tokens.insert(value.clone());
+        }
+        _ => {}
+    }
+}
+
+fn check_source_authority_resolution(root: &Path, artifact: &Value) -> Result<(), String> {
+    let mut authority_tokens = BTreeSet::new();
+    for path in AUTHORITY_TOKEN_PATHS {
+        collect_authority_tokens(&parse_json(root, path)?, &mut authority_tokens);
+    }
+    authority_tokens.insert(ADR_ID.to_owned());
+
+    let mut referenced_tokens = BTreeSet::new();
+    for (collection, _, _) in CELL_COLLECTIONS {
+        let authority_key = if *collection == "protocol_binding_groups" {
+            "authority_rows"
+        } else {
+            "source_authority_ids"
+        };
+        for row in array(artifact, collection)? {
+            let cell_id = text(row, "cell_id")?;
+            let references = array(row, authority_key)?;
+            if references.is_empty() {
+                return Err(format!("cell {cell_id} has no {authority_key}"));
+            }
+            for reference in references {
+                let reference = reference
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| format!("cell {cell_id} has an invalid authority token"))?;
+                if !authority_tokens.contains(reference) {
+                    return Err(format!(
+                        "cell {cell_id} authority token is unresolved: {reference}"
+                    ));
+                }
+                referenced_tokens.insert(reference.to_owned());
+            }
+        }
+    }
+
+    for required_reference in [
+        "KAFKA-K1-SHARED-009",
+        "KAFKA-K1-SHARED-011",
+        "KAFKA-K0-4-UNKNOWN-001",
+        "KAFKA-K0-4-UNKNOWN-007",
+        "KAFKA-K0-4-GAP-020-NEGOTIATION-CORRELATION-RECOVERY",
+    ] {
+        if !referenced_tokens.contains(required_reference) {
+            return Err(format!(
+                "required K1.2 authority token is not joined: {required_reference}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn find_cell<'a>(artifact: &'a Value, collection: &str, id: &str) -> Result<&'a Value, String> {
     array(artifact, collection)?
         .iter()
@@ -502,9 +795,8 @@ fn check_policy_cells(artifact: &Value) -> Result<(), String> {
         ("BLOCKED_EXTERNAL", 20),
         ("CONFIG_ONLY", 12),
         ("LOCAL_MODEL_ONLY", 1),
-        ("PROOF_ONLY", 1),
-        ("ROUTED_GAP", 1),
-        ("STATIC_SOURCE", 5),
+        ("ROUTED_GAP", 2),
+        ("STATIC_SOURCE", 7),
         ("UNKNOWN", 25),
         ("UNPINNED", 1),
         ("WIRE_CODEC_ONLY", 12),
@@ -514,6 +806,7 @@ fn check_policy_cells(artifact: &Value) -> Result<(), String> {
 
     let mut all_ids = BTreeSet::new();
     let mut state_counts = BTreeMap::new();
+    let mut canonical_rows = Vec::new();
     let mut total = 0usize;
 
     for (collection, expected_count, expected_id_digest) in CELL_COLLECTIONS {
@@ -537,6 +830,10 @@ fn check_policy_cells(artifact: &Value) -> Result<(), String> {
         }
 
         for row in rows {
+            canonical_rows.push(canonical_json(&json!({
+                "collection": collection,
+                "row": row,
+            }))?);
             total += 1;
             let cell_id = text(row, "cell_id")?;
             if !cell_id.starts_with("KAFKA-K1-2-") {
@@ -575,32 +872,44 @@ fn check_policy_cells(artifact: &Value) -> Result<(), String> {
             }
 
             let gates = array(row, "terminal_gates")?;
-            if gates.is_empty()
-                || gates
-                    .iter()
-                    .any(|gate| gate.as_str().is_none_or(str::is_empty))
-            {
+            if gates.is_empty() {
                 return Err(format!("cell {cell_id} has incomplete terminal gates"));
             }
-            if let Some(authority_ids) = row.get("source_authority_ids") {
-                let authority_ids = authority_ids
-                    .as_array()
-                    .ok_or_else(|| format!("cell {cell_id} source_authority_ids must be an array"))?;
-                if authority_ids.is_empty()
-                    || authority_ids
-                        .iter()
-                        .any(|id| id.as_str().is_none_or(str::is_empty))
-                {
-                    return Err(format!("cell {cell_id} has incomplete source authority"));
+            for gate in gates {
+                let gate = gate
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| format!("cell {cell_id} has an empty terminal gate"))?;
+                if !gate.starts_with("asupersync-dep-p7-kafka-removal-sarszu.2.") {
+                    return Err(format!("cell {cell_id} has out-of-program terminal gate {gate}"));
                 }
+            }
+            let authority_key = if *collection == "protocol_binding_groups" {
+                "authority_rows"
+            } else {
+                "source_authority_ids"
+            };
+            let authority_ids = array(row, authority_key)?;
+            if authority_ids.is_empty()
+                || authority_ids
+                    .iter()
+                    .any(|id| id.as_str().is_none_or(str::is_empty))
+            {
+                return Err(format!("cell {cell_id} has incomplete source authority"));
             }
         }
     }
 
-    if total != 88 || all_ids.len() != 88 {
+    if total != 90 || all_ids.len() != 90 {
         return Err(format!(
             "combined policy coverage mismatch: total {total}, unique {}",
             all_ids.len()
+        ));
+    }
+    let canonical_row_digest = sorted_newline_sha256(canonical_rows);
+    if canonical_row_digest != POLICY_ROW_SHA256 {
+        return Err(format!(
+            "canonical policy-row drift: expected {POLICY_ROW_SHA256}, got {canonical_row_digest}"
         ));
     }
     if state_counts != expected_state_counts {
@@ -626,7 +935,7 @@ fn check_policy_cells(artifact: &Value) -> Result<(), String> {
     }) {
         return Err("K1.2 must not record an accepted numeric API-version range".to_owned());
     }
-    let api_pair_digest = sorted_newline_sha256(
+    let api_pair_digest = ordered_newline_sha256(
         api_pairs
             .iter()
             .map(|(key, name)| format!("{key}\t{name}"))
@@ -652,7 +961,7 @@ fn check_policy_cells(artifact: &Value) -> Result<(), String> {
     }
 
     let all_id_digest = sorted_newline_sha256(all_ids.iter().map(|id| (*id).to_owned()));
-    if all_id_digest != "68829645b478a101cc22799cd727e35513dbcd7eb94306e65e6d2da33351eb89" {
+    if all_id_digest != "700a61ffbd8ee3bcd3354f334567b6f3e237b40022b774a519c5b44249bd5ada" {
         return Err(format!("combined policy-cell ID drift: {all_id_digest}"));
     }
 
@@ -703,6 +1012,62 @@ fn check_special_policy_rows(artifact: &Value) -> Result<(), String> {
     )?;
     expect_text(bypass, "current_evidence_state", "ROUTED_GAP")?;
 
+    for api_cell in [
+        "KAFKA-K1-2-API-025-ADD-OFFSETS-TO-TXN",
+        "KAFKA-K1-2-API-028-TXN-OFFSET-COMMIT",
+    ] {
+        let row = find_cell(artifact, "api_key_cells", api_cell)?;
+        expect_text(
+            row,
+            "implementation_owner",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.6.3",
+        )?;
+        expect_text(
+            row,
+            "real_service_owner",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.13.3",
+        )?;
+    }
+
+    let salt = find_cell(
+        artifact,
+        "negative_authentication_cells",
+        "KAFKA-K1-2-NEG-AUTH-014-SALT-LENGTH",
+    )?;
+    expect_text(
+        salt,
+        "required_state",
+        "REQUIRED_REJECT_SALT_SHORTER_THAN_8_BYTES_NO_APPLICATION_EFFECT",
+    )?;
+    expect_text(salt, "current_evidence_state", "STATIC_SOURCE")?;
+
+    let iterations = find_cell(
+        artifact,
+        "negative_authentication_cells",
+        "KAFKA-K1-2-NEG-AUTH-015-ITERATION-COUNT",
+    )?;
+    expect_text(
+        iterations,
+        "required_state",
+        "REQUIRED_REJECT_ITERATIONS_OUTSIDE_4096_TO_65536_NO_APPLICATION_EFFECT",
+    )?;
+    expect_text(iterations, "current_evidence_state", "STATIC_SOURCE")?;
+
+    let correlation = find_cell(
+        artifact,
+        "negotiation_transition_cells",
+        "KAFKA-K1-2-NEG-006-CORRELATION",
+    )?;
+    expect_text(correlation, "current_evidence_state", "ROUTED_GAP")?;
+    let correlation_authority = array(correlation, "source_authority_ids")?;
+    let expected_correlation_authority =
+        [json!("KAFKA-K0-4-GAP-020-NEGOTIATION-CORRELATION-RECOVERY")];
+    if correlation_authority.as_slice() != expected_correlation_authority.as_slice() {
+        return Err(format!(
+            "correlation transition authority drift: {correlation_authority:?}"
+        ));
+    }
+
     let closure = artifact
         .get("api_schema_closure")
         .ok_or_else(|| "api_schema_closure is missing".to_owned())?;
@@ -743,6 +1108,30 @@ fn check_special_policy_rows(artifact: &Value) -> Result<(), String> {
         expect_bool(policy, key, false)?;
     }
 
+    let support_rule = text(policy, "support_rule")?;
+    if !support_rule.starts_with(
+        "Required target support and current evidence are independent. Every policy cell remains blocking",
+    ) {
+        return Err("support_rule does not cover every policy cell".to_owned());
+    }
+    for marker in [
+        "UNKNOWN",
+        "BLOCKED",
+        "BLOCKED_EXTERNAL",
+        "NOT_RUN",
+        "CONFIG_ONLY",
+        "WIRE_CODEC_ONLY",
+        "LOCAL_MODEL_ONLY",
+        "PROOF_ONLY",
+        "UNPINNED",
+        "STATIC_SOURCE",
+        "ROUTED_GAP",
+    ] {
+        if !support_rule.contains(marker) {
+            return Err(format!("support_rule is missing blocking state {marker}"));
+        }
+    }
+
     let security_rule = text(policy, "security_rule")?;
     for marker in [
         "Loopback plaintext remains accepted",
@@ -770,9 +1159,9 @@ fn check_policy_receipts(artifact: &Value) -> Result<(), String> {
         ("negotiation_transition_cell_count", 10),
         ("transport_security_cell_count", 8),
         ("credential_cell_count", 8),
-        ("negative_authentication_cell_count", 13),
+        ("negative_authentication_cell_count", 15),
         ("protocol_binding_group_count", 10),
-        ("total_policy_cell_count", 88),
+        ("total_policy_cell_count", 90),
         ("accepted_numeric_version_range_count", 0),
         ("promoted_supported_cell_count", 0),
         ("current_real_broker_receipt_count", 0),
@@ -838,6 +1227,22 @@ fn check_policy_receipts(artifact: &Value) -> Result<(), String> {
     {
         return Err("no_claim_boundaries must contain nine non-empty rows".to_owned());
     }
+    let boundary_digest = sorted_newline_sha256(
+        boundaries
+            .iter()
+            .map(|boundary| {
+                boundary
+                    .as_str()
+                    .ok_or_else(|| "no-claim boundary must be text".to_owned())
+                    .map(str::to_owned)
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    if boundary_digest != NO_CLAIM_SHA256 {
+        return Err(format!(
+            "no-claim boundary drift: expected {NO_CLAIM_SHA256}, got {boundary_digest}"
+        ));
+    }
     let joined = boundaries
         .iter()
         .filter_map(Value::as_str)
@@ -874,10 +1279,22 @@ fn check_source_and_document(root: &Path) -> Result<(), String> {
 
     let doc = std::str::from_utf8(&doc_bytes)
         .map_err(|error| format!("{DOC_PATH} is not UTF-8: {error}"))?;
+    if doc.matches(DOC_BEGIN).count() != 1 || doc.matches(DOC_END).count() != 1 {
+        return Err("policy document must contain exactly one marker pair".to_owned());
+    }
+    let begin_position = doc
+        .find(DOC_BEGIN)
+        .ok_or_else(|| "policy document begin marker is missing".to_owned())?;
+    let end_position = doc
+        .find(DOC_END)
+        .ok_or_else(|| "policy document end marker is missing".to_owned())?;
+    if begin_position >= end_position {
+        return Err("policy document markers are out of order".to_owned());
+    }
     for marker in [
         DOC_BEGIN,
         DOC_END,
-        "The contract contains exactly 88 unique cells",
+        "The contract contains exactly 90 unique cells",
         "This list is a minimum semantic seed, not reachability closure",
         "No cell is promoted to `SUPPORTED`",
         "This packet was produced and inspected statically",
@@ -890,14 +1307,13 @@ fn check_source_and_document(root: &Path) -> Result<(), String> {
 
     let producer = read_text(root, PRODUCER_PATH)?;
     for marker in [
-        "pub enum KafkaSaslMechanism",
-        "ScramSha256",
-        "ScramSha512",
-        "pub enum KafkaSecurityConfig",
-        "Plaintext",
-        "Tls(KafkaTlsConfig)",
-        "SaslSsl(KafkaSaslConfig)",
-        "cfg(any(test, debug_assertions))",
+        "pub enum KafkaSaslMechanism {\n    /// SCRAM with SHA-256.\n    ScramSha256,\n    /// SCRAM with SHA-512.\n    ScramSha512,\n}",
+        "Self::ScramSha256 => \"SCRAM-SHA-256\",\n            Self::ScramSha512 => \"SCRAM-SHA-512\"",
+        "must reject salts shorter than 8 bytes,\n    /// reject iteration counts outside `4096..=65536`, verify server-final proofs",
+        "pub enum KafkaSecurityConfig {\n    /// Plaintext transport. Valid only for loopback brokers unless the",
+        "Tls(KafkaTlsConfig),\n    /// SASL/SCRAM over TLS. SASL_PLAINTEXT is intentionally not exposed.\n    SaslSsl(KafkaSaslConfig),",
+        "KafkaSecurityConfig::SaslSsl(sasl) => {\n            client.set(\"security.protocol\", \"sasl_ssl\");\n            client.set(\"sasl.mechanisms\", sasl.mechanism.as_librdkafka_str());",
+        "#[cfg(any(test, debug_assertions))]\n    #[must_use]\n    pub const fn allow_insecure_transport_for_testing",
     ] {
         if !producer.contains(marker) {
             return Err(format!("producer source is missing marker {marker:?}"));
@@ -936,6 +1352,9 @@ fn kafka_k1_2_packet_is_exact_owned_and_fail_closed() {
     check_metadata(&artifact).expect("K1.2 metadata must remain exact");
     check_input_pins(&root, &artifact).expect("K1.2 authority inputs must remain byte-pinned");
     check_authority_views(&artifact).expect("K1.2 authority views must remain exact");
+    check_tracker_routes(&root, &artifact).expect("K1.2 owners and gates must exist in tracker");
+    check_source_authority_resolution(&root, &artifact)
+        .expect("K1.2 policy rows must resolve to pinned authority tokens");
     check_policy_cells(&artifact).expect("K1.2 policy cells must remain exact and fail-closed");
     check_source_and_document(&root)
         .expect("K1.2 source facts and operator document must remain exact");
@@ -944,6 +1363,7 @@ fn kafka_k1_2_packet_is_exact_owned_and_fail_closed() {
 #[test]
 fn kafka_k1_2_mutations_fail_closed() {
     let artifact = parse_artifact().expect("K1.2 artifact must parse");
+    check_policy_cells(&artifact).expect("the unmodified K1.2 policy must satisfy its checker");
 
     let mut promoted = artifact.clone();
     promoted["api_key_cells"][0]["current_evidence_state"] = json!("SUPPORTED");
@@ -993,6 +1413,41 @@ fn kafka_k1_2_mutations_fail_closed() {
     assert!(
         check_policy_cells(&duplicate).is_err(),
         "a duplicate policy cell must fail closed"
+    );
+
+    let mut changed_required = artifact.clone();
+    changed_required["api_key_cells"][0]["required_state"] = json!("ACCEPTED");
+    assert!(
+        check_policy_cells(&changed_required).is_err(),
+        "changing a non-special required state must fail closed"
+    );
+
+    let mut swapped_owners = artifact.clone();
+    let first_owner = swapped_owners["broker_support_cells"][0]["implementation_owner"].clone();
+    let second_owner = swapped_owners["broker_support_cells"][2]["implementation_owner"].clone();
+    swapped_owners["broker_support_cells"][0]["implementation_owner"] = second_owner;
+    swapped_owners["broker_support_cells"][2]["implementation_owner"] = first_owner;
+    assert!(
+        check_policy_cells(&swapped_owners).is_err(),
+        "swapping otherwise-valid owners must fail closed"
+    );
+
+    let mut weakened_boundary = artifact.clone();
+    weakened_boundary["no_claim_boundaries"][0] =
+        json!("This packet proves every production behavior.");
+    assert!(
+        check_policy_cells(&weakened_boundary).is_err(),
+        "weakening a no-claim boundary must fail closed"
+    );
+
+    let mut unbacked = artifact.clone();
+    unbacked["negotiation_transition_cells"][0]
+        .as_object_mut()
+        .expect("negotiation cell must be an object")
+        .remove("source_authority_ids");
+    assert!(
+        check_policy_cells(&unbacked).is_err(),
+        "removing a source-authority join must fail closed"
     );
 
     let mut unowned = artifact;

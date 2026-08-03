@@ -31,6 +31,12 @@ The fifteen byte-pinned inputs include:
 - the opt-in broker fixture, local authentication audit, and checked protocol
   model.
 
+Separately, the verifier performs an unpinned, identity-only lookup in
+`.beads/issues.jsonl` to confirm that all 36 unique owner and terminal-gate
+references exist. Tracker status, title, description, and mutable workflow
+fields are not K1.2 authority and are not included among the fifteen byte-pinned
+inputs.
+
 The imported K0 views remain independent authorities. K1.2 does not rewrite
 their seven broker/API-version vectors, six transport/authentication vectors,
 nine owned unknowns, 26 routed gaps, or security-enum semantics. Exact counts
@@ -43,18 +49,20 @@ Every policy row carries both a `required_state` and a
 `current_evidence_state`.
 
 `required_state` is the target contract. `current_evidence_state` records what
-the checked repository proves today. `UNKNOWN`, `BLOCKED`, `BLOCKED_EXTERNAL`,
+static inspection observes in the checked repository. `UNKNOWN`, `BLOCKED`, `BLOCKED_EXTERNAL`,
 `UNPINNED`, `WIRE_CODEC_ONLY`, `CONFIG_ONLY`, `LOCAL_MODEL_ONLY`, `PROOF_ONLY`,
-and `ROUTED_GAP` are all migration-blocking states. Static declarations,
-configuration mappings, package-source expectations, mutable tags, local
-models, and planned checks are not broker or interoperability receipts.
+`STATIC_SOURCE`, and `ROUTED_GAP` are all migration-blocking states. The policy
+also treats `NOT_RUN` as blocking if it appears in a later refreshed packet.
+Static declarations, configuration mappings, package-source expectations,
+mutable tags, local models, and planned checks are not broker or
+interoperability receipts.
 
 No cell is promoted to `SUPPORTED`. The artifact records no current real-broker
 receipt and no current actual-native-binary receipt.
 
 ## Exact policy coverage
 
-The contract contains exactly 88 unique cells:
+The contract contains exactly 90 unique cells:
 
 | Domain | Cells | Purpose |
 |---|---:|---|
@@ -65,7 +73,7 @@ The contract contains exactly 88 unique cells:
 | Negotiation transitions | 10 | connect, success, failure, correlation, disconnect, reconnect, drift |
 | Transport policy | 8 | local/remote transport, trust, client identity, mechanisms, bypass |
 | Credential handling | 8 | trust/certificate/key material, identities, native copies, diagnostics |
-| Negative authentication | 13 | invalid identity, trust, proof, downgrade, and disclosure cells |
+| Negative authentication | 15 | invalid identity, trust, proof, parameter bounds, downgrade, and disclosure cells |
 | Protocol binding groups | 10 | producer, idempotence, transactions, fetch, groups, offsets, metadata, connection layers, local model |
 
 All rows name an implementation owner, an independent verification owner, and
@@ -80,14 +88,23 @@ The current-evidence distribution is:
 | `BLOCKED_EXTERNAL` | 20 |
 | `CONFIG_ONLY` | 12 |
 | `LOCAL_MODEL_ONLY` | 1 |
-| `PROOF_ONLY` | 1 |
-| `ROUTED_GAP` | 1 |
-| `STATIC_SOURCE` | 5 |
+| `ROUTED_GAP` | 2 |
+| `STATIC_SOURCE` | 7 |
 | `UNKNOWN` | 25 |
 | `UNPINNED` | 1 |
 | `WIRE_CODEC_ONLY` | 12 |
 
 These are inventory counts, not pass counts.
+
+Every broker, API, header, flexible-encoding, negotiation, transport,
+credential, and negative cell carries a non-empty `source_authority_ids` join.
+Every protocol-binding group carries a non-empty `authority_rows` join. The
+verifier resolves those tokens against the pinned K1.1, K0.4, K0.2, and K1.3
+JSON authorities plus the governing ADR ID. The direct K1.2 assignments
+`KAFKA-K1-SHARED-009` (remote plaintext) and `KAFKA-K1-SHARED-011` (secret
+redaction) are retained explicitly. K0.4 unknowns for package selection and the
+immutable authenticated fixture remain linked and blocking rather than being
+silently omitted.
 
 ## Broker and version policy
 
@@ -182,7 +199,7 @@ The accepted username/password mechanisms are the two configured SCRAM modes
 over encrypted transport. Username/password authentication over plaintext is
 forbidden.
 
-The checked source currently proves configuration shapes and a narrow set of
+The checked source currently records configuration shapes and a narrow set of
 static guards only. It does not prove native-library capabilities, a completed
 handshake, trust validation, client-certificate authentication, or successful
 username/password authentication. The insecure-bypass source is deliberately
@@ -205,11 +222,12 @@ redaction, and K12.4 owns independent review.
 
 ## Negative cells
 
-Thirteen explicit negative cells retain invalid user identity, invalid secret,
+Fifteen explicit negative cells retain invalid user identity, invalid secret,
 unsupported mechanism, untrusted issuer, name mismatch, invalid certificate
 time, missing client certificate, certificate/key mismatch, invalid key
-password, malformed exchange, invalid server proof, downgrade attempt, and
-secret-canary disclosure coverage.
+password, malformed exchange, invalid server proof, downgrade attempt,
+secret-canary disclosure, a salt shorter than eight bytes, and an iteration
+count outside `4096..=65536`.
 
 The policy requires these failures before broker-visible application effects,
 with redacted diagnostics and without silently converting an authentication

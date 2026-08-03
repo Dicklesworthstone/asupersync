@@ -186,12 +186,12 @@
   "policy": {
     "mode": "STATIC_ONLY_FAIL_CLOSED",
     "canonicalization_id": "KAFKA_K1_2_PROTOCOL_SECURITY_SUPPORT_POLICY_V1",
-    "support_rule": "Required target support and current evidence are independent. A REQUIRED cell remains blocking while current evidence is UNKNOWN, BLOCKED, BLOCKED_EXTERNAL, NOT_RUN, CONFIG_ONLY, WIRE_CODEC_ONLY, LOCAL_MODEL_ONLY, PROOF_ONLY, or UNPINNED.",
+    "support_rule": "Required target support and current evidence are independent. Every policy cell remains blocking while current evidence is UNKNOWN, BLOCKED, BLOCKED_EXTERNAL, NOT_RUN, CONFIG_ONLY, WIRE_CODEC_ONLY, LOCAL_MODEL_ONLY, PROOF_ONLY, UNPINNED, STATIC_SOURCE, or ROUTED_GAP.",
     "version_rule": "K1.2 names required semantic API keys and exact closure rules but records no numeric accepted range. K2.1 must freeze every reachable request and response schema, exact min/max version, header version, flexible threshold, broker floor and broker ceiling from independently admitted evidence.",
     "negotiation_rule": "Each connection negotiates a broker/client intersection before ordinary traffic. Unsupported, missing, contradictory, stale, or reconnect-invalidated negotiation state fails closed; no local fuzz maximum becomes a production range.",
     "downgrade_rule": "Fallback is allowed only when K2.1 names the exact fallback schema and K2.4 proves the transition is compatible. Silent version decrement, flexible-to-classic reinterpretation, security downgrade, and reuse of prior-connection negotiation state are forbidden.",
     "security_rule": "Loopback plaintext remains accepted, remote plaintext remains refused, TLS verifies trust and hostname, and SASL exposes only SCRAM-SHA-256 or SCRAM-SHA-512 over TLS. SASL_PLAINTEXT is forbidden.",
-    "credential_rule": "Secrets are never emitted by Debug, Display, error, trace, receipt, argv, environment projection, or retained config. All owned and dependency-copied secret buffers require explicit disposition evidence; current source proves only the narrow wrapper behavior recorded here.",
+    "credential_rule": "Secrets are never emitted by Debug, Display, error, trace, receipt, argv, environment projection, or retained config. All owned and dependency-copied secret buffers require explicit disposition evidence; current static source inspection records only the narrow wrapper behavior stated here.",
     "negative_rule": "Every negative trust, identity, credential, mechanism, proof, and downgrade cell must fail before broker-visible application effects, must be nonretryable unless the exact transport failure is classified separately, and must retain redacted diagnostics.",
     "unknown_rule": "Unknown, blocked, unpinned, local-only, wire-only, config-only, compile-only, planned, proof-only, and silently skipped evidence never counts as support.",
     "missing_cell_state": "BLOCKING_MISSING",
@@ -277,7 +277,7 @@
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.1",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KAFKA-K0-4-BROKER-001-MUTABLE-7-4", "KAFKA-K0-4-BROKER-002-AMBIENT", "KAFKA-K0-4-UNKNOWN-002", "KAFKA-K0-4-UNKNOWN-003"],
+      "source_authority_ids": ["KAFKA-K0-4-BROKER-001-MUTABLE-7-4", "KAFKA-K0-4-BROKER-002-AMBIENT", "KAFKA-K0-4-UNKNOWN-001", "KAFKA-K0-4-UNKNOWN-002", "KAFKA-K0-4-UNKNOWN-003"],
       "blocking_reason": "Mutable tags, ambient endpoints, and package source expectations are not actual binary or broker receipts."
     }
   ],
@@ -514,7 +514,7 @@
       "required_state": "REQUIRED_ADDITIVE_GAP_EXACT_RANGE_PENDING_K2_1",
       "current_evidence_state": "BLOCKED",
       "accepted_version_range": null,
-      "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.6.2",
+      "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.6.3",
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.3",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.6.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
@@ -542,7 +542,7 @@
       "required_state": "REQUIRED_ADDITIVE_GAP_EXACT_RANGE_PENDING_K2_1",
       "current_evidence_state": "BLOCKED",
       "accepted_version_range": null,
-      "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.6.2",
+      "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.6.3",
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.3",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.6.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
@@ -729,7 +729,8 @@
       "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.2.4",
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
-      "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.2.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"]
+      "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.2.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
+      "source_authority_ids": ["KAFKA-K0-4-API-001-NEGOTIATION", "KAFKA-K0-4-UNKNOWN-005"]
     },
     {
       "cell_id": "KAFKA-K1-2-NEG-002-SUCCESS",
@@ -741,7 +742,8 @@
       "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.2.4",
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
-      "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.2.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"]
+      "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.2.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
+      "source_authority_ids": ["KAFKA-K0-4-API-001-NEGOTIATION", "KAFKA-K0-4-UNKNOWN-005"]
     },
     {
       "cell_id": "KAFKA-K1-2-NEG-003-UNSUPPORTED-API-VERSIONS",
@@ -753,7 +755,8 @@
       "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.2.4",
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.1",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
-      "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.2.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"]
+      "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.2.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
+      "source_authority_ids": ["KAFKA-K0-4-API-001-NEGOTIATION", "KAFKA-K0-4-GAP-001-PROTOCOL-RANGE", "KAFKA-K0-4-UNKNOWN-005"]
     },
     {
       "cell_id": "KAFKA-K1-2-NEG-004-NO-INTERSECTION",
@@ -765,7 +768,8 @@
       "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.2.4",
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.1",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
-      "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.2.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"]
+      "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.2.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
+      "source_authority_ids": ["KAFKA-K0-4-API-001-NEGOTIATION", "KAFKA-K0-4-GAP-001-PROTOCOL-RANGE", "KAFKA-K0-4-UNKNOWN-005"]
     },
     {
       "cell_id": "KAFKA-K1-2-NEG-005-UNSUPPORTED-VERSION",
@@ -777,7 +781,8 @@
       "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.2.4",
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
-      "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.2.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"]
+      "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.2.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
+      "source_authority_ids": ["KAFKA-K0-4-API-001-NEGOTIATION", "KAFKA-K0-4-GAP-001-PROTOCOL-RANGE", "KAFKA-K0-4-UNKNOWN-005"]
     },
     {
       "cell_id": "KAFKA-K1-2-NEG-006-CORRELATION",
@@ -785,11 +790,12 @@
       "event": "CORRELATION_ID_MISMATCH_OR_DUPLICATE",
       "required_action": "FAIL_STREAM_DO_NOT_DELIVER_RESPONSE_AND_RECONCILE_ALL_IN_FLIGHT_OWNERS",
       "required_state": "REQUIRED",
-      "current_evidence_state": "PROOF_ONLY",
+      "current_evidence_state": "ROUTED_GAP",
       "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.2.4",
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.3",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
-      "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.2.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"]
+      "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.2.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
+      "source_authority_ids": ["KAFKA-K0-4-GAP-020-NEGOTIATION-CORRELATION-RECOVERY"]
     },
     {
       "cell_id": "KAFKA-K1-2-NEG-007-DISCONNECT",
@@ -801,7 +807,8 @@
       "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.2.4",
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
-      "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.2.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"]
+      "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.2.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
+      "source_authority_ids": ["KAFKA-K0-4-GAP-020-NEGOTIATION-CORRELATION-RECOVERY", "KAFKA-K0-4-UNKNOWN-008"]
     },
     {
       "cell_id": "KAFKA-K1-2-NEG-008-RECONNECT",
@@ -813,7 +820,8 @@
       "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.2.4",
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
-      "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.2.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"]
+      "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.2.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
+      "source_authority_ids": ["KAFKA-K0-4-API-001-NEGOTIATION", "KAFKA-K0-4-GAP-020-NEGOTIATION-CORRELATION-RECOVERY", "KAFKA-K0-4-UNKNOWN-005"]
     },
     {
       "cell_id": "KAFKA-K1-2-NEG-009-RANGE-DRIFT",
@@ -825,7 +833,8 @@
       "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.3.4",
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
-      "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.3.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"]
+      "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.3.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
+      "source_authority_ids": ["KAFKA-K0-4-API-001-NEGOTIATION", "KAFKA-K0-4-GAP-020-NEGOTIATION-CORRELATION-RECOVERY", "KAFKA-K0-4-UNKNOWN-005", "KAFKA-K0-4-UNKNOWN-008"]
     },
     {
       "cell_id": "KAFKA-K1-2-NEG-010-FLEX-DOWNGRADE",
@@ -837,7 +846,8 @@
       "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.2.4",
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.1",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
-      "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.2.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"]
+      "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.2.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
+      "source_authority_ids": ["KAFKA-K0-4-API-001-NEGOTIATION", "KAFKA-K0-4-GAP-001-PROTOCOL-RANGE", "KAFKA-K0-4-UNKNOWN-005"]
     }
   ],
   "transport_security_cells": [
@@ -850,7 +860,7 @@
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.1",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.3.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KAFKA-K0-4-AUTH-001-PLAINTEXT", "KPR-CFG-001", "KPR-CFG-011"]
+      "source_authority_ids": ["KAFKA-K1-SHARED-009", "KAFKA-K0-4-AUTH-001-PLAINTEXT", "KPR-CFG-001", "KPR-CFG-011"]
     },
     {
       "cell_id": "KAFKA-K1-2-SEC-002-REMOTE-PLAINTEXT",
@@ -861,7 +871,7 @@
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.3.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["DEP-ADR-009", "KPR-CFG-001", "KCO-CFG-001"]
+      "source_authority_ids": ["KAFKA-K1-SHARED-009", "DEP-ADR-009", "KPR-CFG-001", "KCO-CFG-001"]
     },
     {
       "cell_id": "KAFKA-K1-2-SEC-003-TLS-SERVER",
@@ -872,7 +882,7 @@
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.3.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KAFKA-K0-4-AUTH-002-TLS", "KAFKA-K0-4-NATIVE-004-BUILD-FLAGS"]
+      "source_authority_ids": ["KAFKA-K0-4-AUTH-002-TLS", "KAFKA-K0-4-NATIVE-004-BUILD-FLAGS", "KAFKA-K0-4-UNKNOWN-007"]
     },
     {
       "cell_id": "KAFKA-K1-2-SEC-004-MTLS",
@@ -883,7 +893,7 @@
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.3.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KAFKA-K0-4-AUTH-002-TLS", "KPR-CFG-016", "KPR-CFG-017", "KPR-CFG-018"]
+      "source_authority_ids": ["KAFKA-K0-4-AUTH-002-TLS", "KAFKA-K0-4-UNKNOWN-007", "KPR-CFG-016", "KPR-CFG-017", "KPR-CFG-018"]
     },
     {
       "cell_id": "KAFKA-K1-2-SEC-005-SCRAM-256",
@@ -894,7 +904,7 @@
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.3.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KAFKA-K0-4-AUTH-003-SCRAM-SHA-256", "KAFKA-ENUM-004", "KAFKA-ENUM-005"]
+      "source_authority_ids": ["KAFKA-K0-4-AUTH-003-SCRAM-SHA-256", "KAFKA-K0-4-UNKNOWN-007", "KAFKA-ENUM-004", "KAFKA-ENUM-005"]
     },
     {
       "cell_id": "KAFKA-K1-2-SEC-006-SCRAM-512",
@@ -905,7 +915,7 @@
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.3.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KAFKA-K0-4-AUTH-004-SCRAM-SHA-512", "KAFKA-ENUM-004", "KAFKA-ENUM-005"]
+      "source_authority_ids": ["KAFKA-K0-4-AUTH-004-SCRAM-SHA-512", "KAFKA-K0-4-UNKNOWN-007", "KAFKA-ENUM-004", "KAFKA-ENUM-005"]
     },
     {
       "cell_id": "KAFKA-K1-2-SEC-007-SASL-PLAINTEXT",
@@ -916,7 +926,7 @@
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.3.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["DEP-ADR-009", "KAFKA-ENUM-004", "KAFKA-ENUM-005"]
+      "source_authority_ids": ["KAFKA-K1-SHARED-009", "DEP-ADR-009", "KAFKA-K0-4-UNKNOWN-007", "KAFKA-ENUM-004", "KAFKA-ENUM-005"]
     },
     {
       "cell_id": "KAFKA-K1-2-SEC-008-INSECURE-BYPASS",
@@ -927,7 +937,7 @@
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.12.5"],
-      "source_authority_ids": ["KAFKA-K0-2-GAP-03", "DEP-ADR-009"]
+      "source_authority_ids": ["KAFKA-K1-SHARED-009", "KAFKA-K0-2-GAP-03", "DEP-ADR-009"]
     }
   ],
   "credential_cells": [
@@ -939,7 +949,7 @@
       "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.3.2",
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.3.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KPR-CFG-015", "KAFKA-K0-4-AUTH-002-TLS"]
+      "source_authority_ids": ["KAFKA-K1-SHARED-011", "KPR-CFG-015", "KAFKA-K0-4-AUTH-002-TLS"]
     },
     {
       "cell_id": "KAFKA-K1-2-CRED-002-CERT",
@@ -949,7 +959,7 @@
       "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.3.2",
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.3.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KPR-CFG-016", "KAFKA-K0-4-AUTH-002-TLS"]
+      "source_authority_ids": ["KAFKA-K1-SHARED-011", "KPR-CFG-016", "KAFKA-K0-4-AUTH-002-TLS"]
     },
     {
       "cell_id": "KAFKA-K1-2-CRED-003-KEY",
@@ -959,7 +969,7 @@
       "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.3.2",
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.3.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KPR-CFG-017", "KAFKA-K0-4-AUTH-002-TLS"]
+      "source_authority_ids": ["KAFKA-K1-SHARED-011", "KPR-CFG-017", "KAFKA-K0-4-AUTH-002-TLS"]
     },
     {
       "cell_id": "KAFKA-K1-2-CRED-004-KEY-PASSWORD",
@@ -969,7 +979,7 @@
       "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.3.2",
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.12.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KPR-CFG-018", "KAFKA-K0-2-GAP-11", "KAFKA-K0-2-GAP-12"]
+      "source_authority_ids": ["KAFKA-K1-SHARED-011", "KPR-CFG-018", "KAFKA-K0-2-GAP-11", "KAFKA-K0-2-GAP-12"]
     },
     {
       "cell_id": "KAFKA-K1-2-CRED-005-SASL-USERNAME",
@@ -979,7 +989,7 @@
       "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.3.3",
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.3.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KPR-CFG-020", "KAFKA-K0-4-AUTH-003-SCRAM-SHA-256", "KAFKA-K0-4-AUTH-004-SCRAM-SHA-512"]
+      "source_authority_ids": ["KAFKA-K1-SHARED-011", "KPR-CFG-020", "KAFKA-K0-4-AUTH-003-SCRAM-SHA-256", "KAFKA-K0-4-AUTH-004-SCRAM-SHA-512"]
     },
     {
       "cell_id": "KAFKA-K1-2-CRED-006-SASL-PASSWORD",
@@ -989,7 +999,7 @@
       "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.3.3",
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.12.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KPR-CFG-021", "KAFKA-K0-4-AUTH-003-SCRAM-SHA-256", "KAFKA-K0-4-AUTH-004-SCRAM-SHA-512"]
+      "source_authority_ids": ["KAFKA-K1-SHARED-011", "KPR-CFG-021", "KAFKA-K0-4-AUTH-003-SCRAM-SHA-256", "KAFKA-K0-4-AUTH-004-SCRAM-SHA-512"]
     },
     {
       "cell_id": "KAFKA-K1-2-CRED-007-NATIVE-COPIES",
@@ -999,7 +1009,7 @@
       "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.3.3",
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.12.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KAFKA-K0-4-UNKNOWN-003", "KAFKA-K0-2-GAP-11", "KAFKA-K0-2-GAP-12"]
+      "source_authority_ids": ["KAFKA-K1-SHARED-011", "KAFKA-K0-4-UNKNOWN-003", "KAFKA-K0-2-GAP-11", "KAFKA-K0-2-GAP-12"]
     },
     {
       "cell_id": "KAFKA-K1-2-CRED-008-DIAGNOSTICS",
@@ -1009,7 +1019,7 @@
       "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.10.4",
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.12.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KAFKA-K0-4-AUTH-005-PROOF-REPORTING", "KAFKA-K0-2-GAP-11", "KAFKA-K0-2-GAP-12"]
+      "source_authority_ids": ["KAFKA-K1-SHARED-011", "KAFKA-K0-4-AUTH-005-PROOF-REPORTING", "KAFKA-K0-2-GAP-11", "KAFKA-K0-2-GAP-12"]
     }
   ],
   "negative_authentication_cells": [
@@ -1155,6 +1165,28 @@
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.12.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
       "source_authority_ids": ["KAFKA-K0-4-AUTH-005-PROOF-REPORTING", "KAFKA-K0-2-GAP-11", "KAFKA-K0-2-GAP-12"]
+    },
+    {
+      "cell_id": "KAFKA-K1-2-NEG-AUTH-014-SALT-LENGTH",
+      "subject": "SCRAM salt shorter than 8 bytes",
+      "required_state": "REQUIRED_REJECT_SALT_SHORTER_THAN_8_BYTES_NO_APPLICATION_EFFECT",
+      "current_evidence_state": "STATIC_SOURCE",
+      "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.3.3",
+      "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
+      "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
+      "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.12.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
+      "source_authority_ids": ["KAFKA-K1-SHARED-011", "KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX", "KAFKA-K0-4-UNKNOWN-007"]
+    },
+    {
+      "cell_id": "KAFKA-K1-2-NEG-AUTH-015-ITERATION-COUNT",
+      "subject": "SCRAM iteration count below 4096 or above 65536",
+      "required_state": "REQUIRED_REJECT_ITERATIONS_OUTSIDE_4096_TO_65536_NO_APPLICATION_EFFECT",
+      "current_evidence_state": "STATIC_SOURCE",
+      "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.3.3",
+      "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
+      "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
+      "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.12.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
+      "source_authority_ids": ["KAFKA-K1-SHARED-011", "KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX", "KAFKA-K0-4-UNKNOWN-007"]
     }
   ],
   "protocol_binding_groups": [
@@ -1246,7 +1278,7 @@
       "cell_id": "KAFKA-K1-2-BIND-008-TLS",
       "subject": "TLS transport configuration",
       "binding_kind": "CONFIG_MAPPING",
-      "authority_rows": ["KPR-CFG-015", "KPR-CFG-016", "KPR-CFG-017", "KPR-CFG-018", "KAFKA-ENUM-005"],
+      "authority_rows": ["KAFKA-K1-SHARED-009", "KAFKA-K1-SHARED-011", "KPR-CFG-015", "KPR-CFG-016", "KPR-CFG-017", "KPR-CFG-018", "KAFKA-ENUM-005", "KAFKA-K0-4-UNKNOWN-007"],
       "message_names": [],
       "required_state": "REQUIRED_TRANSPORT_BEFORE_KAFKA_FRAMING",
       "current_evidence_state": "CONFIG_ONLY",
@@ -1258,7 +1290,7 @@
       "cell_id": "KAFKA-K1-2-BIND-009-SASL",
       "subject": "SASL SCRAM over verified TLS",
       "binding_kind": "MESSAGE_SET",
-      "authority_rows": ["KPR-CFG-019", "KPR-CFG-020", "KPR-CFG-021", "KPR-CFG-022", "KAFKA-ENUM-004", "KAFKA-ENUM-005"],
+      "authority_rows": ["KAFKA-K1-SHARED-009", "KAFKA-K1-SHARED-011", "KPR-CFG-019", "KPR-CFG-020", "KPR-CFG-021", "KPR-CFG-022", "KAFKA-ENUM-004", "KAFKA-ENUM-005", "KAFKA-K0-4-UNKNOWN-007"],
       "message_names": ["ApiVersions", "SaslHandshake", "SaslAuthenticate"],
       "required_state": "REQUIRED_MECHANISM_NEGOTIATION_AND_AUTHENTICATION_BEFORE_APPLICATION_REQUESTS",
       "current_evidence_state": "CONFIG_ONLY",
@@ -1270,7 +1302,7 @@
       "cell_id": "KAFKA-K1-2-BIND-010-LOCAL",
       "subject": "local errors profiles deterministic harness and explicit absences",
       "binding_kind": "LOCAL_ONLY",
-      "authority_rows": ["KPR-OP-001", "KPR-OP-002", "KAFKA-ENUM-003", "KAFKA-ABS-002"],
+      "authority_rows": ["KAFKA-K1-SHARED-011", "KPR-OP-001", "KPR-OP-002", "KAFKA-ENUM-003", "KAFKA-ABS-002"],
       "message_names": [],
       "required_state": "REQUIRED_NO_FAKE_WIRE_BINDING",
       "current_evidence_state": "STATIC_SOURCE",
@@ -1312,9 +1344,9 @@
     "negotiation_transition_cell_count": 10,
     "transport_security_cell_count": 8,
     "credential_cell_count": 8,
-    "negative_authentication_cell_count": 13,
+    "negative_authentication_cell_count": 15,
     "protocol_binding_group_count": 10,
-    "total_policy_cell_count": 88,
+    "total_policy_cell_count": 90,
     "unique_cell_ids": true,
     "required_state_complete": true,
     "current_evidence_state_complete": true,
@@ -1354,7 +1386,7 @@
     "on_missing_extra_duplicate_changed_unowned_unknown_unsupported_or_regression": "KEEP_INCUMBENT"
   },
   "no_claim_boundaries": [
-    "This K1.2 packet proves only the exact checked-in static input pins, policy-cell inventory, required/current state separation, owner routing, source facts, and fail-closed disposition recorded here.",
+    "This K1.2 packet records only the exact checked-in static input pins, policy-cell inventory, required/current state separation, owner routing, source facts, and fail-closed disposition stated here.",
     "It does not prove compilation, formatting, linting, tests, fuzzing, runtime execution, broker contact, container behavior, service health, network behavior, remote execution, or live RCH availability.",
     "It records no accepted numeric broker or API-version range. The five local fuzz-model maxima are explicitly non-normative and cannot be cited as production support.",
     "It does not prove Kafka request or response correctness, header selection, flexible encoding, unknown-tag behavior, negotiation, downgrade, correlation, reconnect recovery, stream reuse, broker interoperability, or oldest/current broker support.",
