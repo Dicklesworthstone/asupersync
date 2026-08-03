@@ -2298,8 +2298,10 @@
       ],
       "source_owners": [
         "src/messaging/kafka.rs",
+        "src/messaging/kafka_consumer.rs",
         "Cargo.toml"
       ],
+      "inventory_artifact": "artifacts/kafka_capability_inventory_v1.json",
       "exposure": [
         "public-api",
         "feature",
@@ -2336,7 +2338,7 @@
       ],
       "baseline": {
         "state": "planned",
-        "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1",
+        "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.5",
         "fixture": "planned://kafka-k0/capability-broker-security-matrix",
         "command": "scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario kafka_multiversion"
       },
@@ -5119,7 +5121,7 @@
         "CAP-KAFKA"
       ],
       "baseline_state": "planned",
-      "baseline_owner": "asupersync-dep-p7-kafka-removal-sarszu.1",
+      "baseline_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.5",
       "e2e_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
     },
     {
@@ -6248,6 +6250,13 @@
       ]
     },
     {
+      "scope": "prefix",
+      "bead_id": "asupersync-dep-p7-kafka-removal-sarszu.1.",
+      "capability_ids": [
+        "CAP-KAFKA"
+      ]
+    },
+    {
       "scope": "exact",
       "bead_id": "asupersync-dep-p7-kafka-removal-sarszu.2",
       "capability_ids": [
@@ -6495,10 +6504,10 @@
     "status": "PASS_SCOPED",
     "scope": "All canonical dep-plan issues after excluding explicit superseded duplicates, effective exact-or-longest-prefix capability mappings, terminal evidence owners, cutover-policy gates, and explicit feature-loss authorization phrases.",
     "mapping_resolution": "An exact rule overrides every prefix rule. Otherwise the unique longest matching prefix is authoritative. Missing or equal-precedence competing rules fail closed.",
-    "dep_plan_issue_count": 398,
-    "non_epic_work_count": 335,
+    "dep_plan_issue_count": 419,
+    "non_epic_work_count": 353,
     "capability_count": 50,
-    "mapping_rule_count": 108,
+    "mapping_rule_count": 109,
     "cutover_target_count": 41,
     "cross_cutting_guard_count": 9,
     "unmapped_bead_ids": [],
