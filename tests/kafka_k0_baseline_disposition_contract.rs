@@ -116,7 +116,7 @@ const AGGREGATE_CLAIMS_SHA256: &str =
 const FIXTURE_PROFILE_MAPPING_SHA256: &str =
     "0c1a77c6b9db4bc3efc478ba4313a65193ab849f7020d5f1f3b2fa4d73c1be9d";
 const AUTHORITY_REFERENCE_MAPPING_SHA256: &str =
-    "4901693bec6aa6397236c6913b6c88302033f51ec4cf57006bf8a18b664fbf45";
+    "0a88e36135222e48bfeab5095be3896ef946cc9fa05f38cbd19d2cb656107cf9";
 const LEXICAL_GROUP_ID_SHA256: &str =
     "e6a23cd6c436c1dd6b775481d2683eb53ca860a928572306f2ea910af3c8231b";
 const LEXICAL_SITE_ID_SHA256: &str =
@@ -973,6 +973,15 @@ fn validate_definition_census(children: &ChildArtifacts) -> Result<(), String> {
     if collisions.len() != AUTHORITY_REFERENCE_COUNT {
         return Err("sanctioned raw-ID collision-group count drifted".to_owned());
     }
+    if sorted_newline_sha256(
+        collisions
+            .iter()
+            .map(|group| group[0].raw_id.to_owned()),
+    ) != AUTHORITY_REFERENCE_ID_SHA256
+    {
+        return Err("authority-reference ID set drifted".to_owned());
+    }
+    let mut authority_mapping = Vec::new();
     for group in collisions {
         if group.len() != 2
             || group.iter().filter(|row| row.authority_reference).count() != 1
@@ -1000,6 +1009,17 @@ fn validate_definition_census(children: &ChildArtifacts) -> Result<(), String> {
         if !valid {
             return Err(format!("unsanctioned raw-ID collision for {}", reference.raw_id));
         }
+        authority_mapping.push(format!(
+            "{}\t{}\t{}\tK0.3\t{}\t{}",
+            authority.stage,
+            authority.collection,
+            authority.raw_id,
+            reference.collection,
+            reference.raw_id
+        ));
+    }
+    if sorted_newline_sha256(authority_mapping) != AUTHORITY_REFERENCE_MAPPING_SHA256 {
+        return Err("authority-reference mapping digest drifted".to_owned());
     }
     Ok(())
 }
@@ -1900,6 +1920,7 @@ fn validate_aggregate_joins_and_collisions(packet: &Value) -> Result<(), String>
                 "site_count":LEXICAL_COLLISION_SITE_COUNT,
                 "group_id_set_sha256":LEXICAL_GROUP_ID_SHA256,
                 "site_id_set_sha256":LEXICAL_SITE_ID_SHA256,
+                "mapping_rule":"For every atomic site classified EXCLUDED_NAME_COLLISION, recursively key-sort and compactly serialize an object with the parent group_id, parent path, and the complete site object; bytewise sort the records and append one LF per row.",
                 "mapping_sha256":LEXICAL_MAPPING_SHA256,
                 "classification":"NON_KAFKA_LEXICAL_EXCLUSIONS"
             },
