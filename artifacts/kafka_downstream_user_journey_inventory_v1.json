@@ -1,0 +1,2632 @@
+{
+  "schema_version": 1,
+  "artifact_id": "kafka-downstream-user-journey-inventory-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-dep-p7-kafka-removal-sarszu.1.3",
+  "capability_id": "CAP-KAFKA",
+  "captured_date_utc": "2026-08-03",
+  "baseline_revision": "ae22e710d87412b38e546b32e9702106619481d5",
+  "authority_revision": "ae22e710d87412b38e546b32e9702106619481d5",
+  "inventory_state": "K0_3_LOCAL_STATIC_CENSUS_FROZEN_EXTERNAL_UNKNOWN",
+  "authority": {
+    "registry_disposition": "KEEP_UNTIL_PARITY",
+    "current_action": "KEEP_INCUMBENT",
+    "k0_1_source_inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.1",
+    "k0_2_semantic_inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.2",
+    "k0_3_downstream_inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.3",
+    "k0_4_broker_provenance_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+    "k0_5_terminal_inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.5",
+    "downstream_docs_implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5",
+    "verification_oracle_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+    "real_broker_e2e_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+    "claim_time_refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+    "conditional_cutover_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.15",
+    "dependency_exit_allowed": false,
+    "feature_removal_allowed": false,
+    "api_removal_allowed": false,
+    "capability_removal_allowed": false,
+    "deletion_authority": false
+  },
+  "policy": {
+    "local_static_scope_complete_required": true,
+    "external_search_executed": false,
+    "absence_authorizes_removal": false,
+    "planned_evidence_counts_as_executed": false,
+    "proof_only_counts_as_real_broker": false,
+    "deterministic_counts_as_real_broker": false,
+    "mock_or_simulated_counts_as_real_broker": false,
+    "stale_counts_as_current": false,
+    "silent_skip_counts_as_pass": false,
+    "compile_only_counts_as_runtime": false,
+    "external_unknown_blocks_migration": true,
+    "missing_local_row_state": "BLOCKING_MISSING",
+    "unowned_row_state": "BLOCKING_UNOWNED"
+  },
+  "taxonomies": {
+    "execution_state": [
+      "NOT_RUN",
+      "PASS",
+      "FAIL",
+      "BLOCKED",
+      "UNSUPPORTED"
+    ],
+    "knowledge_state": [
+      "KNOWN",
+      "UNKNOWN"
+    ],
+    "evidence_class": [
+      "STATIC_SOURCE",
+      "COMPILE_ONLY",
+      "DETERMINISTIC_ONLY",
+      "MOCK_OR_SIMULATED",
+      "PROOF_ONLY",
+      "REAL_BROKER_CAPABLE",
+      "REAL_BROKER_RECEIPT",
+      "WIRE_CODEC_ONLY",
+      "HISTORICAL",
+      "PLANNED"
+    ],
+    "freshness_state": [
+      "CURRENT_SOURCE_PINNED",
+      "STALE",
+      "HISTORICAL",
+      "UNPINNED"
+    ],
+    "wiring_state": [
+      "WIRED",
+      "UNWIRED",
+      "DECLARED_ONLY",
+      "NOT_APPLICABLE"
+    ],
+    "claim_disposition": [
+      "CURRENT",
+      "STALE",
+      "OVERCLAIM",
+      "HISTORICAL",
+      "PLANNED",
+      "BLOCKED"
+    ]
+  },
+  "source_pins": [
+    {
+      "pin_id": "KAFKA-K0-3-PIN-ROOT-MANIFEST",
+      "path": "Cargo.toml",
+      "record_count": 1038,
+      "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+      "role": "feature, dev-dependency-cycle, and explicit real-broker target wiring"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-ROOT-LOCK",
+      "path": "Cargo.lock",
+      "record_count": 4666,
+      "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+      "role": "resolved rdkafka and rdkafka-sys dependency identity"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-CONFORMANCE-MANIFEST",
+      "path": "conformance/Cargo.toml",
+      "record_count": 213,
+      "sha256": "1b734acb9c81e0bbf10b26c5b8dddbd0131d9e9915d447f349567ce2d4be2bfb",
+      "role": "test-internals feature unification provenance"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-CRATE-ROOT",
+      "path": "src/lib.rs",
+      "record_count": 468,
+      "sha256": "22ce17632d6a98843ebd6b9f855a430aef3ea6da07a6657e3311ad87b78c1b7f",
+      "role": "native module wiring and unwired-source check"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-MESSAGING-MODULE",
+      "path": "src/messaging/mod.rs",
+      "record_count": 225,
+      "sha256": "4c5350f58276648f12227ae26578b629d6b510c94f9de77a2d323d1ccca7704b",
+      "role": "module and facade exports"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-PRODUCER-SOURCE",
+      "path": "src/messaging/kafka.rs",
+      "record_count": 4335,
+      "sha256": "5fe763229f2940793bf79739718afc20002ac40b614c35ff0ea475d45fb5aaf1",
+      "role": "provider API and inline tests"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-CONSUMER-SOURCE",
+      "path": "src/messaging/kafka_consumer.rs",
+      "record_count": 2757,
+      "sha256": "82646e24d6e8ebdc07f5ea3a283f681b59855b952e5f86adf575ddc04ee6f61d",
+      "role": "provider API, inline tests, and stale singular commit documentation"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-K0-1-ARTIFACT",
+      "path": "artifacts/kafka_capability_inventory_v1.json",
+      "record_count": 1015,
+      "sha256": "5dfe71df6daaa056f8f4d22d08fa934b5398baeeff0d5ff27eb0f544405251d6",
+      "role": "K0.1 source and profile authority"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-K0-2-ARTIFACT",
+      "path": "artifacts/kafka_incumbent_semantics_matrix_v1.json",
+      "record_count": 2560,
+      "sha256": "fec9ac1a1e9ac63ce25393962c843f9169cae804c16c470ada2bf670ab0fc4ec",
+      "role": "K0.2 semantic authority"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-CAPABILITY-REGISTRY",
+      "path": "artifacts/dependency_capability_registry_v1.json",
+      "record_count": 6917,
+      "sha256": "e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2",
+      "role": "capability, downstream aliases, platform, and scenario authority"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-FEATURE-PLATFORM-MATRIX",
+      "path": "artifacts/dependency_feature_platform_consumer_matrix_v1.json",
+      "record_count": 593,
+      "sha256": "73d8abc4b93a1f732698e17fd949c66dd4047b0e77b23a8f7dfb4fb7a66d9819",
+      "role": "sparse feature, target, combination, and consumer cells"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-REAL-SERVICE-MATRIX",
+      "path": "artifacts/dependency_real_service_fixture_matrix_v1.json",
+      "record_count": 353,
+      "sha256": "00fedda95c7a3d326f471b309c1a0e3e3bf19e091b0898d1268297da4a8521aa",
+      "role": "current Kafka real-service blocker authority"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-DOWNSTREAM-PROOF",
+      "path": "artifacts/downstream_consumer_proof_v1.json",
+      "record_count": 107,
+      "sha256": "4e9219556bc77481c05464f9b6ea9659bc28852eaffecb46ec2ddbb928b1e8ec",
+      "role": "maintained downstream fixture profile authority"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-PROOF-STATUS",
+      "path": "artifacts/proof_status_snapshot_v1.json",
+      "record_count": 1384,
+      "sha256": "6965235ed8273a7e85c91de081a6a7a75f6a87d4cd584c5ee0c6f3c3dfb16baa",
+      "role": "rerun-required downstream proof status"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-ADR",
+      "path": "docs/adr/dep_plan_adr_009_kafka_client.md",
+      "record_count": 155,
+      "sha256": "c2287fe4ff8bdd0b2c015e6b6af95e4c3ee99c422b3fc8c3882fd034a506c0fb",
+      "role": "KEEP_UNTIL_PARITY decision and planned journey authority"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-K0-1-DOC",
+      "path": "docs/kafka_capability_inventory.md",
+      "record_count": 189,
+      "sha256": "1b76345e60be52b33fe1ba94ee26c2116859126114c0e30959fdf9eb2a8dac51",
+      "role": "K0.1 human authority"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-K0-2-DOC",
+      "path": "docs/kafka_incumbent_semantics_matrix.md",
+      "record_count": 536,
+      "sha256": "7cf46fb6eaa7ded66b6d1d04a7c711f4ce687252bb42eaa05d77e3a5e4b79ff5",
+      "role": "K0.2 human authority"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-REGISTRY-DOC",
+      "path": "docs/dependency_capability_registry.md",
+      "record_count": 212,
+      "sha256": "4bd46b6490a4b562c0b11f1b3eb6b95b3cc0eb2aa19a7f4bb7e83ba4e9b397dc",
+      "role": "human capability registry and planned baseline claims"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-BASELINE-DOC",
+      "path": "docs/dependency_capability_baseline.md",
+      "record_count": 222,
+      "sha256": "a546d34e1a0e8237958f8f0aa0666e58c7ef6e5e41e63c12088deec5792d1492",
+      "role": "BLOCKED_EXTERNAL baseline documentation"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-CUTOVER-DOC",
+      "path": "docs/dependency_cutover_policy.md",
+      "record_count": 501,
+      "sha256": "68b7bb3a5154349220aedf1f567512655084ec8d0781de8642d54ab63bc27d12",
+      "role": "KEEP_INCUMBENT and dependency-exit prohibition"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-FEATURE-PLATFORM-DOC",
+      "path": "docs/dependency_feature_platform_consumer_matrix.md",
+      "record_count": 179,
+      "sha256": "27653f78c07593bde3f54041a57981470feb3a37e9ae040051cd83a3de2ceb5f",
+      "role": "RERUN_REQUIRED and BLOCKED_EXTERNAL profile documentation"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-REAL-SERVICE-DOC",
+      "path": "docs/dependency_real_service_fixtures.md",
+      "record_count": 109,
+      "sha256": "96dcd779f944c0102c458c448de9ab05ddb631277834988864ddc0633e13bc36",
+      "role": "real-service blocker documentation"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-REFERENCE-APPS",
+      "path": "docs/tokio_reference_applications_templates.md",
+      "record_count": 214,
+      "sha256": "1ed62ad234e33bff998f919727146122be0d601bbbe5ae0ce6fa3752ce25d0a1",
+      "role": "planned RA-06 Kafka reference application"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-WAVE2-EXAMPLE-EVIDENCE",
+      "path": "artifacts/wave2/capability_examples_smoke_recipes_evidence.json",
+      "record_count": 335,
+      "sha256": "f46a06df3f9eac825e9495e8233117604862712db80e9a905cdc48dac07bf782",
+      "role": "unsupported pending real-broker example evidence"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-MIGRATION-PACK",
+      "path": "docs/tokio_t6_migration_packs.md",
+      "record_count": 1252,
+      "sha256": "0b53608ca88d8f4db006ee9d18203fb09f7103f7d1b9d5bccfe3cf71ddc7c7f6",
+      "role": "maintained Kafka migration journey"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-T6-E2E-RUNNER",
+      "path": "scripts/test_t6_data_path_e2e.sh",
+      "record_count": 335,
+      "sha256": "6c1a2867813371d176d6ba62827712294ba2403f80920050f5c313fdbff6c372",
+      "role": "canonical T6 runner omitting the Kafka feature"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-T6-E2E-DOC",
+      "path": "docs/tokio_t6_data_path_e2e_contract.md",
+      "record_count": 149,
+      "sha256": "cfc17da393cb9cc74acb5bcf6506d2d22bd0436d2441e76252beb06c9cde55db",
+      "role": "stale enforced-DP-14 claim"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-DB-MIGRATION-DOC",
+      "path": "docs/tokio_db_messaging_migration_packs_contract.md",
+      "record_count": 456,
+      "sha256": "2762df76a0645c6b459e6f731ee4a2f65ca97c2159c83ecbff8812255841b82a",
+      "role": "stale Kafka migration call signatures"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-HISTORICAL-GAP-DOC",
+      "path": "docs/tokio_db_messaging_gap_baseline.md",
+      "record_count": 441,
+      "sha256": "8f4ea0be82efa0ff9c4a460f0394344413ba6d2f116f6fceaa528b1b039daeeb",
+      "role": "superseded March Kafka gap snapshot"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-RETRY-DOC",
+      "path": "docs/tokio_retry_idempotency_failure_contracts.md",
+      "record_count": 337,
+      "sha256": "41bfa18c1bf8d5f8b9ecc5aff2bb14686e82e6389ccd19dba92f5e95fd6879b9",
+      "role": "draft with overbroad Kafka implementation claims"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-GA-DOC",
+      "path": "docs/tokio_ga_readiness_checklist_launch_review.md",
+      "record_count": 288,
+      "sha256": "dc89ca933efdf217f46a29680804b0a13a4eb4f4a978092f3ec52aaa42d7b4f7",
+      "role": "stale readiness and benchmark claims"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-INTEROP-DOC",
+      "path": "docs/tokio_interop_support_matrix.md",
+      "record_count": 312,
+      "sha256": "9d2eed50a2bb88dca97ed67385b3aacbb454a9c079c8492d7c192a3b7f78cb90",
+      "role": "stale rdkafka version and admin/conformance claims"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-LIMITATION-DOC",
+      "path": "docs/tokio_compatibility_limitation_matrix.md",
+      "record_count": 368,
+      "sha256": "30842acf31ab60b402d550d470b0d07d308d72b313540bdebc9a5b915da62ac3",
+      "role": "stale nonexistent-test and readiness claims"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-HISTORICAL-SECURITY-DOC",
+      "path": "docs/audits/kafka_security_audit_2026-04-29.md",
+      "record_count": 203,
+      "sha256": "8956ed7b4da5731039e1ccbc341e165b0424b1d295e1dc58a4d569789f400f41",
+      "role": "explicitly historical and superseded security audit"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-HTTP-KAFKA-DOC",
+      "path": "docs/http_h2_server_messaging_kafka_e2e.md",
+      "record_count": 346,
+      "sha256": "fd5e631ef05352942e0f3548da2b62e0d6ee3dd77ae83c02964329bdc3eb376b",
+      "role": "documentation paired with an unwired deterministic source"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-README",
+      "path": "README.md",
+      "record_count": 2094,
+      "sha256": "d9dcd4a7784bbd4600cd612512a9bdc68ef88778cd6627c69d1123f83ef2315a",
+      "role": "public feature and API documentation"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-AGENTS",
+      "path": "AGENTS.md",
+      "record_count": 1238,
+      "sha256": "6ad133a6c45a681eb555debc3f966b3321f89fc5dc91f774f72c8c8a47ea2ba5",
+      "role": "operator feature and proof policy"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-CONFORMANCE-ROOT",
+      "path": "tests/conformance.rs",
+      "record_count": 4,
+      "sha256": "383d7009966a183c1e0a269b6aa6e16ab03993e417945f2c8a598522780f5968",
+      "role": "conformance module wiring"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-OFFSET-CONFORMANCE",
+      "path": "tests/conformance/kafka_offsets.rs",
+      "record_count": 701,
+      "sha256": "da0ed830a23bdba2cde963e45c8e08b1ccc5389da7cb7d7659e373874d91359c",
+      "role": "offset semantic consumer"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-BROKER-PARITY",
+      "path": "tests/conformance/messaging_broker_parity.rs",
+      "record_count": 1482,
+      "sha256": "f7d7f664c5845e7fc91fb34b4b0c0a0fa2f9f8dc6015a45ee173b4dd1277a3c8",
+      "role": "default feature gate and process-capable conformance source"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-E2E-MESSAGING",
+      "path": "tests/e2e_messaging.rs",
+      "record_count": 493,
+      "sha256": "c94daf6deb0728ef47860cac173e2976de54f2c4414a98129e2064d950c76d8d",
+      "role": "feature-gated producer and consumer lifecycle source"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-E2E-T6",
+      "path": "tests/e2e_t6_data_path.rs",
+      "record_count": 1348,
+      "sha256": "18e4d8b7e41c5dc5d3e671daf3ec4446d97c8bae9e9e27b3e6fb230330d75211",
+      "role": "feature-gated T6 data-path source"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-REAL-BROKER",
+      "path": "tests/integration/kafka_real_broker.rs",
+      "record_count": 1883,
+      "sha256": "f12b3e131f2376617dd6d876dfc09bbffe368f749f1ff25d606d2f0631b204f7",
+      "role": "wired real-broker-capable and proof-only source"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-REAL-BROKER-DOC",
+      "path": "tests/integration/kafka_real_broker_README.md",
+      "record_count": 297,
+      "sha256": "c48c1ac1221b3bc7ba1b32f5e828e82db80bfce2a6384b8d6ae6ffde77642dd4",
+      "role": "real-broker operator documentation and overclaim review"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-OFFSET-PROPERTY",
+      "path": "tests/kafka_consumer_offset_commit_property_fuzz.rs",
+      "record_count": 206,
+      "sha256": "8107d0d6733ab47001b0d136b4189dda1f0dfaea14303a2d9193a8b1baae74e6",
+      "role": "local offset property source"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-OFFSET-RETRY",
+      "path": "tests/kafka_offset_commit_retry_audit.rs",
+      "record_count": 71,
+      "sha256": "8e2d84f9d0c64e12da352dc68a3ccffba5705ba5c10664c27c82b5bada32b41a",
+      "role": "source-level retry audit"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-IDEMPOTENCE",
+      "path": "tests/kafka_producer_idempotence_audit.rs",
+      "record_count": 85,
+      "sha256": "f67dd02f8ef30ceefced7b89e7cfa2ac2e891160da99c561787ad1304a1fcbfb",
+      "role": "true default-feature downstream fail-closed source"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-SASL",
+      "path": "tests/kafka_sasl_authentication_audit.rs",
+      "record_count": 265,
+      "sha256": "0a7c9ae8c518af49df2c90dadf14805c81d7ed4abc7591fd2edff8e55cf03363",
+      "role": "authentication error and mapping source"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-COMPRESSION",
+      "path": "tests/messaging_kafka_compression_roundtrip.rs",
+      "record_count": 94,
+      "sha256": "427af5d06e4555bef7aef2efe5560a4b412d3cef1667bc5e36d788e7beb85053",
+      "role": "configuration-only compression source with stale round-trip claim"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-REBALANCE",
+      "path": "tests/messaging_kafka_rebalance_lifecycle.rs",
+      "record_count": 168,
+      "sha256": "de95141a1f7cc70f9ad17ed7bd449d127af65c09e657183a7302b9ad634d11c6",
+      "role": "broker-dependent rebalance source with successful skip paths"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-T6-MATRIX",
+      "path": "tests/t6_database_messaging_unit_matrix.rs",
+      "record_count": 1215,
+      "sha256": "d7f14da3537f06493452c17f56a6f6f6602a2404be4f34c38b7262b0043a8be5",
+      "role": "configuration, offset, and rebalance unit surface"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-T6-FAULT",
+      "path": "tests/t6_deterministic_integration_fault_injection.rs",
+      "record_count": 2019,
+      "sha256": "d0cd0b718a927fef23c19d590adbe7e5ed58d69393305c895447888089380a06",
+      "role": "KafkaError-only deterministic fault taxonomy"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-TOKIO-INTEGRATION",
+      "path": "tests/tokio_db_messaging_integration.rs",
+      "record_count": 1239,
+      "sha256": "9f46f35dcd17d4fb7cf3efcdbe679618467ad72a513edc8fad5f6d320b4179c2",
+      "role": "KafkaError-only migration integration surface"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-DOWNSTREAM-FIXTURE",
+      "path": "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+      "record_count": 20,
+      "sha256": "3d7c7928ef96d8c501a63ed32f77617aa46b86fa6c89e5e703247df51e243a7d",
+      "role": "separate-workspace downstream manifest and Kafka feature forwarder"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-PROOF-RUNNER",
+      "path": "scripts/kafka_broker_parity_proof_runner.sh",
+      "record_count": 440,
+      "sha256": "656a5f812adf8209c5942b7b43243c46c899f9ff0f6e089163814217ce5ec451",
+      "role": "declared broker parity orchestration"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-PROVISIONER",
+      "path": "scripts/provision_kafka_test_env.rs",
+      "record_count": 376,
+      "sha256": "55da137faa1c826985e9c1dfaf1484df9457b4ab152730ed1de5a094ef40e569",
+      "role": "mutable-image and ambient-bootstrap provisioning source"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-DORMANT-HTTP",
+      "path": "src/real_http_h2_server_messaging_kafka_e2e_tests.rs",
+      "record_count": 997,
+      "sha256": "5fd2914a5470ea24dd81f3a08b63cf6f83e0badf152f75349e2ca3bb34998aaf",
+      "role": "unwired deterministic HTTP-to-Kafka model"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-DORMANT-GROUP",
+      "path": "src/real_kafka_consumer_group_rebalance_e2e_tests.rs",
+      "record_count": 1058,
+      "sha256": "49a128e184ae8dbf9f6be4b036487b4f8f88967e6c64acfb0e16cf9eff72d206",
+      "role": "unwired mock and simulated group-rebalance source"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-DORMANT-TRACE",
+      "path": "src/real_messaging_kafka_trace_event_integration_e2e_tests.rs",
+      "record_count": 974,
+      "sha256": "798a1677a689ef563d3ef366bfd35b990b070c4203ba7b6d67f9cfa760e2b8f4",
+      "role": "unwired source using stale Kafka and trace APIs"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-DORMANT-TLS",
+      "path": "src/real_net_tls_connector_messaging_kafka_integration_e2e_tests.rs",
+      "record_count": 684,
+      "sha256": "39760b263f18cae8e5b1f781faa61a045e8799e1b6c51ee1e69199744b8979cc",
+      "role": "unwired source using stale Kafka and TLS APIs"
+    },
+    {
+      "pin_id": "KAFKA-K0-3-PIN-DORMANT-MUTATION",
+      "path": "src/subsystem_mutation_testing.rs",
+      "record_count": 10228,
+      "sha256": "b0d10b158df9b8b559af22dc15bc64cad877146cdb71075842fef53f14e6dfd8",
+      "role": "unwired source using stale Kafka API names"
+    }
+  ],
+  "search_scope": {
+    "scope_id": "KAFKA-K0-3-SCOPE-001",
+    "roots": [
+      ".claude",
+      ".github",
+      "artifacts",
+      "conformance",
+      "docs",
+      "formal",
+      "fuzz",
+      "refactor",
+      "scripts",
+      "skills",
+      "src",
+      "tests"
+    ],
+    "root_files": [
+      "AGENTS.md",
+      "CHANGELOG.md",
+      "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md",
+      "Cargo.lock",
+      "Cargo.toml",
+      "README.md",
+      "TESTING.md",
+      "UPGRADE_LOG.md",
+      "audit_index.jsonl",
+      "e2e_hardening_14_analysis.md",
+      "e2e_hardening_8_analysis.md",
+      "e2e_hardening_summary.md"
+    ],
+    "excluded_components": [
+      ".git",
+      ".beads",
+      ".ntm",
+      ".wrangler",
+      "target"
+    ],
+    "excluded_paths": [
+      "tests/tests",
+      "artifacts/audit",
+      "artifacts/perf",
+      "artifacts/atp_bench_matrix",
+      "artifacts/stub_placeholder_inventory_markers.json",
+      "artifacts/kafka_downstream_user_journey_inventory_v1.json",
+      "docs/kafka_downstream_user_journey_inventory.md",
+      "tests/kafka_downstream_user_journey_inventory_contract.rs"
+    ],
+    "excluded_suffixes": [
+      ".proptest-regressions"
+    ],
+    "artifact_subtree_policy": "scan tracked top-level artifact files and artifacts/wave2; other ignored or generated artifact subtrees are outside the tracked-path census",
+    "matcher": "case-insensitive ASCII substring 'kafka' in tracked path or non-binary tracked file content",
+    "tracked_occurrence_path_count": 245,
+    "sorted_newline_path_map_sha256": "9c815cfcba11f5345e7abced6b0afa21bfb650f9bb280e71bb3da74ebbb55089",
+    "inventory_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.3",
+    "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+  },
+  "search_queries": [
+    {
+      "query_id": "KAFKA-K0-3-QUERY-001",
+      "matcher_kind": "RUST_PATH_OR_SYMBOL",
+      "literals": [
+        "messaging::kafka",
+        "KafkaProducer",
+        "KafkaConsumer",
+        "TransactionalProducer",
+        "KafkaError"
+      ],
+      "purpose": "public and module-level call sites"
+    },
+    {
+      "query_id": "KAFKA-K0-3-QUERY-002",
+      "matcher_kind": "DEPENDENCY_IDENTITY",
+      "literals": [
+        "rdkafka",
+        "rdkafka_sys",
+        "librdkafka"
+      ],
+      "purpose": "backend and dependency mentions"
+    },
+    {
+      "query_id": "KAFKA-K0-3-QUERY-003",
+      "matcher_kind": "FEATURE_AND_CFG",
+      "literals": [
+        "feature = \"kafka\"",
+        "features = [\"kafka\"]",
+        "--features kafka"
+      ],
+      "purpose": "feature, profile, and target wiring"
+    },
+    {
+      "query_id": "KAFKA-K0-3-QUERY-004",
+      "matcher_kind": "SERVICE_ENVIRONMENT",
+      "literals": [
+        "REAL_KAFKA_TESTS",
+        "KAFKA_BOOTSTRAP_SERVERS",
+        "KAFKA_BROKER_BOOTSTRAP"
+      ],
+      "purpose": "real-service admission and skip paths"
+    },
+    {
+      "query_id": "KAFKA-K0-3-QUERY-005",
+      "matcher_kind": "FILENAME_OR_DOCUMENTATION",
+      "literals": [
+        "kafka"
+      ],
+      "purpose": "case-insensitive path and documentation census"
+    },
+    {
+      "query_id": "KAFKA-K0-3-QUERY-006",
+      "matcher_kind": "E2E_WIRING",
+      "literals": [
+        "kafka_real_broker",
+        "kafka_broker_parity",
+        "real_kafka"
+      ],
+      "purpose": "test target, scenario, and runner wiring"
+    },
+    {
+      "query_id": "KAFKA-K0-3-QUERY-007",
+      "matcher_kind": "MIGRATION_LANGUAGE",
+      "literals": [
+        "remove rdkafka",
+        "Kafka migration",
+        "KEEP_UNTIL_PARITY"
+      ],
+      "purpose": "cutover and migration claims"
+    }
+  ],
+  "coverage_joins": {
+    "k0_1_public_symbol_count": 30,
+    "k0_1_public_symbol_id_set_sha256": "307956cfcb2a4e1de2b1a45d9db3767aa88e5be090815bc9ae1a77c8ad3add28",
+    "public_symbol_usage_rule": "symbol IDs referenced by local rows are LOCAL_USE; every remaining K0.1 symbol ID is K14_SYNTHESIS_REQUIRED",
+    "k0_2_semantic_row_count": 97,
+    "k0_2_semantic_id_set_sha256": "a9967c47346ee6386e9e8836d73e819a784f829baa6d255eb24e55aae1950cf7",
+    "semantic_usage_rule": "semantic IDs referenced by local rows are LOCAL_USE, DOC_ONLY, or FIXTURE_ONLY; every remaining K0.2 semantic ID is NO_LOCAL_USE with K14_SYNTHESIS_REQUIRED",
+    "default_gap_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+    "absence_authorizes_removal": false
+  },
+  "non_consumer_dispositions": [
+    {
+      "disposition_id": "KAFKA-K0-3-NONCONSUMER-001",
+      "kind": "PROVIDER_OR_AUTHORITY",
+      "paths": [
+        "src/messaging/kafka.rs",
+        "src/messaging/kafka_consumer.rs",
+        "src/messaging/mod.rs",
+        "artifacts/kafka_capability_inventory_v1.json",
+        "artifacts/kafka_incumbent_semantics_matrix_v1.json"
+      ],
+      "reason": "provider implementation and upstream K0 authority, not downstream proof",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.3"
+    },
+    {
+      "disposition_id": "KAFKA-K0-3-NONCONSUMER-002",
+      "kind": "WIRE_CODEC_ONLY",
+      "paths": [
+        "conformance/src/kafka_record_batch_v2.rs",
+        "tests/kafka_record_batch_v2_integration.rs",
+        "tests/conformance/kafka_record_batch_v2/format.rs",
+        "tests/conformance/kafka_record_batch_v2/golden_tests.rs",
+        "tests/conformance/kafka_record_batch_v2/harness.rs",
+        "tests/conformance/kafka_record_batch_v2/mod.rs",
+        "tests/conformance/kafka_record_batch_v2/test_vectors.rs",
+        "fuzz/fuzz_targets/kafka_fetch_response.rs",
+        "fuzz/fuzz_targets/kafka_produce_response.rs",
+        "fuzz/fuzz_targets/kafka_protocol.rs",
+        "fuzz/fuzz_targets/kafka_protocol_parser.rs",
+        "fuzz/fuzz_targets/kafka_response_frames.rs",
+        "fuzz/fuzz_targets/kafka_wire_protocol.rs",
+        "fuzz/fuzz_targets/messaging_kafka_record_batch.rs"
+      ],
+      "reason": "wire/parser/codec coverage does not exercise a Kafka client or broker journey",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.3"
+    },
+    {
+      "disposition_id": "KAFKA-K0-3-NONCONSUMER-003",
+      "kind": "MODEL_ONLY",
+      "paths": [
+        "src/distributed_service_messaging_metamorphic_tests.rs",
+        "src/messaging_primitives_conformance_tests.rs",
+        "src/messaging_scheduler_deep_metamorphic_tests.rs"
+      ],
+      "reason": "local model types use Kafka terminology but do not call the incumbent client",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5"
+    },
+    {
+      "disposition_id": "KAFKA-K0-3-NONCONSUMER-004",
+      "kind": "OBSERVABILITY_VOCABULARY_ONLY",
+      "paths": [
+        "src/observability/otel.rs",
+        "src/observability/otel_conformance_tests.rs"
+      ],
+      "reason": "OpenTelemetry semantic-convention strings do not call the Kafka client",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    },
+    {
+      "disposition_id": "KAFKA-K0-3-NONCONSUMER-005",
+      "kind": "GOVERNANCE_OR_GENERATED_MENTION",
+      "path_set_source": "search_scope sorted occurrence path map minus explicitly enumerated provider, local-consumer, wire, model, observability, documentation, script, and dormant paths",
+      "reason": "incidental governance, snapshot, audit, policy, and generated mentions are covered by the path-map receipt but are not local client call sites",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.3"
+    }
+  ],
+  "local_consumers": [
+    {
+      "consumer_id": "KAFKA-K0-3-CONSUMER-001",
+      "name": "root conformance harness",
+      "paths": [
+        "tests/conformance.rs",
+        "tests/conformance/kafka_offsets.rs",
+        "tests/conformance/messaging_broker_parity.rs"
+      ],
+      "wiring_state": "WIRED",
+      "evidence_class": "DETERMINISTIC_ONLY",
+      "execution_state": "NOT_RUN",
+      "freshness_state": "CURRENT_SOURCE_PINNED",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5"
+    },
+    {
+      "consumer_id": "KAFKA-K0-3-CONSUMER-002",
+      "name": "feature-gated local E2E call sites",
+      "paths": [
+        "tests/e2e_messaging.rs",
+        "tests/e2e_t6_data_path.rs"
+      ],
+      "wiring_state": "WIRED",
+      "evidence_class": "REAL_BROKER_CAPABLE",
+      "execution_state": "NOT_RUN",
+      "freshness_state": "CURRENT_SOURCE_PINNED",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
+    },
+    {
+      "consumer_id": "KAFKA-K0-3-CONSUMER-003",
+      "name": "explicit real-broker target",
+      "paths": [
+        "Cargo.toml",
+        "tests/integration/kafka_real_broker.rs",
+        "tests/integration/kafka_real_broker_README.md"
+      ],
+      "wiring_state": "WIRED",
+      "evidence_class": "REAL_BROKER_CAPABLE",
+      "execution_state": "NOT_RUN",
+      "freshness_state": "CURRENT_SOURCE_PINNED",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
+    },
+    {
+      "consumer_id": "KAFKA-K0-3-CONSUMER-004",
+      "name": "local property and source audits",
+      "paths": [
+        "tests/kafka_consumer_offset_commit_property_fuzz.rs",
+        "tests/kafka_offset_commit_retry_audit.rs",
+        "tests/kafka_producer_idempotence_audit.rs",
+        "tests/kafka_sasl_authentication_audit.rs"
+      ],
+      "wiring_state": "WIRED",
+      "evidence_class": "DETERMINISTIC_ONLY",
+      "execution_state": "NOT_RUN",
+      "freshness_state": "CURRENT_SOURCE_PINNED",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5"
+    },
+    {
+      "consumer_id": "KAFKA-K0-3-CONSUMER-005",
+      "name": "compression and rebalance tests",
+      "paths": [
+        "tests/messaging_kafka_compression_roundtrip.rs",
+        "tests/messaging_kafka_rebalance_lifecycle.rs"
+      ],
+      "wiring_state": "WIRED",
+      "evidence_class": "STATIC_SOURCE",
+      "execution_state": "NOT_RUN",
+      "freshness_state": "CURRENT_SOURCE_PINNED",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5"
+    },
+    {
+      "consumer_id": "KAFKA-K0-3-CONSUMER-006",
+      "name": "T6 and migration error/configuration surfaces",
+      "paths": [
+        "tests/t6_database_messaging_unit_matrix.rs",
+        "tests/t6_deterministic_integration_fault_injection.rs",
+        "tests/tokio_db_messaging_integration.rs"
+      ],
+      "wiring_state": "WIRED",
+      "evidence_class": "DETERMINISTIC_ONLY",
+      "execution_state": "NOT_RUN",
+      "freshness_state": "CURRENT_SOURCE_PINNED",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5"
+    },
+    {
+      "consumer_id": "KAFKA-K0-3-CONSUMER-007",
+      "name": "separate-workspace downstream proof fixture",
+      "paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/kafka_producer_idempotence_audit.rs",
+        "artifacts/downstream_consumer_proof_v1.json"
+      ],
+      "wiring_state": "WIRED",
+      "evidence_class": "COMPILE_ONLY",
+      "execution_state": "NOT_RUN",
+      "freshness_state": "CURRENT_SOURCE_PINNED",
+      "owner_bead": "asupersync-validation-frontier-v2-b5cjsv.5"
+    },
+    {
+      "consumer_id": "KAFKA-K0-3-CONSUMER-008",
+      "name": "broker proof orchestration",
+      "paths": [
+        "scripts/kafka_broker_parity_proof_runner.sh",
+        "scripts/provision_kafka_test_env.rs"
+      ],
+      "wiring_state": "DECLARED_ONLY",
+      "evidence_class": "PROOF_ONLY",
+      "execution_state": "NOT_RUN",
+      "freshness_state": "CURRENT_SOURCE_PINNED",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
+    },
+    {
+      "consumer_id": "KAFKA-K0-3-CONSUMER-009",
+      "name": "maintained migration documentation",
+      "paths": [
+        "README.md",
+        "docs/tokio_t6_migration_packs.md"
+      ],
+      "wiring_state": "NOT_APPLICABLE",
+      "evidence_class": "STATIC_SOURCE",
+      "execution_state": "NOT_RUN",
+      "freshness_state": "CURRENT_SOURCE_PINNED",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    },
+    {
+      "consumer_id": "KAFKA-K0-3-CONSUMER-010",
+      "name": "unwired real-prefixed sources",
+      "paths": [
+        "src/real_http_h2_server_messaging_kafka_e2e_tests.rs",
+        "src/real_kafka_consumer_group_rebalance_e2e_tests.rs",
+        "src/real_messaging_kafka_trace_event_integration_e2e_tests.rs",
+        "src/real_net_tls_connector_messaging_kafka_integration_e2e_tests.rs"
+      ],
+      "wiring_state": "UNWIRED",
+      "evidence_class": "MOCK_OR_SIMULATED",
+      "execution_state": "NOT_RUN",
+      "freshness_state": "STALE",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    },
+    {
+      "consumer_id": "KAFKA-K0-3-CONSUMER-011",
+      "name": "unwired subsystem mutation source",
+      "paths": [
+        "src/subsystem_mutation_testing.rs"
+      ],
+      "wiring_state": "UNWIRED",
+      "evidence_class": "MOCK_OR_SIMULATED",
+      "execution_state": "NOT_RUN",
+      "freshness_state": "STALE",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5"
+    }
+  ],
+  "local_inventory_rows": [
+    {
+      "row_id": "KAFKA-K0-3-TEST-001",
+      "row_kind": "TEST",
+      "path": "tests/conformance/kafka_offsets.rs",
+      "source_pin_id": "KAFKA-K0-3-PIN-OFFSET-CONFORMANCE",
+      "source_anchor": "lines 1-701; wired by tests/conformance/mod.rs:86 and tests/conformance.rs",
+      "consumer_id": "KAFKA-K0-3-CONSUMER-001",
+      "public_entry_points": [
+        "ConsumerConfig::new",
+        "KafkaConsumer::new",
+        "KafkaConsumer::commit_offsets",
+        "KafkaConsumer::seek",
+        "TopicPartitionOffset::new"
+      ],
+      "k0_1_symbol_ids": [
+        "KPR-PUB-001",
+        "KCO-PUB-003",
+        "KCO-PUB-004",
+        "KCO-PUB-007"
+      ],
+      "journey_ids": [
+        "kfk-journey-consume-group"
+      ],
+      "wiring_state": "WIRED",
+      "evidence_class": "DETERMINISTIC_ONLY",
+      "execution_state": "NOT_RUN",
+      "claim_disposition": "CURRENT",
+      "skip_or_blocker": "feature-disabled cases and local test-internals behavior are not broker interoperability",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+      "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "row_id": "KAFKA-K0-3-TEST-002",
+      "row_kind": "TEST",
+      "path": "tests/conformance/messaging_broker_parity.rs",
+      "source_pin_id": "KAFKA-K0-3-PIN-BROKER-PARITY",
+      "source_anchor": "lines 105-240; wired by tests/conformance/mod.rs:24",
+      "consumer_id": "KAFKA-K0-3-CONSUMER-001",
+      "public_entry_points": [
+        "ProducerConfig::new",
+        "KafkaProducer::new",
+        "KafkaProducer::send",
+        "KafkaFeatureRequirement"
+      ],
+      "k0_1_symbol_ids": [
+        "KPR-PUB-001",
+        "KPR-PUB-005",
+        "KPR-PUB-010",
+        "KPR-PUB-012"
+      ],
+      "journey_ids": [
+        "kfk-journey-feature-disabled"
+      ],
+      "wiring_state": "WIRED",
+      "evidence_class": "DETERMINISTIC_ONLY",
+      "execution_state": "NOT_RUN",
+      "claim_disposition": "CURRENT",
+      "skip_or_blocker": "Kafka portion is gate and diagnostic coverage, not a live broker conformance scenario",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+      "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "row_id": "KAFKA-K0-3-TEST-003",
+      "row_kind": "TEST",
+      "path": "tests/e2e_messaging.rs",
+      "source_pin_id": "KAFKA-K0-3-PIN-E2E-MESSAGING",
+      "source_anchor": "lines 401-493",
+      "consumer_id": "KAFKA-K0-3-CONSUMER-002",
+      "public_entry_points": [
+        "KafkaConsumer::subscribe",
+        "KafkaConsumer::commit_offsets",
+        "KafkaConsumer::poll",
+        "KafkaConsumer::close",
+        "KafkaProducer::send",
+        "KafkaProducer::flush"
+      ],
+      "k0_1_symbol_ids": [
+        "KPR-PUB-001",
+        "KPR-PUB-010",
+        "KPR-PUB-012",
+        "KCO-PUB-003",
+        "KCO-PUB-004",
+        "KCO-PUB-007"
+      ],
+      "journey_ids": [
+        "kfk-journey-produce",
+        "kfk-journey-consume-group"
+      ],
+      "wiring_state": "WIRED",
+      "evidence_class": "REAL_BROKER_CAPABLE",
+      "execution_state": "NOT_RUN",
+      "claim_disposition": "PLANNED",
+      "skip_or_blocker": "feature-gated source supplies no immutable broker identity or retained receipt",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+      "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "row_id": "KAFKA-K0-3-TEST-004",
+      "row_kind": "TEST",
+      "path": "tests/e2e_t6_data_path.rs",
+      "source_pin_id": "KAFKA-K0-3-PIN-E2E-T6",
+      "source_anchor": "lines 925-982",
+      "consumer_id": "KAFKA-K0-3-CONSUMER-002",
+      "public_entry_points": [
+        "KafkaProducer::send",
+        "KafkaConsumer::subscribe",
+        "KafkaProducer::flush",
+        "KafkaConsumer::close"
+      ],
+      "k0_1_symbol_ids": [
+        "KPR-PUB-010",
+        "KPR-PUB-012",
+        "KCO-PUB-003",
+        "KCO-PUB-007"
+      ],
+      "journey_ids": [
+        "kfk-journey-produce",
+        "kfk-journey-consume-group"
+      ],
+      "wiring_state": "WIRED",
+      "evidence_class": "REAL_BROKER_CAPABLE",
+      "execution_state": "NOT_RUN",
+      "claim_disposition": "PLANNED",
+      "skip_or_blocker": "uses localhost and has no fixture admission or retained broker receipt",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+      "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "row_id": "KAFKA-K0-3-TEST-005",
+      "row_kind": "INTEGRATION_BOUNDARY",
+      "path": "tests/integration/kafka_real_broker.rs",
+      "source_pin_id": "KAFKA-K0-3-PIN-REAL-BROKER",
+      "source_anchor": "Cargo.toml:598-600; source lines 324-333, 401-1083, 1094-1883",
+      "consumer_id": "KAFKA-K0-3-CONSUMER-003",
+      "public_entry_points": [
+        "KafkaProducer::send",
+        "KafkaProducer::close",
+        "KafkaConsumer::subscribe",
+        "KafkaConsumer::poll",
+        "KafkaConsumer::commit_offsets",
+        "TransactionalProducer::begin_transaction",
+        "Transaction::commit"
+      ],
+      "k0_1_symbol_ids": [
+        "KPR-PUB-001",
+        "KPR-PUB-010",
+        "KPR-PUB-012",
+        "KPR-PUB-013",
+        "KPR-PUB-014",
+        "KPR-PUB-015",
+        "KCO-PUB-003",
+        "KCO-PUB-007"
+      ],
+      "journey_ids": [
+        "kfk-journey-produce",
+        "kfk-journey-transaction",
+        "kfk-journey-consume-group",
+        "kfk-journey-real-broker-proof"
+      ],
+      "wiring_state": "WIRED",
+      "evidence_class": "REAL_BROKER_CAPABLE",
+      "execution_state": "NOT_RUN",
+      "claim_disposition": "BLOCKED",
+      "skip_or_blocker": "seven named broker tests return successfully when REAL_KAFKA_TESTS is absent; proof helpers also permit skip rows and unknown broker version",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+      "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "row_id": "KAFKA-K0-3-TEST-006",
+      "row_kind": "TEST",
+      "path": "tests/kafka_consumer_offset_commit_property_fuzz.rs",
+      "source_pin_id": "KAFKA-K0-3-PIN-OFFSET-PROPERTY",
+      "source_anchor": "lines 1-206",
+      "consumer_id": "KAFKA-K0-3-CONSUMER-004",
+      "public_entry_points": [
+        "ConsumerConfig",
+        "KafkaConsumer",
+        "TopicPartitionOffset"
+      ],
+      "k0_1_symbol_ids": [
+        "KCO-PUB-003",
+        "KCO-PUB-004",
+        "KCO-PUB-007"
+      ],
+      "journey_ids": [
+        "kfk-journey-consume-group"
+      ],
+      "wiring_state": "WIRED",
+      "evidence_class": "DETERMINISTIC_ONLY",
+      "execution_state": "NOT_RUN",
+      "claim_disposition": "CURRENT",
+      "skip_or_blocker": "property source is local-state evidence only",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+      "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "row_id": "KAFKA-K0-3-TEST-007",
+      "row_kind": "TEST",
+      "path": "tests/kafka_offset_commit_retry_audit.rs",
+      "source_pin_id": "KAFKA-K0-3-PIN-OFFSET-RETRY",
+      "source_anchor": "lines 1-71",
+      "consumer_id": "KAFKA-K0-3-CONSUMER-004",
+      "public_entry_points": [
+        "ConsumerConfig",
+        "KafkaConsumer::commit_offsets"
+      ],
+      "k0_1_symbol_ids": [
+        "KCO-PUB-003",
+        "KCO-PUB-004",
+        "KCO-PUB-007"
+      ],
+      "journey_ids": [
+        "kfk-journey-consume-group"
+      ],
+      "wiring_state": "WIRED",
+      "evidence_class": "STATIC_SOURCE",
+      "execution_state": "NOT_RUN",
+      "claim_disposition": "CURRENT",
+      "skip_or_blocker": "source-text audit is not behavioral broker evidence",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+      "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "row_id": "KAFKA-K0-3-TEST-008",
+      "row_kind": "TEST",
+      "path": "tests/kafka_producer_idempotence_audit.rs",
+      "source_pin_id": "KAFKA-K0-3-PIN-IDEMPOTENCE",
+      "source_anchor": "lines 3-7, 13-84",
+      "consumer_id": "KAFKA-K0-3-CONSUMER-004",
+      "public_entry_points": [
+        "ProducerConfig",
+        "KafkaProducer::new",
+        "KafkaProducer::send",
+        "KafkaError::FeatureDisabled"
+      ],
+      "k0_1_symbol_ids": [
+        "KPR-PUB-001",
+        "KPR-PUB-010",
+        "KPR-PUB-012"
+      ],
+      "journey_ids": [
+        "kfk-journey-feature-disabled"
+      ],
+      "wiring_state": "WIRED",
+      "evidence_class": "DETERMINISTIC_ONLY",
+      "execution_state": "NOT_RUN",
+      "claim_disposition": "CURRENT",
+      "skip_or_blocker": "root test feature unification is documented; separate fixture supplies the true downstream default profile",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+      "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "row_id": "KAFKA-K0-3-TEST-009",
+      "row_kind": "TEST",
+      "path": "tests/kafka_sasl_authentication_audit.rs",
+      "source_pin_id": "KAFKA-K0-3-PIN-SASL",
+      "source_anchor": "lines 1-265",
+      "consumer_id": "KAFKA-K0-3-CONSUMER-004",
+      "public_entry_points": [
+        "KafkaError"
+      ],
+      "k0_1_symbol_ids": [
+        "KPR-PUB-001"
+      ],
+      "journey_ids": [
+        "kfk-journey-secure-connect"
+      ],
+      "wiring_state": "WIRED",
+      "evidence_class": "MOCK_OR_SIMULATED",
+      "execution_state": "NOT_RUN",
+      "claim_disposition": "CURRENT",
+      "skip_or_blocker": "synthetic error mapping and source checks do not contact an authenticated broker",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+      "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "row_id": "KAFKA-K0-3-TEST-010",
+      "row_kind": "TEST",
+      "path": "tests/messaging_kafka_compression_roundtrip.rs",
+      "source_pin_id": "KAFKA-K0-3-PIN-COMPRESSION",
+      "source_anchor": "lines 1-94",
+      "consumer_id": "KAFKA-K0-3-CONSUMER-005",
+      "public_entry_points": [
+        "Compression",
+        "ProducerConfig::compression"
+      ],
+      "k0_1_symbol_ids": [
+        "KPR-PUB-003",
+        "KPR-PUB-010"
+      ],
+      "journey_ids": [
+        "kfk-journey-compression-config"
+      ],
+      "wiring_state": "WIRED",
+      "evidence_class": "STATIC_SOURCE",
+      "execution_state": "NOT_RUN",
+      "claim_disposition": "OVERCLAIM",
+      "skip_or_blocker": "the feature-enabled tests check enum/config identity only; they do not exercise a deterministic broker, wire compression, or real broker round trip",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5",
+      "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "row_id": "KAFKA-K0-3-TEST-011",
+      "row_kind": "TEST",
+      "path": "tests/messaging_kafka_rebalance_lifecycle.rs",
+      "source_pin_id": "KAFKA-K0-3-PIN-REBALANCE",
+      "source_anchor": "lines 1-168",
+      "consumer_id": "KAFKA-K0-3-CONSUMER-005",
+      "public_entry_points": [
+        "KafkaConsumer::subscribe",
+        "KafkaConsumer::rebalance",
+        "RebalanceResult"
+      ],
+      "k0_1_symbol_ids": [
+        "KCO-PUB-005",
+        "KCO-PUB-007"
+      ],
+      "journey_ids": [
+        "kfk-journey-rebalance"
+      ],
+      "wiring_state": "WIRED",
+      "evidence_class": "REAL_BROKER_CAPABLE",
+      "execution_state": "NOT_RUN",
+      "claim_disposition": "OVERCLAIM",
+      "skip_or_blocker": "feature-enabled tests return successfully when construction or subscription fails; no-feature branch is only a placeholder",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5",
+      "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "row_id": "KAFKA-K0-3-TEST-012",
+      "row_kind": "TEST",
+      "path": "tests/t6_database_messaging_unit_matrix.rs",
+      "source_pin_id": "KAFKA-K0-3-PIN-T6-MATRIX",
+      "source_anchor": "lines 743-876, 1091-1149",
+      "consumer_id": "KAFKA-K0-3-CONSUMER-006",
+      "public_entry_points": [
+        "ProducerConfig",
+        "ConsumerConfig",
+        "KafkaConsumer"
+      ],
+      "k0_1_symbol_ids": [
+        "KPR-PUB-010",
+        "KCO-PUB-003",
+        "KCO-PUB-007"
+      ],
+      "journey_ids": [
+        "kfk-journey-produce",
+        "kfk-journey-consume-group",
+        "kfk-journey-rebalance"
+      ],
+      "wiring_state": "WIRED",
+      "evidence_class": "DETERMINISTIC_ONLY",
+      "execution_state": "NOT_RUN",
+      "claim_disposition": "CURRENT",
+      "skip_or_blocker": "configuration and local-state surface only",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+      "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "row_id": "KAFKA-K0-3-TEST-013",
+      "row_kind": "TEST",
+      "path": "tests/t6_deterministic_integration_fault_injection.rs",
+      "source_pin_id": "KAFKA-K0-3-PIN-T6-FAULT",
+      "source_anchor": "lines 1503-1689",
+      "consumer_id": "KAFKA-K0-3-CONSUMER-006",
+      "public_entry_points": [
+        "KafkaError"
+      ],
+      "k0_1_symbol_ids": [
+        "KPR-PUB-001"
+      ],
+      "journey_ids": [
+        "kfk-journey-error-taxonomy"
+      ],
+      "wiring_state": "WIRED",
+      "evidence_class": "DETERMINISTIC_ONLY",
+      "execution_state": "NOT_RUN",
+      "claim_disposition": "CURRENT",
+      "skip_or_blocker": "error taxonomy only",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+      "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "row_id": "KAFKA-K0-3-TEST-014",
+      "row_kind": "TEST",
+      "path": "tests/tokio_db_messaging_integration.rs",
+      "source_pin_id": "KAFKA-K0-3-PIN-TOKIO-INTEGRATION",
+      "source_anchor": "lines 680-905",
+      "consumer_id": "KAFKA-K0-3-CONSUMER-006",
+      "public_entry_points": [
+        "KafkaError"
+      ],
+      "k0_1_symbol_ids": [
+        "KPR-PUB-001"
+      ],
+      "journey_ids": [
+        "kfk-journey-error-taxonomy"
+      ],
+      "wiring_state": "WIRED",
+      "evidence_class": "DETERMINISTIC_ONLY",
+      "execution_state": "NOT_RUN",
+      "claim_disposition": "CURRENT",
+      "skip_or_blocker": "migration error taxonomy only",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+      "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "row_id": "KAFKA-K0-3-FIX-001",
+      "row_kind": "FIXTURE",
+      "path": "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+      "source_pin_id": "KAFKA-K0-3-PIN-DOWNSTREAM-FIXTURE",
+      "source_anchor": "lines 1-20",
+      "consumer_id": "KAFKA-K0-3-CONSUMER-007",
+      "public_entry_points": [
+        "KafkaProducer::new",
+        "KafkaProducer::send",
+        "KafkaError::FeatureDisabled"
+      ],
+      "k0_1_symbol_ids": [
+        "KPR-PUB-001",
+        "KPR-PUB-010",
+        "KPR-PUB-012"
+      ],
+      "journey_ids": [
+        "kfk-journey-feature-disabled"
+      ],
+      "wiring_state": "WIRED",
+      "evidence_class": "COMPILE_ONLY",
+      "execution_state": "NOT_RUN",
+      "claim_disposition": "CURRENT",
+      "skip_or_blocker": "mapped proof status is rerun-required; no maintained feature-enabled Kafka target exists in the fixture",
+      "owner_bead": "asupersync-validation-frontier-v2-b5cjsv.5",
+      "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "row_id": "KAFKA-K0-3-DOC-001",
+      "row_kind": "DOCUMENTATION_CLAIM",
+      "path": "src/messaging/kafka_consumer.rs",
+      "source_pin_id": "KAFKA-K0-3-PIN-CONSUMER-SOURCE",
+      "source_anchor": "line 118 versus commit_offsets at line 1283",
+      "consumer_id": "KAFKA-K0-3-CONSUMER-009",
+      "public_entry_points": [
+        "commit_offset",
+        "KafkaConsumer::commit_offsets"
+      ],
+      "k0_1_symbol_ids": [
+        "KCO-PUB-007"
+      ],
+      "journey_ids": [
+        "kfk-journey-consume-group"
+      ],
+      "wiring_state": "WIRED",
+      "evidence_class": "STATIC_SOURCE",
+      "execution_state": "PASS",
+      "claim_disposition": "STALE",
+      "skip_or_blocker": "singular commit_offset does not exist",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5",
+      "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "row_id": "KAFKA-K0-3-DOC-002",
+      "row_kind": "MIGRATION_GUIDE",
+      "path": "docs/tokio_t6_migration_packs.md",
+      "source_pin_id": "KAFKA-K0-3-PIN-MIGRATION-PACK",
+      "source_anchor": "Kafka migration pack around lines 860-941",
+      "consumer_id": "KAFKA-K0-3-CONSUMER-009",
+      "public_entry_points": [
+        "ProducerConfig",
+        "KafkaProducer",
+        "ConsumerConfig",
+        "KafkaConsumer"
+      ],
+      "k0_1_symbol_ids": [
+        "KPR-PUB-010",
+        "KPR-PUB-012",
+        "KCO-PUB-003",
+        "KCO-PUB-007"
+      ],
+      "journey_ids": [
+        "kfk-journey-migration"
+      ],
+      "wiring_state": "NOT_APPLICABLE",
+      "evidence_class": "STATIC_SOURCE",
+      "execution_state": "PASS",
+      "claim_disposition": "CURRENT",
+      "skip_or_blocker": "documentation snippet is not a compile or runtime receipt",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5",
+      "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "row_id": "KAFKA-K0-3-DOC-003",
+      "row_kind": "DOCUMENTATION_CLAIM",
+      "path": "tests/integration/kafka_real_broker_README.md",
+      "source_pin_id": "KAFKA-K0-3-PIN-REAL-BROKER-DOC",
+      "source_anchor": "lines 1-297",
+      "consumer_id": "KAFKA-K0-3-CONSUMER-003",
+      "public_entry_points": [],
+      "k0_1_symbol_ids": [],
+      "journey_ids": [
+        "kfk-journey-real-broker-proof"
+      ],
+      "wiring_state": "NOT_APPLICABLE",
+      "evidence_class": "PLANNED",
+      "execution_state": "NOT_RUN",
+      "claim_disposition": "OVERCLAIM",
+      "skip_or_blocker": "complete-lifecycle, exactly-once, resilience, and performance language lacks an immutable retained run receipt",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5",
+      "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "row_id": "KAFKA-K0-3-DOC-004",
+      "row_kind": "DOCUMENTATION_CLAIM",
+      "path": "docs/http_h2_server_messaging_kafka_e2e.md",
+      "source_pin_id": "KAFKA-K0-3-PIN-HTTP-KAFKA-DOC",
+      "source_anchor": "lines 1-346",
+      "consumer_id": "KAFKA-K0-3-CONSUMER-010",
+      "public_entry_points": [
+        "KafkaProducer"
+      ],
+      "k0_1_symbol_ids": [
+        "KPR-PUB-012"
+      ],
+      "journey_ids": [
+        "kfk-journey-http-publish"
+      ],
+      "wiring_state": "NOT_APPLICABLE",
+      "evidence_class": "MOCK_OR_SIMULATED",
+      "execution_state": "NOT_RUN",
+      "claim_disposition": "STALE",
+      "skip_or_blocker": "paired source is unwired and uses a deterministic producer model rather than real broker integration",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5",
+      "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "row_id": "KAFKA-K0-3-EX-001",
+      "row_kind": "EXAMPLE",
+      "path": "examples/",
+      "source_pin_id": null,
+      "source_anchor": "tracked path census at baseline revision",
+      "consumer_id": null,
+      "public_entry_points": [],
+      "k0_1_symbol_ids": [],
+      "journey_ids": [],
+      "wiring_state": "NOT_APPLICABLE",
+      "evidence_class": "STATIC_SOURCE",
+      "execution_state": "PASS",
+      "claim_disposition": "BLOCKED",
+      "skip_or_blocker": "zero tracked Kafka examples; absence is a K14 synthesis gap and never removal evidence",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5",
+      "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "row_id": "KAFKA-K0-3-CALL-001",
+      "row_kind": "CALL_SITE",
+      "path": "src/real_http_h2_server_messaging_kafka_e2e_tests.rs",
+      "source_pin_id": "KAFKA-K0-3-PIN-DORMANT-HTTP",
+      "source_anchor": "lines 1-997",
+      "consumer_id": "KAFKA-K0-3-CONSUMER-010",
+      "public_entry_points": [
+        "KafkaProducer"
+      ],
+      "k0_1_symbol_ids": [
+        "KPR-PUB-012"
+      ],
+      "journey_ids": [
+        "kfk-journey-http-publish"
+      ],
+      "wiring_state": "UNWIRED",
+      "evidence_class": "MOCK_OR_SIMULATED",
+      "execution_state": "NOT_RUN",
+      "claim_disposition": "STALE",
+      "skip_or_blocker": "no crate module or Cargo target wiring; deterministic producer model",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5",
+      "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "row_id": "KAFKA-K0-3-CALL-002",
+      "row_kind": "CALL_SITE",
+      "path": "src/real_kafka_consumer_group_rebalance_e2e_tests.rs",
+      "source_pin_id": "KAFKA-K0-3-PIN-DORMANT-GROUP",
+      "source_anchor": "lines 1-1058",
+      "consumer_id": "KAFKA-K0-3-CONSUMER-010",
+      "public_entry_points": [
+        "KafkaConsumer",
+        "RebalanceResult"
+      ],
+      "k0_1_symbol_ids": [
+        "KCO-PUB-005",
+        "KCO-PUB-007"
+      ],
+      "journey_ids": [
+        "kfk-journey-rebalance"
+      ],
+      "wiring_state": "UNWIRED",
+      "evidence_class": "MOCK_OR_SIMULATED",
+      "execution_state": "NOT_RUN",
+      "claim_disposition": "STALE",
+      "skip_or_blocker": "no crate module or Cargo target wiring; source explicitly models subscription, fetch, and rebalance",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5",
+      "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "row_id": "KAFKA-K0-3-CALL-003",
+      "row_kind": "CALL_SITE",
+      "path": "src/real_messaging_kafka_trace_event_integration_e2e_tests.rs",
+      "source_pin_id": "KAFKA-K0-3-PIN-DORMANT-TRACE",
+      "source_anchor": "lines 1-974",
+      "consumer_id": "KAFKA-K0-3-CONSUMER-010",
+      "public_entry_points": [
+        "KafkaProducer",
+        "KafkaConsumer"
+      ],
+      "k0_1_symbol_ids": [
+        "KPR-PUB-012",
+        "KCO-PUB-007"
+      ],
+      "journey_ids": [
+        "kfk-journey-observability"
+      ],
+      "wiring_state": "UNWIRED",
+      "evidence_class": "MOCK_OR_SIMULATED",
+      "execution_state": "NOT_RUN",
+      "claim_disposition": "STALE",
+      "skip_or_blocker": "no crate module or Cargo target wiring; imports stale KafkaConfig and trace API names",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5",
+      "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "row_id": "KAFKA-K0-3-CALL-004",
+      "row_kind": "CALL_SITE",
+      "path": "src/real_net_tls_connector_messaging_kafka_integration_e2e_tests.rs",
+      "source_pin_id": "KAFKA-K0-3-PIN-DORMANT-TLS",
+      "source_anchor": "lines 1-684",
+      "consumer_id": "KAFKA-K0-3-CONSUMER-010",
+      "public_entry_points": [
+        "KafkaProducer"
+      ],
+      "k0_1_symbol_ids": [
+        "KPR-PUB-012"
+      ],
+      "journey_ids": [
+        "kfk-journey-secure-connect"
+      ],
+      "wiring_state": "UNWIRED",
+      "evidence_class": "MOCK_OR_SIMULATED",
+      "execution_state": "NOT_RUN",
+      "claim_disposition": "STALE",
+      "skip_or_blocker": "no crate module or Cargo target wiring; imports stale KafkaConfig, KafkaRecord, and KafkaTransaction APIs",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5",
+      "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "row_id": "KAFKA-K0-3-CALL-005",
+      "row_kind": "CALL_SITE",
+      "path": "src/subsystem_mutation_testing.rs",
+      "source_pin_id": "KAFKA-K0-3-PIN-DORMANT-MUTATION",
+      "source_anchor": "Kafka mutation section around lines 1078 onward",
+      "consumer_id": "KAFKA-K0-3-CONSUMER-011",
+      "public_entry_points": [
+        "KafkaProducer",
+        "KafkaConsumer"
+      ],
+      "k0_1_symbol_ids": [
+        "KPR-PUB-012",
+        "KCO-PUB-007"
+      ],
+      "journey_ids": [
+        "kfk-journey-consume-group"
+      ],
+      "wiring_state": "UNWIRED",
+      "evidence_class": "MOCK_OR_SIMULATED",
+      "execution_state": "NOT_RUN",
+      "claim_disposition": "STALE",
+      "skip_or_blocker": "no crate module wiring; imports nonexistent OffsetCommitMode and Partition and uses stale builders",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+      "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    }
+  ],
+  "documentation_claims": [
+    {
+      "claim_id": "KAFKA-K0-3-DOC-CLAIM-001",
+      "paths": [
+        "README.md",
+        "AGENTS.md"
+      ],
+      "source_pin_ids": [
+        "KAFKA-K0-3-PIN-README",
+        "KAFKA-K0-3-PIN-AGENTS"
+      ],
+      "source_anchor": "README.md:487,1193,1441; AGENTS.md:288,383",
+      "claim": "Kafka is an optional rdkafka-backed feature and feature-gated lanes require explicit coverage",
+      "freshness_state": "CURRENT_SOURCE_PINNED",
+      "claim_disposition": "CURRENT",
+      "evidence_class": "STATIC_SOURCE",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    },
+    {
+      "claim_id": "KAFKA-K0-3-DOC-CLAIM-002",
+      "paths": [
+        "docs/dependency_capability_registry.md",
+        "docs/dependency_capability_baseline.md",
+        "docs/dependency_cutover_policy.md"
+      ],
+      "source_pin_ids": [
+        "KAFKA-K0-3-PIN-REGISTRY-DOC",
+        "KAFKA-K0-3-PIN-BASELINE-DOC",
+        "KAFKA-K0-3-PIN-CUTOVER-DOC"
+      ],
+      "source_anchor": "registry lines 55-61,88-90; baseline lines 139-141,184; cutover line 319 onward",
+      "claim": "baseline is planned or BLOCKED_EXTERNAL and KEEP_INCUMBENT forbids dependency exit regardless of consumer count",
+      "freshness_state": "CURRENT_SOURCE_PINNED",
+      "claim_disposition": "CURRENT",
+      "evidence_class": "STATIC_SOURCE",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.15"
+    },
+    {
+      "claim_id": "KAFKA-K0-3-DOC-CLAIM-003",
+      "paths": [
+        "docs/dependency_feature_platform_consumer_matrix.md",
+        "docs/dependency_real_service_fixtures.md"
+      ],
+      "source_pin_ids": [
+        "KAFKA-K0-3-PIN-FEATURE-PLATFORM-DOC",
+        "KAFKA-K0-3-PIN-REAL-SERVICE-DOC"
+      ],
+      "source_anchor": "feature-platform lines 82-110; real-service line 47 onward",
+      "claim": "positive compile profiles are RERUN_REQUIRED and real-service Kafka cells are BLOCKED_EXTERNAL",
+      "freshness_state": "CURRENT_SOURCE_PINNED",
+      "claim_disposition": "CURRENT",
+      "evidence_class": "PLANNED",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.4"
+    },
+    {
+      "claim_id": "KAFKA-K0-3-DOC-CLAIM-004",
+      "paths": [
+        "docs/tokio_reference_applications_templates.md",
+        "artifacts/wave2/capability_examples_smoke_recipes_evidence.json"
+      ],
+      "source_pin_ids": [
+        "KAFKA-K0-3-PIN-REFERENCE-APPS",
+        "KAFKA-K0-3-PIN-WAVE2-EXAMPLE-EVIDENCE"
+      ],
+      "source_anchor": "reference applications lines 39-60; wave2 evidence lines 316-326",
+      "claim": "RA-06 and a real-broker Kafka example remain planned or unsupported with no example path",
+      "freshness_state": "CURRENT_SOURCE_PINNED",
+      "claim_disposition": "BLOCKED",
+      "evidence_class": "PLANNED",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    },
+    {
+      "claim_id": "KAFKA-K0-3-DOC-CLAIM-005",
+      "paths": [
+        "docs/tokio_t6_data_path_e2e_contract.md",
+        "scripts/test_t6_data_path_e2e.sh",
+        "tests/e2e_t6_data_path.rs"
+      ],
+      "source_pin_ids": [
+        "KAFKA-K0-3-PIN-T6-E2E-DOC",
+        "KAFKA-K0-3-PIN-T6-E2E-RUNNER",
+        "KAFKA-K0-3-PIN-E2E-T6"
+      ],
+      "source_anchor": "contract lines 46-47,123; runner line 149; DP-14 lines 925-977",
+      "claim": "DP-14 is enforced by the canonical T6 runner",
+      "freshness_state": "STALE",
+      "claim_disposition": "OVERCLAIM",
+      "evidence_class": "STATIC_SOURCE",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    },
+    {
+      "claim_id": "KAFKA-K0-3-DOC-CLAIM-006",
+      "paths": [
+        "docs/tokio_t6_migration_packs.md"
+      ],
+      "source_pin_ids": [
+        "KAFKA-K0-3-PIN-MIGRATION-PACK"
+      ],
+      "source_anchor": "lines 858-979 versus TransactionalConfig::new at src/messaging/kafka.rs:1841",
+      "claim": "the Kafka transaction migration snippet is current and complete",
+      "freshness_state": "STALE",
+      "claim_disposition": "OVERCLAIM",
+      "evidence_class": "STATIC_SOURCE",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    },
+    {
+      "claim_id": "KAFKA-K0-3-DOC-CLAIM-007",
+      "paths": [
+        "docs/tokio_db_messaging_migration_packs_contract.md"
+      ],
+      "source_pin_ids": [
+        "KAFKA-K0-3-PIN-DB-MIGRATION-DOC"
+      ],
+      "source_anchor": "lines 315-357",
+      "claim": "Kafka migration calls use current names, Cx arguments, awaits, and constructor signatures",
+      "freshness_state": "STALE",
+      "claim_disposition": "OVERCLAIM",
+      "evidence_class": "STATIC_SOURCE",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    },
+    {
+      "claim_id": "KAFKA-K0-3-DOC-CLAIM-008",
+      "paths": [
+        "docs/tokio_db_messaging_gap_baseline.md"
+      ],
+      "source_pin_ids": [
+        "KAFKA-K0-3-PIN-HISTORICAL-GAP-DOC"
+      ],
+      "source_anchor": "lines 1-7,171-200",
+      "claim": "March-era missing-SASL and transaction-stub statements describe the current client",
+      "freshness_state": "HISTORICAL",
+      "claim_disposition": "HISTORICAL",
+      "evidence_class": "HISTORICAL",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    },
+    {
+      "claim_id": "KAFKA-K0-3-DOC-CLAIM-009",
+      "paths": [
+        "docs/tokio_retry_idempotency_failure_contracts.md"
+      ],
+      "source_pin_ids": [
+        "KAFKA-K0-3-PIN-RETRY-DOC"
+      ],
+      "source_anchor": "lines 1-5,146-148,301-302",
+      "claim": "the draft establishes all Kafka retry and idempotency categories as implemented",
+      "freshness_state": "STALE",
+      "claim_disposition": "OVERCLAIM",
+      "evidence_class": "PLANNED",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    },
+    {
+      "claim_id": "KAFKA-K0-3-DOC-CLAIM-010",
+      "paths": [
+        "docs/tokio_ga_readiness_checklist_launch_review.md"
+      ],
+      "source_pin_ids": [
+        "KAFKA-K0-3-PIN-GA-DOC"
+      ],
+      "source_anchor": "lines 79-96,125-126",
+      "claim": "Kafka readiness and cold-start equivalence are established",
+      "freshness_state": "STALE",
+      "claim_disposition": "OVERCLAIM",
+      "evidence_class": "HISTORICAL",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    },
+    {
+      "claim_id": "KAFKA-K0-3-DOC-CLAIM-011",
+      "paths": [
+        "docs/tokio_interop_support_matrix.md"
+      ],
+      "source_pin_ids": [
+        "KAFKA-K0-3-PIN-INTEROP-DOC"
+      ],
+      "source_anchor": "lines 49-50,81-100,195-196",
+      "claim": "rdkafka 0.36, admin support, and a Kafka interop suite remain current",
+      "freshness_state": "STALE",
+      "claim_disposition": "OVERCLAIM",
+      "evidence_class": "HISTORICAL",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    },
+    {
+      "claim_id": "KAFKA-K0-3-DOC-CLAIM-012",
+      "paths": [
+        "docs/tokio_compatibility_limitation_matrix.md"
+      ],
+      "source_pin_ids": [
+        "KAFKA-K0-3-PIN-LIMITATION-DOC"
+      ],
+      "source_anchor": "lines 146-148,247-249",
+      "claim": "nonexistent tests and a 7-of-8 readiness score remain evidence",
+      "freshness_state": "STALE",
+      "claim_disposition": "OVERCLAIM",
+      "evidence_class": "HISTORICAL",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    },
+    {
+      "claim_id": "KAFKA-K0-3-DOC-CLAIM-013",
+      "paths": [
+        "docs/audits/kafka_security_audit_2026-04-29.md"
+      ],
+      "source_pin_ids": [
+        "KAFKA-K0-3-PIN-HISTORICAL-SECURITY-DOC"
+      ],
+      "source_anchor": "lines 9-20",
+      "claim": "the audit is historical and superseded and must not describe current security posture",
+      "freshness_state": "HISTORICAL",
+      "claim_disposition": "HISTORICAL",
+      "evidence_class": "HISTORICAL",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    }
+  ],
+  "compilation_profiles": [
+    {
+      "profile_id": "KAFKA-K0-3-COMPILE-001",
+      "k0_1_profile_id": "KAFKA-PROFILE-NATIVE-DEFAULT-RELEASE",
+      "target": "native release",
+      "cfg": "not(feature=kafka), not(test), not(test-internals), not(debug_assertions)",
+      "surface_state": "FACADE_PRESENT_FAIL_CLOSED",
+      "execution_state": "NOT_RUN",
+      "evidence_class": "STATIC_SOURCE"
+    },
+    {
+      "profile_id": "KAFKA-K0-3-COMPILE-002",
+      "k0_1_profile_id": "KAFKA-PROFILE-NATIVE-DEFAULT-DEBUG",
+      "target": "native debug",
+      "cfg": "not(feature=kafka), debug_assertions",
+      "surface_state": "FACADE_PRESENT_DEBUG_BYPASS_VISIBLE",
+      "execution_state": "NOT_RUN",
+      "evidence_class": "STATIC_SOURCE"
+    },
+    {
+      "profile_id": "KAFKA-K0-3-COMPILE-003",
+      "k0_1_profile_id": "KAFKA-PROFILE-NATIVE-KAFKA-RELEASE",
+      "target": "native release",
+      "cfg": "feature=kafka, not(test)",
+      "surface_state": "RDKAFKA_REAL_BACKEND",
+      "execution_state": "NOT_RUN",
+      "evidence_class": "COMPILE_ONLY"
+    },
+    {
+      "profile_id": "KAFKA-K0-3-COMPILE-004",
+      "k0_1_profile_id": "KAFKA-PROFILE-NATIVE-KAFKA-DEBUG",
+      "target": "native debug",
+      "cfg": "feature=kafka, debug_assertions",
+      "surface_state": "RDKAFKA_REAL_BACKEND_DEBUG_BYPASS_VISIBLE",
+      "execution_state": "NOT_RUN",
+      "evidence_class": "COMPILE_ONLY"
+    },
+    {
+      "profile_id": "KAFKA-K0-3-COMPILE-005",
+      "k0_1_profile_id": "KAFKA-PROFILE-UNIT-NO-KAFKA",
+      "target": "native crate unit test",
+      "cfg": "test, not(feature=kafka)",
+      "surface_state": "DETERMINISTIC_INTENDED_CFG_GAP_ROUTED",
+      "execution_state": "NOT_RUN",
+      "evidence_class": "DETERMINISTIC_ONLY"
+    },
+    {
+      "profile_id": "KAFKA-K0-3-COMPILE-006",
+      "k0_1_profile_id": "KAFKA-PROFILE-UNIT-WITH-KAFKA",
+      "target": "native crate unit test",
+      "cfg": "test, feature=kafka",
+      "surface_state": "REAL_OR_LOCAL_STATE_BY_FORCE_FLAG",
+      "execution_state": "NOT_RUN",
+      "evidence_class": "COMPILE_ONLY"
+    },
+    {
+      "profile_id": "KAFKA-K0-3-COMPILE-007",
+      "k0_1_profile_id": "KAFKA-PROFILE-DOWNSTREAM-NO-KAFKA",
+      "target": "native downstream integration",
+      "cfg": "not(feature=kafka), not(test-internals)",
+      "surface_state": "FACADE_PRESENT_FAIL_CLOSED",
+      "execution_state": "NOT_RUN",
+      "evidence_class": "COMPILE_ONLY"
+    },
+    {
+      "profile_id": "KAFKA-K0-3-COMPILE-008",
+      "k0_1_profile_id": "KAFKA-PROFILE-TEST-INTERNALS-NO-KAFKA",
+      "target": "native downstream integration",
+      "cfg": "not(feature=kafka), feature=test-internals",
+      "surface_state": "FACADE_AND_HARNESS_PRESENT",
+      "execution_state": "NOT_RUN",
+      "evidence_class": "DETERMINISTIC_ONLY"
+    },
+    {
+      "profile_id": "KAFKA-K0-3-COMPILE-009",
+      "k0_1_profile_id": "KAFKA-PROFILE-FUZZ-WORKSPACE",
+      "target": "excluded fuzz workspace",
+      "cfg": "feature=test-internals, feature=fuzz, not(feature=kafka)",
+      "surface_state": "PARSER_HOOKS_NO_RDKAFKA_EDGE",
+      "execution_state": "NOT_RUN",
+      "evidence_class": "WIRE_CODEC_ONLY"
+    },
+    {
+      "profile_id": "KAFKA-K0-3-COMPILE-010",
+      "k0_1_profile_id": "KAFKA-PROFILE-CI-CROSS-PLATFORM",
+      "target": "native CI umbrella",
+      "cfg": "feature=ci-cross-platform",
+      "surface_state": "KAFKA_EXCLUDED",
+      "execution_state": "NOT_RUN",
+      "evidence_class": "COMPILE_ONLY"
+    },
+    {
+      "profile_id": "KAFKA-K0-3-COMPILE-011",
+      "k0_1_profile_id": "KAFKA-PROFILE-NATIVE-ALL-FEATURES",
+      "target": "native",
+      "cfg": "all-features",
+      "surface_state": "RDKAFKA_REAL_BACKEND",
+      "execution_state": "NOT_RUN",
+      "evidence_class": "COMPILE_ONLY"
+    },
+    {
+      "profile_id": "KAFKA-K0-3-COMPILE-012",
+      "k0_1_profile_id": "KAFKA-PROFILE-WASM-NO-KAFKA",
+      "target": "wasm32",
+      "cfg": "not(feature=kafka)",
+      "surface_state": "MESSAGING_MODULE_ABSENT",
+      "execution_state": "NOT_RUN",
+      "evidence_class": "COMPILE_ONLY"
+    },
+    {
+      "profile_id": "KAFKA-K0-3-COMPILE-013",
+      "k0_1_profile_id": "KAFKA-PROFILE-WASM-WITH-KAFKA",
+      "target": "wasm32",
+      "cfg": "feature=kafka",
+      "surface_state": "HARD_COMPILE_ERROR_EXPECTED",
+      "execution_state": "NOT_RUN",
+      "evidence_class": "COMPILE_ONLY"
+    },
+    {
+      "profile_id": "KAFKA-K0-3-COMPILE-014",
+      "k0_1_profile_id": "KAFKA-PROFILE-DOWNSTREAM-NO-KAFKA",
+      "target": "tests/fixtures/downstream-consumer-proof",
+      "cfg": "fixture default features",
+      "surface_state": "DEFAULT_KAFKA_FAIL_CLOSED_TEST_MAPPED",
+      "execution_state": "NOT_RUN",
+      "evidence_class": "COMPILE_ONLY"
+    },
+    {
+      "profile_id": "KAFKA-K0-3-COMPILE-015",
+      "k0_1_profile_id": "KAFKA-PROFILE-NATIVE-KAFKA-RELEASE",
+      "target": "dependency feature-platform sparse profile",
+      "cfg": "no-default-features, feature=kafka",
+      "surface_state": "RERUN_REQUIRED",
+      "execution_state": "NOT_RUN",
+      "evidence_class": "COMPILE_ONLY"
+    },
+    {
+      "profile_id": "KAFKA-K0-3-COMPILE-016",
+      "k0_1_profile_id": "KAFKA-PROFILE-UNIT-WITH-KAFKA",
+      "target": "kafka_real_broker no-run combination profile",
+      "cfg": "features=kafka,test-internals",
+      "surface_state": "RERUN_REQUIRED_NO_RUN_IS_NOT_INTEROPERABILITY",
+      "execution_state": "NOT_RUN",
+      "evidence_class": "COMPILE_ONLY"
+    },
+    {
+      "profile_id": "KAFKA-K0-3-COMPILE-017",
+      "k0_1_profile_id": "KAFKA-PROFILE-TEST-INTERNALS-NO-KAFKA",
+      "target": "root integration tests through conformance dev-dependency cycle",
+      "cfg": "implicit feature unification includes test-internals",
+      "surface_state": "ROOT_INTERNAL_NOT_REPRESENTATIVE_OF_EXTERNAL_DEFAULT_CONSUMER",
+      "execution_state": "NOT_RUN",
+      "evidence_class": "DETERMINISTIC_ONLY"
+    }
+  ],
+  "feature_platform_cells": [
+    {
+      "cell_id": "KAFKA-K0-3-CELL-001",
+      "platform": "linux",
+      "target_ids": [
+        "linux-x86_64-gnu",
+        "linux-aarch64-gnu"
+      ],
+      "feature_state": "DISABLED",
+      "surface_state": "FACADE_PRESENT_FAIL_CLOSED",
+      "execution_state": "NOT_RUN",
+      "evidence_class": "COMPILE_ONLY",
+      "blocker": "fresh target evidence not recorded"
+    },
+    {
+      "cell_id": "KAFKA-K0-3-CELL-002",
+      "platform": "linux",
+      "target_ids": [
+        "linux-x86_64-gnu",
+        "linux-aarch64-gnu"
+      ],
+      "feature_state": "ENABLED",
+      "surface_state": "RDKAFKA_REAL_BACKEND_EXPECTED",
+      "execution_state": "NOT_RUN",
+      "evidence_class": "COMPILE_ONLY",
+      "blocker": "fresh sparse compile and immutable native-library provenance not recorded"
+    },
+    {
+      "cell_id": "KAFKA-K0-3-CELL-003",
+      "platform": "macos",
+      "target_ids": [
+        "macos-aarch64",
+        "macos-x86_64"
+      ],
+      "feature_state": "DISABLED",
+      "surface_state": "FACADE_PRESENT_FAIL_CLOSED",
+      "execution_state": "NOT_RUN",
+      "evidence_class": "COMPILE_ONLY",
+      "blocker": "fresh target evidence not recorded"
+    },
+    {
+      "cell_id": "KAFKA-K0-3-CELL-004",
+      "platform": "macos",
+      "target_ids": [
+        "macos-aarch64",
+        "macos-x86_64"
+      ],
+      "feature_state": "ENABLED",
+      "surface_state": "RDKAFKA_REAL_BACKEND_EXPECTED",
+      "execution_state": "NOT_RUN",
+      "evidence_class": "COMPILE_ONLY",
+      "blocker": "fresh target evidence and native-library provenance not recorded"
+    },
+    {
+      "cell_id": "KAFKA-K0-3-CELL-005",
+      "platform": "windows",
+      "target_ids": [
+        "windows-x86_64-msvc"
+      ],
+      "feature_state": "DISABLED",
+      "surface_state": "FACADE_PRESENT_FAIL_CLOSED",
+      "execution_state": "NOT_RUN",
+      "evidence_class": "COMPILE_ONLY",
+      "blocker": "fresh target evidence not recorded"
+    },
+    {
+      "cell_id": "KAFKA-K0-3-CELL-006",
+      "platform": "windows",
+      "target_ids": [
+        "windows-x86_64-msvc"
+      ],
+      "feature_state": "ENABLED",
+      "surface_state": "RDKAFKA_REAL_BACKEND_EXPECTED",
+      "execution_state": "NOT_RUN",
+      "evidence_class": "COMPILE_ONLY",
+      "blocker": "fresh target evidence and native-library provenance not recorded"
+    },
+    {
+      "cell_id": "KAFKA-K0-3-CELL-007",
+      "platform": "wasm32-browser",
+      "target_ids": [
+        "wasm32-browser"
+      ],
+      "feature_state": "DISABLED",
+      "surface_state": "MESSAGING_MODULE_ABSENT",
+      "execution_state": "NOT_RUN",
+      "evidence_class": "COMPILE_ONLY",
+      "blocker": "fresh target evidence not recorded"
+    },
+    {
+      "cell_id": "KAFKA-K0-3-CELL-008",
+      "platform": "wasm32-browser",
+      "target_ids": [
+        "wasm32-browser"
+      ],
+      "feature_state": "ENABLED",
+      "surface_state": "HARD_COMPILE_ERROR_EXPECTED",
+      "execution_state": "NOT_RUN",
+      "evidence_class": "COMPILE_ONLY",
+      "blocker": "fresh negative target evidence not recorded"
+    }
+  ],
+  "feature_platform_evidence_state": {
+    "knowledge_state": "UNKNOWN",
+    "linux_sparse_kafka": "RERUN_REQUIRED",
+    "linux_kafka_test_internals_no_run": "RERUN_REQUIRED",
+    "linux_real_service_runtime": "BLOCKED_EXTERNAL",
+    "macos_kafka_compile_link": "UNKNOWN",
+    "windows_kafka_compile_link": "UNKNOWN",
+    "wasm_without_kafka": "SOURCE_DECLARED_MESSAGING_ABSENT",
+    "wasm_with_kafka": "SOURCE_DECLARED_COMPILE_ERROR",
+    "no_cross_compile_claim": true,
+    "no_runtime_claim": true
+  },
+  "user_journeys": [
+    {
+      "journey_id": "kfk-journey-feature-disabled",
+      "description": "default-feature downstream construction and broker operation fail closed with KafkaError::FeatureDisabled",
+      "ordered_public_entry_points": [
+        "ProducerConfig::new",
+        "KafkaProducer::new",
+        "KafkaProducer::send"
+      ],
+      "local_row_ids": [
+        "KAFKA-K0-3-TEST-002",
+        "KAFKA-K0-3-TEST-008",
+        "KAFKA-K0-3-FIX-001"
+      ],
+      "execution_state": "NOT_RUN",
+      "evidence_class": "COMPILE_ONLY",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5"
+    },
+    {
+      "journey_id": "kfk-journey-produce",
+      "description": "configure a producer, send, observe delivery metadata, flush, and close",
+      "ordered_public_entry_points": [
+        "ProducerConfig::new",
+        "KafkaProducer::new",
+        "KafkaProducer::send",
+        "KafkaProducer::flush",
+        "KafkaProducer::close"
+      ],
+      "local_row_ids": [
+        "KAFKA-K0-3-TEST-003",
+        "KAFKA-K0-3-TEST-004",
+        "KAFKA-K0-3-TEST-005"
+      ],
+      "execution_state": "NOT_RUN",
+      "evidence_class": "REAL_BROKER_CAPABLE",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
+    },
+    {
+      "journey_id": "kfk-journey-transaction",
+      "description": "configure a transactional producer, begin, stage sends, commit or abort",
+      "ordered_public_entry_points": [
+        "TransactionalProducer::new",
+        "TransactionalProducer::begin_transaction",
+        "Transaction::send",
+        "Transaction::commit"
+      ],
+      "local_row_ids": [
+        "KAFKA-K0-3-TEST-005"
+      ],
+      "execution_state": "NOT_RUN",
+      "evidence_class": "REAL_BROKER_CAPABLE",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
+    },
+    {
+      "journey_id": "kfk-journey-consume-group",
+      "description": "configure a group consumer, subscribe, poll, commit the next offset, seek, rebalance, and close",
+      "ordered_public_entry_points": [
+        "ConsumerConfig::new",
+        "KafkaConsumer::new",
+        "KafkaConsumer::subscribe",
+        "KafkaConsumer::poll",
+        "KafkaConsumer::commit_offsets",
+        "KafkaConsumer::seek",
+        "KafkaConsumer::rebalance",
+        "KafkaConsumer::close"
+      ],
+      "local_row_ids": [
+        "KAFKA-K0-3-TEST-001",
+        "KAFKA-K0-3-TEST-003",
+        "KAFKA-K0-3-TEST-005",
+        "KAFKA-K0-3-TEST-006",
+        "KAFKA-K0-3-TEST-007",
+        "KAFKA-K0-3-DOC-001",
+        "KAFKA-K0-3-CALL-002",
+        "KAFKA-K0-3-CALL-005"
+      ],
+      "execution_state": "NOT_RUN",
+      "evidence_class": "REAL_BROKER_CAPABLE",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
+    },
+    {
+      "journey_id": "kfk-journey-secure-connect",
+      "description": "configure TLS or SASL_SSL, validate redaction, and connect to an authenticated broker",
+      "ordered_public_entry_points": [
+        "KafkaTlsConfig",
+        "KafkaSaslConfig",
+        "KafkaSecurityConfig",
+        "ProducerConfig::security"
+      ],
+      "local_row_ids": [
+        "KAFKA-K0-3-TEST-009",
+        "KAFKA-K0-3-CALL-004"
+      ],
+      "execution_state": "NOT_RUN",
+      "evidence_class": "PLANNED",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
+    },
+    {
+      "journey_id": "kfk-journey-real-broker-proof",
+      "description": "retain immutable evidence for produce-consume, offset acknowledgement, cancellation taxonomy, recovery, and cleanup against an identified broker",
+      "ordered_public_entry_points": [
+        "KafkaProducer::send",
+        "KafkaConsumer::poll",
+        "KafkaConsumer::commit_offsets",
+        "KafkaProducer::close",
+        "KafkaConsumer::close"
+      ],
+      "local_row_ids": [
+        "KAFKA-K0-3-TEST-005",
+        "KAFKA-K0-3-DOC-003"
+      ],
+      "execution_state": "BLOCKED",
+      "evidence_class": "PROOF_ONLY",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
+    },
+    {
+      "journey_id": "kfk-journey-compression-config",
+      "description": "select a declared compression mode and establish actual codec availability and wire behavior",
+      "ordered_public_entry_points": [
+        "ProducerConfig::compression",
+        "KafkaProducer::send"
+      ],
+      "local_row_ids": [
+        "KAFKA-K0-3-TEST-010"
+      ],
+      "execution_state": "NOT_RUN",
+      "evidence_class": "STATIC_SOURCE",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.2"
+    },
+    {
+      "journey_id": "kfk-journey-rebalance",
+      "description": "observe assignment and revocation across an actual group rebalance",
+      "ordered_public_entry_points": [
+        "KafkaConsumer::subscribe",
+        "KafkaConsumer::rebalance",
+        "KafkaConsumer::assigned_partitions"
+      ],
+      "local_row_ids": [
+        "KAFKA-K0-3-TEST-011",
+        "KAFKA-K0-3-CALL-002"
+      ],
+      "execution_state": "NOT_RUN",
+      "evidence_class": "REAL_BROKER_CAPABLE",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
+    },
+    {
+      "journey_id": "kfk-journey-error-taxonomy",
+      "description": "map broker, authentication, capacity, timeout, cancellation, and feature-disabled failures into stable local variants",
+      "ordered_public_entry_points": [
+        "KafkaError::is_transient",
+        "KafkaError::is_retryable",
+        "KafkaError::is_timeout"
+      ],
+      "local_row_ids": [
+        "KAFKA-K0-3-TEST-013",
+        "KAFKA-K0-3-TEST-014"
+      ],
+      "execution_state": "NOT_RUN",
+      "evidence_class": "DETERMINISTIC_ONLY",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5"
+    },
+    {
+      "journey_id": "kfk-journey-migration",
+      "description": "translate a maintained Tokio Kafka workflow to the first-party asupersync facade",
+      "ordered_public_entry_points": [
+        "ProducerConfig",
+        "KafkaProducer",
+        "ConsumerConfig",
+        "KafkaConsumer"
+      ],
+      "local_row_ids": [
+        "KAFKA-K0-3-DOC-002"
+      ],
+      "execution_state": "NOT_RUN",
+      "evidence_class": "STATIC_SOURCE",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    },
+    {
+      "journey_id": "kfk-journey-http-publish",
+      "description": "translate HTTP backpressure into bounded Kafka publishing",
+      "ordered_public_entry_points": [
+        "KafkaProducer::send"
+      ],
+      "local_row_ids": [
+        "KAFKA-K0-3-DOC-004",
+        "KAFKA-K0-3-CALL-001"
+      ],
+      "execution_state": "NOT_RUN",
+      "evidence_class": "MOCK_OR_SIMULATED",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    },
+    {
+      "journey_id": "kfk-journey-observability",
+      "description": "correlate producer and consumer activity with trace events without stale APIs or ambient authority",
+      "ordered_public_entry_points": [
+        "KafkaProducer::send",
+        "KafkaConsumer::poll"
+      ],
+      "local_row_ids": [
+        "KAFKA-K0-3-CALL-003"
+      ],
+      "execution_state": "NOT_RUN",
+      "evidence_class": "MOCK_OR_SIMULATED",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    }
+  ],
+  "evidence_claims": [
+    {
+      "evidence_id": "KAFKA-K0-3-EVIDENCE-001",
+      "subject": "K0.3 repository-local source census",
+      "evidence_class": "STATIC_SOURCE",
+      "execution_state": "PASS",
+      "freshness_state": "CURRENT_SOURCE_PINNED",
+      "broker_contact_state": "NONE",
+      "source_revision": "ae22e710d87412b38e546b32e9702106619481d5",
+      "executed_at_utc": null,
+      "exact_command": null,
+      "broker_version": null,
+      "service_identity": null,
+      "retained_artifacts": [],
+      "result_summary": "manual static source, manifest, documentation, fixture, wiring, and authority census completed",
+      "limitation": "no compiler, test, runtime, broker, external search, or network evidence"
+    },
+    {
+      "evidence_id": "KAFKA-K0-3-EVIDENCE-002",
+      "subject": "maintained downstream default-feature fixture",
+      "evidence_class": "COMPILE_ONLY",
+      "execution_state": "NOT_RUN",
+      "freshness_state": "CURRENT_SOURCE_PINNED",
+      "broker_contact_state": "NONE",
+      "source_revision": "ae22e710d87412b38e546b32e9702106619481d5",
+      "executed_at_utc": null,
+      "exact_command": null,
+      "broker_version": null,
+      "service_identity": null,
+      "retained_artifacts": [],
+      "result_summary": "lane is mapped in downstream_consumer_proof_v1 and proof status is rerun-required",
+      "limitation": "mapping is not fresh compile evidence and covers no feature-enabled Kafka client"
+    },
+    {
+      "evidence_id": "KAFKA-K0-3-EVIDENCE-003",
+      "subject": "wired kafka_real_broker target",
+      "evidence_class": "REAL_BROKER_CAPABLE",
+      "execution_state": "NOT_RUN",
+      "freshness_state": "CURRENT_SOURCE_PINNED",
+      "broker_contact_state": "NOT_ATTEMPTED",
+      "source_revision": "ae22e710d87412b38e546b32e9702106619481d5",
+      "executed_at_utc": null,
+      "exact_command": null,
+      "broker_version": null,
+      "service_identity": null,
+      "retained_artifacts": [],
+      "result_summary": "source and Cargo target exist",
+      "limitation": "successful skip paths, optional env gate, unknown broker version, and no immutable retained receipt"
+    },
+    {
+      "evidence_id": "KAFKA-K0-3-EVIDENCE-004",
+      "subject": "broker parity runner",
+      "evidence_class": "PROOF_ONLY",
+      "execution_state": "NOT_RUN",
+      "freshness_state": "CURRENT_SOURCE_PINNED",
+      "broker_contact_state": "NOT_ATTEMPTED",
+      "source_revision": "ae22e710d87412b38e546b32e9702106619481d5",
+      "executed_at_utc": null,
+      "exact_command": null,
+      "broker_version": null,
+      "service_identity": null,
+      "retained_artifacts": [],
+      "result_summary": "runner declares default-gate, roundtrip, optional offset-ack, and optional resilience scenarios",
+      "limitation": "declared orchestration is not a terminal execution receipt"
+    },
+    {
+      "evidence_id": "KAFKA-K0-3-EVIDENCE-005",
+      "subject": "canonical real-service fixture matrix",
+      "evidence_class": "PLANNED",
+      "execution_state": "BLOCKED",
+      "freshness_state": "CURRENT_SOURCE_PINNED",
+      "broker_contact_state": "BLOCKED_EXTERNAL",
+      "source_revision": "ae22e710d87412b38e546b32e9702106619481d5",
+      "executed_at_utc": null,
+      "exact_command": null,
+      "broker_version": null,
+      "service_identity": null,
+      "retained_artifacts": [],
+      "result_summary": "Kafka service family and three security/version cells are BLOCKED_EXTERNAL",
+      "limitation": "mutable image, ambient bootstrap, and no approved oldest/newest/security matrix"
+    },
+    {
+      "evidence_id": "KAFKA-K0-3-EVIDENCE-006",
+      "subject": "unwired real-prefixed and mutation sources",
+      "evidence_class": "MOCK_OR_SIMULATED",
+      "execution_state": "NOT_RUN",
+      "freshness_state": "STALE",
+      "broker_contact_state": "NONE",
+      "source_revision": "ae22e710d87412b38e546b32e9702106619481d5",
+      "executed_at_utc": null,
+      "exact_command": null,
+      "broker_version": null,
+      "service_identity": null,
+      "retained_artifacts": [],
+      "result_summary": "tracked sources are not wired and several import nonexistent API names",
+      "limitation": "file names and comments are not executable or broker evidence"
+    }
+  ],
+  "external_searches": [
+    {
+      "external_id": "KAFKA-K0-3-EXTERNAL-001",
+      "domain_kind": "REGISTRY_ALIAS",
+      "domain_name": "Kafka-users",
+      "exact_queries": [
+        "resolve registry alias Kafka-users to exact repository URLs, revisions, manifests, owners, and commands"
+      ],
+      "repository_or_package_set": [],
+      "recorded_date_utc": "2026-08-03",
+      "attempted_at_utc": null,
+      "search_status": "NOT_RUN",
+      "knowledge_state": "UNKNOWN",
+      "result_count": null,
+      "results": [],
+      "result_provenance": [],
+      "limitations": "alias is not an identified repository and this static pass performed no network or owner query",
+      "inventory_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.3",
+      "resolution_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "blocks_migration": true,
+      "absence_authority": "NONE"
+    },
+    {
+      "external_id": "KAFKA-K0-3-EXTERNAL-002",
+      "domain_kind": "REGISTRY_ALIAS",
+      "domain_name": "consumer-portfolio",
+      "exact_queries": [
+        "resolve registry alias consumer-portfolio to exact repository URLs, revisions, manifests, owners, and commands"
+      ],
+      "repository_or_package_set": [],
+      "recorded_date_utc": "2026-08-03",
+      "attempted_at_utc": null,
+      "search_status": "NOT_RUN",
+      "knowledge_state": "UNKNOWN",
+      "result_count": null,
+      "results": [],
+      "result_provenance": [],
+      "limitations": "alias is not an identified repository and this static pass performed no network or owner query",
+      "inventory_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.3",
+      "resolution_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "blocks_migration": true,
+      "absence_authority": "NONE"
+    },
+    {
+      "external_id": "KAFKA-K0-3-EXTERNAL-003",
+      "domain_kind": "MAINTAINED_REPOSITORIES",
+      "domain_name": "FrankenSuite",
+      "exact_queries": [
+        "search every maintained FrankenSuite repository at an exact revision for asupersync Kafka feature declarations and public Kafka paths"
+      ],
+      "repository_or_package_set": [],
+      "recorded_date_utc": "2026-08-03",
+      "attempted_at_utc": null,
+      "search_status": "NOT_RUN",
+      "knowledge_state": "UNKNOWN",
+      "result_count": null,
+      "results": [],
+      "result_provenance": [],
+      "limitations": "repository set and revisions are not pinned in this artifact; no external filesystem search was performed",
+      "inventory_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.3",
+      "resolution_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "blocks_migration": true,
+      "absence_authority": "NONE"
+    },
+    {
+      "external_id": "KAFKA-K0-3-EXTERNAL-004",
+      "domain_kind": "PUBLIC_CODE_SEARCH",
+      "domain_name": "GitHub and public code indexes",
+      "exact_queries": [
+        "language:Rust asupersync kafka",
+        "language:TOML asupersync features kafka",
+        "asupersync::messaging::KafkaProducer",
+        "asupersync::messaging::kafka_consumer"
+      ],
+      "repository_or_package_set": [],
+      "recorded_date_utc": "2026-08-03",
+      "attempted_at_utc": null,
+      "search_status": "NOT_RUN",
+      "knowledge_state": "UNKNOWN",
+      "result_count": null,
+      "results": [],
+      "result_provenance": [],
+      "limitations": "no public network query was performed",
+      "inventory_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.3",
+      "resolution_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "blocks_migration": true,
+      "absence_authority": "NONE"
+    },
+    {
+      "external_id": "KAFKA-K0-3-EXTERNAL-005",
+      "domain_kind": "PACKAGE_INDEX",
+      "domain_name": "crates.io reverse dependencies and package metadata",
+      "exact_queries": [
+        "crates.io asupersync reverse dependencies",
+        "crates.io packages depending on asupersync with kafka feature"
+      ],
+      "repository_or_package_set": [],
+      "recorded_date_utc": "2026-08-03",
+      "attempted_at_utc": null,
+      "search_status": "NOT_RUN",
+      "knowledge_state": "UNKNOWN",
+      "result_count": null,
+      "results": [],
+      "result_provenance": [],
+      "limitations": "no package-index query was performed and feature use cannot be inferred from reverse-dependency counts alone",
+      "inventory_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.3",
+      "resolution_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "blocks_migration": true,
+      "absence_authority": "NONE"
+    }
+  ],
+  "owned_unknowns": [
+    {
+      "unknown_id": "KAFKA-K0-3-UNKNOWN-001",
+      "subject_id": "Kafka-users",
+      "reason": "registry alias has no exact repositories, revisions, owners, or commands",
+      "resolution_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "resolution_gate": "claim-time external inventory",
+      "blocks_migration": true
+    },
+    {
+      "unknown_id": "KAFKA-K0-3-UNKNOWN-002",
+      "subject_id": "consumer-portfolio",
+      "reason": "registry alias has no exact repositories, revisions, owners, or commands",
+      "resolution_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "resolution_gate": "claim-time external inventory",
+      "blocks_migration": true
+    },
+    {
+      "unknown_id": "KAFKA-K0-3-UNKNOWN-003",
+      "subject_id": "FrankenSuite Kafka consumers",
+      "reason": "maintained repository set and revisions were not searched",
+      "resolution_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "resolution_gate": "claim-time cross-repository inventory",
+      "blocks_migration": true
+    },
+    {
+      "unknown_id": "KAFKA-K0-3-UNKNOWN-004",
+      "subject_id": "public downstream Kafka consumers",
+      "reason": "public code and package indexes were not searched",
+      "resolution_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "resolution_gate": "claim-time public provenance inventory",
+      "blocks_migration": true
+    },
+    {
+      "unknown_id": "KAFKA-K0-3-UNKNOWN-005",
+      "subject_id": "feature-enabled maintained downstream compile fixture",
+      "reason": "current fixture forwards kafka but owns no feature-enabled compile or run target",
+      "resolution_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "resolution_gate": "synthesized consumer fixture with exact profile",
+      "blocks_migration": true
+    },
+    {
+      "unknown_id": "KAFKA-K0-3-UNKNOWN-006",
+      "subject_id": "immutable real-broker receipt",
+      "reason": "no retained source-pinned broker-version and service-identity receipt exists",
+      "resolution_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+      "resolution_gate": "terminal real-service evidence without skip success",
+      "blocks_migration": true
+    }
+  ],
+  "routed_gaps": [
+    {
+      "gap_id": "KAFKA-K0-3-GAP-001",
+      "finding": "consumer documentation names nonexistent singular commit_offset instead of commit_offsets",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    },
+    {
+      "gap_id": "KAFKA-K0-3-GAP-002",
+      "finding": "tracked real_kafka_consumer_group_rebalance source is unwired and mock or simulated",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    },
+    {
+      "gap_id": "KAFKA-K0-3-GAP-003",
+      "finding": "compression roundtrip documentation overstates configuration-only tests as broker and wire coverage",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    },
+    {
+      "gap_id": "KAFKA-K0-3-GAP-004",
+      "finding": "rebalance lifecycle source permits successful skip and its no-feature branch is only a placeholder",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    },
+    {
+      "gap_id": "KAFKA-K0-3-GAP-005",
+      "finding": "real-broker README makes broad lifecycle and performance claims without immutable retained evidence",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    },
+    {
+      "gap_id": "KAFKA-K0-3-GAP-006",
+      "finding": "wired real-broker target has no required-features and its named broker tests return success when the opt-in environment is absent",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
+    },
+    {
+      "gap_id": "KAFKA-K0-3-GAP-007",
+      "finding": "canonical real-service Kafka version and security cells remain BLOCKED_EXTERNAL",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.4"
+    },
+    {
+      "gap_id": "KAFKA-K0-3-GAP-008",
+      "finding": "maintained downstream fixture has no feature-enabled Kafka compile or broker journey",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "gap_id": "KAFKA-K0-3-GAP-009",
+      "finding": "there is no tracked Kafka example under examples",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    },
+    {
+      "gap_id": "KAFKA-K0-3-GAP-010",
+      "finding": "all external downstream domains remain unsearched and UNKNOWN",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+    },
+    {
+      "gap_id": "KAFKA-K0-3-GAP-011",
+      "finding": "the canonical T6 runner does not enable Kafka although DP-14 documentation calls the path enforced",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    },
+    {
+      "gap_id": "KAFKA-K0-3-GAP-012",
+      "finding": "maintained migration documents contain stale transaction constructors, public aliases, Cx arguments, awaits, and method signatures",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    },
+    {
+      "gap_id": "KAFKA-K0-3-GAP-013",
+      "finding": "RecordBatch vectors claim librdkafka provenance without immutable metadata and include placeholder bytes",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.3"
+    },
+    {
+      "gap_id": "KAFKA-K0-3-GAP-014",
+      "finding": "SASL audit reimplements a local classifier instead of exercising the private backend mapping",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5"
+    },
+    {
+      "gap_id": "KAFKA-K0-3-GAP-015",
+      "finding": "older migration and readiness documents contain stale Kafka error counts, source anchors, version numbers, and PASS or EQUIVALENT claims",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.10.5"
+    }
+  ],
+  "k14_1_refresh_handoff": {
+    "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+    "trigger": "CLAIM_TIME_BEFORE_MIGRATION_OR_CUTOVER",
+    "baseline_counts_authoritative_at_claim_time": false,
+    "required_scopes": [
+      "REPOSITORY",
+      "WORKSPACE",
+      "FRANKENSUITE",
+      "KNOWN_MAINTAINED_CONSUMERS",
+      "PACKAGE_INDEXES",
+      "PUBLIC_CODE_SEARCH"
+    ],
+    "required_rechecks": [
+      "refresh exact repository revisions and the local occurrence path map",
+      "resolve every external alias to an exact owner and revision or retain owned UNKNOWN",
+      "rerun every maintained compile profile without converting compile-only into runtime evidence",
+      "require immutable broker versions and service identities for real-broker claims",
+      "reject successful skip paths as proof"
+    ],
+    "required_outputs": [
+      "refreshed queries, dates, repositories, revisions, owners, and provenance",
+      "one owned compile fixture for each discovered public capability combination",
+      "one terminal real-broker journey for each claimed broker capability",
+      "synthesized consumers for public combinations with no discovered local use",
+      "exact Agent Mail reservation boundaries for owned changes"
+    ],
+    "unknown_blocks_migration": true,
+    "regression_blocks_migration": true,
+    "may_authorize_deletion": false
+  },
+  "coverage_receipt": {
+    "all_local_rows_source_pinned_or_explicit_absence": true,
+    "all_local_rows_owned": true,
+    "all_claims_classified": true,
+    "all_k0_1_profiles_mapped": true,
+    "all_k0_2_semantics_dispositioned_by_exact_join_rule": true,
+    "all_user_journeys_mapped": true,
+    "local_static_scope_complete": true,
+    "migration_eligible": false,
+    "unowned_local_rows": [],
+    "unclassified_claim_rows": [],
+    "unmapped_k0_1_profiles": [],
+    "unmapped_user_journeys": [],
+    "unknown_local_rows": [],
+    "creation_session_validation_mode": "STATIC_INSPECTION_ONLY",
+    "contract_source_execution_claimed": false,
+    "contract_execution_evidence": "NOT_RECORDED_IN_THIS_ARTIFACT"
+  },
+  "no_claim_boundaries": [
+    "This artifact proves only the source-pinned repository-local static downstream, documentation, fixture, profile, cell, and journey census at its baseline revision.",
+    "It records no compiler, formatter, test, runtime, broker, external-search, or network execution from the creation session.",
+    "A wired target, declared runner, successful skip, deterministic model, mock, parser, codec, source audit, or compile-only profile is not real-broker evidence.",
+    "The external downstream population is UNKNOWN, not zero, and remains owned by K14.1.",
+    "No absence, zero local example count, stale source, or unrun search authorizes removal of rdkafka, librdkafka, the kafka feature, a public API, a capability, a file, or behavior.",
+    "The packet does not prove broker interoperability, version support, security, cancellation correctness, transaction fencing, credential redaction, codec availability, performance, broad workspace health, release readiness, or migration eligibility."
+  ]
+}
