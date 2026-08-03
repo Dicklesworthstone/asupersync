@@ -53,7 +53,7 @@ controlled schedules deterministic and replayable.
 | **No silent drops** | Covered two-phase primitives use reserve/commit so uncommitted work aborts cleanly and committed sends are never half-sent |
 | **Deterministic testing** | Lab runtime: virtual time, deterministic scheduling, trace replay |
 | **Adaptive preemption fairness** | Deterministic EXP3/Hedge policy tunes cancel streak limits with regret-bounded updates |
-| **Drain progress certificates** | Variance-adaptive Azuma/Freedman bounds classify drain phase and confidence to quiescence |
+| **Drain progress certificates** | Conditional range-bounded Azuma/Freedman candidates accompany deterministic phase and projected-confidence diagnostics |
 | **Spectral early warnings** | Wait-graph spectral monitor combines conformal bounds and anytime-valid evidence |
 | **Capability security** | Runtime effect APIs flow through explicit `Cx` or capability tokens; host-boundary and test-only exceptions stay named and scoped |
 
@@ -243,7 +243,7 @@ Running → CancelRequested → Cancelling → Finalizing → Completed(Cancelle
 
 Some primitives and proof surfaces publish explicit cancellation responsiveness bounds, such as bounded commit sections, mask-depth limits, scheduler cancel-streak fairness, static plan analysis, and lab cancellation oracles. A blanket per-primitive responsiveness-bound registry is still a design requirement, not a universal runtime guarantee today; budgets are sufficient conditions only for paths with a concrete published bound.
 
-Cancellation progress is continuously certifiable. `ProgressCertificate` tracks potential descent, classifies the current drain regime (`warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`), and emits variance-adaptive concentration bounds (Freedman with Azuma as a conservative baseline). This turns "is shutdown actually converging?" into a measurable claim instead of a guess.
+Cancellation progress is continuously observable through `ProgressCertificate`. It tracks potential descent, classifies the current drain regime (`warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`), and emits a conditional range-bounded concentration envelope from Freedman and Azuma candidates. The realized delta variance remains diagnostic-only rather than being reused as predictable variation. This makes the evidence behind "is shutdown actually converging?" inspectable without treating one trace as proof of future drift.
 
 ### 3. Two-Phase Effects Prevent Data Loss
 
@@ -366,19 +366,21 @@ with importance-weighted reward `r̂_t(a_t) = r_t / p_t(a_t)` for the selected a
 
 Why it helps: cancel-heavy workloads and latency-heavy workloads need different preemption pressure. This controller adapts online while preserving deterministic replay semantics and bounded starvation envelopes.
 
-### Variance-Adaptive Drain Certificates (Azuma + Freedman + Phase Classification)
+### Range-Bounded Drain Certificates (Azuma + Freedman + Phase Classification)
 
-Cancellation drain progress is monitored as a martingale-style certificate over potential deltas. The runtime reports both a worst-case Azuma bound and a variance-adaptive Freedman bound:
+Cancellation drain progress is monitored over signed net-potential deltas. The runtime reports an Azuma baseline and an operational envelope that compares it with a range-only Freedman candidate:
 
 ```text
-P(M_t - M_0 ≥ x) ≤ exp(-x² / (2(V_t + c x / 3)))
+P(S_t ≥ x and Q_t ≤ q) ≤ exp(-x² / (2(q + B x / 3)))
 ```
 
-where `V_t` is predictable variation and `c` bounds one-step increments.
+For `t ≥ 1`, `c > 0`, `x > 0`, and `q ≥ 0`, signed progress `Y_i = -Δ_i` gives cumulative centered shortfall `S_t = Σ(E[Y_i | F_{i-1}] - Y_i)` and predictable quadratic variation `Q_t`. The absolute signed step is bounded by `c`, and the centered upper increment is bounded by `B = 2c`. The implementation uses the outcome-independent cap `Q_t ≤ t·c²`, then selects the smaller Azuma/Freedman candidate. A trace that exceeds the configured step range disables concentration claims for that verdict.
+
+Gross downward credit is retained for phase diagnostics only. Its accounted-potential total is pathwise nondecreasing, so the progress certificate does not use it for Ville or optional-stopping evidence. The projected confidence field is conditional on persistence of the empirical plug-in net-progress rate; it is not a proof of future drift.
 
 The same monitor classifies operational drain regime (`warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`) so operators can distinguish "normal long tail" from "true stall".
 
-Why it helps: shutdown and fail-fast behavior can be audited with explicit confidence numbers and phase labels, instead of timeout heuristics.
+Why it helps: shutdown and fail-fast behavior can be audited with explicit conditional confidence calculations and phase labels, instead of timeout heuristics alone.
 
 ### Spectral Wait-Graph Early Warning (Cheeger/Fiedler + Conformal + E-Process)
 
@@ -1278,7 +1280,7 @@ Asupersync has formal semantics backing its engineering.
 | **Traces** | Mazurkiewicz equivalence (partial orders) | DPOR-style guided exploration (not certified-optimal DPOR), stable replay |
 | **Cancellation** | Two-player game with budgets | Completeness theorem: sufficient budgets guarantee termination |
 | **Adaptive scheduling** | EXP3/Hedge no-regret online learning | Dynamic preemption control without fairness blind spots |
-| **Drain certificates** | Martingales + Freedman/Azuma concentration | Quantified confidence that cancellation drain reaches quiescence |
+| **Drain certificates** | Signed-step range bounds + empirical phase diagnostics | Conditional, auditable progress evidence for cancellation drain |
 | **Structural diagnostics** | Spectral graph theory + conformal + e-processes | Early warning on wait-graph fragmentation with calibrated alarms |
 
 See [`asupersync_v4_formal_semantics.md`](./asupersync_v4_formal_semantics.md) for the complete operational semantics.
@@ -1292,7 +1294,7 @@ Asupersync is intentionally "math-forward": it uses advanced math and theory-gra
 | Mechanism | Current status |
 |-----------|----------------|
 | EXP3/Hedge scheduler control | Implemented runtime scheduling control surface |
-| Martingale drain certificates | Implemented cancellation progress diagnostics |
+| Drain progress diagnostics | Implemented cancellation progress diagnostics |
 | Spectral wait-graph health | Implemented observability diagnostic; advisory early warning, not a standalone deadlock proof |
 | Mazurkiewicz/Foata trace canonicalization and DPOR | Implemented lab/trace exploration machinery |
 | Persistent homology trace scoring | Implemented lab exploration prototype; used to prioritize interesting schedules, not a production runtime gate |
@@ -1302,9 +1304,9 @@ Asupersync is intentionally "math-forward": it uses advanced math and theory-gra
 
 `src/runtime/scheduler/three_lane.rs` includes a deterministic EXP3/Hedge controller that selects cancel-streak limits per epoch from observed reward (progress + fairness + deadline components). This is the scheduler's online-control layer: it adapts to workload regime shifts while preserving deterministic replay and explicit fairness bounds.
 
-### Martingale Drain Certificates (Freedman + Azuma + Phase Labels)
+### Drain Progress Diagnostics (Freedman + Azuma + Phase Labels)
 
-`src/cancel/progress_certificate.rs` models cancellation drain as a stochastic progress process with auditable evidence, variance estimation, and concentration bounds. Freedman provides a tighter variance-aware bound; Azuma remains as conservative reference. Verdicts include phase classification (`warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`) for operational clarity.
+`src/cancel/progress_certificate.rs` models cancellation drain as a stochastic progress process with auditable evidence, diagnostic variance estimation, and conditional concentration calculations. The public tail selects the stronger of a range-only Freedman candidate and the Azuma baseline; realized variance is never reused as predictable variation. Verdicts include phase classification (`warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`) for operational clarity.
 
 ### Spectral Bifurcation Warnings on the Wait Graph
 

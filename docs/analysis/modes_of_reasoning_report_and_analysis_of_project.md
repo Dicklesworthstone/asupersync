@@ -87,13 +87,13 @@ The descriptive modes (F7, F4) mapped the system's actual behavior — feedback 
 **Modes:** B9, L5, F7, L2 (4 modes)
 **Confidence:** 0.90
 
-Persistent homology, sheaf theory, separation logic, Dialectica interpretation, session types, martingale drain certificates, conformal calibration, TLA+ export, and geodesic normalization are implemented, tested in isolation, and then never called from any operational path. `grep` for their public types returns zero external callers.
+At the time of this point-in-time audit, persistent homology, sheaf theory, separation logic, Dialectica interpretation, session types, drain progress diagnostics, conformal calibration, TLA+ export, and geodesic normalization were reported as implemented and tested in isolation without operational callers. That caller count is historical: later runtime integration and corrected conditional/no-Ville boundaries supersede the progress-certificate portion, so current source must be checked before reusing this conclusion.
 
 **Evidence chain:**
 - B9§F1: Persistent homology / GF(2) boundary — zero callers outside trace/lab chain
 - B9§F2: Sheaf consistency — zero callers outside its own file
 - B9§F3: Separation logic + Dialectica + session types — 9,895 lines, zero runtime callers
-- B9§F4: Martingale drain certificates — zero callers, simpler 10-line alternative exists
+- B9§F4: Drain progress diagnostics — the original audit reported zero callers; later runtime integration and the corrected conditional/no-Ville boundary supersede that snapshot
 - L5§F5: Spectral health monitor — 3,371 lines where cycle detection suffices
 - F7§F3: Lyapunov governor suggests but scheduler never consumes suggestions
 - L2§F2: "Alien Artifact" section appears twice in README, prioritizes impressiveness

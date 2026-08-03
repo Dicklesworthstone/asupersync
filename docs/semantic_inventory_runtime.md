@@ -90,7 +90,7 @@ Source base: `src/` (~377K lines, 499 files)
 
 - **Intent**: Cancelled tasks eventually complete (drain within bounded budget).
 - **Primary citation**: `src/types/cancel.rs:13-19` (cleanup budget table bounds drain time).
-- **Certificate tracking**: `src/cancel/progress_certificate.rs` (statistical certificates for drain progress).
+- **Certificate tracking**: `src/cancel/progress_certificate.rs` (empirical phase/stall diagnostics and conditional signed-step range calculations).
 - **Oracle**: `src/lab/oracle/cancellation_protocol.rs:679` (`fn check` comprehensive invariant checking).
 - **Charter ref**: SEM-INV-003
 

@@ -185,7 +185,7 @@ Early-warning severity model over live wait graph: `none / watch / warning / cri
 
 Source: `src/cancel/progress_certificate.rs`
 
-Drain phase: `warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`. With Freedman/Azuma confidence bounds.
+Drain phase: `warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`, plus conditional range-bounded Freedman/Azuma calculations. Gross credit is diagnostic bookkeeping, not probability evidence.
 
 ## Debugging Workflow
 

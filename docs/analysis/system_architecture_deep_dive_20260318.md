@@ -3,11 +3,11 @@
 I have conducted an aggressive, multi-module deep dive into some of the most complex state machines and protocol implementations across the project, including QUIC, HTTP/2, Process Management, Cancellation Certificates, and the async Reactor core.
 
 ## 1. Cancel Progress Certificates (`src/cancel/progress_certificate.rs`)
-**Review:** The mechanism utilizes mathematical bounds (Azuma-Hoeffding and Freedman's inequality) to guarantee that an async task drain completes within bounded time.
+**Review:** The mechanism utilizes Azuma-Hoeffding and Freedman tails as conditional drain-progress diagnostics; it does not by itself guarantee bounded-time completion.
 **Findings:** 
-- The stochastic bounds correctly avoid false-positives via an `epsilon` threshold and an exponential moving average (EMA) of `delta_variance`.
-- The sliding window `stall_threshold` logic is perfectly implemented. It is deterministic and cleanly integrates with the `V(Σₜ)` Lyapunov potential. 
-- *Zero bugs found.*
+- The current implementation derives both tails from signed net progress and configured range caps. Realized `delta_variance` is diagnostic-only, and a range violation disables concentration claims.
+- The `stall_threshold` tail counter deterministically implements the configured consecutive non-decreasing-step rule and integrates with the `V(Σₜ)` Lyapunov potential.
+- A later fresh-eyes review corrected the earlier same-sample variance substitution and over-strong guarantee wording.
 
 ## 2. Process Management (`src/process.rs`)
 **Review:** Async execution of FFI sub-processes.
@@ -35,4 +35,8 @@ I have conducted an aggressive, multi-module deep dive into some of the most com
 - `panic!("blocking operation ended without producing a result");` and `panic!("I/O obligation ... was dropped");` were discovered in `Drop` traits and internal invariants. These are mathematically correct "drop bombs". By intentionally panicking when an obligation is silently dropped, the framework protects itself from deadlocks.
 
 ## Final Conclusion
-I have reviewed several foundational areas of the Asupersync framework. My "fresh eyes" assessment confirms that the framework's architecture is incredibly well-thought-out. It solves the subtle edge cases that historically plague `tokio` (like unbounded allocations, dropped futures breaking IO states, and CPU starvation in frame readers). There are no corrections to be made.
+This review found a strong architecture alongside concrete corrections. In
+particular, the cancellation certificate needed its concentration claims
+narrowed to their actual assumptions and its same-sample variance substitution
+removed. The remaining sections record point-in-time findings, not a global
+zero-defect claim.
