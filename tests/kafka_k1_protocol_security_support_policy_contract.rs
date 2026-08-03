@@ -23,9 +23,9 @@ const ADR_PATH: &str = "docs/adr/dep_plan_adr_009_kafka_client.md";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
 
 const ARTIFACT_SHA256: &str =
-    "856cbf7f062b25f5534ecfd3ec2e902c6387af0686763ab10a49980c1ca4926c";
+    "fc63047f2d57c514ebd662cf836c85ccf6186c7f56bf9c5e0c49c135fb8fb33a";
 const DOC_SHA256: &str =
-    "63ebc9204b243e0d1ed79c15e1608caf1308f8e7924c706d3919f0412aac3a43";
+    "d28f1b08f273a71ecd4ba303e9efc197d5394d3ae0f3a6e2efb7eebe83b8d5df";
 
 const ARTIFACT_ID: &str = "kafka-k1-protocol-security-support-policy-v1";
 const PROGRAM_ID: &str = "dependency-sovereignty-rev5";
@@ -38,7 +38,7 @@ const BASELINE_REVISION: &str = "f3a02fe6e6e5d0dca6db91204fcf2da53c22a5c7";
 const INVENTORY_STATE: &str =
     "K1_2_PROTOCOL_BROKER_AND_SECURITY_POLICY_FROZEN_KEEP_INCUMBENT";
 const POLICY_ROW_SHA256: &str =
-    "0bbe6624091452001a43445029329098176bf6849bdb60cc277200d4f38e7d38";
+    "a95fe46e59be4859e5fd1d7b106d6e2542a7adba4314050fc2d6616bb91ed60e";
 const NO_CLAIM_SHA256: &str =
     "0de9d792c3348c6fc5c76e1f54d2dd8fbf9bec3f87e9700de27ca08ce2f2345e";
 
@@ -94,7 +94,7 @@ const INPUT_PATHS: &[&str] = &[
     "tests/kafka_sasl_authentication_audit.rs",
 ];
 
-const AUTHORITY_TOKEN_PATHS: &[&str] = &[
+const AUTHORITY_ID_PATHS: &[&str] = &[
     "artifacts/kafka_k1_obligation_index_v1.json",
     "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
     "artifacts/kafka_incumbent_semantics_matrix_v1.json",
@@ -697,31 +697,33 @@ fn check_tracker_routes(root: &Path, artifact: &Value) -> Result<(), String> {
     Ok(())
 }
 
-fn collect_authority_tokens(value: &Value, tokens: &mut BTreeSet<String>) {
+fn collect_authority_ids(value: &Value, ids: &mut BTreeSet<String>) {
     match value {
         Value::Array(values) => {
             for value in values {
-                collect_authority_tokens(value, tokens);
+                collect_authority_ids(value, ids);
             }
         }
         Value::Object(map) => {
-            for value in map.values() {
-                collect_authority_tokens(value, tokens);
+            for (key, value) in map {
+                if key.ends_with("_id") {
+                    if let Some(id) = value.as_str() {
+                        ids.insert(id.to_owned());
+                    }
+                }
+                collect_authority_ids(value, ids);
             }
-        }
-        Value::String(value) => {
-            tokens.insert(value.clone());
         }
         _ => {}
     }
 }
 
 fn check_source_authority_resolution(root: &Path, artifact: &Value) -> Result<(), String> {
-    let mut authority_tokens = BTreeSet::new();
-    for path in AUTHORITY_TOKEN_PATHS {
-        collect_authority_tokens(&parse_json(root, path)?, &mut authority_tokens);
+    let mut authority_ids = BTreeSet::new();
+    for path in AUTHORITY_ID_PATHS {
+        collect_authority_ids(&parse_json(root, path)?, &mut authority_ids);
     }
-    authority_tokens.insert(ADR_ID.to_owned());
+    authority_ids.insert(ADR_ID.to_owned());
 
     let mut referenced_tokens = BTreeSet::new();
     for (collection, _, _) in CELL_COLLECTIONS {
@@ -741,7 +743,7 @@ fn check_source_authority_resolution(root: &Path, artifact: &Value) -> Result<()
                     .as_str()
                     .filter(|value| !value.is_empty())
                     .ok_or_else(|| format!("cell {cell_id} has an invalid authority token"))?;
-                if !authority_tokens.contains(reference) {
+                if !authority_ids.contains(reference) {
                     return Err(format!(
                         "cell {cell_id} authority token is unresolved: {reference}"
                     ));
@@ -1052,6 +1054,21 @@ fn check_special_policy_rows(artifact: &Value) -> Result<(), String> {
         "REQUIRED_REJECT_ITERATIONS_OUTSIDE_4096_TO_65536_NO_APPLICATION_EFFECT",
     )?;
     expect_text(iterations, "current_evidence_state", "STATIC_SOURCE")?;
+
+    for row in array(artifact, "negative_authentication_cells")? {
+        let cell_id = text(row, "cell_id")?;
+        let authority_ids = array(row, "source_authority_ids")?
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<BTreeSet<_>>();
+        for required_authority in ["KAFKA-K1-SHARED-011", "KAFKA-K0-4-UNKNOWN-007"] {
+            if !authority_ids.contains(required_authority) {
+                return Err(format!(
+                    "negative cell {cell_id} is missing direct authority {required_authority}"
+                ));
+            }
+        }
+    }
 
     let correlation = find_cell(
         artifact,

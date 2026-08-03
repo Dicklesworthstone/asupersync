@@ -99,9 +99,10 @@ These are inventory counts, not pass counts.
 Every broker, API, header, flexible-encoding, negotiation, transport,
 credential, and negative cell carries a non-empty `source_authority_ids` join.
 Every protocol-binding group carries a non-empty `authority_rows` join. The
-verifier resolves those tokens against the pinned K1.1, K0.4, K0.2, and K1.3
-JSON authorities plus the governing ADR ID. The direct K1.2 assignments
-`KAFKA-K1-SHARED-009` (remote plaintext) and `KAFKA-K1-SHARED-011` (secret
+verifier resolves those tokens against typed ID fields in the pinned K1.1,
+K0.4, K0.2, and K1.3 JSON authorities plus the governing ADR ID. The direct
+K1.2 assignments `KAFKA-K1-SHARED-009` (remote plaintext) and
+`KAFKA-K1-SHARED-011` (secret
 redaction) are retained explicitly. K0.4 unknowns for package selection and the
 immutable authenticated fixture remain linked and blocking rather than being
 silently omitted.

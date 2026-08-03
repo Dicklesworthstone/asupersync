@@ -1032,7 +1032,7 @@
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX"]
+      "source_authority_ids": ["KAFKA-K1-SHARED-011", "KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX", "KAFKA-K0-4-UNKNOWN-007"]
     },
     {
       "cell_id": "KAFKA-K1-2-NEG-AUTH-002-WRONG-PASSWORD",
@@ -1043,7 +1043,7 @@
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX"]
+      "source_authority_ids": ["KAFKA-K1-SHARED-011", "KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX", "KAFKA-K0-4-UNKNOWN-007"]
     },
     {
       "cell_id": "KAFKA-K1-2-NEG-AUTH-003-WRONG-MECHANISM",
@@ -1054,7 +1054,7 @@
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX", "KAFKA-ENUM-004"]
+      "source_authority_ids": ["KAFKA-K1-SHARED-011", "KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX", "KAFKA-K0-4-UNKNOWN-007", "KAFKA-ENUM-004"]
     },
     {
       "cell_id": "KAFKA-K1-2-NEG-AUTH-004-UNTRUSTED-CA",
@@ -1065,7 +1065,7 @@
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX"]
+      "source_authority_ids": ["KAFKA-K1-SHARED-011", "KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX", "KAFKA-K0-4-UNKNOWN-007"]
     },
     {
       "cell_id": "KAFKA-K1-2-NEG-AUTH-005-HOSTNAME",
@@ -1076,7 +1076,7 @@
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX"]
+      "source_authority_ids": ["KAFKA-K1-SHARED-011", "KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX", "KAFKA-K0-4-UNKNOWN-007"]
     },
     {
       "cell_id": "KAFKA-K1-2-NEG-AUTH-006-CERT-TIME",
@@ -1087,7 +1087,7 @@
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX"]
+      "source_authority_ids": ["KAFKA-K1-SHARED-011", "KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX", "KAFKA-K0-4-UNKNOWN-007"]
     },
     {
       "cell_id": "KAFKA-K1-2-NEG-AUTH-007-MISSING-CLIENT-CERT",
@@ -1098,7 +1098,7 @@
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX"]
+      "source_authority_ids": ["KAFKA-K1-SHARED-011", "KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX", "KAFKA-K0-4-UNKNOWN-007"]
     },
     {
       "cell_id": "KAFKA-K1-2-NEG-AUTH-008-CERT-KEY-MISMATCH",
@@ -1109,7 +1109,7 @@
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX"]
+      "source_authority_ids": ["KAFKA-K1-SHARED-011", "KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX", "KAFKA-K0-4-UNKNOWN-007"]
     },
     {
       "cell_id": "KAFKA-K1-2-NEG-AUTH-009-KEY-PASSWORD",
@@ -1120,7 +1120,7 @@
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX", "KAFKA-K0-2-GAP-11"]
+      "source_authority_ids": ["KAFKA-K1-SHARED-011", "KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX", "KAFKA-K0-4-UNKNOWN-007", "KAFKA-K0-2-GAP-11"]
     },
     {
       "cell_id": "KAFKA-K1-2-NEG-AUTH-010-MALFORMED-SASL",
@@ -1131,7 +1131,7 @@
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.12.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX"]
+      "source_authority_ids": ["KAFKA-K1-SHARED-011", "KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX", "KAFKA-K0-4-UNKNOWN-007"]
     },
     {
       "cell_id": "KAFKA-K1-2-NEG-AUTH-011-SERVER-PROOF",
@@ -1142,7 +1142,7 @@
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX"]
+      "source_authority_ids": ["KAFKA-K1-SHARED-011", "KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX", "KAFKA-K0-4-UNKNOWN-007"]
     },
     {
       "cell_id": "KAFKA-K1-2-NEG-AUTH-012-DOWNGRADE",
@@ -1153,7 +1153,7 @@
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["DEP-ADR-009", "KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX"]
+      "source_authority_ids": ["KAFKA-K1-SHARED-011", "DEP-ADR-009", "KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX", "KAFKA-K0-4-UNKNOWN-007"]
     },
     {
       "cell_id": "KAFKA-K1-2-NEG-AUTH-013-SECRET-CANARY",
@@ -1164,7 +1164,7 @@
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
       "real_service_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
       "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.12.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],
-      "source_authority_ids": ["KAFKA-K0-4-AUTH-005-PROOF-REPORTING", "KAFKA-K0-2-GAP-11", "KAFKA-K0-2-GAP-12"]
+      "source_authority_ids": ["KAFKA-K1-SHARED-011", "KAFKA-K0-4-AUTH-005-PROOF-REPORTING", "KAFKA-K0-4-UNKNOWN-007", "KAFKA-K0-2-GAP-11", "KAFKA-K0-2-GAP-12"]
     },
     {
       "cell_id": "KAFKA-K1-2-NEG-AUTH-014-SALT-LENGTH",
