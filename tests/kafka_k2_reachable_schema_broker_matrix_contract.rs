@@ -11,14 +11,16 @@
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const ARTIFACT_PATH: &str = "artifacts/kafka_k2_reachable_schema_broker_matrix_v1.json";
 const DOC_PATH: &str = "docs/kafka_k2_reachable_schema_broker_matrix.md";
-const ARTIFACT_SHA256: &str = "0b453b88004dd8f9e6acea7d141d60368faf2a3242e8374a4a3638d2b59d2d40";
-const DOC_SHA256: &str = "12c1b04d3fbeed70cbf843e85a5caad8063ae6e46138cb8daaf5905a8e1c2c50";
+const ARTIFACT_SHA256: &str =
+    "6440d8596235263dc780f411af970537494b2b7c5a73691cd998bc901b606cb0";
+const DOC_SHA256: &str =
+    "8535a754a8728fa420e040d23eb95ec8c3a0a4be98dd4a2413c0124ef184b6c3";
 
 const DOC_BEGIN: &str = "<!-- BEGIN KAFKA K2.1 REACHABLE SCHEMA BROKER MATRIX -->";
 const DOC_END: &str = "<!-- END KAFKA K2.1 REACHABLE SCHEMA BROKER MATRIX -->";
@@ -39,8 +41,12 @@ const ROOT_KEYS: &[&str] = &[
     "existing_probe_disposition",
     "explicit_non_reachable_rows",
     "external_authorities",
+    "field_error_projection_source_rows",
     "field_projection_rows",
     "header_contract",
+    "historical_profile_api_range_rows",
+    "historical_schema_source_contracts",
+    "historical_schema_source_rows",
     "incumbent_source_observations",
     "inventory_state",
     "no_claim_boundaries",
@@ -112,13 +118,29 @@ const EXPECTED_APIS: &[(u64, &str, bool, u64, &str, &str, Option<u64>)] = &[
     (17, "SaslHandshake", true, 1, "0-1", "0-1", None),
     (18, "ApiVersions", true, 3, "0-4", "0-3", Some(3)),
     (22, "InitProducerId", true, 4, "0-6", "0-4", Some(2)),
-    (23, "OffsetForLeaderEpoch", true, 2, "2-4", "2", Some(4)),
+    (
+        23,
+        "OffsetForLeaderEpoch",
+        true,
+        2,
+        "2-4",
+        "2",
+        Some(4),
+    ),
     (24, "AddPartitionsToTxn", true, 0, "0-5", "0", Some(3)),
     (25, "AddOffsetsToTxn", true, 0, "0-4", "0", Some(3)),
     (26, "EndTxn", true, 1, "0-5", "0-1", Some(3)),
     (28, "TxnOffsetCommit", true, 3, "0-5", "0-3", Some(3)),
     (36, "SaslAuthenticate", true, 1, "0-2", "0-1", Some(2)),
-    (71, "GetTelemetrySubscriptions", false, 0, "0", "0", Some(0)),
+    (
+        71,
+        "GetTelemetrySubscriptions",
+        false,
+        0,
+        "0",
+        "0",
+        Some(0),
+    ),
     (72, "PushTelemetry", false, 0, "0", "0", Some(0)),
 ];
 
@@ -319,6 +341,1060 @@ const EXPECTED_SCHEMA_SOURCES: &[(u64, &str, &str, u64, &str, u64)] = &[
     ),
 ];
 
+const HISTORICAL_CONTRACT_KEYS: &[&str] = &[
+    "api_range_row_count",
+    "blocking_observations",
+    "canonical_root_tree",
+    "covered_api_keys",
+    "full_frontier_blocker",
+    "full_frontier_state",
+    "nested_payload_state",
+    "profile_id",
+    "recursive_tree_truncated",
+    "schema_declaration_model",
+    "semantic_role_projection_encoding",
+    "scope_state",
+    "sorted_path_object_id_size_projection_sha256",
+    "sorted_path_semantic_role_projection_sha256",
+    "sorted_projection_encoding",
+    "source_authority_id",
+    "source_commit",
+    "source_file_count",
+    "source_tree_entry_count",
+    "total_payload_byte_count",
+];
+
+const HISTORICAL_SOURCE_ROW_KEYS: &[&str] = &[
+    "byte_count",
+    "git_blob_sha1",
+    "path",
+    "profile_id",
+    "semantic_role",
+    "source_authority_id",
+];
+
+const HISTORICAL_RANGE_ROW_KEYS: &[&str] = &[
+    "accepted_version_range",
+    "api_key",
+    "api_name",
+    "broker_declared_versions",
+    "incumbent_candidate_intersection",
+    "profile_id",
+    "source_authority_id",
+    "state",
+];
+
+const FIELD_ERROR_PROJECTION_SOURCE_KEYS: &[&str] = &[
+    "byte_count",
+    "git_blob_sha1",
+    "path",
+    "semantic_role",
+    "source_authority_id",
+    "source_id",
+];
+
+const FIELD_PROJECTION_ROW_KEYS: &[&str] = &[
+    "accepted_version_range",
+    "api_key",
+    "canonical_field_id",
+    "direction",
+    "element_type",
+    "error_set_id",
+    "excluded_source_versions",
+    "field_order",
+    "ignorable_versions",
+    "logical_type",
+    "message_tag_buffer_projected_versions",
+    "nested_projection_state",
+    "nullable_versions",
+    "profile_id",
+    "projected_compact_versions",
+    "projected_tag_ids",
+    "projected_tagged_versions",
+    "projected_versions",
+    "projection_state",
+    "row_id",
+    "schema_default_literal",
+    "schema_default_state",
+    "sensitivity",
+    "source_authority_id",
+    "source_field_name",
+    "source_refs",
+    "source_versions",
+    "version_exclusion_state",
+    "wire_type",
+];
+
+const ERROR_PROJECTION_ROW_KEYS: &[&str] = &[
+    "accepted_version_range",
+    "api_comment_error_code",
+    "api_key",
+    "canonical_error_code",
+    "code_consistency_state",
+    "downgrade_policy_state",
+    "enum_membership_state",
+    "error_name",
+    "error_set_id",
+    "excluded_source_versions",
+    "membership_basis",
+    "outcome_class",
+    "profile_id",
+    "projected_versions",
+    "projection_state",
+    "retry_policy_state",
+    "row_id",
+    "source_authority_id",
+    "source_refs",
+    "source_versions",
+    "wire_enum_closed",
+];
+
+const EXPECTED_PROJECTION_SOURCES: &[(&str, &str, &str, &str, u64, &str)] = &[
+    (
+        "KAFKA-K2-1-PROJECTION-SOURCE-CURRENT-ERRORS",
+        "KAFKA-K2-1-AUTH-APACHE-CURRENT",
+        "clients/src/main/java/org/apache/kafka/common/protocol/Errors.java",
+        "a27a7fcf23c77ce01da71a002901195b32f831c8",
+        36_636,
+        "CANONICAL_ERROR_ENUM",
+    ),
+    (
+        "KAFKA-K2-1-PROJECTION-SOURCE-CURRENT-SASL-AUTHENTICATE-RESPONSE",
+        "KAFKA-K2-1-AUTH-APACHE-CURRENT",
+        "clients/src/main/java/org/apache/kafka/common/requests/SaslAuthenticateResponse.java",
+        "12d16ee41843ea96bde8d40b960ce12656d1027a",
+        2_843,
+        "API_036_ERROR_MEMBERSHIP_AND_COMMENT_CONFLICT",
+    ),
+    (
+        "KAFKA-K2-1-PROJECTION-SOURCE-CURRENT-SASL-HANDSHAKE-REQUEST",
+        "KAFKA-K2-1-AUTH-APACHE-CURRENT",
+        "clients/src/main/java/org/apache/kafka/common/requests/SaslHandshakeRequest.java",
+        "710700257ab34e7123abe88420db07327dd18aa9",
+        3_023,
+        "API_017_EXCEPTION_TO_ERROR_MAPPING",
+    ),
+    (
+        "KAFKA-K2-1-PROJECTION-SOURCE-CURRENT-SASL-HANDSHAKE-RESPONSE",
+        "KAFKA-K2-1-AUTH-APACHE-CURRENT",
+        "clients/src/main/java/org/apache/kafka/common/requests/SaslHandshakeResponse.java",
+        "40de2ceff30ddf7d0e651cecc6d3e65ae9847a55",
+        2_536,
+        "API_017_ERROR_MEMBERSHIP",
+    ),
+    (
+        "KAFKA-K2-1-PROJECTION-SOURCE-CURRENT-SASL-SERVER-AUTHENTICATOR",
+        "KAFKA-K2-1-AUTH-APACHE-CURRENT",
+        "clients/src/main/java/org/apache/kafka/common/security/authenticator/SaslServerAuthenticator.java",
+        "b84b5dc2abc94d2b86b6c1e377c8e2c6cf272dee",
+        38_132,
+        "CURRENT_DEDICATED_HANDLER_OUTCOMES",
+    ),
+    (
+        "KAFKA-K2-1-PROJECTION-SOURCE-HISTORICAL-SASL-SERVER-AUTHENTICATOR",
+        "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR",
+        "clients/src/main/java/org/apache/kafka/common/security/authenticator/SaslServerAuthenticator.java",
+        "1a2aaf497b9ca02eeb715639b6bb7fefcd5723b2",
+        25_876,
+        "HISTORICAL_DEDICATED_HANDLER_OUTCOMES",
+    ),
+];
+
+struct ExpectedFieldProjection {
+    row_id: &'static str,
+    profile_id: &'static str,
+    authority_id: &'static str,
+    source_refs: &'static [&'static str],
+    api_key: u64,
+    direction: &'static str,
+    canonical_field_id: &'static str,
+    source_field_name: &'static str,
+    field_order: u64,
+    source_versions: &'static str,
+    projected_versions: &'static str,
+    excluded_versions: &'static str,
+    logical_type: &'static str,
+    wire_type: &'static str,
+    element_type: Option<&'static str>,
+    nullable_versions: &'static str,
+    default_state: &'static str,
+    default_literal: Option<&'static str>,
+    ignorable_versions: &'static str,
+    sensitivity: &'static str,
+    error_set_id: Option<&'static str>,
+    nested_projection_state: &'static str,
+}
+
+const EXPECTED_FIELD_PROJECTIONS: &[ExpectedFieldProjection] = &[
+    ExpectedFieldProjection {
+        row_id: "KAFKA-K2-1-FIELD-CURRENT-017-REQUEST-000-MECHANISM",
+        profile_id: "KAFKA-K2-1-BROKER-CURRENT",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-CURRENT",
+        source_refs: &["clients/src/main/resources/common/message/SaslHandshakeRequest.json"],
+        api_key: 17,
+        direction: "REQUEST",
+        canonical_field_id: "API17.REQUEST.MECHANISM",
+        source_field_name: "Mechanism",
+        field_order: 0,
+        source_versions: "0-1",
+        projected_versions: "0-1",
+        excluded_versions: "none",
+        logical_type: "STRING",
+        wire_type: "STRING",
+        element_type: None,
+        nullable_versions: "none",
+        default_state: "NOT_EXPLICITLY_DECLARED",
+        default_literal: None,
+        ignorable_versions: "none",
+        sensitivity: "AUTH_NEGOTIATION_METADATA",
+        error_set_id: None,
+        nested_projection_state: "NOT_APPLICABLE",
+    },
+    ExpectedFieldProjection {
+        row_id: "KAFKA-K2-1-FIELD-CURRENT-017-RESPONSE-000-ERROR-CODE",
+        profile_id: "KAFKA-K2-1-BROKER-CURRENT",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-CURRENT",
+        source_refs: &["clients/src/main/resources/common/message/SaslHandshakeResponse.json"],
+        api_key: 17,
+        direction: "RESPONSE",
+        canonical_field_id: "API17.RESPONSE.ERROR_CODE",
+        source_field_name: "ErrorCode",
+        field_order: 0,
+        source_versions: "0-1",
+        projected_versions: "0-1",
+        excluded_versions: "none",
+        logical_type: "INT16",
+        wire_type: "INT16",
+        element_type: None,
+        nullable_versions: "none",
+        default_state: "NOT_EXPLICITLY_DECLARED",
+        default_literal: None,
+        ignorable_versions: "none",
+        sensitivity: "NON_SECRET_CONTROL_METADATA",
+        error_set_id: Some("KAFKA-K2-1-ERROR-SET-CURRENT-API-017"),
+        nested_projection_state: "NOT_APPLICABLE",
+    },
+    ExpectedFieldProjection {
+        row_id: "KAFKA-K2-1-FIELD-CURRENT-017-RESPONSE-001-MECHANISMS",
+        profile_id: "KAFKA-K2-1-BROKER-CURRENT",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-CURRENT",
+        source_refs: &["clients/src/main/resources/common/message/SaslHandshakeResponse.json"],
+        api_key: 17,
+        direction: "RESPONSE",
+        canonical_field_id: "API17.RESPONSE.MECHANISMS",
+        source_field_name: "Mechanisms",
+        field_order: 1,
+        source_versions: "0-1",
+        projected_versions: "0-1",
+        excluded_versions: "none",
+        logical_type: "ARRAY",
+        wire_type: "ARRAY",
+        element_type: Some("STRING"),
+        nullable_versions: "none",
+        default_state: "NOT_EXPLICITLY_DECLARED",
+        default_literal: None,
+        ignorable_versions: "none",
+        sensitivity: "AUTH_NEGOTIATION_METADATA",
+        error_set_id: None,
+        nested_projection_state: "SCALAR_STRING_ELEMENT_PROJECTED",
+    },
+    ExpectedFieldProjection {
+        row_id: "KAFKA-K2-1-FIELD-CURRENT-036-REQUEST-000-AUTH-BYTES",
+        profile_id: "KAFKA-K2-1-BROKER-CURRENT",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-CURRENT",
+        source_refs: &["clients/src/main/resources/common/message/SaslAuthenticateRequest.json"],
+        api_key: 36,
+        direction: "REQUEST",
+        canonical_field_id: "API36.REQUEST.AUTH_BYTES",
+        source_field_name: "AuthBytes",
+        field_order: 0,
+        source_versions: "0-2",
+        projected_versions: "0-1",
+        excluded_versions: "2",
+        logical_type: "BYTES",
+        wire_type: "BYTES",
+        element_type: None,
+        nullable_versions: "none",
+        default_state: "NOT_EXPLICITLY_DECLARED",
+        default_literal: None,
+        ignorable_versions: "none",
+        sensitivity: "SECRET_BEARING_OPAQUE_AUTH_MATERIAL",
+        error_set_id: None,
+        nested_projection_state: "OPAQUE_SASL_MECHANISM_BYTES_NOT_PROJECTED",
+    },
+    ExpectedFieldProjection {
+        row_id: "KAFKA-K2-1-FIELD-CURRENT-036-RESPONSE-000-ERROR-CODE",
+        profile_id: "KAFKA-K2-1-BROKER-CURRENT",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-CURRENT",
+        source_refs: &["clients/src/main/resources/common/message/SaslAuthenticateResponse.json"],
+        api_key: 36,
+        direction: "RESPONSE",
+        canonical_field_id: "API36.RESPONSE.ERROR_CODE",
+        source_field_name: "ErrorCode",
+        field_order: 0,
+        source_versions: "0-2",
+        projected_versions: "0-1",
+        excluded_versions: "2",
+        logical_type: "INT16",
+        wire_type: "INT16",
+        element_type: None,
+        nullable_versions: "none",
+        default_state: "NOT_EXPLICITLY_DECLARED",
+        default_literal: None,
+        ignorable_versions: "none",
+        sensitivity: "NON_SECRET_CONTROL_METADATA",
+        error_set_id: Some("KAFKA-K2-1-ERROR-SET-CURRENT-API-036"),
+        nested_projection_state: "NOT_APPLICABLE",
+    },
+    ExpectedFieldProjection {
+        row_id: "KAFKA-K2-1-FIELD-CURRENT-036-RESPONSE-001-ERROR-MESSAGE",
+        profile_id: "KAFKA-K2-1-BROKER-CURRENT",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-CURRENT",
+        source_refs: &[
+            "clients/src/main/resources/common/message/SaslAuthenticateResponse.json",
+            "clients/src/main/java/org/apache/kafka/common/security/authenticator/SaslServerAuthenticator.java",
+        ],
+        api_key: 36,
+        direction: "RESPONSE",
+        canonical_field_id: "API36.RESPONSE.ERROR_MESSAGE",
+        source_field_name: "ErrorMessage",
+        field_order: 1,
+        source_versions: "0-2",
+        projected_versions: "0-1",
+        excluded_versions: "2",
+        logical_type: "STRING",
+        wire_type: "NULLABLE_STRING",
+        element_type: None,
+        nullable_versions: "0-1",
+        default_state: "NOT_EXPLICITLY_DECLARED",
+        default_literal: None,
+        ignorable_versions: "none",
+        sensitivity: "SENSITIVE_DIAGNOSTIC_REDACT",
+        error_set_id: None,
+        nested_projection_state: "NOT_APPLICABLE",
+    },
+    ExpectedFieldProjection {
+        row_id: "KAFKA-K2-1-FIELD-CURRENT-036-RESPONSE-002-AUTH-BYTES",
+        profile_id: "KAFKA-K2-1-BROKER-CURRENT",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-CURRENT",
+        source_refs: &["clients/src/main/resources/common/message/SaslAuthenticateResponse.json"],
+        api_key: 36,
+        direction: "RESPONSE",
+        canonical_field_id: "API36.RESPONSE.AUTH_BYTES",
+        source_field_name: "AuthBytes",
+        field_order: 2,
+        source_versions: "0-2",
+        projected_versions: "0-1",
+        excluded_versions: "2",
+        logical_type: "BYTES",
+        wire_type: "BYTES",
+        element_type: None,
+        nullable_versions: "none",
+        default_state: "NOT_EXPLICITLY_DECLARED",
+        default_literal: None,
+        ignorable_versions: "none",
+        sensitivity: "SECRET_BEARING_OPAQUE_AUTH_MATERIAL",
+        error_set_id: None,
+        nested_projection_state: "OPAQUE_SASL_MECHANISM_BYTES_NOT_PROJECTED",
+    },
+    ExpectedFieldProjection {
+        row_id: "KAFKA-K2-1-FIELD-CURRENT-036-RESPONSE-003-SESSION-LIFETIME-MS",
+        profile_id: "KAFKA-K2-1-BROKER-CURRENT",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-CURRENT",
+        source_refs: &["clients/src/main/resources/common/message/SaslAuthenticateResponse.json"],
+        api_key: 36,
+        direction: "RESPONSE",
+        canonical_field_id: "API36.RESPONSE.SESSION_LIFETIME_MS",
+        source_field_name: "SessionLifetimeMs",
+        field_order: 3,
+        source_versions: "1-2",
+        projected_versions: "1",
+        excluded_versions: "2",
+        logical_type: "INT64",
+        wire_type: "INT64",
+        element_type: None,
+        nullable_versions: "none",
+        default_state: "EXPLICIT_LITERAL",
+        default_literal: Some("0"),
+        ignorable_versions: "1",
+        sensitivity: "NON_SECRET_CONTROL_METADATA",
+        error_set_id: None,
+        nested_projection_state: "NOT_APPLICABLE",
+    },
+    ExpectedFieldProjection {
+        row_id: "KAFKA-K2-1-FIELD-HISTORICAL-017-REQUEST-000-MECHANISM",
+        profile_id: "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR",
+        source_refs: &[
+            "clients/src/main/java/org/apache/kafka/common/requests/SaslHandshakeRequest.java",
+        ],
+        api_key: 17,
+        direction: "REQUEST",
+        canonical_field_id: "API17.REQUEST.MECHANISM",
+        source_field_name: "mechanism",
+        field_order: 0,
+        source_versions: "0-1",
+        projected_versions: "0-1",
+        excluded_versions: "none",
+        logical_type: "STRING",
+        wire_type: "STRING",
+        element_type: None,
+        nullable_versions: "none",
+        default_state: "NOT_EXPLICITLY_DECLARED",
+        default_literal: None,
+        ignorable_versions: "none",
+        sensitivity: "AUTH_NEGOTIATION_METADATA",
+        error_set_id: None,
+        nested_projection_state: "NOT_APPLICABLE",
+    },
+    ExpectedFieldProjection {
+        row_id: "KAFKA-K2-1-FIELD-HISTORICAL-017-RESPONSE-000-ERROR-CODE",
+        profile_id: "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR",
+        source_refs: &[
+            "clients/src/main/java/org/apache/kafka/common/protocol/CommonFields.java",
+            "clients/src/main/java/org/apache/kafka/common/requests/SaslHandshakeResponse.java",
+        ],
+        api_key: 17,
+        direction: "RESPONSE",
+        canonical_field_id: "API17.RESPONSE.ERROR_CODE",
+        source_field_name: "error_code",
+        field_order: 0,
+        source_versions: "0-1",
+        projected_versions: "0-1",
+        excluded_versions: "none",
+        logical_type: "INT16",
+        wire_type: "INT16",
+        element_type: None,
+        nullable_versions: "none",
+        default_state: "NOT_EXPLICITLY_DECLARED",
+        default_literal: None,
+        ignorable_versions: "none",
+        sensitivity: "NON_SECRET_CONTROL_METADATA",
+        error_set_id: Some("KAFKA-K2-1-ERROR-SET-HISTORICAL-API-017"),
+        nested_projection_state: "NOT_APPLICABLE",
+    },
+    ExpectedFieldProjection {
+        row_id: "KAFKA-K2-1-FIELD-HISTORICAL-017-RESPONSE-001-MECHANISMS",
+        profile_id: "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR",
+        source_refs: &[
+            "clients/src/main/java/org/apache/kafka/common/requests/SaslHandshakeResponse.java",
+        ],
+        api_key: 17,
+        direction: "RESPONSE",
+        canonical_field_id: "API17.RESPONSE.MECHANISMS",
+        source_field_name: "enabled_mechanisms",
+        field_order: 1,
+        source_versions: "0-1",
+        projected_versions: "0-1",
+        excluded_versions: "none",
+        logical_type: "ARRAY",
+        wire_type: "ARRAY",
+        element_type: Some("STRING"),
+        nullable_versions: "none",
+        default_state: "NOT_EXPLICITLY_DECLARED",
+        default_literal: None,
+        ignorable_versions: "none",
+        sensitivity: "AUTH_NEGOTIATION_METADATA",
+        error_set_id: None,
+        nested_projection_state: "SCALAR_STRING_ELEMENT_PROJECTED",
+    },
+    ExpectedFieldProjection {
+        row_id: "KAFKA-K2-1-FIELD-HISTORICAL-036-REQUEST-000-AUTH-BYTES",
+        profile_id: "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR",
+        source_refs: &[
+            "clients/src/main/java/org/apache/kafka/common/requests/SaslAuthenticateRequest.java",
+        ],
+        api_key: 36,
+        direction: "REQUEST",
+        canonical_field_id: "API36.REQUEST.AUTH_BYTES",
+        source_field_name: "sasl_auth_bytes",
+        field_order: 0,
+        source_versions: "0",
+        projected_versions: "0",
+        excluded_versions: "none",
+        logical_type: "BYTES",
+        wire_type: "BYTES",
+        element_type: None,
+        nullable_versions: "none",
+        default_state: "NOT_EXPLICITLY_DECLARED",
+        default_literal: None,
+        ignorable_versions: "none",
+        sensitivity: "SECRET_BEARING_OPAQUE_AUTH_MATERIAL",
+        error_set_id: None,
+        nested_projection_state: "OPAQUE_SASL_MECHANISM_BYTES_NOT_PROJECTED",
+    },
+    ExpectedFieldProjection {
+        row_id: "KAFKA-K2-1-FIELD-HISTORICAL-036-RESPONSE-000-ERROR-CODE",
+        profile_id: "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR",
+        source_refs: &[
+            "clients/src/main/java/org/apache/kafka/common/protocol/CommonFields.java",
+            "clients/src/main/java/org/apache/kafka/common/requests/SaslAuthenticateResponse.java",
+        ],
+        api_key: 36,
+        direction: "RESPONSE",
+        canonical_field_id: "API36.RESPONSE.ERROR_CODE",
+        source_field_name: "error_code",
+        field_order: 0,
+        source_versions: "0",
+        projected_versions: "0",
+        excluded_versions: "none",
+        logical_type: "INT16",
+        wire_type: "INT16",
+        element_type: None,
+        nullable_versions: "none",
+        default_state: "NOT_EXPLICITLY_DECLARED",
+        default_literal: None,
+        ignorable_versions: "none",
+        sensitivity: "NON_SECRET_CONTROL_METADATA",
+        error_set_id: Some("KAFKA-K2-1-ERROR-SET-HISTORICAL-API-036"),
+        nested_projection_state: "NOT_APPLICABLE",
+    },
+    ExpectedFieldProjection {
+        row_id: "KAFKA-K2-1-FIELD-HISTORICAL-036-RESPONSE-001-ERROR-MESSAGE",
+        profile_id: "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR",
+        source_refs: &[
+            "clients/src/main/java/org/apache/kafka/common/protocol/CommonFields.java",
+            "clients/src/main/java/org/apache/kafka/common/requests/SaslAuthenticateResponse.java",
+            "clients/src/main/java/org/apache/kafka/common/security/authenticator/SaslServerAuthenticator.java",
+        ],
+        api_key: 36,
+        direction: "RESPONSE",
+        canonical_field_id: "API36.RESPONSE.ERROR_MESSAGE",
+        source_field_name: "error_message",
+        field_order: 1,
+        source_versions: "0",
+        projected_versions: "0",
+        excluded_versions: "none",
+        logical_type: "STRING",
+        wire_type: "NULLABLE_STRING",
+        element_type: None,
+        nullable_versions: "0",
+        default_state: "NOT_EXPLICITLY_DECLARED",
+        default_literal: None,
+        ignorable_versions: "none",
+        sensitivity: "SENSITIVE_DIAGNOSTIC_REDACT",
+        error_set_id: None,
+        nested_projection_state: "NOT_APPLICABLE",
+    },
+    ExpectedFieldProjection {
+        row_id: "KAFKA-K2-1-FIELD-HISTORICAL-036-RESPONSE-002-AUTH-BYTES",
+        profile_id: "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR",
+        source_refs: &[
+            "clients/src/main/java/org/apache/kafka/common/requests/SaslAuthenticateResponse.java",
+        ],
+        api_key: 36,
+        direction: "RESPONSE",
+        canonical_field_id: "API36.RESPONSE.AUTH_BYTES",
+        source_field_name: "sasl_auth_bytes",
+        field_order: 2,
+        source_versions: "0",
+        projected_versions: "0",
+        excluded_versions: "none",
+        logical_type: "BYTES",
+        wire_type: "BYTES",
+        element_type: None,
+        nullable_versions: "none",
+        default_state: "NOT_EXPLICITLY_DECLARED",
+        default_literal: None,
+        ignorable_versions: "none",
+        sensitivity: "SECRET_BEARING_OPAQUE_AUTH_MATERIAL",
+        error_set_id: None,
+        nested_projection_state: "OPAQUE_SASL_MECHANISM_BYTES_NOT_PROJECTED",
+    },
+];
+
+struct ExpectedErrorProjection {
+    row_id: &'static str,
+    error_set_id: &'static str,
+    profile_id: &'static str,
+    authority_id: &'static str,
+    source_refs: &'static [&'static str],
+    api_key: u64,
+    source_versions: &'static str,
+    projected_versions: &'static str,
+    excluded_versions: &'static str,
+    error_name: &'static str,
+    error_code: u64,
+    comment_code: Option<u64>,
+    outcome_class: &'static str,
+    consistency_state: &'static str,
+}
+
+const EXPECTED_ERROR_PROJECTIONS: &[ExpectedErrorProjection] = &[
+    ExpectedErrorProjection {
+        row_id: "KAFKA-K2-1-ERROR-CURRENT-017-000-NONE",
+        error_set_id: "KAFKA-K2-1-ERROR-SET-CURRENT-API-017",
+        profile_id: "KAFKA-K2-1-BROKER-CURRENT",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-CURRENT",
+        source_refs: &[
+            "clients/src/main/java/org/apache/kafka/common/protocol/Errors.java",
+            "clients/src/main/java/org/apache/kafka/common/security/authenticator/SaslServerAuthenticator.java",
+        ],
+        api_key: 17,
+        source_versions: "0-1",
+        projected_versions: "0-1",
+        excluded_versions: "none",
+        error_name: "NONE",
+        error_code: 0,
+        comment_code: None,
+        outcome_class: "SUCCESS_SENTINEL",
+        consistency_state: "CONSISTENT",
+    },
+    ExpectedErrorProjection {
+        row_id: "KAFKA-K2-1-ERROR-CURRENT-017-033-UNSUPPORTED-SASL-MECHANISM",
+        error_set_id: "KAFKA-K2-1-ERROR-SET-CURRENT-API-017",
+        profile_id: "KAFKA-K2-1-BROKER-CURRENT",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-CURRENT",
+        source_refs: &[
+            "clients/src/main/java/org/apache/kafka/common/protocol/Errors.java",
+            "clients/src/main/java/org/apache/kafka/common/requests/SaslHandshakeResponse.java",
+            "clients/src/main/java/org/apache/kafka/common/security/authenticator/SaslServerAuthenticator.java",
+        ],
+        api_key: 17,
+        source_versions: "0-1",
+        projected_versions: "0-1",
+        excluded_versions: "none",
+        error_name: "UNSUPPORTED_SASL_MECHANISM",
+        error_code: 33,
+        comment_code: Some(33),
+        outcome_class: "DECLARED_PROTOCOL_ERROR",
+        consistency_state: "CONSISTENT",
+    },
+    ExpectedErrorProjection {
+        row_id: "KAFKA-K2-1-ERROR-CURRENT-017-034-ILLEGAL-SASL-STATE",
+        error_set_id: "KAFKA-K2-1-ERROR-SET-CURRENT-API-017",
+        profile_id: "KAFKA-K2-1-BROKER-CURRENT",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-CURRENT",
+        source_refs: &[
+            "clients/src/main/java/org/apache/kafka/common/protocol/Errors.java",
+            "clients/src/main/java/org/apache/kafka/common/requests/SaslHandshakeRequest.java",
+            "clients/src/main/java/org/apache/kafka/common/requests/SaslHandshakeResponse.java",
+            "clients/src/main/java/org/apache/kafka/common/security/authenticator/SaslServerAuthenticator.java",
+        ],
+        api_key: 17,
+        source_versions: "0-1",
+        projected_versions: "0-1",
+        excluded_versions: "none",
+        error_name: "ILLEGAL_SASL_STATE",
+        error_code: 34,
+        comment_code: Some(34),
+        outcome_class: "DECLARED_PROTOCOL_ERROR",
+        consistency_state: "CONSISTENT",
+    },
+    ExpectedErrorProjection {
+        row_id: "KAFKA-K2-1-ERROR-CURRENT-036-000-NONE",
+        error_set_id: "KAFKA-K2-1-ERROR-SET-CURRENT-API-036",
+        profile_id: "KAFKA-K2-1-BROKER-CURRENT",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-CURRENT",
+        source_refs: &[
+            "clients/src/main/java/org/apache/kafka/common/protocol/Errors.java",
+            "clients/src/main/java/org/apache/kafka/common/security/authenticator/SaslServerAuthenticator.java",
+        ],
+        api_key: 36,
+        source_versions: "0-2",
+        projected_versions: "0-1",
+        excluded_versions: "2",
+        error_name: "NONE",
+        error_code: 0,
+        comment_code: None,
+        outcome_class: "SUCCESS_SENTINEL",
+        consistency_state: "CONSISTENT",
+    },
+    ExpectedErrorProjection {
+        row_id: "KAFKA-K2-1-ERROR-CURRENT-036-058-SASL-AUTHENTICATION-FAILED",
+        error_set_id: "KAFKA-K2-1-ERROR-SET-CURRENT-API-036",
+        profile_id: "KAFKA-K2-1-BROKER-CURRENT",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-CURRENT",
+        source_refs: &[
+            "clients/src/main/java/org/apache/kafka/common/protocol/Errors.java",
+            "clients/src/main/java/org/apache/kafka/common/requests/SaslAuthenticateResponse.java",
+            "clients/src/main/java/org/apache/kafka/common/security/authenticator/SaslServerAuthenticator.java",
+        ],
+        api_key: 36,
+        source_versions: "0-2",
+        projected_versions: "0-1",
+        excluded_versions: "2",
+        error_name: "SASL_AUTHENTICATION_FAILED",
+        error_code: 58,
+        comment_code: Some(57),
+        outcome_class: "DECLARED_PROTOCOL_ERROR",
+        consistency_state: "STALE_API_COMMENT_57_CANONICAL_ENUM_58",
+    },
+    ExpectedErrorProjection {
+        row_id: "KAFKA-K2-1-ERROR-HISTORICAL-017-000-NONE",
+        error_set_id: "KAFKA-K2-1-ERROR-SET-HISTORICAL-API-017",
+        profile_id: "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR",
+        source_refs: &[
+            "clients/src/main/java/org/apache/kafka/common/protocol/Errors.java",
+            "clients/src/main/java/org/apache/kafka/common/security/authenticator/SaslServerAuthenticator.java",
+        ],
+        api_key: 17,
+        source_versions: "0-1",
+        projected_versions: "0-1",
+        excluded_versions: "none",
+        error_name: "NONE",
+        error_code: 0,
+        comment_code: None,
+        outcome_class: "SUCCESS_SENTINEL",
+        consistency_state: "CONSISTENT",
+    },
+    ExpectedErrorProjection {
+        row_id: "KAFKA-K2-1-ERROR-HISTORICAL-017-033-UNSUPPORTED-SASL-MECHANISM",
+        error_set_id: "KAFKA-K2-1-ERROR-SET-HISTORICAL-API-017",
+        profile_id: "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR",
+        source_refs: &[
+            "clients/src/main/java/org/apache/kafka/common/protocol/Errors.java",
+            "clients/src/main/java/org/apache/kafka/common/requests/SaslHandshakeResponse.java",
+            "clients/src/main/java/org/apache/kafka/common/security/authenticator/SaslServerAuthenticator.java",
+        ],
+        api_key: 17,
+        source_versions: "0-1",
+        projected_versions: "0-1",
+        excluded_versions: "none",
+        error_name: "UNSUPPORTED_SASL_MECHANISM",
+        error_code: 33,
+        comment_code: Some(33),
+        outcome_class: "DECLARED_PROTOCOL_ERROR",
+        consistency_state: "CONSISTENT",
+    },
+    ExpectedErrorProjection {
+        row_id: "KAFKA-K2-1-ERROR-HISTORICAL-017-034-ILLEGAL-SASL-STATE",
+        error_set_id: "KAFKA-K2-1-ERROR-SET-HISTORICAL-API-017",
+        profile_id: "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR",
+        source_refs: &[
+            "clients/src/main/java/org/apache/kafka/common/protocol/Errors.java",
+            "clients/src/main/java/org/apache/kafka/common/requests/SaslHandshakeRequest.java",
+            "clients/src/main/java/org/apache/kafka/common/requests/SaslHandshakeResponse.java",
+            "clients/src/main/java/org/apache/kafka/common/security/authenticator/SaslServerAuthenticator.java",
+        ],
+        api_key: 17,
+        source_versions: "0-1",
+        projected_versions: "0-1",
+        excluded_versions: "none",
+        error_name: "ILLEGAL_SASL_STATE",
+        error_code: 34,
+        comment_code: Some(34),
+        outcome_class: "DECLARED_PROTOCOL_ERROR",
+        consistency_state: "CONSISTENT",
+    },
+    ExpectedErrorProjection {
+        row_id: "KAFKA-K2-1-ERROR-HISTORICAL-036-000-NONE",
+        error_set_id: "KAFKA-K2-1-ERROR-SET-HISTORICAL-API-036",
+        profile_id: "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR",
+        source_refs: &[
+            "clients/src/main/java/org/apache/kafka/common/protocol/Errors.java",
+            "clients/src/main/java/org/apache/kafka/common/security/authenticator/SaslServerAuthenticator.java",
+        ],
+        api_key: 36,
+        source_versions: "0",
+        projected_versions: "0",
+        excluded_versions: "none",
+        error_name: "NONE",
+        error_code: 0,
+        comment_code: None,
+        outcome_class: "SUCCESS_SENTINEL",
+        consistency_state: "CONSISTENT",
+    },
+    ExpectedErrorProjection {
+        row_id: "KAFKA-K2-1-ERROR-HISTORICAL-036-058-SASL-AUTHENTICATION-FAILED",
+        error_set_id: "KAFKA-K2-1-ERROR-SET-HISTORICAL-API-036",
+        profile_id: "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR",
+        source_refs: &[
+            "clients/src/main/java/org/apache/kafka/common/protocol/Errors.java",
+            "clients/src/main/java/org/apache/kafka/common/requests/SaslAuthenticateResponse.java",
+            "clients/src/main/java/org/apache/kafka/common/security/authenticator/SaslServerAuthenticator.java",
+        ],
+        api_key: 36,
+        source_versions: "0",
+        projected_versions: "0",
+        excluded_versions: "none",
+        error_name: "SASL_AUTHENTICATION_FAILED",
+        error_code: 58,
+        comment_code: Some(57),
+        outcome_class: "DECLARED_PROTOCOL_ERROR",
+        consistency_state: "STALE_API_COMMENT_57_CANONICAL_ENUM_58",
+    },
+];
+
+const HISTORICAL_FULL_FRONTIER_BLOCKER_KEYS: &[&str] = &[
+    "accepted_version_range",
+    "api_key",
+    "api_name",
+    "broker_declared_max",
+    "broker_declared_min",
+    "incumbent_max",
+    "incumbent_min",
+    "intersection",
+    "state",
+];
+
+struct ExpectedHistoricalContract {
+    profile_id: &'static str,
+    authority_id: &'static str,
+    commit: &'static str,
+    root_tree: &'static str,
+    tree_entries: u64,
+    schema_model: &'static str,
+    covered_api_keys: &'static [u64],
+    range_rows: u64,
+    source_files: u64,
+    source_bytes: u64,
+    projection_sha256: &'static str,
+    semantic_role_projection_sha256: &'static str,
+    nested_payload_state: &'static str,
+    full_frontier_state: &'static str,
+    blocking_observation: &'static str,
+    source_path_prefix: &'static str,
+}
+
+const EXPECTED_HISTORICAL_CONTRACTS: &[ExpectedHistoricalContract] = &[
+    ExpectedHistoricalContract {
+        profile_id: "KAFKA-K2-1-BROKER-BASIC-LEGACY",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-LEGACY-BASIC",
+        commit: "15bb3961d9171c1c54c4c840a554ce2c76168163",
+        root_tree: "2a734e8136c0c514d4d105cc513cc5b3fb53169c",
+        tree_entries: 842,
+        schema_model: "SCALA_WRITE_PARSE_METHODS_WITH_SHARED_ENVELOPE_AND_LEGACY_MESSAGE_SET",
+        covered_api_keys: &[0, 1, 2, 3],
+        range_rows: 4,
+        source_files: 22,
+        source_bytes: 95_596,
+        projection_sha256:
+            "808a785e9aaaf3794baf77b4cf6a079436064fdb0480c63c00a469a8cac308c3",
+        semantic_role_projection_sha256:
+            "b287fc3b07d99a92fc2fecf508da081971a2e24943a766bc1ca485d60b54f130",
+        nested_payload_state:
+            "LEGACY_MESSAGE_AND_COMPRESSION_SOURCES_PINNED_INTEROPERABILITY_NOT_PROVED",
+        full_frontier_state: "NOT_EVALUATED_PROFILE_SCOPE_ONLY",
+        blocking_observation:
+            "Only keys 0-3 at v0 are covered; full current-facade support is not evaluated.",
+        source_path_prefix: "core/src/main/scala/kafka/",
+    },
+    ExpectedHistoricalContract {
+        profile_id: "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-DEFAULT-FLOOR",
+        commit: "73be1e1168f91ee2a9d68e1d1c75c14018cf7d3a",
+        root_tree: "41ed42d9c90a6d3903e32573eb6f2c4c2d84d2a2",
+        tree_entries: 2_604,
+        schema_model: "CENTRAL_JAVA_PROTOCOL_SCHEMA_ARRAYS_WITH_TYPE_ENCODINGS",
+        covered_api_keys: &[0, 3, 10, 18, 22, 24, 25, 26, 28],
+        range_rows: 9,
+        source_files: 10,
+        source_bytes: 210_904,
+        projection_sha256:
+            "bdd0b4c71280124cda67095fedfada10647d9b310c7ea9ba92e3c6eade0be414",
+        semantic_role_projection_sha256:
+            "8f5f6a0924973f4cf90cd775e124329d6eb5963a679f77ae277e1194b03a9a46",
+        nested_payload_state: "MAGIC_V2_RECORD_PAYLOAD_SOURCES_EXCLUDED_OWNED_BY_K4_1",
+        full_frontier_state: "KNOWN_EMPTY_INTERSECTION_API_23_BROKER_V0_INCUMBENT_V2",
+        blocking_observation:
+            "API 23 OffsetForLeaderEpoch is broker v0 while the incumbent minimum is v2; the intersection is empty.",
+        source_path_prefix: "clients/src/main/java/org/apache/kafka/common/",
+    },
+    ExpectedHistoricalContract {
+        profile_id: "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR",
+        commit: "aaa7af6d4a11b29d3da9c5d6084530b8fa69be64",
+        root_tree: "b53c9e1ce151dc0e21aed0fd65d4e6d3f293c824",
+        tree_entries: 2_874,
+        schema_model: "PER_REQUEST_JAVA_SCHEMA_ARRAYS_WITH_TYPE_ENCODINGS",
+        covered_api_keys: &[17, 36],
+        range_rows: 2,
+        source_files: 14,
+        source_bytes: 118_304,
+        projection_sha256:
+            "2cb5fa14d4be90ac72126ad3ff2f480cbb3cb8c71d786d392ae8ddf6687b4790",
+        semantic_role_projection_sha256:
+            "a6d6df3c0b7c74a8633acb807a1d9bb4bc303537ec9884887afba6847d3d87b4",
+        nested_payload_state: "AUTH_BODY_FIELDS_PROJECTED_OPAQUE_MECHANISM_PAYLOAD_NOT_PROJECTED",
+        full_frontier_state: "NOT_EVALUATED_PROFILE_SCOPE_ONLY",
+        blocking_observation:
+            "Only candidate body fields and source-established outcome membership for keys 17 and 36 are projected; full current-facade support is not evaluated.",
+        source_path_prefix: "clients/src/main/java/org/apache/kafka/common/",
+    },
+];
+
+struct ExpectedHistoricalBlocker {
+    profile_id: &'static str,
+    api_key: u64,
+    api_name: &'static str,
+    broker_min: u64,
+    broker_max: u64,
+    incumbent_min: u64,
+    incumbent_max: u64,
+    state: &'static str,
+}
+
+const EXPECTED_HISTORICAL_BLOCKERS: &[ExpectedHistoricalBlocker] = &[ExpectedHistoricalBlocker {
+    profile_id: "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR",
+    api_key: 23,
+    api_name: "OffsetForLeaderEpoch",
+    broker_min: 0,
+    broker_max: 0,
+    incumbent_min: 2,
+    incumbent_max: 2,
+    state: "EMPTY_INTERSECTION_BLOCKS_FULL_CURRENT_FACADE",
+}];
+
+struct ExpectedHistoricalRange {
+    profile_id: &'static str,
+    authority_id: &'static str,
+    api_key: u64,
+    api_name: &'static str,
+    broker_versions: &'static str,
+    intersection: &'static str,
+    state: &'static str,
+}
+
+const EXPECTED_HISTORICAL_RANGES: &[ExpectedHistoricalRange] = &[
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-BASIC-LEGACY",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-LEGACY-BASIC",
+        api_key: 0,
+        api_name: "Produce",
+        broker_versions: "0",
+        intersection: "0",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-BASIC-LEGACY",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-LEGACY-BASIC",
+        api_key: 1,
+        api_name: "Fetch",
+        broker_versions: "0",
+        intersection: "0",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-BASIC-LEGACY",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-LEGACY-BASIC",
+        api_key: 2,
+        api_name: "ListOffsets",
+        broker_versions: "0",
+        intersection: "0",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-BASIC-LEGACY",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-LEGACY-BASIC",
+        api_key: 3,
+        api_name: "Metadata",
+        broker_versions: "0",
+        intersection: "0",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-DEFAULT-FLOOR",
+        api_key: 0,
+        api_name: "Produce",
+        broker_versions: "0-3",
+        intersection: "0-3",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-DEFAULT-FLOOR",
+        api_key: 3,
+        api_name: "Metadata",
+        broker_versions: "0-4",
+        intersection: "0-4",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-DEFAULT-FLOOR",
+        api_key: 10,
+        api_name: "FindCoordinator",
+        broker_versions: "0-1",
+        intersection: "0-1",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-DEFAULT-FLOOR",
+        api_key: 18,
+        api_name: "ApiVersions",
+        broker_versions: "0-1",
+        intersection: "0-1",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-DEFAULT-FLOOR",
+        api_key: 22,
+        api_name: "InitProducerId",
+        broker_versions: "0",
+        intersection: "0",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-DEFAULT-FLOOR",
+        api_key: 24,
+        api_name: "AddPartitionsToTxn",
+        broker_versions: "0",
+        intersection: "0",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-DEFAULT-FLOOR",
+        api_key: 25,
+        api_name: "AddOffsetsToTxn",
+        broker_versions: "0",
+        intersection: "0",
+        state: "REQUIRED_ADDITIVE_ABSENT_SOURCE_RANGE_ONLY",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-DEFAULT-FLOOR",
+        api_key: 26,
+        api_name: "EndTxn",
+        broker_versions: "0",
+        intersection: "0",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-DEFAULT-FLOOR",
+        api_key: 28,
+        api_name: "TxnOffsetCommit",
+        broker_versions: "0",
+        intersection: "0",
+        state: "REQUIRED_ADDITIVE_ABSENT_SOURCE_RANGE_ONLY",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR",
+        api_key: 17,
+        api_name: "SaslHandshake",
+        broker_versions: "0-1",
+        intersection: "0-1",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR",
+        api_key: 36,
+        api_name: "SaslAuthenticate",
+        broker_versions: "0",
+        intersection: "0",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+];
+
 const EXTERNAL_SOURCE_ROWS: &[(&str, &str, &str, &str)] = &[
     (
         "KAFKA-K2-1-AUTH-APACHE-CURRENT",
@@ -483,7 +1559,9 @@ fn expect_number(value: &Value, key: &str, expected: u64) -> Result<(), String> 
     if actual == expected {
         Ok(())
     } else {
-        Err(format!("{key} mismatch: expected {expected}, got {actual}"))
+        Err(format!(
+            "{key} mismatch: expected {expected}, got {actual}"
+        ))
     }
 }
 
@@ -492,12 +1570,38 @@ fn expect_boolean(value: &Value, key: &str, expected: bool) -> Result<(), String
     if actual == expected {
         Ok(())
     } else {
-        Err(format!("{key} mismatch: expected {expected}, got {actual}"))
+        Err(format!(
+            "{key} mismatch: expected {expected}, got {actual}"
+        ))
     }
 }
 
 fn sha256_bytes(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn expect_exact_keys(value: &Value, expected: &[&str], label: &str) -> Result<(), String> {
+    let actual = value
+        .as_object()
+        .ok_or_else(|| format!("{label} must be an object"))?
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let expected = expected.iter().copied().collect::<BTreeSet<_>>();
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "{label} keys mismatch: expected {expected:?}, got {actual:?}"
+        ))
+    }
+}
+
+fn is_lower_hex(value: &str, width: usize) -> bool {
+    value.len() == width
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 fn numeric_array(value: &Value, key: &str) -> Result<Vec<u64>, String> {
@@ -509,6 +1613,66 @@ fn numeric_array(value: &Value, key: &str) -> Result<Vec<u64>, String> {
                 .ok_or_else(|| format!("{key} entries must be unsigned integers"))
         })
         .collect()
+}
+
+fn text_array(value: &Value, key: &str) -> Result<Vec<String>, String> {
+    array(value, key)?
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| format!("{key} entries must be non-empty text"))
+        })
+        .collect()
+}
+
+fn version_set(specification: &str) -> Result<BTreeSet<u64>, String> {
+    if specification == "none" {
+        return Ok(BTreeSet::new());
+    }
+    let (minimum, maximum) = match specification.split_once('-') {
+        Some((minimum, maximum)) => (
+            minimum
+                .parse::<u64>()
+                .map_err(|error| format!("invalid minimum version {minimum:?}: {error}"))?,
+            maximum
+                .parse::<u64>()
+                .map_err(|error| format!("invalid maximum version {maximum:?}: {error}"))?,
+        ),
+        None => {
+            let version = specification
+                .parse::<u64>()
+                .map_err(|error| format!("invalid version {specification:?}: {error}"))?;
+            (version, version)
+        }
+    };
+    if maximum < minimum {
+        return Err(format!(
+            "version interval {specification:?} has descending bounds"
+        ));
+    }
+    Ok((minimum..=maximum).collect())
+}
+
+fn sorted_json_rows_sha256(rows: &[Value]) -> Result<String, String> {
+    let mut encoded_rows = rows
+        .iter()
+        .map(|row| {
+            Ok((
+                text(row, "row_id")?.to_owned(),
+                serde_json::to_string(row)
+                    .map_err(|error| format!("failed to serialize projection row: {error}"))?,
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    encoded_rows.sort_by(|left, right| left.0.cmp(&right.0));
+    let projection = encoded_rows
+        .into_iter()
+        .map(|(_, row)| format!("{row}\n"))
+        .collect::<String>();
+    Ok(sha256_bytes(projection.as_bytes()))
 }
 
 fn validate_identity_and_policy(artifact: &Value) -> Result<(), String> {
@@ -551,7 +1715,7 @@ fn validate_identity_and_policy(artifact: &Value) -> Result<(), String> {
     expect_text(
         artifact,
         "inventory_state",
-        "STATIC_REACHABILITY_FRONTIER_FROZEN_SCHEMA_AND_BROKER_PROOF_BLOCKED",
+        "STATIC_REACHABILITY_FRONTIER_FROZEN_AUTH_BODY_PARTIAL_SCHEMA_AND_BROKER_PROOF_BLOCKED",
     )?;
     expect_text(artifact, "disposition", "KEEP_INCUMBENT_BLOCK_K2_2")?;
 
@@ -600,8 +1764,8 @@ fn validate_authority_inputs(artifact: &Value, root: &Path) -> Result<(), String
 
     for row in inputs {
         let path = text(row, "path")?;
-        let bytes =
-            fs::read(root.join(path)).map_err(|error| format!("failed to read {path}: {error}"))?;
+        let bytes = fs::read(root.join(path))
+            .map_err(|error| format!("failed to read {path}: {error}"))?;
         let byte_count = u64::try_from(bytes.len())
             .map_err(|error| format!("byte count overflow for {path}: {error}"))?;
         let record_count = u64::try_from(String::from_utf8_lossy(&bytes).lines().count())
@@ -617,10 +1781,7 @@ fn validate_authority_inputs(artifact: &Value, root: &Path) -> Result<(), String
 fn validate_external_authorities(artifact: &Value) -> Result<(), String> {
     let rows = array(artifact, "external_authorities")?;
     if rows.len() != 5 {
-        return Err(format!(
-            "expected five external authorities, got {}",
-            rows.len()
-        ));
+        return Err(format!("expected five external authorities, got {}", rows.len()));
     }
 
     for (authority_id, tag, tag_object, commit) in EXTERNAL_SOURCE_ROWS {
@@ -705,7 +1866,9 @@ fn validate_reachable_rows(artifact: &Value) -> Result<(), String> {
     }
     let allowed_journeys = JOURNEY_CLASSES.iter().copied().collect::<BTreeSet<_>>();
 
-    for (api_key, name, k1_seed, client_max, valid, intersection, flex_first) in EXPECTED_APIS {
+    for (api_key, name, k1_seed, client_max, valid, intersection, flex_first) in
+        EXPECTED_APIS
+    {
         let row = rows
             .iter()
             .find(|row| row.get("api_key").and_then(Value::as_u64) == Some(*api_key))
@@ -718,10 +1881,7 @@ fn validate_reachable_rows(artifact: &Value) -> Result<(), String> {
         expect_text(row, "apache_4_3_1_valid_versions", valid)?;
         expect_text(row, "candidate_current_intersection", intersection)?;
         let (expected_reachability, expected_probe) = match *api_key {
-            17 | 36 => (
-                "CURRENT_EXPLICIT_BLOCKED_NATIVE_CAPABILITY",
-                "BLOCKED_EXTERNAL",
-            ),
+            17 | 36 => ("CURRENT_EXPLICIT_BLOCKED_NATIVE_CAPABILITY", "BLOCKED_EXTERNAL"),
             25 | 28 => ("REQUIRED_ADDITIVE_ABSENT", "BLOCKED_NOT_SHIPPED"),
             71 | 72 => ("CURRENT_IMPLICIT_DEFAULT_TELEMETRY", "NOT_RUN"),
             _ => ("CURRENT_EXPLICIT", "NOT_RUN"),
@@ -737,9 +1897,7 @@ fn validate_reachable_rows(artifact: &Value) -> Result<(), String> {
                 .as_str()
                 .ok_or_else(|| format!("API key {api_key} journey class must be text"))?;
             if !allowed_journeys.contains(journey) {
-                return Err(format!(
-                    "API key {api_key} has unknown journey class {journey:?}"
-                ));
+                return Err(format!("API key {api_key} has unknown journey class {journey:?}"));
             }
         }
         if row.get("accepted_version_range") != Some(&Value::Null) {
@@ -754,40 +1912,29 @@ fn validate_reachable_rows(artifact: &Value) -> Result<(), String> {
 
         let reaches_flexible = flex_first.is_some_and(|first| first <= *client_max);
         let expected_request_headers: &[u64] = if reaches_flexible { &[1, 2] } else { &[1] };
-        let expected_response_headers: &[u64] = if *api_key == 18 || !reaches_flexible {
-            &[0]
-        } else {
-            &[0, 1]
-        };
+        let expected_response_headers: &[u64] =
+            if *api_key == 18 || !reaches_flexible { &[0] } else { &[0, 1] };
         if numeric_array(row, "candidate_request_header_versions")?.as_slice()
             != expected_request_headers
         {
-            return Err(format!(
-                "API key {api_key} request header selection changed"
-            ));
+            return Err(format!("API key {api_key} request header selection changed"));
         }
         if numeric_array(row, "candidate_response_header_versions")?.as_slice()
             != expected_response_headers
         {
-            return Err(format!(
-                "API key {api_key} response header selection changed"
-            ));
+            return Err(format!("API key {api_key} response header selection changed"));
         }
-        expect_text(
-            row,
-            "schema_projection_state",
-            "SOURCE_SELECTED_FIELDS_NOT_PROJECTED",
-        )?;
+        let expected_projection_state = if matches!(*api_key, 17 | 36) {
+            "AUTH_BODY_PARTIAL_CURRENT_AND_HISTORICAL_PROFILE_PROJECTED_NOT_ACCEPTED"
+        } else {
+            "SOURCE_SELECTED_FIELDS_NOT_PROJECTED"
+        };
+        expect_text(row, "schema_projection_state", expected_projection_state)?;
     }
 
     let telemetry = rows
         .iter()
-        .filter(|row| {
-            matches!(
-                row.get("api_key").and_then(Value::as_u64),
-                Some(71) | Some(72)
-            )
-        })
+        .filter(|row| matches!(row.get("api_key").and_then(Value::as_u64), Some(71) | Some(72)))
         .collect::<Vec<_>>();
     if telemetry.len() != 2 {
         return Err("telemetry reachability rows are incomplete".to_owned());
@@ -865,7 +2012,7 @@ fn validate_schema_sources(artifact: &Value) -> Result<(), String> {
     expect_text(
         identity,
         "state",
-        "CURRENT_SOURCE_GIT_BLOB_IDENTITIES_PINNED_FIELDS_AND_ERRORS_NOT_PROJECTED",
+        "CURRENT_SOURCE_GIT_BLOB_IDENTITIES_PINNED_AUTH_BODY_PARTIAL_FIELDS_AND_ERRORS_PROJECTED",
     )?;
 
     let current_authority = array(artifact, "external_authorities")?
@@ -883,7 +2030,7 @@ fn validate_schema_sources(artifact: &Value) -> Result<(), String> {
     expect_text(
         current_authority,
         "content_state",
-        "CURRENT_SCHEMA_GIT_BLOB_IDENTITIES_PINNED_FIELDS_AND_ERRORS_NOT_PROJECTED",
+        "CURRENT_SCHEMA_IDENTITIES_PINNED_AUTH_BODY_PARTIAL_FIELDS_AND_ERRORS_PROJECTED",
     )?;
 
     let rows = array(artifact, "schema_source_rows")?;
@@ -898,10 +2045,7 @@ fn validate_schema_sources(artifact: &Value) -> Result<(), String> {
         .iter()
         .map(|row| number(row, "api_key"))
         .collect::<Result<BTreeSet<_>, _>>()?;
-    let expected = EXPECTED_APIS
-        .iter()
-        .map(|row| row.0)
-        .collect::<BTreeSet<_>>();
+    let expected = EXPECTED_APIS.iter().map(|row| row.0).collect::<BTreeSet<_>>();
     if keys != expected {
         return Err("schema pair keys do not match the reachability frontier".to_owned());
     }
@@ -934,11 +2078,7 @@ fn validate_schema_sources(artifact: &Value) -> Result<(), String> {
             ("request", request_object_id),
             ("response", response_object_id),
         ] {
-            if object_id.len() != 40
-                || !object_id
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-            {
+            if !is_lower_hex(object_id, 40) {
                 return Err(format!(
                     "API key {api_key} {label} Git blob object ID is not 40 lowercase hex digits"
                 ));
@@ -960,30 +2100,1023 @@ fn validate_schema_sources(artifact: &Value) -> Result<(), String> {
         .map(|(path, object_id, byte_count)| format!("{path}\t{object_id}\t{byte_count}\n"))
         .collect::<String>();
     let projection_sha256 = sha256_bytes(projection.as_bytes());
-    if projection_sha256 != text(identity, "sorted_path_object_id_size_projection_sha256")? {
+    if projection_sha256
+        != text(
+            identity,
+            "sorted_path_object_id_size_projection_sha256",
+        )?
+    {
         return Err("schema source identity projection digest changed".to_owned());
     }
     Ok(())
 }
 
-fn validate_blocked_evidence(artifact: &Value) -> Result<(), String> {
-    if !array(artifact, "field_projection_rows")?.is_empty()
-        || !array(artifact, "error_projection_rows")?.is_empty()
-    {
-        return Err("partial field or error projections must not masquerade as closure".to_owned());
+fn validate_historical_schema_sources(artifact: &Value) -> Result<(), String> {
+    let contracts = array(artifact, "historical_schema_source_contracts")?;
+    let source_rows = array(artifact, "historical_schema_source_rows")?;
+    let range_rows = array(artifact, "historical_profile_api_range_rows")?;
+    if contracts.len() != EXPECTED_HISTORICAL_CONTRACTS.len() {
+        return Err(format!(
+            "expected {} historical source contracts, got {}",
+            EXPECTED_HISTORICAL_CONTRACTS.len(),
+            contracts.len()
+        ));
+    }
+    if source_rows.len() != 46 {
+        return Err(format!(
+            "expected 46 historical source rows, got {}",
+            source_rows.len()
+        ));
+    }
+    if range_rows.len() != EXPECTED_HISTORICAL_RANGES.len() {
+        return Err(format!(
+            "expected {} historical API range rows, got {}",
+            EXPECTED_HISTORICAL_RANGES.len(),
+            range_rows.len()
+        ));
     }
 
+    let external_authorities = array(artifact, "external_authorities")?;
+    let broker_profiles = array(artifact, "broker_profile_rows")?;
+    let reachable_api_rows = array(artifact, "reachable_api_rows")?;
+    let mut all_source_keys = BTreeSet::new();
+    let mut all_object_ids = BTreeSet::new();
+    let mut all_source_bytes = 0_u64;
+    for expected in EXPECTED_HISTORICAL_CONTRACTS {
+        let contract = contracts
+            .iter()
+            .find(|row| row.get("profile_id").and_then(Value::as_str) == Some(expected.profile_id))
+            .ok_or_else(|| {
+                format!(
+                    "missing historical source contract for {}",
+                    expected.profile_id
+                )
+            })?;
+        expect_exact_keys(
+            contract,
+            HISTORICAL_CONTRACT_KEYS,
+            "historical source contract",
+        )?;
+        expect_text(contract, "source_authority_id", expected.authority_id)?;
+        expect_text(contract, "source_commit", expected.commit)?;
+        expect_text(contract, "canonical_root_tree", expected.root_tree)?;
+        expect_number(contract, "source_tree_entry_count", expected.tree_entries)?;
+        expect_boolean(contract, "recursive_tree_truncated", false)?;
+        expect_text(contract, "schema_declaration_model", expected.schema_model)?;
+        if numeric_array(contract, "covered_api_keys")?.as_slice() != expected.covered_api_keys {
+            return Err(format!(
+                "covered historical API keys changed for {}",
+                expected.profile_id
+            ));
+        }
+        expect_number(contract, "api_range_row_count", expected.range_rows)?;
+        expect_number(contract, "source_file_count", expected.source_files)?;
+        expect_number(
+            contract,
+            "total_payload_byte_count",
+            expected.source_bytes,
+        )?;
+        expect_text(
+            contract,
+            "sorted_projection_encoding",
+            "UTF-8 path TAB object_id TAB payload_byte_count LF, bytewise path sort",
+        )?;
+        expect_text(
+            contract,
+            "sorted_path_object_id_size_projection_sha256",
+            expected.projection_sha256,
+        )?;
+        expect_text(
+            contract,
+            "semantic_role_projection_encoding",
+            "UTF-8 path TAB semantic_role LF, bytewise path sort",
+        )?;
+        expect_text(
+            contract,
+            "sorted_path_semantic_role_projection_sha256",
+            expected.semantic_role_projection_sha256,
+        )?;
+        let expected_scope_state = if expected.profile_id
+            == "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR"
+        {
+            "PROFILE_SCOPED_CANDIDATE_SOURCE_IDENTITIES_PINNED_AUTH_BODY_PARTIAL_NOT_ACCEPTED"
+        } else {
+            "PROFILE_SCOPED_CANDIDATE_SOURCE_IDENTITIES_PINNED_NOT_ACCEPTED"
+        };
+        expect_text(contract, "scope_state", expected_scope_state)?;
+        expect_text(
+            contract,
+            "nested_payload_state",
+            expected.nested_payload_state,
+        )?;
+        expect_text(
+            contract,
+            "full_frontier_state",
+            expected.full_frontier_state,
+        )?;
+        let expected_blocker = EXPECTED_HISTORICAL_BLOCKERS
+            .iter()
+            .find(|blocker| blocker.profile_id == expected.profile_id);
+        match expected_blocker {
+            Some(expected_blocker) => {
+                let blocker = contract
+                    .get("full_frontier_blocker")
+                    .ok_or_else(|| "full-frontier blocker must exist".to_owned())?;
+                expect_exact_keys(
+                    blocker,
+                    HISTORICAL_FULL_FRONTIER_BLOCKER_KEYS,
+                    "historical full-frontier blocker",
+                )?;
+                expect_number(blocker, "api_key", expected_blocker.api_key)?;
+                expect_text(blocker, "api_name", expected_blocker.api_name)?;
+                expect_number(
+                    blocker,
+                    "broker_declared_min",
+                    expected_blocker.broker_min,
+                )?;
+                expect_number(
+                    blocker,
+                    "broker_declared_max",
+                    expected_blocker.broker_max,
+                )?;
+                expect_number(blocker, "incumbent_min", expected_blocker.incumbent_min)?;
+                expect_number(blocker, "incumbent_max", expected_blocker.incumbent_max)?;
+                if blocker.get("intersection") != Some(&Value::Null)
+                    || blocker.get("accepted_version_range") != Some(&Value::Null)
+                {
+                    return Err("empty full-frontier blocker gained a range".to_owned());
+                }
+                expect_text(blocker, "state", expected_blocker.state)?;
+                if number(blocker, "broker_declared_max")?
+                    >= number(blocker, "incumbent_min")?
+                {
+                    return Err(
+                        "full-frontier blocker does not encode an empty intersection".to_owned(),
+                    );
+                }
+                let reachable = reachable_api_rows
+                    .iter()
+                    .find(|row| {
+                        row.get("api_key").and_then(Value::as_u64)
+                            == Some(expected_blocker.api_key)
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "full-frontier blocker API {} escaped the reachable frontier",
+                            expected_blocker.api_key
+                        )
+                    })?;
+                expect_text(reachable, "api_name", expected_blocker.api_name)?;
+                expect_number(
+                    reachable,
+                    "librdkafka_client_min",
+                    expected_blocker.incumbent_min,
+                )?;
+                expect_number(
+                    reachable,
+                    "librdkafka_client_max",
+                    expected_blocker.incumbent_max,
+                )?;
+            }
+            None => {
+                if contract.get("full_frontier_blocker") != Some(&Value::Null) {
+                    return Err(format!(
+                        "unexpected full-frontier blocker for {}",
+                        expected.profile_id
+                    ));
+                }
+            }
+        }
+        let observations = array(contract, "blocking_observations")?;
+        if observations.len() != 1
+            || observations[0].as_str() != Some(expected.blocking_observation)
+        {
+            return Err(format!(
+                "blocking observation changed for {}",
+                expected.profile_id
+            ));
+        }
+
+        let authority = external_authorities
+            .iter()
+            .find(|row| {
+                row.get("authority_id").and_then(Value::as_str) == Some(expected.authority_id)
+            })
+            .ok_or_else(|| format!("missing historical authority {}", expected.authority_id))?;
+        expect_text(authority, "commit", expected.commit)?;
+        let expected_content_state = if expected.profile_id
+            == "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR"
+        {
+            "PROFILE_SCOPED_SCHEMA_IDENTITIES_PINNED_AUTH_BODY_PARTIAL_FIELDS_AND_ERRORS_PROJECTED"
+        } else {
+            "PROFILE_SCOPED_SCHEMA_SOURCE_IDENTITIES_PINNED_FIELDS_AND_ERRORS_NOT_PROJECTED"
+        };
+        expect_text(authority, "content_state", expected_content_state)?;
+        let profile = broker_profiles
+            .iter()
+            .find(|row| row.get("profile_id").and_then(Value::as_str) == Some(expected.profile_id))
+            .ok_or_else(|| format!("missing broker profile {}", expected.profile_id))?;
+        expect_text(profile, "source_authority_id", expected.authority_id)?;
+        expect_text(profile, "state", "BLOCKED_EXTERNAL")?;
+
+        let profile_sources = source_rows
+            .iter()
+            .filter(|row| {
+                row.get("source_authority_id").and_then(Value::as_str)
+                    == Some(expected.authority_id)
+            })
+            .collect::<Vec<_>>();
+        if profile_sources.len() != usize::try_from(expected.source_files).unwrap_or(usize::MAX) {
+            return Err(format!(
+                "historical source count changed for {}",
+                expected.profile_id
+            ));
+        }
+        let mut projection = Vec::with_capacity(profile_sources.len());
+        let mut semantic_role_projection = Vec::with_capacity(profile_sources.len());
+        let mut profile_source_bytes = 0_u64;
+        for row in profile_sources {
+            expect_exact_keys(row, HISTORICAL_SOURCE_ROW_KEYS, "historical source row")?;
+            expect_text(row, "profile_id", expected.profile_id)?;
+            expect_text(row, "source_authority_id", expected.authority_id)?;
+            let path = text(row, "path")?;
+            if !path.starts_with(expected.source_path_prefix) {
+                return Err(format!(
+                    "historical source path {path} escaped {}",
+                    expected.source_path_prefix
+                ));
+            }
+            let object_id = text(row, "git_blob_sha1")?;
+            if !is_lower_hex(object_id, 40) {
+                return Err(format!(
+                    "historical source {path} has an invalid Git blob object ID"
+                ));
+            }
+            let byte_count = number(row, "byte_count")?;
+            let semantic_role = text(row, "semantic_role")?;
+            if byte_count == 0 {
+                return Err(format!("historical source {path} lacks bounded metadata"));
+            }
+            if !all_source_keys.insert((expected.authority_id.to_owned(), path.to_owned())) {
+                return Err(format!(
+                    "historical authority {} repeats source path {path}",
+                    expected.authority_id
+                ));
+            }
+            profile_source_bytes += byte_count;
+            all_source_bytes += byte_count;
+            all_object_ids.insert(object_id.to_owned());
+            projection.push((path, object_id, byte_count));
+            semantic_role_projection.push((path, semantic_role));
+        }
+        if profile_source_bytes != expected.source_bytes {
+            return Err(format!(
+                "historical source bytes changed for {}",
+                expected.profile_id
+            ));
+        }
+        projection.sort_by(|left, right| left.0.cmp(&right.0));
+        let projection = projection
+            .into_iter()
+            .map(|(path, object_id, byte_count)| format!("{path}\t{object_id}\t{byte_count}\n"))
+            .collect::<String>();
+        if sha256_bytes(projection.as_bytes()) != expected.projection_sha256 {
+            return Err(format!(
+                "historical source projection changed for {}",
+                expected.profile_id
+            ));
+        }
+        semantic_role_projection.sort_by(|left, right| left.0.cmp(&right.0));
+        let semantic_role_projection = semantic_role_projection
+            .into_iter()
+            .map(|(path, semantic_role)| format!("{path}\t{semantic_role}\n"))
+            .collect::<String>();
+        if sha256_bytes(semantic_role_projection.as_bytes())
+            != expected.semantic_role_projection_sha256
+        {
+            return Err(format!(
+                "historical semantic-role projection changed for {}",
+                expected.profile_id
+            ));
+        }
+
+        let actual_range_keys = range_rows
+            .iter()
+            .filter(|row| {
+                row.get("profile_id").and_then(Value::as_str) == Some(expected.profile_id)
+            })
+            .map(|row| number(row, "api_key"))
+            .collect::<Result<Vec<_>, _>>()?;
+        if actual_range_keys.as_slice() != expected.covered_api_keys {
+            return Err(format!(
+                "historical profile range keys changed for {}",
+                expected.profile_id
+            ));
+        }
+    }
+    if all_source_keys.len() != source_rows.len() || all_source_bytes != 424_804 {
+        return Err("historical source identity coverage changed".to_owned());
+    }
+    if all_object_ids.len() != 44 {
+        return Err("historical distinct Git blob coverage changed".to_owned());
+    }
+
+    let mut range_keys = BTreeSet::new();
+    for expected in EXPECTED_HISTORICAL_RANGES {
+        let row = range_rows
+            .iter()
+            .find(|row| {
+                row.get("profile_id").and_then(Value::as_str) == Some(expected.profile_id)
+                    && row.get("api_key").and_then(Value::as_u64) == Some(expected.api_key)
+            })
+            .ok_or_else(|| {
+                format!(
+                    "missing historical range row {} API {}",
+                    expected.profile_id, expected.api_key
+                )
+            })?;
+        expect_exact_keys(row, HISTORICAL_RANGE_ROW_KEYS, "historical API range row")?;
+        expect_text(row, "source_authority_id", expected.authority_id)?;
+        expect_text(row, "api_name", expected.api_name)?;
+        expect_text(row, "broker_declared_versions", expected.broker_versions)?;
+        expect_text(
+            row,
+            "incumbent_candidate_intersection",
+            expected.intersection,
+        )?;
+        if row.get("accepted_version_range") != Some(&Value::Null) {
+            return Err(format!(
+                "historical range {} API {} was accepted without terminal evidence",
+                expected.profile_id, expected.api_key
+            ));
+        }
+        expect_text(row, "state", expected.state)?;
+        if !range_keys.insert((expected.profile_id.to_owned(), expected.api_key)) {
+            return Err(format!(
+                "duplicate historical range {} API {}",
+                expected.profile_id, expected.api_key
+            ));
+        }
+        let reachable_name = EXPECTED_APIS
+            .iter()
+            .find(|api| api.0 == expected.api_key)
+            .map(|api| api.1)
+            .ok_or_else(|| format!("historical API {} escaped the frontier", expected.api_key))?;
+        if reachable_name != expected.api_name {
+            return Err(format!(
+                "historical API name changed for key {}",
+                expected.api_key
+            ));
+        }
+    }
+    if range_keys.len() != range_rows.len() {
+        return Err("historical API range keys must be unique".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
+    let support_rows = array(artifact, "field_error_projection_source_rows")?;
+    if support_rows.len() != EXPECTED_PROJECTION_SOURCES.len() {
+        return Err(format!(
+            "expected {} field/error support sources, got {}",
+            EXPECTED_PROJECTION_SOURCES.len(),
+            support_rows.len()
+        ));
+    }
+
+    let mut support_ids = BTreeSet::new();
+    let mut support_keys = BTreeSet::new();
+    let mut support_projection = Vec::new();
+    let mut support_bytes = 0_u64;
+    for row in support_rows {
+        expect_exact_keys(
+            row,
+            FIELD_ERROR_PROJECTION_SOURCE_KEYS,
+            "field/error projection source",
+        )?;
+        let source_id = text(row, "source_id")?;
+        let authority = text(row, "source_authority_id")?;
+        let path = text(row, "path")?;
+        let object_id = text(row, "git_blob_sha1")?;
+        let byte_count = number(row, "byte_count")?;
+        let semantic_role = text(row, "semantic_role")?;
+        let expected = EXPECTED_PROJECTION_SOURCES
+            .iter()
+            .find(|expected| expected.0 == source_id)
+            .ok_or_else(|| format!("unexpected field/error support source {source_id}"))?;
+        expect_text(row, "source_authority_id", expected.1)?;
+        expect_text(row, "path", expected.2)?;
+        expect_text(row, "git_blob_sha1", expected.3)?;
+        expect_number(row, "byte_count", expected.4)?;
+        expect_text(row, "semantic_role", expected.5)?;
+        if !matches!(
+            authority,
+            "KAFKA-K2-1-AUTH-APACHE-CURRENT"
+                | "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR"
+        ) {
+            return Err(format!(
+                "field/error projection source {source_id} escaped the two-profile slice"
+            ));
+        }
+        if !is_lower_hex(object_id, 40) || byte_count == 0 {
+            return Err(format!(
+                "field/error projection source {source_id} lacks bounded Git identity"
+            ));
+        }
+        if !support_ids.insert(source_id.to_owned())
+            || !support_keys.insert((authority.to_owned(), path.to_owned()))
+        {
+            return Err("field/error projection support source identities must be unique".to_owned());
+        }
+        support_bytes += byte_count;
+        support_projection.push((
+            authority.to_owned(),
+            path.to_owned(),
+            object_id.to_owned(),
+            byte_count,
+            semantic_role.to_owned(),
+        ));
+    }
+    if support_bytes != 109_046 {
+        return Err("field/error projection support byte coverage changed".to_owned());
+    }
+    support_projection.sort();
+    let support_projection = support_projection
+        .into_iter()
+        .map(|(authority, path, object_id, byte_count, semantic_role)| {
+            format!(
+                "{authority}\t{path}\t{object_id}\t{byte_count}\t{semantic_role}\n"
+            )
+        })
+        .collect::<String>();
+    let support_projection_sha256 = sha256_bytes(support_projection.as_bytes());
+    if support_projection_sha256
+        != "f2238244aadbccb7b654f4e44f0cceee6a04f961a08f9287efb1c57a320af2af"
+    {
+        return Err("field/error projection support digest changed".to_owned());
+    }
+
+    let mut pinned_sources = support_keys;
+    for row in array(artifact, "schema_source_rows")? {
+        pinned_sources.insert((
+            "KAFKA-K2-1-AUTH-APACHE-CURRENT".to_owned(),
+            text(row, "request_path")?.to_owned(),
+        ));
+        pinned_sources.insert((
+            "KAFKA-K2-1-AUTH-APACHE-CURRENT".to_owned(),
+            text(row, "response_path")?.to_owned(),
+        ));
+    }
+    for row in array(artifact, "historical_schema_source_rows")? {
+        pinned_sources.insert((
+            text(row, "source_authority_id")?.to_owned(),
+            text(row, "path")?.to_owned(),
+        ));
+    }
+
+    let fields = array(artifact, "field_projection_rows")?;
+    if fields.len() != EXPECTED_FIELD_PROJECTIONS.len() {
+        return Err(format!(
+            "expected {} partial authentication field rows, got {}",
+            EXPECTED_FIELD_PROJECTIONS.len(),
+            fields.len()
+        ));
+    }
+    let mut field_row_ids = BTreeSet::new();
+    let mut field_profiles = BTreeMap::<String, usize>::new();
+    let mut field_api_keys = BTreeSet::new();
+    let mut field_api_profiles = BTreeSet::new();
+    let mut field_api_versions = BTreeSet::new();
+    let mut field_orders =
+        BTreeMap::<(String, u64, String, u64), BTreeSet<u64>>::new();
+    let mut field_version_cells = 0_usize;
+    let mut explicit_schema_defaults = 0_usize;
+    let mut field_error_sets = BTreeSet::new();
+
+    for row in fields {
+        expect_exact_keys(row, FIELD_PROJECTION_ROW_KEYS, "field projection row")?;
+        let row_id = text(row, "row_id")?;
+        if !field_row_ids.insert(row_id.to_owned()) {
+            return Err(format!("duplicate field projection row {row_id}"));
+        }
+        let expected = EXPECTED_FIELD_PROJECTIONS
+            .iter()
+            .find(|expected| expected.row_id == row_id)
+            .ok_or_else(|| format!("unexpected field projection row {row_id}"))?;
+        expect_text(row, "profile_id", expected.profile_id)?;
+        expect_text(row, "source_authority_id", expected.authority_id)?;
+        let expected_source_refs = expected
+            .source_refs
+            .iter()
+            .map(|source_ref| (*source_ref).to_owned())
+            .collect::<Vec<_>>();
+        if text_array(row, "source_refs")? != expected_source_refs {
+            return Err(format!("field row {row_id} source references changed"));
+        }
+        expect_number(row, "api_key", expected.api_key)?;
+        expect_text(row, "direction", expected.direction)?;
+        expect_text(row, "canonical_field_id", expected.canonical_field_id)?;
+        expect_text(row, "source_field_name", expected.source_field_name)?;
+        expect_number(row, "field_order", expected.field_order)?;
+        expect_text(row, "source_versions", expected.source_versions)?;
+        expect_text(row, "projected_versions", expected.projected_versions)?;
+        expect_text(row, "excluded_source_versions", expected.excluded_versions)?;
+        expect_text(row, "logical_type", expected.logical_type)?;
+        expect_text(row, "wire_type", expected.wire_type)?;
+        match expected.element_type {
+            Some(element_type) => expect_text(row, "element_type", element_type)?,
+            None if row.get("element_type") == Some(&Value::Null) => {}
+            None => return Err(format!("field row {row_id} invented an element type")),
+        }
+        expect_text(row, "nullable_versions", expected.nullable_versions)?;
+        expect_text(row, "schema_default_state", expected.default_state)?;
+        match expected.default_literal {
+            Some(default_literal) => {
+                expect_text(row, "schema_default_literal", default_literal)?
+            }
+            None if row.get("schema_default_literal") == Some(&Value::Null) => {}
+            None => return Err(format!("field row {row_id} invented a schema default")),
+        }
+        expect_text(row, "ignorable_versions", expected.ignorable_versions)?;
+        expect_text(row, "sensitivity", expected.sensitivity)?;
+        match expected.error_set_id {
+            Some(error_set_id) => expect_text(row, "error_set_id", error_set_id)?,
+            None if row.get("error_set_id") == Some(&Value::Null) => {}
+            None => return Err(format!("field row {row_id} invented an error set")),
+        }
+        expect_text(
+            row,
+            "nested_projection_state",
+            expected.nested_projection_state,
+        )?;
+        let profile = text(row, "profile_id")?;
+        let authority = text(row, "source_authority_id")?;
+        let expected_authority = match profile {
+            "KAFKA-K2-1-BROKER-CURRENT" => "KAFKA-K2-1-AUTH-APACHE-CURRENT",
+            "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR" => {
+                "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR"
+            }
+            _ => return Err(format!("field row {row_id} escaped the two-profile slice")),
+        };
+        if authority != expected_authority {
+            return Err(format!("field row {row_id} crossed source authorities"));
+        }
+        *field_profiles.entry(profile.to_owned()).or_default() += 1;
+
+        let api_key = number(row, "api_key")?;
+        if !matches!(api_key, 17 | 36) {
+            return Err(format!("field row {row_id} escaped APIs 17 and 36"));
+        }
+        field_api_keys.insert(api_key);
+        field_api_profiles.insert((profile.to_owned(), api_key));
+
+        let source_versions = version_set(text(row, "source_versions")?)?;
+        let projected_versions = version_set(text(row, "projected_versions")?)?;
+        let excluded_versions = version_set(text(row, "excluded_source_versions")?)?;
+        if projected_versions.is_empty()
+            || !projected_versions.is_subset(&source_versions)
+            || !excluded_versions.is_subset(&source_versions)
+            || !projected_versions.is_disjoint(&excluded_versions)
+        {
+            return Err(format!("field row {row_id} has incoherent version sets"));
+        }
+        let projected_and_excluded = projected_versions
+            .union(&excluded_versions)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if projected_and_excluded != source_versions || projected_versions.contains(&2) {
+            return Err(format!(
+                "field row {row_id} did not fail closed around excluded API 36 v2"
+            ));
+        }
+        let expected_exclusion_state = if excluded_versions.is_empty() {
+            "NONE"
+        } else {
+            "OUTSIDE_INCUMBENT_CANDIDATE_INTERSECTION_FLEXIBLE_ENCODING_UNPROJECTED"
+        };
+        expect_text(row, "version_exclusion_state", expected_exclusion_state)?;
+
+        let candidate_versions = if profile == "KAFKA-K2-1-BROKER-CURRENT" {
+            let reachable = array(artifact, "reachable_api_rows")?
+                .iter()
+                .find(|candidate| candidate.get("api_key").and_then(Value::as_u64) == Some(api_key))
+                .ok_or_else(|| format!("missing current candidate range for API {api_key}"))?;
+            version_set(text(reachable, "candidate_current_intersection")?)?
+        } else {
+            let historical = array(artifact, "historical_profile_api_range_rows")?
+                .iter()
+                .find(|candidate| {
+                    candidate.get("profile_id").and_then(Value::as_str) == Some(profile)
+                        && candidate.get("api_key").and_then(Value::as_u64) == Some(api_key)
+                })
+                .ok_or_else(|| format!("missing historical candidate range for API {api_key}"))?;
+            version_set(text(historical, "incumbent_candidate_intersection")?)?
+        };
+        if !projected_versions.is_subset(&candidate_versions) {
+            return Err(format!("field row {row_id} escaped its candidate range"));
+        }
+
+        let direction = text(row, "direction")?;
+        if !matches!(direction, "REQUEST" | "RESPONSE") {
+            return Err(format!("field row {row_id} has invalid direction"));
+        }
+        let field_order = number(row, "field_order")?;
+        for version in &projected_versions {
+            let key = (profile.to_owned(), api_key, direction.to_owned(), *version);
+            if !field_orders.entry(key).or_default().insert(field_order) {
+                return Err(format!(
+                    "field row {row_id} duplicates an order in projected version {version}"
+                ));
+            }
+            field_api_versions.insert((profile.to_owned(), api_key, *version));
+        }
+        field_version_cells += projected_versions.len();
+
+        for source_ref in text_array(row, "source_refs")? {
+            if !pinned_sources.contains(&(authority.to_owned(), source_ref.clone())) {
+                return Err(format!(
+                    "field row {row_id} references unpinned source {source_ref}"
+                ));
+            }
+        }
+        for key in [
+            "projected_compact_versions",
+            "projected_tagged_versions",
+            "message_tag_buffer_projected_versions",
+        ] {
+            expect_text(row, key, "none")?;
+        }
+        if !array(row, "projected_tag_ids")?.is_empty() {
+            return Err(format!("field row {row_id} invented a tagged field ID"));
+        }
+        if row.get("accepted_version_range") != Some(&Value::Null) {
+            return Err(format!("field row {row_id} acquired an accepted range"));
+        }
+        expect_text(
+            row,
+            "projection_state",
+            "SOURCE_BODY_FIELD_PROJECTED_PARTIAL_PACKET_NOT_ACCEPTED",
+        )?;
+
+        match text(row, "schema_default_state")? {
+            "NOT_EXPLICITLY_DECLARED"
+                if row.get("schema_default_literal") == Some(&Value::Null) => {}
+            "EXPLICIT_LITERAL" => {
+                explicit_schema_defaults += 1;
+                expect_text(row, "schema_default_literal", "0")?;
+            }
+            state => {
+                return Err(format!(
+                    "field row {row_id} has inconsistent schema default state {state}"
+                ));
+            }
+        }
+
+        let canonical_field = text(row, "canonical_field_id")?;
+        if canonical_field.ends_with(".ERROR_CODE") {
+            field_error_sets.insert(text(row, "error_set_id")?.to_owned());
+        } else if row.get("error_set_id") != Some(&Value::Null) {
+            return Err(format!("non-error field row {row_id} acquired an error set"));
+        }
+        if canonical_field.ends_with(".AUTH_BYTES") {
+            expect_text(row, "sensitivity", "SECRET_BEARING_OPAQUE_AUTH_MATERIAL")?;
+            expect_text(
+                row,
+                "nested_projection_state",
+                "OPAQUE_SASL_MECHANISM_BYTES_NOT_PROJECTED",
+            )?;
+        }
+        if canonical_field.ends_with(".SESSION_LIFETIME_MS") {
+            if profile != "KAFKA-K2-1-BROKER-CURRENT"
+                || api_key != 36
+                || projected_versions != BTreeSet::from([1])
+            {
+                return Err("session lifetime escaped current API 36 v1".to_owned());
+            }
+            expect_text(row, "ignorable_versions", "1")?;
+        }
+        if canonical_field.ends_with(".ERROR_MESSAGE") {
+            let expected_nullable = if profile == "KAFKA-K2-1-BROKER-CURRENT" {
+                "0-1"
+            } else {
+                "0"
+            };
+            expect_text(row, "nullable_versions", expected_nullable)?;
+            expect_text(row, "wire_type", "NULLABLE_STRING")?;
+        }
+    }
+
+    if field_profiles
+        != BTreeMap::from([
+            ("KAFKA-K2-1-BROKER-CURRENT".to_owned(), 8),
+            (
+                "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR".to_owned(),
+                7,
+            ),
+        ])
+        || field_api_keys != BTreeSet::from([17, 36])
+        || field_api_profiles.len() != 4
+        || field_api_versions.len() != 7
+        || field_version_cells != 25
+        || explicit_schema_defaults != 1
+    {
+        return Err("partial field projection coverage changed".to_owned());
+    }
+    for ((profile, api_key, direction, version), orders) in field_orders {
+        let maximum = orders
+            .last()
+            .copied()
+            .ok_or_else(|| "projected field order set must not be empty".to_owned())?;
+        let expected_orders = (0..=maximum).collect::<BTreeSet<_>>();
+        if orders != expected_orders {
+            return Err(format!(
+                "field order is not contiguous for {profile} API {api_key} {direction} v{version}"
+            ));
+        }
+    }
+    if sorted_json_rows_sha256(fields)?
+        != "a17bfa34cf57922a68a2bcd17f61c38f7f393ea9a95d042fd31776a884663a40"
+    {
+        return Err("field projection digest changed".to_owned());
+    }
+
+    let errors = array(artifact, "error_projection_rows")?;
+    if errors.len() != EXPECTED_ERROR_PROJECTIONS.len() {
+        return Err(format!(
+            "expected {} partial authentication outcome rows, got {}",
+            EXPECTED_ERROR_PROJECTIONS.len(),
+            errors.len()
+        ));
+    }
+    let expected_error_tuples = [
+        ("KAFKA-K2-1-BROKER-CURRENT", 17, 0, "NONE"),
+        (
+            "KAFKA-K2-1-BROKER-CURRENT",
+            17,
+            33,
+            "UNSUPPORTED_SASL_MECHANISM",
+        ),
+        (
+            "KAFKA-K2-1-BROKER-CURRENT",
+            17,
+            34,
+            "ILLEGAL_SASL_STATE",
+        ),
+        ("KAFKA-K2-1-BROKER-CURRENT", 36, 0, "NONE"),
+        (
+            "KAFKA-K2-1-BROKER-CURRENT",
+            36,
+            58,
+            "SASL_AUTHENTICATION_FAILED",
+        ),
+        (
+            "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
+            17,
+            0,
+            "NONE",
+        ),
+        (
+            "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
+            17,
+            33,
+            "UNSUPPORTED_SASL_MECHANISM",
+        ),
+        (
+            "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
+            17,
+            34,
+            "ILLEGAL_SASL_STATE",
+        ),
+        (
+            "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
+            36,
+            0,
+            "NONE",
+        ),
+        (
+            "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
+            36,
+            58,
+            "SASL_AUTHENTICATION_FAILED",
+        ),
+    ]
+    .into_iter()
+    .map(|(profile, api_key, error_code, error_name)| {
+        (
+            profile.to_owned(),
+            api_key,
+            error_code,
+            error_name.to_owned(),
+        )
+    })
+    .collect::<BTreeSet<_>>();
+
+    let mut actual_error_tuples = BTreeSet::new();
+    let mut error_row_ids = BTreeSet::new();
+    let mut error_sets = BTreeSet::new();
+    let mut error_profiles = BTreeSet::new();
+    let mut error_version_cells = 0_usize;
+    let mut conflict_rows = 0_usize;
+    for row in errors {
+        expect_exact_keys(row, ERROR_PROJECTION_ROW_KEYS, "error projection row")?;
+        let row_id = text(row, "row_id")?;
+        if !error_row_ids.insert(row_id.to_owned()) {
+            return Err(format!("duplicate error projection row {row_id}"));
+        }
+        let expected = EXPECTED_ERROR_PROJECTIONS
+            .iter()
+            .find(|expected| expected.row_id == row_id)
+            .ok_or_else(|| format!("unexpected error projection row {row_id}"))?;
+        expect_text(row, "error_set_id", expected.error_set_id)?;
+        expect_text(row, "profile_id", expected.profile_id)?;
+        expect_text(row, "source_authority_id", expected.authority_id)?;
+        let expected_source_refs = expected
+            .source_refs
+            .iter()
+            .map(|source_ref| (*source_ref).to_owned())
+            .collect::<Vec<_>>();
+        if text_array(row, "source_refs")? != expected_source_refs {
+            return Err(format!("error row {row_id} source references changed"));
+        }
+        expect_number(row, "api_key", expected.api_key)?;
+        expect_text(row, "source_versions", expected.source_versions)?;
+        expect_text(row, "projected_versions", expected.projected_versions)?;
+        expect_text(row, "excluded_source_versions", expected.excluded_versions)?;
+        expect_text(row, "error_name", expected.error_name)?;
+        expect_number(row, "canonical_error_code", expected.error_code)?;
+        match expected.comment_code {
+            Some(comment_code) => expect_number(row, "api_comment_error_code", comment_code)?,
+            None if row.get("api_comment_error_code") == Some(&Value::Null) => {}
+            None => return Err(format!("error row {row_id} invented a comment code")),
+        }
+        expect_text(row, "outcome_class", expected.outcome_class)?;
+        expect_text(
+            row,
+            "code_consistency_state",
+            expected.consistency_state,
+        )?;
+        let profile = text(row, "profile_id")?;
+        let authority = text(row, "source_authority_id")?;
+        let expected_authority = match profile {
+            "KAFKA-K2-1-BROKER-CURRENT" => "KAFKA-K2-1-AUTH-APACHE-CURRENT",
+            "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR" => {
+                "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR"
+            }
+            _ => return Err(format!("error row {row_id} escaped the two-profile slice")),
+        };
+        if authority != expected_authority {
+            return Err(format!("error row {row_id} crossed source authorities"));
+        }
+        let api_key = number(row, "api_key")?;
+        let error_code = number(row, "canonical_error_code")?;
+        let error_name = text(row, "error_name")?;
+        actual_error_tuples.insert((
+            profile.to_owned(),
+            api_key,
+            error_code,
+            error_name.to_owned(),
+        ));
+        error_profiles.insert(profile.to_owned());
+        error_sets.insert(text(row, "error_set_id")?.to_owned());
+
+        let source_versions = version_set(text(row, "source_versions")?)?;
+        let projected_versions = version_set(text(row, "projected_versions")?)?;
+        let excluded_versions = version_set(text(row, "excluded_source_versions")?)?;
+        if projected_versions.is_empty()
+            || !projected_versions.is_subset(&source_versions)
+            || !excluded_versions.is_subset(&source_versions)
+            || !projected_versions.is_disjoint(&excluded_versions)
+            || projected_versions
+                .union(&excluded_versions)
+                .copied()
+                .collect::<BTreeSet<_>>()
+                != source_versions
+            || projected_versions.contains(&2)
+        {
+            return Err(format!("error row {row_id} has incoherent version sets"));
+        }
+        error_version_cells += projected_versions.len();
+        for source_ref in text_array(row, "source_refs")? {
+            if !pinned_sources.contains(&(authority.to_owned(), source_ref.clone())) {
+                return Err(format!(
+                    "error row {row_id} references unpinned source {source_ref}"
+                ));
+            }
+        }
+
+        if boolean(row, "wire_enum_closed")? {
+            return Err(format!("error row {row_id} closed an open INT16 wire field"));
+        }
+        expect_text(row, "enum_membership_state", "CONFIRMED_CANONICAL_ENUM")?;
+        expect_text(row, "retry_policy_state", "UNPROJECTED_BLOCKING")?;
+        expect_text(row, "downgrade_policy_state", "UNPROJECTED_BLOCKING")?;
+        expect_text(
+            row,
+            "projection_state",
+            "SOURCE_DERIVED_NORMAL_CASE_PARTIAL_NOT_ACCEPTED",
+        )?;
+        if row.get("accepted_version_range") != Some(&Value::Null) {
+            return Err(format!("error row {row_id} acquired an accepted range"));
+        }
+
+        if error_code == 58 {
+            expect_number(row, "api_comment_error_code", 57)?;
+            expect_text(
+                row,
+                "code_consistency_state",
+                "STALE_API_COMMENT_57_CANONICAL_ENUM_58",
+            )?;
+            conflict_rows += 1;
+        } else {
+            expect_text(row, "code_consistency_state", "CONSISTENT")?;
+            if error_code == 0 {
+                if row.get("api_comment_error_code") != Some(&Value::Null) {
+                    return Err(format!("success row {row_id} invented a comment code"));
+                }
+                expect_text(row, "outcome_class", "SUCCESS_SENTINEL")?;
+            } else {
+                expect_number(row, "api_comment_error_code", error_code)?;
+            }
+        }
+        expect_text(row, "membership_basis", "DEDICATED_HANDLER_EMITTED")?;
+    }
+    if actual_error_tuples != expected_error_tuples
+        || error_profiles.len() != 2
+        || error_sets != field_error_sets
+        || error_sets.len() != 4
+        || error_version_cells != 18
+        || conflict_rows != 2
+    {
+        return Err("partial error projection coverage changed".to_owned());
+    }
+    if sorted_json_rows_sha256(errors)?
+        != "c97900c739803fecf9adfebb11117f52d99ae990f9d48917b85bc25ff470f160"
+    {
+        return Err("error projection digest changed".to_owned());
+    }
+
+    let coverage = artifact
+        .get("coverage_receipt")
+        .ok_or_else(|| "coverage_receipt must exist".to_owned())?;
+    for (key, expected) in [
+        ("field_error_projection_source_row_count", 6),
+        ("field_error_projection_source_total_byte_count", 109_046),
+        ("partial_projection_profile_count", 2),
+        ("partial_projection_api_key_count", 2),
+        ("partial_projection_api_profile_count", 4),
+        ("partial_projection_api_version_count", 7),
+        ("field_projection_row_count", 15),
+        ("field_projection_version_cell_count", 25),
+        ("error_projection_row_count", 10),
+        ("error_projection_version_cell_count", 18),
+        ("error_projection_source_conflict_row_count", 2),
+        ("complete_field_projection_api_key_count", 0),
+        ("complete_error_projection_api_key_count", 0),
+        ("untouched_reachable_api_key_count", 20),
+    ] {
+        expect_number(coverage, key, expected)?;
+    }
+    expect_text(
+        coverage,
+        "field_error_projection_source_sorted_encoding",
+        "UTF-8 authority_id TAB path TAB object_id TAB payload_byte_count TAB semantic_role LF, authority_id then path sort",
+    )?;
+    expect_text(
+        coverage,
+        "field_error_projection_source_projection_sha256",
+        "f2238244aadbccb7b654f4e44f0cceee6a04f961a08f9287efb1c57a320af2af",
+    )?;
+    expect_text(
+        coverage,
+        "field_projection_sorted_encoding",
+        "RFC 8259 compact JSON with lexicographically sorted object keys, bytewise row_id sort, one LF per row",
+    )?;
+    expect_text(
+        coverage,
+        "field_projection_sha256",
+        "a17bfa34cf57922a68a2bcd17f61c38f7f393ea9a95d042fd31776a884663a40",
+    )?;
+    expect_text(
+        coverage,
+        "error_projection_sorted_encoding",
+        "RFC 8259 compact JSON with lexicographically sorted object keys, bytewise row_id sort, one LF per row",
+    )?;
+    expect_text(
+        coverage,
+        "error_projection_sha256",
+        "c97900c739803fecf9adfebb11117f52d99ae990f9d48917b85bc25ff470f160",
+    )?;
+    Ok(())
+}
+
+fn validate_blocked_evidence(artifact: &Value) -> Result<(), String> {
     let header = artifact
         .get("header_contract")
         .ok_or_else(|| "header_contract must exist".to_owned())?;
-    if numeric_array(
-        header,
-        "reachable_request_header_versions_in_22_row_frontier",
-    )? != [1, 2]
-        || numeric_array(
-            header,
-            "reachable_response_header_versions_in_22_row_frontier",
-        )? != [0, 1]
+    if numeric_array(header, "reachable_request_header_versions_in_22_row_frontier")? != [1, 2]
+        || numeric_array(header, "reachable_response_header_versions_in_22_row_frontier")?
+            != [0, 1]
     {
         return Err("header frontier changed".to_owned());
     }
@@ -1022,10 +3155,7 @@ fn validate_blocked_evidence(artifact: &Value) -> Result<(), String> {
 
     let brokers = array(artifact, "broker_profile_rows")?;
     if brokers.len() != 4 {
-        return Err(format!(
-            "expected four blocked broker profiles, got {}",
-            brokers.len()
-        ));
+        return Err(format!("expected four blocked broker profiles, got {}", brokers.len()));
     }
     let versions = brokers
         .iter()
@@ -1050,16 +3180,17 @@ fn validate_blocked_evidence(artifact: &Value) -> Result<(), String> {
     let probe = artifact
         .get("existing_probe_disposition")
         .ok_or_else(|| "existing_probe_disposition must exist".to_owned())?;
-    expect_text(probe, "path", "scripts/kafka_broker_parity_proof_runner.sh")?;
+    expect_text(
+        probe,
+        "path",
+        "scripts/kafka_broker_parity_proof_runner.sh",
+    )?;
     expect_text(probe, "classification", "PROOF_ONLY_NONTERMINAL")?;
     expect_boolean(probe, "executed_for_k2_1", false)?;
 
     let gaps = array(artifact, "completion_gaps")?;
     if gaps.len() != 7 {
-        return Err(format!(
-            "expected seven completion gaps, got {}",
-            gaps.len()
-        ));
+        return Err(format!("expected seven completion gaps, got {}", gaps.len()));
     }
     let gap_ids = gaps
         .iter()
@@ -1075,7 +3206,7 @@ fn validate_blocked_evidence(artifact: &Value) -> Result<(), String> {
     expect_text(
         current_projection_gap,
         "description",
-        "Project the 44 selected current schema bodies whose Git blob identities are pinned here, and pin and project the historical request and response structures required by each oldest-broker candidate.",
+        "Extend the partial authentication-body projection across the other 20 reachable APIs and any historical profile selected by broker-floor adjudication; pin each newly required interpretation source.",
     )?;
     Ok(())
 }
@@ -1092,10 +3223,14 @@ fn validate_receipts_and_boundaries(artifact: &Value) -> Result<(), String> {
         ("current_schema_identity_pair_count", 22),
         ("current_schema_identity_file_count", 44),
         ("current_schema_identity_total_byte_count", 132_674),
-        ("historical_schema_identity_file_count", 0),
+        ("historical_schema_source_contract_count", 3),
+        ("historical_schema_identity_profile_path_row_count", 46),
+        ("historical_schema_identity_distinct_blob_count", 44),
+        ("historical_schema_identity_total_byte_count", 424_804),
+        ("historical_profile_api_range_row_count", 15),
         ("accepted_numeric_range_count", 0),
-        ("field_projection_row_count", 0),
-        ("error_projection_row_count", 0),
+        ("field_projection_row_count", 15),
+        ("error_projection_row_count", 10),
         ("admitted_broker_profile_count", 0),
         ("schema_probe_receipt_count", 0),
         ("completion_gap_count", 7),
@@ -1127,9 +3262,14 @@ fn validate_receipts_and_boundaries(artifact: &Value) -> Result<(), String> {
     for needle in [
         "not a complete Kafka request/response schema contract",
         "not accepted production version ranges",
-        "No field, default, nullability, tagged-field, or error-code projection is complete",
-        "Pinned Git blob object IDs establish current-source object identity only",
+        "15 field rows and ten source-established outcome-membership rows",
+        "API 36 v2 flexible and tag-buffer encoding",
+        "SASL_AUTHENTICATION_FAILED code 58",
+        "stale code 57",
+        "Pinned Git blob object IDs establish current and profile-scoped historical source identity only",
         "not per-file raw-byte SHA-256 security attestations",
+        "Historical profile API ranges are candidate source-derived overlaps only",
+        "empty API 23 intersection",
         "No compiler, formatter, test, broker, service, container, network protocol, or remote execution evidence is claimed",
         "does not authorize K2.2",
     ] {
@@ -1151,11 +3291,22 @@ fn validate_document(root: &Path) -> Result<(), String> {
         "all 44 selected current request/response files",
         "not per-file raw-byte SHA-256 security attestations",
         "current-source object identity only",
+        "three historical candidate profiles",
+        "44 distinct",
+        "OffsetForLeaderEpoch",
+        "95,596",
+        "15 field rows and ten",
+        "source-established outcome-membership rows",
+        "Six additional error-projection source rows",
+        "109,046",
+        "API 36 source v2 is deliberately excluded",
+        "SASL_AUTHENTICATION_FAILED=58",
+        "stale code 57",
         "GetTelemetrySubscriptions",
         "PushTelemetry",
         "no numeric range is accepted",
         "K2.2 therefore remains blocked",
-        "The packet does not prove schema completeness",
+        "The packet does not prove full schema or error completeness",
     ] {
         if !document.contains(needle) {
             return Err(format!("document is missing {needle:?}"));
@@ -1165,7 +3316,10 @@ fn validate_document(root: &Path) -> Result<(), String> {
 }
 
 fn validate_checked_in_hashes(root: &Path) -> Result<(), String> {
-    for (path, expected) in [(ARTIFACT_PATH, ARTIFACT_SHA256), (DOC_PATH, DOC_SHA256)] {
+    for (path, expected) in [
+        (ARTIFACT_PATH, ARTIFACT_SHA256),
+        (DOC_PATH, DOC_SHA256),
+    ] {
         let bytes =
             fs::read(root.join(path)).map_err(|error| format!("failed to read {path}: {error}"))?;
         let actual = sha256_bytes(&bytes);
@@ -1185,6 +3339,8 @@ fn validate_artifact(artifact: &Value, root: &Path) -> Result<(), String> {
     validate_incumbent_observations(artifact)?;
     validate_reachable_rows(artifact)?;
     validate_schema_sources(artifact)?;
+    validate_historical_schema_sources(artifact)?;
+    validate_partial_auth_projection(artifact)?;
     validate_blocked_evidence(artifact)?;
     validate_receipts_and_boundaries(artifact)?;
     Ok(())
@@ -1227,10 +3383,7 @@ fn kafka_k2_packet_rejects_completion_inflation() -> Result<(), String> {
         .and_then(|rows| rows.first_mut())
         .and_then(Value::as_object_mut)
         .ok_or_else(|| "reachable API mutation target missing".to_owned())?;
-    first_api.insert(
-        "accepted_version_range".to_owned(),
-        Value::String("3-10".to_owned()),
-    );
+    first_api.insert("accepted_version_range".to_owned(), Value::String("3-10".to_owned()));
     expect_invalid(&invented_range, &root, "invented accepted range")?;
 
     let mut admitted_broker = artifact.clone();
@@ -1273,6 +3426,146 @@ fn kafka_k2_packet_rejects_completion_inflation() -> Result<(), String> {
         &wrong_source_authority,
         &root,
         "wrong schema source authority",
+    )?;
+
+    let mut changed_historical_blob = artifact.clone();
+    let first_historical_source = changed_historical_blob
+        .get_mut("historical_schema_source_rows")
+        .and_then(Value::as_array_mut)
+        .and_then(|rows| rows.first_mut())
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "historical schema source mutation target missing".to_owned())?;
+    first_historical_source.insert(
+        "git_blob_sha1".to_owned(),
+        Value::String("0000000000000000000000000000000000000000".to_owned()),
+    );
+    expect_invalid(
+        &changed_historical_blob,
+        &root,
+        "changed historical schema blob identity",
+    )?;
+
+    let mut changed_historical_role = artifact.clone();
+    let first_historical_source = changed_historical_role
+        .get_mut("historical_schema_source_rows")
+        .and_then(Value::as_array_mut)
+        .and_then(|rows| rows.first_mut())
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "historical semantic-role mutation target missing".to_owned())?;
+    first_historical_source.insert(
+        "semantic_role".to_owned(),
+        Value::String("UNPINNED_ROLE".to_owned()),
+    );
+    expect_invalid(
+        &changed_historical_role,
+        &root,
+        "changed historical semantic role",
+    )?;
+
+    let mut weakened_full_frontier_blocker = artifact.clone();
+    let full_frontier_blocker = weakened_full_frontier_blocker
+        .get_mut("historical_schema_source_contracts")
+        .and_then(Value::as_array_mut)
+        .and_then(|rows| {
+            rows.iter_mut().find(|row| {
+                row.get("profile_id").and_then(Value::as_str)
+                    == Some("KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR")
+            })
+        })
+        .and_then(|row| row.get_mut("full_frontier_blocker"))
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "full-frontier blocker mutation target missing".to_owned())?;
+    full_frontier_blocker.insert("broker_declared_max".to_owned(), Value::from(2));
+    expect_invalid(
+        &weakened_full_frontier_blocker,
+        &root,
+        "nonempty historical full-frontier intersection",
+    )?;
+
+    let mut accepted_historical_range = artifact.clone();
+    let first_historical_range = accepted_historical_range
+        .get_mut("historical_profile_api_range_rows")
+        .and_then(Value::as_array_mut)
+        .and_then(|rows| rows.first_mut())
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "historical profile range mutation target missing".to_owned())?;
+    first_historical_range.insert(
+        "accepted_version_range".to_owned(),
+        Value::String("0".to_owned()),
+    );
+    expect_invalid(
+        &accepted_historical_range,
+        &root,
+        "accepted historical range without terminal evidence",
+    )?;
+
+    let mut weakened_auth_bytes = artifact.clone();
+    let auth_bytes = weakened_auth_bytes
+        .get_mut("field_projection_rows")
+        .and_then(Value::as_array_mut)
+        .and_then(|rows| {
+            rows.iter_mut().find(|row| {
+                row.get("canonical_field_id").and_then(Value::as_str)
+                    == Some("API36.REQUEST.AUTH_BYTES")
+            })
+        })
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "opaque authentication field mutation target missing".to_owned())?;
+    auth_bytes.insert(
+        "sensitivity".to_owned(),
+        Value::String("NON_SECRET_CONTROL_METADATA".to_owned()),
+    );
+    expect_invalid(
+        &weakened_auth_bytes,
+        &root,
+        "weakened opaque authentication material classification",
+    )?;
+
+    let mut projected_flexible_v2 = artifact.clone();
+    let current_api_36 = projected_flexible_v2
+        .get_mut("field_projection_rows")
+        .and_then(Value::as_array_mut)
+        .and_then(|rows| {
+            rows.iter_mut().find(|row| {
+                row.get("row_id").and_then(Value::as_str)
+                    == Some("KAFKA-K2-1-FIELD-CURRENT-036-REQUEST-000-AUTH-BYTES")
+            })
+        })
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "excluded flexible-version mutation target missing".to_owned())?;
+    current_api_36.insert(
+        "projected_versions".to_owned(),
+        Value::String("0-2".to_owned()),
+    );
+    current_api_36.insert(
+        "excluded_source_versions".to_owned(),
+        Value::String("none".to_owned()),
+    );
+    expect_invalid(
+        &projected_flexible_v2,
+        &root,
+        "projected API 36 v2 without flexible encoding contract",
+    )?;
+
+    let mut normalized_stale_comment = artifact.clone();
+    let authentication_failure = normalized_stale_comment
+        .get_mut("error_projection_rows")
+        .and_then(Value::as_array_mut)
+        .and_then(|rows| {
+            rows.iter_mut().find(|row| {
+                row.get("row_id").and_then(Value::as_str)
+                    == Some(
+                        "KAFKA-K2-1-ERROR-CURRENT-036-058-SASL-AUTHENTICATION-FAILED",
+                    )
+            })
+        })
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "error-code conflict mutation target missing".to_owned())?;
+    authentication_failure.insert("canonical_error_code".to_owned(), Value::from(57));
+    expect_invalid(
+        &normalized_stale_comment,
+        &root,
+        "normalized stale comment over canonical error 58",
     )?;
 
     let mut unblocked_child = artifact;
