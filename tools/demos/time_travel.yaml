@@ -1,8 +1,11 @@
-# Time-travel bug reproduction demo: scenario configuration.
+# Time-travel demo parameter reference (not a typed FrankenLab Scenario).
 #
-# This YAML describes the parameters used by the reproducible benchmark
-# harness (`examples/demo_benchmark.rs`) to validate that the full
-# time-travel demo pipeline produces identical results across machines.
+# This adjacent YAML records the intended demo parameters for human review.
+# No current source literal, discovery route, or Make target loads it.
+# `examples/demo_benchmark.rs` keeps its operational parameters as compiled
+# constants and reads `artifacts/demo_golden_checksums.json`; it does not read
+# this file. Generic CLI path loaders expect the typed Scenario schema, which
+# this document intentionally does not implement.
 #
 # Run:
 #   make demo-benchmark
@@ -37,5 +40,6 @@ expected:
   minimized_element_count: 3
   is_1_minimal: true
 
-# Artifact checksums are stored in artifacts/demo_golden_checksums.json.
-# The benchmark harness reads and validates against them automatically.
+# Artifact checksums are stored in artifacts/demo_golden_checksums.json and are
+# read by the benchmark harness. This reference file is not an input to that
+# checksum validation.
