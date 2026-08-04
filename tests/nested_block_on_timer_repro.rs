@@ -120,3 +120,25 @@ fn reentrant_block_on_single_runtime_fires_timeout() {
         rt.block_on(async { rt.block_on(await_inner_timeout()) })
     });
 }
+
+/// Exact fastmcp construction: the inner runtime is a current-thread runtime
+/// with a platform I/O reactor attached (fastmcp-core/src/runtime.rs), and it
+/// is re-entered once from inside its own block_on, all nested under a host
+/// runtime's block_on (`run_transport_returning*` consumers).
+#[test]
+fn reentrant_block_on_with_reactor_fires_timeout() {
+    run_with_watchdog("three-level-reactor", || {
+        let rt_a = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build rt_a");
+        let reactor =
+            asupersync::runtime::reactor::create_reactor().expect("create platform reactor");
+        let rt_b = RuntimeBuilder::current_thread()
+            .with_reactor(reactor)
+            .build()
+            .expect("build rt_b");
+        rt_a.block_on(async {
+            rt_b.block_on(async { rt_b.block_on(await_inner_timeout()) })
+        })
+    });
+}
