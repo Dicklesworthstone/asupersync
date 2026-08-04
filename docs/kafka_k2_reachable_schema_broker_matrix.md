@@ -79,11 +79,12 @@ blob object IDs because two unchanged files recur across the 0.11.0.2 and 1.0.0
 profiles. These are candidate source-provenance rows only. They neither select
 an oldest supported broker nor establish complete current-facade coverage.
 
-Seven additional projection-support source rows pin the current message-format
-semantics, error registry, handshake request wrapper, two current response
-wrappers, and current and historical dedicated authentication handlers. Their
-121,540 source bytes are identity evidence for the bounded field and outcome
-rows below; they are not executable broker evidence.
+Nine additional projection-support source rows pin the current message-format
+semantics, generated field-default resolver and assignment logic, error
+registry, handshake request wrapper, two current response wrappers, and current
+and historical dedicated authentication handlers. Their 239,139 source bytes
+are identity evidence for the bounded field, default, and outcome rows below;
+they are not executable broker evidence.
 
 The 0.11.0.2 audit also exposes a concrete incompatibility outside its narrow
 producer profile. A structured blocker row records broker minimum/maximum v0
@@ -157,17 +158,45 @@ contract.
 | 1.0.0 historical | 36 response | `error_code`, nullable `error_message`, `sasl_auth_bytes` | 0 |
 
 The rows preserve order, logical/wire type, array element type, nullability,
-explicit schema-default presence, projected compact/tag state, sensitivity,
-and nested-payload disposition. `SessionLifetimeMs` is the sole field in this
-slice with an explicit schema literal (`0`). Absence of an explicit schema
-default is not interpreted as an effective generated default here.
+explicit schema-default presence, effective default or required-field absence,
+projected compact/tag state, sensitivity, and nested-payload disposition.
+`SessionLifetimeMs` is the sole field in this slice with an explicit schema
+literal (`0`). The separate effective-default columns prevent schema-declaration
+absence from being confused with generated or legacy `Struct` behavior:
+
+| Profile | Fields | Effective default or missing-field behavior |
+|---|---|---|
+| 4.3.1 current | `Mechanism`, `ErrorMessage` | generated non-null empty string (`""`) |
+| 4.3.1 current | `ErrorCode` | generated integer zero |
+| 4.3.1 current | `Mechanisms` | generated empty string list |
+| 4.3.1 current | `AuthBytes` | generated empty byte sequence (`0x`) |
+| 4.3.1 current | `SessionLifetimeMs` | explicit schema zero applied by generated data logic across v0-2; the field itself is present only in v1-2 |
+| 1.0.0 historical | six non-nullable API 17/36 fields | required with no default; unset lookup is rejected |
+| 1.0.0 historical | nullable `error_message` | unset `Struct` lookup resolves to null, without an explicit schema default |
+
+The historical provenance chain retains the wrapper declaration plus `Field`,
+`Type` (and `ArrayOf` for mechanisms), and `Struct`, so the nullability result
+consumed by unset lookup is source-backed rather than inferred from the field
+name.
+
+Current `ErrorMessage` is deliberately the sharp edge: nullable wire versions
+permit an explicit null value, but nullability alone does not make null the
+generated default. Its omitted schema default resolves to an empty string. The
+historical nullable field instead falls back to null through `Struct` lookup.
+The historical two-argument `SaslAuthenticateResponse` convenience overload
+supplies empty response authentication bytes, but that wrapper choice is not a
+schema default and is not generalized to the other required fields.
+
+Effective-default version intervals identify the source-profile domain of the
+constructor or unset-field rule; they do not mean decoding ignores a value that
+is present on the wire.
 
 API 36 source v2 is now projected as a flexible message: its variable-length
 fields use compact encodings, every request and response body ends in a tag
 buffer, and the schema declares no tagged field IDs. This source-only expansion
 does not change the incumbent v0-1 candidate intersection, admit v2, or establish
-runtime handling. Effective implicit defaults and the nested mechanism payload
-carried in `AuthBytes` remain unprojected.
+runtime handling. The nested mechanism payload carried in `AuthBytes` remains
+unprojected.
 
 The ten outcome rows are source-established memberships, not a closed
 wire enum:
@@ -217,8 +246,7 @@ K2.1 remains open until all of the following are complete:
    adjudication; pin each additional interpretation source.
 2. Complete every remaining reachable body and header path, order, type,
    version interval, effective default, nullability, compact encoding, tagged
-   version, and tag identifier; generated implicit defaults remain open in the
-   authentication slice.
+   version, and tag identifier beyond the projected authentication slice.
 3. Extend the ten authentication outcome memberships into exhaustive reachable
    error projections with reviewed retry, downgrade, or fail-closed action.
 4. Adjudicate candidate intersections into explicit accepted numeric ranges.
@@ -238,8 +266,9 @@ Git blob object IDs establish source-object identity, not per-file raw-byte
 SHA-256 security attestations. Historical range rows are source-derived
 candidate overlaps; none is an accepted production range or downgrade policy.
 
-The packet does not prove full schema or error completeness, effective implicit
-defaults, acceptance or runtime handling of API 36 v2, broker interoperability,
+The packet does not prove full schema or error completeness, defaults outside
+the 15 authentication-body rows, exhaustive wrapper or call-site value
+behavior, acceptance or runtime handling of API 36 v2, broker interoperability,
 runtime correctness, production support, migration readiness, dependency
 removal, release readiness, performance, or broad workspace health. It does not
 authorize K2.2 or any production wiring.

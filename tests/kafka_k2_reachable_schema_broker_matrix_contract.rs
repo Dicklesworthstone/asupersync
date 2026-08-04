@@ -18,9 +18,9 @@ use std::path::{Path, PathBuf};
 const ARTIFACT_PATH: &str = "artifacts/kafka_k2_reachable_schema_broker_matrix_v1.json";
 const DOC_PATH: &str = "docs/kafka_k2_reachable_schema_broker_matrix.md";
 const ARTIFACT_SHA256: &str =
-    "d849be7f22050a45e2e2daba0fdf640ea6d76cbad4580b2f91fb00098b962dc2";
+    "31a1fd222fc76d8841b44c7c4de172baca94edf1adccdfd08efad62c868542cd";
 const DOC_SHA256: &str =
-    "dbcf4f43f5f919805356b698f6ca88a893d678cd5865088871c17a84d2707d58";
+    "63fdce6db1c8b300a8591983d93d6c3db19a069533d950c413180c3551d4e3a1";
 
 const DOC_BEGIN: &str = "<!-- BEGIN KAFKA K2.1 REACHABLE SCHEMA BROKER MATRIX -->";
 const DOC_END: &str = "<!-- END KAFKA K2.1 REACHABLE SCHEMA BROKER MATRIX -->";
@@ -400,6 +400,9 @@ const FIELD_PROJECTION_ROW_KEYS: &[&str] = &[
     "direction",
     "element_type",
     "error_set_id",
+    "effective_default_literal",
+    "effective_default_state",
+    "effective_default_versions",
     "excluded_source_versions",
     "field_order",
     "ignorable_versions",
@@ -464,7 +467,23 @@ const EXPECTED_PROJECTION_SOURCES: &[(&str, &str, &str, &str, u64, &str)] = &[
         "clients/src/main/resources/common/message/README.md",
         "ee6de73dee663b7696ff8832335d9089e2a26cd7",
         12_494,
-        "FLEXIBLE_ENCODING_AND_TAG_BUFFER_SEMANTICS",
+        "MESSAGE_DEFAULT_FLEXIBLE_AND_TAG_SEMANTICS",
+    ),
+    (
+        "KAFKA-K2-1-PROJECTION-SOURCE-CURRENT-FIELD-SPEC",
+        "KAFKA-K2-1-AUTH-APACHE-CURRENT",
+        "generator/src/main/java/org/apache/kafka/message/FieldSpec.java",
+        "fcbfc2f8ed3affc4c65abcf623ea15206d825420",
+        28_231,
+        "GENERATED_FIELD_DEFAULT_RESOLUTION",
+    ),
+    (
+        "KAFKA-K2-1-PROJECTION-SOURCE-CURRENT-MESSAGE-DATA-GENERATOR",
+        "KAFKA-K2-1-AUTH-APACHE-CURRENT",
+        "generator/src/main/java/org/apache/kafka/message/MessageDataGenerator.java",
+        "8d2e4e09c54f85c69fdd18cdb296a29e7af9be7d",
+        89_368,
+        "GENERATED_DEFAULT_ASSIGNMENT_AND_ABSENT_VERSION_RESET",
     ),
     (
         "KAFKA-K2-1-PROJECTION-SOURCE-CURRENT-SASL-AUTHENTICATE-RESPONSE",
@@ -929,6 +948,110 @@ const EXPECTED_FIELD_PROJECTIONS: &[ExpectedFieldProjection] = &[
         nested_projection_state: "OPAQUE_SASL_MECHANISM_BYTES_NOT_PROJECTED",
     },
 ];
+
+fn expected_field_source_refs(expected: &ExpectedFieldProjection) -> Vec<String> {
+    let mut source_refs = expected
+        .source_refs
+        .iter()
+        .map(|source_ref| (*source_ref).to_owned())
+        .collect::<Vec<_>>();
+    let handler_position = source_refs
+        .iter()
+        .position(|source_ref| source_ref.ends_with("/SaslServerAuthenticator.java"))
+        .unwrap_or(source_refs.len());
+
+    if expected.profile_id == "KAFKA-K2-1-BROKER-CURRENT" {
+        let readme = "clients/src/main/resources/common/message/README.md";
+        if !source_refs.iter().any(|source_ref| source_ref == readme) {
+            source_refs.insert(handler_position, readme.to_owned());
+        }
+        let handler_position = source_refs
+            .iter()
+            .position(|source_ref| source_ref.ends_with("/SaslServerAuthenticator.java"))
+            .unwrap_or(source_refs.len());
+        source_refs.insert(
+            handler_position,
+            "generator/src/main/java/org/apache/kafka/message/FieldSpec.java".to_owned(),
+        );
+        source_refs.insert(
+            handler_position + 1,
+            "generator/src/main/java/org/apache/kafka/message/MessageDataGenerator.java".to_owned(),
+        );
+    } else {
+        source_refs.insert(
+            handler_position,
+            "clients/src/main/java/org/apache/kafka/common/protocol/types/Field.java".to_owned(),
+        );
+        source_refs.insert(
+            handler_position + 1,
+            "clients/src/main/java/org/apache/kafka/common/protocol/types/Type.java".to_owned(),
+        );
+        let struct_position = if expected.canonical_field_id.ends_with(".MECHANISMS") {
+            source_refs.insert(
+                handler_position + 2,
+                "clients/src/main/java/org/apache/kafka/common/protocol/types/ArrayOf.java"
+                    .to_owned(),
+            );
+            handler_position + 3
+        } else {
+            handler_position + 2
+        };
+        source_refs.insert(
+            struct_position,
+            "clients/src/main/java/org/apache/kafka/common/protocol/types/Struct.java".to_owned(),
+        );
+    }
+    source_refs
+}
+
+fn expected_effective_default(
+    row_id: &str,
+) -> Option<(&'static str, Option<&'static str>, &'static str)> {
+    match row_id {
+        "KAFKA-K2-1-FIELD-CURRENT-017-REQUEST-000-MECHANISM" => Some((
+            "IMPLICIT_GENERATED_TYPE_DEFAULT",
+            Some("\"\""),
+            "0-1",
+        )),
+        "KAFKA-K2-1-FIELD-CURRENT-017-RESPONSE-000-ERROR-CODE" => {
+            Some(("IMPLICIT_GENERATED_TYPE_DEFAULT", Some("0"), "0-1"))
+        }
+        "KAFKA-K2-1-FIELD-CURRENT-017-RESPONSE-001-MECHANISMS" => {
+            Some(("IMPLICIT_GENERATED_TYPE_DEFAULT", Some("[]"), "0-1"))
+        }
+        "KAFKA-K2-1-FIELD-CURRENT-036-REQUEST-000-AUTH-BYTES"
+        | "KAFKA-K2-1-FIELD-CURRENT-036-RESPONSE-002-AUTH-BYTES" => {
+            Some(("IMPLICIT_GENERATED_TYPE_DEFAULT", Some("0x"), "0-2"))
+        }
+        "KAFKA-K2-1-FIELD-CURRENT-036-RESPONSE-000-ERROR-CODE" => {
+            Some(("IMPLICIT_GENERATED_TYPE_DEFAULT", Some("0"), "0-2"))
+        }
+        "KAFKA-K2-1-FIELD-CURRENT-036-RESPONSE-001-ERROR-MESSAGE" => Some((
+            "IMPLICIT_GENERATED_TYPE_DEFAULT",
+            Some("\"\""),
+            "0-2",
+        )),
+        "KAFKA-K2-1-FIELD-CURRENT-036-RESPONSE-003-SESSION-LIFETIME-MS" => Some((
+            "EXPLICIT_SCHEMA_LITERAL_GENERATED_DEFAULT",
+            Some("0"),
+            "0-2",
+        )),
+        "KAFKA-K2-1-FIELD-HISTORICAL-036-RESPONSE-001-ERROR-MESSAGE" => Some((
+            "IMPLICIT_NULLABLE_STRUCT_DEFAULT",
+            Some("null"),
+            "0",
+        )),
+        "KAFKA-K2-1-FIELD-HISTORICAL-017-REQUEST-000-MECHANISM"
+        | "KAFKA-K2-1-FIELD-HISTORICAL-017-RESPONSE-000-ERROR-CODE"
+        | "KAFKA-K2-1-FIELD-HISTORICAL-017-RESPONSE-001-MECHANISMS"
+        | "KAFKA-K2-1-FIELD-HISTORICAL-036-REQUEST-000-AUTH-BYTES"
+        | "KAFKA-K2-1-FIELD-HISTORICAL-036-RESPONSE-000-ERROR-CODE"
+        | "KAFKA-K2-1-FIELD-HISTORICAL-036-RESPONSE-002-AUTH-BYTES" => {
+            Some(("REQUIRED_NO_DEFAULT", None, "none"))
+        }
+        _ => None,
+    }
+}
 
 struct ExpectedErrorProjection {
     row_id: &'static str,
@@ -2559,7 +2682,7 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
             semantic_role.to_owned(),
         ));
     }
-    if support_bytes != 121_540 {
+    if support_bytes != 239_139 {
         return Err("field/error projection support byte coverage changed".to_owned());
     }
     support_projection.sort();
@@ -2573,7 +2696,7 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
         .collect::<String>();
     let support_projection_sha256 = sha256_bytes(support_projection.as_bytes());
     if support_projection_sha256
-        != "3734612d4de8e2e8ef3bd0126b4aaa38e1694a4cefc40d85ccb91938d23fc563"
+        != "9a32a3cb6572e4683cdb4f04ed2b4cc533d8af588b13fb748c014b26531ddef3"
     {
         return Err("field/error projection support digest changed".to_owned());
     }
@@ -2613,6 +2736,12 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
         BTreeMap::<(String, u64, String, u64), BTreeSet<u64>>::new();
     let mut field_version_cells = 0_usize;
     let mut explicit_schema_defaults = 0_usize;
+    let mut implicit_generated_defaults = 0_usize;
+    let mut explicit_generated_defaults = 0_usize;
+    let mut implicit_nullable_struct_defaults = 0_usize;
+    let mut required_no_defaults = 0_usize;
+    let mut effective_default_value_rows = 0_usize;
+    let mut effective_default_version_cells = 0_usize;
     let mut field_error_sets = BTreeSet::new();
 
     for row in fields {
@@ -2627,11 +2756,7 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
             .ok_or_else(|| format!("unexpected field projection row {row_id}"))?;
         expect_text(row, "profile_id", expected.profile_id)?;
         expect_text(row, "source_authority_id", expected.authority_id)?;
-        let expected_source_refs = expected
-            .source_refs
-            .iter()
-            .map(|source_ref| (*source_ref).to_owned())
-            .collect::<Vec<_>>();
+        let expected_source_refs = expected_field_source_refs(expected);
         if text_array(row, "source_refs")? != expected_source_refs {
             return Err(format!("field row {row_id} source references changed"));
         }
@@ -2658,6 +2783,31 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
             }
             None if row.get("schema_default_literal") == Some(&Value::Null) => {}
             None => return Err(format!("field row {row_id} invented a schema default")),
+        }
+        let (effective_state, effective_literal, effective_versions) =
+            expected_effective_default(row_id)
+                .ok_or_else(|| format!("field row {row_id} lacks an effective-default oracle"))?;
+        expect_text(row, "effective_default_state", effective_state)?;
+        match effective_literal {
+            Some(literal) => {
+                expect_text(row, "effective_default_literal", literal)?;
+                effective_default_value_rows += 1;
+            }
+            None if row.get("effective_default_literal") == Some(&Value::Null) => {}
+            None => {
+                return Err(format!(
+                    "field row {row_id} invented an effective default literal"
+                ));
+            }
+        }
+        expect_text(row, "effective_default_versions", effective_versions)?;
+        effective_default_version_cells += version_set(effective_versions)?.len();
+        match effective_state {
+            "IMPLICIT_GENERATED_TYPE_DEFAULT" => implicit_generated_defaults += 1,
+            "EXPLICIT_SCHEMA_LITERAL_GENERATED_DEFAULT" => explicit_generated_defaults += 1,
+            "IMPLICIT_NULLABLE_STRUCT_DEFAULT" => implicit_nullable_struct_defaults += 1,
+            "REQUIRED_NO_DEFAULT" => required_no_defaults += 1,
+            state => return Err(format!("field row {row_id} has unknown default state {state}")),
         }
         expect_text(row, "ignorable_versions", expected.ignorable_versions)?;
         expect_text(row, "sensitivity", expected.sensitivity)?;
@@ -2691,6 +2841,43 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
         }
         field_api_keys.insert(api_key);
         field_api_profiles.insert((profile.to_owned(), api_key));
+
+        let effective_version_set = version_set(text(row, "effective_default_versions")?)?;
+        if profile == "KAFKA-K2-1-BROKER-CURRENT" {
+            let expected_default_versions = if api_key == 17 {
+                BTreeSet::from([0, 1])
+            } else {
+                BTreeSet::from([0, 1, 2])
+            };
+            if effective_version_set != expected_default_versions
+                || !matches!(
+                    effective_state,
+                    "IMPLICIT_GENERATED_TYPE_DEFAULT"
+                        | "EXPLICIT_SCHEMA_LITERAL_GENERATED_DEFAULT"
+                )
+            {
+                return Err(format!(
+                    "current field row {row_id} has incoherent generated defaults"
+                ));
+            }
+            if expected.canonical_field_id.ends_with(".ERROR_MESSAGE") {
+                expect_text(row, "effective_default_literal", "\"\"")?;
+            }
+        } else if expected.canonical_field_id.ends_with(".ERROR_MESSAGE") {
+            if effective_state != "IMPLICIT_NULLABLE_STRUCT_DEFAULT"
+                || effective_version_set != BTreeSet::from([0])
+            {
+                return Err("historical nullable error message default changed".to_owned());
+            }
+            expect_text(row, "effective_default_literal", "null")?;
+        } else if effective_state != "REQUIRED_NO_DEFAULT"
+            || !effective_version_set.is_empty()
+            || row.get("effective_default_literal") != Some(&Value::Null)
+        {
+            return Err(format!(
+                "historical required field row {row_id} acquired a default"
+            ));
+        }
 
         let source_versions = version_set(text(row, "source_versions")?)?;
         let projected_versions = version_set(text(row, "projected_versions")?)?;
@@ -2874,6 +3061,17 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
         || field_api_versions.len() != 8
         || field_version_cells != 30
         || explicit_schema_defaults != 1
+        || implicit_generated_defaults != 7
+        || explicit_generated_defaults != 1
+        || implicit_nullable_struct_defaults != 1
+        || required_no_defaults != 6
+        || effective_default_value_rows != 9
+        || effective_default_version_cells != 22
+        || implicit_generated_defaults
+            + explicit_generated_defaults
+            + implicit_nullable_struct_defaults
+            + required_no_defaults
+            != fields.len()
     {
         return Err("partial field projection coverage changed".to_owned());
     }
@@ -2890,7 +3088,7 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
         }
     }
     if sorted_json_rows_sha256(fields)?
-        != "38e4d1aa599505981d20df421812a923d2557af017b6f38914f304ed88b16b6e"
+        != "171938bad39e9d3579dd746a4e9511667cbc84d25ffe1268ddaaeaa73e6fae07"
     {
         return Err("field projection digest changed".to_owned());
     }
@@ -3153,14 +3351,21 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
         .get("coverage_receipt")
         .ok_or_else(|| "coverage_receipt must exist".to_owned())?;
     for (key, expected) in [
-        ("field_error_projection_source_row_count", 7),
-        ("field_error_projection_source_total_byte_count", 121_540),
+        ("field_error_projection_source_row_count", 9),
+        ("field_error_projection_source_total_byte_count", 239_139),
         ("partial_projection_profile_count", 2),
         ("partial_projection_api_key_count", 2),
         ("partial_projection_api_profile_count", 4),
         ("partial_projection_api_version_count", 8),
         ("field_projection_row_count", 15),
         ("field_projection_version_cell_count", 30),
+        ("effective_default_projected_row_count", 15),
+        ("effective_default_version_cell_count", 22),
+        ("implicit_generated_type_default_row_count", 7),
+        ("explicit_schema_literal_generated_default_row_count", 1),
+        ("implicit_nullable_struct_default_row_count", 1),
+        ("required_no_default_row_count", 6),
+        ("effective_default_value_row_count", 9),
         ("error_projection_row_count", 10),
         ("error_projection_version_cell_count", 20),
         ("error_projection_source_conflict_row_count", 2),
@@ -3178,7 +3383,7 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
     expect_text(
         coverage,
         "field_error_projection_source_projection_sha256",
-        "3734612d4de8e2e8ef3bd0126b4aaa38e1694a4cefc40d85ccb91938d23fc563",
+        "9a32a3cb6572e4683cdb4f04ed2b4cc533d8af588b13fb748c014b26531ddef3",
     )?;
     expect_text(
         coverage,
@@ -3188,7 +3393,7 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
     expect_text(
         coverage,
         "field_projection_sha256",
-        "38e4d1aa599505981d20df421812a923d2557af017b6f38914f304ed88b16b6e",
+        "171938bad39e9d3579dd746a4e9511667cbc84d25ffe1268ddaaeaa73e6fae07",
     )?;
     expect_text(
         coverage,
@@ -3357,6 +3562,9 @@ fn validate_receipts_and_boundaries(artifact: &Value) -> Result<(), String> {
         "not accepted production version ranges",
         "15 field rows and ten source-established outcome-membership rows",
         "API 36 v2 flexible body and tag-buffer encoding are statically projected",
+        "Effective defaults are projected only for the 15 authentication-body field rows",
+        "historical two-argument SaslAuthenticateResponse convenience overload",
+        "do not claim that decoding ignores a field value present on the wire",
         "SASL_AUTHENTICATION_FAILED code 58",
         "stale code 57",
         "Pinned Git blob object IDs establish current and profile-scoped historical source identity only",
@@ -3390,10 +3598,15 @@ fn validate_document(root: &Path) -> Result<(), String> {
         "95,596",
         "15 field rows and ten",
         "source-established outcome-membership rows",
-        "Seven additional projection-support source rows",
-        "121,540",
+        "Nine additional projection-support source rows",
+        "239,139",
         "API 36 source v2 is now projected",
         "current API 36 source-only v2 form does not expand",
+        "nullability alone does not make null the generated default",
+        "historical nullable field instead falls back to null",
+        "`Type` (and `ArrayOf` for mechanisms)",
+        "two-argument `SaslAuthenticateResponse` convenience overload",
+        "do not mean decoding ignores a value that",
         "SASL_AUTHENTICATION_FAILED=58",
         "stale code 57",
         "GetTelemetrySubscriptions",
@@ -3401,6 +3614,7 @@ fn validate_document(root: &Path) -> Result<(), String> {
         "no numeric range is accepted",
         "K2.2 therefore remains blocked",
         "The packet does not prove full schema or error completeness",
+        "defaults outside the 15 authentication-body rows",
     ] {
         if !document.contains(needle) {
             return Err(format!("document is missing {needle:?}"));
@@ -3657,6 +3871,100 @@ fn kafka_k2_packet_rejects_completion_inflation() -> Result<(), String> {
         &omitted_tag_buffer,
         &root,
         "projected API 36 v2 without message tag buffer contract",
+    )?;
+
+    let mut nullable_current_defaulted_to_null = artifact.clone();
+    let current_error_message = nullable_current_defaulted_to_null
+        .get_mut("field_projection_rows")
+        .and_then(Value::as_array_mut)
+        .and_then(|rows| {
+            rows.iter_mut().find(|row| {
+                row.get("row_id").and_then(Value::as_str)
+                    == Some("KAFKA-K2-1-FIELD-CURRENT-036-RESPONSE-001-ERROR-MESSAGE")
+            })
+        })
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "current error-message default mutation target missing".to_owned())?;
+    current_error_message.insert(
+        "effective_default_literal".to_owned(),
+        Value::String("null".to_owned()),
+    );
+    expect_invalid(
+        &nullable_current_defaulted_to_null,
+        &root,
+        "current nullable error message changed from empty string to null default",
+    )?;
+
+    let mut historical_nullable_defaulted_to_empty = artifact.clone();
+    let historical_error_message = historical_nullable_defaulted_to_empty
+        .get_mut("field_projection_rows")
+        .and_then(Value::as_array_mut)
+        .and_then(|rows| {
+            rows.iter_mut().find(|row| {
+                row.get("row_id").and_then(Value::as_str)
+                    == Some("KAFKA-K2-1-FIELD-HISTORICAL-036-RESPONSE-001-ERROR-MESSAGE")
+            })
+        })
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "historical error-message default mutation target missing".to_owned())?;
+    historical_error_message.insert(
+        "effective_default_state".to_owned(),
+        Value::String("IMPLICIT_GENERATED_TYPE_DEFAULT".to_owned()),
+    );
+    historical_error_message.insert(
+        "effective_default_literal".to_owned(),
+        Value::String("\"\"".to_owned()),
+    );
+    expect_invalid(
+        &historical_nullable_defaulted_to_empty,
+        &root,
+        "historical nullable Struct fallback changed from null to empty string",
+    )?;
+
+    let mut historical_required_default_invented = artifact.clone();
+    let historical_mechanism = historical_required_default_invented
+        .get_mut("field_projection_rows")
+        .and_then(Value::as_array_mut)
+        .and_then(|rows| {
+            rows.iter_mut().find(|row| {
+                row.get("row_id").and_then(Value::as_str)
+                    == Some("KAFKA-K2-1-FIELD-HISTORICAL-017-REQUEST-000-MECHANISM")
+            })
+        })
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "historical required-field mutation target missing".to_owned())?;
+    historical_mechanism.insert(
+        "effective_default_literal".to_owned(),
+        Value::String("\"\"".to_owned()),
+    );
+    expect_invalid(
+        &historical_required_default_invented,
+        &root,
+        "invented default for historical required mechanism",
+    )?;
+
+    let mut narrowed_absent_version_default = artifact.clone();
+    let session_lifetime = narrowed_absent_version_default
+        .get_mut("field_projection_rows")
+        .and_then(Value::as_array_mut)
+        .and_then(|rows| {
+            rows.iter_mut().find(|row| {
+                row.get("row_id").and_then(Value::as_str)
+                    == Some(
+                        "KAFKA-K2-1-FIELD-CURRENT-036-RESPONSE-003-SESSION-LIFETIME-MS",
+                    )
+            })
+        })
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "session-lifetime default mutation target missing".to_owned())?;
+    session_lifetime.insert(
+        "effective_default_versions".to_owned(),
+        Value::String("1-2".to_owned()),
+    );
+    expect_invalid(
+        &narrowed_absent_version_default,
+        &root,
+        "session lifetime default omitted for absent v0 field",
     )?;
 
     let mut normalized_stale_comment = artifact.clone();
