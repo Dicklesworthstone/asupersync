@@ -8,9 +8,10 @@ This document is the human-readable companion to
 
 The packet freezes a static 22-key reachability frontier and the normative
 source identities needed to finish K2.1. It now also contains a bounded,
-partial body projection: 39 field rows cover `ApiVersions` plus the two
-authentication APIs across current and applicable historical profiles. Ten
-source-established outcome-membership rows cover authentication only. It
+partial body projection: 70 field rows cover `FindCoordinator`, `ApiVersions`,
+and the two authentication APIs across current and applicable historical
+profiles. Ten source-established outcome-membership rows cover authentication
+only. It
 deliberately does not close K2.1: no numeric range is accepted, no
 full-frontier field or error projection is complete, and no oldest/current
 broker profile is admitted. K2.2 therefore remains blocked.
@@ -56,9 +57,9 @@ path/object-ID/size projection is independently pinned by SHA-256.
 
 Those Git object IDs cover the Git blob header plus exact payload bytes; they
 are not per-file raw-byte SHA-256 security attestations. This establishes
-current-source object identity only. The API 18 and authentication slices below
-project only bounded candidate body fields, defaults, tree metadata, and
-authentication outcome membership. They do not establish a complete
+current-source object identity only. The API 10, API 18, and authentication
+slices below project only bounded candidate body fields, defaults, tree
+metadata, and authentication outcome membership. They do not establish a complete
 field/default/error matrix, accepted versions, broker behavior, or
 interoperability.
 
@@ -70,7 +71,7 @@ pretending that modern per-message JSON existed historically:
 | Candidate | Declaration model | Profile API rows | Source objects | Bytes |
 |---|---|---|---:|---:|
 | 0.8.0 | Scala write/parse methods plus the classic envelope and legacy message set | keys 0-3 at v0 | 22 | 95,596 |
-| 0.11.0.2 | central Java `Protocol` schema arrays plus headers/type encodings | nine idempotent/transaction profile keys, the API 18 v0-1 body tree, plus a structured API 23 full-frontier blocker | 10 | 210,904 |
+| 0.11.0.2 | central Java `Protocol` schema arrays plus headers/type encodings | nine idempotent/transaction profile keys, the API 10 and API 18 v0-1 body trees, plus a structured API 23 full-frontier blocker | 10 | 210,904 |
 | 1.0.0 | per-request Java schema arrays plus headers/type encodings | `SaslHandshake` 0-1 and `SaslAuthenticate` 0 | 14 | 118,304 |
 
 Each receipt pins the canonical root tree, confirms the recursive tree was not
@@ -84,8 +85,8 @@ Nine additional projection-support source rows pin the current message-format
 semantics, generated field-default resolver and assignment logic, error
 registry, handshake request wrapper, two current response wrappers, and current
 and historical dedicated authentication handlers. Their 239,139 source bytes
-are identity evidence for the bounded API 18 and authentication field, default,
-and outcome rows below; they are not executable broker evidence.
+are identity evidence for the bounded API 10, API 18, and authentication field,
+default, and outcome rows below; they are not executable broker evidence.
 
 The 0.11.0.2 audit also exposes a concrete incompatibility outside its narrow
 producer profile. A structured blocker row records broker minimum/maximum v0
@@ -137,10 +138,48 @@ Request header v0 remains required by the broader K1.2 policy but is not reached
 by the selected request families and versions. Header selection remains a
 candidate until exact accepted numeric ranges are reviewed. The field
 projection rows below are body-only: shared request and response header fields
-are not duplicated into each message tree, and the API 18 response-header-v0
-exception remains explicit in the separate header contract.
+are not duplicated into each message tree. API 10's incumbent body intersection
+of v0-v2 therefore continues to record request header v1 and response header v0;
+its flexible source-only v3-v6 header selection remains outside that candidate
+range. The API 18 response-header-v0 exception remains explicit in the separate
+header contract.
 
 ## Partial body projection
+
+### API 10 coordinator-discovery body
+
+Thirty-one rows project the API 10 body tree for current Kafka 4.3.1 and the
+historical 0.11.0.2 default-idempotence candidate. The 16 current rows cover
+the full source-declared v0-v6 body domain. The 15 historical rows preserve v0
+and v1 separately because the response's top-level `ErrorCode` and
+`Coordinator` positions differ between those versions.
+
+| Profile | Direction | Top-level body fields | Named-struct children | Source versions |
+|---|---|---|---|---|
+| 4.3.1 current | request | `Key`, `KeyType`, `CoordinatorKeys` | scalar string elements for `CoordinatorKeys` | field-specific subsets of 0-6 |
+| 4.3.1 current | response | `ThrottleTimeMs`, `ErrorCode`, nullable `ErrorMessage`, `NodeId`, `Host`, `Port`, `Coordinators` | `Coordinator`: `Key`, `NodeId`, `Host`, `Port`, `ErrorCode`, nullable `ErrorMessage` | field-specific subsets of 0-6 |
+| 0.11.0.2 historical | request | v0 `group_id`; v1 `coordinator_key`, `coordinator_type` | none | version-sliced 0 and 1 |
+| 0.11.0.2 historical | response | v0 `error_code`, `coordinator`; v1 `throttle_time_ms`, `error_code`, nullable `error_message`, `coordinator` | `FIND_COORDINATOR_BROKER_V0`: `node_id`, `host`, `port` | version-sliced 0 and 1 |
+
+The current v3-v6 bodies have owner-scoped tag buffers but no tagged fields.
+Compact encoding is recorded only where the source selects it: v3 for the
+single-key strings, and v4-v6 for the multi-coordinator arrays and variable-size
+children. The current generated objects resolve absent fields to type defaults
+over their owning message domains. `KeyType=0` is the one explicit current
+schema literal. In the historical schema, `throttle_time_ms=0` is an explicit
+`Struct` default, nullable `error_message` falls back to null, and all other
+fields remain required with no default.
+
+The v0 `group_id` and v1 `coordinator_key` rows share a stable canonical key
+path while retaining their distinct source names. Likewise, historical response
+rows are version-sliced rather than flattened across changing order. For the
+current JSON schemas, `field_order` is the declaration ordinal, so gaps among
+the fields active in any one version are expected. For historical API 10, it is
+the version-specific `Schema` ordinal; duplicate sibling ordinals are permitted
+only across disjoint singleton version slices. This is a body-schema comparison
+only: API-specific error membership, coordinator-type meaning, shared header
+fields, retry and downgrade behavior, accepted v3-v6 handling, and broker
+execution remain unprojected.
 
 ### API 18 negotiation body
 
@@ -173,8 +212,9 @@ v0 for every body version and is not represented as a body child.
 
 Current generated defaults are recorded as empty strings, empty arrays, or
 numeric zero according to type, except for the two explicit response literals:
-`FinalizedFeaturesEpoch=-1` and `ZkMigrationReady=false`. The historical
-0.11.0.2 `Struct` fields remain required with no default. These rows establish
+`FinalizedFeaturesEpoch=-1` and `ZkMigrationReady=false`. In the historical
+0.11.0.2 `Struct`, `ThrottleTimeMs=0` is an explicit schema default and the
+remaining API 18 fields are required with no default. These rows establish
 source-schema structure only: API 18 error/fallback semantics, negotiation
 downgrade policy, accepted ranges, and broker execution remain unprojected.
 
@@ -283,21 +323,21 @@ oldest/current pair. Its output cannot close K2.1 as written.
 
 K2.1 remains open until all of the following are complete:
 
-1. Extend the partial API 18 and authentication-body projection across the other 19
+1. Extend the partial API 10, API 18, and authentication-body projection across the other 18
    reachable APIs and any historical profile selected by broker-floor
    adjudication; pin each additional interpretation source.
 2. Complete every remaining reachable body and header path, order, type,
    version interval, effective default, nullability, compact encoding, tagged
-   version, and tag identifier beyond the projected API 18 and authentication
-   slices.
+   version, and tag identifier beyond the projected API 10, API 18, and
+   authentication slices.
 3. Extend the ten authentication outcome memberships into exhaustive reachable
    error projections with reviewed retry, downgrade, or fail-closed action.
 4. Adjudicate candidate intersections into explicit accepted numeric ranges.
 5. Retain immutable oldest/current broker identities and terminal schema-probe
    receipts.
-6. Extend the independent official-source cross-check beyond the API 18 and
-   authentication-body slices without treating the incumbent implementation as
-   normative.
+6. Extend the independent official-source cross-check beyond the API 10, API 18,
+   and authentication-body slices without treating the incumbent implementation
+   as normative.
 
 ## Validation and claim boundary
 
@@ -311,10 +351,11 @@ SHA-256 security attestations. Historical range rows are source-derived
 candidate overlaps; none is an accepted production range or downgrade policy.
 
 The packet does not prove full schema or error completeness, defaults outside
-the 39 API 18 and authentication-body rows, API 18 error/fallback behavior,
-exhaustive wrapper or call-site value behavior, acceptance or runtime handling
-of current API 18 v4 or API 36 v2, broker interoperability, runtime correctness,
-production support, migration readiness, dependency removal, release readiness,
+the 70 API 10, API 18, and authentication-body rows, API 10 or API 18 error and
+fallback behavior, coordinator-type semantics, exhaustive wrapper or call-site
+value behavior, acceptance or runtime handling of current API 10 v3-v6, API 18
+v4, or API 36 v2, broker interoperability, runtime correctness, production
+support, migration readiness, dependency removal, release readiness,
 performance, or broad workspace health. It does not authorize K2.2 or any
 production wiring.
 
