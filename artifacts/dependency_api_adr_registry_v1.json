@@ -1939,15 +1939,15 @@
         "CAP-SCENARIO-YAML-JSON"
       ],
       "decision": "ADDITIVE_COEXISTENCE",
-      "decision_summary": "TOML runtime/CLI configuration and YAML lab scenarios are operator- and author-facing accepted inputs and stay accepted. Canonical JSON is additive output and an additional accepted input; it never becomes the only accepted form. `toml` and `serde_yaml` remain KEEP_UNTIL_PARITY. Two facts from the claim-time source read shape this. First, the parsing surfaces are thinner than they look: the `Scenario` type contains no YAML code at all, only serde derives, and every YAML parse happens at a call site in a binary or a test, so `serde_yaml` never appears in a library public signature. Second, `serde_json` is already a non-optional dependency and `Scenario` already round-trips JSON, so scenario JSON is not a new capability. What genuinely does not exist is JSON configuration loading and any shared canonical-JSON encoder; both are recorded NOT_SHIPPED so this ADR cannot be read as implying they are present.",
+      "decision_summary": "TOML runtime/CLI configuration and YAML lab scenarios are operator- and author-facing accepted inputs and stay accepted. Canonical JSON is additive output and an additional accepted input; it never becomes the only accepted form. `toml` and `serde_yaml` remain KEEP_UNTIL_PARITY. The `Scenario` type contains no YAML code, so `serde_yaml` remains at loader and test call sites rather than in a library public signature. `serde_json` is non-optional, and A2 made `Scenario::to_json` a compact, recursively key-ordered canonical encoder for the typed Scenario schema. JSON configuration loading, a shared/config-agnostic canonical encoder, and CLI Scenario JSON input or canonical output remain NOT_SHIPPED. CLI `--json` serializes command results and reports, not Scenario documents.",
       "alternatives_considered": [
         {
           "option": "Migrate configuration and scenarios to canonical versioned JSON and stop accepting TOML and YAML.",
-          "rejected_because": "Both are accepted operator and author inputs with a live corpus: thirteen scenario YAML files across `examples/scenarios/`, `frankenlab/examples/scenarios/`, and `tools/demos/`, plus a documented `getting_started` journey that runs them. Dropping acceptance is direct user-journey loss and the no-loss gate rejects it."
+          "rejected_because": "Both are accepted operator and author inputs with a live typed corpus: ten Scenario files under `examples/scenarios/` and three under `frankenlab/examples/scenarios/`, plus a documented `getting_started` journey. `tools/demos/time_travel.yaml` is an adjacent parameter reference rather than the Scenario schema or a benchmark input. Dropping accepted TOML or typed YAML acceptance is direct user-journey loss and the no-loss gate rejects it."
         },
         {
           "option": "Keep TOML and YAML, but make canonical JSON the primary on-disk format and demote the others to legacy.",
-          "rejected_because": "There is no canonical-JSON encoder in the crate to promote. `Scenario::to_json` uses `serde_json::to_string_pretty`, which is pretty-printed rather than byte-canonical, and the only canonicalization convention in the codebase is incidental `BTreeMap` key ordering plus insta snapshot goldens. Promoting a format that does not yet exist would freeze an aspiration."
+          "rejected_because": "`Scenario::to_json` now provides compact canonical JSON for the typed Scenario schema, but neither CLI accepts or emits canonical Scenario JSON, no exact 13-file cross-format proof exists, JSON configuration loading is absent, and no shared/config-agnostic canonical encoder exists. Promoting JSON to the primary on-disk format before those journeys and boundaries exist would freeze an aspiration."
         },
         {
           "option": "Replace `serde_yaml` with an owned YAML parser now, since it is only used at three call sites.",
@@ -2192,7 +2192,7 @@
             "GoldenProjectionFormat",
             "GoldenProjectionSection"
           ],
-          "note": "Scenario JSON already round-trips today, so JSON scenario support is not a new capability. `to_json` is pretty-printed, not byte-canonical."
+          "note": "`Scenario::from_json` round-trips the typed schema and `Scenario::to_json` emits compact UTF-8 JSON with recursively lexicographic object-key order and preserved array order. This is a library-only Scenario surface: neither CLI accepts JSON Scenario input or emits canonical Scenario JSON."
         },
         {
           "surface": "scenario_execution",
@@ -2228,7 +2228,7 @@
           "wire_encoder": "none",
           "transport": "none",
           "public_entry_points": [],
-          "note": "No shared canonical-JSON type, trait, or helper exists. The de-facto convention is BTreeMap key ordering plus insta goldens. Whoever implements canonical JSON is introducing it, not adopting it."
+          "note": "This row means a shared/config-agnostic canonical-JSON type, trait, or helper. It remains absent. `Scenario::to_json` is a shipped Scenario-specific canonical encoder and does not satisfy the configuration or shared-encoder surface."
         }
       ],
       "preserved_wire_contract": {
@@ -2321,15 +2321,15 @@
         },
         {
           "gap_id": "CFG-GAP-03",
-          "summary": "No cross-format equivalence test exists. `scenario_yaml_roundtrip` and `scenario_json_roundtrip` are independent single-format round-trips; nothing asserts that YAML and JSON produce the same Scenario.",
-          "consequence": "The central claim of this ADR, that JSON is additive and lossless with respect to YAML, has no executable evidence yet. The registry already names `scenario_cross_format` as a planned scenario ID.",
+          "summary": "One focused typed YAML-to-canonical-JSON equality and replay-identity test is recorded, but no exact 13-file cross-format corpus proof or real CLI conversion journey exists.",
+          "consequence": "The focused witness does not establish full-corpus additive and lossless behavior. The registry keeps `scenario_cross_format` as a required scenario ID until all 13 typed files and the downstream journey are covered.",
           "owner_bead": "asupersync-5z2scg.5.3",
           "may_widen": false
         },
         {
           "gap_id": "CFG-GAP-04",
-          "summary": "The accepted YAML subset has never been specified. Anchor, alias, merge-key, tag, numeric, Unicode, and duplicate-key behavior are whatever serde_yaml 0.9 does over the corpus.",
-          "consequence": "No owned parser can be shown to preserve the capability until the accepted subset is pinned from evidence.",
+          "summary": "A1 source-baselines observed anchor, alias, merge-key, tag, numeric, Unicode, and duplicate-key behavior over the typed corpus, while the accepted application language still has no owner-approved finite input policy.",
+          "consequence": "The observed subset is pinned, but an owned parser still cannot claim complete parity while current unbounded accepted witness families conflict with finite application limits.",
           "owner_bead": "asupersync-5z2scg.5.1",
           "may_widen": false
         },
@@ -2420,7 +2420,7 @@
         },
         {
           "id": "scn-journey-json-tooling",
-          "description": "Tooling consumes `--json` output and round-trips a `Scenario` through JSON without touching YAML."
+          "description": "Library tooling may round-trip a typed `Scenario` through `Scenario::from_json` and `Scenario::to_json`. CLI `--json` is command-result/report output and is not Scenario JSON input or canonical Scenario output."
         }
       ],
       "api_surface_delta": {
@@ -2469,7 +2469,7 @@
           "property: TOML and YAML and JSON round-trip idempotence over generated configurations and scenarios",
           "differential: cross-format equivalence proving YAML and JSON deserialize to the same Scenario, which is the gap CFG-GAP-03 names",
           "fuzz: untrusted document parsing bounded in size, nesting, and collection count with no panic",
-          "corpus: every file in examples/scenarios, frankenlab/examples/scenarios, and tools/demos still validates, runs, and replays with unchanged fingerprints",
+          "corpus: the ten typed Scenario files in examples/scenarios and three in frankenlab/examples/scenarios still validate, run, and replay with unchanged fingerprints; tools/demos/time_travel.yaml remains separately classified as an adjacent non-Scenario, non-benchmark-input reference",
           "sparse-feature: default, config-file, cli, and deterministic-mode build and test cells",
           "downstream-consumer: frankenlab and a synthesized config consumer",
           "real E2E: the CLI lab validate/run/replay/explore journey and the ATP layered-config operator journey, including write-back round-trip fidelity"

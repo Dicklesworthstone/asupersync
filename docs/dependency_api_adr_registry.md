@@ -44,6 +44,23 @@ surface is a defect. Each resolved ADR therefore carries a `known_gaps` list
 whose entries name an owning bead and are marked as not permitted to widen. A
 gap is not an authorized loss; it is a fact that may only ever get better.
 
+### DEP-ADR-004 factual refresh (2026-08-04)
+
+The typed Scenario corpus is exactly ten YAML files under
+`examples/scenarios/` plus three under `frankenlab/examples/scenarios/`.
+`tools/demos/time_travel.yaml` is an adjacent parameter reference: it is not the
+typed Scenario schema, no source literal or discovery route selects it, and the
+demo benchmark does not read it. Generic CLI loaders still accept a user-chosen
+path, but they deserialize that path as a typed Scenario.
+
+A2 also changed the claim-time JSON facts. `Scenario::to_json` now emits compact,
+recursively key-ordered canonical JSON for the typed Scenario schema. JSON
+configuration loading, a shared/config-agnostic canonical encoder, and CLI
+Scenario JSON input or canonical output remain absent. CLI `--json` output is a
+command result or report. The `KEEP_INCUMBENT` and no-dependency-exit decisions
+are unchanged, and the focused contracts for this factual refresh were not
+executed in the static A4 lane.
+
 ## What one ADR row owns
 
 Every resolved row names:

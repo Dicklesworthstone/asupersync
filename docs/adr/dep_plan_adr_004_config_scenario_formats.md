@@ -26,15 +26,15 @@ target `RuntimeConfig` contains no format code, and all `toml`-crate parsing is
 concentrated in `runtime/env_config.rs` plus the CLI and daemon config surfaces.
 
 **JSON is already here.** `serde_json` is a non-optional dependency, and
-`Scenario::from_json` / `to_json` already round-trip. So "add JSON scenarios" is
-not a new capability at all.
+`Scenario::from_json` / `to_json` round-trip the typed schema. A2 has since made
+`Scenario::to_json` compact and recursively key-ordered, so canonical Scenario
+JSON is a shipped library surface rather than a new capability.
 
 **What genuinely does not exist** is JSON *configuration* loading — there is no
 `RuntimeBuilder::from_json`, no JSON path in `env_config`, and none in the ATP or
-`atpd` config surfaces — and any shared canonical-JSON encoder. `to_json` is
-pretty-printed rather than byte-canonical, and the only canonicalization
-convention in the codebase is incidental `BTreeMap` key ordering plus insta
-snapshot goldens. Whoever implements canonical JSON will be *introducing* it.
+`atpd` config surfaces — or a shared/config-agnostic canonical-JSON encoder.
+Neither application CLI accepts a JSON Scenario or emits canonical Scenario
+JSON; their `--json` flags serialize command results and reports.
 
 **A trap worth naming.** `src/config.rs` looks like a TOML surface and the
 capability registry names it as a source owner, but it makes zero `toml::` calls.
@@ -102,8 +102,8 @@ Recorded as truthful baseline. Each names an owning bead and may only improve.
 |---|---|---|
 | CFG-GAP-01 | The capability registry's `source_owners` for `CAP-CONFIG-TOML-JSON` (`src/config.rs`, `src/bin/asupersync.rs`) name files that make **zero** `toml::` calls. The real owners are `src/runtime/env_config.rs`, `src/runtime/builder.rs`, `src/cli/atp_config.rs`, `src/bin/atpd.rs`, `src/bin/dependency_marginal_ledger.rs`. The `api_surface_map` selector `config-reexports` has the same mismatch. | `asupersync-dep-p1-foundations-upksjk.5.1` |
 | CFG-GAP-02 | No integration test exercises `RuntimeBuilder::from_toml` (the file-path variant); only `from_toml_str` is covered. | `asupersync-5z2scg.4.3` |
-| CFG-GAP-03 | No cross-format equivalence test. YAML and JSON round-trips are independent, so the central "JSON is lossless w.r.t. YAML" claim has no executable evidence yet. | `asupersync-5z2scg.5.3` |
-| CFG-GAP-04 | The accepted YAML subset has never been specified — anchors, aliases, merge keys, tags, numerics, Unicode, and duplicate-key policy are whatever `serde_yaml` 0.9 does. | `asupersync-5z2scg.5.1` |
+| CFG-GAP-03 | One focused typed YAML-to-canonical-JSON equality and replay-identity test exists, but no exact 13-file cross-format corpus proof or real CLI conversion journey exists. | `asupersync-5z2scg.5.3` |
+| CFG-GAP-04 | A1 source-baselines the observed YAML subset, including anchors, aliases, merge-key behavior, tags, numerics, Unicode, and duplicate keys; the accepted application language still has no owner-approved finite input policy. | `asupersync-5z2scg.5.1` |
 | CFG-GAP-05 | No checked-in example TOML config and no doctested TOML journey; both rustdoc examples are in `ignore` fences and the documented `config/runtime.toml` does not exist. | `asupersync-5z2scg.4.5` |
 | CFG-GAP-06 | `src/fs_config_metamorphic_tests.rs` covers TOML round-trip and canonical form, but against a mock struct and behind `legacy-internal-test-harnesses`. | `asupersync-5z2scg.4.3` |
 
@@ -136,10 +136,13 @@ Evidence state is `BASELINE_PLANNED`: the corpus is specified, not executed.
   `atpd_config_user`, `lab_scenario_yaml`, `scenario_cross_format`,
   `scenario_replay`
 
-The corpus obligation is concrete: every file in `examples/scenarios/`,
-`frankenlab/examples/scenarios/`, and `tools/demos/` must still validate, run,
-and replay with unchanged fingerprints. The differential class must close
-CFG-GAP-03 by proving YAML and JSON deserialize to the same `Scenario`.
+The typed corpus obligation is concrete: the ten Scenario files in
+`examples/scenarios/` and the three in `frankenlab/examples/scenarios/` must
+still validate, run, and replay with unchanged fingerprints. The differential
+class must close CFG-GAP-03 by proving YAML and JSON deserialize to the same
+`Scenario` across all 13 files. `tools/demos/time_travel.yaml` is an adjacent
+parameter reference, not the Scenario schema and not a benchmark input; it must
+remain classified separately rather than being forced through Scenario flows.
 
 ## Rollback
 
@@ -159,8 +162,9 @@ RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBU
 
 This ADR is a frozen decision and public-surface inventory only. It does not
 prove that the planned evidence has run, that JSON is in fact lossless with
-respect to the accepted TOML and YAML corpora, that the accepted YAML subset has
-been characterized, that config write-back preserves comments, that any owned
-parser could reach parity, that performance is unchanged, or that either parser
-dependency may be removed. It also does not certify the capability registry's
+respect to the full accepted TOML and YAML corpora, that config write-back
+preserves comments, that any owned parser could reach parity, that performance
+is unchanged, or that either parser dependency may be removed. The
+Scenario-specific canonical encoder is not a shared config encoder or a CLI
+conversion path. This ADR also does not certify the capability registry's
 source-owner rows, which CFG-GAP-01 records as incorrect for this capability.

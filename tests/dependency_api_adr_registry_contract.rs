@@ -30,6 +30,8 @@ const DOC_PATH: &str = "docs/dependency_api_adr_registry.md";
 const MANIFEST_PATH: &str = "Cargo.toml";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
 const OBSERVABILITY_MOD_PATH: &str = "src/observability/mod.rs";
+const DEP_ADR_004_DOC_PATH: &str = "docs/adr/dep_plan_adr_004_config_scenario_formats.md";
+const SCENARIO_MODEL_PATH: &str = "src/lab/scenario.rs";
 const GENERATED_BEGIN: &str = "<!-- BEGIN GENERATED ADR SUMMARY -->";
 const GENERATED_END: &str = "<!-- END GENERATED ADR SUMMARY -->";
 const EXPECTED_ADR_COUNT: usize = 12;
@@ -455,6 +457,91 @@ fn every_resolved_adr_row_is_complete() {
                 text(gap, "gap_id")
             );
         }
+    }
+}
+
+#[test]
+fn dep_adr_004_claim_time_truth_is_current() {
+    let adr = resolved_adrs()
+        .into_iter()
+        .find(|row| text(row, "adr_id") == "DEP-ADR-004")
+        .expect("DEP-ADR-004 must remain resolved");
+
+    let summary = text(&adr, "decision_summary");
+    assert!(summary.contains("Scenario::to_json"));
+    assert!(summary.contains("compact, recursively key-ordered"));
+    assert!(summary.contains("shared/config-agnostic canonical encoder"));
+    assert!(summary.contains("CLI `--json` serializes command results"));
+
+    let alternatives = array(&adr, "alternatives_considered");
+    let typed_corpus = text(&alternatives[0], "rejected_because");
+    assert!(typed_corpus.contains("ten Scenario files under `examples/scenarios/`"));
+    assert!(typed_corpus.contains("three under `frankenlab/examples/scenarios/`"));
+    assert!(typed_corpus.contains("adjacent parameter reference"));
+    assert!(!typed_corpus.contains("across `examples/scenarios/`, `frankenlab/examples/scenarios/`, and `tools/demos/`"));
+
+    let primary_json = text(&alternatives[1], "rejected_because");
+    assert!(primary_json.contains("no exact 13-file cross-format proof"));
+    assert!(!primary_json.contains("to_string_pretty"));
+
+    let surfaces = array(&adr, "preserved_surfaces");
+    let scenario_json = surfaces
+        .iter()
+        .find(|surface| text(surface, "surface") == "json_scenario_io")
+        .expect("DEP-ADR-004 must retain json_scenario_io");
+    assert_eq!(text(scenario_json, "state"), "SHIPPED_OWNED");
+    assert!(text(scenario_json, "note").contains("recursively lexicographic"));
+    assert!(text(scenario_json, "note").contains("library-only Scenario surface"));
+
+    let shared_encoder = surfaces
+        .iter()
+        .find(|surface| text(surface, "surface") == "canonical_json_encoder")
+        .expect("DEP-ADR-004 must retain the shared encoder boundary");
+    assert_eq!(text(shared_encoder, "state"), "NOT_SHIPPED");
+    assert!(text(shared_encoder, "note").contains("shared/config-agnostic"));
+    assert!(text(shared_encoder, "note").contains("Scenario-specific"));
+
+    let evidence = adr.get("evidence").expect("DEP-ADR-004 evidence");
+    let corpus_evidence = array(evidence, "required_evidence_classes")
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|entry| entry.starts_with("corpus:"))
+        .expect("DEP-ADR-004 must retain a corpus evidence class");
+    assert!(corpus_evidence.contains("ten typed Scenario files in examples/scenarios"));
+    assert!(corpus_evidence.contains("three in frankenlab/examples/scenarios"));
+    assert!(corpus_evidence.contains("separately classified as an adjacent non-Scenario"));
+    assert!(!corpus_evidence.contains("every file in examples/scenarios"));
+
+    let journeys = array(&adr, "documented_user_journeys");
+    let json_journey = journeys
+        .iter()
+        .find(|journey| text(journey, "id") == "scn-journey-json-tooling")
+        .expect("DEP-ADR-004 must retain the JSON tooling journey");
+    assert!(text(json_journey, "description").contains("Library tooling"));
+    assert!(text(json_journey, "description").contains("command-result/report output"));
+
+    let scenario_model = read_repo_file(SCENARIO_MODEL_PATH);
+    assert!(scenario_model.contains("fn canonicalize_json_value("));
+    assert!(scenario_model.contains("serde_json::to_string(&canonicalize_json_value(value))"));
+
+    let adr_doc = read_repo_file(DEP_ADR_004_DOC_PATH);
+    for marker in [
+        "ten Scenario files in",
+        "three in `frankenlab/examples/scenarios/`",
+        "adjacent parameter reference",
+        "shared/config-agnostic canonical-JSON encoder",
+    ] {
+        assert!(adr_doc.contains(marker), "DEP-ADR-004 doc is missing {marker}");
+    }
+
+    let cutover = adr.get("cutover").expect("DEP-ADR-004 cutover");
+    assert_eq!(
+        cutover.get("dependency_exit_allowed").and_then(Value::as_bool),
+        Some(false)
+    );
+    for row in array(cutover, "per_capability") {
+        assert_eq!(text(row, "disposition"), "KEEP_UNTIL_PARITY");
+        assert_eq!(text(row, "cutover_state"), "KEEP_INCUMBENT");
     }
 }
 
