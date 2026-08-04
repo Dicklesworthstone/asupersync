@@ -47,6 +47,28 @@ fn backward_compatible_consumer_version_json() -> String {
     })
 }
 
+fn runtime_create_request_json(
+    consumer_version_json: Option<&str>,
+    allow_example_fetch: bool,
+) -> String {
+    let consumer_version = consumer_version_json.map(|raw| parse_json::<WasmAbiVersion>(raw));
+    let fetch_authority = if allow_example_fetch {
+        serde_json::json!({
+            "allowedOrigins": ["https://example.com"],
+            "allowedMethods": ["GET"],
+            "allowCredentials": false,
+            "maxHeaderCount": 0
+        })
+    } else {
+        serde_json::json!({})
+    };
+    serde_json::json!({
+        "consumerVersion": consumer_version,
+        "fetchAuthority": fetch_authority
+    })
+    .to_string()
+}
+
 #[test]
 fn runtime_create_and_close_round_trip() {
     reset_dispatcher_for_tests();
@@ -208,7 +230,8 @@ fn scope_task_cancel_and_join_surface() {
 fn fetch_request_surface_and_validation() {
     reset_dispatcher_for_tests();
 
-    let runtime_json = runtime_create(None).expect("runtime_create succeeds");
+    let runtime_json = runtime_create(Some(runtime_create_request_json(None, true)))
+        .expect("runtime_create succeeds");
     let runtime: WasmHandleRef = parse_json(&runtime_json);
 
     let scope_req = WasmScopeEnterRequest {
@@ -222,6 +245,7 @@ fn fetch_request_surface_and_validation() {
         scope,
         url: "https://example.com/data".to_string(),
         method: "GET".to_string(),
+        credentials: false,
         body: None,
     };
     let fetch_json = fetch_request(to_json(&request), None).expect("fetch_request succeeds");
@@ -238,6 +262,7 @@ fn fetch_request_surface_and_validation() {
         scope,
         url: String::new(),
         method: "GET".to_string(),
+        credentials: false,
         body: None,
     };
     let err = fetch_request(to_json(&bad_request), None).expect_err("empty URL must fail");
@@ -248,6 +273,7 @@ fn fetch_request_surface_and_validation() {
         scope,
         url: "https://example.com/data".to_string(),
         method: "TRACE".to_string(),
+        credentials: false,
         body: None,
     };
     let err = fetch_request(to_json(&bad_method), None).expect_err("unsupported method must fail");
@@ -258,11 +284,55 @@ fn fetch_request_surface_and_validation() {
         scope,
         url: "https://example.com/data".to_string(),
         method: "GET".to_string(),
+        credentials: false,
         body: Some(vec![1, 2, 3]),
     };
     let err = fetch_request(to_json(&body_on_get), None).expect_err("GET body must be rejected");
     let err = error_message(err);
     assert!(err.contains("does not permit a request body"));
+}
+
+#[test]
+fn fetch_request_without_runtime_authority_fails_before_handle_allocation() {
+    reset_dispatcher_for_tests();
+
+    let runtime_json = runtime_create(None).expect("runtime_create succeeds");
+    let runtime: WasmHandleRef = parse_json(&runtime_json);
+    let scope_json = scope_enter(
+        to_json(&WasmScopeEnterRequest {
+            parent: runtime,
+            label: Some("default-deny".to_string()),
+        }),
+        None,
+    )
+    .expect("scope_enter succeeds");
+    let scope: WasmHandleRef = parse_json(&scope_json);
+    let live_before = dispatcher_diagnostics_for_tests()
+        .memory_report
+        .live_handles;
+
+    let denied = fetch_request(
+        to_json(&WasmFetchRequest {
+            scope,
+            url: "https://evil.example/collect".to_string(),
+            method: "POST".to_string(),
+            credentials: false,
+            body: Some(vec![1, 2, 3]),
+        }),
+        None,
+    )
+    .expect_err("default runtime authority must deny fetch");
+    let failure: WasmAbiFailure = parse_json(&error_message(denied));
+    assert_eq!(failure.code, WasmAbiErrorCode::CapabilityDenied);
+    assert_eq!(
+        dispatcher_diagnostics_for_tests()
+            .memory_report
+            .live_handles,
+        live_before,
+        "denied fetch must not allocate a handle"
+    );
+
+    runtime_close(runtime_json, None).expect("runtime_close succeeds");
 }
 
 #[test]
@@ -279,8 +349,12 @@ fn abi_metadata_exports_match_runtime_constants() {
 fn runtime_create_rejects_incompatible_consumer_version_at_adapter_boundary() {
     reset_dispatcher_for_tests();
 
-    let err = runtime_create(Some(incompatible_consumer_version_json()))
-        .expect_err("incompatible consumer version must fail");
+    let incompatible_version = incompatible_consumer_version_json();
+    let err = runtime_create(Some(runtime_create_request_json(
+        Some(&incompatible_version),
+        false,
+    )))
+    .expect_err("incompatible consumer version must fail");
     let err = error_message(err);
     let failure: WasmAbiFailure = parse_json(&err);
     assert_eq!(failure.code, WasmAbiErrorCode::CompatibilityRejected);
@@ -298,8 +372,11 @@ fn adapter_boundary_accepts_backward_compatible_consumer_minor() {
     reset_dispatcher_for_tests();
 
     let consumer_version_json = backward_compatible_consumer_version_json();
-    let runtime_json =
-        runtime_create(Some(consumer_version_json.clone())).expect("runtime_create succeeds");
+    let runtime_json = runtime_create(Some(runtime_create_request_json(
+        Some(&consumer_version_json),
+        true,
+    )))
+    .expect("runtime_create succeeds");
     let runtime: WasmHandleRef = parse_json(&runtime_json);
 
     let scope_json = scope_enter(
@@ -318,6 +395,7 @@ fn adapter_boundary_accepts_backward_compatible_consumer_minor() {
             scope,
             url: "https://example.com/compat".to_string(),
             method: "GET".to_string(),
+            credentials: false,
             body: None,
         }),
         Some(consumer_version_json.clone()),
@@ -1009,7 +1087,8 @@ fn websocket_url_validation_accepts_mixed_case_ws_schemes() {
 fn runtime_close_drains_open_scope_task_and_fetch_handles() {
     reset_dispatcher_for_tests();
 
-    let runtime_json = runtime_create(None).expect("runtime_create succeeds");
+    let runtime_json = runtime_create(Some(runtime_create_request_json(None, true)))
+        .expect("runtime_create succeeds");
     let runtime: WasmHandleRef = parse_json(&runtime_json);
     let scope_json = scope_enter(
         to_json(&WasmScopeEnterRequest {
@@ -1037,6 +1116,7 @@ fn runtime_close_drains_open_scope_task_and_fetch_handles() {
             scope,
             url: "https://example.com/data".to_string(),
             method: "GET".to_string(),
+            credentials: false,
             body: None,
         }),
         None,
@@ -1261,4 +1341,152 @@ fn cancelled_task_join_preserves_cancellation_payload_and_invalidates_handle() {
         diagnostics.is_clean(),
         "expected clean diagnostics: {diagnostics:?}"
     );
+}
+
+#[cfg(target_arch = "wasm32")]
+mod writable_stream_cancellation {
+    use asupersync::io::{AsyncWrite, WasmWritableStreamSink};
+    use js_sys::Promise;
+    use std::future::poll_fn;
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
+    use wasm_bindgen::JsValue;
+    use wasm_bindgen::prelude::wasm_bindgen;
+    use wasm_bindgen_futures::JsFuture;
+    use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
+    use web_sys::WritableStream;
+
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    #[wasm_bindgen(inline_js = r#"
+        export function makeControlledWritableHarness() {
+            const writes = [];
+            const pending = [];
+            const stream = new WritableStream({
+                write(chunk) {
+                    writes.push(Array.from(chunk));
+                    return new Promise((resolve, reject) => {
+                        pending.push({ resolve, reject });
+                    });
+                }
+            });
+            return { stream, writes, pending };
+        }
+
+        export function controlledWritableStream(harness) {
+            return harness.stream;
+        }
+
+        export function controlledWritableWritesJson(harness) {
+            return JSON.stringify(harness.writes);
+        }
+
+        export function resolveNextControlledWrite(harness) {
+            const next = harness.pending.shift();
+            if (next === undefined) {
+                throw new Error("no controlled WritableStream write is pending");
+            }
+            next.resolve();
+        }
+    "#)]
+    extern "C" {
+        #[wasm_bindgen(js_name = makeControlledWritableHarness)]
+        fn make_controlled_writable_harness() -> JsValue;
+
+        #[wasm_bindgen(js_name = controlledWritableStream)]
+        fn controlled_writable_stream(harness: &JsValue) -> WritableStream;
+
+        #[wasm_bindgen(js_name = controlledWritableWritesJson)]
+        fn controlled_writable_writes_json(harness: &JsValue) -> String;
+
+        #[wasm_bindgen(js_name = resolveNextControlledWrite)]
+        fn resolve_next_controlled_write(harness: &JsValue);
+    }
+
+    fn writes(harness: &JsValue) -> Vec<Vec<u8>> {
+        serde_json::from_str(&controlled_writable_writes_json(harness))
+            .expect("controlled write log must be valid JSON")
+    }
+
+    fn poll_write_once(
+        sink: &mut WasmWritableStreamSink,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        Pin::new(sink).poll_write(&mut cx, buf)
+    }
+
+    async fn yield_microtask() {
+        JsFuture::from(Promise::resolve(&JsValue::UNDEFINED))
+            .await
+            .expect("microtask yield must resolve");
+    }
+
+    async fn wait_for_write_count(harness: &JsValue, expected: usize) {
+        for _ in 0..16 {
+            if writes(harness).len() == expected {
+                return;
+            }
+            yield_microtask().await;
+        }
+        panic!("WritableStream did not observe {expected} queued writes");
+    }
+
+    async fn poll_until_first_chunk_is_accepted(
+        sink: &mut WasmWritableStreamSink,
+        first: &[u8],
+    ) -> std::io::Result<usize> {
+        for _ in 0..16 {
+            if let Poll::Ready(result) = poll_write_once(sink, first) {
+                return result;
+            }
+            yield_microtask().await;
+        }
+        panic!("WritableStream writer.ready did not accept the first chunk");
+    }
+
+    async fn assert_cancelled_write_does_not_credit_old_chunk(first: &[u8], second: &[u8]) {
+        let harness = make_controlled_writable_harness();
+        let stream = controlled_writable_stream(&harness);
+        let mut sink = WasmWritableStreamSink::new(&stream).expect("getWriter succeeds");
+
+        let first_written = poll_until_first_chunk_is_accepted(&mut sink, first)
+            .await
+            .expect("first write succeeds");
+        assert_eq!(first_written, first.len());
+        wait_for_write_count(&harness, 1).await;
+        assert_eq!(writes(&harness), vec![first.to_vec()]);
+
+        // Model a second write future that is polled and then dropped while
+        // the first chunk is still completing. No part of `second` may be
+        // accepted or credited yet.
+        assert!(poll_write_once(&mut sink, second).is_pending());
+        assert_eq!(writes(&harness), vec![first.to_vec()]);
+
+        resolve_next_controlled_write(&harness);
+        yield_microtask().await;
+
+        let second_written = poll_fn(|cx| Pin::new(&mut sink).poll_write(cx, second))
+            .await
+            .expect("second write succeeds");
+        assert_eq!(second_written, second.len());
+        wait_for_write_count(&harness, 2).await;
+        assert_eq!(writes(&harness), vec![first.to_vec(), second.to_vec()]);
+
+        resolve_next_controlled_write(&harness);
+        poll_fn(|cx| Pin::new(&mut sink).poll_shutdown(cx))
+            .await
+            .expect("controlled stream closes cleanly");
+    }
+
+    #[wasm_bindgen_test]
+    async fn cancelled_pending_write_with_unequal_lengths_enqueues_new_buffer() {
+        assert_cancelled_write_does_not_credit_old_chunk(b"old", b"new-buffer").await;
+    }
+
+    #[wasm_bindgen_test]
+    async fn cancelled_pending_write_with_equal_lengths_enqueues_new_buffer() {
+        assert_cancelled_write_does_not_credit_old_chunk(b"old!", b"new!").await;
+    }
 }
