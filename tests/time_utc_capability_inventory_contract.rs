@@ -24,7 +24,7 @@ const CAPABILITY_ID: &str = "CAP-TIME-UTC-RFC3339";
 const ADR_ID: &str = "DEP-ADR-011";
 const BASELINE_REVISION: &str = "1afde84d564bd8ea876459624116f90028b80835";
 const ARTIFACT_SHA256: &str =
-    "f8e8b2c370c5e674a68c0da7d2d5f638f57c4e5326007bfeb9d9483fd0c5c2cd";
+    "6984ba7e7ad070209c392b25b66c0cc18b8af1edbf41156265022f2746c44a09";
 const DOC_BEGIN: &str = "<!-- BEGIN TIME UTC CAPABILITY INVENTORY -->";
 const DOC_END: &str = "<!-- END TIME UTC CAPABILITY INVENTORY -->";
 const CHRONO_TOKEN: &str = concat!("chrono", "::");
@@ -99,6 +99,17 @@ fn string_set(value: &Value, key: &str) -> BTreeSet<String> {
                 .as_str()
                 .unwrap_or_else(|| panic!("{key} entries must be strings"))
                 .to_owned()
+        })
+        .collect()
+}
+
+fn number_set(value: &Value, key: &str) -> BTreeSet<u64> {
+    array(value, key)
+        .iter()
+        .map(|entry| {
+            entry
+                .as_u64()
+                .unwrap_or_else(|| panic!("{key} entries must be unsigned integers"))
         })
         .collect()
 }
@@ -201,7 +212,7 @@ fn validate_identity(inventory: &Value) -> Result<(), String> {
         || policy.get("a1_execution_state").and_then(Value::as_str)
             != Some("NOT_EXECUTED_THIS_TURN")
         || policy.get("source_classification_state").and_then(Value::as_str)
-            != Some("PATH_COUNT_COMPLETE_USE_LEVEL_DETAIL_PARTIAL")
+            != Some("PATH_COUNT_AND_ALIAS_REFERENCES_COMPLETE_PER_USE_DETAIL_PARTIAL")
         || policy.get("bead_acceptance_state").and_then(Value::as_str)
             != Some("PARTIAL_STATIC_INVENTORY_ONLY")
         || policy.get("bead_close_allowed").and_then(Value::as_bool) != Some(false)
@@ -212,10 +223,10 @@ fn validate_identity(inventory: &Value) -> Result<(), String> {
         || policy
             .get("unresolved_static_detail_gap_count")
             .and_then(Value::as_u64)
-            != Some(2)
+            != Some(1)
         || policy.get("acceptance_zero_unknown_met").and_then(Value::as_bool) != Some(false)
         || policy.get("alias_aware_use_inventory_state").and_then(Value::as_str)
-            != Some("INCOMPLETE")
+            != Some("IMPORT_BINDINGS_AND_DIRECT_REFERENCES_COMPLETE_DERIVED_CLASSIFICATION_PARTIAL")
         || contains_unclassified_value(inventory)
     {
         return Err("classification or execution policy drifted".to_owned());
@@ -445,12 +456,29 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
     require_exact_ids(
         array(inventory, "static_inventory_gaps"),
         "gap_id",
-        &[
-            "TIME-STATIC-GAP-ALIAS-AWARE-USES",
-            "TIME-STATIC-GAP-NONDEPENDENCY-TEMPORAL-SCHEMAS",
-        ],
+        &["TIME-STATIC-GAP-PER-USE-CLASSIFICATION"],
         "static inventory gaps",
     )?;
+    require_exact_ids(
+        array(inventory, "resolved_static_details"),
+        "detail_id",
+        &["TIME-STATIC-RESOLVED-ALIAS-BINDINGS"],
+        "resolved static details",
+    )?;
+    require_exact_ids(
+        array(inventory, "scope_boundaries"),
+        "boundary_id",
+        &["TIME-SCOPE-NONDEPENDENCY-TEMPORAL-SCHEMAS"],
+        "scope boundaries",
+    )?;
+    let resolved_alias = &array(inventory, "resolved_static_details")[0];
+    let nondependency_boundary = &array(inventory, "scope_boundaries")[0];
+    if text(resolved_alias, "state") != "RESOLVED_BY_STATIC_ALIAS_INVENTORY"
+        || text(nondependency_boundary, "semantic_contract_id")
+            != "TIME-SEM-NONDEPENDENCY-TEMPORAL-SCHEMAS"
+    {
+        return Err("resolved detail or scope-boundary routing drifted".to_owned());
+    }
     Ok(())
 }
 
@@ -808,9 +836,664 @@ fn validate_census(inventory: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
+    let alias = &inventory["alias_aware_chrono_uses"];
+    if text(alias, "state")
+        != "IMPORT_BINDINGS_AND_DIRECT_REFERENCES_COMPLETE_DERIVED_CLASSIFICATION_PARTIAL"
+        || number(alias, "binding_path_count") != 4
+        || number(alias, "binding_count") != 4
+        || number(alias, "direct_reference_line_count") != 32
+        || number(alias, "imported_symbol_occurrence_count") != 45
+        || number(alias, "literal_namespace_overlap_line_count") != 4
+        || number(alias, "new_line_count_beyond_literal_census") != 28
+        || number(alias, "literal_or_alias_unique_line_count") != 187
+        || number(alias, "derived_operation_anchor_line_count") != 8
+    {
+        return Err("alias-aware inventory totals drifted".to_owned());
+    }
+    require_exact_strings(
+        alias,
+        "absent_forms",
+        &[
+            "Chrono crate rename import",
+            "extern crate Chrono declaration",
+            "renamed imported Chrono symbol",
+            "Chrono-backed type alias",
+        ],
+    )?;
+
+    let bindings = array(alias, "bindings");
+    require_exact_ids(
+        bindings,
+        "binding_id",
+        &[
+            "TIME-ALIAS-CLI-WORKFLOWS",
+            "TIME-ALIAS-ROOT-HPACK-DIFFERENTIAL-TEST",
+            "TIME-ALIAS-STANDALONE-MAINTENANCE",
+            "TIME-ALIAS-STANDALONE-REGRESSION",
+        ],
+        "direct Chrono alias bindings",
+    )?;
+    let binding_by_id: BTreeMap<_, _> = bindings
+        .iter()
+        .map(|row| (text(row, "binding_id"), row))
+        .collect();
+    let expected_binding_facts = [
+        (
+            "TIME-ALIAS-CLI-WORKFLOWS",
+            "src/cli/atp_workflows.rs",
+            35_u64,
+            format!("use {}Utc;", CHRONO_TOKEN),
+            vec!["Utc"],
+        ),
+        (
+            "TIME-ALIAS-ROOT-HPACK-DIFFERENTIAL-TEST",
+            "tests/conformance/hpack_rfc7541/differential_tests.rs",
+            358,
+            format!("use {}Utc;", CHRONO_TOKEN),
+            vec!["Utc"],
+        ),
+        (
+            "TIME-ALIAS-STANDALONE-MAINTENANCE",
+            "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs",
+            12,
+            format!("use {}{{DateTime, Duration, Utc}};", CHRONO_TOKEN),
+            vec!["DateTime", "Duration", "Utc"],
+        ),
+        (
+            "TIME-ALIAS-STANDALONE-REGRESSION",
+            "tests/conformance/raptorq_rfc6330/reporting/src/regression_detection.rs",
+            10,
+            format!("use {}{{DateTime, Utc}};", CHRONO_TOKEN),
+            vec!["DateTime", "Utc"],
+        ),
+    ];
+    for (binding_id, path, import_line, import_source, imported_symbols) in
+        expected_binding_facts
+    {
+        let binding = binding_by_id[binding_id];
+        if text(binding, "path") != path
+            || number(binding, "import_line") != import_line
+            || text(binding, "import_source") != import_source
+        {
+            return Err(format!("{binding_id} import binding drifted"));
+        }
+        require_exact_strings(binding, "imported_symbols", &imported_symbols)?;
+    }
+
+    let profiles = row_ids(array(inventory, "dependency_profiles"), "profile_id");
+    let migrations = row_ids(array(inventory, "migration_groups"), "group_id");
+    let mut binding_paths = BTreeSet::new();
+    let mut direct_pairs = BTreeSet::new();
+    let mut overlap_pairs = BTreeSet::new();
+    let mut derived_pairs = BTreeSet::new();
+    let mut excluded_pairs = BTreeSet::new();
+    let mut declared_occurrences = 0_u64;
+    for binding in bindings {
+        let path = text(binding, "path");
+        binding_paths.insert(path.to_owned());
+        if !profiles.contains(text(binding, "profile_id"))
+            || !migrations.contains(text(binding, "migration_group_id"))
+            || text(binding, "cfg_or_wiring").is_empty()
+            || text(binding, "exposure").is_empty()
+            || !text(binding, "owner_bead").starts_with("asupersync-")
+        {
+            return Err(format!(
+                "{} classification metadata drifted",
+                text(binding, "binding_id")
+            ));
+        }
+
+        let direct_lines = number_set(binding, "direct_reference_lines");
+        let overlap_lines = number_set(binding, "literal_namespace_overlap_lines");
+        let derived_lines = number_set(binding, "derived_operation_lines");
+        let excluded_lines = number_set(binding, "excluded_nonchrono_shadow_lines");
+        if direct_lines.len() != array(binding, "direct_reference_lines").len()
+            || overlap_lines.len() != array(binding, "literal_namespace_overlap_lines").len()
+            || derived_lines.len() != array(binding, "derived_operation_lines").len()
+            || excluded_lines.len() != array(binding, "excluded_nonchrono_shadow_lines").len()
+            || !overlap_lines.is_subset(&direct_lines)
+        {
+            return Err(format!(
+                "{} line sets drifted",
+                text(binding, "binding_id")
+            ));
+        }
+        for line in direct_lines {
+            direct_pairs.insert((path.to_owned(), line));
+        }
+        for line in overlap_lines {
+            overlap_pairs.insert((path.to_owned(), line));
+        }
+        for line in derived_lines {
+            derived_pairs.insert((path.to_owned(), line));
+        }
+        for line in excluded_lines {
+            excluded_pairs.insert((path.to_owned(), line));
+        }
+        declared_occurrences += number(binding, "imported_symbol_occurrence_count");
+    }
+    if binding_paths.len() != 4
+        || direct_pairs.len() != 32
+        || overlap_pairs.len() != 4
+        || derived_pairs.len() != 8
+        || declared_occurrences != 45
+    {
+        return Err("alias binding aggregates drifted".to_owned());
+    }
+    let expected_overlap_pairs: BTreeSet<_> = [236_u64, 399, 458, 1298]
+        .into_iter()
+        .map(|line| ("src/cli/atp_workflows.rs".to_owned(), line))
+        .collect();
+    if overlap_pairs != expected_overlap_pairs {
+        return Err("literal and alias overlap set drifted".to_owned());
+    }
+    let expected_derived_pairs: BTreeSet<_> = [277_u64, 297, 394, 448, 504, 575, 580]
+        .into_iter()
+        .map(|line| {
+            (
+                "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs"
+                    .to_owned(),
+                line,
+            )
+        })
+        .chain(std::iter::once((
+            "tests/conformance/raptorq_rfc6330/reporting/src/regression_detection.rs"
+                .to_owned(),
+            314,
+        )))
+        .collect();
+    if derived_pairs != expected_derived_pairs {
+        return Err("derived temporal operation anchors drifted".to_owned());
+    }
+    let expected_excluded_pairs = BTreeSet::from([(
+        "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs"
+            .to_owned(),
+        751_u64,
+    )]);
+    if excluded_pairs != expected_excluded_pairs {
+        return Err("non-Chrono shadow exclusion set drifted".to_owned());
+    }
+    let Some(reconciled_new_lines) = number(alias, "direct_reference_line_count")
+        .checked_sub(number(alias, "literal_namespace_overlap_line_count"))
+    else {
+        return Err("literal and alias overlap exceeds the direct line count".to_owned());
+    };
+    let Some(reconciled_union) = number(&inventory["chrono_census"], "matching_line_count")
+        .checked_add(reconciled_new_lines)
+    else {
+        return Err("literal and alias union overflowed".to_owned());
+    };
+    if number(alias, "new_line_count_beyond_literal_census") != reconciled_new_lines
+        || number(alias, "literal_or_alias_unique_line_count") != reconciled_union
+    {
+        return Err("literal and alias reconciliation arithmetic drifted".to_owned());
+    }
+
+    let operation_rows = array(alias, "operation_rows");
+    if operation_rows.len() != 32
+        || row_ids(operation_rows, "use_id").len() != operation_rows.len()
+    {
+        return Err("direct alias operation row identity drifted".to_owned());
+    }
+    let mut operation_pairs = BTreeSet::new();
+    let mut operation_occurrences = 0_usize;
+    for row in operation_rows {
+        let binding_id = text(row, "binding_id");
+        let Some(binding) = binding_by_id.get(binding_id).copied() else {
+            return Err(format!("{} references an unknown binding", text(row, "use_id")));
+        };
+        let pair = (text(row, "path").to_owned(), number(row, "line"));
+        if !operation_pairs.insert(pair.clone()) || !direct_pairs.contains(&pair) {
+            return Err(format!("{} direct-use pair drifted", text(row, "use_id")));
+        }
+        if text(row, "path") != text(binding, "path")
+            || text(row, "profile_id") != text(binding, "profile_id")
+            || text(row, "cfg_or_wiring") != text(binding, "cfg_or_wiring")
+            || text(row, "migration_group_id") != text(binding, "migration_group_id")
+            || text(row, "owner_bead") != text(binding, "owner_bead")
+            || text(row, "operation").is_empty()
+            || text(row, "exposure").is_empty()
+            || text(row, "persistence_or_public_association").is_empty()
+        {
+            return Err(format!("{} classification drifted", text(row, "use_id")));
+        }
+        let used_symbols = string_set(row, "imported_symbols_used");
+        let imported_symbols = string_set(binding, "imported_symbols");
+        if used_symbols.is_empty() || !used_symbols.is_subset(&imported_symbols) {
+            return Err(format!("{} imported-symbol set drifted", text(row, "use_id")));
+        }
+        operation_occurrences += used_symbols.len();
+        if row
+            .get("literal_namespace_overlap")
+            .and_then(Value::as_bool)
+            != Some(overlap_pairs.contains(&pair))
+        {
+            return Err(format!("{} overlap classification drifted", text(row, "use_id")));
+        }
+    }
+    if operation_pairs != direct_pairs || operation_occurrences != 45 {
+        return Err(
+            "direct alias references lack one-to-one operation and symbol rows".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn identifier_count(line: &str, identifier: &str) -> usize {
+    line.match_indices(identifier)
+        .filter(|(index, _)| {
+            let bytes = line.as_bytes();
+            let start = *index;
+            let end = start + identifier.len();
+            let left_boundary = start == 0 || !is_identifier_byte(bytes[start - 1]);
+            let right_boundary = end == bytes.len() || !is_identifier_byte(bytes[end]);
+            left_boundary && right_boundary
+        })
+        .count()
+}
+
+fn strip_keyword<'a>(value: &'a str, keyword: &str) -> Option<&'a str> {
+    let value = value.trim_start();
+    let remainder = value.strip_prefix(keyword)?;
+    if remainder
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| is_identifier_byte(*byte))
+    {
+        None
+    } else {
+        Some(remainder)
+    }
+}
+
+fn after_leading_attributes(mut value: &str) -> &str {
+    loop {
+        value = value.trim_start();
+        let Some(attribute) = value
+            .strip_prefix("#[")
+            .or_else(|| value.strip_prefix("#!["))
+        else {
+            return value;
+        };
+        let mut nesting = 1_u64;
+        let mut end = None;
+        for (index, character) in attribute.char_indices() {
+            match character {
+                '[' => nesting += 1,
+                ']' => {
+                    nesting -= 1;
+                    if nesting == 0 {
+                        end = Some(index + character.len_utf8());
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else {
+            return value;
+        };
+        value = &attribute[end..];
+    }
+}
+
+fn after_optional_visibility(value: &str) -> &str {
+    let value = after_leading_attributes(value);
+    let Some(remainder) = strip_keyword(value, "pub") else {
+        return value;
+    };
+    let remainder = remainder.trim_start();
+    if let Some(visibility) = remainder.strip_prefix('(')
+        && let Some(end) = visibility.find(')')
+    {
+        return visibility[end + 1..].trim_start();
+    }
+    remainder
+}
+
+fn use_declaration_tail(value: &str) -> Option<&str> {
+    strip_keyword(after_optional_visibility(value), "use")
+}
+
+fn extern_crate_declaration_tail(value: &str) -> Option<&str> {
+    let remainder = strip_keyword(after_optional_visibility(value), "extern")?;
+    strip_keyword(remainder, "crate")
+}
+
+fn starts_direct_crate_path(value: &str, crate_name: &str) -> bool {
+    let value = value.trim_start();
+    let value = value
+        .strip_prefix("::")
+        .map_or(value, str::trim_start);
+    let Some(remainder) = value.strip_prefix(crate_name) else {
+        return false;
+    };
+    remainder
+        .as_bytes()
+        .first()
+        .is_none_or(|byte| !is_identifier_byte(*byte))
+}
+
+fn root_use_group_contains_crate(value: &str, crate_name: &str) -> bool {
+    let Some(group) = value.trim_start().strip_prefix('{') else {
+        return false;
+    };
+    let mut nesting = 0_u64;
+    let mut branch_start = 0_usize;
+    for (index, character) in group.char_indices() {
+        match character {
+            '{' | '(' | '[' => nesting += 1,
+            '}' | ')' | ']' if nesting > 0 => nesting -= 1,
+            ',' if nesting == 0 => {
+                if starts_direct_crate_path(&group[branch_start..index], crate_name) {
+                    return true;
+                }
+                branch_start = index + character.len_utf8();
+            }
+            '}' if nesting == 0 => {
+                return starts_direct_crate_path(&group[branch_start..index], crate_name);
+            }
+            _ => {}
+        }
+    }
+    starts_direct_crate_path(&group[branch_start..], crate_name)
+}
+
+fn direct_crate_use_tree(value: &str, crate_name: &str) -> bool {
+    let value = value.trim_start();
+    starts_direct_crate_path(value, crate_name)
+        || value
+            .strip_prefix("::")
+            .is_some_and(|value| root_use_group_contains_crate(value, crate_name))
+        || root_use_group_contains_crate(value, crate_name)
+}
+
+#[derive(Default)]
+struct RustLexState {
+    block_comment_depth: usize,
+    in_quoted_string: bool,
+    quoted_escape: bool,
+    raw_string_hashes: Option<usize>,
+}
+
+fn raw_string_open(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
+    let mut cursor = start;
+    if bytes.get(cursor) == Some(&b'b') {
+        cursor += 1;
+    }
+    if bytes.get(cursor) != Some(&b'r') {
+        return None;
+    }
+    cursor += 1;
+    let hash_start = cursor;
+    while bytes.get(cursor) == Some(&b'#') {
+        cursor += 1;
+    }
+    if bytes.get(cursor) != Some(&b'"') {
+        return None;
+    }
+    Some((cursor + 1 - start, cursor - hash_start))
+}
+
+fn strip_rust_non_code(line: &str, state: &mut RustLexState) -> String {
+    let bytes = line.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0_usize;
+    while index < bytes.len() {
+        let pair = bytes.get(index..index + 2);
+        if state.block_comment_depth > 0 {
+            if pair == Some(b"/*") {
+                state.block_comment_depth += 1;
+                index += 2;
+            } else if pair == Some(b"*/") {
+                state.block_comment_depth -= 1;
+                index += 2;
+            } else {
+                index += 1;
+            }
+        } else if let Some(hash_count) = state.raw_string_hashes {
+            let hash_end = index + 1 + hash_count;
+            if bytes[index] == b'"'
+                && bytes
+                    .get(index + 1..hash_end)
+                    .is_some_and(|hashes| hashes.iter().all(|byte| *byte == b'#'))
+            {
+                state.raw_string_hashes = None;
+                index = hash_end;
+            } else {
+                index += 1;
+            }
+        } else if state.in_quoted_string {
+            if state.quoted_escape {
+                state.quoted_escape = false;
+            } else if bytes[index] == b'\\' {
+                state.quoted_escape = true;
+            } else if bytes[index] == b'"' {
+                state.in_quoted_string = false;
+            }
+            index += 1;
+        } else if pair == Some(b"//") {
+            break;
+        } else if pair == Some(b"/*") {
+            state.block_comment_depth += 1;
+            index += 2;
+            output.push(b' ');
+        } else if let Some((consumed, hash_count)) = raw_string_open(bytes, index) {
+            state.raw_string_hashes = Some(hash_count);
+            index += consumed;
+            output.push(b' ');
+        } else if bytes[index] == b'"' {
+            state.in_quoted_string = true;
+            state.quoted_escape = false;
+            index += 1;
+            output.push(b' ');
+        } else {
+            output.push(bytes[index]);
+            index += 1;
+        }
+    }
+    if state.in_quoted_string {
+        state.quoted_escape = false;
+    }
+    String::from_utf8(output).expect("lexically stripped Rust source must remain UTF-8")
+}
+
+fn validate_alias_sources(inventory: &Value) -> Result<(), String> {
+    let alias = &inventory["alias_aware_chrono_uses"];
+    let bindings = array(alias, "bindings");
+    let root = repo_root();
+    let mut files = Vec::new();
+    for scope in ["src", "tests", "benches", "conformance", "fuzz/conformance"] {
+        collect_rs_files(&root.join(scope), &mut files);
+    }
+    files.sort();
+    files.dedup();
+
+    let chrono_name = CHRONO_TOKEN.trim_end_matches("::");
+    let direct_namespace = format!("{chrono_name}::");
+    let mut actual_binding_lines = BTreeSet::new();
+    for path in files {
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let relative = path
+            .strip_prefix(&root)
+            .expect("alias path must be repository-relative")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let mut lex_state = RustLexState::default();
+        let mut pending_use: Option<(u64, String)> = None;
+        let mut pending_extern: Option<(u64, String)> = None;
+        for (index, line) in source.lines().enumerate() {
+            let line_number = index as u64 + 1;
+            let code = strip_rust_non_code(line, &mut lex_state);
+            let trimmed = code.trim();
+            let is_type_declaration =
+                strip_keyword(after_optional_visibility(trimmed), "type").is_some();
+            if is_type_declaration && trimmed.contains(&direct_namespace) {
+                return Err(format!(
+                    "fully qualified Chrono-backed type alias appeared at {relative}:{line_number}"
+                ));
+            }
+
+            if let Some((start_line, use_tree)) = pending_use.as_mut() {
+                use_tree.push(' ');
+                use_tree.push_str(trimmed);
+                if trimmed.contains(';') {
+                    if direct_crate_use_tree(use_tree, chrono_name) {
+                        actual_binding_lines.insert((relative.clone(), *start_line));
+                    }
+                    pending_use = None;
+                }
+                continue;
+            }
+            if let Some((start_line, crate_tail)) = pending_extern.as_mut() {
+                crate_tail.push(' ');
+                crate_tail.push_str(trimmed);
+                if trimmed.contains(';') {
+                    if starts_direct_crate_path(crate_tail, chrono_name) {
+                        actual_binding_lines.insert((relative.clone(), *start_line));
+                    }
+                    pending_extern = None;
+                }
+                continue;
+            }
+
+            if let Some(use_tree) = use_declaration_tail(trimmed) {
+                if direct_crate_use_tree(use_tree, chrono_name) {
+                    actual_binding_lines.insert((relative.clone(), line_number));
+                } else if !use_tree.contains(';') {
+                    pending_use = Some((line_number, use_tree.to_owned()));
+                }
+            } else if let Some(crate_tail) = extern_crate_declaration_tail(trimmed) {
+                if starts_direct_crate_path(crate_tail, chrono_name) {
+                    actual_binding_lines.insert((relative.clone(), line_number));
+                } else if !crate_tail.contains(';') {
+                    pending_extern = Some((line_number, crate_tail.to_owned()));
+                }
+            }
+        }
+        if let Some((start_line, use_tree)) = pending_use
+            && direct_crate_use_tree(&use_tree, chrono_name)
+        {
+            actual_binding_lines.insert((relative.clone(), start_line));
+        }
+        if let Some((start_line, crate_tail)) = pending_extern
+            && starts_direct_crate_path(&crate_tail, chrono_name)
+        {
+            actual_binding_lines.insert((relative, start_line));
+        }
+    }
+    let expected_binding_lines: BTreeSet<_> = bindings
+        .iter()
+        .map(|binding| {
+            (
+                text(binding, "path").to_owned(),
+                number(binding, "import_line"),
+            )
+        })
+        .collect();
+    if actual_binding_lines != expected_binding_lines {
+        return Err("repository direct Chrono import set drifted".to_owned());
+    }
+
+    let operation_rows = array(alias, "operation_rows");
+    let mut actual_occurrences = 0_u64;
+    for binding in bindings {
+        let path = text(binding, "path");
+        let source = read_repo_file(path);
+        let lines: Vec<_> = source.lines().collect();
+        let import_line = number(binding, "import_line");
+        let import_index = usize::try_from(import_line - 1)
+            .map_err(|_| format!("{path} import line overflowed usize"))?;
+        if lines.get(import_index).map(|line| line.trim())
+            != Some(text(binding, "import_source"))
+        {
+            return Err(format!("{path} import source drifted"));
+        }
+        let imported_symbols = string_set(binding, "imported_symbols");
+        let excluded_lines = number_set(binding, "excluded_nonchrono_shadow_lines");
+        let expected_lines = number_set(binding, "direct_reference_lines");
+        let expected_overlap = number_set(binding, "literal_namespace_overlap_lines");
+        let mut actual_lines = BTreeSet::new();
+        let mut actual_overlap = BTreeSet::new();
+        let mut binding_occurrences = 0_u64;
+        for (index, line) in lines.iter().enumerate() {
+            let line_number = index as u64 + 1;
+            let trimmed = line.trim_start();
+            if line_number == import_line
+                || trimmed.starts_with("//")
+                || trimmed.starts_with("/*")
+                || trimmed.starts_with('*')
+            {
+                continue;
+            }
+            let occurrences: usize = imported_symbols
+                .iter()
+                .map(|symbol| identifier_count(line, symbol))
+                .sum();
+            let is_type_declaration =
+                strip_keyword(after_optional_visibility(trimmed), "type").is_some();
+            if is_type_declaration && occurrences > 0 {
+                return Err(format!(
+                    "import-backed Chrono type alias appeared at {path}:{line_number}"
+                ));
+            }
+            if occurrences == 0 || excluded_lines.contains(&line_number) {
+                continue;
+            }
+            actual_lines.insert(line_number);
+            binding_occurrences += occurrences as u64;
+            if line.contains(CHRONO_TOKEN) {
+                actual_overlap.insert(line_number);
+            }
+        }
+        if actual_lines != expected_lines
+            || actual_overlap != expected_overlap
+            || binding_occurrences != number(binding, "imported_symbol_occurrence_count")
+        {
+            return Err(format!("{path} direct alias references drifted"));
+        }
+        actual_occurrences += binding_occurrences;
+
+        for row in operation_rows
+            .iter()
+            .filter(|row| text(row, "binding_id") == text(binding, "binding_id"))
+        {
+            let line_number = number(row, "line");
+            let index = usize::try_from(line_number - 1)
+                .map_err(|_| format!("{path}:{line_number} overflowed usize"))?;
+            let line = lines
+                .get(index)
+                .ok_or_else(|| format!("{path}:{line_number} is outside the source file"))?;
+            let actual_symbols: BTreeSet<_> = imported_symbols
+                .iter()
+                .filter(|symbol| identifier_count(line, symbol) > 0)
+                .cloned()
+                .collect();
+            if actual_symbols != string_set(row, "imported_symbols_used")
+                || row
+                    .get("literal_namespace_overlap")
+                    .and_then(Value::as_bool)
+                    != Some(line.contains(CHRONO_TOKEN))
+            {
+                return Err(format!("{} source classification drifted", text(row, "use_id")));
+            }
+        }
+    }
+    if actual_occurrences != number(alias, "imported_symbol_occurrence_count") {
+        return Err("direct imported-symbol occurrence total drifted".to_owned());
+    }
+    Ok(())
+}
+
 fn validate_source_pins(inventory: &Value) -> Result<(), String> {
     let pins = array(&inventory["source_snapshot"], "files");
-    if pins.len() != 66 {
+    if pins.len() != 67 {
         return Err("source pin count drifted".to_owned());
     }
     let mut paths = BTreeSet::new();
@@ -1293,6 +1976,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     validate_locked_packages(inventory)?;
     validate_public_and_persisted_counts(inventory)?;
     expected_census(inventory)?;
+    validate_alias_inventory(inventory)?;
     validate_foundation_boundary(inventory)?;
     Ok(())
 }
@@ -1303,6 +1987,8 @@ fn time_utc_inventory_is_exact_and_source_pinned() {
     validate_inventory(&inventory).expect("inventory structure must remain fail-closed");
     validate_source_pins(&inventory).expect("source pins must match the frozen snapshot");
     validate_census(&inventory).expect("all source paths must remain exactly classified");
+    validate_alias_sources(&inventory)
+        .expect("direct Chrono imports and imported-symbol references must remain exact");
     validate_source_markers(&inventory).expect("source and manifest markers must remain current");
 
     let docs = read_repo_file(DOC_PATH);
@@ -1311,6 +1997,8 @@ fn time_utc_inventory_is_exact_and_source_pinned() {
         DOC_END,
         "12 concrete Chrono UTC fields",
         "four timestamp-bearing JSON families",
+        "32 alias-bearing code lines",
+        "187 unique",
         "bounded lexical scan of production source finds zero external",
         "This is not compiler-resolved name analysis.",
         "17 public Chrono-backed timestamp fields",
@@ -1348,6 +2036,25 @@ fn time_utc_inventory_rejects_cutover_and_completeness_drift() {
         .expect("surfaces must be an array")
         .retain(|row| row["surface_id"] != "TIME-SURFACE-CLI-DATASET-INDEX");
     assert!(validate_inventory(&store).is_err());
+
+    let mut alias_binding = inventory.clone();
+    alias_binding["alias_aware_chrono_uses"]["bindings"]
+        .as_array_mut()
+        .expect("alias bindings must be an array")
+        .pop();
+    assert!(validate_inventory(&alias_binding).is_err());
+
+    let mut alias_operation = inventory.clone();
+    alias_operation["alias_aware_chrono_uses"]["operation_rows"]
+        .as_array_mut()
+        .expect("alias operations must be an array")
+        .pop();
+    assert!(validate_inventory(&alias_operation).is_err());
+
+    let mut alias_total = inventory.clone();
+    alias_total["alias_aware_chrono_uses"]["direct_reference_line_count"] =
+        Value::from(31_u64);
+    assert!(validate_inventory(&alias_total).is_err());
 
     let mut path = inventory;
     path["chrono_census"]["classification_groups"][0]["paths"]

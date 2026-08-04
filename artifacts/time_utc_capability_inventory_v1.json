@@ -33,20 +33,20 @@
     "unknown_rows": 0,
     "unclassified_chrono_paths": 0,
     "a1_execution_state": "NOT_EXECUTED_THIS_TURN",
-    "source_classification_state": "PATH_COUNT_COMPLETE_USE_LEVEL_DETAIL_PARTIAL",
+    "source_classification_state": "PATH_COUNT_AND_ALIAS_REFERENCES_COMPLETE_PER_USE_DETAIL_PARTIAL",
     "bead_acceptance_state": "PARTIAL_STATIC_INVENTORY_ONLY",
     "bead_close_allowed": false,
     "unresolved_behavioral_gap_count": 7,
-    "unresolved_static_detail_gap_count": 2,
+    "unresolved_static_detail_gap_count": 1,
     "acceptance_zero_unknown_met": false,
-    "alias_aware_use_inventory_state": "INCOMPLETE",
+    "alias_aware_use_inventory_state": "IMPORT_BINDINGS_AND_DIRECT_REFERENCES_COMPLETE_DERIVED_CLASSIFICATION_PARTIAL",
     "default_action": "Keep the incumbent chrono and time dependencies until the terminal owner records complete same-or-better evidence.",
     "claim_rule": "Source presence, a prior receipt, or a contract source file is not fresh behavioral evidence."
   },
   "source_snapshot": {
     "git_head": "1afde84d564bd8ea876459624116f90028b80835",
     "dirty_scope": "A1 paths were absent before this inventory. The literal-source census walks every Rust file under its five workspace roots, including untracked files; unmatched peer paths did not affect the frozen projection.",
-    "pin_scope": "Authority, manifests, public and persisted production owners, owned formatter/parser boundaries, database or messaging oracle owners, test-profile fields, and excluded-conformance sources.",
+    "pin_scope": "Authority, manifests, public and persisted production owners, owned formatter/parser boundaries, database or messaging oracle owners, every direct Chrono alias-import source, test-profile fields, and excluded-conformance sources.",
     "files": [
       {
         "path": "Cargo.toml",
@@ -342,6 +342,11 @@
         "path": "tests/conformance/hpack_rfc7541/mod.rs",
         "sha256": "e1e93d70b77d3d23467d3c867ac11054361c16a126e965b06ab1851d407aa2b0",
         "line_count": 106
+      },
+      {
+        "path": "tests/conformance/hpack_rfc7541/differential_tests.rs",
+        "sha256": "e36eac0e3dd405dfb7f1129e3928d6b2ebc08da49ee375c712a5cb5a9dfc5fa1",
+        "line_count": 453
       },
       {
         "path": "tests/jetstream_real_server.rs",
@@ -1136,6 +1141,717 @@
             "matching_line_count": 1
           }
         ]
+      }
+    ]
+  },
+  "alias_aware_chrono_uses": {
+    "scope": "Bounded lexical inventory of every direct Chrono import binding plus manual classification of every line that directly references an imported Chrono symbol in the five census roots. Derived temporal operations outside the enumerated anchors remain covered by the declared per-use classification gap.",
+    "state": "IMPORT_BINDINGS_AND_DIRECT_REFERENCES_COMPLETE_DERIVED_CLASSIFICATION_PARTIAL",
+    "binding_path_count": 4,
+    "binding_count": 4,
+    "direct_reference_line_count": 32,
+    "imported_symbol_occurrence_count": 45,
+    "literal_namespace_overlap_line_count": 4,
+    "new_line_count_beyond_literal_census": 28,
+    "literal_or_alias_unique_line_count": 187,
+    "derived_operation_anchor_line_count": 8,
+    "absent_forms": [
+      "Chrono crate rename import",
+      "extern crate Chrono declaration",
+      "renamed imported Chrono symbol",
+      "Chrono-backed type alias"
+    ],
+    "bindings": [
+      {
+        "binding_id": "TIME-ALIAS-CLI-WORKFLOWS",
+        "path": "src/cli/atp_workflows.rs",
+        "import_line": 35,
+        "import_source": "use chrono::Utc;",
+        "imported_symbols": [
+          "Utc"
+        ],
+        "profile_id": "TIME-PROFILE-CLI",
+        "cfg_or_wiring": "FEATURE_CLI_NATIVE_ONLY",
+        "exposure": "FEATURE_GATED_PRODUCTION",
+        "migration_group_id": "TIME-MIG-CLI-PUBLIC-PERSISTED",
+        "owner_bead": "asupersync-5z2scg.6.4",
+        "direct_reference_lines": [
+          236,
+          250,
+          399,
+          458,
+          554,
+          709,
+          733,
+          1067,
+          1283,
+          1298,
+          1307,
+          1309,
+          1403,
+          1860
+        ],
+        "imported_symbol_occurrence_count": 14,
+        "literal_namespace_overlap_lines": [
+          236,
+          399,
+          458,
+          1298
+        ],
+        "derived_operation_lines": [],
+        "excluded_nonchrono_shadow_lines": []
+      },
+      {
+        "binding_id": "TIME-ALIAS-ROOT-HPACK-DIFFERENTIAL-TEST",
+        "path": "tests/conformance/hpack_rfc7541/differential_tests.rs",
+        "import_line": 358,
+        "import_source": "use chrono::Utc;",
+        "imported_symbols": [
+          "Utc"
+        ],
+        "profile_id": "TIME-PROFILE-ROOT-DEV",
+        "cfg_or_wiring": "WIRED_CONFORMANCE_TEST_ONLY_MODULE",
+        "exposure": "PRIVATE_TEST_FIXTURE_CONSTRUCTION",
+        "migration_group_id": "TIME-MIG-DOWNSTREAM-CORPUS",
+        "owner_bead": "asupersync-5z2scg.6.7",
+        "direct_reference_lines": [
+          412
+        ],
+        "imported_symbol_occurrence_count": 1,
+        "literal_namespace_overlap_lines": [],
+        "derived_operation_lines": [],
+        "excluded_nonchrono_shadow_lines": []
+      },
+      {
+        "binding_id": "TIME-ALIAS-STANDALONE-MAINTENANCE",
+        "path": "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs",
+        "import_line": 12,
+        "import_source": "use chrono::{DateTime, Duration, Utc};",
+        "imported_symbols": [
+          "DateTime",
+          "Duration",
+          "Utc"
+        ],
+        "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+        "cfg_or_wiring": "PUBLIC_MODULE_AND_CRATE_ROOT_REEXPORT",
+        "exposure": "STANDALONE_REPORTING_LIBRARY_AND_TOOL",
+        "migration_group_id": "TIME-MIG-CONFORMANCE-TOOLS",
+        "owner_bead": "asupersync-5z2scg.6.7",
+        "direct_reference_lines": [
+          55,
+          131,
+          246,
+          263,
+          273,
+          293,
+          369,
+          389,
+          423,
+          443,
+          489,
+          497,
+          571,
+          660,
+          735
+        ],
+        "imported_symbol_occurrence_count": 27,
+        "literal_namespace_overlap_lines": [],
+        "derived_operation_lines": [
+          277,
+          297,
+          394,
+          448,
+          504,
+          575,
+          580
+        ],
+        "excluded_nonchrono_shadow_lines": [
+          751
+        ]
+      },
+      {
+        "binding_id": "TIME-ALIAS-STANDALONE-REGRESSION",
+        "path": "tests/conformance/raptorq_rfc6330/reporting/src/regression_detection.rs",
+        "import_line": 10,
+        "import_source": "use chrono::{DateTime, Utc};",
+        "imported_symbols": [
+          "DateTime",
+          "Utc"
+        ],
+        "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+        "cfg_or_wiring": "PUBLIC_MODULE_AND_CRATE_ROOT_REEXPORT",
+        "exposure": "STANDALONE_REPORTING_LIBRARY",
+        "migration_group_id": "TIME-MIG-CONFORMANCE-TOOLS",
+        "owner_bead": "asupersync-5z2scg.6.7",
+        "direct_reference_lines": [
+          49,
+          281
+        ],
+        "imported_symbol_occurrence_count": 3,
+        "literal_namespace_overlap_lines": [],
+        "derived_operation_lines": [
+          314
+        ],
+        "excluded_nonchrono_shadow_lines": []
+      }
+    ],
+    "operation_rows": [
+      {
+        "use_id": "TIME-ALIAS-USE-CLI-0236",
+        "binding_id": "TIME-ALIAS-CLI-WORKFLOWS",
+        "path": "src/cli/atp_workflows.rs",
+        "line": 236,
+        "imported_symbols_used": [
+          "Utc"
+        ],
+        "literal_namespace_overlap": true,
+        "operation": "ambient UTC now plus a checked standard-duration conversion with a zero-duration fallback",
+        "exposure": "FEATURE_GATED_PRODUCTION",
+        "persistence_or_public_association": "CI artifact optional expiry persisted in pretty JSON",
+        "profile_id": "TIME-PROFILE-CLI",
+        "cfg_or_wiring": "FEATURE_CLI_NATIVE_ONLY",
+        "migration_group_id": "TIME-MIG-CLI-PUBLIC-PERSISTED",
+        "owner_bead": "asupersync-5z2scg.6.4"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-CLI-0250",
+        "binding_id": "TIME-ALIAS-CLI-WORKFLOWS",
+        "path": "src/cli/atp_workflows.rs",
+        "line": 250,
+        "imported_symbols_used": [
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "ambient UTC now",
+        "exposure": "FEATURE_GATED_PRODUCTION",
+        "persistence_or_public_association": "CI artifact timestamp persisted in pretty JSON",
+        "profile_id": "TIME-PROFILE-CLI",
+        "cfg_or_wiring": "FEATURE_CLI_NATIVE_ONLY",
+        "migration_group_id": "TIME-MIG-CLI-PUBLIC-PERSISTED",
+        "owner_bead": "asupersync-5z2scg.6.4"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-CLI-0399",
+        "binding_id": "TIME-ALIAS-CLI-WORKFLOWS",
+        "path": "src/cli/atp_workflows.rs",
+        "line": 399,
+        "imported_symbols_used": [
+          "Utc"
+        ],
+        "literal_namespace_overlap": true,
+        "operation": "ambient UTC now minus a checked standard-duration conversion",
+        "exposure": "FEATURE_GATED_PRODUCTION",
+        "persistence_or_public_association": "CI cleanup cutoff compared with persisted artifact timestamps",
+        "profile_id": "TIME-PROFILE-CLI",
+        "cfg_or_wiring": "FEATURE_CLI_NATIVE_ONLY",
+        "migration_group_id": "TIME-MIG-CLI-PUBLIC-PERSISTED",
+        "owner_bead": "asupersync-5z2scg.6.4"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-CLI-0458",
+        "binding_id": "TIME-ALIAS-CLI-WORKFLOWS",
+        "path": "src/cli/atp_workflows.rs",
+        "line": 458,
+        "imported_symbols_used": [
+          "Utc"
+        ],
+        "literal_namespace_overlap": true,
+        "operation": "ambient UTC now minus a checked standard-duration conversion",
+        "exposure": "FEATURE_GATED_PRODUCTION",
+        "persistence_or_public_association": "CI listing cutoff compared with persisted artifact timestamps",
+        "profile_id": "TIME-PROFILE-CLI",
+        "cfg_or_wiring": "FEATURE_CLI_NATIVE_ONLY",
+        "migration_group_id": "TIME-MIG-CLI-PUBLIC-PERSISTED",
+        "owner_bead": "asupersync-5z2scg.6.4"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-CLI-0554",
+        "binding_id": "TIME-ALIAS-CLI-WORKFLOWS",
+        "path": "src/cli/atp_workflows.rs",
+        "line": 554,
+        "imported_symbols_used": [
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "ambient UTC now",
+        "exposure": "FEATURE_GATED_PRODUCTION",
+        "persistence_or_public_association": "dataset updated_at persisted in pretty JSON",
+        "profile_id": "TIME-PROFILE-CLI",
+        "cfg_or_wiring": "FEATURE_CLI_NATIVE_ONLY",
+        "migration_group_id": "TIME-MIG-CLI-PUBLIC-PERSISTED",
+        "owner_bead": "asupersync-5z2scg.6.4"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-CLI-0709",
+        "binding_id": "TIME-ALIAS-CLI-WORKFLOWS",
+        "path": "src/cli/atp_workflows.rs",
+        "line": 709,
+        "imported_symbols_used": [
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "ambient UTC now mutating an existing record",
+        "exposure": "FEATURE_GATED_PRODUCTION",
+        "persistence_or_public_association": "dataset pin updates persisted updated_at",
+        "profile_id": "TIME-PROFILE-CLI",
+        "cfg_or_wiring": "FEATURE_CLI_NATIVE_ONLY",
+        "migration_group_id": "TIME-MIG-CLI-PUBLIC-PERSISTED",
+        "owner_bead": "asupersync-5z2scg.6.4"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-CLI-0733",
+        "binding_id": "TIME-ALIAS-CLI-WORKFLOWS",
+        "path": "src/cli/atp_workflows.rs",
+        "line": 733,
+        "imported_symbols_used": [
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "ambient UTC now mutating an existing record",
+        "exposure": "FEATURE_GATED_PRODUCTION",
+        "persistence_or_public_association": "dataset unpin updates persisted updated_at",
+        "profile_id": "TIME-PROFILE-CLI",
+        "cfg_or_wiring": "FEATURE_CLI_NATIVE_ONLY",
+        "migration_group_id": "TIME-MIG-CLI-PUBLIC-PERSISTED",
+        "owner_bead": "asupersync-5z2scg.6.4"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-CLI-1067",
+        "binding_id": "TIME-ALIAS-CLI-WORKFLOWS",
+        "path": "src/cli/atp_workflows.rs",
+        "line": 1067,
+        "imported_symbols_used": [
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "ambient UTC now",
+        "exposure": "FEATURE_GATED_PRODUCTION",
+        "persistence_or_public_association": "release published_at persisted in pretty JSON",
+        "profile_id": "TIME-PROFILE-CLI",
+        "cfg_or_wiring": "FEATURE_CLI_NATIVE_ONLY",
+        "migration_group_id": "TIME-MIG-CLI-PUBLIC-PERSISTED",
+        "owner_bead": "asupersync-5z2scg.6.4"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-CLI-1283",
+        "binding_id": "TIME-ALIAS-CLI-WORKFLOWS",
+        "path": "src/cli/atp_workflows.rs",
+        "line": 1283,
+        "imported_symbols_used": [
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "ambient UTC now converted to Unix seconds",
+        "exposure": "FEATURE_GATED_PRODUCTION",
+        "persistence_or_public_association": "default archive identifier text",
+        "profile_id": "TIME-PROFILE-CLI",
+        "cfg_or_wiring": "FEATURE_CLI_NATIVE_ONLY",
+        "migration_group_id": "TIME-MIG-CLI-PUBLIC-PERSISTED",
+        "owner_bead": "asupersync-5z2scg.6.4"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-CLI-1298",
+        "binding_id": "TIME-ALIAS-CLI-WORKFLOWS",
+        "path": "src/cli/atp_workflows.rs",
+        "line": 1298,
+        "imported_symbols_used": [
+          "Utc"
+        ],
+        "literal_namespace_overlap": true,
+        "operation": "ambient UTC now plus a checked standard-duration conversion",
+        "exposure": "FEATURE_GATED_PRODUCTION",
+        "persistence_or_public_association": "archive optional expiry persisted in pretty JSON",
+        "profile_id": "TIME-PROFILE-CLI",
+        "cfg_or_wiring": "FEATURE_CLI_NATIVE_ONLY",
+        "migration_group_id": "TIME-MIG-CLI-PUBLIC-PERSISTED",
+        "owner_bead": "asupersync-5z2scg.6.4"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-CLI-1307",
+        "binding_id": "TIME-ALIAS-CLI-WORKFLOWS",
+        "path": "src/cli/atp_workflows.rs",
+        "line": 1307,
+        "imported_symbols_used": [
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "ambient UTC now",
+        "exposure": "FEATURE_GATED_PRODUCTION",
+        "persistence_or_public_association": "archive archived_at persisted in pretty JSON",
+        "profile_id": "TIME-PROFILE-CLI",
+        "cfg_or_wiring": "FEATURE_CLI_NATIVE_ONLY",
+        "migration_group_id": "TIME-MIG-CLI-PUBLIC-PERSISTED",
+        "owner_bead": "asupersync-5z2scg.6.4"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-CLI-1309",
+        "binding_id": "TIME-ALIAS-CLI-WORKFLOWS",
+        "path": "src/cli/atp_workflows.rs",
+        "line": 1309,
+        "imported_symbols_used": [
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "ambient UTC now",
+        "exposure": "FEATURE_GATED_PRODUCTION",
+        "persistence_or_public_association": "archive last_verified_at persisted in pretty JSON",
+        "profile_id": "TIME-PROFILE-CLI",
+        "cfg_or_wiring": "FEATURE_CLI_NATIVE_ONLY",
+        "migration_group_id": "TIME-MIG-CLI-PUBLIC-PERSISTED",
+        "owner_bead": "asupersync-5z2scg.6.4"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-CLI-1403",
+        "binding_id": "TIME-ALIAS-CLI-WORKFLOWS",
+        "path": "src/cli/atp_workflows.rs",
+        "line": 1403,
+        "imported_symbols_used": [
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "ambient UTC now mutating an existing record",
+        "exposure": "FEATURE_GATED_PRODUCTION",
+        "persistence_or_public_association": "archive verification updates persisted last_verified_at",
+        "profile_id": "TIME-PROFILE-CLI",
+        "cfg_or_wiring": "FEATURE_CLI_NATIVE_ONLY",
+        "migration_group_id": "TIME-MIG-CLI-PUBLIC-PERSISTED",
+        "owner_bead": "asupersync-5z2scg.6.4"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-CLI-1860",
+        "binding_id": "TIME-ALIAS-CLI-WORKFLOWS",
+        "path": "src/cli/atp_workflows.rs",
+        "line": 1860,
+        "imported_symbols_used": [
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "ambient UTC now",
+        "exposure": "FEATURE_GATED_PRODUCTION",
+        "persistence_or_public_association": "public integrity-status JSON last_check_at",
+        "profile_id": "TIME-PROFILE-CLI",
+        "cfg_or_wiring": "FEATURE_CLI_NATIVE_ONLY",
+        "migration_group_id": "TIME-MIG-CLI-PUBLIC-PERSISTED",
+        "owner_bead": "asupersync-5z2scg.6.4"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-HPACK-0412",
+        "binding_id": "TIME-ALIAS-ROOT-HPACK-DIFFERENTIAL-TEST",
+        "path": "tests/conformance/hpack_rfc7541/differential_tests.rs",
+        "line": 412,
+        "imported_symbols_used": [
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "ambient UTC now",
+        "exposure": "PRIVATE_TEST_FIXTURE_CONSTRUCTION",
+        "persistence_or_public_association": "in-memory differential fixture generated_at",
+        "profile_id": "TIME-PROFILE-ROOT-DEV",
+        "cfg_or_wiring": "WIRED_CONFORMANCE_TEST_ONLY_MODULE",
+        "migration_group_id": "TIME-MIG-DOWNSTREAM-CORPUS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-MAINT-0055",
+        "binding_id": "TIME-ALIAS-STANDALONE-MAINTENANCE",
+        "path": "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs",
+        "line": 55,
+        "imported_symbols_used": [
+          "DateTime",
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "UTC datetime field type",
+        "exposure": "PUBLIC_STANDALONE_SERDE_SCHEMA",
+        "persistence_or_public_association": "public MaintenanceResult timestamp",
+        "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+        "cfg_or_wiring": "PUBLIC_MODULE_AND_CRATE_ROOT_REEXPORT",
+        "migration_group_id": "TIME-MIG-CONFORMANCE-TOOLS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-MAINT-0131",
+        "binding_id": "TIME-ALIAS-STANDALONE-MAINTENANCE",
+        "path": "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs",
+        "line": 131,
+        "imported_symbols_used": [
+          "DateTime",
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "UTC datetime field type",
+        "exposure": "PUBLIC_STANDALONE_SERDE_SCHEMA",
+        "persistence_or_public_association": "public FileHealthStatus last_modified",
+        "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+        "cfg_or_wiring": "PUBLIC_MODULE_AND_CRATE_ROOT_REEXPORT",
+        "migration_group_id": "TIME-MIG-CONFORMANCE-TOOLS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-MAINT-0246",
+        "binding_id": "TIME-ALIAS-STANDALONE-MAINTENANCE",
+        "path": "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs",
+        "line": 246,
+        "imported_symbols_used": [
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "ambient UTC now",
+        "exposure": "STANDALONE_REPORTING_LIBRARY_AND_TOOL",
+        "persistence_or_public_association": "MaintenanceResult public serde timestamp value",
+        "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+        "cfg_or_wiring": "PUBLIC_MODULE_AND_CRATE_ROOT_REEXPORT",
+        "migration_group_id": "TIME-MIG-CONFORMANCE-TOOLS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-MAINT-0263",
+        "binding_id": "TIME-ALIAS-STANDALONE-MAINTENANCE",
+        "path": "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs",
+        "line": 263,
+        "imported_symbols_used": [
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "ambient UTC now retained as a local age-comparison baseline",
+        "exposure": "STANDALONE_REPORTING_LIBRARY_AND_TOOL",
+        "persistence_or_public_association": "derived file-health ages and public status rows",
+        "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+        "cfg_or_wiring": "PUBLIC_MODULE_AND_CRATE_ROOT_REEXPORT",
+        "migration_group_id": "TIME-MIG-CONFORMANCE-TOOLS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-MAINT-0273",
+        "binding_id": "TIME-ALIAS-STANDALONE-MAINTENANCE",
+        "path": "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs",
+        "line": 273,
+        "imported_symbols_used": [
+          "DateTime",
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "filesystem modification time converted to UTC datetime",
+        "exposure": "STANDALONE_REPORTING_LIBRARY_AND_TOOL",
+        "persistence_or_public_association": "derived file-health age computation",
+        "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+        "cfg_or_wiring": "PUBLIC_MODULE_AND_CRATE_ROOT_REEXPORT",
+        "migration_group_id": "TIME-MIG-CONFORMANCE-TOOLS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-MAINT-0293",
+        "binding_id": "TIME-ALIAS-STANDALONE-MAINTENANCE",
+        "path": "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs",
+        "line": 293,
+        "imported_symbols_used": [
+          "DateTime",
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "filesystem modification time converted to UTC datetime",
+        "exposure": "STANDALONE_REPORTING_LIBRARY_AND_TOOL",
+        "persistence_or_public_association": "derived report-health age computation",
+        "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+        "cfg_or_wiring": "PUBLIC_MODULE_AND_CRATE_ROOT_REEXPORT",
+        "migration_group_id": "TIME-MIG-CONFORMANCE-TOOLS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-MAINT-0369",
+        "binding_id": "TIME-ALIAS-STANDALONE-MAINTENANCE",
+        "path": "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs",
+        "line": 369,
+        "imported_symbols_used": [
+          "Duration",
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "ambient UTC now minus configured whole days",
+        "exposure": "STANDALONE_REPORTING_LIBRARY_AND_TOOL",
+        "persistence_or_public_association": "golden-file cleanup cutoff",
+        "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+        "cfg_or_wiring": "PUBLIC_MODULE_AND_CRATE_ROOT_REEXPORT",
+        "migration_group_id": "TIME-MIG-CONFORMANCE-TOOLS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-MAINT-0389",
+        "binding_id": "TIME-ALIAS-STANDALONE-MAINTENANCE",
+        "path": "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs",
+        "line": 389,
+        "imported_symbols_used": [
+          "DateTime",
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "filesystem modification time converted to UTC datetime",
+        "exposure": "STANDALONE_REPORTING_LIBRARY_AND_TOOL",
+        "persistence_or_public_association": "golden-file cleanup comparison",
+        "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+        "cfg_or_wiring": "PUBLIC_MODULE_AND_CRATE_ROOT_REEXPORT",
+        "migration_group_id": "TIME-MIG-CONFORMANCE-TOOLS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-MAINT-0423",
+        "binding_id": "TIME-ALIAS-STANDALONE-MAINTENANCE",
+        "path": "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs",
+        "line": 423,
+        "imported_symbols_used": [
+          "Duration",
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "ambient UTC now minus configured whole days",
+        "exposure": "STANDALONE_REPORTING_LIBRARY_AND_TOOL",
+        "persistence_or_public_association": "fixture cleanup cutoff",
+        "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+        "cfg_or_wiring": "PUBLIC_MODULE_AND_CRATE_ROOT_REEXPORT",
+        "migration_group_id": "TIME-MIG-CONFORMANCE-TOOLS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-MAINT-0443",
+        "binding_id": "TIME-ALIAS-STANDALONE-MAINTENANCE",
+        "path": "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs",
+        "line": 443,
+        "imported_symbols_used": [
+          "DateTime",
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "filesystem modification time converted to UTC datetime",
+        "exposure": "STANDALONE_REPORTING_LIBRARY_AND_TOOL",
+        "persistence_or_public_association": "fixture cleanup comparison",
+        "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+        "cfg_or_wiring": "PUBLIC_MODULE_AND_CRATE_ROOT_REEXPORT",
+        "migration_group_id": "TIME-MIG-CONFORMANCE-TOOLS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-MAINT-0489",
+        "binding_id": "TIME-ALIAS-STANDALONE-MAINTENANCE",
+        "path": "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs",
+        "line": 489,
+        "imported_symbols_used": [
+          "Duration",
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "ambient UTC now minus configured whole days",
+        "exposure": "STANDALONE_REPORTING_LIBRARY_AND_TOOL",
+        "persistence_or_public_association": "update-golden stale-file cutoff",
+        "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+        "cfg_or_wiring": "PUBLIC_MODULE_AND_CRATE_ROOT_REEXPORT",
+        "migration_group_id": "TIME-MIG-CONFORMANCE-TOOLS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-MAINT-0497",
+        "binding_id": "TIME-ALIAS-STANDALONE-MAINTENANCE",
+        "path": "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs",
+        "line": 497,
+        "imported_symbols_used": [
+          "DateTime",
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "filesystem modification time converted to UTC datetime",
+        "exposure": "STANDALONE_REPORTING_LIBRARY_AND_TOOL",
+        "persistence_or_public_association": "update-golden stale-file comparison",
+        "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+        "cfg_or_wiring": "PUBLIC_MODULE_AND_CRATE_ROOT_REEXPORT",
+        "migration_group_id": "TIME-MIG-CONFORMANCE-TOOLS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-MAINT-0571",
+        "binding_id": "TIME-ALIAS-STANDALONE-MAINTENANCE",
+        "path": "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs",
+        "line": 571,
+        "imported_symbols_used": [
+          "DateTime",
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "filesystem modification time converted to UTC datetime",
+        "exposure": "STANDALONE_REPORTING_LIBRARY_AND_TOOL",
+        "persistence_or_public_association": "snapshot retention ordering tuple",
+        "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+        "cfg_or_wiring": "PUBLIC_MODULE_AND_CRATE_ROOT_REEXPORT",
+        "migration_group_id": "TIME-MIG-CONFORMANCE-TOOLS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-MAINT-0660",
+        "binding_id": "TIME-ALIAS-STANDALONE-MAINTENANCE",
+        "path": "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs",
+        "line": 660,
+        "imported_symbols_used": [
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "ambient UTC now formatted with a fixed human-readable pattern",
+        "exposure": "STANDALONE_REPORTING_LIBRARY_AND_TOOL",
+        "persistence_or_public_association": "generated maintenance report text",
+        "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+        "cfg_or_wiring": "PUBLIC_MODULE_AND_CRATE_ROOT_REEXPORT",
+        "migration_group_id": "TIME-MIG-CONFORMANCE-TOOLS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-MAINT-0735",
+        "binding_id": "TIME-ALIAS-STANDALONE-MAINTENANCE",
+        "path": "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs",
+        "line": 735,
+        "imported_symbols_used": [
+          "Duration",
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "ambient UTC now minus fixture age in whole days",
+        "exposure": "STANDALONE_REPORTING_LIBRARY_AND_TOOL",
+        "persistence_or_public_association": "public FileHealthStatus last_modified value",
+        "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+        "cfg_or_wiring": "PUBLIC_MODULE_AND_CRATE_ROOT_REEXPORT",
+        "migration_group_id": "TIME-MIG-CONFORMANCE-TOOLS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-REGRESSION-0049",
+        "binding_id": "TIME-ALIAS-STANDALONE-REGRESSION",
+        "path": "tests/conformance/raptorq_rfc6330/reporting/src/regression_detection.rs",
+        "line": 49,
+        "imported_symbols_used": [
+          "DateTime",
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "UTC datetime field type",
+        "exposure": "PUBLIC_STANDALONE_SERDE_SCHEMA",
+        "persistence_or_public_association": "public ConformanceSnapshot timestamp",
+        "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+        "cfg_or_wiring": "PUBLIC_MODULE_AND_CRATE_ROOT_REEXPORT",
+        "migration_group_id": "TIME-MIG-CONFORMANCE-TOOLS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-REGRESSION-0281",
+        "binding_id": "TIME-ALIAS-STANDALONE-REGRESSION",
+        "path": "tests/conformance/raptorq_rfc6330/reporting/src/regression_detection.rs",
+        "line": 281,
+        "imported_symbols_used": [
+          "Utc"
+        ],
+        "literal_namespace_overlap": false,
+        "operation": "ambient UTC now",
+        "exposure": "STANDALONE_REPORTING_LIBRARY",
+        "persistence_or_public_association": "serialized ConformanceSnapshot timestamp",
+        "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+        "cfg_or_wiring": "PUBLIC_MODULE_AND_CRATE_ROOT_REEXPORT",
+        "migration_group_id": "TIME-MIG-CONFORMANCE-TOOLS",
+        "owner_bead": "asupersync-5z2scg.6.7"
       }
     ]
   },
@@ -2280,15 +2996,26 @@
   },
   "static_inventory_gaps": [
     {
-      "gap_id": "TIME-STATIC-GAP-ALIAS-AWARE-USES",
-      "summary": "The 71-path and 159-line projection classifies literal chrono namespace lines, not every alias-based DateTime, Utc, or Duration operation inside those paths. Per-use cfg, operation, exposure, and ownership detail remains incomplete outside the root integration group and three explicitly annotated real-E2E paths.",
+      "gap_id": "TIME-STATIC-GAP-PER-USE-CLASSIFICATION",
+      "summary": "The exact 71-path and 159-line literal projection plus all four direct Chrono import bindings and 32 direct alias-reference lines are frozen. Most census paths remain group-classified rather than having every direct and derived temporal operation assigned an exact cfg or wiring state, operation, exposure, and owner.",
       "effect": "A1 zero-unclassified-use acceptance is not met and the bead must remain open.",
       "owner_bead": "asupersync-5z2scg.6.1"
-    },
+    }
+  ],
+  "resolved_static_details": [
     {
-      "gap_id": "TIME-STATIC-GAP-NONDEPENDENCY-TEMPORAL-SCHEMAS",
+      "detail_id": "TIME-STATIC-RESOLVED-ALIAS-BINDINGS",
+      "summary": "Every direct Chrono import binding in the five census roots and every source line that directly references one of those imported symbols is enumerated, source-pinned, and reconciled with the literal namespace census.",
+      "state": "RESOLVED_BY_STATIC_ALIAS_INVENTORY",
+      "owner_bead": "asupersync-5z2scg.6.1"
+    }
+  ],
+  "scope_boundaries": [
+    {
+      "boundary_id": "TIME-SCOPE-NONDEPENDENCY-TEMPORAL-SCHEMAS",
       "summary": "SystemTime, logical Time, epoch-millisecond integers, and Duration/TTL schemas are cross-referenced but are not substitutes for the Chrono or external-time dependency migration inventory.",
       "effect": "The artifact must not be read as a repository-wide inventory of every temporal value.",
+      "semantic_contract_id": "TIME-SEM-NONDEPENDENCY-TEMPORAL-SCHEMAS",
       "owner_bead": "asupersync-5z2scg.6.1"
     }
   ],
@@ -2335,6 +3062,7 @@
     "contract_execution": "NOT_EXECUTED_THIS_TURN",
     "static_checks_performed": [
       "workspace filesystem source search",
+      "direct Chrono import and imported-symbol reconciliation",
       "manifest and authority inspection",
       "path and matching-line projection hashing",
       "source file hashing",
