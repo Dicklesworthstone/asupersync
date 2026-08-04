@@ -74,30 +74,38 @@ this index.
 
 ## Scenario fixtures
 
+These 13 YAML files are typed `Scenario` fixtures. Their filenames, comments,
+and descriptions are authoring narratives, not evidence that the runner
+schedules the named workload or simulates every declared network, cancellation,
+or fault effect. In particular, include paths are validated but not merged, and
+the schema itself schedules no application tasks. See the
+[FrankenLab author guide](../docs/adoption/getting_started.md) for the current
+input, output, diagnostics, and field-consumption boundaries.
+
 - [`scenarios/smoke_happy_path.yaml`](scenarios/smoke_happy_path.yaml) — small
-  runner smoke scenario.
+  typed smoke fixture.
 - [`scenarios/cancellation_exhaustive.yaml`](scenarios/cancellation_exhaustive.yaml)
-  — exhaustive cancellation behavior.
+  — fixture declaring cancellation settings, which are currently
+  validation-only.
 - [`scenarios/chaos_sendpermit_ack.yaml`](scenarios/chaos_sendpermit_ack.yaml) —
-  send-permit and acknowledgement interactions under chaos.
+  typed chaos and oracle configuration fixture.
 - [`scenarios/clock_skew_lease.yaml`](scenarios/clock_skew_lease.yaml) —
-  clock-skewed lease behavior.
+  clock-skew declaration fixture; the action is recorded rather than simulated.
 - [`scenarios/composable_base.yaml`](scenarios/composable_base.yaml) — reusable
-  base scenario.
+  base-shaped fixture; current loaders do not merge it into another document.
 - [`scenarios/composed_partition_test.yaml`](scenarios/composed_partition_test.yaml)
-  — composed partition workflow.
+  — include and partition declaration fixture; include resolution is not wired.
 - [`scenarios/custom_latency_model.yaml`](scenarios/custom_latency_model.yaml) —
-  custom network latency model.
+  network-validation fixture; the runner does not consume network settings.
 - [`scenarios/host_crash_restart.yaml`](scenarios/host_crash_restart.yaml) —
-  host crash and restart recovery.
+  crash/restart declaration fixture; those actions are trace records today.
 - [`scenarios/partition_heal.yaml`](scenarios/partition_heal.yaml) — network
-  partition and healing.
+  partition/heal declaration fixture; those actions are trace records today.
 - [`scenarios/stress_10k_tasks.yaml`](scenarios/stress_10k_tasks.yaml) —
-  high-task-count stress fixture.
+  large-scale authoring narrative; the YAML does not schedule that workload.
 
 The standalone FrankenLab CLI also ships three typed scenario fixtures, all
-covered by [`metadata.json`](metadata.json). These descriptions are authoring
-narratives, not evidence that the runner simulates the named workload or fault:
+covered by [`metadata.json`](metadata.json):
 
 - [`01_race_condition.yaml`](../frankenlab/examples/scenarios/01_race_condition.yaml)
   — typed fixture describing a race-condition narrative.

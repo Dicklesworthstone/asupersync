@@ -1,9 +1,10 @@
 //! FrankenLab scenario format (bd-1hu19.1).
 //!
-//! A scenario file describes a deterministic test execution:
-//! participants, fault schedule, assertions, seed, and virtual time
-//! configuration.  The canonical on-disk format is YAML, but JSON and
-//! TOML roundtrip cleanly via serde.
+//! A scenario file declares typed lab configuration, participants, faults,
+//! oracle names, and author metadata. YAML is the accepted CLI input format;
+//! [`Scenario::from_json`] and [`Scenario::to_json`] provide a library-only
+//! JSON round trip. Parsing a field does not by itself mean that the current
+//! runner gives that field a simulated runtime effect.
 //!
 //! # Format overview
 //!
@@ -70,22 +71,25 @@
 //!   redacted: true
 //! ```
 //!
-//! # Composability
+//! # Include references
 //!
-//! Scenarios may include other scenarios via `include`:
+//! Scenarios may declare paths in `include`:
 //!
 //! ```yaml
 //! include:
 //!   - path: base_config.yaml
 //! ```
 //!
-//! Included fields are merged with the current file; the current file
-//! wins on conflict.
+//! The current loaders validate each include path but do not read, resolve, or
+//! merge the referenced document. Authors must keep every effective field in
+//! the file passed to the CLI until include resolution is implemented.
 //!
 //! # Determinism
 //!
-//! All randomness is seeded via `lab.seed`.  Given the same YAML + the
-//! same runtime binary, execution is bit-identical.
+//! `lab.seed` feeds the deterministic scheduler, and the replay command compares
+//! two executions of the loaded scenario. This is a scoped replay invariant,
+//! not a cross-build or cross-platform guarantee. The schema itself schedules
+//! no application workload, and several fields are currently validation-only.
 //!
 //! [`Scenario::to_json`] is the canonical machine representation for the
 //! typed schema. It emits compact UTF-8 JSON, orders every object key
@@ -99,6 +103,9 @@
 //! YAML remains an accepted authoring format. The canonical encoder only
 //! emits fields owned by the typed schema; free-form values belong in the
 //! explicit `metadata`, participant `properties`, and fault `args` maps.
+//! Fault `args` keys and values are copied into trace text and JSON run-result
+//! fault logs. They are not scrubbed by `golden_projection.redacted`, so scenario
+//! documents must not contain credentials, tokens, or other private values.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
