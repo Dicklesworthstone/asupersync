@@ -1,0 +1,535 @@
+{
+  "schema_version": 1,
+  "artifact_id": "server-incoming-body-contract-v1",
+  "program_id": "asupersync-server-stack-hardening-eeexl1",
+  "bead_id": "asupersync-server-stack-hardening-eeexl1.6.1",
+  "captured_date_utc": "2026-08-04",
+  "baseline_revision": "e9fa01f67318b3aa7764511e51d35291438a3e40",
+  "purpose": "Freeze the live request-body ownership and buffering surfaces, then define the single-consumer incoming-body contract required before protocol or handler integration changes.",
+  "authority": {
+    "foundation_only": true,
+    "production_source_changes_authorized": false,
+    "protocol_behavior_changes_authorized": false,
+    "handler_streaming_present": false,
+    "executable_validation_status": "UNRUN_STATIC_ONLY",
+    "tracker_closure_authorized": false,
+    "required_disposition": "KEEP_OPEN_PENDING_EXECUTABLE_VALIDATION"
+  },
+  "current_defaults": {
+    "h1_protocol_body_limit_bytes": 16777216,
+    "h2_protocol_body_limit_bytes": 16777216,
+    "h1_stream_frame_limit_bytes": 65536,
+    "h1_stream_decoder_buffer_limit_bytes": 262144,
+    "h1_stream_trailer_limit_bytes": 16384,
+    "h1_stream_channel_capacity_frames": 8,
+    "h1_stream_derived_channel_capacity_bytes": 524288,
+    "h1_stream_channel_byte_cap_enforced": false,
+    "json_extractor_limit_bytes": 10485760,
+    "form_extractor_limit_bytes": 2097152,
+    "raw_extractor_limit_bytes": 10485760,
+    "multipart_total_limit_bytes": 16777216,
+    "multipart_part_limit_bytes": 8388608,
+    "multipart_header_limit_bytes": 8192,
+    "multipart_part_count_limit": 1024,
+    "multipart_request_timeout_seconds": 30,
+    "multipart_idle_timeout_seconds": 5,
+    "handler_request_drain_grace_milliseconds": 500,
+    "json_and_raw_default_policy": "RETAIN_10_MIB_UNLESS_OWNER_APPROVES_A_LOWER_DEFAULT"
+  },
+  "current_surface_matrix": [
+    {
+      "surface_id": "BODY-TRAIT",
+      "state": "PRESENT",
+      "current_semantics": "Body polls data or trailer frames, exposes end-of-stream state, and provides a size hint.",
+      "anchors": ["src/http/body.rs::Body", "src/http/body.rs::Frame", "src/http/body.rs::SizeHint"],
+      "gap": "The web request and live server dispatch paths do not own a Body value."
+    },
+    {
+      "surface_id": "STREAM-BODY-ADAPTER",
+      "state": "PRESENT",
+      "current_semantics": "StreamBody adapts a Stream of frames into Body and becomes terminal when the source stream ends.",
+      "anchors": ["src/http/body.rs::StreamBody"],
+      "gap": "It is not the incoming request type used by H1, H2, or web handlers."
+    },
+    {
+      "surface_id": "LIMITED-ADAPTER",
+      "state": "PRESENT",
+      "current_semantics": "Limited decrements a u64 remaining budget for data frames and fails when a frame exceeds the remaining budget.",
+      "anchors": ["src/http/body.rs::Limited", "src/http/body.rs::LimitedState"],
+      "gap": "Live protocol-to-handler dispatch does not apply Limited around one shared incoming body."
+    },
+    {
+      "surface_id": "H1-STREAM-SCAFFOLD",
+      "state": "PRESENT_WITH_GAPS",
+      "current_semantics": "IncomingBody and IncomingBodyWriter use a bounded frame-count channel and implement fixed-length or chunked parsing; the writer enqueues only successful frames.",
+      "anchors": ["src/http/h1/stream.rs::IncomingBody", "src/http/h1/stream.rs::IncomingBodyWriter", "src/http/h1/stream.rs::StreamingRequest"],
+      "gap": "Parsing and limit failures return out of band from push_bytes or finish rather than entering the frame channel; dropping the writer afterward makes the receiver interpret producer disconnect as clean EOF. The size hint does not decrease, receiver byte accounting uses unchecked addition, writer accounting saturates, and the scaffold is not wired into live handler dispatch."
+    },
+    {
+      "surface_id": "H1-LIVE-DISPATCH",
+      "state": "BUFFERED",
+      "current_semantics": "Http1Codec waits for the complete framed request, applies the configured body cap, and produces Request with Vec<u8> before Http1Server dispatches the handler.",
+      "anchors": ["src/http/h1/codec.rs::Http1Codec", "src/http/h1/types.rs::Request", "src/http/h1/server.rs::Http1Server::serve_with_peer_addr"],
+      "gap": "The handler cannot consume request frames while the connection driver receives them; prospective body-size admission and trailer-byte accounting use saturating addition rather than the proposed checked refusal contract."
+    },
+    {
+      "surface_id": "H2-LIVE-DISPATCH",
+      "state": "BUFFERED",
+      "current_semantics": "The listener stores each pending stream as headers plus Vec<u8>, uses saturating prospective addition against a configured per-stream cap whose default is 16 MiB, sends RST_STREAM(ENHANCE_YOUR_CALM) when that cap is exceeded, and otherwise dispatches only after END_STREAM.",
+      "anchors": ["src/http/h2/listener.rs::pending_requests", "src/http/h2/listener.rs::dispatch_h2_request"],
+      "gap": "The handler cannot consume DATA incrementally, trailer fields are not surfaced through the request type, and the connection has no aggregate incoming-body budget across concurrent streams."
+    },
+    {
+      "surface_id": "WEB-REQUEST",
+      "state": "BUFFERED",
+      "current_semantics": "web::extract::Request owns a cloneable Bytes body alongside request metadata.",
+      "anchors": ["src/web/extract.rs::Request"],
+      "gap": "Cloneable buffered ownership conflicts with a single-consumer incoming stream."
+    },
+    {
+      "surface_id": "WEB-HANDLER-ROUTER",
+      "state": "BUFFERED",
+      "current_semantics": "Handler::call and Router pass the complete web Request by value.",
+      "anchors": ["src/web/handler.rs::Handler::call", "src/web/router.rs::Router"],
+      "gap": "There is no request-head/body split or explicit incoming-body owner."
+    },
+    {
+      "surface_id": "WEB-RETRY-BODY-REPLAY",
+      "state": "CLONES_BUFFERED_REQUEST",
+      "current_semantics": "RetryMiddleware clones and redispatches the complete buffered Request.",
+      "anchors": ["src/web/middleware.rs::RetryMiddleware"],
+      "gap": "A live single-consumer body cannot be retried unless a bounded replayable body is prepared before the first attempt."
+    },
+    {
+      "surface_id": "WEB-EXTRACTOR-LIMITS",
+      "state": "PRESENT_AFTER_BUFFERING",
+      "current_semantics": "JSON and raw extractors default to 10 MiB and form defaults to 2 MiB, checking Content-Length and the already-buffered body.",
+      "anchors": ["src/web/extract.rs::BodyLimits", "tests/web_extract_content_length_audit.rs"],
+      "gap": "Extractor limits do not bound protocol buffering before handler dispatch."
+    },
+    {
+      "surface_id": "WEB-MIDDLEWARE-LIMIT",
+      "state": "PRESENT_AFTER_BUFFERING",
+      "current_semantics": "RequestBodyLimitMiddleware checks declared and actual sizes on the complete web Request.",
+      "anchors": ["src/web/middleware.rs::RequestBodyLimitMiddleware"],
+      "gap": "The check cannot provide queue backpressure or stop pre-dispatch buffering."
+    },
+    {
+      "surface_id": "WEB-MULTIPART",
+      "state": "CONTIGUOUS_BUFFERED_PARSE",
+      "current_semantics": "Multipart parsing consumes the already-materialized web body under aggregate, part-count, per-part body, per-part header, request-time, and idle-time limits.",
+      "anchors": ["src/web/multipart.rs::MultipartLimits", "src/web/multipart.rs::Multipart"],
+      "gap": "No bounded asynchronous collector or incremental multipart integration is present, and parsing currently reads wall time directly."
+    },
+    {
+      "surface_id": "WEB-RESPONSE",
+      "state": "BUFFERED_OUT_OF_SCOPE",
+      "current_semantics": "web::response::Response owns a buffered Bytes body.",
+      "anchors": ["src/web/response.rs::Response"],
+      "gap": "Response streaming is outside BODY-1 and must not be inferred from the incoming-body contract."
+    },
+    {
+      "surface_id": "REQUEST-REGION",
+      "state": "PRESENT_FOR_HANDLER",
+      "current_semantics": "ServerRequestRegion owns handler execution outcomes, request budget, cancellation, and drain grace after request dispatch.",
+      "anchors": ["src/web/request_region.rs::ServerRequestRegion", "src/web/request_region.rs::ServerHopOutcome"],
+      "gap": "Protocol body production currently completes before handler-region ownership begins."
+    },
+    {
+      "surface_id": "ERROR-REGISTRY",
+      "state": "NO_INCOMING_BODY_CODE",
+      "current_semantics": "The ASUP-E5xx range covers network and HTTP diagnostics, with no incoming-body-specific row.",
+      "anchors": ["docs/error_codes/registry.json::ASUP-E5xx"],
+      "gap": "A later implementation must allocate and document any emitted operator-facing code; this foundation does not allocate one."
+    }
+  ],
+  "incoming_body_contract": {
+    "proposed_type": "IncomingRequestBody",
+    "proposed_error_type": "IncomingBodyError",
+    "public_trait": "crate::http::body::Body<Data = BytesCursor, Error = IncomingBodyError>",
+    "reuse_stream_body": false,
+    "reuse_limited_adapter": true,
+    "stream_body_role": "LANDED_REFERENCE_ADAPTER_NOT_AUTHORITATIVE_INCOMING_TYPE",
+    "replace_or_generalize_h1_incoming_body": true,
+    "coexisting_second_public_incoming_type_allowed": false,
+    "required_auto_traits": ["Send", "Unpin", "'static"],
+    "sync_policy": "NOT_REQUIRED_FOR_SINGLE_CONSUMER_BODY; BODY-3 must remove any Sync bound from the final body-consuming extractor while retaining Send.",
+    "limited_compatibility": "IncomingRequestBody is Unpin so the existing Limited<B> Body implementation can wrap it.",
+    "incoming_error_contract": {
+      "required_variants": [
+        {"variant_id": "FRAMING", "payload_fields": ["mapping_id", "detail", "offset"]},
+        {"variant_id": "LIMIT_EXCEEDED", "payload_fields": ["observed", "limit", "limit_source"]},
+        {"variant_id": "CANCELLED", "payload_fields": ["cancel_kind"]},
+        {"variant_id": "SOURCE_DISCONNECTED", "payload_fields": ["source_kind"]},
+        {"variant_id": "CLIENT_ABORTED", "payload_fields": ["transport_kind"]},
+        {"variant_id": "ACCOUNTING_OVERFLOW", "payload_fields": ["counter", "lhs", "rhs"]},
+        {"variant_id": "ALREADY_TERMINAL", "payload_fields": ["prior_terminal_state"]}
+      ],
+      "cancel_kind_preserved": true,
+      "consumer_drop_is_poll_error": false,
+      "consumer_drop_rule": "Consumer drop is an obligation handoff emitted from Drop-side ownership, not an item returned by Body::poll_frame."
+    },
+    "single_consumer": true,
+    "clone_allowed": false,
+    "ambient_authority_allowed": false,
+    "ownership": {
+      "producer": "protocol connection or stream driver",
+      "consumer": "exactly one handler or extractor chain",
+      "budget_owner": "ServerRequestRegion-derived request Cx during production and consumption",
+      "drain_and_reuse_owner": "protocol driver",
+      "telemetry_owner": "protocol driver carrying request-region correlation"
+    },
+    "handoff": "The request head and body are split once. Moving the body transfers the sole consumer obligation; dropping it returns an explicit consumer-dropped signal to the protocol driver."
+  },
+  "state_machine": {
+    "lifecycle_boundary": "IncomingRequestBody is created only after request-head framing is valid and the declared length passes server and route admission. Pre-body failures use request-level error mappings but create no body obligation and emit no http.incoming_body.terminal receipt.",
+    "states": [
+      "CREATED",
+      "OPEN",
+      "EOF",
+      "ERROR",
+      "LIMIT_EXCEEDED",
+      "CANCELLED",
+      "CLIENT_ABORTED",
+      "CONSUMER_DROPPED"
+    ],
+    "transitions": [
+      {"from": "CREATED", "to": "OPEN", "cause": "the sole consumer handoff begins after pre-body admission"},
+      {"from": "OPEN", "to": "EOF", "cause": "producer explicitly commits complete framing and all queued frames are observed"},
+      {"from": "OPEN", "to": "ERROR", "cause": "framing, source, or inner-body failure"},
+      {"from": "OPEN", "to": "LIMIT_EXCEEDED", "cause": "checked total, frame, decoder, or queue budget refusal"},
+      {"from": "OPEN", "to": "CANCELLED", "cause": "request budget or request Cx cancellation"},
+      {"from": "OPEN", "to": "CLIENT_ABORTED", "cause": "transport reports peer reset or connection loss"},
+      {"from": "OPEN", "to": "CONSUMER_DROPPED", "cause": "handler releases the body before EOF"}
+    ],
+    "terminal_states": ["EOF", "ERROR", "LIMIT_EXCEEDED", "CANCELLED", "CLIENT_ABORTED"],
+    "cleanup_handoff_states": ["CONSUMER_DROPPED"],
+    "disconnect_is_eof": false,
+    "terminal_poll_rule": "EOF returns None idempotently. A non-EOF transition yields its typed error; repoll fails closed with an already-terminal error without polling the producer again, matching Limited's failure model.",
+    "trailers_rule": "At most one trailers frame may follow all data frames; it is terminal framing and must be followed only by EOF.",
+    "empty_data_frame_rule": "Protocol adapters do not enqueue zero-length data frames."
+  },
+  "frame_and_budget_contract": {
+    "max_frame_bytes": 65536,
+    "queue_capacity_frames": 8,
+    "queue_capacity_bytes": 524288,
+    "decoder_buffer_capacity_bytes": 262144,
+    "trailer_capacity_bytes": 16384,
+    "default_protocol_total_bytes": 16777216,
+    "effective_total_limit": "minimum of the protocol/server hard cap, RequestBodyLimitMiddleware or route policy, selected extractor cap, and applicable request quota",
+    "limit_binding_rule": "Server and route limits bind before body handoff. A selected extractor may only monotonically tighten the limit before its collector consumes; it never relaxes an already-bound cap. If the selected cap is below bytes already received, delivered, or queued, transition to LIMIT_EXCEEDED and run protocol cleanup.",
+    "checked_accounting_required": true,
+    "saturating_accounting_allowed": false,
+    "admission_rule": "Checked byte and frame budgets are reserved before enqueue; refusal is terminal and the refused frame is never partially delivered.",
+    "queue_rule": "Both frame count and queued bytes are bounded independently; capacity zero is invalid.",
+    "queue_release_rule": "Frame and byte permits represent in-flight queued data only. Ownership transfers exactly once on dequeue; every terminal or cleanup path releases all residual permits exactly once, and a refused frame acquires or retains no permit.",
+    "trailer_accounting_rule": "The protocol-specific checked trailer-size metric counts against the queue byte cap and the independent trailer cap before enqueue.",
+    "trailer_size_metric": {
+      "h1": "Sum each validated trailer line's field-section octets plus its CRLF, excluding the terminating empty line.",
+      "h2": "Decoded header-list size: name octets plus value octets plus 32 octets of per-field overhead; compressed wire size is not used.",
+      "same_metric_for_queue_and_trailer_cap": true
+    },
+    "backpressure_rule": "The producer waits on a cancel-aware queue reservation owned by the request Cx and never buffers an unbounded side queue.",
+    "h2_connection_aggregate_rule": "Before live H2 integration, the assigned H2 owner must define finite connection-level in-flight byte and frame caps in addition to per-stream caps. A connection coordinator must reserve aggregate and stream capacity atomically, or release the first reservation before waiting for the second; aggregate pressure applies protocol flow-control backpressure and cancellation releases both scopes exactly once."
+  },
+  "size_hint_contract": {
+    "content_length": "Exact remaining bytes after validated Content-Length, monotonically decremented only after a data frame is committed to the consumer.",
+    "chunked": "Lower bound zero; upper bound is the remaining effective total limit when representable.",
+    "eof": "Exact zero.",
+    "terminal_error": "Exact zero after the original terminal error is observed; fail-closed repoll does not alter the hint.",
+    "forbidden": ["increasing lower bound after handoff", "reporting the original total after frames are consumed", "using a hint as admission authority"]
+  },
+  "cancellation_and_abort_contract": {
+    "request_budget_scope": "Head acceptance, protocol production, queue reservation, and handler consumption share the derived request budget.",
+    "post_cancel_cleanup_scope": "After cancellation or consumer drop, the protocol driver uses a separate strictly bounded cleanup grace capped by connection and shutdown authority; it does not reuse the cancelled request Cx.",
+    "cancel_kind_mapping": [
+      {"cancel_kind": "User", "mapping_id": "BODY-CANCELLED"},
+      {"cancel_kind": "Timeout", "mapping_id": "BODY-REQUEST-DEADLINE"},
+      {"cancel_kind": "Deadline", "mapping_id": "BODY-REQUEST-DEADLINE"},
+      {"cancel_kind": "PollQuota", "mapping_id": "BODY-RESOURCE-EXHAUSTED"},
+      {"cancel_kind": "CostBudget", "mapping_id": "BODY-RESOURCE-EXHAUSTED"},
+      {"cancel_kind": "FailFast", "mapping_id": "BODY-CANCELLED"},
+      {"cancel_kind": "RaceLost", "mapping_id": "BODY-CANCELLED"},
+      {"cancel_kind": "ParentCancelled", "mapping_id": "BODY-CANCELLED"},
+      {"cancel_kind": "ResourceUnavailable", "mapping_id": "BODY-RESOURCE-EXHAUSTED"},
+      {"cancel_kind": "Shutdown", "mapping_id": "BODY-CANCELLED"},
+      {"cancel_kind": "LinkedExit", "mapping_id": "BODY-CANCELLED"}
+    ],
+    "cancel_kind_preservation_rule": "IncomingBodyError preserves the exact CancelKind; mapping selects response and cleanup policy without erasing it.",
+    "status_499_scope": "499 is the existing web cancellation telemetry representation only. It is not an HTTP response status and is not universal across CancelKind values.",
+    "transport_loss_mapping": "Transport-reported connection loss maps directly to BODY-CLIENT-ABORTED rather than to a CancelKind.",
+    "cancel_rule": "Cancellation stops producer and consumer work, closes the handoff, records remaining obligations, and transfers unresolved framing cleanup to the protocol driver.",
+    "client_abort_rule": "A peer reset or lost connection is CLIENT_ABORTED, never EOF, and does not synthesize a response after the transport is gone.",
+    "source_disconnect_rule": "An internal producer disconnect before explicit EOF is ERROR and maps to the source-disconnected receipt.",
+    "consumer_drop_rule": "Dropping the body before EOF is observable and invokes the protocol-specific drain-or-close policy."
+  },
+  "drain_and_reuse_contract": {
+    "cleanup_states": ["IDLE", "DRAINING", "RESETTING", "REUSABLE", "CLOSE_REQUIRED", "RESET_COMPLETE"],
+    "cleanup_terminal_states": ["REUSABLE", "CLOSE_REQUIRED", "RESET_COMPLETE"],
+    "cleanup_transitions": [
+      {"from": "IDLE", "to": "DRAINING", "protocol": "h1", "cause": "cleanup entry policy selects bounded H1 drain"},
+      {"from": "DRAINING", "to": "REUSABLE", "cause": "valid framing EOF reached within every cleanup bound"},
+      {"from": "DRAINING", "to": "CLOSE_REQUIRED", "cause": "cleanup bound expires or framing/source state fails"},
+      {"from": "IDLE", "to": "RESETTING", "protocol": "h2", "cause": "cleanup entry policy selects affected-stream reset"},
+      {"from": "RESETTING", "to": "RESET_COMPLETE", "cause": "affected stream reset completes and connection state remains valid"},
+      {"from": "RESETTING", "to": "CLOSE_REQUIRED", "cause": "stream cleanup fails or connection state is invalid"},
+      {"from": "IDLE", "to": "CLOSE_REQUIRED", "cause": "typed terminal outcome forbids safe drain or reset, or the transport is gone"}
+    ],
+    "cleanup_entry_policy": [
+      {"protocol": "h1", "body_state": "EOF", "allowed_entries": ["NONE"], "decision_rule": "normal completion requires no unread-body cleanup"},
+      {"protocol": "h1", "body_state": "ERROR", "allowed_entries": ["CLOSE_REQUIRED"], "decision_rule": "framing or source failure forbids H1 reuse"},
+      {"protocol": "h1", "body_state": "LIMIT_EXCEEDED", "allowed_entries": ["DRAINING", "CLOSE_REQUIRED"], "decision_rule": "drain only when framing is synchronized and every cleanup bound applies; otherwise close"},
+      {"protocol": "h1", "body_state": "CANCELLED", "allowed_entries": ["DRAINING", "CLOSE_REQUIRED"], "decision_rule": "drain only under protocol grace independent of the cancelled request Cx; otherwise close"},
+      {"protocol": "h1", "body_state": "CLIENT_ABORTED", "allowed_entries": ["CLOSE_REQUIRED"], "decision_rule": "lost transport cannot be drained or reused"},
+      {"protocol": "h1", "body_state": "CONSUMER_DROPPED", "allowed_entries": ["DRAINING"], "decision_rule": "begin bounded unread-body drain"},
+      {"protocol": "h2", "body_state": "EOF", "allowed_entries": ["NONE"], "decision_rule": "normal stream completion requires no reset"},
+      {"protocol": "h2", "body_state": "ERROR", "allowed_entries": ["RESETTING", "CLOSE_REQUIRED"], "decision_rule": "reset a stream-scoped failure; close for connection-scoped failure"},
+      {"protocol": "h2", "body_state": "LIMIT_EXCEEDED", "allowed_entries": ["RESETTING", "CLOSE_REQUIRED"], "decision_rule": "reset a stream-scoped refusal; close when connection state is invalid"},
+      {"protocol": "h2", "body_state": "CANCELLED", "allowed_entries": ["RESETTING", "CLOSE_REQUIRED"], "decision_rule": "reset the affected stream unless shutdown or connection state requires close"},
+      {"protocol": "h2", "body_state": "CLIENT_ABORTED", "allowed_entries": ["CLOSE_REQUIRED"], "decision_rule": "lost transport cannot complete a reset handshake"},
+      {"protocol": "h2", "body_state": "CONSUMER_DROPPED", "allowed_entries": ["RESETTING"], "decision_rule": "begin affected-stream reset"}
+    ],
+    "budget_authority": "Protocol-owned post-request cleanup grace capped by connection and shutdown authority; never a detached task and never the cancelled request Cx.",
+    "obligation_completion": "The body obligation resolves exactly once only after normal body termination or cleanup reaches REUSABLE, CLOSE_REQUIRED, or RESET_COMPLETE.",
+    "h1": {
+      "time_budget_milliseconds": 500,
+      "time_budget_provenance": "PROPOSED_INITIAL_VALUE_FROM_HANDLER_REQUEST_DRAIN_GRACE_NOT_LIVE_BODY_CLEANUP",
+      "byte_budget": 524288,
+      "frame_budget": 8,
+      "reuse_when": "The consumer reaches EOF, or the protocol driver reaches explicit EOF within both unread-body budgets without another terminal error.",
+      "close_when": "Either unread-body budget expires, the total limit is exceeded, framing fails, the client aborts, or source state is ambiguous.",
+      "owner": "H1 connection driver"
+    },
+    "h2": {
+      "time_budget_milliseconds": 500,
+      "time_budget_provenance": "PROPOSED_INITIAL_VALUE_FROM_HANDLER_REQUEST_DRAIN_GRACE_NOT_LIVE_BODY_CLEANUP",
+      "byte_budget": 524288,
+      "frame_budget": 8,
+      "reuse_when": "Normal EOF completes the stream; early consumer drop resets only that stream and preserves the connection only if connection state remains valid.",
+      "close_when": "A connection-scoped failure, lost transport, failed stream cleanup, or post-drop DATA exhaustion leaves connection state invalid.",
+      "post_drop_data_accounting": "While reset completion is pending, at most frame_budget frames and byte_budget DATA octets may be accepted and discarded. Exceeding either bound transitions RESETTING to CLOSE_REQUIRED.",
+      "owner": "H2 connection driver"
+    },
+    "handler_authority": "Handlers may consume or drop their sole body, but may not declare connection reuse."
+  },
+  "error_mapping": [
+    {
+      "mapping_id": "BODY-LIMIT-EXCEEDED",
+      "lifecycle_applicability": ["PRE_BODY", "BODY_OPEN"],
+      "current_variants": ["HttpError::BodyTooLarge", "HttpError::BodyTooLargeDetailed", "LimitedError::LengthLimit"],
+      "http_status_when_response_possible": 413,
+      "telemetry_status": null,
+      "protocol_action": "Send 413 when safely writable; H1 then drains within every bound and reuses only after synchronized EOF, otherwise closes; H2 cancels or resets unread input as protocol state permits.",
+      "operator_code": null
+    },
+    {
+      "mapping_id": "BODY-FRAMING-INVALID",
+      "lifecycle_applicability": ["PRE_BODY", "BODY_OPEN"],
+      "current_variants": ["HttpError::BadContentLength", "HttpError::DuplicateContentLength", "HttpError::DuplicateTransferEncoding", "HttpError::BadTransferEncoding", "HttpError::BadChunkedEncoding", "HttpError::AmbiguousBodyLength", "HttpError::TrailersNotAllowed", "HttpError::HeadersTooLarge", "HttpError::BadHeader", "HttpError::InvalidHeaderName", "HttpError::InvalidHeaderValue"],
+      "http_status_when_response_possible": 400,
+      "telemetry_status": null,
+      "protocol_action": "Refuse request and do not reuse ambiguous H1 framing; apply the protocol-defined H2 stream action",
+      "operator_code": null
+    },
+    {
+      "mapping_id": "BODY-CANCELLED",
+      "lifecycle_applicability": ["PRE_BODY", "BODY_OPEN"],
+      "current_variants": ["HttpError::BodyCancelled", "ServerHopOutcome::Cancelled"],
+      "http_status_when_response_possible": null,
+      "telemetry_status": 499,
+      "protocol_action": "Record the existing web cancellation representation, stop request work, and transfer unresolved cleanup to the protocol driver",
+      "operator_code": null
+    },
+    {
+      "mapping_id": "BODY-REQUEST-DEADLINE",
+      "lifecycle_applicability": ["PRE_BODY", "BODY_OPEN"],
+      "current_variants": ["ServerHopOutcome::DeadlineExceeded"],
+      "http_status_when_response_possible": 503,
+      "telemetry_status": null,
+      "protocol_action": "Preserve the existing request-deadline response and diagnostic semantics, then run protocol-owned bounded cleanup.",
+      "operator_code": "ASUP-E501"
+    },
+    {
+      "mapping_id": "BODY-RESOURCE-EXHAUSTED",
+      "lifecycle_applicability": ["PRE_BODY", "BODY_OPEN"],
+      "current_variants": [],
+      "http_status_when_response_possible": 503,
+      "telemetry_status": null,
+      "protocol_action": "Retain PollQuota, CostBudget, or ResourceUnavailable as the exact CancelKind, stop request work, and enter the typed bounded cleanup policy; do not apply the generic 499 representation.",
+      "operator_code": null
+    },
+    {
+      "mapping_id": "BODY-SOURCE-DISCONNECTED",
+      "lifecycle_applicability": ["BODY_OPEN"],
+      "current_variants": [],
+      "current_ambiguity": "HttpError::BodyChannelClosed conflates missing sender, full or disconnected producer send, and consumer loss; receiver-side producer disconnect currently becomes EOF.",
+      "http_status_when_response_possible": 500,
+      "telemetry_status": null,
+      "protocol_action": "Treat as terminal internal source failure; never convert to EOF",
+      "operator_code": null
+    },
+    {
+      "mapping_id": "BODY-CLIENT-ABORTED",
+      "lifecycle_applicability": ["PRE_BODY", "BODY_OPEN"],
+      "current_variants": ["ServerHopOutcome::ConnectionLost"],
+      "http_status_when_response_possible": null,
+      "telemetry_status": null,
+      "protocol_action": "Record terminal receipt and release obligations without synthesizing a response",
+      "operator_code": null
+    },
+    {
+      "mapping_id": "BODY-ACCOUNTING-OVERFLOW",
+      "lifecycle_applicability": ["BODY_OPEN"],
+      "current_variants": [],
+      "http_status_when_response_possible": 500,
+      "telemetry_status": null,
+      "protocol_action": "Fail before enqueue, close or reset the affected protocol scope, and retain the checked operands in telemetry",
+      "operator_code": null
+    },
+    {
+      "mapping_id": "BODY-CONSUMER-DROPPED",
+      "lifecycle_applicability": ["BODY_OPEN"],
+      "current_variants": [],
+      "current_ambiguity": "HttpError::BodyChannelClosed is an ambiguous channel-closure variant, not a unique consumer-drop outcome; BODY-1 requires distinct typed source and consumer outcomes.",
+      "http_status_when_response_possible": null,
+      "telemetry_status": null,
+      "protocol_action": "Invoke bounded H1 drain-or-close or H2 stream reset policy",
+      "operator_code": null
+    }
+  ],
+  "operator_code_policy": "ASUP-E501 remains the existing request-deadline code. Before a later implementation emits any other incoming-body failure as an agent or operator diagnostic, allocate an owner-reviewed ASUP-E5xx row and matching page. This foundation allocates no new code.",
+  "telemetry_contract": {
+    "terminal_event": "http.incoming_body.terminal",
+    "emitter_owner": "protocol driver carrying request-region correlation and the final cleanup/reuse decision",
+    "required_fields": [
+      "request_id",
+      "connection_id",
+      "stream_id",
+      "region_id",
+      "protocol",
+      "terminal_state",
+      "declared_length",
+      "bytes_received",
+      "bytes_delivered",
+      "bytes_refused",
+      "bytes_queued_peak",
+      "queued_frames_peak",
+      "unread_bytes",
+      "discarded_bytes",
+      "trailer_bytes_received",
+      "trailer_bytes_delivered",
+      "trailer_bytes_discarded",
+      "frames_delivered",
+      "frames_received",
+      "frames_refused",
+      "frames_discarded",
+      "frames_drained",
+      "effective_total_limit",
+      "limit_sources",
+      "queue_byte_limit",
+      "drain_bytes",
+      "drain_elapsed_milliseconds",
+      "drain_frame_limit",
+      "drain_byte_limit",
+      "drain_time_limit_milliseconds",
+      "drain_result",
+      "connection_reuse_decision",
+      "connection_reuse_reason",
+      "obligation_outcome",
+      "mapping_id",
+      "cancel_kind"
+    ],
+    "field_applicability": {
+      "keys_always_present": true,
+      "null_is_distinct_from_zero": true,
+      "nullable_fields": ["stream_id", "declared_length", "unread_bytes", "frames_drained", "drain_bytes", "drain_elapsed_milliseconds", "drain_frame_limit", "drain_byte_limit", "drain_time_limit_milliseconds", "drain_result", "mapping_id", "cancel_kind"],
+      "stream_id_rule": "null for H1; required for H2",
+      "declared_length_rule": "null for chunked or otherwise unknown length; otherwise the validated nonnegative Content-Length",
+      "unread_bytes_rule": "null when remaining transport bytes cannot be known; zero is reserved for a known empty remainder",
+      "mapping_id_rule": "null only for normal EOF; every non-EOF body terminal or cleanup-handoff receipt uses exactly one error_mapping mapping_id",
+      "cancel_kind_rule": "required only when terminal_state is CANCELLED; null for every other terminal_state",
+      "drain_fields_rule": "frames_drained and all drain_* fields are non-null only when DRAINING or RESETTING occurred; they are null for normal EOF and direct CLOSE_REQUIRED"
+    },
+    "counter_semantics": {
+      "data_rule": "bytes_received counts DATA octets admitted into body accounting. At the final receipt, bytes_received equals bytes_delivered plus discarded_bytes; refused bytes are excluded and recorded in bytes_refused.",
+      "trailer_rule": "Trailer counters use the protocol-specific trailer-size metric. At the final receipt, trailer_bytes_received equals trailer_bytes_delivered plus trailer_bytes_discarded.",
+      "frame_rule": "At the final receipt, frames_received equals frames_delivered plus frames_discarded; refused frames are excluded and recorded in frames_refused.",
+      "cleanup_subset_rule": "Non-null drain_bytes and frames_drained are subsets of discarded_bytes and frames_discarded respectively.",
+      "unknown_unread_rule": "Transport bytes not yet admitted are excluded from received counters; unread_bytes is null when their count is not knowable."
+    },
+    "forbidden_fields": ["body content", "raw authorization headers", "raw cookie headers"],
+    "time_authority": "request/runtime time and logical ticks only; no body-local wall clock",
+    "obligation_rule": "One body obligation is created only after the lifecycle boundary and resolved or aborted exactly once.",
+    "current_status": "NO_INCOMING_BODY_TERMINAL_RECEIPT"
+  },
+  "compatibility_migration": {
+    "policy": "DIRECT_CUTOVER_NO_COMPATIBILITY_SHIM",
+    "request_change": "Replace buffered body ownership in protocol and web request types with the single IncomingRequestBody after protocol adapters are ready.",
+    "buffered_extractors": "JSON, form, and raw extractors collect through Limited with checked accounting and preserve their existing default limits.",
+    "multipart_policy": "Until BODY-5 lands, Multipart remains bounded whole-body collection under its retained 16 MiB aggregate limit; incremental parsing is not claimed.",
+    "json_default_disposition": "KEEP_10_MIB",
+    "raw_default_disposition": "KEEP_10_MIB",
+    "form_default_disposition": "KEEP_2_MIB",
+    "response_surface_change": "NONE_IN_THIS_FOUNDATION",
+    "retry_policy": "RetryMiddleware must reject a live non-replayable body or use a bounded replayable body prepared before first dispatch.",
+    "h2_incoming_follow_up": "REQUIRES_EXPLICIT_OWNER_BEFORE_LIVE_INTEGRATION",
+    "migration_order": ["H1 producer integration", "assign and complete H2 producer integration", "web request and handler ownership", "buffered extractor adapters", "telemetry and stable diagnostics"]
+  },
+  "source_pins": [
+    {"path": "src/http/mod.rs", "sha256": "2a0ca68136d8d4946db692601f25fdb727fb153e8a78529defbc0eb8d913e5ed", "line_count": 85, "anchors": ["pub mod body;", "pub use body::{Body, Empty, Frame, Full, HeaderMap, HeaderName, HeaderValue, SizeHint};"]},
+    {"path": "src/http/body.rs", "sha256": "69e63ff5856457bedd8ea9eaf0a45d5ca120c2ffe8f1db65207e747278ba9753", "line_count": 1918, "anchors": ["pub trait Body {", "pub struct StreamBody<S>", "pub struct Limited<B>"]},
+    {"path": "src/channel/mpsc.rs", "sha256": "ea58ac0b1d78738a4625f366be28e7fa91fadd0ef662446e761ded0b30bb338d", "line_count": 6283, "anchors": ["pub fn channel<T>(capacity: usize)", "pub struct SendPermit<'a, T>", "pub struct Receiver<T>"]},
+    {"path": "src/stream/stream.rs", "sha256": "46012af8a37bc1bd5d8aa6e8c39e896c2ad7bcddc3e68b5b94881ef18f0e826b", "line_count": 254, "anchors": ["pub trait Stream", "fn poll_next"]},
+    {"path": "src/codec/framed.rs", "sha256": "adccbee55b4c1e0268de065a5376cdd8e71cc02a74601013cb6e32a6d829571f", "line_count": 1216, "anchors": ["pub struct Framed<T, U>", "pub fn read_buffer", "impl<T, U> Stream for Framed"]},
+    {"path": "src/codec/framed_read.rs", "sha256": "477bf58ca5ee956c841937e59cacda49927a31f2a99f75560223f6f43142d42d", "line_count": 1165, "anchors": ["pub const DEFAULT_MAX_BUFFER_LEN", "pub struct FramedRead<R, D>"]},
+    {"path": "src/http/h1/mod.rs", "sha256": "567b4921e41e9dbb485eb4b6c75a62a2b3ab249d0ef7a34564c59b1fae76b792", "line_count": 50, "anchors": ["pub mod stream;", "pub use stream::{"]},
+    {"path": "src/http/h1/stream.rs", "sha256": "b10a901731cf6ab2e9f2d255f57c694b07261186a448b09fa042ad6f9cff18c8", "line_count": 1585, "anchors": ["pub struct IncomingBody {", "pub struct IncomingBodyWriter {", "self.received += data.remaining() as u64;", "Poll::Ready(Err(RecvError::Disconnected)) =>", "async fn send_frame", "Ok::<crate::http::body::Frame<BytesCursor>, HttpError>(frame)", "self.total_bytes = self.total_bytes.saturating_add"]},
+    {"path": "src/http/h1/codec.rs", "sha256": "9d6612d647fab75b7348d96eb0999ff8e2f159e8b707a309532efd19ccfed2c1", "line_count": 2827, "anchors": ["pub enum HttpError {", "pub struct Http1Codec", "max_body_size: usize", "self.body.len().saturating_add(size)", "self.trailers_bytes = self.trailers_bytes.saturating_add"]},
+    {"path": "src/http/h1/types.rs", "sha256": "c996611abc2ef2d91e914d19e9110230ea90370de98c4a9bcda7bb0edf238692", "line_count": 2102, "anchors": ["pub struct Request {", "pub body: Vec<u8>"]},
+    {"path": "src/http/h1/server.rs", "sha256": "d9cbd8c351f2112f11d06e28f2c3c6cb898f40bc997a2728c71d06708017521d", "line_count": 2455, "anchors": ["pub async fn serve_with_peer_addr", "self.read_next(&mut framed, &state).await", "ServerRequestRegion"]},
+    {"path": "src/http/h2/connection.rs", "sha256": "af5fd2a7e79deaa1d0bfd4f844ddefa2554e26593fab94170b95df1badbadeb7", "line_count": 6639, "anchors": ["pub enum ReceivedFrame", "pub fn process_frame"]},
+    {"path": "src/http/h2/stream.rs", "sha256": "f33ee521ca6ae7b271fff6aa7d2072320464e7e7ce54245ab742229a6e3ff2bd", "line_count": 3376, "anchors": ["pub struct Stream {", "pub fn recv_data", "pub fn queue_data"]},
+    {"path": "src/http/h2/listener.rs", "sha256": "c0b755e4ed754a9f49221bf9d0bb0af2f99e0075fbee7831efa01fb0b9577c15", "line_count": 3737, "anchors": ["const DEFAULT_H2_MAX_BODY_SIZE: usize = 16 * 1024 * 1024;", "let mut pending_requests: HashMap<u32, (Vec<Header>, Vec<u8>)>", "body.len().saturating_add(data.len())", "conn.reset_stream(stream_id, ErrorCode::EnhanceYourCalm);", "fn dispatch_h2_request"]},
+    {"path": "src/web/mod.rs", "sha256": "f45c786c88eb80fff899b1781f58f610fd6b98f04384123455b42b8a6382a3ed", "line_count": 88, "anchors": ["pub mod extract;", "pub mod response;", "pub use extract::{", "pub use response::{"]},
+    {"path": "src/web/extract.rs", "sha256": "211cecabb4955f2b72aa92058c61e1f3c0f3c5bac4bbec5e805e201667d6171d", "line_count": 2719, "anchors": ["pub struct Request {", "pub body: Bytes", "const DEFAULT_MAX_JSON_BODY_SIZE", "const DEFAULT_MAX_RAW_BODY_SIZE"]},
+    {"path": "src/web/handler.rs", "sha256": "ab54ba77e130e510f79b4dd68f207fe40e1a88ed04ab72c0fd918b5fafb23116", "line_count": 1574, "anchors": ["pub trait Handler", "req: Request"]},
+    {"path": "src/web/router.rs", "sha256": "d31de4ab5694c39d45374577a549ff190a4bbd8539bfc0b646d6751bd32400f2", "line_count": 2475, "anchors": ["handler.call(cx, req).await"]},
+    {"path": "src/web/middleware.rs", "sha256": "979a0b3b3665bba209f8ad84a929a35e70008d8c37096c577f91780d1ba51fff", "line_count": 6029, "anchors": ["pub struct RetryMiddleware", "pub struct RequestBodyLimitMiddleware", "if req.body.len() > self.max_bytes"]},
+    {"path": "src/web/multipart.rs", "sha256": "03ffb856485d1ec52878aa811fef324d0dcf63ad9fc5182430a050e648d72058", "line_count": 1753, "anchors": ["const DEFAULT_MAX_MULTIPART_SIZE", "const DEFAULT_MAX_PART_BODY_SIZE", "pub struct MultipartLimits {", "pub struct Multipart {"]},
+    {"path": "src/web/response.rs", "sha256": "be4f49cbbbf5f71e85143e02df1f3a15765dfda51598428159daf7c977343222", "line_count": 1530, "anchors": ["pub struct Response {", "impl Response"]},
+    {"path": "src/web/request_region.rs", "sha256": "3942340eb27bcea22a575c40241c7aa4f31e52e153b5bc5fa53811cd5cce1da6", "line_count": 2671, "anchors": ["pub enum ServerHopOutcome<R>", "pub struct ServerRequestRegion"]},
+    {"path": "src/types/cancel.rs", "sha256": "5e4e0dc8a220da781afc0c8b316babed57e6561fae29984ba49a410745fded4f", "line_count": 2800, "anchors": ["pub enum CancelKind {", "LinkedExit,"]},
+    {"path": "docs/error_codes/registry.json", "sha256": "6a54faecd9dd9d1e08e7c54de32474510519593bd0df4b13ed7dab659dd59d62", "line_count": 962, "anchors": ["ASUP-E5xx", "net-http"]},
+    {"path": "docs/error_codes/ASUP-E501.md", "sha256": "32ed651e5d68b7dc183e720ea88c7f3ea21a239d21f103146c77ec505ff59384", "line_count": 26, "anchors": ["# ASUP-E501 - HTTP Deadline Exhausted", "[ASUP-E501]", "effective deadline is the meet"]},
+    {"path": "tests/error_code_registry_contract.rs", "sha256": "1a5c6a422d07b0bcb9c29817e6dccb6da9a2d2021d4ede38a08ec2b6c906136f", "line_count": 395, "anchors": ["fn error_code_registry_schema_and_pages_are_complete", "fn live_error_codes_are_bidirectionally_linked_to_source"]},
+    {"path": "tests/conformance/h1_body_framing.rs", "sha256": "7ea752f87b52100842b78a3de404157ed52dbab4b557d7a38ca00dd6ca6e4b01", "line_count": 380, "anchors": ["fn content_length_exact_body_is_decoded", "fn content_length_short_body_is_incomplete"]},
+    {"path": "tests/conformance/h1_trailer_restrictions.rs", "sha256": "cbb0baa1e42393dc535cf717402316dbfe491d79fb7550e53e5ec14d82a71a9c", "line_count": 144, "anchors": ["fn allowed_trailer_field_names_are_preserved", "fn forbidden_trailer_field_names_are_rejected"]},
+    {"path": "tests/web_extract_content_length_audit.rs", "sha256": "c6f146dd57f19c9ad9075df968eb00f04974230606877c88a142abda805d24ee", "line_count": 206, "anchors": ["fn json_extractor_rejects_content_length_mismatch", "fn raw_body_extractor_rejects_content_length_mismatch"]},
+    {"path": "tests/web_framework_integration.rs", "sha256": "976030943842cd6da92b30d7217b60cd46b426931d7875ff6d4872b494445c34", "line_count": 1495, "anchors": ["fn integration_extractor_json_body", "fn integration_extractor_raw_body"]}
+  ],
+  "evidence_status": {
+    "static_source_fingerprints_recorded": true,
+    "architecture_contract_authored": true,
+    "rust_contract_authored": true,
+    "rust_contract_compiled": false,
+    "rust_contract_executed": false,
+    "protocol_integration_executed": false,
+    "bead_complete": false
+  },
+  "direct_follow_on_children": [
+    "asupersync-server-stack-hardening-eeexl1.6.2",
+    "asupersync-server-stack-hardening-eeexl1.6.3",
+    "asupersync-server-stack-hardening-eeexl1.6.5"
+  ],
+  "no_claim_boundaries": [
+    "This artifact does not claim that handlers receive a streaming request body.",
+    "This artifact does not claim reduced memory use or improved performance.",
+    "This artifact does not claim protocol, cancellation, or runtime correctness.",
+    "This artifact does not claim broad server-stack or workspace health.",
+    "This artifact does not claim live H1 or H2 interoperability evidence.",
+    "This artifact does not claim a configured or landed H2 connection-level aggregate body budget.",
+    "This artifact does not claim response streaming or incremental multipart parsing.",
+    "This artifact does not allocate an ASUP error code or authorize production source changes.",
+    "This artifact does not authorize tracker closure while executable validation is unrun."
+  ]
+}
