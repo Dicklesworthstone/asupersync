@@ -1,0 +1,754 @@
+{
+  "schema_version": 1,
+  "artifact_id": "polling-socket-platform-decision-v1",
+  "program_id": "asupersync-3u3tej",
+  "bead_id": "asupersync-3u3tej.4",
+  "capability_id": "CAP-POLLING-SOCKET",
+  "baseline_revision": "e263782a6d5a793b78e53065f70ce7f76605e863",
+  "captured_date_utc": "2026-08-04",
+  "purpose": "Record the terminal KEEP decision for polling and socket2 after a source-pinned cross-platform surface inventory and canonical marginal-ledger review. This packet performs no replacement implementation and authorizes no source, manifest, lockfile, or dependency change.",
+  "authority": {
+    "plan": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md",
+    "plan_decision": "KEEP",
+    "registry": "artifacts/dependency_capability_registry_v1.json",
+    "registry_disposition": "KEEP_UNTIL_PARITY",
+    "registry_evidence_state": "BASELINE_PLANNED",
+    "registry_cutover_state": "KEEP_INCUMBENT",
+    "baseline": "artifacts/dependency_capability_baseline_v1.json",
+    "baseline_state": "BLOCKED_PLATFORM",
+    "cutover_policy": "artifacts/dependency_cutover_policy_v1.json",
+    "gate_decision": "KEEP",
+    "gate_state": "TERMINAL",
+    "decision_basis": "The plan already classifies both dependencies KEEP. Their direct native edges cover reactor registration, wake, readiness modes, descriptor or handle lifecycle, socket creation, addresses, keepalive, and platform-specific options. The canonical ledger records only a small marginal graph benefit, no marginal native code, build script, or proc macro, and no evidence of a rustix eviction. No named incumbent defect, applicable advisory, owner-chartered suite-wide platform project, or meaningful marginal-cost change was found.",
+    "dependency_exit_allowed": false,
+    "replacement_implementation_authorized": false,
+    "source_changes_authorized": false,
+    "owner_review_required_to_change": true
+  },
+  "dependency_resolution": [
+    {
+      "dependency": "polling",
+      "manifest_requirement": "3.11",
+      "manifest_edge": "target-normal:cfg(not(target_arch = \"wasm32\"))",
+      "resolved_version": "3.11.0",
+      "checksum": "5d0e4f59085d47d8241c88ead0f274e8a0cb551f3625263c05eb8dd897c34218",
+      "direct_features": [],
+      "resolved_direct_dependencies": [
+        "cfg-if",
+        "concurrent-queue",
+        "hermit-abi",
+        "pin-project-lite",
+        "rustix",
+        "windows-sys 0.61.2"
+      ],
+      "taxonomy_candidate": "polling-reactor",
+      "unsafe_exposure_class": "BOUNDARY-UNSAFE",
+      "taxonomy_verdict": "KEEP_UNLESS_GATED"
+    },
+    {
+      "dependency": "socket2",
+      "manifest_requirement": "0.6",
+      "manifest_edge": "target-normal:cfg(not(target_arch = \"wasm32\"))",
+      "resolved_version": "0.6.5",
+      "checksum": "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4",
+      "direct_features": [
+        "all"
+      ],
+      "resolved_direct_dependencies": [
+        "libc",
+        "windows-sys 0.61.2"
+      ],
+      "taxonomy_candidate": "socket-platform",
+      "unsafe_exposure_class": "BOUNDARY-UNSAFE",
+      "taxonomy_verdict": "KEEP_UNLESS_GATED"
+    }
+  ],
+  "source_pins": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+      "line_count": 1038
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+      "line_count": 4666
+    },
+    {
+      "path": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md",
+      "sha256": "401b39c99f4909a7e805e0992327d2408fe54aed65610783830031b66083b7b0",
+      "line_count": 332
+    },
+    {
+      "path": "artifacts/dependency_capability_registry_v1.json",
+      "sha256": "e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2",
+      "line_count": 6917
+    },
+    {
+      "path": "artifacts/dependency_capability_baseline_v1.json",
+      "sha256": "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8",
+      "line_count": 1357
+    },
+    {
+      "path": "artifacts/dependency_cutover_policy_v1.json",
+      "sha256": "9a786ff93cc198a91b74d5e52f60ede00a2fac190977841482959aad6891cf5b",
+      "line_count": 1220
+    },
+    {
+      "path": "artifacts/dependency_marginal_ledger_v1.json",
+      "sha256": "9382d8357e59b49b01775f3efad2db95f2186c63bc432b5616ba20f3b9a218a9",
+      "line_count": 188045
+    },
+    {
+      "path": "artifacts/dependency_safety_taxonomy_v1.json",
+      "sha256": "f52111dee493e7bfb77acbfe079fa902ae14cbecc54e13aa5e8232824d89e5a6",
+      "line_count": 1436
+    },
+    {
+      "path": "artifacts/dependency_verification_matrix_v1.json",
+      "sha256": "c42345e9bbd771a1fb525504bce4162b2af6caca8a75b642d6e14bbb14f7d36b",
+      "line_count": 83691
+    },
+    {
+      "path": "src/runtime/reactor/mod.rs",
+      "sha256": "df1ce75337c1a4c0549e58cedc7b8390ed418edf35fb738d24fb8380411b5427",
+      "line_count": 1325
+    },
+    {
+      "path": "src/runtime/reactor/interest.rs",
+      "sha256": "6929b704120cfd497e193dfac22cc541977c2f32e3440c9bca63e4cbc1b63400",
+      "line_count": 825
+    },
+    {
+      "path": "src/runtime/reactor/token.rs",
+      "sha256": "77ace1e62fd6cafc782c323003d705f92a8c03f33c48d543e33a0c0cf8dc6351",
+      "line_count": 1103
+    },
+    {
+      "path": "src/runtime/reactor/source.rs",
+      "sha256": "8ace82acb2215893fa9e7ed499d01cce844e1d07906ab9aa3d0f6db04a00aa48",
+      "line_count": 594
+    },
+    {
+      "path": "src/runtime/reactor/registration.rs",
+      "sha256": "3965fe16dad1ec44d67a6fbf8e3e2e67217095ee4201345e04112947cd0bd43c",
+      "line_count": 906
+    },
+    {
+      "path": "src/runtime/reactor/epoll.rs",
+      "sha256": "28522a60201582a5bb5d5bacd9be7682d3ffb9c6337f44d91dec277d6dbb3b23",
+      "line_count": 2385
+    },
+    {
+      "path": "src/runtime/reactor/kqueue.rs",
+      "sha256": "8268431e577de1f696414edba3a0d93b264e8ee699fbf504d72fa2922d1cb3dc",
+      "line_count": 1450
+    },
+    {
+      "path": "src/runtime/reactor/windows.rs",
+      "sha256": "f8f858fcaa6d6b9b6b5c9292e79bd19a8d92faaebc87a17a97d5799a0ec3aa41",
+      "line_count": 482
+    },
+    {
+      "path": "src/runtime/io_driver.rs",
+      "sha256": "187bb4543a3f5fb46f2f549cec24262f671ef9794e2be27617fd614526da0e94",
+      "line_count": 2952
+    },
+    {
+      "path": "src/net/tcp/socket.rs",
+      "sha256": "74adf8bba97f9ae3e11167ed2bbff87d072a0d0750c6917dc49f195a64bdf0a0",
+      "line_count": 722
+    },
+    {
+      "path": "src/net/tcp/stream.rs",
+      "sha256": "ca7fc4cbd26cbf5985c46939c3deea36e25505537b5f494f99de04ef70c45798",
+      "line_count": 2776
+    },
+    {
+      "path": "src/net/tcp/traits.rs",
+      "sha256": "51ff7270d348c8b7302ea105df330ac6df36874375f40ca32ebc443eab867fe7",
+      "line_count": 418
+    },
+    {
+      "path": "src/net/udp.rs",
+      "sha256": "27b16785f2365a2023673d27cd000cdb1af8b82da751ed0471c237bc6bbd5ffc",
+      "line_count": 4347
+    },
+    {
+      "path": "src/net/unix/listener.rs",
+      "sha256": "012546852c0aca57f9e194b3503c13dac8515fe930713b65a10d63cda364a9d5",
+      "line_count": 1118
+    },
+    {
+      "path": "src/net/unix/stream.rs",
+      "sha256": "4b8ab25359a23c81493564a3d88eb85da086f4540deb1cc08c8d32cbbbf56076",
+      "line_count": 1539
+    },
+    {
+      "path": "src/net/atp/transport_rq/mod.rs",
+      "sha256": "2d3f3123d15124a972b9172be3bcd5a9e8010cfde176e723fb2abb215e28ee86",
+      "line_count": 15242
+    },
+    {
+      "path": "src/messaging/nats.rs",
+      "sha256": "f3328827942abbb04b904275744a30847062e9f01715cb65a1bf93cef3a5f5c0",
+      "line_count": 5539
+    },
+    {
+      "path": "tests/conformance/udp_socket.rs",
+      "sha256": "0c5dd06a2c26c8030762a4679c7314e9b5b72789e5ebc3f2ca3231747a96f90d",
+      "line_count": 784
+    }
+  ],
+  "occurrence_census": {
+    "method": "Exact Rust-file path set containing the direct dependency token under src and tests; the focused contract excludes itself and fails closed on path-set drift.",
+    "polling": {
+      "direct_file_count": 3,
+      "production_paths": [
+        "src/runtime/reactor/epoll.rs",
+        "src/runtime/reactor/kqueue.rs",
+        "src/runtime/reactor/windows.rs"
+      ]
+    },
+    "socket2": {
+      "direct_file_count": 9,
+      "production_file_count": 6,
+      "test_only_file_count": 3,
+      "production_paths": [
+        "src/net/atp/transport_rq/mod.rs",
+        "src/net/tcp/socket.rs",
+        "src/net/tcp/stream.rs",
+        "src/net/tcp/traits.rs",
+        "src/net/udp.rs",
+        "src/net/unix/stream.rs"
+      ],
+      "test_only_paths": [
+        "src/messaging/nats.rs",
+        "src/net/unix/listener.rs",
+        "tests/conformance/udp_socket.rs"
+      ]
+    },
+    "registry_source_owner_paths": [
+      "src/net/tcp/socket.rs",
+      "src/net/tcp/stream.rs",
+      "src/runtime/reactor/epoll.rs",
+      "src/runtime/reactor/kqueue.rs",
+      "src/runtime/reactor/windows.rs"
+    ],
+    "registry_omitted_production_direct_paths": [
+      "src/net/atp/transport_rq/mod.rs",
+      "src/net/tcp/traits.rs",
+      "src/net/udp.rs",
+      "src/net/unix/stream.rs"
+    ],
+    "registry_gap_interpretation": "The registry identifies the capability but understates current direct source ownership. This packet expands the inventory without editing the registry and treats future direct-use drift as a reason to refresh the receipt, not as replacement authority."
+  },
+  "marginal_graph": {
+    "ledger": "artifacts/dependency_marginal_ledger_v1.json",
+    "ledger_source_commit": "ddea6250aee80357756fa1f39456823df88f7af1",
+    "claim_revision": "e263782a6d5a793b78e53065f70ce7f76605e863",
+    "freshness_state": "HISTORICAL_CANONICAL_MEASUREMENT_STATICALLY_CORROBORATED",
+    "freshness_note": "The ledger predates the claim revision. Current static inspection confirms that the two manifest declarations and resolved versions are unchanged, but the ledger was not regenerated. These counts are canonical historical graph evidence, not fresh build, runtime, or platform evidence.",
+    "canonical_feature_profiles": [
+      "cli",
+      "compression",
+      "default",
+      "fuzz-quarantine",
+      "io-uring",
+      "kafka",
+      "loom-tests",
+      "metrics",
+      "minimal",
+      "sqlite",
+      "tls",
+      "trace-compression",
+      "workspace-dev-build-audit"
+    ],
+    "canonical_targets": [
+      "aarch64-apple-darwin",
+      "wasm32-unknown-unknown",
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-gnu"
+    ],
+    "measurement_hosts": [
+      "x86_64-unknown-linux-gnu"
+    ],
+    "cells_per_dependency": 52,
+    "active_native_cells_per_dependency": 39,
+    "inactive_wasm_cells_per_dependency": 13,
+    "recorded_active_rows": 78,
+    "polling": {
+      "active_rows": 39,
+      "cells_removing_one_package_version": 27,
+      "cells_removing_two_package_versions": 12,
+      "marginal_package_version_observations": 51,
+      "one_package_set": [
+        "polling"
+      ],
+      "two_package_set": [
+        "concurrent-queue",
+        "polling"
+      ]
+    },
+    "socket2": {
+      "active_rows": 39,
+      "cells_removing_zero_package_versions": 3,
+      "cells_removing_one_package_version": 36,
+      "marginal_package_version_observations": 36,
+      "zero_package_profile": "workspace-dev-build-audit",
+      "one_package_set": [
+        "socket2"
+      ]
+    },
+    "combined_marginal_package_version_observations": 87,
+    "rows_with_marginal_native_none": 78,
+    "rows_with_nonempty_build_scripts": 0,
+    "rows_with_nonempty_proc_macros": 0,
+    "root_native_status_counts": {
+      "none": 13,
+      "unknown": 65
+    },
+    "independent_rustix_parents_observed_in_lock": [
+      "tempfile",
+      "xattr"
+    ],
+    "rustix_eviction_supported": false,
+    "measured_graph_benefit": "MINIMAL",
+    "interpretation": "The graph evidence does not justify taking ownership of a full portable reactor and socket-option boundary. Removing polling would not evict rustix, and socket2 is already retained by other workspace graph parents in the workspace-dev-build-audit cells."
+  },
+  "platform_matrix": [
+    {
+      "platform_id": "PLATFORM-LINUX-ANDROID",
+      "platforms": [
+        "linux",
+        "android"
+      ],
+      "polling_backend": "EpollReactor, with optional io_uring selection before epoll on Linux",
+      "socket_surface": "TCP, UDP, Unix pathname, Linux abstract Unix, reuse-port where supported, and keepalive",
+      "state": "SOURCE_PRESENT_PLATFORM_RECEIPT_MISSING",
+      "gap": "Epoll has an fstat identity tuple and extensive source tests, but this receipt does not execute them or prove complete fd-reuse, close-race, or Android behavior."
+    },
+    {
+      "platform_id": "PLATFORM-APPLE-BSD",
+      "platforms": [
+        "macos",
+        "freebsd",
+        "openbsd",
+        "netbsd",
+        "dragonfly"
+      ],
+      "polling_backend": "KqueueReactor",
+      "socket_surface": "TCP, UDP, pathname Unix, reuse-port where supported, and platform-varying keepalive",
+      "state": "SOURCE_PRESENT_PLATFORM_RECEIPT_MISSING",
+      "gap": "Kqueue has validity checks but no stable fd identity; priority and dispatch are unsupported. No BSD ledger target or retained macOS/BSD applied-option receipt exists."
+    },
+    {
+      "platform_id": "PLATFORM-WINDOWS",
+      "platforms": [
+        "windows"
+      ],
+      "polling_backend": "IocpReactor backed by polling",
+      "socket_surface": "TCP, UDP, and keepalive; Unix domain modules are absent",
+      "state": "SOURCE_PRESENT_PLATFORM_RECEIPT_MISSING",
+      "gap": "The adapter exposes readable and writable only, has no handle-generation identity, and has no retained live readiness, rearm, or keepalive-value receipt in this packet."
+    },
+    {
+      "platform_id": "PLATFORM-WASM",
+      "platforms": [
+        "wasm32"
+      ],
+      "polling_backend": "BrowserReactor",
+      "socket_surface": "polling and socket2 root edges are inactive; native TCP and UDP paths fail closed",
+      "state": "EXCLUDED_BY_MANIFEST",
+      "gap": "This packet does not establish wasm test-target coverage for test-only direct socket2 imports."
+    },
+    {
+      "platform_id": "PLATFORM-OTHER",
+      "platforms": [
+        "other"
+      ],
+      "polling_backend": "unsupported create_reactor path",
+      "socket_surface": "not inventoried as a supported capability target",
+      "state": "EXPLICIT_UNSUPPORTED",
+      "gap": "No portability claim is made beyond the registry's Linux, macOS, Windows, and supported-BSD scope."
+    }
+  ],
+  "polling_semantic_matrix": [
+    {
+      "semantic_id": "POLLING-PLATFORM-SELECTION",
+      "state": "PRESENT",
+      "current_semantics": "create_reactor chooses epoll or optional io_uring on Linux/Android, kqueue on Apple/BSD, IOCP-backed polling on Windows, BrowserReactor on wasm, and Unsupported elsewhere.",
+      "anchors": [
+        "src/runtime/reactor/mod.rs"
+      ]
+    },
+    {
+      "semantic_id": "POLLING-REGISTER",
+      "state": "PRESENT",
+      "current_semantics": "All native adapters reject duplicate tokens and duplicate raw descriptors or sockets before delegating registration to polling.",
+      "anchors": [
+        "src/runtime/reactor/epoll.rs",
+        "src/runtime/reactor/kqueue.rs",
+        "src/runtime/reactor/windows.rs"
+      ]
+    },
+    {
+      "semantic_id": "POLLING-MODIFY-DEREGISTER",
+      "state": "PRESENT_WITH_PLATFORM_DIFFERENCES",
+      "current_semantics": "Adapters preserve bookkeeping on hard delete failures, remove already-gone registrations, and expose NotFound for unknown tokens. Epoll additionally tracks orphan tombstones.",
+      "anchors": [
+        "src/runtime/reactor/epoll.rs",
+        "src/runtime/reactor/kqueue.rs",
+        "src/runtime/reactor/windows.rs"
+      ]
+    },
+    {
+      "semantic_id": "POLLING-EINTR",
+      "state": "DELEGATED",
+      "current_semantics": "The resolved polling implementation retries Interrupted waits against a fixed deadline; repository adapters call Poller::wait directly while the Reactor trait still permits Interrupted errors.",
+      "anchors": [
+        "Cargo.lock",
+        "src/runtime/reactor/mod.rs",
+        "src/runtime/reactor/epoll.rs",
+        "src/runtime/reactor/kqueue.rs",
+        "src/runtime/reactor/windows.rs"
+      ]
+    },
+    {
+      "semantic_id": "POLLING-TOKEN-GENERATION",
+      "state": "PRESENT_IN_IO_DRIVER",
+      "current_semantics": "Normal IoDriver registrations use generation-tagged TokenSlab entries and retire a slot instead of wrapping its maximum generation. Raw Reactor callers may provide arbitrary tokens.",
+      "anchors": [
+        "src/runtime/reactor/token.rs",
+        "src/runtime/io_driver.rs"
+      ]
+    },
+    {
+      "semantic_id": "POLLING-DESCRIPTOR-REUSE",
+      "state": "PARTIAL",
+      "current_semantics": "Epoll compares an fstat dev/inode/mode tuple before and after add and during lifecycle operations. Kqueue checks only descriptor validity. Windows tracks raw socket values without a generation identity.",
+      "anchors": [
+        "src/runtime/reactor/epoll.rs",
+        "src/runtime/reactor/kqueue.rs",
+        "src/runtime/reactor/windows.rs"
+      ]
+    },
+    {
+      "semantic_id": "POLLING-WAKE",
+      "state": "DELEGATED_WITH_GAP",
+      "current_semantics": "All native adapters delegate wake to Poller::notify; IoDriver serializes a single active poll leader. Some pre-registration and rearm wake errors are intentionally ignored.",
+      "anchors": [
+        "src/runtime/reactor/epoll.rs",
+        "src/runtime/reactor/kqueue.rs",
+        "src/runtime/reactor/windows.rs",
+        "src/runtime/io_driver.rs"
+      ]
+    },
+    {
+      "semantic_id": "POLLING-ONESHOT-EDGE",
+      "state": "PRESENT_WITH_PLATFORM_DIFFERENCES",
+      "current_semantics": "Epoll and kqueue map default registrations to Oneshot, edge to Edge, and edge plus oneshot to EdgeOneshot. Windows rejects public mode flags while polling's default add remains oneshot. No public route selects PollMode::Level.",
+      "anchors": [
+        "src/runtime/reactor/interest.rs",
+        "src/runtime/reactor/epoll.rs",
+        "src/runtime/reactor/kqueue.rs",
+        "src/runtime/reactor/windows.rs"
+      ]
+    },
+    {
+      "semantic_id": "POLLING-READINESS-TRANSLATION",
+      "state": "PRESENT_WITH_PLATFORM_DIFFERENCES",
+      "current_semantics": "Epoll maps read, write, error, HUP, and priority with registered-interest masking. Kqueue derives a narrower read/write/HUP view. Windows maps only read and write.",
+      "anchors": [
+        "src/runtime/reactor/epoll.rs",
+        "src/runtime/reactor/kqueue.rs",
+        "src/runtime/reactor/windows.rs"
+      ]
+    },
+    {
+      "semantic_id": "POLLING-CANCEL-CLOSE",
+      "state": "PARTIAL",
+      "current_semantics": "IoRegistration and Registration provide RAII cleanup and one retry, while generational tokens reject stale driver events. Persistent backend delete errors can still outlive local driver state.",
+      "anchors": [
+        "src/runtime/io_driver.rs",
+        "src/runtime/reactor/registration.rs"
+      ]
+    },
+    {
+      "semantic_id": "POLLING-RAII-REGISTRATION",
+      "state": "PARTIAL",
+      "current_semantics": "The exported Registration catches deregistration panics and retries cleanup, but its constructor is test-only and no production backend wiring through ReactorHandle was found.",
+      "anchors": [
+        "src/runtime/reactor/registration.rs"
+      ]
+    },
+    {
+      "semantic_id": "POLLING-FORK",
+      "state": "ABSENT",
+      "current_semantics": "No reactor or driver atfork hook, process-identity ownership check, child reinitialization path, or inherited-poller policy was found.",
+      "anchors": [
+        "src/runtime/reactor/mod.rs",
+        "src/runtime/io_driver.rs"
+      ]
+    }
+  ],
+  "socket_semantic_matrix": [
+    {
+      "semantic_id": "SOCKET-CREATION",
+      "state": "PRESENT",
+      "current_semantics": "socket2 creates IPv4/IPv6 TCP sockets and Unix stream sockets, applies nonblocking mode, and converts successful sockets into std ownership.",
+      "anchors": [
+        "src/net/tcp/socket.rs",
+        "src/net/tcp/stream.rs",
+        "src/net/tcp/traits.rs",
+        "src/net/unix/stream.rs"
+      ]
+    },
+    {
+      "semantic_id": "SOCKET-ADDRESS",
+      "state": "PRESENT",
+      "current_semantics": "SockAddr bridges IP socket addresses and Unix path addresses for bind and connect paths.",
+      "anchors": [
+        "src/net/tcp/socket.rs",
+        "src/net/tcp/stream.rs",
+        "src/net/unix/stream.rs"
+      ]
+    },
+    {
+      "semantic_id": "SOCKET-ABSTRACT-UNIX",
+      "state": "PRESENT_WITH_BOUNDARY_GAPS",
+      "current_semantics": "Linux abstract Unix connect encodes a leading NUL into SockAddr::unix and interoperates with a std listener. Empty, maximum-length, and embedded-NUL boundary cases are not retained in this packet.",
+      "anchors": [
+        "src/net/unix/stream.rs"
+      ]
+    },
+    {
+      "semantic_id": "SOCKET-SOCKREF",
+      "state": "PRESENT",
+      "current_semantics": "Borrowed SockRef configures TCP keepalive, observes or tunes UDP buffers, and applies best-effort ATP control-stream buffer hints without transferring socket ownership.",
+      "anchors": [
+        "src/net/tcp/socket.rs",
+        "src/net/tcp/stream.rs",
+        "src/net/udp.rs",
+        "src/net/atp/transport_rq/mod.rs"
+      ]
+    },
+    {
+      "semantic_id": "SOCKET-KEEPALIVE",
+      "state": "PRESENT_WITH_PLATFORM_DIFFERENCES",
+      "current_semantics": "TcpKeepalive carries idle, interval, and retry parameters; unsupported interval or retry platforms return Unsupported instead of silently ignoring requests.",
+      "anchors": [
+        "src/net/tcp/stream.rs"
+      ]
+    },
+    {
+      "semantic_id": "SOCKET-TCP-OPTIONS",
+      "state": "PRESENT_WITH_PLATFORM_DIFFERENCES",
+      "current_semantics": "TCP creation paths cover reuse-address, conditionally available reuse-port, IPv6-only, nodelay, bind, listen backlog, and nonblocking conversion.",
+      "anchors": [
+        "src/net/tcp/socket.rs",
+        "src/net/tcp/traits.rs"
+      ]
+    },
+    {
+      "semantic_id": "SOCKET-UDP-OPTIONS",
+      "state": "PRESENT",
+      "current_semantics": "UDP creation remains in std; SockRef observes and tunes bounded receive and send buffer sizes. Observation failures become absent values while setter failures propagate.",
+      "anchors": [
+        "src/net/udp.rs"
+      ]
+    },
+    {
+      "semantic_id": "SOCKET-CONNECT-ERRORS",
+      "state": "PRESENT",
+      "current_semantics": "Nonblocking TCP and Unix connect classify in-progress and Interrupted states, wait for readiness, inspect socket error or peer state, and stop fallback when cancellation is observed.",
+      "anchors": [
+        "src/net/tcp/stream.rs",
+        "src/net/unix/stream.rs"
+      ]
+    },
+    {
+      "semantic_id": "SOCKET-LIFECYCLE",
+      "state": "PRESENT",
+      "current_semantics": "Owned socket2 values close on early return; successful paths transfer ownership to std sockets. Registration ownership and cancellation checkpoints remain coupled to connect and I/O paths.",
+      "anchors": [
+        "src/net/tcp/stream.rs",
+        "src/net/unix/stream.rs",
+        "src/net/udp.rs"
+      ]
+    }
+  ],
+  "planned_evidence": {
+    "baseline_state": "BLOCKED_PLATFORM",
+    "parity_modes": [
+      "PUBLIC_COMPILE",
+      "SEMANTIC",
+      "ERROR_CONTRACT",
+      "RESOURCE_ENVELOPE",
+      "SECURITY_POLICY",
+      "LIFECYCLE",
+      "PLATFORM_MATRIX"
+    ],
+    "scenario_ids": [
+      "polling_socket_cross_platform",
+      "socket_cancel_close_race"
+    ],
+    "cutover_eligible": false,
+    "verification_state": "PLANNED_NOT_EXECUTED_BY_THIS_PACKET",
+    "interpretation": "Planned evidence identifies the size of a future parity project. It is not needed to retain incumbents and does not authorize replacement, cutover, or a cross-platform correctness claim."
+  },
+  "gaps": [
+    {
+      "gap_id": "PLATFORM-GAP-REGISTRY-OWNERS",
+      "state": "ROUTED",
+      "owner": "dependency capability registry maintenance",
+      "detail": "The registry omits four current production direct socket2 owner paths.",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "PLATFORM-GAP-LEDGER-FRESHNESS",
+      "state": "ROUTED",
+      "owner": "dependency marginal-ledger maintenance",
+      "detail": "The canonical ledger predates the claim revision and was only corroborated by current static declaration and lock-version checks.",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "PLATFORM-GAP-BSD-LEDGER",
+      "state": "ROUTED",
+      "owner": "future suite-wide platform project",
+      "detail": "The marginal ledger has macOS, Windows, Linux, and wasm targets but no BSD target.",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "PLATFORM-GAP-FORK",
+      "state": "ROUTED",
+      "owner": "runtime platform boundary",
+      "detail": "Fork-after-reactor initialization safety and child reinitialization are unproven and undocumented in source.",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "PLATFORM-GAP-KQUEUE-REUSE",
+      "state": "ROUTED",
+      "owner": "kqueue incumbent hardening",
+      "detail": "Descriptor validity checks cannot distinguish close-and-reuse between checks and operations.",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "PLATFORM-GAP-WINDOWS-REUSE",
+      "state": "ROUTED",
+      "owner": "Windows reactor incumbent hardening",
+      "detail": "Raw socket value tracking has no handle-generation identity.",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "PLATFORM-GAP-LEVEL-MODE",
+      "state": "ROUTED",
+      "owner": "reactor API semantics",
+      "detail": "No public route selects PollMode::Level; existing level wording does not prove repeated level delivery.",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "PLATFORM-GAP-WAKE-ERROR",
+      "state": "ROUTED",
+      "owner": "IoDriver incumbent hardening",
+      "detail": "Some wake errors are intentionally ignored and no recovery receipt is retained here.",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "PLATFORM-GAP-RAII-DOCS",
+      "state": "ROUTED",
+      "owner": "reactor registration API",
+      "detail": "The exported Registration documents a production path, but construction is test-only and production ReactorHandle wiring was not found.",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "PLATFORM-GAP-PLATFORM-RECEIPTS",
+      "state": "ROUTED",
+      "owner": "future suite-wide platform project",
+      "detail": "No retained live macOS, BSD, Windows, or Android receipt proves the complete declared reactor and socket-option surface.",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "PLATFORM-GAP-KEEPALIVE-VALUES",
+      "state": "ROUTED",
+      "owner": "socket incumbent hardening",
+      "detail": "No retained macOS, BSD, or Windows applied-value receipt covers keepalive interval and retry behavior.",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "PLATFORM-GAP-ABSTRACT-UNIX-BOUNDS",
+      "state": "ROUTED",
+      "owner": "Unix socket incumbent hardening",
+      "detail": "Abstract Unix empty, maximum-length, and embedded-NUL name cases are not covered by this static packet.",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "PLATFORM-GAP-UDP-ERROR-ORACLE",
+      "state": "ROUTED",
+      "owner": "UDP conformance evidence",
+      "detail": "The connected-error conformance case permits ambiguous network filtering and is not strong per-platform evidence.",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "PLATFORM-GAP-REUSEPORT-CFG",
+      "state": "ROUTED",
+      "owner": "TCP socket incumbent hardening",
+      "detail": "One TcpSocket reuse-port surface is cfg(unix), broader than upstream availability on every Unix-like target.",
+      "replacement_required": false
+    }
+  ],
+  "reconsideration_triggers": [
+    {
+      "trigger_id": "PLATFORM-RECONSIDER-DEFECT",
+      "condition": "A reproducible supported-platform production defect is attributable to polling or socket2 and cannot be fixed upstream or while retaining the dependency.",
+      "required_evidence": "Minimal reproduction, affected-platform receipt, upstream disposition, regression scope, and owner approval."
+    },
+    {
+      "trigger_id": "PLATFORM-RECONSIDER-RISK",
+      "condition": "An applicable advisory, unsoundness report, or maintenance-abandonment record materially changes incumbent risk.",
+      "required_evidence": "Applicable record, affected dependency graph, mitigation analysis, and owner approval."
+    },
+    {
+      "trigger_id": "PLATFORM-RECONSIDER-GRAPH",
+      "condition": "A fresh canonical ledger proves an owner-approved graph, native-code, trust, or supply-chain budget violation or a materially larger marginal removal.",
+      "required_evidence": "All-profile target-filtered ledger diff, native provenance, budget threshold, and owner approval."
+    },
+    {
+      "trigger_id": "PLATFORM-RECONSIDER-SUITE",
+      "condition": "An owner charters a suite-wide platform-boundary project covering Linux, macOS, Windows, supported BSDs, and explicit unsupported targets.",
+      "required_evidence": "Complete registration, readiness, EINTR, reuse, wake, fork, close, socket-option, error, lifecycle, and rollback contracts plus retained platform receipts."
+    },
+    {
+      "trigger_id": "PLATFORM-RECONSIDER-DESIGN",
+      "condition": "Independent review demonstrates a narrower first-party boundary with no greater unsafe, FFI, concurrency, and maintenance burden than the incumbents.",
+      "required_evidence": "Reviewed design, exact public and platform signatures, unsafe-ledger delta, maintenance ownership, resource envelope, rollback plan, and owner approval."
+    }
+  ],
+  "decision": {
+    "outcome": "KEEP",
+    "terminal_for_bead": true,
+    "dependencies_retained": [
+      "polling",
+      "socket2"
+    ],
+    "cutover_state": "KEEP_INCUMBENT",
+    "implementation_authority": "NONE",
+    "replacement_implementation_authorized": false,
+    "dependency_exit_allowed": false,
+    "children_unblocked": [],
+    "required_next_action": "Retain both incumbents. Route integration gaps independently, and reopen replacement consideration only when a named trigger has complete evidence and owner approval.",
+    "rollback": "No production source, manifest, lockfile, dependency, or registry change is authorized or required by this terminal decision."
+  },
+  "no_claim_boundaries": [
+    "This packet is a static source and artifact review; it executes no build, test, formatter, runtime, benchmark, remote job, or platform probe.",
+    "It does not prove live Linux, Android, macOS, BSD, Windows, wasm, or other-platform behavior.",
+    "It does not prove cross-platform parity, runtime correctness, cancellation correctness, descriptor-reuse safety, fork safety, wake recovery, or complete deregistration after persistent backend errors.",
+    "It does not prove applied keepalive or socket-option values on macOS, BSD, or Windows.",
+    "The historical canonical marginal ledger is graph evidence only; it does not prove current compilation, runtime behavior, performance, release readiness, or broad workspace health.",
+    "Marginal native status none does not certify the full root graph as native-code-free; root native status remains unknown in most recorded rows.",
+    "KEEP does not bless the routed incumbent-hardening gaps and does not convert planned evidence into executed evidence.",
+    "No thin-wrapper claim, rustix-eviction claim, performance-improvement claim, or source-ownership-completeness claim is made.",
+    "No replacement implementation, dependency removal, manifest or lockfile edit, source migration, implementation child, or cutover is authorized.",
+    "No file deletion, destructive cleanup, branch, worktree, local fallback, peer-job cancellation, or tracker-data rewrite is authorized."
+  ]
+}
