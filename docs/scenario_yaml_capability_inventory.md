@@ -381,6 +381,31 @@ This is a static governance receipt. A3.2 did not rerun A1/A2 evidence, approve
 bounds, implement a parser/writer, prove parity or runtime behavior, remove a
 dependency/YAML capability/file, close the tracker, or exercise A5 authority.
 
+### A4 source progress: exact example registry
+
+A4 (`asupersync-5z2scg.5.4`) records one bounded source-alignment row,
+`SCN-A4-GAP-13-REGISTRY-SOURCE-V1`. `examples/metadata.json` now declares both
+typed scenario roots and registers the same 13 files frozen by the corpus: ten
+under `examples/scenarios/` and three under
+`frankenlab/examples/scenarios/`. `examples/README.md` links the three
+FrankenLab fixtures and explicitly labels their names and descriptions as
+authoring narratives rather than evidence of simulated runtime effects.
+
+The existing `tests/examples_metadata_contract.rs` source now inventories both
+roots, requires exactly 13 typed scenario rows, fixes the three FrankenLab
+paths, and retains live-path and exact-line-span checks. The governed A4 row is
+`SOURCE_ALIGNED_STATIC`: source alignment is complete, but
+`dynamic_contract_executed=false` and the execution state is
+`NOT_RUN_BY_STATIC_LANE`. No Rust contract was executed in this lane, so
+`SCN-GAP-13 remains blocked` and fail-closed.
+
+This source slice changes no parser, model, loader, runner, scenario corpus
+file, accepted YAML construct, dependency, capability, or runtime behavior. It
+does not prove that any scenario parses, validates, executes, explores, or
+replays; it does not establish the named race, leak, or partition effects; and
+it does not prove conversion, semantic or fingerprint equivalence, diagnostics,
+security, performance, release readiness, broad health, or terminal authority.
+
 ## Child routing
 
 | Child | Frozen responsibility | Current evidence |
@@ -388,7 +413,7 @@ dependency/YAML capability/file, close the tracker, or exercise A5 authority.
 | A1 | loaders, schema, grammar, corpus, workflows, diagnostics, consumption, gaps | executed contract |
 | A2 | one versioned typed model and additive canonical JSON | executed contract |
 | A3 | incumbent KEEP or complete bounded owned parser/writer parity | A3.1 static audit and A3.2 durable receipt recorded; tracker state is separate |
-| A4 | located diagnostics, migration, examples, include truth, atomic output, docs | planned |
+| A4 | located diagnostics, migration, examples, include truth, atomic output, docs | static source progress for exact example registry; behavioral evidence remains unrun |
 | A5 | real validate/run/explore/replay journeys and terminal KEEP, DEFER, or CUTOVER decision | planned |
 
 Only A5 is terminal. Any missing, planned, blocked, regressed, or not-at-required
@@ -412,7 +437,7 @@ The artifact routes sixteen fail-closed gaps:
 | `SCN-GAP-10` | no application document/work bounds | A3 |
 | `SCN-GAP-11` | unknown fields are ignored | A3 |
 | `SCN-GAP-12` | time-travel demo YAML is orphaned and not the schema | A4 |
-| `SCN-GAP-13` | root metadata omits the three frankenlab examples | A4 |
+| `SCN-GAP-13` | all 13 typed fixtures are source-registered, but the focused Rust contracts were not executed in this static lane | A4 |
 | `SCN-GAP-14` | no full-corpus typed YAML/JSON equivalence proof | A3 |
 | `SCN-GAP-15` | semantic spans and stable CLI replay code are incomplete | A4 |
 | `SCN-GAP-16` | replay artifact output is non-atomic | A4 |
@@ -428,6 +453,9 @@ negative-mutation contract:
 
 ```bash
 RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay \
+  --overlay-path examples/metadata.json \
+  --overlay-path examples/README.md \
+  --overlay-path tests/examples_metadata_contract.rs \
   --overlay-path artifacts/scenario_yaml_capability_inventory_v1.json \
   --overlay-path docs/scenario_yaml_capability_inventory.md \
   --overlay-path tests/scenario_yaml_capability_inventory_contract.rs \
@@ -446,17 +474,18 @@ checked scenarios and workflows; they do not close the routed execution gaps.
 
 This A1/A2/A3.1/A3.2 packet combines the earlier executable
 inventory/canonical-JSON evidence with a current static
-acceptance-satisfiability audit and fail-closed KEEP receipt. A3.1 and A3.2 did
-not rerun those executable lanes or implement an owned YAML parser or production
-Scenario YAML writer. It proves no complete parity, performance, resource,
-security, broad-health, release, or terminal decision, and authorizes no input
-narrowing, dependency or file removal, tracker closure, or cutover. It also does
-not implement include merging, network or cancellation simulation, participant
-workloads, full fault effects, atomic artifact output, resource-policy bounds,
-or stable located semantic diagnostics. `KEEP_INCUMBENT` and
-`dependency_exit_allowed=false`
-remain mandatory. Only A5 may issue a terminal KEEP, DEFER, or CUTOVER decision;
-CUTOVER and dependency exit remain unauthorized until every declared
-prerequisite is satisfied.
+acceptance-satisfiability audit and fail-closed KEEP receipt. The A4 addition is
+source-level example-registry alignment only; no Rust contract was executed for
+it, and `SCN-GAP-13` remains blocked. A3.1, A3.2, and this A4 static slice did
+not rerun executable lanes or implement an owned YAML parser or production
+Scenario YAML writer. The packet proves no complete parity, runtime behavior,
+performance, resource, security, broad-health, release, or terminal decision,
+and authorizes no input narrowing, dependency or file removal, tracker closure,
+or cutover. It also does not implement include merging, network or cancellation
+simulation, participant workloads, full fault effects, atomic artifact output,
+resource-policy bounds, or stable located semantic diagnostics.
+`KEEP_INCUMBENT` and `dependency_exit_allowed=false` remain mandatory. Only A5
+may issue a terminal KEEP, DEFER, or CUTOVER decision; CUTOVER and dependency
+exit remain unauthorized until every declared prerequisite is satisfied.
 
 <!-- END SCENARIO YAML CAPABILITY INVENTORY -->

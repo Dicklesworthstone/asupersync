@@ -309,7 +309,7 @@ fn metadata_covers_every_file_in_the_declared_example_roots() {
     let actual = current_example_files();
     assert_eq!(
         declared, actual,
-        "examples/metadata.json must cover every non-metadata file under examples/"
+        "examples/metadata.json must cover every file in the declared example roots"
     );
 }
 

@@ -116,8 +116,8 @@
     },
     {
       "path": "examples/metadata.json",
-      "sha256": "5473c8adab1add34bc1082a40596a5b7126881513f672e5051b40efffa0689a8",
-      "line_count": 847
+      "sha256": "649df89c44cb619f5511b70a23032d1e2e0eb898580cb88264a861bb6dcf5843",
+      "line_count": 908
     },
     {
       "path": "docs/adr/dep_plan_adr_004_config_scenario_formats.md",
@@ -156,8 +156,8 @@
     },
     {
       "path": "tests/examples_metadata_contract.rs",
-      "sha256": "6b4a539cb02636249dce2d19d3e464da167898d934e2a630e445bddefe3a8294",
-      "line_count": 414
+      "sha256": "d1093cbb1393630cce816f18f589a38aa4605685ef7e788e0b703d1b61793f6a",
+      "line_count": 467
     },
     {
       "path": "src/conformance/mod.rs",
@@ -2122,8 +2122,8 @@
   "validation_commands": [
     {
       "lane": "scenario-yaml-capability-inventory-contract",
-      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path artifacts/scenario_yaml_capability_inventory_v1.json --overlay-path docs/scenario_yaml_capability_inventory.md --overlay-path tests/scenario_yaml_capability_inventory_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_scenario_yaml_capability_inventory\" cargo test -p asupersync --test scenario_yaml_capability_inventory_contract -- --nocapture",
-      "claim": "source pins, typed schema, observed grammar, exact corpus, loaders, workflows, diagnostics, routed gaps, durable KEEP receipt gate derivation, A4/A5 authority handoff, docs markers, and negative mutations"
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path examples/metadata.json --overlay-path examples/README.md --overlay-path tests/examples_metadata_contract.rs --overlay-path artifacts/scenario_yaml_capability_inventory_v1.json --overlay-path docs/scenario_yaml_capability_inventory.md --overlay-path tests/scenario_yaml_capability_inventory_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_scenario_yaml_capability_inventory\" cargo test -p asupersync --test scenario_yaml_capability_inventory_contract -- --nocapture",
+      "claim": "source pins, typed schema, observed grammar, exact corpus, loaders, workflows, diagnostics, routed gaps, durable KEEP receipt gate derivation, A4/A5 authority handoff, static example-registry alignment, docs markers, and negative mutations"
     },
     {
       "lane": "existing-root-scenario-integration",
