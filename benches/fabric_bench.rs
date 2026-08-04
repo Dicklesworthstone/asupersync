@@ -604,7 +604,7 @@ fn bench_steward_selection(c: &mut Criterion) {
         warm_stewards: 3,
         hot_stewards: 5,
         candidate_pool_size: 6,
-        placement_hash_salt: 0x57_4D_F1D_u64,
+        placement_hash_salt: 0x0574_DF1D_u64,
         ..PlacementPolicy::default()
     };
 
@@ -961,16 +961,16 @@ fn bench_baseline_compare(c: &mut Criterion) {
             let result: Arc<Mutex<Option<Result<u64, CallError>>>> = Arc::new(Mutex::new(None));
             let result_clone = Arc::clone(&result);
 
-            let (client_handle, client_stored) = scope
-                .spawn(&mut runtime.state, &cx, move |cx| async move {
+            // `spawn_registered` stores the task itself, so unlike the
+            // `spawn_gen_server` call above there is no manual
+            // `store_spawned_task` for the client task.
+            let client_handle = scope
+                .spawn_registered(&mut runtime.state, &cx, move |cx| async move {
                     let call_result = server_ref.call(&cx, BenchCall::Add(1)).await;
                     *result_clone.lock().expect("result mutex") = Some(call_result);
                 })
                 .expect("spawn client");
             let client_task_id = client_handle.task_id();
-            runtime
-                .state
-                .store_spawned_task(client_task_id, client_stored);
 
             {
                 let mut scheduler = runtime.scheduler.lock();

@@ -32,14 +32,25 @@
 //!     request-region budget actually reaches a real `PgConnection` on the
 //!     wire and that a budget-deadline cancel resolves the handler cleanly.
 //!
-//! A fully-composed *live* showcase — where the in-region query reaches the
-//! `SELECT`, parks, and the drain dials the `CancelRequest` over loopback in
-//! one flow — is tracked by the follow-up bead noted below: today the
-//! request-region-wrapped `PgConnection` parks on the read immediately
-//! following the budget-derived `SET` write and is only re-woken by the
-//! budget timer, so the query never advances to the `SELECT` whose drain would
-//! dial the cancel. That readiness-delivery investigation is out of scope for
-//! this showcase.
+//! The in-region query now genuinely reaches the `SELECT` and parks there, so
+//! the request-budget deadline — not a transport error — is what resolves the
+//! handler. Historical note, because the previous shape of this comment is what
+//! let a real defect hide: when this file was written the request-region-wrapped
+//! `PgConnection` parked on the read immediately following the budget-derived
+//! `SET` write and was only re-woken by the budget timer, so the query never
+//! advanced to the `SELECT`. `br-asupersync-rr849p` fixed that readiness-delivery
+//! stall the next day, which silently invalidated the assumption baked into the
+//! stand-in backend (it hung up on the first post-`SET` byte). The result was an
+//! `UnexpectedEof` racing ~3s ahead of the deadline and a handler reporting
+//! `Outcome::Err` where the whole point of the showcase is `Outcome::Cancelled`.
+//! Fixed under `br-asupersync-nmqrmi`; the backend now absorbs the `SELECT` and
+//! stays connected. The test taking the full `REQUEST_BUDGET` (~3s) is the
+//! signal that the deadline path, not an early hangup, is under test.
+//!
+//! Still *not* claimed here: that the drain dials a real `CancelRequest` over
+//! loopback. The listener stays bound so such a connect would succeed at the TCP
+//! level, but this test asserts the handler outcome only, and does not observe a
+//! second connection.
 
 #![cfg(all(feature = "postgres", feature = "test-internals"))]
 
@@ -69,7 +80,11 @@ const SERVER_READ_TIMEOUT: Duration = Duration::from_secs(12);
 fn backend_message(msg_type: u8, body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(1 + 4 + body.len());
     out.push(msg_type);
-    out.extend_from_slice(&((body.len() as i32) + 4).to_be_bytes());
+    // The PostgreSQL wire length prefix is a big-endian i32 covering the body
+    // plus the 4 length bytes themselves. Fail loudly on an oversized body
+    // rather than silently wrapping on a 32-bit-pointer target.
+    let body_len = i32::try_from(body.len()).expect("test backend body fits i32");
+    out.extend_from_slice(&(body_len + 4).to_be_bytes());
     out.extend_from_slice(body);
     out
 }
@@ -158,17 +173,30 @@ fn fake_pg_server(listener: &TcpListener, evidence: &mpsc::Sender<u64>) {
         .expect("write SET ReadyForQuery");
     conn.flush().expect("flush SET exchange");
 
-    // Leave the connection idle. The request budget deadline cancels the
-    // handler and tears the connection down; the server observes EOF (or a
-    // reset) rather than further protocol traffic.
+    // Stay connected and absorb frontend traffic until the *client* hangs up.
+    //
+    // This backend must not close first, and it must not treat the in-region
+    // `SELECT` as a protocol surprise. When this showcase was written the
+    // client parked on the read following the `SET` response and was only
+    // re-woken by the budget timer, so the `SELECT` never reached the wire and
+    // hanging up on the first byte was harmless. `br-asupersync-rr849p` fixed
+    // that readiness-delivery stall the following day, so the client now does
+    // send the `SELECT` immediately -- and a backend that returns here drops
+    // `conn`, sends FIN, and makes the client's `read_exact` surface
+    // `UnexpectedEof` about three seconds *before* the request budget deadline
+    // fires. The handler then reports `Outcome::Err` and is observably
+    // indistinguishable from a broken connection, which is precisely the
+    // Err-vs-Cancelled confusion this showcase exists to rule out
+    // (br-asupersync-nmqrmi).
+    //
+    // So: absorb the `SELECT`, answer nothing, and let the budget deadline be
+    // what resolves the handler. `Ok(0)` is the clean teardown after that
+    // cancel; `Err` is a reset or the `SERVER_READ_TIMEOUT` backstop, which
+    // also ends the loop rather than hanging the helper thread.
     let mut probe = [0u8; 64];
-    loop {
-        match conn.read(&mut probe) {
-            Ok(0) => break,
-            // Any further bytes would be a protocol surprise for an idle
-            // backend; only the teardown is expected.
-            Ok(_) => break,
-            Err(_) => break,
+    while let Ok(n) = conn.read(&mut probe) {
+        if n == 0 {
+            break;
         }
     }
 }

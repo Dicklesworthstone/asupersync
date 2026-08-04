@@ -1,0 +1,318 @@
+{
+  "schema_version": 1,
+  "artifact_id": "crossbeam-queue-safe-experiment-v1",
+  "bead_id": "asupersync-0h6myr.2",
+  "capability_id": "CAP-CONCURRENT-QUEUES",
+  "authority": "EXPERIMENT_AND_DOCUMENTATION_EVIDENCE_ONLY",
+  "captured_date_utc": "2026-07-27",
+  "benchmark_baseline_commit": "06c08d95a35acb93494be16778ad04eb3e96c0a1",
+  "evidence_packet_baseline_commit": "876110528f810c3334a99450a521daa27995a3ec",
+  "production_behavior_change_made": false,
+  "dependency": {
+    "manifest_name": "crossbeam-queue",
+    "requirement": "0.3",
+    "locked_name": "crossbeam-queue",
+    "locked_version": "0.3.13",
+    "locked_checksum": "803d13fb3b09d88be9f4dbc29062c66b19bf7170867ceb746d2a8689bf6c7a26",
+    "direct_dependency": "crossbeam-utils 0.8.22"
+  },
+  "decision": {
+    "status": "KEEP",
+    "disposition": "KEEP_INCUMBENT",
+    "dependency_exit_allowed": false,
+    "production_cutover_authorized": false,
+    "cutover_bead_filed": false,
+    "implementation_followups_authorized": [],
+    "reason": "The safe mutex-backed prototype has a non-overlapping regression against the production ArrayQueue in the 64-producer corrected exporter workload. The gate requires the safe candidate to win or tie every required axis. One named regression is terminal, so unmeasured scheduler, channel-tail, fairness, cancellation-latency, allocation, RSS, physical 32/64-core, and Apple Silicon cells cannot turn this candidate into a passing cutover."
+  },
+  "gate": {
+    "candidate_rule": "A safe candidate must win or tie every required axis unless an owner explicitly accepts each named regression.",
+    "early_stop_rule": "A statistically separated candidate regression on a real production-backed workload is terminal KEEP because the conjunctive pass rule can no longer be satisfied.",
+    "early_stop_applied": true,
+    "decisive_cell": "OTLP-64-PRODUCERS",
+    "full_matrix_required_for_cutover": true,
+    "full_matrix_completed": false
+  },
+  "claim_time_drift": {
+    "mpsc_original_plan_assumption": "channel/mpsc uses ArrayQueue",
+    "mpsc_current_fact": "channel/mpsc uses parking_lot::Mutex<ChannelInner<T>> with VecDeque<T> and explicitly rejects a split lock-free queue because reservation, waiter removal, commit, cancellation, and wake state must linearize together",
+    "mpsc_disposition": "EXCLUDED_NOT_A_CROSSBEAM_QUEUE_SURFACE",
+    "direct_production_module_count": 5
+  },
+  "surface_inventory": [
+    {
+      "surface_id": "QUEUE-SCHEDULER-GLOBAL-FIFO",
+      "source_path": "src/runtime/scheduler/global_queue.rs",
+      "primitive": "SegQueue",
+      "status": "LIVE_PRODUCTION_NATIVE",
+      "semantics": "Unbounded MPMC FIFO with best-effort count and publication snapshots; browser wasm uses Mutex<VecDeque>."
+    },
+    {
+      "surface_id": "QUEUE-BLOCKING-POOL",
+      "source_path": "src/runtime/blocking_pool.rs",
+      "primitive": "SegQueue",
+      "status": "LIVE_PRODUCTION",
+      "semantics": "Unbounded global blocking-task queue plus cohort queues participating in dispatch, spill, cancellation, and shutdown."
+    },
+    {
+      "surface_id": "QUEUE-EPOCH-GC",
+      "source_path": "src/runtime/epoch_gc.rs",
+      "primitive": "SegQueue",
+      "status": "LIVE_PRODUCTION",
+      "semantics": "Deferred cleanup work queue with size, backpressure, batch, and cleanup accounting."
+    },
+    {
+      "surface_id": "QUEUE-EPOCH-TRACKING",
+      "source_path": "src/runtime/epoch_tracking.rs",
+      "primitive": "SegQueue",
+      "status": "LIVE_PRODUCTION",
+      "semantics": "Deferred cleanup-entry queue coupled to epoch and memory accounting."
+    },
+    {
+      "surface_id": "QUEUE-OTLP-EXPORT",
+      "source_path": "src/observability/otlp_trace_exporter.rs",
+      "primitive": "ArrayQueue",
+      "status": "LIVE_PRODUCTION",
+      "semantics": "Bounded FIFO with atomic drop-oldest replacement and dropped-item accounting."
+    }
+  ],
+  "benchmark_correction": {
+    "source_path": "benches/otlp_queue_contention.rs",
+    "old_fixed_speedup_claim_removed": true,
+    "old_hand_written_array_queue_approximation_removed": true,
+    "production_type_used": "asupersync::observability::otlp_trace_exporter::BoundedExportQueue",
+    "safe_prototype": "parking_lot::Mutex<VecDeque<T>>",
+    "shared_semantics": "Capacity 1000, drop oldest on overflow, return dropped item, count drops, FIFO dequeue.",
+    "fixed_total_work_per_cell": true,
+    "total_operations_per_cell": 65536,
+    "payload_bytes": 64,
+    "dequeue_every_n_enqueues": 10,
+    "timed_workload_includes": [
+      "queue construction",
+      "64-byte payload allocation",
+      "producer thread spawn and join",
+      "enqueue and dequeue operations"
+    ],
+    "not_a_pure_queue_operation_latency_measurement": true,
+    "producer_thread_counts": [
+      1,
+      8,
+      32,
+      64
+    ],
+    "criterion_sample_size": 10
+  },
+  "historical_harness_replay": {
+    "status": "PASS_NOT_GATE_EVIDENCE",
+    "source": "Committed pre-correction benchmark at benchmark_baseline_commit",
+    "worker": "ovh-a",
+    "exit_code": 0,
+    "criterion_mode": "quick",
+    "admissible_for_gate": false,
+    "reasons": [
+      "It benchmarked a hand-written ArrayQueue approximation rather than the production BoundedExportQueue.",
+      "Its manual pop and push overflow path was not the production force_push algorithm.",
+      "Its total operation count increased with producer count.",
+      "Its two-sample quick estimates cannot support tail-latency claims."
+    ],
+    "observation": "The approximation was slower than the mutex at every 1/2/4/8/16-producer cell, directly contradicting the benchmark file's old unqualified 10x+ purpose statement without measuring the current production queue."
+  },
+  "formal_execution": {
+    "status": "PASS",
+    "runner": "RCH clean-overlay remote benchmark",
+    "worker": "ovh-a",
+    "command": "RCH_WORKER=ovh-a RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path benches/otlp_queue_contention.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_BENCH_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_queue_safe_current_otlp\" cargo bench -p asupersync --bench otlp_queue_contention --features criterion-benches",
+    "exit_code": 0,
+    "sample_size": 10,
+    "remote_command_ms": 416182,
+    "rch_wall_seconds": 422.9,
+    "host": {
+      "architecture": "x86_64",
+      "logical_cpus": 16,
+      "physical_cores": 8,
+      "threads_per_core": 2,
+      "sockets": 1,
+      "numa_nodes": 1,
+      "cpu_model": "AMD Ryzen 7 5800X 8-Core Processor",
+      "kernel": "Linux 6.17.0-8-generic x86_64 GNU/Linux",
+      "memory_kib": 65729736,
+      "rustc": "rustc 1.99.0-nightly (dc3f85158 2026-07-26)",
+      "llvm": "22.1.8"
+    },
+    "results": [
+      {
+        "cell_id": "OTLP-1-PRODUCER",
+        "producer_threads": 1,
+        "oversubscribed": false,
+        "candidate_verdict": "TIE_INTERVAL_OVERLAP",
+        "safe_time_delta_bps": 58,
+        "safe_mutex_queue": {
+          "time_lower_ns": 838692.445416532,
+          "time_point_ns": 850763.5683784105,
+          "time_upper_ns": 867526.1934195512,
+          "throughput_point_elements_per_second": 77031977
+        },
+        "incumbent_array_queue": {
+          "time_lower_ns": 840974.9390585792,
+          "time_point_ns": 845878.6693045272,
+          "time_upper_ns": 855248.9783497998,
+          "throughput_point_elements_per_second": 77476833
+        }
+      },
+      {
+        "cell_id": "OTLP-8-PRODUCERS",
+        "producer_threads": 8,
+        "oversubscribed": false,
+        "candidate_verdict": "WIN",
+        "safe_time_delta_bps": -870,
+        "safe_mutex_queue": {
+          "time_lower_ns": 5269115.014403292,
+          "time_point_ns": 5298558.062337662,
+          "time_upper_ns": 5315185.046444122,
+          "throughput_point_elements_per_second": 12368648
+        },
+        "incumbent_array_queue": {
+          "time_lower_ns": 5788783.156149221,
+          "time_point_ns": 5803152.1498376625,
+          "time_upper_ns": 5819424.2779644,
+          "throughput_point_elements_per_second": 11293173
+        }
+      },
+      {
+        "cell_id": "OTLP-32-PRODUCERS",
+        "producer_threads": 32,
+        "oversubscribed": true,
+        "candidate_verdict": "TIE_INTERVAL_OVERLAP",
+        "safe_time_delta_bps": 862,
+        "safe_mutex_queue": {
+          "time_lower_ns": 7634504.165555555,
+          "time_point_ns": 7883696.207575758,
+          "time_upper_ns": 8112074.405481132,
+          "throughput_point_elements_per_second": 8312852
+        },
+        "incumbent_array_queue": {
+          "time_lower_ns": 6414693.266363637,
+          "time_point_ns": 7258353.305548997,
+          "time_upper_ns": 8139772.359307359,
+          "throughput_point_elements_per_second": 9029045
+        }
+      },
+      {
+        "cell_id": "OTLP-64-PRODUCERS",
+        "producer_threads": 64,
+        "oversubscribed": true,
+        "candidate_verdict": "REGRESSION",
+        "safe_time_delta_bps": 2464,
+        "safe_mutex_queue": {
+          "time_lower_ns": 9185940.792613637,
+          "time_point_ns": 9368912.144415585,
+          "time_upper_ns": 9606412.285508474,
+          "throughput_point_elements_per_second": 6995049
+        },
+        "incumbent_array_queue": {
+          "time_lower_ns": 6657701.973033297,
+          "time_point_ns": 7517051.508719851,
+          "time_upper_ns": 8454725.348105831,
+          "throughput_point_elements_per_second": 8718312
+        }
+      }
+    ]
+  },
+  "evidence_gaps_after_stop": [
+    {
+      "axis": "physical-core scaling",
+      "status": "NO_CLAIM_WORKER_UNAVAILABLE",
+      "detail": "The admitted fleet exposed at most 16 logical CPUs. The 32- and 64-producer rows are explicitly oversubscribed and are not 32- or 64-core results."
+    },
+    {
+      "axis": "Apple Silicon",
+      "status": "NO_CLAIM_HOST_UNAVAILABLE",
+      "detail": "No admitted Apple Silicon worker was available."
+    },
+    {
+      "axis": "p50/p95/p99/p999 operation latency",
+      "status": "NO_CLAIM_NOT_MEASURED",
+      "detail": "Criterion reports whole-workload estimate intervals here, not per-operation latency quantiles."
+    },
+    {
+      "axis": "fairness and starvation",
+      "status": "NO_CLAIM_NOT_MEASURED",
+      "detail": "The exporter workload checks aggregate completion, not per-producer service distribution."
+    },
+    {
+      "axis": "cancellation and shutdown latency",
+      "status": "NOT_APPLICABLE_TO_DECISIVE_EXPORTER_CELL",
+      "detail": "The synchronous exporter queue has no cancellation or shutdown protocol; those axes belong to scheduler and channel workloads."
+    },
+    {
+      "axis": "allocation and RSS",
+      "status": "NO_CLAIM_NOT_MEASURED",
+      "detail": "No allocator counter or process-residency recorder was attached."
+    },
+    {
+      "axis": "isolated queue cost and end-to-end exporter service",
+      "status": "NO_CLAIM_WORKLOAD_SCOPE",
+      "detail": "The timed region includes queue construction, payload allocation, and thread spawn/join around production queue operations. It is neither a pure operation-cost benchmark nor a full exporter service run."
+    },
+    {
+      "axis": "scheduler, blocking-pool, and epoch workloads",
+      "status": "NOT_RUN_AFTER_TERMINAL_REGRESSION",
+      "detail": "The conjunctive candidate gate had already failed; these remain required before any future cutover reconsideration."
+    }
+  ],
+  "source_pins": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "9ba1cd63bcaee1665f101d8804e5deae5e046313dab1735f69564c5def18280e",
+      "line_count": 1035
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+      "line_count": 4666
+    },
+    {
+      "path": "src/channel/mpsc.rs",
+      "sha256": "ea58ac0b1d78738a4625f366be28e7fa91fadd0ef662446e761ded0b30bb338d",
+      "line_count": 6283
+    },
+    {
+      "path": "src/runtime/scheduler/global_queue.rs",
+      "sha256": "432b4b1b845fec0bd37210b4b6559e51f715ae87e370b8c7bb62b48b56e42180",
+      "line_count": 1134
+    },
+    {
+      "path": "src/runtime/blocking_pool.rs",
+      "sha256": "6bbf8cf9f31a911685195ed715622609bdbb3d395bdf1ab8ff82220e618ccf53",
+      "line_count": 3626
+    },
+    {
+      "path": "src/runtime/epoch_gc.rs",
+      "sha256": "d9195dc225c6ba3af5ffcc1c399fa48be397aa1929b27f4d3603a26120072627",
+      "line_count": 1638
+    },
+    {
+      "path": "src/runtime/epoch_tracking.rs",
+      "sha256": "bbff605169a5ec1efa4396c315a7d41c3d9a5ac04f1965cb4660645d77886961",
+      "line_count": 1035
+    },
+    {
+      "path": "src/observability/otlp_trace_exporter.rs",
+      "sha256": "186ba75ae2312f04b84304ea175eb5e3debc1b9c211c66990a313825791f1e73",
+      "line_count": 1048
+    },
+    {
+      "path": "benches/otlp_queue_contention.rs",
+      "sha256": "84b31c07cc3349ef00829730902a5d3755482acd08d50c8e2aece4badbdd8dcb",
+      "line_count": 170
+    }
+  ],
+  "no_claims": [
+    "No crossbeam-queue removal, production cutover, or new queue implementation is authorized.",
+    "The corrected exporter result does not prove scheduler, blocking-pool, epoch, or channel behavior or performance.",
+    "The corrected benchmark is a synthetic production-queue contention workload, not an isolated operation-cost or end-to-end exporter-service result.",
+    "Producer-thread counts are not physical-core counts; 32 and 64 producers were oversubscribed on 16 logical CPUs.",
+    "No p50, p95, p99, p999, fairness, starvation, cancellation-latency, allocation, RSS, Apple Silicon, broad workspace health, release-readiness, or no-regression claim is made.",
+    "No unsafe code was added and no hand-written lock-free queue is authorized."
+  ]
+}

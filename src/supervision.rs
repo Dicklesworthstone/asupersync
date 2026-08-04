@@ -16,26 +16,25 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use asupersync::supervision::{SupervisionStrategy, RestartConfig};
+//! <!-- core-api-doctest: supervision-basics -->
+//! ```
+//! use asupersync::{Cx, main};
+//! use asupersync::supervision::{BackoffStrategy, RestartConfig, SupervisionStrategy};
 //! use std::time::Duration;
 //!
-//! // Stop on any error
-//! let stop = SupervisionStrategy::Stop;
+//! #[main]
+//! async fn main(cx: &Cx) {
+//!     cx.checkpoint().expect("example starts active");
+//!     let restart = RestartConfig::new(3, Duration::from_secs(60))
+//!         .with_backoff(BackoffStrategy::Fixed(Duration::from_millis(100)));
+//!     let strategy = SupervisionStrategy::Restart(restart);
+//!     assert!(matches!(strategy, SupervisionStrategy::Restart(_)));
 //!
-//! // Restart up to 3 times in 60 seconds
-//! let restart = SupervisionStrategy::Restart(RestartConfig {
-//!     max_restarts: 3,
-//!     window: Duration::from_mins(1),
-//!     backoff: BackoffStrategy::Exponential {
-//!         initial: Duration::from_millis(100),
-//!         max: Duration::from_secs(10),
-//!         multiplier: 2.0,
-//!     },
-//! });
-//!
-//! // Escalate to parent
-//! let escalate = SupervisionStrategy::Escalate;
+//!     let disabled = RestartConfig::new(0, Duration::from_secs(60));
+//!     assert_eq!(disabled.max_restarts, 0);
+//!     assert!(matches!(SupervisionStrategy::Stop, SupervisionStrategy::Stop));
+//!     assert!(matches!(SupervisionStrategy::Escalate, SupervisionStrategy::Escalate));
+//! }
 //! ```
 
 use std::collections::BTreeMap;

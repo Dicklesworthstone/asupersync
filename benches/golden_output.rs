@@ -102,9 +102,10 @@ fn golden_mode() -> GoldenMode {
 }
 
 fn mark_scenario_seen(scenario: &str) {
-    if !GOLDEN_SCENARIOS.contains(&scenario) {
-        panic!("golden scenario {scenario:?} is not declared in GOLDEN_SCENARIOS");
-    }
+    assert!(
+        GOLDEN_SCENARIOS.contains(&scenario),
+        "golden scenario {scenario:?} is not declared in GOLDEN_SCENARIOS"
+    );
     let seen = SEEN_SCENARIOS.get_or_init(|| Mutex::new(BTreeSet::new()));
     assert!(
         seen.lock()

@@ -31,10 +31,10 @@
 //! let result = verify_trace("trace.bin", &VerificationOptions::strict())?;
 //! ```
 
-use super::file::{HEADER_SIZE, TRACE_FILE_VERSION, TRACE_MAGIC};
-use super::replay::{REPLAY_SCHEMA_VERSION, ReplayEvent, TraceMetadata};
+use super::file::{TRACE_FILE_VERSION, TraceFileError, TraceReader};
+use super::replay::{ReplayEvent, TraceMetadata};
 use std::fs::File;
-use std::io::{self, BufReader, Read, Seek, SeekFrom};
+use std::io::{self, Read};
 use std::path::Path;
 
 // =============================================================================
@@ -312,6 +312,10 @@ pub struct VerificationResult {
 
     /// Whether full verification was completed.
     pub completed: bool,
+
+    /// Current containers authenticate one complete canonical event stream, so
+    /// a truncated prefix is not independently checksum-admitted.
+    complete_stream_required: bool,
 }
 
 impl VerificationResult {
@@ -324,6 +328,7 @@ impl VerificationResult {
             issues: Vec::new(),
             metadata: None,
             completed: false,
+            complete_stream_required: false,
         }
     }
 
@@ -342,7 +347,7 @@ impl VerificationResult {
     /// Returns true if the trace is partially usable.
     #[must_use]
     pub fn is_partially_usable(&self) -> bool {
-        !self.has_fatal_issues() && self.verified_events > 0
+        !self.has_fatal_issues() && !self.completed && self.safe_event_count() > 0
     }
 
     /// Returns the list of issues found.
@@ -365,7 +370,7 @@ impl VerificationResult {
     /// Returns the number of events that can be safely replayed.
     #[must_use]
     pub fn safe_event_count(&self) -> u64 {
-        if self.has_fatal_issues() {
+        if self.has_fatal_issues() || (self.complete_stream_required && !self.completed) {
             0
         } else {
             self.verified_events
@@ -430,14 +435,15 @@ pub fn verify_trace(
     options: &VerificationOptions,
 ) -> io::Result<VerificationResult> {
     let path = path.as_ref();
-    let file = File::open(path)?;
+    let mut file = File::open(path)?;
     let file_size = file.metadata()?.len();
 
     let mut result = VerificationResult::new(file_size);
-    let mut reader = BufReader::new(file);
 
-    // Check minimum file size
-    let min_size = HEADER_SIZE as u64 + 8; // header + event_count
+    // The smallest supported container is v1: magic + version + flags +
+    // metadata length + event count. Later versions add header fields.
+    const MIN_TRACE_FILE_SIZE: u64 = 11 + 2 + 2 + 4 + 8;
+    let min_size = MIN_TRACE_FILE_SIZE;
     if file_size < min_size {
         result.add_issue(IntegrityIssue::FileTooSmall {
             actual: file_size,
@@ -446,37 +452,123 @@ pub fn verify_trace(
         return Ok(result);
     }
 
-    // Verify header
-    if !verify_header(&mut reader, &mut result, options) {
-        return Ok(result);
-    }
+    // Preserve the concrete invalid magic bytes for the diagnostic surface.
+    let mut found_magic = [0u8; 11];
+    file.read_exact(&mut found_magic)?;
+    drop(file);
 
-    // Verify metadata
-    if !verify_metadata(&mut reader, &mut result, options) {
-        return Ok(result);
-    }
-
-    // Read event count
-    let event_count = match read_event_count(&mut reader) {
-        Ok(count) => count,
-        Err(e) => {
-            result.add_issue(IntegrityIssue::IoError {
-                message: e.to_string(),
-            });
+    let mut reader = match TraceReader::open(path) {
+        Ok(reader) => reader,
+        Err(error) => {
+            let issue = match error {
+                TraceFileError::InvalidMagic => IntegrityIssue::InvalidMagic { found: found_magic },
+                TraceFileError::UnsupportedVersion { found, .. } => {
+                    IntegrityIssue::UnsupportedVersion {
+                        found,
+                        max_supported: TRACE_FILE_VERSION,
+                    }
+                }
+                TraceFileError::UnsupportedFlags(flags) => {
+                    IntegrityIssue::UnsupportedFlags { flags }
+                }
+                TraceFileError::SchemaMismatch { found, expected } => {
+                    IntegrityIssue::SchemaMismatch { found, expected }
+                }
+                metadata_error @ (TraceFileError::ChecksumMismatch {
+                    section: "metadata",
+                }
+                | TraceFileError::Deserialize(_)
+                | TraceFileError::OversizedField {
+                    field: "meta_len", ..
+                }) => IntegrityIssue::InvalidMetadata {
+                    message: metadata_error.to_string(),
+                },
+                TraceFileError::Truncated => IntegrityIssue::Truncated { at_event: 0 },
+                TraceFileError::Io(io_error) if io_error.kind() == io::ErrorKind::UnexpectedEof => {
+                    IntegrityIssue::Truncated { at_event: 0 }
+                }
+                other => IntegrityIssue::IoError {
+                    message: other.to_string(),
+                },
+            };
+            result.add_issue(issue);
             return Ok(result);
         }
     };
-    result.declared_events = event_count;
 
-    // Verify events if requested
-    if options.verify_events {
-        verify_events(&mut reader, &mut result, options);
-    } else {
-        // Just count events without full deserialization
-        count_events(&mut reader, &mut result);
+    result.declared_events = reader.event_count();
+    result.metadata = Some(reader.metadata().clone());
+    result.complete_stream_required = reader.file_version() >= 3;
+
+    // Quick mode validates the complete container header, metadata, schema, and
+    // metadata digest. It intentionally does not scan the event stream.
+    if !options.verify_events {
+        result.completed = true;
+        return Ok(result);
     }
 
-    result.completed = true;
+    let mut prev_time: Option<u64> = None;
+    while result.verified_events < result.declared_events
+        && result.issues.len() < options.max_issues
+    {
+        match reader.read_event() {
+            Ok(Some(event)) => {
+                if options.check_monotonicity
+                    && let Some(curr_time) = extract_timestamp(&event)
+                {
+                    if let Some(prev) = prev_time
+                        && curr_time < prev
+                    {
+                        result.add_issue(IntegrityIssue::TimelineNonMonotonic {
+                            at_event: result.verified_events,
+                            prev_time: prev,
+                            curr_time,
+                        });
+                        if options.fail_fast {
+                            break;
+                        }
+                    }
+                    prev_time = Some(curr_time);
+                }
+                result.verified_events += 1;
+            }
+            Ok(None) => break,
+            Err(error) => {
+                let issue = match error {
+                    TraceFileError::Truncated => IntegrityIssue::Truncated {
+                        at_event: result.verified_events,
+                    },
+                    TraceFileError::Io(io_error)
+                        if io_error.kind() == io::ErrorKind::UnexpectedEof =>
+                    {
+                        IntegrityIssue::Truncated {
+                            at_event: result.verified_events,
+                        }
+                    }
+                    other => IntegrityIssue::InvalidEvent {
+                        index: result.verified_events,
+                        message: other.to_string(),
+                    },
+                };
+                result.add_issue(issue);
+                break;
+            }
+        }
+    }
+
+    if result.verified_events != result.declared_events
+        && !result
+            .issues
+            .iter()
+            .any(|issue| matches!(issue, IntegrityIssue::EventCountMismatch { .. }))
+    {
+        result.add_issue(IntegrityIssue::EventCountMismatch {
+            declared: result.declared_events,
+            actual: result.verified_events,
+        });
+    }
+
+    result.completed = result.verified_events == result.declared_events;
     Ok(result)
 }
 
@@ -489,7 +581,7 @@ pub fn verify_trace(
 /// Returns an error if the file cannot be opened.
 pub fn is_trace_valid_quick(path: impl AsRef<Path>) -> io::Result<bool> {
     let result = verify_trace(path, &VerificationOptions::quick())?;
-    Ok(result.is_valid() || !result.has_fatal_issues())
+    Ok(result.is_valid())
 }
 
 /// Finds the first corrupted event in a trace.
@@ -516,312 +608,6 @@ pub fn find_first_corruption(path: impl AsRef<Path>) -> io::Result<Option<u64>> 
     }
 
     Ok(None)
-}
-
-// =============================================================================
-// Internal Functions
-// =============================================================================
-
-/// Maximum metadata length (1 MB). Anything larger indicates corruption.
-const MAX_METADATA_LEN: usize = 1_048_576;
-
-/// Maximum single event length (16 MB). Anything larger indicates corruption.
-const MAX_EVENT_LEN: usize = 16_777_216;
-
-fn verify_header(
-    reader: &mut BufReader<File>,
-    result: &mut VerificationResult,
-    options: &VerificationOptions,
-) -> bool {
-    // Read magic bytes
-    let mut magic = [0u8; 11];
-    if reader.read_exact(&mut magic).is_err() {
-        result.add_issue(IntegrityIssue::IoError {
-            message: "failed to read magic bytes".to_string(),
-        });
-        return false;
-    }
-
-    if &magic != TRACE_MAGIC {
-        result.add_issue(IntegrityIssue::InvalidMagic { found: magic });
-        return !options.fail_fast;
-    }
-
-    // Read version
-    let mut version_bytes = [0u8; 2];
-    if reader.read_exact(&mut version_bytes).is_err() {
-        result.add_issue(IntegrityIssue::IoError {
-            message: "failed to read version".to_string(),
-        });
-        return false;
-    }
-    let version = u16::from_le_bytes(version_bytes);
-
-    if version > TRACE_FILE_VERSION {
-        result.add_issue(IntegrityIssue::UnsupportedVersion {
-            found: version,
-            max_supported: TRACE_FILE_VERSION,
-        });
-        return !options.fail_fast;
-    }
-
-    // Read flags
-    let mut flags_bytes = [0u8; 2];
-    if reader.read_exact(&mut flags_bytes).is_err() {
-        result.add_issue(IntegrityIssue::IoError {
-            message: "failed to read flags".to_string(),
-        });
-        return false;
-    }
-    let flags = u16::from_le_bytes(flags_bytes);
-
-    // Check for unsupported flags (only compression flag is defined)
-    if flags & super::file::FLAG_COMPRESSED != 0 {
-        result.add_issue(IntegrityIssue::UnsupportedFlags { flags });
-        return !options.fail_fast;
-    }
-
-    // Read compression byte (only in version 2+)
-    if version >= 2 {
-        let mut compression_byte = [0u8; 1];
-        if reader.read_exact(&mut compression_byte).is_err() {
-            result.add_issue(IntegrityIssue::IoError {
-                message: "failed to read compression byte".to_string(),
-            });
-            return false;
-        }
-    }
-
-    true
-}
-
-fn verify_metadata(
-    reader: &mut BufReader<File>,
-    result: &mut VerificationResult,
-    options: &VerificationOptions,
-) -> bool {
-    // Read metadata length
-    let mut meta_len_bytes = [0u8; 4];
-    if reader.read_exact(&mut meta_len_bytes).is_err() {
-        result.add_issue(IntegrityIssue::IoError {
-            message: "failed to read metadata length".to_string(),
-        });
-        return false;
-    }
-    let meta_len = u32::from_le_bytes(meta_len_bytes) as usize;
-
-    // Guard against corrupted metadata length to prevent OOM.
-    if meta_len > MAX_METADATA_LEN {
-        result.add_issue(IntegrityIssue::InvalidMetadata {
-            message: format!("metadata length {meta_len} exceeds maximum {MAX_METADATA_LEN}"),
-        });
-        return !options.fail_fast;
-    }
-
-    // Read metadata bytes
-    let mut meta_bytes = vec![0u8; meta_len];
-    if reader.read_exact(&mut meta_bytes).is_err() {
-        result.add_issue(IntegrityIssue::IoError {
-            message: "failed to read metadata".to_string(),
-        });
-        return false;
-    }
-
-    // Deserialize metadata
-    let metadata: TraceMetadata = match rmp_serde::from_slice(&meta_bytes) {
-        Ok(m) => m,
-        Err(e) => {
-            let e: rmp_serde::decode::Error = e;
-            result.add_issue(IntegrityIssue::InvalidMetadata {
-                message: e.to_string(),
-            });
-            return !options.fail_fast;
-        }
-    };
-
-    // Check schema version
-    if metadata.version != REPLAY_SCHEMA_VERSION {
-        result.add_issue(IntegrityIssue::SchemaMismatch {
-            found: metadata.version,
-            expected: REPLAY_SCHEMA_VERSION,
-        });
-        if options.fail_fast {
-            return false;
-        }
-    }
-
-    result.metadata = Some(metadata);
-    true
-}
-
-fn read_event_count(reader: &mut BufReader<File>) -> io::Result<u64> {
-    let mut count_bytes = [0u8; 8];
-    reader.read_exact(&mut count_bytes)?;
-    Ok(u64::from_le_bytes(count_bytes))
-}
-
-#[allow(clippy::too_many_lines)]
-fn verify_events(
-    reader: &mut BufReader<File>,
-    result: &mut VerificationResult,
-    options: &VerificationOptions,
-) {
-    let mut prev_time: Option<u64> = None;
-    let mut event_index = 0u64;
-
-    loop {
-        if result.issues.len() >= options.max_issues {
-            break;
-        }
-
-        // Read event length
-        let mut len_bytes = [0u8; 4];
-        match reader.read_exact(&mut len_bytes) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                // Check if we've read all declared events
-                if event_index < result.declared_events {
-                    result.add_issue(IntegrityIssue::Truncated {
-                        at_event: event_index,
-                    });
-                }
-                break;
-            }
-            Err(e) => {
-                result.add_issue(IntegrityIssue::IoError {
-                    message: e.to_string(),
-                });
-                break;
-            }
-        }
-
-        let len = u32::from_le_bytes(len_bytes) as usize;
-
-        // Guard against corrupted event length to prevent OOM.
-        if len > MAX_EVENT_LEN {
-            result.add_issue(IntegrityIssue::InvalidEvent {
-                index: event_index,
-                message: format!("event length {len} exceeds maximum {MAX_EVENT_LEN}"),
-            });
-            if options.fail_fast {
-                break;
-            }
-            event_index += 1;
-            continue;
-        }
-
-        // Read event bytes
-        let mut event_bytes = vec![0u8; len];
-        match reader.read_exact(&mut event_bytes) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                result.add_issue(IntegrityIssue::Truncated {
-                    at_event: event_index,
-                });
-                break;
-            }
-            Err(e) => {
-                result.add_issue(IntegrityIssue::IoError {
-                    message: e.to_string(),
-                });
-                if options.fail_fast {
-                    break;
-                }
-                event_index += 1;
-                continue;
-            }
-        }
-
-        // Deserialize event
-        let event: ReplayEvent = match rmp_serde::from_slice(&event_bytes) {
-            Ok(e) => e,
-            Err(e) => {
-                let e: rmp_serde::decode::Error = e;
-                result.add_issue(IntegrityIssue::InvalidEvent {
-                    index: event_index,
-                    message: e.to_string(),
-                });
-                if options.fail_fast {
-                    break;
-                }
-                event_index += 1;
-                continue;
-            }
-        };
-
-        // Check timeline monotonicity if requested
-        if options.check_monotonicity {
-            if let Some(curr_time) = extract_timestamp(&event) {
-                if let Some(prev) = prev_time {
-                    if curr_time < prev {
-                        result.add_issue(IntegrityIssue::TimelineNonMonotonic {
-                            at_event: event_index,
-                            prev_time: prev,
-                            curr_time,
-                        });
-                        if options.fail_fast {
-                            break;
-                        }
-                    }
-                }
-                prev_time = Some(curr_time);
-            }
-        }
-
-        result.verified_events += 1;
-        event_index += 1;
-
-        // Check if we've read all declared events
-        if event_index >= result.declared_events {
-            break;
-        }
-    }
-
-    // Check event count mismatch
-    if result.verified_events != result.declared_events && !result.has_fatal_issues() {
-        result.add_issue(IntegrityIssue::EventCountMismatch {
-            declared: result.declared_events,
-            actual: result.verified_events,
-        });
-    }
-}
-
-fn count_events(reader: &mut BufReader<File>, result: &mut VerificationResult) {
-    let mut event_index = 0u64;
-
-    loop {
-        // Read event length
-        let mut len_bytes = [0u8; 4];
-        if reader.read_exact(&mut len_bytes).is_err() {
-            break;
-        }
-
-        let len = u32::from_le_bytes(len_bytes) as usize;
-
-        // Skip event bytes
-        let len_i64 = i64::try_from(len).unwrap_or(i64::MAX);
-        if reader.seek(SeekFrom::Current(len_i64)).is_err() {
-            result.add_issue(IntegrityIssue::Truncated {
-                at_event: event_index,
-            });
-            break;
-        }
-
-        result.verified_events += 1;
-        event_index += 1;
-
-        if event_index >= result.declared_events {
-            break;
-        }
-    }
-
-    if result.verified_events != result.declared_events {
-        // ubs:ignore - not a secret
-        result.add_issue(IntegrityIssue::EventCountMismatch {
-            declared: result.declared_events,
-            actual: result.verified_events,
-        });
-    }
 }
 
 /// Extracts a timestamp from a replay event (in nanoseconds).
@@ -853,6 +639,7 @@ mod tests {
     use super::*;
     use crate::trace::file::write_trace;
     use crate::trace::replay::CompactTaskId;
+    use std::io::{Seek, SeekFrom};
     use tempfile::NamedTempFile;
 
     fn sample_events(count: u64) -> Vec<ReplayEvent> {
@@ -1020,7 +807,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_recovery_info() {
+    fn current_v3_truncation_is_not_checksum_admitted() {
         let temp = NamedTempFile::new().unwrap();
         let path = temp.path();
 
@@ -1037,10 +824,12 @@ mod tests {
 
         let result = verify_trace(path, &VerificationOptions::default()).unwrap();
 
-        // Should be partially usable
-        assert!(result.is_partially_usable());
-        assert!(result.safe_event_count() > 0);
-        assert!(result.safe_event_count() < 100);
+        // Some records can decode before truncation, but v3 authenticates the
+        // complete event stream and therefore admits no prefix as safe replay.
+        assert!(result.verified_events > 0);
+        assert!(result.verified_events < 100);
+        assert!(!result.is_partially_usable());
+        assert_eq!(result.safe_event_count(), 0);
     }
 
     #[test]
@@ -1410,6 +1199,16 @@ mod tests {
 
         let is_valid = is_trace_valid_quick(path).unwrap();
         assert!(!is_valid);
+    }
+
+    #[test]
+    fn quick_verification_rejects_nonfatal_flag_issue() {
+        let temp = NamedTempFile::new().unwrap();
+        write_trace(temp.path(), &TraceMetadata::new(42), &[]).unwrap();
+        let mut invalid_flags = std::fs::read(temp.path()).unwrap();
+        invalid_flags[13..15].copy_from_slice(&0x8000u16.to_le_bytes());
+        std::fs::write(temp.path(), invalid_flags).unwrap();
+        assert!(!is_trace_valid_quick(temp.path()).unwrap());
     }
 
     // ── Display for valid and invalid result ───────────────────────

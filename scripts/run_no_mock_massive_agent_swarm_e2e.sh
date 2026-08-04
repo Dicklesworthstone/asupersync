@@ -158,7 +158,14 @@ print(json.dumps(out, sort_keys=True, separators=(",", ":")))
 PY
 )"
 
-DISPLAY_COMMAND="timeout ${TIMEOUT_SECONDS} env RCH_REQUIRE_REMOTE=1 ${RCH_BIN} exec -- cargo test -p asupersync --test no_mock_massive_agent_swarm_e2e_contract --features ${FEATURES} -- --nocapture"
+# Must mirror the COMMAND array built below (br-asupersync-t440nm). This string
+# is recorded into the manifest as the command an operator would replay, so a
+# hand-written twin that drifts from the real invocation is an evidence bug, not
+# a cosmetic one: it previously omitted the entire `env ... CARGO_TARGET_DIR=...`
+# prefix, so the advertised replay invoked the test binary with no explicit
+# target directory and would have built somewhere other than the real run.
+# Keep the two in sync when either changes.
+DISPLAY_COMMAND="timeout ${TIMEOUT_SECONDS} env RCH_REQUIRE_REMOTE=1 ${RCH_BIN} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS=-C debuginfo=0 CARGO_TARGET_DIR=${CARGO_TARGET_DIR} cargo test -p asupersync --test no_mock_massive_agent_swarm_e2e_contract --features ${FEATURES} -- --nocapture"
 
 python3 - "$CONTRACT_PATH" "$SCENARIO_CORPUS_PATH" "$MANIFEST_PATH" "$PROFILE" "$RUN_ID" "$MODE" "$FEATURES" "$TIMEOUT_SECONDS" "$GIT_COMMIT" "$OVERRIDES_JSON" "$DISPLAY_COMMAND" <<'PY'
 import json

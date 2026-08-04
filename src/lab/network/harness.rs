@@ -332,14 +332,16 @@ impl SimNode {
             from: req.origin_node.clone(),
         });
 
-        // Bulk-evict stale keys for memory hygiene. `check()` also rejects
-        // the accessed key once its TTL has elapsed, so callers cannot
-        // accidentally revive expired dedup state by skipping this pass.
+        // Bulk-evict terminal records whose retention window elapsed. Live
+        // operations remain resident regardless of age.
         let _ = self.dedup.evict_expired(now);
 
-        // Check idempotency
+        // Decide and reserve new keys in one store operation so no second
+        // caller can observe a gap between the check and insertion.
         let request = IdempotencyRequestFingerprint::from_spawn_request(&req);
-        let dedup = self.dedup.check(&req.idempotency_key, &request, now);
+        let dedup =
+            self.dedup
+                .check_and_record(req.idempotency_key, req.remote_task_id, request, now);
         match dedup {
             crate::remote::DedupDecision::Duplicate(record) => {
                 if record.outcome.is_none() {
@@ -389,10 +391,6 @@ impl SimNode {
             }
             crate::remote::DedupDecision::New => {}
         }
-
-        // Record for idempotency
-        self.dedup
-            .record(req.idempotency_key, req.remote_task_id, request, now);
 
         // Accept the spawn
         let task = RunningTask {
@@ -494,7 +492,7 @@ impl SimNode {
 
     /// Advances virtual work on all running tasks by the given duration.
     /// Returns completed or cancelled tasks that need result delivery.
-    pub fn tick(&mut self, elapsed: Duration) -> Vec<(NodeId, RemoteMessage)> {
+    pub fn tick(&mut self, elapsed: Duration, now: Time) -> Vec<(NodeId, RemoteMessage)> {
         if self.crashed {
             return Vec::new();
         }
@@ -507,14 +505,18 @@ impl SimNode {
             if task.cancel_requested {
                 let outcome =
                     RemoteOutcome::Cancelled(crate::types::CancelReason::user("harness cancel"));
-                let _ = self.dedup.complete(&task.idempotency_key, outcome.clone());
+                let _ = self
+                    .dedup
+                    .complete(&task.idempotency_key, *id, outcome.clone(), now);
                 finalized.push((*id, task.origin.clone(), outcome));
                 self.event_log
                     .push(NodeEvent::TaskCancelled { task_id: *id });
                 to_remove.push(*id);
             } else if task.work_remaining <= elapsed {
                 let outcome = RemoteOutcome::Success(vec![]);
-                let _ = self.dedup.complete(&task.idempotency_key, outcome.clone());
+                let _ = self
+                    .dedup
+                    .complete(&task.idempotency_key, *id, outcome.clone(), now);
                 finalized.push((*id, task.origin.clone(), outcome));
                 self.event_log
                     .push(NodeEvent::TaskCompleted { task_id: *id });
@@ -916,6 +918,11 @@ impl DistributedHarness {
         }
     }
 
+    fn logical_now(&self) -> Time {
+        let nanos = self.sim_time.as_nanos().min(u128::from(u64::MAX)) as u64;
+        Time::from_nanos(nanos)
+    }
+
     /// Delivers packets from the deterministic virtual network to the appropriate nodes.
     fn deliver_packets(&mut self) {
         // Phase 1: Drain raw payloads without borrowing `self.nodes` and
@@ -951,10 +958,7 @@ impl DistributedHarness {
             }
         }
 
-        let now = {
-            let nanos = self.sim_time.as_nanos().min(u128::from(u64::MAX)) as u64;
-            Time::from_nanos(nanos)
-        };
+        let now = self.logical_now();
         for (node_id, envelope) in deliveries {
             if let Some(node) = self.nodes.get_mut(&node_id) {
                 node.handle_message(envelope, now);
@@ -965,9 +969,10 @@ impl DistributedHarness {
     /// Ticks all nodes and collects result deliveries.
     fn tick_nodes(&mut self, elapsed: Duration) {
         let mut result_messages: Vec<(NodeId, NodeId, RemoteMessage)> = Vec::new();
+        let now = self.logical_now();
 
         for (node_id, node) in &mut self.nodes {
-            let completed = node.tick(elapsed);
+            let completed = node.tick(elapsed, now);
             for (dest, msg) in completed {
                 if let RemoteMessage::ResultDelivery(ref rd) = msg {
                     self.trace.push(HarnessTraceEvent {
@@ -1055,6 +1060,7 @@ impl DistributedHarness {
 
     /// Executes a fault against the harness.
     fn execute_fault(&mut self, fault: &HarnessFault) {
+        let now = self.logical_now();
         self.trace.push(HarnessTraceEvent {
             time: self.sim_time,
             kind: HarnessTraceKind::FaultInjected(format!("{fault:?}")),
@@ -1085,7 +1091,12 @@ impl DistributedHarness {
                     for tid in task_ids {
                         if let Some(task) = node.running_tasks.remove(&tid) {
                             let outcome = RemoteOutcome::Failed("lease expired".into());
-                            let _ = node.dedup.complete(&task.idempotency_key, outcome.clone());
+                            let _ = node.dedup.complete(
+                                &task.idempotency_key,
+                                tid,
+                                outcome.clone(),
+                                now,
+                            );
                             node.outbox.push_back((
                                 task.origin.clone(),
                                 RemoteMessage::ResultDelivery(ResultDelivery {
@@ -1851,6 +1862,82 @@ mod tests {
     }
 
     #[test]
+    fn idempotency_in_flight_retry_after_insertion_ttl_reuses_canonical_execution() {
+        let mut node = SimNode::new(NodeId::new("node-b"), HostId::new(1));
+        node.dedup = IdempotencyStore::new(Duration::from_secs(1));
+
+        let origin = NodeId::new("node-a");
+        let idempotency_key = IdempotencyKey::from_raw(0x1D3A);
+        let canonical_task = RemoteTaskId::from_raw(41);
+        let retry_task = RemoteTaskId::from_raw(99);
+        let make_request = |remote_task_id| SpawnRequest {
+            remote_task_id,
+            computation: crate::remote::ComputationName::new("long-running-work"),
+            input: crate::remote::RemoteInput::new(vec![1, 2, 3]),
+            lease: Duration::from_secs(30),
+            idempotency_key,
+            budget: None,
+            origin_node: origin.clone(),
+            origin_region: crate::types::RegionId::new_for_test(0, 0),
+            origin_task: crate::types::TaskId::new_for_test(0, 0),
+        };
+
+        node.handle_spawn(make_request(canonical_task), Time::from_secs(1));
+        node.outbox.clear();
+
+        // The retry arrives after the old insertion-relative TTL would have
+        // elapsed, but before the canonical operation completes.
+        node.handle_spawn(make_request(retry_task), Time::from_secs(3));
+
+        assert_eq!(node.running_tasks.len(), 1);
+        assert!(node.running_tasks.contains_key(&canonical_task));
+        assert!(!node.running_tasks.contains_key(&retry_task));
+        assert_eq!(
+            node.events()
+                .iter()
+                .filter(|event| matches!(event, NodeEvent::SpawnAccepted { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            node.events()
+                .iter()
+                .filter(|event| matches!(event, NodeEvent::DuplicateSpawn { .. }))
+                .count(),
+            1
+        );
+
+        let (_, ack) = node.outbox.pop_front().expect("duplicate spawn ack");
+        assert!(matches!(
+            ack,
+            RemoteMessage::SpawnAck(SpawnAck {
+                remote_task_id,
+                status: SpawnAckStatus::Accepted,
+                ..
+            }) if remote_task_id == retry_task
+        ));
+        assert!(node.outbox.is_empty());
+
+        let completed = node.tick(Duration::from_millis(100), Time::from_millis(3_100));
+        let result_task_ids: Vec<RemoteTaskId> = completed
+            .iter()
+            .filter_map(|(_, message)| match message {
+                RemoteMessage::ResultDelivery(result) => Some(result.remote_task_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(result_task_ids, vec![canonical_task, retry_task]);
+        assert_eq!(
+            node.events()
+                .iter()
+                .filter(|event| matches!(event, NodeEvent::TaskCompleted { .. }))
+                .count(),
+            1,
+            "one canonical operation must produce both correlated results"
+        );
+    }
+
+    #[test]
     fn duplicate_spawn_reuses_cached_outcome_but_echoes_retry_task_id() {
         let mut node = SimNode::new(NodeId::new("node-b"), HostId::new(1));
         let origin = NodeId::new("node-a");
@@ -1872,7 +1959,7 @@ mod tests {
 
         node.handle_spawn(make_request(first_task), Time::from_secs(1));
         node.outbox.clear();
-        let _ = node.tick(Duration::from_millis(100));
+        let _ = node.tick(Duration::from_millis(100), Time::from_secs(2));
 
         node.handle_spawn(make_request(retry_task), Time::from_secs(2));
 

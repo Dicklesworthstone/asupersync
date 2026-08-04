@@ -622,6 +622,7 @@ fuzz_target!(|input: ForensicsEvidenceFuzzInput| {
                     config_hash: crash_config.config_hash,
                     worker_count: (crash_config.worker_count as usize).max(1).min(1000),
                     max_steps: crash_config.max_steps.map(|s| s as u64),
+                    test_name: None,
                     commit_hash: None, // Simplified for fuzzing
                 };
 

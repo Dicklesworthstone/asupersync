@@ -14,7 +14,7 @@
 //! 5. **Resource Fairness**: Flow control doesn't cause starvation of any producers
 
 use crate::types::{TaskId, Time};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque, hash_map::Entry};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Configuration for flow control monitoring.
@@ -61,6 +61,9 @@ pub enum FlowControlType {
     /// Window-based flow control.
     WindowBased,
 }
+
+/// Reserve waits are capacity ownership waits when the event carries no finer reason.
+const RESERVE_FLOW_CONTROL: FlowControlType = FlowControlType::CapacityLimit;
 
 /// Flow control events that can affect channel operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -267,19 +270,57 @@ impl FlowControlViolation {
     }
 }
 
+/// The operation-specific part of a live flow-control wait identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum FlowWaitKind {
+    Producer(FlowControlType),
+    Reserve(u64),
+}
+
+/// Canonical identity for one live flow-control wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct FlowWaitIdentity {
+    task_id: TaskId,
+    channel_id: u64,
+    kind: FlowWaitKind,
+}
+
+impl FlowWaitIdentity {
+    fn producer(task_id: TaskId, channel_id: u64, reason: FlowControlType) -> Self {
+        Self {
+            task_id,
+            channel_id,
+            kind: FlowWaitKind::Producer(reason),
+        }
+    }
+
+    fn reserve(task_id: TaskId, channel_id: u64, permit_id: u64) -> Self {
+        Self {
+            task_id,
+            channel_id,
+            kind: FlowWaitKind::Reserve(permit_id),
+        }
+    }
+
+    fn control_type(self) -> FlowControlType {
+        match self.kind {
+            FlowWaitKind::Producer(reason) => reason,
+            FlowWaitKind::Reserve(_) => RESERVE_FLOW_CONTROL,
+        }
+    }
+}
+
 /// State tracking for a task's interaction with flow control.
 #[derive(Debug, Clone)]
 struct TaskFlowState {
-    /// Current channels this task is blocked on.
-    blocked_channels: HashSet<u64>,
+    /// Current channels this task is blocked on and their live-wait counts.
+    blocked_channels: HashMap<u64, usize>,
     /// Time when task was first blocked (if currently blocked).
     first_block_time: Option<Time>,
     /// Number of times this task has been blocked by flow control.
     block_count: u64,
     /// Total time spent blocked by flow control (milliseconds).
     total_blocked_time_ms: u64,
-    /// Current permit IDs this task is waiting for.
-    pending_permits: HashSet<u64>,
     /// Whether this task has been cancelled.
     is_cancelled: bool,
     /// Time when task was cancelled (if applicable).
@@ -289,10 +330,10 @@ struct TaskFlowState {
 /// State tracking for a channel's flow control.
 #[derive(Debug, Clone)]
 struct ChannelFlowState {
-    /// Current flow control mechanisms active on this channel.
-    active_controls: HashSet<FlowControlType>,
-    /// Tasks currently blocked on this channel.
-    blocked_tasks: HashSet<TaskId>,
+    /// Current flow control mechanisms and their live-owner counts.
+    active_controls: HashMap<FlowControlType, usize>,
+    /// Tasks currently blocked on this channel and their live-wait counts.
+    blocked_tasks: HashMap<TaskId, usize>,
     /// Current capacity/credits available.
     #[allow(dead_code)]
     available_capacity: Option<usize>,
@@ -300,19 +341,18 @@ struct ChannelFlowState {
     max_queue_depth: usize,
     /// Whether backpressure is currently applied.
     backpressure_active: bool,
-    /// Consumer tasks applying backpressure.
-    backpressure_consumers: HashSet<TaskId>,
+    /// Consumer tasks applying backpressure and their first observed timestamps.
+    backpressure_consumers: HashMap<TaskId, Time>,
     /// Time when backpressure was first applied.
     backpressure_start_time: Option<Time>,
 }
 
 fn new_task_flow_state() -> TaskFlowState {
     TaskFlowState {
-        blocked_channels: HashSet::new(),
+        blocked_channels: HashMap::new(),
         first_block_time: None,
         block_count: 0,
         total_blocked_time_ms: 0,
-        pending_permits: HashSet::new(),
         is_cancelled: false,
         cancel_time: None,
     }
@@ -320,13 +360,33 @@ fn new_task_flow_state() -> TaskFlowState {
 
 fn new_channel_flow_state() -> ChannelFlowState {
     ChannelFlowState {
-        active_controls: HashSet::new(),
-        blocked_tasks: HashSet::new(),
+        active_controls: HashMap::new(),
+        blocked_tasks: HashMap::new(),
         available_capacity: None,
         max_queue_depth: 0,
         backpressure_active: false,
-        backpressure_consumers: HashSet::new(),
+        backpressure_consumers: HashMap::new(),
         backpressure_start_time: None,
+    }
+}
+
+impl ChannelFlowState {
+    fn add_active_control(&mut self, control: FlowControlType) {
+        *self.active_controls.entry(control).or_default() += 1;
+    }
+
+    fn remove_active_control(&mut self, control: FlowControlType) -> bool {
+        match self.active_controls.entry(control) {
+            Entry::Occupied(mut active) if *active.get() > 1 => {
+                *active.get_mut() -= 1;
+                true
+            }
+            Entry::Occupied(active) => {
+                active.remove();
+                true
+            }
+            Entry::Vacant(_) => false,
+        }
     }
 }
 
@@ -368,151 +428,224 @@ pub struct FlowControlStats {
     pub tasks_currently_blocked: u64,
 }
 
-/// Deadlock detection state for cycle detection.
+type DeadlockCycleKey = Vec<(TaskId, u64)>;
+
+#[derive(Debug, Clone, Copy)]
+struct DeadlockGraphEdge {
+    waiting_task: TaskId,
+    channel_id: u64,
+    owner_task: TaskId,
+    live_since: Time,
+}
+
+/// Deadlock detection state that cannot drift from the canonical live records.
+///
+/// Wait and ownership edges are derived for every detection pass from
+/// `active_waits` and `ChannelFlowState::backpressure_consumers`. The only
+/// retained state is the map of continuous live episodes and whether each has
+/// crossed the reporting threshold.
 #[derive(Debug, Clone)]
 struct DeadlockDetector {
-    /// Graph of task->channel dependencies (task waiting on channel).
-    task_to_channel: HashMap<TaskId, HashSet<u64>>,
-    /// Graph of channel->task dependencies (channel owned by task).
-    channel_to_task: HashMap<u64, TaskId>,
-    /// Last time deadlock detection was run.
-    last_detection_time: Option<Time>,
+    live_episodes: BTreeMap<DeadlockCycleKey, DeadlockEpisode>,
+}
+
+#[derive(Debug, Clone)]
+struct DeadlockEpisode {
+    cycle: DeadlockCycle,
+    first_live_at: Time,
+    reported: bool,
 }
 
 impl DeadlockDetector {
     fn new() -> Self {
         Self {
-            task_to_channel: HashMap::new(),
-            channel_to_task: HashMap::new(),
-            last_detection_time: None,
+            live_episodes: BTreeMap::new(),
         }
     }
 
-    /// Detects potential deadlocks using cycle detection.
-    fn detect_deadlocks(&mut self, current_time: Time) -> Vec<FlowControlViolation> {
-        let mut violations = Vec::new();
+    fn detect_deadlocks(
+        &mut self,
+        active_waits: &HashMap<FlowWaitIdentity, Time>,
+        channel_states: &HashMap<u64, ChannelFlowState>,
+        current_time: Time,
+        threshold_s: u64,
+    ) -> Vec<FlowControlViolation> {
+        let adjacency = Self::build_adjacency(active_waits, channel_states);
+        self.live_episodes
+            .retain(|key, _| Self::cycle_key_is_live(key, &adjacency));
 
-        // Use DFS to detect cycles in the task-channel dependency graph
-        let mut visited = HashSet::new();
-        let mut recursion_stack = HashSet::new();
-        let mut current_path = Vec::new();
-
-        for &task in self.task_to_channel.keys() {
-            if !visited.contains(&task) {
-                if let Some(cycle) = self.dfs_detect_cycle(
-                    task,
-                    &mut visited,
-                    &mut recursion_stack,
-                    &mut current_path,
-                ) {
-                    violations.push(FlowControlViolation::PotentialDeadlock {
-                        involved_channels: cycle.channels,
-                        involved_tasks: cycle.tasks,
-                        cycle_description: cycle.description,
-                        detection_time: current_time,
+        for cycle in Self::find_cycles(&adjacency) {
+            match self.live_episodes.entry(cycle.key.clone()) {
+                std::collections::btree_map::Entry::Occupied(mut episode) => {
+                    let episode = episode.get_mut();
+                    episode.first_live_at = episode.first_live_at.min(cycle.live_since);
+                }
+                std::collections::btree_map::Entry::Vacant(episode) => {
+                    let first_live_at = cycle.live_since;
+                    episode.insert(DeadlockEpisode {
+                        cycle,
+                        first_live_at,
+                        reported: false,
                     });
                 }
             }
         }
 
-        self.last_detection_time = Some(current_time);
+        let threshold_ns = threshold_s.saturating_mul(1_000_000_000);
+        let mut violations = Vec::new();
+        for episode in self.live_episodes.values_mut() {
+            let age_ns = current_time
+                .as_nanos()
+                .saturating_sub(episode.first_live_at.as_nanos());
+            if age_ns < threshold_ns || episode.reported {
+                continue;
+            }
+            episode.reported = true;
+            violations.push(FlowControlViolation::PotentialDeadlock {
+                involved_channels: episode.cycle.channels.clone(),
+                involved_tasks: episode.cycle.tasks.clone(),
+                cycle_description: episode.cycle.description.clone(),
+                detection_time: current_time,
+            });
+        }
         violations
     }
 
-    fn dfs_detect_cycle(
-        &self,
-        task: TaskId,
-        visited: &mut HashSet<TaskId>,
-        recursion_stack: &mut HashSet<TaskId>,
-        current_path: &mut Vec<(TaskId, u64)>,
-    ) -> Option<DeadlockCycle> {
-        visited.insert(task);
-        recursion_stack.insert(task);
+    fn build_adjacency(
+        active_waits: &HashMap<FlowWaitIdentity, Time>,
+        channel_states: &HashMap<u64, ChannelFlowState>,
+    ) -> BTreeMap<TaskId, Vec<DeadlockGraphEdge>> {
+        let mut wait_starts = BTreeMap::new();
+        for (identity, timestamp) in active_waits {
+            wait_starts
+                .entry((identity.task_id, identity.channel_id))
+                .and_modify(|first: &mut Time| *first = (*first).min(*timestamp))
+                .or_insert(*timestamp);
+        }
 
-        if let Some(channels) = self.task_to_channel.get(&task) {
-            for &channel in channels {
-                current_path.push((task, channel));
+        let mut adjacency: BTreeMap<TaskId, Vec<DeadlockGraphEdge>> = BTreeMap::new();
+        for ((waiting_task, channel_id), wait_since) in wait_starts {
+            let Some(channel_state) = channel_states.get(&channel_id) else {
+                continue;
+            };
+            let mut owners: Vec<_> = channel_state
+                .backpressure_consumers
+                .iter()
+                .map(|(&owner_task, &owner_since)| (owner_task, owner_since))
+                .collect();
+            owners.sort_by_key(|(owner_task, _)| *owner_task);
 
-                if let Some(&next_task) = self.channel_to_task.get(&channel) {
-                    if recursion_stack.contains(&next_task) {
-                        // Found cycle
-                        let cycle_start_idx = current_path
-                            .iter()
-                            .position(|(t, _)| *t == next_task)
-                            .unwrap_or(0);
+            let edges = adjacency.entry(waiting_task).or_default();
+            for (owner_task, owner_since) in owners {
+                edges.push(DeadlockGraphEdge {
+                    waiting_task,
+                    channel_id,
+                    owner_task,
+                    live_since: wait_since.max(owner_since),
+                });
+            }
+        }
+        adjacency
+    }
 
-                        let cycle_path = &current_path[cycle_start_idx..];
-                        return Some(DeadlockCycle::from_path(cycle_path));
+    fn cycle_key_is_live(
+        key: &DeadlockCycleKey,
+        adjacency: &BTreeMap<TaskId, Vec<DeadlockGraphEdge>>,
+    ) -> bool {
+        !key.is_empty()
+            && key.iter().zip(key.iter().cycle().skip(1)).all(
+                |((waiting_task, channel_id), (next_task, _))| {
+                    adjacency.get(waiting_task).is_some_and(|edges| {
+                        edges.iter().any(|edge| {
+                            edge.channel_id == *channel_id && edge.owner_task == *next_task
+                        })
+                    })
+                },
+            )
+    }
+
+    fn find_cycles(adjacency: &BTreeMap<TaskId, Vec<DeadlockGraphEdge>>) -> Vec<DeadlockCycle> {
+        let mut visited = HashSet::new();
+        let mut cycles = Vec::new();
+
+        for &root in adjacency.keys() {
+            if visited.contains(&root) {
+                continue;
+            }
+            visited.insert(root);
+            let mut stack_positions = HashMap::from([(root, 0)]);
+            let mut current_path = Vec::new();
+            let mut frames = vec![(root, 0usize)];
+
+            while let Some((task, next_edge)) = frames.last_mut() {
+                let edges = adjacency.get(task).map_or(&[][..], Vec::as_slice);
+                if *next_edge == edges.len() {
+                    let completed_task = *task;
+                    let _ = frames.pop();
+                    let _ = stack_positions.remove(&completed_task);
+                    if !frames.is_empty() {
+                        let _ = current_path.pop();
                     }
-
-                    if !visited.contains(&next_task) {
-                        if let Some(cycle) =
-                            self.dfs_detect_cycle(next_task, visited, recursion_stack, current_path)
-                        {
-                            return Some(cycle);
-                        }
-                    }
+                    continue;
                 }
 
-                current_path.pop();
+                let edge = edges[*next_edge];
+                *next_edge += 1;
+                current_path.push(edge);
+                if let Some(&cycle_start) = stack_positions.get(&edge.owner_task) {
+                    cycles.push(DeadlockCycle::from_path(&current_path[cycle_start..]));
+                } else if visited.insert(edge.owner_task) {
+                    let _ = stack_positions.insert(edge.owner_task, current_path.len());
+                    frames.push((edge.owner_task, 0));
+                    continue;
+                }
+                let _ = current_path.pop();
             }
         }
-
-        recursion_stack.remove(&task);
-        None
-    }
-
-    fn add_dependency(&mut self, task: TaskId, channel: u64) {
-        self.task_to_channel
-            .entry(task)
-            .or_default()
-            .insert(channel);
-    }
-
-    fn remove_dependency(&mut self, task: TaskId, channel: u64) {
-        if let Some(channels) = self.task_to_channel.get_mut(&task) {
-            channels.remove(&channel);
-            if channels.is_empty() {
-                self.task_to_channel.remove(&task);
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    fn add_channel_owner(&mut self, channel: u64, owner: TaskId) {
-        self.channel_to_task.insert(channel, owner);
-    }
-
-    #[allow(dead_code)]
-    fn remove_channel_owner(&mut self, channel: u64) {
-        self.channel_to_task.remove(&channel);
+        cycles
     }
 }
 
 #[derive(Debug, Clone)]
 struct DeadlockCycle {
+    key: DeadlockCycleKey,
     tasks: Vec<TaskId>,
     channels: Vec<u64>,
     description: String,
+    live_since: Time,
 }
 
 impl DeadlockCycle {
-    fn from_path(path: &[(TaskId, u64)]) -> Self {
-        let tasks: Vec<TaskId> = path.iter().map(|(t, _)| *t).collect();
-        let channels: Vec<u64> = path.iter().map(|(_, c)| *c).collect();
+    fn from_path(path: &[DeadlockGraphEdge]) -> Self {
+        let mut key: DeadlockCycleKey = path
+            .iter()
+            .map(|edge| (edge.waiting_task, edge.channel_id))
+            .collect();
+        if let Some((canonical_start, _)) = key.iter().enumerate().min_by_key(|(_, edge)| **edge) {
+            key.rotate_left(canonical_start);
+        }
+
+        let tasks: Vec<TaskId> = key.iter().map(|(task, _)| *task).collect();
+        let channels: Vec<u64> = key.iter().map(|(_, channel)| *channel).collect();
 
         let description = format!(
             "Circular dependency: {}",
-            path.iter()
+            key.iter()
                 .map(|(task, channel)| format!("T{:?}→C{}", task, channel))
                 .collect::<Vec<_>>()
                 .join("→")
         );
+        let live_since = path
+            .iter()
+            .map(|edge| edge.live_since)
+            .fold(Time::ZERO, Time::max);
 
         Self {
+            key,
             tasks,
             channels,
             description,
+            live_since,
         }
     }
 }
@@ -530,6 +663,8 @@ pub struct FlowControlMonitor {
     task_states: HashMap<TaskId, TaskFlowState>,
     /// Per-channel flow control state.
     channel_states: HashMap<u64, ChannelFlowState>,
+    /// Canonical live waits keyed by their complete operation identity.
+    active_waits: HashMap<FlowWaitIdentity, Time>,
     /// Deadlock detector.
     deadlock_detector: DeadlockDetector,
     /// Statistics.
@@ -551,6 +686,7 @@ impl FlowControlMonitor {
             violations: VecDeque::new(),
             task_states: HashMap::new(),
             channel_states: HashMap::new(),
+            active_waits: HashMap::new(),
             deadlock_detector: DeadlockDetector::new(),
             stats: FlowControlStats::default(),
             total_blocked_time_ms: 0,
@@ -562,6 +698,131 @@ impl FlowControlMonitor {
     /// Creates a monitor with default configuration.
     pub fn with_defaults() -> Self {
         Self::new(FlowControlConfig::default())
+    }
+
+    /// Registers one canonical wait and increments its derived graph edges.
+    /// Exact duplicate begin events are idempotent.
+    fn register_wait(&mut self, identity: FlowWaitIdentity, timestamp: Time) -> bool {
+        match self.active_waits.entry(identity) {
+            Entry::Occupied(mut active_wait) => {
+                let first_observed = active_wait.get_mut();
+                *first_observed = (*first_observed).min(timestamp);
+                if let Some(task_state) = self.task_states.get_mut(&identity.task_id) {
+                    task_state.first_block_time = Some(
+                        task_state
+                            .first_block_time
+                            .map_or(timestamp, |first| first.min(timestamp)),
+                    );
+                }
+                return false;
+            }
+            Entry::Vacant(active_wait) => {
+                active_wait.insert(timestamp);
+            }
+        }
+
+        let task_state = self
+            .task_states
+            .entry(identity.task_id)
+            .or_insert_with(new_task_flow_state);
+        *task_state
+            .blocked_channels
+            .entry(identity.channel_id)
+            .or_default() += 1;
+        task_state.first_block_time = Some(
+            task_state
+                .first_block_time
+                .map_or(timestamp, |first| first.min(timestamp)),
+        );
+        if matches!(identity.kind, FlowWaitKind::Producer(_)) {
+            task_state.block_count += 1;
+        }
+
+        let channel_state = self
+            .channel_states
+            .entry(identity.channel_id)
+            .or_insert_with(new_channel_flow_state);
+        *channel_state
+            .blocked_tasks
+            .entry(identity.task_id)
+            .or_default() += 1;
+        channel_state.add_active_control(identity.control_type());
+
+        true
+    }
+
+    /// Removes one exact wait and decrements only the edges derived from it.
+    fn remove_wait(&mut self, identity: FlowWaitIdentity) -> bool {
+        if self.active_waits.remove(&identity).is_none() {
+            return false;
+        }
+
+        let next_first_block_time = self
+            .active_waits
+            .iter()
+            .filter_map(|(wait, timestamp)| {
+                (wait.task_id == identity.task_id).then_some(*timestamp)
+            })
+            .min();
+
+        if let Some(task_state) = self.task_states.get_mut(&identity.task_id) {
+            let remove_channel = if let Some(wait_count) =
+                task_state.blocked_channels.get_mut(&identity.channel_id)
+            {
+                *wait_count -= 1;
+                *wait_count == 0
+            } else {
+                false
+            };
+            if remove_channel {
+                task_state.blocked_channels.remove(&identity.channel_id);
+            }
+            task_state.first_block_time = next_first_block_time;
+        }
+
+        if let Some(channel_state) = self.channel_states.get_mut(&identity.channel_id) {
+            let remove_task =
+                if let Some(wait_count) = channel_state.blocked_tasks.get_mut(&identity.task_id) {
+                    *wait_count -= 1;
+                    *wait_count == 0
+                } else {
+                    false
+                };
+            if remove_task {
+                channel_state.blocked_tasks.remove(&identity.task_id);
+            }
+            let removed_control = channel_state.remove_active_control(identity.control_type());
+            debug_assert!(
+                removed_control,
+                "live wait must have a matching active-control owner"
+            );
+        }
+
+        true
+    }
+
+    fn has_wait(&self, identity: FlowWaitIdentity) -> bool {
+        self.active_waits.contains_key(&identity)
+    }
+
+    fn typed_active_waits(&self) -> HashMap<(TaskId, u64, FlowControlType), Time> {
+        let mut typed_waits: HashMap<(TaskId, u64, FlowControlType), Time> = HashMap::new();
+        for (&identity, &timestamp) in &self.active_waits {
+            let key = (
+                identity.task_id,
+                identity.channel_id,
+                identity.control_type(),
+            );
+            match typed_waits.entry(key) {
+                Entry::Occupied(mut first_observed) => {
+                    *first_observed.get_mut() = (*first_observed.get()).min(timestamp);
+                }
+                Entry::Vacant(first_observed) => {
+                    first_observed.insert(timestamp);
+                }
+            }
+        }
+        typed_waits
     }
 
     /// Records a flow control event.
@@ -583,8 +844,8 @@ impl FlowControlMonitor {
             FlowControlEvent::AbortDueToFlowControl { timestamp, .. } => *timestamp,
         };
 
-        // Check atomicity before state update so we can see pending permits
-        self.check_atomicity(&event, current_time);
+        // Check terminal-event identity before mutating the corresponding wait.
+        self.check_terminal_identity(&event, current_time);
 
         // Update state based on event type
         self.update_state_from_event(&event);
@@ -611,57 +872,30 @@ impl FlowControlMonitor {
                 timestamp,
                 ..
             } => {
-                let task_state = self
-                    .task_states
-                    .entry(*task_id)
-                    .or_insert_with(new_task_flow_state);
-
-                task_state.blocked_channels.insert(*channel_id);
-                if task_state.first_block_time.is_none() {
-                    task_state.first_block_time = Some(*timestamp);
-                }
-                task_state.block_count += 1;
-
-                let channel_state = self
-                    .channel_states
-                    .entry(*channel_id)
-                    .or_insert_with(new_channel_flow_state);
-
-                channel_state.active_controls.insert(*reason);
-                channel_state.blocked_tasks.insert(*task_id);
-
-                // Update deadlock detection graph
-                self.deadlock_detector.add_dependency(*task_id, *channel_id);
+                self.register_wait(
+                    FlowWaitIdentity::producer(*task_id, *channel_id, *reason),
+                    *timestamp,
+                );
             }
 
             FlowControlEvent::ProducerUnblocked {
                 channel_id,
                 task_id,
+                reason,
                 blocked_duration_ms,
                 ..
             } => {
-                self.total_blocked_time_ms += *blocked_duration_ms;
-                self.total_unblocks += 1;
-                if let Some(task_state) = self.task_states.get_mut(task_id) {
-                    task_state.blocked_channels.remove(channel_id);
+                let identity = FlowWaitIdentity::producer(*task_id, *channel_id, *reason);
+                if self.remove_wait(identity) {
+                    self.total_blocked_time_ms += *blocked_duration_ms;
+                    self.total_unblocks += 1;
+                    let task_state = self
+                        .task_states
+                        .get_mut(task_id)
+                        .expect("removed wait must retain its task state");
                     task_state.total_blocked_time_ms += blocked_duration_ms;
-
-                    if task_state.blocked_channels.is_empty() {
-                        task_state.first_block_time = None;
-                    }
-                }
-
-                if let Some(channel_state) = self.channel_states.get_mut(channel_id) {
-                    channel_state.blocked_tasks.remove(task_id);
-                }
-
-                // Update deadlock detection graph
-                self.deadlock_detector
-                    .remove_dependency(*task_id, *channel_id);
-
-                // Update statistics
-                if *blocked_duration_ms > self.stats.max_block_time_ms {
-                    self.stats.max_block_time_ms = *blocked_duration_ms;
+                    self.stats.max_block_time_ms =
+                        self.stats.max_block_time_ms.max(*blocked_duration_ms);
                 }
             }
 
@@ -677,12 +911,21 @@ impl FlowControlMonitor {
                     .or_insert_with(new_channel_flow_state);
 
                 channel_state.backpressure_active = true;
-                channel_state.backpressure_consumers.insert(*consumer_task);
-                channel_state.max_queue_depth = channel_state.max_queue_depth.max(*queue_depth);
-
-                if channel_state.backpressure_start_time.is_none() {
-                    channel_state.backpressure_start_time = Some(*timestamp);
+                match channel_state.backpressure_consumers.entry(*consumer_task) {
+                    Entry::Occupied(mut consumer) => {
+                        *consumer.get_mut() = (*consumer.get()).min(*timestamp);
+                    }
+                    Entry::Vacant(consumer) => {
+                        consumer.insert(*timestamp);
+                        channel_state.add_active_control(FlowControlType::ConsumerBackpressure);
+                    }
                 }
+                channel_state.max_queue_depth = channel_state.max_queue_depth.max(*queue_depth);
+                channel_state.backpressure_start_time = Some(
+                    channel_state
+                        .backpressure_start_time
+                        .map_or(*timestamp, |first| first.min(*timestamp)),
+                );
             }
 
             FlowControlEvent::BackpressureReleased {
@@ -691,11 +934,16 @@ impl FlowControlMonitor {
                 ..
             } => {
                 if let Some(channel_state) = self.channel_states.get_mut(channel_id) {
-                    channel_state.backpressure_consumers.remove(consumer_task);
-
-                    if channel_state.backpressure_consumers.is_empty() {
-                        channel_state.backpressure_active = false;
-                        channel_state.backpressure_start_time = None;
+                    if channel_state
+                        .backpressure_consumers
+                        .remove(consumer_task)
+                        .is_some()
+                    {
+                        channel_state.remove_active_control(FlowControlType::ConsumerBackpressure);
+                        channel_state.backpressure_active =
+                            !channel_state.backpressure_consumers.is_empty();
+                        channel_state.backpressure_start_time =
+                            channel_state.backpressure_consumers.values().copied().min();
                     }
                 }
             }
@@ -707,23 +955,10 @@ impl FlowControlMonitor {
                 timestamp,
                 ..
             } => {
-                let task_state = self
-                    .task_states
-                    .entry(*task_id)
-                    .or_insert_with(new_task_flow_state);
-                task_state.pending_permits.insert(*permit_id);
-                task_state.blocked_channels.insert(*channel_id);
-                if task_state.first_block_time.is_none() {
-                    task_state.first_block_time = Some(*timestamp);
-                }
-
-                let channel_state = self
-                    .channel_states
-                    .entry(*channel_id)
-                    .or_insert_with(new_channel_flow_state);
-                channel_state.blocked_tasks.insert(*task_id);
-
-                self.deadlock_detector.add_dependency(*task_id, *channel_id);
+                self.register_wait(
+                    FlowWaitIdentity::reserve(*task_id, *channel_id, *permit_id),
+                    *timestamp,
+                );
             }
 
             FlowControlEvent::ReserveUnblocked {
@@ -733,25 +968,17 @@ impl FlowControlMonitor {
                 blocked_duration_ms,
                 ..
             } => {
-                self.total_blocked_time_ms += *blocked_duration_ms;
-                self.total_unblocks += 1;
-                if let Some(task_state) = self.task_states.get_mut(task_id) {
-                    task_state.pending_permits.remove(permit_id);
-                    task_state.blocked_channels.remove(channel_id);
+                let identity = FlowWaitIdentity::reserve(*task_id, *channel_id, *permit_id);
+                if self.remove_wait(identity) {
+                    self.total_blocked_time_ms += *blocked_duration_ms;
+                    self.total_unblocks += 1;
+                    let task_state = self
+                        .task_states
+                        .get_mut(task_id)
+                        .expect("removed wait must retain its task state");
                     task_state.total_blocked_time_ms += blocked_duration_ms;
-                    if task_state.blocked_channels.is_empty() {
-                        task_state.first_block_time = None;
-                    }
-                }
-
-                if let Some(channel_state) = self.channel_states.get_mut(channel_id) {
-                    channel_state.blocked_tasks.remove(task_id);
-                }
-                self.deadlock_detector
-                    .remove_dependency(*task_id, *channel_id);
-
-                if *blocked_duration_ms > self.stats.max_block_time_ms {
-                    self.stats.max_block_time_ms = *blocked_duration_ms;
+                    self.stats.max_block_time_ms =
+                        self.stats.max_block_time_ms.max(*blocked_duration_ms);
                 }
             }
 
@@ -761,19 +988,7 @@ impl FlowControlMonitor {
                 permit_id,
                 ..
             } => {
-                if let Some(task_state) = self.task_states.get_mut(task_id) {
-                    task_state.pending_permits.remove(permit_id);
-                    task_state.blocked_channels.remove(channel_id);
-                    if task_state.blocked_channels.is_empty() {
-                        task_state.first_block_time = None;
-                    }
-                }
-
-                if let Some(channel_state) = self.channel_states.get_mut(channel_id) {
-                    channel_state.blocked_tasks.remove(task_id);
-                }
-                self.deadlock_detector
-                    .remove_dependency(*task_id, *channel_id);
+                self.remove_wait(FlowWaitIdentity::reserve(*task_id, *channel_id, *permit_id));
             }
 
             FlowControlEvent::CommitFlowControlled {
@@ -782,19 +997,7 @@ impl FlowControlMonitor {
                 permit_id,
                 ..
             } => {
-                if let Some(task_state) = self.task_states.get_mut(task_id) {
-                    task_state.pending_permits.remove(permit_id);
-                    task_state.blocked_channels.remove(channel_id);
-                    if task_state.blocked_channels.is_empty() {
-                        task_state.first_block_time = None;
-                    }
-                }
-
-                if let Some(channel_state) = self.channel_states.get_mut(channel_id) {
-                    channel_state.blocked_tasks.remove(task_id);
-                }
-                self.deadlock_detector
-                    .remove_dependency(*task_id, *channel_id);
+                self.remove_wait(FlowWaitIdentity::reserve(*task_id, *channel_id, *permit_id));
             }
         }
     }
@@ -803,7 +1006,12 @@ impl FlowControlMonitor {
     fn check_violations_after_event(&mut self, _event: &FlowControlEvent, current_time: Time) {
         // Check for potential deadlocks
         if self.config.enable_deadlock_prevention {
-            let deadlocks = self.deadlock_detector.detect_deadlocks(current_time);
+            let deadlocks = self.deadlock_detector.detect_deadlocks(
+                &self.active_waits,
+                &self.channel_states,
+                current_time,
+                self.config.deadlock_detection_threshold_s,
+            );
             for violation in deadlocks {
                 self.record_violation(violation, current_time);
             }
@@ -833,7 +1041,7 @@ impl FlowControlMonitor {
                 if blocked_duration_ns >= starvation_threshold_ns
                     && !task_state.blocked_channels.is_empty()
                 {
-                    for &channel_id in &task_state.blocked_channels {
+                    for &channel_id in task_state.blocked_channels.keys() {
                         // Count other producers that were served recently
                         let other_producers_served =
                             self.count_recently_served_producers(channel_id, current_time);
@@ -862,29 +1070,20 @@ impl FlowControlMonitor {
         let blocking_threshold_ns = self.config.deadlock_detection_threshold_s * 1_000_000_000;
         let mut new_violations = Vec::new();
 
-        for (&task_id, task_state) in &self.task_states {
-            if let Some(first_block_time) = task_state.first_block_time {
-                let blocked_duration_ns = current_time
-                    .as_nanos()
-                    .saturating_sub(first_block_time.as_nanos());
-
-                if blocked_duration_ns >= blocking_threshold_ns {
-                    for &channel_id in &task_state.blocked_channels {
-                        if let Some(channel_state) = self.channel_states.get(&channel_id) {
-                            for &flow_control_type in &channel_state.active_controls {
-                                let violation = FlowControlViolation::IndefiniteBlocking {
-                                    channel_id,
-                                    blocked_task: task_id,
-                                    flow_control_type,
-                                    block_duration_s: blocked_duration_ns / 1_000_000_000,
-                                    timestamp: current_time,
-                                };
-
-                                new_violations.push(violation);
-                            }
-                        }
-                    }
-                }
+        for ((task_id, channel_id, flow_control_type), first_block_time) in
+            self.typed_active_waits()
+        {
+            let blocked_duration_ns = current_time
+                .as_nanos()
+                .saturating_sub(first_block_time.as_nanos());
+            if blocked_duration_ns >= blocking_threshold_ns {
+                new_violations.push(FlowControlViolation::IndefiniteBlocking {
+                    channel_id,
+                    blocked_task: task_id,
+                    flow_control_type,
+                    block_duration_s: blocked_duration_ns / 1_000_000_000,
+                    timestamp: current_time,
+                });
             }
         }
 
@@ -897,12 +1096,15 @@ impl FlowControlMonitor {
         let cancellation_threshold_ns = self.config.deadlock_detection_threshold_s * 1_000_000_000;
         let mut new_violations = Vec::new();
 
-        for (&task_id, task_state) in &self.task_states {
+        for ((task_id, channel_id, flow_control_type), _) in self.typed_active_waits() {
+            let Some(task_state) = self.task_states.get(&task_id) else {
+                continue;
+            };
             let Some(cancel_time) = task_state.cancel_time else {
                 continue;
             };
 
-            if !task_state.is_cancelled || task_state.blocked_channels.is_empty() {
+            if !task_state.is_cancelled {
                 continue;
             }
 
@@ -913,19 +1115,13 @@ impl FlowControlMonitor {
                 continue;
             }
 
-            for &channel_id in &task_state.blocked_channels {
-                if let Some(channel_state) = self.channel_states.get(&channel_id) {
-                    for &flow_control_type in &channel_state.active_controls {
-                        new_violations.push(FlowControlViolation::CancellationUnblockFailure {
-                            channel_id,
-                            cancelled_task: task_id,
-                            flow_control_type,
-                            time_since_cancel_s: time_since_cancel_ns / 1_000_000_000,
-                            timestamp: current_time,
-                        });
-                    }
-                }
-            }
+            new_violations.push(FlowControlViolation::CancellationUnblockFailure {
+                channel_id,
+                cancelled_task: task_id,
+                flow_control_type,
+                time_since_cancel_s: time_since_cancel_ns / 1_000_000_000,
+                timestamp: current_time,
+            });
         }
 
         for violation in new_violations {
@@ -933,18 +1129,81 @@ impl FlowControlMonitor {
         }
     }
 
-    fn check_atomicity(&mut self, event: &FlowControlEvent, current_time: Time) {
+    fn check_terminal_identity(&mut self, event: &FlowControlEvent, current_time: Time) {
         match event {
+            FlowControlEvent::BackpressureReleased {
+                channel_id,
+                consumer_task,
+                ..
+            } => {
+                let has_matching_owner = self
+                    .channel_states
+                    .get(channel_id)
+                    .is_some_and(|state| state.backpressure_consumers.contains_key(consumer_task));
+                if !has_matching_owner {
+                    self.record_violation(
+                        FlowControlViolation::FlowControlInconsistency {
+                            channel_id: *channel_id,
+                            expected_state: format!(
+                                "matching backpressure owner task {consumer_task:?}"
+                            ),
+                            actual_state: "backpressure release without matching owner".to_string(),
+                            timestamp: current_time,
+                        },
+                        current_time,
+                    );
+                }
+            }
+            FlowControlEvent::ProducerUnblocked {
+                channel_id,
+                task_id,
+                reason,
+                ..
+            } => {
+                let identity = FlowWaitIdentity::producer(*task_id, *channel_id, *reason);
+                if !self.has_wait(identity) {
+                    self.record_violation(
+                        FlowControlViolation::FlowControlInconsistency {
+                            channel_id: *channel_id,
+                            expected_state: format!(
+                                "matching producer wait for task {task_id:?} and reason {reason:?}"
+                            ),
+                            actual_state: "producer unblock without matching wait".to_string(),
+                            timestamp: current_time,
+                        },
+                        current_time,
+                    );
+                }
+            }
+            FlowControlEvent::ReserveUnblocked {
+                channel_id,
+                task_id,
+                permit_id,
+                ..
+            } => {
+                let identity = FlowWaitIdentity::reserve(*task_id, *channel_id, *permit_id);
+                if !self.has_wait(identity) {
+                    self.record_violation(
+                        FlowControlViolation::FlowControlInconsistency {
+                            channel_id: *channel_id,
+                            expected_state: format!(
+                                "matching reserve wait for task {task_id:?} and permit {permit_id}"
+                            ),
+                            actual_state: "reserve unblock without matching wait".to_string(),
+                            timestamp: current_time,
+                        },
+                        current_time,
+                    );
+                }
+            }
             FlowControlEvent::CommitFlowControlled {
                 channel_id,
                 task_id,
                 permit_id,
                 ..
             } => {
-                let has_pending_permit = self
-                    .task_states
-                    .get(task_id)
-                    .is_some_and(|task_state| task_state.pending_permits.contains(permit_id));
+                let has_pending_permit =
+                    self.has_wait(FlowWaitIdentity::reserve(*task_id, *channel_id, *permit_id));
 
                 if !has_pending_permit {
                     self.record_violation(
@@ -966,10 +1225,8 @@ impl FlowControlMonitor {
                 permit_id,
                 ..
             } => {
-                let has_pending_permit = self
-                    .task_states
-                    .get(task_id)
-                    .is_some_and(|task_state| task_state.pending_permits.contains(permit_id));
+                let has_pending_permit =
+                    self.has_wait(FlowWaitIdentity::reserve(*task_id, *channel_id, *permit_id));
 
                 if !has_pending_permit {
                     self.record_violation(
@@ -1054,10 +1311,20 @@ impl FlowControlMonitor {
 
     /// Marks a task as cancelled for violation checking.
     pub fn record_task_cancel(&mut self, task_id: TaskId, timestamp: Time) {
-        if let Some(task_state) = self.task_states.get_mut(&task_id) {
-            task_state.is_cancelled = true;
-            task_state.cancel_time = Some(timestamp);
+        if !self.config.enable_verification {
+            return;
         }
+
+        let task_state = self
+            .task_states
+            .entry(task_id)
+            .or_insert_with(new_task_flow_state);
+        task_state.is_cancelled = true;
+        task_state.cancel_time = Some(
+            task_state
+                .cancel_time
+                .map_or(timestamp, |cancel_time| cancel_time.min(timestamp)),
+        );
     }
 
     /// Returns current flow control statistics.
@@ -1111,7 +1378,7 @@ impl FlowControlMonitor {
 
         // Remove old task states to prevent memory growth
         self.task_states.retain(|_, state| {
-            if !state.blocked_channels.is_empty() || !state.pending_permits.is_empty() {
+            if !state.blocked_channels.is_empty() {
                 true
             } else if let Some(cancel_time) = state.cancel_time {
                 cancel_time.as_nanos() >= cutoff_time.as_nanos()
@@ -1140,6 +1407,68 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+
+    fn potential_deadlocks(monitor: &FlowControlMonitor) -> Vec<&FlowControlViolation> {
+        monitor
+            .violations()
+            .iter()
+            .filter_map(|report| {
+                matches!(
+                    &report.violation,
+                    FlowControlViolation::PotentialDeadlock { .. }
+                )
+                .then_some(&report.violation)
+            })
+            .collect()
+    }
+
+    fn deadlock_tick(monitor: &mut FlowControlMonitor, timestamp: Time) {
+        monitor.record_event(FlowControlEvent::BackpressureApplied {
+            channel_id: u64::MAX,
+            consumer_task: TaskId::new_for_test(9_999, 0),
+            queue_depth: 1,
+            timestamp,
+        });
+    }
+
+    fn record_two_task_cycle(
+        monitor: &mut FlowControlMonitor,
+        tasks: [TaskId; 2],
+        channels: [u64; 2],
+        established_edges_at: Time,
+        cycle_completed_at: Time,
+    ) {
+        let [task1, task2] = tasks;
+        let [channel1, channel2] = channels;
+        for event in [
+            FlowControlEvent::BackpressureApplied {
+                channel_id: channel1,
+                consumer_task: task2,
+                queue_depth: 1,
+                timestamp: established_edges_at,
+            },
+            FlowControlEvent::BackpressureApplied {
+                channel_id: channel2,
+                consumer_task: task1,
+                queue_depth: 1,
+                timestamp: established_edges_at,
+            },
+            FlowControlEvent::ProducerBlocked {
+                channel_id: channel1,
+                task_id: task1,
+                reason: FlowControlType::ConsumerBackpressure,
+                timestamp: established_edges_at,
+            },
+            FlowControlEvent::ProducerBlocked {
+                channel_id: channel2,
+                task_id: task2,
+                reason: FlowControlType::ConsumerBackpressure,
+                timestamp: cycle_completed_at,
+            },
+        ] {
+            monitor.record_event(event);
+        }
+    }
 
     #[test]
     fn test_flow_control_monitor_basic_operations() {
@@ -1207,40 +1536,236 @@ mod tests {
     }
 
     #[test]
-    fn test_deadlock_detection() {
+    fn public_cycle_detects_only_at_threshold() {
         let mut config = FlowControlConfig::default();
-        config.enable_deadlock_prevention = true;
+        config.deadlock_detection_threshold_s = 2;
+        config.starvation_threshold_s = 60;
 
         let mut monitor = FlowControlMonitor::new(config);
-        let now = Time::from_nanos(1000);
-
         let task1 = TaskId::new_for_test(1, 0);
         let task2 = TaskId::new_for_test(2, 0);
         let channel1 = 10;
         let channel2 = 20;
 
-        // Create potential deadlock: task1 blocks on channel1, task2 blocks on channel2
-        monitor.deadlock_detector.add_dependency(task1, channel1);
-        monitor.deadlock_detector.add_channel_owner(channel1, task2);
-        monitor.deadlock_detector.add_dependency(task2, channel2);
-        monitor.deadlock_detector.add_channel_owner(channel2, task1);
+        record_two_task_cycle(
+            &mut monitor,
+            [task1, task2],
+            [channel1, channel2],
+            Time::from_secs(1),
+            Time::from_secs(3),
+        );
 
-        // Trigger deadlock detection
-        let deadlocks = monitor.deadlock_detector.detect_deadlocks(now);
+        assert!(potential_deadlocks(&monitor).is_empty());
+        deadlock_tick(&mut monitor, Time::from_secs(4));
+        assert!(potential_deadlocks(&monitor).is_empty());
+        deadlock_tick(&mut monitor, Time::from_secs(5));
 
-        assert!(!deadlocks.is_empty());
-        match &deadlocks[0] {
+        let deadlocks = potential_deadlocks(&monitor);
+        assert_eq!(deadlocks.len(), 1);
+        match deadlocks[0] {
             FlowControlViolation::PotentialDeadlock {
                 involved_tasks,
                 involved_channels,
+                detection_time,
                 ..
             } => {
+                assert_eq!(*detection_time, Time::from_secs(5));
+                assert_eq!(involved_tasks.len(), 2);
                 assert!(involved_tasks.contains(&task1));
                 assert!(involved_tasks.contains(&task2));
+                assert_eq!(involved_channels.len(), 2);
                 assert!(involved_channels.contains(&channel1));
                 assert!(involved_channels.contains(&channel2));
             }
-            _ => panic!("Expected PotentialDeadlock violation"),
+            _ => unreachable!("filtered to potential deadlocks"),
+        }
+    }
+
+    #[test]
+    fn live_cycle_deduplicates_and_rearms_after_release() {
+        let mut config = FlowControlConfig::default();
+        config.deadlock_detection_threshold_s = 1;
+        config.starvation_threshold_s = 60;
+
+        let mut monitor = FlowControlMonitor::new(config);
+        let task1 = TaskId::new_for_test(1, 0);
+        let task2 = TaskId::new_for_test(2, 0);
+        let channel1 = 10;
+        let channel2 = 20;
+
+        record_two_task_cycle(
+            &mut monitor,
+            [task1, task2],
+            [channel1, channel2],
+            Time::from_secs(1),
+            Time::from_secs(1),
+        );
+
+        deadlock_tick(&mut monitor, Time::from_secs(2));
+        assert_eq!(potential_deadlocks(&monitor).len(), 1);
+        assert_eq!(monitor.stats().deadlocks_detected, 1);
+
+        // Cancellation records lifecycle state but is not a wait release and
+        // does not re-arm or duplicate an already reported live cycle.
+        monitor.record_task_cancel(task1, Time::from_secs(3));
+        assert_eq!(potential_deadlocks(&monitor).len(), 1);
+        deadlock_tick(&mut monitor, Time::from_secs(3));
+        deadlock_tick(&mut monitor, Time::from_secs(4));
+        assert_eq!(potential_deadlocks(&monitor).len(), 1);
+        assert_eq!(monitor.stats().deadlocks_detected, 1);
+
+        monitor.record_event(FlowControlEvent::BackpressureReleased {
+            channel_id: channel1,
+            consumer_task: task2,
+            new_queue_depth: 0,
+            timestamp: Time::from_secs(5),
+        });
+        monitor.record_event(FlowControlEvent::BackpressureApplied {
+            channel_id: channel1,
+            consumer_task: task2,
+            queue_depth: 1,
+            timestamp: Time::from_secs(7),
+        });
+        assert_eq!(potential_deadlocks(&monitor).len(), 1);
+
+        deadlock_tick(&mut monitor, Time::from_secs(8));
+        let deadlocks = potential_deadlocks(&monitor);
+        assert_eq!(deadlocks.len(), 2);
+        match deadlocks[1] {
+            FlowControlViolation::PotentialDeadlock {
+                involved_channels,
+                involved_tasks,
+                detection_time,
+                ..
+            } => {
+                assert_eq!(*detection_time, Time::from_secs(8));
+                assert_eq!(involved_tasks.as_slice(), &[task1, task2]);
+                assert_eq!(involved_channels.as_slice(), &[channel1, channel2]);
+            }
+            _ => unreachable!("filtered to potential deadlocks"),
+        }
+        assert_eq!(monitor.stats().deadlocks_detected, 2);
+    }
+
+    #[test]
+    fn overlapping_waits_preserve_continuous_cycle_age() {
+        let mut config = FlowControlConfig::default();
+        config.deadlock_detection_threshold_s = 3;
+        config.starvation_threshold_s = 60;
+
+        let mut monitor = FlowControlMonitor::new(config);
+        let task1 = TaskId::new_for_test(1, 0);
+        let task2 = TaskId::new_for_test(2, 0);
+        let channel1 = 10;
+        let channel2 = 20;
+        let permit_id = 100;
+
+        record_two_task_cycle(
+            &mut monitor,
+            [task1, task2],
+            [channel1, channel2],
+            Time::from_secs(1),
+            Time::from_secs(1),
+        );
+        monitor.record_event(FlowControlEvent::ReserveBlocked {
+            channel_id: channel1,
+            task_id: task1,
+            permit_id,
+            timestamp: Time::from_secs(2),
+        });
+        monitor.record_event(FlowControlEvent::ProducerUnblocked {
+            channel_id: channel1,
+            task_id: task1,
+            reason: FlowControlType::ConsumerBackpressure,
+            blocked_duration_ms: 2_000,
+            timestamp: Time::from_secs(3),
+        });
+
+        assert!(potential_deadlocks(&monitor).is_empty());
+        deadlock_tick(&mut monitor, Time::from_secs(4));
+        assert_eq!(potential_deadlocks(&monitor).len(), 1);
+        assert_eq!(monitor.stats().deadlocks_detected, 1);
+    }
+
+    #[test]
+    fn multi_owner_channel_checks_all_live_owners() {
+        #[derive(Clone, Copy, Debug)]
+        enum OwnerRelease {
+            None,
+            Decoy,
+            CycleOwner,
+        }
+
+        for release in [
+            OwnerRelease::None,
+            OwnerRelease::Decoy,
+            OwnerRelease::CycleOwner,
+        ] {
+            let mut config = FlowControlConfig::default();
+            config.deadlock_detection_threshold_s = 1;
+            config.starvation_threshold_s = 60;
+
+            let mut monitor = FlowControlMonitor::new(config);
+            let decoy = TaskId::new_for_test(1, 0);
+            let task1 = TaskId::new_for_test(2, 0);
+            let task2 = TaskId::new_for_test(3, 0);
+            let channel1 = 10;
+            let channel2 = 20;
+
+            record_two_task_cycle(
+                &mut monitor,
+                [task1, task2],
+                [channel1, channel2],
+                Time::from_secs(1),
+                Time::from_secs(1),
+            );
+            monitor.record_event(FlowControlEvent::BackpressureApplied {
+                channel_id: channel1,
+                consumer_task: decoy,
+                queue_depth: 1,
+                timestamp: Time::from_secs(1),
+            });
+
+            match release {
+                OwnerRelease::None => {}
+                OwnerRelease::Decoy => {
+                    monitor.record_event(FlowControlEvent::BackpressureReleased {
+                        channel_id: channel1,
+                        consumer_task: decoy,
+                        new_queue_depth: 1,
+                        timestamp: Time::from_secs(1),
+                    });
+                }
+                OwnerRelease::CycleOwner => {
+                    monitor.record_event(FlowControlEvent::BackpressureReleased {
+                        channel_id: channel1,
+                        consumer_task: task2,
+                        new_queue_depth: 1,
+                        timestamp: Time::from_secs(1),
+                    });
+                }
+            }
+            deadlock_tick(&mut monitor, Time::from_secs(2));
+
+            let deadlocks = potential_deadlocks(&monitor);
+            match release {
+                OwnerRelease::None | OwnerRelease::Decoy => {
+                    assert_eq!(deadlocks.len(), 1, "release={release:?}");
+                    match deadlocks[0] {
+                        FlowControlViolation::PotentialDeadlock { involved_tasks, .. } => {
+                            assert!(involved_tasks.contains(&task1));
+                            assert!(involved_tasks.contains(&task2));
+                            assert!(!involved_tasks.contains(&decoy));
+                        }
+                        _ => unreachable!("filtered to potential deadlocks"),
+                    }
+                    assert_eq!(monitor.stats().deadlocks_detected, 1);
+                }
+                OwnerRelease::CycleOwner => {
+                    assert!(deadlocks.is_empty(), "release={release:?}");
+                    assert_eq!(monitor.stats().deadlocks_detected, 0);
+                }
+            }
         }
     }
 
@@ -1295,6 +1820,12 @@ mod tests {
         let task_id = TaskId::new_for_test(1, 0);
         let channel_id = 42;
 
+        monitor.record_event(FlowControlEvent::ProducerBlocked {
+            channel_id,
+            task_id,
+            reason: FlowControlType::CapacityLimit,
+            timestamp: Time::from_nanos(500),
+        });
         monitor.record_event(FlowControlEvent::ProducerUnblocked {
             channel_id,
             task_id,
@@ -1326,15 +1857,15 @@ mod tests {
         assert_eq!(stats.tasks_currently_blocked, 1);
 
         let task_state = monitor.task_states.get(&task_id).expect("task state");
-        assert!(task_state.pending_permits.contains(&permit_id));
-        assert!(task_state.blocked_channels.contains(&channel_id));
+        assert!(monitor.has_wait(FlowWaitIdentity::reserve(task_id, channel_id, permit_id)));
+        assert!(task_state.blocked_channels.contains_key(&channel_id));
         assert_eq!(task_state.first_block_time, Some(now));
 
         let channel_state = monitor
             .channel_states
             .get(&channel_id)
             .expect("channel state");
-        assert!(channel_state.blocked_tasks.contains(&task_id));
+        assert!(channel_state.blocked_tasks.contains_key(&task_id));
     }
 
     #[test]
@@ -1362,7 +1893,7 @@ mod tests {
         assert_eq!(stats.tasks_currently_blocked, 0);
 
         let task_state = monitor.task_states.get(&task_id).expect("task state");
-        assert!(task_state.pending_permits.is_empty());
+        assert!(!monitor.has_wait(FlowWaitIdentity::reserve(task_id, channel_id, permit_id)));
         assert!(task_state.blocked_channels.is_empty());
         assert!(task_state.first_block_time.is_none());
 
@@ -1441,7 +1972,7 @@ mod tests {
         );
 
         let task_state = monitor.task_states.get(&task_id).expect("task state");
-        assert!(task_state.pending_permits.is_empty());
+        assert!(!monitor.has_wait(FlowWaitIdentity::reserve(task_id, channel_id, permit_id)));
         assert!(task_state.blocked_channels.is_empty());
         assert!(task_state.first_block_time.is_none());
 
@@ -1484,6 +2015,421 @@ mod tests {
     }
 
     #[test]
+    fn two_permits_on_one_edge_retain_the_remaining_wait() {
+        let mut config = FlowControlConfig::default();
+        config.starvation_threshold_s = 3;
+        let mut monitor = FlowControlMonitor::new(config);
+        let task_id = TaskId::new_for_test(13, 0);
+        let channel_id = 101;
+        let first_permit = 1_001;
+        let second_permit = 1_002;
+        let first_time = Time::from_secs(1);
+        let second_time = Time::from_secs(2);
+
+        monitor.record_event(FlowControlEvent::ReserveBlocked {
+            channel_id,
+            task_id,
+            permit_id: first_permit,
+            timestamp: first_time,
+        });
+        monitor.record_event(FlowControlEvent::ReserveBlocked {
+            channel_id,
+            task_id,
+            permit_id: second_permit,
+            timestamp: second_time,
+        });
+
+        assert_eq!(
+            monitor.task_states[&task_id].blocked_channels[&channel_id],
+            2
+        );
+        assert_eq!(
+            monitor.channel_states[&channel_id].blocked_tasks[&task_id],
+            2
+        );
+        assert_eq!(
+            monitor.task_states[&task_id].first_block_time,
+            Some(first_time)
+        );
+
+        monitor.record_event(FlowControlEvent::ReserveUnblocked {
+            channel_id,
+            task_id,
+            permit_id: first_permit,
+            blocked_duration_ms: 10,
+            timestamp: Time::from_secs(3),
+        });
+
+        assert!(!monitor.has_wait(FlowWaitIdentity::reserve(task_id, channel_id, first_permit)));
+        assert!(monitor.has_wait(FlowWaitIdentity::reserve(
+            task_id,
+            channel_id,
+            second_permit
+        )));
+        assert_eq!(
+            monitor.task_states[&task_id].blocked_channels[&channel_id],
+            1
+        );
+        assert_eq!(
+            monitor.channel_states[&channel_id].blocked_tasks[&task_id],
+            1
+        );
+        assert_eq!(
+            monitor.task_states[&task_id].first_block_time,
+            Some(second_time)
+        );
+        assert_eq!(monitor.stats().tasks_currently_blocked, 1);
+
+        monitor.record_event(FlowControlEvent::BackpressureApplied {
+            channel_id: 999,
+            consumer_task: TaskId::new_for_test(99, 0),
+            queue_depth: 1,
+            timestamp: Time::from_secs(4),
+        });
+        assert!(!monitor.violations().iter().any(|report| matches!(
+            &report.violation,
+            FlowControlViolation::ProducerStarvation {
+                channel_id: violation_channel,
+                starved_task,
+                ..
+            } if *violation_channel == channel_id && *starved_task == task_id
+        )));
+
+        monitor.record_event(FlowControlEvent::BackpressureApplied {
+            channel_id: 999,
+            consumer_task: TaskId::new_for_test(99, 0),
+            queue_depth: 2,
+            timestamp: Time::from_secs(5),
+        });
+        assert!(monitor.violations().iter().any(|report| matches!(
+            &report.violation,
+            FlowControlViolation::ProducerStarvation {
+                channel_id: violation_channel,
+                starved_task,
+                starvation_duration_s: 3,
+                ..
+            } if *violation_channel == channel_id && *starved_task == task_id
+        )));
+
+        monitor.record_event(FlowControlEvent::CommitFlowControlled {
+            channel_id,
+            task_id,
+            permit_id: second_permit,
+            timestamp: Time::from_secs(6),
+        });
+
+        assert!(monitor.task_states[&task_id].blocked_channels.is_empty());
+        assert!(monitor.channel_states[&channel_id].blocked_tasks.is_empty());
+        assert_eq!(monitor.stats().tasks_currently_blocked, 0);
+    }
+
+    #[test]
+    fn mixed_wait_completions_preserve_the_other_wait_on_same_edge() {
+        let mut monitor = FlowControlMonitor::with_defaults();
+        let task_id = TaskId::new_for_test(14, 0);
+        let channel_id = 102;
+        let permit_id = 2_001;
+        let reason = FlowControlType::CapacityLimit;
+        let reserve_time = Time::from_secs(2);
+
+        monitor.record_event(FlowControlEvent::ProducerBlocked {
+            channel_id,
+            task_id,
+            reason,
+            timestamp: Time::from_secs(1),
+        });
+        monitor.record_event(FlowControlEvent::ReserveBlocked {
+            channel_id,
+            task_id,
+            permit_id,
+            timestamp: reserve_time,
+        });
+        monitor.record_event(FlowControlEvent::ProducerUnblocked {
+            channel_id,
+            task_id,
+            reason,
+            blocked_duration_ms: 7,
+            timestamp: Time::from_secs(3),
+        });
+
+        assert!(!monitor.has_wait(FlowWaitIdentity::producer(task_id, channel_id, reason)));
+        assert!(monitor.has_wait(FlowWaitIdentity::reserve(task_id, channel_id, permit_id)));
+        assert_eq!(
+            monitor.task_states[&task_id].blocked_channels[&channel_id],
+            1
+        );
+        assert_eq!(
+            monitor.task_states[&task_id].first_block_time,
+            Some(reserve_time)
+        );
+
+        monitor.record_event(FlowControlEvent::ReserveUnblocked {
+            channel_id,
+            task_id,
+            permit_id,
+            blocked_duration_ms: 5,
+            timestamp: Time::from_secs(4),
+        });
+        assert!(monitor.task_states[&task_id].blocked_channels.is_empty());
+
+        let mut inverse = FlowControlMonitor::with_defaults();
+        inverse.record_event(FlowControlEvent::ProducerBlocked {
+            channel_id,
+            task_id,
+            reason,
+            timestamp: Time::from_secs(1),
+        });
+        inverse.record_event(FlowControlEvent::ReserveBlocked {
+            channel_id,
+            task_id,
+            permit_id,
+            timestamp: reserve_time,
+        });
+        inverse.record_event(FlowControlEvent::ReserveUnblocked {
+            channel_id,
+            task_id,
+            permit_id,
+            blocked_duration_ms: 5,
+            timestamp: Time::from_secs(3),
+        });
+
+        assert!(inverse.has_wait(FlowWaitIdentity::producer(task_id, channel_id, reason)));
+        assert!(!inverse.has_wait(FlowWaitIdentity::reserve(task_id, channel_id, permit_id)));
+        assert_eq!(
+            inverse.task_states[&task_id].blocked_channels[&channel_id],
+            1
+        );
+
+        inverse.record_event(FlowControlEvent::ProducerUnblocked {
+            channel_id,
+            task_id,
+            reason,
+            blocked_duration_ms: 7,
+            timestamp: Time::from_secs(4),
+        });
+        assert!(inverse.task_states[&task_id].blocked_channels.is_empty());
+    }
+
+    #[test]
+    fn wrong_channel_terminal_events_preserve_the_real_reserve_wait() {
+        let task_id = TaskId::new_for_test(15, 0);
+        let real_channel = 103;
+        let wrong_channel = 104;
+        let permit_id = 3_001;
+
+        let terminal_events = [
+            (
+                FlowControlEvent::ReserveUnblocked {
+                    channel_id: wrong_channel,
+                    task_id,
+                    permit_id,
+                    blocked_duration_ms: 1,
+                    timestamp: Time::from_secs(2),
+                },
+                None,
+            ),
+            (
+                FlowControlEvent::CommitFlowControlled {
+                    channel_id: wrong_channel,
+                    task_id,
+                    permit_id,
+                    timestamp: Time::from_secs(2),
+                },
+                Some("commit_flow_controlled_without_pending_reserve"),
+            ),
+            (
+                FlowControlEvent::AbortDueToFlowControl {
+                    channel_id: wrong_channel,
+                    task_id,
+                    permit_id,
+                    timeout_reason: "wrong channel".to_string(),
+                    timestamp: Time::from_secs(2),
+                },
+                Some("abort_without_pending_reserve"),
+            ),
+        ];
+
+        for (terminal_event, expected_atomicity_type) in terminal_events {
+            let mut monitor = FlowControlMonitor::with_defaults();
+            monitor.record_event(FlowControlEvent::ReserveBlocked {
+                channel_id: real_channel,
+                task_id,
+                permit_id,
+                timestamp: Time::from_secs(1),
+            });
+            monitor.record_event(terminal_event);
+
+            assert!(monitor.has_wait(FlowWaitIdentity::reserve(task_id, real_channel, permit_id)));
+            assert_eq!(
+                monitor.task_states[&task_id].blocked_channels[&real_channel],
+                1
+            );
+            assert_eq!(
+                monitor.channel_states[&real_channel].blocked_tasks[&task_id],
+                1
+            );
+            assert_eq!(monitor.stats().tasks_currently_blocked, 1);
+            assert_eq!(monitor.violations().len(), 1);
+            let violation = &monitor.violations().back().expect("violation").violation;
+            if let Some(expected_type) = expected_atomicity_type {
+                assert!(matches!(
+                    violation,
+                    FlowControlViolation::AtomicityViolation {
+                        channel_id: violation_channel,
+                        task_id: violation_task,
+                        permit_id: violation_permit,
+                        violation_type,
+                        ..
+                    } if *violation_channel == wrong_channel
+                        && *violation_task == task_id
+                        && *violation_permit == permit_id
+                        && violation_type.as_str() == expected_type
+                ));
+            } else {
+                assert!(matches!(
+                    violation,
+                    FlowControlViolation::FlowControlInconsistency {
+                        channel_id: violation_channel,
+                        ..
+                    } if *violation_channel == wrong_channel
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn producer_unblock_requires_the_exact_reason() {
+        let mut monitor = FlowControlMonitor::with_defaults();
+        let task_id = TaskId::new_for_test(16, 0);
+        let channel_id = 105;
+        let real_reason = FlowControlType::CreditBased;
+
+        monitor.record_event(FlowControlEvent::ProducerBlocked {
+            channel_id,
+            task_id,
+            reason: real_reason,
+            timestamp: Time::from_secs(1),
+        });
+        monitor.record_event(FlowControlEvent::ProducerUnblocked {
+            channel_id,
+            task_id,
+            reason: FlowControlType::WindowBased,
+            blocked_duration_ms: 50,
+            timestamp: Time::from_secs(2),
+        });
+
+        assert!(monitor.has_wait(FlowWaitIdentity::producer(task_id, channel_id, real_reason)));
+        assert_eq!(monitor.total_unblocks, 0);
+        assert_eq!(monitor.total_blocked_time_ms, 0);
+        assert!(matches!(
+            monitor.violations().back().map(|report| &report.violation),
+            Some(FlowControlViolation::FlowControlInconsistency { .. })
+        ));
+    }
+
+    #[test]
+    fn duplicate_wait_events_are_idempotent() {
+        let mut monitor = FlowControlMonitor::with_defaults();
+        let task_id = TaskId::new_for_test(18, 0);
+        let channel_id = 107;
+        let permit_id = 4_001;
+
+        monitor.record_event(FlowControlEvent::ReserveBlocked {
+            channel_id,
+            task_id,
+            permit_id,
+            timestamp: Time::from_secs(2),
+        });
+        monitor.record_event(FlowControlEvent::ReserveBlocked {
+            channel_id,
+            task_id,
+            permit_id,
+            timestamp: Time::from_secs(1),
+        });
+
+        assert_eq!(
+            monitor.task_states[&task_id].blocked_channels[&channel_id],
+            1
+        );
+        assert_eq!(
+            monitor.channel_states[&channel_id].blocked_tasks[&task_id],
+            1
+        );
+        assert_eq!(
+            monitor.task_states[&task_id].first_block_time,
+            Some(Time::from_secs(1))
+        );
+
+        monitor.record_event(FlowControlEvent::ReserveUnblocked {
+            channel_id,
+            task_id,
+            permit_id,
+            blocked_duration_ms: 10,
+            timestamp: Time::from_secs(3),
+        });
+        monitor.record_event(FlowControlEvent::ReserveUnblocked {
+            channel_id,
+            task_id,
+            permit_id,
+            blocked_duration_ms: 50,
+            timestamp: Time::from_secs(4),
+        });
+
+        assert_eq!(monitor.total_unblocks, 1);
+        assert_eq!(monitor.total_blocked_time_ms, 10);
+        assert_eq!(monitor.stats().max_block_time_ms, 10);
+        assert!(monitor.task_states[&task_id].blocked_channels.is_empty());
+        assert!(monitor.channel_states[&channel_id].blocked_tasks.is_empty());
+        assert!(matches!(
+            monitor.violations().back().map(|report| &report.violation),
+            Some(FlowControlViolation::FlowControlInconsistency { .. })
+        ));
+    }
+
+    #[test]
+    fn cancellation_before_first_block_is_retained() {
+        let mut config = FlowControlConfig::default();
+        config.deadlock_detection_threshold_s = 1;
+        let mut monitor = FlowControlMonitor::new(config);
+        let task_id = TaskId::new_for_test(17, 0);
+        let channel_id = 106;
+        let cancel_time = Time::from_secs(1);
+
+        monitor.record_task_cancel(task_id, cancel_time);
+        let cancelled_state = monitor.task_states.get(&task_id).expect("cancelled state");
+        assert!(cancelled_state.is_cancelled);
+        assert_eq!(cancelled_state.cancel_time, Some(cancel_time));
+
+        monitor.record_event(FlowControlEvent::ProducerBlocked {
+            channel_id,
+            task_id,
+            reason: FlowControlType::ConsumerBackpressure,
+            timestamp: Time::from_secs(2),
+        });
+
+        assert!(monitor.violations().iter().any(|report| matches!(
+            &report.violation,
+            FlowControlViolation::CancellationUnblockFailure {
+                channel_id: violation_channel,
+                cancelled_task,
+                time_since_cancel_s: 1,
+                ..
+            } if *violation_channel == channel_id && *cancelled_task == task_id
+        )));
+    }
+
+    #[test]
+    fn disabled_monitor_ignores_task_cancellation() {
+        let mut config = FlowControlConfig::default();
+        config.enable_verification = false;
+        let mut monitor = FlowControlMonitor::new(config);
+
+        monitor.record_task_cancel(TaskId::new_for_test(19, 0), Time::from_secs(1));
+
+        assert!(monitor.task_states.is_empty());
+    }
+
+    #[test]
     fn test_cancelled_task_still_blocked_reports_unblock_failure() {
         let mut config = FlowControlConfig::default();
         config.deadlock_detection_threshold_s = 1;
@@ -1519,5 +2465,287 @@ mod tests {
                 && *flow_control_type == FlowControlType::ConsumerBackpressure
                 && *time_since_cancel_s == 2
         )));
+    }
+
+    #[test]
+    fn producer_control_refcounts_follow_live_waits() {
+        let mut monitor = FlowControlMonitor::with_defaults();
+        let channel_id = 201;
+        let reason = FlowControlType::RateLimit;
+        let first_task = TaskId::new_for_test(21, 0);
+        let second_task = TaskId::new_for_test(22, 0);
+
+        for task_id in [first_task, second_task] {
+            monitor.record_event(FlowControlEvent::ProducerBlocked {
+                channel_id,
+                task_id,
+                reason,
+                timestamp: Time::from_secs(1),
+            });
+        }
+
+        assert_eq!(
+            monitor.channel_states[&channel_id]
+                .active_controls
+                .get(&reason),
+            Some(&2)
+        );
+        assert_eq!(monitor.stats().channels_under_flow_control, 1);
+
+        monitor.record_event(FlowControlEvent::ProducerUnblocked {
+            channel_id,
+            task_id: first_task,
+            reason,
+            blocked_duration_ms: 1,
+            timestamp: Time::from_secs(2),
+        });
+        assert_eq!(
+            monitor.channel_states[&channel_id]
+                .active_controls
+                .get(&reason),
+            Some(&1)
+        );
+        assert_eq!(monitor.stats().channels_under_flow_control, 1);
+
+        monitor.record_event(FlowControlEvent::ProducerUnblocked {
+            channel_id,
+            task_id: second_task,
+            reason,
+            blocked_duration_ms: 1,
+            timestamp: Time::from_secs(2),
+        });
+        assert!(
+            monitor.channel_states[&channel_id]
+                .active_controls
+                .is_empty()
+        );
+        assert_eq!(monitor.stats().channels_under_flow_control, 0);
+
+        monitor.cleanup_old_state(Time::from_secs(400));
+        assert!(!monitor.channel_states.contains_key(&channel_id));
+    }
+
+    #[test]
+    fn backpressure_control_refcounts_follow_consumer_owners() {
+        let mut monitor = FlowControlMonitor::with_defaults();
+        let channel_id = 202;
+        let first_consumer = TaskId::new_for_test(23, 0);
+        let second_consumer = TaskId::new_for_test(24, 0);
+        let unknown_consumer = TaskId::new_for_test(25, 0);
+
+        monitor.record_event(FlowControlEvent::BackpressureApplied {
+            channel_id,
+            consumer_task: first_consumer,
+            queue_depth: 2,
+            timestamp: Time::from_secs(2),
+        });
+        monitor.record_event(FlowControlEvent::BackpressureApplied {
+            channel_id,
+            consumer_task: first_consumer,
+            queue_depth: 3,
+            timestamp: Time::from_secs(1),
+        });
+        monitor.record_event(FlowControlEvent::BackpressureApplied {
+            channel_id,
+            consumer_task: second_consumer,
+            queue_depth: 4,
+            timestamp: Time::from_secs(3),
+        });
+
+        let state = &monitor.channel_states[&channel_id];
+        assert_eq!(
+            state
+                .active_controls
+                .get(&FlowControlType::ConsumerBackpressure),
+            Some(&2)
+        );
+        assert_eq!(state.backpressure_start_time, Some(Time::from_secs(1)));
+
+        monitor.record_event(FlowControlEvent::BackpressureReleased {
+            channel_id,
+            consumer_task: unknown_consumer,
+            new_queue_depth: 3,
+            timestamp: Time::from_secs(4),
+        });
+        assert_eq!(
+            monitor.channel_states[&channel_id]
+                .active_controls
+                .get(&FlowControlType::ConsumerBackpressure),
+            Some(&2)
+        );
+        assert!(matches!(
+            monitor.violations().back().map(|report| &report.violation),
+            Some(FlowControlViolation::FlowControlInconsistency { .. })
+        ));
+
+        monitor.record_event(FlowControlEvent::BackpressureReleased {
+            channel_id,
+            consumer_task: first_consumer,
+            new_queue_depth: 2,
+            timestamp: Time::from_secs(5),
+        });
+        let state = &monitor.channel_states[&channel_id];
+        assert_eq!(
+            state
+                .active_controls
+                .get(&FlowControlType::ConsumerBackpressure),
+            Some(&1)
+        );
+        assert!(state.backpressure_active);
+        assert_eq!(state.backpressure_start_time, Some(Time::from_secs(3)));
+
+        monitor.record_event(FlowControlEvent::BackpressureReleased {
+            channel_id,
+            consumer_task: second_consumer,
+            new_queue_depth: 0,
+            timestamp: Time::from_secs(6),
+        });
+        let state = &monitor.channel_states[&channel_id];
+        assert!(state.active_controls.is_empty());
+        assert!(!state.backpressure_active);
+        assert!(state.backpressure_start_time.is_none());
+        assert_eq!(monitor.stats().channels_under_flow_control, 0);
+    }
+
+    #[test]
+    fn reserve_wait_reports_capacity_for_indefinite_and_cancellation() {
+        let mut config = FlowControlConfig::default();
+        config.deadlock_detection_threshold_s = 1;
+        let mut monitor = FlowControlMonitor::new(config);
+        let task_id = TaskId::new_for_test(26, 0);
+        let channel_id = 203;
+
+        monitor.record_event(FlowControlEvent::ReserveBlocked {
+            channel_id,
+            task_id,
+            permit_id: 5_001,
+            timestamp: Time::from_secs(1),
+        });
+        monitor.record_task_cancel(task_id, Time::from_secs(2));
+        monitor.record_event(FlowControlEvent::BackpressureApplied {
+            channel_id: 999,
+            consumer_task: TaskId::new_for_test(27, 0),
+            queue_depth: 1,
+            timestamp: Time::from_secs(4),
+        });
+
+        assert!(monitor.violations().iter().any(|report| matches!(
+            &report.violation,
+            FlowControlViolation::IndefiniteBlocking {
+                channel_id: violation_channel,
+                blocked_task,
+                flow_control_type: FlowControlType::CapacityLimit,
+                block_duration_s: 3,
+                ..
+            } if *violation_channel == channel_id && *blocked_task == task_id
+        )));
+        assert!(monitor.violations().iter().any(|report| matches!(
+            &report.violation,
+            FlowControlViolation::CancellationUnblockFailure {
+                channel_id: violation_channel,
+                cancelled_task,
+                flow_control_type: FlowControlType::CapacityLimit,
+                time_since_cancel_s: 2,
+                ..
+            } if *violation_channel == channel_id && *cancelled_task == task_id
+        )));
+    }
+
+    #[test]
+    fn typed_wait_violations_do_not_cross_attribute_channel_controls() {
+        let mut config = FlowControlConfig::default();
+        config.deadlock_detection_threshold_s = 1;
+        let mut monitor = FlowControlMonitor::new(config);
+        let channel_id = 204;
+        let rate_limited = TaskId::new_for_test(28, 0);
+        let capacity_limited = TaskId::new_for_test(29, 0);
+
+        monitor.record_event(FlowControlEvent::ProducerBlocked {
+            channel_id,
+            task_id: rate_limited,
+            reason: FlowControlType::RateLimit,
+            timestamp: Time::from_secs(1),
+        });
+        monitor.record_event(FlowControlEvent::ProducerBlocked {
+            channel_id,
+            task_id: capacity_limited,
+            reason: FlowControlType::CapacityLimit,
+            timestamp: Time::from_secs(1),
+        });
+        monitor.record_event(FlowControlEvent::BackpressureApplied {
+            channel_id: 998,
+            consumer_task: TaskId::new_for_test(30, 0),
+            queue_depth: 1,
+            timestamp: Time::from_secs(3),
+        });
+
+        let typed_reports: Vec<_> = monitor
+            .violations()
+            .iter()
+            .filter_map(|report| match report.violation {
+                FlowControlViolation::IndefiniteBlocking {
+                    channel_id: violation_channel,
+                    blocked_task,
+                    flow_control_type,
+                    ..
+                } if violation_channel == channel_id => Some((blocked_task, flow_control_type)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(typed_reports.len(), 2);
+        assert!(typed_reports.contains(&(rate_limited, FlowControlType::RateLimit)));
+        assert!(typed_reports.contains(&(capacity_limited, FlowControlType::CapacityLimit)));
+    }
+
+    #[test]
+    fn removed_producer_reason_does_not_label_later_reserve_wait() {
+        let mut config = FlowControlConfig::default();
+        config.deadlock_detection_threshold_s = 1;
+        let mut monitor = FlowControlMonitor::new(config);
+        let task_id = TaskId::new_for_test(31, 0);
+        let channel_id = 205;
+
+        monitor.record_event(FlowControlEvent::ProducerBlocked {
+            channel_id,
+            task_id,
+            reason: FlowControlType::RateLimit,
+            timestamp: Time::from_secs(1),
+        });
+        monitor.record_event(FlowControlEvent::ProducerUnblocked {
+            channel_id,
+            task_id,
+            reason: FlowControlType::RateLimit,
+            blocked_duration_ms: 1,
+            timestamp: Time::from_secs(2),
+        });
+        monitor.record_event(FlowControlEvent::ReserveBlocked {
+            channel_id,
+            task_id,
+            permit_id: 5_002,
+            timestamp: Time::from_secs(3),
+        });
+        monitor.record_event(FlowControlEvent::BackpressureApplied {
+            channel_id: 997,
+            consumer_task: TaskId::new_for_test(32, 0),
+            queue_depth: 1,
+            timestamp: Time::from_secs(5),
+        });
+
+        let reported_types: Vec<_> = monitor
+            .violations()
+            .iter()
+            .filter_map(|report| match report.violation {
+                FlowControlViolation::IndefiniteBlocking {
+                    channel_id: violation_channel,
+                    blocked_task,
+                    flow_control_type,
+                    ..
+                } if violation_channel == channel_id && blocked_task == task_id => {
+                    Some(flow_control_type)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reported_types, vec![FlowControlType::CapacityLimit]);
     }
 }

@@ -330,6 +330,26 @@
       {
         "expected_graph_roots": [
           "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+          "tests/kafka_producer_idempotence_audit.rs"
+        ],
+        "expected_heavy_edges": [],
+        "lane_class": "run_exact",
+        "lane_id": "downstream-consumer-default-kafka-test",
+        "max_expected_crates": 220,
+        "no_claim_boundaries": [
+          "all-root-integration-tests-default-clean",
+          "broad-workspace-health",
+          "conformance-crate",
+          "conformance-dev-dependency-cycle-removal",
+          "kafka-backend-behavior",
+          "performance",
+          "release-readiness",
+          "test-internals-public-api"
+        ]
+      },
+      {
+        "expected_graph_roots": [
+          "tests/fixtures/downstream-consumer-proof/Cargo.toml",
           "tests/fixtures/downstream-consumer-proof/src/bin/metrics_consumer.rs"
         ],
         "expected_heavy_edges": [
@@ -430,6 +450,7 @@
     "unsafe-boundary-ledger-contract",
     "proof-lane-manifest-verifier",
     "downstream-consumer-default-public-api",
+    "downstream-consumer-default-kafka-fail-closed",
     "downstream-consumer-metrics-public-api",
     "downstream-consumer-channel-public-api",
     "downstream-consumer-default-tokio-free",
@@ -444,7 +465,9 @@
     "artifact-governance-validation-harness",
     "artifact-governance-final-signoff",
     "clean-overlay-proof-orchestration-contract",
-    "proof-traffic-final-signoff"
+    "proof-traffic-final-signoff",
+    "dependency-supply-chain-policy-contract",
+    "dependency-budget-contract"
   ],
   "lanes": [
     {
@@ -1228,6 +1251,22 @@
       ]
     },
     {
+      "lane_id": "downstream-consumer-default-kafka-test",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "package": "asupersync-downstream-consumer-proof",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_kafka_default CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --test kafka_default_feature_surface -- --nocapture",
+      "guarantee_ids": [
+        "downstream-consumer-default-kafka-fail-closed"
+      ],
+      "feature_flags": [],
+      "expected_signal": "kafka_default_feature_surface runs 2 tests successfully against the external fixture with only default asupersync features",
+      "source_paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/kafka_producer_idempotence_audit.rs"
+      ]
+    },
+    {
       "lane_id": "downstream-consumer-metrics-run",
       "kind": "test_frontier",
       "resource_envelope_class": "test-frontier-heavy",
@@ -1636,6 +1675,58 @@
         "README.md",
         "AGENTS.md"
       ]
+    },
+    {
+      "lane_id": "dependency-supply-chain-policy-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_supply_chain_policy CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test dependency_supply_chain_policy_contract -- --nocapture",
+      "guarantee_ids": [
+        "dependency-supply-chain-policy-contract"
+      ],
+      "feature_flags": [],
+      "expected_signal": "dependency_supply_chain_policy_contract tests pass",
+      "source_paths": [
+        "deny.toml",
+        ".cargo/audit.toml",
+        "scripts/ci/audit_dependencies.sh",
+        ".github/workflows/ci.yml",
+        "artifacts/dependency_supply_chain_policy_v1.json",
+        "docs/dependency_supply_chain_policy.md",
+        "tests/dependency_supply_chain_policy_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json",
+        "README.md",
+        "AGENTS.md"
+      ]
+    },
+    {
+      "lane_id": "dependency-budget-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_budget_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features dependency-ledger --test dependency_budget_contract -- --nocapture",
+      "guarantee_ids": [
+        "dependency-budget-contract"
+      ],
+      "feature_flags": [
+        "dependency-ledger"
+      ],
+      "expected_signal": "dependency_budget_contract tests pass",
+      "source_paths": [
+        "artifacts/dependency_budget_contract_v1.json",
+        "artifacts/dependency_marginal_ledger_v1.json",
+        "src/bin/dependency_marginal_ledger.rs",
+        "docs/dependency_budget_contract.md",
+        "tests/dependency_budget_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json",
+        "README.md",
+        "AGENTS.md"
+      ]
     }
   ],
   "guarantees": [
@@ -1880,6 +1971,12 @@
       ]
     },
     {
+      "guarantee_id": "downstream-consumer-default-kafka-fail-closed",
+      "lane_ids": [
+        "downstream-consumer-default-kafka-test"
+      ]
+    },
+    {
       "guarantee_id": "downstream-consumer-metrics-public-api",
       "lane_ids": [
         "downstream-consumer-metrics-run"
@@ -1979,6 +2076,18 @@
       "guarantee_id": "proof-traffic-final-signoff",
       "lane_ids": [
         "proof-traffic-final-signoff"
+      ]
+    },
+    {
+      "guarantee_id": "dependency-supply-chain-policy-contract",
+      "lane_ids": [
+        "dependency-supply-chain-policy-contract"
+      ]
+    },
+    {
+      "guarantee_id": "dependency-budget-contract",
+      "lane_ids": [
+        "dependency-budget-contract"
       ]
     }
   ]

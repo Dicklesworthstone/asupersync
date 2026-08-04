@@ -138,7 +138,7 @@ impl FoataTrace {
     /// produce identical fingerprints.
     #[must_use]
     pub fn fingerprint(&self) -> u64 {
-        let mut hasher = DetHasher::default();
+        let mut hasher = DetHasher::for_lab();
         for (layer_idx, layer) in self.layers.iter().enumerate() {
             layer_idx.hash(&mut hasher);
             layer.len().hash(&mut hasher);
@@ -418,7 +418,7 @@ pub fn trace_fingerprint(events: &[TraceEvent]) -> u64 {
         layer_indices[layer].push(idx);
     }
 
-    let mut hasher = DetHasher::default();
+    let mut hasher = DetHasher::for_lab();
     for (layer_idx, indices) in layer_indices.iter_mut().enumerate() {
         indices.sort_by_cached_key(|&idx| event_total_order_key(&events[idx]));
         layer_idx.hash(&mut hasher);
@@ -522,7 +522,7 @@ fn event_sort_key(event: &TraceEvent) -> (u8, u64, u64, u64) {
             // `equivalent` (fingerprint) disagree with `equivalent_exact`.
             // Fold the distinguishing fields into the key so distinct
             // observations get distinct, deterministic keys.
-            let mut hasher = DetHasher::default();
+            let mut hasher = DetHasher::for_lab();
             idle_steps.hash(&mut hasher);
             held.hash(&mut hasher);
             (k, pack_arena(task.0), pack_arena(region.0), hasher.finish())
@@ -573,7 +573,7 @@ fn event_sort_key(event: &TraceEvent) -> (u8, u64, u64, u64) {
             (k, task_key, 0, 0)
         }
         TraceData::Message(msg) => {
-            let mut h = DetHasher::default();
+            let mut h = DetHasher::for_lab();
             msg.hash(&mut h);
             (k, h.finish(), 0, 0)
         }

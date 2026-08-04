@@ -40,6 +40,7 @@
     "arq-quic-wire-conformance",
     "arq-quic-fleet-benchmark",
     "downstream-consumer-default-run",
+    "downstream-consumer-default-kafka-test",
     "downstream-consumer-metrics-run",
     "downstream-consumer-channel-profile-run",
     "downstream-consumer-default-tokio-tree",
@@ -56,6 +57,8 @@
     "artifact-governance-validation-harness",
     "artifact-governance-final-signoff",
     "clean-overlay-proof-orchestration-contract",
-    "proof-traffic-final-signoff"
+    "proof-traffic-final-signoff",
+    "dependency-supply-chain-policy-contract",
+    "dependency-budget-contract"
   ]
 }

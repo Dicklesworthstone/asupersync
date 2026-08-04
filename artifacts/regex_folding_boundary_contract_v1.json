@@ -1,0 +1,413 @@
+{
+  "schema_version": 1,
+  "artifact_id": "regex-folding-boundary-contract-v1",
+  "program_id": "dependency-sovereignty",
+  "bead_id": "asupersync-5z2scg.8.3.2.3",
+  "capability_id": "CAP-REGEX-PRIVACY",
+  "semantics_id": "ASUP-REGEX-FOLD-BOUNDARY-V1",
+  "captured_date_utc": "2026-07-25",
+  "decision": {
+    "disposition": "STAGED_SIMPLE_FOLD_AND_BOUNDARY_SEMANTICS",
+    "incumbent_state": "RETAIN_REGEX_AND_REGEX_SYNTAX",
+    "semantic_kernel_state": "INTERNAL_NOT_WIRED",
+    "r3_2_3_surface_complete": true,
+    "cutover_eligible": false,
+    "dependency_removal_authorized": false,
+    "matcher_authorized": false,
+    "terminal_cross_target_conformance_complete": false,
+    "reason_codes": [
+      "UNICODE_SIMPLE_ONE_SCALAR_FOLD_ONLY",
+      "ASCII_BYTE_FOLD_ONLY_WHEN_UNICODE_DISABLED",
+      "WORD_TABLES_RETAINED_AT_UNICODE_16",
+      "CRLF_PAIRS_NEVER_SPLIT",
+      "FLAG_SCOPES_RESTORED",
+      "WORK_IS_BOUNDED",
+      "R3_2_4_OWNS_TERMINAL_CONFORMANCE"
+    ],
+    "on_backend_fold_rejection": "ERROR_KEEP_INCUMBENT",
+    "on_unicode_word_table_unavailability": "ERROR_KEEP_INCUMBENT",
+    "on_budget_exhaustion": "ERROR_KEEP_INCUMBENT"
+  },
+  "authority": {
+    "syntax_contract": "ASUP-REGEX-SYNTAX-V1",
+    "syntax_source": "src/observability/regex_syntax.rs",
+    "syntax_source_sha256": "2fbeae8fc1346d51cf5535930b750d0d69055d8923b3c6e8fcb3bf8ce25315b0",
+    "character_semantics_contract": "ASUP-REGEX-CHAR-SEMANTICS-V1",
+    "character_semantics_source": "src/observability/regex_semantics.rs",
+    "character_semantics_source_sha256": "bd762181da7620330a580152688af7684da371a9a32c144ef09ac5b5d0c2221a",
+    "retained_backend": "regex-syntax@0.8.11",
+    "unicode_version": "16.0.0",
+    "consumer_input_type": "&str pattern and &str haystack",
+    "bytes_regex_consumer_reachable": false,
+    "ambient_locale_used": false,
+    "platform_tables_used": false,
+    "normalization_used": false
+  },
+  "source": {
+    "path": "src/observability/regex_boundaries.rs",
+    "sha256": "bac41152af892d6fb3c84fcc4c1ee2a75d70219ec877604207dbcd4c8efafbbd",
+    "module_wiring": "src/observability/mod.rs",
+    "visibility": "pub(crate)",
+    "feature": "metrics",
+    "public_api_added": false,
+    "unsafe_code_added": false
+  },
+  "fold_contract": {
+    "kind": "UNICODE_SIMPLE_ONE_SCALAR",
+    "unicode_default": true,
+    "unicode_table_version": "16.0.0",
+    "unicode_output": "canonical scalar ranges",
+    "unicode_disabled_output": "ASCII canonical byte ranges or exact bytes admitted by whole-scope UTF-8 validation",
+    "full_multi_scalar_folds_supported": false,
+    "locale_sensitive_folds_supported": false,
+    "normalization_performed": false,
+    "combining_sequence_policy": "preserve code points without normalization",
+    "special_fold_examples": [
+      "sigma equivalence includes U+03C3 U+03A3 U+03C2",
+      "ASCII k equivalence includes U+212A in Unicode mode",
+      "sharp s never expands to the two-scalar sequence ss",
+      "Unicode-disabled ASCII folding excludes U+212A"
+    ],
+    "unsupported_policy": "EXPLICIT_NOT_IN_CANDIDATE_LANGUAGE_KEEP_INCUMBENT"
+  },
+  "boundary_contract": {
+    "offset_domain": "UTF-8 code point boundaries from zero through haystack length",
+    "invalid_offset_policy": "ERROR",
+    "missing_adjacent_character_word_status": false,
+    "ascii_word_definition": "[_0-9A-Za-z]",
+    "unicode_word_definition": "retained regex-syntax Unicode Perl word table",
+    "line_terminators": [
+      "LF",
+      "CRLF-aware CR and LF"
+    ],
+    "crlf_pair_policy": "NEVER_MATCH_BETWEEN_CR_AND_LF",
+    "variants": [
+      "INPUT_START",
+      "INPUT_END",
+      "LINE_START_LF",
+      "LINE_END_LF",
+      "LINE_START_CRLF",
+      "LINE_END_CRLF",
+      "WORD_ASCII",
+      "NOT_WORD_ASCII",
+      "WORD_UNICODE",
+      "NOT_WORD_UNICODE",
+      "WORD_START_ASCII",
+      "WORD_END_ASCII",
+      "WORD_START_UNICODE",
+      "WORD_END_UNICODE",
+      "WORD_START_HALF_ASCII",
+      "WORD_END_HALF_ASCII",
+      "WORD_START_HALF_UNICODE",
+      "WORD_END_HALF_UNICODE"
+    ]
+  },
+  "flag_contract": {
+    "tracked_flags": [
+      "i",
+      "m",
+      "R",
+      "u",
+      "x"
+    ],
+    "ordinary_group_inherits": true,
+    "scoped_group_restores_parent": true,
+    "unscoped_directive_updates_current_group": true,
+    "line_anchor_without_m": "INPUT_BOUNDARY",
+    "line_anchor_with_m": "LF_BOUNDARY",
+    "line_anchor_with_m_and_R": "CRLF_BOUNDARY",
+    "word_boundary_with_u": "UNICODE_WORD",
+    "word_boundary_without_u": "ASCII_WORD",
+    "angle_word_start_end": "ASCII_WORD_REGARDLESS_OF_U"
+  },
+  "limits": {
+    "max_pattern_bytes": 1048576,
+    "max_syntax_tokens": 1048576,
+    "max_syntax_nodes": 1048576,
+    "max_syntax_nesting": 250,
+    "max_semantic_atoms": 1048576,
+    "max_ranges_per_character_class": 4096,
+    "max_total_character_ranges": 1048576,
+    "max_fold_atoms": 1048576,
+    "max_ranges_per_fold": 4096,
+    "max_total_fold_ranges": 1048576,
+    "max_boundary_assertions": 1048576,
+    "backend_nesting_limit": 250,
+    "allocation_policy": "grow only after the owning atom or assertion budget admits the item",
+    "accounting_policy": "checked aggregate range and represented-alternative arithmetic"
+  },
+  "diagnostics": [
+    {
+      "code": "RGX-FB-E001",
+      "category": "RGX-DIAG-RETAINED-FOLD-REJECTED",
+      "trigger": "retained simple-fold translator rejects an atom"
+    },
+    {
+      "code": "RGX-FB-E002",
+      "category": "RGX-DIAG-FOLD-SHAPE",
+      "trigger": "retained output is not one canonical character atom"
+    },
+    {
+      "code": "RGX-FB-E003",
+      "category": "RGX-DIAG-FOLD-ATOM-LIMIT",
+      "trigger": "case-insensitive atom budget is exhausted"
+    },
+    {
+      "code": "RGX-FB-E004",
+      "category": "RGX-DIAG-FOLD-RANGE-LIMIT",
+      "trigger": "one folded atom exceeds its canonical range budget"
+    },
+    {
+      "code": "RGX-FB-E005",
+      "category": "RGX-DIAG-TOTAL-FOLD-RANGE-LIMIT",
+      "trigger": "aggregate folded ranges or represented alternatives overflow their budget"
+    },
+    {
+      "code": "RGX-FB-E006",
+      "category": "RGX-DIAG-BOUNDARY-LIMIT",
+      "trigger": "zero-width boundary assertion budget is exhausted"
+    },
+    {
+      "code": "RGX-FB-E007",
+      "category": "RGX-DIAG-FOLD-FLAG-CONTEXT",
+      "trigger": "candidate token nesting cannot reconcile active flag ownership"
+    },
+    {
+      "code": "RGX-FB-EVAL-E001",
+      "category": "RGX-DIAG-INVALID-UTF8-OFFSET",
+      "trigger": "evaluation offset is outside the haystack or splits a scalar"
+    },
+    {
+      "code": "RGX-FB-EVAL-E002",
+      "category": "RGX-DIAG-UNICODE-WORD-TABLE-UNAVAILABLE",
+      "trigger": "retained Unicode Perl word table is unavailable"
+    }
+  ],
+  "semantic_cases": [
+    {
+      "case_id": "RGX-R323-C001",
+      "surface": "ASCII Unicode-mode simple fold",
+      "pattern": "(?i:a)",
+      "expected": "a and A"
+    },
+    {
+      "case_id": "RGX-R323-C002",
+      "surface": "Greek sigma special equivalence",
+      "pattern": "(?i:σ)",
+      "expected": "sigma small capital and final variants"
+    },
+    {
+      "case_id": "RGX-R323-C003",
+      "surface": "Kelvin special equivalence",
+      "pattern": "(?i:k)",
+      "expected": "k K and U+212A"
+    },
+    {
+      "case_id": "RGX-R323-C004",
+      "surface": "full multi-scalar fold exclusion",
+      "pattern": "(?i:ß)",
+      "expected": "does not expand to ss"
+    },
+    {
+      "case_id": "RGX-R323-C005",
+      "surface": "combining mark identity",
+      "pattern": "(?i:é)",
+      "expected": "two code points remain two atoms without normalization"
+    },
+    {
+      "case_id": "RGX-R323-C006",
+      "surface": "Unicode-disabled ASCII fold",
+      "pattern": "(?i-u:a)",
+      "expected": "ASCII a and A only"
+    },
+    {
+      "case_id": "RGX-R323-C007",
+      "surface": "Unicode-disabled non-ASCII identity",
+      "pattern": "(?i-u:é)",
+      "expected": "exact validated UTF-8 bytes only"
+    },
+    {
+      "case_id": "RGX-R323-C008",
+      "surface": "folded class algebra",
+      "pattern": "(?i:[a-z&&[^q]])",
+      "expected": "canonical folded ranges exclude q and Q"
+    },
+    {
+      "case_id": "RGX-R323-C009",
+      "surface": "absolute input boundaries",
+      "pattern": "\\Asecret\\z",
+      "expected": "offset zero and haystack length only"
+    },
+    {
+      "case_id": "RGX-R323-C010",
+      "surface": "LF multiline boundaries",
+      "pattern": "(?m)^secret$",
+      "expected": "after and before LF plus input edges"
+    },
+    {
+      "case_id": "RGX-R323-C011",
+      "surface": "CRLF multiline boundaries",
+      "pattern": "(?mR)^secret$",
+      "expected": "CRLF-aware edges never split a pair"
+    },
+    {
+      "case_id": "RGX-R323-C012",
+      "surface": "lone CR and lone LF",
+      "pattern": "(?mR)^x$",
+      "expected": "each lone terminator is a line edge"
+    },
+    {
+      "case_id": "RGX-R323-C013",
+      "surface": "Unicode word transition",
+      "pattern": "\\bκόσμος\\b",
+      "expected": "Greek letters are word characters"
+    },
+    {
+      "case_id": "RGX-R323-C014",
+      "surface": "ASCII word transition",
+      "pattern": "(?-u:\\b)secret(?-u:\\b)",
+      "expected": "word set is [_0-9A-Za-z]"
+    },
+    {
+      "case_id": "RGX-R323-C015",
+      "surface": "combining mark word status",
+      "pattern": "\\b́",
+      "expected": "Mark category participates in Unicode word"
+    },
+    {
+      "case_id": "RGX-R323-C016",
+      "surface": "negative word boundary",
+      "pattern": "\\B",
+      "expected": "adjacent word statuses are equal"
+    },
+    {
+      "case_id": "RGX-R323-C017",
+      "surface": "directional word boundaries",
+      "pattern": "\\b{start}\\b{end}",
+      "expected": "nonword-to-word and word-to-nonword are distinct"
+    },
+    {
+      "case_id": "RGX-R323-C018",
+      "surface": "half word boundaries",
+      "pattern": "\\b{start-half}\\b{end-half}",
+      "expected": "left and right nonword predicates are independent"
+    },
+    {
+      "case_id": "RGX-R323-C019",
+      "surface": "empty input",
+      "pattern": "\\A\\z",
+      "expected": "both absolute assertions match offset zero"
+    },
+    {
+      "case_id": "RGX-R323-C020",
+      "surface": "nested flag restoration",
+      "pattern": "(?i:a(?-i:b)c)(?m:^x$)^y$",
+      "expected": "case and line modes restore at scoped group close"
+    }
+  ],
+  "r1_rows": [
+    {
+      "case_id": "RGX-SYN-006",
+      "surface": "absolute-anchors"
+    },
+    {
+      "case_id": "RGX-SYN-007",
+      "surface": "multiline-anchors"
+    },
+    {
+      "case_id": "RGX-SYN-009",
+      "surface": "crlf-mode"
+    },
+    {
+      "case_id": "RGX-SYN-010",
+      "surface": "unicode-case-fold"
+    },
+    {
+      "case_id": "RGX-SYN-019",
+      "surface": "unicode-word-boundary"
+    },
+    {
+      "case_id": "RGX-SYN-020",
+      "surface": "ascii-boundary-unicode-disabled"
+    },
+    {
+      "case_id": "RGX-SYN-023",
+      "surface": "zero-width-anchor"
+    }
+  ],
+  "test_evidence": {
+    "source_unit_lanes": 13,
+    "artifact_contract_lanes": 7,
+    "property_cases_per_lane": 256,
+    "generated_property_cases": 512,
+    "incumbent_fold_golden_cases": 12,
+    "incumbent_boundary_haystacks": 11,
+    "incumbent_boundary_variants": 18,
+    "empty_input_covered": true,
+    "crlf_pair_covered": true,
+    "combining_mark_covered": true,
+    "private_source_canary": true,
+    "cross_target_determinism_basis": "pure Rust char-boundary logic plus exact retained Unicode 16 tables",
+    "terminal_cross_target_receipt_deferred_to": "asupersync-5z2scg.8.3.2.4"
+  },
+  "proof": {
+    "warning_denied_lib_check": {
+      "state": "PASSED",
+      "build_id": 29947326818680927,
+      "worker": "hz1",
+      "exit_code": 0,
+      "source_sha256": "bac41152af892d6fb3c84fcc4c1ee2a75d70219ec877604207dbcd4c8efafbbd",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check -p asupersync --features metrics --lib",
+      "local_fallback_used": false
+    },
+    "focused_contract_test": {
+      "state": "PASSED",
+      "build_id": 29947326818680928,
+      "worker": "hz2",
+      "exit_code": 0,
+      "tests_passed": 68,
+      "tests_failed": 0,
+      "source_sha256": "bac41152af892d6fb3c84fcc4c1ee2a75d70219ec877604207dbcd4c8efafbbd",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics --test regex_folding_boundary_contract -- --nocapture",
+      "local_fallback_used": false
+    },
+    "focused_clippy": {
+      "state": "PASSED",
+      "build_id": 29947326818680926,
+      "worker": "hz1",
+      "exit_code": 0,
+      "source_sha256": "bac41152af892d6fb3c84fcc4c1ee2a75d70219ec877604207dbcd4c8efafbbd",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --features metrics --test regex_folding_boundary_contract -- -D warnings",
+      "local_fallback_used": false
+    },
+    "broad_all_targets_clippy": {
+      "state": "BLOCKED_STALE_PROGRESS_CANCELLED",
+      "build_id": 29947326818680929,
+      "worker": "hz1",
+      "heartbeat_stale": false,
+      "progress_age_at_cancel_seconds": 261,
+      "graceful_cancel": true,
+      "terminal_success_claimed": false,
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --features metrics --all-targets --keep-going -- -D warnings",
+      "local_fallback_used": false
+    }
+  },
+  "proof_commands": [
+    "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check -p asupersync --features metrics --lib",
+    "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics --test regex_folding_boundary_contract -- --nocapture",
+    "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --features metrics --test regex_folding_boundary_contract -- -D warnings",
+    "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --features metrics --all-targets --keep-going -- -D warnings"
+  ],
+  "no_claims": [
+    "no regex or regex-syntax removal authorization",
+    "no candidate production wiring",
+    "no compiler or matcher correctness",
+    "no capture replacement or privacy integration",
+    "no terminal Unicode byte or cross-target conformance",
+    "no performance improvement or no-regression claim",
+    "no broad workspace health or release-readiness claim",
+    "no locale-sensitive or full multi-scalar folding",
+    "no normalization",
+    "no local Cargo fallback approval"
+  ]
+}

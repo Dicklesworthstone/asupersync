@@ -53,7 +53,7 @@ controlled schedules deterministic and replayable.
 | **No silent drops** | Covered two-phase primitives use reserve/commit so uncommitted work aborts cleanly and committed sends are never half-sent |
 | **Deterministic testing** | Lab runtime: virtual time, deterministic scheduling, trace replay |
 | **Adaptive preemption fairness** | Deterministic EXP3/Hedge policy tunes cancel streak limits with regret-bounded updates |
-| **Drain progress certificates** | Variance-adaptive Azuma/Freedman bounds classify drain phase and confidence to quiescence |
+| **Drain progress certificates** | Conditional range-bounded Azuma/Freedman candidates accompany deterministic phase and projected-confidence diagnostics |
 | **Spectral early warnings** | Wait-graph spectral monitor combines conformal bounds and anytime-valid evidence |
 | **Capability security** | Runtime effect APIs flow through explicit `Cx` or capability tokens; host-boundary and test-only exceptions stay named and scoped |
 
@@ -61,62 +61,22 @@ controlled schedules deterministic and replayable.
 
 ## Quick Example
 
-Current API note: runtime-wired code spawns through `Cx::spawn` for the current
-region, or `Cx::spawn_in` for an explicit scope's region. The remaining
-`Scope::spawn_registered` API is the synchronous boot/test path for call sites
-that already hold `&mut RuntimeState`.
+The attribute macro builds and drives the production runtime, so the first
+program needs no runtime concepts:
 
 ```rust
-use asupersync::{Cx, Error, LabConfig, LabRuntime, Outcome};
-use asupersync::runtime::{RuntimeBuilder, SpawnError};
+use asupersync::main;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = RuntimeBuilder::current_thread().build()?;
-    let result = runtime.block_on(runtime.handle().spawn(async {
-        let cx = Cx::current().expect("runtime task Cx");
-        main_task(&cx).await
-    }));
-    result?;
-    Ok(())
-}
-
-// Structured concurrency: spawned tasks are owned by the current region and
-// joined before the parent task finishes.
-async fn main_task(cx: &Cx) -> Result<(), SpawnError> {
-    let mut worker_a = cx.spawn(|task_cx| async move { worker_a(&task_cx).await })?;
-    let mut worker_b = cx.spawn(|task_cx| async move { worker_b(&task_cx).await })?;
-
-    let a = worker_a.join(cx).await.expect("worker_a joins");
-    let b = worker_b.join(cx).await.expect("worker_b joins");
-    assert!(matches!(a, Outcome::Ok(())));
-    assert!(matches!(b, Outcome::Ok(())));
-    Ok(())
-}
-
-// Cancellation is a protocol, not a flag.
-async fn worker_a(cx: &Cx) -> Outcome<(), Error> {
-    cx.checkpoint()?;
-    // Do cancel-safe work here, e.g. reserve()/send() on a channel.
-    Outcome::ok(())
-}
-
-async fn worker_b(cx: &Cx) -> Outcome<(), Error> {
-    cx.checkpoint()?;
-    Outcome::ok(())
-}
-
-// Lab runtime: deterministic testing uses explicit run reports.
-#[test]
-fn test_cancellation_protocol_invariants() {
-    let mut lab = LabRuntime::new(LabConfig::new(42));
-
-    // Enqueue work into `lab.state` / `lab.scheduler`, then drive to quiescence.
-    let report = lab.run_until_quiescent_with_report();
-
-    assert!(report.oracle_report.all_passed());
-    assert!(report.invariant_violations.is_empty());
+#[main]
+async fn main() {
+    println!("hello from asupersync");
 }
 ```
+
+This exact program is [`examples/onramp_level0.rs`](./examples/onramp_level0.rs).
+Continue with the four-level [graduated on-ramp](./docs/onramp.md) to add the
+prelude, capability context, outcomes, budgets, structured fan-out, two-phase
+effects, and deterministic lab oracles.
 
 ---
 
@@ -128,11 +88,12 @@ If you already know tokio, this section maps the primitives you use daily to the
 
 | tokio | asupersync | Key difference |
 |-------|-----------|----------------|
-| `tokio::spawn(fut)` | `cx.spawn(\|cx\| async move { fut.await })` or `cx.spawn_in(&scope, \|cx\| fut)` | Task is owned by a region; cannot orphan. Factory receives its own `Cx`. |
-| `JoinHandle<T>` | `TaskHandle<T>` | `.join(&cx).await` returns `Result<T, JoinError>`. JoinError is Cancelled or Panicked. |
+| `tokio::spawn(fut)` | `cx.spawn(\|cx\| async move { fut.await })` or `cx.spawn_in(&scope, \|cx\| fut)` | Task is owned by a region; the factory receives its own `Cx`. See [`onramp_level2.rs`](./examples/onramp_level2.rs). |
+| `JoinHandle<T>` | `TaskHandle<T>` | `.join(cx).await` returns `Result<T, JoinError>`; cancellation and panic remain distinct. |
+| `tokio::task::JoinSet<T>` | `JoinSet<T, E, P>` | `JoinSet::in_cx(cx)` or `JoinSet::new(&scope)` owns dynamic fan-out in one region; `join_next`, `join_all`, and `cancel_all` always retain drain ownership. |
 | `tokio::spawn_blocking(f)` | `spawn_blocking(f)` | Same idea. Runs closure on a blocking pool thread. |
-| `tokio::select!` | `Select::new(a, b).await` | Returns `Either::Left(a)` / `Either::Right(b)`. Futures must be `Unpin`. Use `Scope::race` for auto-drain of losers. |
-| `tokio::join!` | `scope.join_all(cx, futs).await` | All branches always complete (no abandonment). Outcomes aggregate via severity lattice. |
+| `tokio::select!` | `race!(cx, { a, b })` or `cx.race_drained(...)` | Returns only after the winner is selected and every loser is protocol-cancelled and drained. See [`macros_race.rs`](./examples/macros_race.rs). |
+| `tokio::join!` | `join!(a, b)`; use `JoinSet::join_all(cx)` for dynamic arity | Inline branches complete together; spawned dynamic members remain region-owned and are collected in spawn order. See [`macros_basic.rs`](./examples/macros_basic.rs). |
 | `tokio::time::sleep(dur)` | `sleep(now, dur)` | Takes current `Time` instead of reading the clock implicitly. Works with virtual time in lab runtime. |
 | `tokio::time::timeout(dur, fut)` | `timeout(now, dur, fut)` | Returns `Result<T, Elapsed>`. Also see the `Timeout` combinator type for richer outcome handling. |
 | `tokio::time::interval(dur)` | `interval(now, dur)` | Same `MissedTickBehavior` options (Burst, Delay, Skip). |
@@ -266,7 +227,8 @@ scope
 
 ### 2. Cancellation as a First-Class Protocol
 
-Cancellation operates as a multi-phase protocol, not a silent `drop`:
+Cancellation is request, acknowledgement, drain, and finalization—not a silent
+`drop`. It operates as a multi-phase protocol:
 
 ```
 Running → CancelRequested → Cancelling → Finalizing → Completed(Cancelled)
@@ -281,7 +243,7 @@ Running → CancelRequested → Cancelling → Finalizing → Completed(Cancelle
 
 Some primitives and proof surfaces publish explicit cancellation responsiveness bounds, such as bounded commit sections, mask-depth limits, scheduler cancel-streak fairness, static plan analysis, and lab cancellation oracles. A blanket per-primitive responsiveness-bound registry is still a design requirement, not a universal runtime guarantee today; budgets are sufficient conditions only for paths with a concrete published bound.
 
-Cancellation progress is continuously certifiable. `ProgressCertificate` tracks potential descent, classifies the current drain regime (`warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`), and emits variance-adaptive concentration bounds (Freedman with Azuma as a conservative baseline). This turns "is shutdown actually converging?" into a measurable claim instead of a guess.
+Cancellation progress is continuously observable through `ProgressCertificate`. It tracks potential descent, classifies the current drain regime (`warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`), and reports range-bounded Freedman and Azuma candidates plus a separate projected conditional calculation. Under the current range-only variation cap, raw Freedman is never tighter than Azuma, so the selected public envelope equals Azuma. At the current same-history horizon, telescoping makes both candidate tails algebraically `1`; they are not evidence of convergence. The `converging` flag is instead an empirical status over the complete accepted finite non-negative observation history represented by running statistics. It requires positive endpoint net progress, no detected stall, bounded rebound count and magnitude, no latest-step rebound, and no dropped invalid sample. Non-finite or materially negative telemetry is dropped; that suppresses the remaining-step estimate and reports `warmup` instead of an actionable terminal phase until reset. The realized delta variance remains diagnostic-only rather than being reused as predictable variation. This makes the evidence behind "is shutdown actually converging?" inspectable without treating one trace as proof of future drift, termination, or bounded drain time.
 
 ### 3. Two-Phase Effects Prevent Data Loss
 
@@ -337,7 +299,7 @@ The runtime design is backed by a small-step operational semantics (`asupersync_
 
 The proof posture is exact: these are Lean-checked **model** invariants with theorem and executable-test linkage. The production Rust runtime has not been proved to refine that model. This is therefore not a blanket mechanized proof of the executor, adapters, protocol implementations, platform backends, or distributed transports. Broader runtime-facing claims stay tiered through TLA+/TLC exports, lab/refinement oracles, and lane-specific coverage artifacts. The canonical proof command is `RCH_REQUIRE_REMOTE=1 rch exec -- lake --dir formal/lean build`; see [`artifacts/formal_proof_posture_contract_v1.json`](./artifacts/formal_proof_posture_contract_v1.json), [`tests/formal_proof_posture_contract.rs`](./tests/formal_proof_posture_contract.rs), and [`formal/README.md`](./formal/README.md).
 
-Some checked artifacts retain the legacy marker `Lean-checked core invariants cover the six non-negotiable runtime invariants`. In this README that phrase means coverage of the six abstract-model rows only; it does not assert a Rust refinement proof.
+Some checked artifacts retain the legacy markers `Lean-checked core invariants cover the six non-negotiable runtime invariants` and `checks the six non-negotiable runtime invariants`. In this README those phrases mean coverage of the six abstract-model rows only; they do not assert a Rust refinement proof.
 
 The canonical proof-command coverage map is [`artifacts/proof_lane_manifest_v1.json`](./artifacts/proof_lane_manifest_v1.json), checked by [`tests/proof_lane_manifest_contract.rs`](./tests/proof_lane_manifest_contract.rs). It records which `RCH_REQUIRE_REMOTE=1 rch exec -- ...` lane covers each production graph, feature graph, fuzz smoke, lib/all-target/clippy/rustdoc frontier, and formal proof guarantee, plus what each lane explicitly does not prove. It also carries proof-lane resource-envelope classes for expected timeout, memory, remote-required, and no-local-fallback semantics; those classes harden proof admission metadata and do not replace OS-level RCH worker cgroup limits. The current green/red claim dashboard is [`artifacts/proof_status_snapshot_v1.json`](./artifacts/proof_status_snapshot_v1.json), checked by [`tests/proof_status_snapshot_contract.rs`](./tests/proof_status_snapshot_contract.rs); it maps README/AGENTS proof claims to manifest lanes and validation-frontier blocker rows.
 
@@ -404,19 +366,21 @@ with importance-weighted reward `r̂_t(a_t) = r_t / p_t(a_t)` for the selected a
 
 Why it helps: cancel-heavy workloads and latency-heavy workloads need different preemption pressure. This controller adapts online while preserving deterministic replay semantics and bounded starvation envelopes.
 
-### Variance-Adaptive Drain Certificates (Azuma + Freedman + Phase Classification)
+### Range-Bounded Drain Certificates (Azuma + Freedman + Phase Classification)
 
-Cancellation drain progress is monitored as a martingale-style certificate over potential deltas. The runtime reports both a worst-case Azuma bound and a variance-adaptive Freedman bound:
+Cancellation drain progress is monitored over signed net-potential deltas. The runtime reports an Azuma baseline and an operational envelope that compares it with a range-only Freedman candidate:
 
 ```text
-P(M_t - M_0 ≥ x) ≤ exp(-x² / (2(V_t + c x / 3)))
+P(S_t ≥ x and Q_t ≤ q) ≤ exp(-x² / (2(q + B x / 3)))
 ```
 
-where `V_t` is predictable variation and `c` bounds one-step increments.
+For `t ≥ 1`, `c > 0`, `x > 0`, and `q ≥ 0`, signed progress `Y_i = -Δ_i` gives cumulative centered shortfall `S_t = Σ(E[Y_i | F_{i-1}] - Y_i)` and predictable quadratic variation `Q_t`. The absolute signed step is bounded by `c`, and the centered upper increment is bounded by `B = 2c`. The implementation uses the outcome-independent cap `Q_t ≤ t·c²`. With `B = 2c`, the resulting Freedman denominator is never smaller than Azuma's, so the selected envelope is always Azuma; the explicit raw candidate remains for auditability. A trace that exceeds the configured step range, or whose history is incomplete because an invalid sample was dropped, disables concentration claims for that verdict. At the current same-history horizon, the plug-in mean telescopes to zero deviation, so both public current-horizon candidates are the trivial bound `1`.
 
-The same monitor classifies operational drain regime (`warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`) so operators can distinguish "normal long tail" from "true stall".
+Gross downward credit is retained for phase diagnostics only. Its accounted-potential total is pathwise nondecreasing, so the progress certificate does not use it for Ville or optional-stopping evidence. The projected confidence field is conditional on persistence of the empirical plug-in net-progress rate; it is not a proof of future drift.
 
-Why it helps: shutdown and fail-fast behavior can be audited with explicit confidence numbers and phase labels, instead of timeout heuristics.
+The same monitor classifies operational drain regime (`warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`) so operators can distinguish an observed slow tail from a configured stalled run. Its `converging` flag is an empirical status over the complete accepted finite non-negative observation history represented by running statistics. It is guarded by positive endpoint net progress, the stall rule, fixed rebound-count and rebound-magnitude limits, a non-increasing latest step, and the absence of dropped invalid samples; the conditional tails do not gate it. Incomplete telemetry fails actionable outputs closed to `warmup`, no remaining-step estimate, and disabled concentration.
+
+Why it helps: shutdown and fail-fast behavior can be audited with explicit conditional confidence calculations and phase labels, instead of timeout heuristics alone.
 
 ### Spectral Wait-Graph Early Warning (Cheeger/Fiedler + Conformal + E-Process)
 
@@ -972,7 +936,7 @@ format remain adapter-specific rather than blanket core-runtime claims.
 |-----------|----------|------------------|
 | Named remote spawn | `src/remote.rs` | `spawn_remote` creates a region-owned `RemoteHandle`; attached runtimes send protocol messages, while missing runtimes fail closed to an explicit deterministic fallback |
 | Lease obligations | `src/remote.rs` | Leases are obligation-backed and participate in region close/quiescence |
-| Idempotency store | `src/remote.rs` | Deduplicates spawn retries with TTL-bounded records and conflict detection |
+| Idempotency store | `src/remote.rs` | Deduplicates spawn retries for the in-flight operation lifetime plus a bounded terminal-result retention window, with conflict detection |
 | Session-typed protocol | `src/remote.rs` | Origin/remote state machines validate legal spawn/ack/cancel/result/renewal transitions |
 | Logical-time envelopes | `src/remote.rs` | Protocol messages carry logical clock metadata for causal correlation |
 | Saga compensations | `src/remote.rs` | Forward steps and compensations are tracked as a structured rollback flow for distributed workflows |
@@ -1314,9 +1278,9 @@ Asupersync has formal semantics backing its engineering.
 | **Budgets** | Tropical semiring: `(ℝ∪{∞}, min, +)` | Critical path computation, budget propagation |
 | **Obligations** | Linear-logic discipline: resources resolved exactly once (Rust is affine, so enforcement is `#[must_use]` + runtime leak detection, not purely static) | Leaked obligations are loudly detected at region close instead of silently dropped |
 | **Traces** | Mazurkiewicz equivalence (partial orders) | DPOR-style guided exploration (not certified-optimal DPOR), stable replay |
-| **Cancellation** | Two-player game with budgets | Completeness theorem: sufficient budgets guarantee termination |
+| **Cancellation** | Two-player game with budgets | Scoped completeness when modeled responsiveness assumptions hold and budgets are sufficient |
 | **Adaptive scheduling** | EXP3/Hedge no-regret online learning | Dynamic preemption control without fairness blind spots |
-| **Drain certificates** | Martingales + Freedman/Azuma concentration | Quantified confidence that cancellation drain reaches quiescence |
+| **Drain certificates** | Signed-step range bounds + empirical phase diagnostics | Conditional, auditable progress evidence for cancellation drain |
 | **Structural diagnostics** | Spectral graph theory + conformal + e-processes | Early warning on wait-graph fragmentation with calibrated alarms |
 
 See [`asupersync_v4_formal_semantics.md`](./asupersync_v4_formal_semantics.md) for the complete operational semantics.
@@ -1330,7 +1294,7 @@ Asupersync is intentionally "math-forward": it uses advanced math and theory-gra
 | Mechanism | Current status |
 |-----------|----------------|
 | EXP3/Hedge scheduler control | Implemented runtime scheduling control surface |
-| Martingale drain certificates | Implemented cancellation progress diagnostics |
+| Drain progress diagnostics | Implemented cancellation progress diagnostics |
 | Spectral wait-graph health | Implemented observability diagnostic; advisory early warning, not a standalone deadlock proof |
 | Mazurkiewicz/Foata trace canonicalization and DPOR | Implemented lab/trace exploration machinery |
 | Persistent homology trace scoring | Implemented lab exploration prototype; used to prioritize interesting schedules, not a production runtime gate |
@@ -1340,9 +1304,9 @@ Asupersync is intentionally "math-forward": it uses advanced math and theory-gra
 
 `src/runtime/scheduler/three_lane.rs` includes a deterministic EXP3/Hedge controller that selects cancel-streak limits per epoch from observed reward (progress + fairness + deadline components). This is the scheduler's online-control layer: it adapts to workload regime shifts while preserving deterministic replay and explicit fairness bounds.
 
-### Martingale Drain Certificates (Freedman + Azuma + Phase Labels)
+### Drain Progress Diagnostics (Freedman + Azuma + Phase Labels)
 
-`src/cancel/progress_certificate.rs` models cancellation drain as a stochastic progress process with auditable evidence, variance estimation, and concentration bounds. Freedman provides a tighter variance-aware bound; Azuma remains as conservative reference. Verdicts include phase classification (`warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`) for operational clarity.
+`src/cancel/progress_certificate.rs` models cancellation drain as a stochastic progress process with auditable evidence, diagnostic variance estimation, and conditional concentration calculations. The range-only raw Freedman candidate is never tighter than the Azuma baseline under the implemented cap, so the selected public envelope equals Azuma; realized variance is never reused as predictable variation. Both public current-horizon candidates are algebraically `1` under the same-history plug-in mean, while `confidence_bound` is a separate conditional projection. Verdicts include phase classification (`warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`) plus an accepted-history empirical `converging` status. Neither the status nor the conditional calculations prove future drift, termination, or bounded drain time.
 
 ### Spectral Bifurcation Warnings on the Wait Graph
 
@@ -1411,6 +1375,32 @@ Traces can be exported as TLA+ behaviors with spec skeletons for bounded TLC mod
 Payoff: bridge from deterministic runtime traces to model-checking workflows when you need "prove it", not "it passed tests".
 
 ---
+
+## Dependency budget contract
+
+The checked
+[`artifacts/dependency_budget_contract_v1.json`](artifacts/dependency_budget_contract_v1.json)
+freezes the exact direct Cargo edge allowset and package-version plus
+unique-package-name ceilings for every canonical synthesized-consumer
+profile/platform cell. The focused `dependency-budget-contract` lane verifies
+the current marginal-ledger fingerprint, profile/target/host/edge-kind
+partitions, automatic downward ratchet, safe direct-edge and graph-growth
+negative fixtures, and the narrow reviewed-exception path. See
+[`docs/dependency_budget_contract.md`](docs/dependency_budget_contract.md).
+This contract does not authorize dependency removal or cutover and is not a
+broad workspace, runtime, security, performance, or release-readiness claim.
+
+## Dependency supply-chain policy contract
+
+The checked supply-chain gate is
+[`scripts/ci/audit_dependencies.sh`](scripts/ci/audit_dependencies.sh), with
+policy and interpretation in
+[`artifacts/dependency_supply_chain_policy_v1.json`](artifacts/dependency_supply_chain_policy_v1.json)
+and
+[`docs/dependency_supply_chain_policy.md`](docs/dependency_supply_chain_policy.md).
+Its focused proof lane is `dependency-supply-chain-policy-contract`. A root
+scanner pass does not claim that the separately excluded fuzz workspace is
+green; consult the live receipt for its explicit non-green status.
 
 ## Using Asupersync as a Dependency
 
@@ -1909,7 +1899,7 @@ rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fmt_check_ol11aa3 ca
 
 | Gate | Direct-main trigger | Direct-main enforcement | PR workflow enforcement | Required artifact |
 |------|---------------------|-------------------------|-------------------------|-------------------|
-| Baseline benchmarks | Every substantive direct-main change before commit/push | Run the canonical `methodology_baselines` command from the signoff contract. Its post-benchmark gate compares every tracked p50 against `artifacts/baseline.json` at a fixed **5%** threshold in the same remote process. | **CI-blocking** for PRs. Fails if any benchmark's p50 regresses by more than **5%** vs `artifacts/baseline.json`. | `artifacts/baseline.json` plus criterion output. |
+| Baseline benchmarks | Every substantive direct-main change before commit/push | Run the canonical `methodology_baselines` command from the signoff contract. Its post-benchmark gate compares every tracked p50 against `artifacts/baseline.json` in the same remote process; a row fails only above **max(5%, its recorded ci95 envelope, +0.6ns absolute)** — ambient same-host noise exceeds 5% on few-ns rows and quick-mode CIs can collapse to a point, so the recorded confidence bound plus a sub-ns absolute floor form the per-row noise allowance (br-asupersync-87h3es). | **CI-blocking** for PRs. Fails if any benchmark's p50 exceeds **max(5%, the row's recorded ci95 envelope, +0.6ns absolute)** vs `artifacts/baseline.json`. | `artifacts/baseline.json` plus criterion output. |
 | Flamegraph | Direct-main changes under `src/runtime/scheduler/`, `src/channel/`, `src/obligation/`, `src/cancel/`, or `src/sync/` | Generate and commit `artifacts/flamegraphs/main-<bead-or-short-sha>.svg`. Pressure-control work that cites `scheduler_tail_pressure` uses this artifact only as attribution for the `methodology_baselines` scheduler-adjacent rows, not as a throughput or regression-closure claim. | **CI-blocking** for PRs when triggered; otherwise skipped. | Direct-main: `artifacts/flamegraphs/main-<bead-or-short-sha>.svg`; PR lane: `artifacts/flamegraphs/pr-<N>.svg`. |
 | Golden checksums | Every substantive direct-main change before commit/push | Run the scoped `rch exec --` golden benchmark and integration test commands. | **CI-blocking** for PRs. Fails on any `[GOLDEN] MISMATCH` or failing `golden_outputs` integration test. | `artifacts/golden_checksums.json` when intentionally updated. |
 | Proof notes | Direct-main changes under `src/obligation/` or `src/safety/`, or any changed `.rs` file containing an `unsafe { ... }` block | Commit `artifacts/proof_notes/main-<bead-or-short-sha>.md` and validate it is substantive. | **CI-blocking** for PRs when triggered; otherwise skipped. | Direct-main: `artifacts/proof_notes/main-<bead-or-short-sha>.md`; PR lane: `artifacts/proof_notes/pr-<N>.md`. |
@@ -1918,7 +1908,7 @@ The PR workflow `summary` job (`needs: [baseline-gate, flamegraph-gate, golden-c
 
 ### Direct-main preflight commands
 
-Run only the gates that apply to the files you are landing. All cargo work stays behind strict `RCH_REQUIRE_REMOTE=1 rch exec --` execution, has no local fallback, and is scoped to the `asupersync` crate. The Phase 6 baseline bench maps Criterion's live `median.point_estimate` to the tracked `p50_ns` after measurement in the same remote process, fails closed when any tracked row is missing, duplicated, malformed, or more than 5% slower, and leaves newly added candidate rows outside the gate until they are deliberately added to `artifacts/baseline.json`:
+Run only the gates that apply to the files you are landing. All cargo work stays behind strict `RCH_REQUIRE_REMOTE=1 rch exec --` execution, has no local fallback, and is scoped to the `asupersync` crate. The Phase 6 baseline bench maps Criterion's live `median.point_estimate` to the tracked `p50_ns` after measurement in the same remote process, fails closed when any tracked row is missing, duplicated, malformed, or slower than max(5%, the row's recorded ci95 envelope, +0.6ns absolute) (br-asupersync-87h3es), and leaves newly added candidate rows outside the gate until they are deliberately added to `artifacts/baseline.json`:
 
 ```bash
 RCH_BUILD_TIMEOUT_SEC=5400 RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_baselines ASUPERSYNC_PHASE6_BASELINE=artifacts/baseline.json ASUPERSYNC_PHASE6_MAX_REGRESSION_PCT=5 cargo bench -p asupersync --bench methodology_baselines --features test-internals,criterion-benches -- --noplot
@@ -2010,6 +2000,8 @@ Open an issue at https://github.com/Dicklesworthstone/asupersync/issues
 | [`asupersync_v4_formal_semantics.md`](./asupersync_v4_formal_semantics.md) | **Operational Semantics**: Small-step rules, TLA+ sketch |
 | [`docs/design/api_skeleton_v4.rs`](./docs/design/api_skeleton_v4.rs) | **API Skeleton**: Rust types and signatures |
 | [`docs/integration.md`](./docs/integration.md) | **Integration Docs**: Architecture, API orientation, tutorials, Browser Edition docs IA/navigation contract, support matrix, and fail-closed boundary guidance |
+| [`docs/onramp.md`](./docs/onramp.md) | **Graduated On-Ramp**: four compile-backed levels from `#[asupersync::main]` through lab obligation oracles |
+| [`examples/README.md`](./examples/README.md) | **Examples Index**: every runnable example, operator artifact, and deterministic scenario fixture |
 | [`docs/lab_live_differential_scope_matrix.md`](./docs/lab_live_differential_scope_matrix.md) | **Lab-vs-Live Differential Scope Matrix**: admitted semantic surfaces, rollout ladder, and eligibility gates for future external-boundary work |
 | [`docs/lab_live_time_normalization_policy.md`](./docs/lab_live_time_normalization_policy.md) | **Time + Scheduler-Noise Policy**: scenario-clock rules, qualified-time semantics, and the boundary between semantic timing claims and provenance-only timing |
 | [`docs/lab_live_virtualized_surface_matrix.md`](./docs/lab_live_virtualized_surface_matrix.md) | **Phase 2 Virtualized Surface Matrix**: timer/virtual-transport coverage rows, required logs, invalid-experiment signals, and promotion floors |

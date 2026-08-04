@@ -182,17 +182,38 @@ fn cycle_taskids_are_now_in_report() {
 fn wait_cause_classification_has_structured_variants_and_unknown_fallback() {
     let source = read_three_lane_source();
 
+    // The precise-cause registration paths are not wired yet (production
+    // snapshots fall back to Unknown), so qualified-path usages of the
+    // Lock/Channel/Notify/Join variants do not exist in live code. The
+    // durable witness for the structured taxonomy is the enum declaration
+    // itself: pin its variant list and the Unknown default fallback.
+    let enum_start = source.find("enum WaitCause").expect("WaitCause enum");
+    let enum_end = enum_start
+        + source[enum_start..]
+            .find("\n}\n")
+            .expect("WaitCause enum close");
+    let enum_body = &source[enum_start..enum_end];
     for token in [
-        "enum WaitCause",
-        "WaitCause::Lock",
-        "WaitCause::Channel",
-        "WaitCause::Notify",
-        "WaitCause::Join",
-        "WaitCause::Unknown",
-        "cause: WaitCause",
+        "Lock,",
+        "Channel,",
+        "Notify,",
+        "Join,",
+        "Unknown,",
+        "#[default]",
     ] {
-        assert!(source.contains(token), "missing wait-cause token {token}");
+        assert!(
+            enum_body.contains(token),
+            "missing wait-cause variant token {token}"
+        );
     }
+    assert!(
+        source.contains("cause: WaitCause"),
+        "missing wait-cause token cause: WaitCause"
+    );
+    assert!(
+        source.contains("cause: WaitCause::Unknown"),
+        "missing unknown-fallback construction WaitCause::Unknown"
+    );
 }
 
 #[test]

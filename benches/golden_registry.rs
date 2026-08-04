@@ -8,11 +8,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Formatter};
 use std::path::Path;
 
-pub(super) const GOLDEN_CHECKSUMS_PATH: &str = "artifacts/golden_checksums.json";
-pub(super) const GOLDEN_SCHEMA_VERSION: u32 = 1;
-pub(super) const GOLDEN_GENERATED_BY: &str =
+// Visibility note (br-asupersync-vdbvkv): this file is a support module pulled in
+// with `#[path]` by `benches/golden_output.rs` and `tests/golden_registry.rs`, in
+// both cases as a *private* `mod golden_registry;`. Inside a private module `pub`,
+// `pub(crate)` and `pub(super)` are all exactly equivalent — nothing escapes the
+// binary either way — so these are plain `pub`, which is the spelling
+// `clippy::redundant_pub_crate` accepts. Do not "tighten" them back to
+// `pub(super)`/`pub(crate)`: it changes no visibility and re-reds the
+// `--all-targets -D warnings` clippy gate.
+pub const GOLDEN_CHECKSUMS_PATH: &str = "artifacts/golden_checksums.json";
+pub const GOLDEN_SCHEMA_VERSION: u32 = 1;
+pub const GOLDEN_GENERATED_BY: &str =
     "golden_output benchmark (br-asupersync-golden-registry-fail-closed-provenance-xzv2c4)";
-pub(super) const GOLDEN_SCENARIOS: [&str; 14] = [
+pub const GOLDEN_SCENARIOS: [&str; 14] = [
     "budget/combine_chain",
     "budget/deadline_check_matrix",
     "cancel/cancel_budgets",
@@ -29,30 +37,30 @@ pub(super) const GOLDEN_SCENARIOS: [&str; 14] = [
     "scheduler/priority_lane_ordering_100",
 ];
 
-pub(super) type RegistryResult<T> = Result<T, String>;
+pub type RegistryResult<T> = Result<T, String>;
 
 /// Schema for the golden checksums JSON artifact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct GoldenChecksumFile {
-    pub(super) schema_version: u32,
-    pub(super) generated_by: String,
-    pub(super) checksums: StrictChecksumMap,
+pub struct GoldenChecksumFile {
+    pub schema_version: u32,
+    pub generated_by: String,
+    pub checksums: StrictChecksumMap,
 }
 
 /// A single golden checksum entry with mandatory reviewed provenance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct GoldenEntry {
-    pub(super) output_hash: String,
-    pub(super) git_sha: String,
-    pub(super) generated_at: String,
+pub struct GoldenEntry {
+    pub output_hash: String,
+    pub git_sha: String,
+    pub generated_at: String,
 }
 
 /// Checksum map whose deserializer rejects duplicate scenario keys.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(transparent)]
-pub(super) struct StrictChecksumMap(pub(super) BTreeMap<String, GoldenEntry>);
+pub struct StrictChecksumMap(pub BTreeMap<String, GoldenEntry>);
 
 impl<'de> Deserialize<'de> for StrictChecksumMap {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -89,16 +97,16 @@ impl<'de> Deserialize<'de> for StrictChecksumMap {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct ReviewedProvenance {
-    pub(super) git_sha: String,
-    pub(super) generated_at: String,
+pub struct ReviewedProvenance {
+    pub git_sha: String,
+    pub generated_at: String,
 }
 
 fn expected_scenarios() -> BTreeSet<&'static str> {
     GOLDEN_SCENARIOS.into_iter().collect()
 }
 
-pub(super) fn is_lower_hex(value: &str, expected_len: usize) -> bool {
+pub fn is_lower_hex(value: &str, expected_len: usize) -> bool {
     value.len() == expected_len
         && value
             .bytes()
@@ -111,7 +119,7 @@ fn validate_timestamp(value: &str) -> bool {
         .is_some_and(|seconds| !seconds.is_empty() && seconds.bytes().all(|b| b.is_ascii_digit()))
 }
 
-pub(super) fn validate_registry(file: &GoldenChecksumFile) -> RegistryResult<()> {
+pub fn validate_registry(file: &GoldenChecksumFile) -> RegistryResult<()> {
     if file.schema_version != GOLDEN_SCHEMA_VERSION {
         return Err(format!(
             "unsupported golden registry schema_version {}; expected {GOLDEN_SCHEMA_VERSION}",
@@ -153,20 +161,20 @@ pub(super) fn validate_registry(file: &GoldenChecksumFile) -> RegistryResult<()>
     Ok(())
 }
 
-pub(super) fn parse_golden_registry(contents: &str) -> RegistryResult<GoldenChecksumFile> {
+pub fn parse_golden_registry(contents: &str) -> RegistryResult<GoldenChecksumFile> {
     let file: GoldenChecksumFile = serde_json::from_str(contents)
         .map_err(|error| format!("parse golden checksum registry: {error}"))?;
     validate_registry(&file)?;
     Ok(file)
 }
 
-pub(super) fn load_golden_registry_from_path(path: &Path) -> RegistryResult<GoldenChecksumFile> {
+pub fn load_golden_registry_from_path(path: &Path) -> RegistryResult<GoldenChecksumFile> {
     let contents = std::fs::read_to_string(path)
         .map_err(|error| format!("read required golden registry {}: {error}", path.display()))?;
     parse_golden_registry(&contents)
 }
 
-pub(super) fn validate_reviewed_provenance(
+pub fn validate_reviewed_provenance(
     reviewed_sha: &str,
     head_sha: &str,
     tracked_status: &str,
@@ -189,7 +197,7 @@ pub(super) fn validate_reviewed_provenance(
     Ok(())
 }
 
-pub(super) fn build_update_candidate(
+pub fn build_update_candidate(
     updates: &BTreeMap<String, String>,
     provenance: &ReviewedProvenance,
 ) -> RegistryResult<GoldenChecksumFile> {

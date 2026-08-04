@@ -1,0 +1,342 @@
+{
+  "schema_version": 1,
+  "artifact_id": "regex-ir-lowering-contract-v1",
+  "bead_id": "asupersync-5z2scg.8.3.3.2",
+  "capability_id": "CAP-REGEX-PRIVACY",
+  "captured_at_utc": "2026-07-26T01:00:00Z",
+  "lowering_id": "ASUP-REGEX-THOMPSON-LOWERING-V1",
+  "lowering_schema_version": 1,
+  "ir_id": "ASUP-REGEX-THOMPSON-IR-V1",
+  "ir_schema_version": 1,
+  "decision": {
+    "disposition": "STAGED_CHECKED_STRUCTURAL_LOWERING",
+    "incumbent_state": "RETAIN_REGEX_AND_REGEX_SYNTAX",
+    "r3_3_2_lowering_complete": true,
+    "compiler_must_retain_pinned_semantics": true,
+    "capture_or_repetition_lowering_complete": false,
+    "matcher_execution_authorized": false,
+    "production_wiring_authorized": false,
+    "persistence_authorized": false,
+    "cutover_eligible": false,
+    "dependency_removal_authorized": false,
+    "on_missing_or_drifted_evidence": "KEEP_INCUMBENT_DEFER"
+  },
+  "authority": {
+    "semantic_terminal_path": "artifacts/regex_semantic_terminal_receipt_v1.json",
+    "semantic_terminal_sha256": "887dd0b97c6794ef7481090a8c1677830093cfdce440ebdb720c3c337b260d23",
+    "semantic_terminal_disposition": "KEEP_INCUMBENT_DEFER",
+    "ir_schema_source_path": "src/observability/regex_ir.rs",
+    "ir_schema_source_sha256": "de4906beb838fda2c57bccfdb16316e8de661e564940a47e7b9b87f065311cb3",
+    "retained_backend": "regex-syntax@0.8.11",
+    "unicode_version": "16.0.0",
+    "on_authority_drift": "KEEP_INCUMBENT_DEFER"
+  },
+  "sources": [
+    {
+      "path": "src/observability/regex_lowering.rs",
+      "sha256": "fc8c41c2a7da18e0881c1e51f5c620953e449c4f2eccb095b78bd37eba73e1d0",
+      "bytes": 29392,
+      "role": "iterative checked AST-to-IR compiler"
+    },
+    {
+      "path": "src/observability/regex_ir.rs",
+      "sha256": "de4906beb838fda2c57bccfdb16316e8de661e564940a47e7b9b87f065311cb3",
+      "bytes": 45049,
+      "role": "frozen R3.3.1 IR schema and validator"
+    },
+    {
+      "path": "src/observability/regex_syntax.rs",
+      "sha256": "2fbeae8fc1346d51cf5535930b750d0d69055d8923b3c6e8fcb3bf8ce25315b0",
+      "bytes": 112380,
+      "role": "frozen accepted AST and source-span authority"
+    },
+    {
+      "path": "src/observability/regex_semantics.rs",
+      "sha256": "bd762181da7620330a580152688af7684da371a9a32c144ef09ac5b5d0c2221a",
+      "bytes": 41269,
+      "role": "frozen canonical Unicode and byte class authority"
+    },
+    {
+      "path": "src/observability/regex_boundaries.rs",
+      "sha256": "bac41152af892d6fb3c84fcc4c1ee2a75d70219ec877604207dbcd4c8efafbbd",
+      "bytes": 49494,
+      "role": "frozen fold and zero-width assertion authority"
+    }
+  ],
+  "supported_ast_rows": [
+    {
+      "ast": "Empty",
+      "lowering": "pending Jump patched to successor"
+    },
+    {
+      "ast": "Literal",
+      "lowering": "folded output or canonical singleton Consume"
+    },
+    {
+      "ast": "Dot",
+      "lowering": "canonical R3.2 semantic class Consume"
+    },
+    {
+      "ast": "Escape",
+      "lowering": "literal, class, or assertion output by variant"
+    },
+    {
+      "ast": "Assertion",
+      "lowering": "resolved R3.2 BoundaryKind Assert"
+    },
+    {
+      "ast": "LineStart",
+      "lowering": "resolved R3.2 input/LF/CRLF Assert"
+    },
+    {
+      "ast": "LineEnd",
+      "lowering": "resolved R3.2 input/LF/CRLF Assert"
+    },
+    {
+      "ast": "Concat",
+      "lowering": "left exits patched to right entries"
+    },
+    {
+      "ast": "Alternation",
+      "lowering": "right-associated ordered Split chain"
+    },
+    {
+      "ast": "NonCapturing",
+      "lowering": "transparent child fragment"
+    },
+    {
+      "ast": "Flags",
+      "lowering": "R3.2-resolved transparent child or empty directive"
+    },
+    {
+      "ast": "Class",
+      "lowering": "one canonical outer semantic class Consume"
+    }
+  ],
+  "deferred_ast_rows": [
+    {
+      "ast": "Capture",
+      "owner": "asupersync-5z2scg.8.3.3.3",
+      "error_code": "RGX-LOWER-E007"
+    },
+    {
+      "ast": "Repetition",
+      "owner": "asupersync-5z2scg.8.3.3.3",
+      "error_code": "RGX-LOWER-E008"
+    }
+  ],
+  "fragment_contract": {
+    "walk": "ITERATIVE_AST_POSTORDER",
+    "partial_state_visibility": "PRIVATE_BUILDER_ONLY",
+    "patch_target_representation": "OPTION_STATE_ID",
+    "alternation_priority": "SOURCE_LEFT_TO_RIGHT_PREFERRED_THEN_FALLBACK",
+    "exact_byte_policy": "R3_2_VALIDATED_SINGLETON_BYTE_CONSUME_CHAIN",
+    "class_internal_nodes_emit_states": false,
+    "finalization": "PATCH_ROOT_TO_SOLE_ACCEPT_THEN_PROGRAM_CHECKED",
+    "partial_program_on_error": false
+  },
+  "lowering_failures": [
+    {
+      "code": "RGX-LOWER-E001",
+      "kind": "InvalidAnalysis"
+    },
+    {
+      "code": "RGX-LOWER-E002",
+      "kind": "MissingSemanticClass"
+    },
+    {
+      "code": "RGX-LOWER-E003",
+      "kind": "MissingBoundary"
+    },
+    {
+      "code": "RGX-LOWER-E004",
+      "kind": "MissingFragment"
+    },
+    {
+      "code": "RGX-LOWER-E005",
+      "kind": "DuplicatePatch"
+    },
+    {
+      "code": "RGX-LOWER-E006",
+      "kind": "UnresolvedPatch"
+    },
+    {
+      "code": "RGX-LOWER-E007",
+      "kind": "UnsupportedCapture"
+    },
+    {
+      "code": "RGX-LOWER-E008",
+      "kind": "UnsupportedRepetition"
+    }
+  ],
+  "semantic_fingerprints": [
+    {
+      "id": "RGX-LOWER-FP-EMPTY",
+      "pattern": "",
+      "states": 2,
+      "transitions": 1,
+      "classes": 0,
+      "splits": 0,
+      "assertions": 0,
+      "fingerprint_sha256": "a4fa6eba8365da3545e9ca8f96e03ac7d24ba4ed67280c6da9e5d12bbd302115"
+    },
+    {
+      "id": "RGX-LOWER-FP-CONCAT",
+      "pattern": "ab",
+      "states": 3,
+      "transitions": 2,
+      "classes": 2,
+      "splits": 0,
+      "assertions": 0,
+      "fingerprint_sha256": "ccdc995160b2573b2d0df6a717da02384ae2f9174fcb5686953eee2ea4984c40"
+    },
+    {
+      "id": "RGX-LOWER-FP-ALT-EMPTY",
+      "pattern": "a|b|",
+      "states": 6,
+      "transitions": 7,
+      "classes": 2,
+      "splits": 2,
+      "assertions": 0,
+      "fingerprint_sha256": "679e526686b9ae44e39585717db30af6806b284f4d4220cad2023f31ad10cbde"
+    },
+    {
+      "id": "RGX-LOWER-FP-FOLD-BYTES-ASSERT",
+      "pattern": "(?i:[a-z])(?i-u:é)\\A\\b$",
+      "states": 7,
+      "transitions": 6,
+      "classes": 3,
+      "splits": 0,
+      "assertions": 3,
+      "fingerprint_sha256": "37dea1204f0a0ff8f3f1c5945a6118a4e9bb395715c7fc352644fed9a5871749"
+    },
+    {
+      "id": "RGX-LOWER-FP-CLASS-ALT",
+      "pattern": "[a-c](?:x|y)",
+      "states": 5,
+      "transitions": 5,
+      "classes": 3,
+      "splits": 1,
+      "assertions": 0,
+      "fingerprint_sha256": "798a49f47584438dccb6977d5f8f5d7457c40aca20dbd09497960c9896bc02b2"
+    }
+  ],
+  "test_matrix": {
+    "unit_tests": 6,
+    "contract_tests": 8,
+    "property_cases": 256,
+    "bounded_model_patterns": 8,
+    "bounded_model_haystacks_per_pattern": 9,
+    "deep_noncapturing_nesting": 250,
+    "malformed_paths": true,
+    "budget_paths": true,
+    "priority_goldens": true,
+    "exact_utf8_byte_chain": true,
+    "panic_free": true
+  },
+  "proof": {
+    "unit_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics --lib observability::regex_lowering::tests -- --nocapture",
+    "contract_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics --test regex_ir_lowering_contract -- --nocapture",
+    "clippy_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path artifacts/regex_ir_lowering_contract_v1.json --overlay-path docs/regex_ir_lowering_contract.md --overlay-path src/observability/mod.rs --overlay-path src/observability/regex_lowering.rs --overlay-path tests/regex_ir_lowering_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --features metrics --test regex_ir_lowering_contract -- -D warnings",
+    "format_command": "rustfmt --edition 2024 --check src/observability/regex_lowering.rs tests/regex_ir_lowering_contract.rs",
+    "workspace_format_check_admitted": false,
+    "workspace_format_blocker": "unreserved peer edit in tests/no_mock_policy_contract.rs",
+    "no_local_fallback": true,
+    "sealed_jobs": [
+      {
+        "job_id": "29947326818680984",
+        "worker": "hz1",
+        "lane": "focused-unit",
+        "result": "PASS",
+        "passed": 6,
+        "failed": 0
+      },
+      {
+        "job_id": "29947326818680996",
+        "worker": "hz2",
+        "lane": "integration-contract",
+        "result": "PASS",
+        "passed": 83,
+        "failed": 0
+      },
+      {
+        "job_id": "29947326818681003",
+        "worker": "vmi1153651",
+        "lane": "integration-contract-final-tree",
+        "result": "PASS",
+        "passed": 83,
+        "failed": 0
+      },
+      {
+        "job_id": "29947326818681002",
+        "worker": "vmi1149989",
+        "lane": "predecessor-schema-recheck",
+        "result": "PASS",
+        "passed": 74,
+        "failed": 0
+      },
+      {
+        "job_id": "29947326818681010",
+        "worker": "vmi1153651",
+        "lane": "focused-clippy-clean-overlay",
+        "result": "PASS",
+        "warnings": 0,
+        "errors": 0
+      }
+    ],
+    "rejected_attempts": [
+      {
+        "job_id": "29947326818680980",
+        "worker": "hz2",
+        "lane": "focused-unit",
+        "result": "CANCELLED_STALE_PROGRESS",
+        "evidence_admitted": false,
+        "reason": "fresh hook heartbeat but stale compile progress on a memory-critical worker"
+      },
+      {
+        "job_id": "29947326818680999",
+        "worker": "hz2",
+        "lane": "focused-clippy",
+        "result": "REJECTED_INCOMPLETE_SYNC",
+        "evidence_admitted": false,
+        "reason": "remote worker lacked the staged integration-test path"
+      },
+      {
+        "job_id": "29947326818681006",
+        "worker": "vmi1153651",
+        "lane": "focused-clippy",
+        "result": "REJECTED_SHARED_ROOT_RACE",
+        "evidence_admitted": false,
+        "reason": "a concurrent shared-root sync removed the staged integration-test path before rustc opened it"
+      },
+      {
+        "job_id": "29947326818681001",
+        "worker": "vmi1227854",
+        "lane": "redundant-focused-unit",
+        "result": "CANCELLED_STALE_PROGRESS",
+        "evidence_admitted": false,
+        "reason": "fresh hook heartbeat but stale compile progress after the same unit tests passed in the final-tree integration contract"
+      }
+    ]
+  },
+  "successor_handoff": {
+    "successor_bead_id": "asupersync-5z2scg.8.3.3.3",
+    "successor_artifact_path": "artifacts/regex_priority_capture_lowering_contract_v1.json",
+    "successor_scope": "quantifier_greediness_capture_and_flag_scope_lowering",
+    "historical_source_sha256": "fc8c41c2a7da18e0881c1e51f5c620953e449c4f2eccb095b78bd37eba73e1d0",
+    "live_source_policy": "HISTORICAL_COMPLETION_PIN_SUCCESSOR_OWNS_LIVE_SOURCE",
+    "frozen_semantic_and_ir_authorities_remain_live_checked": true,
+    "r3_3_2_claim_rewritten": false
+  },
+  "no_claims": [
+    "no capture or repetition lowering",
+    "no matcher or VM execution",
+    "no persisted or deserializable IR format",
+    "no public API or production wiring",
+    "no regex or regex-syntax removal authorization",
+    "no owned Unicode table authorization",
+    "no performance improvement or no-regression claim",
+    "no broad workspace health or release-readiness claim",
+    "no local Cargo fallback approval"
+  ]
+}

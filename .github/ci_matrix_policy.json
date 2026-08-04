@@ -25,6 +25,88 @@
     "max_failures": 0,
     "required_artifacts_min": 1
   },
+  "script_routing_exceptions": [
+    {
+      "pattern": "*scripts/run_h2_conformance_evidence.sh",
+      "category": "command_builder_string",
+      "owner": "runtime-core",
+      "reason": "scenario_command() emits printf format strings that BUILD a display/repro command; the executed command at lines 326+ is 'timeout ... \"$RCH_BIN\" exec -- \\' and is correctly routed.",
+      "revisit_condition": "Revisit if this script gains a cargo invocation that is executed rather than printed.",
+      "violations": ["local_cargo"]
+    },
+    {
+      "pattern": "*scripts/run_observability_evidence.sh",
+      "category": "command_builder_string",
+      "owner": "runtime-core",
+      "reason": "All flagged segments come from printf builders composing cargo_env_prefix() with \"$CARGO_BIN\" into scenario command strings; the executed lanes are rch-routed. The --local path is additionally gated behind ALLOW_LOCAL_CARGO=1 and documented 'not for agent validation'.",
+      "revisit_condition": "Revisit if a cargo invocation here is executed outside an rch exec wrapper without the ALLOW_LOCAL_CARGO gate.",
+      "violations": ["local_cargo"]
+    },
+    {
+      "pattern": "*scripts/run_postgres_copy_from_evidence.sh",
+      "category": "command_builder_string",
+      "owner": "runtime-core",
+      "reason": "Same printf command-builder shape as the sibling evidence runners: the flagged text is a constructed scenario command string, not an executed invocation.",
+      "revisit_condition": "Revisit if this script gains a cargo invocation that is executed rather than printed.",
+      "violations": ["local_cargo"]
+    },
+    {
+      "pattern": "*scripts/run_rfc6330_conformance_evidence.sh",
+      "category": "command_builder_string",
+      "owner": "runtime-core",
+      "reason": "cli_base_command() and rch_command_string() sit side by side (lines 150-158): the first builds the display string the scan flags, the second builds the routed command that actually runs, complete with CARGO_TARGET_DIR.",
+      "revisit_condition": "Revisit if rch_command_string() stops being the executed form.",
+      "violations": ["local_cargo"]
+    },
+    {
+      "pattern": "*scripts/run_runtime_sync_invariant_evidence.sh",
+      "category": "command_builder_string",
+      "owner": "runtime-core",
+      "reason": "Same printf command-builder shape as the sibling evidence runners: the flagged text is a constructed scenario command string, not an executed invocation.",
+      "revisit_condition": "Revisit if this script gains a cargo invocation that is executed rather than printed.",
+      "violations": ["local_cargo"]
+    },
+    {
+      "pattern": "*scripts/nats_jetstream_broker_parity_proof_runner.sh",
+      "category": "command_builder_string",
+      "owner": "runtime-core",
+      "reason": "The flagged segment is a constructed env/CARGO_TARGET_DIR/CARGO_BIN command string assembled for the proof receipt; the executed lane is rch-routed.",
+      "revisit_condition": "Revisit if this runner executes cargo outside an rch exec wrapper.",
+      "violations": ["local_cargo"]
+    },
+    {
+      "pattern": "*scripts/alloc_census.sh",
+      "category": "gated_local_opt_in",
+      "owner": "runtime-core",
+      "reason": "Local cargo profiling is disabled by default and reachable only with ALLOW_LOCAL_CARGO=1 (see the explicit refusals at lines 60 and 118); the default path at line 36 is rch-routed with its own target dir. AGENTS.md permits a local run when the operator explicitly authorizes one, and this flag is that authorization.",
+      "revisit_condition": "Revisit if a local cargo invocation here becomes reachable without ALLOW_LOCAL_CARGO=1.",
+      "violations": ["local_cargo"]
+    },
+    {
+      "pattern": "*scripts/run_swarm_pressure_trace_summary_smoke.sh",
+      "category": "gated_local_opt_in",
+      "owner": "runtime-core",
+      "reason": "The bare COMMAND=(cargo ...) at line 83 is reachable only via the documented --local flag ('Run cargo directly instead of rch'); the default at line 86 is the rch-routed form with RCH_REQUIRE_REMOTE and an explicit CARGO_TARGET_DIR.",
+      "revisit_condition": "Revisit if the --local branch becomes the default or the gate is removed.",
+      "violations": ["local_cargo"]
+    },
+    {
+      "pattern": "*scripts/test_doctor_workspace_scan_e2e.sh",
+      "category": "remote_reentrant_block",
+      "owner": "runtime-core",
+      "reason": "The script dispatches ITSELF: line 131 runs '\"${RCH_BIN}\" exec -- bash ./scripts/test_doctor_workspace_scan_e2e.sh __remote_scan ...', and the flagged cargo call inside the __remote_scan block (lines 26-45) therefore executes ON the worker. Routing it again would be rch-inside-rch. The script also fails closed at line 68 when rch is missing.",
+      "revisit_condition": "Revisit if the __remote_scan block becomes reachable outside an rch exec dispatch.",
+      "violations": ["local_cargo"]
+    },
+    {
+      "pattern": "*scripts/test_doctor_invariant_analyzer_e2e.sh",
+      "category": "remote_reentrant_block",
+      "owner": "runtime-core",
+      "reason": "Same self-dispatching shape as test_doctor_workspace_scan_e2e.sh: the flagged cargo call lives in the remote-side re-entrant block and runs on the worker inside an already-routed context.",
+      "revisit_condition": "Revisit if the remote-side block becomes reachable outside an rch exec dispatch.",
+      "violations": ["local_cargo"]
+    }
+  ],
   "lanes": [
     {
       "lane_id": "unit",
@@ -46,10 +128,10 @@
       "lane_id": "lint-build",
       "title": "Compile and lint heavy lane",
       "owner": "runtime-core",
-      "required_job_ids": ["check"],
+      "required_job_ids": ["lint-build"],
       "required_step_names": ["Clippy lints", "Check compilation"],
       "required_artifact_names": [],
-      "replay_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_clippy cargo clippy --all-targets --all-features -- -D warnings && rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_check cargo check --all-targets --all-features",
+      "replay_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_clippy cargo clippy --all-targets --all-features --keep-going -- -D warnings && rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_check cargo check --all-targets --all-features --keep-going",
       "require_rch": true,
       "rch_required_step_names": ["Clippy lints", "Check compilation"],
       "failure_taxonomy": ["lint_failure", "compile_failure", "rch_routing_violation"],

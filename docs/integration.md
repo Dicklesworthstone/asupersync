@@ -1986,12 +1986,19 @@ Capability checks:
 #### 6.5 Idempotency Rules
 
 - Each `SpawnRequest` MUST include an `IdempotencyKey`.
-- On duplicate request with same key:
-  - If computation + input match: return the original `SpawnAck` without re-executing.
+- Admission MUST atomically reserve a new key before canonical execution starts.
+- While a record is retained, a duplicate request with the same key:
+  - If computation + input match: return an accepted acknowledgement correlated
+    to the current attempt and attach it to the original canonical execution
+    without re-executing; return the cached outcome if already terminal.
   - If computation + input differ: respond with `SpawnAck` rejected
     `IdempotencyConflict`.
-- Idempotency records expire per `IdempotencyStore` TTL; expired keys are treated
-  as new requests.
+- In-flight records MUST remain resident for the operation lifetime and MUST NOT
+  expire merely because execution exceeds the configured TTL.
+- Completion starts the terminal-result retention TTL. Once that deadline
+  elapses, or after the store is reset, the key may be admitted as a new request.
+- A completion MUST identify the current canonical task for the key; delayed
+  completions from an expired and replaced record generation are rejected.
 
 #### 6.6 Lease Rules
 

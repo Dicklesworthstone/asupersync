@@ -7,7 +7,7 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
+use serde_json::{Value as JsonValue, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::env;
@@ -27,6 +27,13 @@ type Result<T> = std::result::Result<T, AnyError>;
 const ARTIFACT_ID: &str = "dependency-marginal-ledger-v1";
 const BEAD_ID: &str = "asupersync-dep-p1-foundations-upksjk.2";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
+const BUDGET_ARTIFACT_ID: &str = "dependency-budget-contract-v1";
+const BUDGET_ARTIFACT_PATH: &str = "artifacts/dependency_budget_contract_v1.json";
+const BUDGET_BEAD_ID: &str = "asupersync-mnotoo.1";
+const BUDGET_CAPABILITY_ID: &str = "CAP-DEPENDENCY-LEDGER";
+const BUDGET_CONTRACT_PATH: &str = "tests/dependency_budget_contract.rs";
+const BUDGET_DOC_PATH: &str = "docs/dependency_budget_contract.md";
+const BUDGET_LEDGER_PATH: &str = "artifacts/dependency_marginal_ledger_v1.json";
 const TAXONOMY_PATH: &str = "artifacts/dependency_safety_taxonomy_v1.json";
 const GENERATOR_PATH: &str = "src/bin/dependency_marginal_ledger.rs";
 const CONTRACT_PATH: &str = "tests/dependency_marginal_ledger_contract.rs";
@@ -140,6 +147,7 @@ struct Config {
     work_dir: PathBuf,
     output: Option<PathBuf>,
     source_commit: Option<String>,
+    budget_from_ledger: Option<PathBuf>,
     jobs: usize,
     offline: bool,
     selected_profiles: Option<BTreeSet<String>>,
@@ -153,6 +161,7 @@ impl Config {
         let mut work_dir = None;
         let mut output = None;
         let mut source_commit = None;
+        let mut budget_from_ledger = None;
         let mut jobs = 4;
         let mut offline = false;
         let mut selected_profiles = None;
@@ -178,6 +187,12 @@ impl Config {
                             .to_string_lossy()
                             .into_owned(),
                     );
+                }
+                "--budget-from-ledger" => {
+                    budget_from_ledger = Some(PathBuf::from(required_arg(
+                        &mut args,
+                        "--budget-from-ledger",
+                    )?));
                 }
                 "--jobs" => {
                     let value = required_arg(&mut args, "--jobs")?;
@@ -210,11 +225,14 @@ impl Config {
             work_dir.unwrap_or_else(|| PathBuf::from("target/dependency-marginal-ledger")),
         );
         let output = output.map(|path| absolutize_cli_path(&repo_root, path));
+        let budget_from_ledger =
+            budget_from_ledger.map(|path| absolutize_cli_path(&repo_root, path));
         Ok(Self {
             repo_root,
             work_dir,
             output,
             source_commit,
+            budget_from_ledger,
             jobs,
             offline,
             selected_profiles,
@@ -300,7 +318,8 @@ fn print_help() {
     println!(
         "dependency_marginal_ledger [--repo-root PATH] [--work-dir PATH] \
          [--output PATH|-] [--source-commit SHA] [--profiles CSV] \
-         [--targets CSV] [--jobs 1..=32] [--offline]"
+         [--targets CSV] [--jobs 1..=32] [--offline] \
+         [--budget-from-ledger PATH]"
     );
 }
 
@@ -506,11 +525,19 @@ fn run() -> Result<()> {
     let manifest_text = fs::read_to_string(&manifest_path)?;
     let manifest = toml::from_str::<TomlValue>(&manifest_text)?;
     let dependencies = collect_direct_dependencies(&manifest)?;
-    let first_party_package_names = first_party_package_names(&config.repo_root, &manifest)?;
     if dependencies.is_empty() {
         return Err("Cargo.toml contains no direct dependency edges".into());
     }
 
+    let source_commit = match config.source_commit.as_deref() {
+        Some(commit) => validate_source_commit(commit)?,
+        None => validate_source_commit(&git_head(&config.repo_root)?)?,
+    };
+    if let Some(ledger_path) = &config.budget_from_ledger {
+        return generate_dependency_budget(&config, ledger_path, &dependencies, source_commit);
+    }
+
+    let first_party_package_names = first_party_package_names(&config.repo_root, &manifest)?;
     let profiles = config.profiles()?;
     let targets = config.targets()?;
     fs::create_dir_all(&config.work_dir)?;
@@ -519,10 +546,6 @@ fn run() -> Result<()> {
     let cargo_version = cargo_version()?;
     let rustc_verbose = rustc_verbose()?;
     let host_triple = parse_host_triple(&rustc_verbose)?;
-    let source_commit = match config.source_commit.as_deref() {
-        Some(commit) => validate_source_commit(commit)?,
-        None => validate_source_commit(&git_head(&config.repo_root)?)?,
-    };
 
     let mut graph_records = Vec::new();
     let mut baseline_cells = Vec::new();
@@ -688,6 +711,407 @@ fn run() -> Result<()> {
         print!("{rendered}");
     }
     Ok(())
+}
+
+fn generate_dependency_budget(
+    config: &Config,
+    ledger_path: &Path,
+    dependencies: &[DirectDependency],
+    source_commit: String,
+) -> Result<()> {
+    let ledger_bytes = fs::read(ledger_path)?;
+    let ledger = serde_json::from_slice::<JsonValue>(&ledger_bytes)?;
+    if json_string(&ledger, "artifact_id")? != ARTIFACT_ID {
+        return Err(format!("{} must identify {ARTIFACT_ID}", ledger_path.display()).into());
+    }
+
+    let inventory = json_array(&ledger, "direct_dependency_inventory")?;
+    let ledger_edges = inventory
+        .iter()
+        .map(|row| Ok(json_string(row, "edge_id")?.to_owned()))
+        .collect::<Result<BTreeSet<_>>>()?;
+    let manifest_edges = dependencies
+        .iter()
+        .map(|dependency| dependency.edge_id.clone())
+        .collect::<BTreeSet<_>>();
+    if ledger_edges != manifest_edges {
+        let missing_from_ledger = manifest_edges
+            .difference(&ledger_edges)
+            .cloned()
+            .collect::<Vec<_>>();
+        let removed_from_manifest = ledger_edges
+            .difference(&manifest_edges)
+            .cloned()
+            .collect::<Vec<_>>();
+        return Err(format!(
+            "frozen ledger direct-edge inventory does not match Cargo.toml; \
+             missing_from_ledger={missing_from_ledger:?}, \
+             removed_from_manifest={removed_from_manifest:?}; regenerate the ledger first"
+        )
+        .into());
+    }
+
+    let existing_path = config
+        .output
+        .clone()
+        .unwrap_or_else(|| config.repo_root.join(BUDGET_ARTIFACT_PATH));
+    let existing = existing_path
+        .exists()
+        .then(|| fs::read(&existing_path))
+        .transpose()?
+        .map(|bytes| serde_json::from_slice::<JsonValue>(&bytes))
+        .transpose()?;
+    if let Some(existing) = &existing
+        && json_string(existing, "artifact_id")? != BUDGET_ARTIFACT_ID
+    {
+        return Err("existing budget output has the wrong artifact_id".into());
+    }
+
+    let reviewed_exceptions = existing
+        .as_ref()
+        .map(|artifact| json_array(artifact, "reviewed_exceptions"))
+        .transpose()?
+        .map(<[JsonValue]>::to_vec)
+        .unwrap_or_default();
+    validate_reviewed_exceptions(&reviewed_exceptions)?;
+
+    let previous_edges = existing
+        .as_ref()
+        .map(|artifact| {
+            json_array(artifact, "allowed_direct_dependencies")?
+                .iter()
+                .map(|row| Ok(json_string(row, "edge_id")?.to_owned()))
+                .collect::<Result<BTreeSet<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    if existing.is_some() {
+        for added_edge in ledger_edges.difference(&previous_edges) {
+            reviewed_direct_addition(&reviewed_exceptions, added_edge)?.ok_or_else(|| {
+                format!(
+                    "direct dependency {added_edge} is not in the prior allowset; \
+                     add an explicit reviewed direct-dependency-addition exception first"
+                )
+            })?;
+        }
+    }
+
+    let mut allowed_direct_dependencies = inventory.to_vec();
+    allowed_direct_dependencies.sort_by(|left, right| {
+        json_string(left, "edge_id")
+            .unwrap_or_default()
+            .cmp(json_string(right, "edge_id").unwrap_or_default())
+    });
+
+    let profile_scopes = json_array(&ledger, "canonical_profiles")?
+        .iter()
+        .map(|profile| {
+            Ok((
+                json_string(profile, "profile_id")?.to_owned(),
+                json_string(profile, "graph_scope")?.to_owned(),
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let inventory_kinds = inventory
+        .iter()
+        .map(|row| {
+            Ok((
+                json_string(row, "edge_id")?.to_owned(),
+                json_string(row, "dependency_edge_kind")?.to_owned(),
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+
+    let previous_ceilings = existing
+        .as_ref()
+        .map(previous_graph_ceilings)
+        .transpose()?
+        .unwrap_or_default();
+    let mut direct_edge_cells =
+        BTreeMap::<(String, String, String, String), BTreeSet<String>>::new();
+    let mut graph_ceilings = Vec::new();
+    for row in json_array(&ledger, "graph_records")? {
+        let feature_profile = json_string(row, "feature_profile")?;
+        let graph_scope = profile_scopes
+            .get(feature_profile)
+            .ok_or_else(|| format!("graph record references unknown profile {feature_profile}"))?;
+        if graph_scope != "synthesized-consumer" {
+            continue;
+        }
+
+        let target_triple = json_string(row, "target_triple")?;
+        let host_triple = json_string(row, "host_triple")?;
+        for edge in json_array(row, "active_direct_root_edges")? {
+            let edge = edge
+                .as_str()
+                .ok_or("active_direct_root_edges entries must be strings")?;
+            let kind = inventory_kinds
+                .get(edge)
+                .ok_or_else(|| format!("active edge {edge} is absent from the inventory"))?;
+            direct_edge_cells
+                .entry((
+                    feature_profile.to_owned(),
+                    target_triple.to_owned(),
+                    host_triple.to_owned(),
+                    kind.clone(),
+                ))
+                .or_default()
+                .insert(edge.to_owned());
+        }
+
+        let key = (
+            feature_profile.to_owned(),
+            target_triple.to_owned(),
+            host_triple.to_owned(),
+        );
+        let package_versions = json_usize(row, "baseline_package_version_count")?;
+        let package_names = json_usize(row, "baseline_unique_package_name_count")?;
+        if let Some((previous_versions, previous_names)) = previous_ceilings.get(&key)
+            && (package_versions > *previous_versions || package_names > *previous_names)
+        {
+            reviewed_graph_increase(&reviewed_exceptions, &key, package_versions, package_names)?
+                .ok_or_else(|| {
+                format!(
+                    "synthesized-consumer graph ceiling increased for {key:?}: \
+                     package_versions {previous_versions}->{package_versions}, \
+                     unique_names {previous_names}->{package_names}; \
+                     add an explicit reviewed graph-ceiling-increase exception first"
+                )
+            })?;
+        }
+
+        graph_ceilings.push(json!({
+            "feature_profile": feature_profile,
+            "target_triple": target_triple,
+            "host_triple": host_triple,
+            "graph_scope": graph_scope,
+            "package_version_ceiling": package_versions,
+            "unique_package_name_ceiling": package_names,
+            "baseline_manifest_hash": json_string(row, "baseline_manifest_hash")?,
+            "baseline_lockfile_hash": json_string(row, "baseline_lockfile_hash")?,
+            "exact_command": json_string(row, "exact_command")?,
+        }));
+    }
+    graph_ceilings.sort_by(|left, right| budget_graph_key(left).cmp(&budget_graph_key(right)));
+
+    let direct_edge_cells = direct_edge_cells
+        .into_iter()
+        .map(
+            |((feature_profile, target_triple, host_triple, dependency_edge_kind), edges)| {
+                json!({
+                    "feature_profile": feature_profile,
+                    "target_triple": target_triple,
+                    "host_triple": host_triple,
+                    "dependency_edge_kind": dependency_edge_kind,
+                    "allowed_direct_root_edges": edges,
+                })
+            },
+        )
+        .collect::<Vec<_>>();
+
+    let excluded_graph_scopes = profile_scopes
+        .iter()
+        .filter(|(_, graph_scope)| graph_scope.as_str() != "synthesized-consumer")
+        .map(|(feature_profile, graph_scope)| {
+            json!({
+                "feature_profile": feature_profile,
+                "graph_scope": graph_scope,
+                "reason": "Graph ceilings enforce neutral out-of-workspace consumer resolution; full-workspace dev/build audits remain a separately scoped ledger surface."
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let artifact = json!({
+        "schema_version": 1,
+        "artifact_id": BUDGET_ARTIFACT_ID,
+        "bead_id": BUDGET_BEAD_ID,
+        "program_id": PROGRAM_ID,
+        "capability_id": BUDGET_CAPABILITY_ID,
+        "source_commit": source_commit,
+        "generator_path": GENERATOR_PATH,
+        "contract_path": BUDGET_CONTRACT_PATH,
+        "documentation_path": BUDGET_DOC_PATH,
+        "source_ledger": {
+            "path": BUDGET_LEDGER_PATH,
+            "artifact_id": ARTIFACT_ID,
+            "bead_id": json_string(&ledger, "bead_id")?,
+            "source_commit": json_string(&ledger, "source_commit")?,
+            "sha256": sha256(&ledger_bytes),
+            "measurement_basis": "Cargo package IDs from synthesized out-of-workspace consumer resolution"
+        },
+        "ratchet_policy": {
+            "direct_dependencies": "Exact allowset. Removals ratchet automatically; additions require a reviewed direct-dependency-addition exception before regeneration.",
+            "graph_ceilings": "Per profile/target/host ceilings lower automatically with the source ledger; increases require a reviewed graph-ceiling-increase exception before regeneration.",
+            "edge_kind_partition": "Active direct-root edges are partitioned by Cargo dependency edge kind in every synthesized-consumer cell.",
+            "fail_closed": true
+        },
+        "allowed_direct_dependencies": allowed_direct_dependencies,
+        "direct_edge_cells": direct_edge_cells,
+        "graph_ceilings": graph_ceilings,
+        "excluded_graph_scopes": excluded_graph_scopes,
+        "reviewed_exceptions": reviewed_exceptions,
+        "negative_fixture_contract": {
+            "direct_dependency_addition": "Inject a synthetic normal:trivial edge into the parsed manifest inventory; validation must reject it.",
+            "graph_ceiling_increase": "Increment a synthesized-consumer package-version count above its stored ceiling; validation must reject it.",
+            "graph_ratchet_down": "Decrement both current graph counts; validation must accept the smaller graph so regeneration can lower the ceilings.",
+            "repository_files_are_not_mutated": true
+        },
+        "methodology": [
+            "The budget is a deterministic projection of the frozen marginal ledger; it does not run a second resolver with different feature unification.",
+            "Only graph records whose canonical profile scope is synthesized-consumer are admitted as graph ceilings.",
+            "Cargo package IDs define graph reachability in the source ledger; both package-version and unique package-name counts are retained.",
+            "Each direct-edge cell key is feature profile, target triple, host triple, and dependency edge kind."
+        ],
+        "no_claim_boundaries": [
+            "This contract enforces checked dependency and resolved-graph budgets; it does not authorize dependency removal, replacement, or cutover.",
+            "Cargo resolution counts do not prove compilation, runtime correctness, security, performance, interoperability, release readiness, or broad workspace health.",
+            "The workspace dev/build audit and excluded fuzz health remain separately scoped evidence and are not synthesized-consumer graph claims.",
+            "A reviewed exception documents a rare budget increase; it is not evidence that the added dependency or larger graph is desirable."
+        ]
+    });
+
+    let rendered = serde_json::to_string_pretty(&artifact)? + "\n";
+    if let Some(output) = &config.output {
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(output, rendered)?;
+    } else {
+        print!("{rendered}");
+    }
+    Ok(())
+}
+
+type BudgetGraphKey = (String, String, String);
+
+fn budget_graph_key(value: &JsonValue) -> BudgetGraphKey {
+    (
+        json_string(value, "feature_profile")
+            .unwrap_or_default()
+            .to_owned(),
+        json_string(value, "target_triple")
+            .unwrap_or_default()
+            .to_owned(),
+        json_string(value, "host_triple")
+            .unwrap_or_default()
+            .to_owned(),
+    )
+}
+
+fn previous_graph_ceilings(
+    artifact: &JsonValue,
+) -> Result<BTreeMap<BudgetGraphKey, (usize, usize)>> {
+    json_array(artifact, "graph_ceilings")?
+        .iter()
+        .map(|row| {
+            Ok((
+                budget_graph_key(row),
+                (
+                    json_usize(row, "package_version_ceiling")?,
+                    json_usize(row, "unique_package_name_ceiling")?,
+                ),
+            ))
+        })
+        .collect()
+}
+
+fn validate_reviewed_exceptions(exceptions: &[JsonValue]) -> Result<()> {
+    let mut ids = BTreeSet::new();
+    for exception in exceptions {
+        let exception_id = json_string(exception, "exception_id")?;
+        if !ids.insert(exception_id) {
+            return Err(format!("duplicate reviewed exception {exception_id}").into());
+        }
+        for key in [
+            "reviewed_by",
+            "approved_on",
+            "expires_on",
+            "review_reference",
+            "rationale",
+        ] {
+            if json_string(exception, key)?.trim().is_empty() {
+                return Err(format!("{exception_id} has an empty {key}").into());
+            }
+        }
+        match json_string(exception, "exception_kind")? {
+            "direct-dependency-addition" => {
+                json_string(exception, "direct_root_edge")?;
+            }
+            "graph-ceiling-increase" => {
+                budget_graph_key_checked(exception)?;
+                json_usize(exception, "approved_package_version_ceiling")?;
+                json_usize(exception, "approved_unique_package_name_ceiling")?;
+            }
+            kind => {
+                return Err(format!("{exception_id} has unknown exception_kind {kind}").into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reviewed_direct_addition<'a>(
+    exceptions: &'a [JsonValue],
+    edge: &str,
+) -> Result<Option<&'a str>> {
+    exceptions
+        .iter()
+        .find(|exception| {
+            exception.get("exception_kind").and_then(JsonValue::as_str)
+                == Some("direct-dependency-addition")
+                && exception
+                    .get("direct_root_edge")
+                    .and_then(JsonValue::as_str)
+                    == Some(edge)
+        })
+        .map(|exception| json_string(exception, "exception_id"))
+        .transpose()
+}
+
+fn reviewed_graph_increase<'a>(
+    exceptions: &'a [JsonValue],
+    key: &BudgetGraphKey,
+    package_versions: usize,
+    package_names: usize,
+) -> Result<Option<&'a str>> {
+    for exception in exceptions {
+        if exception.get("exception_kind").and_then(JsonValue::as_str)
+            != Some("graph-ceiling-increase")
+            || budget_graph_key_checked(exception)? != *key
+        {
+            continue;
+        }
+        if json_usize(exception, "approved_package_version_ceiling")? >= package_versions
+            && json_usize(exception, "approved_unique_package_name_ceiling")? >= package_names
+        {
+            return Ok(Some(json_string(exception, "exception_id")?));
+        }
+    }
+    Ok(None)
+}
+
+fn budget_graph_key_checked(value: &JsonValue) -> Result<BudgetGraphKey> {
+    Ok((
+        json_string(value, "feature_profile")?.to_owned(),
+        json_string(value, "target_triple")?.to_owned(),
+        json_string(value, "host_triple")?.to_owned(),
+    ))
+}
+
+fn json_array<'a>(value: &'a JsonValue, key: &str) -> Result<&'a [JsonValue]> {
+    value
+        .get(key)
+        .and_then(JsonValue::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| format!("JSON field {key} must be an array").into())
+}
+
+fn json_usize(value: &JsonValue, key: &str) -> Result<usize> {
+    let number = value
+        .get(key)
+        .and_then(JsonValue::as_u64)
+        .ok_or_else(|| format!("JSON field {key} must be an unsigned integer"))?;
+    usize::try_from(number).map_err(|_| format!("JSON field {key} exceeds usize").into())
 }
 
 fn resolve_measurements_parallel(

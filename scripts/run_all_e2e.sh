@@ -7,6 +7,7 @@
 # Usage:
 #   ./scripts/run_all_e2e.sh               # run all suites
 #   ./scripts/run_all_e2e.sh --suite NAME   # run a single suite
+#   ./scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario ID
 #   ./scripts/run_all_e2e.sh --list         # list available suites
 #   ./scripts/run_all_e2e.sh --verify-matrix # validate canonical E2E matrix
 #
@@ -342,8 +343,26 @@ declare -A SUITES=(
     [doctor-frankensuite-export]="test_doctor_frankensuite_export_e2e.sh"
     [doctor-e2e-proof-lane]="run_doctor_e2e.sh"
     [phase6]="run_phase6_e2e.sh"
+    # server-stack and agent-dx are registered but DELIBERATELY absent from
+    # SUITE_ORDER (br-asupersync-1do8g1): measured 2026-07-27, neither lane is
+    # default-run-ready. server-stack wraps its fixture in `timeout 120`
+    # THROUGH rch, but a cold dispatch alone costs ~180s (structurally
+    # unreachable; same class as br-asupersync-9yr1t8). agent-dx's
+    # live_failure_chain stage compiles the full lib-test binary with the
+    # `fuzz` feature graph and was OOM-killed (SIGKILL) on a standard fleet
+    # worker at 754s wall. Wire them into SUITE_ORDER only after their owners
+    # fix the per-lane budget/feature-set; run them standalone until then.
     [server-stack]="run_server_stack_e2e.sh"
     [agent-dx]="run_agent_dx_e2e.sh"
+    [api-v2-journey]="run_api_v2_e2e.sh"
+    # sched-perf is registered but deliberately absent from SUITE_ORDER
+    # (same posture as server-stack/agent-dx, br-asupersync-1do8g1): its
+    # S1 regression stage is the full Phase-6 methodology_baselines bench
+    # (~20 min via rch when unblocked, and currently blocked fleet-wide by
+    # br-asupersync-zqs4bo). Run standalone or with SCHED_PERF_SKIP_S1=1;
+    # wire into SUITE_ORDER only after S1 is measured inside the per-suite
+    # budget (br-asupersync-sched-hot-path-perf-bt4y5f.8).
+    [sched-perf]="run_sched_perf_e2e.sh"
 )
 
 # Canonical artifact roots for manifest indexing.
@@ -379,6 +398,8 @@ declare -A SUITE_ARTIFACT_ROOTS=(
     [phase6]="target/phase6-e2e"
     [server-stack]="target/e2e-results/server_stack"
     [agent-dx]="target/e2e-results/agent_dx"
+    [api-v2-journey]="target/e2e-results/api_v2"
+    [sched-perf]="target/e2e-results/sched_perf"
 )
 
 # Summary file patterns used to discover suite artifacts deterministically.
@@ -414,6 +435,8 @@ declare -A SUITE_SUMMARY_GLOBS=(
     [phase6]="summary_*.json"
     [server-stack]="summary.json"
     [agent-dx]="summary.json"
+    [api-v2-journey]="summary.json"
+    [sched-perf]="summary.json"
 )
 
 # Artifact directory patterns used when summary path is not emitted.
@@ -481,6 +504,8 @@ declare -A SUITE_CANONICAL_SCENARIO_ID=(
     [doctor-e2e-proof-lane]="E2E-SUITE-DOCTOR-E2E-PROOF-LANE"
     [phase6]="E2E-SUITE-PHASE6"
     [agent-dx]="E2E-SUITE-AGENT-DX-AFFORDANCE"
+    [api-v2-journey]="E2E-SUITE-API-V2-USER-JOURNEY"
+    [sched-perf]="E2E-SUITE-SCHED-PERF-INVARIANT-FLOOR"
 )
 
 RAPTORQ_REQUIRED_SCENARIOS=(
@@ -503,6 +528,7 @@ SUITE_ORDER=(
     doctor-replay-launcher doctor-orchestration-state-machine doctor-scenario-coverage-packs doctor-stress-soak
     doctor-frankensuite-export doctor-e2e-proof-lane
     phase6
+    api-v2-journey
 )
 
 verify_matrix_gate() {
@@ -677,6 +703,7 @@ verify_matrix_gate() {
 
 # --- Argument parsing ---
 FILTER=""
+SCENARIO_FILTER=""
 LIST_ONLY=0
 VERIFY_MATRIX_ONLY=0
 while [[ $# -gt 0 ]]; do
@@ -693,6 +720,18 @@ while [[ $# -gt 0 ]]; do
             FILTER="$2"
             shift 2
             ;;
+        --scenario)
+            if [[ -z "${2:-}" ]]; then
+                echo "Missing scenario ID after --scenario" >&2
+                exit 1
+            fi
+            if [[ -n "$SCENARIO_FILTER" ]]; then
+                echo "Only one --scenario value is supported" >&2
+                exit 1
+            fi
+            SCENARIO_FILTER="$2"
+            shift 2
+            ;;
         --verify-matrix)
             VERIFY_MATRIX_ONLY=1
             shift
@@ -703,6 +742,25 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ -n "$SCENARIO_FILTER" ]]; then
+    if [[ "$FILTER" != "dependency-sovereignty" ]]; then
+        echo "--scenario is supported only with --suite dependency-sovereignty" >&2
+        exit 1
+    fi
+    if [[ "$VERIFY_MATRIX_ONLY" -eq 1 ]]; then
+        echo "--scenario cannot be combined with --verify-matrix" >&2
+        exit 1
+    fi
+    if [[ "$LIST_ONLY" -eq 1 ]]; then
+        echo "--scenario cannot be combined with --list" >&2
+        exit 1
+    fi
+    if [[ ! "$SCENARIO_FILTER" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        echo "Invalid scenario ID: use only ASCII letters, digits, dot, underscore, and hyphen" >&2
+        exit 1
+    fi
+fi
 
 if [[ "$LIST_ONLY" -eq 1 ]]; then
     echo "Available E2E suites:"
@@ -721,6 +779,14 @@ if [[ -n "$FILTER" && -z "${SUITES[$FILTER]+x}" ]]; then
     echo "Unknown suite: $FILTER"
     echo "Run with --list to see available suites"
     exit 1
+fi
+
+if [[ -n "$SCENARIO_FILTER" ]]; then
+    dependency_runner="${SCRIPT_DIR}/${SUITES[dependency-sovereignty]}"
+    if ! bash "$dependency_runner" --list | grep -Fqx -- "$SCENARIO_FILTER"; then
+        echo "Unknown dependency sovereignty scenario: $SCENARIO_FILTER" >&2
+        exit 1
+    fi
 fi
 
 validate_artifact_lifecycle_inputs
@@ -743,6 +809,7 @@ echo "  RUST_LOG:        ${RUST_LOG}"
 echo "  TEST_SEED:       ${TEST_SEED}"
 echo "  LOG_QUALITY_MIN_SCORE: ${LOG_QUALITY_MIN_SCORE}"
 echo "  WASM_FAULT_MATRIX_MODE: ${WASM_FAULT_MATRIX_MODE}"
+echo "  Scenario:        ${SCENARIO_FILTER:-suite-default}"
 echo "  Timeout:         ${E2E_TIMEOUT}s per suite"
 echo "  Timestamp:       ${TIMESTAMP}"
 echo "  Report:          ${REPORT_DIR}"
@@ -783,9 +850,15 @@ for name in "${SUITE_ORDER[@]}"; do
     suite_log="${REPORT_DIR}/${name}.log"
     suite_id="${name}_e2e"
     scenario_id="${SUITE_CANONICAL_SCENARIO_ID[$name]:-}"
+    suite_args=()
     replay_command="TEST_LOG_LEVEL=${TEST_LOG_LEVEL} RUST_LOG=${RUST_LOG} TEST_SEED=${TEST_SEED} E2E_TIMEOUT=${E2E_TIMEOUT} bash ${SCRIPT_DIR}/run_all_e2e.sh --suite ${name}"
     if [[ "$name" == "wasm-cross-framework" ]]; then
         replay_command="TEST_LOG_LEVEL=${TEST_LOG_LEVEL} RUST_LOG=${RUST_LOG} TEST_SEED=${TEST_SEED} E2E_TIMEOUT=${E2E_TIMEOUT} WASM_FAULT_MATRIX_MODE=${WASM_FAULT_MATRIX_MODE} bash ${SCRIPT_DIR}/run_all_e2e.sh --suite ${name}"
+    fi
+    if [[ "$name" == "dependency-sovereignty" && -n "$SCENARIO_FILTER" ]]; then
+        scenario_id="$SCENARIO_FILTER"
+        suite_args=(--scenario "$SCENARIO_FILTER")
+        replay_command="RCH_REQUIRE_REMOTE=1 TEST_LOG_LEVEL=${TEST_LOG_LEVEL} RUST_LOG=${RUST_LOG} TEST_SEED=${TEST_SEED} E2E_TIMEOUT=${E2E_TIMEOUT} bash ${SCRIPT_DIR}/run_all_e2e.sh --suite ${name} --scenario ${SCENARIO_FILTER}"
     fi
     suite_start_s="$(date +%s)"
     suite_exit_code=0
@@ -821,9 +894,9 @@ for name in "${SUITE_ORDER[@]}"; do
 
     set +e
     if [[ "$name" == "wasm-cross-framework" ]]; then
-        timeout "$E2E_TIMEOUT" env FAULT_MATRIX_MODE="${WASM_FAULT_MATRIX_MODE}" bash "$script_path" > "$suite_log" 2>&1
+        timeout "$E2E_TIMEOUT" env FAULT_MATRIX_MODE="${WASM_FAULT_MATRIX_MODE}" bash "$script_path" "${suite_args[@]}" > "$suite_log" 2>&1
     else
-        timeout "$E2E_TIMEOUT" bash "$script_path" > "$suite_log" 2>&1
+        timeout "$E2E_TIMEOUT" bash "$script_path" "${suite_args[@]}" > "$suite_log" 2>&1
     fi
     rc=$?
     set -e

@@ -39,6 +39,38 @@
 //! [`JoinSet::new`] and [`JoinSet::in_cx`] intentionally reuse an existing
 //! region instead of allocating a hidden quiescence boundary.
 //!
+//! # There is no separate `TaskGroup`
+//!
+//! `JoinSet` **is** this runtime's task-group primitive, and no `TaskGroup`
+//! type is planned (`br-asupersync-ufdab2`). If you came here looking for one,
+//! stop looking: everything a task group is normally wanted for is already on
+//! this type — region-owned members, completion-order [`JoinSet::join_next`],
+//! spawn-order [`JoinSet::join_all`], drained [`JoinSet::cancel_all`],
+//! [`JoinSet::summary`] severity aggregation, and abort-on-drop.
+//!
+//! A `TaskGroup` that merely renamed or aliased `JoinSet` would be a
+//! compatibility shim, which this project does not add, and it would leave
+//! agents choosing between two names for one concept.
+//!
+//! The one genuinely different design — a group that *owns* a child region by
+//! construction, so that cancelling the group is a region cancel and leaving it
+//! is a quiescence boundary — is deliberately **not** what `JoinSet` does.
+//! `JoinSet` shares the caller's region. When you want the group itself to be a
+//! structure boundary, compose it explicitly rather than reaching for a
+//! different type:
+//!
+//! ```ignore
+//! // The group IS the quiescence boundary: the child region cannot close
+//! // until every member is done, and cancelling the region cancels them all.
+//! scope
+//!     .region(&mut state, &cx, FailFast, |child, state| async move {
+//!         let mut set = JoinSet::new(&child);
+//!         // ... set.spawn(...) ...
+//!         set.join_all(&cx).await
+//!     })
+//!     .await
+//! ```
+//!
 //! [`join_next`]: JoinSet
 
 use std::future::Future;
@@ -182,37 +214,34 @@ where
     ///
     /// Results are yielded in completion order. When multiple members are
     /// already complete in the same poll, the earliest spawned ready member is
-    /// selected as the deterministic tie-break. Pending members are polled with
-    /// their join future's drop-abort path defused, so scanning for readiness
-    /// never cancels still-running work.
-    pub async fn join_next(&mut self, cx: &Cx) -> Option<Outcome<T, E>> {
+    /// selected as the deterministic tie-break. Pending members are polled
+    /// through [`TaskHandle::poll_join`], which registers for wakeup without
+    /// requesting cancellation, so scanning for readiness never cancels
+    /// still-running work.
+    ///
+    /// The `Cx` parameter is kept for symmetry with [`join_all`](Self::join_all)
+    /// and [`cancel_all`](Self::cancel_all). Collection itself is
+    /// uninterruptible, exactly like [`TaskHandle::join`]: observing a member's
+    /// terminal outcome is what upholds the no-orphan accounting, so a
+    /// cancelled caller still drains rather than abandoning members.
+    pub async fn join_next(&mut self, _cx: &Cx) -> Option<Outcome<T, E>> {
         if let Some(outcome) = self.try_join_next() {
             return Some(outcome);
         }
 
         std::future::poll_fn(|task_cx| {
-            if let Some(outcome) = self.try_join_next() {
-                return Poll::Ready(Some(outcome));
-            }
-
             if self.handles.is_empty() {
                 return Poll::Ready(None);
             }
 
+            // Poll each member through its handle's own long-lived receiver so
+            // every pending registration SURVIVES this poll
+            // (br-asupersync-tncxj9). Polling a temporary `handle.join(cx)`
+            // future per member instead registered a waiter and then retired it
+            // again as that future dropped, so the scan ended with no waker
+            // registered on any member and nothing ever re-polled this set.
             for index in 0..self.handles.len() {
-                let joined = {
-                    let handle = &mut self.handles[index];
-                    let mut join = handle.join(cx);
-                    match std::pin::Pin::new(&mut join).poll(task_cx) {
-                        Poll::Ready(joined) => Some(joined),
-                        Poll::Pending => {
-                            join.defuse_drop_abort();
-                            None
-                        }
-                    }
-                };
-
-                if let Some(joined) = joined {
+                if let Poll::Ready(joined) = self.handles[index].poll_join(task_cx) {
                     let outcome = join_to_outcome(joined);
                     self.summary.record(&outcome);
                     self.handles.remove(index);
@@ -646,6 +675,76 @@ mod tests {
             collect_ready_values(&seed_values),
             collect_ready_values(&seed_values)
         );
+    }
+
+    /// Regression proof for `br-asupersync-tncxj9`: a `join_next` poll that
+    /// returns `Pending` must leave every pending member registered for wakeup.
+    /// The previous implementation polled a temporary `handle.join(cx)` future
+    /// per member and dropped it, which retired the waiter it had just
+    /// installed, so member completion woke nothing and the set parked forever.
+    #[test]
+    fn join_next_pending_poll_registers_wakers_for_every_member() {
+        struct CountingWaker {
+            counter: Arc<AtomicUsize>,
+        }
+
+        impl std::task::Wake for CountingWaker {
+            fn wake(self: Arc<Self>) {
+                self.counter.fetch_add(1, Ordering::Relaxed);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.counter.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let cx = Cx::for_testing();
+        let scope = Scope::<FailFast>::new(
+            crate::RegionId::new_for_test(13, 1),
+            crate::Budget::INFINITE,
+        );
+        let mut set = JoinSet::<u32, &'static str, FailFast>::new(&scope);
+        let (_pending_tx, pending_handle) = manual_handle::<Result<u32, &'static str>>(1);
+        let (late_tx, late_handle) = manual_handle::<Result<u32, &'static str>>(2);
+        set.handles.push(pending_handle);
+        set.handles.push(late_handle);
+
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let waker = std::task::Waker::from(Arc::new(CountingWaker {
+            counter: Arc::clone(&wakes),
+        }));
+        let mut poll_cx = std::task::Context::from_waker(&waker);
+
+        let mut join_next = Box::pin(set.join_next(&cx));
+        assert!(
+            join_next.as_mut().poll(&mut poll_cx).is_pending(),
+            "no member is ready yet, so the first poll must park"
+        );
+        assert_eq!(
+            wakes.load(Ordering::Relaxed),
+            0,
+            "parking must not owe a wake while every member is still running"
+        );
+
+        late_tx
+            .send(&cx, Ok(Ok(9)))
+            .expect("late member result sends");
+        assert_eq!(
+            wakes.load(Ordering::Relaxed),
+            1,
+            "a member completing after the parking poll must wake the set"
+        );
+
+        let ready = join_next.as_mut().poll(&mut poll_cx);
+        match ready {
+            Poll::Ready(Some(Outcome::Ok(9))) => {}
+            other => panic!("expected the completed member, got {other:?}"),
+        }
+        drop(join_next);
+
+        assert_eq!(set.len(), 1, "the still-pending member stays owned");
+        assert_eq!(set.summary().completed(), 1);
+        assert_eq!(set.summary().worst(), Severity::Ok);
     }
 
     #[test]

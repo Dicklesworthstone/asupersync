@@ -364,43 +364,12 @@ impl BrowserStorageAdapter {
             return self.sync_backend_requires_async(&request);
         }
 
-        let quota = self.cap.quota_policy();
         let storage_key = StorageKey {
             backend,
             namespace: namespace.clone(),
             key: key.clone(),
         };
-        let new_entry_size = entry_size(&namespace, &key, value.len());
-        let old_entry_size = self
-            .entries
-            .get(&storage_key)
-            .map_or(0, |old| entry_size(&namespace, &key, old.len()));
-
-        let projected_entries = if self.entries.contains_key(&storage_key) {
-            self.entries.len()
-        } else {
-            self.entries.len() + 1
-        };
-        if projected_entries > quota.max_entries {
-            return self.policy_error(
-                &request,
-                StoragePolicyError::EntryCountExceeded {
-                    projected: projected_entries,
-                    limit: quota.max_entries,
-                },
-            );
-        }
-
-        let projected_bytes = self.used_bytes - old_entry_size + new_entry_size;
-        if projected_bytes > quota.max_total_bytes {
-            return self.policy_error(
-                &request,
-                StoragePolicyError::QuotaExceeded {
-                    projected_bytes,
-                    limit_bytes: quota.max_total_bytes,
-                },
-            );
-        }
+        let projected_bytes = self.project_entry_quota(&request, &storage_key, value.len())?;
 
         if let Some(host_backend) = self.host_backend(backend) {
             if let Err(message) = host_backend.set(&namespace, &key, &value) {
@@ -438,7 +407,7 @@ impl BrowserStorageAdapter {
                 Ok(value) => value,
                 Err(message) => return self.host_backend_error(&request, message),
             };
-            self.sync_entry_cache(&storage_key, value.as_ref());
+            self.sync_host_read_cache(&request, &storage_key, value.as_deref())?;
             return Ok(value);
         }
 
@@ -605,7 +574,7 @@ impl BrowserStorageAdapter {
             namespace: namespace.clone(),
             key: key.clone(),
         };
-        let projected_bytes = self.project_set_quota(&request, &storage_key, value.len())?;
+        let projected_bytes = self.project_entry_quota(&request, &storage_key, value.len())?;
         if let Err(message) = host_backend.set(&namespace, &key, &value).await {
             return self.host_backend_error(&request, message);
         }
@@ -643,7 +612,7 @@ impl BrowserStorageAdapter {
             Ok(value) => value,
             Err(message) => return self.host_backend_error(&request, message),
         };
-        self.sync_entry_cache(&storage_key, value.as_ref());
+        self.sync_host_read_cache(&request, &storage_key, value.as_deref())?;
         Ok(value)
     }
 
@@ -854,13 +823,23 @@ impl BrowserStorageAdapter {
         Ok(Self::normalize_listed_keys(keys))
     }
 
-    fn project_set_quota(
+    fn project_entry_quota(
         &mut self,
         request: &StorageRequest,
         storage_key: &StorageKey,
         value_len: usize,
     ) -> Result<usize, BrowserStorageError> {
         let quota = self.cap.quota_policy();
+        if value_len > quota.max_value_bytes {
+            return self.policy_error(
+                request,
+                StoragePolicyError::ValueTooLarge {
+                    len: value_len,
+                    limit: quota.max_value_bytes,
+                },
+            );
+        }
+
         let new_entry_size = entry_size(&storage_key.namespace, &storage_key.key, value_len);
         let old_entry_size = self.entries.get(storage_key).map_or(0, |old| {
             entry_size(&storage_key.namespace, &storage_key.key, old.len())
@@ -895,16 +874,23 @@ impl BrowserStorageAdapter {
         Ok(projected_bytes)
     }
 
-    fn sync_entry_cache(&mut self, storage_key: &StorageKey, value: Option<&Vec<u8>>) {
-        self.remove_cached_entry(storage_key);
-        if let Some(value) = value {
-            self.used_bytes = self.used_bytes.saturating_add(entry_size(
-                &storage_key.namespace,
-                &storage_key.key,
-                value.len(),
-            ));
-            self.entries.insert(storage_key.clone(), value.clone());
-        }
+    fn sync_host_read_cache(
+        &mut self,
+        request: &StorageRequest,
+        storage_key: &StorageKey,
+        value: Option<&[u8]>,
+    ) -> Result<(), BrowserStorageError> {
+        let Some(value) = value else {
+            self.remove_cached_entry(storage_key);
+            return Ok(());
+        };
+
+        let observed_request = request.clone().with_value_len(value.len());
+        let projected_bytes =
+            self.project_entry_quota(&observed_request, storage_key, value.len())?;
+        self.used_bytes = projected_bytes;
+        self.entries.insert(storage_key.clone(), value.to_vec());
+        Ok(())
     }
 
     fn remove_cached_entry(&mut self, storage_key: &StorageKey) {
@@ -1818,6 +1804,363 @@ mod tests {
             StorageConsistencyPolicy::ImmediateReadAfterWrite,
             StorageRedactionPolicy::default(),
         )
+    }
+
+    fn storage_cap_with_quota(quota: StorageQuotaPolicy) -> BrowserStorageIoCap {
+        BrowserStorageIoCap::new(
+            StorageAuthority::deny_all()
+                .grant_backend(StorageBackend::IndexedDb)
+                .grant_backend(StorageBackend::LocalStorage)
+                .grant_namespace("cache:*")
+                .grant_operation(StorageOperation::Get)
+                .grant_operation(StorageOperation::Set),
+            quota,
+            StorageConsistencyPolicy::ImmediateReadAfterWrite,
+            StorageRedactionPolicy::default(),
+        )
+    }
+
+    fn quota(
+        max_total_bytes: usize,
+        max_value_bytes: usize,
+        max_entries: usize,
+    ) -> StorageQuotaPolicy {
+        StorageQuotaPolicy {
+            max_total_bytes,
+            max_key_bytes: 16,
+            max_value_bytes,
+            max_namespace_bytes: 16,
+            max_entries,
+        }
+    }
+
+    fn cached_value<'a>(
+        adapter: &'a BrowserStorageAdapter,
+        backend: StorageBackend,
+        namespace: &str,
+        key: &str,
+    ) -> Option<&'a [u8]> {
+        adapter
+            .entries
+            .get(&StorageKey {
+                backend,
+                namespace: namespace.to_owned(),
+                key: key.to_owned(),
+            })
+            .map(Vec::as_slice)
+    }
+
+    #[test]
+    fn host_get_quota_contract_sync() {
+        const BACKEND: StorageBackend = StorageBackend::LocalStorage;
+        const NAMESPACE: &str = "cache:n";
+
+        let oversized_host = Arc::new(MockHostBackend::default());
+        oversized_host
+            .set(NAMESPACE, "a", b"12345")
+            .expect("seed oversized host value");
+        let mut oversized = BrowserStorageAdapter::new(storage_cap_with_quota(quota(64, 4, 1)));
+        oversized
+            .set(BACKEND, NAMESPACE, "a", b"ok".to_vec())
+            .expect("seed prior cached value");
+        let prior_bytes = oversized.used_bytes();
+        oversized.register_host_backend(BACKEND, oversized_host);
+
+        assert_eq!(
+            oversized.get(BACKEND, NAMESPACE, "a"),
+            Err(BrowserStorageError::Policy(
+                StoragePolicyError::ValueTooLarge { len: 5, limit: 4 }
+            ))
+        );
+        assert_eq!(
+            cached_value(&oversized, BACKEND, NAMESPACE, "a"),
+            Some(&b"ok"[..])
+        );
+        assert_eq!(oversized.used_bytes(), prior_bytes);
+        assert_eq!(oversized.entry_count(), 1);
+        let event = oversized.events().last().expect("oversized denial event");
+        assert_eq!(event.outcome, StorageEventOutcome::Denied);
+        assert_eq!(event.reason_code, StorageEventReasonCode::ValueTooLarge);
+        assert_eq!(event.value_len, Some(5));
+
+        let entry_host = Arc::new(MockHostBackend::default());
+        entry_host
+            .set(NAMESPACE, "b", b"yy")
+            .expect("seed second host entry");
+        let mut entries = BrowserStorageAdapter::new(storage_cap_with_quota(quota(64, 8, 1)));
+        entries
+            .set(BACKEND, NAMESPACE, "a", b"x".to_vec())
+            .expect("seed first cached entry");
+        let prior_bytes = entries.used_bytes();
+        entries.register_host_backend(BACKEND, entry_host);
+
+        assert_eq!(
+            entries.get(BACKEND, NAMESPACE, "b"),
+            Err(BrowserStorageError::Policy(
+                StoragePolicyError::EntryCountExceeded {
+                    projected: 2,
+                    limit: 1,
+                }
+            ))
+        );
+        assert_eq!(
+            cached_value(&entries, BACKEND, NAMESPACE, "a"),
+            Some(&b"x"[..])
+        );
+        assert_eq!(cached_value(&entries, BACKEND, NAMESPACE, "b"), None);
+        assert_eq!(entries.used_bytes(), prior_bytes);
+        let event = entries.events().last().expect("entry denial event");
+        assert_eq!(
+            event.reason_code,
+            StorageEventReasonCode::EntryCountExceeded
+        );
+        assert_eq!(event.value_len, Some(2));
+
+        let total_host = Arc::new(MockHostBackend::default());
+        total_host
+            .set(NAMESPACE, "b", b"y")
+            .expect("seed quota host entry");
+        let mut total = BrowserStorageAdapter::new(storage_cap_with_quota(quota(17, 8, 2)));
+        total
+            .set(BACKEND, NAMESPACE, "a", b"x".to_vec())
+            .expect("seed cached quota entry");
+        let prior_bytes = total.used_bytes();
+        total.register_host_backend(BACKEND, total_host);
+
+        assert_eq!(
+            total.get(BACKEND, NAMESPACE, "b"),
+            Err(BrowserStorageError::Policy(
+                StoragePolicyError::QuotaExceeded {
+                    projected_bytes: 18,
+                    limit_bytes: 17,
+                }
+            ))
+        );
+        assert_eq!(
+            cached_value(&total, BACKEND, NAMESPACE, "a"),
+            Some(&b"x"[..])
+        );
+        assert_eq!(cached_value(&total, BACKEND, NAMESPACE, "b"), None);
+        assert_eq!(total.used_bytes(), prior_bytes);
+        let event = total.events().last().expect("total quota denial event");
+        assert_eq!(event.reason_code, StorageEventReasonCode::QuotaExceeded);
+        assert_eq!(event.value_len, Some(1));
+
+        let boundary_host = Arc::new(MockHostBackend::default());
+        boundary_host
+            .set(NAMESPACE, "a", b"1234")
+            .expect("seed boundary host value");
+        let mut boundary = BrowserStorageAdapter::new(storage_cap_with_quota(quota(12, 4, 1)));
+        boundary
+            .set(BACKEND, NAMESPACE, "a", b"12".to_vec())
+            .expect("seed replacement cache value");
+        boundary.register_host_backend(
+            BACKEND,
+            Arc::clone(&boundary_host) as Arc<dyn StorageHostBackend>,
+        );
+
+        assert_eq!(
+            boundary
+                .get(BACKEND, NAMESPACE, "a")
+                .expect("exact-boundary host read"),
+            Some(b"1234".to_vec())
+        );
+        assert_eq!(boundary.entry_count(), 1);
+        assert_eq!(boundary.used_bytes(), 12);
+        assert_eq!(
+            cached_value(&boundary, BACKEND, NAMESPACE, "a"),
+            Some(&b"1234"[..])
+        );
+
+        boundary_host
+            .delete(NAMESPACE, "a")
+            .expect("delete host value");
+        assert_eq!(
+            boundary
+                .get(BACKEND, NAMESPACE, "a")
+                .expect("host absence must be observed"),
+            None
+        );
+        assert_eq!(boundary.entry_count(), 0);
+        assert_eq!(boundary.used_bytes(), 0);
+
+        boundary_host
+            .set(NAMESPACE, "a", b"")
+            .expect("seed empty host value");
+        assert_eq!(
+            boundary
+                .get(BACKEND, NAMESPACE, "a")
+                .expect("empty host value must be observed"),
+            Some(Vec::new())
+        );
+        assert_eq!(boundary.entry_count(), 1);
+        assert_eq!(boundary.used_bytes(), entry_size(NAMESPACE, "a", 0));
+        assert_eq!(
+            cached_value(&boundary, BACKEND, NAMESPACE, "a"),
+            Some(&b""[..])
+        );
+    }
+
+    #[test]
+    fn host_get_quota_contract_async() {
+        const BACKEND: StorageBackend = StorageBackend::IndexedDb;
+        const NAMESPACE: &str = "cache:n";
+
+        futures_lite::future::block_on(async {
+            let oversized_host = Arc::new(MockAsyncHostBackend::default());
+            oversized_host
+                .set(NAMESPACE, "a", b"12345")
+                .await
+                .expect("seed oversized async host value");
+            let mut oversized = BrowserStorageAdapter::new(storage_cap_with_quota(quota(64, 4, 1)));
+            oversized
+                .set(BACKEND, NAMESPACE, "a", b"ok".to_vec())
+                .expect("seed prior cached value");
+            let prior_bytes = oversized.used_bytes();
+            oversized.register_async_host_backend(BACKEND, oversized_host);
+
+            assert_eq!(
+                oversized.get_async(BACKEND, NAMESPACE, "a").await,
+                Err(BrowserStorageError::Policy(
+                    StoragePolicyError::ValueTooLarge { len: 5, limit: 4 }
+                ))
+            );
+            assert_eq!(
+                cached_value(&oversized, BACKEND, NAMESPACE, "a"),
+                Some(&b"ok"[..])
+            );
+            assert_eq!(oversized.used_bytes(), prior_bytes);
+            assert_eq!(oversized.entry_count(), 1);
+            let event = oversized.events().last().expect("oversized denial event");
+            assert_eq!(event.outcome, StorageEventOutcome::Denied);
+            assert_eq!(event.reason_code, StorageEventReasonCode::ValueTooLarge);
+            assert_eq!(event.value_len, Some(5));
+
+            let entry_host = Arc::new(MockAsyncHostBackend::default());
+            entry_host
+                .set(NAMESPACE, "b", b"yy")
+                .await
+                .expect("seed second async host entry");
+            let mut entries = BrowserStorageAdapter::new(storage_cap_with_quota(quota(64, 8, 1)));
+            entries
+                .set(BACKEND, NAMESPACE, "a", b"x".to_vec())
+                .expect("seed first cached entry");
+            let prior_bytes = entries.used_bytes();
+            entries.register_async_host_backend(BACKEND, entry_host);
+
+            assert_eq!(
+                entries.get_async(BACKEND, NAMESPACE, "b").await,
+                Err(BrowserStorageError::Policy(
+                    StoragePolicyError::EntryCountExceeded {
+                        projected: 2,
+                        limit: 1,
+                    }
+                ))
+            );
+            assert_eq!(
+                cached_value(&entries, BACKEND, NAMESPACE, "a"),
+                Some(&b"x"[..])
+            );
+            assert_eq!(cached_value(&entries, BACKEND, NAMESPACE, "b"), None);
+            assert_eq!(entries.used_bytes(), prior_bytes);
+            let event = entries.events().last().expect("entry denial event");
+            assert_eq!(
+                event.reason_code,
+                StorageEventReasonCode::EntryCountExceeded
+            );
+            assert_eq!(event.value_len, Some(2));
+
+            let total_host = Arc::new(MockAsyncHostBackend::default());
+            total_host
+                .set(NAMESPACE, "b", b"y")
+                .await
+                .expect("seed async quota host entry");
+            let mut total = BrowserStorageAdapter::new(storage_cap_with_quota(quota(17, 8, 2)));
+            total
+                .set(BACKEND, NAMESPACE, "a", b"x".to_vec())
+                .expect("seed cached quota entry");
+            let prior_bytes = total.used_bytes();
+            total.register_async_host_backend(BACKEND, total_host);
+
+            assert_eq!(
+                total.get_async(BACKEND, NAMESPACE, "b").await,
+                Err(BrowserStorageError::Policy(
+                    StoragePolicyError::QuotaExceeded {
+                        projected_bytes: 18,
+                        limit_bytes: 17,
+                    }
+                ))
+            );
+            assert_eq!(
+                cached_value(&total, BACKEND, NAMESPACE, "a"),
+                Some(&b"x"[..])
+            );
+            assert_eq!(cached_value(&total, BACKEND, NAMESPACE, "b"), None);
+            assert_eq!(total.used_bytes(), prior_bytes);
+            let event = total.events().last().expect("total quota denial event");
+            assert_eq!(event.reason_code, StorageEventReasonCode::QuotaExceeded);
+            assert_eq!(event.value_len, Some(1));
+
+            let boundary_host = Arc::new(MockAsyncHostBackend::default());
+            boundary_host
+                .set(NAMESPACE, "a", b"1234")
+                .await
+                .expect("seed boundary async host value");
+            let mut boundary = BrowserStorageAdapter::new(storage_cap_with_quota(quota(12, 4, 1)));
+            boundary
+                .set(BACKEND, NAMESPACE, "a", b"12".to_vec())
+                .expect("seed replacement cache value");
+            boundary.register_async_host_backend(
+                BACKEND,
+                Arc::clone(&boundary_host) as Arc<dyn AsyncStorageHostBackend>,
+            );
+
+            assert_eq!(
+                boundary
+                    .get_async(BACKEND, NAMESPACE, "a")
+                    .await
+                    .expect("exact-boundary async host read"),
+                Some(b"1234".to_vec())
+            );
+            assert_eq!(boundary.entry_count(), 1);
+            assert_eq!(boundary.used_bytes(), 12);
+            assert_eq!(
+                cached_value(&boundary, BACKEND, NAMESPACE, "a"),
+                Some(&b"1234"[..])
+            );
+
+            boundary_host
+                .delete(NAMESPACE, "a")
+                .await
+                .expect("delete async host value");
+            assert_eq!(
+                boundary
+                    .get_async(BACKEND, NAMESPACE, "a")
+                    .await
+                    .expect("async host absence must be observed"),
+                None
+            );
+            assert_eq!(boundary.entry_count(), 0);
+            assert_eq!(boundary.used_bytes(), 0);
+
+            boundary_host
+                .set(NAMESPACE, "a", b"")
+                .await
+                .expect("seed empty async host value");
+            assert_eq!(
+                boundary
+                    .get_async(BACKEND, NAMESPACE, "a")
+                    .await
+                    .expect("empty async host value must be observed"),
+                Some(Vec::new())
+            );
+            assert_eq!(boundary.entry_count(), 1);
+            assert_eq!(boundary.used_bytes(), entry_size(NAMESPACE, "a", 0));
+            assert_eq!(
+                cached_value(&boundary, BACKEND, NAMESPACE, "a"),
+                Some(&b""[..])
+            );
+        });
     }
 
     #[test]

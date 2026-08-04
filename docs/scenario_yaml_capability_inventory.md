@@ -68,6 +68,30 @@ Unknown fields are currently accepted and ignored because the typed structs do
 not use `deny_unknown_fields`. Comments and input layout are accepted but
 discarded.
 
+### Canonical JSON contract
+
+`Scenario::to_json` is the additive canonical machine form for schema v1. It
+emits compact UTF-8 with no trailing newline, sorts every object key
+lexicographically and recursively, and preserves array order. Integer fields
+remain exact base-10 JSON integers; duration fields ending in `_ms` are unsigned
+integer milliseconds; finite decimals use serde_json's stable shortest form.
+The encoder materializes `schema_version`, all typed defaults, and every typed
+field.
+
+An input without `schema_version` follows the existing typed default to v1;
+encoding that value produces the same bytes as an explicit v1 document with the
+same fields. Unsupported versions remain parseable for located diagnostics and
+are rejected by `Scenario::validate`. The preserved free-form extension
+channels are `metadata`, `participants[].properties`, and `faults[].args`.
+Unknown typed-struct fields retain the frozen accept-and-discard behavior; A3
+owns parser parity and bounds rather than A2 silently tightening that policy.
+
+The fixed byte golden, recursive dynamic-map ordering, full typed equality,
+missing-version migration, and YAML-to-JSON replay-identity checks are
+executable tests. The library encoder does not add a CLI conversion command or
+make `golden_projection.format` select an output form; those authoring and
+projection surfaces remain routed to A4.
+
 ## Observed YAML grammar
 
 The executable contract freezes observed typed behavior instead of assuming
@@ -192,7 +216,7 @@ artifact path uses direct `fs::write`, not atomic temp-write, sync, and rename.
 | Child | Frozen responsibility | Current evidence |
 | --- | --- | --- |
 | A1 | loaders, schema, grammar, corpus, workflows, diagnostics, consumption, gaps | executed contract |
-| A2 | one versioned typed model and additive canonical JSON | planned |
+| A2 | one versioned typed model and additive canonical JSON | executed contract |
 | A3 | incumbent KEEP or complete bounded owned parser/writer parity | planned |
 | A4 | located diagnostics, migration, examples, include truth, atomic output, docs | planned |
 | A5 | real validate/run/explore/replay journeys and terminal KEEP-or-cutover decision | planned |
@@ -211,10 +235,10 @@ The artifact routes sixteen fail-closed gaps:
 | `SCN-GAP-03` | cancellation configuration is validation-only | A5 |
 | `SCN-GAP-04` | participant roles/properties are unused | A5 |
 | `SCN-GAP-05` | expected invariants do not select checks | A5 |
-| `SCN-GAP-06` | golden format/canonicalization are not implemented | A2 |
+| `SCN-GAP-06` | library canonical JSON exists, but golden format selection/redaction remain unwired | A4 |
 | `SCN-GAP-07` | six fault actions have no simulated effect | A5 |
 | `SCN-GAP-08` | YAML schedules no workload | A5 |
-| `SCN-GAP-09` | no Scenario dump/canonical JSON workflow | A2 |
+| `SCN-GAP-09` | library canonical JSON exists, but neither CLI exposes dump/conversion | A4 |
 | `SCN-GAP-10` | no application document/work bounds | A3 |
 | `SCN-GAP-11` | unknown fields are ignored | A3 |
 | `SCN-GAP-12` | time-travel demo YAML is orphaned and not the schema | A4 |

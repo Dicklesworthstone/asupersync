@@ -151,6 +151,18 @@ fn feasibility_matrix_covers_required_surfaces_with_live_anchors() {
 fn versioned_schema_and_handoff_protocol_fail_closed() {
     let artifact = artifact();
     let schema = object(&artifact, "versioned_snapshot_schema");
+    let snapshot_source = read_repo_file("src/lab/snapshot_restore.rs");
+    for invariant in [
+        "pub const SNAPSHOT_ARTIFACT_VERSION: u16 = 1;",
+        "pub const SCHEMA_VERSION: u32 = 2;",
+        "pub const MINIMUM_SUPPORTED_SCHEMA_VERSION: u32 = 1;",
+        "pub fn migrate_to_current(&self)",
+    ] {
+        assert!(
+            snapshot_source.contains(invariant),
+            "snapshot source invariant drifted: {invariant}"
+        );
+    }
     assert_eq!(
         schema.get("schema_id").and_then(Value::as_str),
         Some("asupersync-state-snapshot-handoff-v1")
@@ -165,9 +177,25 @@ fn versioned_schema_and_handoff_protocol_fail_closed() {
             .and_then(Value::as_str),
         Some("RestorableSnapshot::content_hash")
     );
+    assert_eq!(
+        schema.get("current_schema_version").and_then(Value::as_u64),
+        Some(2)
+    );
+    assert_eq!(
+        array(schema, "supported_schema_range")
+            .iter()
+            .filter_map(Value::as_u64)
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(
+        schema.get("artifact_envelope").and_then(Value::as_str),
+        Some("ASUPSNAP version 1 full or incremental")
+    );
     assert!(
-        string(schema, "compatible_upgrade_policy").contains("exact schema-version matches"),
-        "schema policy must reject implicit migration"
+        string(schema, "compatible_upgrade_policy").contains("explicit validated")
+            && string(schema, "compatible_upgrade_policy").contains("no implicit"),
+        "schema policy must require explicit migration and reject implicit migration"
     );
 
     let incompatible = object(schema, "incompatible_state_policy");

@@ -1,0 +1,1073 @@
+{
+  "schema_version": 1,
+  "artifact_id": "x509-validation-ownership-inventory-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-0h6myr.3.1",
+  "capability_id": "CAP-TLS-X509",
+  "baseline_revision": "3c09dad6aa59566964724ffe6c9dc99359bfd180",
+  "captured_date_utc": "2026-07-26",
+  "authority": {
+    "registry_disposition": "KEEP_UNTIL_PARITY",
+    "registry_cutover_state": "KEEP_INCUMBENT",
+    "cutover_policy_class": "SECURITY_SENSITIVE",
+    "dependency_exit_allowed": false,
+    "parser_code_allowed_in_this_bead": false,
+    "standard_validation_owner": "rustls-0.23.42/rustls-webpki-0.103.13",
+    "residue_status": "A3_SPEC_APPROVED_A4_IMPLEMENTATION_PENDING"
+  },
+  "policy": {
+    "inventory_state": "BASELINED_WITH_ROUTED_GAPS",
+    "evidence_state": "EXECUTABLE_PARTIAL_BLOCKING",
+    "zero_unknown_required": true,
+    "unknown_rows": 0,
+    "missing_or_ambiguous_owner_action": "KEEP_X509_PARSER_AND_BLOCK_CUTOVER",
+    "custom_verifier_rule": "A custom verifier must either invoke the standard verifier before any local check or explicitly identify the exact pinned-leaf policy that replaces chain trust.",
+    "accepted_states": [
+      "ACTIVE",
+      "CALLER_OWNED",
+      "CFG_DISABLED",
+      "DELEGATED",
+      "LOCAL",
+      "NOT_APPLICABLE",
+      "PLANNED",
+      "ROUTED",
+      "UNSUPPORTED_NO_CLAIM"
+    ]
+  },
+  "locked_dependencies": {
+    "x509_parser": {
+      "manifest_requirement": "0.18",
+      "resolved_version": "0.18.1",
+      "edge_kind": "optional-normal",
+      "enabling_feature": "tls"
+    },
+    "rustls": {
+      "manifest_requirement": "0.23.39",
+      "resolved_version": "0.23.42",
+      "default_features": false,
+      "enabled_features": [
+        "std",
+        "tls12",
+        "ring"
+      ]
+    },
+    "rustls_webpki": {
+      "resolved_version": "0.103.13",
+      "relationship": "transitive through rustls"
+    }
+  },
+  "source_pins": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "b6789b10b8e984a98004cde19952c6b73418afdde30aa61e1c5a6a45377f17bb",
+      "line_count": 1015
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "c670712ab8713897bacc9591c170db2d030df83011dc7b9d092f16099f1540dd",
+      "line_count": 4666
+    },
+    {
+      "path": "src/tls/types.rs",
+      "sha256": "752c7070d3e4753a35cfdda85670d1eb2a4bd69760baf0cb7a3e831e0122e45f",
+      "line_count": 1107
+    },
+    {
+      "path": "src/tls/connector.rs",
+      "sha256": "bd2ed80fdc244592e92985654fb9acb2cf00f0fa2dca68734f4dbd9e4a7da393",
+      "line_count": 2049
+    },
+    {
+      "path": "src/tls/acceptor.rs",
+      "sha256": "1bbf5b9c2fe8d12c029a5e3effe3bede9513c9d094c69e1ff93145b6d76847e6",
+      "line_count": 2785
+    },
+    {
+      "path": "src/tls/error.rs",
+      "sha256": "4125482491a0798fd0590e6709409e5c9ee61ac229eb0ab7408cd45aaf7f7fce",
+      "line_count": 680
+    },
+    {
+      "path": "src/net/quic_native/handshake_driver.rs",
+      "sha256": "51e50620ca4e6006485e31d1b8ece4fc56d29fc36e7a346258c4607af1fa3548",
+      "line_count": 1438
+    },
+    {
+      "path": "src/net/quic_native/tls.rs",
+      "sha256": "0d4452bd8358cf0c23e64b7593db3758d1b084b8f65540333533fd340e8d3e0a",
+      "line_count": 2266
+    },
+    {
+      "path": "src/net/quic_native/connection.rs",
+      "sha256": "e80ab59e4653d5b511229a61fd58c1a08c4b297d0df258406242c5de02dd237b",
+      "line_count": 4299
+    },
+    {
+      "path": "src/bin/atp.rs",
+      "sha256": "b77dd1e90ae1ab81bf084feac214b31cc8f17557d6f3c476dcdb1868075eee4b",
+      "line_count": 11912
+    },
+    {
+      "path": "artifacts/dependency_capability_registry_v1.json",
+      "sha256": "82a73ec1c14fbe317611f6d592af480d75d002cbe9333045ab74840bcaf1c081",
+      "line_count": 6907
+    },
+    {
+      "path": "artifacts/dependency_capability_baseline_v1.json",
+      "sha256": "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8",
+      "line_count": 1357
+    },
+    {
+      "path": "artifacts/dependency_cutover_policy_v1.json",
+      "sha256": "9a786ff93cc198a91b74d5e52f60ede00a2fac190977841482959aad6891cf5b",
+      "line_count": 1220
+    },
+    {
+      "path": "artifacts/dependency_marginal_ledger_v1.json",
+      "sha256": "9382d8357e59b49b01775f3efad2db95f2186c63bc432b5616ba20f3b9a218a9",
+      "line_count": 188045
+    },
+    {
+      "path": "artifacts/api_surface_map_v1.json",
+      "sha256": "a00b61fe82326d766cde69e2392bc493a67d3c62f9d5cd83e3e02f8b5bf5535a",
+      "line_count": 4650
+    }
+  ],
+  "occurrence_census": {
+    "active_production_call_site_files": 4,
+    "active_production_call_sites": 4,
+    "paths": [
+      "src/net/quic_native/handshake_driver.rs",
+      "src/tls/acceptor.rs",
+      "src/tls/connector.rs",
+      "src/tls/types.rs"
+    ],
+    "non_callsite_references": [
+      {
+        "path": "Cargo.toml",
+        "classification": "optional dependency declaration and tls feature edge"
+      },
+      {
+        "path": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md",
+        "classification": "campaign authority and historical source-area baseline"
+      },
+      {
+        "path": "docs/stub_disposition_matrix.md",
+        "classification": "resolved implementation note, not an API use"
+      },
+      {
+        "path": "docs/tokio_capability_evidence_map.md",
+        "classification": "feature inventory, not an API use"
+      },
+      {
+        "path": "tests/dependency_marginal_ledger_contract.rs",
+        "classification": "dependency-edge contract string, not an API use"
+      },
+      {
+        "path": "tests/dependency_oracle_policy_contract.rs",
+        "classification": "oracle policy strings, not an API use"
+      }
+    ],
+    "test_only_custom_verifiers": [
+      "tests/tls_conformance.rs::AcceptAnyCert",
+      "tests/tls_metamorphic.rs::AcceptAnyCert",
+      "tests/tls_pin_mismatch_e2e.rs::AcceptAnyCert",
+      "src/real_net_tls_connector_messaging_jetstream_integration_e2e_tests.rs::TestCertificateVerifier"
+    ],
+    "unknown_occurrences": 0
+  },
+  "call_sites": [
+    {
+      "call_site_id": "X509-CS-SPKI-PIN",
+      "path": "src/tls/types.rs",
+      "function": "CertificatePin::compute_spki_sha256",
+      "cfg": "feature=tls; module surface exists with a cfg-disabled error fallback",
+      "symbols": [
+        "x509_parser::parse_x509_certificate",
+        "X509Certificate::public_key",
+        "SubjectPublicKeyInfo.raw"
+      ],
+      "input": "caller-supplied Certificate DER or the peer leaf DER after a completed TlsConnector handshake",
+      "checks_or_extractions": [
+        "DER parse",
+        "SPKI DER slice extraction",
+        "SHA-256 of SPKI DER"
+      ],
+      "standard_verifier_before": "TlsConnectorBuilder paths complete rustls/WebPkiServerVerifier verification before post-handshake pin validation; TlsConnector::new(raw ClientConfig) leaves the verifier contract caller-owned",
+      "standard_verifier_after": "none; CertificatePinSet performs constant-time comparison across configured pins",
+      "full_input_consumed": false,
+      "custom_verifier_bypass": "possible only through the public raw ClientConfig constructor; pinning does not repair a caller-supplied permissive verifier",
+      "error_behavior": "direct extraction maps parse failure to TlsError::Certificate; set validation converts unavailable SPKI extraction into a nonmatch and then PinMismatch or report-only false",
+      "owner": "asupersync local extraction and pin policy",
+      "delegation_verdict": "PROVISIONAL_NON_DELEGABLE_RESIDUE",
+      "residue_ids": [
+        "X509-R1-SPKI"
+      ],
+      "source_markers": [
+        "pub fn compute_spki_sha256",
+        "x509_parser::parse_x509_certificate(cert.as_der())",
+        "Sha256::digest(parsed.public_key().raw)"
+      ]
+    },
+    {
+      "call_site_id": "X509-CS-ROOT-CA-ADMISSION",
+      "path": "src/tls/connector.rs",
+      "function": "is_ca_certificate",
+      "cfg": "feature=tls; used for env-root loading and opt-in strict direct-root admission",
+      "symbols": [
+        "x509_parser::parse_x509_certificate",
+        "X509Certificate::basic_constraints",
+        "BasicConstraints.ca"
+      ],
+      "input": "DER from explicit root additions or opt-in SSL_CERT_FILE/REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE/SSL_CERT_DIR PEM files",
+      "checks_or_extractions": [
+        "DER parse",
+        "BasicConstraints extension present",
+        "BasicConstraints CA=true"
+      ],
+      "standard_verifier_before": "none; this is a pre-insertion trust-anchor admission gate",
+      "standard_verifier_after": "accepted bytes enter rustls RootCertStore and later WebPkiServerVerifier path building",
+      "full_input_consumed": false,
+      "custom_verifier_bypass": "not a verifier; RootCertStore::add and non-strict direct builder additions remain outside this gate",
+      "error_behavior": "parse/missing/false returns false; env loads count and warn about rejection when tracing is enabled; strict direct additions return the builder without a typed rejection",
+      "owner": "asupersync local trust-anchor admission policy",
+      "delegation_verdict": "PROVISIONAL_NON_DELEGABLE_RESIDUE",
+      "residue_ids": [
+        "X509-R2-CA-ADMISSION"
+      ],
+      "source_markers": [
+        "fn is_ca_certificate",
+        "x509_parser::parse_x509_certificate(der)",
+        ".basic_constraints()"
+      ]
+    },
+    {
+      "call_site_id": "X509-CS-ACCEPTOR-PREFLIGHT",
+      "path": "src/tls/acceptor.rs",
+      "function": "TlsAcceptorBuilder::validate_certificate_chain",
+      "cfg": "feature=tls; strict_cert_validation defaults true and has a public disable_strict_cert_validation escape hatch",
+      "symbols": [
+        "x509_parser::parse_x509_certificate",
+        "X509Certificate::validity",
+        "X509Name::iter_common_name",
+        "X509Name::iter_organizational_unit",
+        "X509Name::iter_organization"
+      ],
+      "input": "the server's configured leaf-first certificate chain at builder build time",
+      "checks_or_extractions": [
+        "nonempty chain",
+        "every certificate not-before",
+        "every certificate not-after",
+        "each subject contains CN, OU, or O"
+      ],
+      "standard_verifier_before": "none; rustls server configuration does not authenticate its own chain to a trust store",
+      "standard_verifier_after": "rustls with_single_cert checks key/certificate configuration, while remote clients later own path/name validation",
+      "full_input_consumed": false,
+      "custom_verifier_bypass": "not a peer verifier; public disable_strict_cert_validation disables this operator preflight",
+      "error_behavior": "TlsError::Configuration includes certificate index, validity time, current Unix time, and an operator remediation marker",
+      "owner": "asupersync local server-configuration preflight",
+      "delegation_verdict": "PROVISIONAL_NON_DELEGABLE_RESIDUE",
+      "residue_ids": [
+        "X509-R3-ACCEPTOR-PREFLIGHT"
+      ],
+      "source_markers": [
+        "fn validate_certificate_chain",
+        "x509_parser::parse_x509_certificate(cert_der)",
+        "certificate {} in chain has EXPIRED"
+      ]
+    },
+    {
+      "call_site_id": "X509-CS-NATIVE-QUIC-PIN-FALLBACK",
+      "path": "src/net/quic_native/handshake_driver.rs",
+      "function": "verify_pinned_end_entity_shape",
+      "cfg": "all(feature=tls, not(target_arch=wasm32)); handshake_driver module is native-only through net::quic_native",
+      "symbols": [
+        "x509_parser::parse_x509_certificate",
+        "x509_parser::extensions::SubjectAlternativeName",
+        "x509_parser::extensions::GeneralName::DNSName",
+        "x509_parser::extensions::GeneralName::IPAddress",
+        "X509Certificate::validity",
+        "X509Certificate::extended_key_usage",
+        "X509Certificate::key_usage",
+        "X509Certificate::subject_alternative_name"
+      ],
+      "input": "peer end-entity DER, configured ServerName, and rustls UnixTime",
+      "checks_or_extractions": [
+        "DER parse with explicit trailing-byte rejection",
+        "not-before and not-after",
+        "explicit EKU serverAuth",
+        "KeyUsage digitalSignature when extension is present",
+        "exact case-insensitive DNS SAN or exact IP SAN"
+      ],
+      "standard_verifier_before": "WebPkiServerVerifier receives leaf, intermediates, server name, OCSP bytes, time, and configured roots first",
+      "standard_verifier_after": "TLS 1.2/1.3 handshake signatures and supported schemes delegate back to WebPkiServerVerifier",
+      "full_input_consumed": true,
+      "custom_verifier_bypass": "only UnknownIssuer may enter fallback, and only when the presented leaf DER exactly equals a configured pinned end entity; chain/path/trust-anchor verification is then replaced by the byte pin",
+      "error_behavior": "local failures map to rustls CertificateError; the live handshake collapses certificate details to QuicTlsError code read_hs_fatal_alert or read_hs_failed",
+      "owner": "rustls/WebPKI first; one shared asupersync exact-leaf trust and shape fallback",
+      "delegation_verdict": "A2_SHARED_PARTIAL_DELEGATION_WITH_EXPLICIT_PIN_POLICY",
+      "residue_ids": [
+        "X509-R4-NATIVE-PIN-FALLBACK"
+      ],
+      "source_markers": [
+        "pub fn webpki_server_verifier_with_exact_leaf_fallback",
+        "fn verify_pinned_end_entity_shape",
+        "if is_unknown_issuer(&error)",
+        "self.webpki.verify_tls13_signature"
+      ]
+    },
+    {
+      "call_site_id": "X509-CS-ATP-CLI-PIN-FALLBACK",
+      "path": "src/bin/atp.rs",
+      "function": "quic_cli_client_config",
+      "cfg": "feature=tls; the atp binary requires atp-cli, and atp-cli enables tls",
+      "symbols": [
+        "rustls::client::WebPkiServerVerifier::builder_with_provider",
+        "webpki_server_verifier_with_exact_leaf_fallback",
+        "ClientConfig::dangerous",
+        "ConfigBuilder::with_custom_certificate_verifier"
+      ],
+      "input": "configured CLI roots and typed exact-leaf pins; peer inputs flow through the shared verifier",
+      "checks_or_extractions": [
+        "standard WebPKI verification first",
+        "only UnknownIssuer may enter the shared fallback",
+        "exact complete leaf DER pin",
+        "shared validity, explicit serverAuth EKU, optional KeyUsage digitalSignature, and exact SAN policy"
+      ],
+      "standard_verifier_before": "WebPkiServerVerifier receives leaf, intermediates, server name, OCSP bytes, time, and configured roots first",
+      "standard_verifier_after": "TLS 1.2/1.3 handshake signatures and supported schemes delegate through the same WebPkiServerVerifier",
+      "full_input_consumed": true,
+      "custom_verifier_bypass": "only UnknownIssuer may enter the shared fallback, and only when the presented leaf DER exactly equals a configured typed pin; every other WebPKI error is returned unchanged",
+      "error_behavior": "the existing client_verifier_build_failed code is preserved; shared local failures map to rustls CertificateError and the native-link handshake remains redacted",
+      "owner": "rustls/WebPKI first; ATP delegates exact-leaf policy to handshake_driver",
+      "delegation_verdict": "A2_DELEGATED_TO_SHARED_EXPLICIT_PIN_POLICY",
+      "residue_ids": [
+        "X509-R4-NATIVE-PIN-FALLBACK"
+      ],
+      "source_markers": [
+        "fn quic_cli_client_config",
+        "WebPkiServerVerifier::builder_with_provider",
+        "webpki_server_verifier_with_exact_leaf_fallback"
+      ]
+    }
+  ],
+  "verifier_paths": [
+    {
+      "path_id": "X509-VP-TLS-STANDARD",
+      "surface": "TlsConnectorBuilder without CRLs",
+      "configuration": "ClientConfig builder.with_root_certificates",
+      "owner": "rustls WebPkiServerVerifier",
+      "trust_inputs": "explicit, native, webpki, or opt-in environment roots",
+      "custom_verifier": false,
+      "standard_checks_bypassed": false,
+      "state": "ACTIVE"
+    },
+    {
+      "path_id": "X509-VP-TLS-CRL",
+      "surface": "TlsConnectorBuilder with CRL PEM",
+      "configuration": "explicit WebPkiServerVerifier with_crls installed through dangerous().with_custom_certificate_verifier",
+      "owner": "rustls WebPkiServerVerifier",
+      "trust_inputs": "the same configured roots plus parsed CRLs",
+      "custom_verifier": true,
+      "standard_checks_bypassed": false,
+      "state": "ACTIVE"
+    },
+    {
+      "path_id": "X509-VP-TLS-RAW-CONFIG",
+      "surface": "TlsConnector::new(rustls::ClientConfig)",
+      "configuration": "verifier is entirely supplied by the caller",
+      "owner": "caller",
+      "trust_inputs": "caller-defined",
+      "custom_verifier": true,
+      "standard_checks_bypassed": "caller-controlled",
+      "state": "CALLER_OWNED"
+    },
+    {
+      "path_id": "X509-VP-TLS-MTLS",
+      "surface": "TlsAcceptorBuilder optional or required ClientAuth",
+      "configuration": "WebPkiClientVerifier with explicit client roots; optional mode allows no client certificate",
+      "owner": "rustls WebPkiClientVerifier",
+      "trust_inputs": "explicit RootCertStore",
+      "custom_verifier": true,
+      "standard_checks_bypassed": false,
+      "state": "ACTIVE"
+    },
+    {
+      "path_id": "X509-VP-QUIC-IDENTITY",
+      "surface": "QuicServerIdentityVerifier::verify_server_chain",
+      "configuration": "explicit WebPkiServerVerifier with nonempty RootCertStore",
+      "owner": "rustls WebPkiServerVerifier",
+      "trust_inputs": "explicit RootCertStore and caller-supplied UnixTime",
+      "custom_verifier": false,
+      "standard_checks_bypassed": false,
+      "state": "ACTIVE"
+    },
+    {
+      "path_id": "X509-VP-NATIVE-QUIC-PIN",
+      "surface": "handshake_driver::client_config",
+      "configuration": "webpki_server_verifier_with_exact_leaf_fallback",
+      "owner": "rustls/WebPKI first, shared exact-leaf fallback second",
+      "trust_inputs": "the roots vector is also the exact-leaf pin set",
+      "custom_verifier": true,
+      "standard_checks_bypassed": "only UnknownIssuer plus exact leaf byte match",
+      "state": "ACTIVE"
+    },
+    {
+      "path_id": "X509-VP-ATP-CLI-PIN",
+      "surface": "atp quic_cli_client_config",
+      "configuration": "shared webpki_server_verifier_with_exact_leaf_fallback when pinned_leafs is nonempty",
+      "owner": "rustls/WebPKI first, shared exact-leaf fallback second",
+      "trust_inputs": "CLI --ca roots and typed exact pinned leaves",
+      "custom_verifier": true,
+      "standard_checks_bypassed": "only UnknownIssuer plus exact leaf byte match",
+      "state": "ACTIVE"
+    },
+    {
+      "path_id": "X509-VP-LEGACY-QUIC",
+      "surface": "src/net/quic/endpoint.rs",
+      "configuration": "orphaned legacy wrapper; source rejects insecure_skip_verify and configures rustls WebPKI when reintroduced",
+      "owner": "not compiled into the crate root",
+      "trust_inputs": "dormant QuicConfig roots",
+      "custom_verifier": false,
+      "standard_checks_bypassed": false,
+      "state": "NOT_APPLICABLE"
+    },
+    {
+      "path_id": "X509-VP-CFG-OFF",
+      "surface": "public tls facade without feature=tls",
+      "configuration": "no rustls or x509-parser validation is compiled",
+      "owner": "cfg-disabled fallbacks",
+      "trust_inputs": "none",
+      "custom_verifier": false,
+      "standard_checks_bypassed": false,
+      "state": "CFG_DISABLED"
+    }
+  ],
+  "check_ownership_matrix": [
+    {
+      "check_id": "X509-CHK-DER-CANONICALITY",
+      "requirement": "certificate DER structure, bounded parsing, and full outer consumption",
+      "standard_server": "rustls-webpki strict DER parser and read-all boundaries",
+      "mtls_client": "rustls-webpki strict DER parser and read-all boundaries",
+      "native_pin_fallback": "shared x509-parser fallback rejects trailing bytes",
+      "atp_pin_fallback": "delegates to the same full-consumption fallback",
+      "local_auxiliary": "SPKI, CA-admission, and acceptor-preflight sites do not reject trailing bytes",
+      "delegation": "PARTIAL",
+      "preservation": "A3/A4 must make every retained residue canonical, bounded, and full-consumption"
+    },
+    {
+      "check_id": "X509-CHK-CHAIN-PATH",
+      "requirement": "build a path from leaf and intermediates to a configured trust anchor",
+      "standard_server": "rustls WebPkiServerVerifier",
+      "mtls_client": "rustls WebPkiClientVerifier",
+      "native_pin_fallback": "WebPKI first; exact leaf byte pin replaces path building only after UnknownIssuer",
+      "atp_pin_fallback": "WebPKI first; exact leaf byte pin replaces path building only after UnknownIssuer",
+      "local_auxiliary": "not performed by parser-only sites",
+      "delegation": "STANDARD_DELEGATED_PIN_PATH_EXPLICITLY_REPLACED",
+      "preservation": "A2 narrows both paths to one checked UnknownIssuer-only policy"
+    },
+    {
+      "check_id": "X509-CHK-CERT-SIGNATURE",
+      "requirement": "verify signatures linking the certificate path",
+      "standard_server": "rustls-webpki path verification",
+      "mtls_client": "rustls-webpki path verification",
+      "native_pin_fallback": "not performed for the pinned exact leaf path; byte identity is the trust decision",
+      "atp_pin_fallback": "not performed for the pinned exact leaf path; byte identity is the trust decision",
+      "local_auxiliary": "not applicable",
+      "delegation": "STANDARD_DELEGATED_PIN_PATH_REPLACED",
+      "preservation": "do not confuse TLS CertificateVerify with issuer-chain signature validation"
+    },
+    {
+      "check_id": "X509-CHK-HANDSHAKE-SIGNATURE",
+      "requirement": "verify peer possession of the private key during TLS CertificateVerify",
+      "standard_server": "rustls WebPkiServerVerifier signature methods",
+      "mtls_client": "rustls WebPkiClientVerifier signature methods",
+      "native_pin_fallback": "delegated to the inner WebPkiServerVerifier",
+      "atp_pin_fallback": "delegated to rustls crypto verification with provider WebPkiSupportedAlgorithms",
+      "local_auxiliary": "not applicable",
+      "delegation": "DELEGATED",
+      "preservation": "no local DER reader may own cryptographic verification"
+    },
+    {
+      "check_id": "X509-CHK-TRUST-ANCHOR",
+      "requirement": "trust only configured roots or an explicit exact-leaf pin",
+      "standard_server": "configured rustls RootCertStore",
+      "mtls_client": "configured client-auth RootCertStore",
+      "native_pin_fallback": "configured roots plus exact byte pin",
+      "atp_pin_fallback": "CLI roots plus exact byte pin",
+      "local_auxiliary": "CA admission filters selected root-loading paths before RootCertStore insertion",
+      "delegation": "SHARED_POLICY",
+      "preservation": "A2/A6 must preserve root-source and exact-pin intent"
+    },
+    {
+      "check_id": "X509-CHK-VALIDITY",
+      "requirement": "enforce not-before and not-after",
+      "standard_server": "rustls-webpki for every built path certificate",
+      "mtls_client": "rustls-webpki for every built path certificate",
+      "native_pin_fallback": "local x509-parser leaf validity",
+      "atp_pin_fallback": "local x509-parser leaf validity",
+      "local_auxiliary": "acceptor preflight checks every configured server-chain certificate",
+      "delegation": "MIXED",
+      "preservation": "every active check remains owned"
+    },
+    {
+      "check_id": "X509-CHK-EKU",
+      "requirement": "enforce serverAuth or clientAuth purpose",
+      "standard_server": "rustls-webpki KeyUsage::server_auth EKU validator",
+      "mtls_client": "rustls-webpki KeyUsage::client_auth EKU validator",
+      "native_pin_fallback": "shared local explicit serverAuth EKU required",
+      "atp_pin_fallback": "delegates to the same explicit serverAuth requirement",
+      "local_auxiliary": "none",
+      "delegation": "MIXED_WITH_A2_SHARED_PIN_POLICY",
+      "preservation": "A2 resolves both pin paths to the stricter explicit serverAuth policy"
+    },
+    {
+      "check_id": "X509-CHK-KEY-USAGE",
+      "requirement": "preserve the active digitalSignature check where present",
+      "standard_server": "rustls-webpki 0.103.13 intentionally ignores certificate KeyUsage during ordinary path validation",
+      "mtls_client": "rustls-webpki 0.103.13 intentionally ignores certificate KeyUsage during ordinary path validation",
+      "native_pin_fallback": "local digitalSignature required when KeyUsage is present",
+      "atp_pin_fallback": "delegates to the same conditional digitalSignature check",
+      "local_auxiliary": "CA admission does not check keyCertSign",
+      "delegation": "LOCAL_ONLY_SHARED_PIN_POLICY",
+      "preservation": "A2 retains this stricter pin-only check and covers it directly"
+    },
+    {
+      "check_id": "X509-CHK-SAN-NAME",
+      "requirement": "match DNS or IP server name against SAN",
+      "standard_server": "rustls-webpki verify_server_name with DNS/IP and WebPKI wildcard policy",
+      "mtls_client": "not applicable to client certificate authentication",
+      "native_pin_fallback": "local exact DNS case-insensitive or exact IP SAN; no wildcard interpretation",
+      "atp_pin_fallback": "local exact DNS case-insensitive or exact IP SAN; no wildcard interpretation",
+      "local_auxiliary": "TlsConnector constructs rustls ServerName and rejects invalid names before handshake",
+      "delegation": "MIXED_WITH_STRICTER_PIN_NAME_POLICY",
+      "preservation": "A2 records exact-only DNS/IP matching as the intentional stricter pin-fallback policy"
+    },
+    {
+      "check_id": "X509-CHK-BASIC-CONSTRAINTS",
+      "requirement": "enforce CA roles in paths and CA=true for strict root admission",
+      "standard_server": "rustls-webpki checks BasicConstraints by path role",
+      "mtls_client": "rustls-webpki checks BasicConstraints by path role",
+      "native_pin_fallback": "not checked on the exact pinned leaf",
+      "atp_pin_fallback": "not checked on the exact pinned leaf",
+      "local_auxiliary": "is_ca_certificate requires BasicConstraints CA=true for env roots and opt-in strict direct roots",
+      "delegation": "MIXED",
+      "preservation": "A2 retains pre-trust admission locally because rustls exposes no identical pre-insertion policy and diagnostic"
+    },
+    {
+      "check_id": "X509-CHK-NAME-CONSTRAINTS",
+      "requirement": "enforce constraints carried by trust anchors and intermediates",
+      "standard_server": "rustls-webpki path verification",
+      "mtls_client": "rustls-webpki path verification",
+      "native_pin_fallback": "not applicable to the no-path exact-leaf policy",
+      "atp_pin_fallback": "not applicable to the same no-path exact-leaf policy",
+      "local_auxiliary": "not parsed locally",
+      "delegation": "STANDARD_DELEGATED_PIN_PATH_BYPASS",
+      "preservation": "A2/A5 must test constrained-chain behavior and pin-policy boundaries"
+    },
+    {
+      "check_id": "X509-CHK-CRITICAL-EXTENSIONS",
+      "requirement": "reject unsupported critical extensions",
+      "standard_server": "rustls-webpki strict unknown-extension policy",
+      "mtls_client": "rustls-webpki strict unknown-extension policy",
+      "native_pin_fallback": "no explicit rejection after UnknownIssuer exact-pin fallback",
+      "atp_pin_fallback": "no explicit rejection after UnknownIssuer exact-pin fallback",
+      "local_auxiliary": "parser-only sites inspect selected extensions without a critical-extension policy",
+      "delegation": "PARTIAL",
+      "preservation": "A2 preserves every non-UnknownIssuer WebPKI failure; A3/A4/A5 specify retained residue rejection on the exact-pin branch"
+    },
+    {
+      "check_id": "X509-CHK-DUPLICATE-EXTENSIONS",
+      "requirement": "reject duplicate security-relevant extensions",
+      "standard_server": "rustls-webpki set-extension-once parsing",
+      "mtls_client": "rustls-webpki set-extension-once parsing",
+      "native_pin_fallback": "no explicit duplicate-extension rejection",
+      "atp_pin_fallback": "no explicit duplicate-extension rejection",
+      "local_auxiliary": "no explicit duplicate-extension rejection",
+      "delegation": "PARTIAL",
+      "preservation": "A3/A4/A5 own explicit duplicate policy and adversarial cases"
+    },
+    {
+      "check_id": "X509-CHK-REVOCATION",
+      "requirement": "apply configured CRL policy without treating OCSP bytes as verified",
+      "standard_server": "optional TlsConnector CRL WebPkiServerVerifier path; default has no revocation list",
+      "mtls_client": "no local CRL configuration exposed by TlsAcceptorBuilder",
+      "native_pin_fallback": "WebPKI receives OCSP bytes but exact-pin fallback has no CRL policy",
+      "atp_pin_fallback": "WebPKI receives OCSP bytes but exact-pin fallback has no CRL policy",
+      "local_auxiliary": "rustls records nonempty OCSP response as unvalidated",
+      "delegation": "OPTIONAL_AND_INCOMPLETE",
+      "preservation": "A8 must report explicit supported and unsupported revocation cases"
+    },
+    {
+      "check_id": "X509-CHK-SPKI-EXTRACTION",
+      "requirement": "extract the complete DER SubjectPublicKeyInfo for SHA-256 pinning",
+      "standard_server": "not exposed through the configured rustls verifier path",
+      "mtls_client": "not used",
+      "native_pin_fallback": "not used; this path pins entire leaf DER",
+      "atp_pin_fallback": "not used; this path pins entire leaf DER",
+      "local_auxiliary": "CertificatePin::compute_spki_sha256 uses x509-parser public_key().raw",
+      "delegation": "LOCAL",
+      "preservation": "X509-R1-SPKI is the narrowest expected owned DER residue"
+    },
+    {
+      "check_id": "X509-CHK-OWN-CERT-PREFLIGHT",
+      "requirement": "reject an empty, future, expired, unparsable, or subject-empty configured server chain before serving",
+      "standard_server": "rustls with_single_cert does not authenticate the server's own chain to roots or provide equivalent operator diagnostics",
+      "mtls_client": "not applicable",
+      "native_pin_fallback": "not applicable",
+      "atp_pin_fallback": "not applicable",
+      "local_auxiliary": "TlsAcceptorBuilder strict preflight, enabled by default but publicly disableable",
+      "delegation": "LOCAL",
+      "preservation": "A2 retains the operator preflight because rustls exposes no identical owner or diagnostic; A8 owns mode parity"
+    }
+  ],
+  "provisional_residue": [
+    {
+      "residue_id": "X509-R1-SPKI",
+      "scope": "locate and return complete SPKI DER bytes for SHA-256 pinning",
+      "current_owner": "src/tls/types.rs",
+      "allowed_checks": [
+        "DER structural parse",
+        "SPKI location",
+        "full-input and canonicality validation"
+      ],
+      "forbidden_checks": [
+        "path building",
+        "certificate signatures",
+        "trust anchors",
+        "hostname validation"
+      ],
+      "state": "A3_SPEC_APPROVED_A4_IMPLEMENTATION_PENDING"
+    },
+    {
+      "residue_id": "X509-R2-CA-ADMISSION",
+      "scope": "pre-insertion BasicConstraints CA=true policy for untrusted root-bundle input",
+      "current_owner": "src/tls/connector.rs",
+      "allowed_checks": [
+        "DER structural parse",
+        "BasicConstraints extraction",
+        "full-input and canonicality validation"
+      ],
+      "forbidden_checks": [
+        "path building",
+        "certificate signatures",
+        "hostname validation"
+      ],
+      "state": "A3_SPEC_APPROVED_A4_IMPLEMENTATION_PENDING"
+    },
+    {
+      "residue_id": "X509-R3-ACCEPTOR-PREFLIGHT",
+      "scope": "operator preflight for configured server-chain dates and subject presence",
+      "current_owner": "src/tls/acceptor.rs",
+      "allowed_checks": [
+        "DER structural parse",
+        "ASN.1 validity extraction",
+        "subject-presence extraction",
+        "full-input and canonicality validation"
+      ],
+      "forbidden_checks": [
+        "path building",
+        "certificate signatures",
+        "trust anchors",
+        "hostname validation"
+      ],
+      "state": "A3_SPEC_APPROVED_A4_IMPLEMENTATION_PENDING"
+    },
+    {
+      "residue_id": "X509-R4-NATIVE-PIN-FALLBACK",
+      "scope": "exact-leaf pin fallback shape checks after an inner WebPKI UnknownIssuer result",
+      "current_owner": "src/net/quic_native/handshake_driver.rs",
+      "allowed_checks": [
+        "full DER consumption",
+        "leaf validity",
+        "explicit serverAuth EKU",
+        "KeyUsage digitalSignature when present",
+        "exact DNS/IP SAN"
+      ],
+      "forbidden_checks": [
+        "general path building",
+        "certificate signatures",
+        "general trust-anchor validation"
+      ],
+      "state": "A3_SPEC_APPROVED_A4_IMPLEMENTATION_PENDING"
+    },
+    {
+      "residue_id": "X509-R5-ATP-PIN-FALLBACK",
+      "scope": "historical ATP CLI duplicate fallback, now delegated to X509-R4",
+      "current_owner": "src/net/quic_native/handshake_driver.rs",
+      "allowed_checks": [
+        "full DER consumption",
+        "leaf validity",
+        "explicit serverAuth EKU",
+        "KeyUsage digitalSignature when present",
+        "exact DNS/IP SAN"
+      ],
+      "forbidden_checks": [
+        "general path building",
+        "certificate signatures",
+        "general trust-anchor validation"
+      ],
+      "state": "RESOLVED_BY_A2_DELEGATION_TO_X509-R4"
+    }
+  ],
+  "feature_target_matrix": [
+    {
+      "cell_id": "X509-CELL-CFG-OFF",
+      "features": "without tls",
+      "targets": "all compiled targets",
+      "active_call_sites": [],
+      "state": "CFG_DISABLED",
+      "behavior": "public facade fallbacks return FeatureDisabled or Configuration errors; no x509 validation claim"
+    },
+    {
+      "cell_id": "X509-CELL-TLS-NATIVE",
+      "features": "tls, optionally tls-native-roots or tls-webpki-roots",
+      "targets": "linux, macos, windows",
+      "active_call_sites": [
+        "X509-CS-SPKI-PIN",
+        "X509-CS-ROOT-CA-ADMISSION",
+        "X509-CS-ACCEPTOR-PREFLIGHT",
+        "X509-CS-NATIVE-QUIC-PIN-FALLBACK"
+      ],
+      "state": "ACTIVE",
+      "behavior": "library TLS and native QUIC validation paths"
+    },
+    {
+      "cell_id": "X509-CELL-ATP-CLI",
+      "features": "atp-cli, which enables tls and rustls-native-certs",
+      "targets": "supported native CLI hosts",
+      "active_call_sites": [
+        "X509-CS-ATP-CLI-PIN-FALLBACK"
+      ],
+      "state": "ACTIVE",
+      "behavior": "ATP direct and SSH-bootstrapped native QUIC client certificate authentication"
+    },
+    {
+      "cell_id": "X509-CELL-TLS-WASM",
+      "features": "tls",
+      "targets": "wasm32-unknown-unknown",
+      "active_call_sites": [
+        "X509-CS-SPKI-PIN",
+        "X509-CS-ROOT-CA-ADMISSION",
+        "X509-CS-ACCEPTOR-PREFLIGHT"
+      ],
+      "state": "UNSUPPORTED_NO_CLAIM",
+      "behavior": "the marginal graph contains the x509-parser edge, while CAP-TLS-X509 currently names only native platforms and no wasm TLS interoperability evidence exists"
+    }
+  ],
+  "public_and_operator_diagnostics": [
+    {
+      "diagnostic_id": "X509-DIAG-TLS-RUSTLS",
+      "surface": "TlsError::Rustls",
+      "behavior": "peer-derived rustls text is control-character sanitized and capped at 256 bytes",
+      "secret_safe": true
+    },
+    {
+      "diagnostic_id": "X509-DIAG-TLS-PIN",
+      "surface": "TlsError::PinMismatch",
+      "behavior": "renders expected configured base64 pin hashes and the actual derived pin; report-only mode logs when tracing is enabled",
+      "secret_safe": true
+    },
+    {
+      "diagnostic_id": "X509-DIAG-ACCEPTOR-PREFLIGHT",
+      "surface": "TlsError::Configuration",
+      "behavior": "reports chain index, validity values, current time, and remediation context for operator-owned server certificates",
+      "secret_safe": true
+    },
+    {
+      "diagnostic_id": "X509-DIAG-ROOT-ADMISSION",
+      "surface": "tracing warnings and load counters",
+      "behavior": "env-root loads report path and accepted/rejected counts with tracing; strict direct additions have no typed rejection result",
+      "secret_safe": true
+    },
+    {
+      "diagnostic_id": "X509-DIAG-QUIC-IDENTITY",
+      "surface": "QuicTlsError::ServerCertificateRejected",
+      "behavior": "maps rustls classes to stable redaction-safe codes such as server_certificate_invalid",
+      "secret_safe": true
+    },
+    {
+      "diagnostic_id": "X509-DIAG-QUIC-HANDSHAKE",
+      "surface": "QuicTlsError::CryptoProviderFailure",
+      "behavior": "live native QUIC collapses certificate detail to read_hs_fatal_alert or read_hs_failed",
+      "secret_safe": true
+    },
+    {
+      "diagnostic_id": "X509-DIAG-CFG-OFF",
+      "surface": "TlsError::FeatureDisabled or Configuration",
+      "behavior": "operator receives an explicit rebuild hint or feature-not-enabled reason",
+      "secret_safe": true
+    }
+  ],
+  "supported_journeys": [
+    {
+      "journey_id": "X509-JOURNEY-TLS-CLIENT",
+      "entry_points": [
+        "TlsConnectorBuilder::build",
+        "TlsConnector::connect"
+      ],
+      "verifier_path_ids": [
+        "X509-VP-TLS-STANDARD",
+        "X509-VP-TLS-CRL"
+      ],
+      "current_evidence": "tests/tls_conformance.rs standard, wrong-host, untrusted-root, protocol, mTLS, cancellation-adjacent and shutdown cases",
+      "aggregate_e2e_owner": "asupersync-0h6myr.3.8",
+      "state": "ACTIVE"
+    },
+    {
+      "journey_id": "X509-JOURNEY-TLS-SERVER-MTLS",
+      "entry_points": [
+        "TlsAcceptorBuilder::build",
+        "TlsAcceptor::accept"
+      ],
+      "verifier_path_ids": [
+        "X509-VP-TLS-MTLS"
+      ],
+      "current_evidence": "tests/tls_conformance.rs required and optional client-auth handshakes",
+      "aggregate_e2e_owner": "asupersync-0h6myr.3.8",
+      "state": "ACTIVE"
+    },
+    {
+      "journey_id": "X509-JOURNEY-TLS-PINNING",
+      "entry_points": [
+        "CertificatePin::compute_spki_sha256",
+        "CertificatePinSet::validate",
+        "TlsConnectorBuilder::with_certificate_pins",
+        "TlsConnector::with_pin_set"
+      ],
+      "verifier_path_ids": [
+        "X509-VP-TLS-STANDARD",
+        "X509-VP-TLS-RAW-CONFIG"
+      ],
+      "current_evidence": "src/tls/types.rs known-answer and malformed-DER tests plus tests/tls_pin_mismatch_e2e.rs",
+      "aggregate_e2e_owner": "asupersync-0h6myr.3.8",
+      "state": "ACTIVE"
+    },
+    {
+      "journey_id": "X509-JOURNEY-NATIVE-QUIC",
+      "entry_points": [
+        "QuicServerIdentityVerifier::verify_server_chain",
+        "handshake_driver::client_config",
+        "QuicClientTls"
+      ],
+      "verifier_path_ids": [
+        "X509-VP-QUIC-IDENTITY",
+        "X509-VP-NATIVE-QUIC-PIN"
+      ],
+      "current_evidence": "tests/quic_native_x509_verification.rs and handshake_driver inline real TLS 1.3 tests",
+      "aggregate_e2e_owner": "asupersync-0h6myr.3.8",
+      "state": "ACTIVE"
+    },
+    {
+      "journey_id": "X509-JOURNEY-ATP-QUIC",
+      "entry_points": [
+        "atp send --transport quic",
+        "quic_cli_client_config",
+        "native_link QuicClientTls"
+      ],
+      "verifier_path_ids": [
+        "X509-VP-ATP-CLI-PIN"
+      ],
+      "current_evidence": "ATP CLI unit cases for exact IP SAN, wrong name, pinned leaf, native roots, and handshake failure classification",
+      "aggregate_e2e_owner": "asupersync-0h6myr.3.8",
+      "state": "ACTIVE"
+    },
+    {
+      "journey_id": "X509-JOURNEY-HTTP-H1",
+      "entry_points": [
+        "HttpClient HTTPS connect"
+      ],
+      "verifier_path_ids": [
+        "X509-VP-TLS-STANDARD"
+      ],
+      "current_evidence": "shared TlsConnector path; aggregate cross-peer receipt remains planned",
+      "aggregate_e2e_owner": "asupersync-0h6myr.3.8",
+      "state": "PLANNED"
+    },
+    {
+      "journey_id": "X509-JOURNEY-MESSAGING",
+      "entry_points": [
+        "Redis rediss",
+        "NATS TLS",
+        "JetStream over NATS TLS"
+      ],
+      "verifier_path_ids": [
+        "X509-VP-TLS-STANDARD",
+        "X509-VP-TLS-RAW-CONFIG"
+      ],
+      "current_evidence": "Redis builds webpki roots; NATS selects native/webpki roots or requires an injected connector",
+      "aggregate_e2e_owner": "asupersync-0h6myr.3.8",
+      "state": "PLANNED"
+    },
+    {
+      "journey_id": "X509-JOURNEY-POSTGRES",
+      "entry_points": [
+        "PostgresClient TLS upgrade",
+        "SCRAM-SHA-256-PLUS tls-server-end-point channel binding"
+      ],
+      "verifier_path_ids": [
+        "X509-VP-TLS-STANDARD"
+      ],
+      "current_evidence": "webpki roots plus strict CA validation for SSL_CERT_FILE additions; channel binding hashes the authenticated leaf certificate",
+      "aggregate_e2e_owner": "asupersync-0h6myr.3.8",
+      "state": "PLANNED"
+    },
+    {
+      "journey_id": "X509-JOURNEY-PLATFORMS",
+      "entry_points": [
+        "linux native roots",
+        "macOS native roots",
+        "Windows native roots",
+        "webpki roots"
+      ],
+      "verifier_path_ids": [
+        "X509-VP-TLS-STANDARD"
+      ],
+      "current_evidence": "registry names native platforms; fresh cross-platform certificates and peers remain an A8 obligation",
+      "aggregate_e2e_owner": "asupersync-0h6myr.3.8",
+      "state": "PLANNED"
+    }
+  ],
+  "marginal_graph": {
+    "direct_edge": "normal:x509-parser",
+    "measurement_count": 8,
+    "profiles": [
+      "tls",
+      "workspace-dev-build-audit"
+    ],
+    "targets": [
+      "aarch64-apple-darwin",
+      "wasm32-unknown-unknown",
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-gnu"
+    ],
+    "tls_profile_marginal_package_versions": 20,
+    "workspace_audit_marginal_package_versions": 9,
+    "unsafe_exposure_class": "SAFE-OWN",
+    "dependency_exit_authority": "asupersync-0h6myr.3.9 only after all children and SAME-or-BETTER evidence"
+  },
+  "routed_gaps": [
+    {
+      "gap_id": "X509-GAP-01",
+      "finding": "Three of four retained parser sites ignore trailing bytes; the shared native/ATP pin fallback now rejects them.",
+      "owner": "asupersync-0h6myr.3.3, asupersync-0h6myr.3.4, asupersync-0h6myr.3.5",
+      "state": "A3_SPEC_APPROVED_A4_IMPLEMENTATION_PENDING"
+    },
+    {
+      "gap_id": "X509-GAP-02",
+      "finding": "A2 removed the ATP broad fallback; native QUIC and ATP now share an UnknownIssuer-only exact-leaf policy.",
+      "owner": "asupersync-0h6myr.3.2",
+      "state": "CLOSED_BY_A2_SHARED_POLICY"
+    },
+    {
+      "gap_id": "X509-GAP-03",
+      "finding": "A2 unified both pin paths on explicit serverAuth and conditional KeyUsage digitalSignature.",
+      "owner": "asupersync-0h6myr.3.2",
+      "state": "CLOSED_BY_A2_SHARED_POLICY"
+    },
+    {
+      "gap_id": "X509-GAP-04",
+      "finding": "rustls-webpki ignores certificate KeyUsage in standard validation; A2 intentionally retains and shares the pin-only conditional digitalSignature check.",
+      "owner": "asupersync-0h6myr.3.8",
+      "state": "A2_DECIDED_KEEP_A8_E2E_PENDING"
+    },
+    {
+      "gap_id": "X509-GAP-05",
+      "finding": "A2 retains local BasicConstraints CA=true admission because rustls exposes no identical pre-insertion policy/diagnostic; keyCertSign and direct-root modes remain A8 evidence obligations.",
+      "owner": "asupersync-0h6myr.3.8",
+      "state": "A2_DECIDED_KEEP_A8_E2E_PENDING"
+    },
+    {
+      "gap_id": "X509-GAP-06",
+      "finding": "A2 retains the acceptor's server-chain date/subject operator preflight because rustls has no identical owner or diagnostic; disable-mode parity remains an A8 obligation.",
+      "owner": "asupersync-0h6myr.3.8",
+      "state": "A2_DECIDED_KEEP_A8_E2E_PENDING"
+    },
+    {
+      "gap_id": "X509-GAP-07",
+      "finding": "TlsConnector::new accepts a caller-supplied ClientConfig whose verifier may bypass all standard checks; attached pinning is additive, not a validation repair.",
+      "owner": "asupersync-0h6myr.3.6, asupersync-0h6myr.3.7",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "X509-GAP-08",
+      "finding": "Live native QUIC and ATP handshake errors collapse detailed certificate causes to redacted provider codes.",
+      "owner": "asupersync-0h6myr.3.6, asupersync-0h6myr.3.8",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "X509-GAP-09",
+      "finding": "The wasm TLS dependency graph contains x509-parser, but CAP-TLS-X509 names only native platforms and has no wasm TLS interoperability evidence.",
+      "owner": "asupersync-0h6myr.3.8, asupersync-0h6myr.3.9",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "X509-GAP-10",
+      "finding": "No canonical dependency-sovereignty tls_x509_interop summary/events receipt exists yet.",
+      "owner": "asupersync-0h6myr.3.8",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "X509-GAP-11",
+      "finding": "A2 narrows both exact-leaf paths to UnknownIssuer but intentionally does not claim OCSP validation or CRL enforcement on the pin branch; A8 owns explicit supported/unsupported E2E.",
+      "owner": "asupersync-0h6myr.3.8",
+      "state": "A2_DECIDED_KEEP_A8_E2E_PENDING"
+    },
+    {
+      "gap_id": "X509-GAP-12",
+      "finding": "The root facade API map records only the preview tls module; nested certificate, connector, acceptor, pin, and QUIC identity APIs require this dedicated inventory.",
+      "owner": "asupersync-0h6myr.3.6, asupersync-0h6myr.3.9",
+      "state": "ROUTED"
+    }
+  ],
+  "der_residue_spec_contract": {
+    "artifact": "artifacts/x509_der_residue_spec_v1.json",
+    "document": "docs/x509_der_residue_spec.md",
+    "test": "tests/x509_der_residue_spec_contract.rs",
+    "state": "APPROVED",
+    "reviewer": "/root/architecture_trace",
+    "reviewed_draft_sha256": "9a1d64225bbce6fbcf671964f2f567d7b9cdb500929f61a2e0b46872b4bbcfd2",
+    "reviewed_normative_payload_sha256": "8a619557ce3a8d87833d7e8733ac89a5fe78a1286c7cdb93c9c88bbd37e17274",
+    "implementation_owner": "asupersync-0h6myr.3.4",
+    "cutover_allowed": false
+  },
+  "downstream_e2e_contract": {
+    "scenario_id": "tls_x509_interop",
+    "suite": "dependency-sovereignty",
+    "runner": "scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario tls_x509_interop",
+    "owner": "asupersync-0h6myr.3.8",
+    "state": "PLANNED",
+    "required_dimensions": [
+      "TLS client and server",
+      "mTLS optional and required",
+      "native QUIC standard and exact-pin paths",
+      "ATP direct and SSH-bootstrapped QUIC",
+      "SPKI and whole-certificate pinning",
+      "public, private, and rotated roots",
+      "expired, future, wrong-name, wrong-EKU, wrong-KU, non-CA, bad-signature, unknown-critical, duplicate-extension, and malformed DER",
+      "linux, macOS, and Windows supported cells",
+      "cancellation, timeout, reconnect, and shutdown",
+      "sanitized deterministic diagnostics and replay"
+    ]
+  },
+  "rollback_triggers": [
+    "a source pin changes without a refreshed call-site audit",
+    "a new x509-parser symbol appears outside the four inventoried production parser files",
+    "a standard verifier path becomes caller-defined without an explicit ownership row",
+    "a pin fallback broadens beyond its recorded WebPKI error class or exact-byte predicate",
+    "any active validity, EKU, KeyUsage, SAN, BasicConstraints, constraint, extension, or SPKI requirement loses an owner",
+    "a routed gap becomes unknown, unowned, or silently accepted",
+    "a supported peer, platform, feature, or downstream journey loses evidence",
+    "a dependency cutover is attempted before A9 authorizes it"
+  ],
+  "no_claim_boundaries": [
+    "This inventory does not implement a DER parser or change runtime behavior.",
+    "It does not prove rustls, rustls-webpki, x509-parser, ring, or any certificate corpus correct.",
+    "It records A2's shared exact-leaf policy but does not prove the broader A8 real-peer interoperability matrix.",
+    "It does not prove canonical DER, duplicate-extension, critical-extension, time, allocation, or depth bounds for retained residue.",
+    "It does not prove live cross-implementation TLS, QUIC, ATP, mTLS, rotation, cancellation, or shutdown.",
+    "It does not claim wasm TLS support merely because Cargo metadata contains the edge.",
+    "It does not prove performance, broad workspace health, release readiness, or live RCH fleet availability.",
+    "It does not authorize changing features, removing x509-parser, deleting files, or cutting over any capability."
+  ]
+}

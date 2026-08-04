@@ -11,9 +11,9 @@ Asupersync uses mathematically rigorous machinery where it buys real correctness
 | **Budgets** | Tropical semiring: `(R u {inf}, min, +)` | Critical path computation, budget propagation |
 | **Obligations** | Linear logic: resources used exactly once | No leaks, static checking possible |
 | **Traces** | Mazurkiewicz equivalence (partial orders) | DPOR-style guided coverage, stable replay |
-| **Cancellation** | Two-player game with budgets | Completeness: sufficient budgets guarantee termination |
+| **Cancellation** | Two-player game with budgets | Scoped completeness when modeled responsiveness assumptions hold and budgets are sufficient |
 | **Adaptive scheduling** | EXP3/Hedge no-regret online learning | Dynamic preemption without fairness blind spots |
-| **Drain certificates** | Martingales + Freedman/Azuma concentration | Quantified confidence that drain reaches quiescence |
+| **Drain certificates** | Signed-step range bounds + empirical phase diagnostics | Conditional, auditable drain-progress evidence |
 | **Structural diagnostics** | Spectral graph theory + conformal + e-processes | Early warning on wait-graph fragmentation |
 
 ## Formal Semantics
@@ -42,19 +42,43 @@ Importance-weighted reward: `r_hat_t(a_t) = r_t / p_t(a_t)`.
 
 Adapts to workload regime shifts while preserving deterministic replay and bounded starvation.
 
-## Variance-Adaptive Drain Certificates (Freedman + Azuma)
+## Range-Bounded Drain Certificates (Freedman + Azuma)
 
 Source: `src/cancel/progress_certificate.rs`
 
-Cancellation drain modeled as stochastic progress process:
+Cancellation drain modeled through signed net-progress deviations:
 ```text
-P(M_t - M_0 >= x) <= exp(-x^2 / (2(V_t + c*x/3)))
+P(S_t >= x and Q_t <= q) <= exp(-x^2 / (2(q + B*x/3)))
 ```
-Where `V_t` is predictable variation and `c` bounds one-step increments.
+For `t >= 1`, `c > 0`, `x > 0`, and `q >= 0`, signed progress
+`Y_i = -Delta_i` gives cumulative centered
+shortfall `sum(E[Y_i | F_{i-1}] - Y_i)` and `Q_t` is its predictable quadratic
+variation. The absolute signed step is bounded by `c`, and `B = 2c` bounds the
+centered upper increment. The implementation uses
+`Q_t <= t*c^2`. With `B = 2c`, the raw Freedman denominator is never smaller
+than Azuma's, so the selected envelope always equals Azuma; the explicit raw
+candidate remains for auditability. Realized variance is diagnostic-only, and
+exceeding the configured range or dropping an invalid sample (non-finite or
+materially negative) disables
+concentration claims for that verdict. At the current
+same-history horizon, the plug-in mean telescopes to zero deviation, so both
+candidate tails are the trivial bound `1`.
 
 Phase classification: `warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`.
 
-Freedman provides tighter variance-aware bound; Azuma is conservative baseline.
+The separate `converging` flag is an empirical trend status over the complete
+accepted finite non-negative observation history represented by running statistics. It is
+guarded by positive endpoint net progress, stall state, rebound-count and
+rebound-magnitude limits, a non-increasing latest step, and the absence of
+dropped invalid samples. The conditional calculations do not gate it, and
+it is not a future-drift, termination, or probability guarantee.
+Incomplete telemetry also suppresses the remaining-step estimate and reports
+`warmup` instead of an actionable terminal phase until reset.
+
+The resulting confidence calculation is conditional on the plug-in empirical
+net-progress rate; one trace does not prove future drift or bounded completion.
+Gross downward credit is phase bookkeeping only. Its accounted-potential total
+is pathwise nondecreasing and supplies no Ville or optional-stopping evidence.
 
 ## Spectral Wait-Graph Early Warning
 

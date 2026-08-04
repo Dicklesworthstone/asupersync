@@ -21,7 +21,7 @@ However, 10 independent analytical lenses converge on five critical findings:
 
 4. **Ergonomics are the primary adoption barrier.** `&Cx` threading infects every function signature. Migration from Tokio is a full rewrite, not an incremental adoption. Examples are toy demonstrations, not runnable applications.
 
-5. **30-40K lines of "alien artifact" math are dead code.** Persistent homology, sheaf theory, separation logic, Dialectica interpretation, session types, martingale certificates, TLA+ export, and geodesic normalization have zero callers from operational paths. The Lyapunov governor is the positive counterexample of math done right (integrated and load-bearing).
+5. **At the original evidence cutoff, 30-40K lines of "alien artifact" math were dead code.** Persistent homology, sheaf theory, separation logic, Dialectica interpretation, session types, the then-current progress-certificate snapshot, TLA+ export, and geodesic normalization had zero callers from operational paths. Later integration work supersedes that point-in-time caller result for progress certificates. The Lyapunov governor was the positive counterexample of math done right (integrated and load-bearing).
 
 ---
 
@@ -87,13 +87,13 @@ The descriptive modes (F7, F4) mapped the system's actual behavior — feedback 
 **Modes:** B9, L5, F7, L2 (4 modes)
 **Confidence:** 0.90
 
-Persistent homology, sheaf theory, separation logic, Dialectica interpretation, session types, martingale drain certificates, conformal calibration, TLA+ export, and geodesic normalization are implemented, tested in isolation, and then never called from any operational path. `grep` for their public types returns zero external callers.
+At the time of this point-in-time audit, persistent homology, sheaf theory, separation logic, Dialectica interpretation, session types, drain progress diagnostics, conformal calibration, TLA+ export, and geodesic normalization were reported as implemented and tested in isolation without operational callers. That caller count is historical: later runtime integration and corrected conditional/no-Ville boundaries supersede the progress-certificate portion, so current source must be checked before reusing this conclusion.
 
 **Evidence chain:**
 - B9§F1: Persistent homology / GF(2) boundary — zero callers outside trace/lab chain
 - B9§F2: Sheaf consistency — zero callers outside its own file
 - B9§F3: Separation logic + Dialectica + session types — 9,895 lines, zero runtime callers
-- B9§F4: Martingale drain certificates — zero callers, simpler 10-line alternative exists
+- B9§F4: Drain progress diagnostics — the original audit reported zero callers; later runtime integration and the corrected conditional/no-Ville boundary supersede that snapshot
 - L5§F5: Spectral health monitor — 3,371 lines where cycle detection suffices
 - F7§F3: Lyapunov governor suggests but scheduler never consumes suggestions
 - L2§F2: "Alien Artifact" section appears twice in README, prioritizes impressiveness
@@ -245,7 +245,7 @@ The combination of virtual time, deterministic scheduling, DPOR exploration, and
    - *Supporting modes:* L5, L2, B9, I4 (4 modes)
    - *Effort:* HIGH | *Impact:* Sustainability transformation
 
-2. **Feature-gate dead math behind `research` flag** — Move persistent homology, sheaf theory, separation logic, Dialectica, session types, martingale certificates, conformal calibration, TLA+ export, and geodesic normalization behind an opt-in feature flag. Keep Lyapunov, EXP3, DPOR integrated.
+2. **Re-audit and feature-gate math that remains uncalled behind `research`** — At the original evidence cutoff this set included persistent homology, sheaf theory, separation logic, Dialectica, session types, the then-current progress-certificate snapshot, conformal calibration, TLA+ export, and geodesic normalization. Current progress-certificate drain diagnostics have operational callers and must be assessed from the live graph rather than feature-gated on this historical snapshot. Keep Lyapunov, EXP3, and DPOR integrated.
    - *Supporting modes:* B9, L5, F7, L2 (4 modes)
    - *Effort:* LOW | *Impact:* ~30-40K lines removed from default compilation
 
@@ -414,7 +414,7 @@ Full outputs available in the project root:
 | Bus factor = 1 | I4 | F3 | K1 |
 | Dead math code (sheaf, homology) | B9 | F1, F2 | K2 |
 | Dead math code (obligation theory) | B9 | F3 | K2 |
-| Dead math code (martingale certs) | B9 | F4 | K2 |
+| Historical progress-certificate caller snapshot | B9 | F4 | K2 |
 | Cx::current() falsifies claims | H2 | F1 | K3 |
 | 34 global statics | H2 | F2 | K3 |
 | 5,043 unwrap() in library code | H2 | F3 | K3 |

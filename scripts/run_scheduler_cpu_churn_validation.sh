@@ -46,20 +46,24 @@ fi
 
 echo "[validation] building + running scheduler_cpu_churn bench (via rch)..." >&2
 # Offload the build/run to RCH; the bench prints its JSON report to stdout.
-if command -v rch >/dev/null 2>&1; then
-    ( cd "$PROJECT_ROOT" && rch exec -- env CARGO_TARGET_DIR="$CARGO_TARGET_DIR_DEFAULT" CARGO_INCREMENTAL=0 \
-        "${BENCH_CMD[@]}" ) >"$CURRENT_RAW" 2>&1 || {
-        echo "FATAL: bench run failed; see $CURRENT_RAW" >&2
-        exit 2
-    }
-else
-    echo "[validation] rch not found; running cargo directly" >&2
-    ( cd "$PROJECT_ROOT" && env CARGO_TARGET_DIR="$CARGO_TARGET_DIR_DEFAULT" CARGO_INCREMENTAL=0 \
-        "${BENCH_CMD[@]}" ) >"$CURRENT_RAW" 2>&1 || {
-        echo "FATAL: bench run failed; see $CURRENT_RAW" >&2
-        exit 2
-    }
+# Fail closed when rch is unavailable rather than silently running cargo
+# locally (br-asupersync-t440nm). This script compares a fresh run against a
+# recorded baseline, so a local build does not just violate the offload rule in
+# AGENTS.md -- it compares two different machine classes and reports the
+# difference as a scheduler regression. No result is better than a wrong one.
+if ! command -v rch >/dev/null 2>&1; then
+    echo "FATAL: rch not found. This validation compares against a baseline recorded" >&2
+    echo "       via rch, so a local cargo run would measure a different machine and" >&2
+    echo "       misreport the delta as a scheduler regression. Install rch (see" >&2
+    echo "       AGENTS.md) and re-run; do not substitute a local build." >&2
+    exit 2
 fi
+
+( cd "$PROJECT_ROOT" && rch exec -- env CARGO_TARGET_DIR="$CARGO_TARGET_DIR_DEFAULT" CARGO_INCREMENTAL=0 \
+    "${BENCH_CMD[@]}" ) >"$CURRENT_RAW" 2>&1 || {
+    echo "FATAL: bench run failed; see $CURRENT_RAW" >&2
+    exit 2
+}
 
 # Extract the JSON report (the object whose first key is "bead") from the raw
 # output, which is interleaved with rch logs and the bench's stderr summary.

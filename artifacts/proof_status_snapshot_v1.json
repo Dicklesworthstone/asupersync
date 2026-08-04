@@ -94,7 +94,9 @@
     "Rust crate release provenance contract",
     "artifact governance final signoff",
     "clean-overlay proof orchestration contract",
-    "proof traffic final signoff"
+    "proof traffic final signoff",
+    "dependency supply-chain policy contract",
+    "dependency budget contract"
   ],
   "claim_categories": [
     {
@@ -796,6 +798,7 @@
       },
       "manifest_guarantee_ids": [
         "downstream-consumer-default-public-api",
+        "downstream-consumer-default-kafka-fail-closed",
         "downstream-consumer-metrics-public-api",
         "downstream-consumer-channel-public-api",
         "downstream-consumer-default-tokio-free",
@@ -804,6 +807,7 @@
       ],
       "manifest_lane_ids": [
         "downstream-consumer-default-run",
+        "downstream-consumer-default-kafka-test",
         "downstream-consumer-metrics-run",
         "downstream-consumer-channel-profile-run",
         "downstream-consumer-default-tokio-tree",
@@ -812,6 +816,7 @@
       ],
       "proof_commands": [
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_default CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin default_consumer",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_kafka_default CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --test kafka_default_feature_surface -- --nocapture",
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_metrics CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --features metrics-profile --bin metrics_consumer",
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_channel CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --features channel-mpsc-select-e2e-profile --bin channel_profile_consumer",
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_tokio_tree cargo tree -e normal --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml -i tokio",
@@ -819,7 +824,7 @@
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test downstream_consumer_proof_contract -- --nocapture"
       ],
       "blocked_frontier": null,
-      "notes": "Yellow frontier for the external downstream fixture: run the listed profile lanes for fresh proof. No-claim boundaries: broad-workspace-health, conformance-crate, performance, release-readiness, test-internals-public-api."
+      "notes": "Yellow frontier for the external downstream fixture: run the listed profile lanes for fresh proof. No-claim boundaries: all-root-integration-tests-default-clean, broad-workspace-health, conformance-crate, conformance-dev-dependency-cycle-removal, kafka-backend-behavior, performance, release-readiness, test-internals-public-api."
     },
     {
       "claim_id": "memory-residency-replay-e2e-contract",
@@ -1092,6 +1097,60 @@
       ],
       "blocked_frontier": null,
       "notes": "Yellow-scoped proof-traffic A6 operator packet: cite it only for A1-A5 evidence aggregation, capability-drift gate, admission receipts, clean-overlay handshake, proof parking lot, blocked-loop e2e, proof manifest/status rows, README/AGENTS markers, no-local-fallback/no-peer-cancel policies, dependency-cycle receipt/checklist, and no-claim boundaries. It does not prove peer-dirt exclusion without supported capability evidence plus an admitted command and terminal execution evidence, release readiness, broad workspace health, runtime correctness, performance improvement, live RCH fleet availability, local Cargo fallback approval, permission to delete files, or permission to cancel peer builds."
+    },
+    {
+      "claim_id": "dependency-supply-chain-policy-contract",
+      "category": "dependency supply-chain policy contract",
+      "status": "yellow_scoped",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "Dependency supply-chain policy contract",
+          "dependency-supply-chain-policy-contract"
+        ],
+        "AGENTS.md": [
+          "dependency supply-chain policy contract",
+          "dependency-supply-chain-policy-contract"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "dependency-supply-chain-policy-contract"
+      ],
+      "manifest_lane_ids": [
+        "dependency-supply-chain-policy-contract"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_supply_chain_policy CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test dependency_supply_chain_policy_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Yellow-scoped dependency supply-chain policy and integration evidence only. A fresh live runner receipt is separately required for scanner health, and the excluded fuzz workspace is explicitly non-green while its lockfile is stale and its known RustSec findings remain. This row does not prove undisclosed-vulnerability absence, legal compliance, publisher identity, excluded fuzz health, release readiness, broad workspace health, runtime correctness, performance, or live RCH fleet availability."
+    },
+    {
+      "claim_id": "dependency-budget-contract",
+      "category": "dependency budget contract",
+      "status": "yellow_scoped",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "Dependency budget contract",
+          "dependency-budget-contract"
+        ],
+        "AGENTS.md": [
+          "dependency budget contract",
+          "dependency-budget-contract"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "dependency-budget-contract"
+      ],
+      "manifest_lane_ids": [
+        "dependency-budget-contract"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_budget_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features dependency-ledger --test dependency_budget_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Yellow-scoped checked dependency-budget evidence only: exact direct-edge allowset, frozen ledger fingerprint, synthesized-consumer package-ID ceilings, safe negative fixtures, reviewed-exception schema, and proof/docs mapping. It does not authorize dependency removal or cutover and does not prove compilation, runtime correctness, security, performance, interoperability, release readiness, broad workspace health, workspace dev/build graph health, excluded fuzz health, or live RCH fleet availability."
     }
   ],
   "proof_reuse_status_rows": [

@@ -286,6 +286,9 @@ fn deferred_cancel_enqueue_publishes_queue_flag_then_parker_permit() {
     );
 
     let scheduler = read("src/runtime/scheduler/three_lane.rs");
+    // br-asupersync-ppdgkg moved the actual unpark into the shared
+    // waiter-preferring round-robin helper; wake_one_parker must stay a
+    // Parker-only delegate to it (no reactor callback on this path).
     let wake_marker = "pub(crate) fn wake_one_parker(&self) {";
     let wake_start = scheduler
         .find(wake_marker)
@@ -295,27 +298,56 @@ fn deferred_cancel_enqueue_publishes_queue_flag_then_parker_permit() {
         .expect("Parker-only coordinator wake end");
     let wake_body = &scheduler[wake_start..wake_start + wake_end];
     assert!(
-        wake_body.contains("self.parkers[slot].unpark();") && !wake_body.contains("io.wake()"),
+        wake_body.contains("self.wake_one_parker_prefer_waiter();")
+            && !wake_body.contains("io.wake()"),
         "REGRESSION: deferred cancellation's outer-lock notifier is no longer Parker-only; \
          reactor callbacks must remain outside RuntimeState.",
     );
-
-    let coordinator = scheduler
-        .find("let coordinator = Arc::new(WorkerCoordinator::new(")
-        .expect("coordinator construction");
-    let install = scheduler[coordinator..]
-        .find("state.set_pending_cancel_dispatch_coordinator(&coordinator);")
-        .map(|offset| coordinator + offset)
-        .expect("deferred notifier installation");
-    let ready_handle = scheduler[coordinator..]
-        .find("state.pending_cancel_dispatch_ready_handle()")
-        .map(|offset| coordinator + offset)
-        .expect("deferred ready handle");
+    let helper_marker = "fn wake_one_parker_prefer_waiter(&self) -> bool {";
+    let helper_start = scheduler
+        .find(helper_marker)
+        .expect("waiter-preferring round-robin helper");
+    let helper_end = scheduler[helper_start..]
+        .find("\n    }\n")
+        .expect("waiter-preferring helper end");
+    let helper_body = &scheduler[helper_start..helper_start + helper_end];
     assert!(
-        install < ready_handle,
-        "REGRESSION: ThreeLaneScheduler no longer installs the concrete deferred-cancel \
-         coordinator before exposing the ready-flag handle.",
+        helper_body.contains("unpark_if_waiting()")
+            && helper_body.contains(".unpark();")
+            && !helper_body.contains("io.wake()"),
+        "REGRESSION: the coordinator's waiter-preferring wake helper no longer \
+         publishes concrete Parker permits (or now calls the reactor). \
+         Reactor callbacks must remain outside RuntimeState.",
     );
+
+    // E1.2 subsystem 3a (br-asupersync-sched-hot-path-perf-bt4y5f.2.2,
+    // rows T01/T02): the readiness handle is extracted ahead of
+    // construction in SchedulerConstructionHandles::extract_from_unified,
+    // and the coordinator install is the explicit
+    // install_pending_cancel_dispatch_coordinator step that the
+    // convenience constructors run before returning (worker threads
+    // cannot be parking before that). The zero-acquisition constructor
+    // itself must not install. Liveness ordering is pinned behaviorally by
+    // construction_with_extracted_handles_acquires_no_unified_state_lock
+    // and convenience_constructor_installs_pending_cancel_dispatch_coordinator
+    // in the scheduler's own test mod; here we pin the source seam.
+    scheduler
+        .find("pending_cancel_dispatch_ready: guard.pending_cancel_dispatch_ready_handle(),")
+        .expect("extracted readiness handle in SchedulerConstructionHandles");
+    let install_fn = scheduler
+        .find("pub fn install_pending_cancel_dispatch_coordinator(")
+        .expect("explicit coordinator install step");
+    let install_call = scheduler[install_fn..]
+        .find("guard.set_pending_cancel_dispatch_coordinator(&self.coordinator);")
+        .expect("install step sets the concrete coordinator");
+    let _ = install_call;
+    let convenience = scheduler
+        .find("let scheduler = Self::new_with_options_task_table_and_handles(")
+        .expect("convenience constructor delegates to the zero-acquisition core");
+    let convenience_install = scheduler[convenience..]
+        .find("scheduler.install_pending_cancel_dispatch_coordinator(state);")
+        .expect("convenience constructor installs before returning");
+    let _ = convenience_install;
 }
 
 #[test]
@@ -335,8 +367,11 @@ fn inject_cancel_unparks_pinned_local_worker() {
         .map_or(window_end, |(i, _)| i);
     let body = &source[start..safe_end];
 
+    // The unpark is wrapped in contain_publication_effect so a panicking
+    // publication effect cannot poison the injection path; the pin accepts
+    // the wrapped call form.
     assert!(
-        body.contains("parker.unpark();"),
+        body.contains("parker.unpark()"),
         "REGRESSION: inject_cancel for local pinned tasks no \
          longer calls parker.unpark(). A parked pinned worker \
          would never wake to dispatch the cancel — \
@@ -439,20 +474,39 @@ fn worker_coordinator_wake_one_unparks_via_round_robin_cursor() {
     // where worker-A is never selected.
     let source = read("src/runtime/scheduler/three_lane.rs");
 
-    let fn_marker = "pub(crate) fn wake_one(&self) {";
-    let start = source.find(fn_marker).expect("wake_one fn");
-    let body_end = source[start..].find("\n    }\n").expect("wake_one close");
+    // br-asupersync-ppdgkg: the round-robin cursor lives in the shared
+    // waiter-preferring helper that wake_one delegates to.
+    let fn_marker = "fn wake_one_parker_prefer_waiter(&self) -> bool {";
+    let start = source
+        .find(fn_marker)
+        .expect("waiter-preferring wake helper fn");
+    let body_end = source[start..]
+        .find("\n    }\n")
+        .expect("waiter-preferring helper close");
     let body = &source[start..start + body_end];
 
     assert!(
         (body.contains("self.next_wake.fetch_add(1, Ordering::Relaxed)")
             || body.contains("self.next_wake.fetch_add(1, Ordering::AcqRel)"))
-            && body.contains("self.parkers[slot].unpark();"),
-        "REGRESSION: WorkerCoordinator.wake_one no longer uses \
+            && body.contains("unpark_if_waiting()")
+            && body.contains(".unpark();"),
+        "REGRESSION: the coordinator wake path no longer uses \
          round-robin via next_wake.fetch_add. Cross-thread \
          cancel propagation depends on round-robin so worker-A \
          is eventually selected — without it, a single worker \
          can monopolize wakes.",
+    );
+
+    let wake_one_marker = "pub(crate) fn wake_one(&self) {";
+    let wake_one_start = source.find(wake_one_marker).expect("wake_one fn");
+    let wake_one_end = source[wake_one_start..]
+        .find("\n    }\n")
+        .expect("wake_one close");
+    let wake_one_body = &source[wake_one_start..wake_one_start + wake_one_end];
+    assert!(
+        wake_one_body.contains("self.wake_one_parker_prefer_waiter()"),
+        "REGRESSION: WorkerCoordinator.wake_one no longer routes through \
+         the round-robin waiter-preferring helper.",
     );
 }
 

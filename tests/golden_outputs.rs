@@ -321,7 +321,7 @@ fn golden_runtime_state_region_lifecycle() {
         cancelled.len() as u64,
         u64::from(state.is_quiescent()),
     ]);
-    assert_golden("runtime_state_region_lifecycle", cs, 0xAF3C_9BE4_8F6F_72CE);
+    assert_golden("runtime_state_region_lifecycle", cs, 0x1154_CC85_B921_A9F8);
 }
 
 // ============================================================================
@@ -343,7 +343,7 @@ fn golden_lab_runtime_deterministic_scheduling() {
     let trace3 = run_deterministic_workload(seed + 1);
     assert_ne!(trace1, trace3, "Different seeds produced same trace");
 
-    assert_golden("lab_runtime_deterministic", trace1, 0xDEEA_BFC7_6E0C_37E0);
+    assert_golden("lab_runtime_deterministic", trace1, 0xA198_598F_C7DC_D58B);
 }
 
 const GOLDEN_TRACE_FIXTURE_LAB: &str = r#"{

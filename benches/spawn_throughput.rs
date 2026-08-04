@@ -8,9 +8,19 @@
 //! `SpawnAdmissionMode::Mailbox` (lock-free enqueue, worker-side batch
 //! admission). The contended case is the one the mailbox exists for: the
 //! direct path serializes every producer on the `RuntimeState` lock.
+//! The spawn-throughput group additionally crosses the admission axis with
+//! `RuntimeStateShape` (`*_sharded` rows dispatch against ShardedState's
+//! shard-A table) — the E1.3 before/after evidence surface for the
+//! default-flip decision (br-asupersync-sched-hot-path-perf-bt4y5f.2.3).
 //! The join-completion group measures the caller-visible cost of collecting
 //! completed [`TaskHandle`](asupersync::runtime::TaskHandle) values in the same
 //! deterministic batch shape.
+//! The `join_set_fanout` group measures the blessed dynamic fan-out helper
+//! ([`JoinSet`](asupersync::combinator::JoinSet)) on top of that path: spawn-order
+//! `join_all` and completion-order `join_next` at 1k members, plus the 10k-member
+//! stress row for AC5 of `br-asupersync-dx-core-api-v2-u1z5hn.5`. Peak
+//! bookkeeping there is the set's owned-handle vector, bounded by live member
+//! count.
 //! The spawn-throughput groups stop when every task body has executed. Runtime
 //! task-record teardown may trail a body counter: repeated iterations amortize
 //! most cleanup into later samples, while the final cleanup tail can fall
@@ -34,13 +44,43 @@ use std::sync::{Arc, Barrier, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use asupersync::Cx;
+use asupersync::combinator::JoinSet;
 use asupersync::runtime::builder::{Runtime, RuntimeBuilder, RuntimeHandle};
-use asupersync::runtime::config::SpawnAdmissionMode;
+use asupersync::runtime::config::{RuntimeStateShape, SpawnAdmissionMode};
 use asupersync::runtime::{JoinError, RegionLimits, SpawnError, TaskHandle};
 use asupersync::types::{CancelKind, CancelReason};
 
 const SPAWNS_PER_ITER: usize = 1_000;
+
+/// E1.3 investigation axis (br-asupersync-sched-hot-path-perf-bt4y5f.2.3):
+/// runtime worker count for the shaped spawn-throughput groups. Default 4
+/// (the historical pin). The unified-vs-sharded contended dossier came
+/// back parity at 4 workers — architecturally consistent with completion
+/// still crossing the unified lock on both shapes — so the no-win
+/// investigation scales the POLLING side. Override with
+/// `ASUPERSYNC_BENCH_WORKERS`; a non-default value prints a loud banner
+/// and the criterion IDs stay unchanged, so cross-run criterion history
+/// is only comparable within one worker-count setting (the dossier
+/// records the env; within-run shape ratios remain the instrument).
+fn bench_worker_threads() -> usize {
+    let workers = std::env::var("ASUPERSYNC_BENCH_WORKERS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&workers| workers >= 1)
+        .unwrap_or(4);
+    if workers != 4 {
+        eprintln!(
+            "spawn_throughput: NON-DEFAULT worker count {workers} \
+             (ASUPERSYNC_BENCH_WORKERS); criterion history across worker \
+             counts is not comparable"
+        );
+    }
+    workers
+}
 const ADVERSARIAL_REQUESTS: usize = 256;
+/// Member count for the `JoinSet` stress row (AC5 of
+/// `br-asupersync-dx-core-api-v2-u1z5hn.5`).
+const JOIN_SET_STRESS_MEMBERS: usize = 10_000;
 
 struct CompletionLatch {
     completed: AtomicUsize,
@@ -110,9 +150,25 @@ impl Drop for ProducerStopGuard<'_> {
 }
 
 fn build_runtime(mode: SpawnAdmissionMode, workers: usize) -> Runtime {
+    build_runtime_shaped(mode, RuntimeStateShape::Unified, workers)
+}
+
+/// E1.3 (br-asupersync-sched-hot-path-perf-bt4y5f.2.3): runtime
+/// construction with an explicit backing-state shape, so the contended
+/// spawn groups can compare `Unified` against `Sharded` (workers
+/// dispatching against ShardedState's shard-A table) on identical
+/// workloads. The default-shape helper above keeps every group that is
+/// not part of the shape comparison byte-identical to its tracked
+/// history.
+fn build_runtime_shaped(
+    mode: SpawnAdmissionMode,
+    shape: RuntimeStateShape,
+    workers: usize,
+) -> Runtime {
     RuntimeBuilder::new()
         .worker_threads(workers)
         .spawn_admission(mode)
+        .with_sharded_state(matches!(shape, RuntimeStateShape::Sharded))
         .build()
         .expect("build benchmark runtime")
 }
@@ -181,6 +237,57 @@ fn join_handle_completion_batch(runtime: &Runtime) {
     });
 }
 
+/// Fan out `members` [`JoinSet`] members and collect every outcome in spawn
+/// order via `join_all`.
+///
+/// This is the AC5 stress shape for `br-asupersync-dx-core-api-v2-u1z5hn.5`:
+/// the set's only queue is its owned-handle vector, so peak bookkeeping is
+/// bounded by the live member count and never by an unbounded completion
+/// buffer.
+fn join_set_join_all_fanout(runtime: &Runtime, members: usize) {
+    runtime.block_on(runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("spawned root task has Cx");
+        let mut set: JoinSet<'static, usize, &'static str, _> = JoinSet::in_cx(&cx);
+        for value in 0..members {
+            set.spawn(&cx, move |_cx| async move { Ok(value) })
+                .expect("spawn join-set member");
+        }
+        assert_eq!(set.len(), members, "every member is owned before draining");
+
+        let mut checksum = 0usize;
+        for outcome in set.join_all(&cx).await {
+            checksum = checksum.wrapping_add(outcome.expect("member ok"));
+        }
+        black_box(checksum);
+    }));
+}
+
+/// Fan out `members` [`JoinSet`] members and collect them in completion order
+/// via `join_next`.
+///
+/// `join_next` costs more than `join_all` by construction: each parking poll
+/// scans the members it still owns, so this row measures completion-order
+/// collection including that scan, not just task throughput.
+fn join_set_join_next_fanout(runtime: &Runtime, members: usize) {
+    runtime.block_on(runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("spawned root task has Cx");
+        let mut set: JoinSet<'static, usize, &'static str, _> = JoinSet::in_cx(&cx);
+        for value in 0..members {
+            set.spawn(&cx, move |_cx| async move { Ok(value) })
+                .expect("spawn join-set member");
+        }
+
+        let mut checksum = 0usize;
+        let mut collected = 0usize;
+        while let Some(outcome) = set.join_next(&cx).await {
+            checksum = checksum.wrapping_add(outcome.expect("member ok"));
+            collected += 1;
+        }
+        assert_eq!(collected, members, "every member is collected exactly once");
+        black_box(checksum);
+    }));
+}
+
 fn acquire_root_cx(runtime: &Runtime, keep_task_live: bool) -> Cx {
     let (sender, receiver) = mpsc::sync_channel(1);
     runtime
@@ -227,9 +334,11 @@ fn quota_scenario(mode: SpawnAdmissionMode) -> QuotaScenario {
 }
 
 fn direct_quota_denial(scenario: &QuotaScenario, collect_tails: bool) -> Vec<Duration> {
-    let mut tails = collect_tails
-        .then(|| Vec::with_capacity(ADVERSARIAL_REQUESTS))
-        .unwrap_or_default();
+    let mut tails = if collect_tails {
+        Vec::with_capacity(ADVERSARIAL_REQUESTS)
+    } else {
+        Vec::new()
+    };
     for _ in 0..ADVERSARIAL_REQUESTS {
         let started = collect_tails.then(Instant::now);
         let result = scenario.handle.try_spawn(async {});
@@ -262,9 +371,11 @@ fn deferred_gateway_quota_denial(scenario: &QuotaScenario, collect_tails: bool) 
         pending.push((task, started));
     }
 
-    let mut tails = collect_tails
-        .then(|| Vec::with_capacity(ADVERSARIAL_REQUESTS))
-        .unwrap_or_default();
+    let mut tails = if collect_tails {
+        Vec::with_capacity(ADVERSARIAL_REQUESTS)
+    } else {
+        Vec::new()
+    };
     scenario.runtime.block_on(async {
         for (mut task, started) in pending {
             let result = task.join(&scenario.cx).await;
@@ -344,9 +455,11 @@ fn cancel_storm(scenario: &mut CancelStormScenario, collect_tails: bool) -> Vec<
     for task in &scenario.tasks {
         task.abort_with_reason(CancelReason::user("adversarial cancel storm"));
     }
-    let mut tails = collect_tails
-        .then(|| Vec::with_capacity(ADVERSARIAL_REQUESTS))
-        .unwrap_or_default();
+    let mut tails = if collect_tails {
+        Vec::with_capacity(ADVERSARIAL_REQUESTS)
+    } else {
+        Vec::new()
+    };
     scenario.runtime.block_on(async {
         for task in &mut scenario.tasks {
             match task.join(&scenario.cx).await {
@@ -440,11 +553,35 @@ fn bench_spawn_throughput(c: &mut Criterion) {
     group.throughput(Throughput::Elements(SPAWNS_PER_ITER as u64));
     group.sample_size(20);
 
-    for (label, mode) in [
-        ("direct", SpawnAdmissionMode::Direct),
-        ("mailbox", SpawnAdmissionMode::Mailbox),
+    // E1.3 (br-asupersync-sched-hot-path-perf-bt4y5f.2.3): the admission
+    // axis crosses the backing-state shape. The unified labels keep their
+    // historical names so tracked comparisons stay valid; the `_sharded`
+    // rows are the before/after evidence for the default-flip decision —
+    // the contended multi-producer cells are exactly where shard-A
+    // dispatch is supposed to relieve the unified-lock serialization.
+    for (label, mode, shape) in [
+        (
+            "direct",
+            SpawnAdmissionMode::Direct,
+            RuntimeStateShape::Unified,
+        ),
+        (
+            "mailbox",
+            SpawnAdmissionMode::Mailbox,
+            RuntimeStateShape::Unified,
+        ),
+        (
+            "direct_sharded",
+            SpawnAdmissionMode::Direct,
+            RuntimeStateShape::Sharded,
+        ),
+        (
+            "mailbox_sharded",
+            SpawnAdmissionMode::Mailbox,
+            RuntimeStateShape::Sharded,
+        ),
     ] {
-        let runtime = build_runtime(mode, 4);
+        let runtime = build_runtime_shaped(mode, shape, bench_worker_threads());
         let completion = Arc::new(CompletionLatch::new());
         group.bench_function(BenchmarkId::new("single_producer_latched", label), |b| {
             b.iter(|| spawn_burst_single(black_box(&runtime), &completion));
@@ -458,7 +595,7 @@ fn bench_spawn_throughput(c: &mut Criterion) {
                 "the benchmark must divide work evenly across producers"
             );
             let per_producer = SPAWNS_PER_ITER / producers;
-            let runtime = build_runtime(mode, 4);
+            let runtime = build_runtime_shaped(mode, shape, bench_worker_threads());
             let completion = Arc::new(CompletionLatch::new());
             let ready = Arc::new(Barrier::new(producers + 1));
             let start = Arc::new(Barrier::new(producers + 1));
@@ -579,6 +716,31 @@ fn bench_join_handle_completion(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_join_set_fanout(c: &mut Criterion) {
+    let mut group = c.benchmark_group("join_set_fanout");
+    let runtime = build_runtime(SpawnAdmissionMode::Mailbox, 4);
+
+    group.throughput(Throughput::Elements(SPAWNS_PER_ITER as u64));
+    group.sample_size(20);
+    group.bench_function(BenchmarkId::new("join_all", SPAWNS_PER_ITER), |b| {
+        b.iter(|| join_set_join_all_fanout(black_box(&runtime), SPAWNS_PER_ITER));
+    });
+    group.bench_function(BenchmarkId::new("join_next", SPAWNS_PER_ITER), |b| {
+        b.iter(|| join_set_join_next_fanout(black_box(&runtime), SPAWNS_PER_ITER));
+    });
+
+    // AC5 stress row: 10k members in one set. Fewer samples because each
+    // iteration spawns and drains ten thousand real region tasks.
+    group.throughput(Throughput::Elements(JOIN_SET_STRESS_MEMBERS as u64));
+    group.sample_size(10);
+    group.bench_function(BenchmarkId::new("join_all", JOIN_SET_STRESS_MEMBERS), |b| {
+        b.iter(|| join_set_join_all_fanout(black_box(&runtime), JOIN_SET_STRESS_MEMBERS));
+    });
+
+    drop(runtime);
+    group.finish();
+}
+
 fn bench_adversarial_tails(c: &mut Criterion) {
     if adversarial_reports_enabled() {
         {
@@ -665,6 +827,7 @@ criterion_group!(
     benches,
     bench_spawn_throughput,
     bench_join_handle_completion,
+    bench_join_set_fanout,
     bench_adversarial_tails
 );
 criterion_main!(benches);

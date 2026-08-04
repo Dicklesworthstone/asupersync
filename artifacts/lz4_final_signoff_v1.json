@@ -1,0 +1,397 @@
+{
+  "schema_version": 1,
+  "artifact_id": "lz4-final-signoff-v1",
+  "title": "LZ4 terminal KEEP signoff",
+  "program_id": "asupersync-ir2uf0",
+  "epic_id": "asupersync-0h6myr.4",
+  "bead_id": "asupersync-0h6myr.4.5",
+  "capability_id": "CAP-TRACE-LZ4",
+  "policy_as_of_date_utc": "2026-07-27",
+  "terminal_verdict": {
+    "outcome": "KEEP_INCUMBENT_NO_CUTOVER",
+    "terminal_receipt": true,
+    "dependency_exit_allowed": false,
+    "production_cutover_authorized": false,
+    "production_default_changed": false,
+    "production_manifest_changed": false,
+    "public_surface_narrowing_allowed": false,
+    "persisted_format_changed": false,
+    "oracle_retirement_allowed": false,
+    "partial_switch_allowed": false,
+    "owned_codec_disposition": "KEEP_SHADOW_ONLY",
+    "reason": "Scoped owned-codec correctness, independent corpus, retained trace, replay, CLI, malformed-input, and rollback evidence is green, but public level and Auto semantics remain unresolved, the named-host owned implementation is materially slower, allocation and portable resource evidence is incomplete, the incumbent remains the differential oracle, and ATP production consumers remain outside this capability."
+  },
+  "child_receipts": [
+    {
+      "bead_id": "asupersync-0h6myr.4.1",
+      "role": "LZ4 source, API, format, dependency, consumer, resource, and authority inventory",
+      "content_commits": [
+        "6e567c64a792c88aae07d311e24dfb984d66d649"
+      ],
+      "required_status": "closed"
+    },
+    {
+      "bead_id": "asupersync-0h6myr.4.2",
+      "role": "strictly safe bounded size-prepended owned block codec",
+      "content_commits": [
+        "747e8620af2532372f61bfdcbdc6243b457e599f"
+      ],
+      "required_status": "closed"
+    },
+    {
+      "bead_id": "asupersync-0h6myr.4.3",
+      "role": "independent vectors, property and differential evidence, and bounded current-version execution",
+      "content_commits": [
+        "92afbefc44bd6bee81532ea9afc433f86e60449a"
+      ],
+      "required_status": "closed"
+    },
+    {
+      "bead_id": "asupersync-0h6myr.4.4",
+      "role": "retained trace integration, replay, CLI, malformed limits, measurement, and go-no-go",
+      "content_commits": [
+        "48a716f661390700185341bf1f3da0511849f896"
+      ],
+      "required_status": "closed"
+    },
+    {
+      "bead_id": "asupersync-5z2scg.3.7",
+      "role": "cross-phase published-v0.3.9 artifact migration, replay, CLI, and rollback prerequisite",
+      "content_commits": [
+        "6c2dbe127fbd12fb23ce157aeb7da68aa6ad8f15",
+        "f6b6d7c81690f45cd665959e438d30882bf0e04c"
+      ],
+      "required_status": "closed"
+    }
+  ],
+  "evidence_join": [
+    {
+      "evidence_id": "LZ4-EVD-A1-INVENTORY",
+      "bead_id": "asupersync-0h6myr.4.1",
+      "admission": "ADMITTED_FOR_TERMINAL_KEEP",
+      "scope": "frozen source, API, format, graph, consumer, resource, gap, and authority baseline",
+      "no_claim_boundary": "The baseline authorizes an isolated replacement experiment, not a production or dependency cutover."
+    },
+    {
+      "evidence_id": "LZ4-EVD-A2-CODEC",
+      "bead_id": "asupersync-0h6myr.4.2",
+      "admission": "ADMITTED_FOR_TERMINAL_KEEP",
+      "scope": "private strictly safe finite size-prepended block encoder and decoder",
+      "no_claim_boundary": "Codec implementation alone does not establish historical trace, performance, graph, oracle, or production parity."
+    },
+    {
+      "evidence_id": "LZ4-EVD-A3-CORPUS",
+      "bead_id": "asupersync-0h6myr.4.3",
+      "admission": "ADMITTED_FOR_TERMINAL_KEEP",
+      "scope": "six independent valid vectors, seventeen malformed vectors, four budget vectors, 256 property cases, differential checks, and bounded execution",
+      "no_claim_boundary": "Current-version differential agreement does not independently authorize oracle retirement or production cutover."
+    },
+    {
+      "evidence_id": "LZ4-EVD-A4-REPLAY-PERF",
+      "bead_id": "asupersync-0h6myr.4.4",
+      "admission": "ADMITTED_FOR_TERMINAL_KEEP",
+      "scope": "retained v2 and v3 traces, cross-decode, migration, replay, CLI, malformed limits, interrupted writer, and named-host measurement",
+      "no_claim_boundary": "One named test-profile host and process VmHWM do not establish portable performance, allocation, or resource parity."
+    },
+    {
+      "evidence_id": "TYPED-FORMAT-A7-CROSS-VERSION",
+      "bead_id": "asupersync-5z2scg.3.7",
+      "admission": "ADMITTED_FOR_TERMINAL_KEEP",
+      "scope": "published-v0.3.9 and current artifact migration, replay, CLI, atomicity, cleanup, and rollback prerequisite",
+      "no_claim_boundary": "The exact published-v0.3.9 corpus is not proof of arbitrary historical or third-party artifacts."
+    }
+  ],
+  "source_contracts": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "b6789b10b8e984a98004cde19952c6b73418afdde30aa61e1c5a6a45377f17bb",
+      "role": "retained root normal feature edge and development oracle edge"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "c670712ab8713897bacc9591c170db2d030df83011dc7b9d092f16099f1540dd",
+      "role": "locked lz4_flex 0.14.0 package and checksum"
+    },
+    {
+      "path": "fuzz/Cargo.toml",
+      "sha256": "8756d0bf2578d20726a63285daa2f7a6a789e4811c5756c9c9c6871a66551473",
+      "role": "excluded differential workspace pinned to incumbent 0.14.0"
+    },
+    {
+      "path": "fuzz/fuzz_targets/trace_compression.rs",
+      "sha256": "6e730416956770b0e092cd9d129fe6af6b0a8081d0c9a89e66550a334b939ec7",
+      "role": "bounded current-version differential target"
+    },
+    {
+      "path": "src/trace/file.rs",
+      "sha256": "c0b163a5fb758cc0a056133b55d5f799b68add1479a7a63ed9599361b5c5e774",
+      "role": "incumbent production default and test-internals shadow selector"
+    },
+    {
+      "path": "src/trace/lz4_block.rs",
+      "sha256": "2b17d409fc9a2f14e86075bf8337369f12bd2714e013482911a941140c1aada1",
+      "role": "private strictly safe bounded owned codec"
+    },
+    {
+      "path": "artifacts/lz4_surface_artifact_inventory_v1.json",
+      "sha256": "642d1a84fc6d391508b75eda1548ddc8aa62436ed4519cb16f877b37009217fa",
+      "role": "A1 machine inventory and routed gap authority"
+    },
+    {
+      "path": "artifacts/lz4_owned_codec_corpus_v1.json",
+      "sha256": "0f599946032eedbb46f336256d456229909d4b2dcf7d552b06e49ddbaa0f1417",
+      "role": "A3 independent corpus and bounded execution receipt"
+    },
+    {
+      "path": "artifacts/lz4_trace_integration_go_no_go_v1.json",
+      "sha256": "d4faa2d065bdfd6a9e91c09327afc509edb9c687a0c5e08a8a9d652236421d73",
+      "role": "A4 compatibility, measurement, blocker, and KEEP receipt"
+    },
+    {
+      "path": "tests/lz4_surface_artifact_inventory_contract.rs",
+      "sha256": "fd6aae1c6802d1a2e178f614994b4afe4f81896bde43d396f5bf32e42a7465ea",
+      "role": "A1 fail-closed source and inventory verifier"
+    },
+    {
+      "path": "tests/lz4_owned_codec_corpus_contract.rs",
+      "sha256": "3adf9aa70e4b303ea59c39bc6e184838c7b9a9ba1b2aec41571d1d47c10b5eef",
+      "role": "A3 vector, mutation, property, budget, and execution verifier"
+    },
+    {
+      "path": "tests/lz4_trace_integration_e2e.rs",
+      "sha256": "88786b3b834943139387387bb00149004cf180f49c7765fee981c449b727fd36",
+      "role": "A4 retained artifact, replay, CLI, malformed, interruption, and measurement verifier"
+    },
+    {
+      "path": "tests/fixtures/lz4-trace-historical-corpus/v0.3.9.json",
+      "sha256": "930164fdd5a7cbca20f38db5fbca2d532bb8c4b872d356a532e31a54f6fa4597",
+      "role": "retained exact v2 and v0.3.9 v3 incumbent traces"
+    },
+    {
+      "path": "docs/lz4_surface_artifact_inventory.md",
+      "sha256": "1cd9a3bb16dbf6e7cd58507f6e6a1947c73412fe8587483e5de6b9239fe86101",
+      "role": "A1 operator inventory reconciled with the A5 terminal decision"
+    },
+    {
+      "path": "docs/lz4_owned_codec_corpus.md",
+      "sha256": "a618ebde74249746e66064415bb1f982ca7a984693a7635a4ce2e3a8243f1301",
+      "role": "A3 independent corpus operator guide"
+    },
+    {
+      "path": "docs/lz4_trace_integration_go_no_go.md",
+      "sha256": "109916edaed122f15ffe41a164c3913693a7bb134c1a6a8d0ee8d1826c24fd0a",
+      "role": "A4 integration and measured go-no-go operator guide"
+    },
+    {
+      "path": "scripts/run_dependency_sovereignty_e2e.sh",
+      "sha256": "a1908b10016b633cd5e2f923cb077533eaa66290c218e4f1c7de09e70e8400a2",
+      "role": "canonical sparse plus aggregate terminal runner"
+    },
+    {
+      "path": "tests/lz4_final_signoff_contract.rs",
+      "sha256": "9b19071c36d2528c5ffb53790bfbcb38ed2e5cb0789bb6609bc610cde06e2b06",
+      "role": "fail-closed terminal KEEP structural verifier"
+    },
+    {
+      "path": "docs/lz4_final_signoff.md",
+      "sha256": "25bdc2fb650ef90257a7fedc9639550307b641ec9c87c8116ea47d99beeaea0f",
+      "role": "terminal decision and operator rollback guide"
+    }
+  ],
+  "live_registry_reconciliation": {
+    "registry_path": "artifacts/dependency_capability_registry_v1.json",
+    "registry_disposition": "KEEP_UNTIL_PARITY",
+    "registry_evidence_state": "BASELINE_PLANNED",
+    "registry_cutover_state": "KEEP_INCUMBENT",
+    "baseline_path": "artifacts/dependency_capability_baseline_v1.json",
+    "baseline_state": "EXECUTABLE_COMPLETE",
+    "baseline_cutover_eligible": false,
+    "baseline_evidence_limit": "registered EVD-TRACE-LZ4 is incumbent semantic filtering evidence; A3 and A4 are scoped campaign successors without rewriting the historical baseline",
+    "cutover_policy_path": "artifacts/dependency_cutover_policy_v1.json",
+    "migration_class": "VERSIONED_DATA",
+    "dependency_exit_allowed": false,
+    "a1_unknown_rows": 0,
+    "a1_source_pin_count": 14
+  },
+  "performance_gate": {
+    "source": "artifacts/lz4_trace_integration_go_no_go_v1.json",
+    "worker": "vmi1264463",
+    "cpu_model": "AMD EPYC Processor (with IBPB)",
+    "iterations": 64,
+    "payload_bytes": 95887,
+    "incumbent_encoded_bytes": 29688,
+    "owned_encoded_bytes": 28953,
+    "owned_size_delta_percent": -2.476,
+    "incumbent_encode_nanos": 479433053,
+    "owned_encode_nanos": 720550247,
+    "owned_encode_time_delta_percent": 50.292,
+    "incumbent_decode_nanos": 95060587,
+    "owned_decode_nanos": 195354661,
+    "owned_decode_time_delta_percent": 105.505,
+    "accepted_for_cutover": false,
+    "disposition": "FAIL_CUTOVER_KEEP_INCUMBENT",
+    "method_limits": [
+      "one named remote worker",
+      "one test-profile process",
+      "wall-clock comparison rather than a cross-host statistical benchmark",
+      "process VmHWM is not per-operation RSS",
+      "no allocation-count instrumentation"
+    ]
+  },
+  "dependency_graph_disposition": {
+    "normal_edge": "KEEP",
+    "normal_requirement": "0.14",
+    "normal_optional": true,
+    "normal_enabling_feature": "trace-compression",
+    "dev_edge": "KEEP",
+    "dev_requirement": "0.14",
+    "fuzz_edge": "KEEP",
+    "fuzz_requirement": "=0.14.0",
+    "root_locked_version": "0.14.0",
+    "root_locked_checksum": "ecbdfe44b1bd960b68170b417450a628c43f7cf56bb3c5317e61cb230ee7f226",
+    "trace_and_cli_marginal_package_versions": [
+      "lz4_flex@0.14.0",
+      "twox-hash@2.1.3"
+    ],
+    "atp_production_call_sites": 5,
+    "dependency_exit_allowed": false,
+    "partial_graph_cutover_allowed": false,
+    "downstream_unblocked_by_terminal_receipt": [
+      "asupersync-0h6myr.7",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.4.4"
+    ]
+  },
+  "oracle_disposition": {
+    "disposition": "KEEP_INCUMBENT_ORACLE",
+    "oracle_package": "lz4_flex 0.14.0",
+    "retirement_allowed": false,
+    "replacement_grade_independent_oracle_available": false,
+    "reason": "A3 differential evidence and A4 cross-decoding use the incumbent to establish agreement. Owned self-roundtrip and hand-authored vectors are scoped evidence, not a complete replacement-grade oracle for every accepted artifact and diagnostic."
+  },
+  "gap_disposition": [
+    {
+      "gap_id": "LZ4-GAP-01",
+      "disposition": "KEEP_BLOCKER",
+      "reason": "CompressionMode Lz4 level remains unapplied."
+    },
+    {
+      "gap_id": "LZ4-GAP-02",
+      "disposition": "KEEP_BLOCKER",
+      "reason": "CompressionMode Auto threshold remains unused."
+    },
+    {
+      "gap_id": "LZ4-GAP-03",
+      "disposition": "KEEP_BLOCKER",
+      "reason": "Persisted compression byte 1 still loses requested level and Auto intent."
+    },
+    {
+      "gap_id": "LZ4-GAP-04",
+      "disposition": "RESOLVED_FORMAT_FREEZE",
+      "reason": "The trace capability is explicitly frozen to one size-prepended block, not the LZ4 frame format."
+    },
+    {
+      "gap_id": "LZ4-GAP-05",
+      "disposition": "RESOLVED_A3_SUCCESSOR_EVIDENCE",
+      "reason": "A3 supplies checked byte-codec evidence while the historical baseline remains labeled semantic filtering only."
+    },
+    {
+      "gap_id": "LZ4-GAP-06",
+      "disposition": "RESOLVED_CURRENT_VERSION_PIN",
+      "reason": "The excluded differential workspace now pins the incumbent exactly to 0.14.0."
+    },
+    {
+      "gap_id": "LZ4-GAP-07",
+      "disposition": "RESOLVED_RETAINED_CORPUS",
+      "reason": "A4 retains exact v2 and v0.3.9 v3 incumbent trace bytes and hashes."
+    },
+    {
+      "gap_id": "LZ4-GAP-08",
+      "disposition": "RESOLVED_CANONICAL_SCENARIOS",
+      "reason": "A4 registers and executes replay, cross-version artifact, and malformed-limit scenarios."
+    },
+    {
+      "gap_id": "LZ4-GAP-09",
+      "disposition": "KEEP_BLOCKER",
+      "reason": "Combined block bytes and process VmHWM are recorded, but allocation counts and portable RSS evidence remain absent."
+    },
+    {
+      "gap_id": "LZ4-GAP-10",
+      "disposition": "KEEP_BLOCKER_OUTSIDE_CAPABILITY",
+      "reason": "Five ATP production calls remain outside CAP-TRACE-LZ4."
+    },
+    {
+      "gap_id": "LZ4-GAP-11",
+      "disposition": "KEEP_BLOCKER_OUTSIDE_CAPABILITY",
+      "reason": "ATP expected-size checks still occur after incumbent decode allocation."
+    }
+  ],
+  "format_and_public_surface": {
+    "container": "LZ4_SIZE_PREPENDED_BLOCK",
+    "persisted_format_changed": false,
+    "frame_format_supported": false,
+    "dictionary_supported": false,
+    "block_checksum_supported": false,
+    "content_checksum_supported": false,
+    "public_compression_modes_preserved": true,
+    "preserved_modes": [
+      "CompressionMode::None",
+      "CompressionMode::Lz4 { level }",
+      "CompressionMode::Auto"
+    ],
+    "production_default_selection": "Lz4Codec::Incumbent",
+    "owned_selector_cfg": "all(feature = \"trace-compression\", feature = \"test-internals\")",
+    "diagnostics_narrowed": false,
+    "historical_artifact_acceptance_narrowed": false
+  },
+  "rollback_contract": {
+    "manifest_rollback_required": false,
+    "artifact_migration_required": false,
+    "incumbent_artifacts_remain_readable": true,
+    "owned_shadow_removal_is_independent": true,
+    "operator_action": "Keep the incumbent edges, production selector, public modes, retained artifacts, and oracle unchanged.",
+    "future_go_requirement": "A future serialized GO must resolve every KEEP blocker, rerun fresh graph and oracle inventories, cover all production consumers, meet accepted cross-host performance and resource gates, and retain tested rollback."
+  },
+  "canonical_scenario": {
+    "scenario_id": "dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd",
+    "runner": "scripts/run_dependency_sovereignty_e2e.sh",
+    "replay_command": "RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh --scenario dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd",
+    "expected_outcome": "PASSED",
+    "steps": [
+      "sparse no-default-features trace-compression check",
+      "A1 inventory, A3 corpus, A4 integration, and A5 terminal contract aggregate"
+    ],
+    "feature_flags": [
+      "cli",
+      "no-default-features",
+      "test-internals",
+      "trace-compression"
+    ],
+    "no_local_fallback": true
+  },
+  "validation": {
+    "focused_contract": "cargo test -p asupersync --test lz4_final_signoff_contract",
+    "sparse_feature_check": "cargo check -p asupersync --no-default-features --features trace-compression",
+    "aggregate_contracts": [
+      "lz4_surface_artifact_inventory_contract",
+      "lz4_owned_codec_corpus_contract",
+      "lz4_trace_integration_e2e",
+      "lz4_final_signoff_contract"
+    ],
+    "remote_required": true,
+    "clean_overlay_required_before_commit": true,
+    "clean_no_overlay_required_after_commit": true,
+    "local_cargo_fallback_allowed": false
+  },
+  "no_claim_boundaries": [
+    "No production codec, dependency, feature, public API, diagnostic, format, or artifact reader is removed or switched.",
+    "No claim extends beyond the exact A3 vectors, A4 retained v2 and v0.3.9 v3 artifacts, and current checked source state.",
+    "No LZ4 frame, dictionary, block-checksum, or content-checksum support is claimed.",
+    "No allocator behavior, allocation count, portable RSS, cross-host performance, or p50 p95 p999 latency is claimed.",
+    "No owned performance improvement or no-regression result is claimed.",
+    "No incumbent differential-oracle retirement is authorized.",
+    "No ATP replacement or root dependency exit is authorized from trace-only evidence.",
+    "No broad workspace health, release readiness, or live RCH fleet availability is claimed.",
+    "No local Cargo fallback is authorized.",
+    "No permission to delete files, retained corpora, evidence, or rollback artifacts is granted."
+  ]
+}

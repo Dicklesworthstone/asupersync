@@ -87,7 +87,7 @@ impl ToolVersion {
 #[async_trait::async_trait]
 pub trait BaselineAdapter: Send + Sync + std::fmt::Debug {
     /// Get the tool name.
-    fn tool_name(&self) -> &str;
+    fn tool_name(&self) -> &'static str;
 
     /// Check if the tool is available and get version info.
     async fn check_availability(&self) -> ToolAvailability;
@@ -179,7 +179,7 @@ impl ScpAdapter {
 
 #[async_trait::async_trait]
 impl BaselineAdapter for ScpAdapter {
-    fn tool_name(&self) -> &str {
+    fn tool_name(&self) -> &'static str {
         "scp"
     }
 
@@ -227,7 +227,7 @@ impl BaselineAdapter for ScpAdapter {
         let mut total_metrics = Vec::new();
 
         for iteration in 0..config.iterations {
-            let iteration_dest = dest_path.with_extension(&format!("iter{iteration}"));
+            let iteration_dest = dest_path.with_extension(format!("iter{iteration}"));
 
             // Build and execute scp command
             let mut cmd = self.build_scp_command(source_path, &iteration_dest);
@@ -324,16 +324,12 @@ fn parse_version_numbers(version_str: &str) -> (Option<u32>, Option<u32>, Option
     let mut parts = version_str
         .split(|c: char| !c.is_ascii_digit() && c != '.')
         .filter(|s| !s.is_empty())
-        .filter_map(|s| {
-            // Take only the part that looks like version numbers
-            if s.chars().any(|c| c.is_ascii_digit()) && s.chars().any(|c| c == '.') {
-                Some(s)
-            } else if s.chars().all(|c| c.is_ascii_digit()) {
-                Some(s)
-            } else {
-                None
-            }
-        });
+        // Keep only the parts that carry a version number. The split above
+        // already admits nothing but digits and '.', so "has a digit and a dot"
+        // OR "is all digits" collapses exactly to "contains a digit" -- the two
+        // arms of the old `filter_map` both returned the input unchanged, and
+        // the only thing the `else` dropped was a run of bare dots.
+        .filter(|s| s.chars().any(|c| c.is_ascii_digit()));
 
     if let Some(version_part) = parts.next() {
         let nums: Vec<u32> = version_part
@@ -416,7 +412,7 @@ impl RsyncAdapter {
 
 #[async_trait::async_trait]
 impl BaselineAdapter for RsyncAdapter {
-    fn tool_name(&self) -> &str {
+    fn tool_name(&self) -> &'static str {
         "rsync"
     }
 
@@ -463,7 +459,7 @@ impl BaselineAdapter for RsyncAdapter {
         let mut total_metrics = Vec::new();
 
         for iteration in 0..config.iterations {
-            let iteration_dest = dest_path.with_extension(&format!("iter{iteration}"));
+            let iteration_dest = dest_path.with_extension(format!("iter{iteration}"));
 
             // Build and execute rsync command
             let mut cmd = self.build_rsync_command(source_path, &iteration_dest);
@@ -609,7 +605,7 @@ impl RcloneAdapter {
 
 #[async_trait::async_trait]
 impl BaselineAdapter for RcloneAdapter {
-    fn tool_name(&self) -> &str {
+    fn tool_name(&self) -> &'static str {
         "rclone"
     }
 
@@ -651,7 +647,7 @@ impl BaselineAdapter for RcloneAdapter {
 
         let mut total_metrics = Vec::new();
         for iteration in 0..config.iterations {
-            let iteration_dest = dest_path.with_extension(&format!("iter{iteration}"));
+            let iteration_dest = dest_path.with_extension(format!("iter{iteration}"));
             let mut cmd = self.build_rclone_command(source_path, &iteration_dest);
 
             let start_time = Instant::now();
@@ -831,7 +827,7 @@ impl CurlAdapter {
 
 #[async_trait::async_trait]
 impl BaselineAdapter for CurlAdapter {
-    fn tool_name(&self) -> &str {
+    fn tool_name(&self) -> &'static str {
         if self.enable_http3 {
             "curl-http3"
         } else {
@@ -856,8 +852,15 @@ impl BaselineAdapter for CurlAdapter {
             if line.contains("curl") {
                 let version = ToolVersion::new("curl", line);
 
-                // Check for minimum curl version (7.50+ for HTTP/3)
-                let min_major = if self.enable_http3 { 7 } else { 7 };
+                // Minimum curl version. Both thresholds live in the curl 7.x
+                // series, so only the minor component actually varies; the
+                // major was previously written as `if http3 { 7 } else { 7 }`.
+                //
+                // NOTE: the comment here used to say "7.50+ for HTTP/3" while
+                // the code requires 7.66. Left at 7.66 rather than silently
+                // relaxing a version gate to match a comment -- if 7.50 is the
+                // intended floor, that is a deliberate behavior change.
+                let min_major = 7;
                 let min_minor = if self.enable_http3 { 66 } else { 0 };
 
                 if version.meets_minimum(min_major, min_minor) {
@@ -898,7 +901,7 @@ impl BaselineAdapter for CurlAdapter {
         let mut total_metrics = Vec::new();
 
         for iteration in 0..config.iterations {
-            let iteration_dest = dest_path.with_extension(&format!("iter{iteration}"));
+            let iteration_dest = dest_path.with_extension(format!("iter{iteration}"));
 
             let test_url = format!("file://{}", source_path.to_string_lossy());
 

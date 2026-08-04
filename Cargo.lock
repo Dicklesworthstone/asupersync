@@ -227,7 +227,7 @@ dependencies = [
 
 [[package]]
 name = "asupersync"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "aes-gcm",
  "arbitrary",
@@ -279,6 +279,7 @@ dependencies = [
  "rdkafka",
  "redis",
  "regex",
+ "regex-syntax",
  "rmp-serde",
  "rusqlite",
  "rustc-demangle",
@@ -308,6 +309,7 @@ dependencies = [
  "toml",
  "tower",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
  "trybuild",
  "unicode-normalization",
@@ -367,7 +369,7 @@ dependencies = [
 
 [[package]]
 name = "asupersync-macros"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "asupersync",
  "proc-macro2",
@@ -1268,7 +1270,7 @@ dependencies = [
 
 [[package]]
 name = "franken-decision"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "franken-evidence",
  "franken-kernel",
@@ -1280,7 +1282,7 @@ dependencies = [
 
 [[package]]
 name = "franken-evidence"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "insta",
  "proptest",
@@ -1291,7 +1293,7 @@ dependencies = [
 
 [[package]]
 name = "franken-kernel"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "proptest",
  "serde",

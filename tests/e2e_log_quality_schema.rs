@@ -694,6 +694,14 @@ fn dependency_sovereignty_runner_is_registered_and_fail_closed() {
         "aggregate-signoff-contract",
         "dependency_verification_final_signoff_contract",
         "ver-a6-aggregate-signoff-contract",
+        "atp_version_artifacts",
+        "dep-sovereignty-asupersync_d24mms_11_d22341de8339",
+        "--lib --test atp_cdc_deduplication toolchain_version_detection",
+        "CAP-ATP-VERSION-SCANNER",
+        "d24mms-11-artifact-version-reassembly",
+        "REPRO_COMMAND",
+        "--argjson feature_flags",
+        "feature_flags: $feature_flags",
     ] {
         assert!(
             runner.contains(token),
@@ -705,10 +713,95 @@ fn dependency_sovereignty_runner_is_registered_and_fail_closed() {
         "[dependency-sovereignty]=\"run_dependency_sovereignty_e2e.sh\"",
         "[dependency-sovereignty]=\"target/e2e-results/dependency-sovereignty\"",
         "[dependency-sovereignty]=\"E2E-SUITE-DEPENDENCY-SOVEREIGNTY\"",
+        "--scenario is supported only with --suite dependency-sovereignty",
+        "Unknown dependency sovereignty scenario",
+        "suite_args=(--scenario \"$SCENARIO_FILTER\")",
+        "bash \"$script_path\" \"${suite_args[@]}\"",
+        "replay_command=\"RCH_REQUIRE_REMOTE=1 TEST_LOG_LEVEL=",
     ] {
         assert!(
             orchestrator.contains(token),
             "run_all_e2e.sh missing dependency-sovereignty registration: {token}"
+        );
+    }
+
+    let scenario_guard = orchestrator
+        .find("Unknown dependency sovereignty scenario")
+        .expect("outer scenario guard");
+    let report_creation = orchestrator
+        .find("mkdir -p \"$REPORT_DIR\"")
+        .expect("orchestrator report creation");
+    assert!(
+        scenario_guard < report_creation,
+        "unknown dependency scenarios must be rejected before report creation"
+    );
+}
+
+#[test]
+fn run_all_orchestrator_rejects_invalid_dependency_scenario_boundaries() {
+    let cases = [
+        (
+            vec!["--scenario", "atp_version_artifacts"],
+            "--scenario is supported only with --suite dependency-sovereignty",
+        ),
+        (
+            vec![
+                "--suite",
+                "websocket",
+                "--scenario",
+                "atp_version_artifacts",
+            ],
+            "--scenario is supported only with --suite dependency-sovereignty",
+        ),
+        (
+            vec![
+                "--suite",
+                "dependency-sovereignty",
+                "--scenario",
+                "first",
+                "--scenario",
+                "second",
+            ],
+            "Only one --scenario value is supported",
+        ),
+        (
+            vec![
+                "--suite",
+                "dependency-sovereignty",
+                "--scenario",
+                "../escape",
+            ],
+            "Invalid scenario ID",
+        ),
+        (
+            vec![
+                "--suite",
+                "dependency-sovereignty",
+                "--scenario",
+                "unknown_scenario",
+            ],
+            "Unknown dependency sovereignty scenario: unknown_scenario",
+        ),
+    ];
+
+    for (args, expected_error) in cases {
+        let output = Command::new("bash")
+            .arg("scripts/run_all_e2e.sh")
+            .args(&args)
+            .current_dir(repo_root())
+            .output()
+            .expect("run all-E2E invalid scenario case");
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "invalid args {args:?} must fail before suite execution\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected_error),
+            "invalid args {args:?} missing expected error {expected_error:?}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 }

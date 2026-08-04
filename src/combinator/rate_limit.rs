@@ -913,12 +913,12 @@ impl SlidingWindowRateLimiter {
     /// Create a new sliding window rate limiter.
     #[must_use]
     pub fn new(policy: RateLimitPolicy) -> Self {
-        let window_capacity = usize::try_from(policy.rate.max(policy.burst))
-            .unwrap_or(usize::MAX)
-            .max(1);
         Self {
             policy,
-            window: RwLock::new(VecDeque::with_capacity(window_capacity)),
+            // Policy limits describe admitted work, not an allocation request.
+            // Grow with actual accepted operations so extreme but valid limits
+            // cannot force a multi-gigabyte constructor allocation.
+            window: RwLock::new(VecDeque::new()),
             total_allowed: AtomicU64::new(0),
             total_rejected: AtomicU64::new(0),
         }
@@ -932,8 +932,8 @@ impl SlidingWindowRateLimiter {
 
     /// Compute current cost from window contents.
     /// This replaces the previous window_cost atomic to avoid race conditions.
-    fn compute_window_cost(window: &std::collections::VecDeque<(u64, u32)>) -> u32 {
-        window.iter().map(|(_, cost)| cost).sum::<u32>()
+    fn compute_window_cost(window: &std::collections::VecDeque<(u64, u32)>) -> u64 {
+        window.iter().map(|(_, cost)| u64::from(*cost)).sum()
     }
 
     /// Try to acquire without waiting.
@@ -958,7 +958,7 @@ impl SlidingWindowRateLimiter {
         // Compute current usage directly from window contents.
         let usage = Self::compute_window_cost(&window);
 
-        if usage.saturating_add(cost) <= self.policy.rate {
+        if usage.saturating_add(u64::from(cost)) <= u64::from(self.policy.rate) {
             if cost > 0 {
                 window.push_back((now_millis, cost));
             }
@@ -997,7 +997,8 @@ impl SlidingWindowRateLimiter {
         }
 
         let usage = Self::compute_window_cost(&window);
-        if usage.saturating_add(cost) <= self.policy.rate {
+        let requested = usage.saturating_add(u64::from(cost));
+        if requested <= u64::from(self.policy.rate) {
             return Duration::ZERO;
         }
 
@@ -1006,10 +1007,10 @@ impl SlidingWindowRateLimiter {
         }
 
         // Find when enough capacity frees up
-        let needed = usage.saturating_add(cost).saturating_sub(self.policy.rate);
-        let mut freed = 0u32;
+        let needed = requested.saturating_sub(u64::from(self.policy.rate));
+        let mut freed = 0u64;
         for (t, c) in window.iter() {
-            freed += c;
+            freed = freed.saturating_add(u64::from(*c));
             if freed >= needed {
                 // This entry will expire at t + period
                 let expire_at = t.saturating_add(period_millis);
@@ -2131,6 +2132,46 @@ mod tests {
             wait >= Duration::from_millis(900) && wait <= Duration::from_millis(1100),
             "Expected ~1000ms, got {wait:?}"
         );
+    }
+
+    #[test]
+    fn sliding_window_max_rate_boundary_uses_wide_arithmetic() {
+        let period = Duration::from_secs(1);
+        let rl = SlidingWindowRateLimiter::new(RateLimitPolicy {
+            rate: u32::MAX,
+            period,
+            ..Default::default()
+        });
+        let start = Time::from_millis(7);
+
+        assert!(rl.try_acquire(u32::MAX - 1, start));
+        assert!(rl.try_acquire(1, start), "exactly-at-limit cost must fit");
+        assert!(
+            !rl.try_acquire(1, start),
+            "cost beyond u32::MAX rate must not be admitted by saturation"
+        );
+        assert_eq!(rl.time_until_available(1, start), period);
+
+        let boundary = Time::from_millis(1_007);
+        assert!(
+            rl.try_acquire(1, boundary),
+            "capacity must return exactly when the window expires"
+        );
+    }
+
+    #[test]
+    fn sliding_window_extreme_policy_does_not_preallocate_from_limits() {
+        let max_rate = SlidingWindowRateLimiter::new(RateLimitPolicy {
+            rate: u32::MAX,
+            ..Default::default()
+        });
+        let max_burst = SlidingWindowRateLimiter::new(RateLimitPolicy {
+            burst: u32::MAX,
+            ..Default::default()
+        });
+
+        assert_eq!(max_rate.window.read().capacity(), 0);
+        assert_eq!(max_burst.window.read().capacity(), 0);
     }
 
     #[test]

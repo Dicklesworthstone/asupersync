@@ -217,7 +217,7 @@ impl AtpProfile {
             self.create_test_data(source_path, config.data_size).await?;
         }
 
-        let iteration_dest = dest_path.with_extension(&format!("atp_iter{iteration}"));
+        let iteration_dest = dest_path.with_extension(format!("atp_iter{iteration}"));
 
         let start_time = Instant::now();
 
@@ -293,8 +293,13 @@ impl AtpProfile {
                     if written < size {
                         // Skip ahead to create a hole
                         let skip = std::cmp::min(hole_size as u64, size - written);
-                        AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Current(skip as i64))
-                            .await?;
+                        // `skip` is bounded by `hole_size`, so this cannot realistically
+                        // exceed i64::MAX; `cast_signed` records that the wrap is accepted.
+                        AsyncSeekExt::seek(
+                            &mut file,
+                            std::io::SeekFrom::Current(skip.cast_signed()),
+                        )
+                        .await?;
                         written += skip;
                     }
                 }

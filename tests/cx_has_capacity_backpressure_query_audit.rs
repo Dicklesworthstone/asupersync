@@ -417,6 +417,11 @@ fn check_resource_pressure_enforces_admission_at_create_child_region() {
          Resource-pressure admission may be bypassed.",
     );
 
+    // E2 S4c-2b (br-asupersync-m9wsza) split the child mint into a
+    // target-threaded core: the public wrapper delegates to
+    // create_child_region_in, which owns the pressure-admission check.
+    // Pin both links so the chain public-entry → core → pressure check
+    // stays intact regardless of the wrapper/core split.
     let admission_marker = "pub fn create_child_region_with_capability_budget_and_priority(";
     let admission_start = source
         .find(admission_marker)
@@ -427,11 +432,40 @@ fn check_resource_pressure_enforces_admission_at_create_child_region() {
     let admission_body = &source[admission_start..admission_start + admission_body_end];
 
     assert!(
-        admission_body.contains("self.check_resource_pressure_for_region("),
+        admission_body.contains("self.create_child_region_in("),
         "REGRESSION: create_child_region_with_capability_budget_and_priority \
-         no longer calls check_resource_pressure_for_region. Backpressure \
+         no longer delegates to the target-threaded mint core. The \
+         pressure-admission pin below anchors on the core; if the wrapper \
+         grew its own mint logic the two can drift.",
+    );
+
+    let core_marker = "fn create_child_region_in(";
+    let core_start = source
+        .find(core_marker)
+        .expect("create_child_region_in core");
+    let core_body_end = source[core_start..]
+        .find("\n    }\n")
+        .expect("create_child_region_in close");
+    let core_body = &source[core_start..core_start + core_body_end];
+
+    assert!(
+        core_body.contains("self.check_resource_pressure_for_region("),
+        "REGRESSION: the child-region mint core no longer calls \
+         check_resource_pressure_for_region before minting. Backpressure \
          enforcement happens AFTER region creation — pathway for \
          unbounded region fan-out under resource pressure.",
+    );
+
+    let mint_marker = "create_child_with_capability_budget(";
+    let pressure_pos = core_body
+        .find("self.check_resource_pressure_for_region(")
+        .expect("pressure check position");
+    let mint_pos = core_body.find(mint_marker).expect("mint position");
+    assert!(
+        pressure_pos < mint_pos,
+        "REGRESSION: the pressure-admission check no longer precedes the \
+         region mint inside create_child_region_in — backpressure is \
+         checked after the fact.",
     );
 }
 

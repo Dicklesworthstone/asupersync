@@ -51,18 +51,32 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use asupersync::channel::mpsc;
+//! <!-- core-api-doctest: channel-families -->
+//! ```
+//! use asupersync::{Cx, main};
+//! use asupersync::channel::{broadcast, mpsc, oneshot, watch};
 //!
-//! // Create a bounded channel
-//! let (tx, rx) = mpsc::channel::<i32>(10);
+//! #[main]
+//! async fn main(cx: &Cx) {
+//!     let (mpsc_tx, mut mpsc_rx) = mpsc::channel(1);
+//!     mpsc_tx.send(cx, 10_i32).await.expect("bounded send");
+//!     assert_eq!(mpsc_rx.recv(cx).await.expect("bounded receive"), 10);
+//!     drop(mpsc_rx);
+//!     assert!(mpsc_tx.send(cx, 11).await.is_err());
 //!
-//! // Two-phase send pattern
-//! let permit = tx.reserve(&cx).await?;  // Phase 1: reserve slot
-//! permit.send(42);                       // Phase 2: commit (cannot fail)
+//!     let (oneshot_tx, mut oneshot_rx) = oneshot::channel();
+//!     oneshot_tx.send(cx, 20_i32).expect("oneshot send");
+//!     assert_eq!(oneshot_rx.recv(cx).await.expect("oneshot receive"), 20);
 //!
-//! // Receive
-//! let value = rx.recv(&cx).await?;
+//!     let (broadcast_tx, mut broadcast_rx) = broadcast::channel(2);
+//!     assert_eq!(broadcast_tx.send(cx, 30_i32).expect("broadcast send"), 1);
+//!     assert_eq!(broadcast_rx.recv(cx).await.expect("broadcast receive"), 30);
+//!
+//!     let (watch_tx, mut watch_rx) = watch::channel(40_i32);
+//!     watch_tx.send(41).expect("watch send");
+//!     watch_rx.changed(cx).await.expect("watch change");
+//!     assert_eq!(*watch_rx.borrow(), 41);
+//! }
 //! ```
 //!
 //! # Module Contents

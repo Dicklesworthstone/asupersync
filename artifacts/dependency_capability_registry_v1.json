@@ -1234,8 +1234,8 @@
       "baseline": {
         "state": "planned",
         "owner_bead": "asupersync-d24mms.11",
-        "fixture": "planned://atp-version-scanner/artifact-corpus",
-        "command": "scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario atp_version_artifacts"
+        "fixture": "tests/atp_cdc_deduplication.rs",
+        "command": "RCH_REQUIRE_REMOTE=1 bash scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario atp_version_artifacts"
       },
       "replacement_bead_ids": [
         "asupersync-d24mms.11"
@@ -2298,8 +2298,10 @@
       ],
       "source_owners": [
         "src/messaging/kafka.rs",
+        "src/messaging/kafka_consumer.rs",
         "Cargo.toml"
       ],
+      "inventory_artifact": "artifacts/kafka_capability_inventory_v1.json",
       "exposure": [
         "public-api",
         "feature",
@@ -2336,7 +2338,7 @@
       ],
       "baseline": {
         "state": "planned",
-        "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1",
+        "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.5",
         "fixture": "planned://kafka-k0/capability-broker-security-matrix",
         "command": "scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario kafka_multiversion"
       },
@@ -4163,16 +4165,16 @@
     "snapshot_files": [
       {
         "source_path": "src/bin/asupersync.rs",
-        "line_count": 16577,
-        "sha256": "cbf0c69b27ac98921afebed685dc5d0a8855a05c87cf7eb8e28134256a1062f7",
+        "line_count": 16705,
+        "sha256": "7578b320c1e911375597851aa1821ec1ed871313545b5b159b0df7daa12761df",
         "capability_ids": [
           "CAP-CLI-ASUPERSYNC"
         ]
       },
       {
         "source_path": "src/bin/atp.rs",
-        "line_count": 12090,
-        "sha256": "cc9528cfafcb2a0dfec210ad486694c22c628ee04966dd4f6b997e2a28ce9c9e",
+        "line_count": 11912,
+        "sha256": "b77dd1e90ae1ab81bf084feac214b31cc8f17557d6f3c476dcdb1868075eee4b",
         "capability_ids": [
           "CAP-CLI-ATP"
         ]
@@ -4489,9 +4491,9 @@
   },
   "api_surface_snapshot": {
     "source_path": "artifacts/api_surface_map_v1.json",
-    "root_export_count": 298,
+    "root_export_count": 315,
     "entry_point_count": 19,
-    "semantic_sha256": "4d9a10b6fa18667baa3d42b4f04e0be8523dba85c5e3a096959d7197b4fbe616",
+    "semantic_sha256": "1251e67b8086b44f20f478810385b434e40a9bd892621db024562d1e6cbd3ab6",
     "semantic_projection": "kind TAB name TAB comma-joined-feature-flags TAB cfg NEWLINE in artifact order",
     "selector_policy": "every root export must match at least one selector",
     "selectors": [
@@ -4590,7 +4592,8 @@
         "name_prefix": "types::",
         "capability_ids": [
           "CAP-PUBLIC-API-TOPOLOGY",
-          "CAP-BROWSER-RUNTIME"
+          "CAP-BROWSER-RUNTIME",
+          "CAP-SERDE-GENERIC"
         ]
       }
     ]
@@ -4803,8 +4806,8 @@
   ],
   "diagnostic_inventory": {
     "source_path": "docs/error_codes/registry.json",
-    "expected_code_count": 43,
-    "code_projection_sha256": "d239335ceb433f40092c3a449f642466258b9e44ba309781cc63ba7609870a8a",
+    "expected_code_count": 44,
+    "code_projection_sha256": "25b402d84377e5794ff61ed2429a4f48fdbdc4fb00978de75e0c9760103de1a6",
     "capability_ids": [
       "CAP-DIAGNOSTICS"
     ],
@@ -5118,7 +5121,7 @@
         "CAP-KAFKA"
       ],
       "baseline_state": "planned",
-      "baseline_owner": "asupersync-dep-p7-kafka-removal-sarszu.1",
+      "baseline_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.5",
       "e2e_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
     },
     {
@@ -5418,9 +5421,9 @@
   ],
   "downstream_probe_policy": {
     "portfolio_root": "/dp",
-    "local_probe_rule": "When /dp is mounted, every listed repository and Cargo.toml must exist and the manifest must contain an asupersync dependency declaration.",
+    "local_probe_rule": "Every listed manifest that is available under /dp must reference asupersync; an incomplete or unavailable portfolio yields BLOCKED_EXTERNAL and no downstream compatibility claim.",
     "remote_absence_state": "BLOCKED_EXTERNAL",
-    "remote_absence_rule": "An RCH worker without /dp validates registry structure only and may not claim downstream compatibility, freshness, or green portfolio evidence.",
+    "remote_absence_rule": "An environment without the complete /dp portfolio validates registry structure and available manifests only and may not claim downstream compatibility, freshness, or green portfolio evidence.",
     "executable_baseline_owner": "asupersync-dep-p1-foundations-upksjk.5.2",
     "cross_platform_owner": "asupersync-dep-p1-foundations-upksjk.6.5",
     "canonical_probe_command": "for manifest in /dp/*/Cargo.toml; do rg -n 'asupersync' \"$manifest\"; done",
@@ -6247,6 +6250,13 @@
       ]
     },
     {
+      "scope": "prefix",
+      "bead_id": "asupersync-dep-p7-kafka-removal-sarszu.1.",
+      "capability_ids": [
+        "CAP-KAFKA"
+      ]
+    },
+    {
       "scope": "exact",
       "bead_id": "asupersync-dep-p7-kafka-removal-sarszu.2",
       "capability_ids": [
@@ -6494,10 +6504,10 @@
     "status": "PASS_SCOPED",
     "scope": "All canonical dep-plan issues after excluding explicit superseded duplicates, effective exact-or-longest-prefix capability mappings, terminal evidence owners, cutover-policy gates, and explicit feature-loss authorization phrases.",
     "mapping_resolution": "An exact rule overrides every prefix rule. Otherwise the unique longest matching prefix is authoritative. Missing or equal-precedence competing rules fail closed.",
-    "dep_plan_issue_count": 398,
-    "non_epic_work_count": 335,
+    "dep_plan_issue_count": 419,
+    "non_epic_work_count": 353,
     "capability_count": 50,
-    "mapping_rule_count": 108,
+    "mapping_rule_count": 109,
     "cutover_target_count": 41,
     "cross_cutting_guard_count": 9,
     "unmapped_bead_ids": [],

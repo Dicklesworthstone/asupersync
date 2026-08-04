@@ -572,7 +572,11 @@ impl ComparisonReport {
             });
 
         let performance_ratios = Self::calculate_ratios(baseline_results, atp_results);
-        let assessment = Self::generate_assessment(&best_baseline, &best_atp, &performance_ratios);
+        let assessment = Self::generate_assessment(
+            best_baseline.as_ref(),
+            best_atp.as_ref(),
+            &performance_ratios,
+        );
 
         Self {
             best_baseline_performance: best_baseline,
@@ -628,8 +632,8 @@ impl ComparisonReport {
     }
 
     fn generate_assessment(
-        best_baseline: &Option<PerformanceSummary>,
-        best_atp: &Option<PerformanceSummary>,
+        best_baseline: Option<&PerformanceSummary>,
+        best_atp: Option<&PerformanceSummary>,
         ratios: &[PerformanceRatio],
     ) -> String {
         let comparison_count = ratios.len();
@@ -798,7 +802,7 @@ fn median(values: &[f64]) -> f64 {
     } else if n % 2 == 1 {
         sorted[n / 2]
     } else {
-        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+        f64::midpoint(sorted[n / 2 - 1], sorted[n / 2])
     }
 }
 

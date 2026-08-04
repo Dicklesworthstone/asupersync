@@ -18,10 +18,10 @@ use asupersync::runtime::yield_now;
 use asupersync::trace::format::{GoldenTraceConfig, GoldenTraceFixture};
 use asupersync::trace::replay::{CompactTaskId, TraceMetadata};
 use asupersync::trace::{
-    DiagnosticConfig, ReplayEvent, ReplayTrace, StreamingReplayer, TraceEvent, TraceReader,
-    TraceReplayer, browser_trace_log_fields, browser_trace_schema_v1, diagnose_divergence,
-    minimal_divergent_prefix, redact_browser_trace_event, validate_browser_trace_schema,
-    write_trace,
+    DiagnosticConfig, ReplayEvent, ReplayTrace, StreamingReplayer, TRACE_FILE_VERSION, TRACE_MAGIC,
+    TraceEvent, TraceReader, TraceRecoveryStatus, TraceReplayer, browser_trace_log_fields,
+    browser_trace_schema_v1, diagnose_divergence, migrate_trace_file, minimal_divergent_prefix,
+    recover_trace_prefix, redact_browser_trace_event, validate_browser_trace_schema, write_trace,
 };
 use asupersync::types::Budget;
 use asupersync::util::DetRng;
@@ -29,6 +29,7 @@ use common::*;
 use insta::assert_snapshot;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
+use std::io::Write as IoWrite;
 use std::path::PathBuf;
 use std::time::Instant;
 use tempfile::NamedTempFile;
@@ -153,6 +154,33 @@ fn render_streaming_replay_ndjson(
     Ok(lines.join("\n") + "\n")
 }
 
+fn write_synthesized_v2_trace(
+    path: &std::path::Path,
+    metadata: &TraceMetadata,
+    events: &[ReplayEvent],
+    declared_events: u64,
+) {
+    let mut file = std::fs::File::create(path).expect("create synthesized v2 trace");
+    file.write_all(TRACE_MAGIC).expect("write trace magic");
+    file.write_all(&2u16.to_le_bytes())
+        .expect("write v2 version");
+    file.write_all(&0u16.to_le_bytes()).expect("write v2 flags");
+    file.write_all(&[0]).expect("write compression byte");
+    let metadata_bytes = rmp_serde::to_vec(metadata).expect("serialize v2 metadata");
+    file.write_all(&(metadata_bytes.len() as u32).to_le_bytes())
+        .expect("write metadata length");
+    file.write_all(&metadata_bytes).expect("write metadata");
+    file.write_all(&declared_events.to_le_bytes())
+        .expect("write declared event count");
+    for event in events {
+        let event_bytes = rmp_serde::to_vec(event).expect("serialize v2 event");
+        file.write_all(&(event_bytes.len() as u32).to_le_bytes())
+            .expect("write event length");
+        file.write_all(&event_bytes).expect("write event");
+    }
+    file.flush().expect("flush synthesized v2 trace");
+}
+
 fn dual_run_happy_semantics() -> asupersync::lab::NormalizedSemantics {
     asupersync::lab::NormalizedSemantics {
         terminal_outcome: asupersync::lab::TerminalOutcome::ok(),
@@ -165,8 +193,11 @@ fn dual_run_happy_semantics() -> asupersync::lab::NormalizedSemantics {
 }
 
 fn trace_hash_hex(trace: &ReplayTrace) -> String {
-    use std::fmt::Write;
     let payload = serde_json::to_vec(&trace.events).expect("serialize replay events");
+    digest_hex(&payload)
+}
+
+fn digest_hex(payload: &[u8]) -> String {
     let digest = Sha256::digest(payload);
     // sha2 0.11 / digest 0.11 removed `LowerHex` on the finalize output
     // (`Array<u8, _>` instead of `GenericArray<u8, _>`). Hex-encode manually.
@@ -658,6 +689,114 @@ fn file_roundtrip_verifies_against_original() {
     test_complete!(
         "file_roundtrip_verifies_against_original",
         events = event_count
+    );
+}
+
+/// Synthesized exact-v2 bytes → ordinary/streaming read → non-overwriting v3
+/// migration → deterministic replay, plus a bounded truncated-prefix receipt.
+#[test]
+fn trace_v2_to_v3_migration_and_recovery_e2e() {
+    init_test("trace_v2_to_v3_migration_and_recovery_e2e");
+
+    test_section!("record-current-semantics-as-v2-container");
+    let trace = record_trace_with_seed(0xA4A4_0302);
+    let workspace = tempfile::tempdir().expect("migration workspace");
+    let legacy_path = workspace.path().join("legacy-v2.trace");
+    let migrated_path = workspace.path().join("current-v3.trace");
+    write_synthesized_v2_trace(
+        &legacy_path,
+        &trace.metadata,
+        &trace.events,
+        trace.events.len() as u64,
+    );
+    let legacy_bytes_before = std::fs::read(&legacy_path).expect("read legacy source");
+    let legacy_sha256_before = digest_hex(&legacy_bytes_before);
+
+    test_section!("legacy-ordinary-and-streaming-read");
+    let legacy_reader = TraceReader::open(&legacy_path).expect("open legacy trace");
+    assert_eq!(legacy_reader.file_version(), 2);
+    assert_eq!(
+        legacy_reader.load_all().expect("load legacy trace"),
+        trace.events
+    );
+    let mut legacy_stream = StreamingReplayer::open(&legacy_path).expect("stream legacy trace");
+    let mut streamed_events = Vec::new();
+    while let Some(event) = legacy_stream
+        .next_event()
+        .expect("read legacy stream event")
+    {
+        streamed_events.push(event);
+    }
+    assert_eq!(streamed_events, trace.events);
+
+    test_section!("migrate-with-source-rollback-anchor");
+    let receipt = migrate_trace_file(&legacy_path, &migrated_path).expect("migrate legacy trace");
+    assert_eq!(receipt.source_version, 2);
+    assert_eq!(receipt.target_version, TRACE_FILE_VERSION);
+    assert_eq!(receipt.events_copied, trace.events.len() as u64);
+    let legacy_bytes_after = std::fs::read(&legacy_path).expect("read rollback source");
+    assert_eq!(legacy_bytes_after, legacy_bytes_before);
+
+    test_section!("verify-current-container-and-deterministic-replay");
+    let migrated_reader = TraceReader::open(&migrated_path).expect("open migrated trace");
+    assert_eq!(migrated_reader.file_version(), TRACE_FILE_VERSION);
+    assert_eq!(migrated_reader.metadata(), &trace.metadata);
+    let migrated_events = migrated_reader.load_all().expect("load migrated events");
+    assert_eq!(migrated_events, trace.events);
+    let mut replayer = TraceReplayer::new(trace.clone());
+    for event in &migrated_events {
+        replayer
+            .verify_and_advance(event)
+            .expect("migrated event must replay identically");
+    }
+    assert!(replayer.is_completed());
+
+    test_section!("bounded-truncated-prefix-recovery");
+    let truncated_path = workspace.path().join("truncated-v2.trace");
+    assert!(
+        !trace.events.is_empty(),
+        "recorded trace must contain an event to exercise truncated-prefix recovery"
+    );
+    let recovered_count = trace.events.len().saturating_sub(1);
+    write_synthesized_v2_trace(
+        &truncated_path,
+        &trace.metadata,
+        &trace.events[..recovered_count],
+        trace.events.len() as u64,
+    );
+    let recovery =
+        recover_trace_prefix(&truncated_path, trace.events.len()).expect("recover valid prefix");
+    assert_eq!(recovery.recovered_events, trace.events[..recovered_count]);
+    assert!(matches!(
+        &recovery.status,
+        TraceRecoveryStatus::Partial { next_event, .. }
+            if *next_event == recovered_count as u64
+    ));
+
+    let evidence = serde_json::json!({
+        "capability_id": "CAP-PERSISTED-TRACE-SNAPSHOT",
+        "scenario_id": "typed-formats-a4-v2-v3-migration-replay",
+        "source_container_version": receipt.source_version,
+        "target_container_version": receipt.target_version,
+        "events_copied": receipt.events_copied,
+        "source_sha256_before": legacy_sha256_before,
+        "source_sha256_after": digest_hex(&legacy_bytes_after),
+        "rollback_source_preserved": true,
+        "ordinary_reader_semantics_preserved": true,
+        "streaming_reader_semantics_preserved": true,
+        "deterministic_replay_completed": replayer.is_completed(),
+        "partial_recovery_events": recovery.recovered_events.len(),
+        "partial_recovery_status": format!("{:?}", recovery.status),
+        "corpus_provenance": "synthesized exact v2 framing over current replay schema",
+        "no_claim": "not an externally emitted historical release corpus or production cutover proof",
+    });
+    write_replay_artifact_json("typed_formats_a4_v2_v3_migration_replay.json", &evidence);
+
+    test_complete!(
+        "trace_v2_to_v3_migration_and_recovery_e2e",
+        events = migrated_events.len(),
+        source_preserved = true,
+        deterministic_replay = replayer.is_completed()
     );
 }
 

@@ -89,6 +89,14 @@ pub struct CrashPackConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_steps: Option<u64>,
 
+    /// Exact libtest name that produced this crash pack.
+    ///
+    /// Optional for crash packs created outside a test harness and for
+    /// backward compatibility with schema-v1 packs written before this field
+    /// existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_name: Option<String>,
+
     /// Git commit hash (hex) of the code that produced this crash pack.
     ///
     /// Optional; when present, allows exact code checkout for reproduction.
@@ -103,6 +111,7 @@ impl Default for CrashPackConfig {
             config_hash: 0,
             worker_count: 1,
             max_steps: None,
+            test_name: None,
             commit_hash: None,
         }
     }
@@ -538,10 +547,10 @@ impl CrashPack {
     /// Generate a replay command from this crash pack's configuration.
     ///
     /// This is a convenience method equivalent to
-    /// `ReplayCommand::from_config(&pack.manifest.config, artifact_path)`.
+    /// `ReplayCommand::from_config(&pack.manifest.config)`.
     #[must_use]
-    pub fn replay_command(&self, artifact_path: Option<&str>) -> ReplayCommand {
-        ReplayCommand::from_config(&self.manifest.config, artifact_path)
+    pub fn replay_command(&self) -> ReplayCommand {
+        ReplayCommand::from_config(&self.manifest.config)
     }
 
     /// Returns `true` if any oracle violations were detected.
@@ -861,9 +870,12 @@ pub struct ReplayEnvVar {
 /// ```json
 /// {
 ///   "program": "cargo",
-///   "args": ["test", "--lib", "--", "--seed", "42"],
-///   "env": [{"key": "ASUPERSYNC_WORKERS", "value": "4"}],
-///   "command_line": "ASUPERSYNC_WORKERS=4 cargo test --lib -- --seed 42"
+///   "args": ["test", "lab::tests::case", "--", "--exact", "--nocapture"],
+///   "env": [
+///     {"key": "ASUPERSYNC_LAB_TEST_SEED", "value": "42"},
+///     {"key": "ASUPERSYNC_WORKERS", "value": "4"}
+///   ],
+///   "command_line": "ASUPERSYNC_LAB_TEST_SEED=42 ASUPERSYNC_WORKERS=4 cargo test lab::tests::case -- --exact --nocapture"
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -890,33 +902,32 @@ impl ReplayCommand {
     /// Generates a `cargo test` invocation with the crash pack's seed
     /// and configuration parameters.
     #[must_use]
-    pub fn from_config(config: &CrashPackConfig, artifact_path: Option<&str>) -> Self {
-        let mut args = vec![
-            "test".to_string(),
-            "--lib".to_string(),
+    pub fn from_config(config: &CrashPackConfig) -> Self {
+        let mut args = vec!["test".to_string()];
+        if let Some(test_name) = config.test_name.as_deref().filter(|name| !name.is_empty()) {
+            args.push(test_name.to_string());
+        }
+        args.extend([
             "--".to_string(),
-            "--seed".to_string(),
-            config.seed.to_string(),
-        ];
+            "--exact".to_string(),
+            "--nocapture".to_string(),
+        ]);
 
-        let mut env = Vec::new();
-
+        let mut env = vec![ReplayEnvVar {
+            key: "ASUPERSYNC_LAB_TEST_SEED".to_string(),
+            value: config.seed.to_string(),
+        }];
         env.push(ReplayEnvVar {
             key: "ASUPERSYNC_WORKERS".to_string(),
             value: config.worker_count.to_string(),
         });
 
-        if let Some(max_steps) = config.max_steps {
-            env.push(ReplayEnvVar {
-                key: "ASUPERSYNC_MAX_STEPS".to_string(),
-                value: max_steps.to_string(),
-            });
-        }
-
-        if let Some(path) = artifact_path {
-            args.push("--crashpack".to_string());
-            args.push(path.to_string());
-        }
+        env.push(ReplayEnvVar {
+            key: "ASUPERSYNC_MAX_STEPS".to_string(),
+            value: config
+                .max_steps
+                .map_or_else(|| "none".to_string(), |steps| steps.to_string()),
+        });
 
         let command_line = build_command_line("cargo", &args, &env);
 
@@ -1261,6 +1272,7 @@ mod tests {
             config_hash: 0xDEAD,
             worker_count: 4,
             max_steps: Some(1000),
+            test_name: None,
             commit_hash: Some("abc123".to_string()),
         }
     }
@@ -1428,6 +1440,7 @@ mod tests {
         assert_eq!(config.config_hash, 0);
         assert_eq!(config.worker_count, 1);
         assert_eq!(config.max_steps, None);
+        assert_eq!(config.test_name, None);
         assert_eq!(config.commit_hash, None);
 
         crate::test_complete!("default_config");
@@ -2609,25 +2622,28 @@ mod tests {
             config_hash: 0xDEAD,
             worker_count: 4,
             max_steps: Some(1000),
+            test_name: Some("lab::tests::case".to_string()),
             commit_hash: Some("abc123".to_string()),
         };
 
-        let cmd = ReplayCommand::from_config(&config, None);
+        let cmd = ReplayCommand::from_config(&config);
         assert_eq!(cmd.program, "cargo");
-        assert!(cmd.args.contains(&"--seed".to_string()));
-        assert!(cmd.args.contains(&"42".to_string()));
-        assert!(!cmd.env.is_empty());
-        assert!(cmd.command_line.contains("cargo"));
-        assert!(cmd.command_line.contains("--seed"));
-        assert!(cmd.command_line.contains("42"));
-        assert!(cmd.command_line.contains("ASUPERSYNC_WORKERS=4"));
+        assert_eq!(
+            cmd.args,
+            ["test", "lab::tests::case", "--", "--exact", "--nocapture"]
+        );
+        assert_eq!(
+            cmd.command_line,
+            "ASUPERSYNC_LAB_TEST_SEED=42 ASUPERSYNC_WORKERS=4 \
+             ASUPERSYNC_MAX_STEPS=1000 cargo test lab::tests::case -- --exact --nocapture"
+        );
 
         crate::test_complete!("replay_command_from_config_basic");
     }
 
     #[test]
-    fn replay_command_from_config_with_artifact() {
-        init_test("replay_command_from_config_with_artifact");
+    fn replay_command_from_config_without_test_name() {
+        init_test("replay_command_from_config_without_test_name");
 
         let config = CrashPackConfig {
             seed: 99,
@@ -2635,13 +2651,12 @@ mod tests {
             ..Default::default()
         };
 
-        let cmd = ReplayCommand::from_config(&config, Some("crashes/pack.json"));
-        assert!(cmd.args.contains(&"--crashpack".to_string()));
-        assert!(cmd.args.contains(&"crashes/pack.json".to_string()));
-        assert!(cmd.command_line.contains("--crashpack"));
-        assert!(cmd.command_line.contains("crashes/pack.json"));
+        let cmd = ReplayCommand::from_config(&config);
+        assert_eq!(cmd.args, ["test", "--", "--exact", "--nocapture"]);
+        assert!(!cmd.command_line.contains("--crashpack"));
+        assert!(!cmd.command_line.contains("--seed"));
 
-        crate::test_complete!("replay_command_from_config_with_artifact");
+        crate::test_complete!("replay_command_from_config_without_test_name");
     }
 
     #[test]
@@ -2698,15 +2713,12 @@ mod tests {
     fn replay_command_serde_round_trip() {
         init_test("replay_command_serde_round_trip");
 
-        let cmd = ReplayCommand::from_config(
-            &CrashPackConfig {
-                seed: 42,
-                worker_count: 4,
-                max_steps: Some(1000),
-                ..Default::default()
-            },
-            Some("pack.json"),
-        );
+        let cmd = ReplayCommand::from_config(&CrashPackConfig {
+            seed: 42,
+            worker_count: 4,
+            max_steps: Some(1000),
+            ..Default::default()
+        });
 
         let json = serde_json::to_string_pretty(&cmd).unwrap();
         let parsed: ReplayCommand = serde_json::from_str(&json).unwrap();
@@ -2720,7 +2732,7 @@ mod tests {
         init_test("replay_command_in_crash_pack");
 
         let config = sample_config();
-        let replay_cmd = ReplayCommand::from_config(&config, Some("crashes/test.json"));
+        let replay_cmd = ReplayCommand::from_config(&config);
 
         let pack = CrashPack::builder(config)
             .failure(sample_failure())
@@ -2741,7 +2753,7 @@ mod tests {
             parsed["replay"]["command_line"]
                 .as_str()
                 .unwrap()
-                .contains("--seed")
+                .contains("ASUPERSYNC_LAB_TEST_SEED=42")
         );
 
         crate::test_complete!("replay_command_in_crash_pack");
@@ -2774,16 +2786,17 @@ mod tests {
         let pack = CrashPack::builder(CrashPackConfig {
             seed: 77,
             worker_count: 2,
+            test_name: Some("trace::tests::replay_case".to_string()),
             ..Default::default()
         })
         .failure(sample_failure())
         .build()
         .expect("crash pack builder should have failure metadata");
 
-        let cmd = pack.replay_command(Some("output.json"));
-        assert!(cmd.command_line.contains("--seed"));
-        assert!(cmd.command_line.contains("77"));
-        assert!(cmd.command_line.contains("output.json"));
+        let cmd = pack.replay_command();
+        assert!(cmd.command_line.contains("ASUPERSYNC_LAB_TEST_SEED=77"));
+        assert!(cmd.command_line.contains("trace::tests::replay_case"));
+        assert!(!cmd.command_line.contains("output.json"));
 
         crate::test_complete!("replay_command_convenience_method");
     }
@@ -2792,25 +2805,23 @@ mod tests {
     fn replay_command_max_steps_included_when_set() {
         init_test("replay_command_max_steps_included_when_set");
 
-        let with_steps = ReplayCommand::from_config(
-            &CrashPackConfig {
-                seed: 1,
-                max_steps: Some(999),
-                ..Default::default()
-            },
-            None,
-        );
+        let with_steps = ReplayCommand::from_config(&CrashPackConfig {
+            seed: 1,
+            max_steps: Some(999),
+            ..Default::default()
+        });
         assert!(with_steps.command_line.contains("ASUPERSYNC_MAX_STEPS=999"));
 
-        let without_steps = ReplayCommand::from_config(
-            &CrashPackConfig {
-                seed: 1,
-                max_steps: None,
-                ..Default::default()
-            },
-            None,
+        let without_steps = ReplayCommand::from_config(&CrashPackConfig {
+            seed: 1,
+            max_steps: None,
+            ..Default::default()
+        });
+        assert!(
+            without_steps
+                .command_line
+                .contains("ASUPERSYNC_MAX_STEPS=none")
         );
-        assert!(!without_steps.command_line.contains("ASUPERSYNC_MAX_STEPS"));
 
         crate::test_complete!("replay_command_max_steps_included_when_set");
     }
@@ -2855,6 +2866,7 @@ mod tests {
             config_hash: 0xDEAD,
             worker_count: 4,
             max_steps: Some(1000),
+            test_name: None,
             commit_hash: Some("abc123def".to_string()),
         }
     }
@@ -3233,6 +3245,7 @@ mod tests {
             config_hash: 0xCAFE,
             worker_count: 2,
             max_steps: Some(500),
+            test_name: None,
             commit_hash: Some("a1b2c3d".to_string()),
         };
 
@@ -3376,10 +3389,9 @@ mod tests {
         let pack = walkthrough_pack();
 
         // -- cargo test mode --
-        let replay = pack.replay_command(None);
+        let replay = pack.replay_command();
         assert_eq!(replay.program, "cargo");
-        assert!(replay.args.contains(&"--seed".to_string()));
-        assert!(replay.args.contains(&"42".to_string()));
+        assert!(replay.command_line.contains("ASUPERSYNC_LAB_TEST_SEED=42"));
 
         // The command_line is a shell-ready string.
         assert!(
@@ -3388,19 +3400,9 @@ mod tests {
             replay.command_line
         );
         assert!(
-            replay.command_line.contains("--seed 42"),
+            replay.command_line.contains("ASUPERSYNC_LAB_TEST_SEED=42"),
             "command line should contain seed: {}",
             replay.command_line
-        );
-
-        // -- With artifact path --
-        let replay_with_path = pack.replay_command(Some("/tmp/crashpacks/my_pack.json"));
-        assert!(
-            replay_with_path
-                .command_line
-                .contains("/tmp/crashpacks/my_pack.json"),
-            "command line should reference artifact: {}",
-            replay_with_path.command_line
         );
 
         // -- CLI mode --
@@ -3457,6 +3459,7 @@ mod tests {
             config_hash: 0xCAFE,
             worker_count: 2,
             max_steps: Some(500),
+            test_name: None,
             commit_hash: Some("a1b2c3d".to_string()),
         };
 
@@ -3514,6 +3517,7 @@ mod tests {
             config_hash: 0xCAFE,
             worker_count: 2,
             max_steps: Some(500),
+            test_name: None,
             commit_hash: Some("a1b2c3d".to_string()),
         };
 

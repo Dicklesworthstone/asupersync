@@ -263,8 +263,10 @@ fn the_delta_is_arithmetically_consistent_with_the_consumer_rows() {
 
     // Shared plus each side's exclusive set must reconstruct both totals.
     let shared = number(delta, "shared_crates");
-    let incumbent_only = array(delta, "incumbent_only").len() as i64;
-    let proposal_only = array(delta, "proposal_only").len() as i64;
+    let incumbent_only = i64::try_from(array(delta, "incumbent_only").len())
+        .expect("incumbent-only crate count fits in i64");
+    let proposal_only = i64::try_from(array(delta, "proposal_only").len())
+        .expect("proposal-only crate count fits in i64");
     assert_eq!(
         shared + incumbent_only,
         incumbent,
@@ -341,12 +343,11 @@ fn the_naive_combined_consumer_is_recorded_as_duplicating_asupersync() {
         "the patch must measurably reduce duplication: {patched_dupes} is not fewer than {naive_dupes}"
     );
 
-    let findings: Vec<&str> = array(&artifact, "findings")
+    let has_duplicated_runtime_finding = array(&artifact, "findings")
         .iter()
-        .map(|row| text(row, "finding_id"))
-        .collect();
+        .any(|row| text(row, "finding_id") == "GB-03");
     assert!(
-        findings.contains(&"GB-03"),
+        has_duplicated_runtime_finding,
         "the duplicated-runtime finding must be recorded"
     );
 }

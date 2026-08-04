@@ -411,6 +411,26 @@
         ]
       },
       {
+        "lane_id": "downstream-consumer-default-kafka-test",
+        "lane_class": "run_exact",
+        "expected_graph_roots": [
+          "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+          "tests/kafka_producer_idempotence_audit.rs"
+        ],
+        "expected_heavy_edges": [],
+        "max_expected_crates": 220,
+        "no_claim_boundaries": [
+          "all-root-integration-tests-default-clean",
+          "broad-workspace-health",
+          "conformance-crate",
+          "conformance-dev-dependency-cycle-removal",
+          "kafka-backend-behavior",
+          "performance",
+          "release-readiness",
+          "test-internals-public-api"
+        ]
+      },
+      {
         "lane_id": "downstream-consumer-metrics-run",
         "lane_class": "run_exact",
         "expected_graph_roots": [
@@ -500,6 +520,7 @@
     "unsafe-boundary-ledger-contract",
     "proof-lane-manifest-verifier",
     "downstream-consumer-default-public-api",
+    "downstream-consumer-default-kafka-fail-closed",
     "downstream-consumer-metrics-public-api",
     "downstream-consumer-channel-public-api",
     "downstream-consumer-default-tokio-free",
@@ -514,7 +535,9 @@
     "artifact-governance-validation-harness",
     "artifact-governance-final-signoff",
     "clean-overlay-proof-orchestration-contract",
-    "proof-traffic-final-signoff"
+    "proof-traffic-final-signoff",
+    "dependency-supply-chain-policy-contract",
+    "dependency-budget-contract"
   ],
   "lanes": [
     {
@@ -2143,6 +2166,43 @@
       }
     },
     {
+      "lane_id": "downstream-consumer-default-kafka-test",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_kafka_default CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --test kafka_default_feature_surface -- --nocapture",
+      "package": "asupersync-downstream-consumer-proof",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "downstream-consumer-default-kafka-fail-closed"
+      ],
+      "covers": "Runs the existing Kafka fail-closed assertions as an integration target of the external downstream fixture with only asupersync default features.",
+      "explicit_not_covered": "removing the root conformance dev-dependency cycle, proving every root integration test default-clean, Kafka backend behavior, conformance crate behavior, test-internals public API, broad workspace health, performance, release-readiness.",
+      "expected_signal": "kafka_default_feature_surface runs 2 tests successfully against the external fixture with only default asupersync features",
+      "source_paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/kafka_producer_idempotence_audit.rs"
+      ],
+      "common_unrelated_blockers": [
+        "external fixture compile drift",
+        "public runtime API drift",
+        "remote worker compile cache pressure"
+      ],
+      "escalation_notes": "Use this lane only for the representative downstream default-feature Kafka fail-closed branch; it does not repair or characterize the root package dev-dependency cycle broadly.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "downstream-consumer-default-kafka-fail-closed"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
       "lane_id": "downstream-consumer-metrics-run",
       "kind": "test_frontier",
       "resource_envelope_class": "test-frontier-heavy",
@@ -2960,6 +3020,119 @@
           "peer-dirt-exclusion-without-supported-admitted-terminal-receipt"
         ]
       }
+    },
+    {
+      "lane_id": "dependency-supply-chain-policy-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_supply_chain_policy CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test dependency_supply_chain_policy_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "dependency-supply-chain-policy-contract"
+      ],
+      "covers": "Dependency supply-chain policy schema, exact Cargo scanner versions, RustSec database freshness contract, root and excluded-fuzz lockfile fingerprints, advisory exception ownership and expiry, license/source policy, duplicate ratchets, safe negative-fixture wiring, CI receipts, runbook boundaries, and proof manifest/status mapping stay aligned.",
+      "explicit_not_covered": "Fresh scanner execution until scripts/ci/audit_dependencies.sh run is executed, a green excluded fuzz graph, undisclosed vulnerabilities, legal advice, publisher identity, release readiness, broad workspace health, runtime correctness, performance, or live RCH fleet availability.",
+      "expected_signal": "dependency_supply_chain_policy_contract tests pass",
+      "source_paths": [
+        "deny.toml",
+        ".cargo/audit.toml",
+        "scripts/ci/audit_dependencies.sh",
+        ".github/workflows/ci.yml",
+        "artifacts/dependency_supply_chain_policy_v1.json",
+        "docs/dependency_supply_chain_policy.md",
+        "tests/dependency_supply_chain_policy_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json",
+        "README.md",
+        "AGENTS.md"
+      ],
+      "common_unrelated_blockers": [
+        "pinned Cargo scanner installation unavailable",
+        "RustSec advisory database missing or older than seven days",
+        "root Cargo.lock or policy baseline drift",
+        "excluded fuzz lock remains stale and non-green",
+        "manifest projection golden drift",
+        "proof-status marker drift"
+      ],
+      "escalation_notes": "Use this lane only for the checked policy and integration contract. Cite live root scanner health only from a current runner receipt. The excluded fuzz row remains non-green until its separately owned lockfile and advisory findings are resolved.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "dependency-supply-chain-policy-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "fresh-scanner-pass",
+          "excluded-fuzz-health",
+          "no-undisclosed-vulnerabilities",
+          "legal-compliance",
+          "publisher-authentication",
+          "release-readiness",
+          "workspace-health",
+          "runtime-correctness",
+          "live-rch-fleet-availability"
+        ]
+      }
+    },
+    {
+      "lane_id": "dependency-budget-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_budget_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features dependency-ledger --test dependency_budget_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [
+        "dependency-ledger"
+      ],
+      "guarantee_ids": [
+        "dependency-budget-contract"
+      ],
+      "covers": "The exact direct-dependency allowset, frozen marginal-ledger fingerprint, synthesized-consumer profile/target/host/edge-kind partitions, package-version and unique-name ceilings, ratchet-down behavior, fail-closed direct-edge and graph-growth fixtures, reviewed-exception schema, generator/docs markers, and proof manifest/status mapping stay aligned.",
+      "explicit_not_covered": "Dependency removal or cutover authority, compilation, runtime correctness, security, performance, interoperability, release readiness, broad workspace health, workspace dev/build graph health, excluded fuzz health, or live RCH fleet availability.",
+      "expected_signal": "dependency_budget_contract tests pass",
+      "source_paths": [
+        "artifacts/dependency_budget_contract_v1.json",
+        "artifacts/dependency_marginal_ledger_v1.json",
+        "src/bin/dependency_marginal_ledger.rs",
+        "docs/dependency_budget_contract.md",
+        "tests/dependency_budget_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json",
+        "README.md",
+        "AGENTS.md"
+      ],
+      "common_unrelated_blockers": [
+        "frozen marginal-ledger fingerprint drift",
+        "Cargo.toml direct-edge inventory drift",
+        "unreviewed synthesized-consumer graph growth",
+        "manifest projection golden drift",
+        "proof-status marker drift"
+      ],
+      "escalation_notes": "Regenerate the marginal ledger before the budget whenever Cargo or lock resolution changes. A rare upward exception must be added to the existing budget before regeneration and must identify its reviewer, approval, expiry, review reference, rationale, and exact edge or graph cell.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "dependency-budget-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "dependency-removal-authority",
+          "dependency-cutover-authority",
+          "release-readiness",
+          "workspace-health",
+          "runtime-correctness",
+          "security",
+          "performance",
+          "excluded-fuzz-health",
+          "live-rch-fleet-availability"
+        ]
+      }
     }
   ],
   "guarantees": [
@@ -3244,6 +3417,13 @@
       ]
     },
     {
+      "guarantee_id": "downstream-consumer-default-kafka-fail-closed",
+      "description": "default-kafka-fail-closed-test runs the representative Kafka boundary as a true external default-feature test without root dev-dependency feature unification.",
+      "lane_ids": [
+        "downstream-consumer-default-kafka-test"
+      ]
+    },
+    {
       "guarantee_id": "downstream-consumer-metrics-public-api",
       "description": "metrics-public-surface-run is represented by a downstream-consumer proof lane with explicit no-claim boundaries.",
       "lane_ids": [
@@ -3360,6 +3540,20 @@
       "description": "Proof-traffic A6 final signoff artifact, A1-A5 evidence aggregation, capability-drift gate, admission receipt taxonomy, clean-overlay handshake, proof parking lot, blocked-loop e2e packet, manifest/status rows, README/AGENTS markers, no-local-fallback and no-peer-cancel policies, dependency-cycle receipt/checklist, and scoped no-claim boundaries have a canonical verifier command.",
       "lane_ids": [
         "proof-traffic-final-signoff"
+      ]
+    },
+    {
+      "guarantee_id": "dependency-supply-chain-policy-contract",
+      "description": "Pinned Cargo scanner policy, RustSec freshness receipts, workspace graph scope, expiring exceptions, license/source rules, duplicate ratchets, negative fixtures, CI/runbook wiring, excluded-fuzz quarantine, and scoped no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "dependency-supply-chain-policy-contract"
+      ]
+    },
+    {
+      "guarantee_id": "dependency-budget-contract",
+      "description": "The exact direct-edge allowset, synthesized-consumer package-ID graph ceilings, automatic downward ratchet, reviewed upward-exception path, safe negative fixtures, and scoped no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "dependency-budget-contract"
       ]
     }
   ],

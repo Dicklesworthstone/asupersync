@@ -190,9 +190,15 @@ fn worker_panic_path_marks_outcome_panicked_not_cancelled() {
     // them would erase the panic-vs-cancel distinction.
     let source = read("src/runtime/scheduler/three_lane.rs");
 
+    // E1.2 subsystem 3b (br-asupersync-sched-hot-path-perf-bt4y5f.2.2): the
+    // Err arm builds `panic_outcome` once and routes it into the single
+    // ordered completion seam as `PolledCompletion::Panicked`; the terminal
+    // transition itself is applied by the shared `apply_polled_completion`
+    // arm (`record.complete(outcome)` guarded by `is_terminal`). The window
+    // from the Err arm covers both the routing and the shared apply arm.
     let err_marker = "Err(payload) => {";
     let pos = source.find(err_marker).expect("Err arm marker");
-    let window_end = (pos + 4000).min(source.len());
+    let window_end = (pos + 9000).min(source.len());
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
@@ -201,9 +207,12 @@ fn worker_panic_path_marks_outcome_panicked_not_cancelled() {
     let body = &source[pos..safe_end];
 
     assert!(
-        body.contains("record.complete(crate::types::Outcome::Panicked(panic_payload));"),
+        body.contains("let panic_outcome = crate::types::Outcome::Panicked(panic_payload);")
+            && body.contains("PolledCompletion::Panicked(panic_outcome),")
+            && body.contains("record.complete(outcome);"),
         "REGRESSION: catch_unwind Err arm no longer marks \
-         the task Outcome::Panicked. Either it marks \
+         the task Outcome::Panicked (routing through the \
+         ordered completion seam). Either it marks \
          Outcome::Cancelled (conflation) or doesn't mark a \
          terminal at all (region never quiesces).",
     );
@@ -251,29 +260,53 @@ fn worker_panic_path_wakes_dependents_so_parent_observes_panicked() {
     // this, the parent silently hangs waiting on the join.
     let source = read("src/runtime/scheduler/three_lane.rs");
 
+    // E1.2 subsystem 3b: the Err arm delegates to the single ordered
+    // completion seam (`complete_polled_task_ordered`); waiter gathering and
+    // dependent wakes live in the seam's two arms (external-record and
+    // unified fallback), so the audit scans the arm routing first and then
+    // the seam function itself.
     let err_marker = "Err(payload) => {";
     let pos = source.find(err_marker).expect("Err arm marker");
-    let window_end = (pos + 4000).min(source.len());
-    let safe_end = source
+    let arm_end = (pos + 2000).min(source.len());
+    let safe_arm_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .rfind(|&i| i <= window_end)
-        .unwrap_or(window_end);
-    let body = &source[pos..safe_end];
+        .rfind(|&i| i <= arm_end)
+        .unwrap_or(arm_end);
+    let arm = &source[pos..safe_arm_end];
+    assert!(
+        arm.contains("self.complete_polled_task_ordered(")
+            && arm.contains("PolledCompletion::Panicked(panic_outcome),")
+            && arm.contains("artifacts.dispatch_post_lock(self);"),
+        "REGRESSION: panic Err arm no longer routes through the ordered \
+         completion seam. Completion effects (waiter wakes, observer) are \
+         no longer guaranteed — the parent's JoinHandle may never resolve.",
+    );
+
+    let seam_marker = "fn complete_polled_task_ordered(";
+    let seam_pos = source.find(seam_marker).expect("ordered completion seam");
+    let seam_end = source[seam_pos..]
+        .find("fn complete_task_after_unwind_ordered")
+        .map_or(source.len(), |offset| seam_pos + offset);
+    let seam = &source[seam_pos..seam_end];
 
     assert!(
-        body.contains("let (waiters, completion_observer)")
-            && body.contains("state.task_completed(task_id).into_parts();"),
-        "REGRESSION: panic Err arm no longer gathers waiters \
-         and the owned completion observer via task_completed. The parent's JoinHandle never \
+        seam.contains("let (waiters, completion_observer)")
+            && seam.contains("state.task_completed_from_external_record(record)")
+            && seam.contains("state.task_completed(task_id).into_parts();"),
+        "REGRESSION: the ordered completion seam no longer gathers waiters \
+         and the owned completion observer via task_completed (external-\
+         record arm or unified fallback). The parent's JoinHandle never \
          resolves — silent task hang.",
     );
 
     assert!(
-        body.contains("self.wake_dependents_locked(&state, waiters);"),
-        "REGRESSION: panic Err arm no longer wakes \
-         dependents. Parent JoinHandle never re-enters the \
-         dispatch loop — silent task hang.",
+        seam.matches("self.wake_dependents_locked(&state, waiters);")
+            .count()
+            >= 2,
+        "REGRESSION: the ordered completion seam no longer wakes \
+         dependents in both completion arms. Parent JoinHandle never \
+         re-enters the dispatch loop — silent task hang.",
     );
 }
 
@@ -285,28 +318,55 @@ fn worker_panic_path_drains_finalizers_for_region_cleanup() {
     // region cleanup is stranded after a task panic.
     let source = read("src/runtime/scheduler/three_lane.rs");
 
-    let err_marker = "Err(payload) => {";
-    let pos = source.find(err_marker).expect("Err arm marker");
-    let window_end = (pos + 4000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .rfind(|&i| i <= window_end)
-        .unwrap_or(window_end);
-    let body = &source[pos..safe_end];
+    // E1.2 subsystem 3b: every completion path drains through the single
+    // gated B→A seam `drain_ready_finalizers_locked` (external-table arm and
+    // unified fallback both call it inside `complete_polled_task_ordered`),
+    // and scheduling routes through publish_ready_finalizers plus the
+    // post-unlock finish_ready_finalizer_publication half carried by the
+    // completion artifacts.
+    let seam_marker = "fn complete_polled_task_ordered(";
+    let seam_pos = source.find(seam_marker).expect("ordered completion seam");
+    let seam_end = source[seam_pos..]
+        .find("fn complete_task_after_unwind_ordered")
+        .map_or(source.len(), |offset| seam_pos + offset);
+    let seam = &source[seam_pos..seam_end];
 
     assert!(
-        body.contains("let finalizers = state.drain_ready_async_finalizers();"),
-        "REGRESSION: panic Err arm no longer drains \
-         finalizers. Region cleanup is stranded — the \
-         region stays in Closing state forever after a \
-         task panic.",
+        seam.matches("self.drain_ready_finalizers_locked(&mut state)")
+            .count()
+            >= 2,
+        "REGRESSION: the ordered completion seam no longer drains \
+         finalizers in both arms (external-table and unified fallback). \
+         Region cleanup is stranded — the region stays in Closing state \
+         forever after a task panic.",
+    );
+
+    let drain_marker = "fn drain_ready_finalizers_locked(";
+    let drain_pos = source.find(drain_marker).expect("finalizer drain seam");
+    let drain_end = (drain_pos + 2500).min(source.len());
+    let safe_drain_end = source
+        .char_indices()
+        .map(|(i, _)| i)
+        .rfind(|&i| i <= drain_end)
+        .unwrap_or(drain_end);
+    let drain = &source[drain_pos..safe_drain_end];
+    assert!(
+        drain.contains("state.has_finalizing_regions()")
+            && drain.contains("state.drain_ready_async_finalizers_in(")
+            && drain.contains("&mut finalizer_tasks,"),
+        "REGRESSION: the B→A finalizer drain seam no longer routes drained \
+         finalizers through the minting-table target. Finalizer tasks mint \
+         in a table the dispatching workers never consult — region cleanup \
+         silently never runs.",
     );
 
     assert!(
-        body.contains("self.global.inject_ready_uncounted(finalizer_task, priority);")
-            && body.contains("self.coordinator.wake_many(finalizer_wakes);"),
-        "REGRESSION: panic Err arm no longer schedules \
+        seam.matches("self.publish_ready_finalizers(finalizers)")
+            .count()
+            >= 2
+            && source
+                .contains("worker.finish_ready_finalizer_publication(self.finalizer_publication);"),
+        "REGRESSION: panic completion no longer schedules \
          drained finalizers. Even if the drain happens, the \
          finalizers don't run — region cleanup is silently \
          dropped.",
@@ -392,11 +452,33 @@ fn task_execution_guard_safety_net_marks_panicked_under_unwind() {
          terminal — region.quiesce hangs.",
     );
 
-    // The safety net must also mark Panicked.
+    // E1.2 subsystem 3b: the guard drop delegates to the unwind-ordered
+    // completion seam, which synthesizes the Panicked terminal state and
+    // routes it through the shared apply arm. Pin the routing first, then
+    // the synthesis inside the seam.
+    let net_pos = source
+        .find("if !self.completed && std::thread::panicking() {")
+        .expect("safety net marker");
+    let net_end = (net_pos + 1500).min(source.len());
+    let net_body = &source[net_pos..net_end];
     assert!(
-        source.contains("record.complete(crate::types::Outcome::Panicked(\n                                    crate::types::outcome::PanicPayload::new(")
-            || source.contains("Outcome::Panicked(crate::types::outcome::PanicPayload::new("),
-        "REGRESSION: TaskExecutionGuard safety net no longer \
+        net_body.contains(".complete_task_after_unwind_ordered(self.task_id);")
+            && net_body.contains("artifacts.dispatch_post_lock(self.worker);"),
+        "REGRESSION: TaskExecutionGuard safety net no longer routes through \
+         the unwind-ordered completion seam. The escape path leaves the \
+         task in a non-terminal state.",
+    );
+
+    let unwind_pos = source
+        .find("fn complete_task_after_unwind_ordered(")
+        .expect("unwind completion seam");
+    let unwind_end = (unwind_pos + 4000).min(source.len());
+    let unwind_body = &source[unwind_pos..unwind_end];
+    assert!(
+        unwind_body.contains("crate::types::Outcome::Panicked(")
+            && unwind_body.contains("crate::types::outcome::PanicPayload::new(")
+            && unwind_body.contains("PolledCompletion::Panicked(panic_outcome)"),
+        "REGRESSION: the unwind completion seam no longer \
          marks Outcome::Panicked. The escape path leaves \
          the task in a non-terminal state.",
     );
@@ -410,9 +492,12 @@ fn panic_payload_carries_message_for_parent_join_observation() {
     // can't see the panic reason.
     let source = read("src/runtime/scheduler/three_lane.rs");
 
+    // E1.2: the message is extracted once into `panic_message` (the opaque
+    // payload is then leaked fail-closed) and the PanicPayload is built
+    // from that string.
     let err_marker = "Err(payload) => {";
     let pos = source.find(err_marker).expect("Err arm marker");
-    let window_end = (pos + 4000).min(source.len());
+    let window_end = (pos + 9000).min(source.len());
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
@@ -421,8 +506,8 @@ fn panic_payload_carries_message_for_parent_join_observation() {
     let body = &source[pos..safe_end];
 
     assert!(
-        body.contains("crate::types::outcome::PanicPayload::new(")
-            && body.contains("crate::cx::scope::payload_to_string(&payload),"),
+        body.contains("let panic_message = crate::cx::scope::payload_to_string(&payload);")
+            && body.contains("crate::types::outcome::PanicPayload::new(panic_message)"),
         "REGRESSION: panic Err arm no longer constructs \
          PanicPayload from the downcast payload string. The \
          Panicked outcome carries an empty payload — \
@@ -439,27 +524,36 @@ fn worker_panic_path_releases_state_lock_with_drop_state() {
     // ordering invariant.
     let source = read("src/runtime/scheduler/three_lane.rs");
 
-    let err_marker = "Err(payload) => {";
-    let pos = source.find(err_marker).expect("Err arm marker");
-    let window_end = (pos + 4000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .rfind(|&i| i <= window_end)
-        .unwrap_or(window_end);
-    let body = &source[pos..safe_end];
+    // E1.2 subsystem 3b: both arms of the ordered completion seam end their
+    // state critical section with an explicit drop before the artifacts'
+    // observer/wake dispatch runs post-lock.
+    let seam_marker = "fn complete_polled_task_ordered(";
+    let seam_pos = source.find(seam_marker).expect("ordered completion seam");
+    let seam_end = source[seam_pos..]
+        .find("fn complete_task_after_unwind_ordered")
+        .map_or(source.len(), |offset| seam_pos + offset);
+    let seam = &source[seam_pos..seam_end];
 
     assert!(
-        body.contains("drop(state);"),
-        "REGRESSION: panic Err arm no longer explicitly \
-         drops the state lock. The implicit drop at scope \
-         end may delay other workers waiting for the lock — \
+        seam.matches("drop(state);").count() >= 2,
+        "REGRESSION: the ordered completion seam no longer explicitly \
+         drops the state lock in both completion arms. The implicit drop \
+         at scope end may delay other workers waiting for the lock — \
          minor performance issue but signals a control-flow \
          change worth investigating.",
     );
 
     // guard.completed = true is the final action that
     // suppresses the safety-net guard's Drop.
+    let err_marker = "Err(payload) => {";
+    let pos = source.find(err_marker).expect("Err arm marker");
+    let window_end = (pos + 2000).min(source.len());
+    let safe_end = source
+        .char_indices()
+        .map(|(i, _)| i)
+        .rfind(|&i| i <= window_end)
+        .unwrap_or(window_end);
+    let body = &source[pos..safe_end];
     assert!(
         body.contains("guard.completed = true;"),
         "REGRESSION: panic Err arm no longer sets \
@@ -483,16 +577,36 @@ fn region_quiescence_advances_after_panicked_task_via_is_terminal() {
          quiescence after task panic depends on this check.",
     );
 
+    // E2 S4b-1a (br-asupersync-m9wsza) split the finalize gate into a
+    // target-threaded core: the public wrapper delegates to
+    // can_region_finalize_in, which owns the per-task terminal check. Pin
+    // both links so the chain public-entry → core → is_terminal() stays
+    // intact regardless of the wrapper/core split.
     let fn_marker = "pub fn can_region_finalize(&self, region_id: RegionId) -> bool {";
     let start = source.find(fn_marker).expect("can_region_finalize fn");
-    let body_end = source[start..]
+    let wrapper_end = source[start..]
         .find("\n    }\n")
         .expect("can_region_finalize close");
-    let body = &source[start..start + body_end];
-
+    let wrapper_body = &source[start..start + wrapper_end];
     assert!(
-        body.contains("t.state.is_terminal()"),
-        "REGRESSION: can_region_finalize no longer uses \
+        wrapper_body.contains("can_region_finalize_in("),
+        "REGRESSION: can_region_finalize no longer delegates to the \
+         target-threaded core. The per-task terminal check below is \
+         pinned on the core; if the wrapper grew its own logic the two \
+         can drift.",
+    );
+
+    let core_marker = "fn can_region_finalize_in(";
+    let core_start = source
+        .find(core_marker)
+        .expect("can_region_finalize_in core");
+    let core_end = source[core_start..]
+        .find("\n    }\n")
+        .expect("can_region_finalize_in close");
+    let core_body = &source[core_start..core_start + core_end];
+    assert!(
+        core_body.contains("t.state.is_terminal()"),
+        "REGRESSION: the finalize gate no longer uses \
          is_terminal() for the per-task check. If it now \
          requires a specific outcome variant (e.g., only Ok \
          counts as terminal), panicked tasks would prevent \

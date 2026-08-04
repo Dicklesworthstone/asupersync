@@ -4,45 +4,51 @@
 //! format, allowing:
 //!
 //! - **Forward compatibility**: Newer runtimes can read older trace files
-//! - **Backward tolerance**: Unknown events are skipped with warnings
-//! - **Migration**: Transform traces from older formats to newer ones
+//! - **Strict compatibility**: Unknown records are rejected without silently skipping
+//!   or weakening deterministic replay
+//! - **Explicit inspection**: `read_event_compat` can return one rejected
+//!   record and its raw bytes for diagnostics
+//! - **Migration**: Transform traces only when every event has a lossless mapping
 //!
 //! # Version Policy
 //!
 //! - Schema version increments on breaking changes to event format
 //! - File format version increments on changes to the binary container
-//! - Older traces can always be read; unknown events are skipped
-//! - Migration transforms old event types to new equivalents
+//! - Supported older containers can be read when their replay schema is known
+//! - Unknown records fail closed in `read_event`, `events`, and `load_all`
+//! - Migration rejects a trace if any event has no lossless mapping
 //!
 //! # Example
 //!
 //! ```ignore
 //! use asupersync::trace::compat::{TraceMigrator, CompatReader};
 //!
-//! // Read a trace with compatibility handling
-//! let reader = CompatReader::open("old_trace.bin")?;
+//! // Ordinary iteration is strict: an unknown event is an error.
+//! let mut reader = CompatReader::open("old_trace.bin")?;
 //! for event in reader.events() {
-//!     match event {
-//!         Ok(event) => process(event),
-//!         Err(CompatEvent::Skipped { reason }) => {
-//!             warn!("Skipped unknown event: {}", reason);
-//!         }
-//!         Err(CompatEvent::Error(e)) => return Err(e),
-//!     }
+//!     process(event?);
+//! }
+//!
+//! // Diagnostic tooling can explicitly inspect one rejected raw record.
+//! let mut reader = CompatReader::open("old_trace.bin")?;
+//! if let Some(CompatEvent::Skipped { reason, raw_bytes }) =
+//!     reader.read_event_compat()?
+//! {
+//!     inspect_rejected_record(&reason, &raw_bytes);
 //! }
 //! ```
 
-use super::file::{HEADER_SIZE, TRACE_FILE_VERSION, TRACE_MAGIC, TraceFileError, TraceFileResult};
+use super::file::{
+    FLAG_CHECKSUMMED, FLAG_COMPRESSED, MAX_EVENT_LEN, MAX_EVENT_PREALLOC, MAX_META_LEN,
+    TRACE_CHECKSUM_LEN, TRACE_FILE_VERSION, TRACE_MAGIC, TraceFileError, TraceFileResult,
+};
 use super::replay::{REPLAY_SCHEMA_VERSION, ReplayEvent, TraceMetadata};
-use crate::tracing_compat::warn;
+use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 type SkipHandler = dyn Fn(&str, &[u8]) + Send + Sync;
-const MAX_META_SIZE: usize = 64 * 1024 * 1024;
-const MAX_EVENT_SIZE: usize = 64 * 1024 * 1024;
-
 // =============================================================================
 // Version Compatibility
 // =============================================================================
@@ -167,10 +173,8 @@ impl CompatStats {
 
 /// A trace reader with forward and backward compatibility support.
 ///
-/// Unlike `TraceReader`, this reader:
-/// - Accepts older schema versions (within supported range)
-/// - Skips unknown events with warnings instead of failing
-/// - Provides statistics about compatibility issues
+/// Unlike `TraceReader`, this reader can expose an undecodable event and its
+/// raw bytes through [`CompatEvent`]. Ordinary reads remain fail-closed.
 pub struct CompatReader {
     reader: BufReader<File>,
     metadata: TraceMetadata,
@@ -178,6 +182,8 @@ pub struct CompatReader {
     events_read: u64,
     events_start_pos: u64,
     schema_version: u32,
+    expected_event_digest: Option<[u8; TRACE_CHECKSUM_LEN]>,
+    event_hasher: Sha256,
     stats: CompatStats,
     on_skip: Option<Box<SkipHandler>>,
 }
@@ -206,7 +212,7 @@ impl CompatReader {
         let mut version_bytes = [0u8; 2];
         reader.read_exact(&mut version_bytes)?;
         let file_version = u16::from_le_bytes(version_bytes);
-        if file_version > TRACE_FILE_VERSION {
+        if !(1..=TRACE_FILE_VERSION).contains(&file_version) {
             return Err(TraceFileError::UnsupportedVersion {
                 expected: TRACE_FILE_VERSION,
                 found: file_version,
@@ -217,18 +223,25 @@ impl CompatReader {
         let mut flags_bytes = [0u8; 2];
         reader.read_exact(&mut flags_bytes)?;
         let flags = u16::from_le_bytes(flags_bytes);
-        if flags != 0 {
-            // For forward compat, we warn about unknown flags but continue
-            // Only fail on flags we know are incompatible
-            if flags & super::file::FLAG_COMPRESSED != 0 {
-                return Err(TraceFileError::UnsupportedFlags(flags));
-            }
+        let supported_flags = if file_version >= 3 {
+            FLAG_COMPRESSED | FLAG_CHECKSUMMED
+        } else {
+            FLAG_COMPRESSED
+        };
+        if flags & !supported_flags != 0
+            || flags & FLAG_COMPRESSED != 0
+            || (file_version >= 3 && flags & FLAG_CHECKSUMMED == 0)
+        {
+            return Err(TraceFileError::UnsupportedFlags(flags));
         }
 
         // Read compression byte (only in version 2+)
         if file_version >= 2 {
             let mut compression_byte = [0u8; 1];
             reader.read_exact(&mut compression_byte)?;
+            if compression_byte[0] != 0 {
+                return Err(TraceFileError::UnsupportedCompression(compression_byte[0]));
+            }
         }
 
         // Read metadata length
@@ -236,17 +249,33 @@ impl CompatReader {
         reader.read_exact(&mut meta_len_bytes)?;
         let meta_len = u32::from_le_bytes(meta_len_bytes) as usize;
 
-        if meta_len > MAX_META_SIZE {
+        if meta_len > MAX_META_LEN {
             return Err(TraceFileError::OversizedField {
                 field: "metadata",
                 actual: meta_len as u64,
-                max: MAX_META_SIZE as u64,
+                max: MAX_META_LEN as u64,
             });
         }
+
+        let expected_metadata_digest = if file_version >= 3 {
+            let mut digest = [0u8; TRACE_CHECKSUM_LEN];
+            reader.read_exact(&mut digest)?;
+            Some(digest)
+        } else {
+            None
+        };
 
         // Read metadata with lenient deserialization
         let mut meta_bytes = vec![0u8; meta_len];
         reader.read_exact(&mut meta_bytes)?;
+        if let Some(expected) = expected_metadata_digest {
+            let actual: [u8; TRACE_CHECKSUM_LEN] = Sha256::digest(&meta_bytes).into();
+            if expected != actual {
+                return Err(TraceFileError::ChecksumMismatch {
+                    section: "metadata",
+                });
+            }
+        }
         let metadata: TraceMetadata = rmp_serde::from_slice(&meta_bytes)?;
 
         // Check schema version compatibility
@@ -268,14 +297,10 @@ impl CompatReader {
                 found,
                 max_supported,
             } => {
-                // For forward compat with newer traces, we proceed but may skip events
-                // Log a warning via structured tracing (caller can also check stats).
-                let _ = (found, max_supported);
-                warn!(
+                return Err(TraceFileError::SchemaMismatch {
+                    expected: max_supported,
                     found,
-                    max_supported,
-                    "trace schema version is newer than supported; some events may be skipped"
-                );
+                });
             }
         }
 
@@ -284,13 +309,24 @@ impl CompatReader {
         reader.read_exact(&mut event_count_bytes)?;
         let event_count = u64::from_le_bytes(event_count_bytes);
 
-        // Header size depends on version (version 2+ has compression byte)
-        let header_size = if file_version >= 2 {
-            HEADER_SIZE
+        let expected_event_digest = if file_version >= 3 {
+            let mut digest = [0u8; TRACE_CHECKSUM_LEN];
+            reader.read_exact(&mut digest)?;
+            Some(digest)
         } else {
-            HEADER_SIZE - 1
+            None
         };
-        let events_start_pos = header_size as u64 + meta_len as u64 + 8;
+        let events_start_pos = reader.stream_position()?;
+        if event_count == 0 {
+            if let Some(expected) = expected_event_digest {
+                let actual: [u8; TRACE_CHECKSUM_LEN] = Sha256::digest([]).into();
+                if expected != actual {
+                    return Err(TraceFileError::ChecksumMismatch {
+                        section: "event stream",
+                    });
+                }
+            }
+        }
 
         Ok(Self {
             reader,
@@ -299,6 +335,8 @@ impl CompatReader {
             events_read: 0,
             events_start_pos,
             schema_version,
+            expected_event_digest,
+            event_hasher: Sha256::new(),
             stats: CompatStats::default(),
             on_skip: None,
         })
@@ -340,57 +378,23 @@ impl CompatReader {
         &self.stats
     }
 
-    /// Reads the next event, skipping unknown events.
+    /// Reads the next event without fallback.
     ///
     /// Returns `Ok(None)` when all events have been read.
-    /// Unknown events are skipped and recorded in stats.
+    /// Unknown events are an explicit deserialization error. Use
+    /// [`read_event_compat`](Self::read_event_compat) to inspect one rejected
+    /// raw record at a time.
     pub fn read_event(&mut self) -> TraceFileResult<Option<ReplayEvent>> {
-        loop {
-            if self.events_read >= self.event_count {
-                return Ok(None);
-            }
-
-            // Read event length
-            let mut len_bytes = [0u8; 4];
-            self.reader
-                .read_exact(&mut len_bytes)
-                .map_err(TraceFileError::Io)?;
-            let len = u32::from_le_bytes(len_bytes) as usize;
-
-            if len > MAX_EVENT_SIZE {
-                return Err(TraceFileError::OversizedField {
-                    field: "event",
-                    actual: len as u64,
-                    max: MAX_EVENT_SIZE as u64,
-                });
-            }
-
-            // Read event data
-            let mut event_bytes = vec![0u8; len];
-            self.reader.read_exact(&mut event_bytes)?;
-            self.events_read += 1;
-
-            // Try to deserialize
-            match rmp_serde::from_slice::<ReplayEvent>(&event_bytes) {
-                Ok(event) => {
-                    self.stats.record_read();
-                    return Ok(Some(event));
-                }
-                Err(e) => {
-                    // Try to extract the event type from the raw bytes for logging
-                    let event_type = extract_event_type(&event_bytes);
-                    let reason = format!("unknown event type: {e}");
-
-                    self.stats.record_skipped(event_type.as_deref());
-
-                    if let Some(ref callback) = self.on_skip {
-                        callback(&reason, &event_bytes);
-                    }
-
-                    // Continue to next event
-                }
-            }
+        if self.events_read >= self.event_count {
+            return Ok(None);
         }
+
+        let (len_bytes, event_bytes) = self.read_event_frame()?;
+        let event = rmp_serde::from_slice::<ReplayEvent>(&event_bytes)?;
+        self.record_frame(&len_bytes, &event_bytes)?;
+        self.events_read += 1;
+        self.stats.record_read();
+        Ok(Some(event))
     }
 
     /// Reads the next event, returning detailed compatibility info.
@@ -402,24 +406,8 @@ impl CompatReader {
             return Ok(None);
         }
 
-        // Read event length
-        let mut len_bytes = [0u8; 4];
-        self.reader
-            .read_exact(&mut len_bytes)
-            .map_err(TraceFileError::Io)?;
-        let len = u32::from_le_bytes(len_bytes) as usize;
-
-        if len > MAX_EVENT_SIZE {
-            return Err(TraceFileError::OversizedField {
-                field: "event",
-                actual: len as u64,
-                max: MAX_EVENT_SIZE as u64,
-            });
-        }
-
-        // Read event data
-        let mut event_bytes = vec![0u8; len];
-        self.reader.read_exact(&mut event_bytes)?;
+        let (len_bytes, event_bytes) = self.read_event_frame()?;
+        self.record_frame(&len_bytes, &event_bytes)?;
         self.events_read += 1;
 
         // Try to deserialize
@@ -449,13 +437,15 @@ impl CompatReader {
         }
     }
 
-    /// Returns an iterator over events, skipping unknown ones.
+    /// Returns a fail-closed iterator over events.
     #[must_use]
     pub fn events(self) -> CompatEventIterator {
         CompatEventIterator {
             reader: self.reader,
             remaining: self.event_count,
             on_skip: self.on_skip,
+            expected_event_digest: self.expected_event_digest,
+            event_hasher: self.event_hasher,
         }
     }
 
@@ -463,16 +453,56 @@ impl CompatReader {
     pub fn rewind(&mut self) -> TraceFileResult<()> {
         self.reader.seek(SeekFrom::Start(self.events_start_pos))?;
         self.events_read = 0;
+        self.event_hasher = Sha256::new();
         Ok(())
     }
 
-    /// Loads all known events into memory, skipping unknown ones.
+    /// Loads all known events into memory without skipping unknown records.
     pub fn load_all(mut self) -> TraceFileResult<(Vec<ReplayEvent>, CompatStats)> {
-        let mut events = Vec::with_capacity(self.event_count as usize);
+        let mut events = Vec::with_capacity(
+            usize::try_from(self.event_count)
+                .unwrap_or(usize::MAX)
+                .min(MAX_EVENT_PREALLOC),
+        );
         while let Some(event) = self.read_event()? {
             events.push(event);
         }
         Ok((events, self.stats))
+    }
+
+    fn read_event_frame(&mut self) -> TraceFileResult<([u8; 4], Vec<u8>)> {
+        let mut len_bytes = [0u8; 4];
+        self.reader
+            .read_exact(&mut len_bytes)
+            .map_err(TraceFileError::Io)?;
+        let len = u32::from_le_bytes(len_bytes) as usize;
+        if len > MAX_EVENT_LEN {
+            return Err(TraceFileError::OversizedField {
+                field: "event",
+                actual: len as u64,
+                max: MAX_EVENT_LEN as u64,
+            });
+        }
+
+        let mut event_bytes = vec![0u8; len];
+        self.reader.read_exact(&mut event_bytes)?;
+        Ok((len_bytes, event_bytes))
+    }
+
+    fn record_frame(&mut self, len_bytes: &[u8; 4], event_bytes: &[u8]) -> TraceFileResult<()> {
+        self.event_hasher.update(len_bytes);
+        self.event_hasher.update(event_bytes);
+        if self.events_read.saturating_add(1) == self.event_count {
+            if let Some(expected) = self.expected_event_digest {
+                let actual: [u8; TRACE_CHECKSUM_LEN] = self.event_hasher.clone().finalize().into();
+                if expected != actual {
+                    return Err(TraceFileError::ChecksumMismatch {
+                        section: "event stream",
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -481,58 +511,65 @@ pub struct CompatEventIterator {
     reader: BufReader<File>,
     remaining: u64,
     on_skip: Option<Box<SkipHandler>>,
+    expected_event_digest: Option<[u8; TRACE_CHECKSUM_LEN]>,
+    event_hasher: Sha256,
 }
 
 impl Iterator for CompatEventIterator {
     type Item = TraceFileResult<ReplayEvent>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if self.remaining == 0 {
-                return None;
-            }
+        if self.remaining == 0 {
+            return None;
+        }
 
-            // Read event length
-            let mut len_bytes = [0u8; 4];
-            if let Err(e) = self.reader.read_exact(&mut len_bytes) {
-                return Some(Err(TraceFileError::Io(e)));
-            }
-            let len = u32::from_le_bytes(len_bytes) as usize;
+        let mut len_bytes = [0u8; 4];
+        if let Err(error) = self.reader.read_exact(&mut len_bytes) {
+            return Some(Err(TraceFileError::Io(error)));
+        }
+        let len = u32::from_le_bytes(len_bytes) as usize;
+        if len > MAX_EVENT_LEN {
+            return Some(Err(TraceFileError::OversizedField {
+                field: "event",
+                actual: len as u64,
+                max: MAX_EVENT_LEN as u64,
+            }));
+        }
 
-            if len > MAX_EVENT_SIZE {
-                return Some(Err(TraceFileError::OversizedField {
-                    field: "event",
-                    actual: len as u64,
-                    max: MAX_EVENT_SIZE as u64,
-                }));
-            }
+        let mut event_bytes = vec![0u8; len];
+        if let Err(error) = self.reader.read_exact(&mut event_bytes) {
+            return Some(Err(TraceFileError::Io(error)));
+        }
 
-            // Read event data
-            let mut event_bytes = vec![0u8; len];
-            if let Err(e) = self.reader.read_exact(&mut event_bytes) {
-                return Some(Err(TraceFileError::Io(e)));
-            }
-
-            self.remaining -= 1;
-
-            // Try to deserialize
-            match rmp_serde::from_slice::<ReplayEvent>(&event_bytes) {
-                Ok(event) => return Some(Ok(event)),
-                Err(e) => {
-                    // Skip unknown events
-                    if let Some(ref callback) = self.on_skip {
-                        let event_type = extract_event_type(&event_bytes);
-                        let reason = format!(
-                            "skipping unknown event: {}{}",
-                            event_type
-                                .map(|t| format!("type '{t}', "))
-                                .unwrap_or_default(),
-                            e
-                        );
-                        callback(&reason, &event_bytes);
-                    }
-                    // Continue to next event
+        self.event_hasher.update(len_bytes);
+        self.event_hasher.update(&event_bytes);
+        if self.remaining == 1 {
+            if let Some(expected) = self.expected_event_digest {
+                let actual: [u8; TRACE_CHECKSUM_LEN] = self.event_hasher.clone().finalize().into();
+                if expected != actual {
+                    return Some(Err(TraceFileError::ChecksumMismatch {
+                        section: "event stream",
+                    }));
                 }
+            }
+        }
+        self.remaining -= 1;
+
+        match rmp_serde::from_slice::<ReplayEvent>(&event_bytes) {
+            Ok(event) => Some(Ok(event)),
+            Err(error) => {
+                if let Some(ref callback) = self.on_skip {
+                    let event_type = extract_event_type(&event_bytes);
+                    let reason = format!(
+                        "rejected unknown event: {}{}",
+                        event_type
+                            .map(|event_type| format!("type '{event_type}', "))
+                            .unwrap_or_default(),
+                        error
+                    );
+                    callback(&reason, &event_bytes);
+                }
+                Some(Err(TraceFileError::from(error)))
             }
         }
     }
@@ -556,7 +593,8 @@ pub trait TraceMigration: Send + Sync {
 
     /// Migrates a single event.
     ///
-    /// Returns `None` if the event should be dropped during migration.
+    /// Returning `None` rejects the entire migration. Successful migration is
+    /// therefore lossless with respect to event count.
     fn migrate_event(&self, event: ReplayEvent) -> Option<ReplayEvent>;
 
     /// Migrates metadata.
@@ -597,8 +635,11 @@ impl TraceMigrator {
 
     /// Returns migrations needed to go from one version to another.
     fn find_migration_path(&self, from: u32, to: u32) -> Option<Vec<&dyn TraceMigration>> {
-        if from >= to {
+        if from == to {
             return Some(Vec::new());
+        }
+        if from > to {
+            return None;
         }
 
         let mut path = Vec::new();
@@ -611,8 +652,12 @@ impl TraceMigrator {
                 .iter()
                 .find(|m| m.from_version() == current)?;
 
+            let next = migration.to_version();
+            if next <= current || next > to {
+                return None;
+            }
             path.push(migration.as_ref());
-            current = migration.to_version();
+            current = next;
         }
 
         Some(path)
@@ -637,10 +682,11 @@ impl TraceMigrator {
 
         for migration in path {
             current_metadata = migration.migrate_metadata(current_metadata);
-            current_events = current_events
-                .into_iter()
-                .filter_map(|e| migration.migrate_event(e))
-                .collect();
+            let mut migrated_events = Vec::with_capacity(current_events.len());
+            for event in current_events {
+                migrated_events.push(migration.migrate_event(event)?);
+            }
+            current_events = migrated_events;
         }
 
         Some((current_metadata, current_events))
@@ -768,7 +814,31 @@ mod tests {
     }
 
     #[test]
-    fn compat_reader_skips_unknown_events() {
+    fn compat_reader_rejects_zero_version_and_compression_mismatch() {
+        let temp = NamedTempFile::new().expect("create temp file");
+        write_trace(temp.path(), &TraceMetadata::new(42), &[]).expect("write trace");
+        let baseline = std::fs::read(temp.path()).expect("read trace");
+
+        let mut zero_version = baseline.clone();
+        zero_version[TRACE_MAGIC.len()..TRACE_MAGIC.len() + 2].copy_from_slice(&0u16.to_le_bytes());
+        std::fs::write(temp.path(), zero_version).expect("write zero-version trace");
+        assert!(matches!(
+            CompatReader::open(temp.path()),
+            Err(TraceFileError::UnsupportedVersion { found: 0, .. })
+        ));
+
+        let mut mismatched_compression = baseline;
+        mismatched_compression[TRACE_MAGIC.len() + 4] = 1;
+        std::fs::write(temp.path(), mismatched_compression)
+            .expect("write mismatched compression byte");
+        assert!(matches!(
+            CompatReader::open(temp.path()),
+            Err(TraceFileError::UnsupportedCompression(1))
+        ));
+    }
+
+    #[test]
+    fn compat_reader_loads_known_events_without_issues() {
         let temp = NamedTempFile::new().expect("create temp file");
         let path = temp.path();
 
@@ -795,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn compat_reader_skips_unknown_event_types_with_raw_bytes() {
+    fn compat_reader_rejects_unknown_event_types_without_skipping() {
         use std::io::Write;
         let temp = NamedTempFile::new().expect("create temp file");
         let path = temp.path();
@@ -805,8 +875,7 @@ mod tests {
 
         // Write header
         file.write_all(super::TRACE_MAGIC).expect("write magic");
-        file.write_all(&super::TRACE_FILE_VERSION.to_le_bytes())
-            .expect("write version");
+        file.write_all(&2u16.to_le_bytes()).expect("write version");
         file.write_all(&0u16.to_le_bytes()).expect("write flags");
         file.write_all(&[0u8]).expect("write compression byte");
 
@@ -851,27 +920,15 @@ mod tests {
         file.flush().expect("flush");
         drop(file);
 
-        // Now read with compat reader
-        let reader = CompatReader::open(path)
-            .expect("open reader")
-            .on_skip(|reason, _bytes| {
-                assert!(reason.contains("FutureEventType") || reason.contains("unknown"));
-            });
-
-        let (loaded_events, stats) = reader.load_all().expect("load all");
-
-        // Should have read 2 events (skipped the unknown one)
-        assert_eq!(loaded_events.len(), 2);
-        assert!(matches!(
-            loaded_events[0],
-            ReplayEvent::RngSeed { seed: 100 }
-        ));
-        assert!(matches!(loaded_events[1], ReplayEvent::TaskYielded { .. }));
-
-        // Stats should show 1 skipped event
-        assert_eq!(stats.events_read, 2);
-        assert_eq!(stats.events_skipped, 1);
-        assert!(stats.has_issues());
+        let mut reader = CompatReader::open(path).expect("open reader");
+        let first = reader.read_event().expect("read").expect("known event");
+        assert!(matches!(first, ReplayEvent::RngSeed { seed: 100 }));
+        let error = reader
+            .read_event()
+            .expect_err("unknown event must fail closed");
+        assert!(matches!(error, TraceFileError::Deserialize(_)));
+        assert_eq!(reader.stats().events_read, 1);
+        assert_eq!(reader.stats().events_skipped, 0);
     }
 
     #[test]
@@ -883,8 +940,7 @@ mod tests {
         // Manually construct a trace with an unknown event
         let mut file = std::fs::File::create(path).expect("create file");
         file.write_all(super::TRACE_MAGIC).expect("write magic");
-        file.write_all(&super::TRACE_FILE_VERSION.to_le_bytes())
-            .expect("write version");
+        file.write_all(&2u16.to_le_bytes()).expect("write version");
         file.write_all(&0u16.to_le_bytes()).expect("write flags");
         file.write_all(&[0u8]).expect("write compression byte");
 
@@ -928,8 +984,7 @@ mod tests {
     fn write_header_with_metadata(file: &mut std::fs::File) {
         use std::io::Write;
         file.write_all(super::TRACE_MAGIC).expect("write magic");
-        file.write_all(&super::TRACE_FILE_VERSION.to_le_bytes())
-            .expect("write version");
+        file.write_all(&2u16.to_le_bytes()).expect("write version");
         file.write_all(&0u16.to_le_bytes()).expect("write flags");
         file.write_all(&[0u8]).expect("write compression byte");
 
@@ -1043,6 +1098,7 @@ mod tests {
         // No migrations registered, so can only "migrate" same version
         assert!(migrator.can_migrate(1, 1));
         assert!(!migrator.can_migrate(1, 2)); // No migration registered
+        assert!(!migrator.can_migrate(2, 1)); // Reverse migration is not implicit identity
     }
 
     // Example migration for testing

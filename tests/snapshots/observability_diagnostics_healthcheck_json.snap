@@ -77,18 +77,12 @@ expression: value
     },
     "status": "degraded",
     "structural_health": {
-      "bottleneck_count": 9,
+      "bottleneck_count": 3,
       "classification": {
         "bottleneck_nodes": [
-          1,
-          2,
-          3,
           4,
           5,
-          6,
-          7,
-          8,
-          9
+          6
         ],
         "fiedler": 0.081,
         "kind": "degraded"

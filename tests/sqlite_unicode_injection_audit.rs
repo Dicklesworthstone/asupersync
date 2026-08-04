@@ -17,19 +17,6 @@ use asupersync::cx::Cx;
 use asupersync::database::{SqliteConnection, SqliteRow, SqliteValue};
 #[cfg(feature = "sqlite")]
 use asupersync::test_utils::init_test_logging;
-#[cfg(feature = "sqlite")]
-use asupersync::types::{Budget, RegionId, TaskId};
-#[cfg(feature = "sqlite")]
-use asupersync::util::ArenaIndex;
-
-#[cfg(feature = "sqlite")]
-fn create_test_cx() -> Cx {
-    Cx::new(
-        RegionId::from_arena(ArenaIndex::new(0, 1)),
-        TaskId::from_arena(ArenaIndex::new(0, 0)),
-        Budget::INFINITE,
-    )
-}
 
 #[cfg(feature = "sqlite")]
 #[test]
@@ -77,8 +64,13 @@ fn unicode_normalization_injection_audit() {
         println!("=== SQLITE UNICODE NORMALIZATION INJECTION AUDIT ===");
 
         // Test Case 1: Regular apostrophe (U+0027) vs Right single quotation mark (U+2019)
-        let regular_apostrophe = "user'@example.com"; // U+0027
-        let unicode_apostrophe = "user'@example.com"; // U+2019 (right single quotation mark)
+        // Written as an explicit \u{} escape, not a literal glyph: the U+2019 that
+        // this comment promised was silently flattened to ASCII U+0027 at some
+        // point, which made the assert_ne! below panic unconditionally and meant
+        // this homoglyph audit was asserting nothing about homoglyphs
+        // (br-asupersync-fq4xy2).
+        let regular_apostrophe = "user\u{0027}@example.com"; // U+0027
+        let unicode_apostrophe = "user\u{2019}@example.com"; // U+2019 (right single quotation mark)
 
         assert_ne!(
             regular_apostrophe, unicode_apostrophe,
@@ -330,8 +322,11 @@ fn unicode_sql_construction_vulnerability_demo() {
     init_test_logging();
     println!("\n=== EDUCATIONAL: Why String Concatenation Would Be Vulnerable ===");
 
-    let user_input = "'; DROP TABLE users; --";
-    let unicode_variant = "'; DROP TABLE users; --"; // Using U+2019 instead of U+0027
+    let user_input = "\u{0027}; DROP TABLE users; --";
+    // Explicit \u{} escape: this was ASCII U+0027 despite the comment, so the
+    // "unicode variant" was byte-identical to `user_input` and demonstrated
+    // nothing (br-asupersync-fq4xy2).
+    let unicode_variant = "\u{2019}; DROP TABLE users; --"; // Using U+2019 instead of U+0027
 
     // UNSAFE (educational only - not actually executed):
     let unsafe_query = format!("SELECT * FROM users WHERE name = '{}'", user_input);
@@ -348,7 +343,6 @@ fn unicode_sql_construction_vulnerability_demo() {
 fn verify_text_storage_preserves_bytes() {
     // Verify that SQLite TEXT storage preserves exact Unicode byte sequences
     init_test_logging();
-    let cx = create_test_cx();
 
     let config = TestConfig::new().with_seed(42);
     let mut runtime = LabRuntimeTarget::create_runtime(config);
@@ -369,10 +363,11 @@ fn verify_text_storage_preserves_bytes() {
         }
 
         let test_strings = vec![
-            "café",            // NFC form
-            "cafe\u{0301}",    // NFD form
-            "user'quote",      // U+0027
-            "user'quote",      // U+2019
+            "café",              // NFC form
+            "cafe\u{0301}",      // NFD form
+            "user\u{0027}quote", // U+0027
+            "user\u{2019}quote", // U+2019 — was ASCII, so slots 2 and 3 tested
+            // the same input twice (br-asupersync-fq4xy2)
             "test\u{200B}end", // Zero-width space
         ];
 
@@ -383,7 +378,7 @@ fn verify_text_storage_preserves_bytes() {
                     &cx,
                     "INSERT INTO unicode_test (rowid, data) VALUES (?, ?)",
                     &[
-                        SqliteValue::Integer(i as i64),
+                        SqliteValue::Integer(i64::try_from(i).expect("test row index fits i64")),
                         SqliteValue::Text(s.to_string()),
                     ],
                 )
@@ -400,7 +395,9 @@ fn verify_text_storage_preserves_bytes() {
                 .query(
                     &cx,
                     "SELECT data FROM unicode_test WHERE rowid = ?",
-                    &[SqliteValue::Integer(i as i64)],
+                    &[SqliteValue::Integer(
+                        i64::try_from(i).expect("test row index fits i64"),
+                    )],
                 )
                 .await
             {
@@ -429,7 +426,7 @@ fn verify_text_storage_preserves_bytes() {
                 "✓ String {}: '{}' preserved exactly ({} bytes)",
                 i,
                 original,
-                original.as_bytes().len()
+                original.len()
             );
         }
 

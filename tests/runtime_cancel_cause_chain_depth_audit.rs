@@ -308,20 +308,37 @@ fn region_subtree_processes_depth_ascending_for_chain_lookup() {
 
 #[test]
 fn tnk8ny_hardening_logs_error_and_synthesizes_self_rooted_placeholder() {
-    // Pin (link 5): the tnk8ny fix emits an error! log AND
-    // synthesizes a SELF-ROOTED ParentCancelled placeholder
-    // (NOT a chain to the root reason) when the parent's
-    // reason is missing. This avoids the previous silent-
-    // poisoning bug where the root's reason was used as if
-    // it were the immediate parent's.
+    // Pin (link 5): the tnk8ny fix synthesized a SELF-ROOTED
+    // ParentCancelled placeholder (NOT a chain to the root reason) when
+    // the parent's reason is missing. This avoids the previous silent-
+    // poisoning bug where the root's reason was used as if it were the
+    // immediate parent's.
+    //
+    // br-asupersync-u5jdvw: the tnk8ny error!-level "INVARIANT VIOLATION"
+    // diagnostic — removed by the 118ayd lock-isolation commit (acd3c2ee6,
+    // no tracing under the state lock) — is re-emitted through the
+    // deferred cancel-observer path: `push_cancel_protocol_violation`
+    // rides the CancelWakeEffects token and logs at error level after the
+    // lock is released. This pin guards both halves: the deferred
+    // emission AND the structural sentinel contract below.
     let source = read("src/runtime/state.rs");
 
     assert!(
-        source.contains("INVARIANT VIOLATION: parent region's cancel reason missing"),
-        "REGRESSION: cancel-region-subtree no longer logs the \
-         tnk8ny invariant violation. The chain-bookkeeping \
-         break becomes silent — debugging cancel attribution \
-         loses the diagnostic.",
+        source.contains("INVARIANT VIOLATION: parent region's cancel")
+            && source.contains("cancel-region-subtree parent-reason lookup"),
+        "REGRESSION (br-asupersync-u5jdvw): the missing-parent invariant \
+         diagnostic is no longer emitted. It must ride the deferred \
+         cancel-observer path (push_cancel_protocol_violation) so the \
+         operator-facing error! signal survives lock isolation.",
+    );
+
+    assert!(
+        source.contains("Self-rooted sentinel: ParentCancelled stamped")
+            && source.contains("chain the root target reason here"),
+        "REGRESSION: cancel-region-subtree lost the tnk8ny no-root-fallback \
+         contract comment for the missing-parent case. If the code fell \
+         back to the root reason again, the silent chain-poisoning bug \
+         is back.",
     );
 
     // The synthesized placeholder must be ParentCancelled

@@ -7,30 +7,36 @@
 //!
 //! # Writer-Preference Fairness
 //!
-//! This RwLock uses a **writer-preference** policy: when a writer is waiting,
-//! new read requests are blocked until the writer acquires and releases the lock.
-//! This prevents writer starvation under heavy read load, but can cause reader
-//! starvation under heavy write load.
+//! This RwLock uses a **bounded writer-preference** policy: new read requests
+//! normally queue behind a waiting writer, but a long enough queued-writer run
+//! forces a FIFO turn for the oldest queued reader. This prevents writer
+//! starvation under heavy read load while also bounding reader admission by
+//! queue position under continued progress.
 //!
 //! ## Fairness Characteristics
 //!
-//! | Scenario                  | Behavior                                      |
-//! |---------------------------|-----------------------------------------------|
-//! | No writers waiting        | Readers acquire immediately                   |
-//! | Writer waiting            | New readers blocked until writer completes    |
-//! | Existing readers + writer | Writer waits for all readers to release       |
-//! | Multiple writers          | Writers queue in arrival order (FIFO)         |
+//! | Scenario                    | Behavior                                        |
+//! |-----------------------------|-------------------------------------------------|
+//! | No writer active or waiting | Readers acquire immediately                     |
+//! | Writer waiting              | New readers queue, subject to forced FIFO turns |
+//! | Existing readers + writer   | Writer waits for all readers to release         |
+//! | Multiple writers            | Writers queue in arrival order (FIFO)           |
 //!
 //! ## Starvation Analysis
 //!
-//! - **Writer starvation**: Prevented. Writers block new readers while waiting.
-//! - **Reader starvation**: Bounded. After
-//!   [`MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH`] writers have been
-//!   served from the queue while readers are also queued, the next
-//!   `release_writer` forces a reader turn — admitting one queued reader
-//!   before another writer can proceed. This bounds reader-side waiting to
-//!   at most N writer cycles without letting an older writer sit behind an
-//!   unbounded tail of younger readers (br-asupersync-4j40bb).
+//! - **Writer starvation**: Prevented. Waiting writers normally block new
+//!   readers, and the head writer resumes after any forced FIFO reader turn.
+//! - **Reader starvation**: Bounded by FIFO queue position, measured in
+//!   queued-writer hand-offs. Let `N` be
+//!   [`MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH`]. For an unpoisoned lock and
+//!   a subject reader that remains queued, continued release and polling progress
+//!   forces a turn for exactly the oldest queued reader after every `N`
+//!   consecutive writer hand-offs while a further writer remains queued. A
+//!   reader with `p` older queued readers is therefore admitted after at most
+//!   `(p + 1) * N` additional queued-writer hand-offs. Writer-queue drain or
+//!   cancellation of older waiters may admit it earlier; cancelling the subject
+//!   ends its acquisition. This is not a wall-clock bound: guard duration and task
+//!   scheduling or polling delays are outside the claim (br-asupersync-4j40bb).
 //!
 //! ## When to Use RwLock vs Mutex
 //!
@@ -77,15 +83,19 @@ use super::waiter::{WaiterChain, WaiterId};
 use crate::cx::Cx;
 use crate::sync::lock_ordering::{self, LockRank};
 
-/// br-asupersync-4j40bb: bound on consecutive writers served from the queue
-/// while readers are also queued. After this many writer hand-offs in a row,
-/// the next `release_writer` forces a single reader turn before any more
-/// writers run. This prevents indefinite reader starvation without letting a
-/// head writer sit behind an unbounded batch of younger readers.
+/// br-asupersync-4j40bb: maximum gap, in queued-writer hand-offs, between
+/// forced FIFO reader turns while readers and further writers remain queued.
+/// Each threshold crossing admits exactly the oldest queued reader before the
+/// head writer resumes. Writing `N` for this constant, an unpoisoned lock with a
+/// subject reader that remains queued admits that reader, under continued
+/// release and polling progress, after at most `(p + 1) * N` additional
+/// queued-writer hand-offs when `p` older readers are queued. Queue drain or
+/// cancellation of older waiters may admit it earlier; cancelling the subject
+/// ends its acquisition. Guard duration and scheduling or polling delays are not
+/// bounded.
 ///
-/// Tuning: 16 is large enough that read-vs-write workloads don't see
-/// frequent forced flips, but small enough that worst-case reader latency
-/// is bounded to (N writer-critical-section durations).
+/// Tuning: 16 preserves long writer runs while still placing a finite hand-off
+/// bound on successive forced reader turns.
 const MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH: usize = 16;
 
 /// Error returned when acquiring a read or write lock fails.
@@ -164,21 +174,25 @@ struct State {
     next_waiter_id: u64,
     /// br-asupersync-4j40bb: count of consecutive writer hand-offs from
     /// the queue while readers were also queued. Reset to 0 whenever a
-    /// reader batch runs (forced or natural).
+    /// reader admission runs (a forced turn or a natural batch).
     consecutive_writers_served: usize,
 }
 
-/// A cancel-aware read-write lock with writer-preference fairness.
+/// A cancel-aware read-write lock with bounded writer-preference fairness.
 ///
 /// This lock allows multiple readers to access the data concurrently, or a single
-/// writer to have exclusive access. When a writer is waiting, new read attempts
-/// are blocked to prevent writer starvation.
+/// writer to have exclusive access. New read attempts normally queue behind a
+/// waiting writer, with periodic FIFO reader turns bounding admission under
+/// continued queued-writer pressure.
 ///
 /// # Fairness Policy
 ///
-/// - **Writer-preference**: When `writer_waiters > 0`, new readers block.
+/// - **Writer-preference**: When `writer_waiters > 0`, new readers normally
+///   queue behind the head writer.
+/// - **Bounded reader admission**: Under sustained queued-writer pressure, each
+///   threshold-length writer run gives exactly the oldest queued reader a turn.
 /// - **Reader parallelism**: Multiple readers can hold the lock simultaneously
-///   when no writer is waiting or active.
+///   when no writer is waiting or active; a forced turn admits one reader.
 /// - **Writer exclusivity**: Only one writer can hold the lock, and no readers
 ///   can hold it while a writer does.
 ///
@@ -526,8 +540,9 @@ impl<T> RwLock<T> {
                 // consecutive writer hand-offs while readers were also
                 // queued, force one reader turn and reset the counter before
                 // any further writer can proceed. Waking a single queued
-                // reader keeps reader waiting bounded without postponing the
-                // head writer behind an arbitrary tail of younger readers.
+                // reader bounds the gap between forced reader turns without
+                // postponing the head writer behind an arbitrary tail of
+                // younger readers.
                 //
                 // The forced turn is ONLY for cutting a reader in front of
                 // waiting writers. When the writer queue is empty there is no
@@ -3522,112 +3537,99 @@ mod tests {
         crate::test_complete!("test_drop_queued_writer_wakes_readers_when_readers_active");
     }
 
-    /// br-asupersync-4j40bb regression: under continuous write load, queued
-    /// readers must NOT wait indefinitely. After
-    /// MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH writer hand-offs in a
-    /// row while readers are queued, the next release_writer must force a
-    /// reader turn before any further writer can proceed.
+    /// br-asupersync-4j40bb regression: under continuous write load, a reader
+    /// with `p` older queued readers is admitted after at most `(p + 1) * N`
+    /// queued-writer hand-offs. Each forced turn admits only the oldest reader,
+    /// then returns to the head writer.
     #[test]
     fn bounded_writer_preference_eventually_admits_starved_reader() {
         init_test("bounded_writer_preference_eventually_admits_starved_reader");
         let cx = test_cx();
         let lock = RwLock::new(0_u32);
-
-        let wake_state = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
-        let waker = Waker::from(StdArc::new(CountWaker(wake_state.clone())));
-        let mut task_cx = Context::from_waker(&waker);
-
-        // Queue N+2 writers ahead of one reader. The reader must eventually
-        // be granted by the forced reader-turn path instead of waiting for
-        // the entire writer queue to drain first.
         const N: usize = MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH;
+        const READER_COUNT: usize = 3;
+        const WRITER_COUNT: usize = READER_COUNT * N + 1;
 
-        // First take a writer so the reader is forced to queue.
-        let mut fut_initial_w = lock.write(&cx);
-        let Poll::Ready(Ok(initial_w_guard)) =
-            std::pin::Pin::new(&mut fut_initial_w).poll(&mut task_cx)
-        else {
-            panic!("expected Ready on uncontended write")
+        let active_writer = write_blocking(&lock, &cx);
+
+        // The extra writer keeps the writer queue non-empty when the final
+        // threshold is reached, so queue drain cannot satisfy the assertion.
+        let mut writer_futs: Vec<_> = (0..WRITER_COUNT).map(|_| lock.write(&cx)).collect();
+        for writer in &mut writer_futs {
+            assert!(poll_once(writer).is_none(), "successor writer must queue");
+        }
+
+        let mut reader_futs: Vec<_> = (0..READER_COUNT).map(|_| lock.read(&cx)).collect();
+        for reader in &mut reader_futs {
+            assert!(poll_once(reader).is_none(), "reader must initially queue");
+        }
+
+        drop(active_writer);
+
+        let mut writers_served = 0;
+        for original_position in 0..READER_COUNT {
+            let handoff_bound = (original_position + 1) * N;
+            while writers_served < handoff_bound {
+                for reader in &mut reader_futs {
+                    assert!(
+                        poll_once(reader).is_none(),
+                        "reader at original position {original_position} was admitted before \
+                         hand-off bound {handoff_bound}"
+                    );
+                }
+
+                let writer_guard = match poll_once(&mut writer_futs[0]) {
+                    Some(Ok(guard)) => guard,
+                    other => panic!(
+                        "oldest writer should acquire at hand-off {}: {other:?}",
+                        writers_served + 1
+                    ),
+                };
+                drop(writer_futs.remove(0));
+                writers_served += 1;
+                drop(writer_guard);
+            }
+
+            let reader_guard = match poll_once(&mut reader_futs[0]) {
+                Some(Ok(guard)) => guard,
+                other => panic!(
+                    "reader at original position {original_position} should acquire by \
+                     hand-off {handoff_bound}: {other:?}"
+                ),
+            };
+            for younger_reader in &mut reader_futs[1..] {
+                assert!(
+                    poll_once(younger_reader).is_none(),
+                    "forced turn must admit only the oldest queued reader"
+                );
+            }
+            drop(reader_futs.remove(0));
+            drop(reader_guard);
+        }
+
+        assert_eq!(writers_served, READER_COUNT * N);
+        assert_eq!(writer_futs.len(), 1, "one trailing writer must remain");
+
+        let trailing_writer = match poll_once(&mut writer_futs[0]) {
+            Some(Ok(guard)) => guard,
+            other => panic!("trailing writer should acquire after final reader: {other:?}"),
         };
+        drop(writer_futs.remove(0));
+        writers_served += 1;
+        drop(trailing_writer);
 
-        // Queue successor writers first so the reader is genuinely behind
-        // continuous writer pressure.
-        let mut writer_futs: Vec<_> = (0..(N + 2)).map(|_| Box::pin(lock.write(&cx))).collect();
-        for f in &mut writer_futs {
-            assert!(
-                f.as_mut().poll(&mut task_cx).is_pending(),
-                "successor writers must queue"
-            );
-        }
-
-        // Queue a reader that would be starved without the forced reader turn.
-        let mut fut_starved_reader = lock.read(&cx);
+        assert_eq!(writers_served, WRITER_COUNT);
+        let final_state = lock.debug_state();
+        assert_eq!(final_state.readers, 0, "all reader guards must be released");
+        assert!(!final_state.writer_active, "no writer may remain active");
+        assert_eq!(final_state.writer_waiters, 0, "no writer may remain queued");
         assert!(
-            std::pin::Pin::new(&mut fut_starved_reader)
-                .poll(&mut task_cx)
-                .is_pending(),
-            "reader must initially queue behind active writer"
+            final_state.reader_waiters.is_empty(),
+            "no reader waiter may remain queued"
         );
-
-        // Release the initial writer; the chain begins. After at most N
-        // writer hand-offs, the forced reader-turn path must fire and
-        // grant the queued reader.
-        drop(initial_w_guard);
-
-        let mut readers_active = false;
-        let mut writers_drained = 0;
-        for cycle in 0..(N + 2) {
-            // The next queued writer is now active; release it.
-            // Find the writer future that is now Ready.
-            let mut popped = None;
-            for (i, f) in writer_futs.iter_mut().enumerate() {
-                if let Poll::Ready(Ok(_g)) = f.as_mut().poll(&mut task_cx) {
-                    popped = Some(i);
-                    break;
-                }
-            }
-            if let Some(i) = popped {
-                writers_drained += 1;
-                drop(writer_futs.remove(i));
-            } else {
-                // No writer ready means the forced reader-turn fired.
-                // Verify the reader is now ready.
-                if std::pin::Pin::new(&mut fut_starved_reader)
-                    .poll(&mut task_cx)
-                    .is_ready()
-                {
-                    readers_active = true;
-                    break;
-                }
-            }
-
-            // After every release, check whether the reader was admitted.
-            if std::pin::Pin::new(&mut fut_starved_reader)
-                .poll(&mut task_cx)
-                .is_ready()
-            {
-                readers_active = true;
-                break;
-            }
-            assert!(
-                cycle < N + 1,
-                "reader should be admitted within N writer cycles, got {cycle}"
-            );
-        }
-
-        crate::assert_with_log!(
-            readers_active,
-            "starved reader admitted within N writer cycles",
-            true,
-            readers_active
-        );
-        // Sanity: we did serve writers along the way; the bound is
-        // 'eventually admit reader', not 'never serve writer'.
-        crate::assert_with_log!(
-            writers_drained > 0 && writers_drained <= N + 1,
-            "writers drained within bound",
-            true,
-            writers_drained > 0 && writers_drained <= N + 1
+        assert!(
+            final_state.writer_queue.is_empty(),
+            "writer FIFO must be empty"
         );
 
         crate::test_complete!("bounded_writer_preference_eventually_admits_starved_reader");
@@ -4881,14 +4883,15 @@ mod metamorphic_tests {
         );
     }
 
-    /// Metamorphic property: Reader-writer fairness under continuous write pressure.
+    /// Metamorphic property: reader-writer fairness under continuous write pressure.
     ///
-    /// Property: When writers continuously arrive and readers are queued, the forced
-    /// reader batch mechanism ensures readers get service within bounded time. The
-    /// bound is MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH writer cycles.
+    /// Property: when writers continuously arrive and readers are queued, each run of
+    /// MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH queued-writer hand-offs creates one
+    /// forced FIFO reader turn. This checks the first turn, not a wall-clock or
+    /// queue-position-independent per-reader bound.
     ///
-    /// Metamorphic relationship: Increasing write pressure should NOT prevent
-    /// readers from eventually getting served - fairness bound is invariant.
+    /// Metamorphic relationship: increasing excess write pressure must not suppress
+    /// that first forced reader turn.
     proptest! {
         #[test]
         fn mr_reader_writer_fairness_bound_invariant(
@@ -4900,21 +4903,33 @@ mod metamorphic_tests {
             let lock = harness.lock();
             let cx = test_cx();
 
-            // Total writers = threshold + excess (guarantees forced batch trigger)
+            // Total writers = threshold + excess (guarantees a forced turn).
             let total_writers = MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH + num_excess_writers;
 
             // Start with active writer to force queuing
             let initial_writer = block_on(lock.write(&cx)).expect("initial writer acquire");
 
-            // Queue readers - these will test the fairness bound.
+            // Queue and poll writers first so they are present in the lock's
+            // waiter chain before the readers arrive. The excess writers keep
+            // that chain non-empty at the threshold.
+            let mut writer_futures = Vec::new();
+            for _ in 0..total_writers {
+                let writer_lock = lock.clone();
+                let mut write_fut = OwnedRwLockWriteGuard::write(writer_lock, &cx);
+                prop_assert!(
+                    poll_once(&mut write_fut).is_none(),
+                    "successor writer should queue"
+                );
+                writer_futures.push(write_fut);
+            }
+
+            // Queue readers behind the established writer chain to observe the
+            // first forced FIFO turn rather than natural reader admission.
             //
             // The read futures MUST stay alive to remain queued: dropping a
             // pending read future deregisters its waiter, after which a forced
-            // reader batch has nothing to wake. We therefore retain both the
-            // futures and their wakers for the duration of the test (mirroring
-            // how the writer futures below are kept in `writer_futures`).
+            // reader turn has nothing to wake.
             let mut reader_futures = Vec::new();
-            let mut reader_wakers = Vec::new();
             let mut reader_wake_counts = Vec::new();
             for i in 0..num_queued_readers {
                 let reader_lock = lock.clone();
@@ -4930,78 +4945,54 @@ mod metamorphic_tests {
                 );
 
                 reader_wake_counts.push(count);
-                reader_wakers.push(waker_obj);
                 reader_futures.push(read_fut);
-            }
-
-            // Queue writers beyond the fairness threshold
-            let mut writer_futures = Vec::new();
-            for _i in 0..total_writers {
-                let writer_lock = lock.clone();
-                let write_fut = OwnedRwLockWriteGuard::write(writer_lock, &cx);
-
-                writer_futures.push(write_fut);
             }
 
             // Release initial writer to start the consecutive writer sequence
             drop(initial_writer);
 
-            // Execute writers one by one until fairness threshold triggers
-            let mut writers_served = 0;
-            for _ in 0..total_writers {
-                let mut found_ready = false;
-                for writer_fut in writer_futures.iter_mut() {
-                    let (waker, _) = CountWaker::new();
-                    let waker_obj = Waker::from(Arc::new(waker));
-                    let mut task_cx = Context::from_waker(&waker_obj);
-
-                    if let Poll::Ready(Ok(guard)) = Pin::new(writer_fut).poll(&mut task_cx) {
-                        writers_served += 1;
-                        drop(guard); // Release immediately for next writer
-                        found_ready = true;
-                        break;
-                    }
-                }
-
-                if !found_ready {
-                    // Forced reader batch triggered early
-                    break;
-                }
-
-                // Check if we've reached the fairness bound
-                if writers_served >= MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH {
-                    // At this point, forced reader batch should trigger
-                    let readers_granted = reader_wake_counts.iter()
-                        .map(|c| c.load(Ordering::SeqCst))
-                        .sum::<usize>();
-
-                    prop_assert!(
-                        readers_granted > 0,
-                        "FAIRNESS VIOLATION: No readers granted after {} writers served (excess={})",
-                        writers_served, num_excess_writers
-                    );
-                    break;
-                }
+            // Execute exactly one threshold-length writer run. FIFO ordering
+            // makes the first queued future ready at each hand-off.
+            for handoff in 1..=MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH {
+                let writer_guard = match poll_once(&mut writer_futures[0]) {
+                    Some(Ok(guard)) => guard,
+                    other => return Err(TestCaseError::fail(format!(
+                        "oldest writer should acquire at hand-off {handoff}: {other:?}"
+                    ))),
+                };
+                drop(writer_futures.remove(0));
+                drop(writer_guard);
             }
 
-            // METAMORPHIC PROPERTY: Fairness bound holds regardless of excess pressure
-            if writers_served >= MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH {
-                let total_reader_wakes = reader_wake_counts.iter()
-                    .map(|c| c.load(Ordering::SeqCst))
-                    .sum::<usize>();
+            let total_reader_wakes = reader_wake_counts
+                .iter()
+                .map(|count| count.load(Ordering::SeqCst))
+                .sum::<usize>();
+            prop_assert_eq!(
+                total_reader_wakes,
+                1,
+                "exactly one FIFO reader should wake at the threshold (excess={})",
+                num_excess_writers
+            );
 
+            let reader_guard = match poll_once(&mut reader_futures[0]) {
+                Some(Ok(guard)) => guard,
+                other => return Err(TestCaseError::fail(format!(
+                    "oldest reader should acquire at the threshold: {other:?}"
+                ))),
+            };
+            for younger_reader in &mut reader_futures[1..] {
                 prop_assert!(
-                    total_reader_wakes > 0,
-                    "BOUNDED FAIRNESS VIOLATED: Excess write pressure ({} beyond threshold) \
-                     prevented reader service after {} writer cycles",
-                    num_excess_writers, writers_served
+                    poll_once(younger_reader).is_none(),
+                    "forced turn must not admit a younger queued reader"
                 );
             }
+            drop(reader_futures.remove(0));
+            drop(reader_guard);
 
-            // Keep reader futures/wakers alive until here so they stayed queued
-            // throughout the writer sequence above.
+            // Pending futures clean up their waiter registrations on drop.
+            drop(writer_futures);
             drop(reader_futures);
-            drop(reader_wakers);
         }
     }
 
@@ -5009,8 +5000,8 @@ mod metamorphic_tests {
     ///
     /// Verifies that when readers continuously attempt to acquire read locks,
     /// queued writers still get scheduled and cannot wait forever. This test
-    /// validates the core fairness invariant: after a writer is queued,
-    /// new readers must block until the writer runs.
+    /// validates the core below-threshold invariant: after a writer is queued,
+    /// a new reader remains queued until that writer runs.
     #[test]
     fn audit_rwlock_writer_starvation_prevention() {
         init_test("audit_rwlock_writer_starvation_prevention");

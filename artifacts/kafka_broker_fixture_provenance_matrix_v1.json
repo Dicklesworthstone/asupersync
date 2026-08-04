@@ -1,0 +1,2187 @@
+{
+  "schema_version": 1,
+  "artifact_id": "kafka-broker-fixture-provenance-matrix-v1",
+  "program_id": "asupersync-ir2uf0",
+  "capability_id": "CAP-KAFKA",
+  "bead_id": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+  "captured_date_utc": "2026-08-03",
+  "baseline_revision": "012c13714db267a4fba928db9f900b70d6c1d25a",
+  "inventory_state": "K0_4_STATIC_FIXTURE_AND_PROVENANCE_MATRIX_FROZEN_RUNTIME_UNKNOWN",
+  "authority": {
+    "registry_disposition": "KEEP_UNTIL_PARITY",
+    "current_action": "KEEP_INCUMBENT",
+    "dependency_exit_allowed": false,
+    "feature_removal_allowed": false,
+    "api_removal_allowed": false,
+    "capability_removal_allowed": false,
+    "deletion_authority": false,
+    "inventory_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+    "refresh_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+    "conditional_cutover_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.15",
+    "later_owner_preservation": [
+      {
+        "owner_family": "K2",
+        "bead_id": "asupersync-dep-p7-kafka-removal-sarszu.2.2",
+        "preserved_scope": "protocol schemas, API-version negotiation, compatibility, downgrade, and terminal protocol signoff"
+      },
+      {
+        "owner_family": "K4",
+        "bead_id": "asupersync-dep-p7-kafka-removal-sarszu.2.4",
+        "preserved_scope": "compression capability, availability, resource limits, interoperability, and terminal codec signoff"
+      },
+      {
+        "owner_family": "K12",
+        "bead_id": "asupersync-dep-p7-kafka-removal-sarszu.2.12",
+        "preserved_scope": "independent corpora, parser robustness, security review, and independent verification"
+      },
+      {
+        "owner_family": "K13",
+        "bead_id": "asupersync-dep-p7-kafka-removal-sarszu.2.13",
+        "preserved_scope": "managed broker fixtures, producer, transaction, group, security, fault, restart, teardown, and terminal real-service evidence"
+      },
+      {
+        "owner_family": "K14.1",
+        "bead_id": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+        "preserved_scope": "claim-time refresh and drift rejection"
+      },
+      {
+        "owner_family": "K15",
+        "bead_id": "asupersync-dep-p7-kafka-removal-sarszu.2.15",
+        "preserved_scope": "conditional cutover or explicit keep decision after all gates"
+      }
+    ]
+  },
+  "policy": {
+    "mode": "STATIC_ONLY_FAIL_CLOSED",
+    "source_revision_is_authoritative_for_this_packet": true,
+    "planned_or_opt_in_is_executed_evidence": false,
+    "silent_skip_is_executed_evidence": false,
+    "proof_schema_is_executed_broker_evidence": false,
+    "wire_codec_is_executed_broker_evidence": false,
+    "local_model_is_executed_broker_evidence": false,
+    "package_coordinate_is_actual_native_identity": false,
+    "package_source_expectation_is_actual_native_identity": false,
+    "mutable_image_tag_is_immutable_broker_identity": false,
+    "environment_variable_presence_is_authenticated_transport_evidence": false,
+    "required_receipt_rule": "Only a source-pinned terminal receipt carrying the required native, broker, execution, and teardown fields may enter REAL_BROKER_RECEIPT or ACTUAL_BINARY_RECEIPT state.",
+    "unknown_rule": "A missing identity, version, capability, command, terminal result, or immutable provenance field remains UNKNOWN or BLOCKED and never defaults to supported.",
+    "scope_rule": "This packet inventories current source and routes executable work; it neither executes nor substitutes for K2, K4, K12, K13, K14.1, or K15 evidence."
+  },
+  "taxonomies": {
+    "evidence_class": [
+      "STATIC_SOURCE",
+      "LOCKFILE_DECLARED",
+      "PACKAGE_SOURCE_EXPECTATION",
+      "CONFIG_ONLY",
+      "COMPILE_ONLY",
+      "WIRE_CODEC_ONLY",
+      "LOCAL_MODEL_ONLY",
+      "MOCK_OR_SIMULATED",
+      "PROOF_ONLY",
+      "REAL_BROKER_CAPABLE",
+      "REAL_BROKER_RECEIPT",
+      "ACTUAL_BINARY_RECEIPT",
+      "HISTORICAL",
+      "PLANNED"
+    ],
+    "truth_class": [
+      "CURRENT_SOURCE_PINNED",
+      "LOCKFILE_DECLARED",
+      "PACKAGE_SOURCE_EXPECTATION",
+      "CONFIG_ONLY",
+      "WIRE_CODEC_ONLY",
+      "LOCAL_MODEL_ONLY",
+      "OVERCLAIM",
+      "STALE_CONTRADICTED",
+      "UNPINNED",
+      "UNKNOWN",
+      "BLOCKED_EXTERNAL",
+      "ACTUAL_BINARY_RECEIPT",
+      "REAL_BROKER_RECEIPT"
+    ],
+    "knowledge_state": [
+      "KNOWN",
+      "UNKNOWN",
+      "BLOCKED"
+    ],
+    "execution_state": [
+      "NOT_RUN",
+      "PASS",
+      "FAIL",
+      "BLOCKED",
+      "UNSUPPORTED"
+    ],
+    "provenance_class": [
+      "SOURCE_PINNED",
+      "LOCKFILE_PINNED",
+      "PACKAGE_SOURCE_EXPECTATION",
+      "MUTABLE_TAG",
+      "AMBIENT_UNPINNED",
+      "IMMUTABLE_IMAGE",
+      "ACTUAL_BINARY",
+      "ABSENT"
+    ],
+    "claim_disposition": [
+      "CURRENT",
+      "STALE",
+      "OVERCLAIM",
+      "HISTORICAL",
+      "PLANNED",
+      "BLOCKED"
+    ]
+  },
+  "source_scope": {
+    "authority_anchor": {
+      "artifact_id": "kafka-downstream-user-journey-inventory-v1",
+      "path": "artifacts/kafka_downstream_user_journey_inventory_v1.json",
+      "sha256": "52f8dc9a2695a170b14c85c9b29b6e60f95e05bd013d3d9db0dab8d94a1ced09",
+      "authority_revision": "ae22e710d87412b38e546b32e9702106619481d5",
+      "captured_date_utc": "2026-08-03",
+      "inventory_state": "K0_3_LOCAL_STATIC_AND_CALL_SITE_CENSUS_FROZEN_EXTERNAL_UNKNOWN"
+    },
+    "inherited_counts": {
+      "source_pins": 225,
+      "baseline_occurrence_paths": 245,
+      "k0_1_public_symbols": 30,
+      "k0_2_semantic_rows": 97,
+      "test_declaration_groups": 35,
+      "test_declarations": 936,
+      "exact_test_declarations": 888,
+      "tokio_test_declarations": 48,
+      "local_inventory_rows": 34,
+      "atomic_test_cases": 16,
+      "call_site_groups": 48,
+      "call_sites": 1363,
+      "documentation_claims": 31,
+      "user_journeys": 15
+    },
+    "inherited_digests": {
+      "baseline_occurrence_path_map_sha256": "9c815cfcba11f5345e7abced6b0afa21bfb650f9bb280e71bb3da74ebbb55089",
+      "k0_1_public_symbol_id_set_sha256": "307956cfcb2a4e1de2b1a45d9db3767aa88e5be090815bc9ae1a77c8ad3add28",
+      "k0_2_semantic_id_set_sha256": "a9967c47346ee6386e9e8836d73e819a784f829baa6d255eb24e55aae1950cf7",
+      "tokio_test_declaration_tuple_sha256": "c21dd6b0021dc189e82e6a3cf95dd37f1cddb100cf9688595fbe7a969b09b80d",
+      "test_declaration_group_path_sha256": "720d9d8fca6a4b23d06d5cfa400eef884c016edb39ac71ce74cde44036b26011",
+      "test_declaration_group_path_pin_sha256": "5eb3a4a99955992f5a8ef5bbd79969dce668e908499872bd9588fa7214b4b2ae",
+      "compilation_profile_semantic_tuple_sha256": "dd718eca06f6c1309e8e073dc65cc4e0c836e4705747bbaa72d7986dc1d31c61",
+      "call_site_id_set_sha256": "27ac17b660888d65f1d6a92c924becec669a96b4b1c09795450c89a350aabe2c",
+      "call_site_path_set_sha256": "612152c18e6daff98c7d0c3c7d907df8aa7100a8bab45e88a701d08588718d9c",
+      "downstream_helper_tuple_sha256": "a2c49e5cb2519afa11a2d29bee72d97c60532292b2817f725466683b3a93a777",
+      "provider_test_candidate_tuple_sha256": "1c1f5c263973f83026f7a4235cbe21252de23b4f22ba8833d5fd433659a2e255",
+      "documentation_candidate_path_sha256": "092daf94a5e428430bc2e6fab7a13a30649aca53e30680c300f9eb76cbbfec67",
+      "documentation_occurrence_tuple_sha256": "1045749285eb5a01933adfee3bd79dc34ed30f2e7cd1b7117caab51c89043dbc",
+      "documentation_matching_line_tuple_sha256": "93d84baac784b880d19fc7c790a19488d1c62547aadbce1ce5056582dafb7545",
+      "documentation_occurrence_id_sha256": "577ca40dd5f40101a2c4bdca225fcb6930ed2925353a1419404adc0ca5e30b3d",
+      "documentation_canonical_occurrence_id_sha256": "96dcbefec213d04a2a8f29e5255bf8ca1b55b229c993b9997f28c3209365c5ab",
+      "documentation_remainder_occurrence_id_sha256": "db4e006cdb3cde6fee615f3d64753df484c0848474dcd68a412ab055b0ffced0",
+      "documentation_group_id_sha256": "5e36b023be812fd3887b84af75d46e7b220c0138317b2a4face21917bdf180dd",
+      "documentation_source_pin_tuple_sha256": "24425b9d52e7f82a2f0ae596ba4a17ea55c4fdb565ca8f5b8998f334e6d6fb74",
+      "documentation_surface_tuple_sha256": "71d1cc5d04e71d3005d4449a11758af96d4d787f28bb63ec86102f902ce32970",
+      "documentation_actual_surface_tuple_sha256": "94ccd2b31c37be2c9a899d9d33cdcabc794f035107f1ca69615dbc0cc633082e",
+      "documentation_remainder_group_sha256": "a52b98d4cb5460c4731c64e085e4852990fd408196c67b9c67d46cc9c5acb7d1"
+    },
+    "fixture_scope_derivation": {
+      "rule_a": "Take every exact path from the K0.3 authority artifact at .test_declaration_groups[].path.",
+      "rule_b": "From .search_scope.baseline_occurrence_paths[], take paths rooted at tests/, fuzz/, conformance/, or scripts/ whose case-insensitive path contains kafka or record_batch.",
+      "rule_c": "Add exactly six anchors: conformance/src/lib.rs, artifacts/dependency_real_service_fixture_matrix_v1.json, docs/dependency_real_service_fixtures.md, tests/dependency_real_service_fixture_contract.rs, .github/no_mock_policy.json, and artifacts/adapter_certification_matrix_v1.json.",
+      "normalization": "Take the bytewise sorted unique union and serialize each path as UTF-8 followed by one LF.",
+      "authority_anchor_exclusion": "artifacts/kafka_downstream_user_journey_inventory_v1.json is a direct authority pin but is not a fixture path.",
+      "inherited_pin_join": "A fixture path already present in K0.3 source_pins inherits that exact pin by path and must fail closed if the current bytes no longer match.",
+      "direct_pin_join": "A fixture path absent from K0.3 source_pins must resolve to exactly one direct_source_pins row by path; the K0.3 authority anchor is the sole direct pin intentionally outside fixture_paths.",
+      "duplicate_rule": "No path may resolve to more than one direct pin or more than one fixture-path entry.",
+      "missing_rule": "Any fixture path without an inherited or direct pin is UNKNOWN and blocks freshness admission."
+    },
+    "fixture_path_count": 67,
+    "fixture_path_digest_sha256": "d9542095b391dbd44a0f8d855d6cfb87e41b981642430a0de662a2965ad26db0",
+    "fixture_paths": [
+      ".github/no_mock_policy.json",
+      "artifacts/adapter_certification_matrix_v1.json",
+      "artifacts/dependency_real_service_fixture_matrix_v1.json",
+      "conformance/src/kafka_record_batch_v2.rs",
+      "conformance/src/lib.rs",
+      "docs/dependency_real_service_fixtures.md",
+      "fuzz/corpus/kafka_protocol/api_versions_tagged_fields",
+      "fuzz/corpus/kafka_protocol/invalid_api_version_header",
+      "fuzz/corpus/kafka_protocol/oversized_request_frame",
+      "fuzz/corpus/kafka_response_frames/empty",
+      "fuzz/corpus/kafka_response_frames/error_response",
+      "fuzz/corpus/kafka_response_frames/malformed_length",
+      "fuzz/corpus/kafka_response_frames/success_response",
+      "fuzz/fuzz_targets/kafka_fetch_response.rs",
+      "fuzz/fuzz_targets/kafka_produce_response.rs",
+      "fuzz/fuzz_targets/kafka_protocol.rs",
+      "fuzz/fuzz_targets/kafka_protocol_parser.rs",
+      "fuzz/fuzz_targets/kafka_response_frames.rs",
+      "fuzz/fuzz_targets/kafka_wire_protocol.rs",
+      "fuzz/fuzz_targets/messaging_kafka_record_batch.rs",
+      "scripts/kafka_broker_parity_proof_runner.sh",
+      "scripts/provision_kafka_test_env.rs",
+      "src/app.rs",
+      "src/bin/dependency_marginal_ledger.rs",
+      "src/golden_artifacts_tests.rs",
+      "src/messaging/kafka.rs",
+      "src/messaging/kafka_consumer.rs",
+      "src/real_http_h2_server_messaging_kafka_e2e_tests.rs",
+      "src/real_kafka_consumer_group_rebalance_e2e_tests.rs",
+      "src/real_messaging_kafka_trace_event_integration_e2e_tests.rs",
+      "src/real_net_tls_connector_messaging_kafka_integration_e2e_tests.rs",
+      "src/subsystem_mutation_testing.rs",
+      "tests/checkpoint_frequency_survey_audit.rs",
+      "tests/conformance/kafka_offsets.rs",
+      "tests/conformance/kafka_record_batch_v2/format.rs",
+      "tests/conformance/kafka_record_batch_v2/golden_tests.rs",
+      "tests/conformance/kafka_record_batch_v2/harness.rs",
+      "tests/conformance/kafka_record_batch_v2/mod.rs",
+      "tests/conformance/kafka_record_batch_v2/test_vectors.rs",
+      "tests/conformance/messaging_broker_parity.rs",
+      "tests/conformance/mod.rs",
+      "tests/dependency_marginal_ledger_contract.rs",
+      "tests/dependency_real_service_fixture_contract.rs",
+      "tests/downstream_consumer_proof_contract.rs",
+      "tests/e2e_messaging.rs",
+      "tests/e2e_t6_data_path.rs",
+      "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
+      "tests/integration/kafka_real_broker.rs",
+      "tests/integration/kafka_real_broker_README.md",
+      "tests/kafka_capability_inventory_contract.rs",
+      "tests/kafka_consumer_offset_commit_property_fuzz.rs",
+      "tests/kafka_incumbent_semantics_matrix_contract.rs",
+      "tests/kafka_offset_commit_retry_audit.rs",
+      "tests/kafka_producer_idempotence_audit.rs",
+      "tests/kafka_record_batch_v2_integration.rs",
+      "tests/kafka_sasl_authentication_audit.rs",
+      "tests/messaging_kafka_compression_roundtrip.rs",
+      "tests/messaging_kafka_rebalance_lifecycle.rs",
+      "tests/t6_database_messaging_unit_matrix.rs",
+      "tests/t6_deterministic_integration_fault_injection.rs",
+      "tests/tokio_db_messaging_gap_baseline.rs",
+      "tests/tokio_db_messaging_integration.rs",
+      "tests/tokio_db_messaging_migration_packs.rs",
+      "tests/tokio_db_messaging_unit_test_matrix.rs",
+      "tests/tokio_interop_support_matrix.rs",
+      "tests/tokio_retry_idempotency_failure_contracts.rs",
+      "tests/tokio_t6_migration_packs.rs"
+    ]
+  },
+  "direct_source_pins": [
+    {
+      "pin_id": "KAFKA-K0-4-PIN-001-K0-3-AUTHORITY",
+      "path": "artifacts/kafka_downstream_user_journey_inventory_v1.json",
+      "sha256": "52f8dc9a2695a170b14c85c9b29b6e60f95e05bd013d3d9db0dab8d94a1ced09",
+      "byte_count": 1171732,
+      "record_count": 17988
+    },
+    {
+      "pin_id": "KAFKA-K0-4-PIN-002-RECORD-BATCH-CONFORMANCE",
+      "path": "conformance/src/kafka_record_batch_v2.rs",
+      "sha256": "eb9d3ccf193e3fe34e82fe2b32ee76ee1d3e376e98ac82eec8d428ea91de676f",
+      "byte_count": 49117,
+      "record_count": 1460
+    },
+    {
+      "pin_id": "KAFKA-K0-4-PIN-003-API-VERSIONS-SEED",
+      "path": "fuzz/corpus/kafka_protocol/api_versions_tagged_fields",
+      "sha256": "db799bc1fb6da0a9ba18d68e0925b283f17278be130a1e071dc28592c6ff0500",
+      "byte_count": 65,
+      "record_count": 1
+    },
+    {
+      "pin_id": "KAFKA-K0-4-PIN-004-INVALID-API-VERSION-SEED",
+      "path": "fuzz/corpus/kafka_protocol/invalid_api_version_header",
+      "sha256": "445f88f6befb68cd7ce6f96e86630a35bac514f7fe1ded1d482d64bbdf9e1f7c",
+      "byte_count": 49,
+      "record_count": 1
+    },
+    {
+      "pin_id": "KAFKA-K0-4-PIN-005-OVERSIZED-REQUEST-SEED",
+      "path": "fuzz/corpus/kafka_protocol/oversized_request_frame",
+      "sha256": "acb2b8901d0e4246dc77a574462e462263a740df72f97e368df24c758db98a0f",
+      "byte_count": 58,
+      "record_count": 1
+    },
+    {
+      "pin_id": "KAFKA-K0-4-PIN-006-EMPTY-RESPONSE-SEED",
+      "path": "fuzz/corpus/kafka_response_frames/empty",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "byte_count": 0,
+      "record_count": 0
+    },
+    {
+      "pin_id": "KAFKA-K0-4-PIN-007-ERROR-RESPONSE-SEED",
+      "path": "fuzz/corpus/kafka_response_frames/error_response",
+      "sha256": "b2386ded5fb9864f800fc5f71fcdd568bda5cd5eff4f215b21e5489b6938dfbb",
+      "byte_count": 16,
+      "record_count": 1
+    },
+    {
+      "pin_id": "KAFKA-K0-4-PIN-008-MALFORMED-LENGTH-SEED",
+      "path": "fuzz/corpus/kafka_response_frames/malformed_length",
+      "sha256": "a7a433f4573f250a0d70abad78d3f73a0d41431750c77c5583c0966151f65ef4",
+      "byte_count": 8,
+      "record_count": 1
+    },
+    {
+      "pin_id": "KAFKA-K0-4-PIN-009-SUCCESS-RESPONSE-SEED",
+      "path": "fuzz/corpus/kafka_response_frames/success_response",
+      "sha256": "91f06235671ba18eb5f8270590be31f5ae3797ee3fdedbbaa00b29fd2ec6caf2",
+      "byte_count": 12,
+      "record_count": 1
+    },
+    {
+      "pin_id": "KAFKA-K0-4-PIN-010-FETCH-RESPONSE-TARGET",
+      "path": "fuzz/fuzz_targets/kafka_fetch_response.rs",
+      "sha256": "26ba1f480788efb0579847c8de902011d467cf966cdef01b3b2910720c20344e",
+      "byte_count": 23452,
+      "record_count": 767
+    },
+    {
+      "pin_id": "KAFKA-K0-4-PIN-011-RECORD-BATCH-TARGET",
+      "path": "fuzz/fuzz_targets/messaging_kafka_record_batch.rs",
+      "sha256": "12c42531e21385a71975ad01b721a1090879aa244b9cd1069b12e058c5b8a957",
+      "byte_count": 8088,
+      "record_count": 241
+    },
+    {
+      "pin_id": "KAFKA-K0-4-PIN-012-RECORD-BATCH-FORMAT",
+      "path": "tests/conformance/kafka_record_batch_v2/format.rs",
+      "sha256": "aac8c4dda43a119bcb1784b8c3b6c777a6ab2a7ff5346ae9167ed014cb43cb3e",
+      "byte_count": 20622,
+      "record_count": 706
+    },
+    {
+      "pin_id": "KAFKA-K0-4-PIN-013-RECORD-BATCH-GOLDEN",
+      "path": "tests/conformance/kafka_record_batch_v2/golden_tests.rs",
+      "sha256": "f4cb1812da5c702dd77bc37d404c38f48e7a120a49afecdeb4fba296c1eda730",
+      "byte_count": 15550,
+      "record_count": 439
+    },
+    {
+      "pin_id": "KAFKA-K0-4-PIN-014-RECORD-BATCH-HARNESS",
+      "path": "tests/conformance/kafka_record_batch_v2/harness.rs",
+      "sha256": "fbf70b139e233a4625325447e79b83bb4c5e6becb8cf2481fd24d23103727c82",
+      "byte_count": 26157,
+      "record_count": 761
+    },
+    {
+      "pin_id": "KAFKA-K0-4-PIN-015-RECORD-BATCH-MODULE",
+      "path": "tests/conformance/kafka_record_batch_v2/mod.rs",
+      "sha256": "8c3a54c2981cfcecb8f1281b9bcc2bd0b6705a448311f026d5550b67613e1a4d",
+      "byte_count": 3785,
+      "record_count": 107
+    },
+    {
+      "pin_id": "KAFKA-K0-4-PIN-016-RECORD-BATCH-VECTORS",
+      "path": "tests/conformance/kafka_record_batch_v2/test_vectors.rs",
+      "sha256": "8f846b4a1868ca6fc7cfc71924cdba2da5a130cf2ea39aaa592d52bd7b260242",
+      "byte_count": 11040,
+      "record_count": 344
+    },
+    {
+      "pin_id": "KAFKA-K0-4-PIN-017-REAL-SERVICE-CONTRACT",
+      "path": "tests/dependency_real_service_fixture_contract.rs",
+      "sha256": "1005032290ee46ec083a0e9b2a2d9310e8ea274a17c23d8052cc6168da0ca3c0",
+      "byte_count": 12779,
+      "record_count": 335
+    },
+    {
+      "pin_id": "KAFKA-K0-4-PIN-018-K0-1-CONTRACT",
+      "path": "tests/kafka_capability_inventory_contract.rs",
+      "sha256": "d1e7492185f798b5affc7dea4c62761552bc6a8804f1b61b14d379f75df23c5e",
+      "byte_count": 28908,
+      "record_count": 858
+    },
+    {
+      "pin_id": "KAFKA-K0-4-PIN-019-K0-2-CONTRACT",
+      "path": "tests/kafka_incumbent_semantics_matrix_contract.rs",
+      "sha256": "36bd4fe722d8ac79c05c21a29772d592211c8f8e3b5a78c0ba6ebd7aeb41caf9",
+      "byte_count": 69301,
+      "record_count": 1692
+    },
+    {
+      "pin_id": "KAFKA-K0-4-PIN-020-RECORD-BATCH-INTEGRATION",
+      "path": "tests/kafka_record_batch_v2_integration.rs",
+      "sha256": "c9ee73c0a200a4f95934aa48383031fd8ccfc4f2721211977067b82c95522f23",
+      "byte_count": 1500,
+      "record_count": 53
+    }
+  ],
+  "fixture_classification_profiles": [
+    {
+      "classification_profile_id": "KAFKA-K0-4-FIXTURE-PROFILE-001-POLICY-CONTEXT",
+      "evidence_class": "STATIC_SOURCE",
+      "truth_class": "CURRENT_SOURCE_PINNED",
+      "knowledge_state": "KNOWN",
+      "execution_state": "NOT_RUN",
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-001-STATIC-BASELINE"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "Policy, registry, documentation, and dependency-accounting context is static inventory only and proves no Kafka behavior."
+    },
+    {
+      "classification_profile_id": "KAFKA-K0-4-FIXTURE-PROFILE-002-COMPILE-STATIC-CONTRACT",
+      "evidence_class": "COMPILE_ONLY",
+      "truth_class": "CURRENT_SOURCE_PINNED",
+      "knowledge_state": "KNOWN",
+      "execution_state": "NOT_RUN",
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-001-STATIC-BASELINE"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "A source-pinned contract or compile surface is not an executed compiler result, semantic proof, or broker receipt."
+    },
+    {
+      "classification_profile_id": "KAFKA-K0-4-FIXTURE-PROFILE-003-LOCAL-MODEL",
+      "evidence_class": "LOCAL_MODEL_ONLY",
+      "truth_class": "LOCAL_MODEL_ONLY",
+      "knowledge_state": "KNOWN",
+      "execution_state": "NOT_RUN",
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-001-STATIC-BASELINE"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "Deterministic, simulated, fallback, mock, or source-model behavior cannot become native-client or broker evidence."
+    },
+    {
+      "classification_profile_id": "KAFKA-K0-4-FIXTURE-PROFILE-004-WIRE-CORPUS",
+      "evidence_class": "WIRE_CODEC_ONLY",
+      "truth_class": "WIRE_CODEC_ONLY",
+      "knowledge_state": "KNOWN",
+      "execution_state": "NOT_RUN",
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-001-STATIC-BASELINE"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.3",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "Parser targets, response frames, seeds, and generic goldens do not establish a Kafka client, production API negotiation, or broker interoperability."
+    },
+    {
+      "classification_profile_id": "KAFKA-K0-4-FIXTURE-PROFILE-005-RECORD-BATCH-LOCAL-MODEL",
+      "evidence_class": "WIRE_CODEC_ONLY",
+      "truth_class": "LOCAL_MODEL_ONLY",
+      "knowledge_state": "KNOWN",
+      "execution_state": "NOT_RUN",
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-001-STATIC-BASELINE"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.1",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "The first-party RecordBatch model is not a complete client and lacks independently pinned expected bytes and terminal broker comparison."
+    },
+    {
+      "classification_profile_id": "KAFKA-K0-4-FIXTURE-PROFILE-006-PROOF-ONLY",
+      "evidence_class": "PROOF_ONLY",
+      "truth_class": "CURRENT_SOURCE_PINNED",
+      "knowledge_state": "KNOWN",
+      "execution_state": "NOT_RUN",
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-001-STATIC-BASELINE",
+        "KAFKA-K0-4-ENV-005-AMBIENT-BROKER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "A proof runner or proof-oriented document is schema and orchestration source only until a non-skipped immutable terminal receipt exists."
+    },
+    {
+      "classification_profile_id": "KAFKA-K0-4-FIXTURE-PROFILE-007-PLANNED-PROVISIONER",
+      "evidence_class": "PLANNED",
+      "truth_class": "UNPINNED",
+      "knowledge_state": "KNOWN",
+      "execution_state": "NOT_RUN",
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-004-MUTABLE-PROVISIONER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.1",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "The mutable provisioner proposal is CONFIG_ONLY, UNPINNED, and NOT_RUN and cannot supply immutable fixture provenance."
+    },
+    {
+      "classification_profile_id": "KAFKA-K0-4-FIXTURE-PROFILE-008-OPT-IN-REAL-BROKER",
+      "evidence_class": "REAL_BROKER_CAPABLE",
+      "truth_class": "BLOCKED_EXTERNAL",
+      "knowledge_state": "BLOCKED",
+      "execution_state": "BLOCKED",
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-005-AMBIENT-BROKER",
+        "KAFKA-K0-4-ENV-006-OLDEST-BROKER",
+        "KAFKA-K0-4-ENV-007-CURRENT-BROKER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "Opt-in source capability and silent skip behavior remain BLOCKED_EXTERNAL without immutable broker identity, non-skip execution, and teardown receipts."
+    }
+  ],
+  "fixture_census": [
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-001","path":".github/no_mock_policy.json","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-NO-MOCK-POLICY","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-001-POLICY-CONTEXT"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-002","path":"artifacts/adapter_certification_matrix_v1.json","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-ADAPTER-CERTIFICATION","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-001-POLICY-CONTEXT"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-003","path":"artifacts/dependency_real_service_fixture_matrix_v1.json","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-REAL-SERVICE-MATRIX","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-001-POLICY-CONTEXT"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-004","path":"conformance/src/kafka_record_batch_v2.rs","pin_origin":"K0_4_DIRECT","source_pin_id":"KAFKA-K0-4-PIN-002-RECORD-BATCH-CONFORMANCE","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-005-RECORD-BATCH-LOCAL-MODEL"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-005","path":"conformance/src/lib.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-CONFORMANCE-LIB","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-002-COMPILE-STATIC-CONTRACT"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-006","path":"docs/dependency_real_service_fixtures.md","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-REAL-SERVICE-DOC","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-001-POLICY-CONTEXT"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-007","path":"fuzz/corpus/kafka_protocol/api_versions_tagged_fields","pin_origin":"K0_4_DIRECT","source_pin_id":"KAFKA-K0-4-PIN-003-API-VERSIONS-SEED","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-004-WIRE-CORPUS"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-008","path":"fuzz/corpus/kafka_protocol/invalid_api_version_header","pin_origin":"K0_4_DIRECT","source_pin_id":"KAFKA-K0-4-PIN-004-INVALID-API-VERSION-SEED","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-004-WIRE-CORPUS"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-009","path":"fuzz/corpus/kafka_protocol/oversized_request_frame","pin_origin":"K0_4_DIRECT","source_pin_id":"KAFKA-K0-4-PIN-005-OVERSIZED-REQUEST-SEED","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-004-WIRE-CORPUS"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-010","path":"fuzz/corpus/kafka_response_frames/empty","pin_origin":"K0_4_DIRECT","source_pin_id":"KAFKA-K0-4-PIN-006-EMPTY-RESPONSE-SEED","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-004-WIRE-CORPUS"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-011","path":"fuzz/corpus/kafka_response_frames/error_response","pin_origin":"K0_4_DIRECT","source_pin_id":"KAFKA-K0-4-PIN-007-ERROR-RESPONSE-SEED","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-004-WIRE-CORPUS"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-012","path":"fuzz/corpus/kafka_response_frames/malformed_length","pin_origin":"K0_4_DIRECT","source_pin_id":"KAFKA-K0-4-PIN-008-MALFORMED-LENGTH-SEED","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-004-WIRE-CORPUS"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-013","path":"fuzz/corpus/kafka_response_frames/success_response","pin_origin":"K0_4_DIRECT","source_pin_id":"KAFKA-K0-4-PIN-009-SUCCESS-RESPONSE-SEED","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-004-WIRE-CORPUS"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-014","path":"fuzz/fuzz_targets/kafka_fetch_response.rs","pin_origin":"K0_4_DIRECT","source_pin_id":"KAFKA-K0-4-PIN-010-FETCH-RESPONSE-TARGET","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-004-WIRE-CORPUS"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-015","path":"fuzz/fuzz_targets/kafka_produce_response.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-FUZZ-PRODUCE-RESPONSE","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-004-WIRE-CORPUS"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-016","path":"fuzz/fuzz_targets/kafka_protocol.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-FUZZ-PROTOCOL","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-004-WIRE-CORPUS"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-017","path":"fuzz/fuzz_targets/kafka_protocol_parser.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-FUZZ-PROTOCOL-PARSER","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-004-WIRE-CORPUS"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-018","path":"fuzz/fuzz_targets/kafka_response_frames.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-FUZZ-RESPONSE-FRAMES","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-004-WIRE-CORPUS"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-019","path":"fuzz/fuzz_targets/kafka_wire_protocol.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-FUZZ-WIRE-PROTOCOL","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-004-WIRE-CORPUS"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-020","path":"fuzz/fuzz_targets/messaging_kafka_record_batch.rs","pin_origin":"K0_4_DIRECT","source_pin_id":"KAFKA-K0-4-PIN-011-RECORD-BATCH-TARGET","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-005-RECORD-BATCH-LOCAL-MODEL"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-021","path":"scripts/kafka_broker_parity_proof_runner.sh","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-PROOF-RUNNER","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-006-PROOF-ONLY"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-022","path":"scripts/provision_kafka_test_env.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-PROVISIONER","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-007-PLANNED-PROVISIONER"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-023","path":"src/app.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-APP-SPEC","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-003-LOCAL-MODEL"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-024","path":"src/bin/dependency_marginal_ledger.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-MARGINAL-LEDGER-SOURCE","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-001-POLICY-CONTEXT"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-025","path":"src/golden_artifacts_tests.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-GOLDEN-SOURCE","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-004-WIRE-CORPUS"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-026","path":"src/messaging/kafka.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-PRODUCER-SOURCE","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-003-LOCAL-MODEL"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-027","path":"src/messaging/kafka_consumer.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-CONSUMER-SOURCE","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-003-LOCAL-MODEL"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-028","path":"src/real_http_h2_server_messaging_kafka_e2e_tests.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-DORMANT-HTTP","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-003-LOCAL-MODEL"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-029","path":"src/real_kafka_consumer_group_rebalance_e2e_tests.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-DORMANT-GROUP","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-003-LOCAL-MODEL"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-030","path":"src/real_messaging_kafka_trace_event_integration_e2e_tests.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-DORMANT-TRACE","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-003-LOCAL-MODEL"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-031","path":"src/real_net_tls_connector_messaging_kafka_integration_e2e_tests.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-DORMANT-TLS","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-003-LOCAL-MODEL"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-032","path":"src/subsystem_mutation_testing.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-DORMANT-MUTATION","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-003-LOCAL-MODEL"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-033","path":"tests/checkpoint_frequency_survey_audit.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-CHECKPOINT-AUDIT","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-002-COMPILE-STATIC-CONTRACT"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-034","path":"tests/conformance/kafka_offsets.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-OFFSET-CONFORMANCE","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-008-OPT-IN-REAL-BROKER"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-035","path":"tests/conformance/kafka_record_batch_v2/format.rs","pin_origin":"K0_4_DIRECT","source_pin_id":"KAFKA-K0-4-PIN-012-RECORD-BATCH-FORMAT","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-005-RECORD-BATCH-LOCAL-MODEL"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-036","path":"tests/conformance/kafka_record_batch_v2/golden_tests.rs","pin_origin":"K0_4_DIRECT","source_pin_id":"KAFKA-K0-4-PIN-013-RECORD-BATCH-GOLDEN","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-005-RECORD-BATCH-LOCAL-MODEL"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-037","path":"tests/conformance/kafka_record_batch_v2/harness.rs","pin_origin":"K0_4_DIRECT","source_pin_id":"KAFKA-K0-4-PIN-014-RECORD-BATCH-HARNESS","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-005-RECORD-BATCH-LOCAL-MODEL"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-038","path":"tests/conformance/kafka_record_batch_v2/mod.rs","pin_origin":"K0_4_DIRECT","source_pin_id":"KAFKA-K0-4-PIN-015-RECORD-BATCH-MODULE","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-005-RECORD-BATCH-LOCAL-MODEL"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-039","path":"tests/conformance/kafka_record_batch_v2/test_vectors.rs","pin_origin":"K0_4_DIRECT","source_pin_id":"KAFKA-K0-4-PIN-016-RECORD-BATCH-VECTORS","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-005-RECORD-BATCH-LOCAL-MODEL"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-040","path":"tests/conformance/messaging_broker_parity.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-BROKER-PARITY","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-003-LOCAL-MODEL"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-041","path":"tests/conformance/mod.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-CONFORMANCE-MODULE","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-002-COMPILE-STATIC-CONTRACT"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-042","path":"tests/dependency_marginal_ledger_contract.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-MARGINAL-LEDGER-CONTRACT","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-002-COMPILE-STATIC-CONTRACT"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-043","path":"tests/dependency_real_service_fixture_contract.rs","pin_origin":"K0_4_DIRECT","source_pin_id":"KAFKA-K0-4-PIN-017-REAL-SERVICE-CONTRACT","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-002-COMPILE-STATIC-CONTRACT"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-044","path":"tests/downstream_consumer_proof_contract.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-DOWNSTREAM-PROOF-CONTRACT","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-002-COMPILE-STATIC-CONTRACT"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-045","path":"tests/e2e_messaging.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-E2E-MESSAGING","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-008-OPT-IN-REAL-BROKER"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-046","path":"tests/e2e_t6_data_path.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-E2E-T6","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-008-OPT-IN-REAL-BROKER"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-047","path":"tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-GENERIC-FIXTURE-SOURCE","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-002-COMPILE-STATIC-CONTRACT"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-048","path":"tests/integration/kafka_real_broker.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-REAL-BROKER","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-008-OPT-IN-REAL-BROKER"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-049","path":"tests/integration/kafka_real_broker_README.md","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-REAL-BROKER-DOC","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-006-PROOF-ONLY"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-050","path":"tests/kafka_capability_inventory_contract.rs","pin_origin":"K0_4_DIRECT","source_pin_id":"KAFKA-K0-4-PIN-018-K0-1-CONTRACT","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-002-COMPILE-STATIC-CONTRACT"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-051","path":"tests/kafka_consumer_offset_commit_property_fuzz.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-OFFSET-PROPERTY","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-003-LOCAL-MODEL"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-052","path":"tests/kafka_incumbent_semantics_matrix_contract.rs","pin_origin":"K0_4_DIRECT","source_pin_id":"KAFKA-K0-4-PIN-019-K0-2-CONTRACT","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-002-COMPILE-STATIC-CONTRACT"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-053","path":"tests/kafka_offset_commit_retry_audit.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-OFFSET-RETRY","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-002-COMPILE-STATIC-CONTRACT"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-054","path":"tests/kafka_producer_idempotence_audit.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-IDEMPOTENCE","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-002-COMPILE-STATIC-CONTRACT"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-055","path":"tests/kafka_record_batch_v2_integration.rs","pin_origin":"K0_4_DIRECT","source_pin_id":"KAFKA-K0-4-PIN-020-RECORD-BATCH-INTEGRATION","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-005-RECORD-BATCH-LOCAL-MODEL"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-056","path":"tests/kafka_sasl_authentication_audit.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-SASL","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-003-LOCAL-MODEL"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-057","path":"tests/messaging_kafka_compression_roundtrip.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-COMPRESSION","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-003-LOCAL-MODEL"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-058","path":"tests/messaging_kafka_rebalance_lifecycle.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-REBALANCE","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-008-OPT-IN-REAL-BROKER"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-059","path":"tests/t6_database_messaging_unit_matrix.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-T6-MATRIX","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-002-COMPILE-STATIC-CONTRACT"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-060","path":"tests/t6_deterministic_integration_fault_injection.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-T6-FAULT","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-003-LOCAL-MODEL"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-061","path":"tests/tokio_db_messaging_gap_baseline.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-T6-GAP-CONTRACT","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-002-COMPILE-STATIC-CONTRACT"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-062","path":"tests/tokio_db_messaging_integration.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-TOKIO-INTEGRATION","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-003-LOCAL-MODEL"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-063","path":"tests/tokio_db_messaging_migration_packs.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-DB-MIGRATION-CONTRACT-TEST","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-002-COMPILE-STATIC-CONTRACT"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-064","path":"tests/tokio_db_messaging_unit_test_matrix.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-T6-UNIT-META","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-002-COMPILE-STATIC-CONTRACT"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-065","path":"tests/tokio_interop_support_matrix.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-INTEROP-CONTRACT-TEST","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-002-COMPILE-STATIC-CONTRACT"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-066","path":"tests/tokio_retry_idempotency_failure_contracts.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-RETRY-CONTRACT-TEST","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-002-COMPILE-STATIC-CONTRACT"},
+    {"fixture_id":"KAFKA-K0-4-FIXTURE-067","path":"tests/tokio_t6_migration_packs.rs","pin_origin":"K0_3_INHERITED","source_pin_id":"KAFKA-K0-3-PIN-T6-MIGRATION-CONTRACT-TEST","classification_profile_id":"KAFKA-K0-4-FIXTURE-PROFILE-002-COMPILE-STATIC-CONTRACT"}
+  ],
+  "environment_identities": [
+    {
+      "environment_id": "KAFKA-K0-4-ENV-001-STATIC-BASELINE",
+      "kind": "REPOSITORY_STATIC_BASELINE",
+      "truth_class": "CURRENT_SOURCE_PINNED",
+      "knowledge_state": "KNOWN",
+      "execution_state": "NOT_RUN",
+      "identity": {
+        "revision": "012c13714db267a4fba928db9f900b70d6c1d25a",
+        "captured_date_utc": "2026-08-03"
+      },
+      "source_refs": [
+        "artifacts/kafka_downstream_user_journey_inventory_v1.json",
+        "KAFKA-K0-4-PIN-001-K0-3-AUTHORITY"
+      ],
+      "limitation": "A repository snapshot is not a compiler, native linker, broker, or runtime identity."
+    },
+    {
+      "environment_id": "KAFKA-K0-4-ENV-002-PACKAGE-SOURCE",
+      "kind": "PACKAGE_SOURCE_EXPECTATION",
+      "truth_class": "PACKAGE_SOURCE_EXPECTATION",
+      "knowledge_state": "KNOWN",
+      "execution_state": "NOT_RUN",
+      "identity": {
+        "rdkafka_package_name": "rdkafka",
+        "rdkafka_package_version": "0.39.0",
+        "rdkafka_package_checksum": "d7956f9ac12b5712e50372d9749a3102f4810a8d42481c5eae3748d36d585bcf",
+        "rdkafka_sys_package_name": "rdkafka-sys",
+        "rdkafka_sys_package_version": "4.10.0+2.12.1",
+        "rdkafka_sys_package_checksum": "e234cf318915c1059d4921ef7f75616b5219b10b46e9f3a511a15eb4b56a3f77",
+        "rust_rdkafka_vcs_commit": "47a17d8de72b8bfa89589a84a4a0c600c54df1e0",
+        "vendored_header_version_hex": "0x020c01ff",
+        "vendored_header_version": "2.12.1",
+        "rdkafka_default_features": false,
+        "rdkafka_to_rdkafka_sys_default_features": false,
+        "expected_branch": "VENDORED_STATIC",
+        "expected_build_mechanism": "configure+make",
+        "expected_disabled_capabilities": [
+          "SSL",
+          "GSSAPI",
+          "zlib",
+          "curl",
+          "Zstd",
+          "external LZ4"
+        ],
+        "expected_source_capabilities": [
+          "built-in Snappy",
+          "internal LZ4 1.9.4"
+        ],
+        "actual_execution_receipt": null
+      },
+      "source_refs": [
+        "Cargo.lock:2799-2823",
+        "artifacts/kafka_capability_inventory_v1.json:149-192",
+        "rdkafka-sys-4.10.0+2.12.1/.cargo_vcs_info.json",
+        "rdkafka-sys-4.10.0+2.12.1/build.rs",
+        "rdkafka-sys-4.10.0+2.12.1/librdkafka/src/rdkafka.h",
+        "rdkafka-sys-4.10.0+2.12.1/librdkafka/configure.self"
+      ],
+      "limitation": "The checksum pins the packaged vendored bytes and their declared branch expectation, but no separate vendored librdkafka upstream git commit is retained and no actual build, link, or loaded-binary receipt exists."
+    },
+    {
+      "environment_id": "KAFKA-K0-4-ENV-003-ACTUAL-BUILD-HOST",
+      "kind": "ACTUAL_NATIVE_BUILD_HOST",
+      "truth_class": "UNKNOWN",
+      "knowledge_state": "BLOCKED",
+      "execution_state": "BLOCKED",
+      "identity": null,
+      "source_refs": [
+        "docs/adr/dep_plan_adr_009_kafka_client.md:103",
+        "docs/kafka_capability_inventory.md:42-58"
+      ],
+      "limitation": "Host triple, compiler, linker, pkg-config source, .pc bytes, native library bytes, link mode, configure flags, and built-in features have no receipt."
+    },
+    {
+      "environment_id": "KAFKA-K0-4-ENV-004-MUTABLE-PROVISIONER",
+      "kind": "MUTABLE_PROVISIONER_PROPOSAL",
+      "truth_class": "UNPINNED",
+      "knowledge_state": "KNOWN",
+      "execution_state": "NOT_RUN",
+      "identity": {
+        "kafka_image": "confluentinc/cp-kafka:7.4.0",
+        "zookeeper_image": "confluentinc/cp-zookeeper:7.4.0",
+        "image_digests": null
+      },
+      "source_refs": [
+        "scripts/provision_kafka_test_env.rs:162-195",
+        "artifacts/dependency_real_service_fixture_matrix_v1.json:57-95"
+      ],
+      "limitation": "Mutable tags and configuration text are not immutable service identity or execution evidence."
+    },
+    {
+      "environment_id": "KAFKA-K0-4-ENV-005-AMBIENT-BROKER",
+      "kind": "AMBIENT_BROKER",
+      "truth_class": "UNPINNED",
+      "knowledge_state": "UNKNOWN",
+      "execution_state": "NOT_RUN",
+      "identity": null,
+      "source_refs": [
+        "tests/integration/kafka_real_broker.rs:25-57"
+      ],
+      "limitation": "KAFKA_BOOTSTRAP_SERVERS can identify an ambient endpoint but supplies no immutable broker version, image, configuration, topology, or lifecycle ownership."
+    },
+    {
+      "environment_id": "KAFKA-K0-4-ENV-006-OLDEST-BROKER",
+      "kind": "REQUIRED_OLDEST_SUPPORTED_BROKER",
+      "truth_class": "BLOCKED_EXTERNAL",
+      "knowledge_state": "BLOCKED",
+      "execution_state": "BLOCKED",
+      "identity": null,
+      "source_refs": [
+        "artifacts/dependency_real_service_fixture_matrix_v1.json:69-72"
+      ],
+      "limitation": "No approved oldest-supported broker version or immutable image digest exists."
+    },
+    {
+      "environment_id": "KAFKA-K0-4-ENV-007-CURRENT-BROKER",
+      "kind": "REQUIRED_CURRENT_SUPPORTED_BROKER",
+      "truth_class": "BLOCKED_EXTERNAL",
+      "knowledge_state": "BLOCKED",
+      "execution_state": "BLOCKED",
+      "identity": null,
+      "source_refs": [
+        "artifacts/dependency_real_service_fixture_matrix_v1.json:74-77"
+      ],
+      "limitation": "No approved current-supported broker version or immutable image digest exists."
+    },
+    {
+      "environment_id": "KAFKA-K0-4-ENV-008-AUTHENTICATED-BROKER",
+      "kind": "REQUIRED_AUTHENTICATED_BROKER",
+      "truth_class": "BLOCKED_EXTERNAL",
+      "knowledge_state": "BLOCKED",
+      "execution_state": "BLOCKED",
+      "identity": null,
+      "source_refs": [
+        "artifacts/dependency_real_service_fixture_matrix_v1.json:79-82"
+      ],
+      "limitation": "No immutable TLS/SASL broker identity, certificate chain, credential fixture, or authenticated terminal receipt exists."
+    }
+  ],
+  "locked_dependency_identity": [
+    {
+      "vector_id": "KAFKA-K0-4-DEP-001-FEATURE-EDGE",
+      "subject": "root kafka feature edge",
+      "current_evidence": "Cargo.toml maps kafka to dep:rdkafka and declares rdkafka 0.39 optional with default features disabled.",
+      "truth_class": "LOCKFILE_DECLARED",
+      "knowledge_state": "KNOWN",
+      "execution_state": "NOT_RUN",
+      "source_refs": [
+        "Cargo.toml:215",
+        "Cargo.toml:460",
+        "artifacts/kafka_capability_inventory_v1.json:149-159"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-001-STATIC-BASELINE"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-001-STATIC-BASELINE"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.1",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "A manifest edge proves neither compilation nor linkage."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-DEP-002-RDKAFKA",
+      "subject": "rdkafka Rust package",
+      "current_evidence": "Cargo.lock pins rdkafka 0.39.0 with checksum d7956f9ac12b5712e50372d9749a3102f4810a8d42481c5eae3748d36d585bcf.",
+      "truth_class": "LOCKFILE_DECLARED",
+      "knowledge_state": "KNOWN",
+      "execution_state": "NOT_RUN",
+      "source_refs": [
+        "Cargo.lock:2799-2815",
+        "artifacts/kafka_capability_inventory_v1.json:160-165"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-002-PACKAGE-SOURCE"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-001-STATIC-BASELINE",
+        "KAFKA-K0-4-ENV-002-PACKAGE-SOURCE"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.1",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "A locked Rust package is not an actual native binary receipt."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-DEP-003-RDKAFKA-SYS",
+      "subject": "rdkafka-sys Rust package and declared native coordinate",
+      "current_evidence": "Cargo.lock pins rdkafka-sys 4.10.0+2.12.1 with checksum e234cf318915c1059d4921ef7f75616b5219b10b46e9f3a511a15eb4b56a3f77 and lists libc, num_enum, and pkg-config.",
+      "truth_class": "LOCKFILE_DECLARED",
+      "knowledge_state": "KNOWN",
+      "execution_state": "NOT_RUN",
+      "source_refs": [
+        "Cargo.lock:2816-2824",
+        "artifacts/kafka_capability_inventory_v1.json:166-176"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-002-PACKAGE-SOURCE"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-001-STATIC-BASELINE",
+        "KAFKA-K0-4-ENV-002-PACKAGE-SOURCE"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.1",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "The +2.12.1 package coordinate is not evidence that those native bytes were selected, compiled, or linked."
+    }
+  ],
+  "native_build_vectors": [
+    {
+      "vector_id": "KAFKA-K0-4-NATIVE-001-PACKAGE-SOURCE",
+      "subject": "package-source native-library expectation",
+      "current_evidence": "Checksum-pinned rdkafka 0.39.0 depends on rdkafka-sys 4.10.0+2.12.1 with default features disabled; the pinned rdkafka-sys package source therefore declares the vendored static branch, with librdkafka header version 0x020c01ff and rust-rdkafka package commit 47a17d8de72b8bfa89589a84a4a0c600c54df1e0.",
+      "truth_class": "PACKAGE_SOURCE_EXPECTATION",
+      "knowledge_state": "KNOWN",
+      "execution_state": "NOT_RUN",
+      "source_refs": [
+        "Cargo.toml:460",
+        "Cargo.lock:2799-2824",
+        "rdkafka-sys-4.10.0+2.12.1/.cargo_vcs_info.json",
+        "rdkafka-sys-4.10.0+2.12.1/build.rs",
+        "rdkafka-sys-4.10.0+2.12.1/librdkafka/src/rdkafka.h"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-002-PACKAGE-SOURCE"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-002-PACKAGE-SOURCE"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.1",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "actual_execution_receipt": null,
+      "limitation": "The package checksum pins the packaged source expectation, not a separate vendored librdkafka upstream git commit or the native bytes actually compiled, linked, or loaded; this must not be promoted to ACTUAL_BINARY_RECEIPT."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-NATIVE-002-PKG-CONFIG",
+      "subject": "unselected conditional pkg-config dynamic branch",
+      "current_evidence": "The checksum-pinned rdkafka-sys build source uses pkg-config only for its conditional dynamic-linking branch; the declared default-features=false closure selects neither dynamic-linking nor static-external and therefore expects the vendored static branch instead.",
+      "truth_class": "PACKAGE_SOURCE_EXPECTATION",
+      "knowledge_state": "KNOWN",
+      "execution_state": "NOT_RUN",
+      "source_refs": [
+        "Cargo.lock:2816-2824",
+        "rdkafka-sys-4.10.0+2.12.1/build.rs",
+        "docs/kafka_capability_inventory.md:53-58"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-002-PACKAGE-SOURCE",
+        "KAFKA-K0-4-ENV-003-ACTUAL-BUILD-HOST"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-002-PACKAGE-SOURCE",
+        "KAFKA-K0-4-ENV-003-ACTUAL-BUILD-HOST"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.1",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "actual_execution_receipt": null,
+      "limitation": "The conditional dynamic branch is not the declared package-source expectation, and no actual receipt establishes whether any external override selected a .pc file, its bytes, Version, Libs, Cflags, or linked library."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-NATIVE-003-ACTUAL-LIBRARY",
+      "subject": "actual linked librdkafka binary",
+      "current_evidence": "No source-pinned receipt identifies the native library bytes selected by any build.",
+      "truth_class": "UNKNOWN",
+      "knowledge_state": "BLOCKED",
+      "execution_state": "BLOCKED",
+      "source_refs": [
+        "docs/adr/dep_plan_adr_009_kafka_client.md:103",
+        "artifacts/kafka_capability_inventory_v1.json:171-186"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-003-ACTUAL-BUILD-HOST"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-003-ACTUAL-BUILD-HOST"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.1",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "Library path, SHA-256, SONAME, static/dynamic link mode, and process-loaded-object evidence are all absent."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-NATIVE-004-BUILD-FLAGS",
+      "subject": "native configure and capability flags",
+      "current_evidence": "For the declared vendored static branch, the checksum-pinned package source uses configure+make without cmake-build and expects SSL, GSSAPI, zlib, curl, Zstd, and external LZ4 disabled while retaining source-capable built-in Snappy and internal LZ4 1.9.4.",
+      "truth_class": "PACKAGE_SOURCE_EXPECTATION",
+      "knowledge_state": "KNOWN",
+      "execution_state": "NOT_RUN",
+      "source_refs": [
+        "rdkafka-sys-4.10.0+2.12.1/build.rs",
+        "rdkafka-sys-4.10.0+2.12.1/librdkafka/configure.self",
+        "rdkafka-sys-4.10.0+2.12.1/librdkafka/src/rdkafka.h"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-002-PACKAGE-SOURCE",
+        "KAFKA-K0-4-ENV-003-ACTUAL-BUILD-HOST"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-002-PACKAGE-SOURCE",
+        "KAFKA-K0-4-ENV-003-ACTUAL-BUILD-HOST"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.1",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "actual_execution_receipt": null,
+      "limitation": "These are checksum-pinned package-source flags and source capabilities only; they do not prove configure execution, successful compilation, runtime availability, or the bytes actually linked."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-NATIVE-005-HOST-IDENTITY",
+      "subject": "actual native build host and toolchain",
+      "current_evidence": "No admitted build receipt records a host or toolchain for the selected native library.",
+      "truth_class": "UNKNOWN",
+      "knowledge_state": "BLOCKED",
+      "execution_state": "BLOCKED",
+      "source_refs": [
+        "docs/kafka_capability_inventory.md:42-58"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-003-ACTUAL-BUILD-HOST"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-003-ACTUAL-BUILD-HOST"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.1",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "Target triple, OS, architecture, C compiler, linker, pkg-config version, and relevant environment are UNKNOWN."
+    }
+  ],
+  "broker_api_version_vectors": [
+    {
+      "vector_id": "KAFKA-K0-4-BROKER-001-MUTABLE-7-4",
+      "subject": "mutable Confluent 7.4.0 provisioner proposal",
+      "current_evidence": "The provisioner text names cp-kafka:7.4.0 and cp-zookeeper:7.4.0 without image digests.",
+      "truth_class": "CONFIG_ONLY",
+      "knowledge_state": "KNOWN",
+      "execution_state": "NOT_RUN",
+      "source_refs": [
+        "scripts/provision_kafka_test_env.rs:162-195",
+        "artifacts/dependency_real_service_fixture_matrix_v1.json:57-95"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-004-MUTABLE-PROVISIONER"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-004-MUTABLE-PROVISIONER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.1",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "CONFIG_ONLY, UNPINNED, and NOT_RUN; the tag is not a broker-version receipt."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-BROKER-002-AMBIENT",
+      "subject": "ambient KAFKA_BOOTSTRAP_SERVERS broker",
+      "current_evidence": "The real-broker target accepts an ambient bootstrap-server list and can silently return when configuration is unavailable.",
+      "truth_class": "UNPINNED",
+      "knowledge_state": "UNKNOWN",
+      "execution_state": "NOT_RUN",
+      "source_refs": [
+        "tests/integration/kafka_real_broker.rs:25-57",
+        "tests/integration/kafka_real_broker.rs:686-706"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-005-AMBIENT-BROKER"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-005-AMBIENT-BROKER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.1",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "An endpoint string does not establish broker version, image digest, configuration, topology, authentication, or lifecycle."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-BROKER-003-OLDEST",
+      "subject": "oldest supported broker",
+      "current_evidence": "The canonical service matrix reserves kafka-oldest-supported-plaintext but supplies no version or immutable identity.",
+      "truth_class": "BLOCKED_EXTERNAL",
+      "knowledge_state": "BLOCKED",
+      "execution_state": "BLOCKED",
+      "source_refs": [
+        "artifacts/dependency_real_service_fixture_matrix_v1.json:69-72"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-006-OLDEST-BROKER"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-006-OLDEST-BROKER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.1",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "K13.1 owns the immutable oldest-broker fixture identity; the supported API floor remains UNKNOWN and routed separately to K2.1."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-BROKER-004-CURRENT",
+      "subject": "current supported broker",
+      "current_evidence": "The canonical service matrix reserves kafka-newest-supported-plaintext but supplies no version or immutable identity.",
+      "truth_class": "BLOCKED_EXTERNAL",
+      "knowledge_state": "BLOCKED",
+      "execution_state": "BLOCKED",
+      "source_refs": [
+        "artifacts/dependency_real_service_fixture_matrix_v1.json:74-77"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-007-CURRENT-BROKER"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-007-CURRENT-BROKER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.1",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "K13.1 owns the immutable current-broker fixture identity; the supported API ceiling remains UNKNOWN and routed separately to K2.1."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-API-001-NEGOTIATION",
+      "subject": "production API-version negotiation",
+      "current_evidence": "Primary Kafka sources do not pin api.version.request, broker.version.fallback, or an accepted negotiation range; the incumbent delegates negotiation to the unresolved linked library.",
+      "truth_class": "UNKNOWN",
+      "knowledge_state": "BLOCKED",
+      "execution_state": "BLOCKED",
+      "source_refs": [
+        "src/messaging/kafka.rs",
+        "src/messaging/kafka_consumer.rs",
+        "docs/adr/dep_plan_adr_009_kafka_client.md:103"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-003-ACTUAL-BUILD-HOST",
+        "KAFKA-K0-4-ENV-006-OLDEST-BROKER",
+        "KAFKA-K0-4-ENV-007-CURRENT-BROKER"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-003-ACTUAL-BUILD-HOST",
+        "KAFKA-K0-4-ENV-006-OLDEST-BROKER",
+        "KAFKA-K0-4-ENV-007-CURRENT-BROKER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.2.1",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "No production request/response negotiation receipt or downgrade result exists."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-API-002-REQUEST-RANGES",
+      "subject": "request API-key and version ranges",
+      "current_evidence": "Local parser targets carry bounded tables, including Produce 0..9, Fetch 0..13, Metadata 0..12, ApiVersions 0..4, and InitProducerId 0..4 in one target.",
+      "truth_class": "WIRE_CODEC_ONLY",
+      "knowledge_state": "UNKNOWN",
+      "execution_state": "NOT_RUN",
+      "source_refs": [
+        "fuzz/fuzz_targets/kafka_protocol.rs:96-118",
+        "fuzz/fuzz_targets/kafka_protocol_parser.rs:374-401"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-PIN-003-API-VERSIONS-SEED",
+        "KAFKA-K0-4-PIN-004-INVALID-API-VERSION-SEED"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-001-STATIC-BASELINE"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.1",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "The two local tables differ in scope and are not normative production acceptance ranges."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-API-003-RESPONSE-RANGES",
+      "subject": "response API-key and version ranges",
+      "current_evidence": "Local response parsers and seeds cover selected frames without a broker-negotiated API-version provenance receipt.",
+      "truth_class": "WIRE_CODEC_ONLY",
+      "knowledge_state": "UNKNOWN",
+      "execution_state": "NOT_RUN",
+      "source_refs": [
+        "fuzz/fuzz_targets/kafka_fetch_response.rs",
+        "fuzz/fuzz_targets/kafka_produce_response.rs",
+        "fuzz/fuzz_targets/kafka_response_frames.rs"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-PIN-006-EMPTY-RESPONSE-SEED",
+        "KAFKA-K0-4-PIN-007-ERROR-RESPONSE-SEED",
+        "KAFKA-K0-4-PIN-008-MALFORMED-LENGTH-SEED",
+        "KAFKA-K0-4-PIN-009-SUCCESS-RESPONSE-SEED"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-001-STATIC-BASELINE"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.1",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "Selected local frames do not establish accepted broker responses, flexible-version compatibility, or downgrade behavior."
+    }
+  ],
+  "compression_vectors": [
+    {
+      "vector_id": "KAFKA-K0-4-CODEC-001-NONE",
+      "subject": "None compression",
+      "current_evidence": "The public enum maps None to the client configuration string none.",
+      "truth_class": "CONFIG_ONLY",
+      "knowledge_state": "KNOWN",
+      "execution_state": "NOT_RUN",
+      "source_refs": [
+        "src/messaging/kafka.rs:389-395",
+        "src/messaging/kafka.rs:833-845"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-003-ACTUAL-BUILD-HOST"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-003-ACTUAL-BUILD-HOST",
+        "KAFKA-K0-4-ENV-006-OLDEST-BROKER",
+        "KAFKA-K0-4-ENV-007-CURRENT-BROKER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.4.2",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "Configuration mapping is not end-to-end producer/consumer interoperability evidence."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-CODEC-002-GZIP",
+      "subject": "Gzip compression",
+      "current_evidence": "The public enum maps Gzip to the client configuration string gzip.",
+      "truth_class": "CONFIG_ONLY",
+      "knowledge_state": "UNKNOWN",
+      "execution_state": "NOT_RUN",
+      "source_refs": [
+        "src/messaging/kafka.rs:389-395",
+        "tests/messaging_kafka_compression_roundtrip.rs"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-003-ACTUAL-BUILD-HOST"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-003-ACTUAL-BUILD-HOST",
+        "KAFKA-K0-4-ENV-006-OLDEST-BROKER",
+        "KAFKA-K0-4-ENV-007-CURRENT-BROKER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.4.2",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "Actual native Gzip availability and broker interoperability are UNKNOWN."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-CODEC-003-SNAPPY",
+      "subject": "Snappy compression",
+      "current_evidence": "The public enum maps Snappy to the client configuration string snappy.",
+      "truth_class": "CONFIG_ONLY",
+      "knowledge_state": "UNKNOWN",
+      "execution_state": "NOT_RUN",
+      "source_refs": [
+        "src/messaging/kafka.rs:389-395",
+        "tests/messaging_kafka_compression_roundtrip.rs"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-003-ACTUAL-BUILD-HOST"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-003-ACTUAL-BUILD-HOST",
+        "KAFKA-K0-4-ENV-006-OLDEST-BROKER",
+        "KAFKA-K0-4-ENV-007-CURRENT-BROKER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.4.2",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "Actual native Snappy availability and broker interoperability are UNKNOWN."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-CODEC-004-LZ4",
+      "subject": "Lz4 compression",
+      "current_evidence": "The public enum maps Lz4 to the client configuration string lz4.",
+      "truth_class": "CONFIG_ONLY",
+      "knowledge_state": "UNKNOWN",
+      "execution_state": "NOT_RUN",
+      "source_refs": [
+        "src/messaging/kafka.rs:389-395",
+        "tests/messaging_kafka_compression_roundtrip.rs"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-003-ACTUAL-BUILD-HOST"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-003-ACTUAL-BUILD-HOST",
+        "KAFKA-K0-4-ENV-006-OLDEST-BROKER",
+        "KAFKA-K0-4-ENV-007-CURRENT-BROKER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.4.2",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "Actual native Lz4 availability and broker interoperability are UNKNOWN."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-CODEC-005-ZSTD",
+      "subject": "Zstd compression",
+      "current_evidence": "The public enum maps Zstd to the client configuration string zstd.",
+      "truth_class": "CONFIG_ONLY",
+      "knowledge_state": "UNKNOWN",
+      "execution_state": "NOT_RUN",
+      "source_refs": [
+        "src/messaging/kafka.rs:389-395",
+        "tests/messaging_kafka_compression_roundtrip.rs"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-003-ACTUAL-BUILD-HOST"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-003-ACTUAL-BUILD-HOST",
+        "KAFKA-K0-4-ENV-006-OLDEST-BROKER",
+        "KAFKA-K0-4-ENV-007-CURRENT-BROKER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.4.2",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "Actual native Zstd availability and broker interoperability are UNKNOWN."
+    }
+  ],
+  "transport_auth_vectors": [
+    {
+      "vector_id": "KAFKA-K0-4-AUTH-001-PLAINTEXT",
+      "subject": "plaintext transport",
+      "current_evidence": "The public security enum defaults to Plaintext, and the mutable provisioner exposes plaintext listeners only.",
+      "truth_class": "CONFIG_ONLY",
+      "knowledge_state": "KNOWN",
+      "execution_state": "NOT_RUN",
+      "source_refs": [
+        "src/messaging/kafka.rs:1133-1152",
+        "src/messaging/kafka.rs:1176-1180",
+        "scripts/provision_kafka_test_env.rs:184-195"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-004-MUTABLE-PROVISIONER"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-004-MUTABLE-PROVISIONER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "Static plaintext configuration and a mutable proposal are not a broker receipt."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-AUTH-002-TLS",
+      "subject": "TLS transport",
+      "current_evidence": "KafkaTlsConfig exposes CA, client certificate, private key, and key-password fields and maps them to librdkafka configuration keys.",
+      "truth_class": "CONFIG_ONLY",
+      "knowledge_state": "UNKNOWN",
+      "execution_state": "NOT_RUN",
+      "source_refs": [
+        "src/messaging/kafka.rs:932-989",
+        "src/messaging/kafka.rs:1158-1184"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-008-AUTHENTICATED-BROKER"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-003-ACTUAL-BUILD-HOST",
+        "KAFKA-K0-4-ENV-008-AUTHENTICATED-BROKER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "Actual native TLS support, certificate validation, and authenticated broker interoperability are UNKNOWN."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-AUTH-003-SCRAM-SHA-256",
+      "subject": "SCRAM-SHA-256 over TLS",
+      "current_evidence": "The public mechanism maps ScramSha256 to SCRAM-SHA-256 and SaslSsl maps credentials and TLS fields into client configuration.",
+      "truth_class": "CONFIG_ONLY",
+      "knowledge_state": "UNKNOWN",
+      "execution_state": "NOT_RUN",
+      "source_refs": [
+        "src/messaging/kafka.rs:995-1013",
+        "src/messaging/kafka.rs:1184-1190"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-008-AUTHENTICATED-BROKER"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-003-ACTUAL-BUILD-HOST",
+        "KAFKA-K0-4-ENV-008-AUTHENTICATED-BROKER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "No immutable credential fixture, negative-auth result, or successful authenticated terminal receipt exists."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-AUTH-004-SCRAM-SHA-512",
+      "subject": "SCRAM-SHA-512 over TLS",
+      "current_evidence": "The public mechanism maps ScramSha512 to SCRAM-SHA-512 and SaslSsl maps credentials and TLS fields into client configuration.",
+      "truth_class": "CONFIG_ONLY",
+      "knowledge_state": "UNKNOWN",
+      "execution_state": "NOT_RUN",
+      "source_refs": [
+        "src/messaging/kafka.rs:995-1013",
+        "src/messaging/kafka.rs:1184-1190"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-008-AUTHENTICATED-BROKER"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-003-ACTUAL-BUILD-HOST",
+        "KAFKA-K0-4-ENV-008-AUTHENTICATED-BROKER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "No immutable credential fixture, negative-auth result, or successful authenticated terminal receipt exists."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-AUTH-005-PROOF-REPORTING",
+      "subject": "real-broker proof auth-mode field",
+      "current_evidence": "The proof row infers auth_mode only from SASL environment-variable presence, while the roundtrip constructor applies no security configuration and explicitly enables insecure test transport.",
+      "truth_class": "OVERCLAIM",
+      "knowledge_state": "KNOWN",
+      "execution_state": "NOT_RUN",
+      "source_refs": [
+        "tests/integration/kafka_real_broker.rs:368-375",
+        "tests/integration/kafka_real_broker.rs:547-568"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-005-AMBIENT-BROKER",
+        "KAFKA-K0-4-ENV-008-AUTHENTICATED-BROKER"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-005-AMBIENT-BROKER",
+        "KAFKA-K0-4-ENV-008-AUTHENTICATED-BROKER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "The auth_mode field cannot certify TLS or SASL until the applied client configuration and broker identity are recorded."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX",
+      "subject": "complete negative authentication and transport matrix",
+      "current_evidence": "Public TLS/SCRAM configuration and local authentication-error classification exist, but no immutable authenticated-broker fixture or terminal receipt covers wrong username, wrong password, wrong mechanism, untrusted CA, hostname mismatch, expired certificate, or client certificate/private-key mismatch.",
+      "truth_class": "BLOCKED_EXTERNAL",
+      "knowledge_state": "BLOCKED",
+      "execution_state": "BLOCKED",
+      "source_refs": [
+        "src/messaging/kafka.rs:932-1013",
+        "src/messaging/kafka.rs:1133-1190",
+        "tests/kafka_sasl_authentication_audit.rs:1-262",
+        "tests/integration/kafka_real_broker.rs:547-568",
+        "artifacts/dependency_real_service_fixture_matrix_v1.json:79-95"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-008-AUTHENTICATED-BROKER"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-008-AUTHENTICATED-BROKER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "Generic config validation and synthetic error classification cannot establish broker-side rejection taxonomy, certificate validation, credential redaction, retry classification, or zero broker-visible effect for any required negative cell."
+    }
+  ],
+  "topology_vectors": [
+    {
+      "vector_id": "KAFKA-K0-4-TOPO-001-SINGLE-BROKER",
+      "subject": "mutable single-broker topology",
+      "current_evidence": "The provisioner proposes broker.id=1, three default partitions, offsets replication factor 1, and transaction-state replication factor/minimum ISR 1.",
+      "truth_class": "CONFIG_ONLY",
+      "knowledge_state": "KNOWN",
+      "execution_state": "NOT_RUN",
+      "source_refs": [
+        "scripts/provision_kafka_test_env.rs:177-197"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-004-MUTABLE-PROVISIONER"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-004-MUTABLE-PROVISIONER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.1",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "The text is unpinned and not executed; RF1 cannot establish leader failover or replicated durability."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-TOPO-002-GROUP",
+      "subject": "two-consumer group and rebalance shape",
+      "current_evidence": "The optional real-broker test creates two consumers in one group and samples local rebalance_generation around subscriptions.",
+      "truth_class": "OVERCLAIM",
+      "knowledge_state": "UNKNOWN",
+      "execution_state": "NOT_RUN",
+      "source_refs": [
+        "tests/integration/kafka_real_broker.rs:1401-1482",
+        "docs/kafka_incumbent_semantics_matrix.md:201"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-005-AMBIENT-BROKER"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-005-AMBIENT-BROKER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.4",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "No terminal receipt establishes coordinator behavior, partition movement, slow-handler behavior, or callback parity."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-TOPO-003-TRANSACTION",
+      "subject": "transaction and read-committed shape",
+      "current_evidence": "The optional real-broker test constructs an idempotent transactional producer and a ReadCommitted consumer.",
+      "evidence_class": "REAL_BROKER_CAPABLE",
+      "truth_class": "CONFIG_ONLY",
+      "knowledge_state": "UNKNOWN",
+      "execution_state": "NOT_RUN",
+      "source_refs": [
+        "tests/integration/kafka_real_broker.rs:1306-1399"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-005-AMBIENT-BROKER"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-005-AMBIENT-BROKER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.3",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "Opt-in source capability is not executed transaction, fencing, offset, or restart evidence."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-TOPO-004-MULTI-BROKER",
+      "subject": "required multi-broker topology",
+      "current_evidence": "No pinned multi-broker, controller, leader, coordinator, or replicated-partition fixture is present.",
+      "truth_class": "BLOCKED_EXTERNAL",
+      "knowledge_state": "BLOCKED",
+      "execution_state": "BLOCKED",
+      "source_refs": [
+        "artifacts/dependency_real_service_fixture_matrix_v1.json:57-95",
+        "scripts/provision_kafka_test_env.rs:177-197"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-006-OLDEST-BROKER",
+        "KAFKA-K0-4-ENV-007-CURRENT-BROKER"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-006-OLDEST-BROKER",
+        "KAFKA-K0-4-ENV-007-CURRENT-BROKER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.1",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "K13.1 owns the generic multi-broker lifecycle; leader migration, coordinator movement, replication, and rolling topology behavior remain UNKNOWN and route to their scenario owners after fixture admission."
+    }
+  ],
+  "fault_lifecycle_vectors": [
+    {
+      "vector_id": "KAFKA-K0-4-FAULT-001-NETWORK-LABEL",
+      "subject": "network-failure recovery test",
+      "current_evidence": "The test named test_real_broker_network_failure_recovery performs one baseline send followed by fifty ordinary sends and injects no broker or network fault.",
+      "truth_class": "OVERCLAIM",
+      "knowledge_state": "KNOWN",
+      "execution_state": "NOT_RUN",
+      "source_refs": [
+        "tests/integration/kafka_real_broker.rs:1489-1579"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-005-AMBIENT-BROKER"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-005-AMBIENT-BROKER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "Load-shaped sends do not establish disconnect, retry, reconnect, leader change, or recovery behavior."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-FAULT-002-SYNTHETIC-UNAVAILABLE",
+      "subject": "synthetic unavailable endpoint and reconnect field",
+      "current_evidence": "The resilience proof uses 127.0.0.1:1 for an unavailable probe and constructs reconnect_count=1 before the optional independent recovery roundtrip.",
+      "truth_class": "LOCAL_MODEL_ONLY",
+      "knowledge_state": "KNOWN",
+      "execution_state": "NOT_RUN",
+      "source_refs": [
+        "tests/integration/kafka_real_broker.rs:926-989"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-005-AMBIENT-BROKER"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-005-AMBIENT-BROKER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "The assigned count is not an observed reconnect across a broker interruption."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-FAULT-003-RESTART",
+      "subject": "broker stop, start, and reconnect lifecycle",
+      "current_evidence": "The canonical service matrix requires restart/reconnect, but no fixture-owned stop/start step or terminal receipt is tracked.",
+      "truth_class": "BLOCKED_EXTERNAL",
+      "knowledge_state": "BLOCKED",
+      "execution_state": "BLOCKED",
+      "source_refs": [
+        "artifacts/dependency_real_service_fixture_matrix_v1.json:83-95"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-006-OLDEST-BROKER",
+        "KAFKA-K0-4-ENV-007-CURRENT-BROKER"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-006-OLDEST-BROKER",
+        "KAFKA-K0-4-ENV-007-CURRENT-BROKER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.3",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "No observed outage window, reconnect sequence, post-restart delivery, or offset continuity exists."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-FAULT-004-ROLLING-VERSION",
+      "subject": "rolling oldest/current broker transition",
+      "current_evidence": "No oldest/current version pair, immutable broker identities, upgrade order, downgrade step, or rolling-version receipt is tracked.",
+      "truth_class": "BLOCKED_EXTERNAL",
+      "knowledge_state": "BLOCKED",
+      "execution_state": "BLOCKED",
+      "source_refs": [
+        "artifacts/dependency_real_service_fixture_matrix_v1.json:69-95"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-006-OLDEST-BROKER",
+        "KAFKA-K0-4-ENV-007-CURRENT-BROKER"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-006-OLDEST-BROKER",
+        "KAFKA-K0-4-ENV-007-CURRENT-BROKER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "Compatibility across a rolling transition and downgrade behavior are UNKNOWN."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-FAULT-005-TEARDOWN",
+      "subject": "mutable provisioner teardown proposal",
+      "current_evidence": "Provisioner source proposes compose down -v and removal of its generated compose file, but no executed reverse-order, idempotent, or zero-residue teardown receipt exists.",
+      "truth_class": "BLOCKED_EXTERNAL",
+      "knowledge_state": "BLOCKED",
+      "execution_state": "BLOCKED",
+      "source_refs": [
+        "scripts/provision_kafka_test_env.rs:240-255"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-004-MUTABLE-PROVISIONER"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-004-MUTABLE-PROVISIONER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "Mutable teardown source text cannot prove reverse-order cleanup, repeated-call idempotence, failure-path cleanup, or zero broker, network, volume, topic, credential, certificate, and generated-file residue."
+    },
+    {
+      "vector_id": "KAFKA-K0-4-FAULT-006-CANCELLATION-RECONCILIATION",
+      "subject": "cancellation during send, poll, commit, transaction, and rebalance with broker-visible outcome reconciliation",
+      "current_evidence": "The incumbent semantics matrix records ambiguous effects after cancellation or dropped awaits, and the optional resilience path checks entry cancellation for send and poll only; no managed broker receipt reconciles broker-visible records, offsets, transaction state, group assignment, or rebalance generation after cancellation during send, poll, commit, transaction, and rebalance.",
+      "truth_class": "BLOCKED_EXTERNAL",
+      "knowledge_state": "BLOCKED",
+      "execution_state": "BLOCKED",
+      "source_refs": [
+        "artifacts/kafka_incumbent_semantics_matrix_v1.json:178",
+        "artifacts/kafka_incumbent_semantics_matrix_v1.json:1622-1643",
+        "artifacts/kafka_incumbent_semantics_matrix_v1.json:1913-1958",
+        "artifacts/kafka_incumbent_semantics_matrix_v1.json:2417",
+        "artifacts/kafka_incumbent_semantics_matrix_v1.json:2495",
+        "artifacts/kafka_incumbent_semantics_matrix_v1.json:2525",
+        "tests/integration/kafka_real_broker.rs:859-923",
+        "tests/integration/kafka_real_broker.rs:992"
+      ],
+      "provenance_refs": [
+        "KAFKA-K0-4-ENV-006-OLDEST-BROKER",
+        "KAFKA-K0-4-ENV-007-CURRENT-BROKER"
+      ],
+      "environment_ids": [
+        "KAFKA-K0-4-ENV-006-OLDEST-BROKER",
+        "KAFKA-K0-4-ENV-007-CURRENT-BROKER"
+      ],
+      "inventory_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "executable_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.3",
+      "refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "Entry checkpoints, local cancellation errors, and semantic analysis do not determine whether a broker accepted a record, committed an offset or transaction, or changed group assignment; every required cancellation point remains blocked pending terminal reconciliation receipts."
+    }
+  ],
+  "source_contradictions": [
+    {
+      "contradiction_id": "KAFKA-K0-4-CONTRA-001-SYSTEM-VS-BUNDLED",
+      "kind": "CONTRADICTORY_NATIVE_ATTRIBUTION",
+      "source_refs": [
+        "Cargo.toml:459-460",
+        "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md:48",
+        "artifacts/dependency_capability_registry_v1.json:6830-6832",
+        "docs/adr/dep_plan_adr_009_kafka_client.md:103",
+        "rdkafka-sys-4.10.0+2.12.1/build.rs",
+        "rdkafka-sys-4.10.0+2.12.1/librdkafka/configure.self"
+      ],
+      "finding": "The Cargo comment saying librdkafka is required on the system is stale for the declared default-features=false closure: checksum-pinned package source determines a vendored static configure+make expectation, while the native bytes actually compiled and linked remain unknown.",
+      "truth_class": "STALE_CONTRADICTED",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "limitation": "The Cargo system-library comment is stale for the checksum-pinned declared feature closure: package source expects vendored static configure+make, but that expectation still is not ACTUAL_BINARY_RECEIPT evidence."
+    },
+    {
+      "contradiction_id": "KAFKA-K0-4-CONTRA-002-BUILD-INFERENCE",
+      "kind": "PACKAGE_EXPECTATION_VS_ACTUAL_RECEIPT",
+      "source_refs": [
+        "docs/adr/dep_plan_adr_009_kafka_client.md:46-54",
+        "artifacts/dependency_api_adr_registry_v1.json:4943-4945",
+        "Cargo.lock:2816-2824",
+        "rdkafka-sys-4.10.0+2.12.1/build.rs",
+        "rdkafka-sys-4.10.0+2.12.1/librdkafka/configure.self"
+      ],
+      "finding": "Older lockfile-only inference was insufficient, but checksum-pinned package source now determines the declared expectation: vendored static configure+make unless dynamic-linking or static-external is enabled. No actual execution or link receipt exists.",
+      "truth_class": "PACKAGE_SOURCE_EXPECTATION",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "limitation": "Package source establishes the declared branch and flags only; actual selection still requires build output and linked-library receipts, and no separate vendored librdkafka upstream git commit is retained."
+    },
+    {
+      "contradiction_id": "KAFKA-K0-4-CONTRA-003-AUTH-ENV",
+      "kind": "PROOF_FIELD_OVERCLAIM",
+      "source_refs": [
+        "tests/integration/kafka_real_broker.rs:368-375"
+      ],
+      "finding": "The proof auth_mode field is inferred solely from SASL environment-variable presence.",
+      "truth_class": "OVERCLAIM",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
+      "limitation": "Environment presence does not prove applied configuration or authenticated transport."
+    },
+    {
+      "contradiction_id": "KAFKA-K0-4-CONTRA-004-ROUNDTRIP-SECURITY",
+      "kind": "UNAPPLIED_SECURITY_CONFIG",
+      "source_refs": [
+        "tests/integration/kafka_real_broker.rs:547-568"
+      ],
+      "finding": "The proof roundtrip applies no TLS or SASL configuration and enables insecure transport for testing.",
+      "truth_class": "OVERCLAIM",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
+      "limitation": "Any auth_mode=sasl row from this path must remain non-authenticated evidence."
+    },
+    {
+      "contradiction_id": "KAFKA-K0-4-CONTRA-005-NETWORK-RECOVERY",
+      "kind": "TEST_NAME_OVERCLAIM",
+      "source_refs": [
+        "tests/integration/kafka_real_broker.rs:1489-1579"
+      ],
+      "finding": "The network-failure recovery test injects no broker or network failure and performs ordinary sends only.",
+      "truth_class": "OVERCLAIM",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.2",
+      "limitation": "The source cannot prove outage recovery or reconnect behavior."
+    },
+    {
+      "contradiction_id": "KAFKA-K0-4-CONTRA-006-SYNTHETIC-RECONNECT",
+      "kind": "SYNTHETIC_RECEIPT_OVERCLAIM",
+      "source_refs": [
+        "tests/integration/kafka_real_broker.rs:926-989"
+      ],
+      "finding": "The resilience path probes 127.0.0.1:1 and assigns reconnect_count=1 rather than observing a broker restart and reconnection.",
+      "truth_class": "OVERCLAIM",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
+      "limitation": "Synthetic unavailability and a constructed field are not restart evidence."
+    },
+    {
+      "contradiction_id": "KAFKA-K0-4-CONTRA-007-EMPTY-VECTOR",
+      "kind": "GOLDEN_PROVENANCE_GAP",
+      "source_refs": [
+        "tests/conformance/kafka_record_batch_v2/test_vectors.rs:38-45",
+        "KAFKA-K0-4-PIN-016-RECORD-BATCH-VECTORS"
+      ],
+      "finding": "The basic KIP-98 vector says actual librdkafka bytes would be filled later and stores an empty expected byte slice.",
+      "truth_class": "OVERCLAIM",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.1",
+      "limitation": "Hand-built structures and empty expected bytes are not an independent corpus."
+    },
+    {
+      "contradiction_id": "KAFKA-K0-4-CONTRA-008-CRC-ROUTING",
+      "kind": "STATIC_PROTOCOL_CONCERN",
+      "source_refs": [
+        "conformance/src/kafka_record_batch_v2.rs:310-333",
+        "conformance/src/kafka_record_batch_v2.rs:443-456",
+        "tests/conformance/kafka_record_batch_v2/format.rs:337-368",
+        "tests/conformance/kafka_record_batch_v2/format.rs:391-408"
+      ],
+      "finding": "Both local RecordBatch implementations route CRC production and checking through crc32fast::hash.",
+      "truth_class": "WIRE_CODEC_ONLY",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+      "limitation": "This is a static implementation concern only; independent normative and differential evidence is required before claiming protocol correctness."
+    },
+    {
+      "contradiction_id": "KAFKA-K0-4-CONTRA-009-EXPIRED-WAIVERS",
+      "kind": "STALE_POLICY_WAIVER",
+      "source_refs": [
+        ".github/no_mock_policy.json:561-579"
+      ],
+      "finding": "The Kafka producer and consumer phase-0 stub waivers expired at 2026-06-30T00:00:00Z, before this packet's capture date.",
+      "truth_class": "STALE_CONTRADICTED",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "limitation": "Expired waivers cannot authorize mock, fallback, or incomplete behavior as accepted real-service evidence."
+    },
+    {
+      "contradiction_id": "KAFKA-K0-4-CONTRA-010-WORKFLOW-SCOPE",
+      "kind": "WORKFLOW_COVERAGE_GAP",
+      "source_refs": [
+        ".github/workflows/fuzz.yml:59",
+        ".github/workflows/fuzz.yml:207"
+      ],
+      "finding": "The workflow's selected Kafka runtime target is kafka_protocol only; it provisions no broker and does not execute the remaining Kafka/RecordBatch targets as real-service scenarios.",
+      "truth_class": "OVERCLAIM",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.3",
+      "limitation": "Workflow presence is neither full target coverage nor broker interoperability evidence."
+    },
+    {
+      "contradiction_id": "KAFKA-K0-4-CONTRA-011-BROKER-VERSION",
+      "kind": "PROOF_PROVENANCE_GAP",
+      "source_refs": [
+        "tests/integration/kafka_real_broker.rs:732-756",
+        "tests/integration/kafka_real_broker.rs:1022-1070"
+      ],
+      "finding": "Success and failure proof rows record broker_version as unknown, while unavailable paths record unavailable.",
+      "truth_class": "OVERCLAIM",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+      "limitation": "A proof row lacking broker identity and version cannot enter current_real_broker_receipts."
+    }
+  ],
+  "current_real_broker_receipts": [],
+  "required_future_receipt_fields": {
+    "native_build": [
+      "receipt_schema_version",
+      "source_revision",
+      "dirty or overlay path set",
+      "Cargo.toml sha256",
+      "Cargo.lock sha256",
+      "rdkafka package id and checksum",
+      "rdkafka-sys package id and checksum",
+      "Cargo feature set",
+      "target triple",
+      "host OS and architecture",
+      "kernel identity",
+      "libc identity",
+      "Rust toolchain",
+      "C compiler identity",
+      "linker identity",
+      "build image or worker identity",
+      "resource envelope",
+      "pkg-config version and sanitized search environment",
+      "selected .pc absolute path, sha256, Version, Libs, and Cflags",
+      "selected native library absolute path, sha256, SONAME, and static-or-dynamic link mode",
+      "native build or discovery branch",
+      "configure and capability flags",
+      "reported native library version and built-in feature list",
+      "consuming binary sha256",
+      "terminal command outcome"
+    ],
+    "broker": [
+      "environment_id",
+      "scenario_id",
+      "immutable image repository@sha256 or equivalent immutable service identity",
+      "auxiliary-service immutable identities",
+      "broker vendor and reported version",
+      "cluster ID",
+      "negotiated API versions and canonical hash",
+      "broker configuration sha256",
+      "listener and advertised-listener map",
+      "topology including broker, controller, leader, coordinator, partition, replication, and ISR identities",
+      "security protocol",
+      "certificate and public-key fingerprints",
+      "certificate validity metadata",
+      "SASL mechanism and principal identity",
+      "non-secret credential-fixture identities",
+      "semantic readiness receipt",
+      "oldest-or-current support role"
+    ],
+    "execution": [
+      "receipt_id",
+      "capability_id",
+      "bead_id",
+      "scenario_id",
+      "step_id",
+      "broker_id",
+      "API_id",
+      "codec_id",
+      "security_id",
+      "fault_id",
+      "UTC start timestamp",
+      "UTC end timestamp",
+      "source revision and every fixture pin",
+      "exact sanitized command",
+      "replay metadata",
+      "worker or host identity",
+      "client package identity",
+      "actual native identity",
+      "consuming binary sha256",
+      "broker environment identity",
+      "terminal exit status",
+      "explicit non-skip assertion",
+      "expected and actual result",
+      "normalized outcome",
+      "payload and artifact sha256 values",
+      "per-process log manifest and sha256 digests",
+      "message, acknowledgement, offset, partition, transaction, group-generation, reconnect, and error-taxonomy fields as applicable",
+      "client-to-broker direction"
+    ],
+    "teardown": [
+      "reverse-order teardown step IDs",
+      "each teardown terminal status",
+      "pre-execution resource inventory",
+      "post-execution resource inventory",
+      "broker, controller, network, volume, topic, credential, certificate, and generated-file residue checks",
+      "residual resource count",
+      "idempotent teardown retry result",
+      "zero-residue assertion",
+      "cleanup log sha256",
+      "failure-path cleanup result"
+    ],
+    "redaction": [
+      "redaction policy version",
+      "secret-field allow and deny lists",
+      "credential and private-key non-persistence assertion",
+      "bootstrap credential redaction assertion",
+      "sanitized configuration",
+      "sanitized receipt sha256",
+      "canary-based redaction result",
+      "independent redaction verifier result"
+    ]
+  },
+  "evidence_claims": [
+    {
+      "claim_id": "KAFKA-K0-4-EVIDENCE-001",
+      "statement": "The root manifest and lockfile source-pin the optional rdkafka Rust edge and its rdkafka-sys package coordinate.",
+      "evidence_class": "LOCKFILE_DECLARED",
+      "source_refs": [
+        "KAFKA-K0-4-DEP-001-FEATURE-EDGE",
+        "KAFKA-K0-4-DEP-002-RDKAFKA",
+        "KAFKA-K0-4-DEP-003-RDKAFKA-SYS"
+      ],
+      "limitation": "This does not identify the actual native binary."
+    },
+    {
+      "claim_id": "KAFKA-K0-4-EVIDENCE-002",
+      "statement": "Actual native build-host, .pc, library, link-mode, configure, codec, TLS, and SASL identities are UNKNOWN or BLOCKED.",
+      "evidence_class": "STATIC_SOURCE",
+      "source_refs": [
+        "KAFKA-K0-4-NATIVE-002-PKG-CONFIG",
+        "KAFKA-K0-4-NATIVE-003-ACTUAL-LIBRARY",
+        "KAFKA-K0-4-NATIVE-005-HOST-IDENTITY"
+      ],
+      "limitation": "Only a future ACTUAL_BINARY_RECEIPT may resolve these fields."
+    },
+    {
+      "claim_id": "KAFKA-K0-4-EVIDENCE-003",
+      "statement": "The managed Kafka service matrix is blocked because oldest/current/authenticated broker versions and immutable image identities are absent.",
+      "evidence_class": "PLANNED",
+      "source_refs": [
+        "KAFKA-K0-4-BROKER-003-OLDEST",
+        "KAFKA-K0-4-BROKER-004-CURRENT",
+        "KAFKA-K0-4-ENV-008-AUTHENTICATED-BROKER"
+      ],
+      "limitation": "BLOCKED_EXTERNAL is not a passing skip."
+    },
+    {
+      "claim_id": "KAFKA-K0-4-EVIDENCE-004",
+      "statement": "The public source exposes five compression selections plus plaintext, TLS, and SCRAM-SHA-256/512 over TLS configuration surfaces.",
+      "evidence_class": "CONFIG_ONLY",
+      "source_refs": [
+        "KAFKA-K0-4-CODEC-001-NONE",
+        "KAFKA-K0-4-CODEC-002-GZIP",
+        "KAFKA-K0-4-CODEC-003-SNAPPY",
+        "KAFKA-K0-4-CODEC-004-LZ4",
+        "KAFKA-K0-4-CODEC-005-ZSTD",
+        "KAFKA-K0-4-AUTH-001-PLAINTEXT",
+        "KAFKA-K0-4-AUTH-002-TLS",
+        "KAFKA-K0-4-AUTH-003-SCRAM-SHA-256",
+        "KAFKA-K0-4-AUTH-004-SCRAM-SHA-512"
+      ],
+      "limitation": "Config surface does not prove native availability or broker interoperability."
+    },
+    {
+      "claim_id": "KAFKA-K0-4-EVIDENCE-005",
+      "statement": "No current real-broker receipt satisfies immutable broker identity, terminal non-skip execution, and teardown provenance requirements.",
+      "evidence_class": "STATIC_SOURCE",
+      "source_refs": [
+        "current_real_broker_receipts",
+        "KAFKA-K0-4-CONTRA-011-BROKER-VERSION"
+      ],
+      "limitation": "Receipt absence says nothing about behavior that may have occurred outside tracked evidence."
+    },
+    {
+      "claim_id": "KAFKA-K0-4-EVIDENCE-006",
+      "statement": "The exact K0.4 fixture scope contains 67 sorted paths with digest d9542095b391dbd44a0f8d855d6cfb87e41b981642430a0de662a2965ad26db0 and 20 direct authority or missing-source pins.",
+      "evidence_class": "STATIC_SOURCE",
+      "source_refs": [
+        "source_scope.fixture_paths",
+        "direct_source_pins"
+      ],
+      "limitation": "Scope completeness is static inventory evidence, not semantic or runtime correctness."
+    }
+  ],
+  "owned_unknowns": [
+    {
+      "unknown_id": "KAFKA-K0-4-UNKNOWN-001",
+      "subject": "actual pkg-config selection and .pc bytes",
+      "knowledge_state": "BLOCKED",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "resolution_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.1"
+    },
+    {
+      "unknown_id": "KAFKA-K0-4-UNKNOWN-002",
+      "subject": "actual linked native library bytes, SONAME, and link mode",
+      "knowledge_state": "BLOCKED",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "resolution_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.1"
+    },
+    {
+      "unknown_id": "KAFKA-K0-4-UNKNOWN-003",
+      "subject": "actual build-host identity and native capability flags",
+      "knowledge_state": "BLOCKED",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "resolution_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.1"
+    },
+    {
+      "unknown_id": "KAFKA-K0-4-UNKNOWN-004",
+      "subject": "oldest and current supported broker versions and immutable identities",
+      "knowledge_state": "BLOCKED",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "resolution_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.2.1"
+    },
+    {
+      "unknown_id": "KAFKA-K0-4-UNKNOWN-005",
+      "subject": "production request, response, negotiation, and downgrade API-version ranges",
+      "knowledge_state": "BLOCKED",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "resolution_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.2.1"
+    },
+    {
+      "unknown_id": "KAFKA-K0-4-UNKNOWN-006",
+      "subject": "actual None, Gzip, Snappy, Lz4, and Zstd native/broker capability matrix",
+      "knowledge_state": "BLOCKED",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "resolution_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.4.2"
+    },
+    {
+      "unknown_id": "KAFKA-K0-4-UNKNOWN-007",
+      "subject": "immutable TLS/SASL fixture and authenticated positive/negative behavior",
+      "knowledge_state": "BLOCKED",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "resolution_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5"
+    },
+    {
+      "unknown_id": "KAFKA-K0-4-UNKNOWN-008",
+      "subject": "multi-broker topology, fault, restart, rolling-version, and teardown receipts",
+      "knowledge_state": "BLOCKED",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "resolution_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
+    },
+    {
+      "unknown_id": "KAFKA-K0-4-UNKNOWN-009",
+      "subject": "independent RecordBatch vector provenance and CRC oracle agreement",
+      "knowledge_state": "BLOCKED",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "resolution_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5"
+    }
+  ],
+  "routed_gaps": [
+    {
+      "gap_id": "KAFKA-K0-4-GAP-001-PROTOCOL-RANGE",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.2.1",
+      "route": "Freeze reachable request/response schemas, API versions, oldest/current support, and downgrade behavior."
+    },
+    {
+      "gap_id": "KAFKA-K0-4-GAP-002-PROTOCOL-SIGNOFF",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.2.5",
+      "route": "Produce terminal protocol compatibility and negative-case signoff."
+    },
+    {
+      "gap_id": "KAFKA-K0-4-GAP-003-CODEC-CAPABILITY",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.4.2",
+      "route": "Establish the five-mode capability and resource matrix against actual native and broker identities."
+    },
+    {
+      "gap_id": "KAFKA-K0-4-GAP-004-CODEC-SIGNOFF",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.4.7",
+      "route": "Produce terminal five-mode interoperability evidence."
+    },
+    {
+      "gap_id": "KAFKA-K0-4-GAP-005-INDEPENDENT-CORPUS",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.1",
+      "route": "Pin independently sourced versioned protocol, RecordBatch, and compression vectors."
+    },
+    {
+      "gap_id": "KAFKA-K0-4-GAP-006-BOUNDED-PARSER",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.3",
+      "route": "Exercise the bounded parser corpus under its own scoped acceptance contract."
+    },
+    {
+      "gap_id": "KAFKA-K0-4-GAP-007-SECURITY-REVIEW",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
+      "route": "Review TLS, SASL, credential handling, protocol limits, and negative paths."
+    },
+    {
+      "gap_id": "KAFKA-K0-4-GAP-008-INDEPENDENT-ORACLE",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+      "route": "Resolve RecordBatch and CRC concerns with independent normative and differential evidence."
+    },
+    {
+      "gap_id": "KAFKA-K0-4-GAP-009-FIXTURE",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.1",
+      "route": "Own immutable broker images, native build identity, managed lifecycle, readiness, and receipt schema."
+    },
+    {
+      "gap_id": "KAFKA-K0-4-GAP-010-PRODUCER",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.2",
+      "route": "Exercise producer, five codecs, acknowledgements, idempotence, leader/network disruption, and restart."
+    },
+    {
+      "gap_id": "KAFKA-K0-4-GAP-011-TRANSACTIONS",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.3",
+      "route": "Exercise transactions, read-committed isolation, offsets, seek, fencing, and restart."
+    },
+    {
+      "gap_id": "KAFKA-K0-4-GAP-012-GROUPS",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.4",
+      "route": "Exercise groups, rebalance, topology, slow handlers, cancellation, and shutdown."
+    },
+    {
+      "gap_id": "KAFKA-K0-4-GAP-013-AUTH-FAULT",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
+      "route": "Exercise TLS/SASL positives and negatives, rolling versions, and network/broker faults."
+    },
+    {
+      "gap_id": "KAFKA-K0-4-GAP-014-TERMINAL-REAL-BROKER",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+      "route": "Aggregate terminal receipts, replayability, reverse teardown, and residue checks."
+    },
+    {
+      "gap_id": "KAFKA-K0-4-GAP-015-REFRESH",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "route": "Reject stale source pins, scope drift, expired policy, and carried-forward receipts at claim time."
+    },
+    {
+      "gap_id": "KAFKA-K0-4-GAP-016-CUTOVER",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.15",
+      "route": "Make the conditional cutover or explicit keep decision only after every required gate."
+    },
+    {
+      "gap_id": "KAFKA-K0-4-GAP-017-IDEMPOTENCE-AUDIT",
+      "owner_bead": "asupersync-o82yd7",
+      "relation": "INVENTORY_INPUT_ONLY",
+      "route": "Track the weak producer-idempotence audit without creating an automatic dependency edge."
+    },
+    {
+      "gap_id": "KAFKA-K0-4-GAP-018-BLOCKING-COMMIT",
+      "owner_bead": "asupersync-messaging-resp3-kafka-commit-o9ujbk",
+      "relation": "INVENTORY_INPUT_ONLY",
+      "route": "Track synchronous commit_offsets worker blocking without creating an automatic dependency edge."
+    },
+    {
+      "gap_id": "KAFKA-K0-4-GAP-019-BLOCKING-FLUSH",
+      "owner_bead": "asupersync-ne8jdw",
+      "relation": "INVENTORY_INPUT_ONLY",
+      "route": "Track flush_inner executor blocking without creating an automatic dependency edge."
+    },
+    {
+      "gap_id": "KAFKA-K0-4-GAP-020-NEGOTIATION-CORRELATION-RECOVERY",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.2.4",
+      "route": "Own request correlation, in-flight matching, and recovery of negotiation state across disconnects."
+    },
+    {
+      "gap_id": "KAFKA-K0-4-GAP-021-RECORD-BATCH-CRC32C",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.4.1",
+      "route": "Own RecordBatch encoding and decoding plus CRC32C correctness as the compression foundation."
+    },
+    {
+      "gap_id": "KAFKA-K0-4-GAP-022-GZIP",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.4.3",
+      "route": "Own Gzip codec capability, framing semantics, and bounded resource behavior."
+    },
+    {
+      "gap_id": "KAFKA-K0-4-GAP-023-LZ4",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.4.4",
+      "route": "Own Kafka Lz4 codec capability and frame compatibility."
+    },
+    {
+      "gap_id": "KAFKA-K0-4-GAP-024-SNAPPY-TERMINAL-INTEROP",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.4.5.4",
+      "route": "Own terminal Snappy interoperability evidence against the admitted broker matrix."
+    },
+    {
+      "gap_id": "KAFKA-K0-4-GAP-025-ZSTD-TERMINAL-INTEROP",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.4.6.7",
+      "route": "Own terminal Zstd interoperability evidence against the admitted broker matrix."
+    },
+    {
+      "gap_id": "KAFKA-K0-4-GAP-026-STATE-MODELS",
+      "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
+      "route": "Own producer, transaction, group, and offset state models and their transition invariants."
+    }
+  ],
+  "coverage_receipt": {
+    "source_revision": "012c13714db267a4fba928db9f900b70d6c1d25a",
+    "authority_anchor_count": 1,
+    "direct_source_pin_count": 20,
+    "direct_fixture_pin_count": 19,
+    "inherited_fixture_pin_count": 48,
+    "fixture_path_count": 67,
+    "fixture_path_digest_sha256": "d9542095b391dbd44a0f8d855d6cfb87e41b981642430a0de662a2965ad26db0",
+    "fixture_classification_profile_count": 8,
+    "fixture_census_count": 67,
+    "fixture_profile_counts": {
+      "KAFKA-K0-4-FIXTURE-PROFILE-001-POLICY-CONTEXT": 5,
+      "KAFKA-K0-4-FIXTURE-PROFILE-002-COMPILE-STATIC-CONTRACT": 18,
+      "KAFKA-K0-4-FIXTURE-PROFILE-003-LOCAL-MODEL": 14,
+      "KAFKA-K0-4-FIXTURE-PROFILE-004-WIRE-CORPUS": 14,
+      "KAFKA-K0-4-FIXTURE-PROFILE-005-RECORD-BATCH-LOCAL-MODEL": 8,
+      "KAFKA-K0-4-FIXTURE-PROFILE-006-PROOF-ONLY": 2,
+      "KAFKA-K0-4-FIXTURE-PROFILE-007-PLANNED-PROVISIONER": 1,
+      "KAFKA-K0-4-FIXTURE-PROFILE-008-OPT-IN-REAL-BROKER": 5
+    },
+    "locked_dependency_vector_count": 3,
+    "native_build_vector_count": 5,
+    "broker_api_version_vector_count": 7,
+    "compression_vector_count": 5,
+    "transport_auth_vector_count": 6,
+    "topology_vector_count": 4,
+    "fault_lifecycle_vector_count": 6,
+    "source_contradiction_count": 11,
+    "current_real_broker_receipt_count": 0,
+    "executed_broker_evidence_count": 0,
+    "actual_binary_receipt_count": 0,
+    "validation_mode": "STATIC_JSON_AND_EXACT_FILE_DIFF_ONLY",
+    "status": "STATIC_INVENTORY_COMPLETE_RUNTIME_PROVENANCE_BLOCKED",
+    "limitation": "Completeness applies only to the declared static fixture scope and joins at the frozen source revision."
+  },
+  "k14_1_refresh_handoff": {
+    "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+    "required_at": "claim time before any terminal inventory, cutover, or keep decision",
+    "refresh_steps": [
+      "Resolve the current main revision and reject silent reuse of baseline_revision.",
+      "Recompute the K0.3 authority-anchor hash and every inherited K0.3 tuple digest.",
+      "Recompute all 20 direct source pins using byte counts, record counts, and SHA-256.",
+      "Re-derive the exact fixture path union from rules a through c; require bytewise sort, uniqueness, LF termination, count 67 unless explicitly versioned, and the recomputed digest.",
+      "Re-scan Cargo manifest and lock coordinates without promoting package metadata to actual native identity.",
+      "Re-evaluate contradictory build attribution, expired waivers, workflow scope, proof-field overclaims, and RecordBatch vector provenance.",
+      "Admit only fresh ACTUAL_BINARY_RECEIPT and REAL_BROKER_RECEIPT rows that satisfy every required_future_receipt_fields group.",
+      "Preserve UNKNOWN and BLOCKED cells when immutable identity or terminal evidence is absent.",
+      "Re-route every gap to its still-live owner and do not infer tracker dependencies from inventory-only gaps.",
+      "Keep incumbent and removal prohibitions unless K15 records a separately authorized terminal decision."
+    ],
+    "drift_failures": [
+      "authority anchor mismatch",
+      "direct source-pin mismatch",
+      "fixture count or digest mismatch",
+      "unowned fixture path",
+      "duplicate fixture path or pin",
+      "new mutable or ambient provenance",
+      "expired policy waiver",
+      "planned, skipped, proof-only, wire-only, or local-model evidence promoted to executed broker evidence",
+      "receipt missing immutable native or broker identity",
+      "receipt missing terminal non-skip or teardown evidence"
+    ],
+    "carry_forward_allowed": false
+  },
+  "no_claim_boundaries": [
+    "This static packet does not prove that Cargo compiled the kafka feature or any Kafka source.",
+    "The rdkafka-sys +2.12.1 package coordinate does not identify the native librdkafka bytes selected, compiled, linked, or loaded.",
+    "The package-source expectation does not establish an actual build branch, .pc file, library path, SONAME, link mode, configure flags, or host capability set.",
+    "A mutable Confluent 7.4.0 tag is not an immutable broker image, broker-reported version, supported-version policy, or executed fixture.",
+    "An ambient bootstrap endpoint is not broker provenance, topology, lifecycle ownership, or authenticated identity.",
+    "The oldest and current supported broker coordinates and accepted API-version ranges remain UNKNOWN and BLOCKED.",
+    "Local request/response tables, parser seeds, and RecordBatch implementations are wire-only evidence and do not prove production negotiation or broker interoperability.",
+    "The five public compression selections do not prove that the actual native library can encode or decode those codecs on any host.",
+    "Public TLS and SCRAM configuration mappings do not prove native capability, certificate validation, credential rejection, or authenticated broker transport.",
+    "Environment-variable presence and an auth_mode proof field do not prove that security settings were applied.",
+    "A two-consumer source test does not prove coordinator, assignment, revocation, rebalance, slow-handler, or multi-broker behavior without a terminal receipt.",
+    "Ordinary load sends, a loopback unavailable endpoint, or a constructed reconnect count do not prove broker fault injection, restart, leader migration, or recovery.",
+    "Transaction, offset, group, restart, rolling-version, and teardown source paths remain opt-in or planned until immutable terminal receipts exist.",
+    "Empty expected RecordBatch bytes and locally generated seeds are not independently sourced compatibility corpora.",
+    "CRC implementation routing is recorded only as a static review concern and is not a finding of protocol correctness or incorrectness.",
+    "Expired no-mock waivers cannot upgrade fallback, mock, simulated, or incomplete paths to accepted real-service evidence.",
+    "A workflow entry for kafka_protocol does not prove all Kafka targets, native linkage, a provisioned broker, or live interoperability.",
+    "The empty current_real_broker_receipts array makes no claim about untracked executions outside the repository.",
+    "No row in this packet proves performance, resource bounds, security, reliability, broad workspace health, release readiness, or absence of defects.",
+    "This packet grants no authority to remove rdkafka, librdkafka, the kafka feature, public API, capability, source file, fixture, or artifact.",
+    "The three standalone gap beads are inventory inputs only and this packet creates no automatic tracker dependency edges.",
+    "K2, K4, K12, K13, K14.1, and K15 retain their executable, refresh, verification, and decision authority."
+  ]
+}

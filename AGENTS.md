@@ -202,6 +202,10 @@ This is expected to additionally surface `opentelemetry_sdk` (via the dev-dep `t
 
 **proof-traffic final signoff:** `artifacts/proof_traffic_final_signoff_v1.json`, checked by `tests/proof_traffic_final_signoff_contract.rs`, is the scoped A6 operator packet for the proof-traffic controller under `asupersync-proof-traffic-control-kuyx64`. Its focused manifest lane is `proof-traffic-final-signoff`; cite it only for A1-A5 evidence aggregation, the capability-drift gate, admission receipt taxonomy, clean-overlay handshake, proof parking lot, blocked-loop e2e packet, proof manifest/status rows, README/AGENTS markers, no-local-fallback/no-peer-cancel policies, dependency-cycle receipt/checklist, and no-claim boundaries. The runbook is `docs/proof_traffic_control.md`. It does not prove peer-dirt exclusion without supported capability evidence plus an admitted command and terminal execution evidence, release readiness, broad workspace health, runtime correctness, performance improvement, live RCH fleet availability, local Cargo fallback approval, permission to delete files, or permission to cancel peer builds.
 
+**dependency supply-chain policy contract:** `artifacts/dependency_supply_chain_policy_v1.json`, checked by `tests/dependency_supply_chain_policy_contract.rs`, is the scoped policy packet for `asupersync-mnotoo.2`. Its focused manifest lane is `dependency-supply-chain-policy-contract`; cite it only for exact Cargo scanner pins, RustSec database freshness requirements, checked root/fuzz lockfile fingerprints, advisory exception ownership/expiry, license/source rules, duplicate ratchets, safe negative fixtures, CI/runbook wiring, proof manifest/status rows, and no-claim boundaries. Live scanner status comes from `scripts/ci/audit_dependencies.sh run`, not from the Rust contract alone. The excluded fuzz workspace is explicitly non-green until its stale lock and known findings are resolved. The runbook is `docs/dependency_supply_chain_policy.md`. It does not prove undisclosed-vulnerability absence, legal compliance, publisher identity, excluded fuzz health, release readiness, broad workspace health, runtime correctness, performance, or live RCH fleet availability.
+
+**dependency budget contract:** `artifacts/dependency_budget_contract_v1.json`, checked by `tests/dependency_budget_contract.rs`, is the scoped Phase-9 ratchet for `asupersync-mnotoo.1`. Its focused manifest lane is `dependency-budget-contract`; cite it only for the exact direct Cargo edge allowset, refreshed marginal-ledger fingerprint, synthesized-consumer package-ID graph ceilings keyed by feature profile/target/host plus edge-kind partitions, safe negative fixtures, automatic downward ratchet, reviewed upward-exception schema, generator/docs markers, proof manifest/status rows, and no-claim boundaries. The generator is `src/bin/dependency_marginal_ledger.rs --budget-from-ledger`; it rejects stale manifest inventory and unreviewed graph growth before output. The runbook is `docs/dependency_budget_contract.md`. It does not authorize dependency removal or cutover and does not prove compilation, runtime correctness, security, performance, interoperability, release readiness, broad workspace health, workspace dev/build graph health, excluded fuzz health, or live RCH fleet availability.
+
 **Pattern**: All async functions take `&Cx` as first parameter. The `Cx` flows down through structured concurrency scopes.
 
 ### Dependency Policy
@@ -371,6 +375,34 @@ rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target
 ```
 
 If you see errors, **carefully understand and resolve each issue**. Read sufficient context to fix them the RIGHT way.
+
+### Feature-gated targets: the three commands above are not enough
+
+The commands above use the **default** feature set, which reaches only the
+ungated targets. Every `[[bench]]` / `[[test]]` with `required-features`, and
+every module behind `postgres`, `mysql`, `sqlite`, `tls`, `kafka`, `quic`,
+`messaging-fabric`, `cli`, `io-uring`, or `simd-intrinsics`, is **silently
+skipped** — it is not compiled, so it cannot fail, so it looks fine.
+
+That is not hypothetical. Two call sites of a removed `Scope::spawn` API sat
+broken on `main` for ~3 months (`br-asupersync-jwr6k0`), and
+`src/database/postgres.rs` has not compiled since 2026-07-15
+(`br-asupersync-evb4i9`), because nothing anyone routinely ran compiled them.
+
+Before landing anything that touches a feature-gated surface, run:
+
+```bash
+# Reaches every required-features target. --keep-going is mandatory:
+# without it the build stops at the FIRST bad target and every target behind
+# it stays invisible, so you fix one thing and the failure merely moves.
+rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_check_all_features" cargo check --all-targets --all-features --keep-going
+rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_clippy_all_features" cargo clippy --all-targets --all-features --keep-going -- -D warnings
+```
+
+**A red gate and a skipped gate are indistinguishable from the outside.** CI's
+`lint-build` job runs exactly these two commands, but do not rely on it to cover
+for you: grepping a workflow proves a step *exists*, never that it *ran*
+(`br-asupersync-c6ppu4`). Check that the job actually reached the step.
 
 ---
 

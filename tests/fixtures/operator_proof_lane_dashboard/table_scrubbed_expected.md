@@ -1,8 +1,8 @@
 # Asupersync Proof Lane Dashboard - [TIMESTAMP]
 
 ## Summary
-Total lanes: 57 | Green: 13 | Yellow: 32 | Red: 0 | Unknown: 12
-Total guarantees: 57 | Green: 13 | Red: 0
+Total lanes: 60 | Green: 13 | Yellow: 35 | Red: 0 | Unknown: 12
+Total guarantees: 60 | Green: 13 | Red: 0
 
 ## Production Graph Proofs
 ✅ default-production-tokio-tree (dependency_graph)
@@ -61,6 +61,8 @@ Total guarantees: 57 | Green: 13 | Red: 0
    Canonical G2 fleet benchmark command for RaptorQ-over-QUIC versus tuned rsync ov...
 🟡 downstream-consumer-default-run (test_frontier)
    Runs the downstream fixture as an external crate against default asupersync feat...
+🟡 downstream-consumer-default-kafka-test (test_frontier)
+   Runs the existing Kafka fail-closed assertions as an integration target of the e...
 🟡 downstream-consumer-metrics-run (test_frontier)
    Runs the downstream fixture as an external crate while forwarding the asupersync...
 🟡 downstream-consumer-channel-profile-run (test_frontier)

@@ -1,0 +1,1025 @@
+{
+  "schema_version": 1,
+  "artifact_id": "regex-privacy-capability-inventory-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-5z2scg.8.1",
+  "capability_id": "CAP-REGEX-PRIVACY",
+  "baseline_revision": "23c5ac4074901349fba93617ef11ed5360d3dc61",
+  "authority_revision": "909e709c61fe6fbf7e8fbe52c9f355e7ab773992",
+  "captured_date_utc": "2026-07-25",
+  "authority": {
+    "adr_id": "DEP-ADR-012",
+    "decision": "KEEP_UNTIL_PARITY",
+    "disposition": "KEEP_INCUMBENT",
+    "cutover_state": "BLOCKED_PENDING_FULL_PARITY",
+    "dependency_exit_allowed": false,
+    "fixed_scanners_are_general_replacement": false
+  },
+  "policy": {
+    "zero_unknown_required": true,
+    "unknown_rows": 0,
+    "inventory_state": "BASELINED_WITH_ROUTED_GAPS",
+    "evidence_state": "EXECUTABLE_PARTIAL_BLOCKING",
+    "accepted_states": [
+      "BASELINED",
+      "PRESENT",
+      "ABSENT",
+      "PLANNED",
+      "BLOCKED",
+      "ROUTED",
+      "RESOLVED_BEFORE_BASELINE",
+      "OUT_OF_SCOPE"
+    ]
+  },
+  "source_pins": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
+      "line_count": 991
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "9fa12e8af1e6b15a3070d88d62b2b81b8ba49c0e9d8592c1d1682f1cd72a4461",
+      "line_count": 4664
+    },
+    {
+      "path": "src/observability/otel.rs",
+      "sha256": "c6cc312af370ee4485bedeb49aa0d900ed649b813c849179c68f5d03944de311",
+      "line_count": 9427
+    },
+    {
+      "path": "src/observability/mod.rs",
+      "sha256": "099e1e6e581cd9239cd19de1590323b5ec061591c25096026b76b4a247296d06",
+      "line_count": 1126
+    },
+    {
+      "path": "src/net/atp/chunk/artifact.rs",
+      "sha256": "f0ca0b6a25867e57847450ea06d0742aeec40a927692c859fc96fafc25cd744f",
+      "line_count": 1123
+    },
+    {
+      "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
+      "sha256": "9016a1e0ed3bfeb1f2eb1c3e287323d64488a16077300a7c817269b30b719da6",
+      "line_count": 354
+    },
+    {
+      "path": "docs/adr/dep_plan_adr_012_regex_privacy.md",
+      "sha256": "76456b9192cc828f59b9c9a5bb19d20b31dc7e8171554e73bc8f4391c892301c",
+      "line_count": 145
+    },
+    {
+      "path": "artifacts/dependency_capability_registry_v1.json",
+      "sha256": "82a73ec1c14fbe317611f6d592af480d75d002cbe9333045ab74840bcaf1c081",
+      "line_count": 6907
+    },
+    {
+      "path": "artifacts/dependency_marginal_ledger_v1.json",
+      "sha256": "832e8d68eefe9400a246ea619a250ea91bcf16a57d5fe728a6ce45e25bbdb4a6",
+      "line_count": 187712
+    },
+    {
+      "path": "artifacts/api_surface_map_v1.json",
+      "sha256": "a00b61fe82326d766cde69e2392bc493a67d3c62f9d5cd83e3e02f8b5bf5535a",
+      "line_count": 4650
+    }
+  ],
+  "dependency_resolution": {
+    "manifest_requirement": "1.12",
+    "resolved_version": "1.13.1",
+    "edge_kind": "optional-normal",
+    "enabling_feature": "metrics",
+    "default_profile_contains_edge": false,
+    "metrics_profile_contains_edge": true,
+    "root_default_features": true,
+    "upstream_default_features": [
+      "std",
+      "perf",
+      "unicode",
+      "regex-syntax/default"
+    ],
+    "supported_target_scope": [
+      "aarch64-apple-darwin",
+      "wasm32-unknown-unknown",
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-gnu"
+    ],
+    "upstream_default_limits": {
+      "nfa_size_limit_bytes": 10485760,
+      "hybrid_cache_capacity_bytes": 2097152,
+      "syntax_nest_limit": 250,
+      "privacy_pattern_count_limit": null,
+      "privacy_pattern_length_limit": null,
+      "privacy_haystack_length_limit": null,
+      "privacy_scan_cancellation_checkpoint": false
+    },
+    "search_complexity": {
+      "custom_patterns": "Regex::is_match; worst-case O(m*n)",
+      "email": "Regex::is_match; worst-case O(m*n)",
+      "ssn": "Regex::is_match; worst-case O(m*n)",
+      "card_candidates": "Regex::find_iter followed by Luhn; iterator has upstream worst-case O(m*n^2)",
+      "phone": "Regex::is_match; worst-case O(m*n)"
+    }
+  },
+  "occurrence_census": {
+    "privacy_config": {
+      "files": 2,
+      "tokens": 19,
+      "paths": [
+        "src/observability/otel.rs",
+        "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs"
+      ]
+    },
+    "span_config": {
+      "files": 1,
+      "tokens": 6,
+      "paths": [
+        "src/observability/otel.rs"
+      ]
+    },
+    "regex_path_tokens": {
+      "files": 3,
+      "tokens": 4,
+      "classifications": [
+        {
+          "path": "src/observability/otel.rs",
+          "tokens": 2,
+          "classification": "real optional production dependency"
+        },
+        {
+          "path": "src/net/atp/chunk/artifact.rs",
+          "tokens": 1,
+          "classification": "local mock module; not the dependency"
+        },
+        {
+          "path": "tests/otel_metric_attribute_denylist_audit.rs",
+          "tokens": 1,
+          "classification": "string literal forbidding fuzzy matching; not an API use"
+        }
+      ]
+    },
+    "regex_identifier_tokens": {
+      "files": 2,
+      "tokens": 15,
+      "classifications": [
+        {
+          "path": "src/observability/otel.rs",
+          "tokens": 12,
+          "classification": "real dependency type, compile, match, and detector sites"
+        },
+        {
+          "path": "src/net/atp/chunk/artifact.rs",
+          "tokens": 3,
+          "classification": "local mock type; not the dependency"
+        }
+      ]
+    },
+    "real_dependency_source_owner": "src/observability/otel.rs",
+    "root_facade_privacy_config_tokens": 0,
+    "api_surface_map_privacy_config_tokens": 0,
+    "examples": 0,
+    "benches": 0,
+    "dedicated_fuzz_targets": 0,
+    "unknown_occurrences": 0
+  },
+  "public_surface": [
+    {
+      "surface_id": "RGX-PUB-CONFIG",
+      "path": "asupersync::observability::otel::PrivacyConfig",
+      "feature": "metrics",
+      "state": "PRESENT",
+      "derives": [
+        "Debug",
+        "Clone",
+        "Default"
+      ],
+      "public_fields": [
+        "drop_attributes: Vec<String>",
+        "drop_labels: Vec<String>",
+        "allowed_fields: Vec<String>",
+        "pii_patterns: Vec<String>",
+        "auto_pii_detection: bool"
+      ],
+      "private_fields": [
+        "compiled_pii_patterns: Vec<Regex>"
+      ],
+      "serde_serializable": false,
+      "root_facade_reexported": false
+    },
+    {
+      "surface_id": "RGX-PUB-BUILDERS",
+      "state": "PRESENT",
+      "methods": [
+        "new",
+        "with_drop_attribute",
+        "with_drop_label",
+        "with_allowed_field",
+        "with_pii_pattern",
+        "try_with_pii_pattern",
+        "with_auto_pii_detection"
+      ],
+      "invalid_pattern_paths": {
+        "with_pii_pattern": "panics with invalid PrivacyConfig PII regex pattern",
+        "try_with_pii_pattern": "returns public regex::Error",
+        "direct_public_vector_mutation": "invalid entries are silently ignored during fallback compilation"
+      }
+    },
+    {
+      "surface_id": "RGX-PUB-MATCH",
+      "state": "PRESENT",
+      "methods": [
+        "should_drop_field(&self, &str) -> bool",
+        "redact_pii(&self, &str, &str) -> String"
+      ],
+      "field_name_used_by_redact_pii": false,
+      "custom_match_operation": "Regex::is_match",
+      "replacement_operation": "replace the entire field value with [REDACTED]",
+      "captures_exposed": false,
+      "match_spans_exposed": false,
+      "byte_haystack_api_exposed": false
+    },
+    {
+      "surface_id": "RGX-PUB-SPAN-ALIAS",
+      "state": "PRESENT",
+      "path": "asupersync::observability::otel::SpanConfig",
+      "target": "PrivacyConfig",
+      "documentation_says_deprecated": true,
+      "rust_deprecated_attribute_present": false
+    },
+    {
+      "surface_id": "RGX-PUB-LOG-PRIVACY",
+      "state": "PRESENT",
+      "paths": [
+        "OtlpLogRecord::from_log_entry_with_privacy",
+        "OtlpLogRecord::with_filtered_attribute"
+      ],
+      "filtered_components": [
+        "target attribute",
+        "structured log attributes"
+      ],
+      "unfiltered_components": [
+        "log body/message",
+        "trace and span identifiers",
+        "event name",
+        "resource attributes"
+      ]
+    },
+    {
+      "surface_id": "RGX-TEST-METRICS-PRIVACY",
+      "state": "PRESENT",
+      "path": "otlp_request_builder::metrics_request_from_snapshot_with_privacy",
+      "cargo_scope": "test or fuzz plus metrics plus tracing-integration",
+      "production_exporter_wiring": false
+    },
+    {
+      "surface_id": "RGX-TEST-TRACE-PRIVACY",
+      "state": "ABSENT",
+      "path": "otlp_request_builder::proto_span",
+      "observed_behavior": "uses ordered_proto_attributes without PrivacyConfig"
+    },
+    {
+      "surface_id": "RGX-TEST-LOG-WIRE-PRIVACY",
+      "state": "ABSENT",
+      "path": "otlp_request_builder::log_record",
+      "observed_behavior": "serializes supplied body and attributes without PrivacyConfig"
+    }
+  ],
+  "field_policy_semantics": {
+    "drop_precedence": [
+      "exact drop_attributes match",
+      "exact drop_labels match",
+      "non-empty allowed_fields glob allowlist",
+      "keep"
+    ],
+    "drop_lists_are_signal_merged": true,
+    "drop_match_kind": "exact UTF-8 string equality",
+    "allowlist_match_kind": "byte-oriented glob with only unescaped *",
+    "star_matches": "zero or more UTF-8 bytes, including dots",
+    "literal_star_representable": false,
+    "case_sensitive": true
+  },
+  "custom_pattern_semantics": {
+    "pattern_language": "regex 1.13.1 string Regex syntax with default Unicode and performance features",
+    "haystack_type": "&str",
+    "search": "unanchored is_match unless the pattern supplies anchors",
+    "successful_match_output": "[REDACTED]",
+    "non_match_output": "original value",
+    "partial_replacement": false,
+    "capture_replacement": false,
+    "pattern_order_visible": false,
+    "first_match_short_circuits": true,
+    "empty_pattern": "accepted; every value is fully redacted",
+    "zero_width_pattern": "accepted; any value with a matching position is fully redacted",
+    "lookaround": "rejected",
+    "backreferences": "rejected",
+    "unicode_default": true,
+    "unicode_case_folding": "simple case folding",
+    "leftmost_first": "incumbent engine policy, but PrivacyConfig exposes only a boolean match",
+    "cache": {
+      "builder_added_patterns": "compiled once and stored per config",
+      "unchanged_cache": "reused",
+      "direct_mutation_stale_cache": "all public strings recompiled on every redact_pii call; cache is not refreshed",
+      "clone": "clones both strings and compiled regex handles",
+      "thread_sharing": "PrivacyConfig is Send + Sync once constructed"
+    }
+  },
+  "syntax_corpus": [
+    {
+      "case_id": "RGX-SYN-001",
+      "class": "literal-and-counted-repetition",
+      "pattern": "token-[A-F0-9]{8}",
+      "haystack": "bearer token-DEADBEEF",
+      "compile_state": "ACCEPTED",
+      "matches": true
+    },
+    {
+      "case_id": "RGX-SYN-002",
+      "class": "literal-negative",
+      "pattern": "token-[A-F0-9]{8}",
+      "haystack": "bearer token-nothex",
+      "compile_state": "ACCEPTED",
+      "matches": false
+    },
+    {
+      "case_id": "RGX-SYN-003",
+      "class": "alternation-left-branch",
+      "pattern": "cat|dog",
+      "haystack": "a dog",
+      "compile_state": "ACCEPTED",
+      "matches": true
+    },
+    {
+      "case_id": "RGX-SYN-004",
+      "class": "named-capture",
+      "pattern": "(?P<kind>secret)-\\d+",
+      "haystack": "secret-42",
+      "compile_state": "ACCEPTED",
+      "matches": true
+    },
+    {
+      "case_id": "RGX-SYN-005",
+      "class": "noncapturing-group-range",
+      "pattern": "(?:ab){2,3}",
+      "haystack": "zzababzz",
+      "compile_state": "ACCEPTED",
+      "matches": true
+    },
+    {
+      "case_id": "RGX-SYN-006",
+      "class": "absolute-anchors",
+      "pattern": "\\Asecret\\z",
+      "haystack": "secret",
+      "compile_state": "ACCEPTED",
+      "matches": true
+    },
+    {
+      "case_id": "RGX-SYN-007",
+      "class": "multiline-anchors",
+      "pattern": "(?m)^secret$",
+      "haystack": "public\nsecret\npublic",
+      "compile_state": "ACCEPTED",
+      "matches": true
+    },
+    {
+      "case_id": "RGX-SYN-008",
+      "class": "dotall",
+      "pattern": "(?s)BEGIN.*END",
+      "haystack": "BEGIN\nsecret\nEND",
+      "compile_state": "ACCEPTED",
+      "matches": true
+    },
+    {
+      "case_id": "RGX-SYN-009",
+      "class": "crlf-mode",
+      "pattern": "(?mR)^secret$",
+      "haystack": "\r\nsecret\r\n",
+      "compile_state": "ACCEPTED",
+      "matches": true
+    },
+    {
+      "case_id": "RGX-SYN-010",
+      "class": "unicode-case-fold",
+      "pattern": "(?i)σ",
+      "haystack": "Σ",
+      "compile_state": "ACCEPTED",
+      "matches": true
+    },
+    {
+      "case_id": "RGX-SYN-011",
+      "class": "verbose-mode",
+      "pattern": "(?x) secret \\s+ \\d+",
+      "haystack": "secret  42",
+      "compile_state": "ACCEPTED",
+      "matches": true
+    },
+    {
+      "case_id": "RGX-SYN-012",
+      "class": "ungreedy-mode",
+      "pattern": "(?U)a+",
+      "haystack": "aaaa",
+      "compile_state": "ACCEPTED",
+      "matches": true
+    },
+    {
+      "case_id": "RGX-SYN-013",
+      "class": "unicode-script",
+      "pattern": "\\p{Greek}+",
+      "haystack": "κρυφό",
+      "compile_state": "ACCEPTED",
+      "matches": true
+    },
+    {
+      "case_id": "RGX-SYN-014",
+      "class": "unicode-digit",
+      "pattern": "\\d+",
+      "haystack": "pin ١٢٣٤",
+      "compile_state": "ACCEPTED",
+      "matches": true
+    },
+    {
+      "case_id": "RGX-SYN-015",
+      "class": "ascii-posix-class",
+      "pattern": "[[:digit:]]+",
+      "haystack": "pin 1234",
+      "compile_state": "ACCEPTED",
+      "matches": true
+    },
+    {
+      "case_id": "RGX-SYN-016",
+      "class": "class-intersection-subtraction",
+      "pattern": "[a-z&&[^aeiou]]+",
+      "haystack": "rhythm",
+      "compile_state": "ACCEPTED",
+      "matches": true
+    },
+    {
+      "case_id": "RGX-SYN-017",
+      "class": "direct-class-subtraction",
+      "pattern": "[0-9--4]+",
+      "haystack": "1235",
+      "compile_state": "ACCEPTED",
+      "matches": true
+    },
+    {
+      "case_id": "RGX-SYN-018",
+      "class": "class-symmetric-difference",
+      "pattern": "[a-g~~b-h]+",
+      "haystack": "ah",
+      "compile_state": "ACCEPTED",
+      "matches": true
+    },
+    {
+      "case_id": "RGX-SYN-019",
+      "class": "unicode-word-boundary",
+      "pattern": "\\bκόσμος\\b",
+      "haystack": "ο κόσμος εδώ",
+      "compile_state": "ACCEPTED",
+      "matches": true
+    },
+    {
+      "case_id": "RGX-SYN-020",
+      "class": "ascii-boundary-unicode-disabled",
+      "pattern": "(?-u:\\b)secret(?-u:\\b)",
+      "haystack": "$$secret$$",
+      "compile_state": "ACCEPTED",
+      "matches": true
+    },
+    {
+      "case_id": "RGX-SYN-021",
+      "class": "hex-unicode-escapes",
+      "pattern": "\\x73\\u{65}cret",
+      "haystack": "secret",
+      "compile_state": "ACCEPTED",
+      "matches": true
+    },
+    {
+      "case_id": "RGX-SYN-022",
+      "class": "empty-pattern",
+      "pattern": "",
+      "haystack": "💩",
+      "compile_state": "ACCEPTED",
+      "matches": true
+    },
+    {
+      "case_id": "RGX-SYN-023",
+      "class": "zero-width-anchor",
+      "pattern": "^",
+      "haystack": "secret",
+      "compile_state": "ACCEPTED",
+      "matches": true
+    },
+    {
+      "case_id": "RGX-SYN-024",
+      "class": "empty-character-class",
+      "pattern": "[a&&b]",
+      "haystack": "anything",
+      "compile_state": "ACCEPTED",
+      "matches": false
+    },
+    {
+      "case_id": "RGX-SYN-025",
+      "class": "nested-repetition-linear-engine",
+      "pattern": "(a+)+$",
+      "haystack": "aaaaaaaaaaaaaaaa!",
+      "compile_state": "ACCEPTED",
+      "matches": false
+    },
+    {
+      "case_id": "RGX-SYN-026",
+      "class": "lookahead-unsupported",
+      "pattern": "(?=secret)",
+      "compile_state": "REJECTED",
+      "error_contains": "look-around"
+    },
+    {
+      "case_id": "RGX-SYN-027",
+      "class": "backreference-unsupported",
+      "pattern": "(secret)\\1",
+      "compile_state": "REJECTED",
+      "error_contains": "backreferences"
+    },
+    {
+      "case_id": "RGX-SYN-028",
+      "class": "unclosed-group",
+      "pattern": "(",
+      "compile_state": "REJECTED",
+      "error_contains": "unclosed group"
+    },
+    {
+      "case_id": "RGX-SYN-029",
+      "class": "unclosed-class",
+      "pattern": "[",
+      "compile_state": "REJECTED",
+      "error_contains": "unclosed character class"
+    },
+    {
+      "case_id": "RGX-SYN-030",
+      "class": "invalid-repetition-range",
+      "pattern": "a{3,2}",
+      "compile_state": "REJECTED",
+      "error_contains": "invalid repetition count range"
+    },
+    {
+      "case_id": "RGX-SYN-031",
+      "class": "unknown-flag",
+      "pattern": "(?q)secret",
+      "compile_state": "REJECTED",
+      "error_contains": "unrecognized flag"
+    }
+  ],
+  "field_policy_corpus": [
+    {
+      "case_id": "RGX-FIELD-001",
+      "drop_attributes": ["secret"],
+      "drop_labels": [],
+      "allowed_fields": [],
+      "field": "secret",
+      "drop": true
+    },
+    {
+      "case_id": "RGX-FIELD-002",
+      "drop_attributes": [],
+      "drop_labels": ["secret"],
+      "allowed_fields": [],
+      "field": "secret",
+      "drop": true
+    },
+    {
+      "case_id": "RGX-FIELD-003",
+      "drop_attributes": ["id"],
+      "drop_labels": [],
+      "allowed_fields": [],
+      "field": "user.id",
+      "drop": false
+    },
+    {
+      "case_id": "RGX-FIELD-004",
+      "drop_attributes": [],
+      "drop_labels": [],
+      "allowed_fields": ["http.*.duration"],
+      "field": "http.client.duration",
+      "drop": false
+    },
+    {
+      "case_id": "RGX-FIELD-005",
+      "drop_attributes": [],
+      "drop_labels": [],
+      "allowed_fields": ["http.*.duration"],
+      "field": "http.client.bytes",
+      "drop": true
+    },
+    {
+      "case_id": "RGX-FIELD-006",
+      "drop_attributes": [],
+      "drop_labels": [],
+      "allowed_fields": ["*.safe"],
+      "field": "trace.safe.safe",
+      "drop": false
+    },
+    {
+      "case_id": "RGX-FIELD-007",
+      "drop_attributes": [],
+      "drop_labels": [],
+      "allowed_fields": ["*"],
+      "field": "任意.字段",
+      "drop": false
+    },
+    {
+      "case_id": "RGX-FIELD-008",
+      "drop_attributes": [],
+      "drop_labels": [],
+      "allowed_fields": [""],
+      "field": "",
+      "drop": false
+    },
+    {
+      "case_id": "RGX-FIELD-009",
+      "drop_attributes": [],
+      "drop_labels": [],
+      "allowed_fields": [""],
+      "field": "x",
+      "drop": true
+    },
+    {
+      "case_id": "RGX-FIELD-010",
+      "drop_attributes": ["secret"],
+      "drop_labels": [],
+      "allowed_fields": ["secret"],
+      "field": "secret",
+      "drop": true
+    },
+    {
+      "case_id": "RGX-FIELD-011",
+      "drop_attributes": [],
+      "drop_labels": [],
+      "allowed_fields": ["Secret"],
+      "field": "secret",
+      "drop": true
+    }
+  ],
+  "built_in_detector_corpus": [
+    {
+      "case_id": "RGX-PII-001",
+      "class": "email",
+      "value": "Contact Jane.Doe@example.com for access",
+      "output": "[EMAIL_REDACTED]"
+    },
+    {
+      "case_id": "RGX-PII-002",
+      "class": "email-case-insensitive",
+      "value": "ADMIN@EXAMPLE.COM",
+      "output": "[EMAIL_REDACTED]"
+    },
+    {
+      "case_id": "RGX-PII-003",
+      "class": "email-invalid-short-tld",
+      "value": "person@example.c",
+      "output": "person@example.c"
+    },
+    {
+      "case_id": "RGX-PII-004",
+      "class": "ssn",
+      "value": "SSN 123-45-6789",
+      "output": "[SSN_REDACTED]"
+    },
+    {
+      "case_id": "RGX-PII-005",
+      "class": "luhn-valid-card-spaces",
+      "value": "Visa 4111 1111 1111 1111",
+      "output": "[CARD_REDACTED]"
+    },
+    {
+      "case_id": "RGX-PII-006",
+      "class": "luhn-valid-card-hyphens",
+      "value": "4111-1111-1111-1111",
+      "output": "[CARD_REDACTED]"
+    },
+    {
+      "case_id": "RGX-PII-007",
+      "class": "luhn-invalid-card",
+      "value": "ticket 4111 1111 1111 1112",
+      "output": "ticket 4111 1111 1111 1112"
+    },
+    {
+      "case_id": "RGX-PII-008",
+      "class": "phone",
+      "value": "Call +1 (415) 555-2671",
+      "output": "[PHONE_REDACTED]"
+    },
+    {
+      "case_id": "RGX-PII-009",
+      "class": "email-before-ssn",
+      "value": "mail a@example.com ssn 123-45-6789",
+      "output": "[EMAIL_REDACTED]"
+    },
+    {
+      "case_id": "RGX-PII-010",
+      "class": "custom-before-built-in",
+      "value": "prefix secret-42 and a@example.com",
+      "custom_pattern": "secret-\\d+",
+      "output": "[REDACTED]"
+    },
+    {
+      "case_id": "RGX-PII-011",
+      "class": "whole-value-replacement",
+      "value": "prefix a@example.com suffix",
+      "output": "[EMAIL_REDACTED]"
+    }
+  ],
+  "resource_and_concurrency_corpus": [
+    {
+      "case_id": "RGX-RES-001",
+      "class": "large-nonmatching-haystack",
+      "generator": "65536 ASCII a bytes followed by !",
+      "pattern": "(a+)+$",
+      "expected": "no match; no panic",
+      "state": "BASELINED"
+    },
+    {
+      "case_id": "RGX-RES-002",
+      "class": "nest-limit",
+      "generator": "251 nested capture groups around a",
+      "expected": "compile error",
+      "state": "BASELINED"
+    },
+    {
+      "case_id": "RGX-RES-003",
+      "class": "compiled-size-limit",
+      "generator": "stacked counted repetitions that exceed the 10 MiB NFA limit",
+      "expected": "CompiledTooBig",
+      "state": "BASELINED"
+    },
+    {
+      "case_id": "RGX-RES-004",
+      "class": "shared-concurrency",
+      "generator": "Arc<PrivacyConfig> read by eight scoped standard threads",
+      "expected": "identical redaction output and clean joins",
+      "state": "BASELINED"
+    },
+    {
+      "case_id": "RGX-RES-005",
+      "class": "direct-valid-mutation",
+      "generator": "push valid public pii_patterns entry after construction",
+      "expected": "matching values redact; fallback recompiles on every call",
+      "state": "BASELINED"
+    },
+    {
+      "case_id": "RGX-RES-006",
+      "class": "direct-invalid-mutation",
+      "generator": "push invalid public pii_patterns entry after construction",
+      "expected": "incumbent silently ignores entry and returns original value",
+      "state": "BASELINED_SECURITY_GAP"
+    }
+  ],
+  "detector_order": [
+    "custom user pattern -> [REDACTED]",
+    "email -> [EMAIL_REDACTED]",
+    "SSN -> [SSN_REDACTED]",
+    "Luhn-valid payment card candidate -> [CARD_REDACTED]",
+    "phone -> [PHONE_REDACTED]",
+    "unchanged original value"
+  ],
+  "downstream_and_e2e": {
+    "existing_downstream_fixture": {
+      "path": "tests/fixtures/dependency-capability-baseline-consumer",
+      "feature": "metrics-profile",
+      "proves": [
+        "nested public PrivacyConfig path compiles",
+        "fallible custom pattern construction",
+        "custom match redaction",
+        "automatic email redaction"
+      ],
+      "does_not_prove": [
+        "full syntax",
+        "direct mutation",
+        "invalid diagnostic contract",
+        "field policy",
+        "production OTLP signal wiring",
+        "large-input resources",
+        "concurrency",
+        "real collector redaction"
+      ]
+    },
+    "existing_examples": [],
+    "existing_benchmarks": [],
+    "existing_dedicated_fuzz_targets": [],
+    "planned_scenarios": [
+      {
+        "scenario_id": "regex_custom_patterns",
+        "owner": "asupersync-5z2scg.8.5",
+        "state": "PLANNED"
+      },
+      {
+        "scenario_id": "privacy_multisignal_redaction",
+        "owner": "asupersync-5z2scg.8.5",
+        "state": "PLANNED"
+      },
+      {
+        "scenario_id": "regex_adversarial_limits",
+        "owner": "asupersync-5z2scg.8.5",
+        "state": "PLANNED"
+      }
+    ],
+    "canonical_runner_rows_present": 0
+  },
+  "marginal_counterfactual": {
+    "cells": 8,
+    "metrics_cells": 4,
+    "workspace_dev_build_audit_cells": 4,
+    "metrics_marginal_package_count": 4,
+    "metrics_marginal_packages": [
+      "aho-corasick@1.1.4",
+      "regex@1.13.1",
+      "regex-automata@0.4.16",
+      "regex-syntax@0.8.11"
+    ],
+    "workspace_dev_build_audit_marginal_package_count": 0,
+    "workspace_retention_reason": "other workspace/dev graph edges retain the incumbent family",
+    "build_scripts": [],
+    "proc_macros": [],
+    "native_code": [],
+    "targets": [
+      "aarch64-apple-darwin",
+      "wasm32-unknown-unknown",
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-gnu"
+    ]
+  },
+  "migration_reservation_groups": [
+    {
+      "group_id": "RGX-GROUP-PUBLIC-CONTRACT",
+      "owner_beads": [
+        "asupersync-5z2scg.8.3.5",
+        "asupersync-5z2scg.8.3.7.4"
+      ],
+      "paths": [
+        "src/observability/otel.rs",
+        "src/observability/mod.rs",
+        "tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml",
+        "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs"
+      ]
+    },
+    {
+      "group_id": "RGX-GROUP-FIXED-DETECTORS",
+      "owner_beads": [
+        "asupersync-5z2scg.8.2"
+      ],
+      "paths": [
+        "src/observability/otel.rs"
+      ]
+    },
+    {
+      "group_id": "RGX-GROUP-OWNED-ENGINE-CUTOVER",
+      "owner_beads": [
+        "asupersync-5z2scg.8.3.7.4"
+      ],
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "src/observability/otel.rs"
+      ]
+    },
+    {
+      "group_id": "RGX-GROUP-ADVERSARIAL-E2E",
+      "owner_beads": [
+        "asupersync-5z2scg.8.5"
+      ],
+      "paths": [
+        "fuzz/Cargo.toml",
+        "fuzz/fuzz_targets",
+        "scripts/run_dependency_sovereignty_e2e.sh",
+        "tests/fixtures/dependency-capability-baseline-consumer"
+      ]
+    },
+    {
+      "group_id": "RGX-GROUP-ATP-MOCK",
+      "owner_beads": [
+        "asupersync-d24mms.11"
+      ],
+      "paths": [
+        "src/net/atp/chunk/artifact.rs"
+      ],
+      "dependency_replacement_scope": false
+    }
+  ],
+  "gaps": [
+    {
+      "gap_id": "RGX-R1-GAP-01",
+      "severity": "critical",
+      "state": "ROUTED",
+      "owner": "asupersync-5z2scg.8.3.5",
+      "summary": "Invalid patterns inserted through the public pii_patterns vector are silently ignored, contradicting the registry invariant that custom privacy patterns are never silently ignored."
+    },
+    {
+      "gap_id": "RGX-R1-GAP-02",
+      "severity": "high",
+      "state": "ROUTED",
+      "owner": "asupersync-5z2scg.8.3.4.4",
+      "summary": "Valid direct mutations trigger fallback compilation of every pattern on every redaction call; the cache is never refreshed and pattern count is unbounded."
+    },
+    {
+      "gap_id": "RGX-R1-GAP-03",
+      "severity": "high",
+      "state": "ROUTED",
+      "owner": "asupersync-5z2scg.8.3.7.4",
+      "summary": "Derived Debug and regex syntax errors can expose raw user pattern text; no secret-safe diagnostic contract exists."
+    },
+    {
+      "gap_id": "RGX-R1-GAP-04",
+      "severity": "high",
+      "state": "ROUTED",
+      "owner": "asupersync-5z2scg.8.3.3",
+      "summary": "PrivacyConfig adds no pattern length/count, haystack length, time, memory, or cancellation bounds beyond upstream defaults."
+    },
+    {
+      "gap_id": "RGX-R1-GAP-05",
+      "severity": "critical",
+      "state": "ROUTED",
+      "owner": "asupersync-5z2scg.8.5",
+      "summary": "Production multi-signal redaction is absent: metrics privacy builders are test/fuzz-only, trace builders are unfiltered, and log bodies/resources bypass attribute filtering."
+    },
+    {
+      "gap_id": "RGX-R1-GAP-06",
+      "severity": "high",
+      "state": "ROUTED",
+      "owner": "asupersync-5z2scg.8.5",
+      "summary": "No dedicated regex/privacy fuzz target, benchmark, or canonical dependency-sovereignty scenario is implemented."
+    },
+    {
+      "gap_id": "RGX-R1-GAP-07",
+      "severity": "medium",
+      "state": "ROUTED",
+      "owner": "asupersync-5z2scg.8.3.5",
+      "summary": "PrivacyConfig has no Serde/config-file round trip and is not re-exported by the observability facade or listed in the root API surface map."
+    },
+    {
+      "gap_id": "RGX-R1-GAP-08",
+      "severity": "medium",
+      "state": "ROUTED",
+      "owner": "asupersync-5z2scg.8.3.5",
+      "summary": "SpanConfig is only documentation-deprecated; no Rust deprecated attribute emits a migration warning."
+    },
+    {
+      "gap_id": "RGX-R1-GAP-09",
+      "severity": "high",
+      "state": "ROUTED",
+      "owner": "asupersync-5z2scg.8.3.7",
+      "summary": "Registry find/replace, captures, bytes, and cancellation language is broader than the consumed PrivacyConfig surface; current use is string is_match plus card find_iter and whole-value token replacement."
+    },
+    {
+      "gap_id": "RGX-R1-GAP-10",
+      "severity": "medium",
+      "state": "ROUTED",
+      "owner": "asupersync-5z2scg.8.2",
+      "summary": "All four built-in detectors remain regex-backed; the proposed fixed-scanner fast path does not yet exist."
+    },
+    {
+      "gap_id": "RGX-R1-GAP-11",
+      "severity": "high",
+      "state": "ROUTED",
+      "owner": "asupersync-d24mms.11",
+      "summary": "The ATP artifact local regex module is a mock that accepts any pattern and ignores it; it is not replacement evidence."
+    },
+    {
+      "gap_id": "RGX-R1-GAP-12",
+      "severity": "medium",
+      "state": "ROUTED",
+      "owner": "asupersync-5z2scg.8.5",
+      "summary": "The entire OTLP regex/redaction module disappears without metrics; no default-feature privacy journey exists."
+    },
+    {
+      "gap_id": "RGX-R1-GAP-13",
+      "severity": "low",
+      "state": "RESOLVED_BEFORE_BASELINE",
+      "owner": "asupersync-dvgpji",
+      "summary": "The ADR source-owner gap is stale: the current capability registry correctly names src/observability/otel.rs and Cargo.toml."
+    },
+    {
+      "gap_id": "RGX-R1-GAP-14",
+      "severity": "medium",
+      "state": "ROUTED",
+      "owner": "asupersync-5z2scg.8.5",
+      "summary": "drop_attributes and drop_labels are signal-merged by should_drop_field despite signal-specific field documentation."
+    }
+  ],
+  "rollback_triggers": [
+    "any previously accepted pattern stops compiling",
+    "any custom match or whole-value replacement changes",
+    "invalid builder patterns stop returning or panicking as documented without an explicit API migration",
+    "a direct public vector mutation stops taking effect without a replacement API",
+    "Unicode, flag, boundary, empty, or zero-width behavior changes",
+    "detector ordering, class token, or Luhn-negative behavior changes",
+    "exact drop matching or byte-glob allowlist behavior changes",
+    "the metrics feature loses the nested public PrivacyConfig path",
+    "an owned or fixed scanner silently narrows or bypasses custom patterns"
+  ],
+  "no_claim_boundaries": [
+    "This inventory does not authorize changing or removing regex.",
+    "The corpus freezes incumbent behavior and discovered defects; it does not bless silent invalid-pattern handling, raw-pattern diagnostics, missing bounds, or incomplete signal wiring as desired design.",
+    "Fixed detector equivalence does not prove a general regex replacement.",
+    "Small bounded adversarial probes do not prove performance parity, a production resource envelope, or cooperative cancellation.",
+    "The existing downstream fixture is compile/semantic evidence for two examples, not a real collector or multi-signal E2E receipt.",
+    "Marginal package counts do not prove behavioral replacement parity.",
+    "The ATP local mock is excluded from dependency scope and supplies no regex evidence.",
+    "No local Cargo fallback is approved when a remote-required proof lane is blocked."
+  ]
+}

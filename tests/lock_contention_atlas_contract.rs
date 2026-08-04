@@ -93,7 +93,7 @@ fn markdown_projection(contract: &Value) -> String {
 }
 
 #[test]
-fn contract_declares_sources_and_atlas_policy() {
+fn percentile_horizon_contract_declares_sources_and_atlas_policy() {
     let contract = contract();
     assert_eq!(
         contract["contract_version"].as_str(),
@@ -131,6 +131,21 @@ fn contract_declares_sources_and_atlas_policy() {
     assert_eq!(
         policy["fail_closed_when_live_samples_missing"].as_bool(),
         Some(true)
+    );
+    assert_eq!(
+        policy["percentile_scope"].as_str(),
+        Some("exact_over_retained_most_recent_suffixes")
+    );
+    assert_eq!(
+        policy["all_history_percentiles_claimed"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        string_list(policy, "live_percentile_sample_count_fields"),
+        [
+            "wait_percentile_sample_count",
+            "hold_percentile_sample_count",
+        ]
     );
 }
 
@@ -182,7 +197,7 @@ fn canonical_lock_order_matches_project_policy() {
 }
 
 #[test]
-fn atlas_fields_extend_current_snapshot_without_losing_existing_counters() {
+fn percentile_horizon_atlas_fields_preserve_all_history_counters() {
     let contract = contract();
     let current = string_set(&contract, "current_snapshot_fields");
     for field in [
@@ -193,8 +208,10 @@ fn atlas_fields_extend_current_snapshot_without_losing_existing_counters() {
         "hold_ns",
         "max_wait_ns",
         "max_hold_ns",
+        "wait_percentile_sample_count",
         "p95_wait_ns",
         "p999_wait_ns",
+        "hold_percentile_sample_count",
         "p95_hold_ns",
         "p999_hold_ns",
         "instrumentation_mode",
@@ -210,8 +227,10 @@ fn atlas_fields_extend_current_snapshot_without_losing_existing_counters() {
         "lock_name",
         "lock_rank",
         "lock_module",
+        "wait_percentile_sample_count",
         "p95_wait_ns",
         "p999_wait_ns",
+        "hold_percentile_sample_count",
         "p95_hold_ns",
         "p999_hold_ns",
         "order_edges_exercised",
@@ -229,6 +248,22 @@ fn atlas_fields_extend_current_snapshot_without_losing_existing_counters() {
         required.contains("hold_ns") && required.contains("p999_hold_ns"),
         "atlas must keep cumulative hold time separate from tail latency"
     );
+
+    let rows = rows_by_surface(&contract);
+    let live_snapshot = rows
+        .get("contended_mutex_snapshot")
+        .expect("contended mutex row");
+    assert_eq!(live_snapshot["report_status"].as_str(), Some("LIVE"));
+    let live_fields = string_set(live_snapshot, "required_fields");
+    for field in [
+        "wait_percentile_sample_count",
+        "hold_percentile_sample_count",
+    ] {
+        assert!(
+            live_fields.contains(field),
+            "live percentile evidence must carry {field}"
+        );
+    }
 }
 
 #[test]
@@ -266,7 +301,7 @@ fn rows_fail_closed_until_live_atlas_reporting_exists() {
 
 #[cfg(feature = "lock-metrics")]
 #[test]
-fn live_contended_mutex_snapshot_projects_tail_latency_fields() {
+fn percentile_horizon_live_snapshot_projects_retained_sample_counts() {
     use asupersync::sync::ContendedMutex;
 
     let contract = contract();
@@ -291,8 +326,10 @@ fn live_contended_mutex_snapshot_projects_tail_latency_fields() {
     assert_eq!(snapshot.acquisitions, 4);
     assert!(snapshot.p95_wait_ns <= snapshot.max_wait_ns);
     assert!(snapshot.p999_wait_ns <= snapshot.max_wait_ns);
+    assert_eq!(snapshot.wait_percentile_sample_count, 4);
     assert!(snapshot.p95_hold_ns <= snapshot.max_hold_ns);
     assert!(snapshot.p999_hold_ns <= snapshot.max_hold_ns);
+    assert_eq!(snapshot.hold_percentile_sample_count, 4);
 }
 
 #[cfg(feature = "lock-metrics")]
@@ -364,8 +401,10 @@ fn instrumentation_disabled_path_does_not_record_or_sample_metrics() {
     assert_eq!(snapshot.max_hold_ns, 0);
     assert_eq!(snapshot.p95_wait_ns, 0);
     assert_eq!(snapshot.p999_wait_ns, 0);
+    assert_eq!(snapshot.wait_percentile_sample_count, 0);
     assert_eq!(snapshot.p95_hold_ns, 0);
     assert_eq!(snapshot.p999_hold_ns, 0);
+    assert_eq!(snapshot.hold_percentile_sample_count, 0);
 
     lock.reset_metrics();
     let after_reset = lock.snapshot();

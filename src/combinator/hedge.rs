@@ -40,8 +40,11 @@
 //!
 //! # Cancellation Handling
 //!
-//! - If caller requests cancel before primary completes: cancel primary, never spawn backup
-//! - If caller requests cancel during race: cancel both (loser surfaced as cancelled outcome)
+//! - If caller cancellation is observed before primary completes: drop primary and
+//!   do not invoke the backup factory
+//! - If caller requests cancel during a race: drop both attempts and return both
+//!   outcomes with the caller's reason. `HedgeWinner::Primary` is the deterministic
+//!   representative for this simultaneous terminal event; neither attempt won.
 
 use crate::cx::Cx;
 use crate::time::Sleep;
@@ -313,10 +316,12 @@ impl<T> Default for Hedge<T> {
     }
 }
 
-/// Which branch won in a hedged operation.
+/// Which branch won in a hedged operation, or the deterministic representative
+/// when external cancellation ends both branches simultaneously.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HedgeWinner {
-    /// The primary operation completed first.
+    /// The primary operation completed first, or represents simultaneous
+    /// external cancellation.
     Primary,
     /// The backup operation completed first.
     Backup,
@@ -341,14 +346,23 @@ impl HedgeWinner {
 pub enum HedgeResult<T, E> {
     /// Primary completed before the hedge deadline (backup never spawned).
     PrimaryFast(Outcome<T, E>),
-    /// Hedge race occurred; includes winner, which won, and loser (if backup was spawned).
+    /// Hedge race occurred; includes both terminal outcomes and the representative branch.
+    ///
+    /// When external cancellation ends an active race, neither branch won. Both
+    /// outcomes are cancelled with the caller's reason and `winner` is
+    /// [`HedgeWinner::Primary`] as a deterministic representative.
     Raced {
-        /// The winner's outcome.
+        /// The winner's outcome, or the primary cancellation outcome when
+        /// external cancellation ends both branches simultaneously.
         winner_outcome: Outcome<T, E>,
-        /// Which branch won.
+        /// Which branch won, or Primary as the deterministic representative
+        /// for simultaneous external cancellation.
         winner: HedgeWinner,
-        /// The loser's outcome after being cancelled and drained.
-        /// This is always present when a race occurred.
+        /// The other branch's terminal representation.
+        ///
+        /// This standalone future drops cancelled branches; it does not drain
+        /// them. Runtime integrations that require draining must enforce that
+        /// policy externally.
         loser_outcome: Outcome<T, E>,
     },
 }
@@ -392,7 +406,8 @@ impl<T, E> HedgeResult<T, E> {
         matches!(self, Self::Raced { .. })
     }
 
-    /// Returns the winner's outcome.
+    /// Returns the winner's outcome, or the primary cancellation outcome for a
+    /// simultaneously cancelled race.
     #[must_use]
     pub fn winner_outcome(&self) -> &Outcome<T, E> {
         match self {
@@ -401,7 +416,8 @@ impl<T, E> HedgeResult<T, E> {
         }
     }
 
-    /// Consumes self and returns the winner's outcome.
+    /// Consumes self and returns the winner's outcome, or the primary
+    /// cancellation outcome for a simultaneously cancelled race.
     #[must_use]
     pub fn into_winner_outcome(self) -> Outcome<T, E> {
         match self {
@@ -416,7 +432,9 @@ impl<T, E> HedgeResult<T, E> {
         self.winner_outcome().is_ok()
     }
 
-    /// Returns which branch won (always Primary for `PrimaryFast`).
+    /// Returns which branch won (always Primary for `PrimaryFast`). A
+    /// simultaneously cancelled race also returns Primary as its deterministic
+    /// representative.
     #[must_use]
     pub const fn winner(&self) -> HedgeWinner {
         match self {
@@ -607,6 +625,40 @@ impl<Prim, Back, F> HedgeFuture<Prim, Back, F> {
             completed: false,
         }
     }
+
+    fn finish_cancelled<T, E>(&mut self, reason: CancelReason) -> HedgeResult<T, E> {
+        let backup_was_running = self.backup.is_some();
+
+        self.completed = true;
+        self.primary = None;
+        self.backup = None;
+        self.backup_factory = None;
+        self.timer = None;
+
+        if backup_was_running {
+            // External cancellation has no race winner. Preserve the fact that
+            // both attempts were active by returning a raced result, using the
+            // primary as the deterministic representative and the caller's
+            // reason for both dropped attempts.
+            HedgeResult::primary_won(
+                Outcome::Cancelled(reason.clone()),
+                Outcome::Cancelled(reason),
+            )
+        } else {
+            HedgeResult::primary_fast(Outcome::Cancelled(reason))
+        }
+    }
+}
+
+fn ambient_cancel_reason() -> Option<CancelReason> {
+    Cx::with_current(|current| {
+        if current.checkpoint().is_err() {
+            Some(current.cancel_reason().unwrap_or_default())
+        } else {
+            None
+        }
+    })
+    .flatten()
 }
 
 impl<Prim, Back, F, T, E> Future for HedgeFuture<Prim, Back, F>
@@ -630,6 +682,10 @@ where
         // `PolledAfterCompletion` error, but `HedgeResult` has no error variant
         // to carry one.
         assert!(!this.completed, "HedgeFuture polled after completion");
+
+        if let Some(reason) = ambient_cancel_reason() {
+            return Poll::Ready(this.finish_cancelled(reason));
+        }
 
         // Poll primary if present
         if let Some(primary) = &mut this.primary {
@@ -664,8 +720,17 @@ where
             // If timer is ready, spawn backup
             if Pin::new(this.timer.as_mut().expect("timer initialized")).poll(cx) == Poll::Ready(())
             {
-                // Timer elapsed, start backup
                 this.timer = None; // Drop timer
+
+                // Cancellation can arrive while the primary or timer is being
+                // polled. Re-check immediately before consuming the factory so
+                // cancellation already observed at this cooperative boundary
+                // cannot create speculative backup work.
+                if let Some(reason) = ambient_cancel_reason() {
+                    return Poll::Ready(this.finish_cancelled(reason));
+                }
+
+                // Timer elapsed, start backup
                 this.config.backup_spawned = true;
                 if let Some(factory) = this.backup_factory.take() {
                     this.backup = Some(factory());
@@ -688,6 +753,14 @@ where
                     Outcome::Cancelled(CancelReason::race_loser()),
                 ));
             }
+        }
+
+        // Either inner future may request cancellation while returning
+        // Pending. Observe it in the same outer poll instead of relying on a
+        // later wake, which is particularly important for standalone/manual
+        // polling without a runtime-owned cancellation waker.
+        if let Some(reason) = ambient_cancel_reason() {
+            return Poll::Ready(this.finish_cancelled(reason));
         }
 
         Poll::Pending
@@ -742,6 +815,10 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     // =========================================================================
     // HedgeConfig Tests
@@ -1254,6 +1331,59 @@ mod tests {
         futures_lite::future::block_on(f)
     }
 
+    struct PendingProbe {
+        polls: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+        cancel_on_poll: Option<(Cx, CancelReason)>,
+    }
+
+    impl PendingProbe {
+        fn new(polls: Arc<AtomicUsize>, drops: Arc<AtomicUsize>) -> Self {
+            Self {
+                polls,
+                drops,
+                cancel_on_poll: None,
+            }
+        }
+
+        fn cancelling(
+            polls: Arc<AtomicUsize>,
+            drops: Arc<AtomicUsize>,
+            cx: Cx,
+            reason: CancelReason,
+        ) -> Self {
+            Self {
+                polls,
+                drops,
+                cancel_on_poll: Some((cx, reason)),
+            }
+        }
+    }
+
+    impl Future for PendingProbe {
+        type Output = Outcome<(), ()>;
+
+        fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            self.polls.fetch_add(1, Ordering::Relaxed);
+            if let Some((cx, reason)) = self.cancel_on_poll.take() {
+                cx.set_cancel_reason(reason);
+            }
+            Poll::Pending
+        }
+    }
+
+    impl Drop for PendingProbe {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn poll_once<F: Future + Unpin>(future: &mut F) -> Poll<F::Output> {
+        let waker = std::task::Waker::noop();
+        let mut task_cx = Context::from_waker(waker);
+        Pin::new(future).poll(&mut task_cx)
+    }
+
     #[test]
     fn test_hedge_execution_primary_fast() {
         let config = HedgeConfig::from_secs(10); // Long delay
@@ -1282,6 +1412,147 @@ mod tests {
         assert!(result.winner().is_backup());
         if let Outcome::Ok(v) = result.winner_outcome() {
             assert_eq!(*v, 2);
+        }
+    }
+
+    #[test]
+    fn hedge_pre_cancelled_never_polls_primary_or_starts_backup() {
+        let primary_polls = Arc::new(AtomicUsize::new(0));
+        let primary_drops = Arc::new(AtomicUsize::new(0));
+        let backup_polls = Arc::new(AtomicUsize::new(0));
+        let backup_drops = Arc::new(AtomicUsize::new(0));
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let expected_reason = CancelReason::shutdown();
+
+        let ambient = Cx::for_testing();
+        ambient.set_cancel_reason(expected_reason.clone());
+        let _current = Cx::set_current(Some(ambient));
+
+        let factory_calls_probe = Arc::clone(&factory_calls);
+        let backup_polls_probe = Arc::clone(&backup_polls);
+        let backup_drops_probe = Arc::clone(&backup_drops);
+        let mut future = hedge(
+            HedgeConfig::new(Duration::ZERO),
+            PendingProbe::new(Arc::clone(&primary_polls), Arc::clone(&primary_drops)),
+            move || {
+                factory_calls_probe.fetch_add(1, Ordering::Relaxed);
+                PendingProbe::new(backup_polls_probe, backup_drops_probe)
+            },
+        );
+
+        let Poll::Ready(result) = poll_once(&mut future) else {
+            panic!("pre-cancelled hedge must complete immediately");
+        };
+
+        assert!(result.is_primary_fast());
+        assert_eq!(primary_polls.load(Ordering::Relaxed), 0);
+        assert_eq!(primary_drops.load(Ordering::Relaxed), 1);
+        assert_eq!(factory_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(backup_polls.load(Ordering::Relaxed), 0);
+        assert_eq!(backup_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            result.into_winner_outcome(),
+            Outcome::Cancelled(expected_reason)
+        );
+    }
+
+    #[test]
+    fn hedge_rechecks_same_poll_cancellation_before_pending_or_backup() {
+        for hedge_delay in [Duration::ZERO, Duration::from_secs(60)] {
+            let primary_polls = Arc::new(AtomicUsize::new(0));
+            let primary_drops = Arc::new(AtomicUsize::new(0));
+            let backup_polls = Arc::new(AtomicUsize::new(0));
+            let backup_drops = Arc::new(AtomicUsize::new(0));
+            let factory_calls = Arc::new(AtomicUsize::new(0));
+            let expected_reason = CancelReason::deadline();
+
+            let ambient = Cx::for_testing();
+            let _current = Cx::set_current(Some(ambient.clone()));
+
+            let factory_calls_probe = Arc::clone(&factory_calls);
+            let backup_polls_probe = Arc::clone(&backup_polls);
+            let backup_drops_probe = Arc::clone(&backup_drops);
+            let mut future = hedge(
+                HedgeConfig::new(hedge_delay),
+                PendingProbe::cancelling(
+                    Arc::clone(&primary_polls),
+                    Arc::clone(&primary_drops),
+                    ambient,
+                    expected_reason.clone(),
+                ),
+                move || {
+                    factory_calls_probe.fetch_add(1, Ordering::Relaxed);
+                    PendingProbe::new(backup_polls_probe, backup_drops_probe)
+                },
+            );
+
+            let Poll::Ready(result) = poll_once(&mut future) else {
+                panic!("same-poll cancellation must complete before pending or backup creation");
+            };
+
+            assert!(result.is_primary_fast());
+            assert_eq!(primary_polls.load(Ordering::Relaxed), 1);
+            assert_eq!(primary_drops.load(Ordering::Relaxed), 1);
+            assert_eq!(factory_calls.load(Ordering::Relaxed), 0);
+            assert_eq!(backup_polls.load(Ordering::Relaxed), 0);
+            assert_eq!(backup_drops.load(Ordering::Relaxed), 0);
+            assert_eq!(
+                result.into_winner_outcome(),
+                Outcome::Cancelled(expected_reason)
+            );
+        }
+    }
+
+    #[test]
+    fn hedge_cancellation_during_race_drops_both_with_caller_reason() {
+        let primary_polls = Arc::new(AtomicUsize::new(0));
+        let primary_drops = Arc::new(AtomicUsize::new(0));
+        let backup_polls = Arc::new(AtomicUsize::new(0));
+        let backup_drops = Arc::new(AtomicUsize::new(0));
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+
+        let ambient = Cx::for_testing();
+        let _current = Cx::set_current(Some(ambient.clone()));
+
+        let factory_calls_probe = Arc::clone(&factory_calls);
+        let backup_polls_probe = Arc::clone(&backup_polls);
+        let backup_drops_probe = Arc::clone(&backup_drops);
+        let mut future = hedge(
+            HedgeConfig::new(Duration::ZERO),
+            PendingProbe::new(Arc::clone(&primary_polls), Arc::clone(&primary_drops)),
+            move || {
+                factory_calls_probe.fetch_add(1, Ordering::Relaxed);
+                PendingProbe::new(backup_polls_probe, backup_drops_probe)
+            },
+        );
+
+        assert!(poll_once(&mut future).is_pending());
+        assert_eq!(primary_polls.load(Ordering::Relaxed), 1);
+        assert_eq!(factory_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(backup_polls.load(Ordering::Relaxed), 1);
+
+        let expected_reason = CancelReason::shutdown();
+        ambient.set_cancel_reason(expected_reason.clone());
+        let Poll::Ready(result) = poll_once(&mut future) else {
+            panic!("cancelled hedge race must complete immediately");
+        };
+
+        assert_eq!(primary_drops.load(Ordering::Relaxed), 1);
+        assert_eq!(backup_drops.load(Ordering::Relaxed), 1);
+        assert_eq!(primary_polls.load(Ordering::Relaxed), 1);
+        assert_eq!(factory_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(backup_polls.load(Ordering::Relaxed), 1);
+        match result {
+            HedgeResult::Raced {
+                winner_outcome,
+                winner,
+                loser_outcome,
+            } => {
+                assert_eq!(winner, HedgeWinner::Primary);
+                assert_eq!(winner_outcome, Outcome::Cancelled(expected_reason.clone()));
+                assert_eq!(loser_outcome, Outcome::Cancelled(expected_reason));
+            }
+            HedgeResult::PrimaryFast(_) => panic!("backup was already running"),
         }
     }
 

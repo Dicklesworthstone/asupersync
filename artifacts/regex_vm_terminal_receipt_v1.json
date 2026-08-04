@@ -1,0 +1,337 @@
+{
+  "schema_version": 1,
+  "artifact_id": "regex-vm-terminal-receipt-v1",
+  "bead_id": "asupersync-5z2scg.8.3.4.4",
+  "capability_id": "CAP-REGEX-PRIVACY",
+  "terminal_id": "ASUP-REGEX-VM-TERMINAL-V1",
+  "generated_at_utc": "2026-07-26T06:56:02Z",
+  "authority": {
+    "compiler_terminal_path": "artifacts/regex_compiler_terminal_receipt_v1.json",
+    "compiler_terminal_sha256": "caf2507d626b25c55b4371c84bd2c946f2b5a7d60f7578582b86994d97f59668",
+    "compiler_disposition": "KEEP_INCUMBENT_DEFER",
+    "iteration_predecessor_path": "artifacts/regex_vm_iteration_contract_v1.json",
+    "iteration_predecessor_sha256": "611c22c0a7095f230d09c72dc6333f604b329961970fd1cc23ce7189d8662bf7",
+    "incumbent": "regex@1.13.1",
+    "production_cutover_eligible": false
+  },
+  "sources": [
+    {
+      "path": "src/observability/regex_ir.rs",
+      "sha256": "de4906beb838fda2c57bccfdb16316e8de661e564940a47e7b9b87f065311cb3",
+      "bytes": 45049,
+      "revision": "asupersync-5z2scg.8.3.3.1"
+    },
+    {
+      "path": "src/observability/regex_lowering.rs",
+      "sha256": "664753b2198fa53a4e80845639a21e24c6f3871d240f59f75f7b522cc8a66a54",
+      "bytes": 56882,
+      "revision": "asupersync-5z2scg.8.3.3.4"
+    },
+    {
+      "path": "src/observability/regex_vm.rs",
+      "sha256": "c4dd00a1346a5954a2ff5d1a12b0c567d8c0b15cf45977c5d987503513bdf673",
+      "bytes": 115185,
+      "revision": "asupersync-5z2scg.8.3.4.4"
+    },
+    {
+      "path": "src/observability/mod.rs",
+      "sha256": "9008a30ec981e63ef07f2351b5ad80bfcd89dea8d191869fd027d2dd76fd7a80",
+      "bytes": 43361,
+      "revision": "asupersync-5z2scg.8.3.4.1"
+    }
+  ],
+  "decision": {
+    "disposition": "KEEP_INCUMBENT_DEFER",
+    "incumbent_state": "RETAIN_REGEX_AND_REGEX_SYNTAX",
+    "candidate_state": "PRIVATE_BOUNDED_VM_WITH_EXPLICIT_CANCELLATION",
+    "r3_4_vm_terminal_complete": true,
+    "validated_ir_required": true,
+    "core_capture_iteration_behavior_replayed": true,
+    "aggregate_work_and_memory_bounded": true,
+    "explicit_cancellation_checkpoints": true,
+    "ambient_cancellation_state": false,
+    "cancelled_operation_returns_partial_outcome": false,
+    "adversarial_evidence_complete": true,
+    "performance_measurement_complete": true,
+    "all_mapped_rows_same_or_better": false,
+    "matcher_api_integration_authorized": false,
+    "production_wiring_authorized": false,
+    "dependency_removal_authorized": false,
+    "reason_codes": [
+      "CANCELLATION_AND_BOUNDED_VM_ROWS_SAME",
+      "RAW_TWO_TARGET_DISTRIBUTIONS_RECORDED",
+      "UNOPTIMIZED_MATCH_DISTRIBUTIONS_WORSE_RETAIN_INCUMBENT",
+      "ALLOCATION_AND_RSS_UNKNOWN_NO_REGRESSION_ADMISSION",
+      "UPSTREAM_COMPILER_TERMINAL_RETAINS_INCUMBENT",
+      "PUBLIC_API_AND_PRODUCTION_WIRING_NOT_EVALUATED"
+    ],
+    "on_missing_unknown_expired_or_drifted_evidence": "KEEP_INCUMBENT_DEFER"
+  },
+  "cancellation_contract": {
+    "error_code": "RGX-VM-E015",
+    "error_kind": "Cancelled",
+    "default_check_interval_work_units": 1024,
+    "zero_interval_error": "RGX-VM-E001",
+    "checkpoint_fields": [
+      "sequence",
+      "work_units",
+      "offset",
+      "optional_state"
+    ],
+    "probe_authority": "caller supplied mutable probe",
+    "ambient_state": false,
+    "input_or_pattern_bytes_retained": false,
+    "aggregate_across_nested_iteration_searches": true,
+    "built_in_work_limit_precedes_probe": true,
+    "partial_success_on_cancel": false,
+    "program_reusable_after_cancel": true
+  },
+  "adversarial_rows": [
+    {
+      "row_id": "RGX-VM-ADV-001",
+      "shape": "huge consuming repetition",
+      "pattern": "a*",
+      "input_generator": "a repeated 20000",
+      "oracle": "regex@1.13.1 captures_iter",
+      "expected": "SAME"
+    },
+    {
+      "row_id": "RGX-VM-ADV-002",
+      "shape": "ambiguous suffix",
+      "pattern": "(?:a|aa)+b",
+      "input_generator": "a repeated 2048 followed by b",
+      "oracle": "regex@1.13.1 captures_iter",
+      "expected": "SAME"
+    },
+    {
+      "row_id": "RGX-VM-ADV-003",
+      "shape": "wide alternation",
+      "pattern": "(?:a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q|r|s|t|u|v|w|x|y|z)+",
+      "input_generator": "alphabet repeated 128",
+      "oracle": "regex@1.13.1 captures_iter",
+      "expected": "SAME"
+    },
+    {
+      "row_id": "RGX-VM-ADV-004",
+      "shape": "deep captures",
+      "pattern_generator": "64 nested capturing groups around a",
+      "input_generator": "a",
+      "oracle": "regex@1.13.1 captures",
+      "expected": "SAME"
+    },
+    {
+      "row_id": "RGX-VM-ADV-005",
+      "shape": "Unicode property run",
+      "pattern": "\\p{Greek}+",
+      "input_generator": "Greek alpha beta gamma repeated 1024",
+      "oracle": "regex@1.13.1 captures_iter",
+      "expected": "SAME"
+    },
+    {
+      "row_id": "RGX-VM-ADV-006",
+      "shape": "nullable unbounded loop",
+      "pattern": "(?:a?)*",
+      "input_generator": "a repeated 1024",
+      "oracle": "compiler terminal",
+      "expected": "KEEP_DEFER_RGX_LOWER_E009"
+    }
+  ],
+  "evidence": {
+    "inline_vm_tests": 16,
+    "predecessor_core_contract_tests": 100,
+    "predecessor_capture_contract_tests": 102,
+    "predecessor_iteration_contract_tests": 103,
+    "exact_iteration_fixtures": 20,
+    "bounded_non_overlapping_incumbent_comparisons": 1210,
+    "bounded_overlapping_model_comparisons": 726,
+    "property_cases": 512,
+    "privacy_pattern_probes": 4,
+    "cancellation_interval_sequence_cases": 160,
+    "adversarial_rows": 6,
+    "panic_containment": true,
+    "deterministic_replay": true,
+    "secret_canary": true,
+    "independent_reference": "regex@1.13.1"
+  },
+  "performance_evidence": {
+    "status": "MEASURED_NO_THRESHOLD_CLAIM",
+    "profile": "cargo test unoptimized with debuginfo disabled",
+    "sample_count_per_operation": 9,
+    "workload": {
+      "pattern": "([a-z]+)=([0-9]+)",
+      "input_generator": "a=1 bb=22 plus separator repeated to at least 4096 bytes",
+      "candidate_operation": "lower plus execute_find_iter",
+      "incumbent_operation": "Regex::new plus captures_iter"
+    },
+    "target_rows": [
+      {
+        "target_id": "ovh-a",
+        "status": "MEASURED",
+        "host_class": "RCH Linux x86_64 worker",
+        "topology": "8 advertised RCH build slots",
+        "toolchain": "nightly-2026-07-05",
+        "rch_build_hash": "e5021ed6dfe49ab0",
+        "selected_worker_receipt": "ovh-a at ubuntu@51.222.245.56",
+        "candidate_revision": "c4dd00a1346a5954a2ff5d1a12b0c567d8c0b15cf45977c5d987503513bdf673",
+        "incumbent_revision": "regex@1.13.1",
+        "compile_candidate_ns": [
+          59561,
+          67192,
+          64659,
+          65895,
+          63921,
+          64615,
+          65284,
+          64216,
+          66899
+        ],
+        "compile_incumbent_ns": [
+          452404,
+          461898,
+          457203,
+          456273,
+          455251,
+          452891,
+          455079,
+          466530,
+          455624
+        ],
+        "match_candidate_ns": [
+          17160894,
+          17517353,
+          17047851,
+          17086775,
+          17048983,
+          17930772,
+          17252685,
+          17558091,
+          19491486
+        ],
+        "match_incumbent_ns": [
+          1220442,
+          1321544,
+          1217867,
+          1215415,
+          1216989,
+          1434255,
+          1226373,
+          1378308,
+          1216517
+        ],
+        "compile_observed_ordering": "CANDIDATE_LOWER_ALL_SAMPLES",
+        "match_observed_ordering": "CANDIDATE_HIGHER_ALL_SAMPLES",
+        "allocation_status": "UNKNOWN_NOT_INSTRUMENTED",
+        "rss_status": "UNKNOWN_NOT_INSTRUMENTED"
+      },
+      {
+        "target_id": "hz2",
+        "status": "MEASURED",
+        "host_class": "RCH Linux x86_64 worker",
+        "topology": "8 advertised RCH build slots",
+        "toolchain": "nightly-2026-07-05",
+        "rch_build_hash": "4c6ba944e35b13c8",
+        "selected_worker_receipt": "hz2 at root@178.104.77.29",
+        "candidate_revision": "c4dd00a1346a5954a2ff5d1a12b0c567d8c0b15cf45977c5d987503513bdf673",
+        "incumbent_revision": "regex@1.13.1",
+        "compile_candidate_ns": [
+          150484,
+          64362,
+          63340,
+          80552,
+          63678,
+          63206,
+          61638,
+          62394,
+          63344
+        ],
+        "compile_incumbent_ns": [
+          1211530,
+          490082,
+          500936,
+          493442,
+          488356,
+          481774,
+          485198,
+          481932,
+          477326
+        ],
+        "match_candidate_ns": [
+          23526081,
+          18510466,
+          18391456,
+          18202139,
+          18091820,
+          18364284,
+          18021688,
+          18432458,
+          18061886
+        ],
+        "match_incumbent_ns": [
+          1239148,
+          1192086,
+          1348686,
+          1189633,
+          1186592,
+          1185423,
+          1185963,
+          1191275,
+          1196244
+        ],
+        "compile_observed_ordering": "CANDIDATE_LOWER_ALL_SAMPLES",
+        "match_observed_ordering": "CANDIDATE_HIGHER_ALL_SAMPLES",
+        "allocation_status": "UNKNOWN_NOT_INSTRUMENTED",
+        "rss_status": "UNKNOWN_NOT_INSTRUMENTED"
+      }
+    ],
+    "measurement_commands": [
+      "RCH_WORKER=ovh-a RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/observability/regex_vm.rs --overlay-path artifacts/regex_vm_terminal_receipt_v1.json --overlay-path docs/regex_vm_terminal_receipt.md --overlay-path tests/regex_vm_terminal_receipt_contract.rs --overlay-path artifacts/regex_vm_iteration_contract_v1.json --overlay-path docs/regex_vm_iteration_contract.md --overlay-path tests/regex_vm_iteration_contract.rs -- env REGEX_VM_BENCH_TARGET=ovh-a CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics --test regex_vm_terminal_receipt_contract benchmark_provenance_emitter -- --nocapture",
+      "RCH_WORKER=hz2 RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/observability/regex_vm.rs --overlay-path artifacts/regex_vm_terminal_receipt_v1.json --overlay-path docs/regex_vm_terminal_receipt.md --overlay-path tests/regex_vm_terminal_receipt_contract.rs --overlay-path artifacts/regex_vm_iteration_contract_v1.json --overlay-path docs/regex_vm_iteration_contract.md --overlay-path tests/regex_vm_iteration_contract.rs -- env REGEX_VM_BENCH_TARGET=hz2 CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics --test regex_vm_terminal_receipt_contract benchmark_provenance_emitter -- --nocapture"
+    ],
+    "admission": "measurement only; no threshold, improvement, or no-regression claim"
+  },
+  "retained_minimized_cases": [
+    {
+      "case_id": "RGX-VM-TERM-MIN-001",
+      "pattern": "(?:a?)*",
+      "input": "a",
+      "disposition": "KEEP_DEFER_RGX_LOWER_E009"
+    },
+    {
+      "case_id": "RGX-VM-TERM-MIN-002",
+      "pattern": "a*",
+      "input": "baa",
+      "disposition": "SAME_ADJACENT_EMPTY_DISCARD"
+    },
+    {
+      "case_id": "RGX-VM-TERM-MIN-003",
+      "pattern": "(a)?b",
+      "input": "b ab",
+      "disposition": "SAME_UNMATCHED_AND_PARTICIPATING_CAPTURES"
+    },
+    {
+      "case_id": "RGX-VM-TERM-MIN-004",
+      "pattern": "aa",
+      "input": "aaa",
+      "disposition": "EXPLICIT_OVERLAP_POLICY"
+    }
+  ],
+  "proof": {
+    "unit_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/observability/regex_vm.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics --lib observability::regex_vm::tests -- --nocapture",
+    "contract_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/observability/regex_vm.rs --overlay-path artifacts/regex_vm_terminal_receipt_v1.json --overlay-path docs/regex_vm_terminal_receipt.md --overlay-path tests/regex_vm_terminal_receipt_contract.rs --overlay-path artifacts/regex_vm_iteration_contract_v1.json --overlay-path docs/regex_vm_iteration_contract.md --overlay-path tests/regex_vm_iteration_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics --test regex_vm_core_contract --test regex_vm_captures_contract --test regex_vm_iteration_contract --test regex_vm_terminal_receipt_contract -- --nocapture",
+    "clippy_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/observability/regex_vm.rs --overlay-path artifacts/regex_vm_terminal_receipt_v1.json --overlay-path docs/regex_vm_terminal_receipt.md --overlay-path tests/regex_vm_terminal_receipt_contract.rs --overlay-path artifacts/regex_vm_iteration_contract_v1.json --overlay-path docs/regex_vm_iteration_contract.md --overlay-path tests/regex_vm_iteration_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --features metrics --test regex_vm_core_contract --test regex_vm_captures_contract --test regex_vm_iteration_contract --test regex_vm_terminal_receipt_contract -- -D warnings",
+    "format_command": "rustfmt --edition 2024 --check src/observability/regex_vm.rs tests/regex_vm_core_contract.rs tests/regex_vm_captures_contract.rs tests/regex_vm_iteration_contract.rs tests/regex_vm_terminal_receipt_contract.rs",
+    "local_cargo_fallback": false
+  },
+  "no_claims": [
+    "no production privacy wiring or dependency removal",
+    "no complete public regex API or replacement-template expansion",
+    "no accepted regex syntax expansion",
+    "no persisted or deserializable VM or cancellation state",
+    "no allocation or RSS measurement",
+    "no performance improvement or no-regression claim",
+    "no isolated binary-size or cross-target result",
+    "no broad workspace health or release-readiness claim",
+    "no live RCH fleet availability claim",
+    "no local Cargo fallback approval"
+  ]
+}

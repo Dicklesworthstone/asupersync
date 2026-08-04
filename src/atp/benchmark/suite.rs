@@ -52,7 +52,7 @@ impl BenchmarkSuite {
         config: &BenchmarkConfig,
     ) -> Result<BenchmarkReport, BenchmarkError> {
         // Set up working directory
-        let work_dir = TempDir::new().map_err(|e| BenchmarkError::Io(e))?;
+        let work_dir = TempDir::new().map_err(BenchmarkError::Io)?;
         let source_path = work_dir.path().join("test_source");
         let dest_base = work_dir.path().join("dest");
 

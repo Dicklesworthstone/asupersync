@@ -2085,8 +2085,8 @@ impl ScramAuth {
         let salted_password = salted_password_result?;
 
         // Compute client key and stored key
-        let client_key = Self::hmac_sha256(&salted_password, b"Client Key");
-        let stored_key = Self::sha256(&client_key);
+        let client_key = Self::hmac_sha256(&salted_password[..], b"Client Key");
+        let stored_key = Self::sha256(&client_key[..]);
 
         // Build client-final-message-without-proof. The `c=` field is the
         // base64 encoding of GS2-header || cbind_data, where the GS2 header
@@ -2107,7 +2107,7 @@ impl ScramAuth {
         );
 
         // Compute client signature and proof
-        let client_signature = Self::hmac_sha256(&stored_key, auth_message.as_bytes());
+        let client_signature = Self::hmac_sha256(&stored_key[..], auth_message.as_bytes());
         let client_proof: zeroize::Zeroizing<[u8; SCRAM_SHA256_LEN]> =
             zeroize::Zeroizing::new(std::array::from_fn(|index| {
                 client_key[index] ^ client_signature[index]
@@ -2119,9 +2119,9 @@ impl ScramAuth {
 
         // Derive the verifier while the single salted-password result is live.
         // Server-final then performs only bounded decoding and comparison.
-        let server_key = Self::hmac_sha256(&salted_password, b"Server Key");
+        let server_key = Self::hmac_sha256(&salted_password[..], b"Server Key");
         self.expected_server_signature =
-            Some(Self::hmac_sha256(&server_key, auth_message.as_bytes()));
+            Some(Self::hmac_sha256(&server_key[..], auth_message.as_bytes()));
 
         // Build client-final-message
         let client_final = format!("{client_final_without_proof},p={client_proof_b64}");
@@ -2193,7 +2193,7 @@ impl ScramAuth {
             )));
         }
 
-        if !scram_constant_time_eq_expected_len(&expected_sig, &server_sig) {
+        if !scram_constant_time_eq_expected_len(&expected_sig[..], &server_sig) {
             return Err(PgError::AuthenticationFailed(
                 "server signature mismatch".to_string(),
             ));
@@ -2237,7 +2237,7 @@ impl ScramAuth {
                 }
             }
 
-            u = keyed.digest(&u);
+            u = keyed.digest(&u[..]);
             for (accumulator, value) in result.iter_mut().zip(u.iter()) {
                 *accumulator ^= value;
             }
@@ -3197,6 +3197,30 @@ fn row_returning_execute_error(api: &str, query_api: &str) -> PgError {
 #[inline]
 fn cancelled_error(cx: &Cx) -> PgError {
     PgError::Cancelled(cancelled_reason(cx))
+}
+
+/// Classify a zero-byte read from the peer.
+///
+/// `read_exact`'s in-poll cancel guard runs at the top of each poll, but the
+/// `n == 0` check happens after the poll returns. Cancellation is set from
+/// another thread (the deadline monitor, `cancel_with`), so it can land in that
+/// window: the guard sees a live `cx`, the peer's hangup is observed, and the
+/// EOF is reported as `Outcome::Err` even though a cancel was already pending.
+/// Per the severity lattice (`Ok < Err < Cancelled < Panicked`), `Cancelled`
+/// dominates and the caller should see 499, not 5xx (br-asupersync-xwanb4).
+///
+/// The downgrade is gated on cancellation *actually* being pending, mirroring
+/// the established idiom in `src/transport/router.rs`. A peer that genuinely
+/// hung up early with no cancel outstanding still reports `UnexpectedEof`; this
+/// is not a license to suppress errors that happened before any cancel.
+fn eof_or_cancelled(cx: &Cx) -> PgError {
+    if cx.checkpoint().is_err() {
+        return cancelled_error(cx);
+    }
+    PgError::Io(io::Error::new(
+        io::ErrorKind::UnexpectedEof,
+        "unexpected end of stream",
+    ))
 }
 
 const POSTGRES_PROTOCOL_VERSION_3_0: i32 = 196_608;
@@ -6498,10 +6522,7 @@ impl PgConnection {
 
             let n = read_buf.filled().len();
             if n == 0 {
-                return Err(PgError::Io(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "unexpected end of stream",
-                )));
+                return Err(eof_or_cancelled(cx));
             }
             pos += n;
         }
@@ -7447,8 +7468,11 @@ mod typed_query_parameter_audit_tests {
         let i16_val = 42i16;
         let i32_val = 42i32;
         let i64_val = 42i64;
-        let f32_val = 3.14f32;
-        let f64_val = 3.14f64;
+        // Arbitrary non-integral values: only the STATIC TYPE selects the
+        // parameter OID here, never the value. Deliberately not 3.14, which
+        // clippy reads as an approximation of PI (`approx_constant`).
+        let f32_val = 2.5f32;
+        let f64_val = 2.5f64;
         let str_val = "hello";
         let string_val = "world".to_string();
 
@@ -9764,7 +9788,7 @@ mod tests {
         let oversized_body_len = body_limit + 1;
         let declared_len = i32::try_from(oversized_body_len + 4).expect("test length fits i32");
 
-        peer.write_all(&[b'R']).expect("write message type");
+        peer.write_all(b"R").expect("write message type");
         peer.write_all(&declared_len.to_be_bytes())
             .expect("write declared length");
         peer.shutdown(Shutdown::Write).expect("shutdown write half");
@@ -12411,6 +12435,67 @@ mod tests {
         assert_eq!(buf, [0]);
 
         wake_writer.join().expect("wake writer should exit cleanly");
+    }
+
+    // ================================================================
+    // br-asupersync-xwanb4: the `n == 0` branch of `read_exact` sits
+    // after the in-poll cancel guard, so a cancel set from another
+    // thread can land between them and be reported as `Err`.
+    //
+    // That interleaving is a genuine race and is not deterministically
+    // reachable through `read_exact` itself (pre-setting the cancel
+    // makes the guard fire first, which would green these tests without
+    // ever executing the branch under test). `eof_or_cancelled` is
+    // extracted precisely so the decision can be pinned directly.
+    // ================================================================
+
+    /// A cancel that races the peer's hangup reports `Cancelled`, not
+    /// `UnexpectedEof`. `outcome_from_error` keys off the variant, so before
+    /// this the client saw a server error (5xx) for its own deadline cancel.
+    #[test]
+    fn eof_during_pending_cancel_reports_cancelled() {
+        let cx = crate::cx::Cx::for_testing();
+        cx.cancel_fast(CancelKind::User);
+
+        match eof_or_cancelled(&cx) {
+            PgError::Cancelled(reason) => assert_eq!(reason.kind, CancelKind::User),
+            other => panic!("expected Cancelled, got: {other:?}"),
+        }
+    }
+
+    /// The paired NEGATIVE test, mirroring the asymmetry that
+    /// `src/transport/router.rs` already encodes: a peer that genuinely hung up
+    /// with no cancel outstanding must still report `UnexpectedEof`. The
+    /// severity lattice does not license suppressing an error that happened
+    /// before any cancel was requested.
+    #[test]
+    fn eof_without_cancel_stays_unexpected_eof() {
+        let cx = crate::cx::Cx::for_testing();
+
+        match eof_or_cancelled(&cx) {
+            PgError::Io(err) => assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof),
+            other => panic!("expected Io(UnexpectedEof), got: {other:?}"),
+        }
+    }
+
+    /// End-to-end: a cancelled EOF actually aggregates as `Outcome::Cancelled`,
+    /// and an uncancelled one stays `Outcome::Err`.
+    #[test]
+    fn eof_classification_reaches_the_right_outcome() {
+        let cancelled = crate::cx::Cx::for_testing();
+        cancelled.cancel_fast(CancelKind::Timeout);
+        let outcome: Outcome<(), PgError> = outcome_from_error(eof_or_cancelled(&cancelled));
+        assert!(
+            matches!(outcome, Outcome::Cancelled(_)),
+            "cancelled EOF must aggregate as Cancelled, got: {outcome:?}"
+        );
+
+        let live = crate::cx::Cx::for_testing();
+        let outcome: Outcome<(), PgError> = outcome_from_error(eof_or_cancelled(&live));
+        assert!(
+            matches!(outcome, Outcome::Err(_)),
+            "uncancelled EOF must stay Err, got: {outcome:?}"
+        );
     }
 
     #[test]

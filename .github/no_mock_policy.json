@@ -62,6 +62,10 @@
       "category": "canonical_grpc_status_code"
     },
     {
+      "pattern": "src/grpc/server.rs",
+      "category": "canonical_grpc_status_code"
+    },
+    {
       "pattern": "src/grpc/snapshots/asupersync__grpc__status__tests__grpc_status_http_mapping_all_codes.snap",
       "category": "canonical_grpc_status_code"
     },
@@ -181,6 +185,42 @@
     "tests/recovery_security.rs"
   ],
   "allowlist_entries": [
+    {
+      "pattern": "src/bin/dependency_verification_matrix.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "The only lexical hit is the literal rule text 'no-mock dependency-sovereignty scenario' inside the JSON contract this binary emits, so the scan is matching the implementation-completeness policy's own vocabulary rather than an incomplete code path. Narrowed by justified_text (asupersync-pzfwf5): this entry covers that emitted rule string only, so any other flagged line in this binary still fails the gate.",
+      "revisit_condition": "Revisit if this binary gains a lexical hit outside the emitted policy rule text; such a hit now fails the gate on its own rather than being absorbed by this entry.",
+      "replacement_issue": "asupersync-pzfwf5",
+      "justified_text": ["\"e2e_rule\":.*no-mock dependency-sovereignty scenario"]
+    },
+    {
+      "pattern": "src/net/atp/sdk/bonded.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "The module doc contrasts BondedTransfer against the single-source ActiveTransfer handle, whose in-process driver it documents as a fail-closed stub. The term describes a different type in a different module; BondedTransfer itself drives the landed bonded RaptorQ data path. Narrowed by justified_text (asupersync-pzfwf5): this entry covers that one doc sentence only.",
+      "revisit_condition": "Revisit when the ActiveTransfer in-process driver stops being a fail-closed stub and the contrasting sentence is removed; the entry stops covering the file automatically once that sentence changes.",
+      "replacement_issue": "asupersync-pzfwf5",
+      "justified_text": ["^//!.*in-process driver is still a fail-closed stub"]
+    },
+    {
+      "pattern": "src/net/atp/transport_quic/native_link.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "The hit is the word 'fake-expires' in a comment explaining why an all-dropped packet batch must keep waiting out the caller's remaining idle allowance instead of short-circuiting a zero back (br-asupersync-u6m3dy). It documents a landed fix, not a fake implementation. Narrowed by justified_text (asupersync-pzfwf5): this entry covers that explanatory comment only, so the rest of this 13k-line native QUIC link stays under the gate.",
+      "revisit_condition": "Revisit if this file gains a lexical hit outside that comment; such a hit now fails the gate on its own.",
+      "replacement_issue": "asupersync-pzfwf5",
+      "justified_text": ["^\\s*//.*\\bfake-expires\\b"]
+    },
+    {
+      "pattern": "src/net/udp.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "The hit is the comment on the non-Windows suppress_windows_udp_connection_reset no-op, which accurately describes a deliberate platform-conditional shim rather than unfinished work. Narrowed by justified_text (asupersync-pzfwf5): this entry covers that one comment only.",
+      "revisit_condition": "Revisit if the non-Windows shim gains real behavior or the descriptive comment is removed; any other flagged line in this file now fails the gate on its own.",
+      "replacement_issue": "asupersync-pzfwf5",
+      "justified_text": ["^\\s*//.*no-op stub"]
+    },
     {
       "pattern": "src/channel/session.rs",
       "category": "production_stub",
@@ -415,6 +455,7 @@
         "src/grpc/status.rs",
         "src/grpc/streaming.rs",
         "src/grpc/web.rs",
+        "src/grpc/server.rs",
         "src/grpc/snapshots/asupersync__grpc__status__tests__grpc_status_http_mapping_all_codes.snap",
         "tests/conformance/grpc_connect/src/connect_compat.rs",
         "tests/conformance/grpc_connect/src/lib.rs",
@@ -490,130 +531,32 @@
     {
       "group_id": "known-production-runtime-core-policy-hits-2026-05-05",
       "patterns": [
-        "src/bin/asupersync.rs",
-        "src/cancel/symbol_cancel.rs",
-        "src/combinator/join.rs",
-        "src/combinator/race.rs",
-        "src/combinator/timeout.rs",
-        "src/cx/macaroon.rs",
-        "src/database/postgres.rs",
-        "src/database/sqlite.rs",
-        "src/gen_server.rs",
-        "src/lab/explorer.rs",
-        "src/lab/network/harness.rs",
-        "src/lab/oracle/cancel_signal_ordering.rs",
-        "src/lab/oracle/priority_inversion.rs",
-        "src/lab/oracle/region_leak.rs",
-        "src/lab/util/stack_trace.rs",
-        "src/net/dns/resolver.rs",
-        "src/obligation/choreography/pipeline.rs",
-        "src/obligation/saga.rs",
-        "src/record/obligation.rs",
-        "src/record/region.rs",
-        "src/runtime/epoch_tracking.rs",
-        "src/runtime/panic_isolation.rs",
-        "src/runtime/resource_monitor.rs",
-        "src/runtime/state.rs",
-        "src/runtime/task_table.rs",
-        "src/security/authenticated.rs",
-        "src/security/tag.rs",
-        "src/service/load_balance.rs",
-        "src/service/reconnect.rs",
-        "src/service/steer.rs",
-        "src/supervision.rs",
-        "src/trace/event_structure.rs",
-        "src/trace/file.rs",
-        "src/transport/mock.rs",
-        "src/types/typed_symbol.rs",
-        "src/types/wasm_abi.rs",
-        "src/util/arena.rs",
-        "src/util/stack_trace.rs"
+        "src/bin/asupersync.rs"
       ],
       "category": "production_stub",
       "owner": "runtime-core",
-      "reason": "These exact runtime-core production paths are known lexical hits whose behavior is either live, cfg/test-support bounded, or tracked by closed mock-code-finder repair beads. New production source paths remain uncovered and fail the gate.",
-      "revisit_condition": "Re-audit exact path list during asupersync-u7y final ratchet signoff and retire entries as wording or test-support boundaries are normalized.",
-      "replacement_issue": "asupersync-u7y"
-    },
-    {
-      "group_id": "known-production-grpc-policy-hits-2026-05-05",
-      "patterns": [
-        "src/grpc/mod.rs"
-      ],
-      "category": "production_stub",
-      "owner": "grpc-core",
-      "reason": "These exact gRPC paths are known lexical hits after gRPC compression, status, and deadline source-truth repairs landed. Future gRPC production placeholders remain policy violations.",
-      "revisit_condition": "Re-audit after asupersync-oelvq2 aggregate proof and asupersync-u7y final gap closure.",
-      "replacement_issue": "asupersync-u7y"
-    },
-    {
-      "group_id": "known-production-messaging-policy-hits-2026-05-05",
-      "patterns": [
-        "src/messaging/fabric.rs",
-        "src/messaging/jetstream.rs",
-        "src/messaging/nats.rs",
-        "src/messaging/redis.rs"
-      ],
-      "category": "production_stub",
-      "owner": "messaging-core",
-      "reason": "These exact messaging paths are known lexical hits in live or tracked transport surfaces. Kafka phase-0 stubs stay under expiring waivers; new messaging paths remain uncovered.",
-      "revisit_condition": "Re-audit after asupersync-oelvq2 aggregate proof and retire entries as transport wording is normalized.",
-      "replacement_issue": "asupersync-u7y"
-    },
-    {
-      "group_id": "known-production-observability-policy-hits-2026-05-05",
-      "patterns": [
-        "src/observability/analyzer_plugin.rs",
-        "src/observability/cancellation_analyzer.rs",
-        "src/observability/diagnostics.rs",
-        "src/observability/metrics.rs",
-        "src/observability/mod.rs",
-        "src/observability/otel.rs",
-        "src/observability/otlp_trace_exporter.rs"
-      ],
-      "category": "production_stub",
-      "owner": "observability-core",
-      "reason": "These exact observability production paths are known lexical hits after the OTLP/metrics repair beads closed. Audit modules are separately categorized as stale audit prose.",
-      "revisit_condition": "Re-audit after observability evidence aggregation in asupersync-oelvq2 and final gap closure in asupersync-u7y.",
-      "replacement_issue": "asupersync-u7y"
-    },
-    {
-      "group_id": "known-production-reactor-policy-hits-2026-05-05",
-      "patterns": [
-        "src/runtime/reactor/browser.rs"
-      ],
-      "category": "production_stub",
-      "owner": "runtime-reactor",
-      "reason": "The browser reactor path contains known platform-boundary fallback terminology and remains separated from default native runtime behavior; macOS and Windows fallback exports remain expiring waivers.",
-      "expires_at_utc": "2026-06-30T00:00:00Z",
-      "replacement_issue": "asupersync-u7y"
-    },
-    {
-      "group_id": "known-production-tls-policy-hits-2026-05-05",
-      "patterns": [
-        "src/tls/connector.rs",
-        "src/tls/error.rs"
-      ],
-      "category": "production_stub",
-      "owner": "tls-core",
-      "reason": "These exact TLS paths are known lexical hits in live connector/error handling surfaces rather than hidden fake TLS behavior.",
-      "revisit_condition": "Re-audit during asupersync-u7y final ratchet signoff.",
-      "replacement_issue": "asupersync-u7y"
-    },
-    {
-      "group_id": "known-production-web-policy-hits-2026-05-05",
-      "patterns": [
-        "src/web/middleware.rs",
-        "src/web/response.rs"
-      ],
-      "category": "production_stub",
-      "owner": "web-runtime",
-      "reason": "These exact web-runtime paths are known lexical hits in live middleware/response code or documented test-support hooks. New web production placeholders remain uncovered.",
-      "revisit_condition": "Re-audit during asupersync-u7y final ratchet signoff.",
-      "replacement_issue": "asupersync-u7y"
+      "reason": "Re-verified 2026-07-26 under asupersync-3j4ib0. This group held 38 whole-file patterns; after asupersync-pzfwf5 gave the scanner #[cfg(test)] awareness, 37 of them matched no production hit at all and were removed rather than left as standing whole-file coverage. The one survivor is the ATP CLI, and it is narrowed to its five justified sentences: two comments recording that fake progress/sleep-loop streams were REMOVED (br-asupersync-qk02uw), one documented preview sentinel for a local-only receive preflight, and two comments on atp_not_implemented() refusals for sync and mirror reconcile. Those refusals are complete fail-closed behavior, not unfinished work, which is why they take an allowlist entry rather than an expiring waiver.",
+      "revisit_condition": "Any flagged line in this binary outside those five sentences now fails the gate on its own; re-audit if the CLI gains a lexical hit that is not one of them. The 37 removed patterns are recoverable from git history if a marker ever reappears in those files.",
+      "replacement_issue": "asupersync-u7y",
+      "justified_text": [
+        "^\\s*//.*Retained for unit-test coverage of the chunking contract",
+        "^\\s*//.*Retained for unit-test coverage of the progress format",
+        "^\\s*//.*explicit preview placeholder, not a real peer identity",
+        "^\\s*//.*is not implemented; do not fake"
+      ]
     }
   ],
   "waivers": [
+    {
+      "waiver_id": "waiver.atp.bond-pull-ssh-tunnel.2026-07-25",
+      "path": "src/bin/atp.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "status": "active",
+      "reason": "TODO(z01bbr.8.3 H3): for SSH-selected donors, bond-pull computes and reports the `ssh -L` tunnel plan but the leg still falls back to a direct dial of the selected endpoint; opening the live forward and proving UDP-in-TCP against real NAT'd hosts is unimplemented. This is genuinely unfinished work, so it takes a waiver with an expiry rather than an allowlist entry: it must resurface if the tunnel leg stalls instead of being silently reclassified as approved.",
+      "expires_at_utc": "2026-10-31T00:00:00Z",
+      "replacement_issue": "asupersync-atp-channel-bonding-z01bbr.8.3"
+    },
     {
       "waiver_id": "waiver.messaging.kafka.phase0-stub.2026-02-18",
       "path": "src/messaging/kafka.rs",

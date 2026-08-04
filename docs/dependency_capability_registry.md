@@ -52,11 +52,19 @@ exit-path edit therefore forces review. These source snapshots are an
 inventory boundary, not a substitute for CLI A1 byte goldens or CLI A11
 installed workflows.
 
+Kafka source and feature reachability is frozen separately in
+`artifacts/kafka_capability_inventory_v1.json`. The `CAP-KAFKA` row names both
+`src/messaging/kafka.rs` and `src/messaging/kafka_consumer.rs`, while the
+dedicated packet additionally pins the ungated module exports, Cargo and lock
+edges, cfg-selected backend types, deterministic test quarantine, and exact
+no-feature behavior. That packet is structural inventory only: it does not
+promote planned broker rows to evidence or weaken `KEEP_INCUMBENT`.
+
 ## CAP A4 graph-wide no-loss signoff
 
 The canonical artifact now contains the deterministic
-`graph_signoff_report`. It joins all 398 canonical `dep-plan` issues, including
-335 non-epic executable work nodes, to the 50-capability registry through 108
+`graph_signoff_report`. It joins all 419 canonical `dep-plan` issues, including
+353 non-epic executable work nodes, to the 50-capability registry through 109
 effective exact-or-longest-prefix rules. The only excluded tracker row is the
 explicitly superseded duplicate `asupersync-5z2scg.9`, whose closure names
 `asupersync-5z2scg.10` as the canonical no-loss aggregate. The report records
@@ -121,7 +129,7 @@ cycle and is forbidden.
 
 <!-- BEGIN GENERATED CAPABILITY SUMMARY -->
 - Artifact: `dependency-capability-registry-v1` (schema 1)
-- Inventories: 50 capabilities; 57 Cargo features; 15 binaries; 19 formats; 33 journeys; 33 taxonomy candidates; 16 downstream consumers; 108 bead mapping rules.
+- Inventories: 50 capabilities; 57 Cargo features; 15 binaries; 19 formats; 33 journeys; 33 taxonomy candidates; 16 downstream consumers; 109 bead mapping rules.
 - Categories: CLI=4, async-api=1, authentication=1, benchmark-tooling=1, codec=2, collection=2, compression=2, concurrency-hot-path=1, configuration=2, database=2, dependency-governance=1, downstream-interop=1, filesystem=2, interop=1, messaging=2, operator-ux=1, parser=1, pattern-matching=1, performance-experiment=1, performance-kernel=1, persisted-format=1, platform=3, platform-io=1, proc-macro=1, public-api=2, runtime-core=1, security=1, security-protocol=1, serialization=2, synchronization=1, telemetry=1, time=1, transport=1, verification=2, verification-runtime=1.
 - Dispositions: EXPERIMENT_ONLY=2, INTERNAL_ONLY=1, KEEP_UNTIL_PARITY=21, PRESERVE=8, PRESERVE_AND_REPLACE_IF_PARITY=18.
 - Evidence states: BASELINE_EXISTING=4, BASELINE_PLANNED=46.

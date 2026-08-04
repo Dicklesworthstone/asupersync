@@ -6,30 +6,48 @@
 //! All effects in Asupersync flow through explicit capabilities, ensuring
 //! no ambient authority exists.
 //!
-//! # For External Crate Authors
+//! # Canonical context and scope usage
 //!
-//! If you're building a framework (like fastapi_rust) that depends on Asupersync,
-//! the `Cx` type is your primary interface to the runtime. You can:
+//! A runtime entry point supplies the [`Cx`]. Derive a [`Scope`] from that
+//! context when an API needs an explicit ownership target, and spawn through
+//! the context so every child remains region-owned.
 //!
-//! ```ignore
-//! use asupersync::Cx;
+//! <!-- core-api-doctest: cx-scope -->
+//! ```
+//! use asupersync::{Cx, main};
 //!
-//! // Wrap Cx in your own context type
-//! pub struct RequestContext<'a> {
-//!     cx: &'a Cx,
-//!     request_id: u64,
+//! #[main]
+//! async fn main(cx: &Cx) {
+//!     assert!(!cx.is_cancel_requested());
+//!
+//!     let scope = cx.scope();
+//!     assert_eq!(scope.region_id(), cx.region_id());
+//!
+//!     let mut child = cx
+//!         .spawn(|child_cx| async move {
+//!             child_cx.checkpoint().expect("child remains active");
+//!             42_u8
+//!         })
+//!         .expect("the runtime-wired Cx has spawn authority");
+//!     assert_eq!(child.join(cx).await.expect("child completes"), 42);
 //! }
+//! ```
 //!
-//! impl<'a> RequestContext<'a> {
-//!     pub fn new(cx: &'a Cx, request_id: u64) -> Self {
-//!         Self { cx, request_id }
-//!     }
+//! A detached context deliberately has no runtime effects. This fail-closed
+//! behavior is useful in adapters that must never invent ambient authority:
 //!
-//!     // Delegate to Cx
-//!     pub fn is_cancelled(&self) -> bool {
-//!         self.cx.is_cancel_requested()
-//!     }
-//! }
+//! ```
+//! use asupersync::{CancelKind, Cx};
+//!
+//! let cx = Cx::detached_cancel_context();
+//! let capabilities = cx.capabilities();
+//! assert!(!capabilities.spawn);
+//! assert!(!capabilities.time);
+//! assert!(!capabilities.io);
+//!
+//! cx.cancel_with(CancelKind::User, Some("adapter shutdown"));
+//! assert!(cx.is_cancel_requested());
+//! assert!(cx.checkpoint().is_err());
 //! ```
 //!
 //! # Module Contents

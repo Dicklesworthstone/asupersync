@@ -600,7 +600,7 @@ fn crashpack_replay_command_well_formed() {
     .build()
     .expect("contract test crash pack should include failure metadata");
 
-    let cmd = pack.replay_command(Some("crashpack.bin"));
+    let cmd = pack.replay_command();
     assert!(
         !cmd.command_line.is_empty(),
         "replay command must be non-empty"

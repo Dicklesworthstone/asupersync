@@ -1,0 +1,433 @@
+{
+  "schema_version": 1,
+  "artifact_id": "regex-semantic-terminal-receipt-v1",
+  "bead_id": "asupersync-5z2scg.8.3.2.4",
+  "capability_id": "CAP-REGEX-PRIVACY",
+  "program_id": "dependency-sovereignty",
+  "captured_date_utc": "2026-07-25",
+  "terminal_id": "ASUP-REGEX-SEMANTICS-TERMINAL-V1",
+  "decision": {
+    "disposition": "KEEP_INCUMBENT_DEFER",
+    "incumbent_state": "RETAIN_REGEX_AND_REGEX_SYNTAX",
+    "semantic_rows": "SAME_WITH_EXPLICIT_KEEP_DEFER",
+    "r3_2_semantic_surface_complete": true,
+    "compiler_experimentation_authorized": true,
+    "compiler_must_retain_pinned_semantics": true,
+    "production_cutover_eligible": false,
+    "dependency_removal_authorized": false,
+    "owned_unicode_tables_authorized": false,
+    "isolated_binary_delta_complete": false,
+    "cross_target_terminal_complete": false,
+    "reason_codes": [
+      "SEMANTIC_CORPUS_SAME_EXCEPT_EXPLICIT_KEEP_DEFER",
+      "DOTTED_AGE_PROPERTY_VALUE_SPELLING_KEEP_DEFER",
+      "CANDIDATE_STILL_CONSUMES_RETAINED_REGEX_SYNTAX_TABLES",
+      "ISOLATED_RELEASE_ARTIFACT_DELTA_INCOMPLETE",
+      "ARM_AND_WASM_EXECUTION_INCOMPLETE"
+    ],
+    "on_missing_or_drifted_evidence": "KEEP_INCUMBENT_DEFER"
+  },
+  "predecessors": [
+    {
+      "bead_id": "asupersync-5z2scg.8.3.2.1",
+      "path": "artifacts/regex_unicode_table_contract_v1.json",
+      "sha256": "61e38fe79120fc9e79b7f55c3142f92ce0032bfed0ced8742d1063675790d24a",
+      "decision": "KEEP_INCUMBENT_DEFER"
+    },
+    {
+      "bead_id": "asupersync-5z2scg.8.3.2.2",
+      "path": "artifacts/regex_character_semantics_contract_v1.json",
+      "sha256": "06c4c42c32e1f875fc0219be202744653af9e7f81227a1f65fc782fb7f680d6d",
+      "decision": "STAGED_RETAINED_TABLE_BACKEND"
+    },
+    {
+      "bead_id": "asupersync-5z2scg.8.3.2.3",
+      "path": "artifacts/regex_folding_boundary_contract_v1.json",
+      "sha256": "c462ddc3903335e7895ef54e1a1a4085c814cb5881a4f2fdcb523483cb45478d",
+      "decision": "STAGED_SIMPLE_FOLD_AND_BOUNDARY_SEMANTICS"
+    }
+  ],
+  "candidate_sources": [
+    {
+      "path": "src/observability/regex_syntax.rs",
+      "sha256": "2fbeae8fc1346d51cf5535930b750d0d69055d8923b3c6e8fcb3bf8ce25315b0",
+      "bytes": 112380
+    },
+    {
+      "path": "src/observability/regex_semantics.rs",
+      "sha256": "bd762181da7620330a580152688af7684da371a9a32c144ef09ac5b5d0c2221a",
+      "bytes": 41269
+    },
+    {
+      "path": "src/observability/regex_boundaries.rs",
+      "sha256": "bac41152af892d6fb3c84fcc4c1ee2a75d70219ec877604207dbcd4c8efafbbd",
+      "bytes": 49494
+    }
+  ],
+  "source_revisions": {
+    "cargo_toml_sha256": "6f23d63e0addc5c10841c3a425a6c4aed5e00cea37bc9a0752b94ca98ee3ab7d",
+    "cargo_lock_sha256": "e23937c9cafef508e7fb72861c11388b9960edb3b13665ae91f4c0670fb67e2d",
+    "rust_toolchain_sha256": "7be955420e9a82164d4c4307e141035b29cd395ba6f621af32f3fddfb4013f63",
+    "package": "asupersync",
+    "package_version": "0.3.9",
+    "edition": "2024",
+    "pinned_toolchain": "nightly-2026-07-05"
+  },
+  "unicode_authority": {
+    "authority": "Unicode Character Database",
+    "version": "16.0.0",
+    "release_date": "2024-09-10",
+    "archive_url": "https://www.unicode.org/Public/zipped/16.0.0/UCD.zip",
+    "archive_bytes": 9020779,
+    "archive_sha256": "c86dd81f2b14a43b0cc064aa5f89aa7241386801e35c59c7984e579832634eb2",
+    "files": [
+      {
+        "path": "CaseFolding.txt",
+        "url": "https://www.unicode.org/Public/16.0.0/ucd/CaseFolding.txt",
+        "sha256": "6f1f9c588eb4a5c718d9e8f93b782685e5c7fec872cf05e8e6878053599e09bb"
+      },
+      {
+        "path": "PropList.txt",
+        "url": "https://www.unicode.org/Public/16.0.0/ucd/PropList.txt",
+        "sha256": "53d614508e2a0b2305a8aa21cd60d993de9326cdf65993660dfcce4503548583"
+      },
+      {
+        "path": "DerivedCoreProperties.txt",
+        "url": "https://www.unicode.org/Public/16.0.0/ucd/DerivedCoreProperties.txt",
+        "sha256": "39d35161f2954497f69e08bdb9e701493f476a3d30222de20028feda36c1dabd"
+      },
+      {
+        "path": "UnicodeData.txt",
+        "url": "https://www.unicode.org/Public/16.0.0/ucd/UnicodeData.txt",
+        "sha256": "ff58e5823bd095166564a006e47d111130813dcf8bf234ef79fa51a870edb48f"
+      }
+    ],
+    "simple_fold_statuses": [
+      "C",
+      "S"
+    ],
+    "excluded_default_simple_fold_statuses": [
+      "F",
+      "T"
+    ],
+    "normalization_performed": false,
+    "locale_sensitive_folding_performed": false
+  },
+  "conformance_corpus": {
+    "accepted_row_policy": "SAME_OR_BETTER_ELSE_KEEP_DEFER",
+    "official_vector_count": 20,
+    "generated_seed": "0x5A2C_0324_D15C_A11E",
+    "generated_pattern_cases": 1024,
+    "generated_word_pair_cases": 121,
+    "minimized_failures": [
+      {
+        "case_id": "RGX-R324-U001",
+        "pattern": "\\p{Age:16.0}",
+        "candidate": "RGX-LEX-E004",
+        "incumbent": "ACCEPT",
+        "resolution": "KEEP_DEFER_DOTTED_VALUE_SPELLING",
+        "canonical_candidate_replay": "\\p{Age:V16_0}"
+      }
+    ],
+    "unresolved_semantic_drifts": [],
+    "rows": [
+      {
+        "case_id": "RGX-R324-U001",
+        "surface": "Unicode 16 Age dotted value spelling",
+        "pattern": "\\p{Age:16.0}",
+        "include": "U+1C89",
+        "exclude": "U+0378",
+        "candidate": "RGX-LEX-E004",
+        "incumbent": "ACCEPT",
+        "result": "KEEP_DEFER"
+      },
+      {
+        "case_id": "RGX-R324-U002",
+        "surface": "Extended_Pictographic",
+        "pattern": "\\p{Extended_Pictographic}",
+        "include": "U+1F600",
+        "exclude": "U+0041",
+        "result": "SAME"
+      },
+      {
+        "case_id": "RGX-R324-U003",
+        "surface": "general category Letter",
+        "pattern": "\\p{Letter}",
+        "include": "U+03A3",
+        "exclude": "U+0031",
+        "result": "SAME"
+      },
+      {
+        "case_id": "RGX-R324-U004",
+        "surface": "general category Mark",
+        "pattern": "\\p{M}",
+        "include": "U+0301",
+        "exclude": "U+0041",
+        "result": "SAME"
+      },
+      {
+        "case_id": "RGX-R324-U005",
+        "surface": "Unicode decimal",
+        "pattern": "\\d",
+        "include": "U+0665",
+        "exclude": "U+00B2",
+        "result": "SAME"
+      },
+      {
+        "case_id": "RGX-R324-U006",
+        "surface": "Unicode space",
+        "pattern": "\\s",
+        "include": "U+00A0",
+        "exclude": "U+200B",
+        "result": "SAME"
+      },
+      {
+        "case_id": "RGX-R324-U007",
+        "surface": "Unicode word Join_Control",
+        "pattern": "\\w",
+        "include": "U+200C",
+        "exclude": "U+1F600",
+        "result": "SAME"
+      },
+      {
+        "case_id": "RGX-R324-U008",
+        "surface": "Greek Script",
+        "pattern": "\\p{Greek}",
+        "include": "U+03A3",
+        "exclude": "U+0041",
+        "result": "SAME"
+      },
+      {
+        "case_id": "RGX-R324-U009",
+        "surface": "Hiragana Script_Extensions",
+        "pattern": "\\p{scx:Hira}",
+        "include": "U+30FC",
+        "exclude": "U+0041",
+        "result": "SAME"
+      },
+      {
+        "case_id": "RGX-R324-U010",
+        "surface": "grapheme break Extend",
+        "pattern": "\\p{gcb=Extend}",
+        "include": "U+0301",
+        "exclude": "U+0041",
+        "result": "SAME"
+      },
+      {
+        "case_id": "RGX-R324-U011",
+        "surface": "word break Katakana",
+        "pattern": "\\p{wb=Katakana}",
+        "include": "U+30AB",
+        "exclude": "U+0041",
+        "result": "SAME"
+      },
+      {
+        "case_id": "RGX-R324-U012",
+        "surface": "sentence break ATerm",
+        "pattern": "\\p{sb=ATerm}",
+        "include": "U+002E",
+        "exclude": "U+0041",
+        "result": "SAME"
+      },
+      {
+        "case_id": "RGX-R324-U014",
+        "surface": "Unicode 16 Age canonical value alias",
+        "pattern": "\\p{Age:V16_0}",
+        "include": "U+1C89",
+        "exclude": "U+0378",
+        "result": "SAME"
+      },
+      {
+        "case_id": "RGX-R324-F001",
+        "surface": "simple sigma fold C status",
+        "pattern": "(?i:σ)",
+        "include": "U+03A3,U+03C2,U+03C3",
+        "result": "SAME"
+      },
+      {
+        "case_id": "RGX-R324-F002",
+        "surface": "simple Kelvin fold C status",
+        "pattern": "(?i:k)",
+        "include": "U+004B,U+006B,U+212A",
+        "result": "SAME"
+      },
+      {
+        "case_id": "RGX-R324-F003",
+        "surface": "simple Angstrom fold C status",
+        "pattern": "(?i:å)",
+        "include": "U+00C5,U+00E5,U+212B",
+        "result": "SAME"
+      },
+      {
+        "case_id": "RGX-R324-F004",
+        "surface": "full fold exclusion",
+        "pattern": "(?i:ß)",
+        "exclude": "ss",
+        "result": "SAME"
+      },
+      {
+        "case_id": "RGX-R324-F005",
+        "surface": "Turkic fold exclusion",
+        "pattern": "(?i:İ)",
+        "exclude": "i",
+        "result": "SAME"
+      },
+      {
+        "case_id": "RGX-R324-B001",
+        "surface": "valid whole-scope UTF-8 bytes",
+        "pattern": "(?-u:\\xC2\\xA0)",
+        "expected": "ACCEPT",
+        "result": "SAME"
+      },
+      {
+        "case_id": "RGX-R324-B002",
+        "surface": "isolated invalid byte",
+        "pattern": "(?-u:\\xFF)",
+        "expected": "RGX-SEM-E003",
+        "result": "SAME"
+      }
+    ],
+    "inventory_patterns": [
+      "\\A(?:trace_id|span_id)=(\\w+)\\z",
+      "(?i)authorization:\\s*bearer\\s+[^\\s]+",
+      "\\b(?:token|secret|password)\\b",
+      "[\\pL\\pN_.:+/-]+",
+      "(?mR)^x-request-id:\\s*(.+)$"
+    ],
+    "hostile_cases": [
+      "unknown Unicode property fails closed and redacts the property canary",
+      "Unicode property in byte mode fails closed",
+      "isolated invalid UTF-8 byte fails closed",
+      "zero semantic-atom budget fails closed",
+      "zero boundary budget fails closed",
+      "non-character-boundary haystack offset fails closed",
+      "generated corpus is panic-contained and deterministic"
+    ]
+  },
+  "size_audit": {
+    "candidate_source_bytes": 203143,
+    "predecessor_packet_and_source_bytes": 253666,
+    "retained_generated_table_bytes": 787066,
+    "retained_module_plus_table_bytes": 788324,
+    "candidate_source_percent_of_retained_module_plus_table": 25.76,
+    "incumbent_regex_stack_crate_archive_bytes": 1327744,
+    "candidate_is_table_replacement": false,
+    "source_reduction_claim_authorized": false,
+    "isolated_release_artifact_bytes_measured": true,
+    "compile_probe": {
+      "profile": "release",
+      "worker": "hz2",
+      "base_build_id": 29947326818680932,
+      "base_state": "PASSED",
+      "base_compile_seconds": 309.8,
+      "base_rlib_bytes": 328640544,
+      "metrics_build_id": 29947326818680933,
+      "metrics_state": "PASSED",
+      "metrics_compile_seconds": 308.5,
+      "metrics_rlib_bytes": 331072512,
+      "compile_delta_seconds": -1.3,
+      "compile_delta_percent": -0.4196,
+      "rlib_delta_bytes": 2431968,
+      "rlib_delta_percent": 0.740009,
+      "same_worker": true,
+      "cold_runs_per_profile_completed": 1,
+      "required_cold_runs_per_profile": 5,
+      "artifact_retrieval_supported_by_probe": true,
+      "measurement_scope": "aggregate proc-macros base versus proc-macros,metrics feature delta; not a candidate-only linker attribution",
+      "admissible_delta": false,
+      "disposition": "KEEP_INCUMBENT_DEFER",
+      "local_fallback_used": false
+    }
+  },
+  "target_matrix": [
+    {
+      "target": "x86_64-unknown-linux-gnu",
+      "toolchain": "nightly-2026-07-05",
+      "execution_state": "PASSED_FOCUSED_REMOTE_SEMANTIC_PROOF",
+      "decision": "SCOPED_SEMANTIC_PROOF_ONLY"
+    },
+    {
+      "target": "aarch64-unknown-linux-gnu",
+      "toolchain": "nightly-2026-07-05",
+      "execution_state": "NOT_EXECUTED",
+      "decision": "KEEP_DEFER"
+    },
+    {
+      "target": "wasm32-unknown-unknown",
+      "toolchain": "nightly-2026-07-05",
+      "execution_state": "NOT_EXECUTED",
+      "decision": "KEEP_DEFER"
+    }
+  ],
+  "oracle": {
+    "review_by_utc": "2027-07-25",
+    "expiry_disposition": "KEEP_INCUMBENT_DEFER",
+    "invalidation_events": [
+      "Unicode version changes",
+      "regex or regex-syntax resolution changes",
+      "any predecessor artifact or candidate source digest changes",
+      "the accepted syntax, class, fold, byte, or boundary language changes",
+      "a target or compiler changes Unicode behavior",
+      "an unresolved minimized failure appears"
+    ]
+  },
+  "redaction": {
+    "canary": "PRIVATE_TERMINAL_PROPERTY_CANARY",
+    "expected_error_code": "RGX-SEM-E001",
+    "canary_must_not_appear": true,
+    "pattern_must_not_appear": true
+  },
+  "replay": {
+    "contract_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics --test regex_semantic_terminal_receipt_contract -- --nocapture",
+    "clippy_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --features metrics --test regex_semantic_terminal_receipt_contract -- -D warnings",
+    "no_local_fallback": true
+  },
+  "proof": {
+    "focused_contract_test": {
+      "state": "PASSED",
+      "build_id": 29947326818680936,
+      "worker": "vmi1227854",
+      "tests_passed": 72,
+      "tests_failed": 0,
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics --test regex_semantic_terminal_receipt_contract -- --nocapture",
+      "local_fallback_used": false
+    },
+    "focused_clippy": {
+      "state": "PASSED",
+      "build_id": 29947326818680938,
+      "worker": "hz1",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --features metrics --test regex_semantic_terminal_receipt_contract -- -D warnings",
+      "local_fallback_used": false
+    },
+    "corrected_attempts": [
+      {
+        "build_id": 29947326818680934,
+        "state": "FAILED_THEN_CORRECTED",
+        "reason": "dotted Age spelling exposed explicit KEEP_DEFER row and a documentation marker wrapped across a line"
+      },
+      {
+        "build_id": 29947326818680935,
+        "state": "FAILED_THEN_CORRECTED",
+        "reason": "independent Age oracle incorrectly treated Age 16.0 as exact-version instead of cumulative assigned-by-version"
+      },
+      {
+        "build_id": 29947326818680937,
+        "state": "FAILED_THEN_CORRECTED",
+        "reason": "Clippy formatting-placeholder and trivial-regex lints in test-only oracle literals"
+      }
+    ]
+  },
+  "no_claims": [
+    "no regex or regex-syntax removal authorization",
+    "no candidate production wiring or matcher execution",
+    "no owned Unicode table authorization",
+    "no isolated release artifact size delta",
+    "no complete ARM or WASM execution evidence",
+    "no full multi-scalar or locale-sensitive folding",
+    "no normalization",
+    "no raw Unicode Word_Break algorithm claim",
+    "no performance improvement or no-regression claim",
+    "no broad workspace health or release-readiness claim",
+    "no local Cargo fallback approval"
+  ]
+}

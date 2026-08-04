@@ -97,10 +97,10 @@ rdkafka and the `kafka` feature both stay, at `KEEP_UNTIL_PARITY` /
 
 | ID | Gap | Owner |
 |---|---|---|
-| KFK-GAP-01 | Registry `source_owners` omits `src/messaging/kafka_consumer.rs`, which carries its own distinct rdkafka import set. Both listed entries are genuine, so this is wrong **by omission** — a baseline built from it would miss groups, rebalancing, commits, seek and isolation entirely. | `asupersync-dep-p1-foundations-upksjk.5.1` |
+| KFK-GAP-01 | **Resolved by Kafka K0.1.** Registry `source_owners` now includes `src/messaging/kafka_consumer.rs`, and the dedicated Kafka inventory pins both source files plus their Cargo, export, cfg and no-feature reachability. | `asupersync-dep-p7-kafka-removal-sarszu.1.1` |
 | KFK-GAP-02 | **No transactional consumer offsets** → no consume-process-produce exactly-once. The registry's atomicity claim covers the producer side only. | `asupersync-dep-p7-kafka-removal-sarszu.2.12.5` |
 | KFK-GAP-03 | **No admin surface at all** — no topic, partition, ACL, config or group administration. | `asupersync-dep-p7-kafka-removal-sarszu.2.12.5` |
-| KFK-GAP-04 | Compression codec availability is decided by the bundled library's `configure` autodetection on the build host, not by any Cargo feature. Same config can succeed on one host and fail on another. | `asupersync-dep-p7-kafka-removal-sarszu.1` |
+| KFK-GAP-04 | The root manifest disables rdkafka default features and the lockfile shows a pkg-config-backed `rdkafka-sys` edge, while the exact resolved native link, codec and auth profile is not source-pinned. K0.4 must establish build-host identity and availability instead of assuming a bundled-library profile. | `asupersync-dep-p7-kafka-removal-sarszu.1.4` |
 | KFK-GAP-05 | Plan says REMOVE after a downstream inventory; registry says keep-until-parity. The inventory has not been run. | `asupersync-dep-p7-kafka-removal-sarszu` |
 | KFK-GAP-06 | All four registry scenario ids and the baseline command are planned. The real-broker suite is opt-in via env var; several tests in that file run **without** a broker and emit proof rows only — not interoperability evidence. | `asupersync-dep-p7-kafka-removal-sarszu.2.13.6` |
 | KFK-GAP-07 | `RebalanceResult`, the security config types, the client type and both backend traits are public but **not** re-exported from the `messaging` facade. | `asupersync-dep-p7-kafka-removal-sarszu.2.12.5` |
@@ -151,5 +151,5 @@ particular broker version or deployment, that transaction fencing or credential
 zeroization behave as stated, that compression codecs are available on any given
 build host, that a native client could reach protocol parity, that performance is
 unchanged, or that rdkafka or the `kafka` feature may be removed. It also does
-not certify the capability registry's source-owner row, which KFK-GAP-01 records
-as omitting the consumer file.
+not turn the corrected source-owner row into behavioral or interoperability
+evidence; the K0.1 packet proves structural reachability only.

@@ -21,6 +21,32 @@ use crate::atp::manifest::{
 };
 use sha2::{Digest, Sha256};
 
+/// Maximum artifact prefix inspected for a version token.
+///
+/// This matches the pre-existing artifact metadata sample, preserving the Rust
+/// marker's search reach while keeping work independent of artifact size.
+const MAX_VERSION_SCAN_BYTES: usize = 2000;
+
+/// The legacy non-Rust marker path searched a single 50-byte area.
+const NON_RUST_VERSION_SCAN_BYTES: usize = 50;
+
+/// Maximum accepted version token length.
+///
+/// Conventional compiler releases fit comfortably within this limit. The
+/// bound intentionally rejects the legacy Rust fast path's remainder-of-sample
+/// whitespace token (including oversized or non-grammar text) instead of
+/// persisting an arbitrary metadata field.
+const MAX_VERSION_TOKEN_BYTES: usize = 64;
+
+const TOOLCHAIN_MARKERS: &[(&str, &str, usize, Option<usize>)] = &[
+    ("rustc", "rustc", MAX_VERSION_SCAN_BYTES, None),
+    ("gcc", "gcc", NON_RUST_VERSION_SCAN_BYTES, Some(3)),
+    ("clang", "clang", NON_RUST_VERSION_SCAN_BYTES, Some(3)),
+    ("go", "go", NON_RUST_VERSION_SCAN_BYTES, Some(3)),
+    ("javac", "java", NON_RUST_VERSION_SCAN_BYTES, Some(3)),
+    ("java", "java", NON_RUST_VERSION_SCAN_BYTES, Some(3)),
+];
+
 /// Artifact chunking profile implementation.
 pub struct ArtifactProfile;
 
@@ -411,44 +437,247 @@ impl ArtifactProfile {
 
     /// Detect toolchain version from artifact metadata.
     fn detect_toolchain_version(data: &[u8]) -> String {
-        let data_str = String::from_utf8_lossy(&data[..2000.min(data.len())]);
-
-        // Look for version strings in the data
-        if let Some(rustc_pos) = data_str.find("rustc") {
-            if let Some(version_start) = data_str[rustc_pos..].find(char::is_numeric) {
-                let version_str = &data_str[rustc_pos + version_start..];
-                if let Some(version_end) = version_str.find(char::is_whitespace) {
-                    return format!("rustc-{}", &version_str[..version_end]);
-                }
-            }
+        let sample_len = MAX_VERSION_SCAN_BYTES.min(data.len());
+        let mut data_str = String::from_utf8_lossy(&data[..sample_len]);
+        if sample_len < data.len() {
+            // Prevent a candidate touching the outer sample boundary from
+            // looking complete solely because the input was truncated there.
+            data_str.to_mut().push('\u{fffd}');
         }
 
-        // Similar patterns for other toolchains
-        for (pattern, prefix) in &[
-            ("gcc", "gcc"),
-            ("clang", "clang"),
-            ("go", "go"),
-            ("java", "java"),
-        ] {
-            if let Some(pos) = data_str.find(pattern) {
-                // Look for version number after pattern
-                let search_area = &data_str[pos..pos.saturating_add(50).min(data_str.len())];
-                for line in search_area.lines().take(3) {
-                    if let Some(version) = Self::extract_version_number(line) {
-                        return format!("{}-{}", prefix, version);
-                    }
+        for &(marker, prefix, scan_limit, max_lines) in TOOLCHAIN_MARKERS {
+            let mut marker_search_start = 0;
+            while let Some(marker_start) =
+                Self::find_next_toolchain_marker(&data_str, marker, marker_search_start)
+            {
+                let (search_end, resume_at) = Self::version_search_bounds(
+                    &data_str,
+                    marker_start,
+                    marker.len(),
+                    scan_limit,
+                    max_lines,
+                );
+                if let Some(version) = Self::extract_version_number_with_limit(
+                    &data_str[marker_start..search_end],
+                    scan_limit,
+                ) {
+                    return format!("{prefix}-{version}");
                 }
+
+                marker_search_start = resume_at.max(marker_start + marker.len());
             }
         }
 
         "unknown".to_string()
     }
 
-    /// Extract version number from a string.
-    fn extract_version_number(text: &str) -> Option<String> {
-        // Look for patterns like "1.2.3" or "1.2.3-beta"
-        let version_pattern = regex::Regex::new(r"(\d+\.)+\d+(-\w+)?").ok()?;
-        version_pattern.find(text).map(|m| m.as_str().to_string())
+    /// Extract the first bounded ASCII version token from a string.
+    ///
+    /// The accepted grammar is two or more dot-separated digit components,
+    /// followed by an optional `-` suffix containing ASCII letters, digits, or
+    /// underscores. Alphabetic tool prefixes such as `v` and `go` are not part
+    /// of the returned token.
+    #[cfg(test)]
+    fn extract_version_number(text: &str) -> Option<&str> {
+        Self::extract_version_number_with_limit(text, MAX_VERSION_SCAN_BYTES)
+    }
+
+    fn extract_version_number_with_limit(text: &str, scan_limit: usize) -> Option<&str> {
+        let (start, end) = Self::version_span_with_limit(text, scan_limit)?;
+        text.get(start..end)
+    }
+
+    fn version_span_with_limit(text: &str, scan_limit: usize) -> Option<(usize, usize)> {
+        let bytes = text.as_bytes();
+        let scan_end = bytes.len().min(scan_limit);
+        let mut cursor = 0;
+
+        while cursor < scan_end {
+            if !bytes[cursor].is_ascii_digit() {
+                cursor += 1;
+                continue;
+            }
+            if !Self::is_version_start_boundary(bytes, cursor) {
+                cursor = Self::skip_version_like(bytes, cursor, scan_end);
+                continue;
+            }
+
+            let start = cursor;
+            cursor = Self::consume_ascii_digits(bytes, cursor, scan_end);
+            let mut has_additional_component = false;
+
+            while cursor < scan_end
+                && bytes[cursor] == b'.'
+                && cursor + 1 < scan_end
+                && bytes[cursor + 1].is_ascii_digit()
+            {
+                cursor += 1;
+                cursor = Self::consume_ascii_digits(bytes, cursor, scan_end);
+                has_additional_component = true;
+            }
+
+            if !has_additional_component {
+                cursor = Self::skip_version_like(bytes, cursor, scan_end);
+                continue;
+            }
+
+            if cursor < scan_end && bytes[cursor] == b'-' {
+                let suffix_start = cursor + 1;
+                cursor = suffix_start;
+                while cursor < scan_end
+                    && (bytes[cursor].is_ascii_alphanumeric() || bytes[cursor] == b'_')
+                {
+                    cursor += 1;
+                }
+
+                if cursor == suffix_start {
+                    cursor = Self::skip_version_like(bytes, cursor, scan_end);
+                    continue;
+                }
+            }
+
+            let token_len = cursor - start;
+            if token_len > MAX_VERSION_TOKEN_BYTES || !Self::is_version_end_boundary(bytes, cursor)
+            {
+                cursor = Self::skip_version_like(bytes, cursor, scan_end);
+                continue;
+            }
+
+            return Some((start, cursor));
+        }
+
+        None
+    }
+
+    fn find_next_toolchain_marker(text: &str, marker: &str, from: usize) -> Option<usize> {
+        text[from..]
+            .match_indices(marker)
+            .find_map(|(relative_start, _)| {
+                let start = from + relative_start;
+                Self::is_toolchain_marker_boundary(text, start, marker.len()).then_some(start)
+            })
+    }
+
+    fn version_search_bounds(
+        text: &str,
+        marker_start: usize,
+        marker_len: usize,
+        scan_limit: usize,
+        max_lines: Option<usize>,
+    ) -> (usize, usize) {
+        let bytes = text.as_bytes();
+        let inspect_end = marker_start
+            .saturating_add(scan_limit)
+            .saturating_add(1)
+            .min(bytes.len());
+        let accepted_version_span =
+            Self::version_span_with_limit(&text[marker_start..], scan_limit);
+        let mut cursor = marker_start + marker_len;
+        let mut newline_count = 0;
+
+        while cursor < inspect_end {
+            if bytes[cursor] == b'\n' {
+                newline_count += 1;
+                if max_lines.is_some_and(|max_lines| newline_count == max_lines) {
+                    return (cursor, cursor);
+                }
+            }
+
+            for &(candidate, _, _, _) in TOOLCHAIN_MARKERS {
+                let candidate_end = cursor.saturating_add(candidate.len());
+                if candidate_end <= bytes.len()
+                    && &bytes[cursor..candidate_end] == candidate.as_bytes()
+                    && Self::is_toolchain_marker_boundary(text, cursor, candidate.len())
+                    && !Self::marker_is_accepted_version_suffix(
+                        bytes,
+                        marker_start,
+                        cursor,
+                        candidate.len(),
+                        accepted_version_span,
+                    )
+                {
+                    return (cursor, cursor);
+                }
+            }
+
+            cursor += 1;
+        }
+
+        let scan_boundary = marker_start.saturating_add(scan_limit).min(bytes.len());
+        let mut resume_at = scan_boundary;
+        while resume_at > marker_start && !text.is_char_boundary(resume_at) {
+            resume_at -= 1;
+        }
+
+        (text.len(), resume_at)
+    }
+
+    fn skip_version_like(bytes: &[u8], mut cursor: usize, scan_end: usize) -> usize {
+        while cursor < scan_end && !Self::is_version_separator(bytes[cursor]) {
+            cursor += 1;
+        }
+        cursor
+    }
+
+    fn is_toolchain_marker_boundary(text: &str, start: usize, marker_len: usize) -> bool {
+        let bytes = text.as_bytes();
+        let end = start + marker_len;
+        let valid_start = start == 0 || Self::is_marker_separator(bytes[start - 1]);
+        let valid_end = end == bytes.len()
+            || Self::is_marker_separator(bytes[end])
+            || bytes[end].is_ascii_digit();
+
+        valid_start && valid_end
+    }
+
+    fn marker_is_accepted_version_suffix(
+        bytes: &[u8],
+        segment_start: usize,
+        marker_start: usize,
+        marker_len: usize,
+        accepted_version_span: Option<(usize, usize)>,
+    ) -> bool {
+        let Some((version_start, version_end)) = accepted_version_span else {
+            return false;
+        };
+        let Some(relative_marker_start) = marker_start.checked_sub(segment_start) else {
+            return false;
+        };
+
+        relative_marker_start > 0
+            && bytes[marker_start - 1] == b'-'
+            && relative_marker_start > version_start
+            && relative_marker_start
+                .checked_add(marker_len)
+                .is_some_and(|marker_end| marker_end <= version_end)
+    }
+
+    fn consume_ascii_digits(bytes: &[u8], mut cursor: usize, scan_end: usize) -> usize {
+        while cursor < scan_end && bytes[cursor].is_ascii_digit() {
+            cursor += 1;
+        }
+        cursor
+    }
+
+    fn is_version_start_boundary(bytes: &[u8], start: usize) -> bool {
+        start == 0
+            || Self::is_version_separator(bytes[start - 1])
+            || bytes[start - 1].is_ascii_alphabetic()
+            || (bytes[start - 1] == b'-' && start >= 2 && bytes[start - 2].is_ascii_alphabetic())
+    }
+
+    fn is_version_end_boundary(bytes: &[u8], end: usize) -> bool {
+        end == bytes.len() || Self::is_version_separator(bytes[end])
+    }
+
+    fn is_version_separator(byte: u8) -> bool {
+        byte.is_ascii()
+            && !byte.is_ascii_alphanumeric()
+            && !matches!(byte, b'_' | b'.' | b'-' | b'+' | b'~')
+    }
+
+    fn is_marker_separator(byte: u8) -> bool {
+        byte.is_ascii() && !byte.is_ascii_alphanumeric() && byte != b'_'
     }
 
     /// Compute proof strength for a chunk.
@@ -748,60 +977,6 @@ pub struct DeduplicationMetrics {
     pub proof_strength_distribution: std::collections::HashMap<ProofStrength, usize>,
 }
 
-// Temporary regex module for version extraction
-mod regex {
-    pub struct Regex {
-        #[allow(dead_code)]
-        pattern: String,
-    }
-
-    impl Regex {
-        pub fn new(pattern: &str) -> Result<Self, ()> {
-            // Simplified regex for version patterns
-            Ok(Self {
-                pattern: pattern.to_string(),
-            })
-        }
-
-        pub fn find<'t>(&self, text: &'t str) -> Option<Match<'t>> {
-            // Simple version number detection
-            for part in text.split_whitespace() {
-                if Self::is_version_like(part) {
-                    return Some(Match {
-                        text: part,
-                        start: 0,
-                        end: part.len(),
-                    });
-                }
-            }
-            None
-        }
-
-        fn is_version_like(s: &str) -> bool {
-            // Check if string looks like a version number
-            let parts: Vec<&str> = s.split('.').collect();
-            parts.len() >= 2
-                && parts
-                    .iter()
-                    .all(|p| p.chars().next().is_some_and(|c| c.is_ascii_digit()))
-        }
-    }
-
-    pub struct Match<'t> {
-        text: &'t str,
-        #[allow(dead_code)]
-        start: usize,
-        #[allow(dead_code)]
-        end: usize,
-    }
-
-    impl<'t> Match<'t> {
-        pub fn as_str(&self) -> &'t str {
-            self.text
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -909,11 +1084,178 @@ mod tests {
     }
 
     #[test]
-    fn toolchain_version_detection() {
-        let rust_data = b"rustc 1.70.0 (90c541806 2023-05-31)";
-        let version = ArtifactProfile::detect_toolchain_version(rust_data);
-        assert!(version.contains("rustc"));
-        assert!(version.contains("1.70.0"));
+    fn toolchain_version_detection_covers_recognized_markers() {
+        let cases: &[(&[u8], &str)] = &[
+            (b"rustc 1.70.0 (90c541806 2023-05-31)", "rustc-1.70.0"),
+            (
+                b"rustc 1.93.0-nightly (abc123 2026-08-01)",
+                "rustc-1.93.0-nightly",
+            ),
+            (b"rustc-1.70.0", "rustc-1.70.0"),
+            (b"gcc (Ubuntu) 13.2.1 release", "gcc-13.2.1"),
+            (b"gcc-13.2.1", "gcc-13.2.1"),
+            (b"clang version 18.1.8 (release)", "clang-18.1.8"),
+            (b"clang-18.1.8", "clang-18.1.8"),
+            (b"go version go1.22.5 linux/amd64", "go-1.22.5"),
+            (b"go1.23.0 linux/amd64", "go-1.23.0"),
+            (b"go-1.23.0 linux/amd64", "go-1.23.0"),
+            (b"cargo metadata; go1.23.1 linux/amd64", "go-1.23.1"),
+            (b"javac 21.0.2", "java-21.0.2"),
+            (b"javac-21.0.2", "java-21.0.2"),
+            (b"java version \"21.0.2\"", "java-21.0.2"),
+            (b"java-21.0.2", "java-21.0.2"),
+            (b"rustc 1.2-java", "rustc-1.2-java"),
+            (b"rustc 1.2-javac", "rustc-1.2-javac"),
+            (b"rustc 1.2-go1", "rustc-1.2-go1"),
+            (b"cargo 1.88.0 metadata", "unknown"),
+            (b"golang 1.22.5 metadata", "unknown"),
+            (b"artifact without a toolchain marker", "unknown"),
+        ];
+
+        for &(input, expected) in cases {
+            assert_eq!(
+                ArtifactProfile::detect_toolchain_version(input),
+                expected,
+                "input={}",
+                String::from_utf8_lossy(input)
+            );
+        }
+    }
+
+    #[test]
+    fn toolchain_version_detection_is_stable_in_public_artifact_metadata() {
+        let input = b"go build metadata; go version go1.22.5 linux/amd64";
+        let first = crate::net::atp::chunk::ChunkingProfile::Artifact
+            .compute_boundaries(input)
+            .unwrap();
+        let second = crate::net::atp::chunk::ChunkingProfile::Artifact
+            .compute_boundaries(input)
+            .unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first
+                .iter()
+                .map(|boundary| boundary.size_bytes)
+                .sum::<u64>(),
+            u64::try_from(input.len()).unwrap()
+        );
+
+        let Some(ChunkMetadata::Artifact { build_context, .. }) = first
+            .first()
+            .and_then(|boundary| boundary.metadata.as_ref())
+        else {
+            panic!("artifact chunk must contain artifact metadata");
+        };
+        assert_eq!(build_context.toolchain_version, "go-1.22.5");
+    }
+
+    #[test]
+    fn toolchain_version_detection_respects_sample_and_utf8_boundaries() {
+        let mut beyond_sample = vec![b'x'; 2000];
+        beyond_sample.extend_from_slice(b" clang version 18.1.8");
+        assert_eq!(
+            ArtifactProfile::detect_toolchain_version(&beyond_sample),
+            "unknown"
+        );
+
+        let mut crossing_sample = vec![b'x'; 1988];
+        crossing_sample.extend_from_slice(b" rustc 1.234567890");
+        assert_eq!(
+            ArtifactProfile::detect_toolchain_version(&crossing_sample),
+            "unknown"
+        );
+
+        let mut late_rustc_version = b"rustc ".to_vec();
+        late_rustc_version.extend(std::iter::repeat_n(b'x', 123));
+        late_rustc_version.extend_from_slice(b" 1.70.0");
+        assert_eq!(
+            ArtifactProfile::detect_toolchain_version(&late_rustc_version),
+            "rustc-1.70.0"
+        );
+        assert_eq!(
+            ArtifactProfile::detect_toolchain_version(
+                b"rustc marker\nfirst line\nsecond line\nthird line\n1.70.0"
+            ),
+            "rustc-1.70.0"
+        );
+
+        let mut late_gcc_version = b"gcc ".to_vec();
+        late_gcc_version.extend(std::iter::repeat_n(b'x', NON_RUST_VERSION_SCAN_BYTES));
+        late_gcc_version.extend_from_slice(b" 13.2.1");
+        assert_eq!(
+            ArtifactProfile::detect_toolchain_version(&late_gcc_version),
+            "unknown"
+        );
+
+        assert_eq!(
+            ArtifactProfile::detect_toolchain_version(b"clang version \xff 18.1.8"),
+            "clang-18.1.8"
+        );
+        assert_eq!(
+            ArtifactProfile::detect_toolchain_version(b"clang version \xff18.1.8"),
+            "unknown"
+        );
+
+        let decoy_then_real = b"go marker without a version\nno token here\nstill no token\ncargo metadata; go1.23.1 linux/amd64";
+        assert_eq!(
+            ArtifactProfile::detect_toolchain_version(decoy_then_real),
+            "go-1.23.1"
+        );
+        assert_eq!(
+            ArtifactProfile::detect_toolchain_version(b"rustc metadata; java version 21.0.2"),
+            "java-21.0.2"
+        );
+
+        let mut repeated_markers = "rustc ".repeat(100);
+        repeated_markers.push_str("rustc 1.70.0");
+        assert_eq!(
+            ArtifactProfile::detect_toolchain_version(repeated_markers.as_bytes()),
+            "rustc-1.70.0"
+        );
+
+        let separated_gcc_markers = format!("gcc {} gcc 13.2.1", "x".repeat(60));
+        assert_eq!(
+            ArtifactProfile::detect_toolchain_version(separated_gcc_markers.as_bytes()),
+            "gcc-13.2.1"
+        );
+
+        let straddling_gcc_marker = format!("gcc {}-gcc-13.2.1", "x".repeat(43));
+        assert_eq!(
+            ArtifactProfile::detect_toolchain_version(straddling_gcc_marker.as_bytes()),
+            "gcc-13.2.1"
+        );
+
+        let straddling_clang_join = format!("clang {}-clang-18.1.8", "x".repeat(37));
+        assert_eq!(
+            ArtifactProfile::detect_toolchain_version(straddling_clang_join.as_bytes()),
+            "clang-18.1.8"
+        );
+
+        let straddling_clang_prefix = format!("clang {}-clang-v18.1.8", "x".repeat(36));
+        assert_eq!(
+            ArtifactProfile::detect_toolchain_version(straddling_clang_prefix.as_bytes()),
+            "clang-18.1.8"
+        );
+
+        assert_eq!(
+            ArtifactProfile::detect_toolchain_version(b"rustc metadata-java-21.0"),
+            "java-21.0"
+        );
+
+        let oversized_before_java = format!(
+            "rustc {}.0-java 21.0",
+            "7".repeat(MAX_VERSION_TOKEN_BYTES - 1)
+        );
+        assert_eq!(
+            ArtifactProfile::detect_toolchain_version(oversized_before_java.as_bytes()),
+            "java-21.0"
+        );
+
+        assert_eq!(
+            ArtifactProfile::detect_toolchain_version(b"rustc foo9bar1.2-java 21.0"),
+            "java-21.0"
+        );
     }
 
     #[test]
@@ -1106,18 +1448,150 @@ mod tests {
     }
 
     #[test]
-    fn version_extraction() {
+    fn toolchain_version_detection_freezes_token_boundaries() {
+        let cases = [
+            ("rustc 1.70.0 something", Some("1.70.0")),
+            ("version 2.1.3-beta info", Some("2.1.3-beta")),
+            ("go version go1.22.5", Some("1.22.5")),
+            ("release v01.002.3-rc_1!", Some("01.002.3-rc_1")),
+            ("build7.4 finished", Some("7.4")),
+            ("tool-7.4 finished", Some("7.4")),
+            ("nul\0delimited\x001.2\0token", Some("1.2")),
+            ("no version here", None),
+            ("1", None),
+            (".1.2", None),
+            ("1.2.", None),
+            ("1..2", None),
+            ("1.2-", None),
+            ("-1.2", None),
+            ("1.2-3.4", None),
+            ("1.2-beta-2", None),
+            ("1.2+metadata", None),
+            ("1.2+metadata3.4", None),
+            ("1.2~vendor", None),
+            ("1.2suffix", None),
+            ("1.2suffix3.4", None),
+            ("1.2-beta.more", None),
+            ("١.٢.٣", None),
+            ("1.2β", None),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(
+                ArtifactProfile::extract_version_number(input),
+                expected,
+                "input={input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn toolchain_version_detection_skips_invalid_candidates_without_truncation() {
         assert_eq!(
-            ArtifactProfile::extract_version_number("rustc 1.70.0 something"),
-            Some("1.70.0".to_string())
+            ArtifactProfile::extract_version_number("bad 1.2. then good 3.4.5"),
+            Some("3.4.5")
         );
+
+        let maximum = format!("{}.0", "7".repeat(MAX_VERSION_TOKEN_BYTES - 2));
+        assert_eq!(maximum.len(), MAX_VERSION_TOKEN_BYTES);
         assert_eq!(
-            ArtifactProfile::extract_version_number("version 2.1.3-beta info"),
-            Some("2.1.3-beta".to_string())
+            ArtifactProfile::extract_version_number(&maximum),
+            Some(maximum.as_str())
         );
+
+        let oversized = format!("{}.0", "7".repeat(MAX_VERSION_TOKEN_BYTES - 1));
+        assert_eq!(oversized.len(), MAX_VERSION_TOKEN_BYTES + 1);
+        assert_eq!(ArtifactProfile::extract_version_number(&oversized), None);
+
+        let mut beyond_scan_window = "x".repeat(MAX_VERSION_SCAN_BYTES);
+        beyond_scan_window.push_str(" 1.2.3");
         assert_eq!(
-            ArtifactProfile::extract_version_number("no version here"),
+            ArtifactProfile::extract_version_number(&beyond_scan_window),
             None
         );
+
+        let mut crossing_scan_window = "x".repeat(MAX_VERSION_SCAN_BYTES - 4);
+        crossing_scan_window.push_str(" 1.23456789");
+        assert_eq!(
+            ArtifactProfile::extract_version_number(&crossing_scan_window),
+            None
+        );
+    }
+
+    #[test]
+    fn toolchain_version_detection_generated_tokens_match_independent_grammar() {
+        for major in ["0", "1", "01", "999"] {
+            for minor in ["0", "2", "002", "88"] {
+                for patch in ["0", "3", "0004"] {
+                    for suffix in ["", "-alpha", "-RC1", "-rc_1", "-9"] {
+                        let token = format!("{major}.{minor}.{patch}{suffix}");
+                        assert!(reference_version_token(&token));
+
+                        let input = format!("toolchain=({token}); done");
+                        assert_eq!(
+                            ArtifactProfile::extract_version_number(&input),
+                            Some(token.as_str()),
+                            "input={input:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn toolchain_version_detection_short_exact_candidates_match_independent_grammar() {
+        const ALPHABET: &[u8] = b"01.-a_+";
+
+        for length in 1..=6 {
+            let mut combinations = 1;
+            for _ in 1..length {
+                combinations *= ALPHABET.len();
+            }
+
+            for leading in *b"01" {
+                for mut encoded in 0..combinations {
+                    let mut bytes = vec![leading; length];
+                    for byte in &mut bytes[1..] {
+                        *byte = ALPHABET[encoded % ALPHABET.len()];
+                        encoded /= ALPHABET.len();
+                    }
+
+                    let candidate = String::from_utf8(bytes).unwrap();
+                    let expected =
+                        reference_version_token(&candidate).then_some(candidate.as_str());
+                    assert_eq!(
+                        ArtifactProfile::extract_version_number(&candidate),
+                        expected,
+                        "candidate={candidate:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn reference_version_token(token: &str) -> bool {
+        if token.is_empty() || token.len() > MAX_VERSION_TOKEN_BYTES || !token.is_ascii() {
+            return false;
+        }
+
+        let (components, suffix) = match token.split_once('-') {
+            Some((components, suffix)) => (components, Some(suffix)),
+            None => (token, None),
+        };
+
+        let component_count = components.split('.').count();
+        let components_are_numeric = components.split('.').all(|component| {
+            !component.is_empty() && component.bytes().all(|byte| byte.is_ascii_digit())
+        });
+
+        components_are_numeric
+            && component_count >= 2
+            && suffix.is_none_or(|suffix| {
+                !suffix.is_empty()
+                    && suffix
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            })
     }
 }

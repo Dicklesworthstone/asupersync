@@ -262,6 +262,23 @@ impl StateSnapshot {
     /// - resilient: if a task's `CxInner` lock is poisoned, deadline contribution is skipped
     #[must_use]
     pub fn from_runtime_state(state: &crate::runtime::RuntimeState) -> Self {
+        Self::from_runtime_state_with_tasks(state, &state.tasks)
+    }
+
+    /// Builds the snapshot with task counters read from an explicit task
+    /// table (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2
+    /// subsystem 3d; E1.1 rows T06/T07/T14).
+    ///
+    /// Schedulers dispatching against an external shard-A table pass that
+    /// table (locked in canonical B → A order) so Lyapunov potential,
+    /// cancel-phase counters, and deadline pressure describe the tasks the
+    /// workers actually run; region and obligation counters still come from
+    /// the unified lifecycle owner. Embedded callers use
+    /// [`Self::from_runtime_state`], which passes `&state.tasks`.
+    pub fn from_runtime_state_with_tasks(
+        state: &crate::runtime::RuntimeState,
+        tasks: &crate::runtime::TaskTable,
+    ) -> Self {
         use crate::record::obligation::ObligationKind;
         use crate::record::task::TaskPhase;
 
@@ -272,18 +289,18 @@ impl StateSnapshot {
         let now = state.now;
 
         // -- Task counters (O(1), br-asupersync-xxcss5) --
-        let live_tasks = state.tasks.live_task_count() as u32;
-        let cancel_requested_tasks = state.tasks.count_in_phase(TaskPhase::CancelRequested) as u32;
-        let cancelling_tasks = state.tasks.count_in_phase(TaskPhase::Cancelling) as u32;
-        let finalizing_tasks = state.tasks.count_in_phase(TaskPhase::Finalizing) as u32;
+        let live_tasks = tasks.live_task_count() as u32;
+        let cancel_requested_tasks = tasks.count_in_phase(TaskPhase::CancelRequested) as u32;
+        let cancelling_tasks = tasks.count_in_phase(TaskPhase::Cancelling) as u32;
+        let finalizing_tasks = tasks.count_in_phase(TaskPhase::Finalizing) as u32;
 
         // -- Deadline pressure O(1) estimation (br-asupersync-xxcss5) --
         // pressure = Σ max(0, 1 - (deadline - now)/D₀)
         // Coarse approximation: Σ (1 - (deadline - now)/D₀) for all tasks with deadlines.
         // This is accurate if most tasks with deadlines are within D₀ of their deadline.
-        let tasks_with_deadline = state.tasks.tasks_with_deadline_count();
+        let tasks_with_deadline = tasks.tasks_with_deadline_count();
         let deadline_pressure = if tasks_with_deadline > 0 {
-            let deadline_sum_ns = state.tasks.deadline_sum_ns();
+            let deadline_sum_ns = tasks.deadline_sum_ns();
             let now_ns = u128::from(now.as_nanos());
 
             #[allow(clippy::cast_precision_loss)]

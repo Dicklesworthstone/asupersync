@@ -244,11 +244,16 @@ emit_event "setup" "started" "preparing retained loopback artifacts"
 
 if [[ -z "$ATP_BIN" ]]; then
     emit_event "build_atp" "started" "building standalone atp binary with atp-cli,tls"
-    CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PROJECT_ROOT/target}"
+    CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_arq_quic_loopback_atp}"
     export CARGO_TARGET_DIR
+    # Routed through rch with an explicit target dir (AGENTS.md). rch retrieves
+    # the target directory, so $CARGO_TARGET_DIR/debug/atp is present locally
+    # afterwards -- the same build-then-use-the-local-path pattern AGENTS.md
+    # documents for the ATP bench binary.
     (
         cd "$PROJECT_ROOT"
-        cargo build -p asupersync --bin atp --features atp-cli,tls
+        "${RCH_BIN:-rch}" exec -- env CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+            cargo build -p asupersync --bin atp --features atp-cli,tls
     )
     ATP_BIN="$CARGO_TARGET_DIR/debug/atp"
 fi

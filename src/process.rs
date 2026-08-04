@@ -53,10 +53,12 @@ use std::cmp::Ordering;
 use std::os::unix::io::{AsRawFd, RawFd};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::os::unix::{ffi::OsStrExt, net::UnixStream};
 #[cfg(windows)]
 use std::os::windows::{
     ffi::OsStrExt,
-    io::{AsRawHandle, RawHandle},
+    io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle},
 };
 
 #[cfg(unix)]
@@ -519,8 +521,1132 @@ impl PartialOrd for EnvKey {
 #[cfg(windows)]
 impl PartialEq for EnvKey {
     fn eq(&self, other: &Self) -> bool {
-        self.utf16.len() == other.utf16.len() && self.cmp(other) == Ordering::Equal
+        self.cmp(other) == Ordering::Equal
     }
+}
+
+/// Version of the fail-closed exact-image spawn contract.
+///
+/// Increment this whenever executable selection, environment construction,
+/// process-tree isolation, or stdio inheritance semantics change.
+pub const EXACT_IMAGE_SPAWN_POLICY_VERSION: u32 = 1;
+
+/// Auditable OS mechanism used by [`ExactImageCommand`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExactImageSpawnMechanism {
+    /// POSIX `posix_spawn` with an absolute path and a fresh process group.
+    PosixSpawnAbsoluteProcessGroup,
+    /// Win32 `CreateProcessW` with explicit application name and atomic job
+    /// assignment through `PROC_THREAD_ATTRIBUTE_JOB_LIST`.
+    WindowsCreateProcessJobList,
+}
+
+impl ExactImageSpawnMechanism {
+    /// Stable provenance identity for the mechanism.
+    #[must_use]
+    pub const fn identity(self) -> &'static str {
+        match self {
+            Self::PosixSpawnAbsoluteProcessGroup => "posix_spawn.absolute_path.new_process_group",
+            Self::WindowsCreateProcessJobList => {
+                "create_process_w.explicit_application.atomic_job_list"
+            }
+        }
+    }
+}
+
+/// A fail-closed command for executing one already-resolved native image.
+///
+/// This deliberately has a much smaller surface than [`Command`]:
+///
+/// - `program` must be absolute, so no `PATH` search is possible;
+/// - the child receives exactly the supplied environment, never the parent's;
+/// - stdin, stdout, and stderr are always private pipes;
+/// - the child starts in a process tree that [`ExactImageChild`] can terminate;
+/// - no current-directory or pre-exec hook exists.
+///
+/// Unix uses `posix_spawn`, never `execvp` or `posix_spawnp`; an `ENOEXEC`
+/// therefore remains an error instead of invoking a shell. Windows supplies
+/// `lpApplicationName` directly to `CreateProcessW`, accepts only `.exe`
+/// images, and atomically assigns the process to a kill-on-close Job Object.
+#[derive(Debug, Clone)]
+pub struct ExactImageCommand {
+    program: PathBuf,
+    args: Vec<OsString>,
+    env: BTreeMap<EnvKey, OsString>,
+}
+
+impl ExactImageCommand {
+    /// Construct an exact-image command.
+    #[must_use]
+    pub fn new<S: AsRef<OsStr>>(program: S) -> Self {
+        Self {
+            program: PathBuf::from(program.as_ref()),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+        }
+    }
+
+    /// Append one argument, passed without shell parsing.
+    pub fn arg<S: AsRef<OsStr>>(&mut self, arg: S) -> &mut Self {
+        self.args.push(arg.as_ref().to_os_string());
+        self
+    }
+
+    /// Append arguments, passed without shell parsing.
+    pub fn args<I, S>(&mut self, args: I) -> &mut Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        self.args
+            .extend(args.into_iter().map(|arg| arg.as_ref().to_os_string()));
+        self
+    }
+
+    /// Set one entry in the child's complete environment.
+    ///
+    /// Environment inheritance is never enabled. On Windows, keys follow the
+    /// platform's case-insensitive ordering and replacement semantics.
+    pub fn env<K, V>(&mut self, key: K, value: V) -> &mut Self
+    where
+        K: AsRef<OsStr>,
+        V: AsRef<OsStr>,
+    {
+        let key = EnvKey::from(key.as_ref());
+        self.env.remove(&key);
+        self.env.insert(key, value.as_ref().to_os_string());
+        self
+    }
+
+    /// Set entries in the child's complete environment.
+    pub fn envs<I, K, V>(&mut self, env: I) -> &mut Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<OsStr>,
+        V: AsRef<OsStr>,
+    {
+        for (key, value) in env {
+            self.env(key, value);
+        }
+        self
+    }
+
+    /// The absolute image path configured for this command.
+    #[must_use]
+    pub fn program(&self) -> &Path {
+        &self.program
+    }
+
+    /// Spawn the exact image with isolated tree ownership and piped stdio.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcessError::InvalidConfiguration`] before OS resource
+    /// creation for malformed paths, arguments, or environment entries.
+    /// Unsupported targets and runtimes return [`ProcessError::Unsupported`]
+    /// without falling back to [`Command`] or a shell.
+    pub fn spawn(&self) -> Result<ExactImageChild, ProcessError> {
+        if !self.program.is_absolute() {
+            return Err(ProcessError::InvalidConfiguration(format!(
+                "exact-image program path must be absolute: {}",
+                self.program.display()
+            )));
+        }
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            spawn_exact_image_unix(self)
+        }
+        #[cfg(windows)]
+        {
+            spawn_exact_image_windows(self)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        {
+            Err(ProcessError::Unsupported(format!(
+                "exact-image process spawning is unsupported on {}",
+                std::env::consts::OS
+            )))
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+type ExactImagePipe = UnixStream;
+#[cfg(windows)]
+type ExactImagePipe = std::fs::File;
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+#[derive(Debug)]
+struct ExactImagePipe;
+
+/// Parent write end of an exact-image child's stdin pipe.
+#[derive(Debug)]
+pub struct ExactImageChildStdin {
+    inner: ExactImagePipe,
+}
+
+impl std::io::Write for ExactImageChildStdin {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+        {
+            std::io::Write::write(&mut self.inner, buf)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        {
+            let _ = buf;
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "exact-image stdin is unsupported on this target",
+            ))
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+        {
+            std::io::Write::flush(&mut self.inner)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "exact-image stdin is unsupported on this target",
+            ))
+        }
+    }
+}
+
+/// Parent read end of an exact-image child's stdout pipe.
+#[derive(Debug)]
+pub struct ExactImageChildStdout {
+    inner: ExactImagePipe,
+}
+
+impl std::io::Read for ExactImageChildStdout {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+        {
+            self.inner.read(buf)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        {
+            let _ = buf;
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "exact-image stdout is unsupported on this target",
+            ))
+        }
+    }
+}
+
+/// Parent read end of an exact-image child's stderr pipe.
+#[derive(Debug)]
+pub struct ExactImageChildStderr {
+    inner: ExactImagePipe,
+}
+
+impl std::io::Read for ExactImageChildStderr {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+        {
+            self.inner.read(buf)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        {
+            let _ = buf;
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "exact-image stderr is unsupported on this target",
+            ))
+        }
+    }
+}
+
+/// Owned child from [`ExactImageCommand`].
+///
+/// Dropping a live child closes stdin, requests termination of its isolated
+/// process tree, and reaps the direct child after confirmed termination. If
+/// the operating system unexpectedly refuses termination, drop performs only
+/// a nonblocking reap attempt so destruction cannot hang indefinitely.
+#[derive(Debug)]
+pub struct ExactImageChild {
+    platform: ExactImagePlatformChild,
+    stdin: Option<ExactImageChildStdin>,
+    stdout: Option<ExactImageChildStdout>,
+    stderr: Option<ExactImageChildStderr>,
+    mechanism: ExactImageSpawnMechanism,
+}
+
+impl ExactImageChild {
+    /// Direct child process identifier.
+    #[must_use]
+    pub fn id(&self) -> u32 {
+        self.platform.id()
+    }
+
+    /// Auditable mechanism used for this spawn.
+    #[must_use]
+    pub const fn mechanism(&self) -> ExactImageSpawnMechanism {
+        self.mechanism
+    }
+
+    /// Take the parent write end of stdin.
+    pub fn take_stdin(&mut self) -> Option<ExactImageChildStdin> {
+        self.stdin.take()
+    }
+
+    /// Take the parent read end of stdout.
+    pub fn take_stdout(&mut self) -> Option<ExactImageChildStdout> {
+        self.stdout.take()
+    }
+
+    /// Take the parent read end of stderr.
+    pub fn take_stderr(&mut self) -> Option<ExactImageChildStderr> {
+        self.stderr.take()
+    }
+
+    /// Non-blockingly observe the direct child's exit status.
+    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.platform.try_wait()
+    }
+
+    /// Close stdin and wait for the direct child, then terminate any
+    /// descendants that outlived it.
+    pub fn wait(&mut self) -> io::Result<ExitStatus> {
+        drop(self.stdin.take());
+        let status = self.platform.wait()?;
+        match self.platform.kill_process_tree() {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        Ok(status)
+    }
+
+    /// Terminate every process in the child's isolated process tree.
+    pub fn kill_process_tree(&mut self) -> io::Result<()> {
+        self.platform.kill_process_tree()
+    }
+}
+
+impl Drop for ExactImageChild {
+    fn drop(&mut self) {
+        drop(self.stdin.take());
+        match self.platform.kill_process_tree() {
+            Ok(()) => {
+                let _ = self.platform.wait();
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let _ = self.platform.wait();
+            }
+            Err(_) => {
+                let _ = self.platform.try_wait();
+            }
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+#[derive(Debug)]
+struct ExactImagePlatformChild;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+impl ExactImagePlatformChild {
+    fn id(&self) -> u32 {
+        0
+    }
+
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "exact-image process spawning is unsupported on this target",
+        ))
+    }
+
+    fn wait(&mut self) -> io::Result<ExitStatus> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "exact-image process spawning is unsupported on this target",
+        ))
+    }
+
+    fn kill_process_tree(&mut self) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "exact-image process spawning is unsupported on this target",
+        ))
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug)]
+struct ExactImagePlatformChild {
+    pid: nix::unistd::Pid,
+    process_group: nix::unistd::Pid,
+    status: Option<ExitStatus>,
+    tree_terminated: bool,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl ExactImagePlatformChild {
+    fn id(&self) -> u32 {
+        debug_assert!(self.pid.as_raw() > 0);
+        self.pid.as_raw().cast_unsigned()
+    }
+
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        if let Some(status) = self.status {
+            return Ok(Some(status));
+        }
+        loop {
+            match nix::sys::wait::waitpid(self.pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG)) {
+                Ok(nix::sys::wait::WaitStatus::StillAlive) => return Ok(None),
+                Ok(status) => {
+                    if let Some(status) = exact_image_exit_status(status) {
+                        self.status = Some(status);
+                        return Ok(Some(status));
+                    }
+                }
+                Err(nix::errno::Errno::EINTR) => {}
+                Err(error) => return Err(nix_errno_to_io(error)),
+            }
+        }
+    }
+
+    fn wait(&mut self) -> io::Result<ExitStatus> {
+        if let Some(status) = self.status {
+            return Ok(status);
+        }
+        loop {
+            match nix::sys::wait::waitpid(self.pid, None) {
+                Ok(status) => {
+                    if let Some(status) = exact_image_exit_status(status) {
+                        self.status = Some(status);
+                        return Ok(status);
+                    }
+                }
+                Err(nix::errno::Errno::EINTR) => {}
+                Err(error) => return Err(nix_errno_to_io(error)),
+            }
+        }
+    }
+
+    fn kill_process_tree(&mut self) -> io::Result<()> {
+        if self.tree_terminated {
+            return Ok(());
+        }
+        match nix::sys::signal::killpg(self.process_group, nix::sys::signal::Signal::SIGKILL) {
+            Ok(()) => {
+                self.tree_terminated = true;
+                Ok(())
+            }
+            Err(nix::errno::Errno::ESRCH) => {
+                self.tree_terminated = true;
+                Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "exact-image process group no longer exists",
+                ))
+            }
+            Err(error) => Err(nix_errno_to_io(error)),
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn exact_image_exit_status(status: nix::sys::wait::WaitStatus) -> Option<ExitStatus> {
+    match status {
+        nix::sys::wait::WaitStatus::Exited(_, code) => {
+            Some(ExitStatus::from_parts(Some(code), None))
+        }
+        nix::sys::wait::WaitStatus::Signaled(_, signal, _) => {
+            Some(ExitStatus::from_parts(None, Some(signal as i32)))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn nix_errno_to_io(error: nix::errno::Errno) -> io::Error {
+    io::Error::from_raw_os_error(error as i32)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn exact_image_spawn_error(program: &Path, error: nix::errno::Errno) -> ProcessError {
+    match error {
+        nix::errno::Errno::ENOENT => ProcessError::NotFound(program.display().to_string()),
+        nix::errno::Errno::EACCES | nix::errno::Errno::EPERM => {
+            ProcessError::PermissionDenied(program.display().to_string())
+        }
+        _ => ProcessError::Io(nix_errno_to_io(error)),
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn exact_image_cstring(bytes: &[u8], what: &str) -> Result<std::ffi::CString, ProcessError> {
+    std::ffi::CString::new(bytes).map_err(|_| {
+        ProcessError::InvalidConfiguration(format!("{what} contains an interior NUL byte"))
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn exact_image_unix_vectors(
+    command: &ExactImageCommand,
+) -> Result<(Vec<std::ffi::CString>, Vec<std::ffi::CString>), ProcessError> {
+    let mut argv = Vec::with_capacity(command.args.len().saturating_add(1));
+    argv.push(exact_image_cstring(
+        command.program.as_os_str().as_bytes(),
+        "exact-image program path",
+    )?);
+    for (index, arg) in command.args.iter().enumerate() {
+        argv.push(exact_image_cstring(
+            arg.as_bytes(),
+            &format!("exact-image argument {index}"),
+        )?);
+    }
+
+    let mut env = Vec::with_capacity(command.env.len());
+    for (key, value) in &command.env {
+        let key = key.as_ref().as_bytes();
+        if key.is_empty() || key.contains(&b'=') {
+            return Err(ProcessError::InvalidConfiguration(
+                "exact-image environment keys must be non-empty and contain no '='".to_owned(),
+            ));
+        }
+        let value = value.as_bytes();
+        let mut entry = Vec::with_capacity(key.len().saturating_add(value.len()).saturating_add(1));
+        entry.extend_from_slice(key);
+        entry.push(b'=');
+        entry.extend_from_slice(value);
+        env.push(exact_image_cstring(
+            &entry,
+            "exact-image environment entry",
+        )?);
+    }
+    Ok((argv, env))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn reserve_exact_image_standard_fds() -> io::Result<Vec<std::fs::File>> {
+    let mut reservations = Vec::new();
+    loop {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/null")?;
+        let above_standard_streams = file.as_raw_fd() > libc::STDERR_FILENO;
+        reservations.push(file);
+        if above_standard_streams {
+            return Ok(reservations);
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn add_exact_image_close_action(
+    actions: &mut nix::spawn::PosixSpawnFileActions,
+    fd: RawFd,
+) -> Result<(), ProcessError> {
+    if fd > libc::STDERR_FILENO {
+        actions
+            .add_close(fd)
+            .map_err(|error| ProcessError::Io(io::Error::from_raw_os_error(error as i32)))?;
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn spawn_exact_image_unix(command: &ExactImageCommand) -> Result<ExactImageChild, ProcessError> {
+    use std::net::Shutdown;
+
+    let (argv, env) = exact_image_unix_vectors(command)?;
+
+    // Keep 0, 1, and 2 occupied while creating the socket pairs. This makes
+    // every file-action source descriptor greater than the destination it is
+    // duplicated onto, so the close actions cannot accidentally close a
+    // newly-installed standard stream in a parent that began with one absent.
+    let standard_fd_reservations = reserve_exact_image_standard_fds()?;
+    let (parent_stdin, child_stdin) = UnixStream::pair()?;
+    let (parent_stdout, child_stdout) = UnixStream::pair()?;
+    let (parent_stderr, child_stderr) = UnixStream::pair()?;
+    parent_stdin.shutdown(Shutdown::Read)?;
+    child_stdin.shutdown(Shutdown::Write)?;
+    parent_stdout.shutdown(Shutdown::Write)?;
+    child_stdout.shutdown(Shutdown::Read)?;
+    parent_stderr.shutdown(Shutdown::Write)?;
+    child_stderr.shutdown(Shutdown::Read)?;
+
+    let mut actions = nix::spawn::PosixSpawnFileActions::init()
+        .map_err(|error| ProcessError::Io(nix_errno_to_io(error)))?;
+    actions
+        .add_dup2(child_stdin.as_raw_fd(), libc::STDIN_FILENO)
+        .map_err(|error| ProcessError::Io(nix_errno_to_io(error)))?;
+    actions
+        .add_dup2(child_stdout.as_raw_fd(), libc::STDOUT_FILENO)
+        .map_err(|error| ProcessError::Io(nix_errno_to_io(error)))?;
+    actions
+        .add_dup2(child_stderr.as_raw_fd(), libc::STDERR_FILENO)
+        .map_err(|error| ProcessError::Io(nix_errno_to_io(error)))?;
+    for fd in [
+        parent_stdin.as_raw_fd(),
+        child_stdin.as_raw_fd(),
+        parent_stdout.as_raw_fd(),
+        child_stdout.as_raw_fd(),
+        parent_stderr.as_raw_fd(),
+        child_stderr.as_raw_fd(),
+    ] {
+        add_exact_image_close_action(&mut actions, fd)?;
+    }
+    for file in &standard_fd_reservations {
+        add_exact_image_close_action(&mut actions, file.as_raw_fd())?;
+    }
+
+    let mut attributes = nix::spawn::PosixSpawnAttr::init()
+        .map_err(|error| ProcessError::Io(nix_errno_to_io(error)))?;
+    attributes
+        .set_pgroup(nix::unistd::Pid::from_raw(0))
+        .map_err(|error| ProcessError::Io(nix_errno_to_io(error)))?;
+    let mut signal_defaults = nix::sys::signal::SigSet::empty();
+    signal_defaults.add(nix::sys::signal::Signal::SIGPIPE);
+    attributes
+        .set_sigdefault(&signal_defaults)
+        .map_err(|error| ProcessError::Io(nix_errno_to_io(error)))?;
+    let spawn_flags = nix::spawn::PosixSpawnFlags::POSIX_SPAWN_SETPGROUP
+        | nix::spawn::PosixSpawnFlags::POSIX_SPAWN_SETSIGDEF;
+    #[cfg(target_os = "macos")]
+    let spawn_flags = {
+        // Apple guarantees that this extension closes every descriptor not
+        // named by a file action. It removes the inheritance race from
+        // Darwin's non-atomic socketpair-then-FD_CLOEXEC implementation.
+        spawn_flags
+            | nix::spawn::PosixSpawnFlags::from_bits_retain(libc::POSIX_SPAWN_CLOEXEC_DEFAULT)
+    };
+    attributes
+        .set_flags(spawn_flags)
+        .map_err(|error| ProcessError::Io(nix_errno_to_io(error)))?;
+
+    let pid = nix::spawn::posix_spawn(
+        command.program.as_path(),
+        &actions,
+        &attributes,
+        &argv,
+        &env,
+    )
+    .map_err(|error| exact_image_spawn_error(&command.program, error))?;
+
+    drop(child_stdin);
+    drop(child_stdout);
+    drop(child_stderr);
+    drop(standard_fd_reservations);
+
+    Ok(ExactImageChild {
+        platform: ExactImagePlatformChild {
+            pid,
+            process_group: pid,
+            status: None,
+            tree_terminated: false,
+        },
+        stdin: Some(ExactImageChildStdin {
+            inner: parent_stdin,
+        }),
+        stdout: Some(ExactImageChildStdout {
+            inner: parent_stdout,
+        }),
+        stderr: Some(ExactImageChildStderr {
+            inner: parent_stderr,
+        }),
+        mechanism: ExactImageSpawnMechanism::PosixSpawnAbsoluteProcessGroup,
+    })
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+struct ExactImagePlatformChild {
+    process: OwnedHandle,
+    job: OwnedHandle,
+    id: u32,
+    status: Option<ExitStatus>,
+    tree_terminated: bool,
+}
+
+#[cfg(windows)]
+impl ExactImagePlatformChild {
+    fn id(&self) -> u32 {
+        self.id
+    }
+
+    fn status_after_wait(&mut self, wait: u32) -> io::Result<Option<ExitStatus>> {
+        use windows_sys::Win32::Foundation::{WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::GetExitCodeProcess;
+
+        match wait {
+            WAIT_TIMEOUT => Ok(None),
+            WAIT_OBJECT_0 => {
+                let mut code = 0_u32;
+                // Safety: `process` is an owned live process handle and `code`
+                // is a valid writable out-parameter for the duration of the call.
+                if unsafe { GetExitCodeProcess(self.process.as_raw_handle(), &mut code) } == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let status = ExitStatus::from_parts(Some(code as i32), None);
+                self.status = Some(status);
+                Ok(Some(status))
+            }
+            WAIT_FAILED => Err(io::Error::last_os_error()),
+            other => Err(io::Error::other(format!(
+                "unexpected WaitForSingleObject result {other}"
+            ))),
+        }
+    }
+
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+        if let Some(status) = self.status {
+            return Ok(Some(status));
+        }
+        // Safety: `process` remains owned by self throughout the call.
+        let wait = unsafe { WaitForSingleObject(self.process.as_raw_handle(), 0) };
+        self.status_after_wait(wait)
+    }
+
+    fn wait(&mut self) -> io::Result<ExitStatus> {
+        use windows_sys::Win32::System::Threading::{INFINITE, WaitForSingleObject};
+
+        if let Some(status) = self.status {
+            return Ok(status);
+        }
+        // Safety: `process` remains owned by self throughout the call.
+        let wait = unsafe { WaitForSingleObject(self.process.as_raw_handle(), INFINITE) };
+        self.status_after_wait(wait)?
+            .ok_or_else(|| io::Error::other("infinite process wait unexpectedly timed out"))
+    }
+
+    fn kill_process_tree(&mut self) -> io::Result<()> {
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+
+        if self.tree_terminated {
+            return Ok(());
+        }
+        // Safety: `job` is the owned Job Object that atomically received this
+        // child at creation. The exit code is an application-defined value.
+        if unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        self.tree_terminated = true;
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+struct ProcThreadAttributeList {
+    storage: Vec<usize>,
+    pointer: windows_sys::Win32::System::Threading::LPPROC_THREAD_ATTRIBUTE_LIST,
+}
+
+#[cfg(windows)]
+impl ProcThreadAttributeList {
+    fn new(attribute_count: u32) -> io::Result<Self> {
+        use windows_sys::Win32::System::Threading::InitializeProcThreadAttributeList;
+
+        let mut bytes = 0_usize;
+        // Safety: a null first argument is the documented sizing query and
+        // `bytes` is a valid writable size out-parameter.
+        let _ = unsafe {
+            InitializeProcThreadAttributeList(std::ptr::null_mut(), attribute_count, 0, &mut bytes)
+        };
+        if bytes == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let words = bytes.div_ceil(std::mem::size_of::<usize>());
+        let mut storage = vec![0_usize; words];
+        let pointer = storage.as_mut_ptr().cast();
+        // Safety: `storage` is aligned for pointer-sized data, contains at
+        // least the size returned by the sizing query, and does not move
+        // while retained by this object.
+        if unsafe { InitializeProcThreadAttributeList(pointer, attribute_count, 0, &mut bytes) }
+            == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self { storage, pointer })
+    }
+
+    fn update_handles(
+        &mut self,
+        attribute: usize,
+        handles: &[windows_sys::Win32::Foundation::HANDLE],
+    ) -> io::Result<()> {
+        use windows_sys::Win32::System::Threading::UpdateProcThreadAttribute;
+
+        let bytes = handles
+            .len()
+            .checked_mul(std::mem::size_of::<windows_sys::Win32::Foundation::HANDLE>())
+            .ok_or_else(|| io::Error::other("process attribute size overflow"))?;
+        // Safety: `pointer` names an initialized attribute list; `handles`
+        // remains valid for the call and `bytes` describes its full extent.
+        if unsafe {
+            UpdateProcThreadAttribute(
+                self.pointer,
+                0,
+                attribute,
+                handles.as_ptr().cast(),
+                bytes,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProcThreadAttributeList {
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Threading::DeleteProcThreadAttributeList;
+
+        // Keep the allocation observably live through deletion.
+        let _ = self.storage.len();
+        // Safety: `pointer` was initialized exactly once and has not been
+        // deleted. The backing allocation remains alive until after this call.
+        unsafe { DeleteProcThreadAttributeList(self.pointer) };
+    }
+}
+
+#[cfg(windows)]
+fn close_partial_windows_handle(handle: windows_sys::Win32::Foundation::HANDLE) {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+
+    if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+        // Safety: this helper is called only for raw handles returned from a
+        // failed CreatePipe call before ownership was transferred.
+        let _ = unsafe { CloseHandle(handle) };
+    }
+}
+
+#[cfg(windows)]
+fn own_windows_handle(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    what: &str,
+) -> io::Result<OwnedHandle> {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::other(format!(
+            "{what} returned an invalid handle"
+        )));
+    }
+    // Safety: the caller transfers one newly-created, valid, uniquely-owned
+    // Win32 handle. `OwnedHandle` closes it exactly once.
+    Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
+}
+
+#[cfg(windows)]
+fn exact_image_windows_pipe() -> io::Result<(OwnedHandle, OwnedHandle)> {
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::System::Pipes::CreatePipe;
+
+    let n_length = u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>())
+        .map_err(|_| io::Error::other("SECURITY_ATTRIBUTES size exceeds u32"))?;
+    let mut security = SECURITY_ATTRIBUTES {
+        nLength: n_length,
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: 1,
+    };
+    let mut read = std::ptr::null_mut();
+    let mut write = std::ptr::null_mut();
+    // Safety: both out-pointers and the initialized security descriptor remain
+    // valid for the call. A zero buffer size requests the system default.
+    if unsafe { CreatePipe(&mut read, &mut write, &mut security, 0) } == 0 {
+        let error = io::Error::last_os_error();
+        close_partial_windows_handle(read);
+        close_partial_windows_handle(write);
+        return Err(error);
+    }
+    let read = own_windows_handle(read, "CreatePipe read end")?;
+    let write = own_windows_handle(write, "CreatePipe write end")?;
+    Ok((read, write))
+}
+
+#[cfg(windows)]
+fn clear_windows_handle_inheritance(handle: &OwnedHandle) -> io::Result<()> {
+    use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+
+    // Safety: `handle` remains owned and valid during the call.
+    if unsafe { SetHandleInformation(handle.as_raw_handle(), HANDLE_FLAG_INHERIT, 0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn exact_image_windows_job() -> io::Result<OwnedHandle> {
+    use windows_sys::Win32::System::JobObjects::{
+        CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, SetInformationJobObject,
+    };
+
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    let bytes = u32::try_from(std::mem::size_of_val(&limits))
+        .map_err(|_| io::Error::other("job limit structure size exceeds u32"))?;
+    // Safety: both optional pointer arguments are null, requesting default
+    // security and an unnamed Job Object.
+    let raw = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    let job = own_windows_handle(raw, "CreateJobObjectW")?;
+    // Safety: `job` is a live Job Object and `limits` is a fully initialized
+    // structure of the declared information class and size.
+    if unsafe {
+        SetInformationJobObject(
+            job.as_raw_handle(),
+            JobObjectExtendedLimitInformation,
+            std::ptr::from_ref(&limits).cast(),
+            bytes,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(job)
+}
+
+#[cfg(windows)]
+fn push_windows_quoted_argument(argument: &[u16], command_line: &mut Vec<u16>) {
+    const BACKSLASH: u16 = b'\\' as u16;
+    const DOUBLE_QUOTE: u16 = b'"' as u16;
+    let quote = argument.is_empty()
+        || argument
+            .iter()
+            .any(|&unit| matches!(unit, 0x09 | 0x20 | DOUBLE_QUOTE));
+    if !quote {
+        command_line.extend_from_slice(argument);
+        return;
+    }
+
+    command_line.push(DOUBLE_QUOTE);
+    let mut backslashes = 0_usize;
+    for &unit in argument {
+        if unit == BACKSLASH {
+            backslashes = backslashes.saturating_add(1);
+        } else if unit == DOUBLE_QUOTE {
+            command_line.extend(std::iter::repeat_n(
+                BACKSLASH,
+                backslashes.saturating_mul(2).saturating_add(1),
+            ));
+            command_line.push(DOUBLE_QUOTE);
+            backslashes = 0;
+        } else {
+            command_line.extend(std::iter::repeat_n(BACKSLASH, backslashes));
+            command_line.push(unit);
+            backslashes = 0;
+        }
+    }
+    command_line.extend(std::iter::repeat_n(
+        BACKSLASH,
+        backslashes.saturating_mul(2),
+    ));
+    command_line.push(DOUBLE_QUOTE);
+}
+
+#[cfg(windows)]
+fn exact_image_windows_command_line(
+    command: &ExactImageCommand,
+) -> Result<(Vec<u16>, Vec<u16>), ProcessError> {
+    const MAX_COMMAND_LINE_UNITS: usize = 32_767;
+
+    let mut application: Vec<u16> = command.program.as_os_str().encode_wide().collect();
+    if application.contains(&0) {
+        return Err(ProcessError::InvalidConfiguration(
+            "exact-image program path contains an interior NUL".to_owned(),
+        ));
+    }
+    if application.len().saturating_add(1) > MAX_COMMAND_LINE_UNITS {
+        return Err(ProcessError::InvalidConfiguration(
+            "exact-image application path exceeds the Win32 limit".to_owned(),
+        ));
+    }
+
+    let mut command_line = Vec::new();
+    push_windows_quoted_argument(&application, &mut command_line);
+    for (index, argument) in command.args.iter().enumerate() {
+        let argument: Vec<u16> = argument.encode_wide().collect();
+        if argument.contains(&0) {
+            return Err(ProcessError::InvalidConfiguration(format!(
+                "exact-image argument {index} contains an interior NUL"
+            )));
+        }
+        command_line.push(b' ' as u16);
+        push_windows_quoted_argument(&argument, &mut command_line);
+    }
+    application.push(0);
+    command_line.push(0);
+    if command_line.len() > MAX_COMMAND_LINE_UNITS {
+        return Err(ProcessError::InvalidConfiguration(
+            "exact-image command line exceeds the Win32 limit".to_owned(),
+        ));
+    }
+    Ok((application, command_line))
+}
+
+#[cfg(windows)]
+fn exact_image_windows_environment(command: &ExactImageCommand) -> Result<Vec<u16>, ProcessError> {
+    const MAX_ENVIRONMENT_UNITS: usize = 32_767;
+
+    let mut block = Vec::new();
+    for (key, value) in &command.env {
+        let key: Vec<u16> = key.as_ref().encode_wide().collect();
+        if key.is_empty() || key.contains(&(b'=' as u16)) || key.contains(&0) {
+            return Err(ProcessError::InvalidConfiguration(
+                "exact-image environment keys must be non-empty and contain no '=' or NUL"
+                    .to_owned(),
+            ));
+        }
+        let value: Vec<u16> = value.encode_wide().collect();
+        if value.contains(&0) {
+            return Err(ProcessError::InvalidConfiguration(
+                "exact-image environment value contains an interior NUL".to_owned(),
+            ));
+        }
+        block.extend_from_slice(&key);
+        block.push(b'=' as u16);
+        block.extend_from_slice(&value);
+        block.push(0);
+    }
+    block.push(0);
+    if block.len() == 1 {
+        block.push(0);
+    }
+    if block.len() > MAX_ENVIRONMENT_UNITS {
+        return Err(ProcessError::InvalidConfiguration(
+            "exact-image environment exceeds the Win32 limit".to_owned(),
+        ));
+    }
+    Ok(block)
+}
+
+#[cfg(windows)]
+fn exact_image_windows_spawn_error(program: &Path, error: io::Error) -> ProcessError {
+    match error.raw_os_error() {
+        Some(2 | 3) => ProcessError::NotFound(program.display().to_string()),
+        Some(5) => ProcessError::PermissionDenied(program.display().to_string()),
+        _ => ProcessError::Io(error),
+    }
+}
+
+#[cfg(windows)]
+fn spawn_exact_image_windows(command: &ExactImageCommand) -> Result<ExactImageChild, ProcessError> {
+    use windows_sys::Win32::System::Threading::{
+        CREATE_UNICODE_ENVIRONMENT, CreateProcessW, EXTENDED_STARTUPINFO_PRESENT,
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION,
+        STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    };
+
+    if !command
+        .program
+        .extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+    {
+        return Err(ProcessError::InvalidConfiguration(format!(
+            "exact-image Windows program must have an .exe extension: {}",
+            command.program.display()
+        )));
+    }
+    let (application, mut command_line) = exact_image_windows_command_line(command)?;
+    let environment = exact_image_windows_environment(command)?;
+    let startup_size = u32::try_from(std::mem::size_of::<STARTUPINFOEXW>()).map_err(|_| {
+        ProcessError::Unsupported("STARTUPINFOEXW size exceeds the Win32 field".to_owned())
+    })?;
+
+    let (child_stdin, parent_stdin) = exact_image_windows_pipe()?;
+    clear_windows_handle_inheritance(&parent_stdin)?;
+    let (parent_stdout, child_stdout) = exact_image_windows_pipe()?;
+    clear_windows_handle_inheritance(&parent_stdout)?;
+    let (parent_stderr, child_stderr) = exact_image_windows_pipe()?;
+    clear_windows_handle_inheritance(&parent_stderr)?;
+
+    let job = exact_image_windows_job()?;
+    let child_handles = [
+        child_stdin.as_raw_handle(),
+        child_stdout.as_raw_handle(),
+        child_stderr.as_raw_handle(),
+    ];
+    let job_handles = [job.as_raw_handle()];
+    let mut attributes = ProcThreadAttributeList::new(2)?;
+    attributes.update_handles(PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize, &child_handles)?;
+    attributes
+        .update_handles(PROC_THREAD_ATTRIBUTE_JOB_LIST as usize, &job_handles)
+        .map_err(|error| {
+            ProcessError::Unsupported(format!(
+                "atomic Job Object assignment requires Windows 10 or Windows Server 2016 or newer: {error}"
+            ))
+        })?;
+
+    let mut startup = STARTUPINFOEXW::default();
+    startup.StartupInfo.cb = startup_size;
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = child_stdin.as_raw_handle();
+    startup.StartupInfo.hStdOutput = child_stdout.as_raw_handle();
+    startup.StartupInfo.hStdError = child_stderr.as_raw_handle();
+    startup.lpAttributeList = attributes.pointer;
+    let mut process_info = PROCESS_INFORMATION::default();
+    // Safety: every pointer names initialized storage with the lifetime
+    // required by CreateProcessW. `lpApplicationName` is explicit, the command
+    // line is writable and NUL-terminated, the environment is double-NUL
+    // terminated, and the inherited handle list contains only the three child
+    // stdio handles. The Job Object attribute makes tree ownership atomic with
+    // process creation.
+    if unsafe {
+        CreateProcessW(
+            application.as_ptr(),
+            command_line.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+            CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+            environment.as_ptr().cast(),
+            std::ptr::null(),
+            std::ptr::from_ref(&startup).cast(),
+            &mut process_info,
+        )
+    } == 0
+    {
+        return Err(exact_image_windows_spawn_error(
+            &command.program,
+            io::Error::last_os_error(),
+        ));
+    }
+
+    let process = own_windows_handle(process_info.hProcess, "CreateProcessW process")?;
+    let thread = own_windows_handle(process_info.hThread, "CreateProcessW thread")?;
+    drop(thread);
+    drop(child_stdin);
+    drop(child_stdout);
+    drop(child_stderr);
+    drop(attributes);
+
+    Ok(ExactImageChild {
+        platform: ExactImagePlatformChild {
+            process,
+            job,
+            id: process_info.dwProcessId,
+            status: None,
+            tree_terminated: false,
+        },
+        stdin: Some(ExactImageChildStdin {
+            inner: std::fs::File::from(parent_stdin),
+        }),
+        stdout: Some(ExactImageChildStdout {
+            inner: std::fs::File::from(parent_stdout),
+        }),
+        stderr: Some(ExactImageChildStderr {
+            inner: std::fs::File::from(parent_stderr),
+        }),
+        mechanism: ExactImageSpawnMechanism::WindowsCreateProcessJobList,
+    })
 }
 
 /// Builder for spawning child processes.
@@ -2431,6 +3557,146 @@ mod tests {
             .expect("child pid should fit pid_t in test")
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn exact_image_child_helper() {
+        if std::env::var_os("ASUPERSYNC_EXACT_IMAGE_CHILD").as_deref() != Some(OsStr::new("1")) {
+            return;
+        }
+
+        let mut input = String::new();
+        std::io::stdin()
+            .read_to_string(&mut input)
+            .expect("read exact-image helper stdin");
+        println!(
+            "ASUPERSYNC_EXACT_IMAGE_CHILD:{input}:env={}",
+            std::env::vars_os().count()
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn exact_image_test_command() -> ExactImageCommand {
+        let executable = std::env::current_exe().expect("resolve current test executable");
+        let mut command = ExactImageCommand::new(executable);
+        command
+            .args([
+                "--exact",
+                "process::tests::exact_image_child_helper",
+                "--nocapture",
+            ])
+            .env("ASUPERSYNC_EXACT_IMAGE_CHILD", "1");
+        command
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn exact_image_executes_absolute_native_binary_with_exact_environment() {
+        let mut child = exact_image_test_command()
+            .spawn()
+            .expect("spawn exact native test image");
+        assert_eq!(
+            child.mechanism(),
+            ExactImageSpawnMechanism::PosixSpawnAbsoluteProcessGroup
+        );
+        assert_eq!(
+            child.mechanism().identity(),
+            "posix_spawn.absolute_path.new_process_group"
+        );
+        assert_eq!(EXACT_IMAGE_SPAWN_POLICY_VERSION, 1);
+
+        let mut stdin = child.take_stdin().expect("exact-image stdin");
+        stdin
+            .write_all(b"ordered-input")
+            .expect("write exact-image stdin");
+        drop(stdin);
+        let mut stdout = child.take_stdout().expect("exact-image stdout");
+        let mut stderr = child.take_stderr().expect("exact-image stderr");
+        let status = child.wait().expect("wait exact native test image");
+        let mut stdout_bytes = Vec::new();
+        let mut stderr_bytes = Vec::new();
+        stdout
+            .read_to_end(&mut stdout_bytes)
+            .expect("read exact-image stdout");
+        stderr
+            .read_to_end(&mut stderr_bytes)
+            .expect("read exact-image stderr");
+
+        assert!(status.success(), "child failed: {stderr_bytes:?}");
+        let stdout = String::from_utf8(stdout_bytes).expect("UTF-8 helper stdout");
+        assert!(
+            stdout.contains("ASUPERSYNC_EXACT_IMAGE_CHILD:ordered-input:env=1"),
+            "unexpected exact-image stdout: {stdout:?}"
+        );
+    }
+
+    #[test]
+    fn exact_image_refuses_relative_program_before_spawn() {
+        let error = ExactImageCommand::new("relative-program")
+            .spawn()
+            .expect_err("relative exact-image path must be refused");
+        assert!(
+            matches!(error, ProcessError::InvalidConfiguration(_)),
+            "unexpected refusal: {error}"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn exact_image_never_interprets_executable_text_without_shebang() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/process/executable_text_no_shebang");
+        let command = ExactImageCommand::new(fixture);
+        match command.spawn() {
+            Err(ProcessError::Io(error)) => {
+                assert_eq!(
+                    error.raw_os_error(),
+                    Some(libc::ENOEXEC),
+                    "unexpected direct-spawn error: {error}"
+                );
+            }
+            Err(other) => assert!(false, "unexpected direct-spawn refusal: {other}"),
+            Ok(mut child) => {
+                drop(child.take_stdin());
+                let mut stdout = child.take_stdout().expect("fixture stdout");
+                let mut stderr = child.take_stderr().expect("fixture stderr");
+                let status = child.wait().expect("wait failed fixture spawn");
+                let mut output = Vec::new();
+                stdout
+                    .read_to_end(&mut output)
+                    .expect("read fixture stdout");
+                stderr
+                    .read_to_end(&mut output)
+                    .expect("read fixture stderr");
+                assert!(
+                    !output
+                        .windows(b"ASUPERSYNC_INTERPRETER_FALLBACK_RAN".len())
+                        .any(|window| window == b"ASUPERSYNC_INTERPRETER_FALLBACK_RAN"),
+                    "an interpreter executed the no-shebang fixture"
+                );
+                assert!(!status.success(), "non-native text unexpectedly executed");
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn exact_image_child_is_its_process_group_leader_and_tree_kill_reaps_it() {
+        let mut child = exact_image_test_command()
+            .spawn()
+            .expect("spawn exact-image group test");
+        let pid =
+            nix::unistd::Pid::from_raw(i32::try_from(child.id()).expect("child pid must fit i32"));
+        assert_eq!(
+            nix::unistd::getpgid(Some(pid)).expect("read exact-image process group"),
+            pid
+        );
+        child
+            .kill_process_tree()
+            .expect("kill exact-image process tree");
+        let status = child.wait().expect("reap exact-image group leader");
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
+    }
+
     #[test]
     fn test_command_echo() {
         init_test("test_command_echo");
@@ -3850,5 +5116,115 @@ mod tests {
         }
 
         crate::test_complete!("test_exit_code_preservation");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_exact_image_tests {
+    use super::*;
+    use std::io::Write as _;
+
+    #[test]
+    fn exact_image_windows_quotes_crt_arguments() {
+        fn quoted(argument: &str) -> String {
+            let mut encoded = Vec::new();
+            push_windows_quoted_argument(
+                &argument.encode_utf16().collect::<Vec<_>>(),
+                &mut encoded,
+            );
+            String::from_utf16(&encoded).expect("quoted argument must remain UTF-16")
+        }
+
+        assert_eq!(quoted("plain"), "plain");
+        assert_eq!(quoted("two words"), r#""two words""#);
+        assert_eq!(quoted(r#"a"b"#), r#""a\"b""#);
+        assert_eq!(quoted(r"C:\path with space\"), r#""C:\path with space\\""#);
+    }
+
+    #[test]
+    fn exact_image_windows_environment_keys_are_case_insensitive() {
+        let mut command = ExactImageCommand::new(r"C:\private\ffmpeg.exe");
+        command.env("Path", "first").env("PATH", "second");
+
+        assert_eq!(command.env.len(), 1);
+        assert_eq!(
+            command.env.values().next().map(OsString::as_os_str),
+            Some(OsStr::new("second"))
+        );
+    }
+
+    #[test]
+    fn exact_image_windows_child_helper() {
+        if std::env::var_os("ASUPERSYNC_EXACT_IMAGE_WINDOWS_CHILD").as_deref()
+            != Some(OsStr::new("1"))
+        {
+            return;
+        }
+
+        let mut input = String::new();
+        std::io::stdin()
+            .read_to_string(&mut input)
+            .expect("read Windows exact-image helper stdin");
+        println!(
+            "ASUPERSYNC_EXACT_IMAGE_WINDOWS_CHILD:{input}:env={}",
+            std::env::vars_os().count()
+        );
+    }
+
+    #[test]
+    fn exact_image_windows_uses_explicit_application_and_atomic_job() {
+        let executable = std::env::current_exe().expect("resolve Windows test image");
+        let mut command = ExactImageCommand::new(executable);
+        command
+            .args([
+                "--exact",
+                "process::windows_exact_image_tests::exact_image_windows_child_helper",
+                "--nocapture",
+            ])
+            .env("ASUPERSYNC_EXACT_IMAGE_WINDOWS_CHILD", "1");
+        let mut child = command.spawn().expect("spawn Windows exact image");
+        assert_eq!(
+            child.mechanism(),
+            ExactImageSpawnMechanism::WindowsCreateProcessJobList
+        );
+        assert_eq!(
+            child.mechanism().identity(),
+            "create_process_w.explicit_application.atomic_job_list"
+        );
+
+        let mut stdin = child.take_stdin().expect("Windows exact-image stdin");
+        stdin
+            .write_all(b"ordered-input")
+            .expect("write Windows exact-image stdin");
+        drop(stdin);
+        let mut stdout = child.take_stdout().expect("Windows exact-image stdout");
+        let mut stderr = child.take_stderr().expect("Windows exact-image stderr");
+        let status = child.wait().expect("wait Windows exact image");
+        let mut stdout_bytes = Vec::new();
+        let mut stderr_bytes = Vec::new();
+        stdout
+            .read_to_end(&mut stdout_bytes)
+            .expect("read Windows exact-image stdout");
+        stderr
+            .read_to_end(&mut stderr_bytes)
+            .expect("read Windows exact-image stderr");
+
+        assert!(status.success(), "child failed: {stderr_bytes:?}");
+        let stdout = String::from_utf8(stdout_bytes).expect("UTF-8 helper stdout");
+        assert!(
+            stdout.contains("ASUPERSYNC_EXACT_IMAGE_WINDOWS_CHILD:ordered-input:env=1"),
+            "unexpected Windows exact-image stdout: {stdout:?}"
+        );
+    }
+
+    #[test]
+    fn exact_image_windows_refuses_command_scripts_before_resource_creation() {
+        let error = ExactImageCommand::new(r"C:\private\ffmpeg.cmd")
+            .spawn()
+            .expect_err("command scripts must be refused");
+        assert!(
+            matches!(error, ProcessError::InvalidConfiguration(_)),
+            "unexpected refusal: {error}"
+        );
     }
 }

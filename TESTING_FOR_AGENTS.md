@@ -135,6 +135,33 @@ Use this for cancellation, virtual-time, region, and obligation behavior. Prefer
 `run_test_with_cx` when the tested API expects a `Cx`; use direct `LabRuntime`
 only when you need scheduler or trace control.
 
+The runtime helpers preserve any dispatcher supplied by the caller. Otherwise
+they use a thread-scoped subscriber for runtime construction and future polling,
+honoring a wholly valid `RUST_LOG` and falling back to
+`warn,asupersync=debug`. They do not mutate the process-global tracing
+subscriber or install a `log` bridge. Do not precede them with
+`init_test_logging`.
+
+Use the named OFF authority when test-helper tracing must remain disabled
+across runtime construction, polling, and cleanup. The scope is synchronous,
+so drive the future inside it rather than returning a future from the closure:
+
+```rust
+asupersync::test_utils::with_test_logging_disabled(|| {
+    asupersync::test_utils::run_test_with_cx(|cx| async move {
+        exercise_quiet_path(&cx).await;
+    });
+});
+```
+
+A raw `tracing::subscriber::NoSubscriber` is the ambient-absence sentinel and
+is not supported as disable intent; helpers will install the safe default over
+it. A nested `with_test_logging(&config, ...)` can explicitly re-enable logging
+and restores OFF afterward. These policies are thread-local, so OS workers need
+an explicitly cloned and entered `tracing::Dispatch`. See
+[`TESTING.md`](./TESTING.md#logging-standards) for nested, propagation, and
+fresh-process global-bridge examples.
+
 ```rust
 #[test]
 fn scenario_id_cancel_path_is_clean() {
@@ -158,9 +185,15 @@ rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target
 ## Recipe 3: Lab Test Matrix
 
 Use `#[asupersync::lab_test]` for deterministic lab tests that fit one of the
-two blessed signatures. The macro initializes logging, creates the lab runtime
-for each seed, drives the lab to quiescence, and reports the failing seed plus a
-rerun command.
+two blessed signatures. The macro creates the lab runtime for each seed, drives
+the lab to quiescence, and reports the failing seed plus a rerun command.
+
+The macro still enters the transitional legacy global logging initializer. That
+initializer now honors a valid `RUST_LOG`, otherwise uses
+`warn,asupersync=debug`, and never installs `LogTracer`; however, global
+installation remains process-wide and first-wins. Use the direct runtime
+helpers when a test needs per-thread filter or subscriber isolation until the
+macro migration is complete.
 
 ```rust
 use asupersync::{lab::LabRuntime, lab_test};

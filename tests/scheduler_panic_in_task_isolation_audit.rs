@@ -180,11 +180,18 @@ fn catch_unwind_err_arm_marks_task_outcome_panicked() {
     // would never quiesce.
     let source = read("src/runtime/scheduler/three_lane.rs");
 
+    // E1.2 subsystem 3b (br-asupersync-sched-hot-path-perf-bt4y5f.2.2): the
+    // Err arm builds `panic_outcome` and routes it into the ordered
+    // completion seam as `PolledCompletion::Panicked`; the shared apply arm
+    // performs the terminal transition (`record.complete(outcome)` guarded
+    // by `is_terminal`).
     assert!(
         source.contains("let panic_outcome = crate::types::Outcome::Panicked(panic_payload);")
-            && source.contains("record.complete(panic_outcome);"),
+            && source.contains("PolledCompletion::Panicked(panic_outcome),")
+            && source.contains("record.complete(outcome);"),
         "REGRESSION: panic-in-task Err arm no longer marks \
-         the task as Outcome::Panicked. The task stays in \
+         the task as Outcome::Panicked (via the ordered \
+         completion seam). The task stays in \
          non-terminal state — region.quiesce() loops forever \
          waiting for it. Parent JoinHandle never resolves.",
     );
@@ -217,12 +224,33 @@ fn catch_unwind_err_arm_wakes_dependents_so_parent_observes_panic() {
     // answer (c) "worst".
     let source = read("src/runtime/scheduler/three_lane.rs");
 
-    // The Err arm contains the wake_dependents call.
+    // E1.2 subsystem 3b (br-asupersync-sched-hot-path-perf-bt4y5f.2.2): the
+    // Err arm delegates to the single ordered completion seam
+    // (`complete_polled_task_ordered`), where waiter gathering and the
+    // wake_dependents call now live for both the external-table arm and the
+    // unified fallback.
     let body = panic_err_arm(&source);
+    assert!(
+        body.contains("self.complete_polled_task_ordered(")
+            && body.contains("PolledCompletion::Panicked(panic_outcome),")
+            && body.contains("artifacts.dispatch_post_lock(self);"),
+        "REGRESSION: panic-in-task Err arm no longer routes through the \
+         ordered completion seam. The parent's JoinHandle awaiter never \
+         re-enters the dispatch loop — silent swallow of the \
+         panic. Matches operator answer (c) 'worst'.",
+    );
+
+    let seam_pos = source
+        .find("fn complete_polled_task_ordered(")
+        .expect("ordered completion seam");
+    let seam_end = source[seam_pos..]
+        .find("fn complete_task_after_unwind_ordered")
+        .map_or(source.len(), |offset| seam_pos + offset);
+    let seam = &source[seam_pos..seam_end];
 
     assert!(
-        body.contains("self.wake_dependents_locked(&state, waiters);"),
-        "REGRESSION: panic-in-task Err arm no longer wakes \
+        seam.contains("self.wake_dependents_locked(&state, waiters);"),
+        "REGRESSION: the ordered completion seam no longer wakes \
          dependents. The parent's JoinHandle awaiter never \
          re-enters the dispatch loop — silent swallow of the \
          panic. Matches operator answer (c) 'worst'.",
@@ -230,9 +258,9 @@ fn catch_unwind_err_arm_wakes_dependents_so_parent_observes_panic() {
 
     // The waiters set is gathered via task_completed.
     assert!(
-        body.contains("let (waiters, completion_observer)")
-            && body.contains("state.task_completed(task_id).into_parts();"),
-        "REGRESSION: panic-in-task Err arm no longer gathers \
+        seam.contains("let (waiters, completion_observer)")
+            && seam.contains("state.task_completed(task_id).into_parts();"),
+        "REGRESSION: the ordered completion seam no longer gathers \
          waiters and the owned completion observer via task_completed. The wake_dependents call \
          has nothing to wake — equivalent silent-swallow.",
     );
@@ -318,14 +346,17 @@ fn task_execution_guard_fires_on_panic_unwind_as_safety_net() {
          and stranding the region in non-quiescent state.",
     );
 
-    // The guard must still mark the task as Panicked under
-    // the safety-net path.
+    // The guard must still mark the task as Panicked under the safety-net
+    // path. E1.2 subsystem 3b: the guard drop routes through the
+    // unwind-ordered completion seam, which synthesizes the Panicked
+    // outcome and applies it via the shared apply arm.
     assert!(
-        source.contains("record.complete(crate::types::Outcome::Panicked("),
+        source.contains(".complete_task_after_unwind_ordered(self.task_id);")
+            && source.contains("\"task panicked during scheduler bookkeeping\""),
         "REGRESSION: TaskExecutionGuard safety-net no longer \
-         marks the task as Outcome::Panicked. Even if the \
-         guard fires, the task wouldn't transition to a \
-         terminal state.",
+         marks the task as Outcome::Panicked (via the unwind-ordered \
+         completion seam). Even if the guard fires, the task wouldn't \
+         transition to a terminal state.",
     );
 }
 

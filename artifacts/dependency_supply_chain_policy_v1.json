@@ -1,0 +1,243 @@
+{
+  "schema_version": 1,
+  "artifact_id": "dependency-supply-chain-policy-v1",
+  "bead_id": "asupersync-mnotoo.2",
+  "capability_id": "CAP-VERIFICATION-PROFILES",
+  "policy_as_of_date_utc": "2026-07-25",
+  "decision": "ENFORCE_ROOT_AND_FAIL_CLOSED_ON_EXCLUDED_FUZZ_DRIFT",
+  "tools": {
+    "cargo_deny": {
+      "crate": "cargo-deny",
+      "version": "0.19.4",
+      "version_output": "cargo-deny 0.19.4",
+      "install_command": "cargo install --locked --version 0.19.4 cargo-deny"
+    },
+    "cargo_audit": {
+      "crate": "cargo-audit",
+      "version": "0.22.2",
+      "version_output": "cargo-audit 0.22.2",
+      "install_command": "cargo install --locked --version 0.22.2 cargo-audit"
+    },
+    "package_manager_policy": "Cargo only; no second package manager or unpinned action-provided binary is an admitted installation path."
+  },
+  "advisory_database_policy": {
+    "url": "https://github.com/RustSec/advisory-db",
+    "maximum_age_seconds": 604800,
+    "update_cadence": "Every direct-main and CI audit attempt fetches before evaluation; scheduled operators refresh at least daily.",
+    "offline_policy": "Offline evidence is admissible only when the exact revision is recorded and its commit age is at most seven days.",
+    "missing_or_stale_outcome": "BLOCKED_EXTERNAL",
+    "required_receipt_fields": [
+      "url",
+      "revision",
+      "commit_timestamp_utc",
+      "age_seconds",
+      "maximum_age_seconds",
+      "fetched",
+      "fresh"
+    ],
+    "observed_setup_revision": "29638ff054fdbb83d2844240f7ef7e576cb52629",
+    "observed_setup_commit_timestamp": "2026-07-25T17:33:50+02:00",
+    "observation_scope": "Bootstrap evidence only. Each citeable run must record its own current revision and freshness."
+  },
+  "root_workspace": {
+    "manifest_path": "Cargo.toml",
+    "lockfile_path": "Cargo.lock",
+    "manifest_sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
+    "lockfile_sha256": "9fa12e8af1e6b15a3070d88d62b2b81b8ba49c0e9d8592c1d1682f1cd72a4461",
+    "manifest_line_count": 991,
+    "lockfile_line_count": 4664,
+    "coverage": [
+      "normal",
+      "build",
+      "dev",
+      "proc-macro",
+      "all workspace members",
+      "all configured features",
+      "declared Apple, Linux, Windows, and wasm target filters"
+    ],
+    "cargo_deny_status": "pass",
+    "cargo_audit_status": "pass",
+    "observed_dependency_count": 469
+  },
+  "excluded_fuzz_workspace": {
+    "manifest_path": "fuzz/Cargo.toml",
+    "lockfile_path": "fuzz/Cargo.lock",
+    "manifest_sha256": "1a90bcc6869fcca866b6572f6c571b42dcdbcea43960211901ed21bdad83f21f",
+    "lockfile_sha256": "d91db6afd228ec60aa57d5782cbe5ae3bf7170f5e2c37dd15280e7b476e95271",
+    "manifest_line_count": 6226,
+    "lockfile_line_count": 3731,
+    "cargo_deny_status": "blocked_stale_lockfile",
+    "cargo_deny_blocker": "cargo metadata --locked requires updating fuzz/Cargo.lock; a dry run would relock 165 packages, which is outside this policy-only bead.",
+    "cargo_audit_status": "fail_known_advisories",
+    "observed_dependency_count": 372,
+    "observed_advisories": [
+      {
+        "id": "RUSTSEC-2026-0204",
+        "package": "crossbeam-epoch",
+        "resolved_version": "0.9.18",
+        "patched_version_requirement": ">=0.9.20",
+        "disposition": "block_fuzz_green_until_lock_refresh"
+      },
+      {
+        "id": "RUSTSEC-2026-0190",
+        "package": "anyhow",
+        "resolved_version": "1.0.102",
+        "patched_version_requirement": ">=1.0.103",
+        "disposition": "block_fuzz_green_until_lock_refresh"
+      }
+    ],
+    "overall_interpretation": "The root workspace lane may pass, but the excluded-fuzz row remains explicitly non-green and cannot be cited as fuzz graph health."
+  },
+  "advisory_exceptions": [
+    {
+      "id": "RUSTSEC-2025-0134",
+      "package": "rustls-pemfile",
+      "resolved_version": "2.2.0",
+      "classification": "unmaintained",
+      "scope": "root workspace direct dependency",
+      "reason": "The current TLS PEM loading surface still declares the thin rustls-pemfile wrapper; there is no patched release.",
+      "remediation": "Migrate callers to rustls-pki-types PemObject and remove the direct edge.",
+      "owner": "asupersync-mnotoo.4.3",
+      "expires_date_utc": "2026-09-01",
+      "renewal_policy": "No automatic renewal. Expiry is a hard policy failure unless an owner records a new reason, evidence, and date."
+    }
+  ],
+  "license_policy": {
+    "include_dev": true,
+    "confidence_threshold": 0.93,
+    "allowed_spdx_identifiers": [
+      "0BSD",
+      "Apache-2.0",
+      "Apache-2.0 WITH LLVM-exception",
+      "BSD-1-Clause",
+      "BSD-2-Clause",
+      "BSD-3-Clause",
+      "BSL-1.0",
+      "CDLA-Permissive-2.0",
+      "ISC",
+      "LGPL-2.1-or-later",
+      "LicenseRef-MIT-OpenAI-Anthropic-Rider",
+      "MIT",
+      "Unicode-3.0",
+      "Unlicense",
+      "Zlib"
+    ],
+    "exception_policy": "Crate-specific license exceptions require package, version range, reason, owner, and expiry. There are no crate-specific license exceptions at this revision."
+  },
+  "source_policy": {
+    "allowed_registries": [
+      "https://github.com/rust-lang/crates.io-index"
+    ],
+    "unknown_registry": "deny",
+    "unknown_git": "deny",
+    "required_git_spec": "rev",
+    "allowed_git": [],
+    "observed_root_sources": [
+      "registry+https://github.com/rust-lang/crates.io-index",
+      "workspace path"
+    ],
+    "observed_fuzz_sources": [
+      "registry+https://github.com/rust-lang/crates.io-index",
+      "workspace path"
+    ]
+  },
+  "duplicate_version_ratchets": {
+    "root": {
+      "policy": "Current duplicate versions may disappear but no new duplicate family or version may enter without updating this reviewed baseline.",
+      "allowed": [
+        { "name": "base64", "versions": ["0.22.1", "0.23.0"] },
+        { "name": "bitflags", "versions": ["1.3.2", "2.13.1"] },
+        { "name": "block-buffer", "versions": ["0.10.4", "0.12.1"] },
+        { "name": "const-oid", "versions": ["0.10.2", "0.9.6"] },
+        { "name": "cpufeatures", "versions": ["0.2.17", "0.3.0"] },
+        { "name": "crypto-common", "versions": ["0.1.7", "0.2.2"] },
+        { "name": "digest", "versions": ["0.10.7", "0.11.3"] },
+        { "name": "getrandom", "versions": ["0.2.17", "0.3.4", "0.4.3"] },
+        { "name": "hashbrown", "versions": ["0.16.1", "0.17.1"] },
+        { "name": "hashlink", "versions": ["0.11.1", "0.12.1"] },
+        { "name": "itertools", "versions": ["0.13.0", "0.14.0"] },
+        { "name": "r-efi", "versions": ["5.3.0", "6.0.0"] },
+        { "name": "rand", "versions": ["0.8.7", "0.9.5"] },
+        { "name": "rand_chacha", "versions": ["0.3.1", "0.9.0"] },
+        { "name": "rand_core", "versions": ["0.10.1", "0.6.4", "0.9.5"] },
+        { "name": "sha2", "versions": ["0.10.9", "0.11.0"] },
+        { "name": "syn", "versions": ["2.0.119", "3.0.3"] },
+        { "name": "wasi", "versions": ["0.11.1+wasi-snapshot-preview1", "0.14.7+wasi-0.2.4"] },
+        { "name": "windows-sys", "versions": ["0.52.0", "0.61.2"] }
+      ]
+    },
+    "fuzz": {
+      "policy": "Snapshot-only while the fuzz lock is stale. It is non-green and must be regenerated and re-reviewed before promotion.",
+      "allowed": [
+        { "name": "block-buffer", "versions": ["0.10.4", "0.12.0"] },
+        { "name": "const-oid", "versions": ["0.10.2", "0.9.6"] },
+        { "name": "core-foundation", "versions": ["0.10.1", "0.9.4"] },
+        { "name": "cpufeatures", "versions": ["0.2.17", "0.3.0"] },
+        { "name": "crypto-common", "versions": ["0.1.7", "0.2.1"] },
+        { "name": "digest", "versions": ["0.10.7", "0.11.3"] },
+        { "name": "foldhash", "versions": ["0.1.5", "0.2.0"] },
+        { "name": "getrandom", "versions": ["0.2.17", "0.3.4", "0.4.2"] },
+        { "name": "hashbrown", "versions": ["0.15.5", "0.16.1", "0.17.1"] },
+        { "name": "hmac", "versions": ["0.12.1", "0.13.0"] },
+        { "name": "r-efi", "versions": ["5.3.0", "6.0.0"] },
+        { "name": "rand", "versions": ["0.8.6", "0.9.4"] },
+        { "name": "rand_chacha", "versions": ["0.3.1", "0.9.0"] },
+        { "name": "rand_core", "versions": ["0.6.4", "0.9.5"] },
+        { "name": "redox_syscall", "versions": ["0.5.18", "0.8.1"] },
+        { "name": "sha2", "versions": ["0.10.9", "0.11.0"] },
+        { "name": "windows-core", "versions": ["0.57.0", "0.62.2"] },
+        { "name": "windows-implement", "versions": ["0.57.0", "0.60.2"] },
+        { "name": "windows-interface", "versions": ["0.57.0", "0.59.3"] },
+        { "name": "windows-result", "versions": ["0.1.2", "0.4.1"] },
+        { "name": "windows-sys", "versions": ["0.52.0", "0.61.2"] },
+        { "name": "wit-bindgen", "versions": ["0.51.0", "0.57.1"] }
+      ]
+    }
+  },
+  "negative_fixture_contract": [
+    {
+      "fixture_id": "advisory-ignore-removed",
+      "policy_class": "advisories",
+      "mutation": "Remove RUSTSEC-2025-0134 from a temporary deny.toml copy.",
+      "expected": "cargo-deny exits nonzero and names RUSTSEC-2025-0134."
+    },
+    {
+      "fixture_id": "license-isc-removed",
+      "policy_class": "licenses",
+      "mutation": "Remove ISC from a temporary deny.toml copy.",
+      "expected": "cargo-deny exits nonzero and rejects untrusted 0.9.0."
+    },
+    {
+      "fixture_id": "duplicate-version-added",
+      "policy_class": "duplicate-ratchet",
+      "mutation": "Add base64 99.0.0 to a temporary current-duplicates JSON document.",
+      "expected": "The ratchet comparator reports base64 as an unreviewed expansion."
+    },
+    {
+      "fixture_id": "unknown-git-source",
+      "policy_class": "sources",
+      "mutation": "Change one package source in a temporary cargo-metadata document to an unapproved git revision.",
+      "expected": "cargo-deny exits nonzero with unknown-git."
+    }
+  ],
+  "commands": {
+    "install": "scripts/ci/audit_dependencies.sh install-tools",
+    "direct_main": "scripts/ci/audit_dependencies.sh run",
+    "negative_fixtures": "scripts/ci/audit_dependencies.sh self-test",
+    "focused_contract": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_supply_chain_policy CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test dependency_supply_chain_policy_contract -- --nocapture"
+  },
+  "outcome_taxonomy": {
+    "pass": "Root workspace tools, database, config, advisory scan, license/source policy, and duplicate ratchet all pass.",
+    "fail": "A policy violation is observed.",
+    "blocked": "A required tool, exact version, database, freshness field, lock consistency, or executable evidence surface is unavailable.",
+    "unsupported": "The requested graph cannot be represented by the pinned tool; this is non-green."
+  },
+  "no_claim_boundaries": [
+    "A root PASS does not prove excluded fuzz green; the current fuzz row is explicitly blocked and vulnerable.",
+    "A fresh advisory database and zero reported vulnerability are not proof that no undisclosed vulnerability exists.",
+    "License metadata checks are not legal advice and do not exhaustively inspect every source file.",
+    "A duplicate ratchet prevents expansion; it does not prove the retained duplicates are desirable or cost-free.",
+    "Source allowlisting authenticates configured origins, not publisher identity or crate correctness.",
+    "This policy does not prove release readiness, broad workspace health, runtime correctness, performance, or RCH fleet availability."
+  ]
+}

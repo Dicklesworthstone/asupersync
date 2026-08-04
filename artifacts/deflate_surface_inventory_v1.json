@@ -1,0 +1,786 @@
+{
+  "schema_version": 1,
+  "artifact_id": "deflate-surface-inventory-v1",
+  "bead_id": "asupersync-0h6myr.5.1",
+  "capability_id": "CAP-HTTP-COMPRESSION",
+  "authority": "INVENTORY_EVIDENCE_ONLY",
+  "captured_date_utc": "2026-07-27",
+  "source_commit": "bad3042c5c59c92ae693cac6025eedebe2565caf",
+  "production_change_made": false,
+  "decision": {
+    "status": "KEEP",
+    "disposition": "KEEP_INCUMBENT",
+    "dependency": "flate2",
+    "dependency_exit_allowed": false,
+    "owned_replacement_authorized": false,
+    "implementation_followups_authorized": [],
+    "reason": "The incumbent is a public type dependency and a byte-format dependency across HTTP, gRPC, two persisted ATP envelopes, manifest size metadata, and OTLP; a public but unwired ATP transform also exposes it. The current HTTP deflate token emits raw RFC 1951 rather than an RFC 1950 zlib envelope, production payload distributions are unavailable, cross-implementation service evidence is blocked, persisted decoders have unresolved allocation and envelope-boundary gaps, and the browser target cell was unavailable. Replacing the backend before those gaps close would guess at observable compatibility."
+  },
+  "dependency_resolution": {
+    "manifest_edges": [
+      {
+        "edge_id": "normal:flate2",
+        "table": "dependencies",
+        "requirement": "1.1",
+        "optional": true,
+        "activated_by": [
+          "compression"
+        ]
+      },
+      {
+        "edge_id": "dev:flate2",
+        "table": "dev-dependencies",
+        "requirement": "1.1",
+        "optional": false,
+        "activated_by": [
+          "test and harness targets"
+        ]
+      }
+    ],
+    "lock_package": {
+      "name": "flate2",
+      "version": "1.1.9",
+      "checksum": "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c",
+      "direct_dependencies": [
+        "crc32fast 1.5.0",
+        "miniz_oxide 0.8.9"
+      ]
+    },
+    "selected_backend": {
+      "feature": "rust_backend",
+      "implementation": "miniz_oxide 0.8.9",
+      "default_feature_source": "flate2 1.1.9",
+      "system_library": null,
+      "native_build_script_active": false,
+      "host_specific_backend_selection": false
+    },
+    "compression_profile_marginal_packages": [
+      "flate2 1.1.9",
+      "miniz_oxide 0.8.9",
+      "adler2 2.0.1",
+      "simd-adler32 0.3.10"
+    ],
+    "marginal_graph_boundary": "crc32fast is a direct runtime dependency and is not removable with flate2. miniz_oxide is also reachable through the optional backtrace package in the lockfile, so this list is a compression-profile delta, not a whole-workspace package-removal claim.",
+    "tree_command_status": {
+      "status": "NO_CLAIM_RCH_NON_COMPILATION_REFUSAL",
+      "error_code": "RCH-E301",
+      "reason": "The remote-only executor refused cargo tree as a non-compilation command, and local Cargo fallback is prohibited."
+    }
+  },
+  "profile_matrix": [
+    {
+      "cell_id": "DEFAULT-X86_64-LINUX",
+      "target": "x86_64-unknown-linux-gnu",
+      "requested_features": [
+        "default"
+      ],
+      "flate2_normal_edge_active": false,
+      "dev_edge_in_scope": false,
+      "backend": null,
+      "status": "PASS",
+      "worker": "ovh-b",
+      "exit_code": 0,
+      "remote_command_ms": 112641,
+      "interpretation": "A clean default package check passed without activating the optional production edge."
+    },
+    {
+      "cell_id": "COMPRESSION-ALL-TARGETS-X86_64-LINUX",
+      "target": "x86_64-unknown-linux-gnu",
+      "requested_features": [
+        "compression"
+      ],
+      "flate2_normal_edge_active": true,
+      "dev_edge_in_scope": true,
+      "backend": "rust_backend/miniz_oxide",
+      "status": "PASS",
+      "worker": "ovh-a",
+      "exit_code": 0,
+      "remote_command_ms": 475918,
+      "interpretation": "The clean all-target frontier compiled flate2 1.1.9 and miniz_oxide 0.8.9 with no C backend."
+    },
+    {
+      "cell_id": "COMPRESSION-WASM32-UNKNOWN-UNKNOWN",
+      "target": "wasm32-unknown-unknown",
+      "requested_features": [
+        "compression"
+      ],
+      "flate2_normal_edge_active": null,
+      "dev_edge_in_scope": false,
+      "backend": null,
+      "status": "UNSUPPORTED_WORKER_TARGET_MISSING",
+      "worker": "hz1",
+      "exit_code": 101,
+      "remote_command_ms": 3716,
+      "interpretation": "The worker did not have the Rust target installed; this is not codec compile evidence."
+    },
+    {
+      "cell_id": "COMPRESSION-AARCH64-APPLE-DARWIN",
+      "target": "aarch64-apple-darwin",
+      "requested_features": [
+        "compression"
+      ],
+      "flate2_normal_edge_active": null,
+      "dev_edge_in_scope": false,
+      "backend": null,
+      "status": "NO_CLAIM_NOT_RUN",
+      "worker": null,
+      "exit_code": null,
+      "remote_command_ms": null,
+      "interpretation": "No admitted Apple target host was available."
+    },
+    {
+      "cell_id": "COMPRESSION-X86_64-WINDOWS-MSVC",
+      "target": "x86_64-pc-windows-msvc",
+      "requested_features": [
+        "compression"
+      ],
+      "flate2_normal_edge_active": null,
+      "dev_edge_in_scope": false,
+      "backend": null,
+      "status": "NO_CLAIM_NOT_RUN",
+      "worker": null,
+      "exit_code": null,
+      "remote_command_ms": null,
+      "interpretation": "No admitted Windows target host was available."
+    }
+  ],
+  "surface_inventory": [
+    {
+      "surface_id": "DEFLATE-HTTP-CODECS",
+      "status": "LIVE_PRODUCTION",
+      "source_path": "src/http/compress.rs",
+      "feature_gate": "compression",
+      "formats": [
+        "gzip RFC 1952",
+        "raw DEFLATE RFC 1951"
+      ],
+      "apis": [
+        "GzipCompressor",
+        "GzipDecompressor",
+        "DeflateCompressor",
+        "DeflateDecompressor",
+        "make_compressor",
+        "make_compressor_with_output_limit"
+      ],
+      "streaming": "State persists across repeated chunk calls. Encoder finish finalizes once; decoder calls flush per input chunk and finish finalizes the stream.",
+      "limits": "Compressed output accepts Option<usize>; middleware defaults to 16 MiB. Decompressed output accepts Option<usize>. Limits are enforced before LimitedWriter grows.",
+      "public_dependency_leak": "GzipCompressor::with_level, GzipCompressor::with_level_and_output_limit, DeflateCompressor::with_level, and DeflateCompressor::with_level_and_output_limit accept flate2::Compression.",
+      "downstream_consumers": [
+        "src/web/compress.rs",
+        "src/web/middleware.rs"
+      ]
+    },
+    {
+      "surface_id": "DEFLATE-GRPC-FRAMES",
+      "status": "LIVE_PRODUCTION",
+      "source_path": "src/grpc/codec.rs",
+      "feature_gate": "compression",
+      "formats": [
+        "one RFC 1952 gzip member per compressed gRPC message"
+      ],
+      "apis": [
+        "gzip_frame_compress",
+        "gzip_frame_decompress",
+        "FramedCodec::with_gzip_frame_codec"
+      ],
+      "streaming": "One-shot per message; codec state is not shared across messages.",
+      "limits": "Both the on-wire frame and inflated message are bounded by the configured decode limit; the default is 4 MiB.",
+      "public_dependency_leak": null,
+      "downstream_consumers": [
+        "gRPC client/server FramedCodec users",
+        "tests/grpc_codec_gzip_prost_conformance.rs"
+      ]
+    },
+    {
+      "surface_id": "DEFLATE-ATP-TRANSPORT",
+      "status": "LIVE_PUBLIC_UNWIRED",
+      "source_path": "src/net/atp/transport_common/compression.rs",
+      "feature_gate": "compression",
+      "formats": [
+        "one RFC 1952 gzip member plus first-party size descriptor"
+      ],
+      "apis": [
+        "maybe_compress_pre_encode",
+        "decompress_pre_encoded",
+        "CompressionDescriptor",
+        "CompressionPolicy"
+      ],
+      "streaming": "One-shot object transform.",
+      "limits": "Default minimum input 1024 bytes, minimum saving 64 bytes and 500 basis points. Restore checks encoded size, declared original size, caller cap, actual produced size, and overflow.",
+      "public_dependency_leak": null,
+      "downstream_consumers": [
+        "tests/atp_transport_common_compression_contract.rs"
+      ],
+      "production_callsite_count": 0
+    },
+    {
+      "surface_id": "DEFLATE-ATP-CACHE-PERSISTENCE",
+      "status": "LIVE_PERSISTED_FORMAT",
+      "source_path": "src/atp/cache/storage.rs",
+      "feature_gate": "compression",
+      "formats": [
+        "ASUPCACHE\\u0000 version 1 codec 1 containing one RFC 1952 gzip member"
+      ],
+      "apis": [
+        "FileStorage::store",
+        "FileStorage::retrieve"
+      ],
+      "streaming": "One-shot file payload.",
+      "limits": "Only content above 1024 bytes is attempted; level 6; compressed bytes plus 60-byte envelope must be smaller. Envelope pins original length, encoded length, and SHA-256 plaintext digest. Decode currently trusts the declared original length for Vec capacity and has no caller cap.",
+      "public_dependency_leak": null,
+      "downstream_consumers": [
+        "ATP file cache users and existing cache files"
+      ]
+    },
+    {
+      "surface_id": "DEFLATE-ATP-MAILBOX-PERSISTENCE",
+      "status": "LIVE_PERSISTED_FORMAT",
+      "source_path": "src/atp/mailbox/storage.rs",
+      "feature_gate": "compression",
+      "formats": [
+        "ASUPMBX1 version 1 compressed flag containing one RFC 1952 gzip member"
+      ],
+      "apis": [
+        "MailboxStorage::store_transfer",
+        "MailboxStorage::retrieve_transfer"
+      ],
+      "streaming": "One-shot per storage chunk.",
+      "limits": "Default chunk size 1 MiB; content above 1024 bytes is attempted at level 6 and retained only when smaller. Decode checks declared original size against configured chunk size and verifies stored lengths and plaintext digest, but read_to_end can grow beyond the declared size before the final equality check.",
+      "public_dependency_leak": null,
+      "downstream_consumers": [
+        "ATP mailbox users and existing mailbox chunks"
+      ]
+    },
+    {
+      "surface_id": "DEFLATE-ATP-MANIFEST-METADATA",
+      "status": "LIVE_PRODUCTION_METADATA",
+      "source_path": "src/atp/manifest.rs",
+      "feature_gate": "compression",
+      "formats": [
+        "manifest CompressionMetadata for Gzip"
+      ],
+      "apis": [
+        "CompressionAlgorithm::Gzip",
+        "CompressionPolicy",
+        "CompressionMetadata"
+      ],
+      "streaming": "One-shot size calculation; compressed bytes are not persisted here.",
+      "limits": "Policy threshold and object-kind filter apply; configured level is capped at 9 for the size calculation.",
+      "public_dependency_leak": null,
+      "downstream_consumers": [
+        "ATP manifest producers and readers"
+      ]
+    },
+    {
+      "surface_id": "DEFLATE-OTLP-HTTP",
+      "status": "LIVE_PRODUCTION",
+      "source_path": "src/observability/otel.rs",
+      "feature_gate": "compression",
+      "formats": [
+        "one RFC 1952 gzip member per OTLP HTTP request"
+      ],
+      "apis": [
+        "OtlpHttpExporter::with_compression",
+        "OtlpLogsHttpExporter::with_compression"
+      ],
+      "streaming": "One-shot request body.",
+      "limits": "Compression defaults off. Requesting it without the feature returns an explicit error rather than downgrading.",
+      "public_dependency_leak": null,
+      "downstream_consumers": [
+        "OTLP metrics, traces, and logs exporters"
+      ]
+    },
+    {
+      "surface_id": "DEFLATE-METRICS-TEST-HARNESS",
+      "status": "TEST_ONLY",
+      "source_path": "src/observability/metrics.rs",
+      "feature_gate": "cfg(test)",
+      "formats": [
+        "one RFC 1952 gzip member over deterministic JSON"
+      ],
+      "apis": [
+        "test-only OtelMetricsExporter"
+      ],
+      "streaming": "One-shot captured request.",
+      "limits": "Fixture-only; not production transport evidence.",
+      "public_dependency_leak": null,
+      "downstream_consumers": [
+        "inline observability tests"
+      ]
+    },
+    {
+      "surface_id": "DEFLATE-ORPHANED-ATP-ENGINE",
+      "status": "EXCLUDED_ORPHANED_SOURCE",
+      "source_path": "src/net/atp/compress/mod.rs",
+      "secondary_source_path": "src/net/atp/compress/algorithms.rs",
+      "feature_gate": null,
+      "formats": [
+        "uncompiled gzip helpers"
+      ],
+      "apis": [
+        "CompressionEngine",
+        "GzipAdapter"
+      ],
+      "streaming": "One-shot source text only.",
+      "limits": "No module declaration reaches this directory; it is neither implementation nor coverage.",
+      "public_dependency_leak": null,
+      "downstream_consumers": []
+    },
+    {
+      "surface_id": "DEFLATE-DEV-COMPRESSED-FRAME-HARNESS",
+      "status": "NON_PRODUCTION_HARNESS",
+      "source_path": "fuzz/fuzz_targets/grpc_compressed_flag_mismatch.rs",
+      "feature_gate": "separate harness crate",
+      "formats": [
+        "gzip and raw DEFLATE"
+      ],
+      "apis": [
+        "reference producers and consumers"
+      ],
+      "streaming": "Harness-owned one-shot vectors.",
+      "limits": "Not production API, service interoperability, or performance evidence.",
+      "public_dependency_leak": null,
+      "downstream_consumers": []
+    },
+    {
+      "surface_id": "DEFLATE-WEBSOCKET-EXTENSION",
+      "status": "ADVERTISEMENT_ONLY_NO_CODEC",
+      "source_path": "src/net/websocket/handshake.rs",
+      "secondary_source_path": "src/net/websocket/server.rs",
+      "feature_gate": null,
+      "formats": [
+        "permessage-deflate extension token only"
+      ],
+      "apis": [
+        "WebSocketClientBuilder extension requests",
+        "WebSocketServerConfig accepted extensions"
+      ],
+      "streaming": "No encoder, decoder, context-takeover state, window-bit parser, or RFC 7692 tail handling exists.",
+      "limits": "No DEFLATE resource envelope exists because no transform is wired. RSV1 remains reserved in the frame codec by default.",
+      "public_dependency_leak": null,
+      "downstream_consumers": [
+        "WebSocket clients and servers that inspect negotiated extension strings"
+      ]
+    },
+    {
+      "surface_id": "DEFLATE-KAFKA-EXTERNAL-BACKEND",
+      "status": "EXTERNAL_BACKEND_NOT_FLATE2",
+      "source_path": "src/messaging/kafka.rs",
+      "feature_gate": "kafka",
+      "formats": [
+        "Kafka gzip record batches owned by librdkafka"
+      ],
+      "apis": [
+        "Compression::Gzip",
+        "Kafka producer compression.type"
+      ],
+      "streaming": "Owned by librdkafka rather than an asupersync codec.",
+      "limits": "No local member, flush, dictionary, or decoder semantics are exposed by the Rust implementation.",
+      "public_dependency_leak": null,
+      "downstream_consumers": [
+        "Kafka producers and consumers"
+      ]
+    }
+  ],
+  "format_scope": {
+    "gzip": {
+      "required": true,
+      "rfc": "RFC 1952",
+      "producer_members": "exactly one member per HTTP stream, gRPC message, ATP object/chunk, persisted payload, or OTLP request",
+      "decoder_scope": "HTTP explicitly rejects concatenated members. Other read-adapter callers are single-member consumers but do not all prove rejection of trailing or concatenated data.",
+      "header_customization": false,
+      "checksum_and_size_trailer": true,
+      "default_level": 6,
+      "default_header": "GzEncoder::new emits the locked flate2 default 10-byte header with no optional fields, MTIME 0 and OS 255."
+    },
+    "raw_deflate": {
+      "required": true,
+      "rfc": "RFC 1951",
+      "producer_scope": "HTTP Content-Encoding deflate and non-production reference harness",
+      "empty_stream_hex": "0300",
+      "compatibility_rule": "The shipped raw bytes are frozen for inventory purposes even though HTTP deflate is normally defined as a zlib-wrapped stream."
+    },
+    "zlib_wrapper": {
+      "required_by_current_bytes": false,
+      "rfc": "RFC 1950",
+      "direct_api_uses": 0,
+      "status": "ABSENT",
+      "compatibility_gap": "The ContentEncoding documentation says wrapped in zlib, but the implementation and vectors use raw DeflateEncoder and DeflateDecoder."
+    },
+    "preset_dictionary": {
+      "supported": false,
+      "direct_api_uses": 0,
+      "status": "ABSENT"
+    },
+    "flush_and_finish": {
+      "http_gzip_compress": "write chunks without forcing a sync flush; finish flushes and finalizes once",
+      "http_deflate_compress": "write chunks without forcing a sync flush; finish finalizes once",
+      "http_gzip_decompress": "write and flush each input chunk; finish validates and finalizes",
+      "http_deflate_decompress": "write and flush each input chunk; finish validates and finalizes",
+      "one_shot_callers": "write_all plus finish, or read until EOF"
+    },
+    "feature_off": {
+      "http": "encoding vocabulary and negotiation remain; factories return None for real codecs and identity remains available",
+      "atp_transport": "attempt returns FeatureDisabled",
+      "atp_cache": "configured compression above threshold returns an error",
+      "atp_mailbox": "stored compressed chunks cannot be decoded",
+      "manifest": "gzip size metadata is unavailable",
+      "otlp": "requesting compression returns an explicit error"
+    }
+  },
+  "payload_baseline": {
+    "production_telemetry": {
+      "status": "NO_CLAIM_NOT_CAPTURED",
+      "distributions": [],
+      "reason": "No checked artifact records real HTTP, gRPC, ATP, cache, mailbox, or OTLP payload histograms."
+    },
+    "source_fixture_distribution": {
+      "status": "FIXTURE_ONLY",
+      "minimum_plaintext_bytes": 0,
+      "maximum_plaintext_bytes": 16384,
+      "representative_cells": [
+        {
+          "surface": "HTTP gzip boundary matrix",
+          "plaintext_bytes": [
+            0,
+            16,
+            4096,
+            16384
+          ]
+        },
+        {
+          "surface": "HTTP streaming chunk widths",
+          "chunk_bytes": [
+            5,
+            7,
+            10
+          ]
+        },
+        {
+          "surface": "gRPC protobuf fixture payload fields",
+          "payload_bytes": [
+            0,
+            2,
+            256,
+            512,
+            1024,
+            4096
+          ]
+        },
+        {
+          "surface": "ATP transport fixtures",
+          "plaintext_bytes": [
+            5,
+            1280,
+            3840,
+            8192,
+            10752
+          ]
+        },
+        {
+          "surface": "ATP cache persisted fixture",
+          "plaintext_bytes": [
+            13,
+            1025,
+            7168
+          ]
+        },
+        {
+          "surface": "ATP manifest metadata fixture",
+          "plaintext_bytes": [
+            520
+          ]
+        }
+      ],
+      "interpretation": "These cells exercise boundaries and shapes but are not workload prevalence, throughput, latency, ratio, memory, or CPU evidence."
+    }
+  },
+  "evidence_reconciliation": {
+    "capability_registry": "BASELINE_PLANNED",
+    "capability_baseline": "EXECUTABLE_COMPLETE",
+    "actual_service_scenario": "NOT_REGISTERED",
+    "cutover_eligible": false,
+    "interpretation": "The checked authorities disagree, and the named service scenario is absent. This inventory cannot promote either row to replacement evidence."
+  },
+  "gaps": [
+    {
+      "gap_id": "DEF-A1-01",
+      "summary": "HTTP deflate emits raw RFC 1951 while documentation describes an RFC 1950 zlib wrapper.",
+      "blocks_exit": true
+    },
+    {
+      "gap_id": "DEF-A1-02",
+      "summary": "No current zlib-wrapper or preset-dictionary surface exists, so any future support decision needs explicit compatibility authority.",
+      "blocks_exit": true
+    },
+    {
+      "gap_id": "DEF-A1-03",
+      "summary": "The capability registry omits live ATP transport, cache, mailbox, manifest, and OTLP owners.",
+      "blocks_exit": true
+    },
+    {
+      "gap_id": "DEF-A1-04",
+      "summary": "The capability registry says planned while the capability baseline says executable complete.",
+      "blocks_exit": true
+    },
+    {
+      "gap_id": "DEF-A1-05",
+      "summary": "The named real-service compression scenario is not registered.",
+      "blocks_exit": true
+    },
+    {
+      "gap_id": "DEF-A1-06",
+      "summary": "No production payload distribution or compression performance receipt exists.",
+      "blocks_exit": true
+    },
+    {
+      "gap_id": "DEF-A1-07",
+      "summary": "The browser target was unavailable and Apple and Windows cells were not run.",
+      "blocks_exit": true
+    },
+    {
+      "gap_id": "DEF-A1-08",
+      "summary": "Remote cargo tree evidence is unavailable because RCH refuses non-compilation commands and local fallback is prohibited.",
+      "blocks_exit": false
+    },
+    {
+      "gap_id": "DEF-A1-09",
+      "summary": "Only the HTTP decoder has an explicit concatenated-member rejection contract; other single-member consumers lack a uniform trailing-data contract.",
+      "blocks_exit": true
+    },
+    {
+      "gap_id": "DEF-A1-10",
+      "summary": "Four public constructors expose flate2::Compression directly.",
+      "blocks_exit": true
+    },
+    {
+      "gap_id": "DEF-A1-11",
+      "summary": "The public ATP transport transform has no production TCP, RQ, or QUIC caller, so its bytes are not live transport evidence.",
+      "blocks_exit": true
+    },
+    {
+      "gap_id": "DEF-A1-12",
+      "summary": "Raw cache content beginning with ASUPCACHE followed by a NUL byte is interpreted as an envelope because the raw fallback has no escaping rule.",
+      "blocks_exit": true
+    },
+    {
+      "gap_id": "DEF-A1-13",
+      "summary": "Cache decode allocates from the envelope-declared original size without a configured upper bound.",
+      "blocks_exit": true
+    },
+    {
+      "gap_id": "DEF-A1-14",
+      "summary": "Mailbox decode checks the declared size against chunk_size but read_to_end can allocate beyond it before the final exact-size rejection.",
+      "blocks_exit": true
+    },
+    {
+      "gap_id": "DEF-A1-15",
+      "summary": "WebSocket can negotiate the permessage-deflate token without implementing the RFC 7692 transform.",
+      "blocks_exit": true
+    },
+    {
+      "gap_id": "DEF-A1-16",
+      "summary": "gRPC classifies literal deflate and snappy encodings as compressed in one decode path while the production codec registry wires only identity and gzip.",
+      "blocks_exit": true
+    },
+    {
+      "gap_id": "DEF-A1-17",
+      "summary": "The real-http compression files are undeclared test source and contain stale or simulated transforms, so they are not executable interoperability evidence.",
+      "blocks_exit": true
+    }
+  ],
+  "required_parity_scope": [
+    "Preserve the optional compression feature and feature-off behavior for every live caller.",
+    "Preserve public gzip and deflate streaming types, factory behavior, output limits, error poisoning, idempotent finish, and the four flate2::Compression constructor signatures unless a separately approved breaking API change is made.",
+    "Preserve gzip RFC 1952 bytes and single-member production boundaries across HTTP, gRPC, ATP transport, cache, mailbox, manifest size calculation, and OTLP.",
+    "Preserve the current raw RFC 1951 HTTP deflate bytes until the raw-versus-zlib discrepancy is separately adjudicated with interoperability evidence.",
+    "Preserve ASUPCACHE version 1 codec 1 and ASUPMBX1 version 1 compressed-flag decoding for existing persisted data.",
+    "Preserve gRPC compressed-flag framing, the default 4 MiB directional limits, and per-message codec reset.",
+    "Preserve HTTP negotiation, x-gzip alias, server preference, 16 MiB compressed-output default, sensitivity policy, header rewriting, and identity fallback.",
+    "Preserve ATP thresholds, descriptors, exact length checks, digest checks, and fail-closed feature-off behavior.",
+    "Decide whether the public but unwired ATP transform is retained and wire it only with its own transport and persisted-format evidence.",
+    "Bound cache and mailbox decode allocation before treating either persisted envelope as replacement-ready, and preserve raw cache values that collide with the envelope magic.",
+    "Preserve OTLP compression default-off and explicit feature-missing error.",
+    "Keep Kafka gzip scoped to its external backend and do not count WebSocket permessage-deflate advertisement as an implemented codec.",
+    "Do not infer Brotli parity from any DEFLATE result."
+  ],
+  "validation_receipts": [
+    {
+      "lane": "default-native-check",
+      "status": "PASS",
+      "worker": "ovh-b",
+      "exit_code": 0
+    },
+    {
+      "lane": "compression-all-targets-check",
+      "status": "PASS",
+      "worker": "ovh-a",
+      "exit_code": 0
+    },
+    {
+      "lane": "compression-wasm-check",
+      "status": "UNSUPPORTED_WORKER_TARGET_MISSING",
+      "worker": "hz1",
+      "exit_code": 101
+    },
+    {
+      "lane": "remote-tree-inventory",
+      "status": "NO_CLAIM_RCH_NON_COMPILATION_REFUSAL",
+      "worker": null,
+      "exit_code": 1
+    }
+  ],
+  "source_pins": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "2b1141b8d3d465b6fd387025973a3ee3a2706aecfaff9012b37722d21dbe8e4d",
+      "line_count": 1035
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "c670712ab8713897bacc9591c170db2d030df83011dc7b9d092f16099f1540dd",
+      "line_count": 4666
+    },
+    {
+      "path": "src/http/compress.rs",
+      "sha256": "0a090ed3e1c3f629199101e0b7115a2b39ea9690d96a4b7819c3712b0f946c98",
+      "line_count": 2546
+    },
+    {
+      "path": "src/web/compress.rs",
+      "sha256": "99cae5a969688460911c54076d3bb815fac3de0b714fe8fe7807678eb2c97eb9",
+      "line_count": 897
+    },
+    {
+      "path": "src/web/middleware.rs",
+      "sha256": "979a0b3b3665bba209f8ad84a929a35e70008d8c37096c577f91780d1ba51fff",
+      "line_count": 6029
+    },
+    {
+      "path": "src/grpc/codec.rs",
+      "sha256": "f8d6d1f7f4748d5bd818c59c4744e45b3d6fe94b1efd2a7f3bd56217a25673f8",
+      "line_count": 2782
+    },
+    {
+      "path": "src/net/atp/transport_common/compression.rs",
+      "sha256": "892dfb0a300ea03bcf5e25122d6d1ccef32069073520020c532f2bd465babc84",
+      "line_count": 394
+    },
+    {
+      "path": "src/atp/cache/storage.rs",
+      "sha256": "db786d274604ee96e3f7a803ca9f19cf7c60b9be12fe25bf012a824a59fc4837",
+      "line_count": 1384
+    },
+    {
+      "path": "src/atp/mailbox/storage.rs",
+      "sha256": "beb55b4e96f895ff746de1b89b5c1cc2d41fa0bd2ed9a1a21ff581919d55af56",
+      "line_count": 1066
+    },
+    {
+      "path": "src/atp/manifest.rs",
+      "sha256": "c870f9ff6fcda07065bb4bd58cb2a329152afb98230ea97a86af11fc020edd50",
+      "line_count": 4086
+    },
+    {
+      "path": "src/observability/otel.rs",
+      "sha256": "c6cc312af370ee4485bedeb49aa0d900ed649b813c849179c68f5d03944de311",
+      "line_count": 9427
+    },
+    {
+      "path": "src/observability/metrics.rs",
+      "sha256": "1a5d3a65f5b7b91cba70666da93aa844df9715ce424a08334b1ed4d19367b9c0",
+      "line_count": 2907
+    },
+    {
+      "path": "src/net/atp/compress/mod.rs",
+      "sha256": "6139dd59ad79e882b316d752897239cc0e87f400a6b3840851b559c17116071f",
+      "line_count": 718
+    },
+    {
+      "path": "src/net/atp/compress/algorithms.rs",
+      "sha256": "71f2c518b20eceaafcedef6217a938ce8e56703fdea9110049e8a705a1204fdc",
+      "line_count": 490
+    },
+    {
+      "path": "src/net/atp/mod.rs",
+      "sha256": "fff6f36cd57f83fc949b9f5a11ad67382367aeb79152a0b6bd62d36b274fb058",
+      "line_count": 67
+    },
+    {
+      "path": "src/net/websocket/handshake.rs",
+      "sha256": "51eee2f6dacb5df672bdbcbf7a1098db4f3e63daef51fdee0bea2aa3d6e14f32",
+      "line_count": 2634
+    },
+    {
+      "path": "src/net/websocket/server.rs",
+      "sha256": "8f6867dfa6d769dcb9f9b5f2e09547b3b0a507a923aef07f9668169da57b6939",
+      "line_count": 1819
+    },
+    {
+      "path": "src/net/websocket/frame.rs",
+      "sha256": "ffde5ba8628e34eb4c35c815d6ffa689fc7120db7230611cc40e6cb5a03a9718",
+      "line_count": 2168
+    },
+    {
+      "path": "src/messaging/kafka.rs",
+      "sha256": "5fe763229f2940793bf79739718afc20002ac40b614c35ff0ea475d45fb5aaf1",
+      "line_count": 4335
+    },
+    {
+      "path": "tests/grpc_codec_gzip_prost_conformance.rs",
+      "sha256": "5e5c52707588468b41703e44dd3a43d4c12baa1100ee7bfbedeef9c831aaeb7b",
+      "line_count": 235
+    },
+    {
+      "path": "fuzz/fuzz_targets/grpc_compressed_flag_mismatch.rs",
+      "sha256": "78820a5e5733d8c121b207b064eb41a3a2253f51fd81e3de897200524295d29c",
+      "line_count": 432
+    },
+    {
+      "path": "docs/adr/dep_plan_adr_006_brotli_compression.md",
+      "sha256": "cc257a898eb60f720e47431c5dee21fe051a919c4f6e92ab8b932186299dd658",
+      "line_count": 144
+    },
+    {
+      "path": "artifacts/dependency_capability_registry_v1.json",
+      "sha256": "82a73ec1c14fbe317611f6d592af480d75d002cbe9333045ab74840bcaf1c081",
+      "line_count": 6907
+    },
+    {
+      "path": "artifacts/dependency_capability_baseline_v1.json",
+      "sha256": "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8",
+      "line_count": 1357
+    },
+    {
+      "path": "artifacts/dependency_budget_contract_v1.json",
+      "sha256": "b45ffcea151f15c0ae52add672d403fa9ba202ee6d67945c14f3ccc1755817fe",
+      "line_count": 4315
+    },
+    {
+      "path": "artifacts/dependency_real_service_fixture_matrix_v1.json",
+      "sha256": "00fedda95c7a3d326f471b309c1a0e3e3bf19e091b0898d1268297da4a8521aa",
+      "line_count": 353
+    },
+    {
+      "path": "src/lib.rs",
+      "sha256": "8afb93328139e32d9474f6164faec62b038c2d76bc9d2b697e5202dda5a9832a",
+      "line_count": 465
+    },
+    {
+      "path": "src/web/mod.rs",
+      "sha256": "f45c786c88eb80fff899b1781f58f610fd6b98f04384123455b42b8a6382a3ed",
+      "line_count": 88
+    }
+  ],
+  "no_claims": [
+    "No dependency removal, owned codec implementation, cutover, or production source change is authorized.",
+    "No production payload distribution, throughput, latency, compression ratio, memory, CPU, or maintenance-cost claim is made.",
+    "No Apple, Windows, or browser-target compilation claim is made.",
+    "No registered real-service or cross-implementation interoperability result is claimed.",
+    "No zlib-wrapper, preset-dictionary, all-callers trailing-data, or multi-member support claim is made.",
+    "No production ATP transport wiring, WebSocket permessage-deflate transform, or local Kafka gzip implementation is claimed.",
+    "No cache or mailbox decoder-allocation safety claim is made while DEF-A1-12 through DEF-A1-14 remain open.",
+    "A clean all-target check is compilation evidence, not release readiness or broad workspace health.",
+    "Brotli behavior and replacement feasibility are outside this DEFLATE decision."
+  ]
+}

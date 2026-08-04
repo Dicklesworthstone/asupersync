@@ -1,0 +1,245 @@
+{
+  "schema_version": 1,
+  "artifact_id": "regex-vm-core-contract-v1",
+  "bead_id": "asupersync-5z2scg.8.3.4.1",
+  "capability_id": "CAP-REGEX-PRIVACY",
+  "program_id": "dependency-sovereignty",
+  "captured_at_utc": "2026-07-26T04:40:00Z",
+  "vm_id": "ASUP-REGEX-THREAD-SET-VM-V1",
+  "vm_schema_version": 1,
+  "compiler_terminal": {
+    "bead_id": "asupersync-5z2scg.8.3.3.4",
+    "path": "artifacts/regex_compiler_terminal_receipt_v1.json",
+    "sha256": "caf2507d626b25c55b4371c84bd2c946f2b5a7d60f7578582b86994d97f59668",
+    "disposition": "KEEP_INCUMBENT_DEFER",
+    "vm_experimentation_authorized": true,
+    "production_cutover_eligible": false
+  },
+  "successor_handoff": {
+    "live_source_authority": "artifacts/regex_vm_captures_contract_v1.json",
+    "successor_bead_id": "asupersync-5z2scg.8.3.4.2",
+    "historical_vm_source_pin_retained": true,
+    "live_vm_source_pin": false,
+    "core_behavior_replayed_against_successor_source": true
+  },
+  "decision": {
+    "disposition": "STAGED_BOUNDED_VM_CORE",
+    "r3_4_1_vm_core_complete": true,
+    "validated_ir_required": true,
+    "whole_haystack_recognition_only": true,
+    "ordered_first_arrival_deduplication": true,
+    "strictly_safe": true,
+    "deterministic": true,
+    "panic_free_under_contract_limits": true,
+    "production_wiring_authorized": false,
+    "leftmost_search_authorized": false,
+    "capture_propagation_authorized": false,
+    "iteration_or_cancellation_authorized": false,
+    "dependency_removal_authorized": false,
+    "on_missing_unknown_expired_or_drifted_evidence": "KEEP_INCUMBENT_DEFER"
+  },
+  "execution_model": {
+    "recognizer": "ANCHORED_WHOLE_HAYSTACK",
+    "epsilon_closure": "ORDERED_FIRST_ARRIVAL",
+    "duplicate_key": "STATE_ID_WITHIN_BYTE_OFFSET",
+    "offset_domain": "UTF8_BYTE_OFFSETS",
+    "unicode_consume_width": "ONE_UNICODE_SCALAR_1_TO_4_BYTES",
+    "byte_consume_width": "ONE_VALIDATED_EXACT_BYTE",
+    "offset_bucket_strategy": "FIVE_BUCKET_MODULO_RING",
+    "offset_bucket_count": 5,
+    "maximum_unicode_scalar_bytes": 4,
+    "accept_condition": "ACCEPT_STATE_AT_HAYSTACK_BYTE_LENGTH",
+    "capture_save_behavior": "EPSILON_ONLY_NO_CAPTURE_RESULT",
+    "task_lifecycle": "PURE_SYNCHRONOUS_NO_TASKS_OR_BACKGROUND_RESOURCES"
+  },
+  "limits": {
+    "max_input_bytes": 1048576,
+    "max_threads_per_offset": 262144,
+    "max_memory_bytes": 16777216,
+    "max_work_units": 67108864,
+    "max_trace_events": 256,
+    "accounted_vm_base_bytes": 1024,
+    "accounted_thread_bytes": 8,
+    "accounted_seen_byte": 1,
+    "accounted_trace_event_bytes": 32,
+    "memory_formula": "base + 5 * (thread_capacity * thread_bytes + state_count * seen_byte) + trace_capacity * trace_event_bytes",
+    "work_formula": "offset_visits + state_visits + thread_enqueue_attempts + class_range_binary_search_comparisons + assertion_evaluations + cleanup_operations",
+    "class_lookup": "BINARY_SEARCH_CANONICAL_RANGES",
+    "trace_overflow": "TRUNCATE_WITH_FINGERPRINT_CONTINUATION"
+  },
+  "error_rows": [
+    {"code": "RGX-VM-E001", "kind": "InvalidLimits"},
+    {"code": "RGX-VM-E002", "kind": "InputLimit"},
+    {"code": "RGX-VM-E003", "kind": "ThreadLimit"},
+    {"code": "RGX-VM-E004", "kind": "MemoryLimit"},
+    {"code": "RGX-VM-E005", "kind": "WorkLimit"},
+    {"code": "RGX-VM-E006", "kind": "ArithmeticOverflow"},
+    {"code": "RGX-VM-E007", "kind": "InvalidState"},
+    {"code": "RGX-VM-E008", "kind": "InvalidClass"},
+    {"code": "RGX-VM-E009", "kind": "BucketCollision"}
+  ],
+  "sources": [
+    {
+      "path": "src/observability/regex_syntax.rs",
+      "sha256": "2fbeae8fc1346d51cf5535930b750d0d69055d8923b3c6e8fcb3bf8ce25315b0",
+      "bytes": 112380,
+      "revision": "4022e575808c9a314159b3fe37b9c40d929c1ada"
+    },
+    {
+      "path": "src/observability/regex_semantics.rs",
+      "sha256": "bd762181da7620330a580152688af7684da371a9a32c144ef09ac5b5d0c2221a",
+      "bytes": 41269,
+      "revision": "c5c23b591e794c01db668785fdf29fc136009d2a"
+    },
+    {
+      "path": "src/observability/regex_boundaries.rs",
+      "sha256": "bac41152af892d6fb3c84fcc4c1ee2a75d70219ec877604207dbcd4c8efafbbd",
+      "bytes": 49494,
+      "revision": "bdc6ad3d84b4332c9a40183cb4ac2348c7b7796e"
+    },
+    {
+      "path": "src/observability/regex_ir.rs",
+      "sha256": "de4906beb838fda2c57bccfdb16316e8de661e564940a47e7b9b87f065311cb3",
+      "bytes": 45049,
+      "revision": "6d566c140259c141ccdd2e2a843f2dd5552324d8"
+    },
+    {
+      "path": "src/observability/regex_lowering.rs",
+      "sha256": "664753b2198fa53a4e80845639a21e24c6f3871d240f59f75f7b522cc8a66a54",
+      "bytes": 56882,
+      "revision": "dd553f63c2ec3ef8263dfeeb093af5f12dbcd2ca"
+    },
+    {
+      "path": "src/observability/regex_vm.rs",
+      "sha256": "8952e787fe20b6bd0b4896b90e00fe25ed93d44154279c4c4c4deab1565d0e30",
+      "bytes": 36360,
+      "revision": "asupersync-5z2scg.8.3.4.1",
+      "pin_scope": "historical_r3_4_1_source"
+    },
+    {
+      "path": "src/observability/mod.rs",
+      "sha256": "9008a30ec981e63ef07f2351b5ad80bfcd89dea8d191869fd027d2dd76fd7a80",
+      "bytes": 43361,
+      "revision": "asupersync-5z2scg.8.3.4.1"
+    }
+  ],
+  "source_revisions": {
+    "cargo_toml_sha256": "6f23d63e0addc5c10841c3a425a6c4aed5e00cea37bc9a0752b94ca98ee3ab7d",
+    "cargo_lock_sha256": "e23937c9cafef508e7fb72861c11388b9960edb3b13665ae91f4c0670fb67e2d",
+    "rust_toolchain_sha256": "7be955420e9a82164d4c4307e141035b29cd395ba6f621af32f3fddfb4013f63",
+    "package": "asupersync",
+    "package_version": "0.3.9",
+    "edition": "2024",
+    "pinned_toolchain": "nightly-2026-07-05"
+  },
+  "oracle": {
+    "incumbent_package": "regex@1.13.1",
+    "reference_model": "bounded_checked_ir_reachability_model_v1",
+    "incumbent_quarantined_to_test_evidence": true,
+    "whole_match_wrapper": "\\A(?:PATTERN)\\z",
+    "oracle_expiry_utc": "2026-10-23T00:00:00Z",
+    "invalidate_earlier_on": [
+      "Cargo.lock changes regex@1.13.1",
+      "the R3.3 compiler terminal changes or expires",
+      "any candidate source digest changes",
+      "any retained minimized case changes disposition"
+    ]
+  },
+  "fixtures": [
+    {"case_id": "RGX-VM-FIX-001", "pattern": "", "haystack": "", "expected": true},
+    {"case_id": "RGX-VM-FIX-002", "pattern": "", "haystack": "a", "expected": false},
+    {"case_id": "RGX-VM-FIX-003", "pattern": "a", "haystack": "a", "expected": true},
+    {"case_id": "RGX-VM-FIX-004", "pattern": "a", "haystack": "", "expected": false},
+    {"case_id": "RGX-VM-FIX-005", "pattern": "é", "haystack": "é", "expected": true},
+    {"case_id": "RGX-VM-FIX-006", "pattern": "[a-c]+", "haystack": "abc", "expected": true},
+    {"case_id": "RGX-VM-FIX-007", "pattern": "[a-c]+", "haystack": "abd", "expected": false},
+    {"case_id": "RGX-VM-FIX-008", "pattern": "^a$", "haystack": "a", "expected": true},
+    {"case_id": "RGX-VM-FIX-009", "pattern": "^a$", "haystack": "aa", "expected": false},
+    {"case_id": "RGX-VM-FIX-010", "pattern": "\\bword\\b", "haystack": "word", "expected": true},
+    {"case_id": "RGX-VM-FIX-011", "pattern": "\\bword\\b", "haystack": "sword", "expected": false},
+    {"case_id": "RGX-VM-FIX-012", "pattern": "(?:a|b)*", "haystack": "abba", "expected": true},
+    {"case_id": "RGX-VM-FIX-013", "pattern": "(a|b)+", "haystack": "abba", "expected": true},
+    {"case_id": "RGX-VM-FIX-014", "pattern": "a{1,3}", "haystack": "aaaa", "expected": false},
+    {"case_id": "RGX-VM-FIX-015", "pattern": "\\A(?:a|é)\\z", "haystack": "é", "expected": true}
+  ],
+  "retained_minimized_cases": [
+    {
+      "case_id": "RGX-VM-MIN-001",
+      "surface": "epsilon-cycle",
+      "expected": "TERMINATES_FIRST_ARRIVAL_DEDUP_ACCEPTS"
+    },
+    {
+      "case_id": "RGX-VM-MIN-002",
+      "surface": "mixed-unicode-and-exact-byte-offsets",
+      "pattern": "(?:é|(?i-u:é))",
+      "expected": "MATCH_WITH_FIVE_BUCKET_RING"
+    },
+    {
+      "case_id": "RGX-VM-MIN-003",
+      "surface": "non-folded-byte-mode-escape-lowering",
+      "pattern": "(?-u:\\xC3\\xA9)",
+      "disposition": "KEEP_INCUMBENT_DEFER",
+      "reason": "R3_3_COMPILER_DOES_NOT_EMIT_EXACT_BYTE_IR_FOR_THIS_SPELLING"
+    },
+    {
+      "case_id": "RGX-VM-MIN-004",
+      "surface": "long-input",
+      "pattern": "a*",
+      "input_bytes": 100000,
+      "expected": "LINEAR_STATE_VISIT_BOUND_AND_TRUNCATED_TRACE"
+    }
+  ],
+  "evidence": {
+    "fixture_rows": 15,
+    "bounded_reference_patterns": 15,
+    "bounded_reference_alphabet": "a,b,A,é",
+    "bounded_reference_max_haystack_scalars": 4,
+    "bounded_reference_comparisons": 5115,
+    "property_cases": 512,
+    "execution_fuzz_seed": "0x51A7_E7E5_7EED_0001",
+    "execution_fuzz_cases": 1024,
+    "malformed_ir_seed": "0x1BAD_1DEA_7EED_0002",
+    "malformed_ir_cases": 1024,
+    "long_input_bytes": 100000,
+    "panic_observed": false,
+    "hang_observed": false,
+    "unbounded_allocation_observed": false,
+    "partial_outcome_on_error": false,
+    "trace_retained": true,
+    "minimized_cases_retained": true,
+    "replay_commands_retained": true,
+    "cancellation_shutdown_quiescence": "not_applicable_pure_synchronous_bounded_execution"
+  },
+  "proof": {
+    "unit_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/observability/regex_vm.rs --overlay-path src/observability/mod.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics --lib observability::regex_vm::tests -- --nocapture",
+    "contract_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/observability/regex_vm.rs --overlay-path src/observability/mod.rs --overlay-path artifacts/regex_vm_core_contract_v1.json --overlay-path docs/regex_vm_core_contract.md --overlay-path tests/regex_vm_core_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics --test regex_vm_core_contract -- --nocapture",
+    "clippy_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/observability/regex_vm.rs --overlay-path src/observability/mod.rs --overlay-path artifacts/regex_vm_core_contract_v1.json --overlay-path docs/regex_vm_core_contract.md --overlay-path tests/regex_vm_core_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --features metrics --test regex_vm_core_contract -- -D warnings",
+    "format_command": "rustfmt --edition 2024 --check src/observability/regex_vm.rs tests/regex_vm_core_contract.rs",
+    "local_cargo_fallback": false
+  },
+  "required_doc_markers": [
+    "ASUP-REGEX-THREAD-SET-VM-V1",
+    "STAGED_BOUNDED_VM_CORE",
+    "regex@1.13.1",
+    "2026-10-23T00:00:00Z",
+    "RCH_REQUIRE_REMOTE=1",
+    "No local Cargo fallback is approved.",
+    "no leftmost search or capture propagation",
+    "no production privacy wiring or dependency removal"
+  ],
+  "no_claims": [
+    "no leftmost search or capture propagation",
+    "no iteration API or cancellation integration",
+    "no production privacy wiring or dependency removal",
+    "no non-folded byte-mode escape lowering claim",
+    "no persisted or deserializable VM state",
+    "no public API or accepted-syntax expansion",
+    "no isolated binary-size result",
+    "no cross-target execution result",
+    "no performance improvement or no-regression claim",
+    "no broad workspace health or release-readiness claim",
+    "no live RCH fleet availability claim",
+    "no local Cargo fallback approval"
+  ],
+  "on_failure": "KEEP_INCUMBENT_DEFER"
+}

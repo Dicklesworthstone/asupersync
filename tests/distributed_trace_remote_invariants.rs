@@ -1093,15 +1093,19 @@ fn idempotency_store_duplicate_returns_cached_outcome() {
     let now = Time::from_secs(1);
 
     assert!(matches!(
-        store.check(&key, &request, now),
+        store.check_and_record(key, RemoteTaskId::from_raw(7), request.clone(), now),
         DedupDecision::New
     ));
-    assert!(store.record(key, RemoteTaskId::from_raw(7), request.clone(), now));
 
     let outcome = RemoteOutcome::Success(vec![1, 2, 3]);
-    assert!(store.complete(&key, outcome));
+    assert!(store.complete(&key, RemoteTaskId::from_raw(7), outcome, now));
 
-    match store.check(&key, &request, Time::from_secs(2)) {
+    match store.check_and_record(
+        key,
+        RemoteTaskId::from_raw(8),
+        request.clone(),
+        Time::from_secs(2),
+    ) {
         DedupDecision::Duplicate(record) => {
             assert_eq!(record.remote_task_id, RemoteTaskId::from_raw(7));
             match record.outcome {
@@ -1114,9 +1118,10 @@ fn idempotency_store_duplicate_returns_cached_outcome() {
         other => panic!("expected duplicate, got {other:?}"),
     }
 
-    let conflict = store.check(
-        &key,
-        &IdempotencyRequestFingerprint::new(ComputationName::new("other"), RemoteInput::empty()),
+    let conflict = store.check_and_record(
+        key,
+        RemoteTaskId::from_raw(9),
+        IdempotencyRequestFingerprint::new(ComputationName::new("other"), RemoteInput::empty()),
         Time::from_secs(2),
     );
     assert!(matches!(conflict, DedupDecision::Conflict));

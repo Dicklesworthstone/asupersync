@@ -1120,6 +1120,8 @@ Let:
 k ∈ IdempotencyKey = {0,1}^128
 rt ∈ RemoteTaskId  = ℕ
 cn ∈ ComputationName = String
+ri ∈ RemoteInput = Bytes
+fp ∈ IdempotencyRequestFingerprint = (cn, ri)
 ```
 
 Define the idempotency store state:
@@ -1130,72 +1132,97 @@ D: IdempotencyKey → IdempotencyRecord
 IdempotencyRecord = {
   key: k,
   remote_task_id: rt,
-  computation: cn,
+  request: fp,
   created_at: τ,
-  expires_at: τ,
+  expires_at: Option<τ>,
   outcome: Option<RemoteOutcome>
 }
 ```
 
-Decision rules when a request arrives:
+Define a terminal record as expired only after its completion-relative
+retention deadline:
 
 ```
-DEDUP-NEW:
-  k ∉ dom(D)
-  --------------------------------
+terminal_expired(rec, τ_now) ≜
+  rec.outcome ≠ None ∧
+  rec.expires_at = Some(τ_expiry) ∧
+  τ_now ≥ τ_expiry
+```
+
+Admission is one state transition. Returning `New` also reserves the key for
+the canonical task; there is no observable check/record gap:
+
+```
+ADMIT-NEW:
+  k ∉ dom(D) ∨ (k ∈ dom(D) ∧ terminal_expired(D[k], τ_now))
+  --------------------------------------------------------
+  D' = D[k ↦ { key = k, remote_task_id = rt, request = fp,
+               created_at = τ_now, expires_at = None, outcome = None }]
   decision = New
 
 DEDUP-DUPLICATE:
-  D[k].computation = cn
-  --------------------------------
+  k ∈ dom(D) ∧ ¬terminal_expired(D[k], τ_now) ∧ D[k].request = fp
+  -----------------------------------------------------------------
+  D' = D
   decision = Duplicate(D[k])
 
 DEDUP-CONFLICT:
-  k ∈ dom(D) ∧ D[k].computation ≠ cn
-  --------------------------------
+  k ∈ dom(D) ∧ ¬terminal_expired(D[k], τ_now) ∧ D[k].request ≠ fp
+  -----------------------------------------------------------------
+  D' = D
   decision = Conflict
 ```
 
-Record + complete:
+Completion establishes the finite retention window; insertion does not:
 
 ```
-RECORD-NEW:
-  k ∉ dom(D)
-  --------------------------------
-  D' = D[k ↦ { key = k, remote_task_id = rt, computation = cn,
-              created_at = τ_now, expires_at = τ_now + ttl, outcome = None }]
-
 RECORD-COMPLETE:
-  k ∈ dom(D) ∧ τ_now < D[k].expires_at
-  --------------------------------
-  D'[k].outcome = Some(outcome)
+  k ∈ dom(D) ∧ D[k].remote_task_id = rt
+  --------------------------------------------------------------
+  D' = D[k ↦ D[k] with {
+         outcome = Some(outcome),
+         expires_at = Some(τ_now + ttl) }]
+  updated = true
+
+RECORD-COMPLETE-REJECT:
+  k ∉ dom(D) ∨ (k ∈ dom(D) ∧ D[k].remote_task_id ≠ rt)
+  ----------------------------------------------------------
+  D' = D
+  updated = false
 ```
 
-The `τ_now < D[k].expires_at` premise is load-bearing: a record whose TTL
-has already elapsed is effectively absent from the store, even if it has
-not yet been physically evicted (see `EVICT` below). Completing such a
-record is undefined — implementations MUST fail closed and treat the key
-as `k ∉ dom(D)` rather than overwriting a stale entry. This matches the
-lazy-eviction discipline that
-[`IdempotencyStore::check`](src/remote.rs) applies on every dedup
-decision: an expired record is removed and the request is reclassified
-as `New`, so by the time `RECORD-COMPLETE` is reached the expiry guard is
-implied by construction.
+The `expires_at = None` in `ADMIT-NEW` is load-bearing: an in-flight operation
+cannot outlive its deduplication record. [`IdempotencyStore::check_and_record`](src/remote.rs)
+implements the admission transition atomically. `RECORD-COMPLETE` sets both
+the outcome and its retention deadline from the logical completion time. The
+canonical task-ID premise rejects a delayed completion from an expired record's
+previous generation after the same key has been admitted again.
 
-Eviction (periodic, plus lazy-on-access):
+Eviction (explicit bulk sweep, plus lazy replacement on admission):
 
 ```
 EVICT:
-  D' = { (k ↦ rec) ∈ D | τ_now < rec.expires_at }
+  D' = { (k ↦ rec) ∈ D |
+         rec.outcome = None ∨
+         rec.expires_at = None ∨
+         (rec.expires_at = Some(τ_expiry) ∧ τ_now < τ_expiry) }
 ```
 
 Operational consequence:
-- A duplicate request with the same key and computation must return the
-  **original** `remote_task_id` and any cached `outcome`.
-- A conflicting request with the same key but different computation is rejected.
-- A completion targeting an already-expired record is rejected (or, equivalently,
-  completes a record that is no longer in `dom(D)` after lazy eviction); the
-  caller MUST re-issue the request, which will be classified `New`.
+- An in-flight record is never TTL-evicted, so a retry cannot start a second
+  live execution merely because the operation runs longer than `ttl`.
+- A duplicate request with the same key and fingerprint must retain the
+  **canonical** `remote_task_id` internally; the protocol acknowledgement is
+  correlated to the current delivery attempt while it attaches to the
+  canonical task in-flight or returns the cached terminal `outcome` after
+  completion.
+- A conflicting request with the same key but a different fingerprint is
+  rejected while the record is retained.
+- A terminal record becomes reusable only at its completion-relative deadline.
+- A completion whose task ID does not match the current record generation is
+  rejected without changing the record.
+- The guarantee is scoped to the store lifetime and terminal retention window;
+  it is not durable across store reset or terminal-record eviction.
 
 #### 3.7.2 Saga Compensation Ordering
 

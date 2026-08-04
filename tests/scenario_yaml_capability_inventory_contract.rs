@@ -5,10 +5,11 @@
 //! Fixture: artifacts/scenario_yaml_capability_inventory_v1.json
 //!
 //! This proves source-pinned loader, typed-schema, observed grammar, checked-in
-//! corpus, workflow, diagnostic, resource, execution-consumption, child-owner,
-//! and gap inventories. It does not prove arbitrary YAML, additive JSON,
-//! parser replacement, runtime semantics for validation-only fields, or
-//! permission to remove the incumbent `serde_yaml` dependency.
+//! corpus, canonical JSON, workflow, diagnostic, resource,
+//! execution-consumption, child-owner, and gap inventories. It does not prove
+//! arbitrary YAML, parser replacement, runtime semantics for validation-only
+//! fields, CLI conversion UX, or permission to remove the incumbent
+//! `serde_yaml` dependency.
 
 #![allow(missing_docs)]
 
@@ -406,6 +407,128 @@ fn authority_profiles_and_live_loader_routes_are_truthful() {
     assert_eq!(OracleRegistry::reported_names().len(), 24);
     assert!(OracleRegistry::reported_names().contains(&"quiescence"));
     assert!(OracleRegistry::reported_names().contains(&"obligation_leak"));
+}
+
+#[test]
+fn canonical_json_contract_is_executable_and_residual_work_is_routed() {
+    let inventory = artifact();
+    let canonical = inventory
+        .get("canonical_json_contract")
+        .expect("canonical_json_contract must exist");
+    assert_eq!(text(canonical, "encoder"), "Scenario::to_json");
+    assert_eq!(text(canonical, "encoding"), "UTF-8");
+    assert_eq!(
+        text(canonical, "object_order"),
+        "recursive lexicographic key order"
+    );
+    assert_eq!(
+        text(canonical, "array_order"),
+        "preserve typed source order"
+    );
+    assert_eq!(text(canonical, "evidence_state"), "EXECUTED");
+    assert_eq!(
+        string_set(canonical, "preserved_extension_channels"),
+        ["faults[].args", "metadata", "participants[].properties",]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    assert_eq!(string_set(canonical, "focused_evidence").len(), 5);
+
+    let implicit = Scenario::from_json(r#"{"id":"test-scenario","description":"minimal test"}"#)
+        .expect("parse defaulted v1 scenario");
+    let explicit = Scenario::from_json(
+        r#"{"schema_version":1,"id":"test-scenario","description":"minimal test"}"#,
+    )
+    .expect("parse explicit v1 scenario");
+    assert_eq!(implicit, explicit);
+    assert!(implicit.validate().is_empty());
+
+    let canonical_bytes = implicit.to_json().expect("encode canonical scenario");
+    assert_eq!(
+        canonical_bytes,
+        r#"{"cancellation":null,"chaos":{"preset":"off"},"description":"minimal test","expected_invariants":["quiescence","losers_drained","no_obligation_leaks","deterministic_replay"],"faults":[],"golden_projection":{"canonicalized":true,"format":"json","redacted":true},"id":"test-scenario","include":[],"lab":{"entropy_seed":null,"futurelock_max_idle_steps":10000,"max_steps":100000,"panic_on_futurelock":true,"panic_on_obligation_leak":true,"replay_recording":false,"seed":42,"trace_capacity":4096,"worker_count":1},"metadata":{},"minimization":{"enabled":false,"max_counterexample_events":null,"max_evaluations":null},"network":{"links":{},"preset":"ideal"},"oracles":["all"],"participants":[],"resource_caps":{"max_artifact_bytes":null,"max_counterexample_events":null,"max_fault_events":null},"schema_version":1}"#
+    );
+    assert_eq!(canonical_bytes, explicit.to_json().unwrap());
+    assert_eq!(
+        implicit,
+        Scenario::from_json(&canonical_bytes).expect("round-trip canonical scenario")
+    );
+
+    let dynamic = Scenario::from_json(
+        r#"{
+            "id": "recursive-objects",
+            "participants": [{
+                "name": "worker",
+                "properties": {
+                    "z": {"beta": 2, "alpha": 1},
+                    "a": [{"delta": 4, "charlie": 3}]
+                }
+            }]
+        }"#,
+    )
+    .expect("parse recursive free-form objects");
+    assert!(
+        dynamic
+            .to_json()
+            .unwrap()
+            .contains(r#""properties":{"a":[{"charlie":3,"delta":4}],"z":{"alpha":1,"beta":2}}"#)
+    );
+
+    let unsupported = Scenario::from_json(r#"{"schema_version":2,"id":"future"}"#)
+        .expect("unsupported version remains parseable for validation diagnostics");
+    assert!(
+        unsupported
+            .validate()
+            .iter()
+            .any(|error| error.field == "schema_version")
+    );
+
+    let scenario_model = read_repo_file("src/lab/scenario.rs");
+    for marker in [
+        "fn canonicalize_json_value(",
+        "canonical_contract_full_json_roundtrip",
+        "canonical_contract_matches_byte_golden",
+        "canonical_contract_orders_dynamic_objects_recursively",
+        "canonical_contract_migrates_missing_version_without_meaning_change",
+    ] {
+        assert!(
+            scenario_model.contains(marker),
+            "missing source marker {marker}"
+        );
+    }
+    assert!(!scenario_model.contains("serde_yaml::"));
+
+    let integration = read_repo_file("tests/frankenlab_integration.rs");
+    assert!(integration.contains("canonical_contract_preserves_yaml_replay_identity"));
+    assert!(integration.contains("assert_eq!(authored, reparsed)"));
+    assert!(integration.contains("authored_run.certificate"));
+    assert!(integration.contains("authored.expected_invariants"));
+
+    let children = array(&inventory, "child_capability_rows");
+    let a2 = find_row(children, "owner_bead", "asupersync-5z2scg.5.2");
+    assert_eq!(text(a2, "evidence_state"), "EXECUTED");
+
+    let gaps = array(&inventory, "known_gaps");
+    for gap_id in ["SCN-GAP-06", "SCN-GAP-09"] {
+        assert_eq!(
+            text(find_row(gaps, "gap_id", gap_id), "owner_bead"),
+            "asupersync-5z2scg.5.4"
+        );
+    }
+
+    let doc = read_repo_file(DOC_PATH);
+    for marker in [
+        "### Canonical JSON contract",
+        "compact UTF-8 with no trailing newline",
+        "executed contract",
+        "neither CLI exposes dump/conversion",
+    ] {
+        assert!(
+            doc.contains(marker),
+            "missing documentation marker {marker}"
+        );
+    }
 }
 
 #[test]

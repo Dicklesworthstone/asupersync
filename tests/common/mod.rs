@@ -57,6 +57,8 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Once;
 use std::time::Duration;
+use tracing::Dispatch;
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 
 static INIT_LOGGING: Once = Once::new();
@@ -71,6 +73,7 @@ const PROPTEST_CASES_ENV: &str = "ASUPERSYNC_PROPTEST_CASES";
 const PROPTEST_MAX_SHRINK_ITERS_ENV: &str = "ASUPERSYNC_PROPTEST_MAX_SHRINK_ITERS";
 const CONFORMANCE_ARTIFACTS_DIR_ENV: &str = "ASUPERSYNC_CONFORMANCE_ARTIFACTS_DIR";
 const TOPOLOGY_ARTIFACTS_DIR_ENV: &str = "ASUPERSYNC_TOPOLOGY_ARTIFACTS_DIR";
+const DEFAULT_TEST_LOG_FILTER: &str = "warn,asupersync=debug";
 
 /// Configuration for property tests with optional deterministic seed support.
 ///
@@ -158,15 +161,105 @@ fn read_max_shrink_iters() -> Option<u32> {
         .and_then(|value| value.parse::<u32>().ok())
 }
 
-/// Initialize test logging with trace-level output.
-pub fn init_test_logging() {
-    init_test_logging_with_level(tracing::Level::TRACE);
+fn test_log_filter_from_env() -> (EnvFilter, Option<String>) {
+    let builder = EnvFilter::builder().with_regex(false);
+    match std::env::var("RUST_LOG") {
+        Ok(value) if !value.trim().is_empty() => match builder.parse(value.trim()) {
+            Ok(filter) => (filter, None),
+            Err(error) => (
+                EnvFilter::builder()
+                    .with_regex(false)
+                    .parse(DEFAULT_TEST_LOG_FILTER)
+                    .expect("DEFAULT_TEST_LOG_FILTER must remain valid"),
+                Some(error.to_string()),
+            ),
+        },
+        Ok(_) => (
+            EnvFilter::builder()
+                .with_regex(false)
+                .parse(DEFAULT_TEST_LOG_FILTER)
+                .expect("DEFAULT_TEST_LOG_FILTER must remain valid"),
+            Some("RUST_LOG is empty".to_string()),
+        ),
+        Err(std::env::VarError::NotPresent) => (
+            EnvFilter::builder()
+                .with_regex(false)
+                .parse(DEFAULT_TEST_LOG_FILTER)
+                .expect("DEFAULT_TEST_LOG_FILTER must remain valid"),
+            None,
+        ),
+        Err(std::env::VarError::NotUnicode(_)) => (
+            EnvFilter::builder()
+                .with_regex(false)
+                .parse(DEFAULT_TEST_LOG_FILTER)
+                .expect("DEFAULT_TEST_LOG_FILTER must remain valid"),
+            Some("RUST_LOG is not valid Unicode".to_string()),
+        ),
+    }
 }
 
-/// Initialize test logging with a custom level.
+fn test_dispatch(filter: EnvFilter) -> Dispatch {
+    Dispatch::new(
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_test_writer()
+            .with_file(true)
+            .with_line_number(true)
+            .with_target(true)
+            .with_thread_ids(true)
+            .with_span_events(FmtSpan::CLOSE)
+            .with_ansi(false)
+            .finish(),
+    )
+}
+
+fn report_filter_fallback(error: Option<&str>) {
+    if let Some(error) = error {
+        tracing::warn!(
+            target: "asupersync::tests::common",
+            error,
+            fallback = DEFAULT_TEST_LOG_FILTER,
+            "invalid RUST_LOG; using deterministic test logging fallback"
+        );
+    }
+}
+
+fn with_default_test_logging<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let current_dispatch_is_noop = tracing::dispatcher::get_default(|dispatch| {
+        dispatch.is::<tracing::subscriber::NoSubscriber>()
+    });
+    if !current_dispatch_is_noop {
+        return f();
+    }
+
+    let (filter, error) = test_log_filter_from_env();
+    let dispatch = test_dispatch(filter);
+    tracing::dispatcher::with_default(&dispatch, || {
+        report_filter_fallback(error.as_deref());
+        f()
+    })
+}
+
+/// Initialize legacy process-global test logging with a safe filter.
+///
+/// New tests should use `run_test`, `run_test_with_cx`, or the scoped API in
+/// `asupersync::test_utils`; this explicit global opt-in is transitional.
+pub fn init_test_logging() {
+    INIT_LOGGING.call_once(|| {
+        let (filter, error) = test_log_filter_from_env();
+        if tracing::dispatcher::set_global_default(test_dispatch(filter)).is_ok() {
+            report_filter_fallback(error.as_deref());
+        }
+    });
+}
+
+/// Initialize legacy process-global test logging with an explicit level.
 pub fn init_test_logging_with_level(level: tracing::Level) {
     INIT_LOGGING.call_once(|| {
-        let _ = tracing_subscriber::fmt()
+        let subscriber = tracing_subscriber::fmt()
             .with_max_level(level)
             .with_test_writer()
             .with_file(true)
@@ -175,7 +268,9 @@ pub fn init_test_logging_with_level(level: tracing::Level) {
             .with_thread_ids(true)
             .with_span_events(FmtSpan::CLOSE)
             .with_ansi(false)
-            .try_init();
+            .finish();
+        let _existing_global_is_preserved =
+            tracing::dispatcher::set_global_default(Dispatch::new(subscriber));
     });
 }
 
@@ -237,11 +332,12 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = ()>,
 {
-    init_test_logging();
-    let runtime = RuntimeBuilder::current_thread()
-        .build()
-        .expect("failed to build test runtime");
-    runtime.block_on(f());
+    with_default_test_logging(|| {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("failed to build test runtime");
+        runtime.block_on(f());
+    });
 }
 
 /// Run async test code with a test `Cx`.
@@ -250,12 +346,13 @@ where
     F: FnOnce(Cx) -> Fut,
     Fut: Future<Output = ()>,
 {
-    init_test_logging();
-    let cx: Cx = Cx::for_testing();
-    let runtime = RuntimeBuilder::current_thread()
-        .build()
-        .expect("failed to build test runtime");
-    runtime.block_on(f(cx));
+    with_default_test_logging(|| {
+        let cx: Cx = Cx::for_testing();
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("failed to build test runtime");
+        runtime.block_on(f(cx));
+    });
 }
 
 fn conformance_artifacts_dir() -> Option<PathBuf> {

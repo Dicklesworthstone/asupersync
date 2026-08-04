@@ -1,0 +1,708 @@
+{
+  "schema_version": 1,
+  "artifact_id": "x509-der-residue-spec-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-0h6myr.3.3",
+  "capability_id": "CAP-TLS-X509",
+  "baseline_revision": "2aff62c9d5456c2be8992851dd7a8441effae215",
+  "captured_date_utc": "2026-07-27",
+  "authority": {
+    "state": "SPECIFICATION_ONLY_NO_IMPLEMENTATION",
+    "dependency_exit_allowed": false,
+    "manifest_change_allowed": false,
+    "lockfile_change_allowed": false,
+    "cutover_allowed": false,
+    "production_reader_allowed_in_this_bead": false,
+    "next_implementation_owner": "asupersync-0h6myr.3.4"
+  },
+  "review_gate": {
+    "required": true,
+    "author": "GreenCove",
+    "state": "APPROVED",
+    "reviewer": "/root/architecture_trace",
+    "review_channel": "collaboration_agent",
+    "review_receipt": {
+      "agent_task": "/root/architecture_trace",
+      "decision": "APPROVE",
+      "reviewed_normative_payload_sha256": "8a619557ce3a8d87833d7e8733ac89a5fe78a1286c7cdb93c9c88bbd37e17274"
+    },
+    "reviewed_draft_sha256": "9a1d64225bbce6fbcf671964f2f567d7b9cdb500929f61a2e0b46872b4bbcfd2",
+    "reviewed_normative_payload_sha256": "8a619557ce3a8d87833d7e8733ac89a5fe78a1286c7cdb93c9c88bbd37e17274",
+    "candidate_normative_payload_sha256": "8a619557ce3a8d87833d7e8733ac89a5fe78a1286c7cdb93c9c88bbd37e17274",
+    "normative_projection": {
+      "algorithm": "SHA-256",
+      "canonicalization": "compact JSON with object keys sorted lexicographically and array order preserved",
+      "excluded_top_level_fields": [
+        "review_gate"
+      ],
+      "excluded_a1_reconciliation_fields": {
+        "paths": [
+          "artifacts/x509_validation_ownership_inventory_v1.json",
+          "docs/x509_validation_ownership_inventory.md",
+          "tests/x509_validation_ownership_inventory_contract.rs"
+        ],
+        "fields": [
+          "sha256",
+          "line_count"
+        ],
+        "reason": "A1 records approval only after independent review; excluding only these mutable pins avoids a review-hash cycle while retaining each path and role."
+      }
+    },
+    "approval_scope": "The complete normative projection: threat model, fact-only API profiles, exact limits and accounting, DER canonicality, duplicate and critical-extension policy, error shape and taxonomy, tests, rollback triggers, and no-claim boundaries.",
+    "implementation_may_begin": true
+  },
+  "source_contracts": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "b6789b10b8e984a98004cde19952c6b73418afdde30aa61e1c5a6a45377f17bb",
+      "line_count": 1015,
+      "role": "tls feature and x509-parser dependency baseline"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "c670712ab8713897bacc9591c170db2d030df83011dc7b9d092f16099f1540dd",
+      "line_count": 4666,
+      "role": "resolved dependency baseline"
+    },
+    {
+      "path": "src/tls/types.rs",
+      "sha256": "752c7070d3e4753a35cfdda85670d1eb2a4bd69760baf0cb7a3e831e0122e45f",
+      "line_count": 1107,
+      "role": "X509-R1 SPKI extraction incumbent"
+    },
+    {
+      "path": "src/tls/connector.rs",
+      "sha256": "bd2ed80fdc244592e92985654fb9acb2cf00f0fa2dca68734f4dbd9e4a7da393",
+      "line_count": 2049,
+      "role": "X509-R2 root CA admission incumbent"
+    },
+    {
+      "path": "src/tls/acceptor.rs",
+      "sha256": "1bbf5b9c2fe8d12c029a5e3effe3bede9513c9d094c69e1ff93145b6d76847e6",
+      "line_count": 2785,
+      "role": "X509-R3 server-chain preflight incumbent"
+    },
+    {
+      "path": "src/net/quic_native/handshake_driver.rs",
+      "sha256": "51e50620ca4e6006485e31d1b8ece4fc56d29fc36e7a346258c4607af1fa3548",
+      "line_count": 1438,
+      "role": "X509-R4 shared exact-leaf shape incumbent"
+    },
+    {
+      "path": "artifacts/x509_validation_ownership_inventory_v1.json",
+      "sha256": "1492f449a1430ba2c06c6feebe44754bd92e85259c5e8ff5d1afa553e98665a2",
+      "line_count": 1073,
+      "role": "A1 call-site, owner, residue, and routed-gap authority"
+    },
+    {
+      "path": "docs/x509_validation_ownership_inventory.md",
+      "sha256": "bbb1ee2367d186c4c415b7413596c1891951999e9b8c40cb0f4711f9ad880991",
+      "line_count": 308,
+      "role": "A1 operator inventory"
+    },
+    {
+      "path": "tests/x509_validation_ownership_inventory_contract.rs",
+      "sha256": "55895b057cb7afbd236844bdeed26c292fca7441c5f59cb49113310962e7b0fd",
+      "line_count": 913,
+      "role": "A1 executable ownership contract"
+    },
+    {
+      "path": "artifacts/x509_standard_verifier_delegation_v1.json",
+      "sha256": "86901cdbc800fe478dcb25a956b315848ae8b2e4a8c10fce004b8a3baa18e86d",
+      "line_count": 345,
+      "role": "A2 standard-first delegation and retained-policy authority"
+    },
+    {
+      "path": "docs/x509_standard_verifier_delegation.md",
+      "sha256": "3b4f31b0e32c15f1ed971fe10c2ac837089c2d7dcc3fedeedacdab97f1042585",
+      "line_count": 118,
+      "role": "A2 operator decision"
+    },
+    {
+      "path": "tests/x509_standard_verifier_delegation_contract.rs",
+      "sha256": "39df49e5bb206c292a9c0a71e916604c57abb7f55c505eeb5f876c8617f2cfce",
+      "line_count": 466,
+      "role": "A2 executable delegation contract"
+    }
+  ],
+  "threat_model": {
+    "untrusted_input_channels": [
+      {
+        "channel_id": "X509-THREAT-PEER-LEAF",
+        "input": "remote TLS or QUIC end-entity certificate DER",
+        "attacker": "unauthenticated network peer before certificate acceptance"
+      },
+      {
+        "channel_id": "X509-THREAT-ROOT-BUNDLE",
+        "input": "explicit or environment-selected root certificate DER",
+        "attacker": "local configuration, filesystem, deployment, or supply-chain actor"
+      },
+      {
+        "channel_id": "X509-THREAT-SERVER-CHAIN",
+        "input": "operator-configured server certificate-chain DER",
+        "attacker": "misconfiguration or compromised certificate provisioning path"
+      },
+      {
+        "channel_id": "X509-THREAT-PIN-INPUT",
+        "input": "caller-supplied certificate DER used to derive an SPKI pin or exact-leaf pin",
+        "attacker": "caller or configuration actor controlling certificate bytes"
+      }
+    ],
+    "protected_assets": [
+      "standard-verifier authority boundaries",
+      "exact-leaf pin trust semantics",
+      "root-store admission semantics",
+      "server-chain operator diagnostics",
+      "SPKI pin byte identity",
+      "bounded CPU and memory",
+      "deterministic fail-closed behavior",
+      "stable caller-owned TLS and QUIC error mapping"
+    ],
+    "attack_classes": [
+      {
+        "attack_id": "X509-ATTACK-TRUNCATION-TRAILING",
+        "vector": "truncated TLV or valid prefix followed by attacker bytes",
+        "required_control": "checked bounds plus full outer consumption"
+      },
+      {
+        "attack_id": "X509-ATTACK-LENGTH",
+        "vector": "indefinite, nonminimal, overflowing, or over-limit length encoding",
+        "required_control": "DER-only minimal definite lengths and checked arithmetic"
+      },
+      {
+        "attack_id": "X509-ATTACK-DEPTH-COUNT",
+        "vector": "deep nesting, excessive TLV nodes, extensions, subject RDNs, subject attributes, or SAN entries",
+        "required_control": "hard profile-independent depth and count limits"
+      },
+      {
+        "attack_id": "X509-ATTACK-AMBIGUOUS-EXTENSIONS",
+        "vector": "duplicate extension OIDs or duplicate EKU purposes",
+        "required_control": "reject duplicates before exposing any selected value"
+      },
+      {
+        "attack_id": "X509-ATTACK-CRITICAL-BYPASS",
+        "vector": "critical extension whose semantics are not enforced on the exact-pin branch",
+        "required_control": "pin profile rejects every critical OID outside its exact understood allow-set"
+      },
+      {
+        "attack_id": "X509-ATTACK-TIME-STRING",
+        "vector": "noncanonical time, invalid calendar, malformed DirectoryString, or oversized selected value",
+        "required_control": "exact DER time/string grammar and bounded selected values"
+      },
+      {
+        "attack_id": "X509-ATTACK-AUTHORITY-CREEP",
+        "vector": "reader grows path, signature, trust, wildcard, hostname, name-constraint, or revocation decisions",
+        "required_control": "profile APIs expose facts only and accept no roots, chains, server names, clocks, signatures, or policy callbacks"
+      },
+      {
+        "attack_id": "X509-ATTACK-DIAGNOSTIC-LEAK",
+        "vector": "errors embed peer-controlled DER, strings, OIDs without caps, or cryptographic detail",
+        "required_control": "stable error class, checked offset, optional bounded numeric detail, and no raw peer text"
+      }
+    ]
+  },
+  "api_contract": {
+    "module_planned": "src/tls/der_min.rs",
+    "visibility": "crate-private until A6 migration proves a public need",
+    "input": "one complete certificate DER byte slice and one compile-time profile",
+    "ambient_inputs_forbidden": [
+      "current time",
+      "server name",
+      "trust store",
+      "certificate chain",
+      "signature algorithms",
+      "revocation policy",
+      "network access",
+      "filesystem access",
+      "global configuration"
+    ],
+    "forbidden_capabilities": [
+      "chain construction",
+      "certificate signature verification",
+      "TLS handshake signature verification",
+      "trust-anchor selection or validation",
+      "hostname or IP matching",
+      "wildcard interpretation",
+      "name-constraint evaluation",
+      "certificate-policy evaluation",
+      "revocation or OCSP decisions",
+      "algorithm strength or negotiation policy"
+    ],
+    "implementation_shape": {
+      "unsafe_code": false,
+      "recursion": false,
+      "panics_on_input": false,
+      "unchecked_arithmetic": false,
+      "borrow_selected_der": true,
+      "allocation_policy": "Only fixed-capacity or hard-bounded collections whose maxima appear in resource_limits.",
+      "determinism": "The same bytes and profile produce the same output or the same error class and offset."
+    }
+  },
+  "profiles": [
+    {
+      "profile_id": "X509-PROFILE-SPKI",
+      "residue_id": "X509-R1-SPKI",
+      "planned_function": "extract_spki_der",
+      "outputs": [
+        "SpkiDerSlice"
+      ],
+      "selected_fields": [
+        "Certificate.tbsCertificate.subjectPublicKeyInfo complete encoded TLV"
+      ],
+      "caller_owned_policy": "SHA-256 hashing and pin comparison",
+      "unknown_critical_behavior": "NOT_INTERPRETED; standard verifier or caller remains authoritative",
+      "duplicate_extension_behavior": "REJECT_ANY_DUPLICATE_EXTENSION_OID",
+      "forbidden_inputs": [
+        "server name",
+        "roots",
+        "intermediates",
+        "clock"
+      ]
+    },
+    {
+      "profile_id": "X509-PROFILE-ROOT-CA",
+      "residue_id": "X509-R2-CA-ADMISSION",
+      "planned_function": "inspect_basic_constraints_ca",
+      "outputs": [
+        "BasicConstraintsFact::{Absent,Present{ca}}"
+      ],
+      "selected_fields": [
+        "BasicConstraints extension presence and cA DEFAULT false fact when present"
+      ],
+      "caller_owned_policy": "require extension presence and ca=true before insertion; preserve existing diagnostics",
+      "unknown_critical_behavior": "NOT_REJECTED_BY_READER; no critical-extension acceptance claim; the downstream trust-anchor owner remains responsible",
+      "duplicate_extension_behavior": "REJECT_ANY_DUPLICATE_EXTENSION_OID",
+      "forbidden_inputs": [
+        "trust store",
+        "chain",
+        "server name",
+        "clock"
+      ]
+    },
+    {
+      "profile_id": "X509-PROFILE-ACCEPTOR-PREFLIGHT",
+      "residue_id": "X509-R3-ACCEPTOR-PREFLIGHT",
+      "planned_function": "inspect_server_chain_metadata",
+      "outputs": [
+        "ValidityWindowUnixSeconds",
+        "SubjectIdentityPresence"
+      ],
+      "selected_fields": [
+        "notBefore",
+        "notAfter",
+        "presence of nonempty CN, OU, or O DirectoryString"
+      ],
+      "caller_owned_policy": "current-time comparison, chain index diagnostics, and strict-mode enablement",
+      "unknown_critical_behavior": "NOT_REJECTED_BY_READER; remote standard verifiers own extension semantics",
+      "duplicate_extension_behavior": "REJECT_ANY_DUPLICATE_EXTENSION_OID",
+      "forbidden_inputs": [
+        "clock",
+        "roots",
+        "server name",
+        "signature algorithms"
+      ]
+    },
+    {
+      "profile_id": "X509-PROFILE-PINNED-LEAF",
+      "residue_id": "X509-R4-NATIVE-PIN-FALLBACK",
+      "planned_function": "inspect_pinned_leaf_shape",
+      "outputs": [
+        "ValidityWindowUnixSeconds",
+        "ExtendedKeyUsageFact::{Absent,Present{server_auth}}",
+        "KeyUsageFact::{Absent,Present{digital_signature}}",
+        "SubjectAltNameFact::{Absent,Present{dns_names,ip_addresses}}"
+      ],
+      "selected_fields": [
+        "notBefore",
+        "notAfter",
+        "ExtendedKeyUsage extension presence and serverAuth purpose presence when present",
+        "KeyUsage extension presence and digitalSignature bit when present",
+        "SubjectAltName extension presence plus bounded DNS and IP entries when present"
+      ],
+      "caller_owned_policy": "require EKU presence with serverAuth, reject present KU without digitalSignature, require SAN presence and exact case-insensitive DNS or exact IP match, and compare current time after the A2 UnknownIssuer plus exact-leaf gate",
+      "unknown_critical_behavior": "REJECT_UNLESS_OID_IS_IN_PIN_PROFILE_UNDERSTOOD_CRITICAL_ALLOW_SET",
+      "understood_critical_extension_oids": [
+        "2.5.29.15",
+        "2.5.29.17",
+        "2.5.29.37"
+      ],
+      "duplicate_extension_behavior": "REJECT_ANY_DUPLICATE_EXTENSION_OID",
+      "forbidden_inputs": [
+        "clock",
+        "server name",
+        "roots",
+        "intermediates",
+        "signatures"
+      ]
+    }
+  ],
+  "resource_limits": {
+    "max_certificate_der_bytes": 1048576,
+    "max_tlv_depth": 16,
+    "max_tlv_nodes": 4096,
+    "max_oid_content_bytes": 64,
+    "max_integer_content_bytes": 262144,
+    "max_bit_string_content_bytes": 262144,
+    "max_spki_der_bytes": 262144,
+    "max_extension_count": 64,
+    "max_extension_value_bytes": 262144,
+    "max_subject_rdns": 128,
+    "max_subject_attributes": 256,
+    "max_directory_string_bytes": 4096,
+    "max_eku_purpose_count": 64,
+    "max_san_entry_count": 128,
+    "max_dns_san_bytes": 253
+  },
+  "resource_accounting": {
+    "depth": "The outer Certificate TLV is depth 1. Every entered constructed child increments depth by one. A selected extension's inner root TLV is one deeper than its extnValue OCTET STRING, and all entered inner constructed TLVs count.",
+    "nodes": "The outer Certificate TLV is node 1. Every successfully decoded outer or selected-extension inner TLV header increments the node count exactly once, including primitive TLVs and the extnValue OCTET STRING.",
+    "traversal_frontier": {
+      "entered_outer_schema": "Certificate and TBSCertificate; explicit version and INTEGER; both signature AlgorithmIdentifier SEQUENCE values and their algorithm OIDs; Certificate signatureValue BIT STRING; issuer and subject Name/RDN/AttributeTypeAndValue; validity and both time values; SubjectPublicKeyInfo, its AlgorithmIdentifier, and subjectPublicKey BIT STRING; issuerUniqueID and subjectUniqueID BIT STRING headers; Extensions wrapper/sequence, every Extension row, extnID, critical, and extnValue.",
+      "opaque_outer_values": "AlgorithmIdentifier parameters and unselected AttributeTypeAndValue values are each counted as one bounded complete TLV but their constructed contents are not entered.",
+      "entered_selected_values": "Supported DirectoryString values and, when selected by the active profile, the complete BasicConstraints, KeyUsage, ExtendedKeyUsage, and SubjectAltName inner grammars.",
+      "opaque_general_names": "In a noncritical SAN, unsupported GeneralName alternatives are counted as one bounded context-specific TLV and their constructed contents are not entered; in a critical SAN they are rejected before exposure.",
+      "test_only_parser_frontier": "A4 may exercise the private TLV reader directly with bounded schema-independent TLV fixtures for max_tlv_depth and max_tlv_nodes; this grants no production generic-reader API."
+    },
+    "enforcement": "Certificate size is checked before traversal. Every remaining resource limit is checked before the corresponding slice, allocation, collection insertion, or child entry.",
+    "value_limit_scope": "OID, INTEGER, and BIT STRING limits apply to every entered outer mandatory field and selected inner value. max_subject_rdns and max_subject_attributes apply to the subject Name only; issuer Name is structurally traversed but its collections are not retained.",
+    "derived_invariants": "Any accepted canonical value under max_certificate_der_bytes uses at most three length octets; a nonminimal longer encoding is X509-DER-NONMINIMAL-LENGTH and a minimal declaration beyond the bounded input is X509-DER-BOUNDS or X509-DER-UNEXPECTED-EOF. IP SAN length is a semantic domain of exactly 4 or 16 octets, not a monotonic resource limit.",
+    "boundary_evidence": "Certificate size uses well-formed N-1 and N inputs plus an N+1 input rejected before traversal. Private TLV-reader depth and node ceilings use isolated bounded N-1, N, and N+1 fixtures. Every other monotonic resource limit uses profile-valid N-1 and N fixtures plus an N+1 exact limit error. IP SAN uses accepted 4/16-octet cases and semantic rejection of every other length; length-octet behavior uses canonical short/long, nonminimal, overflow, bounds, and EOF fixtures rather than a fictitious monotonic limit."
+  },
+  "canonicality_rules": [
+    {
+      "rule_id": "X509-DER-CANON-01",
+      "requirement": "Input is one nonempty complete Certificate SEQUENCE and no trailing byte remains.",
+      "error_code": "X509-DER-EMPTY-OR-TRAILING",
+      "testable": true
+    },
+    {
+      "rule_id": "X509-DER-CANON-02",
+      "requirement": "Only DER definite lengths are accepted; BER/CER indefinite length is rejected.",
+      "error_code": "X509-DER-INDEFINITE-LENGTH",
+      "testable": true
+    },
+    {
+      "rule_id": "X509-DER-CANON-03",
+      "requirement": "Length uses short form for values through 127 and the shortest nonzero long form otherwise.",
+      "error_code": "X509-DER-NONMINIMAL-LENGTH",
+      "testable": true
+    },
+    {
+      "rule_id": "X509-DER-CANON-04",
+      "requirement": "Every offset plus header or content length uses checked arithmetic and stays within the containing TLV and input.",
+      "error_code": "X509-DER-BOUNDS",
+      "testable": true
+    },
+    {
+      "rule_id": "X509-DER-CANON-05",
+      "requirement": "High-tag-number form is rejected; every traversed schema tag has the required class, number, and constructed bit.",
+      "error_code": "X509-DER-TAG",
+      "testable": true
+    },
+    {
+      "rule_id": "X509-DER-CANON-06",
+      "requirement": "SEQUENCE and SET are constructed; BOOLEAN, INTEGER, BIT STRING, OCTET STRING, NULL, OID, and selected strings/times are primitive.",
+      "error_code": "X509-DER-CONSTRUCTED-BIT",
+      "testable": true
+    },
+    {
+      "rule_id": "X509-DER-CANON-07",
+      "requirement": "BOOLEAN content is exactly one octet and is 00 for false or FF for true.",
+      "error_code": "X509-DER-BOOLEAN",
+      "testable": true
+    },
+    {
+      "rule_id": "X509-DER-CANON-08",
+      "requirement": "INTEGER content is nonempty and has no redundant sign octet.",
+      "error_code": "X509-DER-INTEGER",
+      "testable": true
+    },
+    {
+      "rule_id": "X509-DER-CANON-09",
+      "requirement": "BIT STRING content contains at least the unused-bit-count octet, its count is 0 through 7, and every declared unused bit is zero; KeyUsage additionally uses DER NamedBitList form with all trailing zero bits removed, no set bit above bit 8, and at least one named bit set.",
+      "error_code": "X509-DER-BIT-STRING",
+      "testable": true
+    },
+    {
+      "rule_id": "X509-DER-CANON-10",
+      "requirement": "NULL content length is zero.",
+      "error_code": "X509-DER-NULL",
+      "testable": true
+    },
+    {
+      "rule_id": "X509-DER-CANON-11",
+      "requirement": "OID subidentifiers use minimal terminating base-128 form, do not overflow u64, and stay within the OID byte limit.",
+      "error_code": "X509-DER-OID",
+      "testable": true
+    },
+    {
+      "rule_id": "X509-DER-CANON-12",
+      "requirement": "Every SET OF traversed by the schema is ordered lexicographically by complete encoded child TLV bytes.",
+      "error_code": "X509-DER-SET-ORDER",
+      "testable": true
+    },
+    {
+      "rule_id": "X509-DER-CANON-13",
+      "requirement": "Explicit DEFAULT values are rejected for every entered value: v1 Certificate version and Extension critical FALSE globally, plus BasicConstraints cA FALSE whenever that selected extension grammar is entered.",
+      "error_code": "X509-DER-EXPLICIT-DEFAULT",
+      "testable": true
+    },
+    {
+      "rule_id": "X509-DER-CANON-14",
+      "requirement": "Every mandatory Certificate and TBSCertificate field appears once in schema order; optional context tags appear at most once and in order.",
+      "error_code": "X509-DER-SCHEMA",
+      "testable": true
+    },
+    {
+      "rule_id": "X509-DER-CANON-15",
+      "requirement": "Every Extension SEQUENCE is extnID, optional critical BOOLEAN, and extnValue OCTET STRING with full Extension consumption.",
+      "error_code": "X509-DER-EXTENSION-SHAPE",
+      "testable": true
+    },
+    {
+      "rule_id": "X509-DER-CANON-16",
+      "requirement": "Every extension OID occurs at most once, independent of profile.",
+      "error_code": "X509-DER-DUPLICATE-EXTENSION",
+      "testable": true
+    },
+    {
+      "rule_id": "X509-DER-CANON-17",
+      "requirement": "Every selected extension value is fully consumed and satisfies its exact selected_extension_contracts entry for BasicConstraints, KeyUsage, ExtendedKeyUsage, or SubjectAltName.",
+      "error_code": "X509-DER-SELECTED-EXTENSION",
+      "testable": true
+    },
+    {
+      "rule_id": "X509-DER-CANON-18",
+      "requirement": "Under X509-PROFILE-PINNED-LEAF, no ExtendedKeyUsage purpose OID repeats; CANON-17 separately requires the sequence to be nonempty.",
+      "error_code": "X509-DER-DUPLICATE-EKU",
+      "testable": true
+    }
+  ],
+  "time_policy": {
+    "utc_time": "Exactly YYMMDDHHMMSSZ; years 50-99 map to 1950-1999 and 00-49 map to 2000-2049.",
+    "generalized_time": "Exactly YYYYMMDDHHMMSSZ; fractional seconds and numeric offsets are rejected.",
+    "tag_choice": "Both UTCTime and GeneralizedTime are deliberately accepted for either validity endpoint because RFC 5280 relying applications must process both; this reader does not enforce the issuer year-to-tag generation rule.",
+    "calendar": "Gregorian month/day and leap-year validation; hour 00-23, minute 00-59, second 00-59; leap seconds are rejected.",
+    "output": "Checked i64 Unix seconds only; the reader accepts no clock and performs no current-time comparison.",
+    "ordering": "notBefore greater than notAfter is X509-DER-VALIDITY-ORDER."
+  },
+  "string_policy": {
+    "selected_subject_oids": [
+      "2.5.4.3",
+      "2.5.4.10",
+      "2.5.4.11"
+    ],
+    "accepted_directory_string_tags": [
+      "UTF8String",
+      "PrintableString",
+      "UniversalString",
+      "BMPString"
+    ],
+    "presence_rule": "SubjectIdentityPresence is true only for a selected OID with a nonempty canonical supported DirectoryString.",
+    "validation": [
+      "UTF8String is valid shortest-form UTF-8 with no surrogate encoding.",
+      "PrintableString uses only the ASN.1 PrintableString alphabet.",
+      "BMPString length is even and contains no surrogate code unit.",
+      "UniversalString length is divisible by four and every code point is a Unicode scalar."
+    ],
+    "teletex_policy": "A structurally complete TeletexString no larger than max_directory_string_bytes on a selected subject OID returns SubjectIdentityPresence=false and does not emit X509-DER-STRING because A3 defines no T.61 decoder; malformed supported encodings do emit X509-DER-STRING. A5 owns differential evidence for this intentional compatibility boundary.",
+    "forbidden_operations": [
+      "normalization",
+      "case folding",
+      "locale mapping",
+      "distinguished-name comparison",
+      "display rendering"
+    ]
+  },
+  "extension_policy": {
+    "duplicate_extension_oids": "REJECT_FOR_ALL_PROFILES",
+    "duplicate_eku_purposes": "REJECT_FOR_PINNED_LEAF_PROFILE",
+    "unknown_noncritical_extensions": "OPAQUE_AND_IGNORED_AFTER_BOUNDED_OUTER_EXTENSION_PARSE",
+    "unknown_critical_spki_root_acceptor_profiles": "NOT_INTERPRETED; no critical-extension acceptance claim; the downstream owner remains responsible",
+    "unknown_critical_pinned_leaf_profile": "REJECT",
+    "critical_default": "critical FALSE must be omitted; explicit FALSE is noncanonical DER and rejected",
+    "selected_extension_full_consumption": true,
+    "selected_extension_contracts": {
+      "basic_constraints": "SEQUENCE with optional cA BOOLEAN DEFAULT FALSE followed by optional nonnegative minimal pathLenConstraint INTEGER; explicit cA FALSE is rejected, pathLenConstraint requires cA TRUE, and the sequence is fully consumed.",
+      "key_usage": "One fully consumed BIT STRING in DER NamedBitList form; at least one named bit is set, all trailing zero bits are removed, no set bit exceeds bit 8, and digitalSignature bit 0 is returned as a fact.",
+      "extended_key_usage": "A fully consumed nonempty SEQUENCE of unique, canonical, bounded OIDs; serverAuth 1.3.6.1.5.5.7.3.1 presence is returned as a fact.",
+      "subject_alt_name": "A fully consumed nonempty GeneralNames SEQUENCE. dNSName is primitive context tag 2 with 1 through 253 IA5 ASCII bytes; A3 performs no DNS-label grammar or normalization. iPAddress is primitive context tag 7 with exactly 4 or 16 octets. In a noncritical SAN, every other GeneralName choice must have canonical outer context-specific TLV framing and bounded content but constructed contents remain opaque and carry no nested-DER canonicality claim. Any unsupported choice in a critical SAN is X509-DER-UNKNOWN-CRITICAL."
+    }
+  },
+  "error_shape": {
+    "class": "closed enum containing exactly the thirty error_taxonomy codes",
+    "offset": "absolute zero-based byte position in the original certificate input, checked and no greater than input length; offset zero is valid for X509-DER-EMPTY-OR-TRAILING on empty input, and otherwise one-past-end input length is permitted only for X509-DER-UNEXPECTED-EOF",
+    "numeric_detail": "optional fixed-shape u64 observed and limit values, each bounded by max_certificate_der_bytes; no strings or attacker-selected field names",
+    "raw_peer_bytes": false,
+    "raw_peer_text": false,
+    "raw_oid_text": false,
+    "cryptographic_detail": false
+  },
+  "error_taxonomy": [
+    {
+      "code": "X509-DER-EMPTY-OR-TRAILING",
+      "trigger": "empty input or byte remaining after outer Certificate"
+    },
+    {
+      "code": "X509-DER-CERTIFICATE-LIMIT",
+      "trigger": "certificate exceeds max_certificate_der_bytes"
+    },
+    {
+      "code": "X509-DER-UNEXPECTED-EOF",
+      "trigger": "header or content ends outside its containing TLV"
+    },
+    {
+      "code": "X509-DER-INDEFINITE-LENGTH",
+      "trigger": "length octet 80"
+    },
+    {
+      "code": "X509-DER-NONMINIMAL-LENGTH",
+      "trigger": "long form for value through 127, leading zero length octet, or more length octets than the shortest encoding"
+    },
+    {
+      "code": "X509-DER-LENGTH-OVERFLOW",
+      "trigger": "length or checked offset arithmetic overflows"
+    },
+    {
+      "code": "X509-DER-BOUNDS",
+      "trigger": "child exceeds parent or input bounds"
+    },
+    {
+      "code": "X509-DER-TAG",
+      "trigger": "high-tag form or unexpected class or tag number"
+    },
+    {
+      "code": "X509-DER-CONSTRUCTED-BIT",
+      "trigger": "known tag has wrong primitive or constructed form"
+    },
+    {
+      "code": "X509-DER-DEPTH-LIMIT",
+      "trigger": "traversal exceeds max_tlv_depth"
+    },
+    {
+      "code": "X509-DER-NODE-LIMIT",
+      "trigger": "traversal exceeds max_tlv_nodes"
+    },
+    {
+      "code": "X509-DER-COUNT-LIMIT",
+      "trigger": "extensions, subject RDNs, subject attributes, EKUs, or SAN entries exceed their hard limit"
+    },
+    {
+      "code": "X509-DER-VALUE-LIMIT",
+      "trigger": "entered OID, INTEGER, BIT STRING, SPKI, extension value, supported DirectoryString, or DNS SAN exceeds its hard limit"
+    },
+    {
+      "code": "X509-DER-BOOLEAN",
+      "trigger": "BOOLEAN length or canonical value invalid"
+    },
+    {
+      "code": "X509-DER-INTEGER",
+      "trigger": "INTEGER empty or redundantly sign-extended"
+    },
+    {
+      "code": "X509-DER-BIT-STRING",
+      "trigger": "BIT STRING content missing, unused bit count invalid, unused bit nonzero, or KeyUsage NamedBitList nonminimal, empty, or above bit 8"
+    },
+    {
+      "code": "X509-DER-NULL",
+      "trigger": "NULL has content"
+    },
+    {
+      "code": "X509-DER-OID",
+      "trigger": "OID is empty, unterminated, nonminimal, overflowing, or over limit"
+    },
+    {
+      "code": "X509-DER-SET-ORDER",
+      "trigger": "SET OF children are not ordered by encoded bytes"
+    },
+    {
+      "code": "X509-DER-EXPLICIT-DEFAULT",
+      "trigger": "DER DEFAULT value is explicitly encoded"
+    },
+    {
+      "code": "X509-DER-SCHEMA",
+      "trigger": "mandatory field missing, repeated, reordered, or unexpected"
+    },
+    {
+      "code": "X509-DER-EXTENSION-SHAPE",
+      "trigger": "Extension fields malformed, reordered, repeated, or not fully consumed"
+    },
+    {
+      "code": "X509-DER-DUPLICATE-EXTENSION",
+      "trigger": "two Extension rows carry the same extnID"
+    },
+    {
+      "code": "X509-DER-DUPLICATE-EKU",
+      "trigger": "ExtendedKeyUsage repeats a purpose OID"
+    },
+    {
+      "code": "X509-DER-UNKNOWN-CRITICAL",
+      "trigger": "pinned-leaf profile sees a critical OID outside its understood allow-set or an allow-listed critical extension containing unsupported semantics"
+    },
+    {
+      "code": "X509-DER-SELECTED-EXTENSION",
+      "trigger": "selected extension violates its exact BasicConstraints, KeyUsage, ExtendedKeyUsage, or SubjectAltName inner contract or has trailing content"
+    },
+    {
+      "code": "X509-DER-TIME",
+      "trigger": "time tag, width, digits, Z suffix, calendar, or Unix conversion invalid"
+    },
+    {
+      "code": "X509-DER-VALIDITY-ORDER",
+      "trigger": "notBefore is greater than notAfter"
+    },
+    {
+      "code": "X509-DER-STRING",
+      "trigger": "selected supported UTF8String, PrintableString, BMPString, or UniversalString encoding invalid; bounded TeletexString is an unsupported absence fact, not this error"
+    },
+    {
+      "code": "X509-DER-MISSING-SELECTED-FIELD",
+      "trigger": "profile-mandatory SPKI or validity field absent; optional BasicConstraints, EKU, KU, and SAN absence is returned as a fact"
+    }
+  ],
+  "test_obligations": [
+    "one positive and one exact negative fixture for every canonicality rule",
+    "limit-specific resource evidence exactly follows resource_accounting.boundary_evidence rather than assuming every domain is monotonic",
+    "depth fixtures count the outer Certificate as depth and node one, count every outer and selected-extension inner TLV exactly once, and exercise both boundaries",
+    "error offsets exercise empty-input offset zero, nonempty-input zero, final input byte, permitted one-past-end EOF, and rejection of every offset greater than input length independently of resource-limit fixtures",
+    "truncation at every header and content boundary",
+    "nonminimal and overflowing length encodings",
+    "every duplicate extension position and duplicate EKU purpose",
+    "unknown critical and noncritical OIDs under every profile",
+    "UTC and GeneralizedTime century, leap-year, calendar, width, suffix, and ordering cases",
+    "every supported DirectoryString tag plus malformed and over-limit cases",
+    "wrong profile cannot request or observe an unselected field",
+    "absent and present-false or empty-policy facts remain distinguishable for BasicConstraints, EKU, KU, and SAN while caller admission decisions remain outside the reader",
+    "error class and offset are deterministic across repeated execution",
+    "no panic, unsafe code, recursion, ambient authority, or allocation beyond the declared maxima"
+  ],
+  "downstream_handoff": {
+    "implementation_owner": "asupersync-0h6myr.3.4",
+    "adversarial_owner": "asupersync-0h6myr.3.5",
+    "migration_owner": "asupersync-0h6myr.3.6",
+    "independent_security_owner": "asupersync-0h6myr.3.7",
+    "real_peer_owner": "asupersync-0h6myr.3.8",
+    "cutover_owner": "asupersync-0h6myr.3.9",
+    "implementation_gate": "review_gate.state must be APPROVED and implementation_may_begin must be true before A4 starts"
+  },
+  "rollback_triggers": [
+    "an A4 API accepts a clock, server name, trust store, chain, signature, or policy callback",
+    "a profile exposes a field not selected by this artifact",
+    "a limit is raised, removed, made runtime-ambient, or enforced after allocation",
+    "indefinite, nonminimal, trailing, duplicate, or over-depth DER is accepted",
+    "the pinned-leaf critical-extension allow-set broadens without independent review",
+    "a new production x509-parser call site is added without an A1 and A3 refresh",
+    "an error embeds raw peer-controlled DER or unbounded text",
+    "implementation begins before independent approval"
+  ],
+  "no_claim_boundaries": [
+    "This artifact is a specification and threat model; it does not implement or prove a DER reader.",
+    "It does not verify certificate chains, certificate signatures, TLS handshake signatures, trust anchors, hostnames, wildcards, name constraints, policies, revocation, or OCSP.",
+    "It does not authorize replacing rustls/WebPKI or treating local facts as standard verification.",
+    "It does not authorize removing x509-parser, changing Cargo features, changing Cargo.lock, or cutting over CAP-TLS-X509.",
+    "It does not prove compatibility with every incumbent x509-parser input; A5 owns differential and adversarial evidence.",
+    "It does not prove the A8 real-peer TLS, mTLS, QUIC, ATP, platform, cancellation, reconnect, or shutdown matrix.",
+    "It does not prove performance, release readiness, broad workspace health, or live RCH fleet availability.",
+    "It does not authorize unsafe code, file deletion, local Cargo fallback, or implementation before independent approval."
+  ]
+}

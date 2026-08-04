@@ -2673,7 +2673,7 @@
       "CAP-HOST-BENCH-METADATA": 10,
       "CAP-HOST-INTROSPECTION": 10,
       "CAP-HTTP-COMPRESSION": 10,
-      "CAP-KAFKA": 78,
+      "CAP-KAFKA": 77,
       "CAP-LAB-DETERMINISM": 6,
       "CAP-NATS-MESSAGING": 2,
       "CAP-NKEY-AUTH": 16,
@@ -2683,11 +2683,11 @@
       "CAP-PROTOBUF-GENERIC": 10,
       "CAP-PUBLIC-API-TOPOLOGY": 7,
       "CAP-REAL-SERVICE-E2E": 14,
-      "CAP-REGEX-PRIVACY": 30,
+      "CAP-REGEX-PRIVACY": 29,
       "CAP-SCENARIO-YAML-JSON": 8,
       "CAP-SERDE-GENERIC": 10,
       "CAP-SIGNALS": 11,
-      "CAP-SQLITE": 22,
+      "CAP-SQLITE": 21,
       "CAP-SYNC-LOCKS": 18,
       "CAP-TEMP-ARTIFACTS": 2,
       "CAP-TIME-UTC-RFC3339": 13,
@@ -2700,28 +2700,28 @@
     },
     "capability_invariants": 473,
     "evidence_classes": {
-      "contract": 229,
-      "downstream": 201,
-      "e2e": 197,
-      "fuzz": 303,
-      "lab": 263,
-      "property": 296,
+      "contract": 226,
+      "downstream": 198,
+      "e2e": 194,
+      "fuzz": 300,
+      "lab": 260,
+      "property": 293,
       "unit": 106
     },
-    "evidence_plans": 1595,
-    "matrix_beads": 335,
+    "evidence_plans": 1577,
+    "matrix_beads": 332,
     "risks": {
-      "boundary": 335,
-      "concurrency": 263,
-      "fuzz": 303,
-      "parser_codec": 256,
-      "property": 296,
-      "public_generic": 201,
-      "security": 196,
-      "user_journey": 197
+      "boundary": 332,
+      "concurrency": 260,
+      "fuzz": 300,
+      "parser_codec": 253,
+      "property": 293,
+      "public_generic": 198,
+      "security": 194,
+      "user_journey": 194
     },
     "roles": {
-      "architecture": 14,
+      "architecture": 11,
       "decision": 16,
       "implementation": 106,
       "verification": 199
@@ -2729,9 +2729,9 @@
   },
   "inputs": {
     "capability_registry_path": "artifacts/dependency_capability_registry_v1.json",
-    "capability_registry_sha256": "6aa6ad9b4cfdc84b46c397277a7f5dbe2728db31618e31a48893d5d56180c692",
+    "capability_registry_sha256": "6aa4d7e4773a57a7bbb4231eba71c03447ded458c7b5794670df327b41ad026b",
     "tracker_path": ".beads/issues.jsonl",
-    "tracker_plan_sha256": "f83003c1b99336b90d3237e5002d50d3b0c7695393288760829539b8fe3229ec"
+    "tracker_plan_sha256": "f9dc0fcc460b3e655df2bc6a1d13d77331f492d7dbf15e7e58cce62e3b86defe"
   },
   "matrix": [
     {
@@ -9752,7 +9752,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_0h6myr_5_2_3f25b8485051__local_invariants"
           ],
-          "test_file": "src/web/compress.rs"
+          "test_file": "src/http/compress.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_0h6myr_5_2_3f25b8485051/asupersync_0h6myr_5_2_property",
@@ -9793,7 +9793,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_0h6myr_5_2_3f25b8485051__property_matrix"
           ],
-          "test_file": "src/web/compress.rs"
+          "test_file": "src/http/compress.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_0h6myr_5_2_3f25b8485051/asupersync_0h6myr_5_2_lab",
@@ -9830,7 +9830,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_0h6myr_5_2_3f25b8485051__lab_lifecycle"
           ],
-          "test_file": "src/web/compress.rs"
+          "test_file": "src/http/compress.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_0h6myr_5_2_3f25b8485051/asupersync_0h6myr_5_2_fuzz",
@@ -9954,7 +9954,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_0h6myr_5_3_fc8385b18ff8__local_invariants"
           ],
-          "test_file": "src/web/compress.rs"
+          "test_file": "src/http/compress.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_0h6myr_5_3_fc8385b18ff8/asupersync_0h6myr_5_3_property",
@@ -9995,7 +9995,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_0h6myr_5_3_fc8385b18ff8__property_matrix"
           ],
-          "test_file": "src/web/compress.rs"
+          "test_file": "src/http/compress.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_0h6myr_5_3_fc8385b18ff8/asupersync_0h6myr_5_3_lab",
@@ -10032,7 +10032,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_0h6myr_5_3_fc8385b18ff8__lab_lifecycle"
           ],
-          "test_file": "src/web/compress.rs"
+          "test_file": "src/http/compress.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_0h6myr_5_3_fc8385b18ff8/asupersync_0h6myr_5_3_fuzz",
@@ -12096,7 +12096,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_3u3tej_1_3_2_86f65c53a11b__local_invariants"
           ],
-          "test_file": "src/signal/mod.rs"
+          "test_file": "src/signal/signal.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_3u3tej_1_3_2_86f65c53a11b/asupersync_3u3tej_1_3_2_lab",
@@ -12134,7 +12134,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_3u3tej_1_3_2_86f65c53a11b__lab_lifecycle"
           ],
-          "test_file": "src/signal/mod.rs"
+          "test_file": "src/signal/signal.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_3u3tej_1_3_2_86f65c53a11b/asupersync_3u3tej_1_3_2_fuzz",
@@ -12463,7 +12463,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_3u3tej_1_3_4_e27959c3a7ce__local_invariants"
           ],
-          "test_file": "src/signal/mod.rs"
+          "test_file": "src/signal/signal.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_3u3tej_1_3_4_e27959c3a7ce/asupersync_3u3tej_1_3_4_property",
@@ -12504,7 +12504,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_3u3tej_1_3_4_e27959c3a7ce__property_matrix"
           ],
-          "test_file": "src/signal/mod.rs"
+          "test_file": "src/signal/signal.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_3u3tej_1_3_4_e27959c3a7ce/asupersync_3u3tej_1_3_4_lab",
@@ -12542,7 +12542,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_3u3tej_1_3_4_e27959c3a7ce__lab_lifecycle"
           ],
-          "test_file": "src/signal/mod.rs"
+          "test_file": "src/signal/signal.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_3u3tej_1_3_4_e27959c3a7ce/asupersync_3u3tej_1_3_4_fuzz",
@@ -12908,7 +12908,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_3u3tej_1_5_cfa66bd27fe5__local_invariants"
           ],
-          "test_file": "src/signal/mod.rs"
+          "test_file": "src/signal/signal.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_3u3tej_1_5_cfa66bd27fe5/asupersync_3u3tej_1_5_lab",
@@ -12946,7 +12946,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_3u3tej_1_5_cfa66bd27fe5__lab_lifecycle"
           ],
-          "test_file": "src/signal/mod.rs"
+          "test_file": "src/signal/signal.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_3u3tej_1_5_cfa66bd27fe5/asupersync_3u3tej_1_5_fuzz",
@@ -15557,7 +15557,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_3u3tej_3_3_888f78770c16__local_invariants"
           ],
-          "test_file": "src/fs/mod.rs"
+          "test_file": "src/net/atp/transport_common/metadata.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_3u3tej_3_3_888f78770c16/asupersync_3u3tej_3_3_property",
@@ -15597,7 +15597,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_3u3tej_3_3_888f78770c16__property_matrix"
           ],
-          "test_file": "src/fs/mod.rs"
+          "test_file": "src/net/atp/transport_common/metadata.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_3u3tej_3_3_888f78770c16/asupersync_3u3tej_3_3_lab",
@@ -15634,7 +15634,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_3u3tej_3_3_888f78770c16__lab_lifecycle"
           ],
-          "test_file": "src/fs/mod.rs"
+          "test_file": "src/net/atp/transport_common/metadata.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_3u3tej_3_3_888f78770c16/asupersync_3u3tej_3_3_fuzz",
@@ -16573,7 +16573,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_1_1_76e16508e007__local_invariants"
           ],
-          "test_file": "src/grpc/mod.rs"
+          "test_file": "src/grpc/protobuf.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_1_1_76e16508e007/asupersync_5z2scg_1_1_property",
@@ -16614,7 +16614,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_1_1_76e16508e007__property_matrix"
           ],
-          "test_file": "src/grpc/mod.rs"
+          "test_file": "src/grpc/protobuf.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_1_1_76e16508e007/asupersync_5z2scg_1_1_fuzz",
@@ -16774,7 +16774,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_1_2_09ded9b8bc68__local_invariants"
           ],
-          "test_file": "src/grpc/mod.rs"
+          "test_file": "src/grpc/protobuf.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_1_2_09ded9b8bc68/asupersync_5z2scg_1_2_property",
@@ -16821,7 +16821,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_1_2_09ded9b8bc68__property_matrix"
           ],
-          "test_file": "src/grpc/mod.rs"
+          "test_file": "src/grpc/protobuf.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_1_2_09ded9b8bc68/asupersync_5z2scg_1_2_lab",
@@ -16859,7 +16859,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_1_2_09ded9b8bc68__lab_lifecycle"
           ],
-          "test_file": "src/grpc/mod.rs"
+          "test_file": "src/grpc/protobuf.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_1_2_09ded9b8bc68/asupersync_5z2scg_1_2_fuzz",
@@ -17060,7 +17060,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants"
           ],
-          "test_file": "src/grpc/mod.rs"
+          "test_file": "src/grpc/protobuf.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_1_3_3548cd7b1804/asupersync_5z2scg_1_3_property",
@@ -17107,7 +17107,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix"
           ],
-          "test_file": "src/grpc/mod.rs"
+          "test_file": "src/grpc/protobuf.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_1_3_3548cd7b1804/asupersync_5z2scg_1_3_lab",
@@ -17145,7 +17145,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__lab_lifecycle"
           ],
-          "test_file": "src/grpc/mod.rs"
+          "test_file": "src/grpc/protobuf.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_1_3_3548cd7b1804/asupersync_5z2scg_1_3_fuzz",
@@ -18067,7 +18067,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_1_7_b1b718feb4ce__local_invariants"
           ],
-          "test_file": "src/grpc/mod.rs"
+          "test_file": "src/grpc/protobuf.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_1_7_b1b718feb4ce/asupersync_5z2scg_1_7_property",
@@ -18114,7 +18114,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_1_7_b1b718feb4ce__property_matrix"
           ],
-          "test_file": "src/grpc/mod.rs"
+          "test_file": "src/grpc/protobuf.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_1_7_b1b718feb4ce/asupersync_5z2scg_1_7_lab",
@@ -18152,7 +18152,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_1_7_b1b718feb4ce__lab_lifecycle"
           ],
-          "test_file": "src/grpc/mod.rs"
+          "test_file": "src/grpc/protobuf.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_1_7_b1b718feb4ce/asupersync_5z2scg_1_7_fuzz",
@@ -19423,7 +19423,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_2_11_46c8a184d3fb__local_invariants"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_2_11_46c8a184d3fb/asupersync_5z2scg_2_11_lab",
@@ -19462,7 +19462,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_2_11_46c8a184d3fb__lab_lifecycle"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_2_11_46c8a184d3fb/asupersync_5z2scg_2_11_downstream",
@@ -19858,7 +19858,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_2_3_c4ede274e4ec__local_invariants"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_2_3_c4ede274e4ec/asupersync_5z2scg_2_3_property",
@@ -19897,7 +19897,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_2_3_c4ede274e4ec__property_matrix"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_2_3_c4ede274e4ec/asupersync_5z2scg_2_3_lab",
@@ -19936,7 +19936,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_2_3_c4ede274e4ec__lab_lifecycle"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_2_3_c4ede274e4ec/asupersync_5z2scg_2_3_e2e",
@@ -20516,7 +20516,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_2_6_15d9c26dda1a__local_invariants"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_2_6_15d9c26dda1a/asupersync_5z2scg_2_6_property",
@@ -20559,7 +20559,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_2_6_15d9c26dda1a__property_matrix"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_2_6_15d9c26dda1a/asupersync_5z2scg_2_6_lab",
@@ -20598,7 +20598,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_2_6_15d9c26dda1a__lab_lifecycle"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_2_6_15d9c26dda1a/asupersync_5z2scg_2_6_fuzz",
@@ -20758,7 +20758,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_2_7_27f01a5a3d77__local_invariants"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_2_7_27f01a5a3d77/asupersync_5z2scg_2_7_property",
@@ -20797,7 +20797,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_2_7_27f01a5a3d77__property_matrix"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_2_7_27f01a5a3d77/asupersync_5z2scg_2_7_lab",
@@ -20836,7 +20836,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_2_7_27f01a5a3d77__lab_lifecycle"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_2_7_27f01a5a3d77/asupersync_5z2scg_2_7_e2e",
@@ -20957,7 +20957,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_2_8_9795be0d287c__local_invariants"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_2_8_9795be0d287c/asupersync_5z2scg_2_8_property",
@@ -20997,7 +20997,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_2_8_9795be0d287c__property_matrix"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_2_8_9795be0d287c/asupersync_5z2scg_2_8_fuzz",
@@ -21165,7 +21165,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_2_9_7f1bbadd4008__local_invariants"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_2_9_7f1bbadd4008/asupersync_5z2scg_2_9_property",
@@ -21213,7 +21213,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_2_9_7f1bbadd4008__property_matrix"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_2_9_7f1bbadd4008/asupersync_5z2scg_2_9_lab",
@@ -21252,7 +21252,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_2_9_7f1bbadd4008__lab_lifecycle"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_2_9_7f1bbadd4008/asupersync_5z2scg_2_9_fuzz",
@@ -32627,7 +32627,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_8_3_3_2_2e5280bbd199__local_invariants"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_3_3_2_2e5280bbd199/asupersync_5z2scg_8_3_3_2_property",
@@ -32665,7 +32665,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_8_3_3_2_2e5280bbd199__property_matrix"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_3_3_2_2e5280bbd199/asupersync_5z2scg_8_3_3_2_fuzz",
@@ -33101,7 +33101,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_8_3_4_1_e654b8e71ad9__local_invariants"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_3_4_1_e654b8e71ad9/asupersync_5z2scg_8_3_4_1_property",
@@ -33145,7 +33145,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_8_3_4_1_e654b8e71ad9__property_matrix"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_3_4_1_e654b8e71ad9/asupersync_5z2scg_8_3_4_1_lab",
@@ -33182,7 +33182,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_8_3_4_1_e654b8e71ad9__lab_lifecycle"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_3_4_1_e654b8e71ad9/asupersync_5z2scg_8_3_4_1_fuzz",
@@ -33307,7 +33307,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_8_3_4_2_33b60f61e0c1__local_invariants"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_3_4_2_33b60f61e0c1/asupersync_5z2scg_8_3_4_2_property",
@@ -33345,7 +33345,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_8_3_4_2_33b60f61e0c1__property_matrix"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_3_4_2_33b60f61e0c1/asupersync_5z2scg_8_3_4_2_fuzz",
@@ -33463,7 +33463,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_8_3_4_3_510636864cc0__local_invariants"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_3_4_3_510636864cc0/asupersync_5z2scg_8_3_4_3_property",
@@ -33501,7 +33501,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_8_3_4_3_510636864cc0__property_matrix"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_3_4_3_510636864cc0/asupersync_5z2scg_8_3_4_3_fuzz",
@@ -33625,7 +33625,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_8_3_4_4_7d28ffd73bd9__local_invariants"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_3_4_4_7d28ffd73bd9/asupersync_5z2scg_8_3_4_4_property",
@@ -33669,7 +33669,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_8_3_4_4_7d28ffd73bd9__property_matrix"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_3_4_4_7d28ffd73bd9/asupersync_5z2scg_8_3_4_4_lab",
@@ -33706,7 +33706,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_8_3_4_4_7d28ffd73bd9__lab_lifecycle"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_3_4_4_7d28ffd73bd9/asupersync_5z2scg_8_3_4_4_fuzz",
@@ -33839,7 +33839,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_8_3_5_eb467fd252af__local_invariants"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_3_5_eb467fd252af/asupersync_5z2scg_8_3_5_property",
@@ -33885,7 +33885,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_8_3_5_eb467fd252af__property_matrix"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_3_5_eb467fd252af/asupersync_5z2scg_8_3_5_lab",
@@ -33922,7 +33922,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_8_3_5_eb467fd252af__lab_lifecycle"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_3_5_eb467fd252af/asupersync_5z2scg_8_3_5_fuzz",
@@ -34507,7 +34507,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_8_3_7_2_37838e0db220__local_invariants"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_3_7_2_37838e0db220/asupersync_5z2scg_8_3_7_2_property",
@@ -34551,7 +34551,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_8_3_7_2_37838e0db220__property_matrix"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_3_7_2_37838e0db220/asupersync_5z2scg_8_3_7_2_lab",
@@ -34588,7 +34588,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_8_3_7_2_37838e0db220__lab_lifecycle"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_3_7_2_37838e0db220/asupersync_5z2scg_8_3_7_2_fuzz",
@@ -35145,7 +35145,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_8_4_32b7008420e8__local_invariants"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_4_32b7008420e8/asupersync_5z2scg_8_4_property",
@@ -35191,7 +35191,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_8_4_32b7008420e8__property_matrix"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_4_32b7008420e8/asupersync_5z2scg_8_4_lab",
@@ -35228,7 +35228,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_8_4_32b7008420e8__lab_lifecycle"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_4_32b7008420e8/asupersync_5z2scg_8_4_fuzz",
@@ -35391,7 +35391,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_8_5_ca861e7fb56a__local_invariants"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_5_ca861e7fb56a/asupersync_5z2scg_8_5_property",
@@ -35437,7 +35437,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_8_5_ca861e7fb56a__property_matrix"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_5_ca861e7fb56a/asupersync_5z2scg_8_5_lab",
@@ -35474,7 +35474,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_5z2scg_8_5_ca861e7fb56a__lab_lifecycle"
           ],
-          "test_file": "src/observability/mod.rs"
+          "test_file": "src/observability/otel.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_5_ca861e7fb56a/asupersync_5z2scg_8_5_fuzz",
@@ -49900,277 +49900,6 @@
       "title": "ADR: preserve generic SerdeCodec JSON + MessagePack + Bincode while versioning owned artifacts"
     },
     {
-      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.10",
-      "capability_ids": [
-        "CAP-SQLITE"
-      ],
-      "cutover_state": "BLOCKED_PENDING_EVIDENCE",
-      "evidence_plans": [
-        {
-          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511/asupersync_dep_p3_api_adrs_h3jspm_10_contract",
-          "class": "contract",
-          "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a1_asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511\" cargo test -p asupersync --all-targets --features test-internals ver_a1_asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511__local_invariants -- --nocapture",
-          "covers_case_classes": [
-            "cancellation",
-            "downstream_compile",
-            "downstream_runtime",
-            "empty_boundary",
-            "happy_path",
-            "independent_vector",
-            "invalid_state",
-            "loser_drain",
-            "malformed_error",
-            "maximum_overflow",
-            "obligation_leak",
-            "quiescence",
-            "race_shutdown",
-            "regression",
-            "resource_bound",
-            "round_trip",
-            "task_leak",
-            "truncation"
-          ],
-          "evidence_id": "asupersync-dep-p3-api-adrs-h3jspm.10::contract",
-          "evidence_owner": "asupersync-dep-p3-api-adrs-h3jspm.10",
-          "expected_outcome": "pass",
-          "feature_requirements": [
-            "sqlite"
-          ],
-          "plan_state": "PLANNED_BLOCKING",
-          "seed_or_fixture_id": "fixture:asupersync-dep-p3-api-adrs-h3jspm.10:local",
-          "stable_test_names": [
-            "ver_a1_asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511__local_invariants"
-          ],
-          "test_file": "tests/dependency_verification_matrix_contract.rs"
-        },
-        {
-          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511/asupersync_dep_p3_api_adrs_h3jspm_10_property",
-          "class": "property",
-          "class_contract": {
-            "deterministic_entropy": true,
-            "minimized_failure_retention": "required",
-            "seed_end_exclusive": 64,
-            "seed_start_inclusive": 0
-          },
-          "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a1_asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511\" cargo test -p asupersync --all-targets --features test-internals ver_a1_asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511__property_matrix -- --nocapture",
-          "covers_case_classes": [
-            "cancellation",
-            "downstream_compile",
-            "downstream_runtime",
-            "empty_boundary",
-            "happy_path",
-            "independent_vector",
-            "invalid_state",
-            "loser_drain",
-            "malformed_error",
-            "maximum_overflow",
-            "obligation_leak",
-            "quiescence",
-            "race_shutdown",
-            "regression",
-            "resource_bound",
-            "round_trip",
-            "task_leak",
-            "truncation"
-          ],
-          "evidence_id": "asupersync-dep-p3-api-adrs-h3jspm.10::property",
-          "evidence_owner": "asupersync-dep-p3-api-adrs-h3jspm.10",
-          "expected_outcome": "pass",
-          "feature_requirements": [
-            "sqlite"
-          ],
-          "plan_state": "PLANNED_BLOCKING",
-          "seed_or_fixture_id": "fixed-seeds:asupersync-dep-p3-api-adrs-h3jspm.10:0..64",
-          "stable_test_names": [
-            "ver_a1_asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511__property_matrix"
-          ],
-          "test_file": "tests/dependency_verification_matrix_contract.rs"
-        },
-        {
-          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511/asupersync_dep_p3_api_adrs_h3jspm_10_lab",
-          "class": "lab",
-          "class_contract": {
-            "required_oracles": [
-              "task_leak",
-              "obligation_leak",
-              "loser_drain",
-              "cancellation_protocol",
-              "quiescence"
-            ],
-            "seed_end_exclusive": 16,
-            "seed_start_inclusive": 0,
-            "virtual_time": true
-          },
-          "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a1_asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511\" cargo test -p asupersync --all-targets --features test-internals ver_a1_asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511__lab_lifecycle -- --nocapture",
-          "covers_case_classes": [
-            "cancellation",
-            "race_shutdown",
-            "task_leak",
-            "obligation_leak",
-            "loser_drain",
-            "quiescence"
-          ],
-          "evidence_id": "asupersync-dep-p3-api-adrs-h3jspm.10::lab",
-          "evidence_owner": "asupersync-dep-p3-api-adrs-h3jspm.10",
-          "expected_outcome": "pass",
-          "feature_requirements": [
-            "sqlite"
-          ],
-          "plan_state": "PLANNED_BLOCKING",
-          "seed_or_fixture_id": "lab-seeds:asupersync-dep-p3-api-adrs-h3jspm.10:0..16",
-          "stable_test_names": [
-            "ver_a1_asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511__lab_lifecycle"
-          ],
-          "test_file": "tests/dependency_verification_matrix_contract.rs"
-        },
-        {
-          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511/asupersync_dep_p3_api_adrs_h3jspm_10_fuzz",
-          "class": "fuzz",
-          "class_contract": {
-            "corpus_owner": "asupersync-dep-p3-api-adrs-h3jspm.10",
-            "corpus_path": "fuzz/corpus/dependency_asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511",
-            "crash_artifact_path": "fuzz/artifacts/dependency_asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511",
-            "crash_minimization_command": "cargo fuzz tmin dependency_asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511 <crash-artifact>",
-            "max_input_bytes": 1048576,
-            "max_total_time_seconds": 60,
-            "oracle_evidence_may_authorize_cutover": false,
-            "oracle_retirement_independent": true
-          },
-          "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a1_fuzz_asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511\" cargo fuzz run dependency_asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511 -- -max_total_time=60 -max_len=1048576",
-          "covers_case_classes": [
-            "malformed_error",
-            "resource_bound",
-            "regression"
-          ],
-          "evidence_id": "asupersync-dep-p3-api-adrs-h3jspm.10::fuzz",
-          "evidence_owner": "asupersync-dep-p3-api-adrs-h3jspm.10",
-          "expected_outcome": "pass",
-          "feature_requirements": [
-            "sqlite"
-          ],
-          "plan_state": "PLANNED_BLOCKING",
-          "seed_or_fixture_id": "fuzz/corpus/dependency_asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511",
-          "stable_test_names": [
-            "dependency_asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511"
-          ],
-          "test_file": "fuzz/fuzz_targets/dependency_asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511.rs"
-        },
-        {
-          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511/asupersync_dep_p3_api_adrs_h3jspm_10_downstream",
-          "class": "downstream",
-          "class_contract": {
-            "compile_fixture_required": true,
-            "public_only": true,
-            "runtime_fixture_required": true,
-            "test_internals_forbidden": true
-          },
-          "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a1_downstream_asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511\" cargo test --manifest-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml --locked -- --nocapture",
-          "covers_case_classes": [
-            "downstream_compile",
-            "downstream_runtime"
-          ],
-          "evidence_id": "asupersync-dep-p3-api-adrs-h3jspm.10::downstream",
-          "evidence_owner": "asupersync-dep-p3-api-adrs-h3jspm.10",
-          "expected_outcome": "pass",
-          "feature_requirements": [
-            "sqlite"
-          ],
-          "plan_state": "PLANNED_BLOCKING",
-          "seed_or_fixture_id": "tests/fixtures/dependency-capability-baseline-consumer",
-          "stable_test_names": [
-            "ver_a1_asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511__downstream_consumer"
-          ],
-          "test_file": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs"
-        },
-        {
-          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511/asupersync_dep_p3_api_adrs_h3jspm_10_e2e",
-          "class": "e2e",
-          "class_contract": {
-            "aggregate_owner": "asupersync-dep-p1-foundations-upksjk.6.2",
-            "no_mock": true,
-            "required_artifacts": [
-              "target/e2e-results/dependency-sovereignty/<run_id>/summary.json",
-              "target/e2e-results/dependency-sovereignty/<run_id>/events.ndjson",
-              "target/e2e-results/dependency-sovereignty/<run_id>/<scenario_id>/<step_id>.stdout.log",
-              "target/e2e-results/dependency-sovereignty/<run_id>/<scenario_id>/<step_id>.stderr.log"
-            ],
-            "scenario_id": "dep-sovereignty-asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511"
-          },
-          "command": "scripts/run_all_e2e.sh --suite dependency-sovereignty",
-          "covers_case_classes": [
-            "happy_path",
-            "regression"
-          ],
-          "evidence_id": "asupersync-dep-p3-api-adrs-h3jspm.10::e2e",
-          "evidence_owner": "asupersync-dep-p3-api-adrs-h3jspm.10",
-          "expected_outcome": "pass",
-          "feature_requirements": [
-            "sqlite"
-          ],
-          "plan_state": "PLANNED_BLOCKING",
-          "seed_or_fixture_id": "scenario:dep-sovereignty-asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511",
-          "stable_test_names": [
-            "dep-sovereignty-asupersync_dep_p3_api_adrs_h3jspm_10_bd082d012511"
-          ],
-          "test_file": "scripts/run_all_e2e.sh"
-        }
-      ],
-      "feature_requirements": [
-        "sqlite"
-      ],
-      "invariant_ids": [
-        "CAP-SQLITE::input",
-        "CAP-SQLITE::output",
-        "CAP-SQLITE::error",
-        "CAP-SQLITE::resource",
-        "CAP-SQLITE::security::01",
-        "CAP-SQLITE::security::02",
-        "CAP-SQLITE::security::03",
-        "CAP-SQLITE::security::04",
-        "CAP-SQLITE::cancellation::01",
-        "CAP-SQLITE::cancellation::02",
-        "CAP-SQLITE::cancellation::03"
-      ],
-      "issue_type": "task",
-      "no_claim_boundary": "This is a checked future evidence plan. PLANNED_BLOCKING rows are not behavioral proof, do not satisfy a cutover gate, and do not authorize dependency, feature, API, format, protocol, platform, diagnostic, or user-journey removal.",
-      "required_case_classes": [
-        "cancellation",
-        "downstream_compile",
-        "downstream_runtime",
-        "empty_boundary",
-        "happy_path",
-        "independent_vector",
-        "invalid_state",
-        "loser_drain",
-        "malformed_error",
-        "maximum_overflow",
-        "obligation_leak",
-        "quiescence",
-        "race_shutdown",
-        "regression",
-        "resource_bound",
-        "round_trip",
-        "task_leak",
-        "truncation"
-      ],
-      "risk_tags": [
-        "boundary",
-        "concurrency",
-        "fuzz",
-        "parser_codec",
-        "property",
-        "public_generic",
-        "user_journey"
-      ],
-      "role": "architecture",
-      "target_requirements": [
-        "linux",
-        "macos",
-        "windows"
-      ],
-      "title": "ADR: preserve SQLite feature and one-stop user experience under cycle-safe FrankenSQLite integration"
-    },
-    {
       "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.11",
       "capability_ids": [
         "CAP-TIME-UTC-RFC3339"
@@ -50385,285 +50114,6 @@
         "all-supported"
       ],
       "title": "ADR: owned UTC timestamp/calendar surface for full chrono/time capability, serialization, and UX"
-    },
-    {
-      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.12",
-      "capability_ids": [
-        "CAP-REGEX-PRIVACY"
-      ],
-      "cutover_state": "BLOCKED_PENDING_EVIDENCE",
-      "evidence_plans": [
-        {
-          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15/asupersync_dep_p3_api_adrs_h3jspm_12_contract",
-          "class": "contract",
-          "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a1_asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15\" cargo test -p asupersync --all-targets --features test-internals ver_a1_asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15__local_invariants -- --nocapture",
-          "covers_case_classes": [
-            "authentication_failure",
-            "cancellation",
-            "downstream_compile",
-            "downstream_runtime",
-            "empty_boundary",
-            "happy_path",
-            "independent_vector",
-            "invalid_state",
-            "loser_drain",
-            "malformed_error",
-            "maximum_overflow",
-            "obligation_leak",
-            "quiescence",
-            "race_shutdown",
-            "regression",
-            "resource_bound",
-            "round_trip",
-            "secret_redaction",
-            "security_misuse",
-            "task_leak",
-            "truncation"
-          ],
-          "evidence_id": "asupersync-dep-p3-api-adrs-h3jspm.12::contract",
-          "evidence_owner": "asupersync-dep-p3-api-adrs-h3jspm.12",
-          "expected_outcome": "pass",
-          "feature_requirements": [
-            "metrics"
-          ],
-          "plan_state": "PLANNED_BLOCKING",
-          "seed_or_fixture_id": "fixture:asupersync-dep-p3-api-adrs-h3jspm.12:local",
-          "stable_test_names": [
-            "ver_a1_asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15__local_invariants"
-          ],
-          "test_file": "tests/dependency_verification_matrix_contract.rs"
-        },
-        {
-          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15/asupersync_dep_p3_api_adrs_h3jspm_12_property",
-          "class": "property",
-          "class_contract": {
-            "deterministic_entropy": true,
-            "minimized_failure_retention": "required",
-            "seed_end_exclusive": 64,
-            "seed_start_inclusive": 0
-          },
-          "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a1_asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15\" cargo test -p asupersync --all-targets --features test-internals ver_a1_asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15__property_matrix -- --nocapture",
-          "covers_case_classes": [
-            "authentication_failure",
-            "cancellation",
-            "downstream_compile",
-            "downstream_runtime",
-            "empty_boundary",
-            "happy_path",
-            "independent_vector",
-            "invalid_state",
-            "loser_drain",
-            "malformed_error",
-            "maximum_overflow",
-            "obligation_leak",
-            "quiescence",
-            "race_shutdown",
-            "regression",
-            "resource_bound",
-            "round_trip",
-            "secret_redaction",
-            "security_misuse",
-            "task_leak",
-            "truncation"
-          ],
-          "evidence_id": "asupersync-dep-p3-api-adrs-h3jspm.12::property",
-          "evidence_owner": "asupersync-dep-p3-api-adrs-h3jspm.12",
-          "expected_outcome": "pass",
-          "feature_requirements": [
-            "metrics"
-          ],
-          "plan_state": "PLANNED_BLOCKING",
-          "seed_or_fixture_id": "fixed-seeds:asupersync-dep-p3-api-adrs-h3jspm.12:0..64",
-          "stable_test_names": [
-            "ver_a1_asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15__property_matrix"
-          ],
-          "test_file": "tests/dependency_verification_matrix_contract.rs"
-        },
-        {
-          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15/asupersync_dep_p3_api_adrs_h3jspm_12_lab",
-          "class": "lab",
-          "class_contract": {
-            "required_oracles": [
-              "task_leak",
-              "obligation_leak",
-              "loser_drain",
-              "cancellation_protocol",
-              "quiescence"
-            ],
-            "seed_end_exclusive": 16,
-            "seed_start_inclusive": 0,
-            "virtual_time": true
-          },
-          "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a1_asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15\" cargo test -p asupersync --all-targets --features test-internals ver_a1_asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15__lab_lifecycle -- --nocapture",
-          "covers_case_classes": [
-            "cancellation",
-            "race_shutdown",
-            "task_leak",
-            "obligation_leak",
-            "loser_drain",
-            "quiescence"
-          ],
-          "evidence_id": "asupersync-dep-p3-api-adrs-h3jspm.12::lab",
-          "evidence_owner": "asupersync-dep-p3-api-adrs-h3jspm.12",
-          "expected_outcome": "pass",
-          "feature_requirements": [
-            "metrics"
-          ],
-          "plan_state": "PLANNED_BLOCKING",
-          "seed_or_fixture_id": "lab-seeds:asupersync-dep-p3-api-adrs-h3jspm.12:0..16",
-          "stable_test_names": [
-            "ver_a1_asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15__lab_lifecycle"
-          ],
-          "test_file": "tests/dependency_verification_matrix_contract.rs"
-        },
-        {
-          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15/asupersync_dep_p3_api_adrs_h3jspm_12_fuzz",
-          "class": "fuzz",
-          "class_contract": {
-            "corpus_owner": "asupersync-dep-p3-api-adrs-h3jspm.12",
-            "corpus_path": "fuzz/corpus/dependency_asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15",
-            "crash_artifact_path": "fuzz/artifacts/dependency_asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15",
-            "crash_minimization_command": "cargo fuzz tmin dependency_asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15 <crash-artifact>",
-            "max_input_bytes": 1048576,
-            "max_total_time_seconds": 60,
-            "oracle_evidence_may_authorize_cutover": false,
-            "oracle_retirement_independent": true
-          },
-          "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a1_fuzz_asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15\" cargo fuzz run dependency_asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15 -- -max_total_time=60 -max_len=1048576",
-          "covers_case_classes": [
-            "malformed_error",
-            "resource_bound",
-            "regression",
-            "security_misuse",
-            "authentication_failure"
-          ],
-          "evidence_id": "asupersync-dep-p3-api-adrs-h3jspm.12::fuzz",
-          "evidence_owner": "asupersync-dep-p3-api-adrs-h3jspm.12",
-          "expected_outcome": "pass",
-          "feature_requirements": [
-            "metrics"
-          ],
-          "plan_state": "PLANNED_BLOCKING",
-          "seed_or_fixture_id": "fuzz/corpus/dependency_asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15",
-          "stable_test_names": [
-            "dependency_asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15"
-          ],
-          "test_file": "fuzz/fuzz_targets/dependency_asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15.rs"
-        },
-        {
-          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15/asupersync_dep_p3_api_adrs_h3jspm_12_downstream",
-          "class": "downstream",
-          "class_contract": {
-            "compile_fixture_required": true,
-            "public_only": true,
-            "runtime_fixture_required": true,
-            "test_internals_forbidden": true
-          },
-          "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a1_downstream_asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15\" cargo test --manifest-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml --locked -- --nocapture",
-          "covers_case_classes": [
-            "downstream_compile",
-            "downstream_runtime"
-          ],
-          "evidence_id": "asupersync-dep-p3-api-adrs-h3jspm.12::downstream",
-          "evidence_owner": "asupersync-dep-p3-api-adrs-h3jspm.12",
-          "expected_outcome": "pass",
-          "feature_requirements": [
-            "metrics"
-          ],
-          "plan_state": "PLANNED_BLOCKING",
-          "seed_or_fixture_id": "tests/fixtures/dependency-capability-baseline-consumer",
-          "stable_test_names": [
-            "ver_a1_asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15__downstream_consumer"
-          ],
-          "test_file": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs"
-        },
-        {
-          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15/asupersync_dep_p3_api_adrs_h3jspm_12_e2e",
-          "class": "e2e",
-          "class_contract": {
-            "aggregate_owner": "asupersync-dep-p1-foundations-upksjk.6.2",
-            "no_mock": true,
-            "required_artifacts": [
-              "target/e2e-results/dependency-sovereignty/<run_id>/summary.json",
-              "target/e2e-results/dependency-sovereignty/<run_id>/events.ndjson",
-              "target/e2e-results/dependency-sovereignty/<run_id>/<scenario_id>/<step_id>.stdout.log",
-              "target/e2e-results/dependency-sovereignty/<run_id>/<scenario_id>/<step_id>.stderr.log"
-            ],
-            "scenario_id": "dep-sovereignty-asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15"
-          },
-          "command": "scripts/run_all_e2e.sh --suite dependency-sovereignty",
-          "covers_case_classes": [
-            "happy_path",
-            "regression"
-          ],
-          "evidence_id": "asupersync-dep-p3-api-adrs-h3jspm.12::e2e",
-          "evidence_owner": "asupersync-dep-p3-api-adrs-h3jspm.12",
-          "expected_outcome": "pass",
-          "feature_requirements": [
-            "metrics"
-          ],
-          "plan_state": "PLANNED_BLOCKING",
-          "seed_or_fixture_id": "scenario:dep-sovereignty-asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15",
-          "stable_test_names": [
-            "dep-sovereignty-asupersync_dep_p3_api_adrs_h3jspm_12_b8b0569ead15"
-          ],
-          "test_file": "scripts/run_all_e2e.sh"
-        }
-      ],
-      "feature_requirements": [
-        "metrics"
-      ],
-      "invariant_ids": [
-        "CAP-REGEX-PRIVACY::input",
-        "CAP-REGEX-PRIVACY::output",
-        "CAP-REGEX-PRIVACY::error",
-        "CAP-REGEX-PRIVACY::resource",
-        "CAP-REGEX-PRIVACY::security::01",
-        "CAP-REGEX-PRIVACY::security::02",
-        "CAP-REGEX-PRIVACY::security::03",
-        "CAP-REGEX-PRIVACY::cancellation::01",
-        "CAP-REGEX-PRIVACY::cancellation::02"
-      ],
-      "issue_type": "task",
-      "no_claim_boundary": "This is a checked future evidence plan. PLANNED_BLOCKING rows are not behavioral proof, do not satisfy a cutover gate, and do not authorize dependency, feature, API, format, protocol, platform, diagnostic, or user-journey removal.",
-      "required_case_classes": [
-        "authentication_failure",
-        "cancellation",
-        "downstream_compile",
-        "downstream_runtime",
-        "empty_boundary",
-        "happy_path",
-        "independent_vector",
-        "invalid_state",
-        "loser_drain",
-        "malformed_error",
-        "maximum_overflow",
-        "obligation_leak",
-        "quiescence",
-        "race_shutdown",
-        "regression",
-        "resource_bound",
-        "round_trip",
-        "secret_redaction",
-        "security_misuse",
-        "task_leak",
-        "truncation"
-      ],
-      "risk_tags": [
-        "boundary",
-        "concurrency",
-        "fuzz",
-        "parser_codec",
-        "property",
-        "public_generic",
-        "security",
-        "user_journey"
-      ],
-      "role": "architecture",
-      "target_requirements": [
-        "all-supported"
-      ],
-      "title": "ADR: preserve full user-supplied regex semantics and privacy guarantees; fixed scanners are only a fast path"
     },
     {
       "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.13",
@@ -53322,290 +52772,6 @@
         "all-supported"
       ],
       "title": "ADR: preserve full futures-lite production semantics, public Stream usability, and test executor workflows"
-    },
-    {
-      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.9",
-      "capability_ids": [
-        "CAP-KAFKA"
-      ],
-      "cutover_state": "BLOCKED_PENDING_EVIDENCE",
-      "evidence_plans": [
-        {
-          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d/asupersync_dep_p3_api_adrs_h3jspm_9_contract",
-          "class": "contract",
-          "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a1_asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d\" cargo test -p asupersync --all-targets --features test-internals ver_a1_asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d__local_invariants -- --nocapture",
-          "covers_case_classes": [
-            "authentication_failure",
-            "cancellation",
-            "downstream_compile",
-            "downstream_runtime",
-            "empty_boundary",
-            "happy_path",
-            "independent_vector",
-            "invalid_state",
-            "loser_drain",
-            "malformed_error",
-            "maximum_overflow",
-            "obligation_leak",
-            "quiescence",
-            "race_shutdown",
-            "regression",
-            "resource_bound",
-            "round_trip",
-            "secret_redaction",
-            "security_misuse",
-            "task_leak",
-            "truncation"
-          ],
-          "evidence_id": "asupersync-dep-p3-api-adrs-h3jspm.9::contract",
-          "evidence_owner": "asupersync-dep-p3-api-adrs-h3jspm.9",
-          "expected_outcome": "pass",
-          "feature_requirements": [
-            "kafka"
-          ],
-          "plan_state": "PLANNED_BLOCKING",
-          "seed_or_fixture_id": "fixture:asupersync-dep-p3-api-adrs-h3jspm.9:local",
-          "stable_test_names": [
-            "ver_a1_asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d__local_invariants"
-          ],
-          "test_file": "tests/dependency_verification_matrix_contract.rs"
-        },
-        {
-          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d/asupersync_dep_p3_api_adrs_h3jspm_9_property",
-          "class": "property",
-          "class_contract": {
-            "deterministic_entropy": true,
-            "minimized_failure_retention": "required",
-            "seed_end_exclusive": 64,
-            "seed_start_inclusive": 0
-          },
-          "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a1_asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d\" cargo test -p asupersync --all-targets --features test-internals ver_a1_asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d__property_matrix -- --nocapture",
-          "covers_case_classes": [
-            "authentication_failure",
-            "cancellation",
-            "downstream_compile",
-            "downstream_runtime",
-            "empty_boundary",
-            "happy_path",
-            "independent_vector",
-            "invalid_state",
-            "loser_drain",
-            "malformed_error",
-            "maximum_overflow",
-            "obligation_leak",
-            "quiescence",
-            "race_shutdown",
-            "regression",
-            "resource_bound",
-            "round_trip",
-            "secret_redaction",
-            "security_misuse",
-            "task_leak",
-            "truncation"
-          ],
-          "evidence_id": "asupersync-dep-p3-api-adrs-h3jspm.9::property",
-          "evidence_owner": "asupersync-dep-p3-api-adrs-h3jspm.9",
-          "expected_outcome": "pass",
-          "feature_requirements": [
-            "kafka"
-          ],
-          "plan_state": "PLANNED_BLOCKING",
-          "seed_or_fixture_id": "fixed-seeds:asupersync-dep-p3-api-adrs-h3jspm.9:0..64",
-          "stable_test_names": [
-            "ver_a1_asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d__property_matrix"
-          ],
-          "test_file": "tests/dependency_verification_matrix_contract.rs"
-        },
-        {
-          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d/asupersync_dep_p3_api_adrs_h3jspm_9_lab",
-          "class": "lab",
-          "class_contract": {
-            "required_oracles": [
-              "task_leak",
-              "obligation_leak",
-              "loser_drain",
-              "cancellation_protocol",
-              "quiescence"
-            ],
-            "seed_end_exclusive": 16,
-            "seed_start_inclusive": 0,
-            "virtual_time": true
-          },
-          "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a1_asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d\" cargo test -p asupersync --all-targets --features test-internals ver_a1_asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d__lab_lifecycle -- --nocapture",
-          "covers_case_classes": [
-            "cancellation",
-            "race_shutdown",
-            "task_leak",
-            "obligation_leak",
-            "loser_drain",
-            "quiescence"
-          ],
-          "evidence_id": "asupersync-dep-p3-api-adrs-h3jspm.9::lab",
-          "evidence_owner": "asupersync-dep-p3-api-adrs-h3jspm.9",
-          "expected_outcome": "pass",
-          "feature_requirements": [
-            "kafka"
-          ],
-          "plan_state": "PLANNED_BLOCKING",
-          "seed_or_fixture_id": "lab-seeds:asupersync-dep-p3-api-adrs-h3jspm.9:0..16",
-          "stable_test_names": [
-            "ver_a1_asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d__lab_lifecycle"
-          ],
-          "test_file": "tests/dependency_verification_matrix_contract.rs"
-        },
-        {
-          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d/asupersync_dep_p3_api_adrs_h3jspm_9_fuzz",
-          "class": "fuzz",
-          "class_contract": {
-            "corpus_owner": "asupersync-dep-p3-api-adrs-h3jspm.9",
-            "corpus_path": "fuzz/corpus/dependency_asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d",
-            "crash_artifact_path": "fuzz/artifacts/dependency_asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d",
-            "crash_minimization_command": "cargo fuzz tmin dependency_asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d <crash-artifact>",
-            "max_input_bytes": 1048576,
-            "max_total_time_seconds": 60,
-            "oracle_evidence_may_authorize_cutover": false,
-            "oracle_retirement_independent": true
-          },
-          "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a1_fuzz_asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d\" cargo fuzz run dependency_asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d -- -max_total_time=60 -max_len=1048576",
-          "covers_case_classes": [
-            "malformed_error",
-            "resource_bound",
-            "regression",
-            "security_misuse",
-            "authentication_failure"
-          ],
-          "evidence_id": "asupersync-dep-p3-api-adrs-h3jspm.9::fuzz",
-          "evidence_owner": "asupersync-dep-p3-api-adrs-h3jspm.9",
-          "expected_outcome": "pass",
-          "feature_requirements": [
-            "kafka"
-          ],
-          "plan_state": "PLANNED_BLOCKING",
-          "seed_or_fixture_id": "fuzz/corpus/dependency_asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d",
-          "stable_test_names": [
-            "dependency_asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d"
-          ],
-          "test_file": "fuzz/fuzz_targets/dependency_asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d.rs"
-        },
-        {
-          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d/asupersync_dep_p3_api_adrs_h3jspm_9_downstream",
-          "class": "downstream",
-          "class_contract": {
-            "compile_fixture_required": true,
-            "public_only": true,
-            "runtime_fixture_required": true,
-            "test_internals_forbidden": true
-          },
-          "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a1_downstream_asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d\" cargo test --manifest-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml --locked -- --nocapture",
-          "covers_case_classes": [
-            "downstream_compile",
-            "downstream_runtime"
-          ],
-          "evidence_id": "asupersync-dep-p3-api-adrs-h3jspm.9::downstream",
-          "evidence_owner": "asupersync-dep-p3-api-adrs-h3jspm.9",
-          "expected_outcome": "pass",
-          "feature_requirements": [
-            "kafka"
-          ],
-          "plan_state": "PLANNED_BLOCKING",
-          "seed_or_fixture_id": "tests/fixtures/dependency-capability-baseline-consumer",
-          "stable_test_names": [
-            "ver_a1_asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d__downstream_consumer"
-          ],
-          "test_file": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs"
-        },
-        {
-          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d/asupersync_dep_p3_api_adrs_h3jspm_9_e2e",
-          "class": "e2e",
-          "class_contract": {
-            "aggregate_owner": "asupersync-dep-p1-foundations-upksjk.6.2",
-            "no_mock": true,
-            "required_artifacts": [
-              "target/e2e-results/dependency-sovereignty/<run_id>/summary.json",
-              "target/e2e-results/dependency-sovereignty/<run_id>/events.ndjson",
-              "target/e2e-results/dependency-sovereignty/<run_id>/<scenario_id>/<step_id>.stdout.log",
-              "target/e2e-results/dependency-sovereignty/<run_id>/<scenario_id>/<step_id>.stderr.log"
-            ],
-            "scenario_id": "dep-sovereignty-asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d"
-          },
-          "command": "scripts/run_all_e2e.sh --suite dependency-sovereignty",
-          "covers_case_classes": [
-            "happy_path",
-            "regression"
-          ],
-          "evidence_id": "asupersync-dep-p3-api-adrs-h3jspm.9::e2e",
-          "evidence_owner": "asupersync-dep-p3-api-adrs-h3jspm.9",
-          "expected_outcome": "pass",
-          "feature_requirements": [
-            "kafka"
-          ],
-          "plan_state": "PLANNED_BLOCKING",
-          "seed_or_fixture_id": "scenario:dep-sovereignty-asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d",
-          "stable_test_names": [
-            "dep-sovereignty-asupersync_dep_p3_api_adrs_h3jspm_9_ae9fae699f1d"
-          ],
-          "test_file": "scripts/run_all_e2e.sh"
-        }
-      ],
-      "feature_requirements": [
-        "kafka"
-      ],
-      "invariant_ids": [
-        "CAP-KAFKA::input",
-        "CAP-KAFKA::output",
-        "CAP-KAFKA::error",
-        "CAP-KAFKA::resource",
-        "CAP-KAFKA::security::01",
-        "CAP-KAFKA::security::02",
-        "CAP-KAFKA::security::03",
-        "CAP-KAFKA::security::04",
-        "CAP-KAFKA::cancellation::01",
-        "CAP-KAFKA::cancellation::02",
-        "CAP-KAFKA::cancellation::03",
-        "CAP-KAFKA::cancellation::04"
-      ],
-      "issue_type": "task",
-      "no_claim_boundary": "This is a checked future evidence plan. PLANNED_BLOCKING rows are not behavioral proof, do not satisfy a cutover gate, and do not authorize dependency, feature, API, format, protocol, platform, diagnostic, or user-journey removal.",
-      "required_case_classes": [
-        "authentication_failure",
-        "cancellation",
-        "downstream_compile",
-        "downstream_runtime",
-        "empty_boundary",
-        "happy_path",
-        "independent_vector",
-        "invalid_state",
-        "loser_drain",
-        "malformed_error",
-        "maximum_overflow",
-        "obligation_leak",
-        "quiescence",
-        "race_shutdown",
-        "regression",
-        "resource_bound",
-        "round_trip",
-        "secret_redaction",
-        "security_misuse",
-        "task_leak",
-        "truncation"
-      ],
-      "risk_tags": [
-        "boundary",
-        "concurrency",
-        "fuzz",
-        "parser_codec",
-        "property",
-        "public_generic",
-        "security",
-        "user_journey"
-      ],
-      "role": "architecture",
-      "target_requirements": [
-        "linux",
-        "macos",
-        "windows"
-      ],
-      "title": "ADR: preserve complete Kafka producer, transaction, consumer-group, security, and interop capability"
     },
     {
       "bead_id": "asupersync-dep-p4-nkeys-poc60v.1.1",

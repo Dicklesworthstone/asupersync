@@ -128,8 +128,11 @@ fn verify_pinned_end_entity_shape(
     server_name: &ServerName<'_>,
     now: UnixTime,
 ) -> Result<(), RustlsError> {
-    let (_, parsed) = x509_parser::parse_x509_certificate(end_entity.as_ref())
+    let (remaining, parsed) = x509_parser::parse_x509_certificate(end_entity.as_ref())
         .map_err(|_| invalid_certificate(CertificateError::BadEncoding))?;
+    if !remaining.is_empty() {
+        return Err(invalid_certificate(CertificateError::BadEncoding));
+    }
 
     let now = i64::try_from(now.as_secs())
         .map_err(|_| invalid_certificate(CertificateError::BadEncoding))?;
@@ -145,7 +148,7 @@ fn verify_pinned_end_entity_shape(
         .extended_key_usage()
         .map_err(|_| invalid_certificate(CertificateError::BadEncoding))?
     {
-        Some(usage) if usage.value.server_auth || usage.value.any => {}
+        Some(usage) if usage.value.server_auth => {}
         _ => return Err(invalid_certificate(CertificateError::InvalidPurpose)),
     }
 
@@ -172,6 +175,34 @@ fn verify_pinned_end_entity_shape(
 struct WebPkiOrPinnedEndEntityVerifier {
     webpki: Arc<rustls::client::WebPkiServerVerifier>,
     pinned_end_entities: Vec<CertificateDer<'static>>,
+}
+
+/// Wrap a standard WebPKI verifier with a narrowly scoped exact-leaf fallback.
+///
+/// WebPKI always runs first. The fallback is considered only when WebPKI
+/// returns [`CertificateError::UnknownIssuer`] and the complete presented leaf
+/// DER exactly matches a configured pin. It then preserves the accepted pinned
+/// leaf policy: full DER consumption, validity, explicit `serverAuth` EKU,
+/// `digitalSignature` when KeyUsage is present, and exact DNS/IP SAN matching.
+/// TLS 1.2/1.3 handshake signatures and supported schemes remain delegated to
+/// the supplied WebPKI verifier.
+///
+/// A pin deliberately replaces issuer-path trust only. It does not turn other
+/// WebPKI failures (bad signature, wrong name/purpose, critical extensions,
+/// constraints, or revocation failures) into successful verification.
+#[must_use]
+pub fn webpki_server_verifier_with_exact_leaf_fallback(
+    webpki: Arc<rustls::client::WebPkiServerVerifier>,
+    pinned_end_entities: Vec<CertificateDer<'static>>,
+) -> Arc<dyn ServerCertVerifier> {
+    if pinned_end_entities.is_empty() {
+        webpki
+    } else {
+        Arc::new(WebPkiOrPinnedEndEntityVerifier {
+            webpki,
+            pinned_end_entities,
+        })
+    }
 }
 
 impl ServerCertVerifier for WebPkiOrPinnedEndEntityVerifier {
@@ -880,13 +911,10 @@ pub fn client_config(
         )
         .build()
         .map_err(|_| handshake_failure("client_verifier_build"))?;
-        let verifier = WebPkiOrPinnedEndEntityVerifier {
-            webpki,
-            pinned_end_entities,
-        };
+        let verifier = webpki_server_verifier_with_exact_leaf_fallback(webpki, pinned_end_entities);
         builder
             .dangerous()
-            .with_custom_certificate_verifier(Arc::new(verifier))
+            .with_custom_certificate_verifier(verifier)
             .with_no_client_auth()
     };
     config.alpn_protocols = alpn;
@@ -965,6 +993,63 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
 
     fn ca_cert() -> CertificateDer<'static> {
         parse_one_cert(CA_CERT_PEM)
+    }
+
+    fn cert_without_eku() -> CertificateDer<'static> {
+        let mut reader = std::io::BufReader::new(
+            include_bytes!("../../../tests/fixtures/tls/server.crt").as_slice(),
+        );
+        rustls_pemfile::certs(&mut reader)
+            .next()
+            .expect("one cert")
+            .expect("valid cert pem")
+    }
+
+    fn fixture_valid_time() -> UnixTime {
+        UnixTime::since_unix_epoch(Duration::from_secs(1_800_000_000))
+    }
+
+    fn test_server_verifier(
+        roots: Vec<CertificateDer<'static>>,
+        pins: Vec<CertificateDer<'static>>,
+    ) -> Arc<dyn ServerCertVerifier> {
+        let mut root_store = RootCertStore::empty();
+        for root in roots {
+            root_store.add(root).expect("valid test root");
+        }
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let webpki = rustls::client::WebPkiServerVerifier::builder_with_provider(
+            Arc::new(root_store),
+            provider,
+        )
+        .build()
+        .expect("test WebPKI verifier");
+        webpki_server_verifier_with_exact_leaf_fallback(webpki, pins)
+    }
+
+    fn mutate_extension_value(
+        cert: CertificateDer<'static>,
+        oid: &str,
+        mutate: impl FnOnce(&mut [u8]),
+    ) -> CertificateDer<'static> {
+        let mut der = cert.as_ref().to_vec();
+        let (offset, len) = {
+            let (remaining, parsed) =
+                x509_parser::parse_x509_certificate(&der).expect("parse test certificate");
+            assert!(
+                remaining.is_empty(),
+                "test certificate must consume full DER"
+            );
+            let extension = parsed
+                .extensions()
+                .iter()
+                .find(|extension| extension.oid.to_id_string() == oid)
+                .expect("test extension");
+            let offset = extension.value.as_ptr() as usize - der.as_ptr() as usize;
+            (offset, extension.value.len())
+        };
+        mutate(&mut der[offset..offset + len]);
+        CertificateDer::from(der)
     }
 
     fn leaf_key() -> PrivateKeyDer<'static> {
@@ -1181,6 +1266,119 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
         assert!(client.is_complete(), "client handshake incomplete");
         assert!(server.is_complete(), "server handshake incomplete");
         assert!(client.one_rtt_keys_installed() && server.one_rtt_keys_installed());
+    }
+
+    #[test]
+    fn exact_leaf_shape_enforces_validity_bounds() {
+        let leaf = leaf_cert();
+        let server_name = ServerName::try_from("localhost").expect("server name");
+
+        let not_yet_valid = verify_pinned_end_entity_shape(
+            &leaf,
+            &server_name,
+            UnixTime::since_unix_epoch(Duration::from_secs(1)),
+        )
+        .expect_err("future certificate must fail");
+        assert!(matches!(
+            not_yet_valid,
+            RustlsError::InvalidCertificate(CertificateError::NotValidYet)
+        ));
+
+        let expired = verify_pinned_end_entity_shape(
+            &leaf,
+            &server_name,
+            UnixTime::since_unix_epoch(Duration::from_secs(5_000_000_000)),
+        )
+        .expect_err("expired certificate must fail");
+        assert!(matches!(
+            expired,
+            RustlsError::InvalidCertificate(CertificateError::Expired)
+        ));
+    }
+
+    #[test]
+    fn exact_leaf_shape_requires_server_auth_and_digital_signature() {
+        let server_name = ServerName::try_from("localhost").expect("server name");
+
+        let wrong_eku = mutate_extension_value(leaf_cert(), "2.5.29.37", |value| {
+            let final_oid_byte = value.last_mut().expect("EKU value");
+            assert_eq!(*final_oid_byte, 1, "fixture must carry serverAuth");
+            *final_oid_byte = 2;
+        });
+        let wrong_eku_error =
+            verify_pinned_end_entity_shape(&wrong_eku, &server_name, fixture_valid_time())
+                .expect_err("clientAuth-only leaf must fail");
+        assert!(matches!(
+            wrong_eku_error,
+            RustlsError::InvalidCertificate(CertificateError::InvalidPurpose)
+        ));
+
+        let wrong_ku = mutate_extension_value(leaf_cert(), "2.5.29.15", |value| {
+            *value.last_mut().expect("KeyUsage value") = 0;
+        });
+        let wrong_ku_error =
+            verify_pinned_end_entity_shape(&wrong_ku, &server_name, fixture_valid_time())
+                .expect_err("leaf without digitalSignature must fail");
+        assert!(matches!(
+            wrong_ku_error,
+            RustlsError::InvalidCertificate(CertificateError::InvalidPurpose)
+        ));
+    }
+
+    #[test]
+    fn exact_leaf_shape_rejects_missing_eku_and_trailing_der() {
+        let server_name = ServerName::try_from("localhost").expect("server name");
+
+        let missing_eku_error =
+            verify_pinned_end_entity_shape(&cert_without_eku(), &server_name, fixture_valid_time())
+                .expect_err("pinned leaf without explicit serverAuth must fail");
+        assert!(matches!(
+            missing_eku_error,
+            RustlsError::InvalidCertificate(CertificateError::InvalidPurpose)
+        ));
+
+        let mut trailing = leaf_cert().as_ref().to_vec();
+        trailing.push(0);
+        let trailing_error = verify_pinned_end_entity_shape(
+            &CertificateDer::from(trailing),
+            &server_name,
+            fixture_valid_time(),
+        )
+        .expect_err("trailing DER must fail");
+        assert!(matches!(
+            trailing_error,
+            RustlsError::InvalidCertificate(CertificateError::BadEncoding)
+        ));
+    }
+
+    #[test]
+    fn exact_leaf_fallback_never_overrides_standard_signature_or_name_errors() {
+        let mut bad_signature = leaf_cert().as_ref().to_vec();
+        let final_signature_byte = bad_signature.last_mut().expect("certificate byte");
+        *final_signature_byte ^= 1;
+        let bad_signature = CertificateDer::from(bad_signature);
+        let verifier = test_server_verifier(vec![ca_cert()], vec![bad_signature.clone()]);
+        let server_name = ServerName::try_from("localhost").expect("server name");
+        let signature_error = verifier
+            .verify_server_cert(&bad_signature, &[], &server_name, &[], fixture_valid_time())
+            .expect_err("exact pin must not bypass bad chain signature");
+        assert!(matches!(
+            signature_error,
+            RustlsError::InvalidCertificate(CertificateError::BadSignature)
+        ));
+
+        let leaf = leaf_cert();
+        let verifier = test_server_verifier(vec![ca_cert()], vec![leaf.clone()]);
+        let wrong_name = ServerName::try_from("not-localhost.example").expect("server name");
+        let name_error = verifier
+            .verify_server_cert(&leaf, &[], &wrong_name, &[], fixture_valid_time())
+            .expect_err("exact pin must not bypass standard name rejection");
+        assert!(matches!(
+            name_error,
+            RustlsError::InvalidCertificate(
+                CertificateError::NotValidForName | CertificateError::NotValidForNameContext { .. }
+            )
+        ));
     }
 
     #[test]

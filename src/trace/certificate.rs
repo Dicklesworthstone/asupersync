@@ -66,7 +66,7 @@ impl TraceCertificate {
     pub fn record_event(&mut self, event: &TraceEvent) {
         // Commit to the full event semantics so offline verification catches
         // payload tampering, not just reordered or retyped events.
-        let mut hasher = crate::util::DetHasher::default();
+        let mut hasher = crate::util::DetHasher::for_lab();
         self.event_hash.hash(&mut hasher);
         hash_trace_event(&mut hasher, event);
         self.event_hash = hasher.finish();

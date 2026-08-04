@@ -33,9 +33,19 @@ dump_failure_logs() {
 }
 trap dump_failure_logs EXIT
 
-git_state="$(git rev-parse --short HEAD)"
-if ! git diff --quiet -- . ':!target' 2>/dev/null; then
-  git_state="${git_state}+dirty"
+# Provenance is best-effort on purpose. RCH syncs sources to a plain staging
+# directory on the worker, which is NOT a git repository, so an unguarded
+# `git rev-parse` aborted this whole script at status 128 under `set -e` and the
+# four evidence logs were never written (br-asupersync-bq3c9g). The gate itself
+# does not depend on git; only the provenance stamp does. Degrade to an explicit
+# marker so the evidence is still produced and the record says plainly that the
+# sha is unknown, rather than fabricating one or losing the run.
+if git_state="$(git rev-parse --short HEAD 2>/dev/null)"; then
+  if ! git diff --quiet -- . ':!target' 2>/dev/null; then
+    git_state="${git_state}+dirty"
+  fi
+else
+  git_state="unavailable-not-a-git-repository"
 fi
 
 echo "NO_MOCK_POLICY_EVIDENCE start bead=asupersync-a45 output=$jsonl" >&2

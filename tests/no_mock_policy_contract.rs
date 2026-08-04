@@ -175,6 +175,27 @@ fn no_mock_policy_metadata_is_actionable_and_not_overbroad() {
                     "{section} entry {category} must include replacement_issue: {entry:?}"
                 );
             }
+            // Optional narrowing field (asupersync-pzfwf5): when present it must
+            // be a non-empty list of non-empty strings. A malformed value that
+            // was silently ignored would restore whole-file coverage without
+            // anything saying so, which is the exact failure this field exists
+            // to prevent. Regex validity is checked by the Python loader.
+            if let Some(justified) = entry.get("justified_text") {
+                let justified_patterns = justified.as_array().unwrap_or_else(|| {
+                    panic!("{section} justified_text must be an array: {entry:?}")
+                });
+                assert!(
+                    !justified_patterns.is_empty(),
+                    "{section} justified_text must be non-empty: {entry:?}"
+                );
+                for value in justified_patterns {
+                    assert!(
+                        value.as_str().is_some_and(|text| !text.is_empty()),
+                        "{section} justified_text entries must be non-empty strings: {entry:?}"
+                    );
+                }
+            }
+
             for pattern in patterns {
                 assert!(
                     !forbidden.contains(&(category, pattern)),
@@ -242,10 +263,38 @@ fn no_mock_policy_report_passes_and_keeps_categories_visible() {
         );
     }
 
-    let remaining = array(&report, "remaining_allowlist_entries");
+    // Every `.rs` file under `src/` must resolve unambiguously, because the
+    // scanner falls back to "treat the whole file as production" when it cannot
+    // determine a `#[cfg(test)]` region's extent. That fallback is the safe
+    // direction, but a file sitting in it is a file whose test doubles will keep
+    // being reported as production stubs. Fix the scanner, don't allowlist the
+    // file. Offending paths are listed by name in the report.
+    assert_eq!(
+        report.pointer("/scan_counts/test_gated_undetermined_paths"),
+        Some(&Value::from(0)),
+        "unresolved cfg(test) extents: {:?}",
+        report.pointer("/test_gated_undetermined_paths")
+    );
+    // Proves the cfg(test) classification is actually engaged on the real tree
+    // rather than silently short-circuiting to zero (asupersync-pzfwf5).
     assert!(
-        remaining.len() >= 250,
-        "report should enumerate remaining intentional allowlist entries"
+        report
+            .pointer("/scan_counts/test_gated_hits")
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count > 0),
+        "cfg(test)-gated hits should be recognised and excluded from production categories"
+    );
+
+    let remaining = array(&report, "remaining_allowlist_entries");
+    // Was >= 250 before `#[cfg(test)]` awareness landed. Roughly 55 files whose
+    // only flagged lines lived in test modules stopped needing an allowlist
+    // entry at all, so the list shrank because the gate got more precise, not
+    // less covered. This bound is a smoke test that the accountability list is
+    // populated -- `violating_paths == 0` above is what proves coverage.
+    assert!(
+        remaining.len() >= 150,
+        "report should enumerate remaining intentional allowlist entries, got {}",
+        remaining.len()
     );
     for row in remaining {
         assert!(
@@ -326,6 +375,23 @@ fn no_mock_policy_evidence_runner_emits_valid_jsonl_and_logs() {
         assert_eq!(str_field(&record, "verdict"), "pass");
         assert_eq!(str_field(&record, "evidence_quality"), "live");
         assert_eq!(str_field(&record, "blocker_bead_id"), "");
+        // Provenance must be stated, never fabricated. RCH's synced worker tree
+        // is not a git repository, so the runner degrades to an explicit marker
+        // instead of aborting (br-asupersync-bq3c9g). Either form is acceptable;
+        // an empty or absent stamp is not.
+        let git_state = str_field(&record, "git_sha_or_tree_state");
+        assert!(
+            !git_state.is_empty(),
+            "record must state its provenance: {record:?}"
+        );
+        assert!(
+            git_state == "unavailable-not-a-git-repository"
+                || git_state
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_hexdigit()),
+            "provenance should be a git sha or the explicit unavailable marker, got {git_state:?}"
+        );
         assert!(scenario_ids.insert(str_field(&record, "scenario_id").to_string()));
         let output_artifact = str_field(&record, "output_artifact");
         assert!(

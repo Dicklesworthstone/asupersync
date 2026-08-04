@@ -60,9 +60,9 @@ checksum = "cc7bb162ec39d46ab1ca8c77bf72e890535becd1751bb45f64c597edb4c8c6b3"
 
 [[package]]
 name = "alloc-stdlib"
-version = "0.2.4"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e76a019e91224d279006ff972f1e984179a6e9feb050adba6ce8274aef23195"
+checksum = "94fb8275041c72129eb51b7d0322c29b8387a0386127718b096429201a5d6ece"
 dependencies = [
  "alloc-no-stdlib",
 ]
@@ -81,7 +81,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "asupersync"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "aes-gcm",
  "asupersync-macros",
@@ -112,6 +112,7 @@ dependencies = [
  "polling",
  "prost",
  "regex",
+ "regex-syntax",
  "rmp-serde",
  "semver",
  "serde",
@@ -149,11 +150,11 @@ dependencies = [
 
 [[package]]
 name = "asupersync-macros"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -223,9 +224,9 @@ dependencies = [
 
 [[package]]
 name = "brotli"
-version = "8.0.4"
+version = "8.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5cc91aac060a7a1e25823bdccbfb6af1875b88f17c6daac97894eed8207166b3"
+checksum = "4bd8b9603c7aa97359dbd97ecf258968c95f3adddd6db2f7e7a5bef101c84560"
 dependencies = [
  "alloc-no-stdlib",
  "alloc-stdlib",
@@ -234,9 +235,9 @@ dependencies = [
 
 [[package]]
 name = "brotli-decompressor"
-version = "5.0.3"
+version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a32acac15fe1967bc3986b2a6347dffc965602354ea6f450ad07e8bfd253583"
+checksum = "874bb8112abecc98cbd6d81ea4fa7e94fb9449648c93cc89aa40c81c24d7de03"
 dependencies = [
  "alloc-no-stdlib",
  "alloc-stdlib",
@@ -564,7 +565,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "franken-decision"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "franken-evidence",
  "franken-kernel",
@@ -573,7 +574,7 @@ dependencies = [
 
 [[package]]
 name = "franken-evidence"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "serde",
  "serde_json",
@@ -581,7 +582,7 @@ dependencies = [
 
 [[package]]
 name = "franken-kernel"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "serde",
 ]

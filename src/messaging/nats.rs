@@ -1558,7 +1558,7 @@ fn build_default_nats_tls_connector() -> Result<TlsConnector, NatsError> {
     #[cfg(feature = "tls-native-roots")]
     {
         let builder = builder.with_native_roots().map_err(NatsError::Tls)?;
-        return builder.build().map_err(NatsError::Tls);
+        builder.build().map_err(NatsError::Tls)
     }
 
     #[cfg(all(not(feature = "tls-native-roots"), feature = "tls-webpki-roots"))]
