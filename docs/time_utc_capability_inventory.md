@@ -42,10 +42,11 @@ registry without mutating those shared authorities:
    reported overlaps have their literal `chrono::Duration` call on the
    preceding line. The corrected literal-or-alias union is therefore 190
    unique lines.
-7. Thirty-two declared in-file consumer anchors across six categories link to
-   28 unique direct source anchors. Together with eight imported-alias anchors,
-   the artifact freezes 40 derived anchors and 230 classified direct-plus-
-   derived anchors. This is a source-linked static count, not runtime coverage.
+7. Thirty-eight declared in-file consumer anchors across six categories link
+   to 40 unique direct source anchors. Together with eight imported-alias
+   anchors, the artifact freezes 46 derived anchors and 236 classified
+   direct-plus-derived anchors. This is a source-linked static count, not
+   runtime coverage.
 
 The direct `time` edge remains present under `cli`, and Chrono remains present
 under `cli`, `benchmark-adapters`, dev targets, the conformance member, and
@@ -128,13 +129,14 @@ direct bindings, 32 direct alias rows, one same-line overlap, and eight
 imported-alias arithmetic, comparison, association, or ordering anchors are
 also exact.
 
-The declared downstream tranche now freezes 32 exact rows across CLI
+The declared downstream tranche now freezes 38 exact rows across CLI
 cutoff/expiry handling, PostgreSQL and Kafka arithmetic, JetStream wire
 insertion, real-E2E serialization/retention/return/embedding, conformance
-rendering, and standalone fixture serialization. Every row names its direct
-source anchor and stops at the declared first semantic boundary. The remaining
-static gap is narrower but real: cross-file consumers outside Chrono-bearing
-paths, external consumers absent from this snapshot, and later container or
+field association and rendering, and standalone fixture serialization,
+template association, and result retention. Every row names its direct source
+anchor and stops at the declared first semantic boundary. The remaining static
+gap is narrower but real: cross-file consumers outside Chrono-bearing paths,
+external consumers absent from this snapshot, and later container or
 arbitrary-byte propagation are not enumerated. A1's zero-unclassified-use
 acceptance remains unmet and the bead stays open.
 
@@ -356,7 +358,7 @@ not proof of real Redis or RDB temporal behavior.
 
 The exact text of all 159 literal source lines, their operation projection,
 path routing, line-specific overrides, direct alias binding/reference
-discovery, eight imported-alias anchors, and 32 declared source-linked
+discovery, eight imported-alias anchors, and 38 declared source-linked
 downstream anchors are frozen in the artifact. The downstream boundary admits
 the first semantic compare, arithmetic, format, serialization, persistence,
 retention, return, extraction, or embedding consumer in a Chrono-bearing path.
@@ -398,7 +400,7 @@ The artifact routes, without mutating shared authority files:
 Every reconciliation row has an explicit owner and
 `ROUTED_NOT_MUTATED_BY_A1` state. There are no unclassified literal Chrono
 paths or undiscovered direct Chrono import bindings in the pinned census, but
-derived-consumer coverage beyond the 32 declared in-file rows remains partial.
+derived-consumer coverage beyond the 38 declared in-file rows remains partial.
 
 ## Validation and no-claim boundary
 

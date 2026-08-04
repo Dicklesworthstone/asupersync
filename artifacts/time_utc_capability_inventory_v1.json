@@ -1158,15 +1158,15 @@
     "direct_alias_line_count": 32,
     "literal_alias_overlap_line_count": 1,
     "literal_or_alias_unique_line_count": 190,
-    "derived_operation_anchor_count": 40,
-    "classified_anchor_count": 230,
+    "derived_operation_anchor_count": 46,
+    "classified_anchor_count": 236,
     "literal_use_override_count": 36,
-    "additional_derived_operation_anchor_count": 32,
+    "additional_derived_operation_anchor_count": 38,
     "literal_operation_projection_sha256": "a533497be94a3a8c649a061117053acff88821c102e9cedbe16cb4da0b66990b",
     "literal_source_projection_sha256": "5c4020cfe41d10dbfcab19c64f3677ee78941c65441c12da93dc7e3cd6946f2d",
     "path_classification_projection_sha256": "5f60bb8b7deb36b1aac2123747fd1be426f1888fc759f46afe3baae103dc3b63",
     "literal_override_projection_sha256": "81f3549c7644361eabee937044ba098315b3aeffbd079d9c644eb1d60ccc3f84",
-    "additional_derived_projection_sha256": "b4188bf022ce336bb51b36e24bc011be879fb9bfd18d3b10f506ef1c1116659a",
+    "additional_derived_projection_sha256": "b20b65d03be1995802d929275531ac96a8a66ec06c1c64f0bf887ee27803f674",
     "semantic_consumer_boundary": "Include nonliteral consumers through the first semantic compare, arithmetic, format, serialize, persist, retain, return, extract, or embed boundary in a Chrono-bearing source path; exclude cross-file propagation, external consumers, and later container or arbitrary-byte taint.",
     "derived_consumer_category_ids": [
       "TIME-CONSUMER-CLI-CUTOFF-EXPIRY",
@@ -2358,6 +2358,49 @@
         "persistence_or_public_association": "DataEndStreamComplianceReport Markdown report"
       },
       {
+        "use_id": "TIME-DERIVED-CONFORMANCE-EXPECT-CONTINUE-FIELD-0266",
+        "derivation_sources": [
+          "conformance/src/h1_expect_continue_conformance.rs:252"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-CONFORMANCE-OUTPUT",
+        "path": "conformance/src/h1_expect_continue_conformance.rs",
+        "line": 266,
+        "source_anchor": "timestamp,",
+        "operation": "associate the generated RFC3339 timestamp with the public serialized compliance-report field",
+        "cfg_or_wiring": "PUBLIC_CONFORMANCE_LIBRARY_MODULE",
+        "exposure": "PUBLIC_SERDE_SCHEMA_AND_OPTIONAL_REPORT_OUTPUT",
+        "persistence_or_public_association": "ExpectContinueComplianceReport timestamp field"
+      },
+      {
+        "use_id": "TIME-DERIVED-CONFORMANCE-PING-RENDER-0464",
+        "derivation_sources": [
+          "conformance/src/h2_ping_conformance.rs:146",
+          "conformance/src/h2_ping_conformance.rs:190"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-CONFORMANCE-OUTPUT",
+        "path": "conformance/src/h2_ping_conformance.rs",
+        "line": 464,
+        "source_anchor": "output.push_str(&format!(\"**Timestamp:** {}\\n\", report.timestamp));",
+        "operation": "render the generated typed timestamp into public Markdown output",
+        "cfg_or_wiring": "PUBLIC_CONFORMANCE_LIBRARY_MODULE",
+        "exposure": "PUBLIC_SERDE_SCHEMA_AND_OPTIONAL_REPORT_OUTPUT",
+        "persistence_or_public_association": "PingComplianceReport Markdown report"
+      },
+      {
+        "use_id": "TIME-DERIVED-CONFORMANCE-RAPTORQ-HISTORY-FIELD-0039",
+        "derivation_sources": [
+          "conformance/raptorq_rfc6330/reporting/src/coverage_matrix.rs:229"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-CONFORMANCE-OUTPUT",
+        "path": "conformance/raptorq_rfc6330/reporting/src/regression_detection.rs",
+        "line": 39,
+        "source_anchor": "timestamp: matrix.generated_at.clone(),",
+        "operation": "copy the generated coverage timestamp into the public serialized history record",
+        "cfg_or_wiring": "PUBLIC_CONFORMANCE_LIBRARY_REEXPORT",
+        "exposure": "PUBLIC_SERDE_SCHEMA_AND_MAINTENANCE_OUTPUT",
+        "persistence_or_public_association": "ConformanceRecord timestamp field"
+      },
+      {
         "use_id": "TIME-DERIVED-EXCLUDED-CONFORMANCE-PING-RENDER-0631",
         "derivation_sources": [
           "fuzz/conformance/src/h2_ping_rtt_measurement_conformance.rs:534",
@@ -2373,9 +2416,25 @@
         "persistence_or_public_association": "H2 PING RTT summary report"
       },
       {
+        "use_id": "TIME-DERIVED-EXCLUDED-CONFORMANCE-PING-MARKDOWN-0690",
+        "derivation_sources": [
+          "fuzz/conformance/src/h2_ping_rtt_measurement_conformance.rs:534",
+          "fuzz/conformance/src/h2_ping_rtt_measurement_conformance.rs:565"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-CONFORMANCE-OUTPUT",
+        "path": "fuzz/conformance/src/h2_ping_rtt_measurement_conformance.rs",
+        "line": 690,
+        "source_anchor": "output.push_str(&format!(\"**Timestamp:** {}\\n\", results.timestamp));",
+        "operation": "render either generated report timestamp into Markdown output",
+        "cfg_or_wiring": "EXCLUDED_WORKSPACE_SOURCE",
+        "exposure": "SEPARATE_WORKSPACE_REPORT_OUTPUT",
+        "persistence_or_public_association": "H2 PING RTT Markdown report"
+      },
+      {
         "use_id": "TIME-DERIVED-STANDALONE-GOLDEN-SERIALIZE-0197",
         "derivation_sources": [
-          "tests/conformance/raptorq_rfc6330/golden/src/fixture_generator.rs:191"
+          "tests/conformance/raptorq_rfc6330/golden/src/fixture_generator.rs:191",
+          "tests/conformance/raptorq_rfc6330/golden/src/fixture_generator.rs:613"
         ],
         "consumer_category_id": "TIME-CONSUMER-STANDALONE-PERSISTENCE",
         "path": "tests/conformance/raptorq_rfc6330/golden/src/fixture_generator.rs",
@@ -2385,6 +2444,39 @@
         "cfg_or_wiring": "NESTED_STANDALONE_WORKSPACE",
         "exposure": "PRIVATE_SERIALIZED_TEST_ARTIFACT",
         "persistence_or_public_association": "RFC 6330 golden fixture JSON"
+      },
+      {
+        "use_id": "TIME-DERIVED-STANDALONE-TEMPLATE-FIELD-0221",
+        "derivation_sources": [
+          "tests/conformance/raptorq_rfc6330/reporting/src/coverage_matrix.rs:26",
+          "tests/conformance/raptorq_rfc6330/reporting/src/coverage_matrix.rs:314",
+          "tests/conformance/raptorq_rfc6330/reporting/src/compliance_report.rs:735"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-STANDALONE-PERSISTENCE",
+        "path": "tests/conformance/raptorq_rfc6330/reporting/src/compliance_report.rs",
+        "line": 221,
+        "source_anchor": "generated_at: matrix",
+        "operation": "associate the typed matrix timestamp with the serializable report-template field",
+        "cfg_or_wiring": "NESTED_STANDALONE_LIBRARY",
+        "exposure": "PUBLIC_STANDALONE_SERDE_SCHEMA_AND_FILESYSTEM_OUTPUT",
+        "persistence_or_public_association": "TemplateContext generated_at field"
+      },
+      {
+        "use_id": "TIME-DERIVED-STANDALONE-HEALTH-RETAIN-0280",
+        "derivation_sources": [
+          "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs:131",
+          "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs:263",
+          "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs:273",
+          "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs:735"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-STANDALONE-PERSISTENCE",
+        "path": "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs",
+        "line": 280,
+        "source_anchor": "health_statuses.push(status);",
+        "operation": "retain a timestamp-bearing file-health result after age classification",
+        "cfg_or_wiring": "NESTED_STANDALONE_LIBRARY",
+        "exposure": "PUBLIC_STANDALONE_SERDE_SCHEMA_AND_FILESYSTEM_OUTPUT",
+        "persistence_or_public_association": "public FileHealthStatus result vector"
       },
       {
         "use_id": "TIME-DERIVED-STANDALONE-SNAPSHOT-SERIALIZE-0287",
@@ -4401,7 +4493,7 @@
     },
     {
       "detail_id": "TIME-STATIC-RESOLVED-DECLARED-DERIVED-CONSUMERS",
-      "summary": "Thirty-two declared in-file consumer anchors across six categories are linked to 28 unique direct source anchors, source-matched, category-routed, and frozen through the stated first semantic boundary. The wider remainder stays explicit in static_inventory_gaps.",
+      "summary": "Thirty-eight declared in-file consumer anchors across six categories are linked to 40 unique direct source anchors, source-matched, category-routed, and frozen through the stated first semantic boundary. The wider remainder stays explicit in static_inventory_gaps.",
       "state": "RESOLVED_BY_STATIC_DECLARED_DERIVED_CLASSIFICATION",
       "owner_bead": "asupersync-5z2scg.6.1"
     }

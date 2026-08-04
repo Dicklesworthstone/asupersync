@@ -24,7 +24,7 @@ const CAPABILITY_ID: &str = "CAP-TIME-UTC-RFC3339";
 const ADR_ID: &str = "DEP-ADR-011";
 const BASELINE_REVISION: &str = "1afde84d564bd8ea876459624116f90028b80835";
 const ARTIFACT_SHA256: &str =
-    "1ac799332e035d80ec5ff439b9b323600d193d06ad90908e45a0a32eb8713f96";
+    "5cbdd734cbbe2a34bcaf93636c95021b85317d430f2b6b784f3383fc612df712";
 const DOC_BEGIN: &str = "<!-- BEGIN TIME UTC CAPABILITY INVENTORY -->";
 const DOC_END: &str = "<!-- END TIME UTC CAPABILITY INVENTORY -->";
 const CHRONO_TOKEN: &str = concat!("chrono", "::");
@@ -44,7 +44,7 @@ const LITERAL_OVERRIDE_PROJECTION_SHA256: &str =
 const ALIAS_CLASSIFICATION_PROJECTION_SHA256: &str =
     "867c7f39911b829635b5a28413179e8cc2d4156f0cfe2a1218fbb3f4819c5118";
 const ADDITIONAL_DERIVED_PROJECTION_SHA256: &str =
-    "b4188bf022ce336bb51b36e24bc011be879fb9bfd18d3b10f506ef1c1116659a";
+    "b20b65d03be1995802d929275531ac96a8a66ec06c1c64f0bf887ee27803f674";
 const SEMANTIC_CONSUMER_BOUNDARY: &str = concat!(
     "Include nonliteral consumers through the first semantic compare, arithmetic, format, ",
     "serialize, persist, retain, return, extract, or embed boundary in a Chrono-bearing ",
@@ -2759,8 +2759,8 @@ fn time_utc_inventory_is_exact_and_source_pinned() {
         "Thirteen ordered literal-operation rules",
         "one same-line overlap",
         "derived-consumer remainder",
-        "32 exact rows",
-        "230 classified",
+        "38 exact rows",
+        "236 classified",
         "literal-source",
         "bounded lexical scan of production source finds zero external",
         "This is not compiler-resolved name analysis.",
