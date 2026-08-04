@@ -1,0 +1,938 @@
+//! Fail-closed static contract for the source-pinned Base64 capability inventory.
+//!
+//! Bead: asupersync-d24mms.10.1
+//! Fixture: artifacts/base64_capability_inventory_v1.json
+//!
+//! This contract checks inventory structure and repository source projection.
+//! It does not execute codec behavior and performs no external process,
+//! network, timing, or environment-dependent work.
+
+#![allow(missing_docs)]
+
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+const ARTIFACT_PATH: &str = "artifacts/base64_capability_inventory_v1.json";
+const DOC_PATH: &str = "docs/base64_capability_inventory.md";
+const REGISTRY_PATH: &str = "artifacts/dependency_capability_registry_v1.json";
+const BASELINE_PATH: &str = "artifacts/dependency_capability_baseline_v1.json";
+const MATRIX_PATH: &str = "artifacts/dependency_verification_matrix_v1.json";
+const MARGINAL_LEDGER_PATH: &str = "artifacts/dependency_marginal_ledger_v1.json";
+const ROOT_MANIFEST_PATH: &str = "Cargo.toml";
+const FUZZ_MANIFEST_PATH: &str = "fuzz/Cargo.toml";
+const RAPTORQ_MANIFEST_PATH: &str = "tests/conformance/raptorq_differential/Cargo.toml";
+const IGNORE_PATH: &str = ".gitignore";
+const ARTIFACT_ID: &str = "base64-capability-inventory-v1";
+const PROGRAM_ID: &str = "asupersync-ir2uf0";
+const BEAD_ID: &str = "asupersync-d24mms.10.1";
+const CAPABILITY_ID: &str = "CAP-BASE64-CODEC";
+const AUTHORITY_REVISION: &str = "7bb939ab2d18c1c102671809cf74b922d2ed0437";
+const DOC_BEGIN: &str = "<!-- BEGIN BASE64 CAPABILITY INVENTORY -->";
+const DOC_END: &str = "<!-- END BASE64 CAPABILITY INVENTORY -->";
+const PATH_TOKEN: &str = concat!("base", "64::");
+const SOURCE_PIN_PATHS_SHA256: &str =
+    "12dcbba4d979f2ded1f858c31a4a14108b219eced6698896059b181a039e3a55";
+const CLAIMS_PROJECTION_SHA256: &str =
+    "125c6fab5148b957c7d119442ad8a752e84d29883b0efa630b32ba52119d620e";
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn read_repo_file(path: &str) -> String {
+    std::fs::read_to_string(repo_root().join(path))
+        .unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
+}
+
+fn read_repo_bytes(path: &str) -> Vec<u8> {
+    std::fs::read(repo_root().join(path))
+        .unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
+}
+
+fn parse_repo_json(path: &str) -> Value {
+    serde_json::from_str(&read_repo_file(path))
+        .unwrap_or_else(|error| panic!("{path} must be valid JSON: {error}"))
+}
+
+fn artifact() -> Value {
+    parse_repo_json(ARTIFACT_PATH)
+}
+
+fn array<'a>(value: &'a Value, key: &str) -> &'a Vec<Value> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("{key} must be an array"))
+}
+
+fn object<'a>(value: &'a Value, key: &str) -> &'a serde_json::Map<String, Value> {
+    value
+        .get(key)
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| panic!("{key} must be an object"))
+}
+
+fn text<'a>(value: &'a Value, key: &str) -> &'a str {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("{key} must be a string"))
+}
+
+fn number(value: &Value, key: &str) -> u64 {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| panic!("{key} must be an unsigned integer"))
+}
+
+fn row_ids(rows: &[Value], key: &str) -> BTreeSet<String> {
+    rows.iter().map(|row| text(row, key).to_owned()).collect()
+}
+
+fn string_set(value: &Value, key: &str) -> BTreeSet<String> {
+    array(value, key)
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .unwrap_or_else(|| panic!("{key} entries must be strings"))
+                .to_owned()
+        })
+        .collect()
+}
+
+fn require_exact_strings(value: &Value, key: &str, expected: &[&str]) -> Result<(), String> {
+    let expected: BTreeSet<String> = expected.iter().map(|item| (*item).to_owned()).collect();
+    if array(value, key).len() != expected.len() || string_set(value, key) != expected {
+        return Err(format!("{key} exact unique string set drifted"));
+    }
+    Ok(())
+}
+
+fn require_exact_ids(
+    rows: &[Value],
+    key: &str,
+    expected: &[&str],
+    label: &str,
+) -> Result<(), String> {
+    let expected: BTreeSet<String> = expected.iter().map(|id| (*id).to_owned()).collect();
+    if rows.len() != expected.len() || row_ids(rows, key) != expected {
+        return Err(format!("{label} exact unique {key} set drifted"));
+    }
+    Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    const LOWER: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        encoded.push(char::from(LOWER[usize::from(byte >> 4)]));
+        encoded.push(char::from(LOWER[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn write_canonical_json(value: &Value, output: &mut String) {
+    match value {
+        Value::Null => output.push_str("null"),
+        Value::Bool(flag) => output.push_str(if *flag { "true" } else { "false" }),
+        Value::Number(number) => output.push_str(&number.to_string()),
+        Value::String(text) => output.push_str(
+            &serde_json::to_string(text).expect("JSON string serialization must succeed"),
+        ),
+        Value::Array(values) => {
+            output.push('[');
+            for (index, child) in values.iter().enumerate() {
+                if index != 0 {
+                    output.push(',');
+                }
+                write_canonical_json(child, output);
+            }
+            output.push(']');
+        }
+        Value::Object(values) => {
+            output.push('{');
+            let mut keys: Vec<_> = values.keys().collect();
+            keys.sort_unstable();
+            for (index, key) in keys.into_iter().enumerate() {
+                if index != 0 {
+                    output.push(',');
+                }
+                output.push_str(
+                    &serde_json::to_string(key).expect("JSON key serialization must succeed"),
+                );
+                output.push(':');
+                write_canonical_json(
+                    values.get(key).expect("canonical JSON key must exist"),
+                    output,
+                );
+            }
+            output.push('}');
+        }
+    }
+}
+
+fn canonical_json_bytes(value: &Value) -> Vec<u8> {
+    let mut output = String::new();
+    write_canonical_json(value, &mut output);
+    output.into_bytes()
+}
+
+fn claims_projection(inventory: &Value) -> Value {
+    serde_json::json!({
+        "authority": inventory["authority"].clone(),
+        "policy": inventory["policy"].clone(),
+        "source_pin_scope": inventory["source_pin_scope"].clone(),
+        "source_pins": inventory["source_pins"].clone(),
+        "dependency_resolution": inventory["dependency_resolution"].clone(),
+        "engines": inventory["engines"].clone(),
+        "incumbent_api": inventory["incumbent_api"].clone(),
+        "decode_error_contract": inventory["decode_error_contract"].clone(),
+        "semantic_corpus": inventory["semantic_corpus"].clone(),
+        "call_compilation_profiles": inventory["call_compilation_profiles"].clone(),
+        "occurrence_census": inventory["occurrence_census"].clone(),
+        "call_sites": inventory["call_sites"].clone(),
+        "migration_reservation_groups": inventory["migration_reservation_groups"].clone(),
+        "public_surface": inventory["public_surface"].clone(),
+        "manual_collision_surfaces": inventory["manual_collision_surfaces"].clone(),
+        "downstream_and_e2e": inventory["downstream_and_e2e"].clone(),
+        "gaps": inventory["gaps"].clone(),
+        "rollback_triggers": inventory["rollback_triggers"].clone(),
+        "no_claim_boundaries": inventory["no_claim_boundaries"].clone(),
+    })
+}
+
+fn contains_unknown_value(value: &Value) -> bool {
+    match value {
+        Value::String(text) => text.contains("UNKNOWN"),
+        Value::Array(values) => values.iter().any(contains_unknown_value),
+        Value::Object(values) => values.values().any(contains_unknown_value),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+fn sum_nested(rows: &[Value], section: &str, key: &str) -> u64 {
+    rows.iter()
+        .map(|row| {
+            row.get(section)
+                .and_then(Value::as_object)
+                .and_then(|values| values.get(key))
+                .and_then(Value::as_u64)
+                .unwrap_or_else(|| panic!("{section}.{key} must be an unsigned integer"))
+        })
+        .sum()
+}
+
+fn validate_inventory(inventory: &Value) -> Result<(), String> {
+    if inventory.get("schema_version").and_then(Value::as_u64) != Some(1)
+        || text(inventory, "artifact_id") != ARTIFACT_ID
+        || text(inventory, "program_id") != PROGRAM_ID
+        || text(inventory, "bead_id") != BEAD_ID
+        || text(inventory, "capability_id") != CAPABILITY_ID
+        || text(inventory, "authority_revision") != AUTHORITY_REVISION
+    {
+        return Err("inventory identity drifted".to_owned());
+    }
+    if contains_unknown_value(inventory) {
+        return Err("inventory contains an UNKNOWN value".to_owned());
+    }
+
+    let policy = object(inventory, "policy");
+    if policy.get("zero_unknown_required").and_then(Value::as_bool) != Some(true)
+        || policy.get("unknown_rows").and_then(Value::as_u64) != Some(0)
+        || policy.get("a1_execution_state").and_then(Value::as_str) != Some("NOT_RUN_BY_A1")
+    {
+        return Err("zero-UNKNOWN or A1 execution policy drifted".to_owned());
+    }
+    let authority = object(inventory, "authority");
+    if authority.get("current_action").and_then(Value::as_str) != Some("KEEP_INCUMBENT")
+        || authority.get("cutover_state").and_then(Value::as_str)
+            != Some("BLOCKED_PENDING_EVIDENCE")
+        || authority
+            .get("dependency_exit_allowed")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return Err("authority disposition drifted".to_owned());
+    }
+
+    let source_scope = object(inventory, "source_pin_scope");
+    if source_scope.get("path_count").and_then(Value::as_u64) != Some(70)
+        || source_scope.get("paths_sha256").and_then(Value::as_str)
+            != Some(SOURCE_PIN_PATHS_SHA256)
+        || array(inventory, "source_pins").len() != 70
+    {
+        return Err("source-pin scope drifted".to_owned());
+    }
+
+    let resolution = object(inventory, "dependency_resolution");
+    if resolution["root"]["manifest_requirement"].as_str() != Some("0.23")
+        || resolution["root"]["resolved_version"].as_str() != Some("0.23.0")
+        || resolution["root"]["default_features"].as_bool() != Some(false)
+        || resolution["root_transitive_retained"]["resolved_version"].as_str()
+            != Some("0.22.1")
+        || resolution["root_transitive_retained"]["direct_0_23_edge_removal_effect"].as_str()
+            != Some("DOES_NOT_REMOVE_ALL_BASE64_PACKAGES_FROM_ROOT_LOCKED_GRAPH")
+        || resolution["excluded_fuzz_workspace"]["resolved_version"].as_str()
+            != Some("0.22.1")
+        || resolution["standalone_raptorq_workspace"]["resolved_version_state"].as_str()
+            != Some("NOT_LOCKED_IN_REPOSITORY")
+        || resolution["synthesized_consumer_profile_count"].as_u64() != Some(12)
+        || resolution["workspace_dev_build_audit_profile_count"].as_u64() != Some(1)
+        || resolution["canonical_ledger_cells"].as_u64() != Some(52)
+    {
+        return Err("dependency version or graph boundary drifted".to_owned());
+    }
+    require_exact_strings(
+        &inventory["dependency_resolution"]["root_transitive_retained"],
+        "consumers",
+        &["opentelemetry-proto@0.32.0", "sqlx-core@0.9.0", "tonic@0.14.6"],
+    )?;
+    require_exact_strings(
+        &inventory["dependency_resolution"],
+        "canonical_ledger_profile_ids",
+        &[
+            "minimal",
+            "default",
+            "tls",
+            "sqlite",
+            "kafka",
+            "metrics",
+            "cli",
+            "compression",
+            "trace-compression",
+            "io-uring",
+            "loom-tests",
+            "fuzz-quarantine",
+            "workspace-dev-build-audit",
+        ],
+    )?;
+    require_exact_strings(
+        &inventory["dependency_resolution"],
+        "canonical_ledger_target_triples",
+        &[
+            "aarch64-apple-darwin",
+            "wasm32-unknown-unknown",
+            "x86_64-pc-windows-msvc",
+            "x86_64-unknown-linux-gnu",
+        ],
+    )?;
+
+    require_exact_ids(
+        array(inventory, "engines"),
+        "engine_id",
+        &[
+            "B64-ENGINE-STANDARD-PAD",
+            "B64-ENGINE-STANDARD-NO-PAD",
+            "B64-ENGINE-URL-SAFE-PAD",
+            "B64-ENGINE-URL-SAFE-NO-PAD",
+        ],
+        "engines",
+    )?;
+    for engine in array(inventory, "engines") {
+        if engine.get("rejects_nonzero_trailing_bits").and_then(Value::as_bool) != Some(true)
+            || engine.get("rejects_whitespace").and_then(Value::as_bool) != Some(true)
+            || engine.get("empty_input").and_then(Value::as_str) != Some("ACCEPT_AS_EMPTY")
+            || text(engine, "current_acceptance_rule").is_empty()
+        {
+            return Err(format!("engine {} semantics drifted", text(engine, "engine_id")));
+        }
+    }
+
+    require_exact_strings(
+        &inventory["decode_error_contract"],
+        "root_0_23_variants",
+        &[
+            "InvalidByte(usize,u8)",
+            "InvalidLength(usize)",
+            "InvalidLastSymbol{offset,symbol,symbol_value}",
+            "InvalidPadding",
+        ],
+    )?;
+    require_exact_strings(
+        &inventory["decode_error_contract"],
+        "fuzz_and_possible_raptorq_0_22_variants",
+        &[
+            "InvalidByte(usize,u8)",
+            "InvalidLength(usize)",
+            "InvalidLastSymbol(usize,u8)",
+            "InvalidPadding",
+        ],
+    )?;
+    if inventory["decode_error_contract"]["public_upstream_error_exposure"].as_str()
+        != Some("ABSENT")
+    {
+        return Err("upstream error exposure boundary drifted".to_owned());
+    }
+
+    require_exact_ids(
+        array(inventory, "call_compilation_profiles"),
+        "profile_id",
+        &[
+            "B64-PROFILE-PORTABLE-LIBRARY",
+            "B64-PROFILE-NATIVE-MESSAGING",
+            "B64-PROFILE-NATIVE-GRPC",
+            "B64-PROFILE-POSTGRES",
+            "B64-PROFILE-WASM32-BROWSER",
+            "B64-PROFILE-ATP-CLI",
+            "B64-PROFILE-CFG-TEST",
+            "B64-PROFILE-LEGACY-INTERNAL",
+            "B64-PROFILE-H3-WEBSOCKET-E2E",
+            "B64-PROFILE-UNWIRED-SOURCE",
+            "B64-PROFILE-STANDALONE-RAPTORQ",
+            "B64-PROFILE-EXCLUDED-FUZZ",
+            "B64-PROFILE-LOCAL-MOCK-OR-COMMENT",
+        ],
+        "compilation profiles",
+    )?;
+
+    let call_sites = array(inventory, "call_sites");
+    let expected_call_ids: Vec<String> = (1..=36)
+        .map(|index| format!("B64-CALL-{index:03}"))
+        .collect();
+    let expected_call_refs: Vec<&str> = expected_call_ids.iter().map(String::as_str).collect();
+    require_exact_ids(call_sites, "call_id", &expected_call_refs, "call sites")?;
+
+    let engine_ids = row_ids(array(inventory, "engines"), "engine_id");
+    let profile_ids = row_ids(array(inventory, "call_compilation_profiles"), "profile_id");
+    let mut paths = BTreeSet::new();
+    for row in call_sites {
+        let path = text(row, "path");
+        if !paths.insert(path.to_owned()) {
+            return Err(format!("duplicate call-site path {path}"));
+        }
+        if !profile_ids.contains(text(row, "profile")) {
+            return Err(format!("unregistered profile at {path}"));
+        }
+        if text(row, "role").is_empty()
+            || text(row, "error_mapping").is_empty()
+            || text(row, "acceptance_rule").is_empty()
+        {
+            return Err(format!("unclassified role/error/acceptance at {path}"));
+        }
+        let row_engines = array(row, "engines");
+        let classification = text(row, "classification");
+        let external = !matches!(classification, "LOCAL_MOCK" | "COMMENT_ONLY");
+        if external && row_engines.is_empty() {
+            return Err(format!("external row {path} has no engine"));
+        }
+        if !external && !row_engines.is_empty() {
+            return Err(format!("nonexternal row {path} names an engine"));
+        }
+        for engine in row_engines {
+            let engine = engine
+                .as_str()
+                .ok_or_else(|| format!("engine id at {path} must be text"))?;
+            if !engine_ids.contains(engine) {
+                return Err(format!("unregistered engine {engine} at {path}"));
+            }
+        }
+    }
+    if call_sites.len() != 36
+        || call_sites.iter().map(|row| number(row, "literal_tokens")).sum::<u64>() != 166
+        || sum_nested(call_sites, "production", "encode") != 23
+        || sum_nested(call_sites, "production", "decode") != 20
+        || sum_nested(call_sites, "nonproduction", "encode") != 52
+        || sum_nested(call_sites, "nonproduction", "decode") != 28
+    {
+        return Err("call-site census totals drifted".to_owned());
+    }
+
+    let occurrence = object(inventory, "occurrence_census");
+    if occurrence.get("path_count").and_then(Value::as_u64) != Some(36)
+        || occurrence.get("literal_token_count").and_then(Value::as_u64) != Some(166)
+        || occurrence.get("local_mock_paths").and_then(Value::as_u64) != Some(2)
+        || occurrence.get("comment_only_paths").and_then(Value::as_u64) != Some(1)
+    {
+        return Err("occurrence summary drifted".to_owned());
+    }
+    let external_totals = occurrence
+        .get("external_call_totals")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "external_call_totals must be an object".to_owned())?;
+    if external_totals.get("all_encode").and_then(Value::as_u64) != Some(75)
+        || external_totals.get("all_decode").and_then(Value::as_u64) != Some(48)
+    {
+        return Err("external call totals drifted".to_owned());
+    }
+    let expected_engine_totals = BTreeMap::from([
+        ("B64-ENGINE-STANDARD-PAD", (57, 35)),
+        ("B64-ENGINE-STANDARD-NO-PAD", (4, 5)),
+        ("B64-ENGINE-URL-SAFE-PAD", (0, 2)),
+        ("B64-ENGINE-URL-SAFE-NO-PAD", (14, 6)),
+    ]);
+    let actual_engine_totals: BTreeMap<_, _> =
+        array(&inventory["occurrence_census"], "engine_call_totals")
+            .iter()
+            .map(|row| {
+                (
+                    text(row, "engine_id"),
+                    (number(row, "encode"), number(row, "decode")),
+                )
+            })
+            .collect();
+    if actual_engine_totals != expected_engine_totals {
+        return Err("per-engine call totals drifted".to_owned());
+    }
+
+    require_exact_ids(
+        array(inventory, "migration_reservation_groups"),
+        "group_id",
+        &["B64-A3-AUTH", "B64-A4-WEB-GRPC", "B64-A5-REMAINING"],
+        "migration groups",
+    )?;
+    let expected_group_owners = BTreeMap::from([
+        ("B64-A3-AUTH", "asupersync-d24mms.10.3"),
+        ("B64-A4-WEB-GRPC", "asupersync-d24mms.10.4"),
+        ("B64-A5-REMAINING", "asupersync-d24mms.10.5"),
+    ]);
+    for row in array(inventory, "migration_reservation_groups") {
+        if expected_group_owners.get(text(row, "group_id")).copied()
+            != Some(text(row, "owner"))
+        {
+            return Err("migration group owner drifted".to_owned());
+        }
+    }
+    let group_ids = row_ids(array(inventory, "migration_reservation_groups"), "group_id");
+    if call_sites
+        .iter()
+        .any(|row| !group_ids.contains(text(row, "group")))
+    {
+        return Err("call site has an unregistered migration group".to_owned());
+    }
+
+    require_exact_ids(
+        array(inventory, "public_surface"),
+        "surface_id",
+        &[
+            "B64-PUBLIC-GRPC-WEB",
+            "B64-PUBLIC-TLS-PIN",
+            "B64-PUBLIC-HTTP-BASIC",
+            "B64-PUBLIC-WEBSOCKET",
+            "B64-PERSISTED-BROWSER",
+            "B64-PERSISTED-RUNTIME-PROFILE",
+            "B64-AUTH-NATS",
+            "B64-AUTH-POSTGRES",
+            "B64-CLI-ATP",
+        ],
+        "public and protocol surfaces",
+    )?;
+    if array(inventory, "public_surface")
+        .iter()
+        .any(|row| row.get("upstream_error_exposed").and_then(Value::as_bool) != Some(false))
+    {
+        return Err("a public surface exposes the upstream error".to_owned());
+    }
+
+    require_exact_ids(
+        array(inventory, "gaps"),
+        "gap_id",
+        &[
+            "B64-GAP-REGISTRY-SOURCES",
+            "B64-GAP-REGISTRY-PROFILES",
+            "B64-GAP-PARTIAL-BASELINE",
+            "B64-GAP-GLOBAL-BOUND",
+            "B64-GAP-CONSTANT-TIME",
+            "B64-GAP-GRPC-BUFFER",
+            "B64-GAP-MANUAL-HTTP",
+            "B64-GAP-BROWSER-HOST",
+            "B64-GAP-HOST-COMMAND",
+            "B64-GAP-VERSION-SKEW",
+            "B64-GAP-ORPHAN-SOURCES",
+            "B64-GAP-LOCAL-MOCKS",
+            "B64-GAP-DEBUG-WS-KEY",
+            "B64-GAP-URL-SAFE-PAD-ONLY-DECODE",
+            "B64-GAP-A1-NOT-EXECUTED",
+        ],
+        "routed gaps",
+    )?;
+    for gap in array(inventory, "gaps") {
+        if !matches!(text(gap, "state"), "ROUTED" | "BLOCKED")
+            || !text(gap, "owner").starts_with("asupersync-d24mms.10.")
+            || text(gap, "detail").is_empty()
+        {
+            return Err(format!("gap {} is not fully routed", text(gap, "gap_id")));
+        }
+    }
+
+    require_exact_ids(
+        array(inventory, "semantic_corpus"),
+        "case_id",
+        &[
+            "B64-VEC-EMPTY",
+            "B64-VEC-F",
+            "B64-VEC-FO",
+            "B64-VEC-FOO",
+            "B64-VEC-ALPHABET",
+            "B64-ERR-WHITESPACE",
+            "B64-ERR-MIXED-STANDARD",
+            "B64-ERR-MIXED-URL",
+            "B64-ERR-PADDING-IN-NO-PAD",
+            "B64-ERR-MISSING-PADDING",
+            "B64-ERR-ONE-SYMBOL",
+            "B64-ERR-TRAILING-BITS",
+        ],
+        "semantic corpus",
+    )?;
+    require_exact_ids(
+        array(inventory, "manual_collision_surfaces"),
+        "collision_id",
+        &[
+            "B64-COLLISION-HTTP-REQUEST",
+            "B64-COLLISION-JETSTREAM-TEST",
+            "B64-COLLISION-BROWSER-TS",
+            "B64-COLLISION-HOST-SHELL",
+            "B64-COLLISION-TLS-PIN-TEST",
+            "B64-COLLISION-OTEL-MOCK",
+            "B64-COLLISION-WEBSOCKET-MOCK",
+        ],
+        "manual collisions",
+    )?;
+    if array(inventory, "semantic_corpus").len() != 12
+        || array(inventory, "manual_collision_surfaces").len() != 7
+        || array(inventory, "rollback_triggers").len() != 7
+        || array(inventory, "no_claim_boundaries").len() != 7
+    {
+        return Err("corpus, collision, rollback, or no-claim coverage drifted".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_claims_projection(inventory: &Value) -> Result<(), String> {
+    validate_inventory(inventory)?;
+    let actual = sha256_hex(&canonical_json_bytes(&claims_projection(inventory)));
+    if actual != CLAIMS_PROJECTION_SHA256 {
+        return Err("canonical claims projection drifted".to_owned());
+    }
+    Ok(())
+}
+
+fn collect_rust_files(directory: &Path, output: &mut Vec<PathBuf>) {
+    if !directory.exists() {
+        return;
+    }
+    let mut entries: Vec<_> = std::fs::read_dir(directory)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", directory.display()))
+        .map(|entry| entry.expect("directory entry must be readable").path())
+        .collect();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            collect_rust_files(&path, output);
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+            output.push(path);
+        }
+    }
+}
+
+fn live_literal_census() -> BTreeMap<String, u64> {
+    let root = repo_root();
+    let mut files = Vec::new();
+    for directory in ["src", "tests", "fuzz", "examples", "benches", "conformance"] {
+        collect_rust_files(&root.join(directory), &mut files);
+    }
+    let mut census = BTreeMap::new();
+    for path in files {
+        let content = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let count = content.matches(PATH_TOKEN).count() as u64;
+        if count != 0 {
+            let relative = path
+                .strip_prefix(&root)
+                .expect("scanned file must be under repository root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            census.insert(relative, count);
+        }
+    }
+    census
+}
+
+fn artifact_literal_census(inventory: &Value) -> BTreeMap<String, u64> {
+    array(inventory, "call_sites")
+        .iter()
+        .map(|row| (text(row, "path").to_owned(), number(row, "literal_tokens")))
+        .collect()
+}
+
+#[test]
+fn identity_policy_engines_profiles_and_routed_gaps_are_exact() {
+    validate_claims_projection(&artifact()).expect("Base64 inventory claims must remain exact");
+}
+
+#[test]
+fn source_pins_cover_every_claimed_path_and_match_bytes() {
+    let inventory = artifact();
+    let pins = array(&inventory, "source_pins");
+    assert_eq!(pins.len(), 70);
+
+    let mut pinned_paths = BTreeSet::new();
+    for pin in pins {
+        let path = text(pin, "path");
+        assert!(
+            pinned_paths.insert(path.to_owned()),
+            "duplicate source pin {path}"
+        );
+        let bytes = read_repo_bytes(path);
+        assert_eq!(
+            sha256_hex(&bytes),
+            text(pin, "sha256"),
+            "source hash drifted for {path}"
+        );
+        let content = String::from_utf8(bytes).expect("pinned sources must be UTF-8");
+        assert_eq!(
+            content.lines().count() as u64,
+            number(pin, "line_count"),
+            "line count drifted for {path}"
+        );
+    }
+
+    let mut projection = String::new();
+    for path in &pinned_paths {
+        projection.push_str(path);
+        projection.push('\n');
+    }
+    assert_eq!(sha256_hex(projection.as_bytes()), SOURCE_PIN_PATHS_SHA256);
+    assert_eq!(text(&inventory["source_pin_scope"], "paths_sha256"), SOURCE_PIN_PATHS_SHA256);
+
+    for row in array(&inventory, "call_sites") {
+        assert!(pinned_paths.contains(text(row, "path")), "call-site path is not pinned");
+    }
+    for row in array(&inventory, "manual_collision_surfaces") {
+        assert!(pinned_paths.contains(text(row, "path")), "collision path is not pinned");
+    }
+}
+
+#[test]
+fn literal_path_token_census_and_reservation_digests_are_exact() {
+    let inventory = artifact();
+    assert_eq!(live_literal_census(), artifact_literal_census(&inventory));
+
+    let call_sites = array(&inventory, "call_sites");
+    for group in array(&inventory, "migration_reservation_groups") {
+        let group_id = text(group, "group_id");
+        let mut projection = BTreeMap::new();
+        for row in call_sites.iter().filter(|row| text(row, "group") == group_id) {
+            projection.insert(text(row, "path").to_owned(), number(row, "literal_tokens"));
+        }
+        assert_eq!(projection.len() as u64, number(group, "path_count"));
+        assert_eq!(projection.values().sum::<u64>(), number(group, "literal_token_count"));
+        let mut bytes = String::new();
+        for (path, count) in projection {
+            bytes.push_str(&path);
+            bytes.push('\t');
+            bytes.push_str(&count.to_string());
+            bytes.push('\n');
+        }
+        assert_eq!(sha256_hex(bytes.as_bytes()), text(group, "projection_sha256"));
+    }
+}
+
+#[test]
+fn dependency_governance_sources_remain_blocking_and_version_skew_is_explicit() {
+    let registry = parse_repo_json(REGISTRY_PATH);
+    let registry_row = array(&registry, "capabilities")
+        .iter()
+        .find(|row| row.get("capability_id").and_then(Value::as_str) == Some(CAPABILITY_ID))
+        .expect("registry must contain the Base64 capability");
+    assert_eq!(text(registry_row, "disposition"), "PRESERVE_AND_REPLACE_IF_PARITY");
+    assert_eq!(text(registry_row, "evidence_state"), "BASELINE_PLANNED");
+    assert_eq!(text(registry_row, "cutover_state"), "BLOCKED_PENDING_EVIDENCE");
+    assert_eq!(registry_row["baseline"]["owner_bead"].as_str(), Some(BEAD_ID));
+
+    let baseline = parse_repo_json(BASELINE_PATH);
+    let baseline_row = array(&baseline, "capability_baselines")
+        .iter()
+        .find(|row| row.get("capability_id").and_then(Value::as_str) == Some(CAPABILITY_ID))
+        .expect("baseline must contain the Base64 capability");
+    assert_eq!(text(baseline_row, "baseline_state"), "EXECUTABLE_PARTIAL_BLOCKING");
+    assert_eq!(baseline_row["cutover_eligible"].as_bool(), Some(false));
+    assert_eq!(baseline_row["downstream_profiles"], serde_json::json!(["consumer-default"]));
+
+    let matrix = parse_repo_json(MATRIX_PATH);
+    let rows: Vec<_> = array(&matrix, "matrix")
+        .iter()
+        .filter(|row| {
+            row.get("bead_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id.starts_with("asupersync-d24mms.10."))
+        })
+        .filter(|row| {
+            array(row, "capability_ids")
+                .iter()
+                .any(|id| id.as_str() == Some(CAPABILITY_ID))
+        })
+        .collect();
+    assert_eq!(rows.len(), 6);
+    for row in rows {
+        assert_eq!(text(row, "cutover_state"), "BLOCKED_PENDING_EVIDENCE");
+        assert!(array(row, "evidence_plans").iter().all(|plan| {
+            plan.get("plan_state").and_then(Value::as_str) == Some("PLANNED_BLOCKING")
+        }));
+    }
+
+    let ledger = parse_repo_json(MARGINAL_LEDGER_PATH);
+    assert_eq!(array(&ledger, "canonical_profiles").len(), 13);
+    assert_eq!(array(&ledger, "canonical_target_triples").len(), 4);
+    require_exact_ids(
+        array(&ledger, "canonical_profiles"),
+        "profile_id",
+        &[
+            "minimal",
+            "default",
+            "tls",
+            "sqlite",
+            "kafka",
+            "metrics",
+            "cli",
+            "compression",
+            "trace-compression",
+            "io-uring",
+            "loom-tests",
+            "fuzz-quarantine",
+            "workspace-dev-build-audit",
+        ],
+        "marginal-ledger profiles",
+    )
+    .expect("marginal-ledger profiles must remain exact");
+    require_exact_strings(
+        &ledger,
+        "canonical_target_triples",
+        &[
+            "aarch64-apple-darwin",
+            "wasm32-unknown-unknown",
+            "x86_64-pc-windows-msvc",
+            "x86_64-unknown-linux-gnu",
+        ],
+    )
+    .expect("marginal-ledger targets must remain exact");
+    let base64_measurements: Vec<_> = array(&ledger, "marginal_measurements")
+        .iter()
+        .filter(|row| row.get("direct_root_edge").and_then(Value::as_str) == Some("normal:base64"))
+        .collect();
+    assert_eq!(base64_measurements.len(), 52);
+    assert_eq!(
+        base64_measurements
+            .iter()
+            .map(|row| text(row, "feature_profile"))
+            .collect::<BTreeSet<_>>()
+            .len(),
+        13
+    );
+    assert_eq!(
+        base64_measurements
+            .iter()
+            .map(|row| text(row, "target_triple"))
+            .collect::<BTreeSet<_>>()
+            .len(),
+        4
+    );
+    assert!(base64_measurements.iter().all(|row| {
+        row.get("marginal_package_version_count")
+            .and_then(Value::as_u64)
+            == Some(1)
+            && row.get("marginal_package_versions")
+                .and_then(Value::as_array)
+                .is_some_and(|packages| {
+                    packages.len() == 1
+                        && packages[0].as_str()
+                            == Some(
+                                "registry+https://github.com/rust-lang/crates.io-index#base64@0.23.0",
+                            )
+                })
+    }));
+
+    let root_manifest = read_repo_file(ROOT_MANIFEST_PATH);
+    assert!(root_manifest.contains(
+        "base64 = { version = \"0.23\", default-features = false, features = [\"std\"] }"
+    ));
+    let root_lock = read_repo_file("Cargo.lock");
+    for needle in [
+        concat!(
+            "name = \"base64\"\n",
+            "version = \"0.22.1\"\n",
+            "source = \"registry+https://github.com/rust-lang/crates.io-index\"\n",
+            "checksum = \"72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6\"",
+        ),
+        concat!(
+            "name = \"base64\"\n",
+            "version = \"0.23.0\"\n",
+            "source = \"registry+https://github.com/rust-lang/crates.io-index\"\n",
+            "checksum = \"b25655df2c3cdd83c5e5b293b88acd880332b2ddadd7c30ac43144fdc0033da9\"",
+        ),
+        "name = \"opentelemetry-proto\"\nversion = \"0.32.0\"",
+        "name = \"sqlx-core\"\nversion = \"0.9.0\"",
+        "name = \"tonic\"\nversion = \"0.14.6\"",
+    ] {
+        assert!(root_lock.contains(needle), "root lock boundary missing: {needle}");
+    }
+    assert_eq!(root_lock.matches(" \"base64 0.22.1\",").count(), 3);
+    assert!(read_repo_file(FUZZ_MANIFEST_PATH).contains("base64 = \"0.22\""));
+    assert!(read_repo_file(RAPTORQ_MANIFEST_PATH).contains("base64 = \"0.22\""));
+}
+
+#[test]
+fn docs_ignore_and_no_claim_markers_remain_discoverable() {
+    let docs = read_repo_file(DOC_PATH);
+    assert_eq!(docs.matches(DOC_BEGIN).count(), 1);
+    assert_eq!(docs.matches(DOC_END).count(), 1);
+    for needle in [
+        "NOT_RUN_BY_A1",
+        "36 Rust paths and 166 literal",
+        "23 | 20 | 43",
+        "52 | 28 | 80",
+        "B64-A3-AUTH",
+        "B64-A4-WEB-GRPC",
+        "B64-A5-REMAINING",
+        "no constant-time claim",
+        "does not prove compilation",
+        "Only A6",
+    ] {
+        assert!(docs.contains(needle), "documentation marker missing: {needle}");
+    }
+    assert!(read_repo_file(IGNORE_PATH)
+        .lines()
+        .any(|line| line == "!artifacts/base64_capability_inventory_v1.json"));
+}
+
+#[test]
+fn safe_negative_mutations_fail_closed() {
+    let original = artifact();
+
+    let mut with_unknown = original.clone();
+    with_unknown["authority"]["current_action"] = Value::String("UNKNOWN".to_owned());
+    assert!(validate_claims_projection(&with_unknown).is_err());
+
+    let mut missing_call = original.clone();
+    missing_call["call_sites"]
+        .as_array_mut()
+        .expect("call_sites must be mutable array")
+        .pop();
+    assert!(validate_claims_projection(&missing_call).is_err());
+
+    let mut unrouted_gap = original.clone();
+    unrouted_gap["gaps"][0]["owner"] = Value::String(String::new());
+    assert!(validate_claims_projection(&unrouted_gap).is_err());
+
+    let mut changed_vector = original.clone();
+    changed_vector["semantic_corpus"][1]["expected"]["STANDARD"] =
+        Value::String("drifted".to_owned());
+    assert!(validate_claims_projection(&changed_vector).is_err());
+
+    let mut changed_classification = original.clone();
+    changed_classification["call_sites"][0]["classification"] =
+        Value::String("EXTERNAL_PRODUCTION".to_owned());
+    assert!(validate_claims_projection(&changed_classification).is_err());
+
+    let mut changed_group = original.clone();
+    changed_group["call_sites"][0]["group"] = Value::String("B64-A3-AUTH".to_owned());
+    assert!(validate_claims_projection(&changed_group).is_err());
+
+    let mut exposed_error = original;
+    exposed_error["public_surface"][0]["upstream_error_exposed"] = Value::Bool(true);
+    assert!(validate_claims_projection(&exposed_error).is_err());
+}

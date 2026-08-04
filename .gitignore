@@ -125,6 +125,7 @@ repro_*.rs
 artifacts/
 !artifacts/
 artifacts/*
+!artifacts/base64_capability_inventory_v1.json
 !artifacts/runtime_workload_corpus_v*.json
 !artifacts/runtime_control_seam_inventory_v1.json
 !artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json
