@@ -56,13 +56,13 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
-      "line_count": 991
+      "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+      "line_count": 1038
     },
     {
       "path": "Cargo.lock",
-      "sha256": "9fa12e8af1e6b15a3070d88d62b2b81b8ba49c0e9d8592c1d1682f1cd72a4461",
-      "line_count": 4664
+      "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+      "line_count": 4666
     },
     {
       "path": "src/lab/scenario.rs",
@@ -81,13 +81,13 @@
     },
     {
       "path": "src/lab/mod.rs",
-      "sha256": "c3f24c5217620c82ce8f2fc3ef790e49a3d40933aa5410249fe68dca6d7643a5",
-      "line_count": 281
+      "sha256": "fccb709ed88e07bdb75b02b231edd6936e43b881a5a65af90a0f41d67d749213",
+      "line_count": 315
     },
     {
       "path": "src/bin/asupersync.rs",
-      "sha256": "cbf0c69b27ac98921afebed685dc5d0a8855a05c87cf7eb8e28134256a1062f7",
-      "line_count": 16577
+      "sha256": "397f3800f4a40ccb4f25366bb10ce641d12b4947b9e1b230359db69c5af1e283",
+      "line_count": 16700
     },
     {
       "path": "frankenlab/Cargo.toml",
@@ -111,8 +111,8 @@
     },
     {
       "path": "examples/metadata.json",
-      "sha256": "cb31a8d58a4055aeeb553ecb5a43691583eadc87569ee187e7b6fd8d29b8ecb5",
-      "line_count": 584
+      "sha256": "5473c8adab1add34bc1082a40596a5b7126881513f672e5051b40efffa0689a8",
+      "line_count": 847
     },
     {
       "path": "docs/adr/dep_plan_adr_004_config_scenario_formats.md",
@@ -121,8 +121,8 @@
     },
     {
       "path": "TESTING_FOR_AGENTS.md",
-      "sha256": "2b90d430b64eeeb7ea13f065abfc63e609df785ab93c7604e3cf980d2e3802a6",
-      "line_count": 320
+      "sha256": "f29e7b43c6baed9b8713ef9d7a237e86434c8184086e92249b2727c3dc9bb070",
+      "line_count": 353
     },
     {
       "path": "docs/adoption/getting_started.md",
@@ -138,6 +138,81 @@
       "path": "examples/demo_benchmark.rs",
       "sha256": "8525af694bd4d75f2a224200991e3d63d70e611bff435c441b778b439397a2ef",
       "line_count": 679
+    },
+    {
+      "path": "tests/scenario_yaml_capability_inventory_contract.rs",
+      "sha256": "22b7d43bc133e280a05006b66dc7c367bd780d29a06a1aa437513d557cf4dec9",
+      "line_count": 2025
+    },
+    {
+      "path": "tests/phase6_methodology_gate_contract.rs",
+      "sha256": "a9ef28336cac25ecd925676148f30d8b71ac43a1df1180757c0df50dc9e84ed1",
+      "line_count": 622
+    },
+    {
+      "path": "tests/examples_metadata_contract.rs",
+      "sha256": "6b4a539cb02636249dce2d19d3e464da167898d934e2a630e445bddefe3a8294",
+      "line_count": 414
+    },
+    {
+      "path": "src/conformance/mod.rs",
+      "sha256": "b0097f8efc3f9ac6b1c4c852eb3a0d8e5578256ec05319f3cff4a28e47f27d13",
+      "line_count": 1361
+    },
+    {
+      "path": "src/http/h1/codec.rs",
+      "sha256": "9d6612d647fab75b7348d96eb0999ff8e2f159e8b707a309532efd19ccfed2c1",
+      "line_count": 2827
+    },
+    {
+      "path": "src/observability/diagnostics.rs",
+      "sha256": "e26a88ce0fd375bc3157d9220e2304d3fa9f0e64080ce406ed072ffd470f4693",
+      "line_count": 8111
+    },
+    {
+      "path": "scripts/provision_kafka_test_env.rs",
+      "sha256": "55da137faa1c826985e9c1dfaf1484df9457b4ab152730ed1de5a094ef40e569",
+      "line_count": 376
+    },
+    {
+      "path": ".github/workflows/methodology-gates.yml",
+      "sha256": "14d7c31f81566eafc21358547ff5f579c8879ef941355c576898f9af5d27bea6",
+      "line_count": 553
+    },
+    {
+      "path": "tools/demos/time_travel.yaml",
+      "sha256": "41f30dd07c70f7e70cc3334ed03cb640fe286403f5868c90791953b12b28c3f7",
+      "line_count": 41
+    },
+    {
+      "path": "pnpm-workspace.yaml",
+      "sha256": "0fb360452b0231d114d0b0ad6cc76bb48fe528382f55827cf93739bf64ec79e1",
+      "line_count": 2
+    },
+    {
+      "path": "scripts/validate_npm_pack_smoke.sh",
+      "sha256": "db1947a783170e99bff0e8cae9fe178bf3929e3ccac4d0fb3db8692fad4b7a92",
+      "line_count": 342
+    },
+    {
+      "path": "scripts/validate_package_build.sh",
+      "sha256": "299216a2781e42597251cd5f7a9068271740a767591f6221657d8bff7c3a0f95",
+      "line_count": 102
+    },
+    {
+      "path": "artifacts/dependency_capability_registry_v1.json",
+      "sha256": "e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2",
+      "line_count": 6917
+    },
+    {
+      "path": "artifacts/dependency_capability_baseline_v1.json",
+      "sha256": "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8",
+      "line_count": 1357
+    },
+    {
+      "path": "artifacts/api_surface_map_v1.json",
+      "sha256": "7dfbb239422630e1ef9c875e7542c4cee440211233dc7b734611fa8481d54178",
+      "line_count": 4824
     }
   ],
   "feature_profiles": [
@@ -815,13 +890,17 @@
       "output": "minimization report",
       "evidence_state": "SOURCE_BASELINED"
     },
-    {
-      "workflow_id": "SCN-WORKFLOW-FRANKEN-DEMO",
-      "command_surface": "frankenlab demo",
-      "input": "built-in scenario",
-      "output": "human demonstration",
-      "evidence_state": "SOURCE_BASELINED"
-    },
+      {
+        "workflow_id": "SCN-WORKFLOW-FRANKEN-DEMO",
+        "command_surface": "frankenlab demo",
+        "input": "discovered YAML Scenario directory",
+        "output": "validate, run, and explore demonstration summary",
+        "source_entrypoints": [
+          "find_scenarios_dir",
+          "collect_yaml_files"
+        ],
+        "evidence_state": "SOURCE_BASELINED"
+      },
     {
       "workflow_id": "SCN-WORKFLOW-SCENARIO-DUMP",
       "command_surface": "none",
@@ -1001,6 +1080,588 @@
       "evidence_state": "SOURCE_BASELINED"
     }
   ],
+  "a3_acceptance_satisfiability_audit": {
+    "bead_id": "asupersync-5z2scg.5.3.1",
+    "parent_bead_id": "asupersync-5z2scg.5.3",
+    "captured_date_utc": "2026-08-04",
+    "captured_revision": "207a435d59bad452239caa773f3a7c64c8b5edbc",
+    "audit_state": "LIVE_SOURCE_BOUND_STATIC_AUDIT",
+    "inventory_state": "FROZEN",
+    "evidence_state": "SOURCE_BASELINED",
+    "execution_state": "NOT_RUN_BY_A3_1_STATIC_LANE",
+    "authority": {
+      "adr_id": "DEP-ADR-004",
+      "capability_ids": [
+        "CAP-LAB-DETERMINISM",
+        "CAP-SCENARIO-YAML-JSON"
+      ],
+      "current_disposition": "KEEP_INCUMBENT",
+      "required_disposition": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "input_narrowing_allowed": false,
+      "owned_parser_present": false,
+      "owned_writer_present": false,
+      "audit_owner_bead": "asupersync-5z2scg.5.3.1",
+      "durable_receipt_owner_bead": "asupersync-5z2scg.5.3.2",
+      "additive_authoring_owner_bead": "asupersync-5z2scg.5.4",
+      "terminal_cutover_authority_bead": "asupersync-5z2scg.5.5",
+      "owner_policy_receipt": null
+    },
+    "authority_source_revisions": {
+      "capability_registry_revision": "5f208e04f24d8addaa051c9bf7465f7b398848fe",
+      "capability_baseline_revision": "7390d33f4ac297cd28138c8e1ece38f60b278660",
+      "api_surface_map_revision": "2c7f2dd883cbbac1df6581f65673cf23eb40ee3d"
+    },
+    "a1_a2_join": {
+      "a1_inventory_commit": "b89b713164e161ca58697e17d129229c94e2254e",
+      "a2_canonical_json_commit": "bf5bdd619a087e8a9aef1c983726cbee7adea7fd",
+      "a1_content_baseline_revision": "295136459f9e3e38e7373394e713866ec0693a8d",
+      "grammar_construct_count": 23,
+      "typed_corpus_file_count": 13,
+      "diagnostic_contract_count": 10,
+      "resource_contract_count": 8,
+      "all_corpus_fingerprints_match_current_files": true,
+      "prior_executable_evidence_state": "EXECUTED_AT_A1_A2_REVISIONS_NOT_RERUN_BY_A3_1",
+      "a3_1_evidence_kind": "STATIC_SOURCE_AND_ARTIFACT_AUDIT_ONLY"
+    },
+    "source_pin_refresh": {
+      "previous_path_count": 17,
+      "current_path_count": 32,
+      "refreshed_stale_path_count": 6,
+      "added_path_count": 15,
+      "refreshed_stale_paths": [
+        "Cargo.lock",
+        "Cargo.toml",
+        "TESTING_FOR_AGENTS.md",
+        "examples/metadata.json",
+        "src/bin/asupersync.rs",
+        "src/lab/mod.rs"
+      ],
+      "added_paths": [
+        ".github/workflows/methodology-gates.yml",
+        "artifacts/api_surface_map_v1.json",
+        "artifacts/dependency_capability_baseline_v1.json",
+        "artifacts/dependency_capability_registry_v1.json",
+        "pnpm-workspace.yaml",
+        "scripts/provision_kafka_test_env.rs",
+        "scripts/validate_npm_pack_smoke.sh",
+        "scripts/validate_package_build.sh",
+        "src/conformance/mod.rs",
+        "src/http/h1/codec.rs",
+        "src/observability/diagnostics.rs",
+        "tests/examples_metadata_contract.rs",
+        "tests/phase6_methodology_gate_contract.rs",
+        "tests/scenario_yaml_capability_inventory_contract.rs",
+        "tools/demos/time_travel.yaml"
+      ],
+      "sorted_path_projection_sha256": "1c532b020668307d39cec4db9c5c66e52442f1fd433546a7a2b7ce78c50e985b"
+    },
+    "dependency_edges": [
+      {
+        "edge_id": "SCN-A3-EDGE-ROOT-CLI-NORMAL",
+        "package": "asupersync",
+        "edge_kind": "OPTIONAL_NORMAL",
+        "manifest_path": "Cargo.toml",
+        "declaration": "serde_yaml = { version = \"0.9\", optional = true }",
+        "activation": "cli -> dep:serde_yaml",
+        "default_profile_includes_edge": false,
+        "evidence_state": "SOURCE_BASELINED"
+      },
+      {
+        "edge_id": "SCN-A3-EDGE-ROOT-DEV",
+        "package": "asupersync",
+        "edge_kind": "DEV",
+        "manifest_path": "Cargo.toml",
+        "declaration": "serde_yaml = \"0.9\"",
+        "activation": "root tests and adjacent workflow contract",
+        "default_profile_includes_edge": false,
+        "evidence_state": "SOURCE_BASELINED"
+      },
+      {
+        "edge_id": "SCN-A3-EDGE-FRANKENLAB-NORMAL",
+        "package": "frankenlab",
+        "edge_kind": "NORMAL",
+        "manifest_path": "frankenlab/Cargo.toml",
+        "declaration": "serde_yaml = \"0.9\"",
+        "activation": "frankenlab binary and tests",
+        "default_profile_includes_edge": true,
+        "evidence_state": "SOURCE_BASELINED"
+      }
+    ],
+    "locked_dependency": {
+      "package": "serde_yaml",
+      "version": "0.9.34+deprecated",
+      "checksum": "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47",
+      "backend_package": "unsafe-libyaml",
+      "backend_version": "0.2.11",
+      "backend_checksum": "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861",
+      "lock_path": "Cargo.lock",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    "consumer_matrix_scope": {
+      "included_surface": "EVERY_TRACKED_RUST_SOURCE_WITH_DIRECT_SERDE_YAML_SYNTAX",
+      "included_direct_source_count": 7,
+      "included_live_semantic_consumer_count": 6,
+      "included_documentation_only_reference_count": 1,
+      "included_live_production_loader_count": 2,
+      "included_adjacent_semantic_parser_count": 1,
+      "writer_scope": "EVERY_CURRENT_EXPLICIT_YAML_WRITER_FOUND_BY_STATIC_SOURCE_INVENTORY",
+      "raw_reference_policy": "Raw text searches, path-presence checks, workflow-name assertions, and orphan YAML documents do not interpret YAML and are not parser-acceptance consumers. They remain classified by adjacent_yaml_files and selected source pins, but are excluded from the direct parser/reference matrix.",
+      "raw_references_do_not_retain_serde_yaml": true,
+      "inventory_state": "FROZEN",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    "consumer_matrix": [
+      {
+        "consumer_id": "SCN-A3-CONSUMER-ROOT-CLI",
+        "category": "PRODUCTION_SCENARIO_LOADER",
+        "path": "src/bin/asupersync.rs",
+        "entrypoints": [
+          "load_scenario",
+          "lab run",
+          "lab validate",
+          "lab replay",
+          "lab explore"
+        ],
+        "inline_test_entrypoints": [
+          "load_scenario_parse_error_is_user_error",
+          "lab_validate_json_uses_output_writer_and_user_error"
+        ],
+        "operation": "WHOLE_FILE_READ_THEN_TYPED_DESERIALIZE",
+        "target_type": "Scenario",
+        "dependency_edge_id": "SCN-A3-EDGE-ROOT-CLI-NORMAL",
+        "application_input_bound": "NONE",
+        "diagnostic_contract_ids": [
+          "SCN-DIAG-READ-ASUP",
+          "SCN-DIAG-PARSE-ASUP"
+        ],
+        "evidence_state": "SOURCE_BASELINED"
+      },
+      {
+        "consumer_id": "SCN-A3-CONSUMER-FRANKENLAB",
+        "category": "PRODUCTION_SCENARIO_LOADER",
+        "path": "frankenlab/src/main.rs",
+        "entrypoints": [
+          "parse_scenario",
+          "load_scenario",
+          "run",
+          "validate",
+          "replay",
+          "explore",
+          "minimize YAML fallback",
+          "demo directory journey"
+        ],
+        "operation": "WHOLE_FILE_READ_THEN_TYPED_DESERIALIZE",
+        "target_type": "Scenario",
+        "dependency_edge_id": "SCN-A3-EDGE-FRANKENLAB-NORMAL",
+        "application_input_bound": "NONE",
+        "diagnostic_contract_ids": [
+          "SCN-DIAG-READ-FRANKEN",
+          "SCN-DIAG-PARSE-FRANKEN"
+        ],
+        "evidence_state": "SOURCE_BASELINED"
+      },
+      {
+        "consumer_id": "SCN-A3-CONSUMER-ROOT-INTEGRATION",
+        "category": "TEST_SCENARIO_LOADER_AND_WRITER",
+        "path": "tests/frankenlab_integration.rs",
+        "entrypoints": [
+          "load_scenario",
+          "scenario_yaml_roundtrip",
+          "canonical_contract_preserves_yaml_replay_identity",
+          "malformed YAML witness"
+        ],
+        "operation": "TYPED_DESERIALIZE_AND_TEST_ONLY_SERIALIZE",
+        "target_type": "Scenario",
+        "dependency_edge_id": "SCN-A3-EDGE-ROOT-DEV",
+        "application_input_bound": "FIXTURE_ONLY_NO_APPLICATION_POLICY",
+        "diagnostic_contract_ids": [],
+        "evidence_state": "EXISTING_TEST"
+      },
+      {
+        "consumer_id": "SCN-A3-CONSUMER-ADOPTION-FUNNEL",
+        "category": "TEST_SCENARIO_LOADER",
+        "path": "frankenlab/tests/adoption_funnel.rs",
+        "entrypoints": [
+          "load_scenario"
+        ],
+        "operation": "WHOLE_FILE_READ_THEN_TYPED_DESERIALIZE",
+        "target_type": "Scenario",
+        "dependency_edge_id": "SCN-A3-EDGE-FRANKENLAB-NORMAL",
+        "application_input_bound": "FIXTURE_ONLY_NO_APPLICATION_POLICY",
+        "diagnostic_contract_ids": [],
+        "evidence_state": "EXISTING_TEST"
+      },
+      {
+        "consumer_id": "SCN-A3-CONSUMER-A1-CONTRACT",
+        "category": "TEST_GRAMMAR_AND_CORPUS_CONTRACT",
+        "path": "tests/scenario_yaml_capability_inventory_contract.rs",
+        "entrypoints": [
+          "observed_yaml_grammar_matches_typed_parser_behavior",
+          "exact_checked_in_typed_corpus_parses_and_validates"
+        ],
+        "operation": "TYPED_DESERIALIZE_AND_STATIC_SOURCE_ASSERTIONS",
+        "target_type": "Scenario",
+        "dependency_edge_id": "SCN-A3-EDGE-ROOT-DEV",
+        "application_input_bound": "FIXTURE_ONLY_NO_APPLICATION_POLICY",
+        "diagnostic_contract_ids": [
+          "SCN-DIAG-DUPLICATE",
+          "SCN-DIAG-MULTI-DOCUMENT"
+        ],
+        "evidence_state": "SOURCE_BASELINED",
+        "historical_execution_state": "EXECUTED_AT_A1_REVISION_NOT_RERUN_BY_A3_1"
+      },
+      {
+        "consumer_id": "SCN-A3-CONSUMER-METHODOLOGY-WORKFLOW",
+        "category": "ADJACENT_SEMANTIC_YAML_PARSER",
+        "path": "tests/phase6_methodology_gate_contract.rs",
+        "input_path": ".github/workflows/methodology-gates.yml",
+        "entrypoints": [
+          "workflow_parses_and_is_explicitly_pr_only"
+        ],
+        "operation": "WHOLE_FILE_READ_THEN_VALUE_DESERIALIZE",
+        "target_type": "serde_yaml::Value",
+        "dependency_edge_id": "SCN-A3-EDGE-ROOT-DEV",
+        "application_input_bound": "FIXTURE_ONLY_NO_APPLICATION_POLICY",
+        "diagnostic_contract_ids": [],
+        "evidence_state": "EXISTING_TEST"
+      },
+      {
+        "consumer_id": "SCN-A3-CONSUMER-RUNNER-DOC-EXAMPLE",
+        "category": "DOCUMENTATION_ONLY_YAML_EXAMPLE",
+        "path": "src/lab/scenario_runner.rs",
+        "entrypoints": [
+          "module Quick Start ignore block"
+        ],
+        "operation": "DOCUMENTED_TYPED_DESERIALIZE_NOT_LIVE_LOADER",
+        "target_type": "Scenario",
+        "dependency_edge_id": null,
+        "documented_dependency_name": "serde_yaml",
+        "application_input_bound": "NOT_APPLICABLE_DOCUMENTATION_ONLY",
+        "diagnostic_contract_ids": [],
+        "evidence_state": "SOURCE_BASELINED"
+      }
+    ],
+    "semantic_serde_yaml_source_allowset": [
+      "frankenlab/src/main.rs",
+      "frankenlab/tests/adoption_funnel.rs",
+      "src/bin/asupersync.rs",
+      "src/lab/scenario_runner.rs",
+      "tests/frankenlab_integration.rs",
+      "tests/phase6_methodology_gate_contract.rs",
+      "tests/scenario_yaml_capability_inventory_contract.rs"
+    ],
+    "writer_matrix": [
+      {
+        "writer_id": "SCN-A3-WRITER-PRODUCTION-SCENARIO",
+        "category": "PRODUCTION_SCENARIO_YAML_WRITER",
+        "path": null,
+        "operation": "ABSENT",
+        "retains_serde_yaml_edge": false,
+        "evidence_state": "EXPLICIT_UNSUPPORTED"
+      },
+      {
+        "writer_id": "SCN-A3-WRITER-TEST-SCENARIO",
+        "category": "TEST_SCENARIO_YAML_WRITER",
+        "path": "tests/frankenlab_integration.rs",
+        "operation": "serde_yaml::to_string for typed round trip",
+        "retains_serde_yaml_edge": true,
+        "evidence_state": "EXISTING_TEST"
+      },
+      {
+        "writer_id": "SCN-A3-WRITER-KAFKA-COMPOSE",
+        "category": "ADJACENT_RAW_YAML_WRITER",
+        "path": "scripts/provision_kafka_test_env.rs",
+        "operation": "write static Docker Compose YAML text",
+        "retains_serde_yaml_edge": false,
+        "evidence_state": "SOURCE_BASELINED"
+      },
+      {
+        "writer_id": "SCN-A3-WRITER-CONFORMANCE-MANIFEST",
+        "category": "ADJACENT_TEST_MANUAL_YAML_WRITER",
+        "path": "src/conformance/mod.rs",
+        "operation": "render_conformance_manifest_yaml builds a deterministic test snapshot",
+        "retains_serde_yaml_edge": false,
+        "evidence_state": "EXISTING_TEST"
+      },
+      {
+        "writer_id": "SCN-A3-WRITER-HTTP-SNAPSHOT",
+        "category": "ADJACENT_TEST_YAML_SNAPSHOT_WRITER",
+        "path": "src/http/h1/codec.rs",
+        "operation": "insta::assert_yaml_snapshot in test module",
+        "retains_serde_yaml_edge": false,
+        "evidence_state": "EXISTING_TEST"
+      },
+      {
+        "writer_id": "SCN-A3-WRITER-DIAGNOSTIC-SNAPSHOT",
+        "category": "ADJACENT_TEST_YAML_SNAPSHOT_WRITER",
+        "path": "src/observability/diagnostics.rs",
+        "operation": "insta::assert_yaml_snapshot in test module",
+        "retains_serde_yaml_edge": false,
+        "evidence_state": "EXISTING_TEST"
+      }
+    ],
+    "grammar_partition": {
+      "accepted_or_accepted_with_documented_projection": [
+        "SCN-YAML-ANCHOR-ALIAS",
+        "SCN-YAML-COMMENTS",
+        "SCN-YAML-FLOW-COLLECTIONS",
+        "SCN-YAML-HEX-OCTAL-BINARY-INTEGER",
+        "SCN-YAML-MAPPING",
+        "SCN-YAML-MERGE-KEY",
+        "SCN-YAML-NULL-IN-OPTION",
+        "SCN-YAML-NULL-IN-STRING",
+        "SCN-YAML-QUOTED-AND-BLOCK-STRINGS",
+        "SCN-YAML-SEQUENCE",
+        "SCN-YAML-TAGGED-SCALAR",
+        "SCN-YAML-U64-MAX",
+        "SCN-YAML-UNICODE",
+        "SCN-YAML-UNKNOWN-FIELD"
+      ],
+      "rejected_by_typed_parse": [
+        "SCN-YAML-DUPLICATE-MAPPING-KEY",
+        "SCN-YAML-EMPTY-DOCUMENT",
+        "SCN-YAML-LEGACY-YES-NO-BOOL",
+        "SCN-YAML-MULTI-DOCUMENT",
+        "SCN-YAML-U64-OVERFLOW"
+      ],
+      "parsed_then_rejected_semantically": [
+        "SCN-YAML-NAN-INFINITY"
+      ],
+      "parser_internal_boundaries": [
+        "SCN-YAML-ALIAS-REPETITION",
+        "SCN-YAML-RECURSION"
+      ],
+      "typed_deserialization_behavior_boundaries": [
+        "SCN-YAML-ARBITRARY-TAGS"
+      ],
+      "construct_count": 23,
+      "partition_is_disjoint_and_complete": true
+    },
+    "corpus_join": {
+      "source_array": "corpus_files",
+      "required_file_count": 13,
+      "root_example_count": 10,
+      "frankenlab_example_count": 3,
+      "all_current_fingerprints_match": true,
+      "parse_and_validate_evidence_state": "EXECUTED_AT_A1_REVISION_NOT_RERUN_BY_A3_1"
+    },
+    "unknown_field_contract": {
+      "root_typed_struct": "ACCEPT_AND_IGNORE",
+      "nested_typed_structs": "ACCEPT_AND_IGNORE",
+      "deny_unknown_fields_present": false,
+      "merge_key_behavior": "ACCEPT_AS_IGNORED_UNKNOWN_FIELD_WITHOUT_MERGE",
+      "preserved_extension_maps": [
+        "faults[].args",
+        "metadata",
+        "participants[].properties"
+      ],
+      "tightening_requires_owner_policy": true,
+      "owner_policy_approved": false,
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    "diagnostic_matrix": [
+      {
+        "surface_id": "SCN-A3-DIAGNOSTIC-ROOT-CLI",
+        "contract_ids": [
+          "SCN-DIAG-READ-ASUP",
+          "SCN-DIAG-PARSE-ASUP"
+        ],
+        "behavior": "structured scenario_parse_error USER_ERROR with path, parser text and available location, plus generic hint",
+        "yaml_source_spans_for_semantic_errors": false,
+        "evidence_state": "SOURCE_BASELINED"
+      },
+      {
+        "surface_id": "SCN-A3-DIAGNOSTIC-FRANKENLAB",
+        "contract_ids": [
+          "SCN-DIAG-READ-FRANKEN",
+          "SCN-DIAG-PARSE-FRANKEN"
+        ],
+        "behavior": "plain string with path, I/O or parser text and available location, plus generic hint",
+        "yaml_source_spans_for_semantic_errors": false,
+        "evidence_state": "SOURCE_BASELINED"
+      },
+      {
+        "surface_id": "SCN-A3-DIAGNOSTIC-SEMANTIC",
+        "contract_ids": [
+          "SCN-DIAG-SEMANTIC",
+          "SCN-DIAG-VERSION"
+        ],
+        "behavior": "aggregate field-like validation paths without YAML source spans",
+        "yaml_source_spans_for_semantic_errors": false,
+        "evidence_state": "EXISTING_TEST"
+      },
+      {
+        "surface_id": "SCN-A3-DIAGNOSTIC-ORACLE-AND-REPLAY",
+        "contract_ids": [
+          "SCN-DIAG-REPLAY-DIVERGENCE",
+          "SCN-DIAG-UNKNOWN-ORACLE"
+        ],
+        "behavior": "unknown oracles are rejected; runner owns ASUP-E401 while both CLI adapters omit that token",
+        "yaml_source_spans_for_semantic_errors": false,
+        "evidence_state": "SOURCE_BASELINED"
+      },
+      {
+        "surface_id": "SCN-A3-DIAGNOSTIC-PARSER-BOUNDARIES",
+        "contract_ids": [
+          "SCN-DIAG-DUPLICATE",
+          "SCN-DIAG-MULTI-DOCUMENT"
+        ],
+        "behavior": "duplicate keys are located and multiple documents are rejected",
+        "yaml_source_spans_for_semantic_errors": false,
+        "evidence_state": "SOURCE_BASELINED",
+        "historical_execution_state": "EXECUTED_AT_A1_REVISION_NOT_RERUN_BY_A3_1"
+      }
+    ],
+    "application_limit_matrix": [
+      {
+        "limit_id": "SCN-A3-LIMIT-DOCUMENT-BYTES",
+        "current_application_policy": "NONE",
+        "incumbent_internal_limit": null,
+        "post_parse_or_execution_control": null,
+        "finite_replacement_bound_required": true,
+        "independent_unsat_witness": "otherwise valid Scenario with description longer than any proposed finite byte bound"
+      },
+      {
+        "limit_id": "SCN-A3-LIMIT-SCALAR-LENGTH",
+        "current_application_policy": "NONE",
+        "incumbent_internal_limit": null,
+        "post_parse_or_execution_control": null,
+        "finite_replacement_bound_required": true,
+        "independent_unsat_witness": "otherwise valid Scenario with a description scalar longer than any proposed finite scalar bound"
+      },
+      {
+        "limit_id": "SCN-A3-LIMIT-MAPPING-COUNT",
+        "current_application_policy": "NONE",
+        "incumbent_internal_limit": null,
+        "post_parse_or_execution_control": null,
+        "finite_replacement_bound_required": true,
+        "independent_unsat_witness": "otherwise valid Scenario metadata map with more unique entries than any proposed finite mapping bound"
+      },
+      {
+        "limit_id": "SCN-A3-LIMIT-SEQUENCE-COUNT",
+        "current_application_policy": "NONE",
+        "incumbent_internal_limit": null,
+        "post_parse_or_execution_control": null,
+        "finite_replacement_bound_required": true,
+        "independent_unsat_witness": "otherwise valid Scenario with more uniquely named participants than any proposed finite sequence bound"
+      },
+      {
+        "limit_id": "SCN-A3-LIMIT-PARSE-WORK",
+        "current_application_policy": "NONE",
+        "incumbent_internal_limit": null,
+        "post_parse_or_execution_control": null,
+        "finite_replacement_bound_required": true,
+        "independent_unsat_witness": "accepted flat byte, scalar, and collection witness families grow parsing work without an application budget"
+      },
+      {
+        "limit_id": "SCN-A3-LIMIT-NESTING",
+        "current_application_policy": "NONE",
+        "incumbent_internal_limit": "serde_yaml recursion counter starts at 128",
+        "post_parse_or_execution_control": null,
+        "finite_replacement_bound_required": true,
+        "independent_unsat_witness": null
+      },
+      {
+        "limit_id": "SCN-A3-LIMIT-ALIAS-REPETITION",
+        "current_application_policy": "NONE",
+        "incumbent_internal_limit": "serde_yaml alias repetition guard",
+        "post_parse_or_execution_control": null,
+        "finite_replacement_bound_required": true,
+        "independent_unsat_witness": null
+      },
+      {
+        "limit_id": "SCN-A3-LIMIT-INCLUDE-PATH",
+        "current_application_policy": "PER_ENTRY_SEMANTIC_VALIDATION_ONLY",
+        "incumbent_internal_limit": null,
+        "post_parse_or_execution_control": "each include path is at most 255 bytes; includes are not resolved",
+        "finite_replacement_bound_required": false,
+        "independent_unsat_witness": null
+      },
+      {
+        "limit_id": "SCN-A3-LIMIT-FAULT-COUNT",
+        "current_application_policy": "OPTIONAL_AUTHOR_SELECTED_POST_PARSE_CAP",
+        "incumbent_internal_limit": null,
+        "post_parse_or_execution_control": "resource_caps.max_fault_events applies only when present",
+        "finite_replacement_bound_required": false,
+        "independent_unsat_witness": null
+      },
+      {
+        "limit_id": "SCN-A3-LIMIT-RUNTIME-STEPS",
+        "current_application_policy": "OPTIONAL_EXECUTION_CONTROL_NOT_PARSE_BOUND",
+        "incumbent_internal_limit": null,
+        "post_parse_or_execution_control": "lab.max_steps defaults to 100000 and may deserialize from null to None",
+        "finite_replacement_bound_required": false,
+        "independent_unsat_witness": null
+      }
+    ],
+    "satisfiability_decision": {
+      "current_acceptance_language": "EVERY_DOCUMENT_ACCEPTED_BY_CURRENT_APPLICATION_LOADERS",
+      "replacement_requirement": "PRESERVE_CURRENT_ACCEPTANCE_AND_APPLY_FINITE_APPLICATION_BYTE_DEPTH_COUNT_AND_WORK_BOUNDS",
+      "owner_policy_approved": false,
+      "owned_candidate_present": false,
+      "all_currently_accepted_documents_must_remain_accepted": true,
+      "all_replacement_bounds_must_be_finite": true,
+      "witness_families_are_flat_and_semantically_valid": true,
+      "satisfiability": "UNSATISFIABLE_UNDER_CURRENT_ACCEPTANCE",
+      "policy_resolution": "OWNER_POLICY_REQUIRED",
+      "required_disposition": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "reason": "For every finite byte or scalar bound there is an otherwise valid Scenario with a longer description; for every finite mapping or sequence bound there is an otherwise valid Scenario with a larger metadata map or uniquely named participant list. Current loaders define no application policy rejecting those witnesses. A finite owned replacement therefore cannot preserve the entire current acceptance language unless an owner first approves a narrower input policy."
+    },
+    "unresolved_rows": [
+      {
+        "row_id": "SCN-A3-UNRESOLVED-OWNER-INPUT-POLICY",
+        "owner": "product owner",
+        "state": "MISSING",
+        "blocking": true
+      },
+      {
+        "row_id": "SCN-A3-UNRESOLVED-OWNED-PARSER",
+        "owner": "future replacement campaign",
+        "state": "ABSENT",
+        "blocking": true
+      },
+      {
+        "row_id": "SCN-A3-UNRESOLVED-OWNED-WRITER",
+        "owner": "future replacement campaign",
+        "state": "ABSENT",
+        "blocking": true
+      },
+      {
+        "row_id": "SCN-A3-UNRESOLVED-GRAMMAR-DIFFERENTIAL",
+        "owner": "future replacement campaign",
+        "state": "NOT_RUN",
+        "blocking": true
+      },
+      {
+        "row_id": "SCN-A3-UNRESOLVED-DIAGNOSTIC-PARITY",
+        "owner": "future replacement campaign",
+        "state": "NOT_PROVEN",
+        "blocking": true
+      },
+      {
+        "row_id": "SCN-A3-UNRESOLVED-WRITER-PARITY",
+        "owner": "future replacement campaign",
+        "state": "NOT_PROVEN",
+        "blocking": true
+      },
+      {
+        "row_id": "SCN-A3-UNRESOLVED-CONSUMER-CUTOVER",
+        "owner": "asupersync-5z2scg.5.5",
+        "state": "NOT_AUTHORIZED",
+        "blocking": true
+      }
+    ],
+    "downstream_handoff": {
+      "a3_2": "record the durable KEEP_INCUMBENT receipt and fail-closed governance projection",
+      "a4": "may continue additive YAML/JSON authoring, diagnostics, migration, example, and include-truth work without narrowing YAML",
+      "a5": "retains sole terminal cutover authority after owner-approved bounds and complete SAME-or-BETTER evidence",
+      "on_missing_or_regressed_row": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false
+    },
+    "no_claim_boundary": "This A3.1 section is a static, source-pinned acceptance-satisfiability audit. It implements no owned YAML parser or production Scenario YAML writer, proves no complete parity, performance, resource, security, broad-health, or release claim, and authorizes no input narrowing, dependency or file removal, tracker closure, or cutover. KEEP_INCUMBENT and dependency_exit_allowed=false remain mandatory; only A5 may authorize terminal cutover after owner-approved bounds and complete SAME-or-BETTER evidence."
+  },
   "child_capability_rows": [
     {
       "owner_bead": "asupersync-5z2scg.5.1",
@@ -1028,14 +1689,14 @@
     },
     {
       "owner_bead": "asupersync-5z2scg.5.3",
-      "responsibility": "prove incumbent KEEP or complete owned parser/writer parity over the frozen grammar and corpus",
+      "responsibility": "use A3.1 to prove current acceptance satisfiability, then use A3.2 to record the durable incumbent KEEP receipt; any future parser/writer campaign remains separately gated",
       "required_evidence": [
-        "grammar differential corpus",
-        "YAML to typed to JSON semantic equivalence",
-        "bounds and diagnostics"
+        "live consumer, writer, dependency, grammar, corpus, unknown-field, diagnostic, and limit matrix",
+        "formal finite-bound versus current-acceptance satisfiability decision",
+        "durable KEEP_INCUMBENT receipt with A4/A5 handoff"
       ],
-      "evidence_state": "PLANNED",
-      "no_claim": "Partial parser parity forces KEEP."
+      "evidence_state": "SOURCE_BASELINED",
+      "no_claim": "A3.1 is static decision evidence only; A3.2 remains required and only A5 may authorize terminal cutover."
     },
     {
       "owner_bead": "asupersync-5z2scg.5.4",
@@ -1143,7 +1804,7 @@
     },
     {
       "gap_id": "SCN-GAP-14",
-      "finding": "no typed cross-format YAML to JSON semantic and canonical equivalence proof exists",
+      "finding": "no full-corpus typed cross-format YAML to JSON semantic and canonical equivalence proof exists",
       "owner_bead": "asupersync-5z2scg.5.3",
       "evidence_state": "BLOCKED_GAP"
     },
@@ -1177,5 +1838,5 @@
       "claim": "existing frankenlab example author journey only"
     }
   ],
-  "no_claim_boundary": "This A1 packet proves a source-pinned, zero-UNKNOWN inventory and executable parser/typed-corpus baseline only. It does not implement JSON input, canonical output, an owned YAML parser, include merging, network or cancellation simulation, participant workloads, full fault effects, atomic artifact output, resource-policy bounds, stable located diagnostics, broad workspace health, performance, or permission to remove serde_yaml, serde, any field, error, document, workflow, or dependency."
+  "no_claim_boundary": "This A1/A2/A3.1 packet combines the earlier executable inventory and canonical-JSON evidence with a current static acceptance-satisfiability audit. A3.1 did not rerun executable lanes or implement an owned YAML parser or production Scenario YAML writer. It proves no complete parity, performance, resource, security, broad-health, release, or terminal decision, and authorizes no input narrowing, dependency or file removal, tracker closure, or cutover. It grants no permission to remove serde_yaml, serde, any accepted field, error, document, or workflow. It also does not implement include merging, network or cancellation simulation, participant workloads, full fault effects, atomic artifact output, resource-policy bounds, or stable located semantic diagnostics. KEEP_INCUMBENT and dependency_exit_allowed=false remain mandatory; only A5 may authorize terminal cutover after owner-approved bounds and complete SAME-or-BETTER evidence."
 }
