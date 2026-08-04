@@ -1,0 +1,339 @@
+{
+  "artifact_id": "kafka-k2-reachable-schema-broker-matrix-v1",
+  "schema_version": 1,
+  "baseline_revision": "00baf573d2bc6fcae461a74dc37c78d205dec8fd",
+  "captured_date_utc": "2026-08-04",
+  "program_id": "dependency-sovereignty-rev5",
+  "parent_bead_id": "asupersync-dep-p7-kafka-removal-sarszu.2.2",
+  "bead_id": "asupersync-dep-p7-kafka-removal-sarszu.2.2.1",
+  "capability_id": "CAP-KAFKA",
+  "adr_id": "DEP-ADR-009",
+  "inventory_state": "STATIC_REACHABILITY_FRONTIER_FROZEN_SCHEMA_AND_BROKER_PROOF_BLOCKED",
+  "disposition": "KEEP_INCUMBENT_BLOCK_K2_2",
+  "policy": {
+    "accepted_numeric_ranges": false,
+    "field_projection_complete": false,
+    "error_projection_complete": false,
+    "oldest_broker_admitted": false,
+    "current_broker_admitted": false,
+    "schema_probe_executed": false,
+    "k2_1_complete": false,
+    "k2_2_unblocked": false,
+    "production_wiring_authorized": false,
+    "dependency_cutover_authorized": false
+  },
+  "authority_inputs": [
+    {
+      "input_id": "KAFKA-K2-1-INPUT-CARGO-TOML",
+      "authority_class": "REPOSITORY_MANIFEST",
+      "path": "Cargo.toml",
+      "byte_count": 37112,
+      "record_count": 1038,
+      "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02"
+    },
+    {
+      "input_id": "KAFKA-K2-1-INPUT-CARGO-LOCK",
+      "authority_class": "LOCKED_DEPENDENCY_IDENTITY",
+      "path": "Cargo.lock",
+      "byte_count": 114619,
+      "record_count": 4666,
+      "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4"
+    },
+    {
+      "input_id": "KAFKA-K2-1-INPUT-PRODUCER-SOURCE",
+      "authority_class": "INCUMBENT_REACHABILITY",
+      "path": "src/messaging/kafka.rs",
+      "byte_count": 149142,
+      "record_count": 4335,
+      "sha256": "5fe763229f2940793bf79739718afc20002ac40b614c35ff0ea475d45fb5aaf1"
+    },
+    {
+      "input_id": "KAFKA-K2-1-INPUT-CONSUMER-SOURCE",
+      "authority_class": "INCUMBENT_REACHABILITY",
+      "path": "src/messaging/kafka_consumer.rs",
+      "byte_count": 102484,
+      "record_count": 2757,
+      "sha256": "82646e24d6e8ebdc07f5ea3a283f681b59855b952e5f86adf575ddc04ee6f61d"
+    },
+    {
+      "input_id": "KAFKA-K2-1-INPUT-K1-2",
+      "authority_class": "GOVERNING_POLICY",
+      "path": "artifacts/kafka_k1_protocol_security_support_policy_v1.json",
+      "byte_count": 82178,
+      "record_count": 1399,
+      "sha256": "fc63047f2d57c514ebd662cf836c85ccf6186c7f56bf9c5e0c49c135fb8fb33a"
+    },
+    {
+      "input_id": "KAFKA-K2-1-INPUT-K1-5",
+      "authority_class": "GOVERNING_AGGREGATE_GATE",
+      "path": "artifacts/kafka_k1_aggregate_evidence_gate_v1.json",
+      "byte_count": 111408,
+      "record_count": 2122,
+      "sha256": "c9ba9d9b41223de97f492808e4408f3e14804051d2b05dd7049c647c58088692"
+    },
+    {
+      "input_id": "KAFKA-K2-1-INPUT-K0-4",
+      "authority_class": "BROKER_PROVENANCE_BASELINE",
+      "path": "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
+      "byte_count": 119245,
+      "record_count": 2187,
+      "sha256": "03406fe1146345ef7c50ec5e4077f0c6131db963e3776215629e9d34a781a643"
+    },
+    {
+      "input_id": "KAFKA-K2-1-INPUT-K1-3",
+      "authority_class": "PUBLIC_SURFACE_POLICY",
+      "path": "artifacts/kafka_k1_public_api_contract_v1.json",
+      "byte_count": 37860,
+      "record_count": 753,
+      "sha256": "0c6a395f0a43f451491e52c26c452a5d69f0103ae3e49b431d826f889275ac9f"
+    }
+  ],
+  "external_authorities": [
+    {
+      "authority_id": "KAFKA-K2-1-AUTH-APACHE-CURRENT",
+      "authority_class": "NORMATIVE_CURRENT_SCHEMA",
+      "repository": "https://github.com/apache/kafka.git",
+      "tag": "4.3.1",
+      "tag_object": "a07059eb9b5bac1bfdbb1e74313f2fae4ca20fd9",
+      "commit": "26b251a451ce941d3d7a55e6487bcb7f16b5ad48",
+      "release_state": "SUPPORTED_RELEASE_AT_CAPTURE",
+      "content_state": "SOURCE_PATHS_SELECTED_CONTENT_DIGESTS_NOT_IMPORTED"
+    },
+    {
+      "authority_id": "KAFKA-K2-1-AUTH-APACHE-LEGACY-BASIC",
+      "authority_class": "NORMATIVE_HISTORICAL_SCHEMA",
+      "repository": "https://github.com/apache/kafka.git",
+      "tag": "0.8.0",
+      "tag_object": "2c20a71a010659e25af075a024cbd692c87d4c89",
+      "commit": "15bb3961d9171c1c54c4c840a554ce2c76168163",
+      "release_state": "HISTORICAL_CANDIDATE_BASIC_FLOOR",
+      "content_state": "BROKER_PROBE_NOT_RUN"
+    },
+    {
+      "authority_id": "KAFKA-K2-1-AUTH-APACHE-DEFAULT-FLOOR",
+      "authority_class": "NORMATIVE_HISTORICAL_SCHEMA",
+      "repository": "https://github.com/apache/kafka.git",
+      "tag": "0.11.0.2",
+      "tag_object": "fac05f594ad98cff6508400a9b572c0966997469",
+      "commit": "73be1e1168f91ee2a9d68e1d1c75c14018cf7d3a",
+      "release_state": "HISTORICAL_CANDIDATE_DEFAULT_IDEMPOTENCE_FLOOR",
+      "content_state": "BROKER_PROBE_NOT_RUN"
+    },
+    {
+      "authority_id": "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR",
+      "authority_class": "NORMATIVE_HISTORICAL_SCHEMA",
+      "repository": "https://github.com/apache/kafka.git",
+      "tag": "1.0.0",
+      "tag_object": "3ed24acba855ec00d4c0323a7aaf1fac1d8f99d4",
+      "commit": "aaa7af6d4a11b29d3da9c5d6084530b8fa69be64",
+      "release_state": "HISTORICAL_CANDIDATE_SASL_AUTHENTICATE_FLOOR",
+      "content_state": "BROKER_PROBE_NOT_RUN"
+    },
+    {
+      "authority_id": "KAFKA-K2-1-AUTH-LIBRDKAFKA-2-12-1",
+      "authority_class": "INDEPENDENT_INCUMBENT_CROSS_CHECK",
+      "package": "rdkafka-sys 4.10.0+2.12.1",
+      "package_checksum": "e234cf318915c1059d4921ef7f75616b5219b10b46e9f3a511a15eb4b56a3f77",
+      "native_version": "2.12.1",
+      "content_state": "CARGO_PACKAGE_PINNED_SELECTED_SOURCE_FILES_HASHED"
+    }
+  ],
+  "incumbent_source_observations": [
+    {
+      "observation_id": "KAFKA-K2-1-LIBRDKAFKA-INTRODUCTION",
+      "package_relative_path": "librdkafka/INTRODUCTION.md",
+      "byte_count": 130924,
+      "record_count": 2481,
+      "sha256": "299579b2e96e02e7117188ad314f904fc229b9e304f709ab0893a4f6ffa9655a",
+      "semantic_role": "client protocol maxima and broker compatibility cross-check"
+    },
+    {
+      "observation_id": "KAFKA-K2-1-LIBRDKAFKA-REQUEST",
+      "package_relative_path": "librdkafka/src/rdkafka_request.c",
+      "byte_count": 291398,
+      "record_count": 7089,
+      "sha256": "0b265bf870e735b4c288647924ce5352e8f1828c2965702cd40bfaf8b848d46b",
+      "semantic_role": "request selection and response parsing cross-check"
+    },
+    {
+      "observation_id": "KAFKA-K2-1-LIBRDKAFKA-BROKER",
+      "package_relative_path": "librdkafka/src/rdkafka_broker.c",
+      "byte_count": 250967,
+      "record_count": 6337,
+      "sha256": "228271f55ba611c93c4507e3f8be3e2fdc8510196370c45b85f58ddfcd58a19b",
+      "semantic_role": "broker capability selection and default telemetry reachability"
+    },
+    {
+      "observation_id": "KAFKA-K2-1-LIBRDKAFKA-TELEMETRY",
+      "package_relative_path": "librdkafka/src/rdkafka_telemetry.c",
+      "byte_count": 31372,
+      "record_count": 760,
+      "sha256": "6ad27c01ae0dc41a038ec03b2433006df1e47f0a74cbf7605c22b03cf82ca2a9",
+      "semantic_role": "implicit API 71 and 72 reachability"
+    },
+    {
+      "observation_id": "KAFKA-K2-1-LIBRDKAFKA-CONFIG",
+      "package_relative_path": "librdkafka/src/rdkafka_conf.c",
+      "byte_count": 211291,
+      "record_count": 4880,
+      "sha256": "14d379fcc6744d2677cea5e6b21aea2585b08f702d83a52f9f8c2a0469493c15",
+      "semantic_role": "enable.metrics.push default true"
+    },
+    {
+      "observation_id": "KAFKA-K2-1-LIBRDKAFKA-FEATURE",
+      "package_relative_path": "librdkafka/src/rdkafka_feature.c",
+      "byte_count": 30329,
+      "record_count": 898,
+      "sha256": "7905d821c02f60166dccf3526160af023da1994127fff44cb19f92a782e7fe4d",
+      "semantic_role": "legacy broker and feature gates"
+    },
+    {
+      "observation_id": "KAFKA-K2-1-LIBRDKAFKA-PROTOCOL",
+      "package_relative_path": "librdkafka/src/rdkafka_protocol.h",
+      "byte_count": 5625,
+      "record_count": 128,
+      "sha256": "2960180d0082b2ad36db9536f395c82c5dfbcaed802ce3034388a0b189e15808",
+      "semantic_role": "API key numeric identities"
+    },
+    {
+      "observation_id": "KAFKA-K2-1-LIBRDKAFKA-GROUP",
+      "package_relative_path": "librdkafka/src/rdkafka_cgrp.c",
+      "byte_count": 309960,
+      "record_count": 7587,
+      "sha256": "003f551029dfd756b567e1f89bd95b98f772c7739a104836ee9d6600da2bf7f6",
+      "semantic_role": "classic group request reachability"
+    },
+    {
+      "observation_id": "KAFKA-K2-1-LIBRDKAFKA-TRANSACTION",
+      "package_relative_path": "librdkafka/src/rdkafka_txnmgr.c",
+      "byte_count": 126637,
+      "record_count": 3256,
+      "sha256": "bee7f3cad8926bc2eb458cf3e008601a42cd03ff34494ea95a3f5dd9751c6ebd",
+      "semantic_role": "transaction request reachability and additive gap cross-check"
+    }
+  ],
+  "header_contract": {
+    "request_header_versions_required_by_k1": [0, 1, 2],
+    "response_header_versions_required_by_k1": [0, 1],
+    "reachable_request_header_versions_in_22_row_frontier": [1, 2],
+    "reachable_response_header_versions_in_22_row_frontier": [0, 1],
+    "request_header_v0_disposition": "HISTORICAL_NON_REACHABLE_FOR_SELECTED_API_FRONTIER",
+    "classic_selection": "request_v1_response_v0",
+    "flexible_selection": "request_v2_response_v1",
+    "api_versions_response_header_exception": "ApiVersions flexible bodies retain response header v0 for backward compatibility",
+    "selection_state": "CANDIDATE_SCHEMA_DERIVED_NOT_ACCEPTED"
+  },
+  "reachable_api_rows": [
+    {"row_id":"KAFKA-K2-1-API-000-PRODUCE","api_key":0,"api_name":"Produce","reachability_class":"CURRENT_EXPLICIT","journey_classes":["producer","idempotence","transaction"],"k1_seed":true,"librdkafka_client_min":0,"librdkafka_client_max":10,"apache_4_3_1_valid_versions":"3-13","candidate_current_intersection":"3-10","accepted_version_range":null,"flexible_version_first":9,"candidate_request_header_versions":[1,2],"candidate_response_header_versions":[0,1],"schema_projection_state":"SOURCE_SELECTED_FIELDS_NOT_PROJECTED","broker_probe_state":"NOT_RUN"},
+    {"row_id":"KAFKA-K2-1-API-001-FETCH","api_key":1,"api_name":"Fetch","reachability_class":"CURRENT_EXPLICIT","journey_classes":["consumer","fetch","recovery"],"k1_seed":true,"librdkafka_client_min":0,"librdkafka_client_max":16,"apache_4_3_1_valid_versions":"4-18","candidate_current_intersection":"4-16","accepted_version_range":null,"flexible_version_first":12,"candidate_request_header_versions":[1,2],"candidate_response_header_versions":[0,1],"schema_projection_state":"SOURCE_SELECTED_FIELDS_NOT_PROJECTED","broker_probe_state":"NOT_RUN"},
+    {"row_id":"KAFKA-K2-1-API-002-LIST-OFFSETS","api_key":2,"api_name":"ListOffsets","reachability_class":"CURRENT_EXPLICIT","journey_classes":["consumer","offset","recovery"],"k1_seed":true,"librdkafka_client_min":0,"librdkafka_client_max":7,"apache_4_3_1_valid_versions":"1-11","candidate_current_intersection":"1-7","accepted_version_range":null,"flexible_version_first":6,"candidate_request_header_versions":[1,2],"candidate_response_header_versions":[0,1],"schema_projection_state":"SOURCE_SELECTED_FIELDS_NOT_PROJECTED","broker_probe_state":"NOT_RUN"},
+    {"row_id":"KAFKA-K2-1-API-003-METADATA","api_key":3,"api_name":"Metadata","reachability_class":"CURRENT_EXPLICIT","journey_classes":["producer","consumer","routing","recovery"],"k1_seed":true,"librdkafka_client_min":0,"librdkafka_client_max":13,"apache_4_3_1_valid_versions":"0-13","candidate_current_intersection":"0-13","accepted_version_range":null,"flexible_version_first":9,"candidate_request_header_versions":[1,2],"candidate_response_header_versions":[0,1],"schema_projection_state":"SOURCE_SELECTED_FIELDS_NOT_PROJECTED","broker_probe_state":"NOT_RUN"},
+    {"row_id":"KAFKA-K2-1-API-008-OFFSET-COMMIT","api_key":8,"api_name":"OffsetCommit","reachability_class":"CURRENT_EXPLICIT","journey_classes":["consumer","group","offset"],"k1_seed":true,"librdkafka_client_min":0,"librdkafka_client_max":9,"apache_4_3_1_valid_versions":"2-10","candidate_current_intersection":"2-9","accepted_version_range":null,"flexible_version_first":8,"candidate_request_header_versions":[1,2],"candidate_response_header_versions":[0,1],"schema_projection_state":"SOURCE_SELECTED_FIELDS_NOT_PROJECTED","broker_probe_state":"NOT_RUN"},
+    {"row_id":"KAFKA-K2-1-API-009-OFFSET-FETCH","api_key":9,"api_name":"OffsetFetch","reachability_class":"CURRENT_EXPLICIT","journey_classes":["consumer","group","offset","recovery"],"k1_seed":true,"librdkafka_client_min":0,"librdkafka_client_max":9,"apache_4_3_1_valid_versions":"1-10","candidate_current_intersection":"1-9","accepted_version_range":null,"flexible_version_first":6,"candidate_request_header_versions":[1,2],"candidate_response_header_versions":[0,1],"schema_projection_state":"SOURCE_SELECTED_FIELDS_NOT_PROJECTED","broker_probe_state":"NOT_RUN"},
+    {"row_id":"KAFKA-K2-1-API-010-FIND-COORDINATOR","api_key":10,"api_name":"FindCoordinator","reachability_class":"CURRENT_EXPLICIT","journey_classes":["group","transaction","recovery"],"k1_seed":true,"librdkafka_client_min":0,"librdkafka_client_max":2,"apache_4_3_1_valid_versions":"0-6","candidate_current_intersection":"0-2","accepted_version_range":null,"flexible_version_first":3,"candidate_request_header_versions":[1],"candidate_response_header_versions":[0],"schema_projection_state":"SOURCE_SELECTED_FIELDS_NOT_PROJECTED","broker_probe_state":"NOT_RUN"},
+    {"row_id":"KAFKA-K2-1-API-011-JOIN-GROUP","api_key":11,"api_name":"JoinGroup","reachability_class":"CURRENT_EXPLICIT","journey_classes":["consumer","group","rebalance"],"k1_seed":true,"librdkafka_client_min":0,"librdkafka_client_max":5,"apache_4_3_1_valid_versions":"0-9","candidate_current_intersection":"0-5","accepted_version_range":null,"flexible_version_first":6,"candidate_request_header_versions":[1],"candidate_response_header_versions":[0],"schema_projection_state":"SOURCE_SELECTED_FIELDS_NOT_PROJECTED","broker_probe_state":"NOT_RUN"},
+    {"row_id":"KAFKA-K2-1-API-012-HEARTBEAT","api_key":12,"api_name":"Heartbeat","reachability_class":"CURRENT_EXPLICIT","journey_classes":["consumer","group","liveness"],"k1_seed":true,"librdkafka_client_min":0,"librdkafka_client_max":3,"apache_4_3_1_valid_versions":"0-4","candidate_current_intersection":"0-3","accepted_version_range":null,"flexible_version_first":4,"candidate_request_header_versions":[1],"candidate_response_header_versions":[0],"schema_projection_state":"SOURCE_SELECTED_FIELDS_NOT_PROJECTED","broker_probe_state":"NOT_RUN"},
+    {"row_id":"KAFKA-K2-1-API-013-LEAVE-GROUP","api_key":13,"api_name":"LeaveGroup","reachability_class":"CURRENT_EXPLICIT","journey_classes":["consumer","group","shutdown"],"k1_seed":true,"librdkafka_client_min":0,"librdkafka_client_max":1,"apache_4_3_1_valid_versions":"0-5","candidate_current_intersection":"0-1","accepted_version_range":null,"flexible_version_first":4,"candidate_request_header_versions":[1],"candidate_response_header_versions":[0],"schema_projection_state":"SOURCE_SELECTED_FIELDS_NOT_PROJECTED","broker_probe_state":"NOT_RUN"},
+    {"row_id":"KAFKA-K2-1-API-014-SYNC-GROUP","api_key":14,"api_name":"SyncGroup","reachability_class":"CURRENT_EXPLICIT","journey_classes":["consumer","group","rebalance"],"k1_seed":true,"librdkafka_client_min":0,"librdkafka_client_max":3,"apache_4_3_1_valid_versions":"0-5","candidate_current_intersection":"0-3","accepted_version_range":null,"flexible_version_first":4,"candidate_request_header_versions":[1],"candidate_response_header_versions":[0],"schema_projection_state":"SOURCE_SELECTED_FIELDS_NOT_PROJECTED","broker_probe_state":"NOT_RUN"},
+    {"row_id":"KAFKA-K2-1-API-017-SASL-HANDSHAKE","api_key":17,"api_name":"SaslHandshake","reachability_class":"CURRENT_EXPLICIT_BLOCKED_NATIVE_CAPABILITY","journey_classes":["authentication","connection"],"k1_seed":true,"librdkafka_client_min":0,"librdkafka_client_max":1,"apache_4_3_1_valid_versions":"0-1","candidate_current_intersection":"0-1","accepted_version_range":null,"flexible_version_first":null,"candidate_request_header_versions":[1],"candidate_response_header_versions":[0],"schema_projection_state":"SOURCE_SELECTED_FIELDS_NOT_PROJECTED","broker_probe_state":"BLOCKED_EXTERNAL"},
+    {"row_id":"KAFKA-K2-1-API-018-API-VERSIONS","api_key":18,"api_name":"ApiVersions","reachability_class":"CURRENT_EXPLICIT","journey_classes":["connection","negotiation","recovery"],"k1_seed":true,"librdkafka_client_min":0,"librdkafka_client_max":3,"apache_4_3_1_valid_versions":"0-4","candidate_current_intersection":"0-3","accepted_version_range":null,"flexible_version_first":3,"candidate_request_header_versions":[1,2],"candidate_response_header_versions":[0],"schema_projection_state":"SOURCE_SELECTED_FIELDS_NOT_PROJECTED","broker_probe_state":"NOT_RUN"},
+    {"row_id":"KAFKA-K2-1-API-022-INIT-PRODUCER-ID","api_key":22,"api_name":"InitProducerId","reachability_class":"CURRENT_EXPLICIT","journey_classes":["idempotence","transaction","recovery"],"k1_seed":true,"librdkafka_client_min":0,"librdkafka_client_max":4,"apache_4_3_1_valid_versions":"0-6","candidate_current_intersection":"0-4","accepted_version_range":null,"flexible_version_first":2,"candidate_request_header_versions":[1,2],"candidate_response_header_versions":[0,1],"schema_projection_state":"SOURCE_SELECTED_FIELDS_NOT_PROJECTED","broker_probe_state":"NOT_RUN"},
+    {"row_id":"KAFKA-K2-1-API-023-OFFSET-FOR-LEADER-EPOCH","api_key":23,"api_name":"OffsetForLeaderEpoch","reachability_class":"CURRENT_EXPLICIT","journey_classes":["consumer","offset","recovery"],"k1_seed":true,"librdkafka_client_min":2,"librdkafka_client_max":2,"apache_4_3_1_valid_versions":"2-4","candidate_current_intersection":"2","accepted_version_range":null,"flexible_version_first":4,"candidate_request_header_versions":[1],"candidate_response_header_versions":[0],"schema_projection_state":"SOURCE_SELECTED_FIELDS_NOT_PROJECTED","broker_probe_state":"NOT_RUN"},
+    {"row_id":"KAFKA-K2-1-API-024-ADD-PARTITIONS-TO-TXN","api_key":24,"api_name":"AddPartitionsToTxn","reachability_class":"CURRENT_EXPLICIT","journey_classes":["transaction","producer"],"k1_seed":true,"librdkafka_client_min":0,"librdkafka_client_max":0,"apache_4_3_1_valid_versions":"0-5","candidate_current_intersection":"0","accepted_version_range":null,"flexible_version_first":3,"candidate_request_header_versions":[1],"candidate_response_header_versions":[0],"schema_projection_state":"SOURCE_SELECTED_FIELDS_NOT_PROJECTED","broker_probe_state":"NOT_RUN"},
+    {"row_id":"KAFKA-K2-1-API-025-ADD-OFFSETS-TO-TXN","api_key":25,"api_name":"AddOffsetsToTxn","reachability_class":"REQUIRED_ADDITIVE_ABSENT","journey_classes":["transaction","consumer","offset"],"k1_seed":true,"librdkafka_client_min":0,"librdkafka_client_max":0,"apache_4_3_1_valid_versions":"0-4","candidate_current_intersection":"0","accepted_version_range":null,"flexible_version_first":3,"candidate_request_header_versions":[1],"candidate_response_header_versions":[0],"schema_projection_state":"SOURCE_SELECTED_FIELDS_NOT_PROJECTED","broker_probe_state":"BLOCKED_NOT_SHIPPED"},
+    {"row_id":"KAFKA-K2-1-API-026-END-TXN","api_key":26,"api_name":"EndTxn","reachability_class":"CURRENT_EXPLICIT","journey_classes":["transaction","shutdown","recovery"],"k1_seed":true,"librdkafka_client_min":0,"librdkafka_client_max":1,"apache_4_3_1_valid_versions":"0-5","candidate_current_intersection":"0-1","accepted_version_range":null,"flexible_version_first":3,"candidate_request_header_versions":[1],"candidate_response_header_versions":[0],"schema_projection_state":"SOURCE_SELECTED_FIELDS_NOT_PROJECTED","broker_probe_state":"NOT_RUN"},
+    {"row_id":"KAFKA-K2-1-API-028-TXN-OFFSET-COMMIT","api_key":28,"api_name":"TxnOffsetCommit","reachability_class":"REQUIRED_ADDITIVE_ABSENT","journey_classes":["transaction","consumer","offset"],"k1_seed":true,"librdkafka_client_min":0,"librdkafka_client_max":3,"apache_4_3_1_valid_versions":"0-5","candidate_current_intersection":"0-3","accepted_version_range":null,"flexible_version_first":3,"candidate_request_header_versions":[1,2],"candidate_response_header_versions":[0,1],"schema_projection_state":"SOURCE_SELECTED_FIELDS_NOT_PROJECTED","broker_probe_state":"BLOCKED_NOT_SHIPPED"},
+    {"row_id":"KAFKA-K2-1-API-036-SASL-AUTHENTICATE","api_key":36,"api_name":"SaslAuthenticate","reachability_class":"CURRENT_EXPLICIT_BLOCKED_NATIVE_CAPABILITY","journey_classes":["authentication","connection"],"k1_seed":true,"librdkafka_client_min":0,"librdkafka_client_max":1,"apache_4_3_1_valid_versions":"0-2","candidate_current_intersection":"0-1","accepted_version_range":null,"flexible_version_first":2,"candidate_request_header_versions":[1],"candidate_response_header_versions":[0],"schema_projection_state":"SOURCE_SELECTED_FIELDS_NOT_PROJECTED","broker_probe_state":"BLOCKED_EXTERNAL"},
+    {"row_id":"KAFKA-K2-1-API-071-GET-TELEMETRY-SUBSCRIPTIONS","api_key":71,"api_name":"GetTelemetrySubscriptions","reachability_class":"CURRENT_IMPLICIT_DEFAULT_TELEMETRY","journey_classes":["connection","telemetry","shutdown"],"k1_seed":false,"librdkafka_client_min":0,"librdkafka_client_max":0,"apache_4_3_1_valid_versions":"0","candidate_current_intersection":"0","accepted_version_range":null,"flexible_version_first":0,"candidate_request_header_versions":[2],"candidate_response_header_versions":[1],"schema_projection_state":"SOURCE_SELECTED_FIELDS_NOT_PROJECTED","broker_probe_state":"NOT_RUN"},
+    {"row_id":"KAFKA-K2-1-API-072-PUSH-TELEMETRY","api_key":72,"api_name":"PushTelemetry","reachability_class":"CURRENT_IMPLICIT_DEFAULT_TELEMETRY","journey_classes":["telemetry","shutdown"],"k1_seed":false,"librdkafka_client_min":0,"librdkafka_client_max":0,"apache_4_3_1_valid_versions":"0","candidate_current_intersection":"0","accepted_version_range":null,"flexible_version_first":0,"candidate_request_header_versions":[2],"candidate_response_header_versions":[1],"schema_projection_state":"SOURCE_SELECTED_FIELDS_NOT_PROJECTED","broker_probe_state":"NOT_RUN"}
+  ],
+  "schema_source_rows": [
+    {"schema_pair_id":"KAFKA-K2-1-SCHEMA-000-PRODUCE","api_key":0,"request_path":"clients/src/main/resources/common/message/ProduceRequest.json","response_path":"clients/src/main/resources/common/message/ProduceResponse.json"},
+    {"schema_pair_id":"KAFKA-K2-1-SCHEMA-001-FETCH","api_key":1,"request_path":"clients/src/main/resources/common/message/FetchRequest.json","response_path":"clients/src/main/resources/common/message/FetchResponse.json"},
+    {"schema_pair_id":"KAFKA-K2-1-SCHEMA-002-LIST-OFFSETS","api_key":2,"request_path":"clients/src/main/resources/common/message/ListOffsetsRequest.json","response_path":"clients/src/main/resources/common/message/ListOffsetsResponse.json"},
+    {"schema_pair_id":"KAFKA-K2-1-SCHEMA-003-METADATA","api_key":3,"request_path":"clients/src/main/resources/common/message/MetadataRequest.json","response_path":"clients/src/main/resources/common/message/MetadataResponse.json"},
+    {"schema_pair_id":"KAFKA-K2-1-SCHEMA-008-OFFSET-COMMIT","api_key":8,"request_path":"clients/src/main/resources/common/message/OffsetCommitRequest.json","response_path":"clients/src/main/resources/common/message/OffsetCommitResponse.json"},
+    {"schema_pair_id":"KAFKA-K2-1-SCHEMA-009-OFFSET-FETCH","api_key":9,"request_path":"clients/src/main/resources/common/message/OffsetFetchRequest.json","response_path":"clients/src/main/resources/common/message/OffsetFetchResponse.json"},
+    {"schema_pair_id":"KAFKA-K2-1-SCHEMA-010-FIND-COORDINATOR","api_key":10,"request_path":"clients/src/main/resources/common/message/FindCoordinatorRequest.json","response_path":"clients/src/main/resources/common/message/FindCoordinatorResponse.json"},
+    {"schema_pair_id":"KAFKA-K2-1-SCHEMA-011-JOIN-GROUP","api_key":11,"request_path":"clients/src/main/resources/common/message/JoinGroupRequest.json","response_path":"clients/src/main/resources/common/message/JoinGroupResponse.json"},
+    {"schema_pair_id":"KAFKA-K2-1-SCHEMA-012-HEARTBEAT","api_key":12,"request_path":"clients/src/main/resources/common/message/HeartbeatRequest.json","response_path":"clients/src/main/resources/common/message/HeartbeatResponse.json"},
+    {"schema_pair_id":"KAFKA-K2-1-SCHEMA-013-LEAVE-GROUP","api_key":13,"request_path":"clients/src/main/resources/common/message/LeaveGroupRequest.json","response_path":"clients/src/main/resources/common/message/LeaveGroupResponse.json"},
+    {"schema_pair_id":"KAFKA-K2-1-SCHEMA-014-SYNC-GROUP","api_key":14,"request_path":"clients/src/main/resources/common/message/SyncGroupRequest.json","response_path":"clients/src/main/resources/common/message/SyncGroupResponse.json"},
+    {"schema_pair_id":"KAFKA-K2-1-SCHEMA-017-SASL-HANDSHAKE","api_key":17,"request_path":"clients/src/main/resources/common/message/SaslHandshakeRequest.json","response_path":"clients/src/main/resources/common/message/SaslHandshakeResponse.json"},
+    {"schema_pair_id":"KAFKA-K2-1-SCHEMA-018-API-VERSIONS","api_key":18,"request_path":"clients/src/main/resources/common/message/ApiVersionsRequest.json","response_path":"clients/src/main/resources/common/message/ApiVersionsResponse.json"},
+    {"schema_pair_id":"KAFKA-K2-1-SCHEMA-022-INIT-PRODUCER-ID","api_key":22,"request_path":"clients/src/main/resources/common/message/InitProducerIdRequest.json","response_path":"clients/src/main/resources/common/message/InitProducerIdResponse.json"},
+    {"schema_pair_id":"KAFKA-K2-1-SCHEMA-023-OFFSET-FOR-LEADER-EPOCH","api_key":23,"request_path":"clients/src/main/resources/common/message/OffsetForLeaderEpochRequest.json","response_path":"clients/src/main/resources/common/message/OffsetForLeaderEpochResponse.json"},
+    {"schema_pair_id":"KAFKA-K2-1-SCHEMA-024-ADD-PARTITIONS-TO-TXN","api_key":24,"request_path":"clients/src/main/resources/common/message/AddPartitionsToTxnRequest.json","response_path":"clients/src/main/resources/common/message/AddPartitionsToTxnResponse.json"},
+    {"schema_pair_id":"KAFKA-K2-1-SCHEMA-025-ADD-OFFSETS-TO-TXN","api_key":25,"request_path":"clients/src/main/resources/common/message/AddOffsetsToTxnRequest.json","response_path":"clients/src/main/resources/common/message/AddOffsetsToTxnResponse.json"},
+    {"schema_pair_id":"KAFKA-K2-1-SCHEMA-026-END-TXN","api_key":26,"request_path":"clients/src/main/resources/common/message/EndTxnRequest.json","response_path":"clients/src/main/resources/common/message/EndTxnResponse.json"},
+    {"schema_pair_id":"KAFKA-K2-1-SCHEMA-028-TXN-OFFSET-COMMIT","api_key":28,"request_path":"clients/src/main/resources/common/message/TxnOffsetCommitRequest.json","response_path":"clients/src/main/resources/common/message/TxnOffsetCommitResponse.json"},
+    {"schema_pair_id":"KAFKA-K2-1-SCHEMA-036-SASL-AUTHENTICATE","api_key":36,"request_path":"clients/src/main/resources/common/message/SaslAuthenticateRequest.json","response_path":"clients/src/main/resources/common/message/SaslAuthenticateResponse.json"},
+    {"schema_pair_id":"KAFKA-K2-1-SCHEMA-071-GET-TELEMETRY-SUBSCRIPTIONS","api_key":71,"request_path":"clients/src/main/resources/common/message/GetTelemetrySubscriptionsRequest.json","response_path":"clients/src/main/resources/common/message/GetTelemetrySubscriptionsResponse.json"},
+    {"schema_pair_id":"KAFKA-K2-1-SCHEMA-072-PUSH-TELEMETRY","api_key":72,"request_path":"clients/src/main/resources/common/message/PushTelemetryRequest.json","response_path":"clients/src/main/resources/common/message/PushTelemetryResponse.json"}
+  ],
+  "field_projection_rows": [],
+  "error_projection_rows": [],
+  "explicit_non_reachable_rows": [
+    {"row_id":"KAFKA-K2-1-NONREACH-ADMIN","api_keys":[],"surface_scope":"ADMIN_FACADE","enumeration_state":"DEFERRED_TO_K10_1","reason":"The shipped Asupersync facade has no admin surface; K10.1 owns the exact additive API disposition.","state":"ABSENT_NOT_PARITY"},
+    {"row_id":"KAFKA-K2-1-NONREACH-CONSUMER-GROUP-PROTOCOL","api_keys":[68],"surface_scope":"CURRENT_CONSUMER_CONFIGURATION","enumeration_state":"EXACT","reason":"The incumbent defaults group.protocol to classic and Asupersync exposes no override.","state":"NOT_REACHABLE_FROM_ACCEPTED_CURRENT_CONFIG"},
+    {"row_id":"KAFKA-K2-1-NONREACH-CONSUMER-GROUP-DESCRIBE","api_keys":[69],"surface_scope":"ADMIN_FACADE","enumeration_state":"EXACT","reason":"ConsumerGroupDescribe is admin-only in the pinned incumbent and the facade has no admin surface.","state":"ABSENT_NOT_PARITY"}
+  ],
+  "broker_profile_rows": [
+    {"profile_id":"KAFKA-K2-1-BROKER-BASIC-LEGACY","candidate_version":"0.8.0","source_authority_id":"KAFKA-K2-1-AUTH-APACHE-LEGACY-BASIC","scope":"explicit non-idempotent basic producer and legacy fetch only","immutable_runtime_identity":null,"schema_probe_receipt":null,"state":"BLOCKED_EXTERNAL"},
+    {"profile_id":"KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR","candidate_version":"0.11.0.2","source_authority_id":"KAFKA-K2-1-AUTH-APACHE-DEFAULT-FLOOR","scope":"default producer with idempotence and transactional producer","immutable_runtime_identity":null,"schema_probe_receipt":null,"state":"BLOCKED_EXTERNAL"},
+    {"profile_id":"KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR","candidate_version":"1.0.0","source_authority_id":"KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR","scope":"SaslAuthenticate-wrapped exchange","immutable_runtime_identity":null,"schema_probe_receipt":null,"state":"BLOCKED_EXTERNAL"},
+    {"profile_id":"KAFKA-K2-1-BROKER-CURRENT","candidate_version":"4.3.1","source_authority_id":"KAFKA-K2-1-AUTH-APACHE-CURRENT","scope":"current supported release at capture","immutable_runtime_identity":null,"schema_probe_receipt":null,"state":"BLOCKED_EXTERNAL"}
+  ],
+  "existing_probe_disposition": {
+    "path": "scripts/kafka_broker_parity_proof_runner.sh",
+    "classification": "PROOF_ONLY_NONTERMINAL",
+    "reasons": [
+      "The runner polls a child process and is outside this static-only pass.",
+      "Its validator permits skipped rows.",
+      "Current real-broker rows may report unknown or unavailable broker versions.",
+      "It does not emit normalized request and response schema fingerprints for an immutable oldest/current pair."
+    ],
+    "executed_for_k2_1": false
+  },
+  "completion_gaps": [
+    {"gap_id":"KAFKA-K2-1-GAP-001","state":"BLOCKED","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.2.1","description":"Import and hash every selected current schema plus the historical request and response structures required by each oldest-broker candidate at immutable commits."},
+    {"gap_id":"KAFKA-K2-1-GAP-002","state":"BLOCKED","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.2.1","description":"Project every field path, order, type, version interval, default, nullability, compactness, tagged version and tag ID."},
+    {"gap_id":"KAFKA-K2-1-GAP-003","state":"BLOCKED","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.2.1","description":"Project protocol error codes and required downgrade or fail-closed action for every reachable schema."},
+    {"gap_id":"KAFKA-K2-1-GAP-004","state":"BLOCKED_EXTERNAL","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.13.1","description":"Provide immutable runnable oldest and current broker identities."},
+    {"gap_id":"KAFKA-K2-1-GAP-005","state":"BLOCKED_EXTERNAL","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.2.1","description":"Retain oldest/current schema-probe receipts with negotiated capabilities and normalized request/response fingerprints."},
+    {"gap_id":"KAFKA-K2-1-GAP-006","state":"BLOCKED","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.2.1","description":"Adjudicate candidate intersections into accepted numeric ranges and reviewed downgrade behavior."},
+    {"gap_id":"KAFKA-K2-1-GAP-007","state":"BLOCKED","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.2.1","description":"Independently cross-check field and error projections without treating the incumbent implementation as normative."}
+  ],
+  "coverage_receipt": {
+    "k1_seed_api_count": 20,
+    "added_implicit_api_count": 2,
+    "reachable_frontier_api_count": 22,
+    "schema_source_pair_count": 22,
+    "accepted_numeric_range_count": 0,
+    "field_projection_row_count": 0,
+    "error_projection_row_count": 0,
+    "admitted_broker_profile_count": 0,
+    "schema_probe_receipt_count": 0,
+    "completion_gap_count": 7
+  },
+  "static_validation_receipt": {
+    "method": "manual repository review, exact byte/hash inventory, official-source identity lookup, and independent incumbent source cross-check",
+    "execution_scope": "STATIC_ONLY",
+    "compiler_run": false,
+    "formatter_run": false,
+    "test_run": false,
+    "broker_contacted": false,
+    "service_started": false,
+    "remote_job_started": false
+  },
+  "no_claim_boundaries": [
+    "This packet freezes a static reachability frontier and selected authorities; it is not a complete Kafka request/response schema contract.",
+    "Candidate current intersections are review inputs only and are not accepted production version ranges.",
+    "No field, default, nullability, tagged-field, or error-code projection is complete while the corresponding arrays remain empty.",
+    "Source tag and commit identities are not immutable runnable broker identities or interoperability receipts.",
+    "No compiler, formatter, test, broker, service, container, network protocol, or remote execution evidence is claimed.",
+    "The two telemetry APIs are static conditional reachability findings, not proof that a broker accepted or requested telemetry.",
+    "The existing broker runner is nonterminal for K2.1 and was not executed.",
+    "This packet does not authorize K2.2, production wiring, migration, dependency removal, release readiness, performance claims, or broad workspace health claims."
+  ]
+}
