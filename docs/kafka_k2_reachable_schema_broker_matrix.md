@@ -8,13 +8,12 @@ This document is the human-readable companion to
 
 The packet freezes a static 22-key reachability frontier and the normative
 source identities needed to finish K2.1. It now also contains a bounded,
-partial body projection: 70 field rows cover `FindCoordinator`, `ApiVersions`,
-and the two authentication APIs across current and applicable historical
-profiles. Ten source-established outcome-membership rows cover authentication
-only. It
-deliberately does not close K2.1: no numeric range is accepted, no
-full-frontier field or error projection is complete, and no oldest/current
-broker profile is admitted. K2.2 therefore remains blocked.
+partial body projection: 88 field rows cover `FindCoordinator`, `ApiVersions`,
+`InitProducerId`, and the two authentication APIs across current and applicable
+historical profiles. Ten source-established outcome-membership rows cover
+authentication only. It deliberately does not close K2.1: no numeric range is
+accepted, no full-frontier field or error projection is complete, and no
+oldest/current broker profile is admitted. K2.2 therefore remains blocked.
 
 ## Outcome
 
@@ -57,10 +56,10 @@ path/object-ID/size projection is independently pinned by SHA-256.
 
 Those Git object IDs cover the Git blob header plus exact payload bytes; they
 are not per-file raw-byte SHA-256 security attestations. This establishes
-current-source object identity only. The API 10, API 18, and authentication
-slices below project only bounded candidate body fields, defaults, tree
-metadata, and authentication outcome membership. They do not establish a complete
-field/default/error matrix, accepted versions, broker behavior, or
+current-source object identity only. The API 10, API 18, API 22, and
+authentication slices below project only bounded candidate body fields,
+defaults, tree metadata, and authentication outcome membership. They do not
+establish a complete field/default/error matrix, accepted versions, broker behavior, or
 interoperability.
 
 The three historical candidate profiles now have profile-scoped source-object
@@ -71,7 +70,7 @@ pretending that modern per-message JSON existed historically:
 | Candidate | Declaration model | Profile API rows | Source objects | Bytes |
 |---|---|---|---:|---:|
 | 0.8.0 | Scala write/parse methods plus the classic envelope and legacy message set | keys 0-3 at v0 | 22 | 95,596 |
-| 0.11.0.2 | central Java `Protocol` schema arrays plus headers/type encodings | nine idempotent/transaction profile keys, the API 10 and API 18 v0-1 body trees, plus a structured API 23 full-frontier blocker | 10 | 210,904 |
+| 0.11.0.2 | central Java `Protocol` schema arrays plus headers/type encodings | nine idempotent/transaction profile keys, the API 10 and API 18 v0-1 body trees, the API 22 v0 body, plus a structured API 23 full-frontier blocker | 10 | 210,904 |
 | 1.0.0 | per-request Java schema arrays plus headers/type encodings | `SaslHandshake` 0-1 and `SaslAuthenticate` 0 | 14 | 118,304 |
 
 Each receipt pins the canonical root tree, confirms the recursive tree was not
@@ -85,8 +84,9 @@ Nine additional projection-support source rows pin the current message-format
 semantics, generated field-default resolver and assignment logic, error
 registry, handshake request wrapper, two current response wrappers, and current
 and historical dedicated authentication handlers. Their 239,139 source bytes
-are identity evidence for the bounded API 10, API 18, and authentication field,
-default, and outcome rows below; they are not executable broker evidence.
+are identity evidence for the bounded API 10, API 18, API 22, and
+authentication field, default, and outcome rows below; they are not executable
+broker evidence.
 
 The 0.11.0.2 audit also exposes a concrete incompatibility outside its narrow
 producer profile. A structured blocker row records broker minimum/maximum v0
@@ -142,7 +142,9 @@ are not duplicated into each message tree. API 10's incumbent body intersection
 of v0-v2 therefore continues to record request header v1 and response header v0;
 its flexible source-only v3-v6 header selection remains outside that candidate
 range. The API 18 response-header-v0 exception remains explicit in the separate
-header contract.
+header contract. API 22's current source declares body versions v0-v6, while
+the incumbent candidate intersection ends at v4; v5-v6 remain source-only and
+v6 is explicitly marked unstable by the current schema.
 
 ## Partial body projection
 
@@ -217,6 +219,38 @@ numeric zero according to type, except for the two explicit response literals:
 remaining API 18 fields are required with no default. These rows establish
 source-schema structure only: API 18 error/fallback semantics, negotiation
 downgrade policy, accepted ranges, and broker execution remain unprojected.
+
+### API 22 producer-identity body
+
+Eighteen rows project the flat `InitProducerId` body declared by current Kafka
+4.3.1 and historical Kafka 0.11.0.2: 12 current rows cover the source's v0-v6
+message domain and six historical rows cover v0. No shared request or response
+header field is duplicated into these body rows.
+
+| Profile | Direction | Top-level body fields | Source versions |
+|---|---|---|---|
+| 4.3.1 current | request | nullable `TransactionalId`, `TransactionTimeoutMs`, `ProducerId`, `ProducerEpoch`, `Enable2Pc`, `KeepPreparedTxn` | field-specific subsets of 0-6 |
+| 4.3.1 current | response | `ThrottleTimeMs`, `ErrorCode`, `ProducerId`, `ProducerEpoch`, `OngoingTxnProducerId`, `OngoingTxnProducerEpoch` | field-specific subsets of 0-6 |
+| 0.11.0.2 historical | request | nullable `transactional_id`, `transaction_timeout_ms` | 0 |
+| 0.11.0.2 historical | response | `throttle_time_ms`, `error_code`, `producer_id`, `producer_epoch` | 0 |
+
+The current `TransactionalId` is the important default distinction: it is
+nullable on the wire, but its omitted schema default resolves to the generated
+empty string (`""`) across v0-v6. The historical nullable field instead uses
+the legacy `Struct` fallback and resolves to null. Current generated numeric
+fields otherwise resolve to zero unless their schemas declare one of seven
+explicit literals: five producer identifiers or epochs use `-1`, and the two
+v6 request flags use `false`. The historical `throttle_time_ms=0` is an
+explicit `Struct` default; its four remaining non-nullable fields are required
+with no schema default.
+
+Current v2-v6 bodies carry owner-scoped tag buffers, and `TransactionalId` uses
+compact encoding in those versions, but the API 22 schemas declare no tagged
+field IDs. The full current source domain is v0-v6; only v0-v4 intersects the
+incumbent candidate, v5-v6 remain source-only, and the source marks v6 unstable.
+These rows do not project shared headers, exhaustive errors, wrapper or
+call-site defaults, retry or downgrade policy, two-phase-commit or recovery
+semantics, broker execution, or an accepted production range.
 
 ### Authentication fields and outcomes
 
@@ -323,21 +357,22 @@ oldest/current pair. Its output cannot close K2.1 as written.
 
 K2.1 remains open until all of the following are complete:
 
-1. Extend the partial API 10, API 18, and authentication-body projection across the other 18
-   reachable APIs and any historical profile selected by broker-floor
-   adjudication; pin each additional interpretation source.
+1. Extend the partial API 10, API 18, API 22, and authentication-body
+   projection across the other 17 reachable APIs and any historical profile
+   selected by broker-floor adjudication; pin each additional interpretation
+   source.
 2. Complete every remaining reachable body and header path, order, type,
    version interval, effective default, nullability, compact encoding, tagged
-   version, and tag identifier beyond the projected API 10, API 18, and
+   version, and tag identifier beyond the projected API 10, API 18, API 22, and
    authentication slices.
 3. Extend the ten authentication outcome memberships into exhaustive reachable
    error projections with reviewed retry, downgrade, or fail-closed action.
 4. Adjudicate candidate intersections into explicit accepted numeric ranges.
 5. Retain immutable oldest/current broker identities and terminal schema-probe
    receipts.
-6. Extend the independent official-source cross-check beyond the API 10, API 18,
-   and authentication-body slices without treating the incumbent implementation
-   as normative.
+6. Extend the independent official-source cross-check beyond the API 10, API
+   18, API 22, and authentication-body slices without treating the incumbent
+   implementation as normative.
 
 ## Validation and claim boundary
 
@@ -351,10 +386,12 @@ SHA-256 security attestations. Historical range rows are source-derived
 candidate overlaps; none is an accepted production range or downgrade policy.
 
 The packet does not prove full schema or error completeness, defaults outside
-the 70 API 10, API 18, and authentication-body rows, API 10 or API 18 error and
-fallback behavior, coordinator-type semantics, exhaustive wrapper or call-site
-value behavior, acceptance or runtime handling of current API 10 v3-v6, API 18
-v4, or API 36 v2, broker interoperability, runtime correctness, production
+the 88 API 10, API 18, API 22, and authentication-body rows, API 10, API 18, or
+API 22 protocol error or fallback behavior beyond the recorded schema defaults,
+coordinator-type semantics, exhaustive wrapper or call-site value behavior,
+acceptance or runtime handling of current API 10 v3-v6, API 18 v4, API 22 v5-v6
+(including source-declared unstable v6), or API 36 v2, broker interoperability,
+runtime correctness, production
 support, migration readiness, dependency removal, release readiness,
 performance, or broad workspace health. It does not authorize K2.2 or any
 production wiring.
