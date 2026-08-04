@@ -94,3 +94,14 @@ this index.
   partition and healing.
 - [`scenarios/stress_10k_tasks.yaml`](scenarios/stress_10k_tasks.yaml) —
   high-task-count stress fixture.
+
+The standalone FrankenLab CLI also ships three typed scenario fixtures, all
+covered by [`metadata.json`](metadata.json). These descriptions are authoring
+narratives, not evidence that the runner simulates the named workload or fault:
+
+- [`01_race_condition.yaml`](../frankenlab/examples/scenarios/01_race_condition.yaml)
+  — typed fixture describing a race-condition narrative.
+- [`02_obligation_leak.yaml`](../frankenlab/examples/scenarios/02_obligation_leak.yaml)
+  — typed fixture describing an obligation-leak narrative.
+- [`03_saga_partition.yaml`](../frankenlab/examples/scenarios/03_saga_partition.yaml)
+  — typed fixture describing a partitioned-saga narrative.

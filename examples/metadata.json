@@ -6,6 +6,16 @@
     "metadata_only": true,
     "executes_examples": false
   },
+  "scenario_registry": {
+    "owner_bead": "asupersync-5z2scg.5.4",
+    "roots": [
+      "examples/scenarios",
+      "frankenlab/examples/scenarios"
+    ],
+    "source_state": "SOURCE_ALIGNED_STATIC",
+    "execution_state": "NOT_RUN_BY_STATIC_LANE",
+    "no_claim": "Registry coverage is source metadata only; it does not prove that any scenario parses, validates, executes, or replays."
+  },
   "rustdoc_coverage": {
     "missing_doc_code_examples": {
       "lint": "missing_doc_code_examples",
@@ -173,7 +183,7 @@
       "file": "examples/README.md",
       "loc": {
         "start": 1,
-        "end": 96
+        "end": 107
       },
       "kind": "markdown",
       "demonstrates": [
@@ -704,6 +714,57 @@
       "feature_flags": [],
       "run_command": "scenario: examples/scenarios/custom_latency_model.yaml",
       "description": "Scenario fixture with a custom latency model for network simulation."
+    },
+    {
+      "name": "scenario_frankenlab_obligation_leak",
+      "file": "frankenlab/examples/scenarios/02_obligation_leak.yaml",
+      "loc": {
+        "start": 1,
+        "end": 57
+      },
+      "kind": "scenario-yaml",
+      "demonstrates": [
+        "scenario-fixture",
+        "obligation-leak-narrative",
+        "frankenlab-cli"
+      ],
+      "feature_flags": [],
+      "run_command": "scenario: frankenlab/examples/scenarios/02_obligation_leak.yaml",
+      "description": "Typed FrankenLab Scenario fixture describing an obligation-leak narrative; this registry does not establish runner effects."
+    },
+    {
+      "name": "scenario_frankenlab_race_condition",
+      "file": "frankenlab/examples/scenarios/01_race_condition.yaml",
+      "loc": {
+        "start": 1,
+        "end": 41
+      },
+      "kind": "scenario-yaml",
+      "demonstrates": [
+        "scenario-fixture",
+        "race-condition-narrative",
+        "frankenlab-cli"
+      ],
+      "feature_flags": [],
+      "run_command": "scenario: frankenlab/examples/scenarios/01_race_condition.yaml",
+      "description": "Typed FrankenLab Scenario fixture describing a race-condition narrative; this registry does not establish runner effects."
+    },
+    {
+      "name": "scenario_frankenlab_saga_partition",
+      "file": "frankenlab/examples/scenarios/03_saga_partition.yaml",
+      "loc": {
+        "start": 1,
+        "end": 127
+      },
+      "kind": "scenario-yaml",
+      "demonstrates": [
+        "scenario-fixture",
+        "saga-partition-narrative",
+        "frankenlab-cli"
+      ],
+      "feature_flags": [],
+      "run_command": "scenario: frankenlab/examples/scenarios/03_saga_partition.yaml",
+      "description": "Typed FrankenLab Scenario fixture describing a partitioned-saga narrative; this registry does not establish runner effects."
     },
     {
       "name": "scenario_host_crash_restart",

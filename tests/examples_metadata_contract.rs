@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 const METADATA_PATH: &str = "examples/metadata.json";
 const SCHEMA_VERSION: &str = "asupersync.examples.metadata.v1";
 const BEAD_ID: &str = "asupersync-agent-native-dx-zxqaqs.4";
+const SCENARIO_REGISTRY_BEAD_ID: &str = "asupersync-5z2scg.5.4";
+const SCENARIO_ROOTS: &[&str] = &["examples/scenarios", "frankenlab/examples/scenarios"];
 const MIN_FAILURE_DOCTESTS: usize = 5;
 const CORE_API_SYMBOLS: &[&str] = &[
     "asupersync::Budget::meet",
@@ -124,6 +126,11 @@ fn current_example_files() -> BTreeSet<String> {
     let repo_root = repo_path("");
     let mut files = BTreeSet::new();
     collect_example_files(&repo_root, &repo_path("examples"), &mut files);
+    collect_example_files(
+        &repo_root,
+        &repo_path("frankenlab/examples/scenarios"),
+        &mut files,
+    );
     files
 }
 
@@ -202,6 +209,21 @@ fn metadata_declares_schema_scope_and_owner() {
     let scope = Value::Object(object(&metadata, "scope").clone());
     assert!(bool_field(&scope, "metadata_only"));
     assert!(!bool_field(&scope, "executes_examples"));
+
+    let registry = metadata
+        .get("scenario_registry")
+        .unwrap_or_else(|| panic!("scenario_registry must be present"));
+    assert_eq!(string(registry, "owner_bead"), SCENARIO_REGISTRY_BEAD_ID);
+    assert_eq!(
+        nonempty_string_set(registry, "roots"),
+        SCENARIO_ROOTS.iter().map(|root| (*root).to_string()).collect()
+    );
+    assert_eq!(string(registry, "source_state"), "SOURCE_ALIGNED_STATIC");
+    assert_eq!(
+        string(registry, "execution_state"),
+        "NOT_RUN_BY_STATIC_LANE"
+    );
+    assert!(string(registry, "no_claim").contains("does not prove"));
 }
 
 #[test]
@@ -278,7 +300,7 @@ fn unavailable_missing_doc_code_examples_lint_has_report_only_fallbacks() {
 }
 
 #[test]
-fn metadata_covers_every_file_under_examples() {
+fn metadata_covers_every_file_in_the_declared_example_roots() {
     let metadata = metadata();
     let declared = metadata_entries_by_file(&metadata)
         .keys()
@@ -288,6 +310,31 @@ fn metadata_covers_every_file_under_examples() {
     assert_eq!(
         declared, actual,
         "examples/metadata.json must cover every non-metadata file under examples/"
+    );
+}
+
+#[test]
+fn scenario_registry_covers_the_exact_thirteen_typed_fixtures() {
+    let metadata = metadata();
+    let scenario_files = array(&metadata, "examples")
+        .iter()
+        .filter(|entry| entry.get("kind").and_then(Value::as_str) == Some("scenario-yaml"))
+        .map(|entry| string(entry, "file").to_string())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(scenario_files.len(), 13);
+
+    let frankenlab_files = scenario_files
+        .iter()
+        .filter(|file| file.starts_with("frankenlab/examples/scenarios/"))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        frankenlab_files,
+        BTreeSet::from([
+            "frankenlab/examples/scenarios/01_race_condition.yaml".to_string(),
+            "frankenlab/examples/scenarios/02_obligation_leak.yaml".to_string(),
+            "frankenlab/examples/scenarios/03_saga_partition.yaml".to_string(),
+        ])
     );
 }
 
@@ -400,8 +447,14 @@ fn commands_kinds_and_feature_flags_are_shape_checked() {
             }
             "scenario-yaml" => {
                 assert!(
-                    file.starts_with("examples/scenarios/") && has_extension(file, "yaml"),
-                    "scenario-yaml entry must point to examples/scenarios/*.yaml: {file}"
+                    SCENARIO_ROOTS
+                        .iter()
+                        .any(|root| {
+                            file.strip_prefix(*root)
+                                .is_some_and(|suffix| suffix.starts_with('/'))
+                        })
+                        && has_extension(file, "yaml"),
+                    "scenario-yaml entry must point below a declared scenario root: {file}"
                 );
                 assert!(
                     run_command.starts_with("scenario: "),
