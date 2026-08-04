@@ -135,15 +135,17 @@ machine artifact. The focused contract reparses and semantically validates all
 13.
 
 `tools/demos/time_travel.yaml` is adjacent, not part of the typed corpus. Its
-root keys are `name`, `seed`, `scenario`, and `expected`, not the `Scenario`
-schema, and no live source reads it. `make demo-benchmark` runs
-`examples/demo_benchmark.rs`, which consumes JSON golden checksums rather than
-that YAML file. CI workflow YAML and `pnpm` metadata are likewise explicitly
-adjacent.
+six root keys are `schema_version`, `name`, `description`, `seed`, `scenario`,
+and `expected`, not the `Scenario` schema. Both CLIs have generic user-selected
+path loaders, but no current source literal or discovery route automatically
+selects this file. `make demo-benchmark` runs `examples/demo_benchmark.rs`,
+which uses compiled constants and consumes JSON golden checksums rather than
+that YAML file. The scenario inventory contract is a test-only governance
+reader. CI workflow YAML and `pnpm` metadata are likewise explicitly adjacent.
 
-This matters because the ADR says every `tools/demos` document must validate,
-run, and replay. That sentence overstates the live implementation; it is
-routed as `SCN-GAP-12`.
+The ADR and machine registry now state the exact two-root, 13-file typed corpus
+and classify this demo reference separately. The focused contracts were not
+executed in the static A4 lane, so `SCN-GAP-12` remains fail-closed.
 
 ## Author workflows
 
@@ -161,7 +163,15 @@ write an optional replay artifact.
 
 Neither CLI accepts a JSON `Scenario` input. Neither CLI has a Scenario dump
 command or emits canonical Scenario JSON. Existing JSON is result/artifact
-output, not yet the additive format journey required by A2.
+output. `Scenario::to_json` is the shipped library-only canonical encoder for
+the typed Scenario schema; it is not a CLI conversion path or a shared config
+encoder.
+
+The author guide at `docs/adoption/getting_started.md` now states the current
+YAML grammar, diagnostics, field-consumption, include, and JSON boundaries. At
+typed struct boundaries, unknown fields are accepted and discarded; a typo can
+therefore silently leave a default in effect. YAML anchors and aliases resolve,
+but `<<` merge keys are not applied by either application loader.
 
 ## Parsing is not execution
 
@@ -181,6 +191,12 @@ Several declared capabilities are currently validation-only:
   properties are unused;
 - expected invariants are validated but do not select or enforce checks;
 - golden format is unused, and `canonicalized` is validation-only.
+
+`golden_projection.redacted` is also validation-only; it does not scrub output.
+Every `faults[].args` key and value is copied into user-trace text, and JSON run
+results include the fault log. Scenario authors must not put credentials,
+tokens, personal data, or other private values in those maps or elsewhere in a
+scenario document.
 
 Fault injection is also partial. Every fault becomes a timed user-trace entry.
 Disk pressure/recovery, delayed cleanup, and process stall/resume affect a
@@ -406,6 +422,36 @@ replays; it does not establish the named race, leak, or partition effects; and
 it does not prove conversion, semantic or fingerprint equivalence, diagnostics,
 security, performance, release readiness, broad health, or terminal authority.
 
+### A4 source progress: GAP-12 and author claim truth
+
+A4 separately records `SCN-A4-GAP-12-CLAIM-TRUTH-V1`. The ADR, its machine
+registry, the adjacent demo comments, the source-level `Scenario` documentation,
+the examples index, and the author guide now agree on these facts:
+
+- the typed corpus is ten files under `examples/scenarios/` and three under
+  `frankenlab/examples/scenarios/`;
+- `tools/demos/time_travel.yaml` is an adjacent parameter reference, not the
+  typed Scenario schema and not an operational benchmark input;
+- generic CLI path loaders exist, while no source literal or discovery route
+  automatically selects that adjacent file;
+- `Scenario::to_json` is a library-only canonical encoder for the typed schema,
+  while CLI JSON is command-result/report output and shared config canonical
+  encoding remains absent;
+- include paths are validated but never read or merged, unknown typed fields
+  are discarded, merge keys are not applied, and parsed fields must not be
+  confused with runner effects; and
+- fault argument keys and values enter trace/result text, while the `redacted`
+  flag does not scrub them.
+
+Only comments changed in the adjacent YAML; its six data fields are unchanged.
+No parser, loader, runner, typed fixture, dependency, accepted input, or runtime
+behavior changed. The Rust contracts were not executed in this static lane, so
+`SCN-GAP-01`, `SCN-GAP-12`, and `SCN-GAP-13` remain blocked. The receipt does
+not prove parsing, validation, execution, replay, conversion, fingerprints,
+benchmark behavior, checksums, cross-platform determinism, redaction, security,
+broad health, release readiness, tracker closure, dependency or file removal,
+cutover, or terminal authority.
+
 ## Child routing
 
 | Child | Frozen responsibility | Current evidence |
@@ -413,7 +459,7 @@ security, performance, release readiness, broad health, or terminal authority.
 | A1 | loaders, schema, grammar, corpus, workflows, diagnostics, consumption, gaps | executed contract |
 | A2 | one versioned typed model and additive canonical JSON | executed contract |
 | A3 | incumbent KEEP or complete bounded owned parser/writer parity | A3.1 static audit and A3.2 durable receipt recorded; tracker state is separate |
-| A4 | located diagnostics, migration, examples, include truth, atomic output, docs | static source progress for exact example registry; behavioral evidence remains unrun |
+| A4 | located diagnostics, migration, examples, include truth, atomic output, docs | static source progress for exact example registry plus GAP-12/author claim truth; behavioral evidence remains unrun |
 | A5 | real validate/run/explore/replay journeys and terminal KEEP, DEFER, or CUTOVER decision | planned |
 
 Only A5 is terminal. Any missing, planned, blocked, regressed, or not-at-required
@@ -436,7 +482,7 @@ The artifact routes sixteen fail-closed gaps:
 | `SCN-GAP-09` | library canonical JSON exists, but neither CLI exposes dump/conversion | A4 |
 | `SCN-GAP-10` | no application document/work bounds | A3 |
 | `SCN-GAP-11` | unknown fields are ignored | A3 |
-| `SCN-GAP-12` | time-travel demo YAML is orphaned and not the schema | A4 |
+| `SCN-GAP-12` | source truth now separates the adjacent demo YAML from the typed corpus, but focused contracts remain unexecuted | A4 |
 | `SCN-GAP-13` | all 13 typed fixtures are source-registered, but the focused Rust contracts were not executed in this static lane | A4 |
 | `SCN-GAP-14` | no full-corpus typed YAML/JSON equivalence proof | A3 |
 | `SCN-GAP-15` | semantic spans and stable CLI replay code are incomplete | A4 |
@@ -453,9 +499,15 @@ negative-mutation contract:
 
 ```bash
 RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay \
-  --overlay-path examples/metadata.json \
+  --overlay-path src/lab/scenario.rs \
+  --overlay-path tools/demos/time_travel.yaml \
+  --overlay-path docs/adoption/getting_started.md \
   --overlay-path examples/README.md \
-  --overlay-path tests/examples_metadata_contract.rs \
+  --overlay-path docs/adr/dep_plan_adr_004_config_scenario_formats.md \
+  --overlay-path artifacts/dependency_api_adr_registry_v1.json \
+  --overlay-path docs/dependency_api_adr_registry.md \
+  --overlay-path tests/dependency_api_adr_registry_contract.rs \
+  --overlay-path artifacts/config_toml_capability_inventory_v1.json \
   --overlay-path artifacts/scenario_yaml_capability_inventory_v1.json \
   --overlay-path docs/scenario_yaml_capability_inventory.md \
   --overlay-path tests/scenario_yaml_capability_inventory_contract.rs \
@@ -474,10 +526,11 @@ checked scenarios and workflows; they do not close the routed execution gaps.
 
 This A1/A2/A3.1/A3.2 packet combines the earlier executable
 inventory/canonical-JSON evidence with a current static
-acceptance-satisfiability audit and fail-closed KEEP receipt. The A4 addition is
-source-level example-registry alignment only; no Rust contract was executed for
-it, and `SCN-GAP-13` remains blocked. A3.1, A3.2, and this A4 static slice did
-not rerun executable lanes or implement an owned YAML parser or production
+acceptance-satisfiability audit and fail-closed KEEP receipt. The A4 additions
+are source-level example-registry and GAP-12/author claim-truth alignment only;
+no Rust contract was executed for them, and `SCN-GAP-01`, `SCN-GAP-12`, and
+`SCN-GAP-13` remain blocked. A3.1, A3.2, and these A4 static slices did not
+rerun executable lanes or implement an owned YAML parser or production
 Scenario YAML writer. The packet proves no complete parity, runtime behavior,
 performance, resource, security, broad-health, release, or terminal decision,
 and authorizes no input narrowing, dependency or file removal, tracker closure,
