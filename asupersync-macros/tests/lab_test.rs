@@ -8,6 +8,10 @@ use asupersync::types::Budget;
 use asupersync_macros::{explore_seeds, lab_test};
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static LAB_REPLAY_OVERRIDE_RUNS: AtomicUsize = AtomicUsize::new(0);
+static EXPLORE_REPLAY_OVERRIDE_RUNS: AtomicUsize = AtomicUsize::new(0);
 
 #[lab_test]
 fn runtime_form_gets_seed_zero(lab: &mut LabRuntime) {
@@ -45,6 +49,51 @@ fn explore_seed_matrix_uses_requested_config(lab: &mut LabRuntime) {
 fn explore_seed_matrix_can_enable_light_chaos(lab: &mut LabRuntime) {
     assert_eq!(lab.config().seed, 8);
     assert!(lab.has_chaos());
+}
+
+#[ignore = "called by replay_environment_reproduces_generated_harnesses"]
+#[lab_test(seeds = 2..5)]
+fn ignored_lab_replay_environment_override(lab: &mut LabRuntime) {
+    assert_eq!(LAB_REPLAY_OVERRIDE_RUNS.fetch_add(1, Ordering::SeqCst), 0);
+    assert_eq!(lab.config().seed, 41);
+    assert_eq!(lab.config().worker_count, 3);
+    assert_eq!(lab.config().max_steps, Some(77));
+}
+
+#[ignore = "called by replay_environment_reproduces_generated_harnesses"]
+#[explore_seeds(base = 10, count = 3, workers = 2, max_steps = 1_000)]
+fn ignored_explore_replay_environment_override(lab: &mut LabRuntime) {
+    assert_eq!(
+        EXPLORE_REPLAY_OVERRIDE_RUNS.fetch_add(1, Ordering::SeqCst),
+        0
+    );
+    assert_eq!(lab.config().seed, 41);
+    assert_eq!(lab.config().worker_count, 3);
+    assert_eq!(lab.config().max_steps, Some(77));
+}
+
+#[test]
+fn replay_environment_reproduces_generated_harnesses() {
+    for test_name in [
+        "ignored_lab_replay_environment_override",
+        "ignored_explore_replay_environment_override",
+    ] {
+        let output = Command::new(std::env::current_exe().expect("current test exe"))
+            .arg("--ignored")
+            .arg(test_name)
+            .arg("--exact")
+            .arg("--nocapture")
+            .env("ASUPERSYNC_LAB_TEST_SEED", "41")
+            .env("ASUPERSYNC_WORKERS", "3")
+            .env("ASUPERSYNC_MAX_STEPS", "77")
+            .env("ASUPERSYNC_AUTO_ARTIFACTS", "0")
+            .output()
+            .expect("run generated harness replay in subprocess");
+
+        let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
+        combined.push_str(&String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{test_name} failed:\n{combined}");
+    }
 }
 
 #[should_panic(expected = "seed 3")]
@@ -120,6 +169,7 @@ fn failing_lab_test_writes_deterministic_crashpack() {
     assert!(json.contains("\"canonical_prefix\""));
     assert!(json.contains("\"oracle_violations\""));
     assert!(json.contains("\"replay\""));
+    assert!(json.contains("\"test_name\": \"ignored_failure_for_deterministic_crashpack\""));
     assert!(json.contains("deterministic crashpack failure"));
 }
 
@@ -133,7 +183,10 @@ fn failing_lab_test_panic_prints_crashpack_and_replay_last_lines() {
 
     assert_eq!(crashpack, format!("crashpack: {path}"));
     assert!(replay.starts_with("replay: "));
-    assert!(replay.contains(&path));
+    assert!(replay.contains("ASUPERSYNC_LAB_TEST_SEED=13"));
+    assert!(replay.contains("ignored_failure_for_panic_tail"));
+    assert!(replay.contains("-- --exact --nocapture"));
+    assert!(!replay.contains(&path));
 }
 
 #[test]

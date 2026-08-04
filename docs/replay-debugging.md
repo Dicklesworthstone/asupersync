@@ -41,6 +41,29 @@ Deterministic replay only works when the environment is fully controlled. The co
 
 If any precondition is violated, replay should fail fast with explicit diagnostics rather than “best-effort.”
 
+### Lab-Test Crashpack Replay
+
+Auto-crashpacks produced by `#[lab_test]` and `#[explore_seeds]` record the
+exact libtest name, seed, worker count, step limit, and (when the source tree
+was clean at build time) Git revision. Their generated replay command uses the
+same environment variables consumed by the test harness:
+
+```sh
+ASUPERSYNC_LAB_TEST_SEED=42 ASUPERSYNC_WORKERS=4 \
+ASUPERSYNC_MAX_STEPS=1000 cargo test lab::tests::case -- --exact --nocapture
+```
+
+The seed override runs exactly one seed even when the original attribute
+declared a range. `ASUPERSYNC_MAX_STEPS=none` reproduces an unlimited step
+budget. The command deliberately names no crashpack argument: libtest does not
+accept one, and the crashpack is evidence used to construct the replay rather
+than a positional test input.
+
+Builds outside a clean repository may set `ASUPERSYNC_GIT_COMMIT` to a 40- or
+64-digit hexadecimal revision. Without a clean package-root checkout or that
+explicit input, the crashpack omits `commit_hash` instead of making a stale
+provenance claim.
+
 ## Golden Replay-Delta Verification
 
 When the same scenario is expected to remain stable across releases, compare

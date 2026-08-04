@@ -224,11 +224,22 @@ fn expand_lab_test(args: LabTestArgs, mut item: ItemFn) -> Result<proc_macro2::T
         #[test]
         fn #test_name() {
             ::asupersync::test_utils::init_test_logging();
-            let __asupersync_test_name = concat!(module_path!(), "::", #test_name_text);
+            let __asupersync_full_test_name =
+                concat!(module_path!(), "::", #test_name_text);
+            let __asupersync_test_name =
+                match __asupersync_full_test_name.split_once("::") {
+                    Some((_, test_name)) => test_name,
+                    None => __asupersync_full_test_name,
+                };
             let __asupersync_chaos = #chaos;
+            let __asupersync_seed_override =
+                ::asupersync::lab::lab_test_seed_override();
 
             for __asupersync_seed in #start..#end {
-                let __asupersync_seed: u64 = __asupersync_seed;
+                let __asupersync_seed: u64 = match __asupersync_seed_override {
+                    Some(seed) => seed,
+                    None => __asupersync_seed,
+                };
                 let __asupersync_phase = format!(
                     "lab_test_seed:{__asupersync_test_name}:{__asupersync_seed}"
                 );
@@ -241,6 +252,10 @@ fn expand_lab_test(args: LabTestArgs, mut item: ItemFn) -> Result<proc_macro2::T
                 );
 
                 #runner
+
+                if __asupersync_seed_override.is_some() {
+                    break;
+                }
             }
 
             ::asupersync::tracing_compat::info!(
@@ -299,7 +314,13 @@ fn expand_explore_seeds(
         #[test]
         fn #test_name() {
             ::asupersync::test_utils::init_test_logging();
-            let __asupersync_test_name = concat!(module_path!(), "::", #test_name_text);
+            let __asupersync_full_test_name =
+                concat!(module_path!(), "::", #test_name_text);
+            let __asupersync_test_name =
+                match __asupersync_full_test_name.split_once("::") {
+                    Some((_, test_name)) => test_name,
+                    None => __asupersync_full_test_name,
+                };
             let __asupersync_base_seed: u64 = #base_seed;
             let __asupersync_count: usize = #count;
             let __asupersync_worker_count: usize = #worker_count;
@@ -314,10 +335,19 @@ fn expand_explore_seeds(
             let mut __asupersync_total_runs: usize = 0;
             let mut __asupersync_new_classes: usize = 0;
             let mut __asupersync_total_races: usize = 0;
+            let __asupersync_seed_override =
+                ::asupersync::lab::lab_test_seed_override();
+            let __asupersync_effective_count = if __asupersync_seed_override.is_some() {
+                1
+            } else {
+                __asupersync_count
+            };
 
-            for __asupersync_idx in 0..__asupersync_count {
-                let __asupersync_seed =
-                    __asupersync_base_seed.wrapping_add(__asupersync_idx as u64);
+            for __asupersync_idx in 0..__asupersync_effective_count {
+                let __asupersync_seed = match __asupersync_seed_override {
+                    Some(seed) => seed,
+                    None => __asupersync_base_seed.wrapping_add(__asupersync_idx as u64),
+                };
                 let mut #arg = ::asupersync::lab::LabRuntime::new(
                     __asupersync_explore_config(
                         __asupersync_seed,
@@ -507,11 +537,12 @@ fn explore_seeds_support_tokens() -> proc_macro2::TokenStream {
                 .worker_count(worker_count)
                 .max_steps(max_steps)
                 .with_default_replay_recording();
-            if chaos {
+            let config = if chaos {
                 config.with_light_chaos()
             } else {
                 config
-            }
+            };
+            ::asupersync::lab::lab_test_config_from_env(config)
         }
 
         fn __asupersync_explore_seed_failure(
@@ -525,7 +556,7 @@ fn explore_seeds_support_tokens() -> proc_macro2::TokenStream {
         ) -> String {
             let mut message = format!(
                 "seed {seed}; rerun: ASUPERSYNC_LAB_TEST_SEED={seed} \
-                 cargo test {test_name} -- --nocapture; cause: {cause}"
+                 cargo test {test_name} -- --exact --nocapture; cause: {cause}"
             );
             match artifact {
                 Ok(Some(artifact)) => {
@@ -595,11 +626,12 @@ fn lab_support_tokens() -> proc_macro2::TokenStream {
             chaos: bool,
         ) -> ::asupersync::lab::LabConfig {
             let config = ::asupersync::lab::LabConfig::new(seed);
-            if chaos {
+            let config = if chaos {
                 config.with_light_chaos()
             } else {
                 config
-            }
+            };
+            ::asupersync::lab::lab_test_config_from_env(config)
         }
 
         fn __asupersync_assert_lab_report(
@@ -654,7 +686,7 @@ fn lab_support_tokens() -> proc_macro2::TokenStream {
         ) -> String {
             let mut message = format!(
                 "lab_test failed for {test_name} seed {seed}; rerun: \
-                 ASUPERSYNC_LAB_TEST_SEED={seed} cargo test {test_name} -- --nocapture; \
+                 ASUPERSYNC_LAB_TEST_SEED={seed} cargo test {test_name} -- --exact --nocapture; \
                  cause: {cause}"
             );
             match artifact {
