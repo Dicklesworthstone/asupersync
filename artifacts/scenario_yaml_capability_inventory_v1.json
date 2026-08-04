@@ -71,8 +71,8 @@
     },
     {
       "path": "src/lab/scenario.rs",
-      "sha256": "0bf5a96825ec074a040ce73eb10e7ac8c24640c602df6ffdebcca8aced973b70",
-      "line_count": 2252
+      "sha256": "94d7609990eee98fb4d9e98140965cdd535f6a8faeca53770dfbf1e6dd764b65",
+      "line_count": 2259
     },
     {
       "path": "src/lab/scenario_runner.rs",
@@ -121,8 +121,8 @@
     },
     {
       "path": "docs/adr/dep_plan_adr_004_config_scenario_formats.md",
-      "sha256": "2255312c71b2b861af5542ed5298e78969887ecaef1c999984b8798060785012",
-      "line_count": 166
+      "sha256": "310709cc8c3d7aab1dbf92ea2d3fde41c6deffee1fe0b9725b598875a6d3780c",
+      "line_count": 170
     },
     {
       "path": "TESTING_FOR_AGENTS.md",
@@ -131,8 +131,8 @@
     },
     {
       "path": "docs/adoption/getting_started.md",
-      "sha256": "7bb1ac0ffac41f8c4fa9e0d4e9ec40639b7e173ac2bfe69a30c1ba4bcba9cfee",
-      "line_count": 201
+      "sha256": "a6a41957ae4d41d66fc068c4e0647053186c6ae90e316695dcc78a7cfaf2e8a9",
+      "line_count": 252
     },
     {
       "path": "Makefile",
@@ -146,8 +146,8 @@
     },
     {
       "path": "tests/scenario_yaml_capability_inventory_contract.rs",
-      "sha256": "56228c5a6494038e7062afa5f5820b8b7831b922dbf7904b0b371464a1c996fd",
-      "line_count": 2995
+      "sha256": "2d3cedfe7a9c51718aa30c16b9822d32920006082629cb40496ad93a23c6bb5e",
+      "line_count": 3296
     },
     {
       "path": "tests/phase6_methodology_gate_contract.rs",
@@ -186,8 +186,8 @@
     },
     {
       "path": "tools/demos/time_travel.yaml",
-      "sha256": "41f30dd07c70f7e70cc3334ed03cb640fe286403f5868c90791953b12b28c3f7",
-      "line_count": 41
+      "sha256": "2f04828fa56c5248053fbb0a280484fae83fb68bdbf50ddbb0477e6500e944c6",
+      "line_count": 45
     },
     {
       "path": "pnpm-workspace.yaml",
