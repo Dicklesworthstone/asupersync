@@ -2974,11 +2974,14 @@ fn fail_closed_mutations_reject_cutover_unknown_missing_surface_bound_and_policy
     assert!(validate_inventory(&a4_removal).is_err());
 
     let mut missing_a4_registration = inventory.clone();
-    missing_a4_registration["a4_source_progress"]["registry"]
-        ["registered_frankenlab_paths"]
-        .as_array_mut()
-        .expect("registered FrankenLab paths")
-        .pop();
+    assert!(
+        missing_a4_registration["a4_source_progress"]["registry"]
+            ["registered_frankenlab_paths"]
+            .as_array_mut()
+            .expect("registered FrankenLab paths")
+            .pop()
+            .is_some()
+    );
     assert!(validate_inventory(&missing_a4_registration).is_err());
 
     let mut premature_a4_gap_closure = inventory.clone();
