@@ -1,11 +1,13 @@
 //! Fail-closed YAML scenario capability inventory contract.
 //!
-//! Bead: asupersync-5z2scg.5.1
+//! Beads: asupersync-5z2scg.5.1, asupersync-5z2scg.5.2,
+//! asupersync-5z2scg.5.3.1
 //! Scenario: scenario-yaml-capability-inventory-contract
 //! Fixture: artifacts/scenario_yaml_capability_inventory_v1.json
 //!
 //! This proves source-pinned loader, typed-schema, observed grammar, checked-in
-//! corpus, canonical JSON, workflow, diagnostic, resource,
+//! corpus, canonical JSON, workflow, diagnostic, resource, current YAML
+//! consumers/writers, and acceptance-satisfiability,
 //! execution-consumption, child-owner, and gap inventories. It does not prove
 //! arbitrary YAML, parser replacement, runtime semantics for validation-only
 //! fields, CLI conversion UX, or permission to remove the incumbent
@@ -23,11 +25,18 @@ const ARTIFACT_PATH: &str = "artifacts/scenario_yaml_capability_inventory_v1.jso
 const DOC_PATH: &str = "docs/scenario_yaml_capability_inventory.md";
 const ADR_PATH: &str = "docs/adr/dep_plan_adr_004_config_scenario_formats.md";
 const CAPABILITY_REGISTRY_PATH: &str = "artifacts/dependency_capability_registry_v1.json";
+const CAPABILITY_BASELINE_PATH: &str = "artifacts/dependency_capability_baseline_v1.json";
+const API_SURFACE_MAP_PATH: &str = "artifacts/api_surface_map_v1.json";
 const BEAD_ID: &str = "asupersync-5z2scg.5.1";
+const A3_BEAD_ID: &str = "asupersync-5z2scg.5.3.1";
+const A3_PARENT_BEAD_ID: &str = "asupersync-5z2scg.5.3";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const CAPABILITY_ID: &str = "CAP-SCENARIO-YAML-JSON";
 const BASELINE_REVISION: &str = "295136459f9e3e38e7373394e713866ec0693a8d";
 const AUTHORITY_REVISION: &str = "673a905631c5580cdc8037315569b72bd636ecca";
+const A3_CAPTURED_REVISION: &str = "207a435d59bad452239caa773f3a7c64c8b5edbc";
+const A3_SOURCE_PIN_PATHS_SHA256: &str =
+    "1c532b020668307d39cec4db9c5c66e52442f1fd433546a7a2b7ce78c50e985b";
 const DOC_BEGIN: &str = "<!-- BEGIN SCENARIO YAML CAPABILITY INVENTORY -->";
 const DOC_END: &str = "<!-- END SCENARIO YAML CAPABILITY INVENTORY -->";
 
@@ -97,6 +106,17 @@ fn find_row<'a>(rows: &'a [Value], key: &str, expected: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("missing {key}={expected}"))
 }
 
+fn source_item<'a>(source: &'a str, marker: &str) -> &'a str {
+    let start = source
+        .find(marker)
+        .unwrap_or_else(|| panic!("missing source marker {marker}"));
+    let end = source[start..]
+        .find("\n}\n")
+        .map(|offset| start + offset + 2)
+        .unwrap_or(source.len());
+    &source[start..end]
+}
+
 fn validate_state_fields(value: &Value, path: &str) -> Result<(), String> {
     match value {
         Value::Array(values) => {
@@ -116,6 +136,983 @@ fn validate_state_fields(value: &Value, path: &str) -> Result<(), String> {
             }
         }
         _ => {}
+    }
+    Ok(())
+}
+
+fn validate_a3_acceptance_satisfiability(inventory: &Value) -> Result<(), String> {
+    let audit = inventory
+        .get("a3_acceptance_satisfiability_audit")
+        .ok_or_else(|| "a3_acceptance_satisfiability_audit is required".to_owned())?;
+    for (key, expected) in [
+        ("bead_id", A3_BEAD_ID),
+        ("parent_bead_id", A3_PARENT_BEAD_ID),
+        ("captured_revision", A3_CAPTURED_REVISION),
+        ("audit_state", "LIVE_SOURCE_BOUND_STATIC_AUDIT"),
+        ("execution_state", "NOT_RUN_BY_A3_1_STATIC_LANE"),
+    ] {
+        if audit.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("a3 audit {key} must be {expected}"));
+        }
+    }
+
+    let authority = object(audit, "authority");
+    for (key, expected) in [
+        ("current_disposition", "KEEP_INCUMBENT"),
+        ("required_disposition", "KEEP_INCUMBENT"),
+        ("audit_owner_bead", A3_BEAD_ID),
+        ("durable_receipt_owner_bead", "asupersync-5z2scg.5.3.2"),
+        ("additive_authoring_owner_bead", "asupersync-5z2scg.5.4"),
+        ("terminal_cutover_authority_bead", "asupersync-5z2scg.5.5"),
+    ] {
+        if authority.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("a3 authority {key} must be {expected}"));
+        }
+    }
+    for key in [
+        "dependency_exit_allowed",
+        "input_narrowing_allowed",
+        "owned_parser_present",
+        "owned_writer_present",
+    ] {
+        if authority.get(key).and_then(Value::as_bool) != Some(false) {
+            return Err(format!("a3 authority {key} must remain false"));
+        }
+    }
+    if !authority
+        .get("owner_policy_receipt")
+        .is_some_and(Value::is_null)
+    {
+        return Err("A3.1 must not invent an owner policy receipt".to_owned());
+    }
+
+    let authority_revisions = object(audit, "authority_source_revisions");
+    for (key, expected) in [
+        (
+            "capability_registry_revision",
+            "5f208e04f24d8addaa051c9bf7465f7b398848fe",
+        ),
+        (
+            "capability_baseline_revision",
+            "7390d33f4ac297cd28138c8e1ece38f60b278660",
+        ),
+        (
+            "api_surface_map_revision",
+            "2c7f2dd883cbbac1df6581f65673cf23eb40ee3d",
+        ),
+    ] {
+        if authority_revisions.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("A3.1 authority revision {key} must be {expected}"));
+        }
+    }
+
+    let a1_a2_join = object(audit, "a1_a2_join");
+    for (key, expected) in [
+        (
+            "a1_inventory_commit",
+            "b89b713164e161ca58697e17d129229c94e2254e",
+        ),
+        (
+            "a2_canonical_json_commit",
+            "bf5bdd619a087e8a9aef1c983726cbee7adea7fd",
+        ),
+        ("a1_content_baseline_revision", BASELINE_REVISION),
+        (
+            "prior_executable_evidence_state",
+            "EXECUTED_AT_A1_A2_REVISIONS_NOT_RERUN_BY_A3_1",
+        ),
+        (
+            "a3_1_evidence_kind",
+            "STATIC_SOURCE_AND_ARTIFACT_AUDIT_ONLY",
+        ),
+    ] {
+        if a1_a2_join.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("A3.1 A1/A2 join {key} must be {expected}"));
+        }
+    }
+    for (key, expected) in [
+        ("grammar_construct_count", 23),
+        ("typed_corpus_file_count", 13),
+        ("diagnostic_contract_count", 10),
+        ("resource_contract_count", 8),
+    ] {
+        if a1_a2_join.get(key).and_then(Value::as_u64) != Some(expected) {
+            return Err(format!("A3.1 A1/A2 join {key} must be {expected}"));
+        }
+    }
+    if a1_a2_join
+        .get("all_corpus_fingerprints_match_current_files")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Err("A3.1 A1/A2 join must preserve current corpus fingerprints".to_owned());
+    }
+
+    let pin_refresh = object(audit, "source_pin_refresh");
+    if pin_refresh
+        .get("previous_path_count")
+        .and_then(Value::as_u64)
+        != Some(17)
+        || pin_refresh
+            .get("current_path_count")
+            .and_then(Value::as_u64)
+            != Some(32)
+        || pin_refresh
+            .get("refreshed_stale_path_count")
+            .and_then(Value::as_u64)
+            != Some(6)
+        || pin_refresh
+            .get("added_path_count")
+            .and_then(Value::as_u64)
+            != Some(15)
+        || pin_refresh
+            .get("sorted_path_projection_sha256")
+            .and_then(Value::as_str)
+            != Some(A3_SOURCE_PIN_PATHS_SHA256)
+        || array(
+            audit.get("source_pin_refresh").expect("source pin refresh"),
+            "refreshed_stale_paths",
+        )
+        .len()
+            != 6
+        || array(audit.get("source_pin_refresh").expect("source pin refresh"), "added_paths")
+            .len()
+            != 15
+    {
+        return Err("A3.1 source-pin refresh counts or projection drifted".to_owned());
+    }
+    let expected_refreshed_paths: BTreeSet<String> = [
+        "Cargo.lock",
+        "Cargo.toml",
+        "TESTING_FOR_AGENTS.md",
+        "examples/metadata.json",
+        "src/bin/asupersync.rs",
+        "src/lab/mod.rs",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    let expected_added_paths: BTreeSet<String> = [
+        ".github/workflows/methodology-gates.yml",
+        "artifacts/api_surface_map_v1.json",
+        "artifacts/dependency_capability_baseline_v1.json",
+        "artifacts/dependency_capability_registry_v1.json",
+        "pnpm-workspace.yaml",
+        "scripts/provision_kafka_test_env.rs",
+        "scripts/validate_npm_pack_smoke.sh",
+        "scripts/validate_package_build.sh",
+        "src/conformance/mod.rs",
+        "src/http/h1/codec.rs",
+        "src/observability/diagnostics.rs",
+        "tests/examples_metadata_contract.rs",
+        "tests/phase6_methodology_gate_contract.rs",
+        "tests/scenario_yaml_capability_inventory_contract.rs",
+        "tools/demos/time_travel.yaml",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if string_set(
+        audit.get("source_pin_refresh").expect("source pin refresh"),
+        "refreshed_stale_paths",
+    ) != expected_refreshed_paths
+        || string_set(
+            audit.get("source_pin_refresh").expect("source pin refresh"),
+            "added_paths",
+        ) != expected_added_paths
+    {
+        return Err("A3.1 source-pin refresh path sets drifted".to_owned());
+    }
+
+    let dependency_edges = array(audit, "dependency_edges");
+    let expected_dependency_edges: BTreeSet<String> = [
+        "SCN-A3-EDGE-FRANKENLAB-NORMAL",
+        "SCN-A3-EDGE-ROOT-CLI-NORMAL",
+        "SCN-A3-EDGE-ROOT-DEV",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if dependency_edges.len() != 3
+        || row_ids(dependency_edges, "edge_id") != expected_dependency_edges
+    {
+        return Err("A3.1 must freeze the exact three direct serde_yaml edges".to_owned());
+    }
+    for (edge_id, package, edge_kind, manifest_path, declaration, activation, default_profile) in [
+        (
+            "SCN-A3-EDGE-ROOT-CLI-NORMAL",
+            "asupersync",
+            "OPTIONAL_NORMAL",
+            "Cargo.toml",
+            "serde_yaml = { version = \"0.9\", optional = true }",
+            "cli -> dep:serde_yaml",
+            false,
+        ),
+        (
+            "SCN-A3-EDGE-ROOT-DEV",
+            "asupersync",
+            "DEV",
+            "Cargo.toml",
+            "serde_yaml = \"0.9\"",
+            "root tests and adjacent workflow contract",
+            false,
+        ),
+        (
+            "SCN-A3-EDGE-FRANKENLAB-NORMAL",
+            "frankenlab",
+            "NORMAL",
+            "frankenlab/Cargo.toml",
+            "serde_yaml = \"0.9\"",
+            "frankenlab binary and tests",
+            true,
+        ),
+    ] {
+        let row = find_row(dependency_edges, "edge_id", edge_id);
+        for (key, expected) in [
+            ("package", package),
+            ("edge_kind", edge_kind),
+            ("manifest_path", manifest_path),
+            ("declaration", declaration),
+            ("activation", activation),
+            ("evidence_state", "SOURCE_BASELINED"),
+        ] {
+            if row.get(key).and_then(Value::as_str) != Some(expected) {
+                return Err(format!("A3.1 dependency edge {edge_id} {key} drifted"));
+            }
+        }
+        if row
+            .get("default_profile_includes_edge")
+            .and_then(Value::as_bool)
+            != Some(default_profile)
+        {
+            return Err(format!("A3.1 dependency edge {edge_id} profile drifted"));
+        }
+    }
+    let locked = object(audit, "locked_dependency");
+    for (key, expected) in [
+        ("package", "serde_yaml"),
+        ("version", "0.9.34+deprecated"),
+        (
+            "checksum",
+            "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47",
+        ),
+        ("backend_package", "unsafe-libyaml"),
+        ("backend_version", "0.2.11"),
+        (
+            "backend_checksum",
+            "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861",
+        ),
+    ] {
+        if locked.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("locked dependency {key} must be {expected}"));
+        }
+    }
+
+    let consumer_scope = object(audit, "consumer_matrix_scope");
+    for (key, expected) in [
+        (
+            "included_surface",
+            "EVERY_TRACKED_RUST_SOURCE_WITH_DIRECT_SERDE_YAML_SYNTAX",
+        ),
+        (
+            "writer_scope",
+            "EVERY_CURRENT_EXPLICIT_YAML_WRITER_FOUND_BY_STATIC_SOURCE_INVENTORY",
+        ),
+        ("inventory_state", "FROZEN"),
+        ("evidence_state", "SOURCE_BASELINED"),
+    ] {
+        if consumer_scope.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("A3.1 consumer scope {key} must be {expected}"));
+        }
+    }
+    for (key, expected) in [
+        ("included_direct_source_count", 7),
+        ("included_live_semantic_consumer_count", 6),
+        ("included_documentation_only_reference_count", 1),
+        ("included_live_production_loader_count", 2),
+        ("included_adjacent_semantic_parser_count", 1),
+    ] {
+        if consumer_scope.get(key).and_then(Value::as_u64) != Some(expected) {
+            return Err(format!("A3.1 consumer scope {key} must be {expected}"));
+        }
+    }
+    if consumer_scope
+        .get("raw_references_do_not_retain_serde_yaml")
+        .and_then(Value::as_bool)
+        != Some(true)
+        || !text(
+            audit.get("consumer_matrix_scope").expect("consumer matrix scope"),
+            "raw_reference_policy",
+        )
+        .contains("excluded from the direct parser/reference matrix")
+    {
+        return Err("A3.1 raw-reference exclusion must remain explicit".to_owned());
+    }
+
+    let consumers = array(audit, "consumer_matrix");
+    let expected_consumers: BTreeSet<String> = [
+        "SCN-A3-CONSUMER-A1-CONTRACT",
+        "SCN-A3-CONSUMER-ADOPTION-FUNNEL",
+        "SCN-A3-CONSUMER-FRANKENLAB",
+        "SCN-A3-CONSUMER-METHODOLOGY-WORKFLOW",
+        "SCN-A3-CONSUMER-ROOT-CLI",
+        "SCN-A3-CONSUMER-ROOT-INTEGRATION",
+        "SCN-A3-CONSUMER-RUNNER-DOC-EXAMPLE",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if consumers.len() != 7 || row_ids(consumers, "consumer_id") != expected_consumers {
+        return Err("A3.1 consumer matrix identity set drifted".to_owned());
+    }
+    for (consumer_id, category, path, dependency_edge, operation, bound, evidence_state) in [
+        (
+            "SCN-A3-CONSUMER-ROOT-CLI",
+            "PRODUCTION_SCENARIO_LOADER",
+            "src/bin/asupersync.rs",
+            Some("SCN-A3-EDGE-ROOT-CLI-NORMAL"),
+            "WHOLE_FILE_READ_THEN_TYPED_DESERIALIZE",
+            "NONE",
+            "SOURCE_BASELINED",
+        ),
+        (
+            "SCN-A3-CONSUMER-FRANKENLAB",
+            "PRODUCTION_SCENARIO_LOADER",
+            "frankenlab/src/main.rs",
+            Some("SCN-A3-EDGE-FRANKENLAB-NORMAL"),
+            "WHOLE_FILE_READ_THEN_TYPED_DESERIALIZE",
+            "NONE",
+            "SOURCE_BASELINED",
+        ),
+        (
+            "SCN-A3-CONSUMER-ROOT-INTEGRATION",
+            "TEST_SCENARIO_LOADER_AND_WRITER",
+            "tests/frankenlab_integration.rs",
+            Some("SCN-A3-EDGE-ROOT-DEV"),
+            "TYPED_DESERIALIZE_AND_TEST_ONLY_SERIALIZE",
+            "FIXTURE_ONLY_NO_APPLICATION_POLICY",
+            "EXISTING_TEST",
+        ),
+        (
+            "SCN-A3-CONSUMER-ADOPTION-FUNNEL",
+            "TEST_SCENARIO_LOADER",
+            "frankenlab/tests/adoption_funnel.rs",
+            Some("SCN-A3-EDGE-FRANKENLAB-NORMAL"),
+            "WHOLE_FILE_READ_THEN_TYPED_DESERIALIZE",
+            "FIXTURE_ONLY_NO_APPLICATION_POLICY",
+            "EXISTING_TEST",
+        ),
+        (
+            "SCN-A3-CONSUMER-A1-CONTRACT",
+            "TEST_GRAMMAR_AND_CORPUS_CONTRACT",
+            "tests/scenario_yaml_capability_inventory_contract.rs",
+            Some("SCN-A3-EDGE-ROOT-DEV"),
+            "TYPED_DESERIALIZE_AND_STATIC_SOURCE_ASSERTIONS",
+            "FIXTURE_ONLY_NO_APPLICATION_POLICY",
+            "SOURCE_BASELINED",
+        ),
+        (
+            "SCN-A3-CONSUMER-METHODOLOGY-WORKFLOW",
+            "ADJACENT_SEMANTIC_YAML_PARSER",
+            "tests/phase6_methodology_gate_contract.rs",
+            Some("SCN-A3-EDGE-ROOT-DEV"),
+            "WHOLE_FILE_READ_THEN_VALUE_DESERIALIZE",
+            "FIXTURE_ONLY_NO_APPLICATION_POLICY",
+            "EXISTING_TEST",
+        ),
+        (
+            "SCN-A3-CONSUMER-RUNNER-DOC-EXAMPLE",
+            "DOCUMENTATION_ONLY_YAML_EXAMPLE",
+            "src/lab/scenario_runner.rs",
+            None,
+            "DOCUMENTED_TYPED_DESERIALIZE_NOT_LIVE_LOADER",
+            "NOT_APPLICABLE_DOCUMENTATION_ONLY",
+            "SOURCE_BASELINED",
+        ),
+    ] {
+        let row = find_row(consumers, "consumer_id", consumer_id);
+        for (key, expected) in [
+            ("category", category),
+            ("path", path),
+            ("operation", operation),
+            ("application_input_bound", bound),
+            ("evidence_state", evidence_state),
+        ] {
+            if row.get(key).and_then(Value::as_str) != Some(expected) {
+                return Err(format!("A3.1 consumer {consumer_id} {key} drifted"));
+            }
+        }
+        if row.get("dependency_edge_id").and_then(Value::as_str) != dependency_edge {
+            return Err(format!("A3.1 consumer {consumer_id} dependency edge drifted"));
+        }
+    }
+    let doc_reference = find_row(
+        consumers,
+        "consumer_id",
+        "SCN-A3-CONSUMER-RUNNER-DOC-EXAMPLE",
+    );
+    if doc_reference
+        .get("documented_dependency_name")
+        .and_then(Value::as_str)
+        != Some("serde_yaml")
+    {
+        return Err("A3.1 documentation reference must not masquerade as an edge".to_owned());
+    }
+    let production_loader_count = consumers
+        .iter()
+        .filter(|row| text(row, "category") == "PRODUCTION_SCENARIO_LOADER")
+        .count();
+    if production_loader_count != 2
+        || consumers
+            .iter()
+            .filter(|row| text(row, "category") == "PRODUCTION_SCENARIO_LOADER")
+            .any(|row| text(row, "application_input_bound") != "NONE")
+    {
+        return Err(
+            "both production loaders must remain present and application-unbounded".to_owned(),
+        );
+    }
+
+    let expected_semantic_sources: BTreeSet<String> = [
+        "frankenlab/src/main.rs",
+        "frankenlab/tests/adoption_funnel.rs",
+        "src/bin/asupersync.rs",
+        "src/lab/scenario_runner.rs",
+        "tests/frankenlab_integration.rs",
+        "tests/phase6_methodology_gate_contract.rs",
+        "tests/scenario_yaml_capability_inventory_contract.rs",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if string_set(audit, "semantic_serde_yaml_source_allowset") != expected_semantic_sources {
+        return Err("direct serde_yaml source allowset drifted".to_owned());
+    }
+
+    let writers = array(audit, "writer_matrix");
+    let expected_writers: BTreeSet<String> = [
+        "SCN-A3-WRITER-CONFORMANCE-MANIFEST",
+        "SCN-A3-WRITER-DIAGNOSTIC-SNAPSHOT",
+        "SCN-A3-WRITER-HTTP-SNAPSHOT",
+        "SCN-A3-WRITER-KAFKA-COMPOSE",
+        "SCN-A3-WRITER-PRODUCTION-SCENARIO",
+        "SCN-A3-WRITER-TEST-SCENARIO",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if writers.len() != 6 || row_ids(writers, "writer_id") != expected_writers {
+        return Err("A3.1 writer matrix identity set drifted".to_owned());
+    }
+    for (writer_id, category, path, operation, retains_serde_yaml, evidence_state) in [
+        (
+            "SCN-A3-WRITER-PRODUCTION-SCENARIO",
+            "PRODUCTION_SCENARIO_YAML_WRITER",
+            None,
+            "ABSENT",
+            false,
+            "EXPLICIT_UNSUPPORTED",
+        ),
+        (
+            "SCN-A3-WRITER-TEST-SCENARIO",
+            "TEST_SCENARIO_YAML_WRITER",
+            Some("tests/frankenlab_integration.rs"),
+            "serde_yaml::to_string for typed round trip",
+            true,
+            "EXISTING_TEST",
+        ),
+        (
+            "SCN-A3-WRITER-KAFKA-COMPOSE",
+            "ADJACENT_RAW_YAML_WRITER",
+            Some("scripts/provision_kafka_test_env.rs"),
+            "write static Docker Compose YAML text",
+            false,
+            "SOURCE_BASELINED",
+        ),
+        (
+            "SCN-A3-WRITER-CONFORMANCE-MANIFEST",
+            "ADJACENT_TEST_MANUAL_YAML_WRITER",
+            Some("src/conformance/mod.rs"),
+            "render_conformance_manifest_yaml builds a deterministic test snapshot",
+            false,
+            "EXISTING_TEST",
+        ),
+        (
+            "SCN-A3-WRITER-HTTP-SNAPSHOT",
+            "ADJACENT_TEST_YAML_SNAPSHOT_WRITER",
+            Some("src/http/h1/codec.rs"),
+            "insta::assert_yaml_snapshot in test module",
+            false,
+            "EXISTING_TEST",
+        ),
+        (
+            "SCN-A3-WRITER-DIAGNOSTIC-SNAPSHOT",
+            "ADJACENT_TEST_YAML_SNAPSHOT_WRITER",
+            Some("src/observability/diagnostics.rs"),
+            "insta::assert_yaml_snapshot in test module",
+            false,
+            "EXISTING_TEST",
+        ),
+    ] {
+        let row = find_row(writers, "writer_id", writer_id);
+        for (key, expected) in [
+            ("category", category),
+            ("operation", operation),
+            ("evidence_state", evidence_state),
+        ] {
+            if row.get(key).and_then(Value::as_str) != Some(expected) {
+                return Err(format!("A3.1 writer {writer_id} {key} drifted"));
+            }
+        }
+        if row.get("path").and_then(Value::as_str) != path
+            || row.get("retains_serde_yaml_edge").and_then(Value::as_bool)
+                != Some(retains_serde_yaml)
+        {
+            return Err(format!("A3.1 writer {writer_id} source join drifted"));
+        }
+    }
+    let production_writer = find_row(
+        writers,
+        "writer_id",
+        "SCN-A3-WRITER-PRODUCTION-SCENARIO",
+    );
+    if text(production_writer, "operation") != "ABSENT"
+        || production_writer
+            .get("retains_serde_yaml_edge")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return Err("A3.1 must not claim a production Scenario YAML writer".to_owned());
+    }
+
+    let grammar = array(inventory, "grammar_constructs");
+    let partition = object(audit, "grammar_partition");
+    let mut partition_ids = BTreeSet::new();
+    for key in [
+        "accepted_or_accepted_with_documented_projection",
+        "rejected_by_typed_parse",
+        "parsed_then_rejected_semantically",
+        "parser_internal_boundaries",
+        "typed_deserialization_behavior_boundaries",
+    ] {
+        for id in string_set(audit.get("grammar_partition").expect("grammar partition"), key) {
+            if !partition_ids.insert(id.clone()) {
+                return Err(format!("grammar partition duplicates {id}"));
+            }
+        }
+    }
+    if partition.get("construct_count").and_then(Value::as_u64) != Some(23)
+        || partition
+            .get("partition_is_disjoint_and_complete")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || partition_ids != row_ids(grammar, "construct_id")
+    {
+        return Err("A3.1 grammar partition must be the exact 23-row A1 set".to_owned());
+    }
+    let expected_accepted: BTreeSet<String> = [
+        "SCN-YAML-ANCHOR-ALIAS",
+        "SCN-YAML-COMMENTS",
+        "SCN-YAML-FLOW-COLLECTIONS",
+        "SCN-YAML-HEX-OCTAL-BINARY-INTEGER",
+        "SCN-YAML-MAPPING",
+        "SCN-YAML-MERGE-KEY",
+        "SCN-YAML-NULL-IN-OPTION",
+        "SCN-YAML-NULL-IN-STRING",
+        "SCN-YAML-QUOTED-AND-BLOCK-STRINGS",
+        "SCN-YAML-SEQUENCE",
+        "SCN-YAML-TAGGED-SCALAR",
+        "SCN-YAML-U64-MAX",
+        "SCN-YAML-UNICODE",
+        "SCN-YAML-UNKNOWN-FIELD",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    let expected_rejected: BTreeSet<String> = [
+        "SCN-YAML-DUPLICATE-MAPPING-KEY",
+        "SCN-YAML-EMPTY-DOCUMENT",
+        "SCN-YAML-LEGACY-YES-NO-BOOL",
+        "SCN-YAML-MULTI-DOCUMENT",
+        "SCN-YAML-U64-OVERFLOW",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    for (key, expected_ids) in [
+        (
+            "accepted_or_accepted_with_documented_projection",
+            expected_accepted,
+        ),
+        ("rejected_by_typed_parse", expected_rejected),
+        (
+            "parsed_then_rejected_semantically",
+            ["SCN-YAML-NAN-INFINITY"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        ),
+        (
+            "parser_internal_boundaries",
+            ["SCN-YAML-ALIAS-REPETITION", "SCN-YAML-RECURSION"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        ),
+        (
+            "typed_deserialization_behavior_boundaries",
+            ["SCN-YAML-ARBITRARY-TAGS"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        ),
+    ] {
+        if string_set(audit.get("grammar_partition").expect("grammar partition"), key)
+            != expected_ids
+        {
+            return Err(format!("A3.1 grammar bucket {key} drifted"));
+        }
+    }
+
+    let corpus_join = object(audit, "corpus_join");
+    if corpus_join
+        .get("required_file_count")
+        .and_then(Value::as_u64)
+        != Some(13)
+        || corpus_join
+            .get("root_example_count")
+            .and_then(Value::as_u64)
+            != Some(10)
+        || corpus_join
+            .get("frankenlab_example_count")
+            .and_then(Value::as_u64)
+            != Some(3)
+        || corpus_join
+            .get("all_current_fingerprints_match")
+            .and_then(Value::as_bool)
+            != Some(true)
+    {
+        return Err("A3.1 corpus join must preserve all thirteen current files".to_owned());
+    }
+
+    let unknown_fields = object(audit, "unknown_field_contract");
+    if unknown_fields
+        .get("root_typed_struct")
+        .and_then(Value::as_str)
+        != Some("ACCEPT_AND_IGNORE")
+        || unknown_fields
+            .get("nested_typed_structs")
+            .and_then(Value::as_str)
+            != Some("ACCEPT_AND_IGNORE")
+        || unknown_fields
+            .get("deny_unknown_fields_present")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || unknown_fields
+            .get("tightening_requires_owner_policy")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || unknown_fields
+            .get("owner_policy_approved")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || string_set(
+            audit.get("unknown_field_contract").expect("unknown field contract"),
+            "preserved_extension_maps",
+        )
+            != ["faults[].args", "metadata", "participants[].properties"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+    {
+        return Err("A3.1 unknown-field policy drifted or was tightened".to_owned());
+    }
+
+    let diagnostics = array(audit, "diagnostic_matrix");
+    let expected_diagnostic_surfaces: BTreeSet<String> = [
+        "SCN-A3-DIAGNOSTIC-FRANKENLAB",
+        "SCN-A3-DIAGNOSTIC-ORACLE-AND-REPLAY",
+        "SCN-A3-DIAGNOSTIC-PARSER-BOUNDARIES",
+        "SCN-A3-DIAGNOSTIC-ROOT-CLI",
+        "SCN-A3-DIAGNOSTIC-SEMANTIC",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if row_ids(diagnostics, "surface_id") != expected_diagnostic_surfaces {
+        return Err("A3.1 diagnostic surface identities drifted".to_owned());
+    }
+    for (surface_id, contract_ids, behavior, evidence_state) in [
+        (
+            "SCN-A3-DIAGNOSTIC-ROOT-CLI",
+            ["SCN-DIAG-READ-ASUP", "SCN-DIAG-PARSE-ASUP"],
+            "structured scenario_parse_error USER_ERROR with path, parser text and available location, plus generic hint",
+            "SOURCE_BASELINED",
+        ),
+        (
+            "SCN-A3-DIAGNOSTIC-FRANKENLAB",
+            ["SCN-DIAG-READ-FRANKEN", "SCN-DIAG-PARSE-FRANKEN"],
+            "plain string with path, I/O or parser text and available location, plus generic hint",
+            "SOURCE_BASELINED",
+        ),
+        (
+            "SCN-A3-DIAGNOSTIC-SEMANTIC",
+            ["SCN-DIAG-SEMANTIC", "SCN-DIAG-VERSION"],
+            "aggregate field-like validation paths without YAML source spans",
+            "EXISTING_TEST",
+        ),
+        (
+            "SCN-A3-DIAGNOSTIC-ORACLE-AND-REPLAY",
+            ["SCN-DIAG-REPLAY-DIVERGENCE", "SCN-DIAG-UNKNOWN-ORACLE"],
+            "unknown oracles are rejected; runner owns ASUP-E401 while both CLI adapters omit that token",
+            "SOURCE_BASELINED",
+        ),
+        (
+            "SCN-A3-DIAGNOSTIC-PARSER-BOUNDARIES",
+            ["SCN-DIAG-DUPLICATE", "SCN-DIAG-MULTI-DOCUMENT"],
+            "duplicate keys are located and multiple documents are rejected",
+            "SOURCE_BASELINED",
+        ),
+    ] {
+        let row = find_row(diagnostics, "surface_id", surface_id);
+        let expected_contract_ids: BTreeSet<String> =
+            contract_ids.into_iter().map(str::to_owned).collect();
+        if string_set(row, "contract_ids") != expected_contract_ids
+            || text(row, "behavior") != behavior
+            || text(row, "evidence_state") != evidence_state
+            || row
+                .get("yaml_source_spans_for_semantic_errors")
+                .and_then(Value::as_bool)
+                != Some(false)
+        {
+            return Err(format!("A3.1 diagnostic surface {surface_id} drifted"));
+        }
+    }
+    let diagnostic_ids: BTreeSet<String> = diagnostics
+        .iter()
+        .flat_map(|row| string_set(row, "contract_ids"))
+        .collect();
+    let diagnostic_assignment_count: usize = diagnostics
+        .iter()
+        .map(|row| array(row, "contract_ids").len())
+        .sum();
+    if diagnostics.len() != 5
+        || diagnostic_assignment_count != 10
+        || diagnostic_ids != row_ids(array(inventory, "diagnostic_contracts"), "diagnostic_id")
+    {
+        return Err("A3.1 diagnostic matrix must cover all ten A1 contracts".to_owned());
+    }
+
+    let limits = array(audit, "application_limit_matrix");
+    let expected_limits: BTreeSet<String> = [
+        "SCN-A3-LIMIT-ALIAS-REPETITION",
+        "SCN-A3-LIMIT-DOCUMENT-BYTES",
+        "SCN-A3-LIMIT-FAULT-COUNT",
+        "SCN-A3-LIMIT-INCLUDE-PATH",
+        "SCN-A3-LIMIT-MAPPING-COUNT",
+        "SCN-A3-LIMIT-NESTING",
+        "SCN-A3-LIMIT-PARSE-WORK",
+        "SCN-A3-LIMIT-RUNTIME-STEPS",
+        "SCN-A3-LIMIT-SCALAR-LENGTH",
+        "SCN-A3-LIMIT-SEQUENCE-COUNT",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if limits.len() != 10 || row_ids(limits, "limit_id") != expected_limits {
+        return Err("A3.1 application-limit matrix identity set drifted".to_owned());
+    }
+    for (limit_id, policy, finite_replacement_bound_required) in [
+        ("SCN-A3-LIMIT-DOCUMENT-BYTES", "NONE", true),
+        ("SCN-A3-LIMIT-SCALAR-LENGTH", "NONE", true),
+        ("SCN-A3-LIMIT-MAPPING-COUNT", "NONE", true),
+        ("SCN-A3-LIMIT-SEQUENCE-COUNT", "NONE", true),
+        ("SCN-A3-LIMIT-PARSE-WORK", "NONE", true),
+        ("SCN-A3-LIMIT-NESTING", "NONE", true),
+        ("SCN-A3-LIMIT-ALIAS-REPETITION", "NONE", true),
+        (
+            "SCN-A3-LIMIT-INCLUDE-PATH",
+            "PER_ENTRY_SEMANTIC_VALIDATION_ONLY",
+            false,
+        ),
+        (
+            "SCN-A3-LIMIT-FAULT-COUNT",
+            "OPTIONAL_AUTHOR_SELECTED_POST_PARSE_CAP",
+            false,
+        ),
+        (
+            "SCN-A3-LIMIT-RUNTIME-STEPS",
+            "OPTIONAL_EXECUTION_CONTROL_NOT_PARSE_BOUND",
+            false,
+        ),
+    ] {
+        let row = find_row(limits, "limit_id", limit_id);
+        if text(row, "current_application_policy") != policy
+            || row
+                .get("finite_replacement_bound_required")
+                .and_then(Value::as_bool)
+                != Some(finite_replacement_bound_required)
+        {
+            return Err(format!("A3.1 limit policy {limit_id} drifted"));
+        }
+    }
+    for limit_id in [
+        "SCN-A3-LIMIT-DOCUMENT-BYTES",
+        "SCN-A3-LIMIT-MAPPING-COUNT",
+        "SCN-A3-LIMIT-PARSE-WORK",
+        "SCN-A3-LIMIT-SCALAR-LENGTH",
+        "SCN-A3-LIMIT-SEQUENCE-COUNT",
+    ] {
+        let row = find_row(limits, "limit_id", limit_id);
+        if text(row, "current_application_policy") != "NONE"
+            || row
+                .get("finite_replacement_bound_required")
+                .and_then(Value::as_bool)
+                != Some(true)
+            || row
+                .get("independent_unsat_witness")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+        {
+            return Err(format!("{limit_id} must retain its finite-bound contradiction"));
+        }
+    }
+    for limit_id in ["SCN-A3-LIMIT-NESTING", "SCN-A3-LIMIT-ALIAS-REPETITION"] {
+        let row = find_row(limits, "limit_id", limit_id);
+        if text(row, "current_application_policy") != "NONE"
+            || row
+                .get("incumbent_internal_limit")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+        {
+            return Err(format!("{limit_id} must distinguish parser-internal policy"));
+        }
+    }
+    for limit_id in [
+        "SCN-A3-LIMIT-INCLUDE-PATH",
+        "SCN-A3-LIMIT-FAULT-COUNT",
+        "SCN-A3-LIMIT-RUNTIME-STEPS",
+    ] {
+        if find_row(limits, "limit_id", limit_id)
+            .get("post_parse_or_execution_control")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            return Err(format!("{limit_id} must retain its non-parse control boundary"));
+        }
+    }
+
+    let decision = object(audit, "satisfiability_decision");
+    for (key, expected) in [
+        ("satisfiability", "UNSATISFIABLE_UNDER_CURRENT_ACCEPTANCE"),
+        ("policy_resolution", "OWNER_POLICY_REQUIRED"),
+        ("required_disposition", "KEEP_INCUMBENT"),
+    ] {
+        if decision.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("A3.1 decision {key} must be {expected}"));
+        }
+    }
+    if decision
+        .get("owner_policy_approved")
+        .and_then(Value::as_bool)
+        != Some(false)
+        || decision
+            .get("owned_candidate_present")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || decision
+            .get("all_currently_accepted_documents_must_remain_accepted")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || decision
+            .get("all_replacement_bounds_must_be_finite")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || decision
+            .get("witness_families_are_flat_and_semantically_valid")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || decision
+            .get("dependency_exit_allowed")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return Err("A3.1 satisfiability premises must fail closed to KEEP".to_owned());
+    }
+
+    let unresolved = array(audit, "unresolved_rows");
+    let expected_unresolved: BTreeSet<String> = [
+        "SCN-A3-UNRESOLVED-CONSUMER-CUTOVER",
+        "SCN-A3-UNRESOLVED-DIAGNOSTIC-PARITY",
+        "SCN-A3-UNRESOLVED-GRAMMAR-DIFFERENTIAL",
+        "SCN-A3-UNRESOLVED-OWNED-PARSER",
+        "SCN-A3-UNRESOLVED-OWNED-WRITER",
+        "SCN-A3-UNRESOLVED-OWNER-INPUT-POLICY",
+        "SCN-A3-UNRESOLVED-WRITER-PARITY",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if unresolved.len() != 7 || row_ids(unresolved, "row_id") != expected_unresolved {
+        return Err("A3.1 unresolved row identities drifted".to_owned());
+    }
+    for (row_id, owner, state) in [
+        (
+            "SCN-A3-UNRESOLVED-OWNER-INPUT-POLICY",
+            "product owner",
+            "MISSING",
+        ),
+        (
+            "SCN-A3-UNRESOLVED-OWNED-PARSER",
+            "future replacement campaign",
+            "ABSENT",
+        ),
+        (
+            "SCN-A3-UNRESOLVED-OWNED-WRITER",
+            "future replacement campaign",
+            "ABSENT",
+        ),
+        (
+            "SCN-A3-UNRESOLVED-GRAMMAR-DIFFERENTIAL",
+            "future replacement campaign",
+            "NOT_RUN",
+        ),
+        (
+            "SCN-A3-UNRESOLVED-DIAGNOSTIC-PARITY",
+            "future replacement campaign",
+            "NOT_PROVEN",
+        ),
+        (
+            "SCN-A3-UNRESOLVED-WRITER-PARITY",
+            "future replacement campaign",
+            "NOT_PROVEN",
+        ),
+        (
+            "SCN-A3-UNRESOLVED-CONSUMER-CUTOVER",
+            "asupersync-5z2scg.5.5",
+            "NOT_AUTHORIZED",
+        ),
+    ] {
+        let row = find_row(unresolved, "row_id", row_id);
+        if text(row, "owner") != owner
+            || text(row, "state") != state
+            || row.get("blocking").and_then(Value::as_bool) != Some(true)
+        {
+            return Err(format!("A3.1 unresolved row {row_id} drifted"));
+        }
+    }
+    let handoff = object(audit, "downstream_handoff");
+    if handoff
+        .get("on_missing_or_regressed_row")
+        .and_then(Value::as_str)
+        != Some("KEEP_INCUMBENT")
+        || handoff
+            .get("dependency_exit_allowed")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || !text(audit, "no_claim_boundary").contains("only A5")
+    {
+        return Err("A3.1 handoff and no-claim boundary must remain fail closed".to_owned());
     }
     Ok(())
 }
@@ -336,6 +1333,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     if text(inventory, "no_claim_boundary").trim().is_empty() {
         return Err("top-level no-claim boundary is required".to_owned());
     }
+    validate_a3_acceptance_satisfiability(inventory)?;
     Ok(())
 }
 
@@ -344,8 +1342,10 @@ fn inventory_is_complete_source_pinned_and_zero_unknown() {
     let inventory = artifact();
     validate_inventory(&inventory).unwrap_or_else(|error| panic!("{error}"));
 
+    let mut paths = BTreeSet::new();
     for pin in array(&inventory, "source_pins") {
         let path = text(pin, "path");
+        assert!(paths.insert(path.to_owned()), "duplicate source pin {path}");
         let bytes = read_repo_bytes(path);
         let digest = hex::encode(Sha256::digest(&bytes));
         assert_eq!(digest, text(pin, "sha256"), "{path} source pin drifted");
@@ -356,6 +1356,13 @@ fn inventory_is_complete_source_pinned_and_zero_unknown() {
             "{path} line count drifted"
         );
     }
+    assert_eq!(paths.len(), 32, "A3.1 must retain 32 current source pins");
+    let path_projection = paths.into_iter().collect::<Vec<_>>().join("\n") + "\n";
+    assert_eq!(
+        hex::encode(Sha256::digest(path_projection.as_bytes())),
+        A3_SOURCE_PIN_PATHS_SHA256,
+        "A3.1 sorted source-pin path projection drifted",
+    );
 }
 
 #[test]
@@ -386,6 +1393,31 @@ fn authority_profiles_and_live_loader_routes_are_truthful() {
         Some("KEEP_UNTIL_PARITY")
     );
 
+    let baseline = parse_repo_json(CAPABILITY_BASELINE_PATH);
+    let baseline_capability = find_row(
+        array(&baseline, "capability_baselines"),
+        "capability_id",
+        CAPABILITY_ID,
+    );
+    assert_eq!(
+        text(baseline_capability, "baseline_state"),
+        "EXECUTABLE_PARTIAL_BLOCKING"
+    );
+    assert_eq!(
+        baseline_capability
+            .get("cutover_eligible")
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+
+    let api_map = parse_repo_json(API_SURFACE_MAP_PATH);
+    let api_map_text = api_map.to_string();
+    assert!(
+        api_map_text.contains("lab_scenario_yaml")
+            && api_map_text.contains("lab::ScenarioRunner"),
+        "API surface map must retain the YAML scenario journey"
+    );
+
     let root_manifest = read_repo_file("Cargo.toml");
     let franken_manifest = read_repo_file("frankenlab/Cargo.toml");
     assert!(root_manifest.contains("\"dep:serde_yaml\""));
@@ -407,6 +1439,119 @@ fn authority_profiles_and_live_loader_routes_are_truthful() {
     assert_eq!(OracleRegistry::reported_names().len(), 24);
     assert!(OracleRegistry::reported_names().contains(&"quiescence"));
     assert!(OracleRegistry::reported_names().contains(&"obligation_leak"));
+}
+
+#[test]
+fn a3_current_consumers_writers_bounds_and_keep_decision_are_source_bound() {
+    let inventory = artifact();
+    validate_a3_acceptance_satisfiability(&inventory)
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    let root_cli = read_repo_file("src/bin/asupersync.rs");
+    let root_loader = source_item(&root_cli, "fn load_scenario(path: &Path)");
+    assert!(root_loader.contains("fs::read_to_string(path)"));
+    assert!(root_loader.contains("serde_yaml::from_str(&yaml)"));
+    assert!(root_loader.contains("\"scenario_parse_error\""));
+    assert!(root_cli.contains("fn load_scenario_parse_error_is_user_error("));
+    assert!(root_cli.contains("fn lab_validate_json_uses_output_writer_and_user_error("));
+
+    let franken_cli = read_repo_file("frankenlab/src/main.rs");
+    let franken_parser = source_item(&franken_cli, "fn parse_scenario(path: &Path, yaml: &str)");
+    let franken_loader = source_item(&franken_cli, "fn load_scenario(path: &Path)");
+    assert!(franken_parser.contains("serde_yaml::from_str(yaml)"));
+    assert!(franken_loader.contains("fs::read_to_string(path)"));
+    assert!(franken_loader.contains("parse_scenario(path, &yaml)"));
+    assert!(franken_cli.contains("fn find_scenarios_dir("));
+    assert!(franken_cli.contains("fn collect_yaml_files("));
+
+    for (surface, body) in [
+        ("root loader", root_loader),
+        ("frankenlab parser", franken_parser),
+        ("frankenlab loader", franken_loader),
+    ] {
+        for forbidden_bound_marker in [
+            "MAX_DOCUMENT",
+            "MAX_SCALAR",
+            "MAX_COLLECTION",
+            "MAX_PARSE_WORK",
+            "metadata(path)",
+        ] {
+            assert!(
+                !body.contains(forbidden_bound_marker),
+                "{surface} gained {forbidden_bound_marker}; refresh A3.1 bounds and decision"
+            );
+        }
+    }
+
+    for workflow_call in [
+        "let scenario = load_scenario(&args.scenario)?;",
+        "parse_scenario(path, raw).map(MinimizeInput::ScenarioYaml)",
+    ] {
+        assert!(
+            root_cli.contains(workflow_call) || franken_cli.contains(workflow_call),
+            "missing current workflow route {workflow_call}"
+        );
+    }
+
+    let scenario = read_repo_file("src/lab/scenario.rs");
+    assert!(scenario.contains("pub description: String"));
+    assert!(scenario.contains("pub participants: Vec<Participant>"));
+    assert!(scenario.contains("pub metadata: BTreeMap<String, String>"));
+    assert!(!scenario.contains("deny_unknown_fields"));
+    assert!(!scenario.contains("validate_description"));
+    assert!(!scenario.contains("validate_metadata"));
+    assert!(scenario.contains("if include.path.len() > 255"));
+    assert!(scenario.contains("pub max_fault_events: Option<usize>"));
+    assert!(scenario.contains("pub max_steps: Option<u64>"));
+
+    let integration = read_repo_file("tests/frankenlab_integration.rs");
+    let adoption = read_repo_file("frankenlab/tests/adoption_funnel.rs");
+    let methodology = read_repo_file("tests/phase6_methodology_gate_contract.rs");
+    let workflow = read_repo_file(".github/workflows/methodology-gates.yml");
+    assert!(integration.contains("serde_yaml::to_string(&scenario)"));
+    assert!(integration.contains("serde_yaml::from_str(&raw)"));
+    assert!(adoption.contains("serde_yaml::from_str(&yaml)"));
+    assert!(methodology.contains("serde_yaml::from_str(&workflow_text)"));
+    assert!(methodology.contains(".github/workflows/methodology-gates.yml"));
+    assert!(workflow.contains("pull_request:"));
+    assert!(!root_cli.contains("serde_yaml::to_string"));
+    assert!(!franken_cli.contains("serde_yaml::to_string"));
+
+    let kafka_writer = read_repo_file("scripts/provision_kafka_test_env.rs");
+    let conformance_writer = read_repo_file("src/conformance/mod.rs");
+    let http_snapshot = read_repo_file("src/http/h1/codec.rs");
+    let diagnostic_snapshot = read_repo_file("src/observability/diagnostics.rs");
+    assert!(kafka_writer.contains("docker-compose-kafka-test.yml"));
+    assert!(conformance_writer.contains("fn render_conformance_manifest_yaml("));
+    assert!(http_snapshot.contains("insta::assert_yaml_snapshot!"));
+    assert!(diagnostic_snapshot.contains("insta::assert_yaml_snapshot!"));
+
+    let root_manifest = read_repo_file("Cargo.toml");
+    let franken_manifest = read_repo_file("frankenlab/Cargo.toml");
+    let lock = read_repo_file("Cargo.lock");
+    assert!(root_manifest.contains("\"dep:serde_yaml\""));
+    assert!(root_manifest.contains("serde_yaml = { version = \"0.9\", optional = true }"));
+    assert!(root_manifest.contains("serde_yaml = \"0.9\""));
+    assert!(franken_manifest.contains("serde_yaml = \"0.9\""));
+    assert!(lock.contains("name = \"serde_yaml\"\nversion = \"0.9.34+deprecated\""));
+    assert!(lock.contains("name = \"unsafe-libyaml\"\nversion = \"0.2.11\""));
+
+    let audit = inventory
+        .get("a3_acceptance_satisfiability_audit")
+        .expect("A3.1 audit");
+    let decision = object(audit, "satisfiability_decision");
+    assert_eq!(
+        text(decision, "satisfiability"),
+        "UNSATISFIABLE_UNDER_CURRENT_ACCEPTANCE"
+    );
+    assert_eq!(text(decision, "policy_resolution"), "OWNER_POLICY_REQUIRED");
+    assert_eq!(text(decision, "required_disposition"), "KEEP_INCUMBENT");
+    assert_eq!(
+        decision
+            .get("dependency_exit_allowed")
+            .and_then(Value::as_bool),
+        Some(false)
+    );
 }
 
 #[test]
@@ -766,9 +1911,15 @@ fn documentation_workflows_and_no_claim_boundary_are_complete() {
         CAPABILITY_ID,
         "CAP-LAB-DETERMINISM",
         BEAD_ID,
+        A3_BEAD_ID,
         BASELINE_REVISION,
+        A3_CAPTURED_REVISION,
         "KEEP_UNTIL_PARITY",
         "KEEP_INCUMBENT",
+        "UNSATISFIABLE_UNDER_CURRENT_ACCEPTANCE",
+        "OWNER_POLICY_REQUIRED",
+        "dependency_exit_allowed=false",
+        "A3.1 did not rerun",
         "13 files",
         "validation-only",
         "does not schedule an application workload",
@@ -807,7 +1958,7 @@ fn documentation_workflows_and_no_claim_boundary_are_complete() {
 }
 
 #[test]
-fn fail_closed_mutations_reject_cutover_unknown_missing_gap_and_schema_drift() {
+fn fail_closed_mutations_reject_cutover_unknown_missing_surface_bound_and_policy_drift() {
     let inventory = artifact();
 
     let mut cutover = inventory.clone();
@@ -828,6 +1979,45 @@ fn fail_closed_mutations_reject_cutover_unknown_missing_gap_and_schema_drift() {
     let mut schema_drift = inventory.clone();
     schema_drift["typed_schema"]["root_field_count"] = Value::from(15);
     assert!(validate_inventory(&schema_drift).is_err());
+
+    let mut missing_consumer = inventory.clone();
+    missing_consumer["a3_acceptance_satisfiability_audit"]["consumer_matrix"]
+        .as_array_mut()
+        .expect("consumer matrix")
+        .pop();
+    assert!(validate_inventory(&missing_consumer).is_err());
+
+    let mut false_application_bound = inventory.clone();
+    let limits = false_application_bound["a3_acceptance_satisfiability_audit"]
+        ["application_limit_matrix"]
+        .as_array_mut()
+        .expect("application limit matrix");
+    let bytes = limits
+        .iter_mut()
+        .find(|row| {
+            row.get("limit_id").and_then(Value::as_str)
+                == Some("SCN-A3-LIMIT-DOCUMENT-BYTES")
+        })
+        .expect("document byte limit row");
+    bytes["current_application_policy"] = Value::String("FINITE".to_owned());
+    assert!(validate_inventory(&false_application_bound).is_err());
+
+    let mut tightened_unknowns = inventory.clone();
+    tightened_unknowns["a3_acceptance_satisfiability_audit"]["unknown_field_contract"]
+        ["root_typed_struct"] = Value::String("REJECT".to_owned());
+    assert!(validate_inventory(&tightened_unknowns).is_err());
+
+    let mut invented_owner_policy = inventory.clone();
+    invented_owner_policy["a3_acceptance_satisfiability_audit"]["satisfiability_decision"]
+        ["owner_policy_approved"] = Value::Bool(true);
+    assert!(validate_inventory(&invented_owner_policy).is_err());
+
+    let mut false_satisfiability = inventory.clone();
+    false_satisfiability["a3_acceptance_satisfiability_audit"]["satisfiability_decision"]
+        ["satisfiability"] = Value::String("SATISFIABLE".to_owned());
+    false_satisfiability["a3_acceptance_satisfiability_audit"]["satisfiability_decision"]
+        ["dependency_exit_allowed"] = Value::Bool(true);
+    assert!(validate_inventory(&false_satisfiability).is_err());
 
     let mut unrouted = inventory;
     unrouted["known_gaps"][0]["owner_bead"] = Value::String(String::new());

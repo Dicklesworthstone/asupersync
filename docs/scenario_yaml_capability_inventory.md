@@ -211,13 +211,145 @@ parse failure cannot expose a partial `Scenario`. They nevertheless read the
 entire file without application-level size or work limits. The root replay
 artifact path uses direct `fs::write`, not atomic temp-write, sync, and rename.
 
+## A3.1 current-surface and acceptance-satisfiability audit
+
+`asupersync-5z2scg.5.3.1` refreshed the live source at revision
+`207a435d59bad452239caa773f3a7c64c8b5edbc`. This is a static source and
+artifact audit. A3.1 did not rerun the A1/A2 executable evidence and does not
+promote the parent A3 decision to a terminal cutover receipt.
+
+The refresh found six stale A1 source pins (`Cargo.toml`, `Cargo.lock`,
+`src/lab/mod.rs`, `src/bin/asupersync.rs`, `examples/metadata.json`, and
+`TESTING_FOR_AGENTS.md`) and refreshed them. It also pins the semantic adjacent
+consumer, its workflow input, all currently known YAML writer classes, the
+selected adjacent-classification anchors, and the registry/baseline/API-map
+authorities. The source-pin inventory now contains 32 unique tracked current
+paths. Untracked local lockfiles are outside this pin inventory. All 13 Scenario
+corpus files still match their A1 hashes, line counts, and byte counts.
+
+### Current dependency edges
+
+| Edge | Profile | Current declaration | Consequence |
+| --- | --- | --- | --- |
+| root optional normal | `asupersync --features cli` | `serde_yaml = { version = "0.9", optional = true }`, activated by `cli -> dep:serde_yaml` | retains the root production loader; absent from the default library profile |
+| root dev | root tests | `serde_yaml = "0.9"` | retains Scenario grammar/corpus tests and the adjacent workflow parser |
+| frankenlab normal | `frankenlab` binary and tests | `serde_yaml = "0.9"` | retains the second production loader and adoption tests |
+
+The lock still resolves `serde_yaml 0.9.34+deprecated` (checksum
+`6a8b1a…b47`) through `unsafe-libyaml 0.2.11` (checksum `673aac…861`).
+This is inventory, not a dependency-safety or vulnerability claim.
+
+### Consumer and writer matrix
+
+| Stable surface | Class | Read/write path | Application input bound |
+| --- | --- | --- | --- |
+| `SCN-A3-CONSUMER-ROOT-CLI` | production Scenario loader | whole-file `read_to_string`, then `serde_yaml::from_str::<Scenario>` for run/validate/replay/explore | none |
+| `SCN-A3-CONSUMER-FRANKENLAB` | production Scenario loader | the same whole-file parse path for run/validate/replay/explore, minimize YAML fallback, and demo discovery | none |
+| `SCN-A3-CONSUMER-ROOT-INTEGRATION` | test Scenario loader and writer | fixture parse plus test-only `serde_yaml::to_string` round trip | fixture-only; no application policy |
+| `SCN-A3-CONSUMER-ADOPTION-FUNNEL` | test Scenario loader | whole-file fixture parse | fixture-only; no application policy |
+| `SCN-A3-CONSUMER-A1-CONTRACT` | grammar/corpus contract | typed positive and negative parses over the frozen 23-row grammar and 13 files | fixture-only; no application policy |
+| `SCN-A3-CONSUMER-METHODOLOGY-WORKFLOW` | adjacent semantic YAML parser | `.github/workflows/methodology-gates.yml` to `serde_yaml::Value` | fixture-only; no application policy |
+| `SCN-A3-CONSUMER-RUNNER-DOC-EXAMPLE` | ignored documentation example | demonstrates a typed parse but is not a live loader | not applicable |
+
+The exact direct `serde_yaml::` source allowset is the root CLI, the
+frankenlab binary, the root integration test, the frankenlab adoption test,
+the A1 contract, the methodology workflow contract, and the ignored runner
+documentation example. The documentation example names `serde_yaml`, but does
+not activate or retain a dependency edge. Raw text and path assertions over
+examples metadata, `pnpm-workspace.yaml`, and workflow names do not interpret
+YAML or retain `serde_yaml`; the time-travel YAML is an orphan document. Those
+surfaces remain classified by A1's adjacent-file inventory and selected source
+pins, but are outside this direct parser-acceptance consumer matrix.
+
+No production Scenario YAML writer or dump command exists. The only typed
+Scenario writer is the test round trip. Separate
+adjacent writers are a raw Docker Compose fixture generator, a deterministic
+test-only conformance-manifest renderer, and two test-only Insta YAML snapshot
+surfaces; none is a Scenario writer.
+
+### Frozen acceptance and diagnostics
+
+The A3.1 audit carries forward all 23 A1 grammar rows without widening their
+claim. Fourteen are accepted (some with a documented projection such as
+comment discard, alias resolution, or unknown-field discard), five are typed
+parse rejections, `.nan`/infinity parse and are then rejected by probability
+validation, and recursion plus alias repetition are incumbent parser-internal
+boundaries. The remaining arbitrary-tag row records only the frozen
+no-implicit-code-execution behavior of typed deserialization; it does not add
+another acceptance witness or make a broad security claim. The partition is
+disjoint and complete.
+
+Unknown root and nested typed-struct fields remain accepted and ignored because
+the structs do not use `deny_unknown_fields`. This is different from the three
+preserved extension maps: `metadata`, `participants[].properties`, and
+`faults[].args`. Tightening unknown-field behavior would narrow the accepted
+language and therefore requires an explicit owner policy; A3.1 records no such
+approval.
+
+The root CLI still returns structured `scenario_parse_error` user errors with
+path context, parser text and available parser location plus a generic hint.
+Frankenlab still returns plain strings with equivalent path/parser context.
+Semantic validation reports field-like paths without YAML source spans.
+Unknown-oracle rejection remains separate. The runner owns `[ASUP-E401]` for
+replay divergence, while both CLI adapters still reconstruct text without that
+token. A3.1 freezes these facts; it does not prove a replacement diagnostic.
+
+### Application-limit matrix
+
+| Dimension | Current application policy | Why another control does not satisfy it |
+| --- | --- | --- |
+| document bytes | none | both production loaders allocate/read the whole file before parsing |
+| scalar length | none | `id`, `description`, metadata values, and other strings have no general application maximum |
+| mapping count | none | `metadata` and other maps have no universal application entry limit |
+| sequence count | none | participants and other sequences have no universal application item limit |
+| total parse work | none | no application work budget surrounds either parse |
+| nesting depth | none | serde_yaml's recursion counter starts at 128, but that is an incumbent-internal guard rather than an application policy |
+| alias repetition | none | serde_yaml's repetition guard is likewise parser-internal |
+| include path | per-entry semantic validation | the 255-byte path check occurs after parsing and does not cap document or include count; includes are not resolved |
+| fault count | optional author-selected post-parse cap | `max_fault_events` constrains only faults and only when present |
+| runtime steps | optional execution control | `lab.max_steps` defaults to 100,000 and may be `null`; it is not a parse bound |
+
+### Formal satisfiability result
+
+Let `L_current` be the documents for which either current application loader
+returns a typed `Scenario`. The replacement requirement simultaneously says:
+
+1. every document in `L_current` must remain accepted; and
+2. the owned replacement must apply finite application byte, depth, count, and
+   work bounds.
+
+Those requirements are `UNSATISFIABLE_UNDER_CURRENT_ACCEPTANCE` without a
+policy change. For any proposed finite byte or scalar bound `N`, an otherwise
+valid flat Scenario can use a `description` longer than `N`. For any finite
+mapping bound, an otherwise valid `metadata` map can contain more than `N`
+unique entries. For any finite sequence bound, an otherwise valid Scenario can
+contain more than `N` uniquely named participants. The current loaders define
+no application rule rejecting those witness families, and each family can stay
+flat, so the incumbent recursion guard does not resolve the contradiction.
+
+The policy result is therefore `OWNER_POLICY_REQUIRED`; no owner policy receipt
+exists. The required A3.1 disposition is `KEEP_INCUMBENT`, with
+`dependency_exit_allowed=false`, `owned_parser_present=false`, and
+`owned_writer_present=false`. This is not an assertion that finite bounds are
+undesirable. It means adopting them changes the current accepted language and
+needs a separately approved product decision before replacement work can claim
+parity.
+
+### A3 handoff
+
+A3.2 owns the durable fail-closed `KEEP_INCUMBENT` receipt. A4 may continue
+additive YAML/JSON authoring, diagnostics, migration, example, and include-truth
+work, but may not narrow YAML acceptance. A5 remains the sole terminal cutover
+authority and can act only after owner-approved bounds and complete
+SAME-or-BETTER evidence. Any missing or regressed row keeps the incumbent.
+
 ## Child routing
 
 | Child | Frozen responsibility | Current evidence |
 | --- | --- | --- |
 | A1 | loaders, schema, grammar, corpus, workflows, diagnostics, consumption, gaps | executed contract |
 | A2 | one versioned typed model and additive canonical JSON | executed contract |
-| A3 | incumbent KEEP or complete bounded owned parser/writer parity | planned |
+| A3 | incumbent KEEP or complete bounded owned parser/writer parity | A3.1 static audit complete; A3.2 durable receipt pending |
 | A4 | located diagnostics, migration, examples, include truth, atomic output, docs | planned |
 | A5 | real validate/run/explore/replay journeys and terminal KEEP-or-cutover decision | planned |
 
@@ -243,7 +375,7 @@ The artifact routes sixteen fail-closed gaps:
 | `SCN-GAP-11` | unknown fields are ignored | A3 |
 | `SCN-GAP-12` | time-travel demo YAML is orphaned and not the schema | A4 |
 | `SCN-GAP-13` | root metadata omits the three frankenlab examples | A4 |
-| `SCN-GAP-14` | no typed YAML/JSON equivalence proof | A3 |
+| `SCN-GAP-14` | no full-corpus typed YAML/JSON equivalence proof | A3 |
 | `SCN-GAP-15` | semantic spans and stable CLI replay code are incomplete | A4 |
 | `SCN-GAP-16` | replay artifact output is non-atomic | A4 |
 
@@ -273,12 +405,17 @@ checked scenarios and workflows; they do not close the routed execution gaps.
 
 ## No-claim boundary
 
-This A1 packet proves a source-pinned, zero-`UNKNOWN` inventory and executable
-parser/typed-corpus baseline only. It does not implement JSON input, canonical
-output, an owned YAML parser, include merging, network or cancellation
-simulation, participant workloads, full fault effects, atomic artifact output,
-resource-policy bounds, stable located diagnostics, broad workspace health,
-performance, or permission to remove `serde_yaml`, `serde`, any field, error,
-document, workflow, or dependency.
+This A1/A2/A3.1 packet combines the earlier executable inventory/canonical-JSON
+evidence with a current static acceptance-satisfiability audit. A3.1 did not
+rerun those executable lanes or implement an owned YAML parser or production
+Scenario YAML writer. It proves no complete parity, performance, resource,
+security, broad-health, release, or terminal decision, and authorizes no input
+narrowing, dependency or file removal, tracker closure, or cutover. It also does
+not implement include
+merging, network or cancellation simulation, participant workloads, full fault
+effects, atomic artifact output, resource-policy bounds, or stable located
+semantic diagnostics. `KEEP_INCUMBENT` and `dependency_exit_allowed=false`
+remain mandatory; only A5 may authorize terminal cutover after owner-approved
+bounds and complete SAME-or-BETTER evidence.
 
 <!-- END SCENARIO YAML CAPABILITY INVENTORY -->
