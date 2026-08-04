@@ -809,9 +809,9 @@
     {
       "adjacent_id": "SCN-ADJACENT-TIME-TRAVEL-DEMO",
       "path": "tools/demos/time_travel.yaml",
-      "sha256": "41f30dd07c70f7e70cc3334ed03cb640fe286403f5868c90791953b12b28c3f7",
-      "line_count": 41,
-      "byte_count": 1325,
+      "sha256": "2f04828fa56c5248053fbb0a280484fae83fb68bdbf50ddbb0477e6500e944c6",
+      "line_count": 45,
+      "byte_count": 1592,
       "classification": "NOT_SCENARIO_SCHEMA_NO_AUTOMATIC_WIRING",
       "root_keys": [
         "schema_version",

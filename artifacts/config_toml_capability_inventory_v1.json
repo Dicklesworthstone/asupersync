@@ -108,8 +108,8 @@
     },
     {
       "path": "docs/adr/dep_plan_adr_004_config_scenario_formats.md",
-      "sha256": "2255312c71b2b861af5542ed5298e78969887ecaef1c999984b8798060785012",
-      "line_count": 166
+      "sha256": "310709cc8c3d7aab1dbf92ea2d3fde41c6deffee1fe0b9725b598875a6d3780c",
+      "line_count": 170
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml",
