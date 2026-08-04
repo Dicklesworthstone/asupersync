@@ -9,7 +9,8 @@
 //! This proves source-pinned loader, typed-schema, observed grammar, checked-in
 //! corpus, canonical JSON, workflow, diagnostic, resource, current YAML
 //! consumers/writers, acceptance-satisfiability, the durable KEEP receipt,
-//! A4/A5 authority handoff, source-level example-registry alignment,
+//! A4/A5 authority handoff, source-level example-registry and GAP-12 claim
+//! truth alignment,
 //! execution-consumption, child-owner, and gap inventories. It does not prove
 //! arbitrary YAML, parser replacement, runtime semantics for validation-only
 //! fields, CLI conversion UX, or permission to remove the incumbent
@@ -26,6 +27,13 @@ use std::path::PathBuf;
 const ARTIFACT_PATH: &str = "artifacts/scenario_yaml_capability_inventory_v1.json";
 const DOC_PATH: &str = "docs/scenario_yaml_capability_inventory.md";
 const ADR_PATH: &str = "docs/adr/dep_plan_adr_004_config_scenario_formats.md";
+const DEPENDENCY_ADR_REGISTRY_PATH: &str = "artifacts/dependency_api_adr_registry_v1.json";
+const DEPENDENCY_ADR_DOC_PATH: &str = "docs/dependency_api_adr_registry.md";
+const DEPENDENCY_ADR_CONTRACT_PATH: &str = "tests/dependency_api_adr_registry_contract.rs";
+const CONFIG_INVENTORY_PATH: &str = "artifacts/config_toml_capability_inventory_v1.json";
+const AUTHOR_GUIDE_PATH: &str = "docs/adoption/getting_started.md";
+const SCENARIO_MODEL_PATH: &str = "src/lab/scenario.rs";
+const ADJACENT_DEMO_PATH: &str = "tools/demos/time_travel.yaml";
 const CAPABILITY_REGISTRY_PATH: &str = "artifacts/dependency_capability_registry_v1.json";
 const CAPABILITY_BASELINE_PATH: &str = "artifacts/dependency_capability_baseline_v1.json";
 const API_SURFACE_MAP_PATH: &str = "artifacts/api_surface_map_v1.json";
@@ -36,6 +44,7 @@ const A3_RECEIPT_BEAD_ID: &str = "asupersync-5z2scg.5.3.2";
 const A3_RECEIPT_ID: &str = "SCN-A3-KEEP-INCUMBENT-V1";
 const A4_BEAD_ID: &str = "asupersync-5z2scg.5.4";
 const A4_PROGRESS_ID: &str = "SCN-A4-GAP-13-REGISTRY-SOURCE-V1";
+const A4_GAP12_PROGRESS_ID: &str = "SCN-A4-GAP-12-CLAIM-TRUTH-V1";
 const EXAMPLES_METADATA_PATH: &str = "examples/metadata.json";
 const EXAMPLES_README_PATH: &str = "examples/README.md";
 const EXAMPLES_METADATA_CONTRACT_PATH: &str = "tests/examples_metadata_contract.rs";
@@ -1974,6 +1983,255 @@ fn validate_a4_source_progress(inventory: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_a4_gap12_source_progress(inventory: &Value) -> Result<(), String> {
+    let progress = inventory
+        .get("a4_gap12_source_progress")
+        .ok_or_else(|| "a4_gap12_source_progress is required".to_owned())?;
+    for (key, expected) in [
+        ("progress_id", A4_GAP12_PROGRESS_ID),
+        ("bead_id", A4_BEAD_ID),
+        ("recorded_date_utc", "2026-08-04"),
+        ("scope", "ADR_CORPUS_AND_AUTHOR_GUIDANCE_TRUTH"),
+        ("gap_id", "SCN-GAP-12"),
+        ("source_state", "SOURCE_ALIGNED_STATIC"),
+        ("execution_state", "NOT_RUN_BY_STATIC_LANE"),
+        ("gap_state", "BLOCKED_GAP"),
+        ("blocker", "FOCUSED_CONTRACTS_NOT_EXECUTED"),
+    ] {
+        if progress.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("A4 GAP-12 progress {key} must be {expected}"));
+        }
+    }
+    if progress
+        .get("source_alignment_complete")
+        .and_then(Value::as_bool)
+        != Some(true)
+        || progress
+            .get("dynamic_contract_executed")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || progress
+            .get("typed_scenario_count")
+            .and_then(Value::as_u64)
+            != Some(13)
+        || string_set(progress, "typed_scenario_roots")
+            != ["examples/scenarios", "frankenlab/examples/scenarios"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+    {
+        return Err("A4 GAP-12 must retain static-only exact typed-corpus truth".to_owned());
+    }
+
+    let adjacent = object(progress, "adjacent_file");
+    for (key, expected) in [
+        ("path", ADJACENT_DEMO_PATH),
+        ("classification", "NOT_SCENARIO_SCHEMA_NO_AUTOMATIC_WIRING"),
+    ] {
+        if adjacent.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("A4 GAP-12 adjacent {key} must be {expected}"));
+        }
+    }
+    for (key, expected) in [
+        ("generic_user_path_loaders_exist", true),
+        ("source_literal_or_discovery_wiring_exists", false),
+        ("benchmark_consumes_path", false),
+        ("test_only_governance_reader_exists", true),
+        ("data_fields_changed", false),
+    ] {
+        if adjacent.get(key).and_then(Value::as_bool) != Some(expected) {
+            return Err(format!("A4 GAP-12 adjacent {key} drifted"));
+        }
+    }
+    let adjacent_inventory = find_row(
+        array(inventory, "adjacent_yaml_files"),
+        "adjacent_id",
+        "SCN-ADJACENT-TIME-TRAVEL-DEMO",
+    );
+    if text(adjacent_inventory, "classification")
+        != "NOT_SCENARIO_SCHEMA_NO_AUTOMATIC_WIRING"
+    {
+        return Err("A4 GAP-12 adjacent classification drifted from inventory".to_owned());
+    }
+    for (key, expected) in [
+        ("generic_user_path_loaders_exist", true),
+        ("source_literal_or_discovery_wiring_exists", false),
+        ("benchmark_consumes_path", false),
+        ("test_only_governance_reader_exists", true),
+    ] {
+        if adjacent_inventory.get(key).and_then(Value::as_bool) != Some(expected) {
+            return Err(format!("adjacent inventory {key} drifted"));
+        }
+    }
+
+    let scenario_json = object(progress, "scenario_json");
+    for (key, expected) in [
+        ("canonical_encoder", "Scenario::to_json"),
+        ("encoder_scope", "LIBRARY_ONLY_TYPED_SCENARIO"),
+        ("cli_json_output_scope", "COMMAND_RESULTS_AND_REPORTS"),
+        ("shared_config_canonical_encoder_state", "NOT_SHIPPED"),
+    ] {
+        if scenario_json.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("A4 GAP-12 scenario_json.{key} must be {expected}"));
+        }
+    }
+    for key in [
+        "cli_accepts_json_scenario",
+        "cli_emits_canonical_json_scenario",
+    ] {
+        if scenario_json.get(key).and_then(Value::as_bool) != Some(false) {
+            return Err(format!("A4 GAP-12 scenario_json.{key} must remain false"));
+        }
+    }
+
+    let guidance = object(progress, "author_guidance");
+    for key in [
+        "yaml_input_only",
+        "unknown_typed_fields_are_ignored",
+        "yaml_merge_keys_are_not_applied",
+        "include_paths_are_validated_not_merged",
+        "validation_only_fields_are_disclosed",
+        "fault_args_trace_disclosure_warning_present",
+        "redacted_flag_is_not_a_scrubber",
+    ] {
+        if guidance.get(key).and_then(Value::as_bool) != Some(true) {
+            return Err(format!("A4 GAP-12 author_guidance.{key} must remain true"));
+        }
+    }
+
+    let expected_paths: BTreeSet<String> = [
+        CONFIG_INVENTORY_PATH,
+        DEPENDENCY_ADR_REGISTRY_PATH,
+        ARTIFACT_PATH,
+        AUTHOR_GUIDE_PATH,
+        ADR_PATH,
+        DEPENDENCY_ADR_DOC_PATH,
+        DOC_PATH,
+        EXAMPLES_README_PATH,
+        SCENARIO_MODEL_PATH,
+        DEPENDENCY_ADR_CONTRACT_PATH,
+        "tests/scenario_yaml_capability_inventory_contract.rs",
+        ADJACENT_DEMO_PATH,
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if string_set(progress, "governed_paths") != expected_paths {
+        return Err("A4 GAP-12 governed path set drifted".to_owned());
+    }
+    for path in expected_paths {
+        let _ = read_repo_file(&path);
+    }
+
+    let preservation = object(progress, "preservation");
+    for key in [
+        "adr_decision_changed",
+        "accepted_yaml_narrowed",
+        "dependency_removed",
+        "yaml_capability_removed",
+        "yaml_file_removed",
+        "scenario_data_changed",
+        "runtime_behavior_changed",
+        "terminal_decision_issued",
+    ] {
+        if preservation.get(key).and_then(Value::as_bool) != Some(false) {
+            return Err(format!("A4 GAP-12 preservation.{key} must remain false"));
+        }
+    }
+
+    let gap = find_row(array(inventory, "known_gaps"), "gap_id", "SCN-GAP-12");
+    if text(gap, "evidence_state") != "BLOCKED_GAP"
+        || text(gap, "progress_pointer") != "a4_gap12_source_progress"
+        || !text(gap, "finding").contains("focused contracts were not executed")
+    {
+        return Err("SCN-GAP-12 must remain fail-closed and point to A4 progress".to_owned());
+    }
+    let a4_child = find_row(
+        array(inventory, "child_capability_rows"),
+        "owner_bead",
+        A4_BEAD_ID,
+    );
+    if !string_set(a4_child, "additional_progress_pointers")
+        .contains("a4_gap12_source_progress")
+    {
+        return Err("A4 child must retain the GAP-12 progress pointer".to_owned());
+    }
+
+    let dependency_registry = parse_repo_json(DEPENDENCY_ADR_REGISTRY_PATH);
+    let dep_adr = find_row(array(&dependency_registry, "adrs"), "adr_id", "DEP-ADR-004");
+    let dep_summary = text(dep_adr, "decision_summary");
+    if !dep_summary.contains("Scenario::to_json")
+        || !dep_summary.contains("shared/config-agnostic canonical encoder")
+        || !dep_summary.contains("CLI `--json` serializes command results")
+    {
+        return Err("DEP-ADR-004 canonical JSON scope drifted".to_owned());
+    }
+    let corpus_evidence = array(
+        dep_adr.get("evidence").expect("DEP-ADR-004 evidence"),
+        "required_evidence_classes",
+    )
+    .iter()
+    .filter_map(Value::as_str)
+    .find(|entry| entry.starts_with("corpus:"))
+    .ok_or_else(|| "DEP-ADR-004 corpus evidence is required".to_owned())?;
+    if !corpus_evidence.contains("ten typed Scenario files in examples/scenarios")
+        || !corpus_evidence.contains("three in frankenlab/examples/scenarios")
+        || corpus_evidence.contains("every file in examples/scenarios")
+    {
+        return Err("DEP-ADR-004 typed corpus evidence drifted".to_owned());
+    }
+    if dep_adr
+        .get("cutover")
+        .and_then(|value| value.get("dependency_exit_allowed"))
+        .and_then(Value::as_bool)
+        != Some(false)
+    {
+        return Err("DEP-ADR-004 must continue to forbid dependency exit".to_owned());
+    }
+
+    let author_guide = read_repo_file(AUTHOR_GUIDE_PATH);
+    for marker in [
+        "This flag does not make the CLI accept a JSON `Scenario`",
+        "Unknown keys at the root or another typed-struct boundary are accepted",
+        "A `<<` merge key is not applied",
+        "Include path extension, length, and character rules are validated",
+        "`golden_projection.redacted: true` does not scrub",
+        "Do not put secrets in scenarios",
+    ] {
+        if !author_guide.contains(marker) {
+            return Err(format!("author guide is missing {marker}"));
+        }
+    }
+    let scenario_model = read_repo_file(SCENARIO_MODEL_PATH);
+    if scenario_model.contains("Included fields are merged")
+        || !scenario_model.contains("do not read, resolve, or")
+        || !scenario_model.contains("must not contain credentials")
+    {
+        return Err("Scenario source documentation drifted from author truth".to_owned());
+    }
+    let adjacent_demo = read_repo_file(ADJACENT_DEMO_PATH);
+    for marker in [
+        "not a typed FrankenLab Scenario",
+        "No current source literal, discovery route, or Make target loads it",
+        "it does not read",
+        "not an input to that",
+    ] {
+        if !adjacent_demo.contains(marker) {
+            return Err(format!("adjacent demo comments are missing {marker}"));
+        }
+    }
+    let dependency_doc = read_repo_file(DEPENDENCY_ADR_DOC_PATH);
+    let scenario_doc = read_repo_file(DOC_PATH);
+    if !dependency_doc.contains("DEP-ADR-004 factual refresh (2026-08-04)")
+        || !scenario_doc.contains("A4 source progress: GAP-12 and author claim truth")
+        || !text(progress, "no_claim_boundary").contains("focused contracts were not executed")
+        || !text(inventory, "no_claim_boundary").contains("SCN-GAP-12")
+    {
+        return Err("A4 GAP-12 docs or no-claim boundary drifted".to_owned());
+    }
+    Ok(())
+}
+
 fn validate_inventory(inventory: &Value) -> Result<(), String> {
     if inventory.get("schema_version").and_then(Value::as_u64) != Some(1) {
         return Err("schema_version must be 1".to_owned());
@@ -2193,6 +2451,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     validate_a3_acceptance_satisfiability(inventory)?;
     validate_a3_keep_incumbent_receipt(inventory)?;
     validate_a4_source_progress(inventory)?;
+    validate_a4_gap12_source_progress(inventory)?;
     Ok(())
 }
 
@@ -2674,21 +2933,63 @@ fn exact_checked_in_typed_corpus_parses_and_validates() {
         asupersync::lab::scenario::ChaosSection::Off
     ));
 
-    let adjacent = read_repo_file("tools/demos/time_travel.yaml");
+    let adjacent = read_repo_file(ADJACENT_DEMO_PATH);
     assert!(
         serde_yaml::from_str::<Scenario>(&adjacent).is_err(),
         "time-travel demo must remain explicitly classified as non-Scenario"
     );
-    let source_reads = [
-        read_repo_file("src/bin/asupersync.rs"),
-        read_repo_file("frankenlab/src/main.rs"),
-        read_repo_file("examples/demo_benchmark.rs"),
+    let adjacent_value: serde_yaml::Value =
+        serde_yaml::from_str(&adjacent).expect("adjacent demo must remain valid YAML");
+    let adjacent_keys: BTreeSet<String> = adjacent_value
+        .as_mapping()
+        .expect("adjacent demo must remain a mapping")
+        .keys()
+        .map(|key| key.as_str().expect("adjacent root keys must be strings").to_owned())
+        .collect();
+    assert_eq!(
+        adjacent_keys,
+        [
+            "description",
+            "expected",
+            "name",
+            "scenario",
+            "schema_version",
+            "seed",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
+    for unchanged_data in [
+        "start: 0",
+        "count: 50000",
+        "num_tasks: 8",
+        "failing_seed: 509",
+        "minimized_element_count: 3",
+    ] {
+        assert!(adjacent.contains(unchanged_data));
+    }
+
+    let root_loader = read_repo_file("src/bin/asupersync.rs");
+    let franken_loader = read_repo_file("frankenlab/src/main.rs");
+    for generic_loader in [&root_loader, &franken_loader] {
+        assert!(generic_loader.contains("fs::read_to_string"));
+        assert!(generic_loader.contains("serde_yaml::from_str"));
+    }
+    let benchmark = read_repo_file("examples/demo_benchmark.rs");
+    assert!(benchmark.contains("const NUM_TASKS: u32 = 8;"));
+    assert!(benchmark.contains("const SEED_COUNT: u64 = 50_000;"));
+    assert!(benchmark.contains("artifacts/demo_golden_checksums.json"));
+    let automatic_wiring = [
+        root_loader,
+        franken_loader,
+        benchmark,
         read_repo_file("Makefile"),
     ]
     .join("\n");
     assert!(
-        !source_reads.contains("tools/demos/time_travel.yaml"),
-        "time-travel YAML gained a live reader and must be reclassified"
+        !automatic_wiring.contains(ADJACENT_DEMO_PATH),
+        "time-travel YAML gained source-literal or discovery wiring and must be reclassified"
     );
 }
 
