@@ -45,8 +45,15 @@ commit are not a runnable broker identity or an interoperability receipt.
 
 The 22 request/response source pairs are selected from Apache Kafka's
 `clients/src/main/resources/common/message` directory at that immutable current
-commit. Their contents have not yet been imported and hashed, so selection is
-not a complete schema projection.
+commit. At the pinned commit, the packet records the Git blob object ID and
+payload byte count for all 44 selected current request/response files. The
+canonical root tree was complete rather than truncated, and the sorted
+path/object-ID/size projection is independently pinned by SHA-256.
+
+Those Git object IDs cover the Git blob header plus exact payload bytes; they
+are not per-file raw-byte SHA-256 security attestations. This establishes
+current-source object identity only. It does not project fields, defaults,
+errors, accepted versions, historical schema coverage, or broker behavior.
 
 ## Reachable API frontier
 
@@ -118,8 +125,9 @@ oldest/current pair. Its output cannot close K2.1 as written.
 
 K2.1 remains open until all of the following are complete:
 
-1. Import and hash every selected current schema and the historical request and
-   response structures required by each oldest-broker candidate.
+1. Project the 44 selected current schema bodies whose Git blob identities are
+   pinned here, and pin and project the historical request and response
+   structures required by each oldest-broker candidate.
 2. Project every field path, order, type, version interval, default,
    nullability, compact encoding, tagged version, and tag identifier.
 3. Project every reachable protocol error and its reviewed downgrade or

@@ -18,9 +18,9 @@ use std::path::{Path, PathBuf};
 const ARTIFACT_PATH: &str = "artifacts/kafka_k2_reachable_schema_broker_matrix_v1.json";
 const DOC_PATH: &str = "docs/kafka_k2_reachable_schema_broker_matrix.md";
 const ARTIFACT_SHA256: &str =
-    "104f56fe22fe537a9267bc8315a66b73a756fe26f4bb4681eb4f69b050739a43";
+    "0b453b88004dd8f9e6acea7d141d60368faf2a3242e8374a4a3638d2b59d2d40";
 const DOC_SHA256: &str =
-    "d669aa8f7d5d984ccf31a1366aa89b900abb2a3ddade534634bf13dffe9a6568";
+    "12c1b04d3fbeed70cbf843e85a5caad8063ae6e46138cb8daaf5905a8e1c2c50";
 
 const DOC_BEGIN: &str = "<!-- BEGIN KAFKA K2.1 REACHABLE SCHEMA BROKER MATRIX -->";
 const DOC_END: &str = "<!-- END KAFKA K2.1 REACHABLE SCHEMA BROKER MATRIX -->";
@@ -50,6 +50,7 @@ const ROOT_KEYS: &[&str] = &[
     "policy",
     "program_id",
     "reachable_api_rows",
+    "schema_source_identity_contract",
     "schema_source_rows",
     "schema_version",
     "static_validation_receipt",
@@ -137,6 +138,203 @@ const EXPECTED_APIS: &[(u64, &str, bool, u64, &str, &str, Option<u64>)] = &[
         Some(0),
     ),
     (72, "PushTelemetry", false, 0, "0", "0", Some(0)),
+];
+
+const SCHEMA_SOURCE_IDENTITY_KEYS: &[&str] = &[
+    "canonical_root_tree",
+    "current_schema_file_count",
+    "historical_schema_file_count",
+    "identity_domain",
+    "identity_scheme",
+    "path_root",
+    "payload_normalization",
+    "recursive_tree_truncated",
+    "schema_pair_count",
+    "sorted_path_object_id_size_projection_sha256",
+    "sorted_projection_encoding",
+    "source_authority_id",
+    "source_commit",
+    "state",
+    "total_payload_byte_count",
+];
+
+const EXPECTED_SCHEMA_SOURCES: &[(u64, &str, &str, u64, &str, u64)] = &[
+    (
+        0,
+        "KAFKA-K2-1-SCHEMA-000-PRODUCE",
+        "3b46a1ff5f46805ce192c90b0025ac85944e0d92",
+        4_011,
+        "adf08e94a35d4719519d0df5652f8f6eb6a816a7",
+        6_128,
+    ),
+    (
+        1,
+        "KAFKA-K2-1-SCHEMA-001-FETCH",
+        "9ebf86ac424c95e2ec0602e505eb38f73565a926",
+        8_063,
+        "36dc05ff60ca421d5efad5032805e5fa38926714",
+        7_753,
+    ),
+    (
+        2,
+        "KAFKA-K2-1-SCHEMA-002-LIST-OFFSETS",
+        "1a2de6ca30a2fa91c32904cd9930682acd86b7d7",
+        3_727,
+        "1407273bf4d8c7e9100faf566542f982a6a402f0",
+        3_372,
+    ),
+    (
+        3,
+        "KAFKA-K2-1-SCHEMA-003-METADATA",
+        "349f88b7c64d2ddbe8003a25a29824f738f4af36",
+        2_958,
+        "07ee7010e5e540845a50816921723ca193e9b40e",
+        6_026,
+    ),
+    (
+        8,
+        "KAFKA-K2-1-SCHEMA-008-OFFSET-COMMIT",
+        "bf15153be0897b3c903d9f554057a25b9b463164",
+        3_952,
+        "0228733ce6bb039bc421af8b541fccc9d28ae24a",
+        3_442,
+    ),
+    (
+        9,
+        "KAFKA-K2-1-SCHEMA-009-OFFSET-FETCH",
+        "5f6ead1ef7cfa876039737fdbe05f04fbe681cca",
+        4_184,
+        "91de93441e5ae1b512cf970143891f4d728bfdff",
+        5_641,
+    ),
+    (
+        10,
+        "KAFKA-K2-1-SCHEMA-010-FIND-COORDINATOR",
+        "2807f40c857af9d46b8582a1d2d98b110f795b83",
+        1_788,
+        "40c43b65f9ccfddc8d224266da55589a7cf8b0ec",
+        3_074,
+    ),
+    (
+        11,
+        "KAFKA-K2-1-SCHEMA-011-JOIN-GROUP",
+        "31afdb1a32ae8dcaf27843d1b1bf553711971df1",
+        3_305,
+        "d2f016f62f66c75b4681db5d12144acef5b046ce",
+        3_405,
+    ),
+    (
+        12,
+        "KAFKA-K2-1-SCHEMA-012-HEARTBEAT",
+        "57ef18e922471dffb1ac4166824598906ef68946",
+        1_733,
+        "280ba1103b437562f8e71ea0374c06eecf71de8e",
+        1_638,
+    ),
+    (
+        13,
+        "KAFKA-K2-1-SCHEMA-013-LEAVE-GROUP",
+        "929f4fb468c95c916eb7e2acb93892e6719c0d06",
+        2_137,
+        "d3c8784b04f790dc3c1aff494d6c70cd0731fa89",
+        2_223,
+    ),
+    (
+        14,
+        "KAFKA-K2-1-SCHEMA-014-SYNC-GROUP",
+        "1b53df27757f28b6709ac8f8ecf7620750003a47",
+        2_726,
+        "4aa17e0d79ad983a9b33af5c0c80f1372e25667f",
+        2_233,
+    ),
+    (
+        17,
+        "KAFKA-K2-1-SCHEMA-017-SASL-HANDSHAKE",
+        "d2189d826ead18f0453a3c451a0c3bbb547a3389",
+        1_313,
+        "a1567c6692169e86cd24b984dd2836a47a8a10cf",
+        1_398,
+    ),
+    (
+        18,
+        "KAFKA-K2-1-SCHEMA-018-API-VERSIONS",
+        "56170c9667350df0b4ac2511075fd832cb608d3a",
+        1_535,
+        "1017f2443604740abad4dea8c1a69076cc6595b2",
+        4_478,
+    ),
+    (
+        22,
+        "KAFKA-K2-1-SCHEMA-022-INIT-PRODUCER-ID",
+        "e8ab48b399b74c833aadb7e80bc8b775d74aa06f",
+        2_764,
+        "c070c92f4e0ed3c31e94354f4bbd9cc5b2923f5f",
+        2_498,
+    ),
+    (
+        23,
+        "KAFKA-K2-1-SCHEMA-023-OFFSET-FOR-LEADER-EPOCH",
+        "dd559bc8777f83c492956e6b0d2f6b26985e91dd",
+        2_820,
+        "f82aa09b7ed843916ca056bd19780e5bcd30502c",
+        2_487,
+    ),
+    (
+        24,
+        "KAFKA-K2-1-SCHEMA-024-ADD-PARTITIONS-TO-TXN",
+        "68a45cdd0aca2a0d3ebcd8c1b118acb92e712911",
+        3_573,
+        "a621740decc14a204ec6632b327494992d0739a1",
+        3_107,
+    ),
+    (
+        25,
+        "KAFKA-K2-1-SCHEMA-025-ADD-OFFSETS-TO-TXN",
+        "9bebc8366cf1db2ccbb41986e2e71b9108499e4d",
+        1_823,
+        "6a713fea1af62325b0b5fb826956201476cdcbb9",
+        1_602,
+    ),
+    (
+        26,
+        "KAFKA-K2-1-SCHEMA-026-END-TXN",
+        "f11c7a3268f131b3842951756de915e019e29dc0",
+        1_884,
+        "7f9017eda74342353dd32fc27ad64ed0d3041d60",
+        2_059,
+    ),
+    (
+        28,
+        "KAFKA-K2-1-SCHEMA-028-TXN-OFFSET-COMMIT",
+        "59a1f05e0972fb51828d33e8c3ff7163bfe646bb",
+        3_793,
+        "9769ed2aa97bb97b9af2e6b88c418e44032a19a1",
+        2_259,
+    ),
+    (
+        36,
+        "KAFKA-K2-1-SCHEMA-036-SASL-AUTHENTICATE",
+        "cdb4247b8a95ac5fe825bfe52be499197660c815",
+        1_234,
+        "edf383b9c58d4980c3d3b293398dc1a1360e0f37",
+        1_731,
+    ),
+    (
+        71,
+        "KAFKA-K2-1-SCHEMA-071-GET-TELEMETRY-SUBSCRIPTIONS",
+        "3f2c5f99e4c0018b605cf83a12ebfff7d3c9a2d5",
+        1_150,
+        "7fc6af81aa896de75e2bcc4ee65ee94534677bca",
+        2_640,
+    ),
+    (
+        72,
+        "KAFKA-K2-1-SCHEMA-072-PUSH-TELEMETRY",
+        "dd39bbf1ce6e93efe316e13d0519844862fd32be",
+        1_693,
+        "56ddfe8bc4737aee1f46a3d28c2c24f104a82d7e",
+        1_314,
+    ),
 ];
 
 const EXTERNAL_SOURCE_ROWS: &[(&str, &str, &str, &str)] = &[
@@ -610,11 +808,93 @@ fn validate_reachable_rows(artifact: &Value) -> Result<(), String> {
 }
 
 fn validate_schema_sources(artifact: &Value) -> Result<(), String> {
+    let identity = artifact
+        .get("schema_source_identity_contract")
+        .ok_or_else(|| "schema_source_identity_contract must exist".to_owned())?;
+    let identity_keys = identity
+        .as_object()
+        .ok_or_else(|| "schema_source_identity_contract must be an object".to_owned())?
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let expected_identity_keys = SCHEMA_SOURCE_IDENTITY_KEYS
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if identity_keys != expected_identity_keys {
+        return Err("schema source identity contract keys changed".to_owned());
+    }
+    expect_text(
+        identity,
+        "source_authority_id",
+        "KAFKA-K2-1-AUTH-APACHE-CURRENT",
+    )?;
+    expect_text(
+        identity,
+        "source_commit",
+        "26b251a451ce941d3d7a55e6487bcb7f16b5ad48",
+    )?;
+    expect_text(
+        identity,
+        "canonical_root_tree",
+        "789c1b8ccd3c1b9d14e718035ae8b3f0a7a66a75",
+    )?;
+    expect_text(
+        identity,
+        "path_root",
+        "clients/src/main/resources/common/message",
+    )?;
+    expect_text(identity, "identity_scheme", "GIT_BLOB_OBJECT_ID_SHA1")?;
+    expect_text(
+        identity,
+        "identity_domain",
+        "git blob header plus exact payload bytes",
+    )?;
+    expect_text(identity, "payload_normalization", "NONE")?;
+    expect_boolean(identity, "recursive_tree_truncated", false)?;
+    expect_number(identity, "schema_pair_count", 22)?;
+    expect_number(identity, "current_schema_file_count", 44)?;
+    expect_number(identity, "historical_schema_file_count", 0)?;
+    expect_number(identity, "total_payload_byte_count", 132_674)?;
+    expect_text(
+        identity,
+        "sorted_projection_encoding",
+        "UTF-8 path TAB object_id TAB payload_byte_count LF, bytewise path sort",
+    )?;
+    expect_text(
+        identity,
+        "sorted_path_object_id_size_projection_sha256",
+        "a41d9f64bf226d638b9673a3ce6f0110ff439a62b605575169b0099bcf300b53",
+    )?;
+    expect_text(
+        identity,
+        "state",
+        "CURRENT_SOURCE_GIT_BLOB_IDENTITIES_PINNED_FIELDS_AND_ERRORS_NOT_PROJECTED",
+    )?;
+
+    let current_authority = array(artifact, "external_authorities")?
+        .iter()
+        .find(|row| {
+            row.get("authority_id").and_then(Value::as_str)
+                == Some("KAFKA-K2-1-AUTH-APACHE-CURRENT")
+        })
+        .ok_or_else(|| "current Apache schema authority is missing".to_owned())?;
+    if text(identity, "source_authority_id")? != text(current_authority, "authority_id")?
+        || text(identity, "source_commit")? != text(current_authority, "commit")?
+    {
+        return Err("schema identity contract does not resolve to its authority".to_owned());
+    }
+    expect_text(
+        current_authority,
+        "content_state",
+        "CURRENT_SCHEMA_GIT_BLOB_IDENTITIES_PINNED_FIELDS_AND_ERRORS_NOT_PROJECTED",
+    )?;
+
     let rows = array(artifact, "schema_source_rows")?;
-    if rows.len() != EXPECTED_APIS.len() {
+    if rows.len() != EXPECTED_SCHEMA_SOURCES.len() {
         return Err(format!(
             "expected {} schema pairs, got {}",
-            EXPECTED_APIS.len(),
+            EXPECTED_SCHEMA_SOURCES.len(),
             rows.len()
         ));
     }
@@ -626,15 +906,68 @@ fn validate_schema_sources(artifact: &Value) -> Result<(), String> {
     if keys != expected {
         return Err("schema pair keys do not match the reachability frontier".to_owned());
     }
+
+    let mut source_paths = BTreeSet::new();
+    let mut projection = Vec::with_capacity(rows.len() * 2);
+    let mut total_payload_byte_count = 0_u64;
     for (api_key, name, ..) in EXPECTED_APIS {
         let row = rows
             .iter()
             .find(|row| row.get("api_key").and_then(Value::as_u64) == Some(*api_key))
             .ok_or_else(|| format!("missing schema pair for API key {api_key}"))?;
+        let expected_source = EXPECTED_SCHEMA_SOURCES
+            .iter()
+            .find(|source| source.0 == *api_key)
+            .ok_or_else(|| format!("missing expected source identity for API key {api_key}"))?;
+        let (_, pair_id, request_object_id, request_bytes, response_object_id, response_bytes) =
+            *expected_source;
         let request = format!("clients/src/main/resources/common/message/{name}Request.json");
         let response = format!("clients/src/main/resources/common/message/{name}Response.json");
+        expect_text(row, "schema_pair_id", pair_id)?;
         expect_text(row, "request_path", &request)?;
+        expect_text(row, "request_git_blob_sha1", request_object_id)?;
+        expect_number(row, "request_byte_count", request_bytes)?;
         expect_text(row, "response_path", &response)?;
+        expect_text(row, "response_git_blob_sha1", response_object_id)?;
+        expect_number(row, "response_byte_count", response_bytes)?;
+
+        for (label, object_id) in [
+            ("request", request_object_id),
+            ("response", response_object_id),
+        ] {
+            if object_id.len() != 40
+                || !object_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            {
+                return Err(format!(
+                    "API key {api_key} {label} Git blob object ID is not 40 lowercase hex digits"
+                ));
+            }
+        }
+        if !source_paths.insert(request.clone()) || !source_paths.insert(response.clone()) {
+            return Err(format!("API key {api_key} reuses a schema source path"));
+        }
+        projection.push((request, request_object_id, request_bytes));
+        projection.push((response, response_object_id, response_bytes));
+        total_payload_byte_count += request_bytes + response_bytes;
+    }
+    if source_paths.len() != 44 || total_payload_byte_count != 132_674 {
+        return Err("schema source path or payload-byte coverage changed".to_owned());
+    }
+    projection.sort_by(|left, right| left.0.cmp(&right.0));
+    let projection = projection
+        .into_iter()
+        .map(|(path, object_id, byte_count)| format!("{path}\t{object_id}\t{byte_count}\n"))
+        .collect::<String>();
+    let projection_sha256 = sha256_bytes(projection.as_bytes());
+    if projection_sha256
+        != text(
+            identity,
+            "sorted_path_object_id_size_projection_sha256",
+        )?
+    {
+        return Err("schema source identity projection digest changed".to_owned());
     }
     Ok(())
 }
@@ -734,6 +1067,15 @@ fn validate_blocked_evidence(artifact: &Value) -> Result<(), String> {
     if gap_ids.len() != 7 {
         return Err("completion gap IDs must be unique".to_owned());
     }
+    let current_projection_gap = gaps
+        .iter()
+        .find(|row| row.get("gap_id").and_then(Value::as_str) == Some("KAFKA-K2-1-GAP-001"))
+        .ok_or_else(|| "current and historical schema projection gap is missing".to_owned())?;
+    expect_text(
+        current_projection_gap,
+        "description",
+        "Project the 44 selected current schema bodies whose Git blob identities are pinned here, and pin and project the historical request and response structures required by each oldest-broker candidate.",
+    )?;
     Ok(())
 }
 
@@ -746,6 +1088,10 @@ fn validate_receipts_and_boundaries(artifact: &Value) -> Result<(), String> {
         ("added_implicit_api_count", 2),
         ("reachable_frontier_api_count", 22),
         ("schema_source_pair_count", 22),
+        ("current_schema_identity_pair_count", 22),
+        ("current_schema_identity_file_count", 44),
+        ("current_schema_identity_total_byte_count", 132_674),
+        ("historical_schema_identity_file_count", 0),
         ("accepted_numeric_range_count", 0),
         ("field_projection_row_count", 0),
         ("error_projection_row_count", 0),
@@ -781,6 +1127,8 @@ fn validate_receipts_and_boundaries(artifact: &Value) -> Result<(), String> {
         "not a complete Kafka request/response schema contract",
         "not accepted production version ranges",
         "No field, default, nullability, tagged-field, or error-code projection is complete",
+        "Pinned Git blob object IDs establish current-source object identity only",
+        "not per-file raw-byte SHA-256 security attestations",
         "No compiler, formatter, test, broker, service, container, network protocol, or remote execution evidence is claimed",
         "does not authorize K2.2",
     ] {
@@ -799,6 +1147,9 @@ fn validate_document(root: &Path) -> Result<(), String> {
     }
     for needle in [
         "static 22-key reachability frontier",
+        "all 44 selected current request/response files",
+        "not per-file raw-byte SHA-256 security attestations",
+        "current-source object identity only",
         "GetTelemetrySubscriptions",
         "PushTelemetry",
         "no numeric range is accepted",
@@ -890,6 +1241,38 @@ fn kafka_k2_packet_rejects_completion_inflation() -> Result<(), String> {
         .ok_or_else(|| "broker mutation target missing".to_owned())?;
     first_broker.insert("state".to_owned(), Value::String("ADMITTED".to_owned()));
     expect_invalid(&admitted_broker, &root, "broker admission without receipt")?;
+
+    let mut changed_blob_identity = artifact.clone();
+    let first_schema = changed_blob_identity
+        .get_mut("schema_source_rows")
+        .and_then(Value::as_array_mut)
+        .and_then(|rows| rows.first_mut())
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "schema source mutation target missing".to_owned())?;
+    first_schema.insert(
+        "request_git_blob_sha1".to_owned(),
+        Value::String("0000000000000000000000000000000000000000".to_owned()),
+    );
+    expect_invalid(
+        &changed_blob_identity,
+        &root,
+        "changed current schema blob identity",
+    )?;
+
+    let mut wrong_source_authority = artifact.clone();
+    let identity = wrong_source_authority
+        .get_mut("schema_source_identity_contract")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "schema identity contract mutation target missing".to_owned())?;
+    identity.insert(
+        "source_authority_id".to_owned(),
+        Value::String("KAFKA-K2-1-AUTH-APACHE-LEGACY-BASIC".to_owned()),
+    );
+    expect_invalid(
+        &wrong_source_authority,
+        &root,
+        "wrong schema source authority",
+    )?;
 
     let mut unblocked_child = artifact;
     let policy = unblocked_child
