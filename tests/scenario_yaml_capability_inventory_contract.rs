@@ -3285,8 +3285,46 @@ fn fail_closed_mutations_reject_cutover_unknown_missing_surface_bound_and_policy
     );
     assert!(validate_inventory(&missing_a4_registration).is_err());
 
+    let mut invented_gap12_execution = inventory.clone();
+    invented_gap12_execution["a4_gap12_source_progress"]["dynamic_contract_executed"] =
+        Value::Bool(true);
+    assert!(validate_inventory(&invented_gap12_execution).is_err());
+
+    let mut premature_gap12_state = inventory.clone();
+    premature_gap12_state["a4_gap12_source_progress"]["gap_state"] =
+        Value::String("EXECUTED".to_owned());
+    assert!(validate_inventory(&premature_gap12_state).is_err());
+
+    let mut tools_as_typed_root = inventory.clone();
+    tools_as_typed_root["a4_gap12_source_progress"]["typed_scenario_roots"]
+        .as_array_mut()
+        .expect("typed scenario roots")
+        .push(Value::String("tools/demos".to_owned()));
+    assert!(validate_inventory(&tools_as_typed_root).is_err());
+
+    let mut gap12_dependency_removal = inventory.clone();
+    gap12_dependency_removal["a4_gap12_source_progress"]["preservation"]
+        ["dependency_removed"] = Value::Bool(true);
+    assert!(validate_inventory(&gap12_dependency_removal).is_err());
+
+    let a4_child_index = array(&inventory, "child_capability_rows")
+        .iter()
+        .position(|row| row.get("owner_bead").and_then(Value::as_str) == Some(A4_BEAD_ID))
+        .expect("A4 child row");
+    let mut missing_gap12_pointer = inventory.clone();
+    missing_gap12_pointer["child_capability_rows"][a4_child_index]
+        ["additional_progress_pointers"]
+        .as_array_mut()
+        .expect("additional A4 progress pointers")
+        .clear();
+    assert!(validate_inventory(&missing_gap12_pointer).is_err());
+
+    let gap13_index = array(&inventory, "known_gaps")
+        .iter()
+        .position(|row| row.get("gap_id").and_then(Value::as_str) == Some("SCN-GAP-13"))
+        .expect("SCN-GAP-13 row");
     let mut premature_a4_gap_closure = inventory.clone();
-    premature_a4_gap_closure["known_gaps"][12]["evidence_state"] =
+    premature_a4_gap_closure["known_gaps"][gap13_index]["evidence_state"] =
         Value::String("EXECUTED".to_owned());
     assert!(validate_inventory(&premature_a4_gap_closure).is_err());
 
