@@ -18,9 +18,9 @@ use std::path::{Path, PathBuf};
 const ARTIFACT_PATH: &str = "artifacts/kafka_k2_reachable_schema_broker_matrix_v1.json";
 const DOC_PATH: &str = "docs/kafka_k2_reachable_schema_broker_matrix.md";
 const ARTIFACT_SHA256: &str =
-    "0b453b88004dd8f9e6acea7d141d60368faf2a3242e8374a4a3638d2b59d2d40";
+    "b58b2c0792d01eaffc7d26e1e2d46b7b25e4ccd39c83a0eaab7d48010500f509";
 const DOC_SHA256: &str =
-    "12c1b04d3fbeed70cbf843e85a5caad8063ae6e46138cb8daaf5905a8e1c2c50";
+    "91f607d3adee71cc9d6cec601026772d58a21d074b6d5fe28948a34a4fabbd9a";
 
 const DOC_BEGIN: &str = "<!-- BEGIN KAFKA K2.1 REACHABLE SCHEMA BROKER MATRIX -->";
 const DOC_END: &str = "<!-- END KAFKA K2.1 REACHABLE SCHEMA BROKER MATRIX -->";
@@ -43,6 +43,9 @@ const ROOT_KEYS: &[&str] = &[
     "external_authorities",
     "field_projection_rows",
     "header_contract",
+    "historical_profile_api_range_rows",
+    "historical_schema_source_contracts",
+    "historical_schema_source_rows",
     "incumbent_source_observations",
     "inventory_state",
     "no_claim_boundaries",
@@ -337,6 +340,317 @@ const EXPECTED_SCHEMA_SOURCES: &[(u64, &str, &str, u64, &str, u64)] = &[
     ),
 ];
 
+const HISTORICAL_CONTRACT_KEYS: &[&str] = &[
+    "api_range_row_count",
+    "blocking_observations",
+    "canonical_root_tree",
+    "covered_api_keys",
+    "full_frontier_blocker",
+    "full_frontier_state",
+    "nested_payload_state",
+    "profile_id",
+    "recursive_tree_truncated",
+    "schema_declaration_model",
+    "semantic_role_projection_encoding",
+    "scope_state",
+    "sorted_path_object_id_size_projection_sha256",
+    "sorted_path_semantic_role_projection_sha256",
+    "sorted_projection_encoding",
+    "source_authority_id",
+    "source_commit",
+    "source_file_count",
+    "source_tree_entry_count",
+    "total_payload_byte_count",
+];
+
+const HISTORICAL_SOURCE_ROW_KEYS: &[&str] = &[
+    "byte_count",
+    "git_blob_sha1",
+    "path",
+    "profile_id",
+    "semantic_role",
+    "source_authority_id",
+];
+
+const HISTORICAL_RANGE_ROW_KEYS: &[&str] = &[
+    "accepted_version_range",
+    "api_key",
+    "api_name",
+    "broker_declared_versions",
+    "incumbent_candidate_intersection",
+    "profile_id",
+    "source_authority_id",
+    "state",
+];
+
+const HISTORICAL_FULL_FRONTIER_BLOCKER_KEYS: &[&str] = &[
+    "accepted_version_range",
+    "api_key",
+    "api_name",
+    "broker_declared_max",
+    "broker_declared_min",
+    "incumbent_max",
+    "incumbent_min",
+    "intersection",
+    "state",
+];
+
+struct ExpectedHistoricalContract {
+    profile_id: &'static str,
+    authority_id: &'static str,
+    commit: &'static str,
+    root_tree: &'static str,
+    tree_entries: u64,
+    schema_model: &'static str,
+    covered_api_keys: &'static [u64],
+    range_rows: u64,
+    source_files: u64,
+    source_bytes: u64,
+    projection_sha256: &'static str,
+    semantic_role_projection_sha256: &'static str,
+    nested_payload_state: &'static str,
+    full_frontier_state: &'static str,
+    blocking_observation: &'static str,
+    source_path_prefix: &'static str,
+}
+
+const EXPECTED_HISTORICAL_CONTRACTS: &[ExpectedHistoricalContract] = &[
+    ExpectedHistoricalContract {
+        profile_id: "KAFKA-K2-1-BROKER-BASIC-LEGACY",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-LEGACY-BASIC",
+        commit: "15bb3961d9171c1c54c4c840a554ce2c76168163",
+        root_tree: "2a734e8136c0c514d4d105cc513cc5b3fb53169c",
+        tree_entries: 842,
+        schema_model: "SCALA_WRITE_PARSE_METHODS_WITH_SHARED_ENVELOPE_AND_LEGACY_MESSAGE_SET",
+        covered_api_keys: &[0, 1, 2, 3],
+        range_rows: 4,
+        source_files: 22,
+        source_bytes: 95_596,
+        projection_sha256:
+            "808a785e9aaaf3794baf77b4cf6a079436064fdb0480c63c00a469a8cac308c3",
+        semantic_role_projection_sha256:
+            "b287fc3b07d99a92fc2fecf508da081971a2e24943a766bc1ca485d60b54f130",
+        nested_payload_state:
+            "LEGACY_MESSAGE_AND_COMPRESSION_SOURCES_PINNED_INTEROPERABILITY_NOT_PROVED",
+        full_frontier_state: "NOT_EVALUATED_PROFILE_SCOPE_ONLY",
+        blocking_observation:
+            "Only keys 0-3 at v0 are covered; full current-facade support is not evaluated.",
+        source_path_prefix: "core/src/main/scala/kafka/",
+    },
+    ExpectedHistoricalContract {
+        profile_id: "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-DEFAULT-FLOOR",
+        commit: "73be1e1168f91ee2a9d68e1d1c75c14018cf7d3a",
+        root_tree: "41ed42d9c90a6d3903e32573eb6f2c4c2d84d2a2",
+        tree_entries: 2_604,
+        schema_model: "CENTRAL_JAVA_PROTOCOL_SCHEMA_ARRAYS_WITH_TYPE_ENCODINGS",
+        covered_api_keys: &[0, 3, 10, 18, 22, 24, 25, 26, 28],
+        range_rows: 9,
+        source_files: 10,
+        source_bytes: 210_904,
+        projection_sha256:
+            "bdd0b4c71280124cda67095fedfada10647d9b310c7ea9ba92e3c6eade0be414",
+        semantic_role_projection_sha256:
+            "8f5f6a0924973f4cf90cd775e124329d6eb5963a679f77ae277e1194b03a9a46",
+        nested_payload_state: "MAGIC_V2_RECORD_PAYLOAD_SOURCES_EXCLUDED_OWNED_BY_K4_1",
+        full_frontier_state: "KNOWN_EMPTY_INTERSECTION_API_23_BROKER_V0_INCUMBENT_V2",
+        blocking_observation:
+            "API 23 OffsetForLeaderEpoch is broker v0 while the incumbent minimum is v2; the intersection is empty.",
+        source_path_prefix: "clients/src/main/java/org/apache/kafka/common/",
+    },
+    ExpectedHistoricalContract {
+        profile_id: "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR",
+        commit: "aaa7af6d4a11b29d3da9c5d6084530b8fa69be64",
+        root_tree: "b53c9e1ce151dc0e21aed0fd65d4e6d3f293c824",
+        tree_entries: 2_874,
+        schema_model: "PER_REQUEST_JAVA_SCHEMA_ARRAYS_WITH_TYPE_ENCODINGS",
+        covered_api_keys: &[17, 36],
+        range_rows: 2,
+        source_files: 14,
+        source_bytes: 118_304,
+        projection_sha256:
+            "2cb5fa14d4be90ac72126ad3ff2f480cbb3cb8c71d786d392ae8ddf6687b4790",
+        semantic_role_projection_sha256:
+            "a6d6df3c0b7c74a8633acb807a1d9bb4bc303537ec9884887afba6847d3d87b4",
+        nested_payload_state: "AUTH_EXCHANGE_ONLY_FULL_SESSION_MATRIX_NOT_PROJECTED",
+        full_frontier_state: "NOT_EVALUATED_PROFILE_SCOPE_ONLY",
+        blocking_observation:
+            "Only keys 17 and 36 are covered for the wrapped authentication exchange; full current-facade support is not evaluated.",
+        source_path_prefix: "clients/src/main/java/org/apache/kafka/common/",
+    },
+];
+
+struct ExpectedHistoricalBlocker {
+    profile_id: &'static str,
+    api_key: u64,
+    api_name: &'static str,
+    broker_min: u64,
+    broker_max: u64,
+    incumbent_min: u64,
+    incumbent_max: u64,
+    state: &'static str,
+}
+
+const EXPECTED_HISTORICAL_BLOCKERS: &[ExpectedHistoricalBlocker] = &[ExpectedHistoricalBlocker {
+    profile_id: "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR",
+    api_key: 23,
+    api_name: "OffsetForLeaderEpoch",
+    broker_min: 0,
+    broker_max: 0,
+    incumbent_min: 2,
+    incumbent_max: 2,
+    state: "EMPTY_INTERSECTION_BLOCKS_FULL_CURRENT_FACADE",
+}];
+
+struct ExpectedHistoricalRange {
+    profile_id: &'static str,
+    authority_id: &'static str,
+    api_key: u64,
+    api_name: &'static str,
+    broker_versions: &'static str,
+    intersection: &'static str,
+    state: &'static str,
+}
+
+const EXPECTED_HISTORICAL_RANGES: &[ExpectedHistoricalRange] = &[
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-BASIC-LEGACY",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-LEGACY-BASIC",
+        api_key: 0,
+        api_name: "Produce",
+        broker_versions: "0",
+        intersection: "0",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-BASIC-LEGACY",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-LEGACY-BASIC",
+        api_key: 1,
+        api_name: "Fetch",
+        broker_versions: "0",
+        intersection: "0",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-BASIC-LEGACY",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-LEGACY-BASIC",
+        api_key: 2,
+        api_name: "ListOffsets",
+        broker_versions: "0",
+        intersection: "0",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-BASIC-LEGACY",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-LEGACY-BASIC",
+        api_key: 3,
+        api_name: "Metadata",
+        broker_versions: "0",
+        intersection: "0",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-DEFAULT-FLOOR",
+        api_key: 0,
+        api_name: "Produce",
+        broker_versions: "0-3",
+        intersection: "0-3",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-DEFAULT-FLOOR",
+        api_key: 3,
+        api_name: "Metadata",
+        broker_versions: "0-4",
+        intersection: "0-4",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-DEFAULT-FLOOR",
+        api_key: 10,
+        api_name: "FindCoordinator",
+        broker_versions: "0-1",
+        intersection: "0-1",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-DEFAULT-FLOOR",
+        api_key: 18,
+        api_name: "ApiVersions",
+        broker_versions: "0-1",
+        intersection: "0-1",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-DEFAULT-FLOOR",
+        api_key: 22,
+        api_name: "InitProducerId",
+        broker_versions: "0",
+        intersection: "0",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-DEFAULT-FLOOR",
+        api_key: 24,
+        api_name: "AddPartitionsToTxn",
+        broker_versions: "0",
+        intersection: "0",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-DEFAULT-FLOOR",
+        api_key: 25,
+        api_name: "AddOffsetsToTxn",
+        broker_versions: "0",
+        intersection: "0",
+        state: "REQUIRED_ADDITIVE_ABSENT_SOURCE_RANGE_ONLY",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-DEFAULT-FLOOR",
+        api_key: 26,
+        api_name: "EndTxn",
+        broker_versions: "0",
+        intersection: "0",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-DEFAULT-FLOOR",
+        api_key: 28,
+        api_name: "TxnOffsetCommit",
+        broker_versions: "0",
+        intersection: "0",
+        state: "REQUIRED_ADDITIVE_ABSENT_SOURCE_RANGE_ONLY",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR",
+        api_key: 17,
+        api_name: "SaslHandshake",
+        broker_versions: "0-1",
+        intersection: "0-1",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+    ExpectedHistoricalRange {
+        profile_id: "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
+        authority_id: "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR",
+        api_key: 36,
+        api_name: "SaslAuthenticate",
+        broker_versions: "0",
+        intersection: "0",
+        state: "CANDIDATE_SOURCE_DERIVED_NOT_ACCEPTED",
+    },
+];
+
 const EXTERNAL_SOURCE_ROWS: &[(&str, &str, &str, &str)] = &[
     (
         "KAFKA-K2-1-AUTH-APACHE-CURRENT",
@@ -520,6 +834,30 @@ fn expect_boolean(value: &Value, key: &str, expected: bool) -> Result<(), String
 
 fn sha256_bytes(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn expect_exact_keys(value: &Value, expected: &[&str], label: &str) -> Result<(), String> {
+    let actual = value
+        .as_object()
+        .ok_or_else(|| format!("{label} must be an object"))?
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let expected = expected.iter().copied().collect::<BTreeSet<_>>();
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "{label} keys mismatch: expected {expected:?}, got {actual:?}"
+        ))
+    }
+}
+
+fn is_lower_hex(value: &str, width: usize) -> bool {
+    value.len() == width
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 fn numeric_array(value: &Value, key: &str) -> Result<Vec<u64>, String> {
@@ -935,11 +1273,7 @@ fn validate_schema_sources(artifact: &Value) -> Result<(), String> {
             ("request", request_object_id),
             ("response", response_object_id),
         ] {
-            if object_id.len() != 40
-                || !object_id
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-            {
+            if !is_lower_hex(object_id, 40) {
                 return Err(format!(
                     "API key {api_key} {label} Git blob object ID is not 40 lowercase hex digits"
                 ));
@@ -968,6 +1302,364 @@ fn validate_schema_sources(artifact: &Value) -> Result<(), String> {
         )?
     {
         return Err("schema source identity projection digest changed".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_historical_schema_sources(artifact: &Value) -> Result<(), String> {
+    let contracts = array(artifact, "historical_schema_source_contracts")?;
+    let source_rows = array(artifact, "historical_schema_source_rows")?;
+    let range_rows = array(artifact, "historical_profile_api_range_rows")?;
+    if contracts.len() != EXPECTED_HISTORICAL_CONTRACTS.len() {
+        return Err(format!(
+            "expected {} historical source contracts, got {}",
+            EXPECTED_HISTORICAL_CONTRACTS.len(),
+            contracts.len()
+        ));
+    }
+    if source_rows.len() != 46 {
+        return Err(format!(
+            "expected 46 historical source rows, got {}",
+            source_rows.len()
+        ));
+    }
+    if range_rows.len() != EXPECTED_HISTORICAL_RANGES.len() {
+        return Err(format!(
+            "expected {} historical API range rows, got {}",
+            EXPECTED_HISTORICAL_RANGES.len(),
+            range_rows.len()
+        ));
+    }
+
+    let external_authorities = array(artifact, "external_authorities")?;
+    let broker_profiles = array(artifact, "broker_profile_rows")?;
+    let reachable_api_rows = array(artifact, "reachable_api_rows")?;
+    let mut all_source_keys = BTreeSet::new();
+    let mut all_object_ids = BTreeSet::new();
+    let mut all_source_bytes = 0_u64;
+    for expected in EXPECTED_HISTORICAL_CONTRACTS {
+        let contract = contracts
+            .iter()
+            .find(|row| row.get("profile_id").and_then(Value::as_str) == Some(expected.profile_id))
+            .ok_or_else(|| {
+                format!(
+                    "missing historical source contract for {}",
+                    expected.profile_id
+                )
+            })?;
+        expect_exact_keys(
+            contract,
+            HISTORICAL_CONTRACT_KEYS,
+            "historical source contract",
+        )?;
+        expect_text(contract, "source_authority_id", expected.authority_id)?;
+        expect_text(contract, "source_commit", expected.commit)?;
+        expect_text(contract, "canonical_root_tree", expected.root_tree)?;
+        expect_number(contract, "source_tree_entry_count", expected.tree_entries)?;
+        expect_boolean(contract, "recursive_tree_truncated", false)?;
+        expect_text(contract, "schema_declaration_model", expected.schema_model)?;
+        if numeric_array(contract, "covered_api_keys")?.as_slice() != expected.covered_api_keys {
+            return Err(format!(
+                "covered historical API keys changed for {}",
+                expected.profile_id
+            ));
+        }
+        expect_number(contract, "api_range_row_count", expected.range_rows)?;
+        expect_number(contract, "source_file_count", expected.source_files)?;
+        expect_number(
+            contract,
+            "total_payload_byte_count",
+            expected.source_bytes,
+        )?;
+        expect_text(
+            contract,
+            "sorted_projection_encoding",
+            "UTF-8 path TAB object_id TAB payload_byte_count LF, bytewise path sort",
+        )?;
+        expect_text(
+            contract,
+            "sorted_path_object_id_size_projection_sha256",
+            expected.projection_sha256,
+        )?;
+        expect_text(
+            contract,
+            "semantic_role_projection_encoding",
+            "UTF-8 path TAB semantic_role LF, bytewise path sort",
+        )?;
+        expect_text(
+            contract,
+            "sorted_path_semantic_role_projection_sha256",
+            expected.semantic_role_projection_sha256,
+        )?;
+        expect_text(
+            contract,
+            "scope_state",
+            "PROFILE_SCOPED_CANDIDATE_SOURCE_IDENTITIES_PINNED_NOT_ACCEPTED",
+        )?;
+        expect_text(
+            contract,
+            "nested_payload_state",
+            expected.nested_payload_state,
+        )?;
+        expect_text(
+            contract,
+            "full_frontier_state",
+            expected.full_frontier_state,
+        )?;
+        let expected_blocker = EXPECTED_HISTORICAL_BLOCKERS
+            .iter()
+            .find(|blocker| blocker.profile_id == expected.profile_id);
+        match expected_blocker {
+            Some(expected_blocker) => {
+                let blocker = contract
+                    .get("full_frontier_blocker")
+                    .ok_or_else(|| "full-frontier blocker must exist".to_owned())?;
+                expect_exact_keys(
+                    blocker,
+                    HISTORICAL_FULL_FRONTIER_BLOCKER_KEYS,
+                    "historical full-frontier blocker",
+                )?;
+                expect_number(blocker, "api_key", expected_blocker.api_key)?;
+                expect_text(blocker, "api_name", expected_blocker.api_name)?;
+                expect_number(
+                    blocker,
+                    "broker_declared_min",
+                    expected_blocker.broker_min,
+                )?;
+                expect_number(
+                    blocker,
+                    "broker_declared_max",
+                    expected_blocker.broker_max,
+                )?;
+                expect_number(blocker, "incumbent_min", expected_blocker.incumbent_min)?;
+                expect_number(blocker, "incumbent_max", expected_blocker.incumbent_max)?;
+                if blocker.get("intersection") != Some(&Value::Null)
+                    || blocker.get("accepted_version_range") != Some(&Value::Null)
+                {
+                    return Err("empty full-frontier blocker gained a range".to_owned());
+                }
+                expect_text(blocker, "state", expected_blocker.state)?;
+                if number(blocker, "broker_declared_max")?
+                    >= number(blocker, "incumbent_min")?
+                {
+                    return Err(
+                        "full-frontier blocker does not encode an empty intersection".to_owned(),
+                    );
+                }
+                let reachable = reachable_api_rows
+                    .iter()
+                    .find(|row| {
+                        row.get("api_key").and_then(Value::as_u64)
+                            == Some(expected_blocker.api_key)
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "full-frontier blocker API {} escaped the reachable frontier",
+                            expected_blocker.api_key
+                        )
+                    })?;
+                expect_text(reachable, "api_name", expected_blocker.api_name)?;
+                expect_number(
+                    reachable,
+                    "librdkafka_client_min",
+                    expected_blocker.incumbent_min,
+                )?;
+                expect_number(
+                    reachable,
+                    "librdkafka_client_max",
+                    expected_blocker.incumbent_max,
+                )?;
+            }
+            None => {
+                if contract.get("full_frontier_blocker") != Some(&Value::Null) {
+                    return Err(format!(
+                        "unexpected full-frontier blocker for {}",
+                        expected.profile_id
+                    ));
+                }
+            }
+        }
+        let observations = array(contract, "blocking_observations")?;
+        if observations.len() != 1
+            || observations[0].as_str() != Some(expected.blocking_observation)
+        {
+            return Err(format!(
+                "blocking observation changed for {}",
+                expected.profile_id
+            ));
+        }
+
+        let authority = external_authorities
+            .iter()
+            .find(|row| {
+                row.get("authority_id").and_then(Value::as_str) == Some(expected.authority_id)
+            })
+            .ok_or_else(|| format!("missing historical authority {}", expected.authority_id))?;
+        expect_text(authority, "commit", expected.commit)?;
+        expect_text(
+            authority,
+            "content_state",
+            "PROFILE_SCOPED_SCHEMA_SOURCE_IDENTITIES_PINNED_FIELDS_AND_ERRORS_NOT_PROJECTED",
+        )?;
+        let profile = broker_profiles
+            .iter()
+            .find(|row| row.get("profile_id").and_then(Value::as_str) == Some(expected.profile_id))
+            .ok_or_else(|| format!("missing broker profile {}", expected.profile_id))?;
+        expect_text(profile, "source_authority_id", expected.authority_id)?;
+        expect_text(profile, "state", "BLOCKED_EXTERNAL")?;
+
+        let profile_sources = source_rows
+            .iter()
+            .filter(|row| {
+                row.get("source_authority_id").and_then(Value::as_str)
+                    == Some(expected.authority_id)
+            })
+            .collect::<Vec<_>>();
+        if profile_sources.len() != usize::try_from(expected.source_files).unwrap_or(usize::MAX) {
+            return Err(format!(
+                "historical source count changed for {}",
+                expected.profile_id
+            ));
+        }
+        let mut projection = Vec::with_capacity(profile_sources.len());
+        let mut semantic_role_projection = Vec::with_capacity(profile_sources.len());
+        let mut profile_source_bytes = 0_u64;
+        for row in profile_sources {
+            expect_exact_keys(row, HISTORICAL_SOURCE_ROW_KEYS, "historical source row")?;
+            expect_text(row, "profile_id", expected.profile_id)?;
+            expect_text(row, "source_authority_id", expected.authority_id)?;
+            let path = text(row, "path")?;
+            if !path.starts_with(expected.source_path_prefix) {
+                return Err(format!(
+                    "historical source path {path} escaped {}",
+                    expected.source_path_prefix
+                ));
+            }
+            let object_id = text(row, "git_blob_sha1")?;
+            if !is_lower_hex(object_id, 40) {
+                return Err(format!(
+                    "historical source {path} has an invalid Git blob object ID"
+                ));
+            }
+            let byte_count = number(row, "byte_count")?;
+            let semantic_role = text(row, "semantic_role")?;
+            if byte_count == 0 {
+                return Err(format!("historical source {path} lacks bounded metadata"));
+            }
+            if !all_source_keys.insert((expected.authority_id.to_owned(), path.to_owned())) {
+                return Err(format!(
+                    "historical authority {} repeats source path {path}",
+                    expected.authority_id
+                ));
+            }
+            profile_source_bytes += byte_count;
+            all_source_bytes += byte_count;
+            all_object_ids.insert(object_id.to_owned());
+            projection.push((path, object_id, byte_count));
+            semantic_role_projection.push((path, semantic_role));
+        }
+        if profile_source_bytes != expected.source_bytes {
+            return Err(format!(
+                "historical source bytes changed for {}",
+                expected.profile_id
+            ));
+        }
+        projection.sort_by(|left, right| left.0.cmp(&right.0));
+        let projection = projection
+            .into_iter()
+            .map(|(path, object_id, byte_count)| format!("{path}\t{object_id}\t{byte_count}\n"))
+            .collect::<String>();
+        if sha256_bytes(projection.as_bytes()) != expected.projection_sha256 {
+            return Err(format!(
+                "historical source projection changed for {}",
+                expected.profile_id
+            ));
+        }
+        semantic_role_projection.sort_by(|left, right| left.0.cmp(&right.0));
+        let semantic_role_projection = semantic_role_projection
+            .into_iter()
+            .map(|(path, semantic_role)| format!("{path}\t{semantic_role}\n"))
+            .collect::<String>();
+        if sha256_bytes(semantic_role_projection.as_bytes())
+            != expected.semantic_role_projection_sha256
+        {
+            return Err(format!(
+                "historical semantic-role projection changed for {}",
+                expected.profile_id
+            ));
+        }
+
+        let actual_range_keys = range_rows
+            .iter()
+            .filter(|row| {
+                row.get("profile_id").and_then(Value::as_str) == Some(expected.profile_id)
+            })
+            .map(|row| number(row, "api_key"))
+            .collect::<Result<Vec<_>, _>>()?;
+        if actual_range_keys.as_slice() != expected.covered_api_keys {
+            return Err(format!(
+                "historical profile range keys changed for {}",
+                expected.profile_id
+            ));
+        }
+    }
+    if all_source_keys.len() != source_rows.len() || all_source_bytes != 424_804 {
+        return Err("historical source identity coverage changed".to_owned());
+    }
+    if all_object_ids.len() != 44 {
+        return Err("historical distinct Git blob coverage changed".to_owned());
+    }
+
+    let mut range_keys = BTreeSet::new();
+    for expected in EXPECTED_HISTORICAL_RANGES {
+        let row = range_rows
+            .iter()
+            .find(|row| {
+                row.get("profile_id").and_then(Value::as_str) == Some(expected.profile_id)
+                    && row.get("api_key").and_then(Value::as_u64) == Some(expected.api_key)
+            })
+            .ok_or_else(|| {
+                format!(
+                    "missing historical range row {} API {}",
+                    expected.profile_id, expected.api_key
+                )
+            })?;
+        expect_exact_keys(row, HISTORICAL_RANGE_ROW_KEYS, "historical API range row")?;
+        expect_text(row, "source_authority_id", expected.authority_id)?;
+        expect_text(row, "api_name", expected.api_name)?;
+        expect_text(row, "broker_declared_versions", expected.broker_versions)?;
+        expect_text(
+            row,
+            "incumbent_candidate_intersection",
+            expected.intersection,
+        )?;
+        if row.get("accepted_version_range") != Some(&Value::Null) {
+            return Err(format!(
+                "historical range {} API {} was accepted without terminal evidence",
+                expected.profile_id, expected.api_key
+            ));
+        }
+        expect_text(row, "state", expected.state)?;
+        if !range_keys.insert((expected.profile_id.to_owned(), expected.api_key)) {
+            return Err(format!(
+                "duplicate historical range {} API {}",
+                expected.profile_id, expected.api_key
+            ));
+        }
+        let reachable_name = EXPECTED_APIS
+            .iter()
+            .find(|api| api.0 == expected.api_key)
+            .map(|api| api.1)
+            .ok_or_else(|| format!("historical API {} escaped the frontier", expected.api_key))?;
+        if reachable_name != expected.api_name {
+            return Err(format!(
+                "historical API name changed for key {}",
+                expected.api_key
+            ));
+        }
+    }
+    if range_keys.len() != range_rows.len() {
+        return Err("historical API range keys must be unique".to_owned());
     }
     Ok(())
 }
@@ -1074,7 +1766,7 @@ fn validate_blocked_evidence(artifact: &Value) -> Result<(), String> {
     expect_text(
         current_projection_gap,
         "description",
-        "Project the 44 selected current schema bodies whose Git blob identities are pinned here, and pin and project the historical request and response structures required by each oldest-broker candidate.",
+        "Project the pinned current and profile-scoped historical source bodies into complete field and error contracts; pin and extend the source closure for any additional dependency discovered during projection, and replace it if broker-floor adjudication selects different candidates.",
     )?;
     Ok(())
 }
@@ -1091,7 +1783,11 @@ fn validate_receipts_and_boundaries(artifact: &Value) -> Result<(), String> {
         ("current_schema_identity_pair_count", 22),
         ("current_schema_identity_file_count", 44),
         ("current_schema_identity_total_byte_count", 132_674),
-        ("historical_schema_identity_file_count", 0),
+        ("historical_schema_source_contract_count", 3),
+        ("historical_schema_identity_profile_path_row_count", 46),
+        ("historical_schema_identity_distinct_blob_count", 44),
+        ("historical_schema_identity_total_byte_count", 424_804),
+        ("historical_profile_api_range_row_count", 15),
         ("accepted_numeric_range_count", 0),
         ("field_projection_row_count", 0),
         ("error_projection_row_count", 0),
@@ -1127,8 +1823,10 @@ fn validate_receipts_and_boundaries(artifact: &Value) -> Result<(), String> {
         "not a complete Kafka request/response schema contract",
         "not accepted production version ranges",
         "No field, default, nullability, tagged-field, or error-code projection is complete",
-        "Pinned Git blob object IDs establish current-source object identity only",
+        "Pinned Git blob object IDs establish current and profile-scoped historical source identity only",
         "not per-file raw-byte SHA-256 security attestations",
+        "Historical profile API ranges are candidate source-derived overlaps only",
+        "empty API 23 intersection",
         "No compiler, formatter, test, broker, service, container, network protocol, or remote execution evidence is claimed",
         "does not authorize K2.2",
     ] {
@@ -1150,6 +1848,10 @@ fn validate_document(root: &Path) -> Result<(), String> {
         "all 44 selected current request/response files",
         "not per-file raw-byte SHA-256 security attestations",
         "current-source object identity only",
+        "three historical candidate profiles",
+        "44 distinct",
+        "OffsetForLeaderEpoch",
+        "95,596",
         "GetTelemetrySubscriptions",
         "PushTelemetry",
         "no numeric range is accepted",
@@ -1187,6 +1889,7 @@ fn validate_artifact(artifact: &Value, root: &Path) -> Result<(), String> {
     validate_incumbent_observations(artifact)?;
     validate_reachable_rows(artifact)?;
     validate_schema_sources(artifact)?;
+    validate_historical_schema_sources(artifact)?;
     validate_blocked_evidence(artifact)?;
     validate_receipts_and_boundaries(artifact)?;
     Ok(())
@@ -1272,6 +1975,77 @@ fn kafka_k2_packet_rejects_completion_inflation() -> Result<(), String> {
         &wrong_source_authority,
         &root,
         "wrong schema source authority",
+    )?;
+
+    let mut changed_historical_blob = artifact.clone();
+    let first_historical_source = changed_historical_blob
+        .get_mut("historical_schema_source_rows")
+        .and_then(Value::as_array_mut)
+        .and_then(|rows| rows.first_mut())
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "historical schema source mutation target missing".to_owned())?;
+    first_historical_source.insert(
+        "git_blob_sha1".to_owned(),
+        Value::String("0000000000000000000000000000000000000000".to_owned()),
+    );
+    expect_invalid(
+        &changed_historical_blob,
+        &root,
+        "changed historical schema blob identity",
+    )?;
+
+    let mut changed_historical_role = artifact.clone();
+    let first_historical_source = changed_historical_role
+        .get_mut("historical_schema_source_rows")
+        .and_then(Value::as_array_mut)
+        .and_then(|rows| rows.first_mut())
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "historical semantic-role mutation target missing".to_owned())?;
+    first_historical_source.insert(
+        "semantic_role".to_owned(),
+        Value::String("UNPINNED_ROLE".to_owned()),
+    );
+    expect_invalid(
+        &changed_historical_role,
+        &root,
+        "changed historical semantic role",
+    )?;
+
+    let mut weakened_full_frontier_blocker = artifact.clone();
+    let full_frontier_blocker = weakened_full_frontier_blocker
+        .get_mut("historical_schema_source_contracts")
+        .and_then(Value::as_array_mut)
+        .and_then(|rows| {
+            rows.iter_mut().find(|row| {
+                row.get("profile_id").and_then(Value::as_str)
+                    == Some("KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR")
+            })
+        })
+        .and_then(|row| row.get_mut("full_frontier_blocker"))
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "full-frontier blocker mutation target missing".to_owned())?;
+    full_frontier_blocker.insert("broker_declared_max".to_owned(), Value::from(2));
+    expect_invalid(
+        &weakened_full_frontier_blocker,
+        &root,
+        "nonempty historical full-frontier intersection",
+    )?;
+
+    let mut accepted_historical_range = artifact.clone();
+    let first_historical_range = accepted_historical_range
+        .get_mut("historical_profile_api_range_rows")
+        .and_then(Value::as_array_mut)
+        .and_then(|rows| rows.first_mut())
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "historical profile range mutation target missing".to_owned())?;
+    first_historical_range.insert(
+        "accepted_version_range".to_owned(),
+        Value::String("0".to_owned()),
+    );
+    expect_invalid(
+        &accepted_historical_range,
+        &root,
+        "accepted historical range without terminal evidence",
     )?;
 
     let mut unblocked_child = artifact;

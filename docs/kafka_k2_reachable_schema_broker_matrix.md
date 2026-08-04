@@ -55,6 +55,31 @@ are not per-file raw-byte SHA-256 security attestations. This establishes
 current-source object identity only. It does not project fields, defaults,
 errors, accepted versions, historical schema coverage, or broker behavior.
 
+The three historical candidate profiles now have profile-scoped source-object
+receipts as well. Kafka changed its schema-authority model across these
+releases, so the packet records the native declaration form instead of
+pretending that modern per-message JSON existed historically:
+
+| Candidate | Declaration model | Profile API rows | Source objects | Bytes |
+|---|---|---|---:|---:|
+| 0.8.0 | Scala write/parse methods plus the classic envelope and legacy message set | keys 0-3 at v0 | 22 | 95,596 |
+| 0.11.0.2 | central Java `Protocol` schema arrays plus headers/type encodings | nine idempotent/transaction profile keys plus a structured API 23 full-frontier blocker | 10 | 210,904 |
+| 1.0.0 | per-request Java schema arrays plus headers/type encodings | `SaslHandshake` 0-1 and `SaslAuthenticate` 0 | 14 | 118,304 |
+
+Each receipt pins the canonical root tree, confirms the recursive tree was not
+truncated, and separately hashes the sorted path/object-ID/size and
+path/semantic-role projections. The 46 profile/path rows resolve to 44 distinct
+blob object IDs because two unchanged files recur across the 0.11.0.2 and 1.0.0
+profiles. These are candidate source-provenance rows only. They neither select
+an oldest supported broker nor establish complete current-facade coverage.
+
+The 0.11.0.2 audit also exposes a concrete incompatibility outside its narrow
+producer profile. A structured blocker row records broker minimum/maximum v0
+and incumbent minimum/maximum v2 for `OffsetForLeaderEpoch`; because broker
+maximum is below incumbent minimum, the intersection is empty. Thus 0.11.0.2
+cannot be promoted to full current-facade support from this static source
+packet.
+
 ## Reachable API frontier
 
 `Client max` is an independent incumbent cross-check. `Apache range` comes
@@ -125,9 +150,10 @@ oldest/current pair. Its output cannot close K2.1 as written.
 
 K2.1 remains open until all of the following are complete:
 
-1. Project the 44 selected current schema bodies whose Git blob identities are
-   pinned here, and pin and project the historical request and response
-   structures required by each oldest-broker candidate.
+1. Project the pinned current and profile-scoped historical source bodies into
+   complete field and error contracts; pin and extend the closure for every
+   additional dependency discovered during projection, and replace it if
+   broker-floor adjudication selects different candidates.
 2. Project every field path, order, type, version interval, default,
    nullability, compact encoding, tagged version, and tag identifier.
 3. Project every reachable protocol error and its reviewed downgrade or
@@ -144,6 +170,10 @@ This pass used repository inspection, exact byte/hash inventory, official
 source identity lookup, and an independent incumbent-source cross-check only.
 It ran no compiler, formatter, test, broker, service, container, protocol
 session, or remote job.
+
+Git blob object IDs establish source-object identity, not per-file raw-byte
+SHA-256 security attestations. Historical range rows are source-derived
+candidate overlaps; none is an accepted production range or downgrade policy.
 
 The packet does not prove schema completeness, broker interoperability,
 runtime correctness, production support, migration readiness, dependency
