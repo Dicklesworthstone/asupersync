@@ -1,0 +1,2353 @@
+{
+  "schema_version": 1,
+  "artifact_id": "time-utc-capability-inventory-v1",
+  "program_id": "asupersync-ir2uf0",
+  "parent_bead_id": "asupersync-5z2scg.6",
+  "bead_id": "asupersync-5z2scg.6.1",
+  "capability_id": "CAP-TIME-UTC-RFC3339",
+  "captured_date_utc": "2026-08-04",
+  "baseline_revision": "1afde84d564bd8ea876459624116f90028b80835",
+  "evidence_mode": "STATIC_SOURCE_INVENTORY",
+  "authority": {
+    "adr_id": "DEP-ADR-011",
+    "adr_bead_id": "asupersync-dep-p3-api-adrs-h3jspm.11",
+    "adr_path": "docs/adr/dep_plan_adr_011_time_utc.md",
+    "capability_registry_path": "artifacts/dependency_capability_registry_v1.json",
+    "capability_baseline_path": "artifacts/dependency_capability_baseline_v1.json",
+    "adr_registry_path": "artifacts/dependency_api_adr_registry_v1.json",
+    "decision": "ADDITIVE_COEXISTENCE",
+    "disposition": "PRESERVE_AND_REPLACE_IF_PARITY",
+    "evidence_state": "BASELINE_PLANNED",
+    "cutover_state": "BLOCKED_PENDING_EVIDENCE",
+    "dependency_exit_allowed": false,
+    "primary_authorities": [
+      "asupersync-5z2scg.6"
+    ],
+    "secondary_compatibility_consumers": [
+      "asupersync-dep-p3-api-adrs-h3jspm.13",
+      "asupersync-d24mms.4"
+    ]
+  },
+  "policy": {
+    "zero_unknown_required": true,
+    "unknown_rows": 0,
+    "unclassified_chrono_paths": 0,
+    "a1_execution_state": "NOT_EXECUTED_THIS_TURN",
+    "source_classification_state": "PATH_COUNT_COMPLETE_USE_LEVEL_DETAIL_PARTIAL",
+    "bead_acceptance_state": "PARTIAL_STATIC_INVENTORY_ONLY",
+    "bead_close_allowed": false,
+    "unresolved_behavioral_gap_count": 7,
+    "unresolved_static_detail_gap_count": 2,
+    "acceptance_zero_unknown_met": false,
+    "alias_aware_use_inventory_state": "INCOMPLETE",
+    "default_action": "Keep the incumbent chrono and time dependencies until the terminal owner records complete same-or-better evidence.",
+    "claim_rule": "Source presence, a prior receipt, or a contract source file is not fresh behavioral evidence."
+  },
+  "source_snapshot": {
+    "git_head": "1afde84d564bd8ea876459624116f90028b80835",
+    "dirty_scope": "A1 paths were absent before this inventory. The literal-source census walks every Rust file under its five workspace roots, including untracked files; unmatched peer paths did not affect the frozen projection.",
+    "pin_scope": "Authority, manifests, public and persisted production owners, owned formatter/parser boundaries, database or messaging oracle owners, test-profile fields, and excluded-conformance sources.",
+    "files": [
+      {
+        "path": "Cargo.toml",
+        "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+        "line_count": 1038
+      },
+      {
+        "path": "Cargo.lock",
+        "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+        "line_count": 4666
+      },
+      {
+        "path": "benches/raptorq_benchmark.rs",
+        "sha256": "788a02a4499db36c5bd7d300de3f60d9c5a28e3a9cec81ebad523294cf5227a6",
+        "line_count": 2180
+      },
+      {
+        "path": "conformance/Cargo.toml",
+        "sha256": "1b734acb9c81e0bbf10b26c5b8dddbd0131d9e9915d447f349567ce2d4be2bfb",
+        "line_count": 213
+      },
+      {
+        "path": "conformance/src/lib.rs",
+        "sha256": "125b67f69c0d7485ae43fe7da4a45327d1b3d93e6f826a609731a9755c78b80b",
+        "line_count": 753
+      },
+      {
+        "path": "conformance/src/h2_data_end_stream_conformance.rs",
+        "sha256": "92dabc3a2d09c86684390321a2d86a94da5fbf690410d85db30ded1cb18763b2",
+        "line_count": 961
+      },
+      {
+        "path": "conformance/src/h2_goaway_conformance.rs",
+        "sha256": "e352862bea010a7a5315b6593341b994da16eb0d30309bfbf959a54c3e6b3ab3",
+        "line_count": 845
+      },
+      {
+        "path": "conformance/src/h2_ping_conformance.rs",
+        "sha256": "acf648726b9b7abe2635a3160f3efb13e11fc7d57f598346e04a34319db462f5",
+        "line_count": 935
+      },
+      {
+        "path": "conformance/src/h2_priority_conformance.rs",
+        "sha256": "1030b09060eec741289169f592c387789edbe5141a5f84dafc2d54143db787f6",
+        "line_count": 965
+      },
+      {
+        "path": "conformance/src/h2_settings_conformance.rs",
+        "sha256": "83a145aa21513730e959bdc4ac7b3e8fa90747db0330cddd0610beaa318157bb",
+        "line_count": 704
+      },
+      {
+        "path": "conformance/src/hpack_conformance.rs",
+        "sha256": "f9a7ddd3de850a802cfd2b744f2c372c8db9e577530ce63c88f5ec340edeb8b5",
+        "line_count": 460
+      },
+      {
+        "path": "conformance/src/h1_expect_continue_conformance.rs",
+        "sha256": "f35b38b4f530c3f0368ee15cd6ea0523367563197dd87f9d558baee3f13ff2e2",
+        "line_count": 611
+      },
+      {
+        "path": "conformance/src/h1_request_building_conformance.rs",
+        "sha256": "4443fb80f14caccc0fb4855f76cf2d35b257ad204a6f86aa46fc14166a0d7d52",
+        "line_count": 670
+      },
+      {
+        "path": "conformance/src/h1_response_building_conformance.rs",
+        "sha256": "223dfea3b0656f09f95967edf8d31ee5d4dafc9a997204b66c341c27b6550db5",
+        "line_count": 607
+      },
+      {
+        "path": "conformance/src/h2_enable_push_conformance.rs",
+        "sha256": "a489073fb62549f06d0886408c1a50bafd921aa3259a8eb95e13adb809b2eb97",
+        "line_count": 691
+      },
+      {
+        "path": "conformance/src/h2_connect_method_conformance.rs",
+        "sha256": "77eb3b575e3d318dc5b12f767089cda925c56976f148903e3eecbecaee1c955f",
+        "line_count": 582
+      },
+      {
+        "path": "conformance/src/h2_continuation_conformance.rs",
+        "sha256": "a7b72599a23a63b0b6a3b9d62d67b71d785a35808b24abdf18c5e6ec6c752595",
+        "line_count": 650
+      },
+      {
+        "path": "conformance/src/hpack_encoder_conformance.rs",
+        "sha256": "60dcc4820e41cfb7e3c6cb4bc807d105a60416b59982ff601b3d5e6441d5ed58",
+        "line_count": 578
+      },
+      {
+        "path": "conformance/src/raptorq_rfc6330.rs",
+        "sha256": "7ac7a315493c3f6319a71b0f3cfa27b0dc309a858f2cc8a0a3634be8600e4933",
+        "line_count": 957
+      },
+      {
+        "path": "conformance/raptorq_rfc6330/reporting/src/coverage_matrix.rs",
+        "sha256": "04afb810f19141c94bd4acc0e2d0c9294b6a5e166d02ea0e406a6bc88f76d61e",
+        "line_count": 522
+      },
+      {
+        "path": "conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs",
+        "sha256": "c3965a433bf162067097cf443ff47a6aa6e0035ef71da0540417eb9aa2cffde4",
+        "line_count": 723
+      },
+      {
+        "path": "conformance/raptorq_rfc6330/reporting/src/regression_detection.rs",
+        "sha256": "fbccd4000d78cf66e60f602280038720e6957005a999c2b3de87e7b7f3aa239f",
+        "line_count": 499
+      },
+      {
+        "path": "conformance/raptorq_rfc6330/reporting/src/mod.rs",
+        "sha256": "14e893f47f6bd1fc260374d76b557e1283bc09585dd409856e29056dc0acd89d",
+        "line_count": 205
+      },
+      {
+        "path": "fuzz/Cargo.toml",
+        "sha256": "857925379ab7068f3faf94435e44b87adfc96c2d716f19b5c1cfdffbbfbd580d",
+        "line_count": 6233
+      },
+      {
+        "path": "fuzz/conformance/Cargo.toml",
+        "sha256": "9f1881aa1450853b2ab5a84ca18a889c56ffe998c32405f2abb049899c20ef8b",
+        "line_count": 50
+      },
+      {
+        "path": "fuzz/conformance/src/h2_ping_rtt_measurement_conformance.rs",
+        "sha256": "740fb12ae50ecc720c0003af5323bbd0bef199198758b5eed56cc4c10b6a92b3",
+        "line_count": 818
+      },
+      {
+        "path": "tests/conformance/raptorq_rfc6330/golden/Cargo.toml",
+        "sha256": "9df3b4755bc7d60b5ab8ae1910211f481d52305ee0a8f7f3f451b8098cb103ec",
+        "line_count": 30
+      },
+      {
+        "path": "tests/conformance/raptorq_rfc6330/reporting/Cargo.toml",
+        "sha256": "c72beb5bb57d3f5fb8b18cc8cb351bde0d59154b2ed7d12728d58b5a6e504dd4",
+        "line_count": 35
+      },
+      {
+        "path": "docs/adr/dep_plan_adr_011_time_utc.md",
+        "sha256": "b570c57e9f7387bac501bb035d9d5e0ea25e3e461abf8944319e662c7aa380cb",
+        "line_count": 151
+      },
+      {
+        "path": "artifacts/dependency_capability_registry_v1.json",
+        "sha256": "e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2",
+        "line_count": 6917
+      },
+      {
+        "path": "artifacts/dependency_capability_baseline_v1.json",
+        "sha256": "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8",
+        "line_count": 1357
+      },
+      {
+        "path": "artifacts/dependency_api_adr_registry_v1.json",
+        "sha256": "ed172c361aa25c3bd7156dfc731a6a90944494a5fd1c7c388f0ab538acef1973",
+        "line_count": 6831
+      },
+      {
+        "path": "artifacts/time_utc_rfc3339_foundation_v1.json",
+        "sha256": "b141bca2ef0238eab6541d903ad02d61dc9c7801acdf7609606fd75a5e1cc599",
+        "line_count": 91
+      },
+      {
+        "path": "docs/time_utc_rfc3339_foundation.md",
+        "sha256": "86474f65d7df6a420b2afe6a9b91aabf5efd0bc78a1a1239bcebdb694bc23292",
+        "line_count": 78
+      },
+      {
+        "path": "tests/time_utc_rfc3339_foundation_contract.rs",
+        "sha256": "a34b4568b56973712730c071f8447aa22ffe37865d84ac3010d736671f667d96",
+        "line_count": 263
+      },
+      {
+        "path": "src/lib.rs",
+        "sha256": "22ce17632d6a98843ebd6b9f855a430aef3ea6da07a6657e3311ad87b78c1b7f",
+        "line_count": 468
+      },
+      {
+        "path": "src/agent_swarm/release_proof_aggregator.rs",
+        "sha256": "dd9584ed24f8ba7eacc94ec8fa9dbbb4fa853072e6b293c8772e69ab13cbb906",
+        "line_count": 2060
+      },
+      {
+        "path": "src/atp/mod.rs",
+        "sha256": "098e4acd9abc7df0a9b6e3ba484b07e4eade44235166b98c43bad9a4cb3b327a",
+        "line_count": 172
+      },
+      {
+        "path": "src/time/mod.rs",
+        "sha256": "8134c6c39eaaa7a6851823afd029bf689a4df6a037fd0dc5278eeb4092b02c66",
+        "line_count": 79
+      },
+      {
+        "path": "src/time/utc.rs",
+        "sha256": "3b7919dde0af0a0b826d7d4be59137ce8a2a3282fd1d8c186cdec8e6ed3e5687",
+        "line_count": 121
+      },
+      {
+        "path": "src/bin/asupersync.rs",
+        "sha256": "397f3800f4a40ccb4f25366bb10ce641d12b4947b9e1b230359db69c5af1e283",
+        "line_count": 16700
+      },
+      {
+        "path": "src/cli/mod.rs",
+        "sha256": "7217622763af3390324f185ddc4a90e7b86c75d94e2623025a1476f8a4630ea7",
+        "line_count": 318
+      },
+      {
+        "path": "src/cli/atp_command_tree.rs",
+        "sha256": "b79d4f01345274f6260d3ce911e48e2c2d2cd7c0c49ff7562f5ecf1a58d2e603",
+        "line_count": 1706
+      },
+      {
+        "path": "src/cli/atp_workflows.rs",
+        "sha256": "a813070896f9d73f83b4f6f59c8bf2f8d3902805838300a88a9656fa48961125",
+        "line_count": 1960
+      },
+      {
+        "path": "src/atp/benchmark/mod.rs",
+        "sha256": "f74f4e75e888fd5110631b753d98f29b9d53e4dad3b05582213cd3ea43670951",
+        "line_count": 234
+      },
+      {
+        "path": "src/atp/benchmark/reports.rs",
+        "sha256": "a8068beb727a5fd3e90cdb5b2ab08bb78b723bdd672c9067342596e6cc7d5183",
+        "line_count": 1014
+      },
+      {
+        "path": "src/database/postgres.rs",
+        "sha256": "8794fe1b0ad93d741d576c05aa1ccfe09ddd82eff0a25429ede34a909ce2dc27",
+        "line_count": 19716
+      },
+      {
+        "path": "src/messaging/redis.rs",
+        "sha256": "5a739d23b48b1d4b0866f6456dfe828b33d79945b393031d4918d3d7df190d53",
+        "line_count": 12286
+      },
+      {
+        "path": "src/messaging/jetstream.rs",
+        "sha256": "2b60620290c08d3c6fc57b262c052dbccce6d64627ed7555d9a0229d44bdddca",
+        "line_count": 6495
+      },
+      {
+        "path": "src/raptorq/offline_tuner.rs",
+        "sha256": "31d01dee026c4610a4f3993e2e4081a08fbb7bb19a180a12c781bd125b1da1be",
+        "line_count": 1366
+      },
+      {
+        "path": "src/bin/offline_tuner.rs",
+        "sha256": "f7a240cac88da235924221ed88a93bd4059ee831c4ec530a58f1fa926e47e203",
+        "line_count": 652
+      },
+      {
+        "path": "src/trace/replay.rs",
+        "sha256": "a5dd73ff157b0526d37b21a21de80cd67a6599da2c1e76c581bf0d0930380145",
+        "line_count": 1314
+      },
+      {
+        "path": "src/atp/logging/mod.rs",
+        "sha256": "488e95c1351d49790c430434b16b6c10e9fd39e0c710243d667910e11230cc02",
+        "line_count": 606
+      },
+      {
+        "path": "tests/atp/golden_logs/direct_success.jsonl",
+        "sha256": "b647a78cb7be727e39d2f77bdb90e1d5a464d4b2128b9065f1c8e3813c96aaea",
+        "line_count": 5
+      },
+      {
+        "path": "tests/atp_j5_workflows.rs",
+        "sha256": "5284b8e238bb870a2a3b4087880648ad48177ab1b993e1ff6787236fa6e3ae01",
+        "line_count": 490
+      },
+      {
+        "path": "tests/atp_dogfood_integration.rs",
+        "sha256": "f996216da85775ecbbb270ce1d44d9c0a399b7a31aa02a003f9a5ce7369e51a8",
+        "line_count": 631
+      },
+      {
+        "path": "tests/conformance.rs",
+        "sha256": "383d7009966a183c1e0a269b6aa6e16ab03993e417945f2c8a598522780f5968",
+        "line_count": 4
+      },
+      {
+        "path": "tests/conformance/mod.rs",
+        "sha256": "2e51e6bbfd5e7794d70caa82608c46b755ee83a6b30bedd436643577ee27aadf",
+        "line_count": 2511
+      },
+      {
+        "path": "tests/conformance/hpack_rfc7541/mod.rs",
+        "sha256": "e1e93d70b77d3d23467d3c867ac11054361c16a126e965b06ab1851d407aa2b0",
+        "line_count": 106
+      },
+      {
+        "path": "tests/jetstream_real_server.rs",
+        "sha256": "718c966cd6b480c52fce1f5a49ebff97fcf1878107b93e588c6d5a14c67914f2",
+        "line_count": 4
+      },
+      {
+        "path": "tests/conformance/hpack_rfc7541/fixtures.rs",
+        "sha256": "6f7ed4b7ce0fb61f495093ac6ea8dc264d54dcd218e3b61089fefc9485418ca2",
+        "line_count": 368
+      },
+      {
+        "path": "tests/conformance/raptorq_rfc6330/golden/src/fixture_generator.rs",
+        "sha256": "b7e7f13b6eb36f41c57ea5eec1016deccf94dbfd379565a26d2820b1baad1289",
+        "line_count": 714
+      },
+      {
+        "path": "tests/conformance/raptorq_rfc6330/golden/src/format_validator.rs",
+        "sha256": "d3bdb1b5c9c26964741eadc30b34d46023ae2de3ee83fc0919763b8cf4d92f84",
+        "line_count": 798
+      },
+      {
+        "path": "tests/conformance/raptorq_rfc6330/reporting/src/coverage_matrix.rs",
+        "sha256": "39a90656826caea4bf6d477883849a6d927d87e2580a4ec21750decd7cd08adc",
+        "line_count": 747
+      },
+      {
+        "path": "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs",
+        "sha256": "8d17c9f8ff81e7205e0e9bbc26d9e3f508a5a3318bb3602eb614e510030cc801",
+        "line_count": 880
+      },
+      {
+        "path": "tests/conformance/raptorq_rfc6330/reporting/src/regression_detection.rs",
+        "sha256": "30a53b00cdc7c317d4f44846657567ac7d28bb7ab9126e56281fbecefe3f489a",
+        "line_count": 641
+      }
+    ]
+  },
+  "dependency_profiles": [
+    {
+      "profile_id": "TIME-PROFILE-DEFAULT",
+      "crate": "asupersync",
+      "cargo_features": [
+        "proc-macros",
+        "nightly-outcome-try"
+      ],
+      "direct_chrono_edge": false,
+      "direct_time_edge": false,
+      "classification": "MANIFEST_STATIC",
+      "no_claim": "No feature graph or build was executed in A1."
+    },
+    {
+      "profile_id": "TIME-PROFILE-CLI",
+      "crate": "asupersync",
+      "cargo_features": [
+        "cli"
+      ],
+      "target_kinds": [
+        "library",
+        "asupersync binary",
+        "integration contract"
+      ],
+      "direct_chrono_edge": true,
+      "direct_time_edge": true,
+      "chrono_dependency": "0.4 optional with serde",
+      "time_dependency": ">=0.3 optional with formatting",
+      "classification": "PRODUCTION_OPT_IN_AND_ORACLE",
+      "no_claim": "The direct time edge remains in the manifest even though no production external-time call was found."
+    },
+    {
+      "profile_id": "TIME-PROFILE-BENCHMARK-ADAPTERS",
+      "crate": "asupersync",
+      "cargo_features": [
+        "benchmark-adapters"
+      ],
+      "target_kinds": [
+        "library"
+      ],
+      "direct_chrono_edge": true,
+      "direct_time_edge": false,
+      "classification": "PRODUCTION_OPT_IN",
+      "no_claim": "The benchmark feature is source-classified only."
+    },
+    {
+      "profile_id": "TIME-PROFILE-OFFLINE-TUNER",
+      "crate": "asupersync",
+      "cargo_features": [
+        "cli",
+        "simd-intrinsics"
+      ],
+      "target_kinds": [
+        "offline_tuner binary"
+      ],
+      "direct_chrono_edge": true,
+      "direct_time_edge": true,
+      "classification": "EXPLICIT_BINARY_TARGET_VIA_CLI_AND_SIMD",
+      "no_claim": "The target was not compiled or executed by A1."
+    },
+    {
+      "profile_id": "TIME-PROFILE-TLS-TRANSITIVE",
+      "crate": "asupersync",
+      "cargo_features": [
+        "tls"
+      ],
+      "direct_chrono_edge": false,
+      "direct_time_edge": false,
+      "locked_transitive_time_dependers": [
+        "asn1-rs 0.7.2",
+        "x509-parser 0.18.1"
+      ],
+      "classification": "LOCKFILE_STATIC_NOT_ACTIVATION_PROOF",
+      "no_claim": "Lock membership does not establish that a feature profile activates the package."
+    },
+    {
+      "profile_id": "TIME-PROFILE-TLS-NATIVE-ROOTS",
+      "crate": "asupersync",
+      "cargo_features": [
+        "tls-native-roots"
+      ],
+      "direct_chrono_edge": false,
+      "direct_time_edge": false,
+      "implied_features": [
+        "tls"
+      ],
+      "classification": "TRANSITIVE_TIME_VIA_TLS_LOCKFILE_STATIC",
+      "no_claim": "The feature alias does not establish activation on every target."
+    },
+    {
+      "profile_id": "TIME-PROFILE-TLS-WEBPKI-ROOTS",
+      "crate": "asupersync",
+      "cargo_features": [
+        "tls-webpki-roots"
+      ],
+      "direct_chrono_edge": false,
+      "direct_time_edge": false,
+      "implied_features": [
+        "tls"
+      ],
+      "classification": "TRANSITIVE_TIME_VIA_TLS_LOCKFILE_STATIC",
+      "no_claim": "The feature alias does not establish activation on every target."
+    },
+    {
+      "profile_id": "TIME-PROFILE-ATP-CLI-TRANSITIVE",
+      "crate": "asupersync",
+      "cargo_features": [
+        "atp-cli"
+      ],
+      "direct_chrono_edge": false,
+      "direct_time_edge": false,
+      "implied_features": [
+        "tls"
+      ],
+      "classification": "TRANSITIVE_TIME_VIA_TLS_LOCKFILE_STATIC",
+      "no_claim": "The atp-cli feature is distinct from cli and does not activate either direct edge."
+    },
+    {
+      "profile_id": "TIME-PROFILE-ATPD-DAEMON",
+      "crate": "asupersync",
+      "cargo_features": [
+        "atpd-daemon"
+      ],
+      "direct_chrono_edge": true,
+      "direct_time_edge": true,
+      "implied_features": [
+        "cli"
+      ],
+      "classification": "ALIAS_TO_CLI_DIRECT_EDGES",
+      "no_claim": "Source classification does not establish daemon execution or timestamp behavior."
+    },
+    {
+      "profile_id": "TIME-PROFILE-CI-CROSS-PLATFORM",
+      "crate": "asupersync",
+      "cargo_features": [
+        "ci-cross-platform"
+      ],
+      "direct_chrono_edge": true,
+      "direct_time_edge": true,
+      "implied_features": [
+        "cli",
+        "tls",
+        "atpd-daemon"
+      ],
+      "classification": "UMBRELLA_DIRECT_AND_TRANSITIVE_EDGES",
+      "no_claim": "The feature name does not establish a successful cross-platform build."
+    },
+    {
+      "profile_id": "TIME-PROFILE-ROOT-DEV",
+      "crate": "asupersync",
+      "manifest_section": "dev-dependencies",
+      "target_kinds": [
+        "library tests",
+        "integration tests",
+        "benchmarks"
+      ],
+      "direct_chrono_edge": true,
+      "direct_time_edge": false,
+      "classification": "TEST_AND_BENCH"
+    },
+    {
+      "profile_id": "TIME-PROFILE-CONFORMANCE-MEMBER",
+      "crate": "asupersync-conformance",
+      "manifest": "conformance/Cargo.toml",
+      "workspace_membership": "ROOT_WORKSPACE_MEMBER",
+      "direct_chrono_edge": true,
+      "direct_time_edge": false,
+      "classification": "CONFORMANCE_LIBRARY_AND_BINS"
+    },
+    {
+      "profile_id": "TIME-PROFILE-EXCLUDED-FUZZ-WORKSPACE",
+      "crate": "asupersync-fuzz",
+      "manifest": "fuzz/Cargo.toml",
+      "workspace_membership": "SEPARATE_EXCLUDED_WORKSPACE_ROOT",
+      "workspace_members": [
+        "conformance"
+      ],
+      "root_dependency_features": [
+        "tls",
+        "benchmark-adapters"
+      ],
+      "direct_chrono_edge": false,
+      "transitive_chrono_edge": true,
+      "chrono_edge_source": "asupersync benchmark-adapters feature",
+      "direct_time_edge": false,
+      "transitive_time_edge": true,
+      "transitive_time_source": "asupersync tls feature",
+      "classification": "SEPARATE_EXCLUDED_WORKSPACE_ROOT",
+      "no_claim": "Manifest inspection does not establish successful resolution, compilation, or target execution."
+    },
+    {
+      "profile_id": "TIME-PROFILE-EXCLUDED-CONFORMANCE",
+      "crate": "asupersync-conformance",
+      "manifest": "fuzz/conformance/Cargo.toml",
+      "workspace_membership": "EXCLUDED_BY_ROOT_WORKSPACE",
+      "direct_chrono_edge": true,
+      "direct_time_edge": false,
+      "classification": "SEPARATE_WORKSPACE_SOURCE"
+    },
+    {
+      "profile_id": "TIME-PROFILE-STANDALONE-GOLDEN",
+      "crate": "raptorq-golden-testing",
+      "manifest": "tests/conformance/raptorq_rfc6330/golden/Cargo.toml",
+      "workspace_membership": "NESTED_STANDALONE_WORKSPACE",
+      "direct_chrono_edge": true,
+      "direct_time_edge": false,
+      "classification": "TEST_TOOL"
+    },
+    {
+      "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+      "crate": "raptorq-conformance-reporting",
+      "manifest": "tests/conformance/raptorq_rfc6330/reporting/Cargo.toml",
+      "workspace_membership": "NESTED_STANDALONE_WORKSPACE",
+      "direct_chrono_edge": true,
+      "direct_time_edge": false,
+      "classification": "TEST_TOOL"
+    }
+  ],
+  "locked_packages": [
+    {
+      "package": "chrono",
+      "version": "0.4.45",
+      "checksum": "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327",
+      "direct_locked_dependers": [
+        "asupersync 0.3.10",
+        "asupersync-conformance 0.3.5"
+      ],
+      "classification": "LOCKFILE_MEMBERSHIP_NOT_ACTIVATION_PROOF"
+    },
+    {
+      "package": "time",
+      "version": "0.3.54",
+      "checksum": "3e1d5e639ff6bab73cb6885cc7e7b1de96c3f32c68ec55f3952614bec1092244",
+      "direct_locked_dependers": [
+        "asn1-rs 0.7.2",
+        "asupersync 0.3.10",
+        "x509-parser 0.18.1"
+      ],
+      "classification": "LOCKFILE_MEMBERSHIP_NOT_ACTIVATION_PROOF"
+    }
+  ],
+  "chrono_census": {
+    "marker": "literal chrono namespace reference per matching Rust source line",
+    "scope_roots": [
+      "src",
+      "tests",
+      "benches",
+      "conformance",
+      "fuzz/conformance"
+    ],
+    "path_count": 71,
+    "matching_line_count": 159,
+    "path_and_line_count_projection_sha256": "f8fd5086d737eb83440e89530d8929d8bcd25dc68449e16ea57f12fcd116c7de",
+    "paths_projection_sha256": "f16dea3b2143a0502579cdde842a5b00694031ec504eb674750554f6030f9700",
+    "classification_groups": [
+      {
+        "group_id": "TIME-CHRONO-PRODUCTION-CLI",
+        "profile_id": "TIME-PROFILE-CLI",
+        "migration_group_id": "TIME-MIG-CLI-PUBLIC-PERSISTED",
+        "operation_classes": [
+          "public UTC field types",
+          "ambient UTC acquisition",
+          "standard-duration conversion",
+          "UTC arithmetic",
+          "serde JSON read and write"
+        ],
+        "path_count": 2,
+        "matching_line_count": 15,
+        "paths": [
+          {
+            "path": "src/cli/atp_command_tree.rs",
+            "matching_line_count": 10
+          },
+          {
+            "path": "src/cli/atp_workflows.rs",
+            "matching_line_count": 5
+          }
+        ]
+      },
+      {
+        "group_id": "TIME-CHRONO-PRODUCTION-BENCHMARK",
+        "profile_id": "TIME-PROFILE-BENCHMARK-ADAPTERS",
+        "migration_group_id": "TIME-MIG-BENCHMARK-REPORTS",
+        "operation_classes": [
+          "public UTC field types",
+          "ambient UTC acquisition",
+          "serde report exposure",
+          "one module-local test comparison"
+        ],
+        "path_count": 2,
+        "matching_line_count": 5,
+        "paths": [
+          {
+            "path": "src/atp/benchmark/mod.rs",
+            "matching_line_count": 3
+          },
+          {
+            "path": "src/atp/benchmark/reports.rs",
+            "matching_line_count": 2
+          }
+        ]
+      },
+      {
+        "group_id": "TIME-CHRONO-ROOT-BENCH",
+        "profile_id": "TIME-PROFILE-ROOT-DEV",
+        "migration_group_id": "TIME-MIG-BENCHMARK-REPORTS",
+        "operation_classes": [
+          "millisecond RFC3339 benchmark metadata"
+        ],
+        "path_count": 1,
+        "matching_line_count": 2,
+        "paths": [
+          {
+            "path": "benches/raptorq_benchmark.rs",
+            "matching_line_count": 2
+          }
+        ]
+      },
+      {
+        "group_id": "TIME-CHRONO-ROOT-DATABASE-MESSAGING-TESTS",
+        "profile_id": "TIME-PROFILE-ROOT-DEV",
+        "migration_group_id": "TIME-MIG-DATABASE-MESSAGING-ORACLES",
+        "operation_classes": [
+          "PostgreSQL temporal differential oracle",
+          "Redis test diagnostics"
+        ],
+        "path_count": 2,
+        "matching_line_count": 8,
+        "paths": [
+          {
+            "path": "src/database/postgres.rs",
+            "matching_line_count": 4
+          },
+          {
+            "path": "src/messaging/redis.rs",
+            "matching_line_count": 4
+          }
+        ]
+      },
+      {
+        "group_id": "TIME-CHRONO-ROOT-REAL-E2E-SOURCES",
+        "profile_id": "TIME-PROFILE-ROOT-DEV",
+        "migration_group_id": "TIME-MIG-DOWNSTREAM-CORPUS",
+        "operation_classes": [
+          "test timestamps",
+          "elapsed and deadline checks",
+          "serialized diagnostic records"
+        ],
+        "wiring_state": "MOSTLY_DORMANT_SOURCE; ONE CHRONO-BEARING H3 SUITE IS FEATURE_WIRED",
+        "activation_note": "Filenames do not establish module inclusion or execution.",
+        "path_count": 21,
+        "matching_line_count": 51,
+        "paths": [
+          {
+            "path": "src/real_cancel_e2e_tests.rs",
+            "matching_line_count": 3
+          },
+          {
+            "path": "src/real_channel_e2e_tests.rs",
+            "matching_line_count": 3
+          },
+          {
+            "path": "src/real_cx_registry_e2e_tests.rs",
+            "matching_line_count": 3
+          },
+        {
+          "path": "src/real_database_postgres_obligation_saga_rollback_integration_e2e_tests.rs",
+          "matching_line_count": 7,
+          "cfg_or_wiring": "DORMANT_SOURCE_AT_PINNED_REVISION",
+          "implementation_owner": "asupersync-5z2scg.6.6",
+          "aggregate_evidence_owner": "asupersync-5z2scg.6.7"
+        },
+        {
+          "path": "src/real_fs_file_messaging_redis_stream_durability_rdb_e2e_tests.rs",
+          "matching_line_count": 4,
+          "cfg_or_wiring": "DORMANT_SOURCE_AT_PINNED_REVISION",
+          "implementation_owner": "asupersync-5z2scg.6.6",
+          "aggregate_evidence_owner": "asupersync-5z2scg.6.7"
+          },
+          {
+            "path": "src/real_fs_uring_e2e_tests.rs",
+            "matching_line_count": 1
+          },
+          {
+            "path": "src/real_grpc_bidirectional_e2e_tests.rs",
+            "matching_line_count": 1
+          },
+          {
+            "path": "src/real_http_grpc_e2e_tests.rs",
+            "matching_line_count": 3
+          },
+          {
+            "path": "src/real_http_h2_concurrent_load_e2e_tests.rs",
+            "matching_line_count": 1
+          },
+          {
+            "path": "src/real_http_h2_server_messaging_kafka_e2e_tests.rs",
+            "matching_line_count": 1
+          },
+        {
+          "path": "src/real_http_h3_server_websocket_upgrade_e2e_tests.rs",
+          "matching_line_count": 2,
+          "cfg_or_wiring": "FEATURE_WIRED_H3_SUITE",
+          "implementation_owner": "asupersync-5z2scg.6.7",
+          "aggregate_evidence_owner": "asupersync-5z2scg.6.7"
+          },
+          {
+            "path": "src/real_kafka_consumer_group_rebalance_e2e_tests.rs",
+            "matching_line_count": 3
+          },
+          {
+            "path": "src/real_net_dns_e2e_tests.rs",
+            "matching_line_count": 1
+          },
+          {
+            "path": "src/real_obligation_e2e_tests.rs",
+            "matching_line_count": 3
+          },
+          {
+            "path": "src/real_raptorq_systematic_e2e_tests.rs",
+            "matching_line_count": 1
+          },
+          {
+            "path": "src/real_scheduler_priority_promotion_starvation_cancel_e2e_tests.rs",
+            "matching_line_count": 3
+          },
+          {
+            "path": "src/real_service_e2e_tests.rs",
+            "matching_line_count": 3
+          },
+          {
+            "path": "src/real_supervision_e2e_tests.rs",
+            "matching_line_count": 1
+          },
+          {
+            "path": "src/real_timer_e2e_tests.rs",
+            "matching_line_count": 3
+          },
+          {
+            "path": "src/real_timer_extended_e2e_tests.rs",
+            "matching_line_count": 1
+          },
+          {
+            "path": "src/real_websocket_e2e_tests.rs",
+            "matching_line_count": 3
+          }
+        ]
+      },
+      {
+        "group_id": "TIME-CHRONO-ROOT-INTEGRATION-SOURCES",
+        "profile_id": "TIME-PROFILE-ROOT-DEV",
+        "migration_group_id": "TIME-MIG-DOWNSTREAM-CORPUS",
+        "operation_classes": [
+          "fixture generation",
+          "reference timestamps",
+          "test report serialization"
+        ],
+      "wiring_state": "PER_PATH_STATIC_CLASSIFICATION_RECORDED",
+        "activation_note": "No integration target was built or run by A1.",
+        "path_count": 8,
+        "matching_line_count": 23,
+        "paths": [
+        {
+          "path": "tests/conformance/codec_framing/mod.rs",
+          "matching_line_count": 1,
+          "target_kind": "module source",
+          "manifest_profile": "TIME-PROFILE-ROOT-DEV",
+          "cfg_or_wiring": "DORMANT_COMMENTED_OUT_MODULE",
+          "operation": "fixture timestamp construction",
+          "exposure": "TEST_SOURCE_ONLY",
+          "implementation_owner": "asupersync-5z2scg.6.7",
+          "aggregate_evidence_owner": "asupersync-5z2scg.6.7"
+        },
+        {
+          "path": "tests/conformance/hpack_rfc7541/differential_tests.rs",
+          "matching_line_count": 1,
+          "target_kind": "wired integration-test module",
+          "manifest_profile": "TIME-PROFILE-ROOT-DEV",
+          "cfg_or_wiring": "WIRED_VIA_TESTS_CONFORMANCE_TARGET",
+          "operation": "differential fixture timestamp",
+          "exposure": "TEST_SOURCE_ONLY",
+          "implementation_owner": "asupersync-5z2scg.6.7",
+          "aggregate_evidence_owner": "asupersync-5z2scg.6.7"
+        },
+        {
+          "path": "tests/conformance/hpack_rfc7541/fixtures.rs",
+          "matching_line_count": 4,
+          "target_kind": "wired integration-test module",
+          "manifest_profile": "TIME-PROFILE-ROOT-DEV",
+          "cfg_or_wiring": "WIRED_VIA_TESTS_CONFORMANCE_TARGET",
+          "operation": "fixture metadata timestamp",
+          "exposure": "PUB_ITEM_IN_PRIVATE_TEST_MODULE",
+          "implementation_owner": "asupersync-5z2scg.6.7",
+          "aggregate_evidence_owner": "asupersync-5z2scg.6.7"
+        },
+        {
+          "path": "tests/conformance/mod.rs",
+          "matching_line_count": 1,
+          "target_kind": "wired integration-test root module",
+          "manifest_profile": "TIME-PROFILE-ROOT-DEV",
+          "cfg_or_wiring": "WIRED_BY_TESTS_CONFORMANCE_RS",
+          "operation": "conformance report timestamp",
+          "exposure": "TEST_SOURCE_ONLY",
+          "implementation_owner": "asupersync-5z2scg.6.7",
+          "aggregate_evidence_owner": "asupersync-5z2scg.6.7"
+        },
+        {
+          "path": "tests/grpc_http2_e2e.rs",
+          "matching_line_count": 1,
+          "target_kind": "automatic integration target",
+          "manifest_profile": "TIME-PROFILE-ROOT-DEV",
+          "cfg_or_wiring": "CARGO_AUTOMATIC_TEST_TARGET",
+          "operation": "test timestamp acquisition",
+          "exposure": "TEST_SOURCE_ONLY",
+          "implementation_owner": "asupersync-5z2scg.6.7",
+          "aggregate_evidence_owner": "asupersync-5z2scg.6.7"
+        },
+        {
+          "path": "tests/integration/jetstream_real_server.rs",
+          "matching_line_count": 2,
+          "target_kind": "wired integration-test module",
+          "manifest_profile": "TIME-PROFILE-ROOT-DEV",
+          "cfg_or_wiring": "WIRED_BY_TESTS_JETSTREAM_REAL_SERVER_RS",
+          "operation": "wire timestamp expectation",
+          "exposure": "TEST_SOURCE_ONLY",
+          "implementation_owner": "asupersync-5z2scg.6.7",
+          "aggregate_evidence_owner": "asupersync-5z2scg.6.7"
+        },
+        {
+          "path": "tests/integration/kafka_real_broker.rs",
+          "matching_line_count": 12,
+          "target_kind": "explicit integration target",
+          "manifest_profile": "TIME-PROFILE-ROOT-DEV",
+          "cfg_or_wiring": "EXPLICIT_CARGO_TEST_TARGET",
+          "operation": "broker timestamp comparison",
+          "exposure": "TEST_SOURCE_ONLY",
+          "implementation_owner": "asupersync-5z2scg.6.7",
+          "aggregate_evidence_owner": "asupersync-5z2scg.6.7"
+        },
+        {
+          "path": "tests/rfc6330_conformance.rs",
+          "matching_line_count": 1,
+          "target_kind": "automatic integration target",
+          "manifest_profile": "TIME-PROFILE-ROOT-DEV",
+          "cfg_or_wiring": "CARGO_AUTOMATIC_TEST_TARGET",
+          "operation": "report timestamp acquisition",
+          "exposure": "TEST_SOURCE_ONLY",
+          "implementation_owner": "asupersync-5z2scg.6.7",
+          "aggregate_evidence_owner": "asupersync-5z2scg.6.7"
+        }
+        ]
+      },
+      {
+        "group_id": "TIME-CHRONO-CONFORMANCE-MEMBER",
+        "profile_id": "TIME-PROFILE-CONFORMANCE-MEMBER",
+        "migration_group_id": "TIME-MIG-CONFORMANCE-TOOLS",
+        "operation_classes": [
+          "public serialized report timestamps",
+          "report construction",
+          "optional file output"
+        ],
+        "path_count": 22,
+        "matching_line_count": 31,
+        "paths": [
+          {
+            "path": "conformance/src/bin/h1_request_building_conformance.rs",
+            "matching_line_count": 1
+          },
+          {
+            "path": "conformance/src/bin/h2_data_end_stream_conformance.rs",
+            "matching_line_count": 1
+          },
+          {
+            "path": "conformance/src/bin/h2_enable_push_conformance.rs",
+            "matching_line_count": 1
+          },
+          {
+            "path": "conformance/src/bin/h2_goaway_conformance.rs",
+            "matching_line_count": 1
+          },
+          {
+            "path": "conformance/src/bin/h2_ping_conformance.rs",
+            "matching_line_count": 1
+          },
+          {
+            "path": "conformance/src/bin/h2_priority_conformance.rs",
+            "matching_line_count": 1
+          },
+          {
+            "path": "conformance/src/bin/h2_settings_conformance.rs",
+            "matching_line_count": 1
+          },
+          {
+            "path": "conformance/src/bin/hpack_conformance.rs",
+            "matching_line_count": 1
+          },
+          {
+            "path": "conformance/src/bin/raptorq_rfc6330_conformance.rs",
+            "matching_line_count": 1
+          },
+          {
+            "path": "conformance/src/h1_expect_continue_conformance.rs",
+            "matching_line_count": 1
+          },
+          {
+            "path": "conformance/src/h1_request_building_conformance.rs",
+            "matching_line_count": 1
+          },
+          {
+            "path": "conformance/src/h1_response_building_conformance.rs",
+            "matching_line_count": 1
+          },
+          {
+            "path": "conformance/src/h2_connect_method_conformance.rs",
+            "matching_line_count": 2
+          },
+          {
+            "path": "conformance/src/h2_continuation_conformance.rs",
+            "matching_line_count": 1
+          },
+          {
+            "path": "conformance/src/h2_data_end_stream_conformance.rs",
+            "matching_line_count": 2
+          },
+          {
+            "path": "conformance/src/h2_enable_push_conformance.rs",
+            "matching_line_count": 2
+          },
+          {
+            "path": "conformance/src/h2_goaway_conformance.rs",
+            "matching_line_count": 2
+          },
+          {
+            "path": "conformance/src/h2_ping_conformance.rs",
+            "matching_line_count": 2
+          },
+          {
+            "path": "conformance/src/h2_priority_conformance.rs",
+            "matching_line_count": 2
+          },
+          {
+            "path": "conformance/src/h2_settings_conformance.rs",
+            "matching_line_count": 3
+          },
+          {
+            "path": "conformance/src/hpack_conformance.rs",
+            "matching_line_count": 2
+          },
+          {
+            "path": "conformance/src/hpack_encoder_conformance.rs",
+            "matching_line_count": 1
+          }
+        ]
+      },
+      {
+        "group_id": "TIME-CHRONO-CONFORMANCE-RAPTORQ-REPORTING",
+        "profile_id": "TIME-PROFILE-CONFORMANCE-MEMBER",
+        "migration_group_id": "TIME-MIG-CONFORMANCE-TOOLS",
+        "operation_classes": [
+          "public serialized RaptorQ report timestamps",
+          "fixture maintenance metadata"
+        ],
+        "wiring_state": "PUBLICLY_WIRED_BY_CONFORMANCE_LIBRARY",
+        "path_count": 3,
+        "matching_line_count": 7,
+        "paths": [
+          {
+            "path": "conformance/raptorq_rfc6330/reporting/src/coverage_matrix.rs",
+            "matching_line_count": 1
+          },
+          {
+            "path": "conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs",
+            "matching_line_count": 4
+          },
+          {
+            "path": "conformance/raptorq_rfc6330/reporting/src/regression_detection.rs",
+            "matching_line_count": 2
+          }
+        ]
+      },
+      {
+        "group_id": "TIME-CHRONO-EXCLUDED-CONFORMANCE",
+        "profile_id": "TIME-PROFILE-EXCLUDED-CONFORMANCE",
+        "migration_group_id": "TIME-MIG-CONFORMANCE-TOOLS",
+        "operation_classes": [
+          "separate-workspace report timing"
+        ],
+        "path_count": 1,
+        "matching_line_count": 2,
+        "paths": [
+          {
+            "path": "fuzz/conformance/src/h2_ping_rtt_measurement_conformance.rs",
+            "matching_line_count": 2
+          }
+        ]
+      },
+      {
+        "group_id": "TIME-CHRONO-STANDALONE-GOLDEN",
+        "profile_id": "TIME-PROFILE-STANDALONE-GOLDEN",
+        "migration_group_id": "TIME-MIG-CONFORMANCE-TOOLS",
+        "operation_classes": [
+          "fixture generated and updated timestamps"
+        ],
+        "path_count": 2,
+        "matching_line_count": 4,
+        "paths": [
+          {
+            "path": "tests/conformance/raptorq_rfc6330/golden/src/fixture_generator.rs",
+            "matching_line_count": 2
+          },
+          {
+            "path": "tests/conformance/raptorq_rfc6330/golden/src/format_validator.rs",
+            "matching_line_count": 2
+          }
+        ]
+      },
+      {
+        "group_id": "TIME-CHRONO-STANDALONE-REPORTING",
+        "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+        "migration_group_id": "TIME-MIG-CONFORMANCE-TOOLS",
+        "operation_classes": [
+          "report and maintenance timestamps",
+          "filesystem modified-time conversion"
+        ],
+        "path_count": 7,
+        "matching_line_count": 11,
+        "paths": [
+          {
+            "path": "tests/conformance/raptorq_rfc6330/reporting/bin/generate_compliance_report.rs",
+            "matching_line_count": 1
+          },
+          {
+            "path": "tests/conformance/raptorq_rfc6330/reporting/bin/maintain_fixtures.rs",
+            "matching_line_count": 3
+          },
+          {
+            "path": "tests/conformance/raptorq_rfc6330/reporting/src/compliance_report.rs",
+            "matching_line_count": 1
+          },
+          {
+            "path": "tests/conformance/raptorq_rfc6330/reporting/src/coverage_matrix.rs",
+            "matching_line_count": 2
+          },
+          {
+            "path": "tests/conformance/raptorq_rfc6330/reporting/src/lib.rs",
+            "matching_line_count": 2
+          },
+          {
+            "path": "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs",
+            "matching_line_count": 1
+          },
+          {
+            "path": "tests/conformance/raptorq_rfc6330/reporting/src/regression_detection.rs",
+            "matching_line_count": 1
+          }
+        ]
+      }
+    ]
+  },
+  "external_time_crate_census": {
+    "root_direct_manifest_edge": "optional >=0.3 with formatting, activated by cli",
+    "scan_scope": "workspace filesystem Rust sources under src for exact external import and known OffsetDateTime/format-description call shapes",
+    "scan_patterns": [
+      "use time namespace import",
+      "absolute time namespace import",
+      "external OffsetDateTime path",
+      "external format_description path"
+    ],
+    "production_source_path_count": 0,
+    "production_call_count": 0,
+    "oracle_paths": [
+      "tests/time_utc_rfc3339_foundation_contract.rs"
+    ],
+    "oracle_role": "Prior scoped differential formatter comparison",
+    "owned_replacement_path": "src/time/utc.rs",
+    "owned_cli_call_path": "src/bin/asupersync.rs",
+    "classification": "DIRECT_EDGE_RETAINED_WITHOUT_PRODUCTION_CALL",
+    "no_claim": "This bounded lexical scan is not compiler-resolved name analysis. Its static absence result does not authorize dependency removal or establish locked-graph impact."
+  },
+  "public_datetime_fields": [
+    {
+      "field_id": "TIME-PUB-CLI-STATUS-TIMESTAMP",
+      "crate": "asupersync",
+      "module": "cli::atp_command_tree",
+      "feature": "cli",
+      "struct": "AtpStatusOutput",
+      "field": "timestamp",
+      "rust_type": "chrono DateTime UTC",
+      "optional": false,
+      "serde_container": true,
+      "source_line": 1041,
+      "exposure": "PUBLIC_SUBMODULE_SERDE_MODEL_NO_IN_TREE_PRODUCER"
+    },
+    {
+      "field_id": "TIME-PUB-CLI-BENCH-SYSTEM-TIMESTAMP",
+      "crate": "asupersync",
+      "module": "cli::atp_command_tree",
+      "feature": "cli",
+      "struct": "AtpBenchSystemInfo",
+      "field": "timestamp",
+      "rust_type": "chrono DateTime UTC",
+      "optional": false,
+      "serde_container": true,
+      "source_line": 1238,
+      "exposure": "PUBLIC_SUBMODULE_SERDE_MODEL_NO_IN_TREE_PRODUCER"
+    },
+    {
+      "field_id": "TIME-PUB-CLI-CI-TIMESTAMP",
+      "crate": "asupersync",
+      "module": "cli::atp_command_tree",
+      "feature": "cli",
+      "struct": "AtpCiArtifact",
+      "field": "timestamp",
+      "rust_type": "chrono DateTime UTC",
+      "optional": false,
+      "serde_container": true,
+      "source_line": 1283,
+      "exposure": "PUBLIC_REEXPORT_AND_PERSISTED_JSON"
+    },
+    {
+      "field_id": "TIME-PUB-CLI-CI-EXPIRES",
+      "crate": "asupersync",
+      "module": "cli::atp_command_tree",
+      "feature": "cli",
+      "struct": "AtpCiArtifact",
+      "field": "expires_at",
+      "rust_type": "Option chrono DateTime UTC",
+      "optional": true,
+      "serde_container": true,
+      "source_line": 1285,
+      "exposure": "PUBLIC_REEXPORT_AND_PERSISTED_JSON"
+    },
+    {
+      "field_id": "TIME-PUB-CLI-DATASET-UPDATED",
+      "crate": "asupersync",
+      "module": "cli::atp_command_tree",
+      "feature": "cli",
+      "struct": "AtpDatasetInfo",
+      "field": "updated_at",
+      "rust_type": "chrono DateTime UTC",
+      "optional": false,
+      "serde_container": true,
+      "source_line": 1348,
+      "exposure": "PUBLIC_REEXPORT_AND_PERSISTED_JSON"
+    },
+    {
+      "field_id": "TIME-PUB-CLI-RELEASE-PUBLISHED",
+      "crate": "asupersync",
+      "module": "cli::atp_command_tree",
+      "feature": "cli",
+      "struct": "AtpReleaseInfo",
+      "field": "published_at",
+      "rust_type": "chrono DateTime UTC",
+      "optional": false,
+      "serde_container": true,
+      "source_line": 1480,
+      "exposure": "PUBLIC_REEXPORT_AND_PERSISTED_JSON"
+    },
+    {
+      "field_id": "TIME-PUB-CLI-ARCHIVE-ARCHIVED",
+      "crate": "asupersync",
+      "module": "cli::atp_command_tree",
+      "feature": "cli",
+      "struct": "AtpArchiveEntry",
+      "field": "archived_at",
+      "rust_type": "chrono DateTime UTC",
+      "optional": false,
+      "serde_container": true,
+      "source_line": 1553,
+      "exposure": "PUBLIC_REEXPORT_AND_PERSISTED_JSON"
+    },
+    {
+      "field_id": "TIME-PUB-CLI-ARCHIVE-EXPIRES",
+      "crate": "asupersync",
+      "module": "cli::atp_command_tree",
+      "feature": "cli",
+      "struct": "AtpArchiveEntry",
+      "field": "expires_at",
+      "rust_type": "Option chrono DateTime UTC",
+      "optional": true,
+      "serde_container": true,
+      "source_line": 1555,
+      "exposure": "PUBLIC_REEXPORT_AND_PERSISTED_JSON"
+    },
+    {
+      "field_id": "TIME-PUB-CLI-ARCHIVE-VERIFIED",
+      "crate": "asupersync",
+      "module": "cli::atp_command_tree",
+      "feature": "cli",
+      "struct": "AtpArchiveEntry",
+      "field": "last_verified_at",
+      "rust_type": "Option chrono DateTime UTC",
+      "optional": true,
+      "serde_container": true,
+      "source_line": 1557,
+      "exposure": "PUBLIC_REEXPORT_AND_PERSISTED_JSON"
+    },
+    {
+      "field_id": "TIME-PUB-CLI-INTEGRITY-LAST-CHECK",
+      "crate": "asupersync",
+      "module": "cli::atp_command_tree",
+      "feature": "cli",
+      "struct": "AtpIntegrityStatus",
+      "field": "last_check_at",
+      "rust_type": "chrono DateTime UTC",
+      "optional": false,
+      "serde_container": true,
+      "source_line": 1589,
+      "exposure": "PUBLIC_REEXPORT_JSON_OUTPUT"
+    },
+    {
+      "field_id": "TIME-PUB-BENCH-ENVIRONMENT-TIMESTAMP",
+      "crate": "asupersync",
+      "module": "atp::benchmark",
+      "feature": "benchmark-adapters",
+      "struct": "BenchmarkEnvironment",
+      "field": "timestamp",
+      "rust_type": "chrono DateTime UTC",
+      "optional": false,
+      "serde_container": true,
+      "source_line": 68,
+      "exposure": "PUBLIC_MODULE_SERDE"
+    },
+    {
+      "field_id": "TIME-PUB-BENCH-REPORT-TIMESTAMP",
+      "crate": "asupersync",
+      "module": "atp::benchmark::reports",
+      "feature": "benchmark-adapters",
+      "struct": "BenchmarkReport",
+      "field": "timestamp",
+      "rust_type": "chrono DateTime UTC",
+      "optional": false,
+      "serde_container": true,
+      "source_line": 252,
+      "exposure": "PUBLIC_REEXPORT_SERDE"
+    },
+    {
+      "field_id": "TIME-PUB-CONFORMANCE-H2-DATA-END",
+      "crate": "asupersync-conformance",
+      "module": "h2_data_end_stream_conformance",
+      "feature": "direct conformance dependency",
+      "struct": "DataEndStreamComplianceReport",
+      "field": "timestamp",
+      "rust_type": "chrono DateTime UTC",
+      "optional": false,
+      "serde_container": true,
+      "source_line": 142,
+      "exposure": "PUBLIC_CONFORMANCE_REPORT"
+    },
+    {
+      "field_id": "TIME-PUB-CONFORMANCE-H2-GOAWAY",
+      "crate": "asupersync-conformance",
+      "module": "h2_goaway_conformance",
+      "feature": "direct conformance dependency",
+      "struct": "GoAwayComplianceReport",
+      "field": "timestamp",
+      "rust_type": "chrono DateTime UTC",
+      "optional": false,
+      "serde_container": true,
+      "source_line": 155,
+      "exposure": "PUBLIC_CONFORMANCE_REPORT"
+    },
+    {
+      "field_id": "TIME-PUB-CONFORMANCE-H2-PING",
+      "crate": "asupersync-conformance",
+      "module": "h2_ping_conformance",
+      "feature": "direct conformance dependency",
+      "struct": "PingComplianceReport",
+      "field": "timestamp",
+      "rust_type": "chrono DateTime UTC",
+      "optional": false,
+      "serde_container": true,
+      "source_line": 146,
+      "exposure": "PUBLIC_CONFORMANCE_REPORT"
+    },
+    {
+      "field_id": "TIME-PUB-CONFORMANCE-H2-PRIORITY",
+      "crate": "asupersync-conformance",
+      "module": "h2_priority_conformance",
+      "feature": "direct conformance dependency",
+      "struct": "PriorityComplianceReport",
+      "field": "timestamp",
+      "rust_type": "chrono DateTime UTC",
+      "optional": false,
+      "serde_container": true,
+      "source_line": 151,
+      "exposure": "PUBLIC_CONFORMANCE_REPORT"
+    },
+    {
+      "field_id": "TIME-PUB-CONFORMANCE-H2-SETTINGS",
+      "crate": "asupersync-conformance",
+      "module": "h2_settings_conformance",
+      "feature": "direct conformance dependency",
+      "struct": "ComplianceReport",
+      "field": "timestamp",
+      "rust_type": "chrono DateTime UTC",
+      "optional": false,
+      "serde_container": true,
+      "source_line": 93,
+      "exposure": "PUBLIC_CONFORMANCE_REPORT"
+    },
+    {
+      "field_id": "TIME-PUB-CONFORMANCE-HPACK",
+      "crate": "asupersync-conformance",
+      "module": "hpack_conformance",
+      "feature": "direct conformance dependency",
+      "struct": "ComplianceReport",
+      "field": "timestamp",
+      "rust_type": "chrono DateTime UTC",
+      "optional": false,
+      "serde_container": true,
+      "source_line": 82,
+      "exposure": "PUBLIC_CONFORMANCE_REPORT"
+    }
+  ],
+  "public_chrono_generated_string_fields": [
+    {
+      "field_id": "TIME-PUB-CONFORMANCE-H1-EXPECT-STRING",
+      "crate": "asupersync-conformance",
+      "module": "h1_expect_continue_conformance",
+      "struct": "ExpectContinueComplianceReport",
+      "field": "timestamp",
+      "rust_type": "String",
+      "source_line": 75,
+      "generation": "ambient UTC now rendered as RFC3339",
+      "serde_container": true,
+      "serde_direction": "SERIALIZE_ONLY",
+      "exposure": "PUBLIC_CONFORMANCE_REPORT"
+    },
+    {
+      "field_id": "TIME-PUB-CONFORMANCE-H1-REQUEST-STRING",
+      "crate": "asupersync-conformance",
+      "module": "h1_request_building_conformance",
+      "struct": "RequestBuildingComplianceReport",
+      "field": "timestamp",
+      "rust_type": "String",
+      "source_line": 86,
+      "generation": "ambient UTC now rendered as RFC3339",
+      "serde_container": true,
+      "serde_direction": "SERIALIZE_ONLY",
+      "exposure": "PUBLIC_CONFORMANCE_REPORT"
+    },
+    {
+      "field_id": "TIME-PUB-CONFORMANCE-H1-RESPONSE-STRING",
+      "crate": "asupersync-conformance",
+      "module": "h1_response_building_conformance",
+      "struct": "ResponseBuildingComplianceReport",
+      "field": "timestamp",
+      "rust_type": "String",
+      "source_line": 84,
+      "generation": "ambient UTC now rendered as RFC3339",
+      "serde_container": true,
+      "serde_direction": "SERIALIZE_ONLY",
+      "exposure": "PUBLIC_CONFORMANCE_REPORT"
+    },
+    {
+      "field_id": "TIME-PUB-CONFORMANCE-H2-ENABLE-PUSH-STRING",
+      "crate": "asupersync-conformance",
+      "module": "h2_enable_push_conformance",
+      "struct": "EnablePushComplianceReport",
+      "field": "timestamp",
+      "rust_type": "String",
+      "source_line": 96,
+      "generation": "ambient UTC now rendered as RFC3339",
+      "serde_container": true,
+      "serde_direction": "SERIALIZE_ONLY",
+      "exposure": "PUBLIC_CONFORMANCE_REPORT"
+    },
+    {
+      "field_id": "TIME-PUB-CONFORMANCE-H2-CONNECT-STRING",
+      "crate": "asupersync-conformance",
+      "module": "h2_connect_method_conformance",
+      "struct": "ConnectMethodComplianceReport",
+      "field": "timestamp",
+      "rust_type": "String",
+      "source_line": 81,
+      "generation": "ambient UTC now rendered as RFC3339",
+      "serde_container": true,
+      "serde_direction": "SERIALIZE_ONLY",
+      "exposure": "PUBLIC_CONFORMANCE_REPORT"
+    },
+    {
+      "field_id": "TIME-PUB-CONFORMANCE-H2-CONTINUATION-STRING",
+      "crate": "asupersync-conformance",
+      "module": "h2_continuation_conformance",
+      "struct": "ContinuationComplianceReport",
+      "field": "timestamp",
+      "rust_type": "String",
+      "source_line": 119,
+      "generation": "ambient UTC now rendered as RFC3339",
+      "serde_container": true,
+      "serde_direction": "SERIALIZE_ONLY",
+      "exposure": "PUBLIC_CONFORMANCE_REPORT"
+    },
+    {
+      "field_id": "TIME-PUB-CONFORMANCE-HPACK-ENCODER-STRING",
+      "crate": "asupersync-conformance",
+      "module": "hpack_encoder_conformance",
+      "struct": "HpackEncoderComplianceReport",
+      "field": "timestamp",
+      "rust_type": "String",
+      "source_line": 85,
+      "generation": "ambient UTC now rendered as RFC3339",
+      "serde_container": true,
+      "serde_direction": "SERIALIZE_ONLY",
+      "exposure": "PUBLIC_CONFORMANCE_REPORT"
+    },
+    {
+      "field_id": "TIME-PUB-CONFORMANCE-RAPTORQ-REFERENCE-UPDATED",
+      "crate": "asupersync-conformance",
+      "module": "raptorq_rfc6330_reporting::maintenance_workflows",
+      "struct": "ReferenceVersion",
+      "field": "last_updated",
+      "rust_type": "String",
+      "source_line": 22,
+      "generation": "ambient UTC now rendered as RFC3339",
+      "serde_container": true,
+      "serde_direction": "SERIALIZE_AND_DESERIALIZE",
+      "exposure": "PUBLIC_CONFORMANCE_SERDE_MODEL",
+      "in_tree_persistence": "EXCLUDED_FROM_PRIVATE_FIXTURE_VERSION_METADATA"
+    },
+    {
+      "field_id": "TIME-PUB-CONFORMANCE-RAPTORQ-COVERAGE-GENERATED",
+      "crate": "asupersync-conformance",
+      "module": "raptorq_rfc6330_reporting::coverage_matrix",
+      "struct": "CoverageMatrix",
+      "field": "generated_at",
+      "rust_type": "String",
+      "source_line": 216,
+      "generation": "ambient UTC now rendered as RFC3339",
+      "serde_container": true,
+      "serde_direction": "SERIALIZE_AND_DESERIALIZE",
+      "exposure": "PUBLIC_CONFORMANCE_REPORT"
+    },
+    {
+      "field_id": "TIME-PUB-CONFORMANCE-RAPTORQ-RECORD-TIMESTAMP",
+      "crate": "asupersync-conformance",
+      "module": "raptorq_rfc6330_reporting::regression_detection",
+      "struct": "ConformanceRecord",
+      "field": "timestamp",
+      "rust_type": "String",
+      "source_line": 17,
+      "generation": "copied from CoverageMatrix.generated_at",
+      "serde_container": true,
+      "serde_direction": "SERIALIZE_AND_DESERIALIZE",
+      "exposure": "PUBLIC_CONFORMANCE_PERSISTED_HISTORY"
+    },
+    {
+      "field_id": "TIME-PUB-CONFORMANCE-RAPTORQ-HISTORY-UPDATED",
+      "crate": "asupersync-conformance",
+      "module": "raptorq_rfc6330_reporting::regression_detection",
+      "struct": "ConformanceHistory",
+      "field": "last_updated",
+      "rust_type": "String",
+      "source_line": 57,
+      "generation": "ambient UTC now rendered as RFC3339",
+      "serde_container": true,
+      "serde_direction": "SERIALIZE_AND_DESERIALIZE",
+      "exposure": "PUBLIC_CONFORMANCE_PERSISTED_HISTORY"
+    },
+    {
+      "field_id": "TIME-PUB-EXCLUDED-CONFORMANCE-PING-REPORT-TIMESTAMP",
+      "profile_id": "TIME-PROFILE-EXCLUDED-CONFORMANCE",
+      "crate": "asupersync-conformance",
+      "module": "h2_ping_rtt_measurement_conformance",
+      "struct": "ConformanceReport",
+      "field": "timestamp",
+      "rust_type": "String",
+      "source_line": 100,
+      "generation": "ambient UTC now rendered as RFC3339 at both report constructors",
+      "serde_container": true,
+      "serde_direction": "SERIALIZE_AND_DESERIALIZE",
+      "exposure": "PUBLIC_EXCLUDED_WORKSPACE_REPORT",
+      "parse_on_deserialize": false,
+      "persistence": "JSON and Markdown output through the excluded workspace binary"
+    }
+  ],
+  "test_profile_datetime_fields": [
+    {
+      "field_id": "TIME-TEST-ROOT-HPACK-FIXTURE-GENERATED",
+      "profile_id": "TIME-PROFILE-ROOT-DEV",
+      "path": "tests/conformance/hpack_rfc7541/fixtures.rs",
+      "struct": "FixtureMetadata",
+      "field": "generated_at",
+      "source_line": 22,
+      "rust_type": "chrono::DateTime<chrono::Utc>",
+      "optional": false,
+      "visibility": "PUB_ITEM_IN_PRIVATE_TEST_MODULE",
+      "serde_container": false
+    },
+    {
+      "field_id": "TIME-TEST-GOLDEN-FIXTURE-GENERATED",
+      "profile_id": "TIME-PROFILE-STANDALONE-GOLDEN",
+      "path": "tests/conformance/raptorq_rfc6330/golden/src/fixture_generator.rs",
+      "struct": "FixtureMetadata",
+      "field": "generated_at",
+      "source_line": 613,
+      "rust_type": "chrono::DateTime<chrono::Utc>",
+      "optional": false,
+      "visibility": "PRIVATE_SERIALIZED_TEST_ARTIFACT",
+      "serde_container": true
+    },
+    {
+      "field_id": "TIME-TEST-GOLDEN-METADATA-UPDATED",
+      "profile_id": "TIME-PROFILE-STANDALONE-GOLDEN",
+      "path": "tests/conformance/raptorq_rfc6330/golden/src/format_validator.rs",
+      "struct": "MetadataSummary",
+      "field": "last_updated",
+      "source_line": 168,
+      "rust_type": "Option<chrono::DateTime<chrono::Utc>>",
+      "optional": true,
+      "visibility": "PUBLIC_TEST_TYPE",
+      "serde_container": false
+    },
+    {
+      "field_id": "TIME-TEST-REPORT-COVERAGE-GENERATED",
+      "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+      "path": "tests/conformance/raptorq_rfc6330/reporting/src/coverage_matrix.rs",
+      "struct": "CoverageMatrix",
+      "field": "generated_at",
+      "source_line": 26,
+      "rust_type": "chrono::DateTime<chrono::Utc>",
+      "optional": false,
+      "visibility": "PUBLIC_SERIALIZED_TEST_ARTIFACT",
+      "serde_container": true
+    },
+    {
+      "field_id": "TIME-TEST-REPORT-MAINTENANCE-TIMESTAMP",
+      "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+      "path": "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs",
+      "struct": "MaintenanceResult",
+      "field": "timestamp",
+      "source_line": 55,
+      "rust_type": "chrono::DateTime<chrono::Utc>",
+      "optional": false,
+      "visibility": "PUBLIC_SERIALIZED_TEST_ARTIFACT",
+      "serde_container": true
+    },
+    {
+      "field_id": "TIME-TEST-REPORT-FILE-MODIFIED",
+      "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+      "path": "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs",
+      "struct": "FileHealthStatus",
+      "field": "last_modified",
+      "source_line": 131,
+      "rust_type": "chrono::DateTime<chrono::Utc>",
+      "optional": false,
+      "visibility": "PUBLIC_SERIALIZED_TEST_ARTIFACT",
+      "serde_container": true
+    },
+    {
+      "field_id": "TIME-TEST-REPORT-SNAPSHOT-TIMESTAMP",
+      "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+      "path": "tests/conformance/raptorq_rfc6330/reporting/src/regression_detection.rs",
+      "struct": "ConformanceSnapshot",
+      "field": "timestamp",
+      "source_line": 49,
+      "rust_type": "chrono::DateTime<chrono::Utc>",
+      "optional": false,
+      "visibility": "PUBLIC_SERIALIZED_TEST_ARTIFACT",
+      "serde_container": true
+    }
+  ],
+  "public_field_totals": {
+    "root_asupersync_fields": 12,
+    "root_asupersync_structs": 9,
+    "root_asupersync_modules": 3,
+    "conformance_member_fields": 6,
+    "conformance_member_chrono_generated_string_fields": 11,
+    "root_conformance_member_chrono_backed_timestamp_fields": 17,
+    "excluded_conformance_chrono_generated_string_fields": 1,
+    "all_public_chrono_backed_timestamp_fields": 30,
+    "test_profile_datetime_fields": 7,
+    "test_profile_publicly_reachable_fields": 5,
+    "test_profile_pub_in_private_module_fields": 1,
+    "test_profile_private_serialized_fields": 1,
+    "all_inventory_field_rows": 37,
+    "syntactically_pub_field_rows": 36,
+    "externally_reachable_public_field_rows": 35,
+    "private_field_rows": 1,
+    "optional_root_fields": 3,
+    "all_serde_field_rows": 35,
+    "all_distinct_serde_container_count": 32
+  },
+  "persisted_and_output_surfaces": [
+    {
+      "surface_id": "TIME-SURFACE-CLI-NESTED-SERDE",
+      "profile_id": "TIME-PROFILE-CLI",
+      "kind": "PUBLIC_SERDE_MODELS_MIXED_REACHABILITY",
+      "source_types": [
+        "AtpStatusOutput",
+        "AtpBenchSystemInfo",
+        "AtpIntegrityStatus"
+      ],
+      "in_tree_writer": "Only AtpIntegrityStatus is produced in-tree, nested in archive output",
+      "in_tree_reader": "NONE_FOUND",
+      "timestamp_fields": [
+        "timestamp",
+        "last_check_at"
+      ],
+      "byte_golden_state": "MISSING_TIMESTAMP_SENSITIVE_GOLDEN",
+      "model_reachability": {
+        "AtpStatusOutput": "NO_IN_TREE_PRODUCER_FOUND",
+        "AtpBenchSystemInfo": "NO_IN_TREE_PRODUCER_FOUND",
+        "AtpIntegrityStatus": "NESTED_IN_ARCHIVE_OUTPUT"
+      },
+      "binary_reachability": "SEPARATE_PRIVATE_BINARY_STATUS_MODEL_FOUND",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "surface_id": "TIME-SURFACE-CLI-CI-INDEX",
+      "profile_id": "TIME-PROFILE-CLI",
+      "kind": "READ_WRITE_PRETTY_JSON_STORE",
+      "path_shape": "ci/index/{build_id}-{content_hash}.json",
+      "source_type": "AtpCiArtifact",
+      "timestamp_fields": [
+        "timestamp",
+        "expires_at"
+      ],
+      "clock_policy": "ambient UTC now",
+      "arithmetic_policy": "expiry converts standard duration; conversion failure becomes zero duration",
+      "conversion_failure_effects": {
+        "publish_parse_failure": "writes expires_at as explicit JSON null",
+        "publish_standard_duration_failure": "writes expires_at equal to the acquisition instant because failed conversion defaults to zero duration",
+        "clean_parse_or_conversion_failure": "disables the age cutoff and may select every otherwise-matching artifact",
+        "list_parse_or_conversion_failure": "disables the recent cutoff and may include every otherwise-matching artifact"
+      },
+      "readback_state": "IMPLEMENTED",
+      "cli_output_modes": [
+        "json",
+        "pretty",
+        "stream"
+      ],
+      "human_and_tsv_timestamp_visibility": "OMITTED",
+      "temporal_assertion_state": "MISSING",
+      "byte_golden_state": "MISSING",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "surface_id": "TIME-SURFACE-CLI-DATASET-INDEX",
+      "profile_id": "TIME-PROFILE-CLI",
+      "kind": "READ_WRITE_PRETTY_JSON_STORE",
+      "path_shape": "datasets/{dataset_id}-{version}.json",
+      "source_type": "AtpDatasetInfo",
+      "timestamp_fields": [
+        "updated_at"
+      ],
+      "clock_policy": "ambient UTC now on seed, pin, and unpin",
+      "arithmetic_policy": "NONE",
+      "readback_state": "IMPLEMENTED",
+      "cli_output_modes": [
+        "json",
+        "pretty",
+        "stream"
+      ],
+      "human_and_tsv_timestamp_visibility": "OMITTED",
+      "temporal_assertion_state": "MISSING",
+      "byte_golden_state": "MISSING",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "surface_id": "TIME-SURFACE-CLI-RELEASE-INDEX",
+      "profile_id": "TIME-PROFILE-CLI",
+      "kind": "READ_WRITE_PRETTY_JSON_STORE",
+      "path_shape": "releases/{channel}-{version}.json",
+      "source_type": "AtpReleaseInfo",
+      "timestamp_fields": [
+        "published_at"
+      ],
+      "clock_policy": "ambient UTC now",
+      "arithmetic_policy": "NONE",
+      "readback_state": "IMPLEMENTED",
+      "cli_output_modes": [
+        "json",
+        "pretty",
+        "stream"
+      ],
+      "human_and_tsv_timestamp_visibility": "OMITTED",
+      "temporal_assertion_state": "MISSING",
+      "byte_golden_state": "MISSING",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "surface_id": "TIME-SURFACE-CLI-ARCHIVE-METADATA",
+      "profile_id": "TIME-PROFILE-CLI",
+      "kind": "READ_WRITE_PRETTY_JSON_STORE",
+      "path_shape": "archives/{archive_id}/metadata.json",
+      "source_type": "AtpArchiveEntry",
+      "timestamp_fields": [
+        "archived_at",
+        "expires_at",
+        "last_verified_at"
+      ],
+      "clock_policy": "ambient UTC now; default identifier uses Unix seconds",
+      "arithmetic_policy": "retention parse or standard-duration conversion failure writes expires_at as explicit JSON null",
+      "readback_state": "IMPLEMENTED",
+      "cli_output_modes": [
+        "json",
+        "pretty",
+        "stream"
+      ],
+      "human_and_tsv_timestamp_visibility": "OMITTED",
+      "temporal_assertion_state": "MISSING",
+      "byte_golden_state": "MISSING",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "surface_id": "TIME-SURFACE-BENCHMARK-SERDE",
+      "profile_id": "TIME-PROFILE-BENCHMARK-ADAPTERS",
+      "kind": "PUBLIC_SERDE_MODEL",
+      "source_types": [
+        "BenchmarkEnvironment",
+        "BenchmarkReport"
+      ],
+      "timestamp_fields": [
+        "timestamp"
+      ],
+      "clock_policy": "ambient UTC now",
+      "in_tree_writer": "NONE_FOUND_FOR_BENCHMARK_REPORT",
+      "byte_golden_state": "MISSING",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "surface_id": "TIME-SURFACE-RAPTORQ-BENCHMARK-STDERR-EVENT",
+      "profile_id": "TIME-PROFILE-ROOT-DEV",
+      "kind": "BENCHMARK_STDERR_JSON_EVENT",
+      "source_type": "raptorq-perf-event-v1",
+      "timestamp_fields": [
+        "timestamp"
+      ],
+      "clock_policy": "ambient UTC now",
+      "format_policy": "UTC text with exactly millisecond fractional precision and uppercase Z",
+      "writer": "benches/raptorq_benchmark.rs emits JSON to stderr",
+      "byte_golden_state": "MISSING",
+      "evidence_state": "SOURCE_BASELINED_NOT_EXECUTED"
+    },
+    {
+      "surface_id": "TIME-SURFACE-TRACE-METADATA-CLI-UTC",
+      "profile_id": "TIME-PROFILE-CLI",
+      "source_profiles": [
+        "TIME-PROFILE-DEFAULT",
+        "TIME-PROFILE-CLI"
+      ],
+      "kind": "RAW_PERSISTED_NANOS_AND_OPTIONAL_CLI_RENDERING",
+      "source_type": "TraceMetadata and TraceInfo",
+      "timestamp_fields": [
+        "recorded_at",
+        "created_at"
+      ],
+      "persistence_policy": "Trace metadata stores u64 Unix nanoseconds; deterministic default zero means no attached wall-clock timestamp.",
+      "render_policy": "CLI maps nonzero values through the owned formatter and maps zero to None; compact JSON therefore emits created_at null while human output omits the Created line.",
+      "byte_golden_state": "PRIOR_SCOPED_FOUNDATION_ONLY",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "surface_id": "TIME-SURFACE-ATP-EVENT-LOG-JSONL",
+      "profile_id": "TIME-PROFILE-DEFAULT",
+      "kind": "PUBLIC_SERDE_JSONL_EVENT",
+      "source_type": "AtpEvent",
+      "timestamp_fields": [
+        "timestamp"
+      ],
+      "clock_policy": "replayable SystemTime with pre-epoch input clamped to zero",
+      "format_policy": "owned whole-second UTC text",
+      "writer": "ATP logger JSON mode",
+      "byte_golden_state": "CHECKED_IN_GOLDEN_PRESENT_STATIC_ONLY",
+      "golden_path": "tests/atp/golden_logs/direct_success.jsonl",
+      "evidence_state": "SOURCE_AND_GOLDEN_PINNED_NOT_EXECUTED"
+    },
+    {
+      "surface_id": "TIME-SURFACE-JETSTREAM-START-TIME-WIRE",
+      "profile_id": "TIME-PROFILE-DEFAULT",
+      "kind": "PROTOCOL_JSON_WIRE_FIELD",
+      "source_type": "ConsumerConfig DeliverPolicy::ByStartTime",
+      "timestamp_fields": [
+        "opt_start_time"
+      ],
+      "clock_policy": "caller-supplied signed pre/post-epoch SystemTime",
+      "format_policy": "owned RFC3339 UTC text with exactly nine fractional digits",
+      "byte_golden_state": "SOURCE_TEST_EXPECTATIONS_PRESENT_NOT_EXECUTED",
+      "evidence_state": "SOURCE_PINNED"
+    },
+    {
+      "surface_id": "TIME-SURFACE-OFFLINE-TUNER-TEMPORAL-METADATA",
+      "profile_id": "TIME-PROFILE-DEFAULT",
+      "source_profiles": [
+        "TIME-PROFILE-DEFAULT",
+        "TIME-PROFILE-OFFLINE-TUNER"
+      ],
+      "kind": "NON_RFC3339_LOGICAL_AND_DEBUG_METADATA",
+      "source_types": [
+        "BenchmarkResult",
+        "offline_tuner JSON documents"
+      ],
+      "timestamp_fields": [
+        "benchmark_timestamp",
+        "generated_at"
+      ],
+      "clock_policy": "BenchmarkResult renders injected or wall-fallback logical Time as t_ns; the CLI binary renders ambient SystemTime with Debug formatting.",
+      "separation_policy": "Neither representation is RFC3339 and neither is a substitute for the Chrono/external-time dependency surface.",
+      "byte_golden_state": "NOT_ESTABLISHED_BY_A1",
+      "evidence_state": "SOURCE_PINNED_NOT_EXECUTED"
+    },
+    {
+      "surface_id": "TIME-SURFACE-CONFORMANCE-REPORTS",
+      "profile_id": "TIME-PROFILE-CONFORMANCE-MEMBER",
+      "kind": "PUBLIC_SERIALIZED_REPORTS_WITH_MIXED_READ_SUPPORT",
+      "timestamp_field_count": 17,
+      "typed_datetime_field_count": 6,
+      "chrono_generated_string_field_count": 11,
+      "serde_direction_counts": {
+        "serialize_only_fields": 7,
+        "serialize_and_deserialize_fields": 10
+      },
+      "clock_policy": "ambient UTC now",
+      "byte_golden_state": "SOURCE_CLASSIFIED_BYTES_NOT_ESTABLISHED",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "surface_id": "TIME-SURFACE-CONFORMANCE-NONCHRONO-TEMPORAL",
+      "profile_id": "TIME-PROFILE-CONFORMANCE-MEMBER",
+      "kind": "PUBLIC_SYSTEM_TIME_AND_UNIX_SECOND_OUTPUT",
+      "source_types": [
+        "TestExecution",
+        "CoverageMatrix",
+        "ConformanceLogEntry"
+      ],
+      "timestamp_fields": [
+        "TestExecution.timestamp",
+        "CoverageMatrix.generated_at",
+        "ConformanceLogEntry.timestamp"
+      ],
+      "representation_policy": "The first two fields use SystemTime; JSONL output converts execution time to a decimal whole-second Unix string with pre-epoch failure defaulted to zero.",
+      "separation_policy": "These are public temporal contracts but are not Chrono-backed fields and are excluded from the 17-field Chrono-backed subtotal.",
+      "byte_golden_state": "NOT_ESTABLISHED_BY_A1",
+      "evidence_state": "SOURCE_PINNED_NOT_EXECUTED"
+    },
+    {
+      "surface_id": "TIME-SURFACE-EXCLUDED-CONFORMANCE-PING-REPORT",
+      "profile_id": "TIME-PROFILE-EXCLUDED-CONFORMANCE",
+      "kind": "PUBLIC_SERDE_REPORT_AND_TEXT_OUTPUT",
+      "source_type": "ConformanceReport",
+      "timestamp_fields": [
+        "timestamp"
+      ],
+      "clock_policy": "ambient UTC now rendered by Chrono",
+      "parse_policy": "plain String on deserialization; no RFC3339 validation",
+      "output_modes": [
+        "JSON",
+        "Markdown",
+        "summary text"
+      ],
+      "byte_golden_state": "MISSING",
+      "evidence_state": "SOURCE_PINNED_NOT_EXECUTED"
+    },
+    {
+      "surface_id": "TIME-SURFACE-CONFORMANCE-HISTORY",
+      "profile_id": "TIME-PROFILE-CONFORMANCE-MEMBER",
+      "kind": "READ_WRITE_PRETTY_JSON_STORE",
+      "path_shape": "caller-selected conformance history JSON file",
+      "source_type": "ConformanceHistory containing ConformanceRecord rows",
+      "timestamp_fields": [
+        "last_updated",
+        "records[].timestamp"
+      ],
+      "clock_policy": "ambient UTC now and copied coverage generation timestamps",
+      "parse_policy": "deserialization accepts arbitrary strings; no RFC3339 validation",
+      "comparison_policy": "records_since compares timestamp strings lexicographically, not as instants",
+      "readback_state": "IMPLEMENTED",
+      "temporal_assertion_state": "MISSING",
+      "byte_golden_state": "MISSING",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "surface_id": "TIME-SURFACE-STANDALONE-TEST-ARTIFACTS",
+      "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+      "kind": "FIXTURE_AND_REPORT_METADATA",
+      "source_profiles": [
+        "TIME-PROFILE-STANDALONE-GOLDEN",
+        "TIME-PROFILE-STANDALONE-REPORTING"
+      ],
+      "clock_policy": "ambient UTC now and filesystem modified-time conversion",
+      "byte_golden_state": "SOURCE_CLASSIFIED_BYTES_NOT_ESTABLISHED",
+      "evidence_state": "SOURCE_BASELINED"
+    }
+  ],
+  "semantic_contracts": [
+    {
+      "contract_id": "TIME-SEM-PUBLIC-TYPE",
+      "surface": "Root public chrono fields",
+      "current_semantics": "Twelve public fields retain the incumbent concrete UTC datetime type and their containing structs retain serde derives.",
+      "range_policy": "INCUMBENT_DEPENDENCY_DEFINED; FULL_ACCEPTED_RANGE_CORPUS_MISSING",
+      "precision_policy": "INCUMBENT_SERDE_DEFAULT; BYTE_LEVEL_RENDERING_NOT_PINNED",
+      "offset_policy": "UTC_CONCRETE_FIELD_TYPE; INPUT_OFFSET_ACCEPTANCE_NOT_CORPUSED",
+      "parse_policy": "INCUMBENT_SERDE_DESERIALIZATION; HISTORICAL_STORE_CORPUS_MISSING",
+      "format_policy": "INCUMBENT_SERDE_SERIALIZATION; EXACT_BYTES_MISSING",
+      "error_policy": "SERDE_ERROR_SURFACE_NOT_FROZEN",
+      "later_owner": "asupersync-5z2scg.6.3"
+    },
+    {
+      "contract_id": "TIME-SEM-OPTION-ABSENCE",
+      "surface": "expires_at and last_verified_at",
+      "current_semantics": "Three root public fields are optional. Because their serde fields have no skip_serializing_if attribute, None serializes as an explicit JSON null rather than an omitted key or epoch sentinel; Serde deserialization maps both explicit null and a missing Option field to None.",
+      "output_policy": "NONE_TO_EXPLICIT_JSON_NULL",
+      "roundtrip_state": "NO_TIMESTAMP_SENSITIVE_ROUNDTRIP_EXECUTED",
+      "evidence_state": "SOURCE_TYPE_FROZEN_ROUNDTRIP_MISSING",
+      "later_owner": "asupersync-5z2scg.6.3"
+    },
+    {
+      "contract_id": "TIME-SEM-CLI-CLOCK",
+      "surface": "ATP workflow timestamps",
+      "current_semantics": "Feature-gated workflow code directly acquires ambient UTC now for create, update, retention, and verification records.",
+      "deterministic_clock_policy": "NOT_AN_INJECTED_CLOCK_TODAY",
+      "later_owner": "asupersync-5z2scg.6.4"
+    },
+    {
+      "contract_id": "TIME-SEM-DURATION-CONVERSION",
+      "surface": "ATP expiry and retention arithmetic",
+      "current_semantics": "CI publish writes null on retention parse failure, but defaults failed standard-duration conversion to zero and writes expiry equal to acquisition time. CI clean and list disable their age/recent cutoffs on parse or conversion failure and may include every otherwise-matching row. Archive retention parse or conversion failure writes expires_at as JSON null.",
+      "overflow_policy": "CURRENT_POLICIES_DIFFER_AND_NEED_TYPED_DECISION",
+      "later_owner": "asupersync-5z2scg.6.4"
+    },
+    {
+      "contract_id": "TIME-SEM-STORE-IO",
+      "surface": "Four ATP workflow JSON families",
+      "current_semantics": "Generic serde JSON pretty serialization writes directly and generic serde JSON deserialization reads the entire file.",
+      "compatibility_policy": "EARLIER_DOCUMENTS_MUST_REMAIN_READABLE",
+      "atomicity_policy": "DIRECT_WRITE_CURRENTLY; MIGRATION_MUST_NOT_WIDEN_LOSS",
+      "later_owner": "asupersync-5z2scg.6.4"
+    },
+    {
+      "contract_id": "TIME-SEM-BENCHMARK",
+      "surface": "Benchmark environment and report",
+      "current_semantics": "Both public serde types acquire ambient UTC now; the report is returned to callers and no in-tree BenchmarkReport file writer was found.",
+      "later_owner": "asupersync-5z2scg.6.5"
+    },
+    {
+      "contract_id": "TIME-SEM-POSTGRES-ORACLE",
+      "surface": "PostgreSQL binary DATE and TIMESTAMP tests",
+      "current_semantics": "Production DATE, TIMESTAMP, and INTERVAL decoding is owned. Chrono independently constructs expected DATE and TIMESTAMP text only; the INTERVAL expected value calls the same owned render_interval_text helper and is not an independent Chrono oracle.",
+      "oracle_scope": "INDEPENDENT_FOR_DATE_AND_TIMESTAMP_ONLY",
+      "later_owner": "asupersync-5z2scg.6.6"
+    },
+    {
+      "contract_id": "TIME-SEM-CONFORMANCE-STRING-TIMESTAMPS",
+      "surface": "Chrono-generated String fields in root and excluded conformance reports",
+      "current_semantics": "Twelve public timestamp fields are generated with Chrono. The first seven root-member report types derive Serialize only. The four wired RaptorQ models and excluded PING report also derive Deserialize, where timestamps remain unvalidated String values. Wired ConformanceHistory accepts arbitrary JSON strings and records_since compares ConformanceRecord.timestamp lexicographically rather than as parsed instants.",
+      "migration_policy": "PARSE_VALIDATION_OR_INSTANT_ORDERING_WOULD_BE_A_BEHAVIOR_CHANGE",
+      "evidence_state": "SOURCE_BASELINED_BEHAVIORAL_BYTES_NOT_EXECUTED",
+      "later_owner": "asupersync-5z2scg.6.7"
+    },
+    {
+      "contract_id": "TIME-SEM-REDIS-TESTS",
+      "surface": "Redis module diagnostics",
+      "current_semantics": "Direct chrono calls are inside the module test region; no production Redis chrono call was found.",
+      "later_owner": "asupersync-5z2scg.6.6"
+    },
+    {
+      "contract_id": "TIME-SEM-OWNED-UTC-FOUNDATION",
+      "surface": "Owned Unix-nanosecond formatter",
+      "current_semantics": "The prior foundation owns render-only nonnegative Unix nanoseconds and the CLI call; it does not own parsing, offsets, negative instants, serde, or public chrono fields.",
+      "evidence_state": "PRIOR_SCOPED_EVIDENCE_ONLY",
+      "later_owner": "asupersync-5z2scg.6.3"
+    },
+    {
+      "contract_id": "TIME-SEM-OWNED-RELEASE-PROOF-PARSER",
+      "surface": "Agent Mail reservation and evidence timestamps",
+      "source": "src/agent_swarm/release_proof_aggregator.rs::parse_utc_system_time",
+      "current_semantics": "A private owned parser accepts trimmed date-time text with T, Z or signed HH:MM offsets, truncates fractional seconds, accepts second 60, rejects negative Unix results, and returns Option<SystemTime>. Its civil-date validation is structural rather than a full RFC3339/calendar proof.",
+      "callers": [
+        "reservation created_ts",
+        "reservation expires_ts",
+        "optional reservation released_ts",
+        "evidence timestamp selection"
+      ],
+      "accepted_syntax": "YYYY-MM-DDTHH:MM:SS followed optionally by a first dot and any unvalidated suffix, then Z or a signed HH:MM offset; everything after the first dot in the seconds component is discarded.",
+      "calendar_validation": "Month and day are independently bounded to 1..12 and 1..31; invalid month/day combinations can normalize through civil conversion.",
+      "error_policy": "NONE_ON_PARSE_RANGE_OR_PRE_EPOCH_FAILURE",
+      "precision_policy": "FRACTIONAL_DIGITS_IGNORED",
+      "leap_second_policy": "SECOND_60_ACCEPTED_WITHOUT_LEAP_TABLE",
+      "evidence_state": "SOURCE_BASELINED_BEHAVIORAL_CORPUS_NOT_INVENTORIED",
+      "later_owners": [
+        "asupersync-5z2scg.6.2",
+        "asupersync-5z2scg.6.3"
+      ]
+    },
+    {
+      "contract_id": "TIME-SEM-OWNED-EMITTERS",
+      "surface": "UTC foundation, ATP logging, and JetStream",
+      "current_semantics": "Three owned emitters exist with distinct input and precision policies: nonnegative Unix nanoseconds with trimmed fractions, SystemTime seconds with pre-epoch clamped to zero, and signed SystemTime with exactly nine fractional digits.",
+      "consolidation_policy": "PROTOCOL_SPECIFIC_BEHAVIOR_MUST_BE_PRESERVED_OR_EXPLICITLY_REVISED",
+      "later_owner": "asupersync-5z2scg.6.3"
+    },
+    {
+      "contract_id": "TIME-SEM-LOGICAL-SEPARATION",
+      "surface": "asupersync time and Time types",
+      "current_semantics": "Scheduling, monotone, virtual, and logical time stay separate from UTC calendar semantics.",
+      "later_owner": "asupersync-5z2scg.6.2"
+    },
+    {
+      "contract_id": "TIME-SEM-NONDEPENDENCY-TEMPORAL-SCHEMAS",
+      "surface": "SystemTime, logical Time, epoch-millisecond integers, and Duration/TTL values",
+      "current_semantics": "ATP grants and backup metadata use SystemTime, offline tuning uses logical Time or Debug SystemTime text, Kafka records use Option<i64> epoch milliseconds, and Redis TTL behavior uses Duration. These are distinct temporal schemas, not Chrono or external-time migration substitutes.",
+      "scope_policy": "CROSS_REFERENCED_NOT_CLAIMED_AS_COMPLETE_REPOSITORY_TEMPORAL_INVENTORY",
+      "later_owner": "asupersync-5z2scg.6.1"
+    }
+  ],
+  "migration_groups": [
+    {
+      "group_id": "TIME-MIG-UTC-CALENDAR-CORE",
+      "owner_bead": "asupersync-5z2scg.6.2",
+      "owned_now": [],
+      "responsibility": "Owned UTC instant, Gregorian conversion, checked duration and arithmetic, ordering, hashing, explicit clock capability, and leap-second no-claim.",
+      "collision_boundary": "Does not change public chrono fields or persisted bytes."
+    },
+    {
+      "group_id": "TIME-MIG-RFC3339-SERDE",
+      "owner_bead": "asupersync-5z2scg.6.3",
+      "owned_now": [
+        "src/time/utc.rs"
+      ],
+      "responsibility": "Parsing, formatting, offsets, fractional precision, serde, typed errors, optional absence, historical corpus and byte policy.",
+      "collision_boundary": "Prior foundation evidence remains separately scoped."
+    },
+    {
+      "group_id": "TIME-MIG-CLI-PUBLIC-PERSISTED",
+      "owner_bead": "asupersync-5z2scg.6.4",
+      "owned_now": [
+        "src/cli/atp_command_tree.rs",
+        "src/cli/atp_workflows.rs"
+      ],
+      "responsibility": "Ten CLI fields, four workflow stores, status output, arithmetic, fixed-clock journeys and migration reads.",
+      "collision_boundary": "Does not own benchmark, database, Redis, or conformance paths."
+    },
+    {
+      "group_id": "TIME-MIG-BENCHMARK-REPORTS",
+      "owner_bead": "asupersync-5z2scg.6.5",
+      "owned_now": [
+        "src/atp/benchmark/mod.rs",
+        "src/atp/benchmark/reports.rs",
+        "benches/raptorq_benchmark.rs",
+        "src/raptorq/offline_tuner.rs",
+        "src/bin/offline_tuner.rs"
+      ],
+      "responsibility": "Two Chrono-backed benchmark public fields, report serialization contract, benchmark stderr events, and logical/SystemTime offline benchmark metadata.",
+      "collision_boundary": "No performance conclusion follows from timestamp migration evidence."
+    },
+    {
+      "group_id": "TIME-MIG-DATABASE-MESSAGING-ORACLES",
+      "owner_bead": "asupersync-5z2scg.6.6",
+      "owned_now": [
+        "src/database/postgres.rs",
+        "src/messaging/redis.rs",
+        "src/real_database_postgres_obligation_saga_rollback_integration_e2e_tests.rs",
+        "src/real_fs_file_messaging_redis_stream_durability_rdb_e2e_tests.rs"
+      ],
+      "responsibility": "PostgreSQL temporal oracle retention and Redis test-only timestamp disposition.",
+      "collision_boundary": "Production database decoders remain owned and are not replaced by this inventory."
+    },
+    {
+      "group_id": "TIME-MIG-DOWNSTREAM-CORPUS",
+      "owner_bead": "asupersync-5z2scg.6.7",
+      "owned_now": [
+        "aggregate evidence for TIME-CHRONO-ROOT-REAL-E2E-SOURCES excluding the two A6 implementation-owned database/messaging paths",
+        "TIME-CHRONO-ROOT-INTEGRATION-SOURCES"
+      ],
+      "responsibility": "Historical store corpus, downstream consumer, sparse feature, cross-platform, property and end-to-end evidence.",
+      "collision_boundary": "A1 source rows are not executed evidence."
+    },
+    {
+      "group_id": "TIME-MIG-CONFORMANCE-TOOLS",
+      "owner_bead": "asupersync-5z2scg.6.7",
+      "owned_now": [
+        "conformance member",
+        "excluded conformance source",
+        "standalone golden workspace",
+        "standalone reporting workspace"
+      ],
+      "responsibility": "Seventeen root-member public timestamp fields, one excluded-workspace public timestamp field, plus report, fixture, history, modified-time, and standalone tool paths.",
+      "collision_boundary": "Each workspace needs its own admitted evidence; root evidence cannot stand in for it."
+    },
+    {
+      "group_id": "TIME-MIG-TERMINAL-CUTOVER",
+      "owner_bead": "asupersync-5z2scg.6.8",
+      "owned_now": [],
+      "responsibility": "Aggregate sparse profiles, oracle disposition, locked graph, rollback and final keep-or-cutover decision.",
+      "collision_boundary": "Only A8 may authorize a dependency exit."
+    }
+  ],
+  "registry_reconciliation": [
+    {
+      "gap_id": "TIME-RECON-01",
+      "finding": "The capability registry names the owned time module and CLI binary but omits all four production chrono owner files.",
+      "current_fact": "Production chrono owners are the CLI command tree, CLI workflows, benchmark module, and benchmark reports.",
+      "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.1",
+      "state": "ROUTED_NOT_MUTATED_BY_A1"
+    },
+    {
+      "gap_id": "TIME-RECON-02",
+      "finding": "The ADR states ten public fields.",
+      "current_fact": "The root crate exposes twelve public fields across nine serde-derived structs and three modules.",
+      "owner_bead": "asupersync-5z2scg.6.4",
+      "state": "ROUTED_NOT_MUTATED_BY_A1"
+    },
+    {
+      "gap_id": "TIME-RECON-03",
+      "finding": "The ADR states three persisted workflow stores.",
+      "current_fact": "CI, dataset, release, and archive metadata form four read-write JSON families.",
+      "owner_bead": "asupersync-5z2scg.6.4",
+      "state": "ROUTED_NOT_MUTATED_BY_A1"
+    },
+    {
+      "gap_id": "TIME-RECON-04",
+      "finding": "The ADR states one production time-crate call.",
+      "current_fact": "The CLI uses the owned formatter and the production external-time call count is zero; only the prior oracle remains.",
+      "owner_bead": "asupersync-5z2scg.6.8",
+      "state": "ROUTED_NOT_MUTATED_BY_A1"
+    },
+    {
+      "gap_id": "TIME-RECON-05",
+      "finding": "The ADR states two owned RFC3339 emitters.",
+      "current_fact": "The UTC foundation is now a third owned emitter alongside ATP logging and JetStream.",
+      "owner_bead": "asupersync-5z2scg.6.3",
+      "state": "ROUTED_NOT_MUTATED_BY_A1"
+    },
+    {
+      "gap_id": "TIME-RECON-06",
+      "finding": "The capability row lists benchmark-adapters but its feature inventory omits the time capability mapping.",
+      "current_fact": "benchmark-adapters directly enables chrono and exposes two public fields.",
+      "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.1",
+      "state": "ROUTED_NOT_MUTATED_BY_A1"
+    },
+    {
+      "gap_id": "TIME-RECON-07",
+      "finding": "The named baseline fixture lists only the CLI binary and its observable claims exceed the single historical whole-second vector.",
+      "current_fact": "The separate foundation artifact is bounded nonnegative-epoch formatter evidence and cannot satisfy the A1 public or persisted baseline.",
+      "owner_bead": "asupersync-5z2scg.6.7",
+      "state": "ROUTED_NOT_MUTATED_BY_A1"
+    },
+    {
+      "gap_id": "TIME-RECON-08",
+      "finding": "The API map is a crate-root export scan.",
+      "current_fact": "It cannot establish nested public chrono field or owned formatter completeness.",
+      "owner_bead": "asupersync-dep-p3-api-adrs-h3jspm.13",
+      "state": "ROUTED_NOT_MUTATED_BY_A1"
+    },
+    {
+      "gap_id": "TIME-RECON-09",
+      "finding": "The ADR says no workflow-store tests exist.",
+      "current_fact": "Workflow and dogfood tests exercise the four families but do not assert timestamp roundtrip or exact bytes.",
+      "owner_bead": "asupersync-5z2scg.6.4",
+      "state": "ROUTED_NOT_MUTATED_BY_A1"
+    },
+    {
+      "gap_id": "TIME-RECON-10",
+      "finding": "The registry names three A1 scenario identifiers and a baseline command.",
+      "current_fact": "The identifiers are not registered as executable A1 scenarios in the source snapshot.",
+      "owner_bead": "asupersync-5z2scg.6.7",
+      "state": "ROUTED_NOT_MUTATED_BY_A1"
+    },
+    {
+      "gap_id": "TIME-RECON-11",
+      "finding": "The prior foundation doc says a zero trace timestamp is absent from each output format.",
+      "current_fact": "Human output omits the Created line, while compact JSON serializes created_at as null.",
+      "owner_bead": "asupersync-d24mms.4",
+      "state": "ROUTED_NOT_MUTATED_BY_A1"
+    },
+    {
+      "gap_id": "TIME-RECON-12",
+      "finding": "The ADR says nothing owned parses RFC3339.",
+      "current_fact": "The release-proof aggregator privately parses Agent Mail timestamps into SystemTime with a narrower and partly permissive source-defined grammar; no behavioral corpus was executed by A1.",
+      "owner_beads": [
+        "asupersync-5z2scg.6.2",
+        "asupersync-5z2scg.6.3"
+      ],
+      "state": "ROUTED_NOT_MUTATED_BY_A1"
+    }
+  ],
+  "foundation_cross_reference": {
+    "bead_id": "asupersync-d24mms.4",
+    "artifact": "artifacts/time_utc_rfc3339_foundation_v1.json",
+    "doc": "docs/time_utc_rfc3339_foundation.md",
+    "contract": "tests/time_utc_rfc3339_foundation_contract.rs",
+    "owned_function": "asupersync::time::format_unix_nanos_rfc3339",
+    "scope": "Render-only u64 Unix nanoseconds, years 1970 through 2554, canonical uppercase Z, and trimmed nonzero fractions.",
+    "evidence_reuse": "PRIOR_SCOPED_ONLY",
+    "excluded_from_a1_claims": [
+      "negative instants",
+      "RFC3339 parsing",
+      "numeric offsets",
+      "timezone database semantics",
+      "leap seconds",
+      "public chrono fields",
+      "persisted chrono documents",
+      "dependency removal",
+      "fresh execution in A1"
+    ]
+  },
+  "static_inventory_gaps": [
+    {
+      "gap_id": "TIME-STATIC-GAP-ALIAS-AWARE-USES",
+      "summary": "The 71-path and 159-line projection classifies literal chrono namespace lines, not every alias-based DateTime, Utc, or Duration operation inside those paths. Per-use cfg, operation, exposure, and ownership detail remains incomplete outside the root integration group and three explicitly annotated real-E2E paths.",
+      "effect": "A1 zero-unclassified-use acceptance is not met and the bead must remain open.",
+      "owner_bead": "asupersync-5z2scg.6.1"
+    },
+    {
+      "gap_id": "TIME-STATIC-GAP-NONDEPENDENCY-TEMPORAL-SCHEMAS",
+      "summary": "SystemTime, logical Time, epoch-millisecond integers, and Duration/TTL schemas are cross-referenced but are not substitutes for the Chrono or external-time dependency migration inventory.",
+      "effect": "The artifact must not be read as a repository-wide inventory of every temporal value.",
+      "owner_bead": "asupersync-5z2scg.6.1"
+    }
+  ],
+  "known_gaps": [
+    {
+      "gap_id": "TIME-GAP-A1-RANGE-CORPUS",
+      "summary": "The complete accepted instant and Gregorian calendar range is not frozen by an independent corpus.",
+      "owner_bead": "asupersync-5z2scg.6.2"
+    },
+    {
+      "gap_id": "TIME-GAP-A1-PARSE-FORMAT",
+      "summary": "Offsets, fractional variants, malformed inputs, bounded parsing and typed errors lack a complete parity corpus.",
+      "owner_bead": "asupersync-5z2scg.6.3"
+    },
+    {
+      "gap_id": "TIME-GAP-A1-PERSISTED-BYTES",
+      "summary": "No checked-in timestamp-sensitive byte golden or historical readback corpus covers the four workflow families.",
+      "owner_bead": "asupersync-5z2scg.6.4"
+    },
+    {
+      "gap_id": "TIME-GAP-A1-BENCHMARK-ARTIFACT",
+      "summary": "Benchmark public serde fields have no in-tree exact-byte artifact contract.",
+      "owner_bead": "asupersync-5z2scg.6.5"
+    },
+    {
+      "gap_id": "TIME-GAP-A1-DATABASE-MESSAGING",
+      "summary": "PostgreSQL oracle retention and Redis test-only timestamp disposition need explicit downstream evidence.",
+      "owner_bead": "asupersync-5z2scg.6.6"
+    },
+    {
+      "gap_id": "TIME-GAP-A1-DOWNSTREAM",
+      "summary": "Sparse profiles, conformance workspaces, historical corpus, cross-platform cells and external consumers remain unexecuted by A1.",
+      "owner_bead": "asupersync-5z2scg.6.7"
+    },
+    {
+      "gap_id": "TIME-GAP-A1-CUTOVER",
+      "summary": "Locked-graph impact, oracle disposition, rollback and terminal keep-or-cutover evaluation remain pending.",
+      "owner_bead": "asupersync-5z2scg.6.8"
+    }
+  ],
+  "validation": {
+    "contract_path": "tests/time_utc_capability_inventory_contract.rs",
+    "doc_path": "docs/time_utc_capability_inventory.md",
+    "contract_execution": "NOT_EXECUTED_THIS_TURN",
+    "static_checks_performed": [
+      "workspace filesystem source search",
+      "manifest and authority inspection",
+      "path and matching-line projection hashing",
+      "source file hashing",
+      "manual cross-review"
+    ]
+  },
+  "no_claim_boundaries": [
+    "No compiler, formatter, test, contract, benchmark, service, remote job, or runtime lane was executed for A1.",
+    "This inventory does not establish calendar, parser, formatter, serde, arithmetic, or clock correctness.",
+    "This inventory does not establish persisted readback, exact bytes, atomicity, migration compatibility, or historical-corpus coverage.",
+    "This inventory does not establish PostgreSQL, Redis, conformance, external-service, sparse-feature, cross-platform, or downstream behavior.",
+    "This inventory does not establish resource bounds, malformed-input safety, performance, broad workspace health, or release readiness.",
+    "Prior foundation receipts are not fresh A1 execution evidence and remain limited to their recorded scope.",
+    "No dependency removal, cutover, tracker closure, or permission to delete files follows from this artifact."
+  ]
+}
