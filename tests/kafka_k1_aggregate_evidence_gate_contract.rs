@@ -1438,15 +1438,19 @@ fn validate_profiles_and_shadow(inputs: &Inputs, artifact: &Value) -> Result<(),
     }
     ensure_unique(&subtype_ids, "shadow subtype semantic IDs")?;
     ensure_unique(&shadow_mapping, "shadow class mapping")?;
+    let operation_id_sha256 = sorted_newline_sha256(authority_ids.clone());
+    let subtype_sha256 = sorted_newline_sha256(subtype_mapping);
+    let shadow_mapping_sha256 = sorted_newline_sha256(shadow_mapping.clone());
     if subtype_ids.into_iter().collect::<BTreeSet<_>>()
         != authority_ids.iter().cloned().collect::<BTreeSet<_>>()
         || shadow_mapping.len() != 38
-        || sorted_newline_sha256(authority_ids.clone())
-            != text(shadow, "semantic_operation_id_set_sha256")?
-        || sorted_newline_sha256(subtype_mapping)
-            != text(shadow, "operational_subtype_mapping_sha256")?
-        || sorted_newline_sha256(shadow_mapping.clone())
-            != text(shadow, "shadow_class_mapping_sha256")?
+        || operation_id_sha256 != SHADOW_OPERATION_ID_SHA256
+        || text(shadow, "semantic_operation_id_set_sha256")? != SHADOW_OPERATION_ID_SHA256
+        || subtype_sha256 != SHADOW_OPERATIONAL_SUBTYPE_SHA256
+        || text(shadow, "operational_subtype_mapping_sha256")?
+            != SHADOW_OPERATIONAL_SUBTYPE_SHA256
+        || shadow_mapping_sha256 != SHADOW_CLASS_MAPPING_SHA256
+        || text(shadow, "shadow_class_mapping_sha256")? != SHADOW_CLASS_MAPPING_SHA256
         || flag(shadow, "per_operation_owner_routing_complete")?
         || flag(shadow, "current_execution_authorized")?
     {
@@ -1455,7 +1459,27 @@ fn validate_profiles_and_shadow(inputs: &Inputs, artifact: &Value) -> Result<(),
     let declared_classes = ids(array(artifact, "shadow_classes")?, "class_id")?
         .into_iter()
         .collect::<BTreeSet<_>>();
+    if declared_classes
+        != BTreeSet::from([
+            "K1S-LOCAL-PURE".to_owned(),
+            "K1S-BROKER-READ-PROBE".to_owned(),
+            "K1S-RESOURCE-CONSTRUCTION-OBSERVE-ONLY".to_owned(),
+            "K1S-ISOLATED-SIDE-EFFECT-CANARY".to_owned(),
+            "K1S-DUPLICATE-FORBIDDEN".to_owned(),
+            "K1S-NON-COMPARABLE".to_owned(),
+        ])
+        || array(artifact, "shadow_classes")?.iter().any(|row| {
+            row.get("current_execution_authorized").and_then(Value::as_bool) != Some(false)
+        })
+    {
+        return Err("shadow class authorization drift".to_owned());
+    }
     let summary_rows = array(artifact, "shadow_operations")?;
+    let summary_ids = ids(summary_rows, "operation_id")?;
+    ensure_unique(&summary_ids, "shadow summary IDs")?;
+    if summary_rows.len() != 13 {
+        return Err("shadow summary count drift".to_owned());
+    }
     let summary_classes = summary_rows
         .iter()
         .map(|row| text(row, "class_id").map(str::to_owned))
@@ -1471,6 +1495,9 @@ fn validate_profiles_and_shadow(inputs: &Inputs, artifact: &Value) -> Result<(),
         .into_iter()
         .collect::<BTreeSet<_>>();
     for summary in summary_rows {
+        if text(summary, "owner")? != "asupersync-dep-p7-kafka-removal-sarszu.2.14.3" {
+            return Err(format!("shadow summary owner drift: {}", text(summary, "operation_id")?));
+        }
         let refs = string_set(array(summary, "stop_condition_ids")?, "shadow stop refs")?;
         if refs.is_empty() || !refs.is_subset(&stop_ids) {
             return Err(format!("unresolved shadow stop refs: {}", text(summary, "operation_id")?));
