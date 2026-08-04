@@ -474,13 +474,27 @@ fn dep_adr_004_claim_time_truth_is_current() {
     assert!(summary.contains("CLI `--json` serializes command results"));
 
     let alternatives = array(&adr, "alternatives_considered");
-    let typed_corpus = text(&alternatives[0], "rejected_because");
+    let typed_corpus = alternatives
+        .iter()
+        .find(|alternative| {
+            text(alternative, "option")
+                == "Migrate configuration and scenarios to canonical versioned JSON and stop accepting TOML and YAML."
+        })
+        .map(|alternative| text(alternative, "rejected_because"))
+        .expect("DEP-ADR-004 must retain the stop-accepting alternative");
     assert!(typed_corpus.contains("ten Scenario files under `examples/scenarios/`"));
     assert!(typed_corpus.contains("three under `frankenlab/examples/scenarios/`"));
     assert!(typed_corpus.contains("adjacent parameter reference"));
     assert!(!typed_corpus.contains("across `examples/scenarios/`, `frankenlab/examples/scenarios/`, and `tools/demos/`"));
 
-    let primary_json = text(&alternatives[1], "rejected_because");
+    let primary_json = alternatives
+        .iter()
+        .find(|alternative| {
+            text(alternative, "option")
+                == "Keep TOML and YAML, but make canonical JSON the primary on-disk format and demote the others to legacy."
+        })
+        .map(|alternative| text(alternative, "rejected_because"))
+        .expect("DEP-ADR-004 must retain the primary-JSON alternative");
     assert!(primary_json.contains("no exact 13-file cross-format proof"));
     assert!(!primary_json.contains("to_string_pretty"));
 
@@ -512,7 +526,7 @@ fn dep_adr_004_claim_time_truth_is_current() {
     assert!(corpus_evidence.contains("separately classified as an adjacent non-Scenario"));
     assert!(!corpus_evidence.contains("every file in examples/scenarios"));
 
-    let journeys = array(&adr, "documented_user_journeys");
+    let journeys = array(&adr, "user_journeys");
     let json_journey = journeys
         .iter()
         .find(|journey| text(journey, "id") == "scn-journey-json-tooling")
@@ -528,7 +542,7 @@ fn dep_adr_004_claim_time_truth_is_current() {
     for marker in [
         "ten Scenario files in",
         "three in `frankenlab/examples/scenarios/`",
-        "adjacent parameter reference",
+        "parameter reference, not the Scenario",
         "shared/config-agnostic canonical-JSON encoder",
     ] {
         assert!(adr_doc.contains(marker), "DEP-ADR-004 doc is missing {marker}");

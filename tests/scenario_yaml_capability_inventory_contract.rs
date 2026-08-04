@@ -2193,7 +2193,8 @@ fn validate_a4_gap12_source_progress(inventory: &Value) -> Result<(), String> {
     for marker in [
         "This flag does not make the CLI accept a JSON `Scenario`",
         "Unknown keys at the root or another typed-struct boundary are accepted",
-        "A `<<` merge key is not applied",
+        "A `<<` merge key is",
+        "not applied by either production loader",
         "Include path extension, length, and character rules are validated",
         "`golden_projection.redacted: true` does not scrub",
         "Do not put secrets in scenarios",
@@ -3029,7 +3030,8 @@ fn execution_consumption_diagnostics_and_gap_routing_stay_truthful() {
     assert!(scenario.contains("validate_cancellation"));
     assert!(scenario.contains("validate_expected_invariants"));
     assert!(scenario.contains("validate_includes"));
-    assert!(scenario.contains("Included fields are merged with the current file"));
+    assert!(scenario.contains("do not read, resolve, or"));
+    assert!(!scenario.contains("Included fields are merged with the current file"));
     assert!(!root_cli.contains("apply_merge"));
     assert!(!franken_cli.contains("apply_merge"));
 
