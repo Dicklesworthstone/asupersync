@@ -7,9 +7,13 @@ This document is the human-readable companion to
 `asupersync-dep-p7-kafka-removal-sarszu.2.2.1`.
 
 The packet freezes a static 22-key reachability frontier and the normative
-source identities needed to finish K2.1. It deliberately does not close K2.1:
-no numeric range is accepted, no field or error projection is complete, and no
-oldest/current broker profile is admitted. K2.2 therefore remains blocked.
+source identities needed to finish K2.1. It now also contains a bounded,
+partial authentication-body projection: 15 field rows and ten
+source-established outcome-membership rows cover keys 17 and 36 across the
+current and wrapped-authentication profiles. It deliberately does not close
+K2.1: no numeric range is accepted,
+no full-frontier field or error projection is complete, and no oldest/current
+broker profile is admitted. K2.2 therefore remains blocked.
 
 ## Outcome
 
@@ -52,8 +56,10 @@ path/object-ID/size projection is independently pinned by SHA-256.
 
 Those Git object IDs cover the Git blob header plus exact payload bytes; they
 are not per-file raw-byte SHA-256 security attestations. This establishes
-current-source object identity only. It does not project fields, defaults,
-errors, accepted versions, historical schema coverage, or broker behavior.
+current-source object identity only. The authentication slice below projects
+only candidate body fields and source-established outcome membership; it does
+not establish a complete field/default/error matrix, accepted versions, broker
+behavior, or interoperability.
 
 The three historical candidate profiles now have profile-scoped source-object
 receipts as well. Kafka changed its schema-authority model across these
@@ -72,6 +78,12 @@ path/semantic-role projections. The 46 profile/path rows resolve to 44 distinct
 blob object IDs because two unchanged files recur across the 0.11.0.2 and 1.0.0
 profiles. These are candidate source-provenance rows only. They neither select
 an oldest supported broker nor establish complete current-facade coverage.
+
+Six additional error-projection source rows pin the current error registry,
+the current handshake request wrapper, the two current response wrappers, and
+the current and historical dedicated authentication handlers. Their 109,046
+source bytes are identity evidence for the bounded outcome rows below; they
+are not executable broker evidence.
 
 The 0.11.0.2 audit also exposes a concrete incompatibility outside its narrow
 producer profile. A structured blocker row records broker minimum/maximum v0
@@ -123,6 +135,53 @@ Request header v0 remains required by the broader K1.2 policy but is not reached
 by the selected request families and versions. Header selection remains a
 candidate until exact accepted numeric ranges are reviewed.
 
+## Partial authentication-body projection
+
+The populated field rows cover only the incumbent candidate intersections:
+current Kafka 4.3.1 API 17 v0-1 and API 36 v0-1, plus historical Kafka 1.0.0
+API 17 v0-1 and API 36 v0. Source field names are retained alongside stable
+canonical field IDs so the modern and historical spellings can be compared
+without treating either spelling as the wire contract.
+
+| Profile | API/direction | Projected body fields | Projected versions |
+|---|---|---|---|
+| 4.3.1 current | 17 request | `Mechanism` | 0-1 |
+| 4.3.1 current | 17 response | `ErrorCode`, `Mechanisms` | 0-1 |
+| 4.3.1 current | 36 request | `AuthBytes` | 0-1 |
+| 4.3.1 current | 36 response | `ErrorCode`, nullable `ErrorMessage`, `AuthBytes`, `SessionLifetimeMs` | 0-1; lifetime starts at 1 |
+| 1.0.0 historical | 17 request | `mechanism` | 0-1 |
+| 1.0.0 historical | 17 response | `error_code`, `enabled_mechanisms` | 0-1 |
+| 1.0.0 historical | 36 request | `sasl_auth_bytes` | 0 |
+| 1.0.0 historical | 36 response | `error_code`, nullable `error_message`, `sasl_auth_bytes` | 0 |
+
+The rows preserve order, logical/wire type, array element type, nullability,
+explicit schema-default presence, projected compact/tag state, sensitivity,
+and nested-payload disposition. `SessionLifetimeMs` is the sole field in this
+slice with an explicit schema literal (`0`). Absence of an explicit schema
+default is not interpreted as an effective generated default here.
+
+API 36 source v2 is deliberately excluded because it is outside the incumbent
+candidate intersection. Its flexible/compact and tag-buffer encoding therefore
+remains unprojected, as do effective implicit defaults and the nested mechanism
+payload carried in `AuthBytes`. All projected candidate versions use classic
+body encoding and declare no tagged field IDs.
+
+The ten outcome rows are source-established memberships, not a closed
+wire enum:
+
+| Profile | API | Projected outcomes |
+|---|---:|---|
+| current and historical | 17 | `NONE=0`, `UNSUPPORTED_SASL_MECHANISM=33`, `ILLEGAL_SASL_STATE=34` |
+| current and historical | 36 | `NONE=0`, `SASL_AUTHENTICATION_FAILED=58` |
+
+For API 17, the dedicated handler establishes codes 0 and 33 directly and
+emits code 34 through its illegal-state exception-to-handshake-response path.
+For API 36, the canonical error registries and dedicated handlers establish
+code 58. Both
+current and historical response-wrapper comments instead contain stale code 57,
+so the packet retains 57 as a source-conflict annotation while preserving 58 as
+the canonical code. Retry and downgrade actions remain unprojected and blocking.
+
 ## Broker candidates
 
 Four profiles are source-identified but blocked:
@@ -150,34 +209,35 @@ oldest/current pair. Its output cannot close K2.1 as written.
 
 K2.1 remains open until all of the following are complete:
 
-1. Project the pinned current and profile-scoped historical source bodies into
-   complete field and error contracts; pin and extend the closure for every
-   additional dependency discovered during projection, and replace it if
-   broker-floor adjudication selects different candidates.
-2. Project every field path, order, type, version interval, default,
-   nullability, compact encoding, tagged version, and tag identifier.
-3. Project every reachable protocol error and its reviewed downgrade or
-   fail-closed action.
+1. Extend the partial authentication-body projection across the other 20
+   reachable APIs and any historical profile selected by broker-floor
+   adjudication; pin each additional interpretation source.
+2. Complete every reachable body and header path, order, type, version
+   interval, effective default, nullability, compact encoding, tagged version,
+   and tag identifier, including the currently excluded API 36 v2 form.
+3. Extend the ten authentication outcome memberships into exhaustive reachable
+   error projections with reviewed retry, downgrade, or fail-closed action.
 4. Adjudicate candidate intersections into explicit accepted numeric ranges.
 5. Retain immutable oldest/current broker identities and terminal schema-probe
    receipts.
-6. Independently cross-check the field and error projections without treating
-   the incumbent implementation as normative.
+6. Extend the independent official-source cross-check beyond the authentication
+   body slice without treating the incumbent implementation as normative.
 
 ## Validation and claim boundary
 
-This pass used repository inspection, exact byte/hash inventory, official
-source identity lookup, and an independent incumbent-source cross-check only.
-It ran no compiler, formatter, test, broker, service, container, protocol
-session, or remote job.
+This pass used repository inspection, exact byte/hash inventory, two
+independent official-source reviews, and an independent incumbent-source
+cross-check only. It ran no compiler, formatter, test, broker, service,
+container, protocol session, or remote job.
 
 Git blob object IDs establish source-object identity, not per-file raw-byte
 SHA-256 security attestations. Historical range rows are source-derived
 candidate overlaps; none is an accepted production range or downgrade policy.
 
-The packet does not prove schema completeness, broker interoperability,
-runtime correctness, production support, migration readiness, dependency
-removal, release readiness, performance, or broad workspace health. It does
-not authorize K2.2 or any production wiring.
+The packet does not prove full schema or error completeness, effective implicit
+defaults, flexible API 36 v2 handling, broker interoperability, runtime
+correctness, production support, migration readiness, dependency removal,
+release readiness, performance, or broad workspace health. It does not
+authorize K2.2 or any production wiring.
 
 <!-- END KAFKA K2.1 REACHABLE SCHEMA BROKER MATRIX -->
