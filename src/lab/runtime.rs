@@ -3303,9 +3303,7 @@ impl LabScheduler {
     fn assignment_for(&self, task: TaskId) -> Option<usize> {
         let slot = task.arena_index().index() as usize;
         match self.assignments.get(slot) {
-            Some(&Some((generation, worker)))
-                if generation == task.arena_index().generation() =>
-            {
+            Some(&Some((generation, worker))) if generation == task.arena_index().generation() => {
                 Some(worker)
             }
             _ => None,
