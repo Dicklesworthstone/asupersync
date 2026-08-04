@@ -8,11 +8,11 @@ This document is the human-readable companion to
 
 The packet freezes a static 22-key reachability frontier and the normative
 source identities needed to finish K2.1. It now also contains a bounded,
-partial authentication-body projection: 15 field rows and ten
-source-established outcome-membership rows cover keys 17 and 36 across the
-current and wrapped-authentication profiles. It deliberately does not close
-K2.1: no numeric range is accepted,
-no full-frontier field or error projection is complete, and no oldest/current
+partial body projection: 39 field rows cover `ApiVersions` plus the two
+authentication APIs across current and applicable historical profiles. Ten
+source-established outcome-membership rows cover authentication only. It
+deliberately does not close K2.1: no numeric range is accepted, no
+full-frontier field or error projection is complete, and no oldest/current
 broker profile is admitted. K2.2 therefore remains blocked.
 
 ## Outcome
@@ -56,10 +56,11 @@ path/object-ID/size projection is independently pinned by SHA-256.
 
 Those Git object IDs cover the Git blob header plus exact payload bytes; they
 are not per-file raw-byte SHA-256 security attestations. This establishes
-current-source object identity only. The authentication slice below projects
-only candidate body fields and source-established outcome membership; it does
-not establish a complete field/default/error matrix, accepted versions, broker
-behavior, or interoperability.
+current-source object identity only. The API 18 and authentication slices below
+project only bounded candidate body fields, defaults, tree metadata, and
+authentication outcome membership. They do not establish a complete
+field/default/error matrix, accepted versions, broker behavior, or
+interoperability.
 
 The three historical candidate profiles now have profile-scoped source-object
 receipts as well. Kafka changed its schema-authority model across these
@@ -69,7 +70,7 @@ pretending that modern per-message JSON existed historically:
 | Candidate | Declaration model | Profile API rows | Source objects | Bytes |
 |---|---|---|---:|---:|
 | 0.8.0 | Scala write/parse methods plus the classic envelope and legacy message set | keys 0-3 at v0 | 22 | 95,596 |
-| 0.11.0.2 | central Java `Protocol` schema arrays plus headers/type encodings | nine idempotent/transaction profile keys plus a structured API 23 full-frontier blocker | 10 | 210,904 |
+| 0.11.0.2 | central Java `Protocol` schema arrays plus headers/type encodings | nine idempotent/transaction profile keys, the API 18 v0-1 body tree, plus a structured API 23 full-frontier blocker | 10 | 210,904 |
 | 1.0.0 | per-request Java schema arrays plus headers/type encodings | `SaslHandshake` 0-1 and `SaslAuthenticate` 0 | 14 | 118,304 |
 
 Each receipt pins the canonical root tree, confirms the recursive tree was not
@@ -83,8 +84,8 @@ Nine additional projection-support source rows pin the current message-format
 semantics, generated field-default resolver and assignment logic, error
 registry, handshake request wrapper, two current response wrappers, and current
 and historical dedicated authentication handlers. Their 239,139 source bytes
-are identity evidence for the bounded field, default, and outcome rows below;
-they are not executable broker evidence.
+are identity evidence for the bounded API 18 and authentication field, default,
+and outcome rows below; they are not executable broker evidence.
 
 The 0.11.0.2 audit also exposes a concrete incompatibility outside its narrow
 producer profile. A structured blocker row records broker minimum/maximum v0
@@ -134,9 +135,50 @@ for flexible encodings. `ApiVersions` is the required exception: its flexible
 body retains response header v0 so older clients can parse the response.
 Request header v0 remains required by the broader K1.2 policy but is not reached
 by the selected request families and versions. Header selection remains a
-candidate until exact accepted numeric ranges are reviewed.
+candidate until exact accepted numeric ranges are reviewed. The field
+projection rows below are body-only: shared request and response header fields
+are not duplicated into each message tree, and the API 18 response-header-v0
+exception remains explicit in the separate header contract.
 
-## Partial authentication-body projection
+## Partial body projection
+
+### API 18 negotiation body
+
+Twenty-four rows project the complete body-field tree declared for API 18 by
+the current 4.3.1 schema and the historical 0.11.0.2 candidate. The historical
+request schemas for v0-v1 are empty, so they correctly produce no request field
+row. The current request fields begin at v3 and remain ignorable, while their
+generated object defaults are recorded across the current message domain
+without claiming that an absent wire field was decoded.
+
+| Profile | Direction | Top-level body fields | Named-struct children | Source versions |
+|---|---|---|---|---|
+| 4.3.1 current | request | `ClientSoftwareName`, `ClientSoftwareVersion` | none | 3-4 |
+| 4.3.1 current | response | `ErrorCode`, `ApiKeys`, `ThrottleTimeMs`, `SupportedFeatures`, `FinalizedFeaturesEpoch`, `FinalizedFeatures`, `ZkMigrationReady` | `ApiVersion`: `ApiKey`, `MinVersion`, `MaxVersion`; `SupportedFeatureKey`: `Name`, `MinVersion`, `MaxVersion`; `FinalizedFeatureKey`: `Name`, `MaxVersionLevel`, `MinVersionLevel` | field-specific subsets of 0-4 |
+| 0.11.0.2 historical | request | none | none | empty schemas at 0-1 |
+| 0.11.0.2 historical | response | `ErrorCode`, `ApiVersions`, `ThrottleTimeMs` | `API_VERSIONS_V0`: `ApiKey`, `MinVersion`, `MaxVersion` | field-specific subsets of 0-1 |
+
+Each child row carries a `parent_row_id`; `field_order` is sibling-local rather
+than globally flattened. Named arrays retain their exact source-declared nested
+type, and current map-key metadata is preserved on the API key and two feature
+name children. Child versions are the intersection of the child declaration,
+the owning message, and every ancestor array.
+
+For current v3-v4, the request strings, named arrays, and feature-name strings
+use compact encodings. Every flexible owning body struct has a tag buffer. The
+four tagged response fields retain their source IDs: `SupportedFeatures` is 0,
+`FinalizedFeaturesEpoch` is 1, `FinalizedFeatures` is 2, and
+`ZkMigrationReady` is 3. The separately selected API 18 response header remains
+v0 for every body version and is not represented as a body child.
+
+Current generated defaults are recorded as empty strings, empty arrays, or
+numeric zero according to type, except for the two explicit response literals:
+`FinalizedFeaturesEpoch=-1` and `ZkMigrationReady=false`. The historical
+0.11.0.2 `Struct` fields remain required with no default. These rows establish
+source-schema structure only: API 18 error/fallback semantics, negotiation
+downgrade policy, accepted ranges, and broker execution remain unprojected.
+
+### Authentication fields and outcomes
 
 The populated field rows cover current Kafka 4.3.1 API 17 v0-1 and API 36
 v0-2, plus historical Kafka 1.0.0 API 17 v0-1 and API 36 v0. Projecting the
@@ -157,10 +199,10 @@ contract.
 | 1.0.0 historical | 36 request | `sasl_auth_bytes` | 0 |
 | 1.0.0 historical | 36 response | `error_code`, nullable `error_message`, `sasl_auth_bytes` | 0 |
 
-The rows preserve order, logical/wire type, array element type, nullability,
+The authentication rows preserve order, logical/wire type, array element type, nullability,
 explicit schema-default presence, effective default or required-field absence,
 projected compact/tag state, sensitivity, and nested-payload disposition.
-`SessionLifetimeMs` is the sole field in this slice with an explicit schema
+`SessionLifetimeMs` is the sole authentication field with an explicit schema
 literal (`0`). The separate effective-default columns prevent schema-declaration
 absence from being confused with generated or legacy `Struct` behavior:
 
@@ -241,19 +283,21 @@ oldest/current pair. Its output cannot close K2.1 as written.
 
 K2.1 remains open until all of the following are complete:
 
-1. Extend the partial authentication-body projection across the other 20
+1. Extend the partial API 18 and authentication-body projection across the other 19
    reachable APIs and any historical profile selected by broker-floor
    adjudication; pin each additional interpretation source.
 2. Complete every remaining reachable body and header path, order, type,
    version interval, effective default, nullability, compact encoding, tagged
-   version, and tag identifier beyond the projected authentication slice.
+   version, and tag identifier beyond the projected API 18 and authentication
+   slices.
 3. Extend the ten authentication outcome memberships into exhaustive reachable
    error projections with reviewed retry, downgrade, or fail-closed action.
 4. Adjudicate candidate intersections into explicit accepted numeric ranges.
 5. Retain immutable oldest/current broker identities and terminal schema-probe
    receipts.
-6. Extend the independent official-source cross-check beyond the authentication
-   body slice without treating the incumbent implementation as normative.
+6. Extend the independent official-source cross-check beyond the API 18 and
+   authentication-body slices without treating the incumbent implementation as
+   normative.
 
 ## Validation and claim boundary
 
@@ -267,10 +311,11 @@ SHA-256 security attestations. Historical range rows are source-derived
 candidate overlaps; none is an accepted production range or downgrade policy.
 
 The packet does not prove full schema or error completeness, defaults outside
-the 15 authentication-body rows, exhaustive wrapper or call-site value
-behavior, acceptance or runtime handling of API 36 v2, broker interoperability,
-runtime correctness, production support, migration readiness, dependency
-removal, release readiness, performance, or broad workspace health. It does not
-authorize K2.2 or any production wiring.
+the 39 API 18 and authentication-body rows, API 18 error/fallback behavior,
+exhaustive wrapper or call-site value behavior, acceptance or runtime handling
+of current API 18 v4 or API 36 v2, broker interoperability, runtime correctness,
+production support, migration readiness, dependency removal, release readiness,
+performance, or broad workspace health. It does not authorize K2.2 or any
+production wiring.
 
 <!-- END KAFKA K2.1 REACHABLE SCHEMA BROKER MATRIX -->
