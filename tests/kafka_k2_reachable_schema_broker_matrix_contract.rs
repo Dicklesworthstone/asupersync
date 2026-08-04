@@ -18,9 +18,9 @@ use std::path::{Path, PathBuf};
 const ARTIFACT_PATH: &str = "artifacts/kafka_k2_reachable_schema_broker_matrix_v1.json";
 const DOC_PATH: &str = "docs/kafka_k2_reachable_schema_broker_matrix.md";
 const ARTIFACT_SHA256: &str =
-    "6440d8596235263dc780f411af970537494b2b7c5a73691cd998bc901b606cb0";
+    "d849be7f22050a45e2e2daba0fdf640ea6d76cbad4580b2f91fb00098b962dc2";
 const DOC_SHA256: &str =
-    "8535a754a8728fa420e040d23eb95ec8c3a0a4be98dd4a2413c0124ef184b6c3";
+    "dbcf4f43f5f919805356b698f6ca88a893d678cd5865088871c17a84d2707d58";
 
 const DOC_BEGIN: &str = "<!-- BEGIN KAFKA K2.1 REACHABLE SCHEMA BROKER MATRIX -->";
 const DOC_END: &str = "<!-- END KAFKA K2.1 REACHABLE SCHEMA BROKER MATRIX -->";
@@ -459,6 +459,14 @@ const EXPECTED_PROJECTION_SOURCES: &[(&str, &str, &str, &str, u64, &str)] = &[
         "CANONICAL_ERROR_ENUM",
     ),
     (
+        "KAFKA-K2-1-PROJECTION-SOURCE-CURRENT-MESSAGE-DEFINITION-README",
+        "KAFKA-K2-1-AUTH-APACHE-CURRENT",
+        "clients/src/main/resources/common/message/README.md",
+        "ee6de73dee663b7696ff8832335d9089e2a26cd7",
+        12_494,
+        "FLEXIBLE_ENCODING_AND_TAG_BUFFER_SEMANTICS",
+    ),
+    (
         "KAFKA-K2-1-PROJECTION-SOURCE-CURRENT-SASL-AUTHENTICATE-RESPONSE",
         "KAFKA-K2-1-AUTH-APACHE-CURRENT",
         "clients/src/main/java/org/apache/kafka/common/requests/SaslAuthenticateResponse.java",
@@ -602,15 +610,18 @@ const EXPECTED_FIELD_PROJECTIONS: &[ExpectedFieldProjection] = &[
         row_id: "KAFKA-K2-1-FIELD-CURRENT-036-REQUEST-000-AUTH-BYTES",
         profile_id: "KAFKA-K2-1-BROKER-CURRENT",
         authority_id: "KAFKA-K2-1-AUTH-APACHE-CURRENT",
-        source_refs: &["clients/src/main/resources/common/message/SaslAuthenticateRequest.json"],
+        source_refs: &[
+            "clients/src/main/resources/common/message/SaslAuthenticateRequest.json",
+            "clients/src/main/resources/common/message/README.md",
+        ],
         api_key: 36,
         direction: "REQUEST",
         canonical_field_id: "API36.REQUEST.AUTH_BYTES",
         source_field_name: "AuthBytes",
         field_order: 0,
         source_versions: "0-2",
-        projected_versions: "0-1",
-        excluded_versions: "2",
+        projected_versions: "0-2",
+        excluded_versions: "none",
         logical_type: "BYTES",
         wire_type: "BYTES",
         element_type: None,
@@ -626,15 +637,18 @@ const EXPECTED_FIELD_PROJECTIONS: &[ExpectedFieldProjection] = &[
         row_id: "KAFKA-K2-1-FIELD-CURRENT-036-RESPONSE-000-ERROR-CODE",
         profile_id: "KAFKA-K2-1-BROKER-CURRENT",
         authority_id: "KAFKA-K2-1-AUTH-APACHE-CURRENT",
-        source_refs: &["clients/src/main/resources/common/message/SaslAuthenticateResponse.json"],
+        source_refs: &[
+            "clients/src/main/resources/common/message/SaslAuthenticateResponse.json",
+            "clients/src/main/resources/common/message/README.md",
+        ],
         api_key: 36,
         direction: "RESPONSE",
         canonical_field_id: "API36.RESPONSE.ERROR_CODE",
         source_field_name: "ErrorCode",
         field_order: 0,
         source_versions: "0-2",
-        projected_versions: "0-1",
-        excluded_versions: "2",
+        projected_versions: "0-2",
+        excluded_versions: "none",
         logical_type: "INT16",
         wire_type: "INT16",
         element_type: None,
@@ -652,6 +666,7 @@ const EXPECTED_FIELD_PROJECTIONS: &[ExpectedFieldProjection] = &[
         authority_id: "KAFKA-K2-1-AUTH-APACHE-CURRENT",
         source_refs: &[
             "clients/src/main/resources/common/message/SaslAuthenticateResponse.json",
+            "clients/src/main/resources/common/message/README.md",
             "clients/src/main/java/org/apache/kafka/common/security/authenticator/SaslServerAuthenticator.java",
         ],
         api_key: 36,
@@ -660,12 +675,12 @@ const EXPECTED_FIELD_PROJECTIONS: &[ExpectedFieldProjection] = &[
         source_field_name: "ErrorMessage",
         field_order: 1,
         source_versions: "0-2",
-        projected_versions: "0-1",
-        excluded_versions: "2",
+        projected_versions: "0-2",
+        excluded_versions: "none",
         logical_type: "STRING",
         wire_type: "NULLABLE_STRING",
         element_type: None,
-        nullable_versions: "0-1",
+        nullable_versions: "0-2",
         default_state: "NOT_EXPLICITLY_DECLARED",
         default_literal: None,
         ignorable_versions: "none",
@@ -677,15 +692,18 @@ const EXPECTED_FIELD_PROJECTIONS: &[ExpectedFieldProjection] = &[
         row_id: "KAFKA-K2-1-FIELD-CURRENT-036-RESPONSE-002-AUTH-BYTES",
         profile_id: "KAFKA-K2-1-BROKER-CURRENT",
         authority_id: "KAFKA-K2-1-AUTH-APACHE-CURRENT",
-        source_refs: &["clients/src/main/resources/common/message/SaslAuthenticateResponse.json"],
+        source_refs: &[
+            "clients/src/main/resources/common/message/SaslAuthenticateResponse.json",
+            "clients/src/main/resources/common/message/README.md",
+        ],
         api_key: 36,
         direction: "RESPONSE",
         canonical_field_id: "API36.RESPONSE.AUTH_BYTES",
         source_field_name: "AuthBytes",
         field_order: 2,
         source_versions: "0-2",
-        projected_versions: "0-1",
-        excluded_versions: "2",
+        projected_versions: "0-2",
+        excluded_versions: "none",
         logical_type: "BYTES",
         wire_type: "BYTES",
         element_type: None,
@@ -701,22 +719,25 @@ const EXPECTED_FIELD_PROJECTIONS: &[ExpectedFieldProjection] = &[
         row_id: "KAFKA-K2-1-FIELD-CURRENT-036-RESPONSE-003-SESSION-LIFETIME-MS",
         profile_id: "KAFKA-K2-1-BROKER-CURRENT",
         authority_id: "KAFKA-K2-1-AUTH-APACHE-CURRENT",
-        source_refs: &["clients/src/main/resources/common/message/SaslAuthenticateResponse.json"],
+        source_refs: &[
+            "clients/src/main/resources/common/message/SaslAuthenticateResponse.json",
+            "clients/src/main/resources/common/message/README.md",
+        ],
         api_key: 36,
         direction: "RESPONSE",
         canonical_field_id: "API36.RESPONSE.SESSION_LIFETIME_MS",
         source_field_name: "SessionLifetimeMs",
         field_order: 3,
         source_versions: "1-2",
-        projected_versions: "1",
-        excluded_versions: "2",
+        projected_versions: "1-2",
+        excluded_versions: "none",
         logical_type: "INT64",
         wire_type: "INT64",
         element_type: None,
         nullable_versions: "none",
         default_state: "EXPLICIT_LITERAL",
         default_literal: Some("0"),
-        ignorable_versions: "1",
+        ignorable_versions: "1-2",
         sensitivity: "NON_SECRET_CONTROL_METADATA",
         error_set_id: None,
         nested_projection_state: "NOT_APPLICABLE",
@@ -998,8 +1019,8 @@ const EXPECTED_ERROR_PROJECTIONS: &[ExpectedErrorProjection] = &[
         ],
         api_key: 36,
         source_versions: "0-2",
-        projected_versions: "0-1",
-        excluded_versions: "2",
+        projected_versions: "0-2",
+        excluded_versions: "none",
         error_name: "NONE",
         error_code: 0,
         comment_code: None,
@@ -1018,8 +1039,8 @@ const EXPECTED_ERROR_PROJECTIONS: &[ExpectedErrorProjection] = &[
         ],
         api_key: 36,
         source_versions: "0-2",
-        projected_versions: "0-1",
-        excluded_versions: "2",
+        projected_versions: "0-2",
+        excluded_versions: "none",
         error_name: "SASL_AUTHENTICATION_FAILED",
         error_code: 58,
         comment_code: Some(57),
@@ -2538,7 +2559,7 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
             semantic_role.to_owned(),
         ));
     }
-    if support_bytes != 109_046 {
+    if support_bytes != 121_540 {
         return Err("field/error projection support byte coverage changed".to_owned());
     }
     support_projection.sort();
@@ -2552,7 +2573,7 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
         .collect::<String>();
     let support_projection_sha256 = sha256_bytes(support_projection.as_bytes());
     if support_projection_sha256
-        != "f2238244aadbccb7b654f4e44f0cceee6a04f961a08f9287efb1c57a320af2af"
+        != "3734612d4de8e2e8ef3bd0126b4aaa38e1694a4cefc40d85ccb91938d23fc563"
     {
         return Err("field/error projection support digest changed".to_owned());
     }
@@ -2685,10 +2706,8 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
             .union(&excluded_versions)
             .copied()
             .collect::<BTreeSet<_>>();
-        if projected_and_excluded != source_versions || projected_versions.contains(&2) {
-            return Err(format!(
-                "field row {row_id} did not fail closed around excluded API 36 v2"
-            ));
+        if projected_and_excluded != source_versions {
+            return Err(format!("field row {row_id} does not partition its source versions"));
         }
         let expected_exclusion_state = if excluded_versions.is_empty() {
             "NONE"
@@ -2713,8 +2732,29 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
                 .ok_or_else(|| format!("missing historical candidate range for API {api_key}"))?;
             version_set(text(historical, "incumbent_candidate_intersection")?)?
         };
-        if !projected_versions.is_subset(&candidate_versions) {
-            return Err(format!("field row {row_id} escaped its candidate range"));
+        let candidate_source_versions = candidate_versions
+            .intersection(&source_versions)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if !candidate_source_versions.is_subset(&projected_versions) {
+            return Err(format!(
+                "field row {row_id} does not cover its source/candidate intersection"
+            ));
+        }
+        let projected_outside_candidate = projected_versions
+            .difference(&candidate_versions)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let allowed_outside_candidate =
+            if profile == "KAFKA-K2-1-BROKER-CURRENT" && api_key == 36 {
+                BTreeSet::from([2])
+            } else {
+                BTreeSet::new()
+            };
+        if !projected_outside_candidate.is_subset(&allowed_outside_candidate) {
+            return Err(format!(
+                "field row {row_id} projected an unauthorized outside-candidate version"
+            ));
         }
 
         let direction = text(row, "direction")?;
@@ -2740,13 +2780,28 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
                 ));
             }
         }
-        for key in [
+        let canonical_field = text(row, "canonical_field_id")?;
+        let current_flexible_api_36 =
+            profile == "KAFKA-K2-1-BROKER-CURRENT" && api_key == 36;
+        let expected_compact_versions = if current_flexible_api_36
+            && (canonical_field.ends_with(".AUTH_BYTES")
+                || canonical_field.ends_with(".ERROR_MESSAGE"))
+        {
+            "2"
+        } else {
+            "none"
+        };
+        expect_text(
+            row,
             "projected_compact_versions",
-            "projected_tagged_versions",
+            expected_compact_versions,
+        )?;
+        expect_text(row, "projected_tagged_versions", "none")?;
+        expect_text(
+            row,
             "message_tag_buffer_projected_versions",
-        ] {
-            expect_text(row, key, "none")?;
-        }
+            if current_flexible_api_36 { "2" } else { "none" },
+        )?;
         if !array(row, "projected_tag_ids")?.is_empty() {
             return Err(format!("field row {row_id} invented a tagged field ID"));
         }
@@ -2773,7 +2828,6 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
             }
         }
 
-        let canonical_field = text(row, "canonical_field_id")?;
         if canonical_field.ends_with(".ERROR_CODE") {
             field_error_sets.insert(text(row, "error_set_id")?.to_owned());
         } else if row.get("error_set_id") != Some(&Value::Null) {
@@ -2790,15 +2844,15 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
         if canonical_field.ends_with(".SESSION_LIFETIME_MS") {
             if profile != "KAFKA-K2-1-BROKER-CURRENT"
                 || api_key != 36
-                || projected_versions != BTreeSet::from([1])
+                || projected_versions != BTreeSet::from([1, 2])
             {
-                return Err("session lifetime escaped current API 36 v1".to_owned());
+                return Err("session lifetime escaped current API 36 v1-v2".to_owned());
             }
-            expect_text(row, "ignorable_versions", "1")?;
+            expect_text(row, "ignorable_versions", "1-2")?;
         }
         if canonical_field.ends_with(".ERROR_MESSAGE") {
             let expected_nullable = if profile == "KAFKA-K2-1-BROKER-CURRENT" {
-                "0-1"
+                "0-2"
             } else {
                 "0"
             };
@@ -2817,8 +2871,8 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
         ])
         || field_api_keys != BTreeSet::from([17, 36])
         || field_api_profiles.len() != 4
-        || field_api_versions.len() != 7
-        || field_version_cells != 25
+        || field_api_versions.len() != 8
+        || field_version_cells != 30
         || explicit_schema_defaults != 1
     {
         return Err("partial field projection coverage changed".to_owned());
@@ -2836,7 +2890,7 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
         }
     }
     if sorted_json_rows_sha256(fields)?
-        != "a17bfa34cf57922a68a2bcd17f61c38f7f393ea9a95d042fd31776a884663a40"
+        != "38e4d1aa599505981d20df421812a923d2557af017b6f38914f304ed88b16b6e"
     {
         return Err("field projection digest changed".to_owned());
     }
@@ -2992,9 +3046,48 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
                 .copied()
                 .collect::<BTreeSet<_>>()
                 != source_versions
-            || projected_versions.contains(&2)
         {
             return Err(format!("error row {row_id} has incoherent version sets"));
+        }
+        let candidate_versions = if profile == "KAFKA-K2-1-BROKER-CURRENT" {
+            let reachable = array(artifact, "reachable_api_rows")?
+                .iter()
+                .find(|candidate| candidate.get("api_key").and_then(Value::as_u64) == Some(api_key))
+                .ok_or_else(|| format!("missing current candidate range for API {api_key}"))?;
+            version_set(text(reachable, "candidate_current_intersection")?)?
+        } else {
+            let historical = array(artifact, "historical_profile_api_range_rows")?
+                .iter()
+                .find(|candidate| {
+                    candidate.get("profile_id").and_then(Value::as_str) == Some(profile)
+                        && candidate.get("api_key").and_then(Value::as_u64) == Some(api_key)
+                })
+                .ok_or_else(|| format!("missing historical candidate range for API {api_key}"))?;
+            version_set(text(historical, "incumbent_candidate_intersection")?)?
+        };
+        let candidate_source_versions = candidate_versions
+            .intersection(&source_versions)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if !candidate_source_versions.is_subset(&projected_versions) {
+            return Err(format!(
+                "error row {row_id} does not cover its source/candidate intersection"
+            ));
+        }
+        let projected_outside_candidate = projected_versions
+            .difference(&candidate_versions)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let allowed_outside_candidate =
+            if profile == "KAFKA-K2-1-BROKER-CURRENT" && api_key == 36 {
+                BTreeSet::from([2])
+            } else {
+                BTreeSet::new()
+            };
+        if !projected_outside_candidate.is_subset(&allowed_outside_candidate) {
+            return Err(format!(
+                "error row {row_id} projected an unauthorized outside-candidate version"
+            ));
         }
         error_version_cells += projected_versions.len();
         for source_ref in text_array(row, "source_refs")? {
@@ -3045,13 +3138,13 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
         || error_profiles.len() != 2
         || error_sets != field_error_sets
         || error_sets.len() != 4
-        || error_version_cells != 18
+        || error_version_cells != 20
         || conflict_rows != 2
     {
         return Err("partial error projection coverage changed".to_owned());
     }
     if sorted_json_rows_sha256(errors)?
-        != "c97900c739803fecf9adfebb11117f52d99ae990f9d48917b85bc25ff470f160"
+        != "2dae2b05d2c68aafb37233f613f58f94b6d2d6978ae4ec4f2ee2019d887feb5d"
     {
         return Err("error projection digest changed".to_owned());
     }
@@ -3060,16 +3153,16 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
         .get("coverage_receipt")
         .ok_or_else(|| "coverage_receipt must exist".to_owned())?;
     for (key, expected) in [
-        ("field_error_projection_source_row_count", 6),
-        ("field_error_projection_source_total_byte_count", 109_046),
+        ("field_error_projection_source_row_count", 7),
+        ("field_error_projection_source_total_byte_count", 121_540),
         ("partial_projection_profile_count", 2),
         ("partial_projection_api_key_count", 2),
         ("partial_projection_api_profile_count", 4),
-        ("partial_projection_api_version_count", 7),
+        ("partial_projection_api_version_count", 8),
         ("field_projection_row_count", 15),
-        ("field_projection_version_cell_count", 25),
+        ("field_projection_version_cell_count", 30),
         ("error_projection_row_count", 10),
-        ("error_projection_version_cell_count", 18),
+        ("error_projection_version_cell_count", 20),
         ("error_projection_source_conflict_row_count", 2),
         ("complete_field_projection_api_key_count", 0),
         ("complete_error_projection_api_key_count", 0),
@@ -3085,7 +3178,7 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
     expect_text(
         coverage,
         "field_error_projection_source_projection_sha256",
-        "f2238244aadbccb7b654f4e44f0cceee6a04f961a08f9287efb1c57a320af2af",
+        "3734612d4de8e2e8ef3bd0126b4aaa38e1694a4cefc40d85ccb91938d23fc563",
     )?;
     expect_text(
         coverage,
@@ -3095,7 +3188,7 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
     expect_text(
         coverage,
         "field_projection_sha256",
-        "a17bfa34cf57922a68a2bcd17f61c38f7f393ea9a95d042fd31776a884663a40",
+        "38e4d1aa599505981d20df421812a923d2557af017b6f38914f304ed88b16b6e",
     )?;
     expect_text(
         coverage,
@@ -3105,7 +3198,7 @@ fn validate_partial_auth_projection(artifact: &Value) -> Result<(), String> {
     expect_text(
         coverage,
         "error_projection_sha256",
-        "c97900c739803fecf9adfebb11117f52d99ae990f9d48917b85bc25ff470f160",
+        "2dae2b05d2c68aafb37233f613f58f94b6d2d6978ae4ec4f2ee2019d887feb5d",
     )?;
     Ok(())
 }
@@ -3263,7 +3356,7 @@ fn validate_receipts_and_boundaries(artifact: &Value) -> Result<(), String> {
         "not a complete Kafka request/response schema contract",
         "not accepted production version ranges",
         "15 field rows and ten source-established outcome-membership rows",
-        "API 36 v2 flexible and tag-buffer encoding",
+        "API 36 v2 flexible body and tag-buffer encoding are statically projected",
         "SASL_AUTHENTICATION_FAILED code 58",
         "stale code 57",
         "Pinned Git blob object IDs establish current and profile-scoped historical source identity only",
@@ -3297,9 +3390,10 @@ fn validate_document(root: &Path) -> Result<(), String> {
         "95,596",
         "15 field rows and ten",
         "source-established outcome-membership rows",
-        "Six additional error-projection source rows",
-        "109,046",
-        "API 36 source v2 is deliberately excluded",
+        "Seven additional projection-support source rows",
+        "121,540",
+        "API 36 source v2 is now projected",
+        "current API 36 source-only v2 form does not expand",
         "SASL_AUTHENTICATION_FAILED=58",
         "stale code 57",
         "GetTelemetrySubscriptions",
@@ -3521,8 +3615,8 @@ fn kafka_k2_packet_rejects_completion_inflation() -> Result<(), String> {
         "weakened opaque authentication material classification",
     )?;
 
-    let mut projected_flexible_v2 = artifact.clone();
-    let current_api_36 = projected_flexible_v2
+    let mut omitted_flexible_encoding = artifact.clone();
+    let current_api_36 = omitted_flexible_encoding
         .get_mut("field_projection_rows")
         .and_then(Value::as_array_mut)
         .and_then(|rows| {
@@ -3532,19 +3626,37 @@ fn kafka_k2_packet_rejects_completion_inflation() -> Result<(), String> {
             })
         })
         .and_then(Value::as_object_mut)
-        .ok_or_else(|| "excluded flexible-version mutation target missing".to_owned())?;
+        .ok_or_else(|| "flexible-version mutation target missing".to_owned())?;
     current_api_36.insert(
-        "projected_versions".to_owned(),
-        Value::String("0-2".to_owned()),
-    );
-    current_api_36.insert(
-        "excluded_source_versions".to_owned(),
+        "projected_compact_versions".to_owned(),
         Value::String("none".to_owned()),
     );
     expect_invalid(
-        &projected_flexible_v2,
+        &omitted_flexible_encoding,
         &root,
-        "projected API 36 v2 without flexible encoding contract",
+        "projected API 36 v2 without compact encoding contract",
+    )?;
+
+    let mut omitted_tag_buffer = artifact.clone();
+    let current_api_36_response = omitted_tag_buffer
+        .get_mut("field_projection_rows")
+        .and_then(Value::as_array_mut)
+        .and_then(|rows| {
+            rows.iter_mut().find(|row| {
+                row.get("row_id").and_then(Value::as_str)
+                    == Some("KAFKA-K2-1-FIELD-CURRENT-036-RESPONSE-000-ERROR-CODE")
+            })
+        })
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "flexible response mutation target missing".to_owned())?;
+    current_api_36_response.insert(
+        "message_tag_buffer_projected_versions".to_owned(),
+        Value::String("none".to_owned()),
+    );
+    expect_invalid(
+        &omitted_tag_buffer,
+        &root,
+        "projected API 36 v2 without message tag buffer contract",
     )?;
 
     let mut normalized_stale_comment = artifact.clone();
