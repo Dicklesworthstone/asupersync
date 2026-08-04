@@ -24,7 +24,7 @@ const CAPABILITY_ID: &str = "CAP-TIME-UTC-RFC3339";
 const ADR_ID: &str = "DEP-ADR-011";
 const BASELINE_REVISION: &str = "1afde84d564bd8ea876459624116f90028b80835";
 const ARTIFACT_SHA256: &str =
-    "5cbdd734cbbe2a34bcaf93636c95021b85317d430f2b6b784f3383fc612df712";
+    "fda440c17077791b40af9c9f753de94f3dae7db8d82ccfd6e46400fa91233fa5";
 const DOC_BEGIN: &str = "<!-- BEGIN TIME UTC CAPABILITY INVENTORY -->";
 const DOC_END: &str = "<!-- END TIME UTC CAPABILITY INVENTORY -->";
 const CHRONO_TOKEN: &str = concat!("chrono", "::");
@@ -45,11 +45,20 @@ const ALIAS_CLASSIFICATION_PROJECTION_SHA256: &str =
     "867c7f39911b829635b5a28413179e8cc2d4156f0cfe2a1218fbb3f4819c5118";
 const ADDITIONAL_DERIVED_PROJECTION_SHA256: &str =
     "b20b65d03be1995802d929275531ac96a8a66ec06c1c64f0bf887ee27803f674";
+const CROSS_FILE_CONSUMER_PROJECTION_SHA256: &str =
+    "bb5d25453462b46bbc9bc2432fd0009e46e6016153f870b31d2ea499f1a8a140";
 const SEMANTIC_CONSUMER_BOUNDARY: &str = concat!(
     "Include nonliteral consumers through the first semantic compare, arithmetic, format, ",
     "serialize, persist, retain, return, extract, or embed boundary in a Chrono-bearing ",
     "source path; exclude cross-file propagation, external consumers, and later container ",
     "or arbitrary-byte taint.",
+);
+const CROSS_FILE_CONSUMER_BOUNDARY: &str = concat!(
+    "Include the first explicit JSON serialization boundary in a different source file ",
+    "when a timestamp-bearing report flows from a direct Chrono producer to a declared ",
+    "executable consumer; exclude delegated in-file renderers, later distinct file or ",
+    "standard-output sink anchors, dynamic dispatch, external consumers, and ambiguous ",
+    "provenance.",
 );
 
 fn repo_root() -> PathBuf {
@@ -231,7 +240,7 @@ fn validate_identity(inventory: &Value) -> Result<(), String> {
             != Some("NOT_EXECUTED_THIS_TURN")
         || policy.get("source_classification_state").and_then(Value::as_str)
             != Some(
-                "LITERAL_DIRECT_ALIAS_AND_DECLARED_IN_FILE_DERIVED_CLASSIFIED_REMAINDER_OPEN",
+                "LITERAL_DIRECT_ALIAS_DECLARED_IN_FILE_AND_CROSS_FILE_CONSUMERS_CLASSIFIED_REMAINDER_OPEN",
             )
         || policy.get("bead_acceptance_state").and_then(Value::as_str)
             != Some("PARTIAL_STATIC_INVENTORY_ONLY")
@@ -507,8 +516,8 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
             != "RESOLVED_BY_STATIC_DIRECT_PER_USE_CLASSIFICATION"
         || text(resolved_derived, "state")
             != "RESOLVED_BY_STATIC_DECLARED_DERIVED_CLASSIFICATION"
-        || array(derived_gap, "newly_classified_consumer_categories").len() != 6
-        || string_set(derived_gap, "newly_classified_consumer_categories").len() != 6
+        || array(derived_gap, "newly_classified_consumer_categories").len() != 9
+        || string_set(derived_gap, "newly_classified_consumer_categories").len() != 9
         || array(derived_gap, "representative_unclassified_consumers").len() != 3
         || string_set(derived_gap, "representative_unclassified_consumers").len() != 3
         || text(derived_gap, "effect").is_empty()
@@ -526,15 +535,18 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
             "JetStream timestamp insertion into a wire payload",
             "PostgreSQL midnight construction and Kafka recency arithmetic",
             "conformance report rendering and output",
+            "conformance executable JSON serialization boundaries",
+            "excluded-conformance executable JSON serialization boundary",
             "real-E2E serialization, retention, return, and embedding boundaries",
             "standalone golden and reporting persistence paths",
+            "standalone reporting executable JSON serialization boundaries",
         ],
     )?;
     require_exact_strings(
         derived_gap,
         "representative_unclassified_consumers",
         &[
-            "cross-file consumers outside Chrono-bearing paths",
+            "cross-file consumers beyond the nine declared JSON serialization boundaries",
             "external consumers not present in the repository snapshot",
             "second-order container and byte propagation beyond the first semantic boundary",
         ],
@@ -1019,6 +1031,30 @@ fn additional_derived_projection(rows: &[Value]) -> String {
     rows.concat()
 }
 
+fn cross_file_consumer_projection(rows: &[Value]) -> String {
+    let mut rows: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                text(row, "use_id"),
+                sorted_strings(row, "derivation_sources"),
+                text(row, "consumer_category_id"),
+                text(row, "profile_id"),
+                text(row, "path"),
+                number(row, "line"),
+                text(row, "source_anchor"),
+                text(row, "operation"),
+                text(row, "cfg_or_wiring"),
+                text(row, "exposure"),
+                text(row, "persistence_or_public_association"),
+            )
+        })
+        .collect();
+    rows.sort();
+    rows.concat()
+}
+
 fn sorted_strings(value: &Value, key: &str) -> String {
     string_set(value, key)
         .into_iter()
@@ -1101,7 +1137,7 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
     let per_use = &inventory["per_use_classification"];
     let alias = &inventory["alias_aware_chrono_uses"];
     if text(per_use, "state")
-        != "LITERAL_DIRECT_ALIAS_AND_DECLARED_IN_FILE_DERIVED_CLASSIFIED_REMAINDER_OPEN"
+        != "LITERAL_DIRECT_ALIAS_DECLARED_IN_FILE_AND_CROSS_FILE_CONSUMERS_CLASSIFIED_REMAINDER_OPEN"
         || number(per_use, "path_count") != 71
         || number(per_use, "literal_line_count") != 159
         || number(per_use, "direct_alias_line_count") != 32
@@ -1118,7 +1154,10 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
             != LITERAL_OVERRIDE_PROJECTION_SHA256
         || text(per_use, "additional_derived_projection_sha256")
             != ADDITIONAL_DERIVED_PROJECTION_SHA256
+        || text(per_use, "cross_file_consumer_projection_sha256")
+            != CROSS_FILE_CONSUMER_PROJECTION_SHA256
         || text(per_use, "semantic_consumer_boundary") != SEMANTIC_CONSUMER_BOUNDARY
+        || text(per_use, "cross_file_consumer_boundary") != CROSS_FILE_CONSUMER_BOUNDARY
         || text(per_use, "inheritance_rule").is_empty()
         || text(per_use, "no_claim").is_empty()
     {
@@ -1134,6 +1173,15 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
             "TIME-CONSUMER-JETSTREAM-WIRE-INSERTION",
             "TIME-CONSUMER-REAL-E2E-BOUNDARY",
             "TIME-CONSUMER-STANDALONE-PERSISTENCE",
+        ],
+    )?;
+    require_exact_strings(
+        per_use,
+        "cross_file_consumer_category_ids",
+        &[
+            "TIME-CROSS-FILE-CONFORMANCE-JSON",
+            "TIME-CROSS-FILE-EXCLUDED-CONFORMANCE-JSON",
+            "TIME-CROSS-FILE-STANDALONE-JSON",
         ],
     )?;
 
@@ -1437,6 +1485,7 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
     }
     let declared_categories = string_set(per_use, "derived_consumer_category_ids");
     let mut actual_categories = BTreeSet::new();
+    let mut declared_consumer_direct_source_ids = BTreeSet::new();
     for row in additional_derived {
         let path = text(row, "path");
         let line = number(row, "line");
@@ -1460,13 +1509,110 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
             return Err(format!("{} additional derived row drifted", text(row, "use_id")));
         }
         actual_categories.insert(category.to_owned());
+        declared_consumer_direct_source_ids.extend(derivation_source_set);
     }
     if actual_categories != declared_categories {
         return Err("derived consumer category coverage drifted".to_owned());
     }
+
+    let cross_file_rows = array(per_use, "cross_file_consumer_rows");
+    if number(per_use, "cross_file_consumer_anchor_count") != cross_file_rows.len() as u64
+        || row_ids(cross_file_rows, "use_id").len() != cross_file_rows.len()
+        || sha256_hex(cross_file_consumer_projection(cross_file_rows).as_bytes())
+            != CROSS_FILE_CONSUMER_PROJECTION_SHA256
+    {
+        return Err("cross-file consumer identity, total, or projection drifted".to_owned());
+    }
+    let declared_cross_file_categories =
+        string_set(per_use, "cross_file_consumer_category_ids");
+    let conformance_manifest = read_repo_file("conformance/Cargo.toml");
+    let excluded_conformance_manifest = read_repo_file("fuzz/conformance/Cargo.toml");
+    let standalone_reporting_manifest =
+        read_repo_file("tests/conformance/raptorq_rfc6330/reporting/Cargo.toml");
+    let mut actual_cross_file_categories = BTreeSet::new();
+    let mut cross_file_pairs = BTreeSet::new();
+    let mut cross_file_direct_source_ids = BTreeSet::new();
+    for row in cross_file_rows {
+        let path = text(row, "path");
+        let line = number(row, "line");
+        let pair = (path.to_owned(), line);
+        let derivation_sources = array(row, "derivation_sources");
+        let derivation_source_set = string_set(row, "derivation_sources");
+        let category = text(row, "consumer_category_id");
+        let same_file_prefix = format!("{path}:");
+        let route_is_valid = match category {
+            "TIME-CROSS-FILE-CONFORMANCE-JSON" => {
+                text(row, "profile_id") == "TIME-PROFILE-CONFORMANCE-MEMBER"
+                    && path.starts_with("conformance/src/bin/")
+                    && text(row, "cfg_or_wiring") == "EXPLICIT_CARGO_BIN"
+                    && text(row, "exposure") == "CONFORMANCE_EXECUTABLE_REPORT_OUTPUT"
+                    && conformance_manifest.contains(&format!(
+                        "path = \"{}\"",
+                        path.strip_prefix("conformance/")
+                            .expect("main conformance consumer prefix must match")
+                    ))
+            }
+            "TIME-CROSS-FILE-EXCLUDED-CONFORMANCE-JSON" => {
+                text(row, "profile_id") == "TIME-PROFILE-EXCLUDED-CONFORMANCE"
+                    && path.starts_with("fuzz/conformance/src/bin/")
+                    && text(row, "cfg_or_wiring") == "EXCLUDED_WORKSPACE_EXPLICIT_BIN"
+                    && text(row, "exposure") == "SEPARATE_WORKSPACE_REPORT_OUTPUT"
+                    && excluded_conformance_manifest.contains(&format!(
+                        "path = \"{}\"",
+                        path.strip_prefix("fuzz/conformance/")
+                            .expect("excluded conformance consumer prefix must match")
+                    ))
+            }
+            "TIME-CROSS-FILE-STANDALONE-JSON" => {
+                text(row, "profile_id") == "TIME-PROFILE-STANDALONE-REPORTING"
+                    && path.starts_with("tests/conformance/raptorq_rfc6330/reporting/bin/")
+                    && text(row, "cfg_or_wiring") == "NESTED_STANDALONE_BIN"
+                    && text(row, "exposure") == "STANDALONE_TOOL_OUTPUT"
+                    && standalone_reporting_manifest.contains(&format!(
+                        "path = \"{}\"",
+                        path.strip_prefix("tests/conformance/raptorq_rfc6330/reporting/")
+                            .expect("standalone reporting consumer prefix must match")
+                    ))
+            }
+            _ => false,
+        };
+        if direct_union.contains(&pair)
+            || derived_pairs.contains(&pair)
+            || !cross_file_pairs.insert(pair)
+            || derivation_sources.is_empty()
+            || derivation_sources.len() != derivation_source_set.len()
+            || !derivation_source_set.is_subset(&direct_source_ids)
+            || derivation_source_set
+                .iter()
+                .any(|source| source.starts_with(&same_file_prefix))
+            || !declared_cross_file_categories.contains(category)
+            || !route_is_valid
+            || !profiles.contains(text(row, "profile_id"))
+            || text(row, "source_anchor") != source_line(path, line)?
+            || text(row, "operation").is_empty()
+            || text(row, "cfg_or_wiring").is_empty()
+            || text(row, "exposure").is_empty()
+            || text(row, "persistence_or_public_association").is_empty()
+        {
+            return Err(format!("{} cross-file consumer row drifted", text(row, "use_id")));
+        }
+        actual_cross_file_categories.insert(category.to_owned());
+        cross_file_direct_source_ids.extend(derivation_source_set.iter().cloned());
+        declared_consumer_direct_source_ids.extend(derivation_source_set);
+    }
+    if actual_cross_file_categories != declared_cross_file_categories {
+        return Err("cross-file consumer category coverage drifted".to_owned());
+    }
+    if number(per_use, "cross_file_direct_source_anchor_count")
+        != cross_file_direct_source_ids.len() as u64
+        || number(per_use, "declared_consumer_unique_direct_source_anchor_count")
+            != declared_consumer_direct_source_ids.len() as u64
+    {
+        return Err("declared consumer direct-source totals drifted".to_owned());
+    }
     if number(per_use, "derived_operation_anchor_count") != derived_pairs.len() as u64
         || number(per_use, "classified_anchor_count")
-            != (direct_union.len() + derived_pairs.len()) as u64
+            != (direct_union.len() + derived_pairs.len() + cross_file_pairs.len()) as u64
     {
         return Err("classified anchor totals drifted".to_owned());
     }
@@ -2760,7 +2906,8 @@ fn time_utc_inventory_is_exact_and_source_pinned() {
         "one same-line overlap",
         "derived-consumer remainder",
         "38 exact rows",
-        "236 classified",
+        "9 exact cross-file JSON rows",
+        "245 classified",
         "literal-source",
         "bounded lexical scan of production source finds zero external",
         "This is not compiler-resolved name analysis.",
@@ -2878,6 +3025,46 @@ fn time_utc_inventory_rejects_cutover_and_completeness_drift() {
     derived_category["per_use_classification"]["additional_derived_operation_rows"][0]
         ["consumer_category_id"] = Value::String("TIME-CONSUMER-UNDECLARED".to_owned());
     assert!(validate_inventory(&derived_category).is_err());
+
+    let mut cross_file_missing = inventory.clone();
+    cross_file_missing["per_use_classification"]["cross_file_consumer_rows"]
+        .as_array_mut()
+        .expect("cross-file consumers must be an array")
+        .pop();
+    assert!(validate_inventory(&cross_file_missing).is_err());
+
+    let mut cross_file_semantic = inventory.clone();
+    cross_file_semantic["per_use_classification"]["cross_file_consumer_rows"][0]
+        ["operation"] = Value::String("nonempty cross-file semantic drift".to_owned());
+    assert!(validate_inventory(&cross_file_semantic).is_err());
+
+    let mut cross_file_duplicate_source = inventory.clone();
+    let cross_file_source = cross_file_duplicate_source["per_use_classification"]
+        ["cross_file_consumer_rows"][0]["derivation_sources"][0]
+        .clone();
+    cross_file_duplicate_source["per_use_classification"]["cross_file_consumer_rows"][0]
+        ["derivation_sources"]
+        .as_array_mut()
+        .expect("cross-file derivation sources must be an array")
+        .push(cross_file_source);
+    assert!(validate_inventory(&cross_file_duplicate_source).is_err());
+
+    let mut cross_file_orphan_source = inventory.clone();
+    cross_file_orphan_source["per_use_classification"]["cross_file_consumer_rows"][0]
+        ["derivation_sources"][0] =
+        Value::String("conformance/src/h2_data_end_stream_conformance.rs:1".to_owned());
+    assert!(validate_inventory(&cross_file_orphan_source).is_err());
+
+    let mut cross_file_category = inventory.clone();
+    cross_file_category["per_use_classification"]["cross_file_consumer_rows"][0]
+        ["consumer_category_id"] =
+        Value::String("TIME-CROSS-FILE-UNDECLARED".to_owned());
+    assert!(validate_inventory(&cross_file_category).is_err());
+
+    let mut cross_file_lineage_total = inventory.clone();
+    cross_file_lineage_total["per_use_classification"]
+        ["declared_consumer_unique_direct_source_anchor_count"] = Value::from(50_u64);
+    assert!(validate_inventory(&cross_file_lineage_total).is_err());
 
     let mut alias_route = inventory.clone();
     for binding in alias_route["alias_aware_chrono_uses"]["bindings"]

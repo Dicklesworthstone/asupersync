@@ -33,7 +33,7 @@
     "unknown_rows": 0,
     "unclassified_chrono_paths": 0,
     "a1_execution_state": "NOT_EXECUTED_THIS_TURN",
-    "source_classification_state": "LITERAL_DIRECT_ALIAS_AND_DECLARED_IN_FILE_DERIVED_CLASSIFIED_REMAINDER_OPEN",
+    "source_classification_state": "LITERAL_DIRECT_ALIAS_DECLARED_IN_FILE_AND_CROSS_FILE_CONSUMERS_CLASSIFIED_REMAINDER_OPEN",
     "bead_acceptance_state": "PARTIAL_STATIC_INVENTORY_ONLY",
     "bead_close_allowed": false,
     "unresolved_behavioral_gap_count": 7,
@@ -1151,23 +1151,28 @@
     ]
   },
   "per_use_classification": {
-    "state": "LITERAL_DIRECT_ALIAS_AND_DECLARED_IN_FILE_DERIVED_CLASSIFIED_REMAINDER_OPEN",
-    "inheritance_rule": "Each literal Chrono line receives its semantic operation from the first ordered literal_operation_rule whose needle occurs on that line. Every literal, import-backed, and derived anchor receives profile, migration group, and owner metadata from its unique path_classification_set; literal overrides and alias binding or operation rows may narrow wiring, exposure, and association without changing that ownership route.",
+    "state": "LITERAL_DIRECT_ALIAS_DECLARED_IN_FILE_AND_CROSS_FILE_CONSUMERS_CLASSIFIED_REMAINDER_OPEN",
+    "inheritance_rule": "Each literal Chrono line receives its semantic operation from the first ordered literal_operation_rule whose needle occurs on that line. Every literal, import-backed, and in-file derived anchor receives profile, migration group, and owner metadata from its unique path_classification_set; literal overrides and alias binding or operation rows may narrow wiring, exposure, and association without changing that ownership route. Declared cross-file rows carry explicit profile, wiring, exposure, association, and direct-source lineage because their consumer paths need not contain a Chrono reference.",
     "path_count": 71,
     "literal_line_count": 159,
     "direct_alias_line_count": 32,
     "literal_alias_overlap_line_count": 1,
     "literal_or_alias_unique_line_count": 190,
     "derived_operation_anchor_count": 46,
-    "classified_anchor_count": 236,
+    "classified_anchor_count": 245,
     "literal_use_override_count": 36,
     "additional_derived_operation_anchor_count": 38,
+    "cross_file_consumer_anchor_count": 9,
+    "cross_file_direct_source_anchor_count": 18,
+    "declared_consumer_unique_direct_source_anchor_count": 51,
     "literal_operation_projection_sha256": "a533497be94a3a8c649a061117053acff88821c102e9cedbe16cb4da0b66990b",
     "literal_source_projection_sha256": "5c4020cfe41d10dbfcab19c64f3677ee78941c65441c12da93dc7e3cd6946f2d",
     "path_classification_projection_sha256": "5f60bb8b7deb36b1aac2123747fd1be426f1888fc759f46afe3baae103dc3b63",
     "literal_override_projection_sha256": "81f3549c7644361eabee937044ba098315b3aeffbd079d9c644eb1d60ccc3f84",
     "additional_derived_projection_sha256": "b20b65d03be1995802d929275531ac96a8a66ec06c1c64f0bf887ee27803f674",
+    "cross_file_consumer_projection_sha256": "bb5d25453462b46bbc9bc2432fd0009e46e6016153f870b31d2ea499f1a8a140",
     "semantic_consumer_boundary": "Include nonliteral consumers through the first semantic compare, arithmetic, format, serialize, persist, retain, return, extract, or embed boundary in a Chrono-bearing source path; exclude cross-file propagation, external consumers, and later container or arbitrary-byte taint.",
+    "cross_file_consumer_boundary": "Include the first explicit JSON serialization boundary in a different source file when a timestamp-bearing report flows from a direct Chrono producer to a declared executable consumer; exclude delegated in-file renderers, later distinct file or standard-output sink anchors, dynamic dispatch, external consumers, and ambiguous provenance.",
     "derived_consumer_category_ids": [
       "TIME-CONSUMER-CLI-CUTOFF-EXPIRY",
       "TIME-CONSUMER-CONFORMANCE-OUTPUT",
@@ -1175,6 +1180,11 @@
       "TIME-CONSUMER-JETSTREAM-WIRE-INSERTION",
       "TIME-CONSUMER-REAL-E2E-BOUNDARY",
       "TIME-CONSUMER-STANDALONE-PERSISTENCE"
+    ],
+    "cross_file_consumer_category_ids": [
+      "TIME-CROSS-FILE-CONFORMANCE-JSON",
+      "TIME-CROSS-FILE-EXCLUDED-CONFORMANCE-JSON",
+      "TIME-CROSS-FILE-STANDALONE-JSON"
     ],
     "literal_operation_rules": [
       {
@@ -2493,7 +2503,153 @@
         "persistence_or_public_association": "standalone conformance snapshot JSON"
       }
     ],
-    "no_claim": "The literal and direct-alias classification is complete, and the declared in-file downstream rows are exact through the stated semantic boundary. Cross-file propagation, external consumers, and later container or arbitrary-byte taint remain open. No profile resolution, compilation, execution, byte preservation, or behavioral evidence follows."
+    "cross_file_consumer_rows": [
+      {
+        "use_id": "TIME-CROSS-FILE-CONFORMANCE-DATA-END-JSON-0098",
+        "derivation_sources": [
+          "conformance/src/h2_data_end_stream_conformance.rs:142",
+          "conformance/src/h2_data_end_stream_conformance.rs:186"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-CONFORMANCE-JSON",
+        "profile_id": "TIME-PROFILE-CONFORMANCE-MEMBER",
+        "path": "conformance/src/bin/h2_data_end_stream_conformance.rs",
+        "line": 98,
+        "source_anchor": "OutputFormat::Json => serde_json::to_string_pretty(&report)?,",
+        "operation": "serialize the timestamp-bearing DataEndStreamComplianceReport to pretty JSON at the executable boundary",
+        "cfg_or_wiring": "EXPLICIT_CARGO_BIN",
+        "exposure": "CONFORMANCE_EXECUTABLE_REPORT_OUTPUT",
+        "persistence_or_public_association": "JSON output buffer before configured file-or-standard-output sink"
+      },
+      {
+        "use_id": "TIME-CROSS-FILE-CONFORMANCE-GOAWAY-JSON-0093",
+        "derivation_sources": [
+          "conformance/src/h2_goaway_conformance.rs:155",
+          "conformance/src/h2_goaway_conformance.rs:199"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-CONFORMANCE-JSON",
+        "profile_id": "TIME-PROFILE-CONFORMANCE-MEMBER",
+        "path": "conformance/src/bin/h2_goaway_conformance.rs",
+        "line": 93,
+        "source_anchor": "OutputFormat::Json => serde_json::to_string_pretty(&report)?,",
+        "operation": "serialize the timestamp-bearing GoAwayComplianceReport to pretty JSON at the executable boundary",
+        "cfg_or_wiring": "EXPLICIT_CARGO_BIN",
+        "exposure": "CONFORMANCE_EXECUTABLE_REPORT_OUTPUT",
+        "persistence_or_public_association": "JSON output buffer before configured file-or-standard-output sink"
+      },
+      {
+        "use_id": "TIME-CROSS-FILE-CONFORMANCE-PING-JSON-0100",
+        "derivation_sources": [
+          "conformance/src/h2_ping_conformance.rs:146",
+          "conformance/src/h2_ping_conformance.rs:190"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-CONFORMANCE-JSON",
+        "profile_id": "TIME-PROFILE-CONFORMANCE-MEMBER",
+        "path": "conformance/src/bin/h2_ping_conformance.rs",
+        "line": 100,
+        "source_anchor": "OutputFormat::Json => serde_json::to_string_pretty(&report)?,",
+        "operation": "serialize the timestamp-bearing PingComplianceReport to pretty JSON at the executable boundary",
+        "cfg_or_wiring": "EXPLICIT_CARGO_BIN",
+        "exposure": "CONFORMANCE_EXECUTABLE_REPORT_OUTPUT",
+        "persistence_or_public_association": "JSON output buffer before configured file-or-standard-output sink"
+      },
+      {
+        "use_id": "TIME-CROSS-FILE-CONFORMANCE-PRIORITY-JSON-0093",
+        "derivation_sources": [
+          "conformance/src/h2_priority_conformance.rs:151",
+          "conformance/src/h2_priority_conformance.rs:195"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-CONFORMANCE-JSON",
+        "profile_id": "TIME-PROFILE-CONFORMANCE-MEMBER",
+        "path": "conformance/src/bin/h2_priority_conformance.rs",
+        "line": 93,
+        "source_anchor": "OutputFormat::Json => serde_json::to_string_pretty(&report)?,",
+        "operation": "serialize the timestamp-bearing PriorityComplianceReport to pretty JSON at the executable boundary",
+        "cfg_or_wiring": "EXPLICIT_CARGO_BIN",
+        "exposure": "CONFORMANCE_EXECUTABLE_REPORT_OUTPUT",
+        "persistence_or_public_association": "JSON output buffer before configured file-or-standard-output sink"
+      },
+      {
+        "use_id": "TIME-CROSS-FILE-CONFORMANCE-SETTINGS-JSON-0094",
+        "derivation_sources": [
+          "conformance/src/h2_settings_conformance.rs:93",
+          "conformance/src/h2_settings_conformance.rs:302"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-CONFORMANCE-JSON",
+        "profile_id": "TIME-PROFILE-CONFORMANCE-MEMBER",
+        "path": "conformance/src/bin/h2_settings_conformance.rs",
+        "line": 94,
+        "source_anchor": "OutputFormat::Json => serde_json::to_string_pretty(&report)?,",
+        "operation": "serialize the timestamp-bearing settings ComplianceReport to pretty JSON at the executable boundary",
+        "cfg_or_wiring": "EXPLICIT_CARGO_BIN",
+        "exposure": "CONFORMANCE_EXECUTABLE_REPORT_OUTPUT",
+        "persistence_or_public_association": "JSON output buffer before configured file-or-standard-output sink"
+      },
+      {
+        "use_id": "TIME-CROSS-FILE-CONFORMANCE-HPACK-JSON-0094",
+        "derivation_sources": [
+          "conformance/src/hpack_conformance.rs:82",
+          "conformance/src/hpack_conformance.rs:126"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-CONFORMANCE-JSON",
+        "profile_id": "TIME-PROFILE-CONFORMANCE-MEMBER",
+        "path": "conformance/src/bin/hpack_conformance.rs",
+        "line": 94,
+        "source_anchor": "OutputFormat::Json => serde_json::to_string_pretty(&report)?,",
+        "operation": "serialize the timestamp-bearing HPACK ComplianceReport to pretty JSON at the executable boundary",
+        "cfg_or_wiring": "EXPLICIT_CARGO_BIN",
+        "exposure": "CONFORMANCE_EXECUTABLE_REPORT_OUTPUT",
+        "persistence_or_public_association": "JSON output buffer before configured file-or-standard-output sink"
+      },
+      {
+        "use_id": "TIME-CROSS-FILE-EXCLUDED-PING-JSON-0051",
+        "derivation_sources": [
+          "fuzz/conformance/src/h2_ping_rtt_measurement_conformance.rs:534",
+          "fuzz/conformance/src/h2_ping_rtt_measurement_conformance.rs:565"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-EXCLUDED-CONFORMANCE-JSON",
+        "profile_id": "TIME-PROFILE-EXCLUDED-CONFORMANCE",
+        "path": "fuzz/conformance/src/bin/h2_ping_rtt_measurement_conformance.rs",
+        "line": 51,
+        "source_anchor": "println!(\"{}\", serde_json::to_string_pretty(&results).unwrap());",
+        "operation": "serialize either timestamp-bearing excluded-workspace report to pretty JSON and write it to standard output",
+        "cfg_or_wiring": "EXCLUDED_WORKSPACE_EXPLICIT_BIN",
+        "exposure": "SEPARATE_WORKSPACE_REPORT_OUTPUT",
+        "persistence_or_public_association": "pretty JSON written to standard output"
+      },
+      {
+        "use_id": "TIME-CROSS-FILE-STANDALONE-MAINT-HEALTH-JSON-0239",
+        "derivation_sources": [
+          "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs:131",
+          "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs:735"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-STANDALONE-JSON",
+        "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+        "path": "tests/conformance/raptorq_rfc6330/reporting/bin/maintain_fixtures.rs",
+        "line": 239,
+        "source_anchor": "std::fs::write(&output_path, serde_json::to_string_pretty(&analysis_data)?)",
+        "operation": "serialize and persist timestamp-bearing file-health rows inside analysis JSON at the executable boundary",
+        "cfg_or_wiring": "NESTED_STANDALONE_BIN",
+        "exposure": "STANDALONE_TOOL_OUTPUT",
+        "persistence_or_public_association": "file_health[*].last_modified in file_health_analysis.json"
+      },
+      {
+        "use_id": "TIME-CROSS-FILE-STANDALONE-MAINT-RESULT-JSON-0552",
+        "derivation_sources": [
+          "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs:55",
+          "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs:246"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-STANDALONE-JSON",
+        "profile_id": "TIME-PROFILE-STANDALONE-REPORTING",
+        "path": "tests/conformance/raptorq_rfc6330/reporting/bin/maintain_fixtures.rs",
+        "line": 552,
+        "source_anchor": "std::fs::write(&results_path, serde_json::to_string_pretty(&result)?)",
+        "operation": "serialize and persist the timestamp-bearing MaintenanceResult as JSON at the executable boundary",
+        "cfg_or_wiring": "NESTED_STANDALONE_BIN",
+        "exposure": "STANDALONE_TOOL_OUTPUT",
+        "persistence_or_public_association": "MaintenanceResult.timestamp in maintenance_results.json"
+      }
+    ],
+    "no_claim": "The literal and direct-alias classification is complete, the declared in-file downstream rows are exact through the stated semantic boundary, and the nine declared cross-file JSON rows are exact through their serialization boundary. Other cross-file propagation, delegated render calls, later distinct sinks, external consumers, and later container or arbitrary-byte taint remain open. No profile resolution, compilation, execution, byte preservation, or behavioral evidence follows."
   },
   "alias_aware_chrono_uses": {
     "scope": "Bounded lexical inventory of every direct Chrono import binding, every line that directly references an imported Chrono symbol in the five census roots, and every adjacent derived temporal arithmetic, comparison, association, or ordering anchor discovered for those bindings.",
@@ -4460,17 +4616,20 @@
   "static_inventory_gaps": [
     {
       "gap_id": "TIME-STATIC-GAP-DERIVED-CONSUMER-CLASSIFICATION",
-      "summary": "All 159 literal Chrono lines, all 32 direct imported-symbol lines, eight imported-alias anchors, and the declared in-file downstream consumers through the first semantic boundary have deterministic source-linked classifications. Cross-file propagation, external consumers, and second-order container or byte propagation remain outside this bounded static tranche.",
+      "summary": "All 159 literal Chrono lines, all 32 direct imported-symbol lines, eight imported-alias anchors, the declared in-file downstream consumers through the first semantic boundary, and nine declared cross-file JSON serialization boundaries have deterministic source-linked classifications. Other cross-file propagation, external consumers, and second-order container or byte propagation remain outside this bounded static tranche.",
       "newly_classified_consumer_categories": [
         "CLI cutoff comparisons and optional-expiry moves",
         "PostgreSQL midnight construction and Kafka recency arithmetic",
         "JetStream timestamp insertion into a wire payload",
         "real-E2E serialization, retention, return, and embedding boundaries",
         "conformance report rendering and output",
-        "standalone golden and reporting persistence paths"
+        "standalone golden and reporting persistence paths",
+        "conformance executable JSON serialization boundaries",
+        "excluded-conformance executable JSON serialization boundary",
+        "standalone reporting executable JSON serialization boundaries"
       ],
       "representative_unclassified_consumers": [
-        "cross-file consumers outside Chrono-bearing paths",
+        "cross-file consumers beyond the nine declared JSON serialization boundaries",
         "external consumers not present in the repository snapshot",
         "second-order container and byte propagation beyond the first semantic boundary"
       ],
@@ -4493,7 +4652,7 @@
     },
     {
       "detail_id": "TIME-STATIC-RESOLVED-DECLARED-DERIVED-CONSUMERS",
-      "summary": "Thirty-eight declared in-file consumer anchors across six categories are linked to 40 unique direct source anchors, source-matched, category-routed, and frozen through the stated first semantic boundary. The wider remainder stays explicit in static_inventory_gaps.",
+      "summary": "Thirty-eight declared in-file consumer anchors across six categories and nine declared cross-file JSON consumers across three categories are linked to 51 unique direct source anchors, source-matched, category-routed, and frozen through their stated boundaries. The wider remainder stays explicit in static_inventory_gaps.",
       "state": "RESOLVED_BY_STATIC_DECLARED_DERIVED_CLASSIFICATION",
       "owner_bead": "asupersync-5z2scg.6.1"
     }
@@ -4553,8 +4712,8 @@
       "direct Chrono import and imported-symbol reconciliation",
       "manifest and authority inspection",
       "path, matching-line, literal-operation, literal-source and classification projection hashing",
-      "literal override, declared derived-row and lineage projection hashing",
-      "derived-anchor source matching and direct-source lineage validation",
+      "literal override, declared derived-row, cross-file consumer, and lineage projection hashing",
+      "derived and cross-file anchor source matching with direct-source lineage validation",
       "source file hashing",
       "manual cross-review"
     ]
