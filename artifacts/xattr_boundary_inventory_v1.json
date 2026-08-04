@@ -1,0 +1,779 @@
+{
+  "schema_version": 1,
+  "artifact_id": "xattr-boundary-inventory-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-3u3tej.3.1",
+  "capability_id": "CAP-XATTR",
+  "baseline_revision": "e958dadee7b692faaf51bee42352d4bc6e7738ef",
+  "purpose": "Freeze the claim-time xattr call, API, error, platform, ATP journey, marginal graph, and replacement-cost inventory; issue a terminal owner gate without authorizing implementation.",
+  "authority": {
+    "plan": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md",
+    "registry": "artifacts/dependency_capability_registry_v1.json",
+    "registry_disposition": "KEEP_UNTIL_PARITY",
+    "registry_evidence_state": "BASELINE_PLANNED",
+    "registry_cutover_state": "KEEP_INCUMBENT",
+    "gate_decision": "DEFER",
+    "gate_state": "TERMINAL",
+    "decision_basis": "The canonical ledger measures xattr as the only marginal package in every active Unix cell, so removing it does not remove rustix. The current integration has important proof and error-reporting gaps, but they are incumbent-hardening gaps. A replacement would add Linux, macOS, FreeBSD, and NetBSD ABI, allocation-race, namespace, and unsafe-maintenance obligations without satisfying the stated rustix-parent trigger.",
+    "dependency_exit_allowed": false,
+    "implementation_children_authorized": false,
+    "owner_review_required_to_change": true
+  },
+  "policy": {
+    "zero_unknown_required": true,
+    "unknown_rows": 0,
+    "inventory_state": "BASELINED_WITH_ROUTED_GAPS",
+    "evidence_state": "MEASURED_TERMINAL_DEFER",
+    "missing_evidence_is_parity": false,
+    "source_changes_authorized": false
+  },
+  "source_pins": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+      "line_count": 1038
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+      "line_count": 4666
+    },
+    {
+      "path": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md",
+      "sha256": "401b39c99f4909a7e805e0992327d2408fe54aed65610783830031b66083b7b0",
+      "line_count": 332
+    },
+    {
+      "path": "artifacts/dependency_capability_registry_v1.json",
+      "sha256": "6eb22d0ead0ad25c8b51bf4435a3ccdb4c41b52bed88eb5ac45a35be116e32bb",
+      "line_count": 6908
+    },
+    {
+      "path": "artifacts/dependency_marginal_ledger_v1.json",
+      "sha256": "9382d8357e59b49b01775f3efad2db95f2186c63bc432b5616ba20f3b9a218a9",
+      "line_count": 188045
+    },
+    {
+      "path": "artifacts/dependency_capability_baseline_v1.json",
+      "sha256": "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8",
+      "line_count": 1357
+    },
+    {
+      "path": "artifacts/api_surface_map_v1.json",
+      "sha256": "7dfbb239422630e1ef9c875e7542c4cee440211233dc7b734611fa8481d54178",
+      "line_count": 4824
+    },
+    {
+      "path": "artifacts/unsafe_boundary_ledger_v1.json",
+      "sha256": "498daaf6154c923fed8d62d5c3096c06ad88297ef95c2f0ef317980c2949464a",
+      "line_count": 6297
+    },
+    {
+      "path": "src/net/atp/transport_common/metadata.rs",
+      "sha256": "033daa24b1bbba859f53f2c3a1a9731fc55a301935ce091cc068c62466ddeb59",
+      "line_count": 3744
+    },
+    {
+      "path": "src/atp/object.rs",
+      "sha256": "b511bcfd14fa297c903a1cfdc4ae7a4233eeeefec17a47f52b0d1e22a21e2411",
+      "line_count": 1337
+    },
+    {
+      "path": "src/bin/atp.rs",
+      "sha256": "b77dd1e90ae1ab81bf084feac214b31cc8f17557d6f3c476dcdb1868075eee4b",
+      "line_count": 11912
+    },
+    {
+      "path": "tests/atp_tcp_metadata_fidelity.rs",
+      "sha256": "1b29258c657056a8362dc98ca39b5953b85d7e34bbd84b9d98e79e738bb12fbd",
+      "line_count": 580
+    },
+    {
+      "path": "scripts/run_dependency_sovereignty_e2e.sh",
+      "sha256": "a1908b10016b633cd5e2f923cb077533eaa66290c218e4f1c7de09e70e8400a2",
+      "line_count": 1208
+    }
+  ],
+  "reviewed_upstream_sources": {
+    "xattr": {
+      "version": "1.6.1",
+      "cargo_lock_checksum": "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156",
+      "default_feature": "unsupported",
+      "files": [
+        {
+          "path": "src/lib.rs",
+          "sha256": "da098a27c3a46b8d630fa11755ec7eeeab8a38c15f04d986dd7b46e6aafabffd",
+          "line_count": 168
+        },
+        {
+          "path": "src/sys/mod.rs",
+          "sha256": "7cd21e443464561a806e811493f88cb05d83232f413f3dcf1784947255afb184",
+          "line_count": 34
+        },
+        {
+          "path": "src/sys/linux_macos.rs",
+          "sha256": "41fc8181c512fd6523e015a570cc69278b2f64cb3f9762c722975ab1e3f4b70c",
+          "line_count": 120
+        },
+        {
+          "path": "src/sys/bsd.rs",
+          "sha256": "ab507c904cb8056dc4259b46764cd2765906d7326c82078443b62b0d45e8ce28",
+          "line_count": 328
+        },
+        {
+          "path": "src/sys/unsupported.rs",
+          "sha256": "a45b961406ee442b6bbd91959cdfa2ea940817baa84f789dd3e30dc4618c7117",
+          "line_count": 80
+        },
+        {
+          "path": "src/util.rs",
+          "sha256": "08fb254cb9d4d95552c5e6994a8485bc8e68f770f3ba7cc1b4f5aa746584ae9b",
+          "line_count": 57
+        },
+        {
+          "path": "src/error.rs",
+          "sha256": "4e8b8e248aac111b056bed44692be0397daf9c34a39829309e58dbf12e0dc7a6",
+          "line_count": 28
+        },
+        {
+          "path": "Cargo.toml.orig",
+          "sha256": "2c383b6f62d7cbad2326819ce03e5a5b511c0d9ca8f48c8db483149fe589a08f",
+          "line_count": 32
+        }
+      ]
+    },
+    "rustix": {
+      "version": "1.1.4",
+      "cargo_lock_checksum": "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190",
+      "reviewed_files": [
+        {
+          "path": "src/backend/libc/fs/syscalls.rs",
+          "sha256": "35ff1ef84e1ae46182e771e0fd4bb7f67f85311ba46e84e336def370bcf1217e",
+          "line_count": 2739
+        },
+        {
+          "path": "src/fs/xattr.rs",
+          "sha256": "a1eacfad1cd089fc1786367211870326e4077b452bf4d6c9b7d3e2e959d484de",
+          "line_count": 256
+        }
+      ]
+    }
+  },
+  "occurrence_census": [
+    {
+      "occurrence_id": "XATTR-OCC-MANIFEST",
+      "state": "PRESENT",
+      "paths": ["Cargo.toml", "Cargo.lock"],
+      "classification": "target cfg(unix) direct dependency pinned to xattr 1.6.1"
+    },
+    {
+      "occurrence_id": "XATTR-OCC-CAPTURE",
+      "state": "PRESENT",
+      "paths": ["src/net/atp/transport_common/metadata.rs"],
+      "classification": "best-effort list and get capture into transfer metadata"
+    },
+    {
+      "occurrence_id": "XATTR-OCC-APPLY",
+      "state": "PRESENT",
+      "paths": ["src/net/atp/transport_common/metadata.rs"],
+      "classification": "best-effort set during destination metadata application"
+    },
+    {
+      "occurrence_id": "XATTR-OCC-POLICY",
+      "state": "PRESENT",
+      "paths": ["src/atp/object.rs"],
+      "classification": "public MetadataPolicy opt-in and full-preservation preset"
+    },
+    {
+      "occurrence_id": "XATTR-OCC-CLI",
+      "state": "PRESENT",
+      "paths": ["src/bin/atp.rs"],
+      "classification": "CLI-selected metadata policy retains default xattr-disabled behavior"
+    },
+    {
+      "occurrence_id": "XATTR-OCC-TEST",
+      "state": "PARTIAL",
+      "paths": ["tests/atp_tcp_metadata_fidelity.rs"],
+      "classification": "one regular-file TCP byte roundtrip that silently returns when setup is unsupported"
+    },
+    {
+      "occurrence_id": "XATTR-OCC-EVIDENCE",
+      "state": "PLANNED",
+      "paths": [
+        "artifacts/dependency_capability_registry_v1.json",
+        "artifacts/dependency_capability_baseline_v1.json",
+        "scripts/run_dependency_sovereignty_e2e.sh"
+      ],
+      "classification": "registry and baseline name three scenarios that the canonical runner does not implement"
+    }
+  ],
+  "call_inventory": [
+    {
+      "call_id": "XATTR-CALL-PROD-LIST-DEREF",
+      "scope": "production",
+      "path": "src/net/atp/transport_common/metadata.rs",
+      "api": "xattr::list_deref",
+      "operation": "list",
+      "symlink_semantics": "follow target",
+      "currently_reachable": false,
+      "result_handling": "a list error becomes an empty metadata map"
+    },
+    {
+      "call_id": "XATTR-CALL-PROD-LIST-NOFOLLOW",
+      "scope": "production",
+      "path": "src/net/atp/transport_common/metadata.rs",
+      "api": "xattr::list",
+      "operation": "list",
+      "symlink_semantics": "operate on link itself",
+      "currently_reachable": true,
+      "result_handling": "used for regular files and directories; a list error becomes an empty map"
+    },
+    {
+      "call_id": "XATTR-CALL-PROD-GET-DEREF",
+      "scope": "production",
+      "path": "src/net/atp/transport_common/metadata.rs",
+      "api": "xattr::get_deref",
+      "operation": "get",
+      "symlink_semantics": "follow target",
+      "currently_reachable": false,
+      "result_handling": "missing values and errors are omitted"
+    },
+    {
+      "call_id": "XATTR-CALL-PROD-GET-NOFOLLOW",
+      "scope": "production",
+      "path": "src/net/atp/transport_common/metadata.rs",
+      "api": "xattr::get",
+      "operation": "get",
+      "symlink_semantics": "operate on link itself",
+      "currently_reachable": true,
+      "result_handling": "only Ok(Some(bytes)) is retained"
+    },
+    {
+      "call_id": "XATTR-CALL-PROD-SET-NOFOLLOW",
+      "scope": "production",
+      "path": "src/net/atp/transport_common/metadata.rs",
+      "api": "xattr::set",
+      "operation": "set",
+      "symlink_semantics": "operate on link itself",
+      "currently_reachable": true,
+      "result_handling": "per-name failures are recorded as skipped while later attributes continue"
+    },
+    {
+      "call_id": "XATTR-CALL-TEST-SET",
+      "scope": "test",
+      "path": "tests/atp_tcp_metadata_fidelity.rs",
+      "api": "xattr::set",
+      "operation": "set",
+      "symlink_semantics": "regular-file fixture",
+      "currently_reachable": true,
+      "result_handling": "failure causes an early successful test return"
+    },
+    {
+      "call_id": "XATTR-CALL-TEST-GET",
+      "scope": "test",
+      "path": "tests/atp_tcp_metadata_fidelity.rs",
+      "api": "xattr::get",
+      "operation": "get",
+      "symlink_semantics": "regular-file fixture",
+      "currently_reachable": true,
+      "result_handling": "asserts exact value bytes when setup succeeded"
+    }
+  ],
+  "public_and_operator_surfaces": [
+    {
+      "surface_id": "XATTR-PUB-POLICY",
+      "state": "PRESENT",
+      "path": "asupersync::atp::object::MetadataPolicy::preserve_extended_attributes",
+      "semantics": "public opt-in; false for Default and portable, true for full_preservation"
+    },
+    {
+      "surface_id": "XATTR-WIRE-METADATA",
+      "state": "PRESENT",
+      "path": "EntryMetadata::xattrs",
+      "semantics": "BTreeMap<String, Vec<u8>> carries UTF-8 names in canonical order and byte-exact values"
+    },
+    {
+      "surface_id": "XATTR-CAPTURE-SYNC",
+      "state": "PARTIAL",
+      "path": "read_entry_metadata_sync",
+      "semantics": "best-effort regular-file and directory capture; symlink entries return before xattr capture"
+    },
+    {
+      "surface_id": "XATTR-APPLY-SYNC",
+      "state": "PARTIAL",
+      "path": "apply_entry_metadata_sync",
+      "semantics": "best-effort no-follow set with per-name skipped diagnostics and no rollback"
+    },
+    {
+      "surface_id": "XATTR-ASYNC-WRAPPERS",
+      "state": "PRESENT",
+      "path": "read_entry_metadata and apply_entry_metadata",
+      "semantics": "filesystem work is delegated to blocking tasks; the synchronous operation itself has no cancellation token"
+    },
+    {
+      "surface_id": "XATTR-CLI-DEFAULT",
+      "state": "PRESENT",
+      "path": "selected_cli_metadata_policy",
+      "semantics": "the CLI enables symlink preservation but leaves extended attributes disabled"
+    }
+  ],
+  "semantic_matrix": [
+    {
+      "semantic_id": "XATTR-SEM-FOLLOW-MAPPING",
+      "state": "PRESENT",
+      "observed": "xattr plain path APIs operate on the link itself; *_deref APIs follow the target",
+      "contract_boundary": "plain and dereference names must never be inferred from generic filesystem naming conventions",
+      "route": "retain incumbent mapping and add explicit fixtures"
+    },
+    {
+      "semantic_id": "XATTR-SEM-DEREF-REACHABILITY",
+      "state": "PARTIAL",
+      "observed": "production calls the helper only with false and returns before capture for symlink entries",
+      "contract_boundary": "the two *_deref branches are present but currently unreachable; symlink xattrs are not preserved",
+      "route": "incumbent integration documentation and policy decision"
+    },
+    {
+      "semantic_id": "XATTR-SEM-NAME-BYTES",
+      "state": "PARTIAL",
+      "observed": "the incumbent iterator yields OsString names, but ATP converts with to_str and drops non-UTF8 names",
+      "contract_boundary": "ATP preserves only UTF-8 attribute names",
+      "route": "ATP metadata schema owner"
+    },
+    {
+      "semantic_id": "XATTR-SEM-VALUE-BYTES",
+      "state": "PRESENT",
+      "observed": "successful values are retained as Vec<u8> and the current fixture includes NUL and newline bytes",
+      "contract_boundary": "byte exactness is proven only for the one successful regular-file fixture",
+      "route": "expand incumbent baselines"
+    },
+    {
+      "semantic_id": "XATTR-SEM-MISSING",
+      "state": "PRESENT",
+      "observed": "the incumbent maps ENODATA or ENOATTR to Ok(None)",
+      "contract_boundary": "ATP capture treats missing and every per-name read failure as omission",
+      "route": "typed capture-report hardening"
+    },
+    {
+      "semantic_id": "XATTR-SEM-LIST-ERROR",
+      "state": "PARTIAL",
+      "observed": "any list error returns an empty BTreeMap",
+      "contract_boundary": "absence, permission denial, unsupported filesystem, and I/O failure are not distinguishable to the sender",
+      "route": "typed capture-report hardening"
+    },
+    {
+      "semantic_id": "XATTR-SEM-GET-ERROR",
+      "state": "PARTIAL",
+      "observed": "non-UTF8 names and every result other than Ok(Some(value)) are skipped",
+      "contract_boundary": "partial capture is silent and has no per-name report",
+      "route": "typed capture-report hardening"
+    },
+    {
+      "semantic_id": "XATTR-SEM-APPLY-ERROR",
+      "state": "PARTIAL",
+      "observed": "set failures append name and display text to MetadataApplyReport while the loop continues",
+      "contract_boundary": "application may be partial; error classes are strings and successful prior writes are not rolled back",
+      "route": "metadata apply contract owner"
+    },
+    {
+      "semantic_id": "XATTR-SEM-ORDER",
+      "state": "PRESENT",
+      "observed": "BTreeMap canonicalizes retained UTF-8 names for serialization, hashing, and application",
+      "contract_boundary": "upstream enumeration order is not exposed and duplicate names would overwrite earlier values",
+      "route": "retain deterministic map contract"
+    },
+    {
+      "semantic_id": "XATTR-SEM-SIZE-RACE",
+      "state": "PARTIAL",
+      "observed": "the incumbent starts with 4096 bytes, size-queries after ERANGE, and retries if the value or list grows",
+      "contract_boundary": "the retry loop has no attempt or allocation ceiling and concurrent mutation can repeat ERANGE",
+      "route": "incumbent resource-envelope baseline"
+    },
+    {
+      "semantic_id": "XATTR-SEM-LIMITS",
+      "state": "BLOCKED_MISSING_EVIDENCE",
+      "observed": "ATP declares no name, value, list, count, aggregate-byte, or retry limit",
+      "contract_boundary": "filesystem limits are platform and filesystem dependent and are not an ATP resource contract",
+      "route": "resource-policy owner"
+    },
+    {
+      "semantic_id": "XATTR-SEM-CANCELLATION",
+      "state": "PARTIAL",
+      "observed": "capture and apply run as synchronous blocking work and apply mutates attributes one at a time",
+      "contract_boundary": "cancellation does not provide transactional rollback or interrupt an in-flight syscall",
+      "route": "blocking-task and metadata lifecycle owner"
+    },
+    {
+      "semantic_id": "XATTR-SEM-SPECIAL-FILES",
+      "state": "PRESENT",
+      "observed": "metadata application skips xattrs for FIFO, socket, block-device, and character-device entries",
+      "contract_boundary": "capture and transfer behavior for every special-file/filesystem combination is not baselined",
+      "route": "ATP metadata baseline"
+    },
+    {
+      "semantic_id": "XATTR-SEM-DEFAULT-OFF",
+      "state": "PRESENT",
+      "observed": "Default, portable, and the selected CLI policy leave xattr preservation disabled",
+      "contract_boundary": "xattr parity is an explicit library opt-in and is not the ordinary CLI journey",
+      "route": "operator documentation"
+    }
+  ],
+  "error_matrix": [
+    {
+      "error_id": "XATTR-ERR-MISSING-ATTRIBUTE",
+      "upstream": "Ok(None) for ENODATA on Linux-like targets or ENOATTR on macOS/BSD",
+      "atp_capture": "omitted without a report",
+      "atp_apply": "not applicable when the key is absent"
+    },
+    {
+      "error_id": "XATTR-ERR-MISSING-PATH",
+      "upstream": "io::Error from the platform call",
+      "atp_capture": "list failure becomes an empty map",
+      "atp_apply": "per-name skipped display error"
+    },
+    {
+      "error_id": "XATTR-ERR-PERMISSION",
+      "upstream": "platform permission io::Error; BSD list suppresses EPERM only for the system namespace",
+      "atp_capture": "empty map or omitted name without classification",
+      "atp_apply": "per-name skipped display error"
+    },
+    {
+      "error_id": "XATTR-ERR-UNSUPPORTED-PLATFORM",
+      "upstream": "io::ErrorKind::Unsupported from the default unsupported stub",
+      "atp_capture": "Unix-only helper can collapse it to an empty map",
+      "atp_apply": "non-Unix platform implementation reports the field unsupported"
+    },
+    {
+      "error_id": "XATTR-ERR-UNSUPPORTED-FILESYSTEM",
+      "upstream": "platform io::Error",
+      "atp_capture": "not distinguished from no attributes",
+      "atp_apply": "per-name skipped display error"
+    },
+    {
+      "error_id": "XATTR-ERR-INVALID-NAME",
+      "upstream": "conversion or platform io::Error; BSD also requires user. or system. namespace",
+      "atp_capture": "non-UTF8 names are dropped before get",
+      "atp_apply": "String keys exclude non-UTF8 names; other invalid names become skipped errors"
+    },
+    {
+      "error_id": "XATTR-ERR-SIZE-RACE",
+      "upstream": "ERANGE triggers a size query and unbounded retry",
+      "atp_capture": "eventual non-ERANGE failure is collapsed; repeated ERANGE has no ATP bound",
+      "atp_apply": "set is one call per value and exposes a display error on failure"
+    }
+  ],
+  "platform_matrix": [
+    {
+      "platform_id": "XATTR-PLAT-LINUX-ANDROID-HURD",
+      "state": "SOURCE_BASELINED",
+      "backend": "rustix fs xattr calls",
+      "follow_nofollow": "get/list/set/remove versus lget/llist/lset/lremove",
+      "abi_notes": "path, name, value pointer, length, and flags for set; ENODATA means missing",
+      "runtime_evidence": "one Linux regular-file TCP fixture only"
+    },
+    {
+      "platform_id": "XATTR-PLAT-MACOS",
+      "state": "SOURCE_ONLY",
+      "backend": "rustix libc backend",
+      "follow_nofollow": "shared functions use position 0 and options 0 for follow or XATTR_NOFOLLOW for no-follow",
+      "abi_notes": "get and set carry position plus options; list and remove carry options; ENOATTR means missing",
+      "runtime_evidence": "no retained macOS ATP receipt"
+    },
+    {
+      "platform_id": "XATTR-PLAT-FREEBSD-NETBSD",
+      "state": "SOURCE_ONLY",
+      "backend": "libc extattr file, link, and fd calls",
+      "follow_nofollow": "file calls follow and link calls do not follow",
+      "abi_notes": "user. and system. namespaces are split and re-prefixed; system-list EPERM becomes an empty system namespace",
+      "runtime_evidence": "no retained BSD ATP receipt"
+    },
+    {
+      "platform_id": "XATTR-PLAT-OTHER-UNIX",
+      "state": "EXPLICIT_UNSUPPORTED",
+      "backend": "xattr default unsupported stub",
+      "follow_nofollow": "all path and fd operations return Unsupported",
+      "abi_notes": "the dependency is active because Asupersync uses cfg(unix), even where the crate has no native backend",
+      "runtime_evidence": "none"
+    },
+    {
+      "platform_id": "XATTR-PLAT-WINDOWS",
+      "state": "OUTSIDE_DEPENDENCY_EDGE",
+      "backend": "Asupersync Windows metadata implementation",
+      "follow_nofollow": "xattr crate edge is absent",
+      "abi_notes": "Unix xattrs are reported unsupported rather than emulated with Windows attributes",
+      "runtime_evidence": "ledger target-filter evidence only"
+    },
+    {
+      "platform_id": "XATTR-PLAT-WASM",
+      "state": "OUTSIDE_DEPENDENCY_EDGE",
+      "backend": "no xattr dependency edge",
+      "follow_nofollow": "not applicable",
+      "abi_notes": "cfg(unix) is inactive",
+      "runtime_evidence": "ledger target-filter evidence only"
+    }
+  ],
+  "journey_inventory": [
+    {
+      "journey_id": "XATTR-JOURNEY-LIBRARY-OPT-IN",
+      "state": "PRESENT",
+      "path": "MetadataPolicy::full_preservation",
+      "evidence": "the public preset opts into capture and apply"
+    },
+    {
+      "journey_id": "XATTR-JOURNEY-REGULAR-FILE-TCP",
+      "state": "PARTIAL",
+      "path": "xattr_roundtrip_preserves_value_when_supported",
+      "evidence": "one Linux-host-compatible regular-file value is byte-exact when setup succeeds; setup failure returns without an unsupported receipt"
+    },
+    {
+      "journey_id": "XATTR-JOURNEY-DIRECTORY",
+      "state": "BLOCKED_MISSING_EVIDENCE",
+      "path": "ATP directory metadata",
+      "evidence": "source supports directory capture/apply but no retained directory xattr fixture was found"
+    },
+    {
+      "journey_id": "XATTR-JOURNEY-SYMLINK",
+      "state": "KNOWN_OMISSION",
+      "path": "ATP symlink metadata",
+      "evidence": "symlink handling returns before xattr capture, so link and target xattrs are absent"
+    },
+    {
+      "journey_id": "XATTR-JOURNEY-ERRORS-LIMITS",
+      "state": "BLOCKED_MISSING_EVIDENCE",
+      "path": "permission, unsupported filesystem, empty, large, many, and concurrent mutation",
+      "evidence": "the baseline catalog assigns these classes to one fixture that does not exercise them"
+    },
+    {
+      "journey_id": "XATTR-JOURNEY-CANCEL-RECOVER",
+      "state": "BLOCKED_MISSING_EVIDENCE",
+      "path": "cancellation, partial apply, restart, and cleanup",
+      "evidence": "no retained receipt establishes rollback or recovery semantics"
+    },
+    {
+      "journey_id": "XATTR-JOURNEY-OTHER-TRANSPORTS-CLI",
+      "state": "BLOCKED_MISSING_EVIDENCE",
+      "path": "other ATP transports and CLI",
+      "evidence": "the only direct xattr roundtrip fixture is TCP and the selected CLI policy disables xattrs"
+    },
+    {
+      "journey_id": "XATTR-JOURNEY-CANONICAL-RUNNER",
+      "state": "PLANNED",
+      "path": "dependency-sovereignty suite",
+      "evidence": "xattr_follow_nofollow, xattr_atp_transfer, and xattr_permission_size_race are registry entries but not runner scenarios"
+    }
+  ],
+  "marginal_graph": {
+    "ledger": "artifacts/dependency_marginal_ledger_v1.json",
+    "direct_root_edge": "target-normal:cfg(unix):xattr",
+    "dependency_version": "xattr@1.6.1",
+    "measurement_cells": 26,
+    "feature_profiles": [
+      "cli",
+      "compression",
+      "default",
+      "fuzz-quarantine",
+      "io-uring",
+      "kafka",
+      "loom-tests",
+      "metrics",
+      "minimal",
+      "sqlite",
+      "tls",
+      "trace-compression",
+      "workspace-dev-build-audit"
+    ],
+    "active_targets": {
+      "aarch64-apple-darwin": 13,
+      "x86_64-unknown-linux-gnu": 13
+    },
+    "inactive_targets": {
+      "wasm32-unknown-unknown": 13,
+      "x86_64-pc-windows-msvc": 13
+    },
+    "measurement_hosts": ["x86_64-unknown-linux-gnu"],
+    "marginal_package_version_count_per_active_cell": 1,
+    "marginal_package_versions_per_active_cell": ["xattr@1.6.1"],
+    "rustix_present_in_active_baselines": 26,
+    "rustix_removed_by_xattr_counterfactual": 0,
+    "rustix_retained_after_xattr_counterfactual": 26,
+    "last_rustix_parent": false,
+    "independent_rustix_parents_observed_in_lock": ["polling@3.11.0", "tempfile@3.27.0"],
+    "marginal_build_scripts": [],
+    "marginal_proc_macros": [],
+    "marginal_native_status": "none",
+    "root_native_status": "unknown",
+    "unsafe_exposure_class": "BOUNDARY-UNSAFE",
+    "taxonomy_candidate": "extended-attributes",
+    "taxonomy_verdict": "OWN_DEFERRED",
+    "measured_graph_benefit": "MINIMAL",
+    "interpretation": "The ledger's baseline-minus-counterfactual package set is exactly xattr in every active cell. Because rustix is present in those baselines but absent from every marginal set, rustix remains after removing xattr in all measured profile, target, and host cells."
+  },
+  "unsafe_cost": {
+    "incumbent_boundary": "xattr owns path/fd conversion, buffer initialization, Linux-like rustix calls, BSD libc calls, namespace conversion, and unsupported stubs; rustix owns the macOS position/options adaptation.",
+    "replacement_delta": "HIGH",
+    "required_owned_platforms": ["linux", "android", "hurd", "macos", "freebsd", "netbsd", "other-unix-unsupported"],
+    "required_review_surfaces": [
+      "FFI signatures and return conventions",
+      "follow versus no-follow mapping",
+      "buffer initialization and size races",
+      "namespace and permission behavior",
+      "unsupported target behavior",
+      "partial apply and cancellation semantics"
+    ],
+    "conclusion": "A first-party replacement would widen Asupersync's reviewed unsafe and platform-maintenance surface while removing only the safe wrapper package and leaving rustix in every measured active cell."
+  },
+  "gaps": [
+    {
+      "gap_id": "XATTR-A1-GAP-01",
+      "severity": "HIGH",
+      "state": "ROUTED",
+      "finding": "the production dereference branches are unreachable and symlink entries return before xattr capture",
+      "owner": "ATP metadata policy owner",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "XATTR-A1-GAP-02",
+      "severity": "HIGH",
+      "state": "ROUTED",
+      "finding": "list failures collapse absence, permission, unsupported filesystem, and I/O failure into an empty map",
+      "owner": "ATP metadata capture-report owner",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "XATTR-A1-GAP-03",
+      "severity": "HIGH",
+      "state": "ROUTED",
+      "finding": "per-name read failures and non-UTF8 names are silently omitted",
+      "owner": "ATP metadata schema and capture owner",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "XATTR-A1-GAP-04",
+      "severity": "HIGH",
+      "state": "ROUTED",
+      "finding": "no attempt, allocation, name, value, list, count, or aggregate-byte bound is defined",
+      "owner": "ATP metadata resource-policy owner",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "XATTR-A1-GAP-05",
+      "severity": "HIGH",
+      "state": "ROUTED",
+      "finding": "metadata application is partial best effort with display-string errors and no transactional rollback",
+      "owner": "ATP metadata apply-contract owner",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "XATTR-A1-GAP-06",
+      "severity": "HIGH",
+      "state": "ROUTED",
+      "finding": "the current roundtrip test returns successfully when xattr setup fails and emits no typed unsupported receipt",
+      "owner": "CAP-XATTR test owner",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "XATTR-A1-GAP-07",
+      "severity": "HIGH",
+      "state": "ROUTED",
+      "finding": "the only direct roundtrip covers one regular file over TCP, not directory, symlink, error, race, lifecycle, CLI, or other transport cells",
+      "owner": "CAP-XATTR E2E owner",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "XATTR-A1-GAP-08",
+      "severity": "HIGH",
+      "state": "ROUTED",
+      "finding": "the three registry scenario IDs are absent from the canonical dependency-sovereignty runner",
+      "owner": "dependency-sovereignty runner owner",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "XATTR-A1-GAP-09",
+      "severity": "MEDIUM",
+      "state": "ROUTED",
+      "finding": "the baseline catalog assigns positive, empty, error, resource, cancellation, and recovery obligations to one fixture that does not cover them",
+      "owner": "dependency capability baseline owner",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "XATTR-A1-GAP-10",
+      "severity": "MEDIUM",
+      "state": "ROUTED",
+      "finding": "the capability registry source owners omit policy, CLI, test, and evidence-runner consumers",
+      "owner": "dependency capability registry owner",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "XATTR-A1-GAP-11",
+      "severity": "MEDIUM",
+      "state": "ROUTED",
+      "finding": "the API surface map contains no CAP-XATTR mapping",
+      "owner": "API surface map owner",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "XATTR-A1-GAP-12",
+      "severity": "HIGH",
+      "state": "ROUTED",
+      "finding": "macOS, FreeBSD, NetBSD, and other-Unix runtime behavior has no retained ATP receipt",
+      "owner": "cross-platform CAP-XATTR proof owner",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "XATTR-A1-GAP-13",
+      "severity": "MEDIUM",
+      "state": "ROUTED",
+      "finding": "the ordinary CLI policy disables xattrs without an operator-facing parity statement",
+      "owner": "ATP CLI documentation owner",
+      "replacement_required": false
+    }
+  ],
+  "decision": {
+    "outcome": "DEFER",
+    "terminal_for_bead": true,
+    "dependency_retained": "xattr",
+    "implementation_authority": "NONE",
+    "implementation_children_authorized": false,
+    "children_unblocked": [],
+    "required_next_action": "Route the thirteen gaps as incumbent integration, evidence, or documentation work. Close replacement children as not applicable under this gate; do not begin first-party design or implementation unless a reconsideration trigger produces a new owner-reviewed gate.",
+    "rollback": "No runtime source, manifest, lockfile, dependency, or registry artifact changed; retain xattr and this inventory as the claim-time baseline."
+  },
+  "reconsideration_triggers": [
+    {
+      "trigger_id": "XATTR-RECONSIDER-01",
+      "condition": "a reproducible supported-platform production defect is attributable to xattr and cannot be fixed upstream or while retaining it",
+      "required_evidence": "minimal reproduction, upstream disposition, affected-platform receipt, and owner review"
+    },
+    {
+      "trigger_id": "XATTR-RECONSIDER-02",
+      "condition": "an applicable advisory or maintenance-abandonment record materially changes incumbent risk",
+      "required_evidence": "advisory or maintenance record, affected graph, mitigation analysis, and owner review"
+    },
+    {
+      "trigger_id": "XATTR-RECONSIDER-03",
+      "condition": "a fresh canonical ledger records a graph or native-code budget violation, or xattr becomes the actual last rustix parent",
+      "required_evidence": "all-profile target-filtered ledger diff, native provenance, and owner-approved budget"
+    },
+    {
+      "trigger_id": "XATTR-RECONSIDER-04",
+      "condition": "Linux, macOS, FreeBSD, NetBSD, and explicit-unsupported baselines cover every call, error, limit, race, lifecycle, and ATP journey and an owner accepts the exact replacement contract",
+      "required_evidence": "retained platform receipts, deterministic runner scenarios, typed outcomes, resource envelopes, and owner review"
+    },
+    {
+      "trigger_id": "XATTR-RECONSIDER-05",
+      "condition": "an independent unsafe review proves a narrower first-party design whose ABI and maintenance burden is no greater than the incumbent boundary",
+      "required_evidence": "design, exact signatures, unsafe-ledger delta, resource proof, rollback plan, and owner signoff"
+    }
+  ],
+  "no_claim_boundaries": [
+    "This source inventory does not prove macOS, FreeBSD, NetBSD, other-Unix, Windows, or wasm runtime behavior.",
+    "A target-filtered cargo metadata cell is dependency-graph evidence, not a runtime platform receipt.",
+    "The existing regular-file TCP fixture does not prove directory, symlink, permission, unsupported-filesystem, size-race, lifecycle, CLI, or other-transport behavior.",
+    "A test that returns when setup fails is not a typed unsupported-platform success claim.",
+    "Best-effort capture and apply do not prove complete metadata preservation or transactional rollback.",
+    "The marginal ledger does not prove runtime correctness, release readiness, or performance.",
+    "The ledger's root_native status remains unknown; marginal_native none does not certify the whole graph as native-code-free.",
+    "DEFER does not bless current integration gaps; it routes them without authorizing dependency replacement.",
+    "No local Cargo fallback or broad workspace-health claim is authorized by this focused inventory.",
+    "No file deletion, dependency removal, replacement child, or cutover is authorized."
+  ]
+}

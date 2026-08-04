@@ -6,7 +6,185 @@
     "metadata_only": true,
     "executes_examples": false
   },
+  "rustdoc_coverage": {
+    "missing_doc_code_examples": {
+      "lint": "missing_doc_code_examples",
+      "availability": "unavailable-on-pinned-toolchain",
+      "policy": "report-only",
+      "checked_command": "rustc -W help",
+      "observed_related_lints": [
+        "missing-docs"
+      ],
+      "replacement_gates": [
+        "cargo test -p asupersync --doc",
+        "cargo doc -p asupersync --no-deps"
+      ]
+    },
+    "core_api": [
+      {
+        "symbol": "asupersync::Cx",
+        "source": "src/cx/mod.rs",
+        "marker": "core-api-doctest: cx-scope",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::Scope",
+        "source": "src/cx/mod.rs",
+        "marker": "core-api-doctest: cx-scope",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::Outcome::map",
+        "source": "src/types/mod.rs",
+        "marker": "core-api-doctest: outcome-budget",
+        "failure_handling": true
+      },
+      {
+        "symbol": "asupersync::Budget::meet",
+        "source": "src/types/mod.rs",
+        "marker": "core-api-doctest: outcome-budget",
+        "failure_handling": true
+      },
+      {
+        "symbol": "asupersync::runtime::RuntimeBuilder",
+        "source": "src/runtime/mod.rs",
+        "marker": "core-api-doctest: runtime-builder-task-handle",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::runtime::Runtime",
+        "source": "src/runtime/mod.rs",
+        "marker": "core-api-doctest: runtime-builder-task-handle",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::runtime::TaskHandle",
+        "source": "src/runtime/mod.rs",
+        "marker": "core-api-doctest: runtime-builder-task-handle",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::LabRuntime",
+        "source": "src/lab/mod.rs",
+        "marker": "core-api-doctest: lab-runtime-config",
+        "failure_handling": true
+      },
+      {
+        "symbol": "asupersync::LabConfig",
+        "source": "src/lab/mod.rs",
+        "marker": "core-api-doctest: lab-runtime-config",
+        "failure_handling": true
+      },
+      {
+        "symbol": "asupersync::combinator::JoinSet",
+        "source": "src/combinator/mod.rs",
+        "marker": "core-api-doctest: join-set-race-join",
+        "failure_handling": true
+      },
+      {
+        "symbol": "asupersync::channel::mpsc",
+        "source": "src/channel/mod.rs",
+        "marker": "core-api-doctest: channel-families",
+        "failure_handling": true
+      },
+      {
+        "symbol": "asupersync::channel::oneshot",
+        "source": "src/channel/mod.rs",
+        "marker": "core-api-doctest: channel-families",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::channel::broadcast",
+        "source": "src/channel/mod.rs",
+        "marker": "core-api-doctest: channel-families",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::channel::watch",
+        "source": "src/channel/mod.rs",
+        "marker": "core-api-doctest: channel-families",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::sync::Mutex",
+        "source": "src/sync/mod.rs",
+        "marker": "core-api-doctest: sync-primitives",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::sync::RwLock",
+        "source": "src/sync/mod.rs",
+        "marker": "core-api-doctest: sync-primitives",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::sync::Semaphore",
+        "source": "src/sync/mod.rs",
+        "marker": "core-api-doctest: sync-primitives",
+        "failure_handling": true
+      },
+      {
+        "symbol": "asupersync::time::sleep",
+        "source": "src/time/mod.rs",
+        "marker": "core-api-doctest: time-primitives",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::time::timeout",
+        "source": "src/time/mod.rs",
+        "marker": "core-api-doctest: time-primitives",
+        "failure_handling": true
+      },
+      {
+        "symbol": "asupersync::time::interval",
+        "source": "src/time/mod.rs",
+        "marker": "core-api-doctest: time-primitives",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::stream::StreamExt",
+        "source": "src/stream/mod.rs",
+        "marker": "core-api-doctest: stream-ext",
+        "failure_handling": false
+      },
+      {
+        "symbol": "asupersync::combinator::join2_outcomes",
+        "source": "src/combinator/mod.rs",
+        "marker": "core-api-doctest: join-set-race-join",
+        "failure_handling": true
+      },
+      {
+        "symbol": "asupersync::combinator::race2_outcomes",
+        "source": "src/combinator/mod.rs",
+        "marker": "core-api-doctest: join-set-race-join",
+        "failure_handling": true
+      },
+      {
+        "symbol": "asupersync::supervision::SupervisionStrategy",
+        "source": "src/supervision.rs",
+        "marker": "core-api-doctest: supervision-basics",
+        "failure_handling": true
+      }
+    ]
+  },
   "examples": [
+    {
+      "name": "examples_index",
+      "file": "examples/README.md",
+      "loc": {
+        "start": 1,
+        "end": 96
+      },
+      "kind": "markdown",
+      "demonstrates": [
+        "example-catalog",
+        "graduated-onramp",
+        "run-command-discovery"
+      ],
+      "feature_flags": [],
+      "run_command": "manual: read examples/README.md",
+      "description": "Human-readable index of every runnable example, operator artifact, and deterministic scenario fixture."
+    },
     {
       "name": "appspec_reference_journey",
       "file": "examples/appspec_reference_journey.rs",
@@ -133,7 +311,7 @@
       "file": "examples/demo_benchmark.rs",
       "loc": {
         "start": 1,
-        "end": 663
+        "end": 679
       },
       "kind": "rust",
       "demonstrates": [
@@ -152,7 +330,7 @@
       "file": "examples/demo_delta_debug.rs",
       "loc": {
         "start": 1,
-        "end": 366
+        "end": 374
       },
       "kind": "rust",
       "demonstrates": [
@@ -171,7 +349,7 @@
       "file": "examples/demo_record_nondeterministic.rs",
       "loc": {
         "start": 1,
-        "end": 433
+        "end": 449
       },
       "kind": "rust",
       "demonstrates": [
@@ -182,6 +360,23 @@
       "feature_flags": [],
       "run_command": "cargo run --example demo_record_nondeterministic",
       "description": "Seed sweep that records a cancel and obligation race for deterministic replay."
+    },
+    {
+      "name": "deterministic_test",
+      "file": "examples/deterministic_test.rs",
+      "loc": {
+        "start": 1,
+        "end": 35
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "same-seed-replay",
+        "lab-runtime",
+        "structured-fanout"
+      ],
+      "feature_flags": [],
+      "run_command": "cargo run --example deterministic_test",
+      "description": "Short same-seed replay example that checks quiescence, leak freedom, and deterministic fan-out."
     },
     {
       "name": "external_consumer",
@@ -301,6 +496,74 @@
       "feature_flags": [],
       "run_command": "cargo run --example macros_race",
       "description": "Race macro example focused on winner selection and loser cleanup."
+    },
+    {
+      "name": "onramp_level0",
+      "file": "examples/onramp_level0.rs",
+      "loc": {
+        "start": 1,
+        "end": 8
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "entry-attribute",
+        "production-runtime-entry"
+      ],
+      "feature_flags": [],
+      "run_command": "cargo run --example onramp_level0",
+      "description": "Level-zero entry point using the production runtime attribute without introducing runtime concepts."
+    },
+    {
+      "name": "onramp_level1",
+      "file": "examples/onramp_level1.rs",
+      "loc": {
+        "start": 1,
+        "end": 16
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "prelude",
+        "capability-context",
+        "outcome",
+        "budget-meet"
+      ],
+      "feature_flags": [],
+      "run_command": "cargo run --example onramp_level1",
+      "description": "Level-one program making capability context, four-valued outcomes, and composable budgets explicit."
+    },
+    {
+      "name": "onramp_level2",
+      "file": "examples/onramp_level2.rs",
+      "loc": {
+        "start": 1,
+        "end": 23
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "scope-budget",
+        "join-set",
+        "region-owned-fanout"
+      ],
+      "feature_flags": [],
+      "run_command": "cargo run --example onramp_level2",
+      "description": "Level-two program spawning and collecting dynamic fan-out through a scoped region-owned JoinSet."
+    },
+    {
+      "name": "onramp_level3",
+      "file": "examples/onramp_level3.rs",
+      "loc": {
+        "start": 1,
+        "end": 42
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "two-phase-send",
+        "lab-runtime",
+        "obligation-leak-oracle"
+      ],
+      "feature_flags": [],
+      "run_command": "cargo run --example onramp_level3",
+      "description": "Level-three program committing a two-phase send and asserting that the lab catches a deliberate obligation leak."
     },
     {
       "name": "production_service",
@@ -549,7 +812,7 @@
       "file": "examples/spork_minimal_supervised_app.rs",
       "loc": {
         "start": 1,
-        "end": 244
+        "end": 247
       },
       "kind": "rust",
       "demonstrates": [

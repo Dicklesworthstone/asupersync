@@ -1,31 +1,31 @@
 #![allow(warnings)]
 #![allow(clippy::all)]
-//! Metamorphic tests for cancel::progress_certificate proof invariants.
+//! Metamorphic tests for `cancel::progress_certificate` diagnostics.
 //!
-//! These tests validate the statistical and mathematical properties of progress
-//! certificates using metamorphic relations under deterministic LabRuntime.
-//! The tests focus on proof invariants rather than specific output values.
+//! These tests validate deterministic accounting and cross-input relations for
+//! progress verdicts under `LabRuntime`. Conditional concentration candidates
+//! retain the assumptions and no-claim boundary documented by the module.
 //!
 //! ## Key Properties Tested (5 Metamorphic Relations)
 //!
-//! 1. **Certificate issued only after drain completes**: converging certificates
-//!    correspond to DrainPhase::Quiescent or strong convergence evidence
-//! 2. **Certificate encoding is canonical**: identical observations produce
-//!    identical verdicts (deterministic reproduction)
-//! 3. **Tampered certificate rejected by verifier**: modified observation data
-//!    detectably changes verdict properties
-//! 4. **Double-signed certificate idempotent**: multiple verdict() calls return
+//! 1. **Converging verdict requires observed progress**: a converging verdict
+//!    has positive net potential reduction
+//! 2. **Verdict reproduction is deterministic**: identical observations
+//!    produce identical verdicts
+//! 3. **Input perturbation is visible**: modified observations detectably
+//!    change verdict properties
+//! 4. **Verdict queries are idempotent**: multiple `verdict()` calls return
 //!    identical results without state mutation
-//! 5. **Revoked certificate honored via generation bump**: reset() invalidates
-//!    previous certificates and new observations generate fresh certificates
+//! 5. **Reset isolates runs**: `reset()` clears prior observations before a new
+//!    trace is recorded
 //!
 //! ## Metamorphic Relations
 //!
 //! - **Deterministic verdict**: same observations → same verdict
-//! - **Tamper detection**: modified observations → different verdict
-//! - **Idempotent verification**: verdict() × N = verdict() × 1
+//! - **Input sensitivity**: modified observations → different verdict
+//! - **Idempotent query**: `verdict()` × N = `verdict()` × 1
 //! - **Convergence consistency**: DrainPhase correlates with convergence status
-//! - **Reset isolation**: post-reset certificates independent of pre-reset state
+//! - **Reset isolation**: post-reset observations are independent of prior state
 
 use proptest::prelude::*;
 use std::collections::VecDeque;
@@ -77,7 +77,8 @@ fn arb_converging_sequence() -> impl Strategy<Value = Vec<f64>> {
                     // Ensure the last few values are very small or zero
                     if values.len() > 2 {
                         values[values.len() - 1] = 0.0;
-                        values[values.len() - 2] = (0.0..5.0).sample(&mut proptest::test_runner::TestRunner::default());
+                        values[values.len() - 2] =
+                            (0.0..5.0).sample(&mut proptest::test_runner::TestRunner::default());
                     }
 
                     values
@@ -142,16 +143,16 @@ fn certificate_from_sequence(observations: &[f64], config: ProgressConfig) -> Pr
 }
 
 // =============================================================================
-// Metamorphic Relation 1: Certificate issued only after drain completes
+// Metamorphic Relation 1: Converging verdict requires observed progress
 // =============================================================================
 
 proptest! {
     #[test]
-    fn mr1_certificate_issued_only_after_drain_completes(
+    fn mr1_converging_verdict_requires_observed_progress(
         converging_seq in arb_converging_sequence(),
         stalled_seq in arb_stalled_sequence(),
     ) {
-        // MR1: Converging certificates should correspond to actual convergence evidence
+        // MR1: A converging verdict should correspond to observed net reduction.
 
         // Test 1: Converging sequence should eventually show convergence
         let mut converging_cert = ProgressCertificate::with_defaults();
@@ -161,17 +162,18 @@ proptest! {
 
         let converging_verdict = converging_cert.verdict();
 
-        // If the certificate claims convergence, validate the evidence
+        // If the verdict reports convergence, validate the observed reduction.
         if converging_verdict.converging {
-            // Should have made significant progress from initial to final potential
+            // The empirical policy requires positive endpoint net progress.
             let progress_made = converging_verdict.initial_potential - converging_verdict.current_potential;
             prop_assert!(progress_made > 0.0,
                 "Converging certificate should show actual progress: initial={}, current={}, progress={}",
                 converging_verdict.initial_potential, converging_verdict.current_potential, progress_made);
 
-            // Should have positive mean credit (average progress per step)
+            // Gross downward credit is always non-negative; rebounds are
+            // accounted for separately by the signed net-progress rate.
             prop_assert!(converging_verdict.mean_credit >= 0.0,
-                "Converging certificate should have non-negative mean credit: {}",
+                "Converging certificate should have non-negative gross credit: {}",
                 converging_verdict.mean_credit);
         }
 
@@ -183,25 +185,23 @@ proptest! {
 
         let stalled_verdict = stalled_cert.verdict();
 
-        // Stalled sequences should either not converge or have stall detection
-        if !stalled_verdict.converging {
-            prop_assert!(true); // Expected behavior
-        } else {
-            // If it claims convergence despite stalling, the confidence should be very low
-            prop_assert!(stalled_verdict.confidence_bound < 0.8,
-                "Stalled sequence claiming convergence should have low confidence: {}",
-                stalled_verdict.confidence_bound);
+        // The generator has a noisy tail and may not meet the configured stall
+        // run length. Whenever the explicit stall rule does fire, the separate
+        // empirical status must fail closed; projected confidence is unrelated.
+        if stalled_verdict.stall_detected {
+            prop_assert!(!stalled_verdict.converging,
+                "An explicit stall cannot be classified as empirically converging");
         }
     }
 }
 
 // =============================================================================
-// Metamorphic Relation 2: Certificate encoding is canonical
+// Metamorphic Relation 2: Verdict reproduction is deterministic
 // =============================================================================
 
 proptest! {
     #[test]
-    fn mr2_certificate_encoding_is_canonical(
+    fn mr2_verdict_reproduction_is_deterministic(
         observations in arb_random_sequence(),
         config_confidence in 0.8f64..0.99,
         config_stall_threshold in 3usize..15,
@@ -231,20 +231,21 @@ proptest! {
         prop_assert_eq!(cert1.len(), cert2.len());
         prop_assert_eq!(cert1.is_empty(), cert2.is_empty());
 
-        // Martingale values should match
-        let mv1 = cert1.martingale_value();
-        let mv2 = cert2.martingale_value();
-        prop_assert!((mv1 - mv2).abs() < 1e-10, "Martingale values should match: {} vs {}", mv1, mv2);
+        // Gross-credit-accounted potential should match.
+        let accounted1 = cert1.martingale_value();
+        let accounted2 = cert2.martingale_value();
+        prop_assert!((accounted1 - accounted2).abs() < 1e-10,
+            "Gross-credit accounting should match: {} vs {}", accounted1, accounted2);
     }
 }
 
 // =============================================================================
-// Metamorphic Relation 3: Tampered certificate rejected by verifier
+// Metamorphic Relation 3: Input perturbation is visible
 // =============================================================================
 
 proptest! {
     #[test]
-    fn mr3_tampered_certificate_rejected_by_verifier(
+    fn mr3_input_perturbation_is_visible(
         observations in arb_random_sequence().prop_filter("Need at least 3 observations", |obs| obs.len() >= 3),
         tamper_index in any::<usize>(),
         tamper_delta in -50.0f64..50.0,
@@ -257,42 +258,43 @@ proptest! {
         let original_cert = certificate_from_sequence(&observations, ProgressConfig::default());
         let original_verdict = original_cert.verdict();
 
-        // Tampered certificate - modify one observation
-        let mut tampered_observations = observations.clone();
-        tampered_observations[tamper_idx] = (tampered_observations[tamper_idx] + tamper_delta).max(0.0);
+        // Perturbed input - modify one observation.
+        let mut perturbed_observations = observations.clone();
+        perturbed_observations[tamper_idx] =
+            (perturbed_observations[tamper_idx] + tamper_delta).max(0.0);
 
-        let tampered_cert = certificate_from_sequence(&tampered_observations, ProgressConfig::default());
-        let tampered_verdict = tampered_cert.verdict();
+        let perturbed_cert =
+            certificate_from_sequence(&perturbed_observations, ProgressConfig::default());
+        let perturbed_verdict = perturbed_cert.verdict();
 
-        // Skip test if the tamper was too small to matter (within epsilon)
-        if (observations[tamper_idx] - tampered_observations[tamper_idx]).abs() < 1e-10 {
+        // Skip if clamping or a tiny delta left the input effectively unchanged.
+        if (observations[tamper_idx] - perturbed_observations[tamper_idx]).abs() < 1e-10 {
             return Ok(());
         }
 
-        // The tampered certificate should produce a detectably different verdict
-        // At least one significant property should change
+        // At least one significant verdict property should change.
         let properties_changed =
-            original_verdict.converging != tampered_verdict.converging ||
-            original_verdict.stall_detected != tampered_verdict.stall_detected ||
-            original_verdict.drain_phase != tampered_verdict.drain_phase ||
-            (original_verdict.current_potential - tampered_verdict.current_potential).abs() > 1e-6 ||
-            (original_verdict.mean_credit - tampered_verdict.mean_credit).abs() > 1e-6 ||
-            (original_verdict.confidence_bound - tampered_verdict.confidence_bound).abs() > 1e-6;
+            original_verdict.converging != perturbed_verdict.converging ||
+            original_verdict.stall_detected != perturbed_verdict.stall_detected ||
+            original_verdict.drain_phase != perturbed_verdict.drain_phase ||
+            (original_verdict.current_potential - perturbed_verdict.current_potential).abs() > 1e-6 ||
+            (original_verdict.mean_credit - perturbed_verdict.mean_credit).abs() > 1e-6 ||
+            (original_verdict.confidence_bound - perturbed_verdict.confidence_bound).abs() > 1e-6;
 
         prop_assert!(properties_changed,
-            "Tampered certificate should produce detectably different verdict.\nOriginal: converging={}, phase={:?}, potential={:.6}, credit={:.6}\nTampered: converging={}, phase={:?}, potential={:.6}, credit={:.6}",
+            "Perturbed input should produce a detectably different verdict.\nOriginal: converging={}, phase={:?}, potential={:.6}, credit={:.6}\nPerturbed: converging={}, phase={:?}, potential={:.6}, credit={:.6}",
             original_verdict.converging, original_verdict.drain_phase, original_verdict.current_potential, original_verdict.mean_credit,
-            tampered_verdict.converging, tampered_verdict.drain_phase, tampered_verdict.current_potential, tampered_verdict.mean_credit);
+            perturbed_verdict.converging, perturbed_verdict.drain_phase, perturbed_verdict.current_potential, perturbed_verdict.mean_credit);
     }
 }
 
 // =============================================================================
-// Metamorphic Relation 4: Double-signed certificate idempotent
+// Metamorphic Relation 4: Repeated verdict queries are idempotent
 // =============================================================================
 
 proptest! {
     #[test]
-    fn mr4_double_signed_certificate_idempotent(
+    fn mr4_repeated_verdict_queries_are_idempotent(
         observations in arb_random_sequence(),
         num_calls in 2usize..10,
     ) {
@@ -318,8 +320,6 @@ proptest! {
         // Certificate should report the same properties before and after verdict calls
         let post_observation_count = cert.total_observations();
         let post_len = cert.len();
-        let post_martingale = cert.martingale_value();
-
         prop_assert_eq!(post_observation_count, observations.len());
         prop_assert_eq!(post_len, observations.len());
 
@@ -331,16 +331,16 @@ proptest! {
 }
 
 // =============================================================================
-// Metamorphic Relation 5: Revoked certificate honored via generation bump
+// Metamorphic Relation 5: Reset isolates observation histories
 // =============================================================================
 
 proptest! {
     #[test]
-    fn mr5_revoked_certificate_honored_via_generation_bump(
+    fn mr5_reset_isolates_observation_histories(
         pre_reset_obs in arb_random_sequence(),
         post_reset_obs in arb_random_sequence(),
     ) {
-        // MR5: reset() should invalidate previous certificates and new observations should generate fresh certificates
+        // MR5: reset() clears prior state before recording a new trace.
 
         let config = ProgressConfig::default();
         let mut cert = ProgressCertificate::new(config);
@@ -353,9 +353,7 @@ proptest! {
         let pre_reset_verdict = cert.verdict();
         let pre_reset_observations_count = cert.total_observations();
         let pre_reset_len = cert.len();
-        let pre_reset_martingale = cert.martingale_value();
-
-        // Reset the certificate (generation bump)
+        // Reset the certificate.
         cert.reset();
 
         // Certificate should be in fresh state after reset
@@ -436,10 +434,13 @@ fn integration_certificate_lifecycle_lab_runtime() {
             assert!(verdict.current_potential >= 0.0);
             assert!(verdict.initial_potential >= verdict.current_potential);
 
-            // As we progress, we should eventually see convergence
-            if step >= 8 {  // After sufficient observations
+            // As we progress, we should eventually see a favorable empirical
+            // trend. Conditional confidence is a separate diagnostic.
+            if step >= 8 {
+                // After sufficient observations
                 if verdict.converging {
-                    assert!(verdict.confidence_bound > 0.0);
+                    assert!(verdict.estimated_remaining_steps.is_some());
+                    assert!(!verdict.stall_detected);
                 }
             }
         }
@@ -447,7 +448,10 @@ fn integration_certificate_lifecycle_lab_runtime() {
         let final_verdict = cert.verdict();
 
         // Final verdict should show successful convergence
-        assert!(final_verdict.converging, "Final verdict should show convergence");
+        assert!(
+            final_verdict.converging,
+            "Final verdict should show convergence"
+        );
         assert_eq!(final_verdict.drain_phase, DrainPhase::Quiescent);
         assert_eq!(final_verdict.current_potential, 0.0);
         assert!(final_verdict.confidence_bound > 0.8);

@@ -63,17 +63,42 @@
 
 use crate::runtime::RuntimeState;
 use crate::runtime::state::{
-    IdSnapshot, ObligationStateSnapshot, RegionStateSnapshot, RuntimeSnapshot, TaskSnapshot,
+    EventSnapshot, FinalizerHistoryEvent, IdSnapshot, LoserDrainHistoryEvent, ObligationSnapshot,
+    ObligationStateSnapshot, RegionSnapshot, RegionStateSnapshot, RuntimeSnapshot, TaskSnapshot,
     TaskStateSnapshot,
 };
 use crate::types::Time;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
+
+/// Magic bytes for the owned runtime-snapshot artifact envelope.
+pub const SNAPSHOT_ARTIFACT_MAGIC: [u8; 8] = *b"ASUPSNAP";
+
+/// Current owned runtime-snapshot artifact envelope version.
+pub const SNAPSHOT_ARTIFACT_VERSION: u16 = 1;
+
+const SNAPSHOT_ARTIFACT_HEADER_LEN: usize = 52;
+const SNAPSHOT_ARTIFACT_KIND_FULL: u8 = 0;
+const SNAPSHOT_ARTIFACT_KIND_INCREMENTAL: u8 = 1;
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0100_0000_01b3;
 
 /// Errors that can occur during snapshot restoration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RestoreError {
+    /// The snapshot schema is outside the supported compatibility window.
+    UnsupportedSchemaVersion {
+        /// Version carried by the snapshot.
+        actual: u32,
+        /// Oldest readable schema version.
+        minimum: u32,
+        /// Newest readable schema version.
+        maximum: u32,
+    },
+    /// The stored content hash does not match the snapshot state.
+    ContentHashMismatch,
     /// A task references a non-existent region.
     OrphanTask {
         /// The orphan task's ID.
@@ -163,6 +188,20 @@ pub enum RestoreError {
 impl fmt::Display for RestoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UnsupportedSchemaVersion {
+                actual,
+                minimum,
+                maximum,
+            } => {
+                write!(
+                    f,
+                    "snapshot schema version {actual} is outside supported range \
+                     {minimum}..={maximum}"
+                )
+            }
+            Self::ContentHashMismatch => {
+                f.write_str("snapshot content hash does not match its state")
+            }
             Self::OrphanTask { task_id, region_id } => {
                 write!(
                     f,
@@ -284,6 +323,260 @@ pub struct SnapshotStats {
     pub closed_region_count: usize,
 }
 
+/// Admission limits for owned runtime-snapshot artifacts.
+///
+/// The byte limit is enforced before JSON decoding. Collection limits and
+/// region-tree depth are checked after decoding and again after applying an
+/// incremental snapshot to its base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotLimits {
+    /// Maximum complete envelope or legacy JSON size.
+    pub max_artifact_bytes: usize,
+    /// Maximum number of region records.
+    pub max_regions: usize,
+    /// Maximum number of task records.
+    pub max_tasks: usize,
+    /// Maximum number of obligation records.
+    pub max_obligations: usize,
+    /// Maximum number of recent trace events.
+    pub max_recent_events: usize,
+    /// Maximum number of finalizer history records.
+    pub max_finalizer_history: usize,
+    /// Maximum number of loser-drain history records.
+    pub max_loser_drain_history: usize,
+    /// Maximum admitted region-parent depth.
+    pub max_region_depth: usize,
+}
+
+impl SnapshotLimits {
+    /// Conservative default admission envelope for persisted runtime state.
+    pub const DEFAULT: Self = Self {
+        max_artifact_bytes: 64 * 1024 * 1024,
+        max_regions: 1_000_000,
+        max_tasks: 1_000_000,
+        max_obligations: 1_000_000,
+        max_recent_events: 10_000_000,
+        max_finalizer_history: 1_000_000,
+        max_loser_drain_history: 1_000_000,
+        max_region_depth: 4_096,
+    };
+}
+
+impl Default for SnapshotLimits {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Whether an owned artifact carries complete state or a delta from a base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotArtifactKind {
+    /// Complete restorable runtime state.
+    Full,
+    /// Entity-level changes relative to a named base content hash.
+    Incremental,
+}
+
+/// Entity-level delta between two complete runtime snapshots.
+///
+/// Primary state tables use sorted upsert and removal lists. Trace and oracle
+/// histories are ordered logs, so an incremental artifact carries their target
+/// value in full rather than attempting an order-sensitive splice.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IncrementalSnapshot {
+    /// Content hash of the required base snapshot.
+    pub base_content_hash: u64,
+    /// Schema version of the materialized target.
+    pub target_schema_version: u32,
+    /// Content hash of the materialized target.
+    pub target_content_hash: u64,
+    /// Target snapshot timestamp.
+    pub timestamp: u64,
+    /// Added or changed regions, sorted by identifier.
+    pub region_upserts: Vec<RegionSnapshot>,
+    /// Removed region identifiers, sorted by identifier.
+    pub removed_regions: Vec<IdSnapshot>,
+    /// Added or changed tasks, sorted by identifier.
+    pub task_upserts: Vec<TaskSnapshot>,
+    /// Removed task identifiers, sorted by identifier.
+    pub removed_tasks: Vec<IdSnapshot>,
+    /// Added or changed obligations, sorted by identifier.
+    pub obligation_upserts: Vec<ObligationSnapshot>,
+    /// Removed obligation identifiers, sorted by identifier.
+    pub removed_obligations: Vec<IdSnapshot>,
+    /// Complete target recent-event window.
+    pub recent_events: Vec<EventSnapshot>,
+    /// Complete target finalizer history.
+    pub finalizer_history: Vec<FinalizerHistoryEvent>,
+    /// Complete target loser-drain history.
+    pub loser_drain_history: Vec<LoserDrainHistoryEvent>,
+}
+
+/// Versioned owned runtime-snapshot artifact.
+#[derive(Debug, Clone)]
+pub enum SnapshotArtifact {
+    /// Complete runtime snapshot.
+    Full(RestorableSnapshot),
+    /// Incremental state relative to a required base snapshot.
+    Incremental(IncrementalSnapshot),
+}
+
+/// Failures while encoding, decoding, or materializing a snapshot artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SnapshotCodecError {
+    /// Input is shorter than the fixed envelope header.
+    TruncatedHeader {
+        /// Actual input length.
+        actual: usize,
+    },
+    /// Neither the owned envelope magic nor legacy JSON was detected.
+    InvalidMagic,
+    /// The owned envelope version is not supported.
+    UnsupportedArtifactVersion {
+        /// Version found in the input.
+        actual: u16,
+    },
+    /// The full/incremental kind tag is not defined.
+    InvalidArtifactKind {
+        /// Kind byte found in the input.
+        actual: u8,
+    },
+    /// Reserved envelope flags were non-zero.
+    UnsupportedFlags {
+        /// Flags byte found in the input.
+        actual: u8,
+    },
+    /// Declared or actual artifact bytes exceed the admission envelope.
+    ArtifactTooLarge {
+        /// Observed or declared size.
+        actual: usize,
+        /// Configured maximum.
+        maximum: usize,
+    },
+    /// Declared payload length did not exactly consume the input.
+    LengthMismatch {
+        /// Total length implied by the header.
+        declared_total: usize,
+        /// Actual input length.
+        actual: usize,
+    },
+    /// The payload checksum did not match.
+    ChecksumMismatch,
+    /// JSON payload decoding or encoding failed.
+    Json {
+        /// Owned backend diagnostic.
+        message: String,
+    },
+    /// A decoded collection or tree exceeds its configured bound.
+    LimitExceeded {
+        /// Bounded resource name.
+        resource: &'static str,
+        /// Observed count or depth.
+        actual: usize,
+        /// Configured maximum.
+        maximum: usize,
+    },
+    /// Structural validation or content integrity failed.
+    InvalidSnapshot {
+        /// Number of validation failures.
+        error_count: usize,
+    },
+    /// Incremental entity lists are internally inconsistent.
+    InvalidDelta {
+        /// Actionable structural diagnostic.
+        message: String,
+    },
+    /// An incremental artifact was materialized without a base.
+    MissingBase,
+    /// The supplied base snapshot does not match the delta's declared base.
+    BaseHashMismatch {
+        /// Hash required by the incremental artifact.
+        expected: u64,
+        /// Hash carried by the supplied base.
+        actual: u64,
+    },
+    /// Applying a delta did not reproduce its declared target hash.
+    TargetHashMismatch {
+        /// Hash declared by the incremental artifact.
+        expected: u64,
+        /// Hash computed after materialization.
+        actual: u64,
+    },
+}
+
+impl fmt::Display for SnapshotCodecError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[ASUP-E404] snapshot artifact ")?;
+        match self {
+            Self::TruncatedHeader { actual } => {
+                write!(
+                    f,
+                    "is truncated: {actual} bytes, need at least \
+                     {SNAPSHOT_ARTIFACT_HEADER_LEN}"
+                )
+            }
+            Self::InvalidMagic => f.write_str("has unknown magic"),
+            Self::UnsupportedArtifactVersion { actual } => {
+                write!(
+                    f,
+                    "version {actual} is unsupported; expected {SNAPSHOT_ARTIFACT_VERSION}"
+                )
+            }
+            Self::InvalidArtifactKind { actual } => {
+                write!(f, "kind byte {actual} is unsupported")
+            }
+            Self::UnsupportedFlags { actual } => {
+                write!(f, "flags byte {actual:#04x} is unsupported")
+            }
+            Self::ArtifactTooLarge { actual, maximum } => {
+                write!(f, "size {actual} exceeds limit {maximum}")
+            }
+            Self::LengthMismatch {
+                declared_total,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "length mismatch: header declares {declared_total} total bytes, got {actual}"
+                )
+            }
+            Self::ChecksumMismatch => f.write_str("payload checksum mismatch"),
+            Self::Json { message } => write!(f, "JSON payload failed: {message}"),
+            Self::LimitExceeded {
+                resource,
+                actual,
+                maximum,
+            } => {
+                write!(f, "{resource} count/depth {actual} exceeds limit {maximum}")
+            }
+            Self::InvalidSnapshot { error_count } => {
+                write!(
+                    f,
+                    "failed structural validation with {error_count} error(s)"
+                )
+            }
+            Self::InvalidDelta { message } => {
+                write!(f, "incremental payload is invalid: {message}")
+            }
+            Self::MissingBase => f.write_str("incremental payload requires a base snapshot"),
+            Self::BaseHashMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "base hash mismatch: expected {expected:#018x}, got {actual:#018x}"
+                )
+            }
+            Self::TargetHashMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "target hash mismatch: expected {expected:#018x}, got {actual:#018x}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for SnapshotCodecError {}
+
 /// A snapshot that can be restored into a runtime state.
 ///
 /// Extends `RuntimeSnapshot` with validation and restoration capabilities.
@@ -299,11 +592,15 @@ pub struct RestorableSnapshot {
 
 impl RestorableSnapshot {
     /// Current schema version.
-    pub const SCHEMA_VERSION: u32 = 1;
+    pub const SCHEMA_VERSION: u32 = 2;
+
+    /// Oldest schema version accepted by the compatibility reader.
+    pub const MINIMUM_SUPPORTED_SCHEMA_VERSION: u32 = 1;
 
     /// Creates a new restorable snapshot from a runtime snapshot.
     #[must_use]
     pub fn new(snapshot: RuntimeSnapshot) -> Self {
+        let snapshot = canonicalize_runtime_snapshot(snapshot);
         let schema_version = Self::SCHEMA_VERSION;
         let content_hash = Self::compute_hash(schema_version, &snapshot);
         Self {
@@ -315,19 +612,23 @@ impl RestorableSnapshot {
 
     /// Computes a deterministic hash of the snapshot content.
     fn compute_hash(schema_version: u32, snapshot: &RuntimeSnapshot) -> u64 {
-        // FNV-1a hash for determinism
-        const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-        const FNV_PRIME: u64 = 0x0100_0000_01b3;
-
         let mut hash = FNV_OFFSET;
         for byte in schema_version.to_le_bytes() {
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(FNV_PRIME);
         }
-        // Hash full snapshot content (not just counts) so semantic tampering is detected.
-        // JSON encoding is deterministic here because RuntimeSnapshot and nested fields are
-        // structs/vectors with stable field order.
-        if let Ok(encoded) = serde_json::to_vec(snapshot) {
+
+        // Schema v1 hashed the caller-provided vector order. Keep that exact
+        // behavior for legacy reads. Schema v2 canonicalizes entity tables and
+        // recent events before hashing so equivalent state has stable bytes.
+        let canonical;
+        let hash_input = if schema_version >= 2 {
+            canonical = canonicalize_runtime_snapshot(snapshot.clone());
+            &canonical
+        } else {
+            snapshot
+        };
+        if let Ok(encoded) = serde_json::to_vec(hash_input) {
             for byte in encoded {
                 hash ^= u64::from(byte);
                 hash = hash.wrapping_mul(FNV_PRIME);
@@ -343,6 +644,20 @@ impl RestorableSnapshot {
         hash
     }
 
+    const fn schema_version_is_supported(schema_version: u32) -> bool {
+        schema_version >= Self::MINIMUM_SUPPORTED_SCHEMA_VERSION
+            && schema_version <= Self::SCHEMA_VERSION
+    }
+
+    /// Returns a current-schema canonical copy after validating the source.
+    ///
+    /// This is the explicit migration boundary for legacy schema-v1 JSON.
+    /// Callers retain the original bytes or path for rollback.
+    pub fn migrate_to_current(&self) -> Result<Self, SnapshotCodecError> {
+        ensure_snapshot_valid(self)?;
+        Ok(Self::new(self.snapshot.clone()))
+    }
+
     /// Validates the snapshot for structural consistency.
     ///
     /// Checks:
@@ -356,6 +671,16 @@ impl RestorableSnapshot {
     pub fn validate(&self) -> ValidationResult {
         let mut errors = Vec::new();
         let mut stats = SnapshotStats::default();
+
+        if !Self::schema_version_is_supported(self.schema_version) {
+            errors.push(RestoreError::UnsupportedSchemaVersion {
+                actual: self.schema_version,
+                minimum: Self::MINIMUM_SUPPORTED_SCHEMA_VERSION,
+                maximum: Self::SCHEMA_VERSION,
+            });
+        } else if !self.verify_integrity() {
+            errors.push(RestoreError::ContentHashMismatch);
+        }
 
         // Referential integrity must include generations to reject stale slot reuse.
         let region_ids: HashSet<SnapshotIdKey> = self
@@ -640,6 +965,565 @@ impl RestorableSnapshot {
     pub fn timestamp(&self) -> Time {
         Time::from_nanos(self.snapshot.timestamp)
     }
+}
+
+impl SnapshotArtifact {
+    /// Builds a validated full artifact.
+    pub fn full(
+        snapshot: RestorableSnapshot,
+        limits: SnapshotLimits,
+    ) -> Result<Self, SnapshotCodecError> {
+        ensure_snapshot_valid(&snapshot)?;
+        validate_snapshot_limits(&snapshot.snapshot, limits)?;
+        Ok(Self::Full(snapshot))
+    }
+
+    /// Builds a deterministic incremental artifact between two snapshots.
+    ///
+    /// The target is migrated to the current canonical schema. The base keeps
+    /// its own supported schema version so existing schema-v1 content hashes
+    /// remain usable as rollback anchors.
+    pub fn incremental(
+        base: &RestorableSnapshot,
+        target: &RestorableSnapshot,
+        limits: SnapshotLimits,
+    ) -> Result<Self, SnapshotCodecError> {
+        ensure_snapshot_valid(base)?;
+        validate_snapshot_limits(&base.snapshot, limits)?;
+        let target = target.migrate_to_current()?;
+        validate_snapshot_limits(&target.snapshot, limits)?;
+
+        let base_state = canonicalize_runtime_snapshot(base.snapshot.clone());
+        let target_state = canonicalize_runtime_snapshot(target.snapshot.clone());
+        let (region_upserts, removed_regions) =
+            diff_entities(&base_state.regions, &target_state.regions, |region| {
+                region.id
+            })?;
+        let (task_upserts, removed_tasks) =
+            diff_entities(&base_state.tasks, &target_state.tasks, |task| task.id)?;
+        let (obligation_upserts, removed_obligations) = diff_entities(
+            &base_state.obligations,
+            &target_state.obligations,
+            |obligation| obligation.id,
+        )?;
+
+        let delta = IncrementalSnapshot {
+            base_content_hash: base.content_hash,
+            target_schema_version: target.schema_version,
+            target_content_hash: target.content_hash,
+            timestamp: target_state.timestamp,
+            region_upserts,
+            removed_regions,
+            task_upserts,
+            removed_tasks,
+            obligation_upserts,
+            removed_obligations,
+            recent_events: target_state.recent_events,
+            finalizer_history: target_state.finalizer_history,
+            loser_drain_history: target_state.loser_drain_history,
+        };
+        validate_delta(&delta, limits)?;
+        Ok(Self::Incremental(delta))
+    }
+
+    /// Returns the artifact's payload kind.
+    #[must_use]
+    pub const fn kind(&self) -> SnapshotArtifactKind {
+        match self {
+            Self::Full(_) => SnapshotArtifactKind::Full,
+            Self::Incremental(_) => SnapshotArtifactKind::Incremental,
+        }
+    }
+
+    /// Encodes this artifact with [`SnapshotLimits::DEFAULT`].
+    pub fn to_bytes(&self) -> Result<Vec<u8>, SnapshotCodecError> {
+        self.to_bytes_with_limits(SnapshotLimits::DEFAULT)
+    }
+
+    /// Encodes this artifact into the owned `ASUPSNAP` envelope.
+    pub fn to_bytes_with_limits(
+        &self,
+        limits: SnapshotLimits,
+    ) -> Result<Vec<u8>, SnapshotCodecError> {
+        let (kind, payload) = match self {
+            Self::Full(snapshot) => {
+                ensure_snapshot_valid(snapshot)?;
+                validate_snapshot_limits(&snapshot.snapshot, limits)?;
+                let normalized = if snapshot.schema_version >= 2 {
+                    RestorableSnapshot {
+                        snapshot: canonicalize_runtime_snapshot(snapshot.snapshot.clone()),
+                        schema_version: snapshot.schema_version,
+                        content_hash: snapshot.content_hash,
+                    }
+                } else {
+                    snapshot.clone()
+                };
+                (
+                    SNAPSHOT_ARTIFACT_KIND_FULL,
+                    serde_json::to_vec(&normalized).map_err(json_error)?,
+                )
+            }
+            Self::Incremental(delta) => {
+                validate_delta(delta, limits)?;
+                (
+                    SNAPSHOT_ARTIFACT_KIND_INCREMENTAL,
+                    serde_json::to_vec(delta).map_err(json_error)?,
+                )
+            }
+        };
+
+        let total_len = SNAPSHOT_ARTIFACT_HEADER_LEN.saturating_add(payload.len());
+        ensure_artifact_size(total_len, limits)?;
+        let payload_len =
+            u64::try_from(payload.len()).map_err(|_| SnapshotCodecError::ArtifactTooLarge {
+                actual: payload.len(),
+                maximum: limits.max_artifact_bytes,
+            })?;
+        let checksum = Sha256::digest(&payload);
+        let mut encoded = Vec::with_capacity(total_len);
+        encoded.extend_from_slice(&SNAPSHOT_ARTIFACT_MAGIC);
+        encoded.extend_from_slice(&SNAPSHOT_ARTIFACT_VERSION.to_le_bytes());
+        encoded.push(kind);
+        encoded.push(0);
+        encoded.extend_from_slice(&payload_len.to_le_bytes());
+        encoded.extend_from_slice(&checksum);
+        encoded.extend_from_slice(&payload);
+        Ok(encoded)
+    }
+
+    /// Decodes an owned envelope or legacy raw JSON with default limits.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, SnapshotCodecError> {
+        Self::from_bytes_with_limits(bytes, SnapshotLimits::DEFAULT)
+    }
+
+    /// Decodes an owned envelope or legacy raw JSON with explicit limits.
+    ///
+    /// Legacy JSON is detected by the first non-whitespace `{` byte. It is
+    /// validated with the schema-v1 hash rule and remains a full artifact until
+    /// [`RestorableSnapshot::migrate_to_current`] is explicitly requested.
+    pub fn from_bytes_with_limits(
+        bytes: &[u8],
+        limits: SnapshotLimits,
+    ) -> Result<Self, SnapshotCodecError> {
+        ensure_artifact_size(bytes.len(), limits)?;
+        if bytes
+            .iter()
+            .copied()
+            .find(|byte| !byte.is_ascii_whitespace())
+            == Some(b'{')
+        {
+            let snapshot: RestorableSnapshot = serde_json::from_slice(bytes).map_err(json_error)?;
+            return Self::full(snapshot, limits);
+        }
+
+        if bytes.len() < SNAPSHOT_ARTIFACT_HEADER_LEN {
+            return Err(SnapshotCodecError::TruncatedHeader {
+                actual: bytes.len(),
+            });
+        }
+        if bytes[..SNAPSHOT_ARTIFACT_MAGIC.len()] != SNAPSHOT_ARTIFACT_MAGIC {
+            return Err(SnapshotCodecError::InvalidMagic);
+        }
+
+        let version = u16::from_le_bytes(
+            bytes[8..10]
+                .try_into()
+                .expect("fixed header version slice has two bytes"),
+        );
+        if version != SNAPSHOT_ARTIFACT_VERSION {
+            return Err(SnapshotCodecError::UnsupportedArtifactVersion { actual: version });
+        }
+        let kind = bytes[10];
+        if !matches!(
+            kind,
+            SNAPSHOT_ARTIFACT_KIND_FULL | SNAPSHOT_ARTIFACT_KIND_INCREMENTAL
+        ) {
+            return Err(SnapshotCodecError::InvalidArtifactKind { actual: kind });
+        }
+        let flags = bytes[11];
+        if flags != 0 {
+            return Err(SnapshotCodecError::UnsupportedFlags { actual: flags });
+        }
+        let payload_len_u64 = u64::from_le_bytes(
+            bytes[12..20]
+                .try_into()
+                .expect("fixed header payload-length slice has eight bytes"),
+        );
+        let payload_len =
+            usize::try_from(payload_len_u64).map_err(|_| SnapshotCodecError::ArtifactTooLarge {
+                actual: usize::MAX,
+                maximum: limits.max_artifact_bytes,
+            })?;
+        if payload_len > limits.max_artifact_bytes {
+            return Err(SnapshotCodecError::ArtifactTooLarge {
+                actual: payload_len,
+                maximum: limits.max_artifact_bytes,
+            });
+        }
+        let declared_total = SNAPSHOT_ARTIFACT_HEADER_LEN
+            .checked_add(payload_len)
+            .ok_or(SnapshotCodecError::ArtifactTooLarge {
+                actual: usize::MAX,
+                maximum: limits.max_artifact_bytes,
+            })?;
+        if declared_total != bytes.len() {
+            return Err(SnapshotCodecError::LengthMismatch {
+                declared_total,
+                actual: bytes.len(),
+            });
+        }
+
+        let expected_checksum = &bytes[20..52];
+        let payload = &bytes[SNAPSHOT_ARTIFACT_HEADER_LEN..];
+        if Sha256::digest(payload).as_slice() != expected_checksum {
+            return Err(SnapshotCodecError::ChecksumMismatch);
+        }
+
+        match kind {
+            SNAPSHOT_ARTIFACT_KIND_FULL => {
+                let snapshot = serde_json::from_slice(payload).map_err(json_error)?;
+                Self::full(snapshot, limits)
+            }
+            SNAPSHOT_ARTIFACT_KIND_INCREMENTAL => {
+                let delta = serde_json::from_slice(payload).map_err(json_error)?;
+                validate_delta(&delta, limits)?;
+                Ok(Self::Incremental(delta))
+            }
+            _ => unreachable!("artifact kind was validated above"),
+        }
+    }
+
+    /// Materializes complete runtime state, applying a delta when necessary.
+    pub fn materialize(
+        &self,
+        base: Option<&RestorableSnapshot>,
+        limits: SnapshotLimits,
+    ) -> Result<RestorableSnapshot, SnapshotCodecError> {
+        match self {
+            Self::Full(snapshot) => {
+                ensure_snapshot_valid(snapshot)?;
+                validate_snapshot_limits(&snapshot.snapshot, limits)?;
+                Ok(snapshot.clone())
+            }
+            Self::Incremental(delta) => {
+                validate_delta(delta, limits)?;
+                let base = base.ok_or(SnapshotCodecError::MissingBase)?;
+                ensure_snapshot_valid(base)?;
+                validate_snapshot_limits(&base.snapshot, limits)?;
+                if base.content_hash != delta.base_content_hash {
+                    return Err(SnapshotCodecError::BaseHashMismatch {
+                        expected: delta.base_content_hash,
+                        actual: base.content_hash,
+                    });
+                }
+
+                let mut state = canonicalize_runtime_snapshot(base.snapshot.clone());
+                apply_entities(
+                    &mut state.regions,
+                    &delta.removed_regions,
+                    &delta.region_upserts,
+                    |region| region.id,
+                );
+                apply_entities(
+                    &mut state.tasks,
+                    &delta.removed_tasks,
+                    &delta.task_upserts,
+                    |task| task.id,
+                );
+                apply_entities(
+                    &mut state.obligations,
+                    &delta.removed_obligations,
+                    &delta.obligation_upserts,
+                    |obligation| obligation.id,
+                );
+                state.timestamp = delta.timestamp;
+                state.recent_events.clone_from(&delta.recent_events);
+                state.finalizer_history.clone_from(&delta.finalizer_history);
+                state
+                    .loser_drain_history
+                    .clone_from(&delta.loser_drain_history);
+                state = canonicalize_runtime_snapshot(state);
+
+                let content_hash =
+                    RestorableSnapshot::compute_hash(delta.target_schema_version, &state);
+                if content_hash != delta.target_content_hash {
+                    return Err(SnapshotCodecError::TargetHashMismatch {
+                        expected: delta.target_content_hash,
+                        actual: content_hash,
+                    });
+                }
+                let snapshot = RestorableSnapshot {
+                    snapshot: state,
+                    schema_version: delta.target_schema_version,
+                    content_hash,
+                };
+                ensure_snapshot_valid(&snapshot)?;
+                validate_snapshot_limits(&snapshot.snapshot, limits)?;
+                Ok(snapshot)
+            }
+        }
+    }
+}
+
+fn json_error(error: serde_json::Error) -> SnapshotCodecError {
+    SnapshotCodecError::Json {
+        message: error.to_string(),
+    }
+}
+
+fn ensure_artifact_size(actual: usize, limits: SnapshotLimits) -> Result<(), SnapshotCodecError> {
+    if actual > limits.max_artifact_bytes {
+        return Err(SnapshotCodecError::ArtifactTooLarge {
+            actual,
+            maximum: limits.max_artifact_bytes,
+        });
+    }
+    Ok(())
+}
+
+fn ensure_snapshot_valid(snapshot: &RestorableSnapshot) -> Result<(), SnapshotCodecError> {
+    let validation = snapshot.validate();
+    if validation.is_valid {
+        Ok(())
+    } else {
+        Err(SnapshotCodecError::InvalidSnapshot {
+            error_count: validation.errors.len(),
+        })
+    }
+}
+
+fn validate_snapshot_limits(
+    snapshot: &RuntimeSnapshot,
+    limits: SnapshotLimits,
+) -> Result<(), SnapshotCodecError> {
+    check_limit("regions", snapshot.regions.len(), limits.max_regions)?;
+    check_limit("tasks", snapshot.tasks.len(), limits.max_tasks)?;
+    check_limit(
+        "obligations",
+        snapshot.obligations.len(),
+        limits.max_obligations,
+    )?;
+    check_limit(
+        "recent events",
+        snapshot.recent_events.len(),
+        limits.max_recent_events,
+    )?;
+    check_limit(
+        "finalizer history",
+        snapshot.finalizer_history.len(),
+        limits.max_finalizer_history,
+    )?;
+    check_limit(
+        "loser-drain history",
+        snapshot.loser_drain_history.len(),
+        limits.max_loser_drain_history,
+    )?;
+    let parent_map: HashMap<SnapshotIdKey, Option<SnapshotIdKey>> = snapshot
+        .regions
+        .iter()
+        .map(|region| {
+            (
+                snapshot_id_key(region.id),
+                region.parent_id.map(snapshot_id_key),
+            )
+        })
+        .collect();
+    check_limit(
+        "region depth",
+        compute_max_depth(&parent_map),
+        limits.max_region_depth,
+    )
+}
+
+fn validate_delta(
+    delta: &IncrementalSnapshot,
+    limits: SnapshotLimits,
+) -> Result<(), SnapshotCodecError> {
+    if delta.target_schema_version != RestorableSnapshot::SCHEMA_VERSION {
+        return Err(SnapshotCodecError::InvalidDelta {
+            message: format!(
+                "target schema {} must be current schema {}",
+                delta.target_schema_version,
+                RestorableSnapshot::SCHEMA_VERSION
+            ),
+        });
+    }
+    check_limit(
+        "region upserts",
+        delta.region_upserts.len(),
+        limits.max_regions,
+    )?;
+    check_limit(
+        "region removals",
+        delta.removed_regions.len(),
+        limits.max_regions,
+    )?;
+    check_limit("task upserts", delta.task_upserts.len(), limits.max_tasks)?;
+    check_limit("task removals", delta.removed_tasks.len(), limits.max_tasks)?;
+    check_limit(
+        "obligation upserts",
+        delta.obligation_upserts.len(),
+        limits.max_obligations,
+    )?;
+    check_limit(
+        "obligation removals",
+        delta.removed_obligations.len(),
+        limits.max_obligations,
+    )?;
+    check_limit(
+        "recent events",
+        delta.recent_events.len(),
+        limits.max_recent_events,
+    )?;
+    check_limit(
+        "finalizer history",
+        delta.finalizer_history.len(),
+        limits.max_finalizer_history,
+    )?;
+    check_limit(
+        "loser-drain history",
+        delta.loser_drain_history.len(),
+        limits.max_loser_drain_history,
+    )?;
+    validate_delta_entity_ids(
+        "region",
+        delta.region_upserts.iter().map(|region| region.id),
+        &delta.removed_regions,
+    )?;
+    validate_delta_entity_ids(
+        "task",
+        delta.task_upserts.iter().map(|task| task.id),
+        &delta.removed_tasks,
+    )?;
+    validate_delta_entity_ids(
+        "obligation",
+        delta
+            .obligation_upserts
+            .iter()
+            .map(|obligation| obligation.id),
+        &delta.removed_obligations,
+    )
+}
+
+fn validate_delta_entity_ids(
+    entity: &'static str,
+    upserts: impl Iterator<Item = IdSnapshot>,
+    removals: &[IdSnapshot],
+) -> Result<(), SnapshotCodecError> {
+    let mut upsert_ids = HashSet::new();
+    for id in upserts {
+        if !upsert_ids.insert(snapshot_id_key(id)) {
+            return Err(SnapshotCodecError::InvalidDelta {
+                message: format!("duplicate {entity} upsert {}:{}", id.index, id.generation),
+            });
+        }
+    }
+    let mut removed_ids = HashSet::new();
+    for id in removals {
+        let key = snapshot_id_key(*id);
+        if !removed_ids.insert(key) {
+            return Err(SnapshotCodecError::InvalidDelta {
+                message: format!("duplicate {entity} removal {}:{}", id.index, id.generation),
+            });
+        }
+        if upsert_ids.contains(&key) {
+            return Err(SnapshotCodecError::InvalidDelta {
+                message: format!(
+                    "{entity} {}:{} is both removed and upserted",
+                    id.index, id.generation
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn check_limit(
+    resource: &'static str,
+    actual: usize,
+    maximum: usize,
+) -> Result<(), SnapshotCodecError> {
+    if actual > maximum {
+        Err(SnapshotCodecError::LimitExceeded {
+            resource,
+            actual,
+            maximum,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn canonicalize_runtime_snapshot(mut snapshot: RuntimeSnapshot) -> RuntimeSnapshot {
+    snapshot
+        .regions
+        .sort_by_key(|region| snapshot_id_key(region.id));
+    for task in &mut snapshot.tasks {
+        task.obligations.sort_by_key(|id| snapshot_id_key(*id));
+    }
+    snapshot.tasks.sort_by_key(|task| snapshot_id_key(task.id));
+    snapshot
+        .obligations
+        .sort_by_key(|obligation| snapshot_id_key(obligation.id));
+    snapshot
+        .recent_events
+        .sort_by_key(|event| (event.seq, event.time, event.version));
+    snapshot
+}
+
+fn diff_entities<T, F>(
+    base: &[T],
+    target: &[T],
+    id: F,
+) -> Result<(Vec<T>, Vec<IdSnapshot>), SnapshotCodecError>
+where
+    T: Clone + Serialize,
+    F: Fn(&T) -> IdSnapshot + Copy,
+{
+    let base_by_id: BTreeMap<SnapshotIdKey, &T> = base
+        .iter()
+        .map(|value| (snapshot_id_key(id(value)), value))
+        .collect();
+    let target_by_id: BTreeMap<SnapshotIdKey, &T> = target
+        .iter()
+        .map(|value| (snapshot_id_key(id(value)), value))
+        .collect();
+    let mut upserts = Vec::new();
+    for (key, target_value) in &target_by_id {
+        let changed = match base_by_id.get(key) {
+            Some(base_value) => {
+                serde_json::to_vec(*base_value).map_err(json_error)?
+                    != serde_json::to_vec(*target_value).map_err(json_error)?
+            }
+            None => true,
+        };
+        if changed {
+            upserts.push((*target_value).clone());
+        }
+    }
+    let removed = base_by_id
+        .keys()
+        .filter(|key| !target_by_id.contains_key(key))
+        .map(|&(index, generation)| IdSnapshot { index, generation })
+        .collect();
+    Ok((upserts, removed))
+}
+
+fn apply_entities<T, F>(base: &mut Vec<T>, removed: &[IdSnapshot], upserts: &[T], id: F)
+where
+    T: Clone,
+    F: Fn(&T) -> IdSnapshot,
+{
+    let removed: HashSet<SnapshotIdKey> = removed.iter().map(|id| snapshot_id_key(*id)).collect();
+    let mut by_id: BTreeMap<SnapshotIdKey, T> = std::mem::take(base)
+        .into_iter()
+        .filter(|value| !removed.contains(&snapshot_id_key(id(value))))
+        .map(|value| (snapshot_id_key(id(&value)), value))
+        .collect();
+    for value in upserts {
+        by_id.insert(snapshot_id_key(id(value)), value.clone());
+    }
+    *base = by_id.into_values().collect();
 }
 
 /// Checks if a task state is terminal.

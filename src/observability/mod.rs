@@ -71,6 +71,12 @@ pub mod otel_sampling_strategy_audit_test;
 pub mod otel_structured_concurrency;
 #[cfg(test)]
 pub mod otlp_attribute_size_cap_audit_test;
+// br-asupersync-5z2scg.1.3: private, native-only owned OTLP message staging.
+// Signal adapters, transport wiring, public re-exports, and dependency cutover
+// remain outside this module's authority.
+#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+#[allow(dead_code)]
+pub(crate) mod otlp_proto;
 // br-asupersync-lf1a77: stale OTLP audit files that depended on removed
 // synthetic HTTP/span APIs remain tracked in-place, but their invariants are
 // normalized into compiled production-seam tests and the OTLP inventory artifact
@@ -123,6 +129,42 @@ pub mod otlp_unexpected_status_audit_test;
 pub mod otlp_upgrade_required_audit_test;
 pub mod performance_budget_monitor;
 pub mod pressure_governor;
+// br-asupersync-5z2scg.8.3.1.2: this private candidate syntax layer is
+// intentionally staged before its parser consumer. It does not replace the
+// incumbent regex dependency or enlarge the public API.
+#[cfg(feature = "metrics")]
+#[allow(dead_code)]
+pub(crate) mod regex_syntax;
+// br-asupersync-5z2scg.8.3.2.2: retained-table-backed, UTF-8-safe semantic
+// normalization for candidate regex character classes. This remains private
+// staging code and carries no dependency-removal or matcher authority.
+#[cfg(feature = "metrics")]
+#[allow(dead_code)]
+pub(crate) mod regex_semantics;
+// br-asupersync-5z2scg.8.3.2.3: retained-table-backed simple folding and
+// zero-width boundary semantics. This private staging layer deliberately
+// leaves matcher integration and terminal cross-target conformance to R3.2.4.
+#[cfg(feature = "metrics")]
+#[allow(dead_code)]
+pub(crate) mod regex_boundaries;
+// br-asupersync-5z2scg.8.3.3.1: versioned, deterministic Thompson IR schema,
+// checked resource accounting, and structural validation. Diagnostic JSON has
+// no persistence contract; lowering, execution, and cutover remain downstream.
+#[cfg(feature = "metrics")]
+#[allow(dead_code)]
+pub(crate) mod regex_ir;
+// br-asupersync-5z2scg.8.3.3.2: checked iterative lowering for atoms,
+// concatenation, and ordered alternation. Capture/repetition remain fail-closed
+// for R3.3.3; matcher execution, production wiring, and cutover remain absent.
+#[cfg(feature = "metrics")]
+#[allow(dead_code)]
+pub(crate) mod regex_lowering;
+// br-asupersync-5z2scg.8.3.4.1: strictly safe, bounded whole-haystack
+// execution over validated Thompson IR. Leftmost search, capture propagation,
+// production privacy wiring, and dependency exit remain downstream.
+#[cfg(feature = "metrics")]
+#[allow(dead_code)]
+pub(crate) mod regex_vm;
 pub mod resource_accounting;
 #[cfg(all(test, feature = "metrics"))]
 pub mod resource_attribute_merging_audit_test;

@@ -12,7 +12,7 @@
 //!
 //! - CC-*: Contract validation (JSON artifact structure)
 //! - CSR-*: Cancel-safe resume (state preservation across cancel)
-//! - RLD-*: Race-loser drain (clean drop in race-loser scenarios)
+//! - RLD-*: Race-loser drain (exact drop-loss or recovery classification)
 //! - BA-*: Buffer accounting (committed vs lost bytes)
 //! - OL-*: Obligation leak checks
 //! - CS-*: Codec state preservation
@@ -166,17 +166,28 @@ fn cc_07_cancel_safety_matrix_covers_all_operators() {
 }
 
 #[test]
-fn cc_08_all_cancel_safe() {
-    init_test("cc_08_all_cancel_safe");
+fn cc_08_cancel_safety_classification_is_truthful() {
+    init_test("cc_08_cancel_safety_classification_is_truthful");
     let v = parse_json();
-    for entry in v["cancel_safety_matrix"].as_array().unwrap() {
-        let op = entry["operator"].as_str().unwrap();
-        assert!(
-            entry["cancel_safe"].as_bool().unwrap(),
-            "operator {op} should be cancel-safe"
+    let matrix = v["cancel_safety_matrix"].as_array().unwrap();
+    for (operator, expected_safe) in [
+        ("copy", false),
+        ("copy_buf", true),
+        ("copy_with_progress", false),
+        ("copy_bidirectional", false),
+    ] {
+        let entry = matrix
+            .iter()
+            .find(|entry| entry["operator"].as_str() == Some(operator))
+            .unwrap_or_else(|| panic!("missing copy classification for {operator}"));
+        assert_eq!(
+            entry["cancel_safe"].as_bool(),
+            Some(expected_safe),
+            "unexpected future-drop classification for {operator}"
         );
     }
-    asupersync::test_complete!("cc_08_all_cancel_safe");
+    assert_eq!(v["summary"]["all_cancel_safe"].as_bool(), Some(false));
+    asupersync::test_complete!("cc_08_cancel_safety_classification_is_truthful");
 }
 
 #[test]
@@ -262,6 +273,20 @@ fn cc_12_summary_metrics_consistent() {
     assert_eq!(
         summary["total_invariants"].as_u64().unwrap() as usize,
         invariants
+    );
+    let cancel_safe_count = v["cancel_safety_matrix"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["cancel_safe"].as_bool() == Some(true))
+        .count();
+    assert_eq!(
+        summary["cancel_safe_count"].as_u64().unwrap() as usize,
+        cancel_safe_count
+    );
+    assert_eq!(
+        summary["all_cancel_safe"].as_bool().unwrap(),
+        cancel_safe_count == v["cancel_safety_matrix"].as_array().unwrap().len()
     );
     asupersync::test_complete!("cc_12_summary_metrics_consistent");
 }
@@ -405,6 +430,55 @@ struct TestStream {
     read_data: Vec<u8>,
     read_pos: usize,
     written: Vec<u8>,
+}
+
+/// Duplex stream that consumes reads immediately but makes its first write
+/// pending, exposing private read-ahead held by `copy_bidirectional`.
+struct PendingWriteStream {
+    inner: TestStream,
+    write_pending: bool,
+}
+
+impl PendingWriteStream {
+    fn new(read_data: &[u8]) -> Self {
+        Self {
+            inner: TestStream::from_read(read_data),
+            write_pending: true,
+        }
+    }
+}
+
+impl AsyncRead for PendingWriteStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for PendingWriteStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        if this.write_pending {
+            this.write_pending = false;
+            return Poll::Pending;
+        }
+        Pin::new(&mut this.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
 }
 
 impl TestStream {
@@ -737,35 +811,46 @@ fn csr_08_framed_write_cancel_preserves_buffer() {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// RLD-1 through RLD-5: Race-Loser Drain Tests
+// RLD-1 through RLD-8: Race-Loser Drain Tests
 // ════════════════════════════════════════════════════════════════════════
 
-// RLD-1: Copy future drop is clean (no panic, no leak)
+// RLD-1: Unbuffered copy explicitly exposes its read-ahead loss on drop.
 #[test]
-fn rld_01_copy_drop_is_clean() {
-    init_test("rld_01_copy_drop_is_clean");
+fn rld_01_copy_drop_after_read_before_write_is_lossy() {
+    init_test("rld_01_copy_drop_after_read_before_write_is_lossy");
 
-    let mut reader = PendingThenDataReader::new(b"race loser data");
-    let mut writer = TestStream::from_read(b"");
+    let payload = b"race loser data";
+    let mut reader: &[u8] = payload;
+    let mut writer = PendingThenWriter::new();
 
     let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);
 
     {
         let mut copy_fut = asupersync::io::copy(&mut reader, &mut writer);
-        // First poll: reader returns Pending
+        // The reader advances immediately, then the first writer poll blocks.
         let result = Pin::new(&mut copy_fut).poll(&mut cx);
         assert!(matches!(result, Poll::Pending));
-        // Drop the future — simulating race-loser cancellation
     }
 
-    // Writer should have no data (nothing was committed before cancel)
+    assert!(reader.is_empty(), "RLD-1: source cursor already advanced");
     assert!(
-        writer.written.is_empty(),
-        "RLD-1: no data committed before cancel"
+        writer.data.is_empty(),
+        "RLD-1: pending write committed no bytes"
+    );
+    let resumed =
+        futures_lite::future::block_on(asupersync::io::copy(&mut reader, &mut writer)).unwrap();
+    assert_eq!(
+        resumed, 0,
+        "RLD-1: restarting cannot recover private read-ahead"
+    );
+    assert_ne!(
+        writer.data.as_slice(),
+        payload,
+        "RLD-1: the unbuffered primitive must not be classified as drop-cancel-safe"
     );
 
-    asupersync::test_complete!("rld_01_copy_drop_is_clean");
+    asupersync::test_complete!("rld_01_copy_drop_after_read_before_write_is_lossy");
 }
 
 // RLD-2: BufWriter drop without flush loses buffered data (race-loser scenario)
@@ -894,6 +979,117 @@ fn rld_05_framed_duplex_drop_clean() {
     );
 
     asupersync::test_complete!("rld_05_framed_duplex_drop_clean");
+}
+
+// RLD-6: CopyWithProgress has the same private read-ahead boundary as Copy.
+#[test]
+fn rld_06_copy_with_progress_drop_after_read_before_write_is_lossy() {
+    init_test("rld_06_copy_with_progress_drop_after_read_before_write_is_lossy");
+
+    let payload = b"progress race loser";
+    let mut reader: &[u8] = payload;
+    let mut writer = PendingThenWriter::new();
+    let mut progress = Vec::new();
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+
+    {
+        let mut copy_fut = asupersync::io::copy_with_progress(&mut reader, &mut writer, |total| {
+            progress.push(total);
+        });
+        assert!(matches!(
+            Pin::new(&mut copy_fut).poll(&mut cx),
+            Poll::Pending
+        ));
+    }
+
+    assert!(reader.is_empty(), "RLD-6: source cursor already advanced");
+    assert!(writer.data.is_empty(), "RLD-6: no write committed");
+    assert!(
+        progress.is_empty(),
+        "RLD-6: lost read-ahead is not progress"
+    );
+    let resumed = futures_lite::future::block_on(asupersync::io::copy_with_progress(
+        &mut reader,
+        &mut writer,
+        |_| {},
+    ))
+    .unwrap();
+    assert_eq!(
+        resumed, 0,
+        "RLD-6: restart cannot recover private read-ahead"
+    );
+
+    asupersync::test_complete!("rld_06_copy_with_progress_drop_after_read_before_write_is_lossy");
+}
+
+// RLD-7: Both bidirectional private buffers can be lost on the same drop.
+#[test]
+fn rld_07_copy_bidirectional_drop_can_skip_both_directions() {
+    init_test("rld_07_copy_bidirectional_drop_can_skip_both_directions");
+
+    let a_payload = b"from a";
+    let b_payload = b"from b";
+    let mut a = PendingWriteStream::new(a_payload);
+    let mut b = PendingWriteStream::new(b_payload);
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+
+    {
+        let mut copy_fut = asupersync::io::copy_bidirectional(&mut a, &mut b);
+        assert!(matches!(
+            Pin::new(&mut copy_fut).poll(&mut cx),
+            Poll::Pending
+        ));
+    }
+
+    assert_eq!(a.inner.read_pos, a_payload.len());
+    assert_eq!(b.inner.read_pos, b_payload.len());
+    assert!(
+        a.inner.written.is_empty(),
+        "RLD-7: B-to-A write was pending"
+    );
+    assert!(
+        b.inner.written.is_empty(),
+        "RLD-7: A-to-B write was pending"
+    );
+    let resumed =
+        futures_lite::future::block_on(asupersync::io::copy_bidirectional(&mut a, &mut b)).unwrap();
+    assert_eq!(resumed, (0, 0), "RLD-7: restart sees both sources at EOF");
+
+    asupersync::test_complete!("rld_07_copy_bidirectional_drop_can_skip_both_directions");
+}
+
+// RLD-8: copy_buf leaves writer-pending input in caller-owned storage.
+#[test]
+fn rld_08_copy_buf_drop_preserves_uncommitted_input() {
+    init_test("rld_08_copy_buf_drop_preserves_uncommitted_input");
+
+    let payload = b"caller owned buffered input";
+    let mut reader: &[u8] = payload;
+    let mut writer = PendingThenWriter::new();
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+
+    {
+        let mut copy_fut = asupersync::io::copy_buf(&mut reader, &mut writer);
+        assert!(matches!(
+            Pin::new(&mut copy_fut).poll(&mut cx),
+            Poll::Pending
+        ));
+    }
+
+    assert_eq!(
+        reader, payload,
+        "RLD-8: pending writes must not consume caller-owned input"
+    );
+    let resumed =
+        futures_lite::future::block_on(asupersync::io::copy_buf(&mut reader, &mut writer)).unwrap();
+    assert_eq!(resumed, payload.len() as u64);
+    assert_eq!(writer.data.as_slice(), payload);
+    assert!(reader.is_empty());
+
+    asupersync::test_complete!("rld_08_copy_buf_drop_preserves_uncommitted_input");
 }
 
 // ════════════════════════════════════════════════════════════════════════

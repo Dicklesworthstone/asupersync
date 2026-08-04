@@ -183,7 +183,7 @@ proptest! {
     }
 
     #[test]
-    fn mr_copy_drop_preserves_written_prefix(
+    fn mr_copy_drop_accounts_for_unrecoverable_read_ahead(
         data in proptest::collection::vec(any::<u8>(), 64..1024),
         read_chunk in 1_usize..32,
         write_chunk in 1_usize..32,
@@ -212,10 +212,30 @@ proptest! {
         drop(future);
         let prefix_after_drop = writer.snapshot();
         let prefix_len = prefix_after_drop.len();
+        let reader_position_after_drop = reader.position;
 
         prop_assert_eq!(prefix_after_drop, data[..prefix_len].to_vec());
+        prop_assert!(
+            prefix_len <= reader_position_after_drop,
+            "writer cannot commit bytes the reader has not consumed"
+        );
+
+        let resumed = block_on(copy(&mut reader, &mut writer))
+            .expect("copy resume should consume the remaining source");
+        prop_assert_eq!(
+            resumed,
+            u64::try_from(data.len() - reader_position_after_drop)
+                .expect("remaining length fits into u64")
+        );
+
+        let mut expected_after_resume = data[..prefix_len].to_vec();
+        expected_after_resume.extend_from_slice(&data[reader_position_after_drop..]);
+        prop_assert_eq!(writer.snapshot(), expected_after_resume);
+        prop_assert_eq!(reader.position, data.len());
+
         if completed {
             prop_assert_eq!(prefix_len, data.len());
+            prop_assert_eq!(reader_position_after_drop, data.len());
         }
     }
 

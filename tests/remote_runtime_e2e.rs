@@ -716,25 +716,34 @@ fn idempotency_store_conflict_detection() {
         IdempotencyRequestFingerprint::new(ComputationName::new("compute_b"), RemoteInput::empty());
 
     assert!(matches!(
-        store.check(&key, &request_a, Time::ZERO),
+        store.check_and_record(
+            key,
+            RemoteTaskId::from_raw(1),
+            request_a.clone(),
+            Time::ZERO,
+        ),
         DedupDecision::New
     ));
-    store.record(
-        key,
-        RemoteTaskId::from_raw(1),
-        request_a.clone(),
-        Time::ZERO,
-    );
 
     // Same key, same computation → duplicate.
     assert!(matches!(
-        store.check(&key, &request_a, Time::from_secs(1)),
+        store.check_and_record(
+            key,
+            RemoteTaskId::from_raw(2),
+            request_a,
+            Time::from_secs(1),
+        ),
         DedupDecision::Duplicate(_)
     ));
 
     // Same key, different computation → conflict.
     assert!(matches!(
-        store.check(&key, &request_b, Time::from_secs(1)),
+        store.check_and_record(
+            key,
+            RemoteTaskId::from_raw(3),
+            request_b,
+            Time::from_secs(1),
+        ),
         DedupDecision::Conflict
     ));
 }

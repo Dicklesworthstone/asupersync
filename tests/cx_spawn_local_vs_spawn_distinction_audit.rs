@@ -253,10 +253,14 @@ fn spawn_local_pins_task_record_to_current_worker() {
     // migration of !Send futures.
     let source = read("src/runtime/state.rs");
 
-    let fn_marker = "pub(crate) fn admit_local_spawn_request(";
+    // E1.2 (br-asupersync-sched-hot-path-perf-bt4y5f.2.2) converted local
+    // spawn admission to the task-table-target seam: the fn is now
+    // admit_local_spawn_request_in. The pinned properties (worker pinning,
+    // fail-closed off-worker admission) live in the _in core.
+    let fn_marker = "pub(crate) fn admit_local_spawn_request_in(";
     let start = source
         .find(fn_marker)
-        .expect("admit_local_spawn_request fn");
+        .expect("admit_local_spawn_request_in fn");
     let window_end = (start + 5000).min(source.len());
     let safe_end = source
         .char_indices()

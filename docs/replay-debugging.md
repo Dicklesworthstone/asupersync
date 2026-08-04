@@ -41,6 +41,29 @@ Deterministic replay only works when the environment is fully controlled. The co
 
 If any precondition is violated, replay should fail fast with explicit diagnostics rather than “best-effort.”
 
+### Lab-Test Crashpack Replay
+
+Auto-crashpacks produced by `#[lab_test]` and `#[explore_seeds]` record the
+exact libtest name, seed, worker count, step limit, and (when the source tree
+was clean at build time) Git revision. Their generated replay command uses the
+same environment variables consumed by the test harness:
+
+```sh
+ASUPERSYNC_LAB_TEST_SEED=42 ASUPERSYNC_WORKERS=4 \
+ASUPERSYNC_MAX_STEPS=1000 cargo test lab::tests::case -- --exact --nocapture
+```
+
+The seed override runs exactly one seed even when the original attribute
+declared a range. `ASUPERSYNC_MAX_STEPS=none` reproduces an unlimited step
+budget. The command deliberately names no crashpack argument: libtest does not
+accept one, and the crashpack is evidence used to construct the replay rather
+than a positional test input.
+
+Builds outside a clean repository may set `ASUPERSYNC_GIT_COMMIT` to a 40- or
+64-digit hexadecimal revision. Without a clean package-root checkout or that
+explicit input, the crashpack omits `commit_hash` instead of making a stale
+provenance claim.
+
 ## Golden Replay-Delta Verification
 
 When the same scenario is expected to remain stable across releases, compare
@@ -1092,20 +1115,45 @@ pub enum Breakpoint {
 ```rust
 // Writing
 let mut writer = TraceWriter::create("trace.bin")?;
-writer.write_trace(&trace)?;
+writer.write_metadata(&trace.metadata)?;
+for event in &trace.events {
+    writer.write_event(event)?;
+}
 writer.finish()?;
 
-// Reading
+// Reading all events
 let reader = TraceReader::open("trace.bin")?;
-let metadata = reader.metadata();
-let trace = reader.read_all()?;
+let file_version = reader.file_version();
+let metadata = reader.metadata().clone();
+let events = reader.load_all()?;
 
 // Streaming read (large traces)
+let reader = TraceReader::open("trace.bin")?;
 for event in reader.events() {
     let event = event?;
     // process event
 }
 ```
+
+Current writers emit checksummed container version 3. Readers accept supported
+legacy v1/v2 containers, but embedded replay metadata must still use the exact
+supported replay schema. Unknown versions, records, checksum mismatches, and
+truncation fail closed.
+
+Use a distinct destination to migrate a legacy container while retaining the
+source as a rollback anchor:
+
+```text
+asupersync trace migrate legacy-v2.trace current-v3.trace
+```
+
+The destination must not exist and the source must be v1 or v2. For damaged
+input, `recover_trace_prefix(path, max_events)` returns only the contiguous
+decoded prefix plus an explicit `Complete`, `Partial`, or `LimitReached`
+status. Recovery never skips a corrupt event and does not convert a partial
+trace into deterministic replay proof. For v3, only `Complete` authenticates
+the whole event stream; partial and limit-reached receipts are decoded prefixes,
+not checksum admission.
 
 ### ReplayEvent Variants
 

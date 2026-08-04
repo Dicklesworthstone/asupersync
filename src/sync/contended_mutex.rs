@@ -41,13 +41,23 @@ pub struct LockMetricsSnapshot {
     pub max_wait_ns: u64,
     /// Maximum single hold duration in nanoseconds.
     pub max_hold_ns: u64,
-    /// Exact p95 wait duration in nanoseconds for observed acquisitions.
+    /// Number of retained most-recent wait samples used for wait percentiles.
+    /// Zero means instrumentation is disabled or no wait samples are retained.
+    pub wait_percentile_sample_count: u64,
+    /// Exact p95 wait duration in nanoseconds over the retained most-recent
+    /// wait-sample suffix.
     pub p95_wait_ns: u64,
-    /// Exact p999 wait duration in nanoseconds for observed acquisitions.
+    /// Exact p999 wait duration in nanoseconds over the retained most-recent
+    /// wait-sample suffix.
     pub p999_wait_ns: u64,
-    /// Exact p95 hold duration in nanoseconds for observed guards.
+    /// Number of retained most-recent hold samples used for hold percentiles.
+    /// Zero means instrumentation is disabled or no hold samples are retained.
+    pub hold_percentile_sample_count: u64,
+    /// Exact p95 hold duration in nanoseconds over the retained most-recent
+    /// hold-sample suffix.
     pub p95_hold_ns: u64,
-    /// Exact p999 hold duration in nanoseconds for observed guards.
+    /// Exact p999 hold duration in nanoseconds over the retained most-recent
+    /// hold-sample suffix.
     pub p999_hold_ns: u64,
     /// Instrumentation mode used to produce this snapshot.
     pub instrumentation_mode: &'static str,
@@ -178,6 +188,7 @@ mod inner {
                 max_wait_ns = self.max_wait_ns.load(Ordering::Relaxed);
                 wait_frozen = samples.clone();
             }
+            let wait_percentile_sample_count = u64::try_from(wait_frozen.len()).unwrap_or(u64::MAX);
             wait_frozen.sort_unstable();
             let p95_wait_ns = Self::percentile_from_sorted(&wait_frozen, 95, 100);
             let p999_wait_ns = Self::percentile_from_sorted(&wait_frozen, 999, 1000);
@@ -194,6 +205,7 @@ mod inner {
                 max_hold_ns = self.max_hold_ns.load(Ordering::Relaxed);
                 hold_frozen = samples.clone();
             }
+            let hold_percentile_sample_count = u64::try_from(hold_frozen.len()).unwrap_or(u64::MAX);
             hold_frozen.sort_unstable();
             let p95_hold_ns = Self::percentile_from_sorted(&hold_frozen, 95, 100);
             let p999_hold_ns = Self::percentile_from_sorted(&hold_frozen, 999, 1000);
@@ -206,8 +218,10 @@ mod inner {
                 hold_ns,
                 max_wait_ns,
                 max_hold_ns,
+                wait_percentile_sample_count,
                 p95_wait_ns,
                 p999_wait_ns,
+                hold_percentile_sample_count,
                 p95_hold_ns,
                 p999_hold_ns,
                 instrumentation_mode: "opt_in_lock_metrics",
@@ -240,6 +254,51 @@ mod inner {
                 self.max_hold_ns.store(0, Ordering::Relaxed);
                 samples.clear();
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::Metrics;
+
+        #[test]
+        fn percentile_horizon_reports_retained_suffix_and_all_history_counters() {
+            let metrics = Metrics::default();
+
+            for _ in 0..2_500 {
+                metrics.record_acquire(1_000, true);
+                metrics.record_hold(1_000);
+            }
+            for _ in 0..7_500 {
+                metrics.record_acquire(1, false);
+                metrics.record_hold(1);
+            }
+
+            let full = metrics.snapshot("percentile_horizon");
+            assert_eq!(full.wait_percentile_sample_count, 10_000);
+            assert_eq!(full.hold_percentile_sample_count, 10_000);
+            assert_eq!(full.p95_wait_ns, 1_000);
+            assert_eq!(full.p999_wait_ns, 1_000);
+            assert_eq!(full.p95_hold_ns, 1_000);
+            assert_eq!(full.p999_hold_ns, 1_000);
+
+            metrics.record_acquire(1, false);
+            metrics.record_hold(1);
+
+            let evicted = metrics.snapshot("percentile_horizon");
+            assert_eq!(evicted.wait_percentile_sample_count, 7_501);
+            assert_eq!(evicted.hold_percentile_sample_count, 7_501);
+            assert_eq!(evicted.p95_wait_ns, 1);
+            assert_eq!(evicted.p999_wait_ns, 1);
+            assert_eq!(evicted.p95_hold_ns, 1);
+            assert_eq!(evicted.p999_hold_ns, 1);
+
+            assert_eq!(evicted.acquisitions, 10_001);
+            assert_eq!(evicted.contentions, 2_500);
+            assert_eq!(evicted.wait_ns, 2_507_501);
+            assert_eq!(evicted.max_wait_ns, 1_000);
+            assert_eq!(evicted.hold_ns, 2_507_501);
+            assert_eq!(evicted.max_hold_ns, 1_000);
         }
     }
 
@@ -945,8 +1004,10 @@ mod tests {
         assert_eq!(snap.hold_ns, 0);
         assert_eq!(snap.max_wait_ns, 0);
         assert_eq!(snap.max_hold_ns, 0);
+        assert_eq!(snap.wait_percentile_sample_count, 0);
         assert_eq!(snap.p95_wait_ns, 0);
         assert_eq!(snap.p999_wait_ns, 0);
+        assert_eq!(snap.hold_percentile_sample_count, 0);
         assert_eq!(snap.p95_hold_ns, 0);
         assert_eq!(snap.p999_hold_ns, 0);
         let cloned = snap.clone();

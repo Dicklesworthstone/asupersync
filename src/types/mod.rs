@@ -10,6 +10,37 @@
 //! - [`symbol`]: Symbol types for RaptorQ-based distributed layer
 //! - [`resource`]: Resource limits and symbol buffer pools
 //! - [`rref`]: Region-owned reference for Send tasks
+//!
+//! # Outcomes and budgets in a runtime context
+//!
+//! [`Outcome`] keeps cancellation and panic distinct from ordinary errors.
+//! [`Budget::meet`] computes the tighter bounds used by nested work.
+//!
+//! <!-- core-api-doctest: outcome-budget -->
+//! ```
+//! use asupersync::{Budget, Cx, Outcome, main};
+//! use asupersync::types::Time;
+//!
+//! #[main]
+//! async fn main(cx: &Cx) {
+//!     cx.checkpoint().expect("example starts active");
+//!
+//!     let mapped: Outcome<u8, &str> = Outcome::Ok(20_u8).map(|value| value + 1);
+//!     assert!(matches!(mapped, Outcome::Ok(21)));
+//!
+//!     let error: Outcome<u8, &str> = Outcome::Err("domain failure");
+//!     assert!(matches!(error.map(|value| value + 1), Outcome::Err("domain failure")));
+//!
+//!     let parent = Budget::with_deadline_at_secs(30).with_cost_quota(10);
+//!     let child = Budget::with_deadline_at_secs(5).with_cost_quota(3);
+//!     let effective = parent.meet(child);
+//!     assert_eq!(effective.deadline, Some(Time::from_secs(5)));
+//!
+//!     let mut exhausted = effective;
+//!     assert!(exhausted.consume_cost(3));
+//!     assert!(!exhausted.consume_cost(1));
+//! }
+//! ```
 
 pub mod budget;
 pub mod builder;
@@ -97,9 +128,10 @@ pub use symbol_set::{
 };
 pub use task_context::{CheckpointHistoryEntry, CheckpointState, CxInner, MAX_MASK_DEPTH};
 pub use typed_symbol::{
-    DeserializationError, Deserializer, SerdeCodec, SerializationError, SerializationFormat,
-    Serializer, TYPED_SYMBOL_HEADER_LEN, TYPED_SYMBOL_MAGIC, TypeDescriptor, TypeMismatchError,
-    TypeRegistry, TypedDecoder, TypedEncoder, TypedSymbol,
+    DeserializationError, Deserializer, LegacyTypedSymbolIdentity, SerdeCodec, SerializationError,
+    SerializationFormat, Serializer, TYPED_SYMBOL_HEADER_LEN, TYPED_SYMBOL_MAGIC,
+    TYPED_SYMBOL_VERSION, TypeDescriptor, TypeMismatchError, TypeRegistry, TypedDecoder,
+    TypedEncoder, TypedSymbol,
 };
 pub use wasm_abi::{
     NextjsAntiPattern, NextjsBootstrapPhase, NextjsBootstrapState, NextjsBootstrapTransitionError,

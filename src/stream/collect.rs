@@ -477,4 +477,81 @@ mod tests {
         );
         crate::test_complete!("collect_repoll_after_completion_panics_without_repolling_upstream");
     }
+
+    // ---------------------------------------------------------------- collect_into
+    //
+    // Bead: asupersync-dx-core-api-v2-u1z5hn.8 (AC4). `collect_into` reuses the
+    // existing `Collect` future with a caller-supplied starting collection, so
+    // the cases that matter are (a) the allocation is genuinely reused rather
+    // than replaced, and (b) the `C: Default + Extend<Item>` bound admits the
+    // three shapes the acceptance criteria name: Vec, HashMap and String.
+
+    #[test]
+    fn collect_into_appends_to_the_supplied_collection() {
+        init_test("collect_into_appends_to_the_supplied_collection");
+        let seeded = vec![1i32, 2];
+        let mut future = Collect::new(iter(vec![3i32, 4, 5]), seeded);
+        let (collected, _) = poll_collect_to_completion(&mut future);
+        crate::assert_with_log!(
+            collected == vec![1, 2, 3, 4, 5],
+            "stream items are appended after the seeded contents",
+            vec![1, 2, 3, 4, 5],
+            collected
+        );
+        crate::test_complete!("collect_into_appends_to_the_supplied_collection");
+    }
+
+    #[test]
+    fn collect_into_reuses_the_supplied_allocation() {
+        init_test("collect_into_reuses_the_supplied_allocation");
+        // A Vec with spare capacity and no elements: if `collect_into` were
+        // secretly starting from `C::default()`, the returned Vec would have
+        // grown its own capacity from zero and would not retain this one.
+        let recycled: Vec<i32> = Vec::with_capacity(64);
+        let capacity_before = recycled.capacity();
+        let mut future = Collect::new(iter(vec![1i32, 2, 3]), recycled);
+        let (collected, _) = poll_collect_to_completion(&mut future);
+        crate::assert_with_log!(
+            collected.capacity() == capacity_before,
+            "the caller's allocation is reused, not replaced",
+            capacity_before,
+            collected.capacity()
+        );
+        crate::assert_with_log!(
+            collected == vec![1, 2, 3],
+            "reuse does not disturb the collected contents",
+            vec![1, 2, 3],
+            collected
+        );
+        crate::test_complete!("collect_into_reuses_the_supplied_allocation");
+    }
+
+    #[test]
+    fn collect_into_accepts_vec_hashmap_and_string() {
+        init_test("collect_into_accepts_vec_hashmap_and_string");
+        use std::collections::HashMap;
+
+        let mut as_vec = Collect::new(iter(vec![1i32, 2]), Vec::<i32>::new());
+        let (v, _) = poll_collect_to_completion(&mut as_vec);
+        crate::assert_with_log!(v == vec![1, 2], "Vec target", vec![1, 2], v);
+
+        let mut as_map = Collect::new(
+            iter(vec![("a", 1i32), ("b", 2)]),
+            HashMap::<&str, i32>::new(),
+        );
+        let (m, _) = poll_collect_to_completion(&mut as_map);
+        crate::assert_with_log!(m.len() == 2, "HashMap target", 2, m.len());
+        crate::assert_with_log!(
+            m.get("a") == Some(&1),
+            "HashMap target keeps pairs",
+            Some(&1),
+            m.get("a")
+        );
+
+        let mut as_string = Collect::new(iter(vec!['h', 'i']), String::new());
+        let (s, _) = poll_collect_to_completion(&mut as_string);
+        crate::assert_with_log!(s == "hi", "String target", "hi", s);
+
+        crate::test_complete!("collect_into_accepts_vec_hashmap_and_string");
+    }
 }

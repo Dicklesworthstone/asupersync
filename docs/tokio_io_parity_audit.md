@@ -257,9 +257,16 @@ Generalized delimiter-based codec. Niche use case; `LinesCodec` covers `\n` and 
 |-----------|-------|-----------|-------|
 | `read_exact` | Not cancel-safe | Not cancel-safe | Consistent |
 | `write_all` | Not cancel-safe | Not cancel-safe | Consistent |
-| `copy` | Cancel-safe | Cancel-safe | Consistent |
+| `copy` | Not drop-cancel-safe | Not drop-cancel-safe | Both can discard private read-ahead after the reader advances and before the writer commits it; use caller-owned buffered input when restart-without-skips is required |
 | `flush` | Cancel-safe | Cancel-safe | Consistent |
 | `BufReader::fill_buf` | Cancel-safe | Cancel-safe | Consistent |
+
+The unbuffered Asupersync copy futures separately make a bounded best-effort
+drain when cooperative `Cx` cancellation is observed on a later poll. That
+checkpoint path cannot run when a race/select drops the future immediately and
+does not make future drop safe. `copy_buf` is the drop-safe restart shape
+because it does not consume caller-owned buffered input until the corresponding
+write commits.
 
 Asupersync adds `WritePermit` for explicit two-phase cancel-safe writes — no Tokio equivalent.
 

@@ -55,8 +55,11 @@ const MAX_ALLOWED_ESI: u32 = 1_000_000;
 /// Maximum columns generated per ESI to prevent matrix blow-up.
 const MAX_COLUMNS_PER_ESI: usize = 1000;
 
-/// Maximum compute budget (in arbitrary units) for dense matrix operations.
-const MAX_DENSE_COMPUTE_BUDGET: u64 = 1_000_000;
+/// Minimum compute budget (in arbitrary units) for dense matrix operations.
+const MIN_DENSE_COMPUTE_BUDGET: u64 = 1_000_000;
+
+/// RFC 6330 tuples expand to at most 30 LT columns plus 2 PI columns.
+const MAX_RFC6330_COLUMNS_PER_ESI: u64 = 32;
 
 /// Rate limiting entry for ESI/ObjectId combinations.
 #[derive(Debug, Clone)]
@@ -1471,15 +1474,29 @@ impl InactivationDecoder {
         self.params.l.saturating_sub(self.implicit_padding_rows())
     }
 
-    /// Validate ESI value against rate limits and amplification attack patterns.
+    /// Return the per-decode compute ceiling for the admitted source-block shape.
+    ///
+    /// A minimally sufficient block can contain [`Self::minimum_received_symbols`]
+    /// equations. Each valid RFC 6330 tuple expands to at most 32 columns, and
+    /// the admission estimate charges the square of that width. Scaling the
+    /// ceiling by the block dimensions admits every minimal valid block while
+    /// retaining a finite allowance for surplus or adversarial rows.
+    fn dense_compute_budget_limit(&self) -> u64 {
+        let block_budget = u64::try_from(self.minimum_received_symbols())
+            .unwrap_or(u64::MAX)
+            .saturating_mul(MAX_RFC6330_COLUMNS_PER_ESI.saturating_pow(2));
+        block_budget.max(MIN_DENSE_COMPUTE_BUDGET)
+    }
+
+    /// Validate ESI value against compute and amplification attack limits.
     ///
     /// br-asupersync-ju2k01: Prevents RaptorQ decoder amplification DoS attacks
     /// by checking for malicious ESI values near u32::MAX that can cause
     /// expensive O(L³) Gaussian elimination operations.
-    fn validate_esi_rate_limits(
+    fn validate_esi_admission(
         &self,
         esi: u32,
-        object_id: &ObjectId,
+        object_id: Option<&ObjectId>,
         compute_budget: &mut ComputeBudget,
     ) -> Result<(), DecodeError> {
         // Check for ESI values that are suspiciously large
@@ -1507,7 +1524,13 @@ impl InactivationDecoder {
         let estimated_cost = (columns.len() as u64).saturating_pow(2);
         compute_budget.consume(estimated_cost)?;
 
-        // Update rate limiting state
+        // Structural and per-call compute admission is identical for every
+        // decode entry point. ObjectId only enables cross-call rate accounting.
+        let Some(object_id) = object_id else {
+            return Ok(());
+        };
+
+        // Update rate limiting state.
         let key = (esi, *object_id);
         let mut rate_limits = self.esi_rate_limits.lock();
         let now = Instant::now();
@@ -1534,11 +1557,11 @@ impl InactivationDecoder {
         }
 
         // Check compute budget per ESI
-        if entry.compute_budget_used > MAX_DENSE_COMPUTE_BUDGET / 10 {
+        if entry.compute_budget_used > MIN_DENSE_COMPUTE_BUDGET / 10 {
             return Err(DecodeError::ComputeBudgetExhausted {
                 used: entry.compute_budget_used,
                 requested: estimated_cost,
-                max: MAX_DENSE_COMPUTE_BUDGET / 10,
+                max: MIN_DENSE_COMPUTE_BUDGET / 10,
             });
         }
 
@@ -1554,8 +1577,10 @@ impl InactivationDecoder {
         let symbol_size = self.params.symbol_size;
         let required = self.minimum_received_symbols();
 
-        // br-asupersync-ju2k01: Create compute budget for dense operations
-        let mut compute_budget = ComputeBudget::new(MAX_DENSE_COMPUTE_BUDGET);
+        // br-asupersync-ju2k01: Create a block-scaled compute budget for dense
+        // operations. This admission policy must not depend on proof capture or
+        // the presence of an ObjectId.
+        let mut compute_budget = ComputeBudget::new(self.dense_compute_budget_limit());
         let mut seen_source_payloads = HashMap::with_capacity(self.params.k.min(symbols.len()));
         let mut seen_equation_payloads = SeenEquationPayloads::with_capacity(symbols.len());
 
@@ -1575,10 +1600,9 @@ impl InactivationDecoder {
                 });
             }
 
-            // br-asupersync-ju2k01: Validate ESI against amplification attacks
-            if let Some(object_id) = object_id {
-                self.validate_esi_rate_limits(sym.esi, object_id, &mut compute_budget)?;
-            }
+            // br-asupersync-ju2k01: Validate every decode entry point against
+            // amplification attacks; ObjectId only keys cross-call accounting.
+            self.validate_esi_admission(sym.esi, object_id, &mut compute_budget)?;
 
             self.validate_source_symbol_equation(sym)?;
             self.validate_symbol_payload_consistency(

@@ -1,0 +1,1181 @@
+{
+  "schema_version": 1,
+  "artifact_id": "scenario-yaml-capability-inventory-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-5z2scg.5.1",
+  "capability_id": "CAP-SCENARIO-YAML-JSON",
+  "mapped_capability_ids": [
+    "CAP-LAB-DETERMINISM",
+    "CAP-SCENARIO-YAML-JSON"
+  ],
+  "captured_date_utc": "2026-07-24",
+  "baseline_revision": "295136459f9e3e38e7373394e713866ec0693a8d",
+  "authority_revision": "673a905631c5580cdc8037315569b72bd636ecca",
+  "authority": {
+    "adr_id": "DEP-ADR-004",
+    "adr_bead_id": "asupersync-dep-p3-api-adrs-h3jspm.4",
+    "adr_path": "docs/adr/dep_plan_adr_004_config_scenario_formats.md",
+    "capability_registry_path": "artifacts/dependency_capability_registry_v1.json",
+    "api_surface_map_path": "artifacts/api_surface_map_v1.json",
+    "decision": "ADDITIVE_COEXISTENCE",
+    "disposition": "KEEP_UNTIL_PARITY",
+    "cutover_state": "KEEP_INCUMBENT",
+    "dependency_exit_allowed": false
+  },
+  "policy": {
+    "zero_unknown_required": true,
+    "unknown_rows": 0,
+    "accepted_yaml_must_remain_accepted": true,
+    "json_is_additive": true,
+    "allowed_inventory_states": [
+      "FROZEN",
+      "EXPLICIT_ADJACENT",
+      "EXPLICIT_UNSUPPORTED"
+    ],
+    "allowed_evidence_states": [
+      "EXECUTED",
+      "EXISTING_TEST",
+      "SOURCE_BASELINED",
+      "PLANNED",
+      "BLOCKED_GAP",
+      "EXPLICIT_ADJACENT",
+      "EXPLICIT_UNSUPPORTED"
+    ],
+    "default_action": "Keep serde_yaml and every observed accepted YAML document until A5 records complete SAME-or-BETTER evidence."
+  },
+  "dependency_baseline": {
+    "crate": "serde_yaml",
+    "resolved_version": "0.9.34+deprecated",
+    "parser_backend": "unsafe-libyaml 0.2.11",
+    "root_normal_edge": "optional via cli",
+    "root_dev_edge": "serde_yaml 0.9",
+    "frankenlab_normal_edge": "serde_yaml 0.9",
+    "inventory_state": "FROZEN",
+    "evidence_state": "SOURCE_BASELINED"
+  },
+  "source_pins": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
+      "line_count": 991
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "9fa12e8af1e6b15a3070d88d62b2b81b8ba49c0e9d8592c1d1682f1cd72a4461",
+      "line_count": 4664
+    },
+    {
+      "path": "src/lab/scenario.rs",
+      "sha256": "0bf5a96825ec074a040ce73eb10e7ac8c24640c602df6ffdebcca8aced973b70",
+      "line_count": 2252
+    },
+    {
+      "path": "src/lab/scenario_runner.rs",
+      "sha256": "380e494f7d5b6864065fbfd0af9fbc5e6acfeb3a4ce29d0383ab572f3d32ef34",
+      "line_count": 1777
+    },
+    {
+      "path": "src/lab/oracle/registry.rs",
+      "sha256": "b7c804f10a25f7ea08e00fc287505b5143da9fd709fae4693439c2499770685c",
+      "line_count": 905
+    },
+    {
+      "path": "src/lab/mod.rs",
+      "sha256": "c3f24c5217620c82ce8f2fc3ef790e49a3d40933aa5410249fe68dca6d7643a5",
+      "line_count": 281
+    },
+    {
+      "path": "src/bin/asupersync.rs",
+      "sha256": "cbf0c69b27ac98921afebed685dc5d0a8855a05c87cf7eb8e28134256a1062f7",
+      "line_count": 16577
+    },
+    {
+      "path": "frankenlab/Cargo.toml",
+      "sha256": "c6cb2a985132c0297e71c894815c0233c3f70cfbde550885118e6344351f2a48",
+      "line_count": 33
+    },
+    {
+      "path": "frankenlab/src/main.rs",
+      "sha256": "d0b22ad25b8744cc5cfc75d2c0d3c0bbbc911068fc5b1d3394771dda18883dc1",
+      "line_count": 1771
+    },
+    {
+      "path": "tests/frankenlab_integration.rs",
+      "sha256": "983fecd9624ff3e0c55155a296cee74acea2143607232cc543ef1f9f56c6b661",
+      "line_count": 786
+    },
+    {
+      "path": "frankenlab/tests/adoption_funnel.rs",
+      "sha256": "bbc7a62ec6ae021cd52f502fdaac79273c36878ae0c810ee9784c481c4d5d7ff",
+      "line_count": 173
+    },
+    {
+      "path": "examples/metadata.json",
+      "sha256": "cb31a8d58a4055aeeb553ecb5a43691583eadc87569ee187e7b6fd8d29b8ecb5",
+      "line_count": 584
+    },
+    {
+      "path": "docs/adr/dep_plan_adr_004_config_scenario_formats.md",
+      "sha256": "2255312c71b2b861af5542ed5298e78969887ecaef1c999984b8798060785012",
+      "line_count": 166
+    },
+    {
+      "path": "TESTING_FOR_AGENTS.md",
+      "sha256": "2b90d430b64eeeb7ea13f065abfc63e609df785ab93c7604e3cf980d2e3802a6",
+      "line_count": 320
+    },
+    {
+      "path": "docs/adoption/getting_started.md",
+      "sha256": "7bb1ac0ffac41f8c4fa9e0d4e9ec40639b7e173ac2bfe69a30c1ba4bcba9cfee",
+      "line_count": 201
+    },
+    {
+      "path": "Makefile",
+      "sha256": "cf9b327ba84b52d87821f36ff896f39eb0eb3e3e2de74af6c735d757a59d1961",
+      "line_count": 64
+    },
+    {
+      "path": "examples/demo_benchmark.rs",
+      "sha256": "8525af694bd4d75f2a224200991e3d63d70e611bff435c441b778b439397a2ef",
+      "line_count": 679
+    }
+  ],
+  "feature_profiles": [
+    {
+      "profile_id": "SCN-PROFILE-LIBRARY-DEFAULT",
+      "cargo_package": "asupersync",
+      "cargo_features": [],
+      "yaml_loader_surfaces": [],
+      "typed_json_surface": [
+        "Scenario::from_json",
+        "Scenario::to_json"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "SOURCE_BASELINED",
+      "no_claim": "The library model is format-neutral and the default production edge does not include serde_yaml."
+    },
+    {
+      "profile_id": "SCN-PROFILE-ASUPERSYNC-CLI",
+      "cargo_package": "asupersync",
+      "cargo_features": [
+        "cli"
+      ],
+      "yaml_loader_surfaces": [
+        "SCN-LOADER-ASUPERSYNC-CLI"
+      ],
+      "typed_json_surface": [
+        "ScenarioRunResult::to_json",
+        "ScenarioExplorationResult::to_json"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST",
+      "no_claim": "JSON is result output; the CLI does not accept a JSON Scenario input or emit canonical Scenario JSON."
+    },
+    {
+      "profile_id": "SCN-PROFILE-FRANKENLAB",
+      "cargo_package": "frankenlab",
+      "cargo_features": [],
+      "yaml_loader_surfaces": [
+        "SCN-LOADER-FRANKENLAB"
+      ],
+      "typed_json_surface": [
+        "ScenarioRunResult::to_json",
+        "ScenarioExplorationResult::to_json"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST",
+      "no_claim": "The member has a direct serde_yaml edge and no Scenario JSON input command."
+    },
+    {
+      "profile_id": "SCN-PROFILE-ROOT-TEST",
+      "cargo_package": "asupersync",
+      "cargo_features": [
+        "test-internals"
+      ],
+      "yaml_loader_surfaces": [
+        "SCN-LOADER-ROOT-INTEGRATION"
+      ],
+      "typed_json_surface": [],
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST",
+      "no_claim": "The root dev dependency and integration test are test evidence, not a normal production dependency edge."
+    },
+    {
+      "profile_id": "SCN-PROFILE-MESSAGING-FABRIC-OVERLAY",
+      "cargo_package": "asupersync",
+      "cargo_features": [
+        "messaging-fabric"
+      ],
+      "yaml_loader_surfaces": [],
+      "typed_json_surface": [],
+      "inventory_state": "FROZEN",
+      "evidence_state": "SOURCE_BASELINED",
+      "no_claim": "This overlay adds four reportable oracle names; it does not add a parser or loader."
+    }
+  ],
+  "typed_schema": {
+    "schema_type": "asupersync::lab::scenario::Scenario",
+    "schema_version_constant": 1,
+    "required_root_fields": [
+      "id:String"
+    ],
+    "root_field_count": 16,
+    "root_fields": [
+      "schema_version:u32",
+      "id:String",
+      "description:String",
+      "lab:LabSection",
+      "chaos:ChaosSection",
+      "network:NetworkSection",
+      "faults:Vec<FaultEvent>",
+      "participants:Vec<Participant>",
+      "oracles:Vec<String>",
+      "cancellation:Option<CancellationSection>",
+      "resource_caps:ResourceCapsSection",
+      "expected_invariants:Vec<String>",
+      "minimization:MinimizationSection",
+      "golden_projection:GoldenProjectionSection",
+      "include:Vec<IncludeRef>",
+      "metadata:BTreeMap<String,String>"
+    ],
+    "nested_sections": [
+      {
+        "section": "lab",
+        "field_count": 9,
+        "fields": [
+          "seed:u64",
+          "entropy_seed:Option<u64>",
+          "worker_count:usize",
+          "trace_capacity:usize",
+          "max_steps:Option<u64>",
+          "panic_on_obligation_leak:bool",
+          "panic_on_futurelock:bool",
+          "futurelock_max_idle_steps:u64",
+          "replay_recording:bool"
+        ]
+      },
+      {
+        "section": "chaos.custom",
+        "field_count": 7,
+        "fields": [
+          "cancel_probability:f64",
+          "delay_probability:f64",
+          "delay_min_ms:u64",
+          "delay_max_ms:u64",
+          "io_error_probability:f64",
+          "wakeup_storm_probability:f64",
+          "budget_exhaustion_probability:f64"
+        ]
+      },
+      {
+        "section": "network",
+        "field_count": 2,
+        "fields": [
+          "preset:NetworkPreset",
+          "links:BTreeMap<String,LinkConditions>"
+        ]
+      },
+      {
+        "section": "network.links.*",
+        "field_count": 6,
+        "fields": [
+          "latency:Option<LatencySpec>",
+          "packet_loss:Option<f64>",
+          "packet_corrupt:Option<f64>",
+          "packet_duplicate:Option<f64>",
+          "packet_reorder:Option<f64>",
+          "bandwidth:Option<u64>"
+        ]
+      },
+      {
+        "section": "faults[]",
+        "field_count": 3,
+        "fields": [
+          "at_ms:u64",
+          "action:FaultAction",
+          "args:BTreeMap<String,serde_json::Value>"
+        ]
+      },
+      {
+        "section": "participants[]",
+        "field_count": 3,
+        "fields": [
+          "name:String",
+          "role:String",
+          "properties:BTreeMap<String,serde_json::Value>"
+        ]
+      },
+      {
+        "section": "cancellation",
+        "field_count": 3,
+        "fields": [
+          "strategy:CancellationStrategy",
+          "count:Option<usize>",
+          "probability:Option<f64>"
+        ]
+      },
+      {
+        "section": "resource_caps",
+        "field_count": 3,
+        "fields": [
+          "max_artifact_bytes:Option<u64>",
+          "max_fault_events:Option<usize>",
+          "max_counterexample_events:Option<usize>"
+        ]
+      },
+      {
+        "section": "minimization",
+        "field_count": 3,
+        "fields": [
+          "enabled:bool",
+          "max_evaluations:Option<usize>",
+          "max_counterexample_events:Option<usize>"
+        ]
+      },
+      {
+        "section": "golden_projection",
+        "field_count": 3,
+        "fields": [
+          "format:GoldenProjectionFormat",
+          "canonicalized:bool",
+          "redacted:bool"
+        ]
+      },
+      {
+        "section": "include[]",
+        "field_count": 1,
+        "fields": [
+          "path:String"
+        ]
+      }
+    ],
+    "dynamic_fault_arg_keys_validated": [
+      "from",
+      "to",
+      "path",
+      "bytes",
+      "phase",
+      "delay_ms",
+      "host",
+      "duration_ms",
+      "skew_ms"
+    ],
+    "default_behavior": {
+      "empty_document": "REJECT_MISSING_ID",
+      "id_only_document": "ACCEPT_TYPED_DEFAULTS_THEN_VALIDATE_NONEMPTY_ID",
+      "partial_document": "ACCEPT_IF_REQUIRED_ID_PRESENT_AND_SEMANTICS_VALID",
+      "unknown_fields": "ACCEPT_AND_IGNORE_AT_ROOT_AND_NESTED_TYPED_STRUCTS",
+      "comments": "ACCEPT_AND_DISCARD",
+      "input_order": "ACCEPT_AND_DO_NOT_PRESERVE"
+    },
+    "inventory_state": "FROZEN",
+    "evidence_state": "EXECUTED"
+  },
+  "canonical_json_contract": {
+    "encoder": "Scenario::to_json",
+    "schema_version": 1,
+    "encoding": "UTF-8",
+    "whitespace": "compact with no trailing newline",
+    "object_order": "recursive lexicographic key order",
+    "array_order": "preserve typed source order",
+    "numbers": {
+      "integers": "exact base-10 JSON integers",
+      "finite_decimals": "serde_json stable shortest representation",
+      "durations": "unsigned integer milliseconds in fields ending with _ms"
+    },
+    "materialized_fields": [
+      "schema_version",
+      "typed defaults",
+      "all typed Scenario fields"
+    ],
+    "migration": {
+      "missing_schema_version": "default to explicit v1 without changing typed meaning",
+      "unsupported_schema_version": "typed parse followed by validation rejection"
+    },
+    "preserved_extension_channels": [
+      "metadata",
+      "participants[].properties",
+      "faults[].args"
+    ],
+    "unknown_field_policy": "accepted and discarded at typed struct boundaries; SCN A3 owns parity and bounds",
+    "focused_evidence": [
+      "canonical_contract_full_json_roundtrip",
+      "canonical_contract_matches_byte_golden",
+      "canonical_contract_orders_dynamic_objects_recursively",
+      "canonical_contract_migrates_missing_version_without_meaning_change",
+      "canonical_contract_preserves_yaml_replay_identity"
+    ],
+    "evidence_state": "EXECUTED",
+    "no_claim": "The library encoder does not implement a CLI dump command, format-selected golden projection, parser replacement, full-corpus parity, or terminal dependency cutover."
+  },
+  "enum_domains": [
+    {
+      "domain_id": "SCN-ENUM-CHAOS",
+      "values": [
+        "off",
+        "light",
+        "heavy",
+        "custom"
+      ]
+    },
+    {
+      "domain_id": "SCN-ENUM-NETWORK",
+      "values": [
+        "ideal",
+        "local",
+        "lan",
+        "wan",
+        "satellite",
+        "congested",
+        "lossy"
+      ]
+    },
+    {
+      "domain_id": "SCN-ENUM-LATENCY",
+      "values": [
+        "fixed",
+        "uniform",
+        "normal"
+      ]
+    },
+    {
+      "domain_id": "SCN-ENUM-FAULT",
+      "values": [
+        "partition",
+        "heal",
+        "disk_pressure",
+        "disk_recovered",
+        "delayed_cleanup",
+        "process_stall",
+        "process_resume",
+        "host_crash",
+        "host_restart",
+        "clock_skew",
+        "clock_reset"
+      ]
+    },
+    {
+      "domain_id": "SCN-ENUM-CANCELLATION",
+      "values": [
+        "never",
+        "all_points",
+        "random_sample",
+        "first_n",
+        "last_n",
+        "every_nth",
+        "probabilistic"
+      ]
+    },
+    {
+      "domain_id": "SCN-ENUM-GOLDEN-FORMAT",
+      "values": [
+        "json",
+        "markdown"
+      ]
+    },
+    {
+      "domain_id": "SCN-EXPECTED-INVARIANTS",
+      "values": [
+        "quiescence",
+        "losers_drained",
+        "no_obligation_leaks",
+        "bounded_artifact_output",
+        "deterministic_replay"
+      ]
+    }
+  ],
+  "oracle_domain": {
+    "selection_token": "all",
+    "default_reported_name_count": 24,
+    "messaging_fabric_additional_name_count": 4,
+    "unknown_name_behavior": "REJECT_BEFORE_RUN",
+    "inventory_state": "FROZEN",
+    "evidence_state": "EXISTING_TEST"
+  },
+  "loader_surfaces": [
+    {
+      "loader_id": "SCN-LOADER-ASUPERSYNC-CLI",
+      "source_path": "src/bin/asupersync.rs",
+      "entrypoint": "load_scenario",
+      "feature_gate": "cli",
+      "read_behavior": "std::fs::read_to_string reads the entire caller-supplied path",
+      "parse_behavior": "serde_yaml::from_str::<Scenario>",
+      "semantic_validation": "performed separately by validate or ScenarioRunner",
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "loader_id": "SCN-LOADER-FRANKENLAB",
+      "source_path": "frankenlab/src/main.rs",
+      "entrypoint": "load_scenario -> parse_scenario",
+      "feature_gate": "workspace member dependency",
+      "read_behavior": "std::fs::read_to_string reads the entire caller-supplied path",
+      "parse_behavior": "serde_yaml::from_str::<Scenario>",
+      "semantic_validation": "performed separately by validate or ScenarioRunner",
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "loader_id": "SCN-LOADER-ROOT-INTEGRATION",
+      "source_path": "tests/frankenlab_integration.rs",
+      "entrypoint": "test-local serde_yaml::from_str::<Scenario>",
+      "feature_gate": "root dev dependency",
+      "read_behavior": "checked-in fixture text",
+      "parse_behavior": "serde_yaml::from_str::<Scenario>",
+      "semantic_validation": "explicit Scenario::validate plus runner calls",
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "loader_id": "SCN-LOADER-ADOPTION-FUNNEL",
+      "source_path": "frankenlab/tests/adoption_funnel.rs",
+      "entrypoint": "test-local serde_yaml::from_str::<Scenario>",
+      "feature_gate": "frankenlab test",
+      "read_behavior": "checked-in fixture text",
+      "parse_behavior": "serde_yaml::from_str::<Scenario>",
+      "semantic_validation": "explicit Scenario::validate plus runner calls",
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    }
+  ],
+  "grammar_constructs": [
+    {
+      "construct_id": "SCN-YAML-MAPPING",
+      "observed_typed_behavior": "ACCEPT"
+    },
+    {
+      "construct_id": "SCN-YAML-SEQUENCE",
+      "observed_typed_behavior": "ACCEPT"
+    },
+    {
+      "construct_id": "SCN-YAML-FLOW-COLLECTIONS",
+      "observed_typed_behavior": "ACCEPT"
+    },
+    {
+      "construct_id": "SCN-YAML-QUOTED-AND-BLOCK-STRINGS",
+      "observed_typed_behavior": "ACCEPT"
+    },
+    {
+      "construct_id": "SCN-YAML-UNICODE",
+      "observed_typed_behavior": "ACCEPT"
+    },
+    {
+      "construct_id": "SCN-YAML-COMMENTS",
+      "observed_typed_behavior": "ACCEPT_DISCARD"
+    },
+    {
+      "construct_id": "SCN-YAML-ANCHOR-ALIAS",
+      "observed_typed_behavior": "ACCEPT_RESOLVE"
+    },
+    {
+      "construct_id": "SCN-YAML-MERGE-KEY",
+      "observed_typed_behavior": "ACCEPT_IGNORE_UNKNOWN_KEY_WITHOUT_MERGE"
+    },
+    {
+      "construct_id": "SCN-YAML-TAGGED-SCALAR",
+      "observed_typed_behavior": "ACCEPT_TAG_TRANSPARENT_FOR_STRING_TARGET"
+    },
+    {
+      "construct_id": "SCN-YAML-DUPLICATE-MAPPING-KEY",
+      "observed_typed_behavior": "REJECT_LOCATED"
+    },
+    {
+      "construct_id": "SCN-YAML-MULTI-DOCUMENT",
+      "observed_typed_behavior": "REJECT"
+    },
+    {
+      "construct_id": "SCN-YAML-NULL-IN-STRING",
+      "observed_typed_behavior": "ACCEPT_AS_LITERAL_STRING_NULL"
+    },
+    {
+      "construct_id": "SCN-YAML-NULL-IN-OPTION",
+      "observed_typed_behavior": "ACCEPT_NONE"
+    },
+    {
+      "construct_id": "SCN-YAML-U64-MAX",
+      "observed_typed_behavior": "ACCEPT"
+    },
+    {
+      "construct_id": "SCN-YAML-U64-OVERFLOW",
+      "observed_typed_behavior": "REJECT_RANGE"
+    },
+    {
+      "construct_id": "SCN-YAML-HEX-OCTAL-BINARY-INTEGER",
+      "observed_typed_behavior": "ACCEPT"
+    },
+    {
+      "construct_id": "SCN-YAML-LEGACY-YES-NO-BOOL",
+      "observed_typed_behavior": "REJECT_FOR_BOOL_TARGET_AS_STRING_TYPE"
+    },
+    {
+      "construct_id": "SCN-YAML-NAN-INFINITY",
+      "observed_typed_behavior": "PARSE_FLOAT_THEN_REJECT_PROBABILITY_SEMANTICS"
+    },
+    {
+      "construct_id": "SCN-YAML-UNKNOWN-FIELD",
+      "observed_typed_behavior": "ACCEPT_IGNORE"
+    },
+    {
+      "construct_id": "SCN-YAML-EMPTY-DOCUMENT",
+      "observed_typed_behavior": "REJECT_MISSING_ID"
+    },
+    {
+      "construct_id": "SCN-YAML-RECURSION",
+      "observed_typed_behavior": "SERDE_YAML_INTERNAL_DEPTH_LIMIT_128"
+    },
+    {
+      "construct_id": "SCN-YAML-ALIAS-REPETITION",
+      "observed_typed_behavior": "SERDE_YAML_INTERNAL_REPETITION_LIMIT"
+    },
+    {
+      "construct_id": "SCN-YAML-ARBITRARY-TAGS",
+      "observed_typed_behavior": "NO_IMPLICIT_CODE_EXECUTION_IN_TYPED_DESERIALIZATION"
+    }
+  ],
+  "corpus_files": [
+    {
+      "corpus_id": "SCN-CORPUS-ROOT-CANCELLATION",
+      "path": "examples/scenarios/cancellation_exhaustive.yaml",
+      "sha256": "7105944a45eb06ddcb5f80b5ab11c8e8989eac326705094198b82efb86c9fac5",
+      "line_count": 30,
+      "byte_count": 644
+    },
+    {
+      "corpus_id": "SCN-CORPUS-ROOT-CHAOS",
+      "path": "examples/scenarios/chaos_sendpermit_ack.yaml",
+      "sha256": "7de873388a1650c183adca47eec4d656057389fd23b023355f82573867042f8a",
+      "line_count": 34,
+      "byte_count": 666
+    },
+    {
+      "corpus_id": "SCN-CORPUS-ROOT-CLOCK",
+      "path": "examples/scenarios/clock_skew_lease.yaml",
+      "sha256": "bf8551ca2dd459552dc3ffcae61de63d9d3fed337ad7925adb7f1fe24c170d00",
+      "line_count": 42,
+      "byte_count": 763
+    },
+    {
+      "corpus_id": "SCN-CORPUS-ROOT-BASE",
+      "path": "examples/scenarios/composable_base.yaml",
+      "sha256": "8c40c01ae95c13c5ee935ac11ca21e9a845dc227ed47923e6d7ee6210fbc72fb",
+      "line_count": 25,
+      "byte_count": 520
+    },
+    {
+      "corpus_id": "SCN-CORPUS-ROOT-COMPOSED",
+      "path": "examples/scenarios/composed_partition_test.yaml",
+      "sha256": "ff35182c4a5c39c7e776d33a446ed86fde17a14c385ffed957afc89c1aedf5fc",
+      "line_count": 31,
+      "byte_count": 581
+    },
+    {
+      "corpus_id": "SCN-CORPUS-ROOT-LATENCY",
+      "path": "examples/scenarios/custom_latency_model.yaml",
+      "sha256": "654f7c07998193c3b7702e6ae90094c6030f3027fea7b49e4f490992baf041cd",
+      "line_count": 64,
+      "byte_count": 1211
+    },
+    {
+      "corpus_id": "SCN-CORPUS-ROOT-CRASH",
+      "path": "examples/scenarios/host_crash_restart.yaml",
+      "sha256": "ae54746b43abb43c6fa60afb4558e676e69900599604880f685cf62f801201b6",
+      "line_count": 46,
+      "byte_count": 849
+    },
+    {
+      "corpus_id": "SCN-CORPUS-ROOT-PARTITION",
+      "path": "examples/scenarios/partition_heal.yaml",
+      "sha256": "36ef8d4bb3fb2e611699931703c86b3a4ae99c39daa284068eb0bbd865dbdc48",
+      "line_count": 62,
+      "byte_count": 1264
+    },
+    {
+      "corpus_id": "SCN-CORPUS-ROOT-SMOKE",
+      "path": "examples/scenarios/smoke_happy_path.yaml",
+      "sha256": "d50fd0e1dea7de4a550bc2defdabe4da77fc275a0eeb509ad4be191234299501",
+      "line_count": 24,
+      "byte_count": 475
+    },
+    {
+      "corpus_id": "SCN-CORPUS-ROOT-STRESS",
+      "path": "examples/scenarios/stress_10k_tasks.yaml",
+      "sha256": "a415d922671a24edf802bab565a005942cfd45091fb91c2fc292add5e7a9de32",
+      "line_count": 44,
+      "byte_count": 930
+    },
+    {
+      "corpus_id": "SCN-CORPUS-FRANKEN-RACE",
+      "path": "frankenlab/examples/scenarios/01_race_condition.yaml",
+      "sha256": "2463fd9c47802383f082217e932fa7076afbb1fcce0a213dd5d771b1bb534389",
+      "line_count": 41,
+      "byte_count": 981
+    },
+    {
+      "corpus_id": "SCN-CORPUS-FRANKEN-OBLIGATION",
+      "path": "frankenlab/examples/scenarios/02_obligation_leak.yaml",
+      "sha256": "e10281e8f7e876b6c4b3933b8be7aef9839b60b05a03ce366a4188209b4dcff4",
+      "line_count": 57,
+      "byte_count": 1254
+    },
+    {
+      "corpus_id": "SCN-CORPUS-FRANKEN-SAGA",
+      "path": "frankenlab/examples/scenarios/03_saga_partition.yaml",
+      "sha256": "21140b3bd87a7b8e240e00362434662e73ddc7626e7a30750e6e3ca6d9f2f225",
+      "line_count": 127,
+      "byte_count": 2999
+    }
+  ],
+  "adjacent_yaml_files": [
+    {
+      "adjacent_id": "SCN-ADJACENT-TIME-TRAVEL-DEMO",
+      "path": "tools/demos/time_travel.yaml",
+      "sha256": "41f30dd07c70f7e70cc3334ed03cb640fe286403f5868c90791953b12b28c3f7",
+      "line_count": 41,
+      "byte_count": 1325,
+      "classification": "NOT_SCENARIO_SCHEMA_AND_NO_LIVE_READER",
+      "inventory_state": "EXPLICIT_ADJACENT",
+      "evidence_state": "EXPLICIT_ADJACENT"
+    },
+    {
+      "adjacent_id": "SCN-ADJACENT-WORKFLOW-CONFIG",
+      "path_glob": ".github/workflows/*.{yaml,yml}",
+      "classification": "CI_CONFIGURATION_NOT_SCENARIO_SCHEMA",
+      "inventory_state": "EXPLICIT_ADJACENT",
+      "evidence_state": "EXPLICIT_ADJACENT"
+    },
+    {
+      "adjacent_id": "SCN-ADJACENT-PNPM",
+      "path_glob": "pnpm*.yaml",
+      "classification": "PACKAGE_MANAGER_METADATA_NOT_SCENARIO_SCHEMA",
+      "inventory_state": "EXPLICIT_ADJACENT",
+      "evidence_state": "EXPLICIT_ADJACENT"
+    }
+  ],
+  "author_workflows": [
+    {
+      "workflow_id": "SCN-WORKFLOW-ASUP-RUN",
+      "command_surface": "asupersync lab run <scenario>",
+      "input": "YAML Scenario path",
+      "output": "human or JSON run result",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "workflow_id": "SCN-WORKFLOW-ASUP-VALIDATE",
+      "command_surface": "asupersync lab validate <scenario>",
+      "input": "YAML Scenario path",
+      "output": "validation report",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "workflow_id": "SCN-WORKFLOW-ASUP-REPLAY",
+      "command_surface": "asupersync lab replay <scenario>",
+      "input": "YAML Scenario path",
+      "output": "replay report and optional direct-written JSON artifact",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "workflow_id": "SCN-WORKFLOW-ASUP-EXPLORE",
+      "command_surface": "asupersync lab explore <scenario>",
+      "input": "YAML Scenario path plus seed range",
+      "output": "human or JSON exploration result",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "workflow_id": "SCN-WORKFLOW-FRANKEN-RUN",
+      "command_surface": "frankenlab run <scenario>",
+      "input": "YAML Scenario path",
+      "output": "human or JSON run result",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "workflow_id": "SCN-WORKFLOW-FRANKEN-VALIDATE",
+      "command_surface": "frankenlab validate <scenario>",
+      "input": "YAML Scenario path",
+      "output": "validation report",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "workflow_id": "SCN-WORKFLOW-FRANKEN-REPLAY",
+      "command_surface": "frankenlab replay <scenario>",
+      "input": "YAML Scenario path",
+      "output": "human or JSON replay result",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "workflow_id": "SCN-WORKFLOW-FRANKEN-EXPLORE",
+      "command_surface": "frankenlab explore <scenario>",
+      "input": "YAML Scenario path plus seed range",
+      "output": "human or JSON exploration result",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "workflow_id": "SCN-WORKFLOW-FRANKEN-MINIMIZE",
+      "command_surface": "frankenlab minimize <input>",
+      "input": "incident JSON or YAML Scenario path",
+      "output": "minimization report",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "workflow_id": "SCN-WORKFLOW-FRANKEN-DEMO",
+      "command_surface": "frankenlab demo",
+      "input": "built-in scenario",
+      "output": "human demonstration",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "workflow_id": "SCN-WORKFLOW-SCENARIO-DUMP",
+      "command_surface": "none",
+      "input": "typed Scenario",
+      "output": "no YAML or canonical JSON dump command",
+      "evidence_state": "EXPLICIT_UNSUPPORTED"
+    }
+  ],
+  "execution_consumption": [
+    {
+      "field_group": "schema_version,id",
+      "state": "ACTIVE",
+      "behavior": "validated and copied into reports"
+    },
+    {
+      "field_group": "description,metadata",
+      "state": "ACTIVE",
+      "behavior": "used for dual-run identity and replay metadata"
+    },
+    {
+      "field_group": "lab",
+      "state": "ACTIVE",
+      "behavior": "converted to LabConfig; runner always enables replay recording"
+    },
+    {
+      "field_group": "chaos",
+      "state": "ACTIVE",
+      "behavior": "validated and converted to LabConfig chaos policy"
+    },
+    {
+      "field_group": "faults",
+      "state": "PARTIAL",
+      "behavior": "timed and traced; only disk pressure/recovery, delayed cleanup, and process stall/resume affect the synthetic fault summary"
+    },
+    {
+      "field_group": "oracles",
+      "state": "ACTIVE",
+      "behavior": "validated and filters the full oracle report"
+    },
+    {
+      "field_group": "resource_caps",
+      "state": "PARTIAL",
+      "behavior": "validates fault count and caps selected artifact/counterexample accounting"
+    },
+    {
+      "field_group": "minimization",
+      "state": "PARTIAL",
+      "behavior": "controls only the unresolved-process-stall counterexample packet"
+    },
+    {
+      "field_group": "golden_projection",
+      "state": "PARTIAL",
+      "behavior": "redacted is copied into one counterexample packet; format is unused and canonicalized is only validated"
+    },
+    {
+      "field_group": "participants",
+      "state": "VALIDATION_ONLY",
+      "behavior": "names validate fault references; roles and properties are not consumed by the runner"
+    },
+    {
+      "field_group": "expected_invariants",
+      "state": "VALIDATION_ONLY",
+      "behavior": "names are validated but do not select or enforce runner checks"
+    },
+    {
+      "field_group": "network,cancellation",
+      "state": "VALIDATION_ONLY",
+      "behavior": "semantics are validated but neither section is consumed by ScenarioRunner"
+    },
+    {
+      "field_group": "include",
+      "state": "VALIDATION_ONLY",
+      "behavior": "paths are validated but no loader resolves, reads, or merges an included document"
+    }
+  ],
+  "diagnostic_contracts": [
+    {
+      "diagnostic_id": "SCN-DIAG-READ-ASUP",
+      "surface": "asupersync CLI",
+      "behavior": "I/O error mapped through io_error with path context",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "diagnostic_id": "SCN-DIAG-PARSE-ASUP",
+      "surface": "asupersync CLI",
+      "behavior": "scenario_parse_error USER_ERROR with parser text, parser location when available, path context, and generic indentation/field hint",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "diagnostic_id": "SCN-DIAG-READ-FRANKEN",
+      "surface": "frankenlab",
+      "behavior": "string error with path and I/O text",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "diagnostic_id": "SCN-DIAG-PARSE-FRANKEN",
+      "surface": "frankenlab",
+      "behavior": "string error with path, parser text/location when available, and generic indentation/field hint",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "diagnostic_id": "SCN-DIAG-SEMANTIC",
+      "surface": "Scenario::validate",
+      "behavior": "returns all known semantic errors with stable field paths but no YAML source spans",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "diagnostic_id": "SCN-DIAG-VERSION",
+      "surface": "Scenario::validate",
+      "behavior": "schema_version field error reports observed and expected version",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "diagnostic_id": "SCN-DIAG-UNKNOWN-ORACLE",
+      "surface": "ScenarioRunner and both CLIs",
+      "behavior": "rejects before execution and reports an available-name list",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "diagnostic_id": "SCN-DIAG-REPLAY-DIVERGENCE",
+      "surface": "ScenarioRunner and both CLIs",
+      "behavior": "runner Display owns ASUP-E401 but both CLI adapters reconstruct text without the stable token",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "diagnostic_id": "SCN-DIAG-DUPLICATE",
+      "surface": "serde_yaml",
+      "behavior": "rejects duplicate mapping keys with line and column",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "diagnostic_id": "SCN-DIAG-MULTI-DOCUMENT",
+      "surface": "serde_yaml",
+      "behavior": "rejects more than one YAML document",
+      "evidence_state": "EXECUTED"
+    }
+  ],
+  "resource_contracts": [
+    {
+      "resource_id": "SCN-RESOURCE-DOCUMENT-BYTES",
+      "behavior": "UNBOUNDED_AT_APPLICATION_LOADER",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "resource_id": "SCN-RESOURCE-NESTING",
+      "behavior": "serde_yaml internal recursion depth starts at 128; no application policy",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "resource_id": "SCN-RESOURCE-ALIAS-REPETITION",
+      "behavior": "serde_yaml rejects excessive alias expansion with repetition limit exceeded",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "resource_id": "SCN-RESOURCE-COLLECTION-COUNT",
+      "behavior": "UNBOUNDED_AT_APPLICATION_LOADER",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "resource_id": "SCN-RESOURCE-SCALAR-LENGTH",
+      "behavior": "UNBOUNDED_AT_APPLICATION_LOADER",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "resource_id": "SCN-RESOURCE-STEPS",
+      "behavior": "lab.max_steps optional u64 with default 100000",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "resource_id": "SCN-RESOURCE-FAULTS",
+      "behavior": "resource_caps.max_fault_events optionally rejects oversized typed fault lists",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "resource_id": "SCN-RESOURCE-INCLUDES",
+      "behavior": "path string is bounded and validated but includes are not resolved",
+      "evidence_state": "SOURCE_BASELINED"
+    }
+  ],
+  "child_capability_rows": [
+    {
+      "owner_bead": "asupersync-5z2scg.5.1",
+      "responsibility": "freeze loaders, typed fields, accepted grammar, corpus, workflows, diagnostics, execution consumption, and routed gaps",
+      "required_evidence": [
+        "source pins",
+        "parser behavior corpus",
+        "all 13 typed YAML files parse and validate",
+        "negative mutation contract"
+      ],
+      "evidence_state": "EXECUTED",
+      "no_claim": "Inventory does not implement JSON, parser parity, runtime semantics, or E2E cutover."
+    },
+    {
+      "owner_bead": "asupersync-5z2scg.5.2",
+      "responsibility": "define one versioned typed schema and additive canonical JSON representation",
+      "required_evidence": [
+        "full typed equality and round trip",
+        "exact canonical JSON golden and recursive ordering",
+        "missing-version migration and unsupported-version validation policy",
+        "YAML to canonical JSON replay identity preservation"
+      ],
+      "evidence_state": "EXECUTED",
+      "no_claim": "The library encoder does not prove full-corpus YAML parity, add a CLI dump command, select golden projection formats, or permit dependency exit."
+    },
+    {
+      "owner_bead": "asupersync-5z2scg.5.3",
+      "responsibility": "prove incumbent KEEP or complete owned parser/writer parity over the frozen grammar and corpus",
+      "required_evidence": [
+        "grammar differential corpus",
+        "YAML to typed to JSON semantic equivalence",
+        "bounds and diagnostics"
+      ],
+      "evidence_state": "PLANNED",
+      "no_claim": "Partial parser parity forces KEEP."
+    },
+    {
+      "owner_bead": "asupersync-5z2scg.5.4",
+      "responsibility": "repair diagnostics, migration ergonomics, examples, include truth, and operator documentation",
+      "required_evidence": [
+        "stable located errors",
+        "migration guidance",
+        "example and metadata alignment"
+      ],
+      "evidence_state": "PLANNED",
+      "no_claim": "Documentation cannot substitute for runtime behavior or terminal proof."
+    },
+    {
+      "owner_bead": "asupersync-5z2scg.5.5",
+      "responsibility": "run real validate, execute, explore, replay, migration, rollback, and terminal KEEP-or-cutover journeys",
+      "required_evidence": [
+        "all typed corpus files",
+        "real binary workflows",
+        "unchanged replay fingerprints",
+        "rollback",
+        "terminal decision"
+      ],
+      "evidence_state": "PLANNED",
+      "no_claim": "Only complete SAME-or-BETTER evidence can authorize a terminal decision."
+    }
+  ],
+  "known_gaps": [
+    {
+      "gap_id": "SCN-GAP-01",
+      "finding": "include entries are parsed and path-validated but never resolved, read, or merged; the current document therefore does not inherit its declared base",
+      "owner_bead": "asupersync-5z2scg.5.4",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "SCN-GAP-02",
+      "finding": "network presets and link conditions are validated but not consumed by ScenarioRunner",
+      "owner_bead": "asupersync-5z2scg.5.5",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "SCN-GAP-03",
+      "finding": "cancellation strategy is validated but not consumed by ScenarioRunner",
+      "owner_bead": "asupersync-5z2scg.5.5",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "SCN-GAP-04",
+      "finding": "participant roles and properties are not consumed; names only validate fault references",
+      "owner_bead": "asupersync-5z2scg.5.5",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "SCN-GAP-05",
+      "finding": "expected_invariants are validated but do not select or enforce runner checks",
+      "owner_bead": "asupersync-5z2scg.5.5",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "SCN-GAP-06",
+      "finding": "the library canonical JSON encoder exists, but golden_projection.format still does not select an output projection and redaction remains validation-only",
+      "owner_bead": "asupersync-5z2scg.5.4",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "SCN-GAP-07",
+      "finding": "partition, heal, host crash/restart, and clock skew/reset faults are trace records without simulated behavioral effects",
+      "owner_bead": "asupersync-5z2scg.5.5",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "SCN-GAP-08",
+      "finding": "the YAML schema schedules no workload; narrative send, lease, saga, and 10K-task scenarios can run an empty runtime",
+      "owner_bead": "asupersync-5z2scg.5.5",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "SCN-GAP-09",
+      "finding": "the library canonical JSON encoder exists, but neither CLI exposes a Scenario dump or conversion command",
+      "owner_bead": "asupersync-5z2scg.5.4",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "SCN-GAP-10",
+      "finding": "both application loaders read the entire file without document-byte, scalar-length, mapping-count, sequence-count, or explicit work limits",
+      "owner_bead": "asupersync-5z2scg.5.3",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "SCN-GAP-11",
+      "finding": "unknown fields are accepted and ignored at root and nested typed struct levels",
+      "owner_bead": "asupersync-5z2scg.5.3",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "SCN-GAP-12",
+      "finding": "tools/demos/time_travel.yaml is not the Scenario schema and has no live reader despite the ADR corpus wording",
+      "owner_bead": "asupersync-5z2scg.5.4",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "SCN-GAP-13",
+      "finding": "examples/metadata.json registers the ten root scenario files but not the three frankenlab scenario files",
+      "owner_bead": "asupersync-5z2scg.5.4",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "SCN-GAP-14",
+      "finding": "no typed cross-format YAML to JSON semantic and canonical equivalence proof exists",
+      "owner_bead": "asupersync-5z2scg.5.3",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "SCN-GAP-15",
+      "finding": "semantic errors have field paths but no YAML source spans, and CLI replay adapters drop the runner's ASUP-E401 token",
+      "owner_bead": "asupersync-5z2scg.5.4",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "SCN-GAP-16",
+      "finding": "asupersync replay artifacts use direct fs::write without atomic temp-write, sync, and rename",
+      "owner_bead": "asupersync-5z2scg.5.4",
+      "evidence_state": "BLOCKED_GAP"
+    }
+  ],
+  "validation_commands": [
+    {
+      "lane": "scenario-yaml-capability-inventory-contract",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path artifacts/scenario_yaml_capability_inventory_v1.json --overlay-path docs/scenario_yaml_capability_inventory.md --overlay-path tests/scenario_yaml_capability_inventory_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_scenario_yaml_capability_inventory\" cargo test -p asupersync --test scenario_yaml_capability_inventory_contract -- --nocapture",
+      "claim": "source pins, typed schema, observed grammar, exact corpus, loaders, workflows, diagnostics, routed gaps, docs markers, and negative mutations"
+    },
+    {
+      "lane": "existing-root-scenario-integration",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path artifacts/scenario_yaml_capability_inventory_v1.json --overlay-path docs/scenario_yaml_capability_inventory.md --overlay-path tests/scenario_yaml_capability_inventory_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_scenario_yaml_root_integration\" cargo test -p asupersync --test frankenlab_integration --features test-internals -- --nocapture",
+      "claim": "existing root example Scenario parse, validation, runner, and replay coverage only"
+    },
+    {
+      "lane": "existing-frankenlab-adoption",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path artifacts/scenario_yaml_capability_inventory_v1.json --overlay-path docs/scenario_yaml_capability_inventory.md --overlay-path tests/scenario_yaml_capability_inventory_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_scenario_yaml_frankenlab_adoption\" cargo test -p frankenlab --test adoption_funnel -- --nocapture",
+      "claim": "existing frankenlab example author journey only"
+    }
+  ],
+  "no_claim_boundary": "This A1 packet proves a source-pinned, zero-UNKNOWN inventory and executable parser/typed-corpus baseline only. It does not implement JSON input, canonical output, an owned YAML parser, include merging, network or cancellation simulation, participant workloads, full fault effects, atomic artifact output, resource-policy bounds, stable located diagnostics, broad workspace health, performance, or permission to remove serde_yaml, serde, any field, error, document, workflow, or dependency."
+}

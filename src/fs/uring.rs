@@ -11,14 +11,14 @@
 //!
 //! # Cancel Safety
 //!
-//! - `open`: Cancel-safe (operation completes or fails atomically)
-//! - `read_at`/`write_at`: Cancel-safe (in-flight operations complete in kernel)
-//! - `sync_data`/`sync_all`: Cancel-safe (atomic completion)
-//!
-//! Note: in-flight io_uring operations cannot be assumed cancellable. Drop
-//! requests cancellation for tracked operations, then drains completions so
-//! buffers and the ring mapping are not torn down while the kernel can still
-//! report a result.
+//! - `open`/`create`/`open_with_flags`: synchronous constructors; any create or
+//!   truncate effect completes before the function returns
+//! - `read`/`read_at`/`write`/`write_at` and `sync_data`/`sync_all`: lazy
+//!   futures whose poll drives one request through its terminal completion and
+//!   returns `Ready`; dropping an unpolled future has no effect, and async
+//!   cancellation cannot interleave inside that synchronous poll
+//! - tracked operations used by teardown tests: cancellation is only a request;
+//!   drop drains their terminal completions before releasing kernel-owned data
 
 #![cfg(all(target_os = "linux", feature = "io-uring"))]
 #![allow(unsafe_code)]
@@ -367,11 +367,15 @@ impl IoUringFile {
     /// Creates a new file in write-only mode using io_uring.
     ///
     /// This will create the file if it doesn't exist and truncate it if it does.
+    /// The constructor is synchronous, so those effects complete before return.
     pub fn create(path: impl AsRef<Path>) -> io::Result<Self> {
         Self::open_with_flags(path, libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC, 0o644)
     }
 
     /// Opens a file with custom flags and mode.
+    ///
+    /// This constructor is synchronous. Mutating flags such as `O_CREAT` or
+    /// `O_TRUNC` take effect before this function returns.
     pub fn open_with_flags(path: impl AsRef<Path>, flags: i32, mode: u32) -> io::Result<Self> {
         let path = path.as_ref();
         let c_path = path_to_cstring(path)?;
@@ -460,7 +464,9 @@ impl IoUringFile {
 
     /// Writes bytes to the file at the current position.
     ///
-    /// This uses `IORING_OP_WRITE` for true async write.
+    /// Polling the returned future drives one `IORING_OP_WRITE` through its
+    /// terminal completion and returns `Ready`. Dropping it before its first
+    /// poll has no effect; cancellation cannot interleave inside the poll.
     #[must_use]
     pub fn write<'a>(&'a self, buf: &'a [u8]) -> WriteFuture<'a> {
         WriteFuture {
@@ -474,7 +480,8 @@ impl IoUringFile {
 
     /// Writes bytes to the file at a specific offset.
     ///
-    /// This does not modify the file's current position.
+    /// This does not modify the file's current position. Its poll has the same
+    /// synchronous-completion boundary as [`write`](Self::write).
     #[must_use]
     pub fn write_at<'a>(&'a self, buf: &'a [u8], offset: u64) -> WriteFuture<'a> {
         WriteFuture {
@@ -488,7 +495,9 @@ impl IoUringFile {
 
     /// Syncs file data to disk (equivalent to fdatasync).
     ///
-    /// This uses `IORING_OP_FSYNC` with `IORING_FSYNC_DATASYNC`.
+    /// Polling drives `IORING_OP_FSYNC` with `IORING_FSYNC_DATASYNC` through
+    /// terminal completion and returns `Ready`; dropping it unpolled has no
+    /// effect.
     #[must_use]
     pub fn sync_data(&self) -> SyncFuture<'_> {
         SyncFuture {
@@ -500,7 +509,8 @@ impl IoUringFile {
 
     /// Syncs all file data and metadata to disk (equivalent to fsync).
     ///
-    /// This uses `IORING_OP_FSYNC`.
+    /// Polling drives `IORING_OP_FSYNC` through terminal completion and returns
+    /// `Ready`; dropping it unpolled has no effect.
     #[must_use]
     pub fn sync_all(&self) -> SyncFuture<'_> {
         SyncFuture {
@@ -540,7 +550,8 @@ impl IoUringFile {
 
     /// Truncates or extends the underlying file to the specified length.
     ///
-    /// Uses `ftruncate` syscall (no io_uring opcode for truncate).
+    /// Uses a synchronous `ftruncate` syscall (no io_uring opcode for
+    /// truncate), so the mutation completes before this function returns.
     pub fn set_len(&self, size: u64) -> io::Result<()> {
         let fd = self.inner.fd.as_raw_fd();
         let size_off = libc::off_t::try_from(size)
@@ -567,7 +578,7 @@ impl IoUringFile {
         std_file.metadata().map(Metadata::from_std)
     }
 
-    /// Changes the permissions on the underlying file.
+    /// Changes the permissions on the underlying file synchronously.
     pub fn set_permissions(&self, perm: Permissions) -> io::Result<()> {
         let fd = self.inner.fd.as_raw_fd();
         let std_file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });

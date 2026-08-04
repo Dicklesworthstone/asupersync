@@ -525,6 +525,107 @@ impl Semaphore {
     }
 }
 
+/// Restores an acquisition that unwinds before ownership reaches a permit.
+///
+/// This guard is declared before the semaphore state guard in each poll loop,
+/// so the state mutex is released before rollback runs during unwinding. The
+/// rollback deliberately restores capacity without waking a waiter: the wake
+/// that caused the unwind may itself panic, and invoking it again from `Drop`
+/// would cause a second panic while the thread is already unwinding.
+struct AcquisitionRollbackGuard<'a> {
+    semaphore: &'a Semaphore,
+    count: usize,
+    obligation: Option<ObligationToken<SemaphorePermitKind>>,
+    release_lock_order_on_drop: bool,
+    armed: bool,
+}
+
+impl<'a> AcquisitionRollbackGuard<'a> {
+    #[inline]
+    fn new(semaphore: &'a Semaphore, count: usize) -> Self {
+        Self {
+            semaphore,
+            count,
+            obligation: None,
+            release_lock_order_on_drop: false,
+            armed: false,
+        }
+    }
+
+    #[inline]
+    fn arm(&mut self) {
+        self.armed = true;
+    }
+
+    #[inline]
+    fn record_lock_acquire(&mut self) {
+        if let Some(rank) = self.semaphore.rank {
+            lock_ordering::record_acquire(self.semaphore.name, rank);
+            // Set this only after recording succeeds. A diagnostic panic
+            // before insertion must not release an older same-name permit.
+            self.release_lock_order_on_drop = true;
+        }
+    }
+
+    #[inline]
+    fn set_obligation(&mut self, obligation: Option<ObligationToken<SemaphorePermitKind>>) {
+        debug_assert!(self.obligation.is_none());
+        self.obligation = obligation;
+    }
+
+    #[inline]
+    fn into_borrowed_permit(mut self) -> SemaphorePermit<'a> {
+        let permit = SemaphorePermit {
+            obligation: self.obligation.take(),
+            semaphore: self.semaphore,
+            count: self.count,
+            release_lock_order_on_drop: self.release_lock_order_on_drop,
+        };
+        self.armed = false;
+        self.release_lock_order_on_drop = false;
+        permit
+    }
+
+    #[inline]
+    fn into_owned_permit(mut self, semaphore: Arc<Semaphore>) -> OwnedSemaphorePermit {
+        let permit = OwnedSemaphorePermit {
+            obligation: self.obligation.take(),
+            semaphore,
+            count: self.count,
+        };
+        self.armed = false;
+        self.release_lock_order_on_drop = false;
+        permit
+    }
+}
+
+impl Drop for AcquisitionRollbackGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+
+        if let Some(obligation) = self.obligation.take() {
+            let _proof = obligation.commit();
+        }
+
+        let mut state = self.semaphore.state.lock();
+        if !state.closed {
+            state.permits = state.permits.saturating_add(self.count);
+            self.semaphore
+                .permits_shadow
+                .store(state.permits, Ordering::Relaxed);
+        }
+        drop(state);
+
+        if self.release_lock_order_on_drop {
+            if let Some(rank) = self.semaphore.rank {
+                lock_ordering::record_release(self.semaphore.name, rank);
+            }
+        }
+    }
+}
+
 /// Future returned by `Semaphore::acquire`.
 pub struct AcquireFuture<'a, 'b, Caps = crate::cx::cap::All> {
     semaphore: &'a Semaphore,
@@ -601,6 +702,9 @@ impl<'a, Caps> Future for AcquireFuture<'a, '_, Caps> {
         // and retries the authoritative check.
         let mut incoming_waker = None;
         loop {
+            // This must be declared before `state`: unwind drops locals in
+            // reverse order, releasing the mutex before rollback re-locks it.
+            let mut rollback = AcquisitionRollbackGuard::new(self.semaphore, self.count);
             let mut state = self.semaphore.state.lock();
 
             if state.closed {
@@ -632,11 +736,10 @@ impl<'a, Caps> Future for AcquireFuture<'a, '_, Caps> {
                 self.semaphore
                     .permits_shadow
                     .store(state.permits, Ordering::Relaxed);
+                rollback.arm();
 
                 // Record lock acquisition for ordering tracking
-                if let Some(rank) = self.semaphore.rank {
-                    lock_ordering::record_acquire(self.semaphore.name, rank);
-                }
+                rollback.record_lock_acquire();
 
                 // Optimization: Since we verified we are next in line, we are either
                 // at the front of the queue or the queue is empty. We can just pop
@@ -660,18 +763,13 @@ impl<'a, Caps> Future for AcquireFuture<'a, '_, Caps> {
                 self.completed = true;
                 drop(retired_waiter);
                 drop(incoming_waker);
+                // Reserve before dispatching the next waiter so rollback also
+                // consumes the obligation if that callback unwinds.
+                rollback.set_obligation(reserve_permit_obligation(self.cx.region_id()));
                 if let Some(next) = next_waker {
                     next.wake_by_ref();
                 }
-                return Poll::Ready(Ok(SemaphorePermit {
-                    // br-asupersync-13jmt3: static description (see paired
-                    // comment in try_acquire); count is exposed via
-                    // SemaphorePermit.count.
-                    obligation: reserve_permit_obligation(self.cx.region_id()),
-                    semaphore: self.semaphore,
-                    count: self.count,
-                    release_lock_order_on_drop: true,
-                }));
+                return Poll::Ready(Ok(rollback.into_borrowed_permit()));
             }
 
             if let Some(waiter) = self.waiter
@@ -1039,6 +1137,9 @@ impl<Caps> Future for OwnedAcquireFuture<Caps> {
         // enqueue or replace a waker, then the state is rechecked before use.
         let mut incoming_waker = None;
         loop {
+            // See the borrowed path: the declaration order guarantees that
+            // rollback never attempts to re-lock while `state` is held.
+            let mut rollback = AcquisitionRollbackGuard::new(&this.semaphore, this.count);
             let mut state = this.semaphore.state.lock();
 
             if state.closed {
@@ -1068,11 +1169,10 @@ impl<Caps> Future for OwnedAcquireFuture<Caps> {
                 this.semaphore
                     .permits_shadow
                     .store(state.permits, Ordering::Relaxed);
+                rollback.arm();
 
                 // Record lock acquisition for ordering tracking
-                if let Some(rank) = this.semaphore.rank {
-                    lock_ordering::record_acquire(this.semaphore.name, rank);
-                }
+                rollback.record_lock_acquire();
 
                 // Optimization: O(1) removal instead of O(N) retain
                 let retired_waiter = if let Some(waiter) = this.waiter {
@@ -1094,29 +1194,17 @@ impl<Caps> Future for OwnedAcquireFuture<Caps> {
                 this.completed = true;
                 drop(retired_waiter);
                 drop(incoming_waker);
+                // The uncancelable host-boundary path has no task-local region,
+                // so it intentionally carries no obligation, as before.
+                rollback.set_obligation(
+                    this.cx
+                        .as_ref()
+                        .and_then(|cx| reserve_permit_obligation(cx.region_id())),
+                );
                 if let Some(next) = next_waker {
                     next.wake_by_ref();
                 }
-                return Poll::Ready(Ok(OwnedSemaphorePermit {
-                    // br-asupersync-13jmt3: static description (see paired
-                    // comment in try_acquire); count is exposed via
-                    // OwnedSemaphorePermit.count.
-                    //
-                    // When this future has no task-local `Cx` (the documented
-                    // `new_uncancelable` host-boundary path, e.g. Service
-                    // middleware polled outside a runtime task), there is no
-                    // region to scope an obligation to. Skip the obligation
-                    // rather than panicking — this mirrors the count==0 fast
-                    // path (`obligation: None`). The permit still releases its
-                    // count on drop, and an obligation that is never reserved
-                    // cannot leak, so the no-leak invariant is preserved.
-                    obligation: this
-                        .cx
-                        .as_ref()
-                        .and_then(|cx| reserve_permit_obligation(cx.region_id())),
-                    semaphore: this.semaphore.clone(),
-                    count: this.count,
-                }));
+                return Poll::Ready(Ok(rollback.into_owned_permit(Arc::clone(&this.semaphore))));
             }
 
             if let Some(waiter) = this.waiter
@@ -1306,6 +1394,31 @@ mod tests {
 
         fn wake_by_ref(self: &Arc<Self>) {
             panic!("hostile semaphore waker panics on wake");
+        }
+    }
+
+    #[derive(Debug)]
+    struct PanicOnceWaker(std::sync::atomic::AtomicUsize);
+
+    impl PanicOnceWaker {
+        fn new() -> Arc<Self> {
+            Arc::new(Self(std::sync::atomic::AtomicUsize::new(0)))
+        }
+
+        fn count(&self) -> usize {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    impl std::task::Wake for PanicOnceWaker {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                panic!("semaphore waker panics on its first wake");
+            }
         }
     }
 
@@ -2712,6 +2825,115 @@ mod tests {
                 && matches!(c, Err(AcquireError::Closed))
         );
         crate::test_complete!("close_wake_panic_still_notifies_all_detached_waiters_then_resumes");
+    }
+
+    /// br-asupersync-semaphore-cascade-wake-panic-leaks-permit-gmr4hk:
+    /// acquisition has committed its count before it dispatches the next
+    /// runnable waiter. If that callback unwinds, the count, obligation, and
+    /// lock-order record must roll back without dispatching the same callback
+    /// again during unwinding.
+    #[test]
+    fn borrowed_acquire_rolls_back_when_cascade_wake_panics() {
+        init_test("borrowed_acquire_rolls_back_when_cascade_wake_panics");
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+        lock_ordering::clear_held_locks();
+
+        let semaphore = Semaphore::with_name("tasks", 0);
+        let cx_a = test_cx();
+        let cx_b = test_cx();
+        let mut future_a = semaphore.acquire(&cx_a, 1);
+        let mut future_b = semaphore.acquire(&cx_b, 1);
+        let panic_counter = PanicOnceWaker::new();
+        let panic_waker = Waker::from(Arc::clone(&panic_counter));
+
+        assert!(poll_once(&mut future_a).is_none());
+        assert!(poll_once_with_waker(&mut future_b, &panic_waker).is_none());
+        semaphore.add_permits(2);
+
+        let first =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| poll_once(&mut future_a)));
+        assert!(first.is_err(), "the next waiter's callback must unwind");
+        assert_eq!(
+            panic_counter.count(),
+            1,
+            "rollback must not dispatch the same waiter during unwind"
+        );
+        assert_eq!(
+            semaphore.available_permits(),
+            2,
+            "A's interrupted acquisition must restore its permit"
+        );
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+        assert!(
+            lock_ordering::current_held_locks().is_empty(),
+            "A's interrupted acquisition must not leave a held rank"
+        );
+
+        drop(future_a);
+        let permit_b = poll_once(&mut future_b)
+            .expect("B must be runnable after A rolls back")
+            .expect("B must acquire its permit");
+        assert_eq!(semaphore.available_permits(), 1);
+        drop(permit_b);
+        assert_eq!(semaphore.available_permits(), 2);
+        assert_eq!(panic_counter.count(), 1);
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+        assert!(lock_ordering::current_held_locks().is_empty());
+
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+        lock_ordering::clear_held_locks();
+        crate::test_complete!("borrowed_acquire_rolls_back_when_cascade_wake_panics");
+    }
+
+    #[test]
+    fn owned_acquire_rolls_back_when_cascade_wake_panics() {
+        init_test("owned_acquire_rolls_back_when_cascade_wake_panics");
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+        lock_ordering::clear_held_locks();
+
+        let semaphore = Arc::new(Semaphore::with_name("tasks", 0));
+        let mut future_a = OwnedAcquireFuture::new(Arc::clone(&semaphore), test_cx(), 1);
+        let mut future_b = OwnedAcquireFuture::new(Arc::clone(&semaphore), test_cx(), 1);
+        let panic_counter = PanicOnceWaker::new();
+        let panic_waker = Waker::from(Arc::clone(&panic_counter));
+
+        assert!(poll_once(&mut future_a).is_none());
+        assert!(poll_once_with_waker(&mut future_b, &panic_waker).is_none());
+        semaphore.add_permits(2);
+
+        let first =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| poll_once(&mut future_a)));
+        assert!(first.is_err(), "the next waiter's callback must unwind");
+        assert_eq!(
+            panic_counter.count(),
+            1,
+            "rollback must not dispatch the same waiter during unwind"
+        );
+        assert_eq!(
+            semaphore.available_permits(),
+            2,
+            "A's interrupted owned acquisition must restore its permit"
+        );
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+        assert!(
+            lock_ordering::current_held_locks().is_empty(),
+            "A's interrupted owned acquisition must not leave a held rank"
+        );
+
+        drop(future_a);
+        let permit_b = poll_once(&mut future_b)
+            .expect("B must be runnable after A rolls back")
+            .expect("B must acquire its owned permit");
+        assert_eq!(semaphore.available_permits(), 1);
+        drop(permit_b);
+        assert_eq!(semaphore.available_permits(), 2);
+        assert_eq!(panic_counter.count(), 1);
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+        assert!(lock_ordering::current_held_locks().is_empty());
+
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+        lock_ordering::clear_held_locks();
+        crate::test_complete!("owned_acquire_rolls_back_when_cascade_wake_panics");
     }
 
     #[test]

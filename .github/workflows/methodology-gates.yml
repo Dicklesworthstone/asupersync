@@ -96,6 +96,9 @@ jobs:
             baseline_p50=$(jq -r --arg name "$bench_name" \
               '.baselines[] | select(.operation | endswith($name)) | .p50_ns // empty' \
               "$BASELINE_FILE" 2>/dev/null | head -1)
+            baseline_ci95_upper=$(jq -r --arg name "$bench_name" \
+              '.baselines[] | select(.operation | endswith($name)) | .ci95_upper_ns // empty' \
+              "$BASELINE_FILE" 2>/dev/null | head -1)
 
             if [ -z "$baseline_p50" ] || [ "$baseline_p50" = "null" ]; then
               continue
@@ -112,8 +115,19 @@ jobs:
               print('0.00')
           ")
 
-            # Check for regression > 5%
-            is_regression=$(python3 -c "print('yes' if float('$delta_pct') > 5.0 else 'no')")
+            # Regression check mirrors benches/phase6_gate.rs
+            # (br-asupersync-87h3es): fail only above
+            # max(p50 * 1.05, ci95_upper * 1.02, p50 + 0.6ns). Ambient
+            # same-host noise exceeds 5% on few-ns rows and quick-mode CIs
+            # can collapse to [p50, p50], so the recorded ci95 envelope plus
+            # an absolute sub-ns floor form the per-row noise allowance.
+            is_regression=$(python3 -c "
+          base=$baseline_p50; cur=$current_p50
+          ci_raw='${baseline_ci95_upper}'
+          ci=float(ci_raw) if ci_raw not in ('', 'null') else 0.0
+          limit=max(base*1.05, ci*1.02, base+0.6)
+          print('yes' if cur > limit else 'no')
+          ")
 
             if [ "$is_regression" = "yes" ]; then
               REGRESSED=$((REGRESSED + 1))
@@ -132,14 +146,14 @@ jobs:
           DURATION=$(( END_MS - START_MS ))
 
           if [ "$REGRESSED" -gt 0 ]; then
-            echo '{"gate_name":"baseline","status":"fail","duration_ms":'$DURATION',"artifact_path":"artifacts/baseline.json","failure_reason":"'$REGRESSED' benchmarks regressed >5%"}' >> "$GITHUB_STEP_SUMMARY"
+            echo '{"gate_name":"baseline","status":"fail","duration_ms":'$DURATION',"artifact_path":"artifacts/baseline.json","failure_reason":"'$REGRESSED' benchmarks regressed beyond max(5%, ci95 envelope)"}' >> "$GITHUB_STEP_SUMMARY"
             {
               echo "summary<<EOF"
-              echo "FAIL: $REGRESSED of $TOTAL benchmarks regressed >5%"
+              echo "FAIL: $REGRESSED of $TOTAL benchmarks regressed beyond max(5%, ci95 envelope)"
               echo -e "$REGRESSIONS"
               echo "EOF"
             } >> "$GITHUB_OUTPUT"
-            echo "::error::Baseline gate FAILED: $REGRESSED benchmarks regressed >5%"
+            echo "::error::Baseline gate FAILED: $REGRESSED benchmarks regressed beyond max(5%, ci95 envelope)"
             exit 1
           else
             echo '{"gate_name":"baseline","status":"pass","duration_ms":'$DURATION',"artifact_path":"artifacts/baseline.json","failure_reason":""}' >> "$GITHUB_STEP_SUMMARY"

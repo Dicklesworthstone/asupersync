@@ -507,7 +507,12 @@ impl AsyncRead for WasmReadableStreamSource {
 pub struct WasmWritableStreamSink {
     writer: WritableStreamDefaultWriter,
     pending_ready: Option<JsFuture>,
-    pending_write: Option<(usize, JsFuture)>,
+    /// Completion of a chunk already accepted by `poll_write`.
+    ///
+    /// The originating call has already received its own byte count. Later
+    /// calls only drain this promise for completion or error; they must never
+    /// credit its length to a different caller buffer.
+    pending_write: Option<JsFuture>,
     pending_close: Option<JsFuture>,
     closed: bool,
 }
@@ -573,7 +578,7 @@ impl WasmWritableStreamSink {
     }
 
     fn poll_inflight_write(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let Some((_, pending)) = self.pending_write.as_mut() else {
+        let Some(pending) = self.pending_write.as_mut() else {
             return Poll::Ready(Ok(()));
         };
         match Pin::new(pending).poll(cx) {
@@ -642,22 +647,13 @@ impl AsyncWrite for WasmWritableStreamSink {
             return Poll::Ready(Ok(0));
         }
 
-        if let Some((requested, pending)) = self.pending_write.as_mut() {
-            return match Pin::new(pending).poll(cx) {
-                Poll::Pending => Poll::Pending,
-                Poll::Ready(Err(err)) => {
-                    self.pending_write = None;
-                    Poll::Ready(Err(js_host_io_error(
-                        &err,
-                        "WritableStreamDefaultWriter.write",
-                    )))
-                }
-                Poll::Ready(Ok(_)) => {
-                    let written = *requested;
-                    self.pending_write = None;
-                    Poll::Ready(Ok(written))
-                }
-            };
+        // br-asupersync-wj4avr: a pending promise belongs to a chunk that a
+        // previous call already queued. Drain it without attributing its byte
+        // count to `buf`; cancellation may have replaced the caller buffer.
+        match self.poll_inflight_write(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+            Poll::Ready(Ok(())) => {}
         }
 
         match self.poll_ready(cx) {
@@ -668,31 +664,13 @@ impl AsyncWrite for WasmWritableStreamSink {
 
         let chunk = Uint8Array::new_with_length(buf.len() as u32);
         chunk.copy_from(buf);
-        self.pending_write = Some((
-            buf.len(),
-            JsFuture::from(self.writer.write_with_chunk(&chunk.into())),
-        ));
+        self.pending_write = Some(JsFuture::from(self.writer.write_with_chunk(&chunk.into())));
 
-        match self.pending_write.as_mut() {
-            Some((requested, pending)) => match Pin::new(pending).poll(cx) {
-                Poll::Pending => Poll::Pending,
-                Poll::Ready(Err(err)) => {
-                    self.pending_write = None;
-                    Poll::Ready(Err(js_host_io_error(
-                        &err,
-                        "WritableStreamDefaultWriter.write",
-                    )))
-                }
-                Poll::Ready(Ok(_)) => {
-                    let written = *requested;
-                    self.pending_write = None;
-                    Poll::Ready(Ok(written))
-                }
-            },
-            None => Poll::Ready(Err(io::Error::other(
-                "internal error: missing pending write after scheduling",
-            ))),
-        }
+        // `WritableStreamDefaultWriter.write()` synchronously queues an owned
+        // Uint8Array. Its promise reports eventual sink completion, so retain
+        // it for the next write/flush/shutdown while crediting this call's
+        // accepted buffer immediately.
+        Poll::Ready(Ok(buf.len()))
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {

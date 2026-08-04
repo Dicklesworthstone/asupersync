@@ -64,6 +64,14 @@ pub mod gf2;
 pub mod incident;
 pub mod independence;
 pub mod integrity;
+#[allow(
+    dead_code,
+    reason = "A2 keeps the owned LZ4 codec private and inactive until A4 integration"
+)]
+mod lz4_block;
+#[cfg(any(feature = "fuzz", feature = "test-internals"))]
+#[doc(hidden)]
+pub use lz4_block::harness as lz4_harness;
 pub mod minimizer;
 pub mod raptorq_journal;
 pub mod raptorq_journal_writer;
@@ -119,8 +127,10 @@ pub use event_structure::{
     Event, EventId, EventStructure, HdaCell, HdaComplex, OwnerKey, TracePoset,
 };
 pub use file::{
-    CompressionMode, TRACE_FILE_VERSION, TRACE_MAGIC, TraceEventIterator, TraceFileConfig,
-    TraceFileError, TraceReader, TraceWriter, read_trace, write_trace,
+    CompressionMode, FLAG_CHECKSUMMED, TRACE_CHECKSUM_LEN, TRACE_FILE_VERSION, TRACE_MAGIC,
+    TraceEventIterator, TraceFileConfig, TraceFileError, TraceFileMigrationReceipt, TraceReader,
+    TraceRecovery, TraceRecoveryStatus, TraceWriter, migrate_trace_file, read_trace,
+    recover_trace_prefix, write_trace,
 };
 pub use filter::{EventCategory, FilterBuilder, FilterableEvent, TraceFilter};
 #[cfg(feature = "test-internals")]

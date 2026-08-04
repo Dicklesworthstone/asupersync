@@ -273,8 +273,7 @@ impl<T> TaskHandle<T> {
         receiver: oneshot::Receiver<Result<T, JoinError>>,
         admitted: std::sync::Arc<crate::runtime::spawn_mailbox::AdmittedTaskSlot>,
     ) -> Self {
-        let requested_cancel_reason =
-            crate::runtime::spawn_mailbox::register_pending_cancel_rendezvous(&admitted);
+        let requested_cancel_reason = admitted.pending_handle_cancel_reason();
         Self {
             task_id: provisional_task_id,
             receiver,
@@ -433,6 +432,75 @@ impl<T> TaskHandle<T> {
                 self.terminal_consumed = true;
                 Err(JoinError::Cancelled(self.closed_reason()))
             }
+        }
+    }
+
+    /// Polls for the task's terminal result, keeping the wake registration
+    /// alive on this handle.
+    ///
+    /// This is the poll-based counterpart to [`join`](Self::join), for callers
+    /// that cannot hold a [`JoinFuture`] across polls — a combinator scanning
+    /// many handles within a single poll, for example. The waiter identity
+    /// lives on this handle's own receiver, so a [`Poll::Pending`] result
+    /// leaves the handle registered for wakeup. Constructing a fresh `join`
+    /// future per poll instead registers a waiter and then retires it again
+    /// when that future drops, which parks the caller with no wake source at
+    /// all (br-asupersync-tncxj9).
+    ///
+    /// [`Poll::Pending`]: std::task::Poll::Pending
+    ///
+    /// The registration is retired when the task's result is consumed or when
+    /// this handle is dropped, whichever comes first. A caller that stops
+    /// polling but keeps the handle alive therefore keeps one waiter slot per
+    /// handle and may observe a spurious wake once the task completes, which is
+    /// the ordinary cost of a wake registration outliving a single poll.
+    ///
+    /// # Cancel Safety
+    ///
+    /// Unlike [`join`](Self::join), this does **not** abort the task when the
+    /// caller stops polling: there is no future whose drop could carry that
+    /// meaning. A caller that wants "stop waiting implies stop the task" calls
+    /// [`abort`](Self::abort) or [`abort_with_reason`](Self::abort_with_reason)
+    /// explicitly. The owning region remains the quiescence backstop either
+    /// way, so a handle that is simply never polled again cannot orphan its
+    /// task.
+    ///
+    /// # Errors
+    ///
+    /// Mirrors [`join`](Self::join): [`JoinError::Cancelled`] if the task was
+    /// cancelled, [`JoinError::Panicked`] if it panicked, and
+    /// [`JoinError::PolledAfterCompletion`] once a terminal result has already
+    /// been consumed through this handle.
+    #[inline]
+    pub fn poll_join(
+        &mut self,
+        ctx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<T, JoinError>> {
+        if self.terminal_consumed {
+            return std::task::Poll::Ready(Err(JoinError::PolledAfterCompletion));
+        }
+        match self.receiver.poll_recv_uninterruptible(ctx) {
+            std::task::Poll::Ready(Ok(result)) => {
+                self.terminal_consumed = true;
+                std::task::Poll::Ready(strengthen_cancelled_result(
+                    result,
+                    &self.requested_cancel_reason,
+                ))
+            }
+            std::task::Poll::Ready(Err(oneshot::RecvError::Closed)) => {
+                self.terminal_consumed = true;
+                std::task::Poll::Ready(Err(JoinError::Cancelled(self.closed_reason())))
+            }
+            std::task::Poll::Ready(Err(oneshot::RecvError::Cancelled)) => {
+                unreachable!("an uninterruptible receive cannot return Cancelled");
+            }
+            std::task::Poll::Ready(Err(oneshot::RecvError::PolledAfterCompletion)) => {
+                unreachable!(
+                    "poll_recv_uninterruptible tracks no per-future completion state; \
+                     terminal repolls are guarded by TaskHandle::terminal_consumed"
+                );
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
         }
     }
 
@@ -1490,6 +1558,162 @@ mod tests {
 
         let second = handle.try_join();
         assert!(matches!(second, Err(JoinError::PolledAfterCompletion)));
+    }
+
+    // =========================================================================
+    // poll_join: wake registration must survive a Pending poll
+    // (br-asupersync-tncxj9)
+    // =========================================================================
+
+    fn counting_waker(counter: Arc<std::sync::atomic::AtomicUsize>) -> Waker {
+        struct CountingWaker {
+            counter: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        impl std::task::Wake for CountingWaker {
+            fn wake(self: Arc<Self>) {
+                self.counter
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.counter
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
+        Waker::from(Arc::new(CountingWaker { counter }))
+    }
+
+    #[test]
+    fn poll_join_pending_registration_survives_repolls_and_completion_wakes() {
+        init_test("poll_join_pending_registration_survives_repolls_and_completion_wakes");
+        let cx = test_cx();
+        let task_id = TaskId::from_arena(ArenaIndex::new(15, 0));
+        let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+        let mut handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
+
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waker = counting_waker(Arc::clone(&wakes));
+        let mut poll_cx = Context::from_waker(&waker);
+
+        // Poll twice. The second Pending must not have discarded the
+        // registration installed by the first: a per-poll join future would
+        // retire its waiter on drop and leave the caller with no wake source.
+        for poll in 0..2 {
+            let pending = handle.poll_join(&mut poll_cx);
+            crate::assert_with_log!(
+                pending.is_pending(),
+                "unfinished task polls pending",
+                "Poll::Pending",
+                format!("poll {poll}: {pending:?}")
+            );
+        }
+        crate::assert_with_log!(
+            wakes.load(std::sync::atomic::Ordering::Relaxed) == 0,
+            "a still-running task owes no wake",
+            0,
+            wakes.load(std::sync::atomic::Ordering::Relaxed)
+        );
+
+        tx.send(&cx, Ok::<i32, JoinError>(11))
+            .expect("result sends");
+        crate::assert_with_log!(
+            wakes.load(std::sync::atomic::Ordering::Relaxed) == 1,
+            "completion wakes the waker registered by the last poll_join",
+            1,
+            wakes.load(std::sync::atomic::Ordering::Relaxed)
+        );
+
+        let ready = handle.poll_join(&mut poll_cx);
+        crate::assert_with_log!(
+            matches!(ready, Poll::Ready(Ok(11))),
+            "poll_join yields the task result",
+            "Poll::Ready(Ok(11))",
+            format!("{ready:?}")
+        );
+
+        let repoll = handle.poll_join(&mut poll_cx);
+        crate::assert_with_log!(
+            matches!(repoll, Poll::Ready(Err(JoinError::PolledAfterCompletion))),
+            "terminal poll_join repoll fails closed",
+            "Poll::Ready(Err(JoinError::PolledAfterCompletion))",
+            format!("{repoll:?}")
+        );
+        crate::test_complete!(
+            "poll_join_pending_registration_survives_repolls_and_completion_wakes"
+        );
+    }
+
+    #[test]
+    fn poll_join_pending_does_not_request_cancellation() {
+        init_test("poll_join_pending_does_not_request_cancellation");
+        let cx = test_cx();
+        let task_id = TaskId::from_arena(ArenaIndex::new(15, 1));
+        let (_tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+        let mut handle = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
+
+        let waker = Waker::noop();
+        let mut poll_cx = Context::from_waker(waker);
+        assert!(handle.poll_join(&mut poll_cx).is_pending());
+        // Walking away from a poll-based join is not a cancellation request:
+        // unlike JoinFuture there is no drop that could carry that meaning.
+        drop(handle);
+
+        let (cancel_requested, cancel_reason_is_none) = {
+            let guard = cx.inner.read();
+            (guard.cancel_requested, guard.cancel_reason.is_none())
+        };
+        crate::assert_with_log!(
+            !cancel_requested,
+            "abandoning poll_join must not request cancellation",
+            false,
+            cancel_requested
+        );
+        crate::assert_with_log!(
+            cancel_reason_is_none,
+            "abandoning poll_join must not stamp a cancel reason",
+            true,
+            cancel_reason_is_none
+        );
+        crate::test_complete!("poll_join_pending_does_not_request_cancellation");
+    }
+
+    #[test]
+    fn poll_join_closed_channel_maps_to_cancelled_with_context_reason() {
+        init_test("poll_join_closed_channel_maps_to_cancelled_with_context_reason");
+        let cx = test_cx();
+        let task_id = TaskId::from_arena(ArenaIndex::new(15, 2));
+        let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+        let mut handle = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
+
+        handle.abort_with_reason(CancelReason::timeout());
+        drop(tx);
+
+        let waker = Waker::noop();
+        let mut poll_cx = Context::from_waker(waker);
+        let closed = handle.poll_join(&mut poll_cx);
+        crate::assert_with_log!(
+            matches!(
+                closed,
+                Poll::Ready(Err(JoinError::Cancelled(CancelReason {
+                    kind: CancelKind::Timeout,
+                    ..
+                })))
+            ),
+            "closed join channel preserves the requested cancel reason",
+            "Poll::Ready(Err(JoinError::Cancelled(Timeout)))",
+            format!("{closed:?}")
+        );
+
+        let repoll = handle.poll_join(&mut poll_cx);
+        crate::assert_with_log!(
+            matches!(repoll, Poll::Ready(Err(JoinError::PolledAfterCompletion))),
+            "closed poll_join repoll fails closed",
+            "Poll::Ready(Err(JoinError::PolledAfterCompletion))",
+            format!("{repoll:?}")
+        );
+        crate::test_complete!("poll_join_closed_channel_maps_to_cancelled_with_context_reason");
     }
 
     #[test]

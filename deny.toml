@@ -1,0 +1,73 @@
+# Canonical cargo-deny policy for asupersync.
+#
+# Tool version: cargo-deny 0.19.4.
+# The runner exports ASUPERSYNC_ADVISORY_DB_ROOT and records the exact RustSec
+# database revision and freshness in its receipt.
+
+[graph]
+all-features = true
+targets = [
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "wasm32-unknown-unknown",
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+]
+
+[advisories]
+db-path = "${ASUPERSYNC_ADVISORY_DB_ROOT:-/tmp/asupersync-advisory-dbs}"
+db-urls = ["https://github.com/RustSec/advisory-db"]
+git-fetch-with-cli = true
+maximum-db-staleness = "P7D"
+yanked = "deny"
+unmaintained = "workspace"
+unsound = "all"
+unused-ignored-advisory = "warn"
+ignore = [
+    { id = "RUSTSEC-2025-0134", reason = "Temporary direct-edge exception through 2026-09-01; migrate rustls-pemfile callers to rustls-pki-types PemObject under asupersync-mnotoo.4.3." },
+]
+
+[licenses]
+confidence-threshold = 0.93
+include-dev = true
+unused-allowed-license = "warn"
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "LGPL-2.1-or-later",
+    "LicenseRef-MIT-OpenAI-Anthropic-Rider",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[licenses.private]
+ignore = false
+
+[bans]
+# Existing duplicate families are governed by the checked ratchet in
+# artifacts/dependency_supply_chain_policy_v1.json. cargo-deny still emits
+# every inclusion graph; the runner rejects any version outside the baseline.
+multiple-versions = "warn"
+multiple-versions-include-dev = true
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+required-git-spec = "rev"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+unused-allowed-source = "deny"

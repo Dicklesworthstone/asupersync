@@ -1,0 +1,749 @@
+{
+  "schema_version": 1,
+  "artifact_id": "oslock-inventory-gate-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-0h6myr.1.1",
+  "capability_id": "CAP-SYNC-LOCKS",
+  "baseline_revision": "d6bfec75aba10957b6a3e29654a29e650b45d510",
+  "captured_date_utc": "2026-07-25",
+  "authority": {
+    "plan": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md",
+    "registry": "artifacts/dependency_capability_registry_v1.json",
+    "registry_disposition": "KEEP_UNTIL_PARITY",
+    "registry_evidence_state": "BASELINE_PLANNED",
+    "registry_cutover_state": "KEEP_INCUMBENT",
+    "gate_decision": "DEFER",
+    "gate_state": "TERMINAL",
+    "decision_basis": "The incumbent is spread across 240 Rust files and 552 exact source lines, owns production Condvar and visible guard semantics, and saves four package versions in 48 of 52 canonical graph cells. A safe std-backed replacement remains plausible, but the required 1/8/32/64-core Linux and Apple throughput, p50/p95/p99/p999, fairness, starvation, cancellation-adjacent, allocation, RSS, compile-time, binary-size, and stable-lane comparison receipts do not exist. Missing parity evidence cannot authorize implementation or cutover.",
+    "dependency_exit_allowed": false,
+    "implementation_children_authorized": false,
+    "owner_review_required_to_change": true
+  },
+  "policy": {
+    "zero_unknown_required": true,
+    "unknown_rows": 0,
+    "inventory_state": "BASELINED_WITH_ROUTED_GAPS",
+    "evidence_state": "MEASURED_TERMINAL_DEFER",
+    "accepted_states": [
+      "PRESENT",
+      "ABSENT",
+      "PARTIAL",
+      "MEASURED_PASS",
+      "MEASURED_FAIL",
+      "BLOCKED_MISSING_EVIDENCE",
+      "ROUTED",
+      "DEFER"
+    ],
+    "missing_evidence_is_parity": false,
+    "source_changes_authorized": false
+  },
+  "source_pins": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
+      "line_count": 991
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "9fa12e8af1e6b15a3070d88d62b2b81b8ba49c0e9d8592c1d1682f1cd72a4461",
+      "line_count": 4664
+    },
+    {
+      "path": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md",
+      "sha256": "401b39c99f4909a7e805e0992327d2408fe54aed65610783830031b66083b7b0",
+      "line_count": 332
+    },
+    {
+      "path": "README.md",
+      "sha256": "8625ba7d6b7a28506beb6622e1065018d8a5ef83126d9765bbf8d26aecaf822e",
+      "line_count": 2102
+    },
+    {
+      "path": "artifacts/dependency_capability_registry_v1.json",
+      "sha256": "82a73ec1c14fbe317611f6d592af480d75d002cbe9333045ab74840bcaf1c081",
+      "line_count": 6907
+    },
+    {
+      "path": "artifacts/dependency_marginal_ledger_v1.json",
+      "sha256": "832e8d68eefe9400a246ea619a250ea91bcf16a57d5fe728a6ce45e25bbdb4a6",
+      "line_count": 187712
+    },
+    {
+      "path": "src/runtime/blocking_pool.rs",
+      "sha256": "6bbf8cf9f31a911685195ed715622609bdbb3d395bdf1ab8ff82220e618ccf53",
+      "line_count": 3626
+    },
+    {
+      "path": "src/service/discover.rs",
+      "sha256": "29db6767bbe5649e7e3608d86a458f8b9c9f694306ac85f41bd28f2a4d63b81b",
+      "line_count": 2421
+    },
+    {
+      "path": "src/runtime/io_driver.rs",
+      "sha256": "187bb4543a3f5fb46f2f549cec24262f671ef9794e2be27617fd614526da0e94",
+      "line_count": 2952
+    },
+    {
+      "path": "src/runtime/state.rs",
+      "sha256": "7f4c3d765f0cf37027e7829360d97aa2769d77bb5e857d0a4230fb0bed62fb5b",
+      "line_count": 17973
+    },
+    {
+      "path": "src/service/steer.rs",
+      "sha256": "c15a7be8a1f186e2f974775424a055f10724388e9f2954f43081691317472693",
+      "line_count": 782
+    },
+    {
+      "path": "src/sync/mutex.rs",
+      "sha256": "3b3464d53f39098560af73e3ebff59c2e498f89de1ac543a7b74e6093200c577",
+      "line_count": 4867
+    },
+    {
+      "path": "src/sync/rwlock.rs",
+      "sha256": "763425ac0e1a8e7aa537269904a5b60397e19bfd208d8b1ea2f9845f501b0553",
+      "line_count": 5443
+    }
+  ],
+  "source_census": {
+    "algorithm": "Over the clean baseline tree, recursively inspect Rust files under benches, examples, fuzz, src, and tests; exclude tests/oslock_inventory_gate_contract.rs; emit one UTF-8 record path:text for every line containing the dependency token, preserving duplicate records; sort records bytewise; terminate every record with LF; hash the complete stream with SHA-256. Line numbers are intentionally excluded so unrelated insertions cannot invalidate an unchanged dependency use.",
+    "roots": [
+      "benches",
+      "examples",
+      "fuzz",
+      "src",
+      "tests"
+    ],
+    "excluded_paths": [
+      "tests/oslock_inventory_gate_contract.rs"
+    ],
+    "matching_file_count": 240,
+    "matching_line_count": 552,
+    "sha256": "aaeb074cb4c2cac65a46c01d04b78f4585c81da2ce8aad0be1970bfdac6ad224",
+    "scope_counts": [
+      {
+        "scope": "benches",
+        "file_count": 1,
+        "occurrence_count": 1
+      },
+      {
+        "scope": "examples",
+        "file_count": 1,
+        "occurrence_count": 4
+      },
+      {
+        "scope": "fuzz",
+        "file_count": 13,
+        "occurrence_count": 31
+      },
+      {
+        "scope": "src",
+        "file_count": 175,
+        "occurrence_count": 426
+      },
+      {
+        "scope": "tests",
+        "file_count": 50,
+        "occurrence_count": 90
+      }
+    ],
+    "workload_counts": [
+      {
+        "workload": "benchmarks",
+        "file_count": 1,
+        "occurrence_count": 1
+      },
+      {
+        "workload": "channels",
+        "file_count": 8,
+        "occurrence_count": 27
+      },
+      {
+        "workload": "database",
+        "file_count": 4,
+        "occurrence_count": 15
+      },
+      {
+        "workload": "deterministic_lab",
+        "file_count": 10,
+        "occurrence_count": 17
+      },
+      {
+        "workload": "examples",
+        "file_count": 1,
+        "occurrence_count": 4
+      },
+      {
+        "workload": "fuzz",
+        "file_count": 13,
+        "occurrence_count": 31
+      },
+      {
+        "workload": "integration_tests",
+        "file_count": 50,
+        "occurrence_count": 90
+      },
+      {
+        "workload": "messaging",
+        "file_count": 8,
+        "occurrence_count": 54
+      },
+      {
+        "workload": "networking",
+        "file_count": 11,
+        "occurrence_count": 13
+      },
+      {
+        "workload": "observability",
+        "file_count": 12,
+        "occurrence_count": 22
+      },
+      {
+        "workload": "other_runtime_surfaces",
+        "file_count": 39,
+        "occurrence_count": 66
+      },
+      {
+        "workload": "protocol_and_server",
+        "file_count": 8,
+        "occurrence_count": 30
+      },
+      {
+        "workload": "raptorq",
+        "file_count": 1,
+        "occurrence_count": 6
+      },
+      {
+        "workload": "runtime_scheduler_reactors",
+        "file_count": 32,
+        "occurrence_count": 62
+      },
+      {
+        "workload": "services",
+        "file_count": 8,
+        "occurrence_count": 15
+      },
+      {
+        "workload": "structured_app",
+        "file_count": 4,
+        "occurrence_count": 25
+      },
+      {
+        "workload": "structured_concurrency_core",
+        "file_count": 17,
+        "occurrence_count": 48
+      },
+      {
+        "workload": "sync_primitives",
+        "file_count": 8,
+        "occurrence_count": 21
+      },
+      {
+        "workload": "transport",
+        "file_count": 5,
+        "occurrence_count": 5
+      }
+    ]
+  },
+  "import_inventory": {
+    "direct_use_statement_count": 178,
+    "forms": [
+      {
+        "form": "Mutex",
+        "count": 127
+      },
+      {
+        "form": "RwLock",
+        "count": 30
+      },
+      {
+        "form": "{Mutex, RwLock}",
+        "count": 7
+      },
+      {
+        "form": "{Mutex, MutexGuard}",
+        "count": 4
+      },
+      {
+        "form": "{Condvar, Mutex}",
+        "count": 3
+      },
+      {
+        "form": "Mutex as ParkingMutex",
+        "count": 3
+      },
+      {
+        "form": "{Mutex, RwLock, RwLockReadGuard}",
+        "count": 1
+      },
+      {
+        "form": "{Mutex, MutexGuard, RwLock}",
+        "count": 1
+      },
+      {
+        "form": "{Mutex as ParkingMutex, RwLock}",
+        "count": 1
+      },
+      {
+        "form": "Mutex as PoolMutex",
+        "count": 1
+      }
+    ]
+  },
+  "primitive_surface": [
+    {
+      "surface_id": "OSLOCK-MUTEX",
+      "state": "PRESENT",
+      "incumbent_surface": "parking_lot::Mutex and aliases ParkingMutex and PoolMutex",
+      "operations": [
+        "new",
+        "lock",
+        "try_lock",
+        "get_mut",
+        "into_inner"
+      ],
+      "parity_obligation": "non-poisoning acquisition behavior, panic unlock, try semantics, guard Send/Sync shape, and hot-path cost"
+    },
+    {
+      "surface_id": "OSLOCK-RWLOCK",
+      "state": "PRESENT",
+      "incumbent_surface": "parking_lot::RwLock",
+      "operations": [
+        "new",
+        "read",
+        "write",
+        "try_read",
+        "try_write",
+        "get_mut",
+        "into_inner"
+      ],
+      "parity_obligation": "reader/writer progress, writer preference, starvation bounds, downgrade behavior where wrapped, and hot-path cost"
+    },
+    {
+      "surface_id": "OSLOCK-CONDVAR",
+      "state": "PRESENT",
+      "incumbent_surface": "parking_lot::Condvar",
+      "production_paths": [
+        "src/runtime/blocking_pool.rs",
+        "src/service/discover.rs"
+      ],
+      "test_only_paths": [
+        "src/net/resolve.rs"
+      ],
+      "operations": [
+        "wait",
+        "wait_for",
+        "notify_one",
+        "notify_all"
+      ],
+      "parity_obligation": "predicate-loop discipline, atomic unlock/park/relock, timeout accounting, wake cardinality, shutdown wakeup, and poison recovery"
+    },
+    {
+      "surface_id": "OSLOCK-MUTEX-GUARD",
+      "state": "PRESENT",
+      "incumbent_surface": "parking_lot::MutexGuard",
+      "parity_obligation": "deref, mutable deref, drop unlock, lifetime shape, and visible signature migration"
+    },
+    {
+      "surface_id": "OSLOCK-RWLOCK-READ-GUARD",
+      "state": "PRESENT",
+      "incumbent_surface": "parking_lot::RwLockReadGuard",
+      "parity_obligation": "borrowed read view lifetime and watch-channel receiver reference behavior"
+    },
+    {
+      "surface_id": "OSLOCK-RWLOCK-WRITE-GUARD",
+      "state": "ABSENT",
+      "incumbent_surface": "No direct parking_lot::RwLockWriteGuard import or qualified signature was found in the exact census.",
+      "parity_obligation": "Any future appearance reopens this inventory."
+    },
+    {
+      "surface_id": "OSLOCK-MAPPED-GUARDS",
+      "state": "PRESENT",
+      "incumbent_surface": "No direct parking_lot mapped-guard spelling is present; Asupersync public Mutex and RwLock wrappers expose their own borrowed and owned mapped guards while parking_lot remains in their waiter-state implementation.",
+      "parity_obligation": "map, try_map, owned projection, drop unlock, poisoning, and cancellation semantics must remain owned by Asupersync"
+    },
+    {
+      "surface_id": "OSLOCK-TYPE-ALIASES",
+      "state": "PRESENT",
+      "incumbent_surface": "ParkingMutex and PoolMutex import aliases plus SharedRegistry and NamedHandleSlot example aliases",
+      "parity_obligation": "All aliases must migrate atomically with their call sites; aliases must not conceal a mixed backend."
+    }
+  ],
+  "visible_and_crate_signatures": [
+    {
+      "surface_id": "OSLOCK-VISIBLE-CX-INNER",
+      "path": "src/cx/cx.rs",
+      "line": 905,
+      "visibility": "pub(crate)",
+      "signature": "Cx::from_inner accepts Arc<parking_lot::RwLock<CxInner>>"
+    },
+    {
+      "surface_id": "OSLOCK-VISIBLE-IO-LOCK",
+      "path": "src/runtime/io_driver.rs",
+      "line": 682,
+      "visibility": "pub",
+      "signature": "IoDriverHandle::lock returns parking_lot::MutexGuard<IoDriver>"
+    },
+    {
+      "surface_id": "OSLOCK-VISIBLE-IO-TRY-LOCK",
+      "path": "src/runtime/io_driver.rs",
+      "line": 688,
+      "visibility": "pub",
+      "signature": "IoDriverHandle::try_lock returns Option<parking_lot::MutexGuard<IoDriver>>"
+    },
+    {
+      "surface_id": "OSLOCK-VISIBLE-RUNTIME-IO",
+      "path": "src/runtime/state.rs",
+      "line": 1844,
+      "visibility": "pub",
+      "signature": "RuntimeState::io_driver_mut returns Option<parking_lot::MutexGuard<IoDriver>>"
+    },
+    {
+      "surface_id": "OSLOCK-VISIBLE-CANCEL-VALIDATOR",
+      "path": "src/runtime/state.rs",
+      "line": 1929,
+      "visibility": "pub",
+      "signature": "RuntimeState::cancel_protocol_validator returns &Arc<parking_lot::Mutex<CancelProtocolValidator>>"
+    },
+    {
+      "surface_id": "OSLOCK-VISIBLE-STEER",
+      "path": "src/service/steer.rs",
+      "line": 78,
+      "visibility": "pub",
+      "signature": "Steer::services_mut returns Vec<parking_lot::MutexGuard<S>> through an imported guard name"
+    },
+    {
+      "surface_id": "OSLOCK-VISIBLE-ENV-LOCK",
+      "path": "src/test_utils.rs",
+      "line": 162,
+      "visibility": "pub(crate)",
+      "signature": "env_lock returns parking_lot::MutexGuard<'static, ()>"
+    },
+    {
+      "surface_id": "OSLOCK-VISIBLE-KAFKA-TEST-GUARD",
+      "path": "src/messaging/kafka.rs",
+      "line": 761,
+      "visibility": "pub under test-internals",
+      "signature": "DeterministicBrokerTestGuard wraps parking_lot::MutexGuard<'static, ()>"
+    },
+    {
+      "surface_id": "OSLOCK-INTERNAL-NOTIFY-GUARD",
+      "path": "src/sync/notify.rs",
+      "line": 484,
+      "visibility": "private",
+      "signature": "pass_baton accepts parking_lot::MutexGuard<WaiterSlab>"
+    }
+  ],
+  "semantic_matrix": [
+    {
+      "semantic_id": "OSLOCK-SEM-POISON",
+      "state": "PARTIAL",
+      "finding": "parking_lot is non-poisoning. The proposed safe std backend must recover poisoned guards internally and keep that policy explicit rather than leaking std LockResult across existing call sites.",
+      "route": "new owner-reviewed parity gate"
+    },
+    {
+      "semantic_id": "OSLOCK-SEM-PANIC-UNLOCK",
+      "state": "PRESENT",
+      "finding": "RAII guards release the incumbent lock during unwind; a replacement must preserve unlock while applying the explicit poison-recovery policy.",
+      "route": "panic and poison fixtures"
+    },
+    {
+      "semantic_id": "OSLOCK-SEM-RECURSION",
+      "state": "PARTIAL",
+      "finding": "Recursive acquisition is not a supported contract and may deadlock. Call-site lock-order and reentrancy audits are incomplete.",
+      "route": "lock-order inventory and deterministic deadlock fixtures"
+    },
+    {
+      "semantic_id": "OSLOCK-SEM-TRY",
+      "state": "PRESENT",
+      "finding": "try_lock, try_read, and try_write behavior is used directly and through owned Asupersync wrappers.",
+      "route": "try-operation parity fixtures"
+    },
+    {
+      "semantic_id": "OSLOCK-SEM-TIMED",
+      "state": "PARTIAL",
+      "finding": "Production blocking-pool Condvar wait_for is load-bearing. No direct timed Mutex/RwLock acquisition contract was found.",
+      "route": "Condvar timeout and spurious-wakeup fixtures"
+    },
+    {
+      "semantic_id": "OSLOCK-SEM-FAIRNESS",
+      "state": "BLOCKED_MISSING_EVIDENCE",
+      "finding": "No retained incumbent-versus-candidate fairness distribution or starvation bound exists at 1/8/32/64 cores.",
+      "route": "named-host contention baseline"
+    },
+    {
+      "semantic_id": "OSLOCK-SEM-LOCK-ORDER",
+      "state": "PARTIAL",
+      "finding": "Some local orders are documented, including watch send_lock before value, but there is no complete 240-file order graph.",
+      "route": "complete lock-order audit"
+    },
+    {
+      "semantic_id": "OSLOCK-SEM-CANCELLATION",
+      "state": "PARTIAL",
+      "finding": "parking_lot primitives are synchronous and not cancellation-aware. Asupersync async wrappers own waiter teardown and prohibit guards across await, but direct call sites still require review.",
+      "route": "cancellation-adjacent hold-time and waiter-teardown baseline"
+    },
+    {
+      "semantic_id": "OSLOCK-SEM-MAPPED-GUARDS",
+      "state": "PRESENT",
+      "finding": "Asupersync owns borrowed and owned mapped-guard APIs in src/sync/mutex.rs; direct parking_lot mapped guards are absent.",
+      "route": "owned guard projection parity fixtures"
+    },
+    {
+      "semantic_id": "OSLOCK-SEM-CONDVAR",
+      "state": "PRESENT",
+      "finding": "Blocking-pool shutdown and DNS discovery coalescing depend on wait, wait_for, notify_one, and notify_all.",
+      "route": "production Condvar parity and quiescence fixtures"
+    },
+    {
+      "semantic_id": "OSLOCK-SEM-STABLE",
+      "state": "PRESENT",
+      "finding": "The incumbent compiles on the audited stable lane. Any safe std wrapper must preserve that lane before a cutover decision.",
+      "route": "scripts/run_stable_lane_e2e.sh candidate comparison"
+    },
+    {
+      "semantic_id": "OSLOCK-SEM-SHUTDOWN",
+      "state": "PARTIAL",
+      "finding": "Blocking-pool notify-all shutdown paths exist, but no replacement-side quiescence receipt exists.",
+      "route": "shutdown and no-waiter-leak matrix"
+    },
+    {
+      "semantic_id": "OSLOCK-SEM-METRICS",
+      "state": "PARTIAL",
+      "finding": "ContendedMutex exposes optional wait and hold metrics using std::sync, but that is not a complete baseline for direct parking_lot call sites.",
+      "route": "whole-surface contention telemetry"
+    },
+    {
+      "semantic_id": "OSLOCK-SEM-UNSAFE",
+      "state": "PRESENT",
+      "finding": "Only a safe std-backed owned wrapper is admissible by default. A raw futex or parking protocol is separately ALGORITHMIC-UNSAFE and prohibited without a complete exception record.",
+      "route": "dependency safety taxonomy"
+    }
+  ],
+  "marginal_graph": {
+    "source_artifact": "artifacts/dependency_marginal_ledger_v1.json",
+    "source_artifact_revision": "f606e28983199a1b51af11e6f65bb9b00686ceb3",
+    "measurement_cells": 52,
+    "feature_profile_count": 13,
+    "target_count": 4,
+    "cells_removing_four_package_versions": 48,
+    "cells_removing_zero_package_versions": 4,
+    "marginal_package_names": [
+      "lock_api",
+      "parking_lot",
+      "parking_lot_core",
+      "scopeguard"
+    ],
+    "zero_marginal_profile": "workspace-dev-build-audit",
+    "profiles": [
+      "cli",
+      "compression",
+      "default",
+      "fuzz-quarantine",
+      "io-uring",
+      "kafka",
+      "loom-tests",
+      "metrics",
+      "minimal",
+      "sqlite",
+      "tls",
+      "trace-compression",
+      "workspace-dev-build-audit"
+    ],
+    "targets": [
+      "aarch64-apple-darwin",
+      "wasm32-unknown-unknown",
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-gnu"
+    ],
+    "marginal_native_statuses": [
+      "none",
+      "unknown"
+    ],
+    "unsafe_exposure_class": "ALGORITHMIC-UNSAFE",
+    "measured_graph_benefit": "MODERATE",
+    "no_claim": "The ledger proves graph deltas only. Unknown marginal native status is not evidence of native code presence or absence, and package removal does not prove runtime parity or a favorable performance trade."
+  },
+  "baseline_matrix": [
+    {
+      "baseline_id": "OSLOCK-BASE-CORRECTNESS-SYNC",
+      "state": "MEASURED_FAIL",
+      "host": "RCH worker vmi1227854, x86_64-unknown-linux-gnu",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_TARGET_DIR=/tmp/rch_target_oslock_a1_sync_baseline RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --lib sync:: -- --nocapture",
+      "receipt": "Terminal remote result: test result: FAILED. 614 passed; 1 failed; 2 ignored; 0 measured; 20793 filtered out; finished in 10.22s. Failed test: sync::mutex::tests::mutex_queued_waiter_sees_poison_after_holder_panics. RCH exit 101; job j-29946775183818764; compile 742.7s; total 758.9s.",
+      "covers": "incumbent focused sync unit tests only; the single failure is a routed incumbent baseline defect and is not attributed to a replacement candidate",
+      "isolated_reproduction": {
+        "state": "MEASURED_PASS",
+        "host": "RCH worker vmi1227854, x86_64-unknown-linux-gnu",
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_TARGET_DIR=/tmp/rch_target_oslock_a1_sync_baseline RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --lib sync::mutex::tests::mutex_queued_waiter_sees_poison_after_holder_panics -- --exact --nocapture --test-threads=1",
+        "receipt": "Terminal remote result: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 21409 filtered out; finished in 0.05s. RCH exit 0; compile 758.8s; total 778.7s.",
+        "interpretation": "The isolated pass does not erase the suite failure. The test coordinates lock acquisition with fixed 10 ms and 50 ms sleeps, so suite-order or load sensitivity remains routed and no deterministic root cause is claimed."
+      }
+    },
+    {
+      "baseline_id": "OSLOCK-BASE-THROUGHPUT",
+      "state": "BLOCKED_MISSING_EVIDENCE",
+      "host": "named Linux x86_64 and Apple Silicon hosts required",
+      "receipt": "No retained incumbent-versus-candidate throughput comparison.",
+      "covers": "unmeasured"
+    },
+    {
+      "baseline_id": "OSLOCK-BASE-TAILS",
+      "state": "BLOCKED_MISSING_EVIDENCE",
+      "host": "named Linux x86_64 and Apple Silicon hosts required",
+      "receipt": "No retained p50/p95/p99/p999 wait or hold latency comparison.",
+      "covers": "unmeasured"
+    },
+    {
+      "baseline_id": "OSLOCK-BASE-FAIRNESS",
+      "state": "BLOCKED_MISSING_EVIDENCE",
+      "host": "named Linux x86_64 and Apple Silicon hosts required",
+      "receipt": "No retained fairness distribution or starvation-bound comparison.",
+      "covers": "unmeasured"
+    },
+    {
+      "baseline_id": "OSLOCK-BASE-CANCELLATION",
+      "state": "BLOCKED_MISSING_EVIDENCE",
+      "host": "LabRuntime plus named native hosts required",
+      "receipt": "No retained cancellation-adjacent guard-hold, waiter-teardown, or shutdown latency comparison.",
+      "covers": "unmeasured"
+    },
+    {
+      "baseline_id": "OSLOCK-BASE-MEMORY",
+      "state": "BLOCKED_MISSING_EVIDENCE",
+      "host": "named Linux x86_64 and Apple Silicon hosts required",
+      "receipt": "No retained allocation, peak RSS, or steady-state memory comparison.",
+      "covers": "unmeasured"
+    },
+    {
+      "baseline_id": "OSLOCK-BASE-BUILD",
+      "state": "BLOCKED_MISSING_EVIDENCE",
+      "host": "canonical clean build hosts required",
+      "receipt": "No retained compile-time or binary-size comparison.",
+      "covers": "unmeasured"
+    },
+    {
+      "baseline_id": "OSLOCK-BASE-SCALING",
+      "state": "BLOCKED_MISSING_EVIDENCE",
+      "host": "named 64-core-capable Linux x86_64 host and Apple Silicon host required",
+      "receipt": "No retained 1/8/32/64-core matrix.",
+      "covers": "unmeasured"
+    },
+    {
+      "baseline_id": "OSLOCK-BASE-STABLE",
+      "state": "BLOCKED_MISSING_EVIDENCE",
+      "host": "audited stable lane",
+      "receipt": "Incumbent stable support is registered, but no candidate exists and therefore no candidate stable-lane comparison can be admitted.",
+      "covers": "incumbent policy only"
+    }
+  ],
+  "gaps": [
+    {
+      "gap_id": "OSLOCK-A1-GAP-01",
+      "state": "ROUTED",
+      "finding": "The full 1/8/32/64-core Linux and Apple performance matrix is absent.",
+      "owner": "new owner-reviewed baseline gate",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "OSLOCK-A1-GAP-02",
+      "state": "ROUTED",
+      "finding": "p50/p95/p99/p999 latency, fairness, and starvation receipts are absent.",
+      "owner": "new owner-reviewed baseline gate",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "OSLOCK-A1-GAP-03",
+      "state": "ROUTED",
+      "finding": "Allocation, RSS, compile-time, and binary-size comparisons are absent.",
+      "owner": "new owner-reviewed baseline gate",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "OSLOCK-A1-GAP-04",
+      "state": "ROUTED",
+      "finding": "There is no complete lock-order and recursive-acquisition audit across the 240-file surface.",
+      "owner": "incumbent lock-order audit",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "OSLOCK-A1-GAP-05",
+      "state": "ROUTED",
+      "finding": "Production Condvar predicate, timeout, shutdown, and spurious-wakeup parity has no candidate receipt.",
+      "owner": "new owner-reviewed parity gate",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "OSLOCK-A1-GAP-06",
+      "state": "ROUTED",
+      "finding": "Direct public and crate-visible parking_lot guard/type signatures have no approved migration contract.",
+      "owner": "new owner-reviewed API gate",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "OSLOCK-A1-GAP-07",
+      "state": "ROUTED",
+      "finding": "Cancellation-adjacent direct lock use and no-await-with-guard coverage are incomplete.",
+      "owner": "incumbent correctness audit",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "OSLOCK-A1-GAP-08",
+      "state": "ROUTED",
+      "finding": "A candidate safe std wrapper does not exist, so stable-lane, poisoning, mapping, and owned-guard parity cannot be measured.",
+      "owner": "new owner-reviewed prototype gate",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "OSLOCK-A1-GAP-09",
+      "state": "ROUTED",
+      "finding": "The clean-HEAD focused incumbent sync suite failed mutex_queued_waiter_sees_poison_after_holder_panics after 614 passes, while the same test passed alone. Its fixed 10 ms and 50 ms sleeps leave suite-order or load sensitivity unresolved.",
+      "owner": "incumbent mutex poison-baseline audit",
+      "replacement_required": false
+    }
+  ],
+  "reconsideration_triggers": [
+    {
+      "trigger_id": "OSLOCK-TRIGGER-PERFORMANCE",
+      "state": "DEFER",
+      "condition": "A named-host 1/8/32/64-core comparison covers throughput, p50/p95/p99/p999, fairness, starvation, allocation, RSS, compile time, and binary size and meets an owner-approved budget."
+    },
+    {
+      "trigger_id": "OSLOCK-TRIGGER-CORRECTNESS",
+      "state": "DEFER",
+      "condition": "A safe std-backed candidate passes poison, panic, try, Condvar, mapping, lock-order, cancellation-adjacent, shutdown, quiescence, and stable-lane contracts."
+    },
+    {
+      "trigger_id": "OSLOCK-TRIGGER-DEFECT",
+      "state": "DEFER",
+      "condition": "A supported-platform production defect is attributable to the incumbent and cannot be repaired upstream or while retaining it."
+    },
+    {
+      "trigger_id": "OSLOCK-TRIGGER-SECURITY",
+      "state": "DEFER",
+      "condition": "An applicable advisory, unsoundness report, or maintenance-abandonment record materially changes incumbent risk."
+    },
+    {
+      "trigger_id": "OSLOCK-TRIGGER-GRAPH",
+      "state": "DEFER",
+      "condition": "A fresh canonical marginal ledger proves an owner-approved package, build-script, native-code, or supply-chain budget violation."
+    }
+  ],
+  "decision": {
+    "outcome": "DEFER",
+    "terminal_for_bead": true,
+    "dependency_retained": "parking_lot",
+    "implementation_authority": "NONE",
+    "implementation_children_authorized": false,
+    "children_unblocked": [],
+    "required_next_action": "Retain the incumbent. Reopen implementation only through a new owner-reviewed gate after the named correctness and performance evidence exists.",
+    "rollback": "No production source, manifest, or lockfile change is authorized or required by this terminal inventory."
+  },
+  "no_claim_boundaries": [
+    "This inventory does not prove release readiness, broad workspace health, or performance equivalence.",
+    "The focused sync test receipt covers incumbent sync unit tests only; it does not cover all 240 files, all targets, all features, or a candidate replacement.",
+    "The source census proves exact dependency-token coverage at one revision; it does not prove that every lock is correctly ordered or cancellation-safe.",
+    "The marginal ledger proves package-graph deltas only and does not prove native-code presence, runtime benefit, or acceptable engineering cost.",
+    "DEFER is terminal success for this gate. This artifact does not authorize implementing a wrapper, migrating call sites, removing parking_lot, editing Cargo manifests, or unblocking implementation children.",
+    "No local Cargo fallback, peer build cancellation, file deletion, branch creation, worktree creation, or destructive cleanup is authorized."
+  ]
+}

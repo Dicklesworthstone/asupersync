@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import fnmatch
 import hashlib
 import json
 from dataclasses import dataclass
@@ -25,6 +26,25 @@ RCH_EXEC_COMMAND_RE = re.compile(
     r'(?m)(?:\brch\b|"\$RCH_BIN"|\$\{RCH_BIN\}|\$RCH_BIN)\s+exec\s+--\s+([^&;\n|]+)'
 )
 CARGO_WORD_RE = re.compile(r"\bcargo\b")
+# The cargo binary is not always the literal token `cargo`: several proof/smoke
+# runners invoke `"${CARGO_BIN:-cargo}"` so the binary can be overridden. Such a
+# token still contains the word "cargo", so CARGO_WORD_RE admits the body for
+# checking, but `tokens.index("cargo")` then fails and the invocation is
+# misreported as rch_cargo_unparseable. Match the indirection forms explicitly.
+CARGO_BINARY_TOKEN_RE = re.compile(
+    r"^(?:cargo|\$(?:CARGO_BIN\b|\{CARGO_BIN(?::-[^}]*)?\}))$"
+)
+
+
+def is_cargo_binary_token(token: str) -> bool:
+    return CARGO_BINARY_TOKEN_RE.match(token) is not None
+
+
+def find_cargo_token_index(tokens: list[str]) -> int | None:
+    for index, token in enumerate(tokens):
+        if is_cargo_binary_token(token):
+            return index
+    return None
 SHELL_COMMAND_SPLIT_RE = re.compile(r"(?:&&|\|\||;|\n)")
 ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
@@ -54,8 +74,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--policy", default=".github/ci_matrix_policy.json", type=Path)
     parser.add_argument("--workflow", type=Path, default=None)
-    parser.add_argument("--summary-output", default="", type=Path)
-    parser.add_argument("--events-output", default="", type=Path)
+    # Default must be None, not "": Path("") normalizes to Path("."), whose str()
+    # is "." and therefore truthy, so an empty-string default silently wins over
+    # the policy's output paths and the run dies writing a file onto the cwd.
+    parser.add_argument("--summary-output", default=None, type=Path)
+    parser.add_argument("--events-output", default=None, type=Path)
     parser.add_argument("--script-scan-root", default=None, type=Path)
     parser.add_argument("--script-scan-glob", default="*.sh")
     parser.add_argument("--skip-script-scan", action="store_true")
@@ -71,12 +94,152 @@ def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+ARRAY_ASSIGN_OPEN_RE = re.compile(
+    r"^[ \t]*(?:(?:local|declare|typeset|readonly|export)[ \t]+(?:-[A-Za-z]+[ \t]+)*)?"
+    r"[A-Za-z_][A-Za-z0-9_]*\+?=\([ \t]*$"
+)
+ARRAY_ASSIGN_LINE_RE = re.compile(
+    r"^[ \t]*(?:(?:local|declare|typeset|readonly|export)[ \t]+(?:-[A-Za-z]+[ \t]+)*)?"
+    r"([A-Za-z_][A-Za-z0-9_]*)\+?=\((.*)\)[ \t]*$"
+)
+ARRAY_REF_RE = re.compile(r'"?\$\{([A-Za-z_][A-Za-z0-9_]*)\[[@*]\]\}"?')
+MAX_EXPANSION_CHARS = 200_000
+
+
+def fold_multiline_array_assignments(text: str) -> str:
+    """Join `NAME=(\\n  elem\\n  elem\\n)` into a single logical line.
+
+    Command arrays are the house style for routed cargo invocations here:
+
+        cmd=(
+            "$RCH_BIN" exec -- env
+            "CARGO_TARGET_DIR=${bench_target_dir}"
+            cargo bench --bench "$bench"
+        )
+        "${cmd[@]}"
+
+    SHELL_COMMAND_SPLIT_RE splits on newlines, so the `cargo bench ...` element
+    looks like a standalone command starting with `cargo` and is reported
+    local_cargo, even though the composed command is correctly routed. Folding
+    the array back into one line lets the existing checks see the real command.
+
+    An array that is never closed is left exactly as-is, so a malformed script
+    can never hide a bare cargo line behind an unterminated `(`.
+    """
+    lines = text.splitlines()
+    folded: list[str] = []
+    index = 0
+    while index < len(lines):
+        if not ARRAY_ASSIGN_OPEN_RE.match(lines[index]):
+            folded.append(lines[index])
+            index += 1
+            continue
+        block = [lines[index]]
+        cursor = index + 1
+        while cursor < len(lines):
+            block.append(lines[cursor])
+            if lines[cursor].strip().startswith(")"):
+                break
+            cursor += 1
+        if cursor < len(lines):
+            folded.append(" ".join(part.strip() for part in block if part.strip()))
+            index = cursor + 1
+        else:
+            folded.extend(block)
+            index = len(lines)
+    return "\n".join(folded)
+
+
+def collect_array_definitions(text: str) -> dict[str, str]:
+    definitions: dict[str, str] = {}
+    for line in text.splitlines():
+        match = ARRAY_ASSIGN_LINE_RE.match(line)
+        if match:
+            definitions.setdefault(match.group(1), match.group(2).strip())
+    return definitions
+
+
+def expand_array_references(text: str) -> str:
+    """Substitute `"${NAME[@]}"` with NAME's definition, up to three levels.
+
+    Detection then happens where the array is EXECUTED rather than where it is
+    defined, which is what keeps the definition-vs-execution split honest:
+    `CMD=(cargo build)` followed by `"${CMD[@]}"` still expands to a bare
+    `cargo build` at the execution site and is still reported local_cargo.
+    """
+    definitions = collect_array_definitions(text)
+    if not definitions:
+        return text
+    expanded = text
+    for _ in range(3):
+        replaced = ARRAY_REF_RE.sub(
+            lambda match: definitions.get(match.group(1), match.group(0)), expanded
+        )
+        if replaced == expanded or len(replaced) > MAX_EXPANSION_CHARS:
+            break
+        expanded = replaced
+    return expanded
+
+
+def is_array_assignment(segment: str) -> bool:
+    return ARRAY_ASSIGN_LINE_RE.match(segment.strip()) is not None
+
+
 def normalize_shell_text(text: str) -> str:
-    return re.sub(r"\\\s*\n\s*", " ", text)
+    joined = re.sub(r"\\\s*\n\s*", " ", text)
+    return expand_array_references(fold_multiline_array_assignments(joined))
+
+
+def truncate_at_unterminated_quote(text: str) -> str:
+    """Cut `text` at the first quote that is opened and never closed.
+
+    RCH_EXEC_COMMAND_RE captures everything up to a shell metacharacter or end of
+    line, so an `rch exec --` command that is itself a quoted ARGUMENT overruns
+    its own string literal:
+
+        run_proof_lane "P1" "CRITICAL" "Native QUIC Conformance" \\
+            'rch exec -- env CARGO_TARGET_DIR="..." cargo test --lib foo' \\
+            600
+
+    normalize_shell_text folds the continuation, so the captured body becomes
+    `env CARGO_TARGET_DIR="..." cargo test --lib foo'  600` -- the stray quote is
+    mid-body, not trailing, so rstrip cannot help and shlex raises "No closing
+    quotation". The command is fully compliant; only the capture is ragged.
+
+    An unterminated quote is exactly the point where the enclosing literal ended,
+    so truncating there recovers the real command. Balanced quotes are left
+    alone, and text with no unterminated quote is returned unchanged.
+    """
+    quote: str | None = None
+    opened_at: int | None = None
+    for index, char in enumerate(text):
+        if quote is None:
+            if char in "\"'":
+                quote = char
+                opened_at = index
+        elif char == quote:
+            quote = None
+            opened_at = None
+    if quote is not None and opened_at is not None:
+        return text[:opened_at]
+    return text
 
 
 def shell_tokens(text: str) -> list[str]:
-    candidates = [text, text.rstrip('",\''), text.strip().rstrip('",\'')]
+    # Fail-closed by construction: every candidate below only REMOVES trailing
+    # continuation/quote characters or truncates at an unterminated quote. None
+    # can introduce a leading `env` or a CARGO_TARGET_DIR= assignment, so a
+    # genuinely non-compliant body such as `cargo fmt --check"` still tokenizes
+    # to tokens[0] == "cargo" and is still flagged. Anything that fails to parse
+    # after every candidate still yields [] -> rch_cargo_unparseable.
+    stripped = text.strip()
+    candidates = [
+        text,
+        text.rstrip('",\''),
+        stripped.rstrip('",\''),
+        stripped.rstrip("\\").strip().rstrip('",\''),
+        truncate_at_unterminated_quote(stripped).strip(),
+    ]
     for candidate in candidates:
         try:
             return shlex.split(candidate, posix=True)
@@ -103,12 +266,21 @@ def command_starts_with_local_cargo(command: str) -> bool:
         while index < len(tokens) and token_is_env_assignment(tokens[index]):
             index += 1
 
-    return index < len(tokens) and tokens[index] == "cargo"
+    return index < len(tokens) and is_cargo_binary_token(tokens[index])
 
 
 def has_local_cargo_command(text: str) -> bool:
     normalized = normalize_shell_text(text)
-    return any(command_starts_with_local_cargo(segment) for segment in SHELL_COMMAND_SPLIT_RE.split(normalized))
+    return any(
+        # An array assignment DEFINES a command, it does not run one. Skipping it
+        # here is not a hole: expand_array_references has already inlined the
+        # definition at every `"${NAME[@]}"` execution site, so an unrouted array
+        # is still caught there. Checking it in both places would report
+        # `CARGO_COMMAND=(cargo test ...)` as a local invocation even when the
+        # only execution site wraps it in `rch exec -- env CARGO_TARGET_DIR=...`.
+        not is_array_assignment(segment) and command_starts_with_local_cargo(segment)
+        for segment in SHELL_COMMAND_SPLIT_RE.split(normalized)
+    )
 
 
 def rch_exec_cargo_violations(text: str) -> list[str]:
@@ -128,7 +300,7 @@ def rch_exec_cargo_violations(text: str) -> list[str]:
             violations.append("rch_nested_shell_cargo")
             continue
 
-        if tokens[0] == "cargo":
+        if is_cargo_binary_token(tokens[0]):
             violations.append("rch_cargo_missing_env")
             continue
 
@@ -136,9 +308,8 @@ def rch_exec_cargo_violations(text: str) -> list[str]:
             violations.append("rch_cargo_unstructured")
             continue
 
-        try:
-            cargo_index = tokens.index("cargo")
-        except ValueError:
+        cargo_index = find_cargo_token_index(tokens)
+        if cargo_index is None:
             violations.append("rch_cargo_unparseable")
             continue
 
@@ -153,6 +324,116 @@ def cargo_routing_violations(text: str) -> list[str]:
     if has_local_cargo_command(text):
         violations.append("local_cargo")
     return sorted(set(violations))
+
+
+SCRIPT_ROUTING_EXCEPTION_CATEGORIES = {
+    # A `printf`/heredoc that CONSTRUCTS a command string for display or repro
+    # while the real execution is routed. Telling a command that is built from
+    # one that is run needs shell dataflow this scan does not do.
+    "command_builder_string",
+    # A bare invocation reachable only behind an explicit, default-off opt-in
+    # (ALLOW_LOCAL_CARGO=1, --local, ...). AGENTS.md permits a local run when the
+    # operator explicitly authorizes one; the flag IS that authorization.
+    "gated_local_opt_in",
+    # Code that only executes ON the worker, inside an already-routed context --
+    # e.g. a script that dispatches itself via `rch exec -- bash <self> __remote`.
+    # Routing it again would be rch-inside-rch.
+    "remote_reentrant_block",
+}
+
+
+def validate_script_routing_exceptions(policy: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = policy.get("script_routing_exceptions", [])
+    if not isinstance(raw, list):
+        raise PolicyError("script_routing_exceptions must be a list")
+    seen: set[str] = set()
+    for index, entry in enumerate(raw):
+        label = f"script_routing_exceptions[{index}]"
+        if not isinstance(entry, dict):
+            raise PolicyError(f"{label} must be an object")
+        pattern = require_str(entry.get("pattern"), f"{label}.pattern")
+        if pattern in seen:
+            raise PolicyError(f"duplicate script_routing_exceptions pattern {pattern}")
+        seen.add(pattern)
+        category = require_str(entry.get("category"), f"{label}.category")
+        if category not in SCRIPT_ROUTING_EXCEPTION_CATEGORIES:
+            raise PolicyError(
+                f"{label}.category {category!r} is not one of "
+                f"{sorted(SCRIPT_ROUTING_EXCEPTION_CATEGORIES)}"
+            )
+        require_str(entry.get("owner"), f"{label}.owner")
+        require_str(entry.get("reason"), f"{label}.reason")
+        # Every entry must carry the exact violation kinds it excuses, so an
+        # exception written for a display string cannot silently also excuse a
+        # genuinely unrouted command that appears in the same file later.
+        violations = entry.get("violations")
+        if not isinstance(violations, list) or not violations:
+            raise PolicyError(f"{label}.violations must be a non-empty list")
+        for violation in violations:
+            require_str(violation, f"{label}.violations[]")
+        if not (
+            isinstance(entry.get("expires_at_utc"), str)
+            or isinstance(entry.get("revisit_condition"), str)
+        ):
+            raise PolicyError(
+                f"{label} must include expires_at_utc or revisit_condition"
+            )
+    return raw
+
+
+def script_routing_exception_expired(entry: dict[str, Any], now_utc: dt.datetime) -> bool:
+    expiry = entry.get("expires_at_utc")
+    if not isinstance(expiry, str):
+        return False
+    raw = expiry[:-1] + "+00:00" if expiry.endswith("Z") else expiry
+    parsed = dt.datetime.fromisoformat(raw)
+    if parsed.tzinfo is None:
+        raise PolicyError(f"expires_at_utc must include a timezone: {expiry}")
+    return parsed.astimezone(dt.timezone.utc) <= now_utc
+
+
+def apply_script_routing_exceptions(
+    reports: list[dict[str, Any]],
+    exceptions: list[dict[str, Any]],
+    now_utc: dt.datetime,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split reports into still-violating and excused.
+
+    An exception removes only the violation kinds it names, and only while it is
+    unexpired. Anything it does not name stays a violation, so a file with a
+    documented builder string still fails on a newly added unrouted command.
+    """
+    remaining: list[dict[str, Any]] = []
+    excused: list[dict[str, Any]] = []
+    for report in reports:
+        path = report["path"]
+        kinds = list(report["violations"])
+        applied: list[dict[str, Any]] = []
+        for entry in exceptions:
+            if not fnmatch.fnmatch(path, entry["pattern"]):
+                continue
+            if script_routing_exception_expired(entry, now_utc):
+                continue
+            excused_kinds = [kind for kind in kinds if kind in entry["violations"]]
+            if not excused_kinds:
+                continue
+            kinds = [kind for kind in kinds if kind not in entry["violations"]]
+            applied.append(
+                {
+                    "pattern": entry["pattern"],
+                    "category": entry["category"],
+                    "owner": entry["owner"],
+                    "reason": entry["reason"],
+                    "expires_at_utc": entry.get("expires_at_utc", ""),
+                    "revisit_condition": entry.get("revisit_condition", ""),
+                    "violations": excused_kinds,
+                }
+            )
+        if applied:
+            excused.append({"path": path, "exceptions": applied})
+        if kinds:
+            remaining.append({"path": path, "violations": kinds})
+    return remaining, excused
 
 
 def collect_script_routing_violations(script_root: Path, script_glob: str) -> list[dict[str, Any]]:
@@ -694,6 +975,122 @@ jobs:
     ):
         raise AssertionError("expected required_artifacts_min threshold failure")
 
+    # Shell-shape fixtures for the routing scan (br-asupersync-t440nm). Each
+    # "must flag" case pins a way the scan could silently fail OPEN; each "must
+    # be clean" case pins a false positive that previously made the gate cry
+    # wolf. Keep both halves: a routing gate that reports compliant commands is
+    # as useless as one that misses violations, just in the other direction.
+    routing_must_flag = [
+        # A command array that is never routed, executed via "${CMD[@]}".
+        ('CMD=(\n    cargo build --release\n)\n"${CMD[@]}"\n', "local_cargo"),
+        # Routed, but `cargo` sits directly after `rch exec --` with no env.
+        ('CMD=(\n    "$RCH_BIN" exec --\n    cargo test\n)\n"${CMD[@]}"\n', "rch_cargo_missing_env"),
+        # Routed through env, but without the mandatory CARGO_TARGET_DIR.
+        ('CMD=(\n    "$RCH_BIN" exec -- env FOO=1\n    cargo test\n)\n"${CMD[@]}"\n', "rch_cargo_missing_target_dir"),
+        # Same three shapes with the overridable binary spelling.
+        ('rch exec -- "${CARGO_BIN:-cargo}" test\n', "rch_cargo_missing_env"),
+        ('env CARGO_TARGET_DIR=/t/x "${CARGO_BIN:-cargo}" bench\n', "local_cargo"),
+        # An unterminated array must not swallow the bare cargo line after it.
+        ("CMD=(\n    cargo build --release\n", "local_cargo"),
+        # A plain local invocation, the base case.
+        ("cargo bench --bench x\n", "local_cargo"),
+    ]
+    for source, expected in routing_must_flag:
+        found = cargo_routing_violations(source)
+        if expected not in found:
+            raise AssertionError(
+                f"routing scan failed open: expected {expected} in {found} for {source!r}"
+            )
+
+    routing_must_be_clean = [
+        # Multi-line command array, correctly routed. SHELL_COMMAND_SPLIT_RE
+        # splits on newlines, so without array folding the `cargo` element looks
+        # like a standalone local command.
+        'CMD=(\n    "$RCH_BIN" exec -- env\n    "CARGO_TARGET_DIR=/t/x"\n    cargo bench --bench y\n)\n"${CMD[@]}"\n',
+        # Composed arrays: the cargo array is inlined into a routed wrapper.
+        'CARGO_COMMAND=(\n    cargo test -p asupersync\n)\n'
+        'RCH_COMMAND=(\n    "${RCH_BIN}" exec -- env "CARGO_TARGET_DIR=/t/x" "${CARGO_COMMAND[@]}"\n)\n'
+        'timeout 60 "${RCH_COMMAND[@]}"\n',
+        # The overridable binary spelling, correctly routed.
+        'CMD=(\n    "$RCH_BIN" exec -- env\n    "CARGO_TARGET_DIR=/t/x"\n    "${CARGO_BIN:-cargo}" test -p asupersync\n)\n"${CMD[@]}"\n',
+        # An `rch exec --` command passed as a quoted ARGUMENT: the capture runs
+        # past the closing quote, so the body must be truncated at the
+        # unterminated quote instead of being called unparseable.
+        "run_proof_lane \"P1\" \"CRITICAL\" \"Native QUIC\" \\\n"
+        "    'rch exec -- env CARGO_TARGET_DIR=\"/t/x\" cargo test --lib foo' \\\n"
+        "    600\n",
+    ]
+    for source in routing_must_be_clean:
+        found = cargo_routing_violations(source)
+        if found:
+            raise AssertionError(
+                f"routing scan false positive: expected clean, got {found} for {source!r}"
+            )
+
+    # Script-routing exception fixtures (br-asupersync-gjn12m). An exception
+    # mechanism is only worth having if it cannot quietly grow into a blanket
+    # waiver, so pin the ways it must REFUSE to excuse.
+    now = dt.datetime.now(dt.timezone.utc)
+    base_exception = {
+        "pattern": "*scripts/route_bad.sh",
+        "category": "command_builder_string",
+        "owner": "runtime-core",
+        "reason": "fixture",
+        "revisit_condition": "fixture",
+        "violations": ["local_cargo"],
+    }
+    reports = [{"path": "scripts/route_bad.sh", "violations": ["local_cargo"]}]
+
+    remaining, excused = apply_script_routing_exceptions(reports, [base_exception], now)
+    if remaining or len(excused) != 1:
+        raise AssertionError("expected the matching exception to excuse the violation")
+
+    # Only the NAMED violation kinds are excused; anything else still fails.
+    mixed = [{"path": "scripts/route_bad.sh", "violations": ["local_cargo", "rch_cargo_missing_env"]}]
+    remaining, _ = apply_script_routing_exceptions(mixed, [base_exception], now)
+    if remaining != [{"path": "scripts/route_bad.sh", "violations": ["rch_cargo_missing_env"]}]:
+        raise AssertionError("exception must not excuse violation kinds it does not name")
+
+    # An expired exception excuses nothing.
+    expired = dict(base_exception, expires_at_utc="2000-01-01T00:00:00Z")
+    remaining, excused = apply_script_routing_exceptions(reports, [expired], now)
+    if not remaining or excused:
+        raise AssertionError("expired exception must not excuse")
+
+    # A non-matching pattern excuses nothing.
+    other = dict(base_exception, pattern="*scripts/route_other.sh")
+    remaining, _ = apply_script_routing_exceptions(reports, [other], now)
+    if not remaining:
+        raise AssertionError("non-matching exception must not excuse")
+
+    # Malformed entries fail closed at load time rather than silently excusing.
+    for broken, label in [
+        ({**base_exception, "violations": []}, "empty violations"),
+        ({k: v for k, v in base_exception.items() if k != "reason"}, "missing reason"),
+        ({k: v for k, v in base_exception.items() if k != "owner"}, "missing owner"),
+        ({**base_exception, "category": "not_a_category"}, "unknown category"),
+        (
+            {k: v for k, v in base_exception.items() if k != "revisit_condition"},
+            "no expiry and no revisit condition",
+        ),
+    ]:
+        try:
+            validate_script_routing_exceptions({"script_routing_exceptions": [broken]})
+        except PolicyError:
+            pass
+        else:
+            raise AssertionError(f"malformed exception accepted: {label}")
+
+    # Duplicate patterns are rejected so two entries cannot disagree silently.
+    try:
+        validate_script_routing_exceptions(
+            {"script_routing_exceptions": [base_exception, dict(base_exception)]}
+        )
+    except PolicyError:
+        pass
+    else:
+        raise AssertionError("duplicate exception patterns accepted")
+
     print("CI matrix policy self-test passed")
     return 0
 
@@ -706,11 +1103,19 @@ def main() -> int:
     policy_path = args.policy
     policy, lanes, default_summary_path, default_events_path = load_policy(policy_path)
     script_scan_root = args.script_scan_root if args.script_scan_root is not None else policy_path.parent.parent / "scripts"
+    script_routing_exceptions = validate_script_routing_exceptions(policy)
+    script_routing_excused: list[dict[str, Any]] = []
     script_routing_violations = (
         []
         if args.skip_script_scan
         else collect_script_routing_violations(script_scan_root, args.script_scan_glob)
     )
+    if script_routing_violations:
+        script_routing_violations, script_routing_excused = apply_script_routing_exceptions(
+            script_routing_violations,
+            script_routing_exceptions,
+            dt.datetime.now(dt.timezone.utc),
+        )
 
     workflow_path = args.workflow or Path(require_str(policy.get("workflow_path"), "workflow_path"))
     workflow_text = workflow_path.read_text(encoding="utf-8")
@@ -739,8 +1144,8 @@ def main() -> int:
         for step_name in lane.get("rch_local_fallback_step_names", [])
     )
 
-    summary_path = args.summary_output if str(args.summary_output) else default_summary_path
-    events_path = args.events_output if str(args.events_output) else default_events_path
+    summary_path = args.summary_output if args.summary_output is not None else default_summary_path
+    events_path = args.events_output if args.events_output is not None else default_events_path
 
     summary = {
         "schema_version": "ci-matrix-policy-report-v1",
@@ -768,6 +1173,10 @@ def main() -> int:
             "glob": args.script_scan_glob,
             "violating_path_count": len(script_routing_violations),
             "violations": script_routing_violations,
+            # Excused paths are reported, never hidden: an exception that stops
+            # being visible is an exception nobody revisits.
+            "excused_path_count": len(script_routing_excused),
+            "excused": script_routing_excused,
         },
         "lanes": lane_reports,
     }

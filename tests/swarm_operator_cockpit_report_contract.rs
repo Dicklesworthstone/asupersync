@@ -104,8 +104,10 @@ fn lock_metric(name: &str, p95_wait_ns: u64, p99_wait_ns: u64) -> SwarmContentio
         p50_wait_ns: p95_wait_ns / 4,
         p95_wait_ns,
         p99_wait_ns,
+        wait_percentile_sample_count: Some(64),
         p95_hold_ns: 2_000,
         p99_hold_ns: 5_000,
+        hold_percentile_sample_count: Some(64),
         instrumentation_mode: "cockpit_fixture".to_string(),
     }
 }
@@ -304,7 +306,7 @@ fn cockpit_artifact_is_source_backed_and_declares_outcome_contract() {
 }
 
 #[test]
-fn cockpit_healthy_run_passes_with_stable_json_and_compact_text() {
+fn percentile_horizon_cockpit_run_preserves_stable_json_and_compact_text() {
     let report = build_swarm_operator_cockpit_report(&healthy_input("cockpit-healthy"));
     let text = render_swarm_operator_cockpit_text(&report);
 
@@ -327,9 +329,18 @@ fn cockpit_healthy_run_passes_with_stable_json_and_compact_text() {
         report.contention_verdict,
         Some(SwarmContentionHeatmapVerdict::Pass)
     );
+    let lock_hotspot = report
+        .contention_hotspots
+        .iter()
+        .find(|hotspot| hotspot.key == "runtime_state")
+        .expect("cockpit lock hotspot");
+    assert_eq!(lock_hotspot.wait_percentile_sample_count, Some(64));
+    assert_eq!(lock_hotspot.hold_percentile_sample_count, Some(64));
     assert!(report.redaction_preserved);
     assert!(text.contains("outcome=Pass"));
     assert!(text.contains("proof_lanes: ready=1/1 remote_observed=true"));
+    assert!(text.contains("wait_percentile_sample_count=64"));
+    assert!(text.contains("hold_percentile_sample_count=64"));
     assert!(text.contains("redaction: policy=agent-mail-safe-redaction-v1 preserved=true"));
     assert!(
         text.len() < 2_500,

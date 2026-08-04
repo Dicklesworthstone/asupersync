@@ -6,12 +6,18 @@
 //!
 //! # Cancel Safety
 //!
-//! - `File::open`, `File::create`: Cancel-safe (no partial state)
-//! - Read operations: Cancel-safe (partial data discarded by caller)
-//! - Write operations: Use `WritePermit` for cancel-safe writes, or accept
-//!   potential partial writes on cancellation
-//! - `sync_all`, `sync_data`: Cancel-safe (atomic completion)
-//! - Seek: Cancel-safe (atomic completion)
+//! - `File::open`: A started open may complete; its discarded handle is closed
+//! - `File::create`/`create_new`: A started call may still create or truncate
+//! - Poll-based read/write/seek operations: one synchronous syscall per poll
+//! - Owned cursor operations: soft-cancelled syscalls may still commit, but a
+//!   per-file completion gate prevents later cursor access from overtaking them
+//! - Direct path mutations: soft-cancelled work may commit after future drop
+//! - `write_atomic`: cancellation can discard staging, while the target rename
+//!   occurs only in a synchronous commit step with no async cancellation point
+//! - `WritePermit`: an in-memory two-phase writer pattern, not filesystem
+//!   rollback for path operations
+//! - `sync_all`, `sync_data`: A started sync may finish after its future drops
+//! - Owned seek/read cancellation is ordered, not rollback-safe
 //!
 //! # Example
 //!
@@ -60,12 +66,21 @@ pub use buf_reader::BufReader;
 pub use buf_writer::BufWriter;
 pub use dir::{create_dir, create_dir_all, remove_dir, remove_dir_all};
 pub use file::File;
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub use file::FileCursorOperationProbe;
 pub use lines::Lines;
 pub use metadata::{FileType, Metadata, Permissions};
 pub use open_options::OpenOptions;
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
 pub use path_ops::{
-    SymlinkKind, canonicalize, copy, hard_link, metadata, read, read_link, read_to_string,
-    remove_file, rename, set_permissions, symlink_metadata, symlink_typed, write, write_atomic,
+    FilesystemOperationProbe, stage_write_atomic_with_probe_for_test, write_with_probe_for_test,
+};
+pub use path_ops::{
+    StagedAtomicWrite, SymlinkKind, canonicalize, copy, hard_link, metadata, read, read_link,
+    read_to_string, remove_file, rename, set_permissions, stage_write_atomic, symlink_metadata,
+    symlink_typed, write, write_atomic,
 };
 pub use platform::{
     CapabilityProbe, CapabilityStatus, FilesystemCapabilityProfile,

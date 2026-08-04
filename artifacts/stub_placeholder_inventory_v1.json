@@ -629,6 +629,60 @@
       "support_class": "not_conformance_evidence",
       "blocker_bead_id": "",
       "notes": "Contract artifacts mention placeholder/stub strings to define scanner policy and negative fixtures; those rows are evidence metadata, not support claims."
+    },
+    {
+      "id": "src-atp-bond-pull-ssh-tunnel-unimplemented",
+      "paths": [
+        "src/bin/atp.rs"
+      ],
+      "terms": [
+        "stubbed (see [`run_bond_pull`])",
+        "todo(z01bbr.8.3 h3)",
+        "stubbed: the leg dialed the direct endpoint"
+      ],
+      "disposition": "product-bug-follow-up",
+      "support_class": "blocked_follow_up",
+      "blocker_bead_id": "asupersync-atp-channel-bonding-z01bbr.8.3",
+      "notes": "Three markers for one gap: for SSH-selected donors, bond-pull computes and reports the `ssh -L` tunnel plan but the leg still dials the direct endpoint, so a donor behind NAT with UDP blocked cannot be reached. Genuinely unfinished and loudly disclosed on stderr, not silent. The same gap holds an expiring no-mock waiver (2026-10-31) under the same bead, so both gates agree. Terms are anchored to the exact sentences; an unrelated marker added to this binary still surfaces as unclassified."
+    },
+    {
+      "id": "src-atp-rq-source-stream-digest-sentinel",
+      "paths": [
+        "src/net/atp/transport_rq/mod.rs"
+      ],
+      "terms": [
+        "sha256_hex_placeholder"
+      ],
+      "disposition": "documented-deferred-surface",
+      "support_class": "documented_runtime_semantics",
+      "blocker_bead_id": "",
+      "notes": "sha256_hex_placeholder() returns a deliberate fixed-width 64-zero hex sentinel meaning 'digest not yet known', used only in SourceStream mode where the digest is not yet computable. It is enforced fail-closed rather than trusted: ManifestDigestMode::Manifest errors outright on a missing digest, and with require_source_stream_trailer the receiver errors if any entry lacks a real trailer digest. Anchored to the identifier, so an unrelated placeholder in this file still surfaces."
+    },
+    {
+      "id": "src-atp-bonded-sdk-contrasting-doc-terminology",
+      "paths": [
+        "src/net/atp/sdk/bonded.rs"
+      ],
+      "terms": [
+        "in-process driver is still a fail-closed stub"
+      ],
+      "disposition": "documented-deferred-surface",
+      "support_class": "terminology",
+      "blocker_bead_id": "",
+      "notes": "The module doc contrasts BondedTransfer against the single-source ActiveTransfer handle, describing that other type's in-process driver. The term names a different type in a different module; BondedTransfer itself drives the landed bonded RaptorQ data path. Adjudicated under asupersync-pzfwf5, which narrows the matching no-mock allowlist entry to the same sentence."
+    },
+    {
+      "id": "src-net-udp-windows-reset-shim-terminology",
+      "paths": [
+        "src/net/udp.rs"
+      ],
+      "terms": [
+        "calls this no-op stub"
+      ],
+      "disposition": "documented-deferred-surface",
+      "support_class": "terminology",
+      "blocker_bead_id": "",
+      "notes": "Comment on the non-Windows suppress_windows_udp_connection_reset no-op, describing a deliberate platform-conditional shim rather than unfinished work. Adjudicated under asupersync-pzfwf5, which narrows the matching no-mock allowlist entry to the same comment."
     }
   ]
 }

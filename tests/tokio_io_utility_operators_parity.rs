@@ -211,16 +211,27 @@ fn cancel_safety_covers_all_operators() {
 }
 
 #[test]
-fn all_cancel_safe_in_current_impl() {
-    init_test("all_cancel_safe_in_current_impl");
+fn copy_cancel_safety_classification_is_truthful() {
+    init_test("copy_cancel_safety_classification_is_truthful");
     let v = parse_json();
     let entries = v["cancel_safety"].as_array().unwrap();
-    for entry in entries {
-        let op = entry["operator"].as_str().unwrap();
-        let safe = entry["cancel_safe"].as_bool().unwrap();
-        assert!(safe, "operator {op} should be cancel-safe in current impl");
+    for (operator, expected_safe) in [
+        ("copy", false),
+        ("copy_buf", true),
+        ("copy_with_progress", false),
+        ("copy_bidirectional", false),
+    ] {
+        let entry = entries
+            .iter()
+            .find(|entry| entry["operator"].as_str() == Some(operator))
+            .unwrap_or_else(|| panic!("missing copy classification for {operator}"));
+        assert_eq!(
+            entry["cancel_safe"].as_bool(),
+            Some(expected_safe),
+            "unexpected future-drop classification for {operator}"
+        );
     }
-    asupersync::test_complete!("all_cancel_safe_in_current_impl");
+    asupersync::test_complete!("copy_cancel_safety_classification_is_truthful");
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -277,7 +288,12 @@ fn summary_metrics_consistent() {
     );
 
     let cs_count = summary["cancel_safe_count"].as_u64().unwrap();
-    let actual_cs = v["cancel_safety"].as_array().unwrap().len() as u64;
+    let actual_cs = v["cancel_safety"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["cancel_safe"].as_bool() == Some(true))
+        .count() as u64;
     assert_eq!(
         cs_count, actual_cs,
         "summary.cancel_safe_count mismatch: claimed={cs_count}, actual={actual_cs}"

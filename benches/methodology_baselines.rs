@@ -20,8 +20,10 @@
 #![allow(missing_docs)]
 #![allow(clippy::semicolon_if_nothing_returned)]
 
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group};
 use std::hint::black_box;
+
+mod phase6_gate;
 
 use asupersync::Cx;
 use asupersync::channel::mpsc;
@@ -698,4 +700,14 @@ criterion_group!(
     bench_obligation_query,
 );
 
-criterion_main!(benches);
+fn main() {
+    benches();
+    Criterion::default().configure_from_args().final_summary();
+    // The gate implementation is shared with the scheduler hot-path benches
+    // (br-asupersync-sched-hot-path-perf-bt4y5f.1); this binary owns exactly
+    // the `methodology/` rows of artifacts/baseline.json.
+    if let Err(error) = phase6_gate::run_phase6_p50_gate("methodology/") {
+        eprintln!("[PHASE6] baseline gate failed: {error}");
+        std::process::exit(2);
+    }
+}

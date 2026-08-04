@@ -271,12 +271,29 @@ fn runtime_state_cancel_request_walks_region_tree() {
     // proper cause chains.
     let source = read("src/runtime/state.rs");
 
+    // E2 S4c-2c-ii (br-asupersync-m9wsza) split cancel_request into a
+    // target-threaded core: the public wrapper delegates to
+    // cancel_request_in, which owns the region-tree walk. Pin both links.
+    // The wrapper grew the sharded-shape resolution arm in S4c-2c-iv
+    // (shard-guard construction + buffered-effects drain around the core
+    // call), so the delegation pin scans a wider window: both match arms
+    // must still route through the core.
     let fn_marker = "pub fn cancel_request(";
     let pos = source.find(fn_marker).expect("cancel_request fn");
-    let body_window = &source[pos..pos + 4000];
+    let wrapper_window = &source[pos..pos + 4000];
+    assert!(
+        wrapper_window.matches("self.cancel_request_in(").count() >= 2,
+        "REGRESSION: cancel_request no longer delegates both shape arms \
+         to the target-threaded core; the walk pins below anchor on the \
+         core and the wrapper can drift.",
+    );
+
+    let core_marker = "fn cancel_request_in(";
+    let core_pos = source.find(core_marker).expect("cancel_request_in core");
+    let body_window = &source[core_pos..core_pos + 5000];
 
     assert!(
-        body_window.contains("collect_region_and_descendants_with_depth(region_id)"),
+        body_window.contains("collect_region_and_descendants_with_depth(regions, region_id)"),
         "REGRESSION: cancel_request no longer walks the \
          region tree via collect_region_and_descendants. \
          Region-cancel propagation is broken.",
@@ -348,10 +365,11 @@ fn each_task_has_own_arc_cxinner_for_sibling_isolation() {
 
 #[test]
 fn inline_test_cancel_request_propagates_to_descendants() {
-    // Pin: state.rs has an inline test that asserts
+    // Pin: the runtime-state test mod (split to the sibling
+    // state_tests.rs by br-asupersync-diczyk) has a test that asserts
     // region cancel propagates to descendants. Without
     // this, propagation regressions can pass CI.
-    let source = read("src/runtime/state.rs");
+    let source = read("src/runtime/state_tests.rs");
 
     assert!(
         source.contains("fn cancel_request_propagates_to_descendants()"),
@@ -363,7 +381,9 @@ fn inline_test_cancel_request_propagates_to_descendants() {
 
 #[test]
 fn inline_test_cancel_request_marks_tasks() {
-    let source = read("src/runtime/state.rs");
+    // The 0.3.10 packaging split (br-asupersync-diczyk) moved state.rs's
+    // inline #[cfg(test)] mod byte-exact to the sibling state_tests.rs.
+    let source = read("src/runtime/state_tests.rs");
 
     assert!(
         source.contains("fn cancel_request_marks_tasks()"),

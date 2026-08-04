@@ -95,11 +95,14 @@ fn expand_entry(args: &EntryArgs, mut function: ItemFn, kind: EntryKind) -> Resu
     validate_entry_signature(&function, kind)?;
     let cx_ident = take_optional_cx_arg(&mut function)?;
 
+    // syn 3.0 added the non-exhaustive `modifiers` field. Entry functions are
+    // free functions, so there is no modifier to carry into the expansion.
     let ItemFn {
         attrs,
         vis,
         mut sig,
         block,
+        ..
     } = function;
     sig.asyncness = None;
 
@@ -142,9 +145,12 @@ fn validate_entry_signature(function: &ItemFn, kind: EntryKind) -> Result<()> {
             "asupersync entry macros do not support const functions",
         ));
     }
-    if sig.unsafety.is_some() {
+    // syn 3.0 replaced `unsafety: Option<Token![unsafe]>` with the `Safety`
+    // enum, which also distinguishes an explicit `safe` marker from the
+    // default. Only the `unsafe` case is rejected here.
+    if let syn::Safety::Unsafe(unsafe_token) = &sig.safety {
         return Err(Error::new(
-            sig.unsafety.span(),
+            unsafe_token.span(),
             "asupersync entry macros do not support unsafe entry functions",
         ));
     }

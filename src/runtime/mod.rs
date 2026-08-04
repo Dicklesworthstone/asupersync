@@ -26,11 +26,29 @@
 //!
 //! ## Quick Start
 //!
-//! ```ignore
+//! A [`RuntimeBuilder`] constructs the [`Runtime`]. Code polled by
+//! [`Runtime::block_on`] can recover its runtime-wired context and use the
+//! returned [`TaskHandle`] to observe a region-owned child.
+//!
+//! <!-- core-api-doctest: runtime-builder-task-handle -->
+//! ```
+//! use asupersync::Cx;
 //! use asupersync::runtime::RuntimeBuilder;
 //!
-//! let runtime = RuntimeBuilder::new().build()?;
-//! runtime.block_on(async { /* your async work */ });
+//! let runtime = RuntimeBuilder::current_thread()
+//!     .build()
+//!     .expect("build current-thread runtime");
+//! let value = runtime.block_on(async {
+//!     let cx = Cx::current().expect("block_on installs a runtime Cx");
+//!     let mut task = cx
+//!         .spawn(|child_cx| async move {
+//!             child_cx.checkpoint().expect("child remains active");
+//!             42_u8
+//!         })
+//!         .expect("runtime Cx has spawn authority");
+//!     task.join(&cx).await.expect("task completes")
+//! });
+//! assert_eq!(value, 42);
 //! ```
 //!
 //! ## Single-Threaded (Deterministic)
@@ -256,7 +274,9 @@ pub use slo_policy::{
     SloRuntimePolicyBridgeRequest, SloRuntimeWorkKind,
 };
 pub use spawn_blocking::{spawn_blocking, spawn_blocking_io};
-pub use state::{RuntimeSnapshot, RuntimeState, SpawnError};
+pub use state::{
+    ManualFinalizerReceipt, ManualFinalizerReceiptError, RuntimeSnapshot, RuntimeState, SpawnError,
+};
 pub use state_verifier::{
     ObligationStateTransitions, RegionStateTransitions, StateEntityType, StateTransitionVerifier,
     StateVerifierConfig, StateVerifierStatsSnapshot, StateViolation,

@@ -1,0 +1,1357 @@
+{
+  "schema_version": 1,
+  "artifact_id": "dependency-capability-baseline-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-dep-p1-foundations-upksjk.5.2",
+  "registry_artifact": "artifacts/dependency_capability_registry_v1.json",
+  "baseline_source_revision": "6a0d2c79eaf989b649ad0b63dcbec9a1169e3abf",
+  "captured_at_utc": "2026-07-24",
+  "purpose": "Freeze replayable incumbent behavior for every CAP A1 capability before dependency replacement. This artifact records what is executable now and classifies every remaining gap without treating absence of evidence as permission to cut over.",
+  "case_classes": [
+    "positive",
+    "empty_boundary",
+    "malformed_error",
+    "resource_limit",
+    "cancellation_cleanup",
+    "recovery"
+  ],
+  "parity_modes": [
+    "EXACT_BYTES",
+    "SEMANTIC",
+    "PUBLIC_COMPILE",
+    "ERROR_CONTRACT",
+    "SECURITY_POLICY",
+    "RESOURCE_ENVELOPE",
+    "LIFECYCLE",
+    "PLATFORM_MATRIX",
+    "SERVICE_INTEROP",
+    "OPERATOR_UX"
+  ],
+  "baseline_states": [
+    "EXECUTABLE_COMPLETE",
+    "EXECUTABLE_PARTIAL_BLOCKING",
+    "BLOCKED_EXTERNAL",
+    "BLOCKED_PLATFORM",
+    "BLOCKED_OWNER"
+  ],
+  "case_dispositions": [
+    "EVIDENCE",
+    "BLOCKED_EXTERNAL",
+    "BLOCKED_PLATFORM",
+    "BLOCKED_OWNER",
+    "NOT_APPLICABLE"
+  ],
+  "policy": {
+    "all_capabilities_rule": "The capability_baselines array must contain exactly the 50 stable capability IDs in the CAP A1 registry.",
+    "case_rule": "Every capability classifies every required case exactly once. EVIDENCE names a catalog entry; BLOCKED dispositions name a live owner bead and a concrete gap; NOT_APPLICABLE explains why the case has no meaningful operation.",
+    "execution_rule": "Evidence commands are feature- and target-aware, require remote RCH execution, use isolated target directories, reject zero-test success, and retain stdout, stderr, exit status, timing, provenance, and replay data.",
+    "parity_rule": "EXACT_BYTES is used only for accepted wire or persisted bytes. Public APIs, errors, lifecycle, security, resource behavior, services, platforms, and operator output retain their separate semantic contracts.",
+    "consumer_rule": "A standalone workspace with exact direct versions and its own committed lockfile exercises public generic Serde, Protobuf, Stream, exporter, configuration, protocol, error, and Tower surfaces without root dev dependencies or test-internals.",
+    "blocked_rule": "Blocked or unsupported evidence is a typed result, never a green skip. A blocker cannot authorize dependency removal, feature narrowing, service deprecation, or cutover.",
+    "redaction_rule": "Fixtures contain deterministic synthetic values only. The runner self-tests its canary filter, scrubs stdout and stderr before terminal display or retention, scans retained output for the raw canary, and retains no credentials, private keys, bearer tokens, or ambient portfolio data.",
+    "revision_rule": "The pinned revision is the product-source baseline immediately before this artifact lands; it includes the production Tower feature-boundary repair discovered by the standalone consumer. It is historical provenance, not a command to check out old code. Replay records the actual source revision and reports drift from the pinned baseline.",
+    "no_loss_rule": "No row grants permission to lose an API, format, feature, protocol, platform, diagnostic, service workflow, cancellation guarantee, or user journey."
+  },
+  "consumer_profiles": [
+    {
+      "profile_id": "consumer-default",
+      "manifest": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml",
+      "lockfile": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock",
+      "features": [],
+      "minimum_tests": 7,
+      "surfaces": ["pinned standalone resolution", "generic Serde", "generic Protobuf", "downstream Stream", "configuration", "public errors", "Base64 protocol helper"]
+    },
+    {
+      "profile_id": "consumer-full",
+      "manifest": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml",
+      "lockfile": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock",
+      "features": ["full-profile"],
+      "minimum_tests": 9,
+      "surfaces": ["consumer-default", "metrics exporter", "privacy regex/redaction", "Tower Service adapter", "config-file graph", "compression graph"]
+    }
+  ],
+  "runner_contract": {
+    "script": "scripts/run_dependency_capability_baseline.sh",
+    "scenarios": ["contract", "consumer-default", "consumer-full", "catalog"],
+    "scenario_minimum_tests": {"contract": 26, "consumer-default": 7, "consumer-full": 9, "catalog": 1},
+    "result_root": "target/e2e-results/dependency-capability-baseline",
+    "required_files": ["summary.json", "events.ndjson", "stdout.log", "stderr.log", "provenance.json", "replay.sh"],
+    "required_provenance": ["source_revision", "baseline_revision", "rustc", "cargo", "command", "features", "fixture_id", "fixture_digest", "fixture_manifest", "target", "host", "execution_tree", "controller_dirty_paths", "rch_worker", "scenario_id", "step_id"],
+    "required_outcomes": ["PASS", "FAIL", "BLOCKED_EXTERNAL", "BLOCKED_PLATFORM", "BLOCKED_OWNER", "UNSUPPORTED"],
+    "zero_test_policy": "A Cargo invocation reporting zero executed tests is FAIL unless the catalog entry explicitly declares a compile-only command.",
+    "cleanup_policy": "The runner records child-process exit, a deterministic generated-path inventory and count, logging-pipeline status, cleanup status, and residual-process count; it never silently deletes retained evidence."
+  },
+  "evidence_catalog": [
+    {
+      "evidence_id": "EVD-API-SURFACE",
+      "fixture_paths": ["artifacts/api_surface_map_v1.json", "tests/api_surface_map_contract.rs"],
+      "feature_profile": "default",
+      "target": "host",
+      "case_classes": ["positive", "malformed_error"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_api_surface\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test api_surface_map_contract -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["root export projection matches", "mutated or missing entries fail closed"]}
+    },
+    {
+      "evidence_id": "EVD-CONSUMER-DEFAULT",
+      "fixture_paths": ["tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml", "tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock", "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs"],
+      "feature_profile": "consumer-default",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_consumer_default\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test --manifest-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml --locked -- --nocapture",
+      "expected": {"minimum_tests": 7, "observables": ["pinned standalone resolver state", "arbitrary downstream Serde roundtrip", "successful Serde reuse after malformed and unsupported-format errors", "downstream Prost map and oneof roundtrip", "malformed and size-limited decode errors", "pending/order/fusion Stream semantics", "public config and error naming", "Base64 binary and malformed cases"]}
+    },
+    {
+      "evidence_id": "EVD-CONSUMER-FULL",
+      "fixture_paths": ["tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml", "tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock", "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs"],
+      "feature_profile": "consumer-full",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_consumer_full\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test --manifest-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml --features full-profile --locked -- --nocapture",
+      "expected": {"minimum_tests": 9, "observables": ["pinned standalone resolver state", "all default consumer surfaces", "external metrics exporter lifecycle", "custom regex and automatic PII redaction", "Tower readiness compatibility"]}
+    },
+    {
+      "evidence_id": "EVD-STRUCTURED-CONCURRENCY",
+      "fixture_paths": ["tests/obligation_invariant_conformance.rs", "tests/e2e_combinator.rs"],
+      "feature_profile": "test-internals",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "cancellation_cleanup", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_structured\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test obligation_invariant_conformance --features test-internals -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["obligation lifecycle invariants", "cancellation cleanup", "terminal quiescence"]}
+    },
+    {
+      "evidence_id": "EVD-PROC-MACROS",
+      "fixture_paths": ["asupersync-macros/src/lib.rs", "examples/macros_basic.rs"],
+      "feature_profile": "proc-macros",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_proc_macros\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync-macros -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["macro expansions compile", "invalid syntax diagnostics remain located", "structured ownership is retained"]}
+    },
+    {
+      "evidence_id": "EVD-LAB-DETERMINISM",
+      "fixture_paths": ["tests/lab_determinism.rs", "tests/lab_scenario_runner_golden.rs"],
+      "feature_profile": "test-internals",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "cancellation_cleanup", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_lab\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test lab_determinism --features test-internals -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["same seed reproduces schedule and trace", "bounded exploration reports limits", "cancellation and replay remain deterministic"]}
+    },
+    {
+      "evidence_id": "EVD-BROWSER-PROFILES",
+      "fixture_paths": ["tests/browser_consumer_compatibility_matrix_contract.rs", "scripts/validate_rust_browser_consumer.sh"],
+      "feature_profile": "wasm-browser profiles",
+      "target": "wasm32-unknown-unknown",
+      "case_classes": ["positive", "malformed_error", "resource_limit", "cancellation_cleanup"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_browser\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test browser_consumer_compatibility_matrix_contract -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["browser profile matrix is complete", "invalid profile drift fails", "lifecycle requirements remain explicit"]}
+    },
+    {
+      "evidence_id": "EVD-DIAGNOSTICS",
+      "fixture_paths": ["docs/error_codes/registry.json", "tests/error_code_registry_contract.rs", "tests/cli_output_golden.rs"],
+      "feature_profile": "default",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_diagnostics\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test error_code_registry_contract -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["registry/source/docs agreement", "leading ASUP token contract", "unknown and missing entries fail"]}
+    },
+    {
+      "evidence_id": "EVD-MARGINAL-LEDGER",
+      "fixture_paths": ["artifacts/dependency_marginal_ledger_v1.json", "tests/dependency_marginal_ledger_contract.rs"],
+      "feature_profile": "dependency profiles",
+      "target": "declared matrix",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_ledger\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test dependency_marginal_ledger_contract -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["package-ID graph accounting", "counterfactual and active-native rows", "negative mutations fail"]}
+    },
+    {
+      "evidence_id": "EVD-REACTOR-REGISTRATION",
+      "fixture_paths": ["tests/e2e_reactor_optin.rs", "tests/conformance/reactor_conformance.rs"],
+      "feature_profile": "test-internals",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "cancellation_cleanup", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_reactor\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test e2e_reactor_optin --features test-internals -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["registration lifecycle", "cancel-close cleanup", "token reuse and recovery"]}
+    },
+    {
+      "evidence_id": "EVD-HOST-TOPOLOGY",
+      "fixture_paths": ["tests/large_host_topology_corpus_contract.rs", "tests/host_profile_planner_contract.rs"],
+      "feature_profile": "default",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_host_topology\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test large_host_topology_corpus_contract -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["large-core topology corpus", "bounded host metadata", "invalid and incomplete inputs classified"]}
+    },
+    {
+      "evidence_id": "EVD-TEMP-ARTIFACTS",
+      "fixture_paths": ["tests/proof_artifact_freshness_receipt_contract.rs", "tests/artifact_governance_final_signoff_contract.rs"],
+      "feature_profile": "default",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "cancellation_cleanup", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_temp_artifacts\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_artifact_freshness_receipt_contract -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["artifact freshness and ownership", "failure receipt retention", "cleanup status"]}
+    },
+    {
+      "evidence_id": "EVD-STREAM-PIPELINE",
+      "fixture_paths": ["tests/e2e_stream_pipeline.rs", "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs"],
+      "feature_profile": "test-internals and consumer-default",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "cancellation_cleanup", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_stream\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test e2e_stream_pipeline --features test-internals -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["pending wake behavior", "order and fusion", "backpressure and cancellation cleanup"]}
+    },
+    {
+      "evidence_id": "EVD-TOKEN-SLAB",
+      "fixture_paths": ["tests/memory_tier_slab_pool_contract.rs"],
+      "feature_profile": "default",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "cancellation_cleanup", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_token_slab\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test memory_tier_slab_pool_contract -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["bounded slot lifecycle", "stale token rejection", "reuse after cleanup"]}
+    },
+    {
+      "evidence_id": "EVD-HEX-GOLDENS",
+      "fixture_paths": ["src/golden_artifacts_tests.rs", "src/protocol_serialization_golden_tests.rs"],
+      "feature_profile": "serialization-golden-harnesses",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_hex\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --lib --features serialization-golden-harnesses golden_artifacts_tests -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["accepted lowercase bytes", "empty and boundary bytes", "malformed and oversized decode failure"]}
+    },
+    {
+      "evidence_id": "EVD-BASE64-PROTOCOL",
+      "fixture_paths": ["tests/grpc_web_base64_chunked_decoder_audit.rs", "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs"],
+      "feature_profile": "default",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_base64\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test grpc_web_base64_chunked_decoder_audit -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["chunk boundary decode", "empty and binary payload", "malformed padding and resource bounds"]}
+    },
+    {
+      "evidence_id": "EVD-ATP-VERSION-SCANNER",
+      "fixture_paths": ["src/net/atp/chunk/artifact.rs"],
+      "feature_profile": "default",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_atp_version\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --lib toolchain_version_detection -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["accepted version shapes", "missing and malformed text", "bounded finite scanner"]}
+    },
+    {
+      "evidence_id": "EVD-TIME-RFC3339",
+      "fixture_paths": ["src/bin/asupersync.rs"],
+      "feature_profile": "cli",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_time\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --bin asupersync --features cli format_timestamp_matches_rfc3339_utc_vector -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["UTC RFC3339 rendering", "epoch and calendar boundary vectors", "out-of-range error"]}
+    },
+    {
+      "evidence_id": "EVD-TRACE-GOLDENS",
+      "fixture_paths": ["tests/trace_format_golden_artifacts.rs"],
+      "feature_profile": "test-internals",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_trace_goldens\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test trace_format_golden_artifacts --features test-internals -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["historical bytes and semantic decode", "truncation and corruption errors", "read-after-recovery"]}
+    },
+    {
+      "evidence_id": "EVD-CONFIG-FORMATS",
+      "fixture_paths": ["src/config.rs", "tests/security_config_enforcement.rs"],
+      "feature_profile": "config-file",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_config\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --lib --features config-file runtime_config_toml_roundtrip_canonical_shape -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["TOML roundtrip", "default and boundary values", "invalid configuration fails closed"]}
+    },
+    {
+      "evidence_id": "EVD-SCENARIO-FORMATS",
+      "fixture_paths": ["tests/lab_scenario_runner_golden.rs"],
+      "feature_profile": "test-internals",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "cancellation_cleanup", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_scenario_formats\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test lab_scenario_runner_golden --features test-internals -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["accepted YAML semantics", "invalid schema diagnostics", "bounded deterministic replay"]}
+    },
+    {
+      "evidence_id": "EVD-PROTOBUF-WIRE",
+      "fixture_paths": ["tests/grpc_protobuf_varint_audit.rs", "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs"],
+      "feature_profile": "consumer-default",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_protobuf\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test grpc_protobuf_varint_audit -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["canonical varints", "truncated and overlong input rejection", "configured message-size bounds"]}
+    },
+    {
+      "evidence_id": "EVD-OTLP-METRICS",
+      "fixture_paths": ["tests/otlp_metrics_request_golden.rs", "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs"],
+      "feature_profile": "metrics and consumer-full",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_otlp_metrics\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test otlp_metrics_request_golden --features metrics -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["OTLP metric request bytes", "empty and boundary datapoints", "invalid data and exporter recovery"]}
+    },
+    {
+      "evidence_id": "EVD-NKEY-SIGNED-PROFILE",
+      "fixture_paths": ["tests/signed_profile_bundle_contract.rs", "tests/nats_jwt_empty_issuer_rejected.rs"],
+      "feature_profile": "default",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_nkey\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test signed_profile_bundle_contract -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["signed bundle verification", "empty issuer and malformed signature failure", "secret-safe errors"]}
+    },
+    {
+      "evidence_id": "EVD-AUTH-POLICY",
+      "fixture_paths": ["tests/security_config_enforcement.rs", "tests/postgres_scram_channel_binding_audit.rs"],
+      "feature_profile": "default",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "cancellation_cleanup", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_auth\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test security_config_enforcement -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["authentication policy matrix", "downgrade rejection", "credential-safe errors", "cancellation cleanup"]}
+    },
+    {
+      "evidence_id": "EVD-CLI-GOLDENS",
+      "fixture_paths": ["tests/cli_output_golden.rs", "src/bin/asupersync.rs", "src/bin/atp.rs", "src/bin/atpd.rs", "src/bin/offline_tuner.rs"],
+      "feature_profile": "cli, atp-cli, atpd-daemon, simd-intrinsics",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "cancellation_cleanup", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_cli_goldens\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test cli_output_golden --features cli,atp-cli,atpd-daemon,simd-intrinsics -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["help and error semantics", "stdout/stderr separation", "semantic exit codes", "deterministic diagnostics"]}
+    },
+    {
+      "evidence_id": "EVD-SQLITE-WAL",
+      "fixture_paths": ["tests/sqlite_wal_conformance.rs"],
+      "feature_profile": "sqlite,test-internals",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "cancellation_cleanup", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_sqlite\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test sqlite_wal_conformance --features sqlite,test-internals -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["real file and WAL behavior", "transaction and error semantics", "cancel/interrupt cleanup", "restart recovery"]}
+    },
+    {
+      "evidence_id": "EVD-KAFKA-AUTH",
+      "fixture_paths": ["tests/kafka_sasl_authentication_audit.rs"],
+      "feature_profile": "kafka",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_kafka_auth\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test kafka_sasl_authentication_audit --features kafka -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["SASL configuration and error handling", "malformed credential rejection", "secret-safe diagnostics"]}
+    },
+    {
+      "evidence_id": "EVD-X509-QUIC",
+      "fixture_paths": ["tests/quic_native_x509_verification.rs"],
+      "feature_profile": "tls,test-internals",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "cancellation_cleanup", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_x509\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test quic_native_x509_verification --features tls,test-internals -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["chain and hostname verification", "malformed and untrusted certificate failure", "handshake cancellation cleanup"]}
+    },
+    {
+      "evidence_id": "EVD-HTTP-COMPRESSION",
+      "fixture_paths": ["src/http/compress.rs", "tests/http_e2e.rs"],
+      "feature_profile": "compression,test-internals",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "cancellation_cleanup", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_http_compression\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --lib --features compression,test-internals http::compress::tests -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["gzip deflate and Brotli negotiation", "empty and boundary bodies", "malformed and bomb limits", "cancellation cleanup"]}
+    },
+    {
+      "evidence_id": "EVD-TRACE-LZ4",
+      "fixture_paths": ["tests/trace_compression_conformance.rs"],
+      "feature_profile": "trace-compression",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_trace_lz4\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test trace_compression_conformance --features trace-compression -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["LZ4 historical decode and new roundtrip", "truncation and size-limit failure", "reader recovery"]}
+    },
+    {
+      "evidence_id": "EVD-SIGNALS",
+      "fixture_paths": ["tests/e2e_signal.rs", "tests/runtime_cancel_signal_coalescing_audit.rs"],
+      "feature_profile": "test-internals",
+      "target": "unix-host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "cancellation_cleanup", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_signals\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test e2e_signal --features test-internals -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["graceful shutdown", "repeated signal coalescing or escalation", "handler cleanup"]}
+    },
+    {
+      "evidence_id": "EVD-XATTR-ATP",
+      "fixture_paths": ["tests/atp_tcp_metadata_fidelity.rs"],
+      "feature_profile": "test-internals",
+      "target": "xattr-capable host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "cancellation_cleanup", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_xattr\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test atp_tcp_metadata_fidelity --features test-internals -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["xattr metadata transfer", "empty and boundary values", "permission/unsupported state is typed", "cleanup"]}
+    },
+    {
+      "evidence_id": "EVD-SYNC-LOCKS",
+      "fixture_paths": ["tests/mutex_poison_std_conformance.rs", "tests/metamorphic/sync_rwlock.rs"],
+      "feature_profile": "test-internals",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "cancellation_cleanup", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_sync_locks\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test mutex_poison_std_conformance --features test-internals -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["poison policy", "contention and wake semantics", "cancel/shutdown cleanup", "recovery"]}
+    },
+    {
+      "evidence_id": "EVD-CACHE-QUEUES",
+      "fixture_paths": ["tests/cache_aware_queues.rs"],
+      "feature_profile": "test-internals",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "cancellation_cleanup", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_cache_queues\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test cache_aware_queues --features test-internals -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["queue model behavior", "empty/full boundaries", "concurrent cleanup and reuse"]}
+    },
+    {
+      "evidence_id": "EVD-RAPTORQ-GOLDEN",
+      "fixture_paths": ["tests/raptorq_encoded_block_golden.rs"],
+      "feature_profile": "default and simd-intrinsics",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "cancellation_cleanup", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_raptorq\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test raptorq_encoded_block_golden --features simd-intrinsics -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["independent encoded-block bytes", "scalar/SIMD semantic agreement", "invalid and bounded input", "decoder recovery"]}
+    },
+    {
+      "evidence_id": "EVD-NATS-HANDSHAKE",
+      "fixture_paths": ["tests/messaging_nats_handshake.rs", "tests/nats_real_server.rs"],
+      "feature_profile": "test-internals",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "cancellation_cleanup", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_nats\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test messaging_nats_handshake --features test-internals -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["protocol handshake", "malformed server input", "auth and cancellation cleanup", "reconnect state"]}
+    },
+    {
+      "evidence_id": "EVD-DATABASE-WIRE",
+      "fixture_paths": ["tests/database_wire_frame_goldens.rs", "tests/postgres_scram_channel_binding_audit.rs"],
+      "feature_profile": "test-internals",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "cancellation_cleanup", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_database_wire\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test database_wire_frame_goldens --features test-internals -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["PostgreSQL/MySQL frame bytes", "empty and boundary values", "malformed frame and auth errors", "cancel cleanup"]}
+    },
+    {
+      "evidence_id": "EVD-QUIC-ATP",
+      "fixture_paths": ["tests/atp_quic_real_udp_transfer_e2e.rs", "tests/http3_qpack_support_matrix_contract.rs"],
+      "feature_profile": "test-internals,tls",
+      "target": "udp-capable host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "cancellation_cleanup", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_quic_atp\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test atp_quic_real_udp_transfer_e2e --features test-internals,tls -- --nocapture",
+      "expected": {"minimum_tests": 1, "observables": ["real UDP transfer", "empty and boundary payloads", "malformed/security errors", "cancel/resume cleanup"]}
+    },
+    {
+      "evidence_id": "EVD-BASELINE-CONTRACT",
+      "fixture_paths": ["artifacts/dependency_capability_baseline_v1.json", "tests/dependency_capability_baseline_contract.rs", "docs/dependency_capability_baseline.md"],
+      "feature_profile": "default",
+      "target": "host",
+      "case_classes": ["positive", "empty_boundary", "malformed_error", "resource_limit", "recovery"],
+      "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_cap_baseline_contract\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test dependency_capability_baseline_contract -- --nocapture",
+      "expected": {"minimum_tests": 26, "observables": ["exact registry coverage", "all cases classified", "fixture and owner resolution", "negative mutations fail closed"]}
+    }
+  ],
+  "capability_baselines": [
+    {
+      "capability_id": "CAP-PUBLIC-API-TOPOLOGY",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["PUBLIC_COMPILE", "SEMANTIC", "ERROR_CONTRACT", "LIFECYCLE"],
+      "evidence_ids": ["EVD-API-SURFACE", "EVD-CONSUMER-DEFAULT", "EVD-CONSUMER-FULL"],
+      "downstream_profiles": ["consumer-default", "consumer-full"],
+      "scenario_ids": ["external_consumer_compile", "api_surface_drift"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-API-SURFACE"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-CONSUMER-DEFAULT"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-API-SURFACE"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-CONSUMER-DEFAULT"},
+        "cancellation_cleanup": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-dep-p1-foundations-upksjk.6.1", "reason": "CAP A2 does not exhaustively map cancellation contracts for every public async entry point; VER A1 owns that invariant matrix."},
+        "recovery": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-dep-p1-foundations-upksjk.6.2", "reason": "Cross-process and real-service recovery across the full public surface belongs to the aggregate no-mock suite."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Root-export and synthesized-consumer evidence cannot enumerate private downstream use, prove item-level rustdoc compatibility, or authorize any public narrowing."
+    },
+    {
+      "capability_id": "CAP-STRUCTURED-CONCURRENCY",
+      "baseline_state": "EXECUTABLE_COMPLETE",
+      "parity_modes": ["SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "LIFECYCLE", "SECURITY_POLICY"],
+      "evidence_ids": ["EVD-STRUCTURED-CONCURRENCY"],
+      "downstream_profiles": [],
+      "scenario_ids": ["structured_scope", "race_two_futures", "obligation_cleanup"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-STRUCTURED-CONCURRENCY"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-STRUCTURED-CONCURRENCY"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-STRUCTURED-CONCURRENCY"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-STRUCTURED-CONCURRENCY"},
+        "cancellation_cleanup": {"disposition": "EVIDENCE", "evidence_id": "EVD-STRUCTURED-CONCURRENCY"},
+        "recovery": {"disposition": "EVIDENCE", "evidence_id": "EVD-STRUCTURED-CONCURRENCY"}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "A finite incumbent baseline records current invariant examples; it does not prove all schedules, global fairness, or replacement parity."
+    },
+    {
+      "capability_id": "CAP-PROC-MACROS",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["PUBLIC_COMPILE", "SEMANTIC", "ERROR_CONTRACT", "LIFECYCLE"],
+      "evidence_ids": ["EVD-PROC-MACROS", "EVD-STRUCTURED-CONCURRENCY"],
+      "downstream_profiles": [],
+      "scenario_ids": ["structured_scope", "race_two_futures"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-PROC-MACROS"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-PROC-MACROS"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-PROC-MACROS"},
+        "resource_limit": {"disposition": "NOT_APPLICABLE", "reason": "Macro expansion has no independent runtime resource budget; generated runtime behavior is classified under structured concurrency."},
+        "cancellation_cleanup": {"disposition": "EVIDENCE", "evidence_id": "EVD-STRUCTURED-CONCURRENCY"},
+        "recovery": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-dep-p1-foundations-upksjk.6.1", "reason": "Compiler-version and expanded downstream syntax recovery require the VER A1 compile/UI matrix."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Current macro tests and examples do not prove arbitrary downstream syntax, every diagnostic span, or future compiler compatibility."
+    },
+    {
+      "capability_id": "CAP-LAB-DETERMINISM",
+      "baseline_state": "EXECUTABLE_COMPLETE",
+      "parity_modes": ["SEMANTIC", "EXACT_BYTES", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "LIFECYCLE"],
+      "evidence_ids": ["EVD-LAB-DETERMINISM", "EVD-SCENARIO-FORMATS"],
+      "downstream_profiles": [],
+      "scenario_ids": ["lab_scenario_yaml", "cancellation_injection", "deterministic_replay"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-LAB-DETERMINISM"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-SCENARIO-FORMATS"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-SCENARIO-FORMATS"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-LAB-DETERMINISM"},
+        "cancellation_cleanup": {"disposition": "EVIDENCE", "evidence_id": "EVD-LAB-DETERMINISM"},
+        "recovery": {"disposition": "EVIDENCE", "evidence_id": "EVD-LAB-DETERMINISM"}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Bounded deterministic exploration and replay are incumbent snapshots, not proof of every production schedule or external service interaction."
+    },
+    {
+      "capability_id": "CAP-BROWSER-RUNTIME",
+      "baseline_state": "BLOCKED_PLATFORM",
+      "parity_modes": ["PUBLIC_COMPILE", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "LIFECYCLE", "PLATFORM_MATRIX"],
+      "evidence_ids": ["EVD-BROWSER-PROFILES"],
+      "downstream_profiles": [],
+      "scenario_ids": ["browser_profile_compile", "browser_stream_lifecycle"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-BROWSER-PROFILES"},
+        "empty_boundary": {"disposition": "BLOCKED_PLATFORM", "owner_bead": "asupersync-dep-p1-foundations-upksjk.6.5", "reason": "Empty browser stream/storage/event behavior needs a real supported browser matrix rather than host-only contract tests."},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-BROWSER-PROFILES"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-BROWSER-PROFILES"},
+        "cancellation_cleanup": {"disposition": "EVIDENCE", "evidence_id": "EVD-BROWSER-PROFILES"},
+        "recovery": {"disposition": "BLOCKED_PLATFORM", "owner_bead": "asupersync-dep-p1-foundations-upksjk.6.5", "reason": "Listener, worker, storage, and stream recovery must run in pinned real browsers."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "A wasm profile contract does not prove behavior in Chrome, Firefox, Safari, workers, storage backends, or unsupported browser versions."
+    },
+    {
+      "capability_id": "CAP-TOWER-COMPAT",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["PUBLIC_COMPILE", "SEMANTIC", "ERROR_CONTRACT", "LIFECYCLE"],
+      "evidence_ids": ["EVD-CONSUMER-FULL"],
+      "downstream_profiles": ["consumer-full"],
+      "scenario_ids": ["tower_external_consumer"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-CONSUMER-FULL"},
+        "empty_boundary": {"disposition": "NOT_APPLICABLE", "reason": "Tower readiness has no independent empty-input value; request boundary behavior is owned by each service implementation."},
+        "malformed_error": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-dep-p1-foundations-upksjk.6.1", "reason": "The synthesized service is infallible; downstream error and readiness-failure shapes need the VER A1 consumer matrix."},
+        "resource_limit": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-dep-p1-foundations-upksjk.6.1", "reason": "Readiness backpressure and bounded in-flight calls require a focused adapter model."},
+        "cancellation_cleanup": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-dep-p1-foundations-upksjk.6.5", "reason": "Dropped-call and shutdown cleanup require the sparse-feature downstream matrix."},
+        "recovery": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-dep-p1-foundations-upksjk.6.5", "reason": "Third-party middleware recovery cannot be inferred from trait compatibility."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "The fixture proves public trait naming and readiness only, not arbitrary Tower middleware behavior or Tokio ecosystem equivalence."
+    },
+    {
+      "capability_id": "CAP-DIAGNOSTICS",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["ERROR_CONTRACT", "EXACT_BYTES", "SECURITY_POLICY", "RESOURCE_ENVELOPE", "OPERATOR_UX", "LIFECYCLE"],
+      "evidence_ids": ["EVD-DIAGNOSTICS", "EVD-CLI-GOLDENS"],
+      "downstream_profiles": [],
+      "scenario_ids": ["diagnostic_registry", "structured_log_redaction", "cli_error_exit"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-DIAGNOSTICS"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-CLI-GOLDENS"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-DIAGNOSTICS"},
+        "resource_limit": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-dep-p1-foundations-upksjk.6.1", "reason": "Disabled-path cost and enabled queue/field bounds need explicit resource-envelope evidence."},
+        "cancellation_cleanup": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-dep-p1-foundations-upksjk.6.2", "reason": "Exactly-once terminal cancellation/shutdown log events belong to the aggregate no-mock runner."},
+        "recovery": {"disposition": "EVIDENCE", "evidence_id": "EVD-DIAGNOSTICS"}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Registry consistency and selected CLI goldens do not prove that every runtime failure is coded or every external sink preserves redaction."
+    },
+    {
+      "capability_id": "CAP-VERIFICATION-PROFILES",
+      "baseline_state": "EXECUTABLE_COMPLETE",
+      "parity_modes": ["SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "OPERATOR_UX"],
+      "evidence_ids": ["EVD-BASELINE-CONTRACT", "EVD-MARGINAL-LEDGER"],
+      "downstream_profiles": [],
+      "scenario_ids": ["dependency_sovereignty_aggregate", "negative_fixture_audit"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-BASELINE-CONTRACT"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-BASELINE-CONTRACT"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-BASELINE-CONTRACT"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-MARGINAL-LEDGER"},
+        "cancellation_cleanup": {"disposition": "NOT_APPLICABLE", "reason": "The static proof-profile contract owns no long-lived child process; runner process cleanup is a separate E2E scenario."},
+        "recovery": {"disposition": "EVIDENCE", "evidence_id": "EVD-BASELINE-CONTRACT"}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "A green focused contract proves only the declared artifact and mutation surfaces, not broad workspace health, fleet availability, or release readiness."
+    },
+    {
+      "capability_id": "CAP-DEPENDENCY-LEDGER",
+      "baseline_state": "EXECUTABLE_COMPLETE",
+      "parity_modes": ["EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "PLATFORM_MATRIX"],
+      "evidence_ids": ["EVD-MARGINAL-LEDGER"],
+      "downstream_profiles": [],
+      "scenario_ids": ["marginal_ledger_generation"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-MARGINAL-LEDGER"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-MARGINAL-LEDGER"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-MARGINAL-LEDGER"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-MARGINAL-LEDGER"},
+        "cancellation_cleanup": {"disposition": "NOT_APPLICABLE", "reason": "The checked static ledger has no asynchronous cancellation lifecycle."},
+        "recovery": {"disposition": "EVIDENCE", "evidence_id": "EVD-MARGINAL-LEDGER"}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Accurate graph cost does not prove correctness, security, performance, interoperability, or product value of a replacement."
+    },
+    {
+      "capability_id": "CAP-DOWNSTREAM-CONSUMERS",
+      "baseline_state": "EXECUTABLE_COMPLETE",
+      "parity_modes": ["PUBLIC_COMPILE", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "LIFECYCLE"],
+      "evidence_ids": ["EVD-CONSUMER-DEFAULT", "EVD-CONSUMER-FULL", "EVD-STREAM-PIPELINE"],
+      "downstream_profiles": ["consumer-default", "consumer-full"],
+      "scenario_ids": ["published_consumer", "portfolio_consumer_matrix"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-CONSUMER-DEFAULT"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-CONSUMER-DEFAULT"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-CONSUMER-DEFAULT"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-CONSUMER-DEFAULT"},
+        "cancellation_cleanup": {"disposition": "EVIDENCE", "evidence_id": "EVD-STREAM-PIPELINE"},
+        "recovery": {"disposition": "EVIDENCE", "evidence_id": "EVD-STREAM-PIPELINE"}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Two synthesized profiles preserve generic extension examples but cannot enumerate every private downstream crate, feature combination, or unusual type."
+    },
+    {
+      "capability_id": "CAP-HASH-MAPS",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "LIFECYCLE", "PLATFORM_MATRIX"],
+      "evidence_ids": ["EVD-REACTOR-REGISTRATION"],
+      "downstream_profiles": [],
+      "scenario_ids": ["reactor_registration_churn"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-REACTOR-REGISTRATION"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-REACTOR-REGISTRATION"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-REACTOR-REGISTRATION"},
+        "resource_limit": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-d24mms.1", "reason": "Allocator behavior, churn, collision resistance, and tail latency need call-site-specific replacement evidence."},
+        "cancellation_cleanup": {"disposition": "EVIDENCE", "evidence_id": "EVD-REACTOR-REGISTRATION"},
+        "recovery": {"disposition": "EVIDENCE", "evidence_id": "EVD-REACTOR-REGISTRATION"}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Reactor conformance covers known map-backed paths, not arbitrary generic HashMap behavior, collision attacks, or all platform reactors."
+    },
+    {
+      "capability_id": "CAP-HOST-BENCH-METADATA",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "PLATFORM_MATRIX", "OPERATOR_UX"],
+      "evidence_ids": ["EVD-HOST-TOPOLOGY"],
+      "downstream_profiles": [],
+      "scenario_ids": ["host_benchmark_metadata"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-HOST-TOPOLOGY"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-HOST-TOPOLOGY"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-HOST-TOPOLOGY"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-HOST-TOPOLOGY"},
+        "cancellation_cleanup": {"disposition": "NOT_APPLICABLE", "reason": "Snapshot collection is synchronous and owns no persistent background task."},
+        "recovery": {"disposition": "BLOCKED_PLATFORM", "owner_bead": "asupersync-dep-p1-foundations-upksjk.6.5", "reason": "Cgroup, affinity, socket, physical-core, and cross-platform fallback behavior needs the platform matrix."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "The host corpus is not evidence that available_parallelism alone preserves sockets, physical cores, cgroups, affinity, or provenance."
+    },
+    {
+      "capability_id": "CAP-TEMP-ARTIFACTS",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "LIFECYCLE", "OPERATOR_UX"],
+      "evidence_ids": ["EVD-TEMP-ARTIFACTS"],
+      "downstream_profiles": [],
+      "scenario_ids": ["temp_artifact_cleanup"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-TEMP-ARTIFACTS"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-TEMP-ARTIFACTS"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-TEMP-ARTIFACTS"},
+        "resource_limit": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-d24mms.5", "reason": "Disk-full, permission, collision, and path-length behavior must be captured at each production-adjacent call site."},
+        "cancellation_cleanup": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-dep-p1-foundations-upksjk.6.2", "reason": "Process interruption and retained-evidence cleanup need the aggregate runner's lifecycle receipt."},
+        "recovery": {"disposition": "EVIDENCE", "evidence_id": "EVD-TEMP-ARTIFACTS"}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Proof-artifact governance does not establish parity for every benchmark, log, spool, permission, rename, or cross-filesystem temporary-file path."
+    },
+    {
+      "capability_id": "CAP-FUTURES-STREAMS",
+      "baseline_state": "EXECUTABLE_COMPLETE",
+      "parity_modes": ["PUBLIC_COMPILE", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "LIFECYCLE"],
+      "evidence_ids": ["EVD-CONSUMER-DEFAULT", "EVD-STREAM-PIPELINE"],
+      "downstream_profiles": ["consumer-default"],
+      "scenario_ids": ["public_stream_consumer", "stream_cancel_backpressure", "test_block_on"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-CONSUMER-DEFAULT"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-CONSUMER-DEFAULT"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-STREAM-PIPELINE"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-STREAM-PIPELINE"},
+        "cancellation_cleanup": {"disposition": "EVIDENCE", "evidence_id": "EVD-STREAM-PIPELINE"},
+        "recovery": {"disposition": "EVIDENCE", "evidence_id": "EVD-STREAM-PIPELINE"}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "The external stream and pipeline corpus do not prove every downstream pin projection, unusual waker, combinator composition, or executor interaction."
+    },
+    {
+      "capability_id": "CAP-VISIBILITY-MACRO",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["PUBLIC_COMPILE", "SEMANTIC", "ERROR_CONTRACT"],
+      "evidence_ids": ["EVD-PROC-MACROS"],
+      "downstream_profiles": [],
+      "scenario_ids": ["test_internals_consumer"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-PROC-MACROS"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-PROC-MACROS"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-PROC-MACROS"},
+        "resource_limit": {"disposition": "NOT_APPLICABLE", "reason": "The attribute only changes item visibility and has no runtime resource lifecycle."},
+        "cancellation_cleanup": {"disposition": "NOT_APPLICABLE", "reason": "Visibility expansion owns no asynchronous work."},
+        "recovery": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-d24mms.7", "reason": "All accepted item shapes, attributes, cfg combinations, spans, and downstream test-internals uses must be inventoried before replacement."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Known stereotyped uses and macro-crate tests do not prove the full accepted attribute grammar or downstream diagnostic compatibility."
+    },
+    {
+      "capability_id": "CAP-TOKEN-SLAB",
+      "baseline_state": "EXECUTABLE_COMPLETE",
+      "parity_modes": ["SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "LIFECYCLE"],
+      "evidence_ids": ["EVD-TOKEN-SLAB"],
+      "downstream_profiles": [],
+      "scenario_ids": ["token_slab_churn", "token_slab_cancel_cleanup"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-TOKEN-SLAB"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-TOKEN-SLAB"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-TOKEN-SLAB"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-TOKEN-SLAB"},
+        "cancellation_cleanup": {"disposition": "EVIDENCE", "evidence_id": "EVD-TOKEN-SLAB"},
+        "recovery": {"disposition": "EVIDENCE", "evidence_id": "EVD-TOKEN-SLAB"}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "The bounded corpus preserves current token and pool invariants but must be re-run against every implementation-time consumer and does not establish performance parity."
+    },
+    {
+      "capability_id": "CAP-HEX-CODEC",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "SECURITY_POLICY"],
+      "evidence_ids": ["EVD-HEX-GOLDENS"],
+      "downstream_profiles": [],
+      "scenario_ids": ["hex_public_api", "hex_protocol_artifact"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-HEX-GOLDENS"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-HEX-GOLDENS"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-HEX-GOLDENS"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-HEX-GOLDENS"},
+        "cancellation_cleanup": {"disposition": "NOT_APPLICABLE", "reason": "The pure codec owns no asynchronous resources."},
+        "recovery": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-d24mms.9.4", "reason": "Every persisted, public, and security embedding must demonstrate error mapping and recovery after malformed input."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Core vectors do not prove every public error variant, persisted artifact, credential path, or embedding protocol."
+    },
+    {
+      "capability_id": "CAP-BASE64-CODEC",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["PUBLIC_COMPILE", "EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "SECURITY_POLICY"],
+      "evidence_ids": ["EVD-CONSUMER-DEFAULT", "EVD-BASE64-PROTOCOL"],
+      "downstream_profiles": ["consumer-default"],
+      "scenario_ids": ["base64_nats_auth", "base64_http_websocket", "base64_certificate"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-CONSUMER-DEFAULT"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-CONSUMER-DEFAULT"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-BASE64-PROTOCOL"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-BASE64-PROTOCOL"},
+        "cancellation_cleanup": {"disposition": "NOT_APPLICABLE", "reason": "The codec itself owns no asynchronous resource; embedding protocol lifecycle is separate."},
+        "recovery": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-d24mms.10.6", "reason": "NATS credentials, HTTP/WebSocket framing, and certificate embeddings each need recovery and error-mapping parity."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Codec agreement does not prove authentication, certificate, or framing security for each embedding protocol."
+    },
+    {
+      "capability_id": "CAP-ATP-VERSION-SCANNER",
+      "baseline_state": "EXECUTABLE_COMPLETE",
+      "parity_modes": ["EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE"],
+      "evidence_ids": ["EVD-ATP-VERSION-SCANNER"],
+      "downstream_profiles": [],
+      "scenario_ids": ["atp_version_artifacts"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-ATP-VERSION-SCANNER"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-ATP-VERSION-SCANNER"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-ATP-VERSION-SCANNER"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-ATP-VERSION-SCANNER"},
+        "cancellation_cleanup": {"disposition": "NOT_APPLICABLE", "reason": "The finite scanner is a synchronous pure parser."},
+        "recovery": {"disposition": "NOT_APPLICABLE", "reason": "A failed scan has no mutable state and the next independent call is unaffected."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "This baseline covers only ATP toolchain version extraction and cannot justify narrowing unrelated regular-expression capability."
+    },
+    {
+      "capability_id": "CAP-TIME-UTC-RFC3339",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "OPERATOR_UX"],
+      "evidence_ids": ["EVD-TIME-RFC3339", "EVD-CLI-GOLDENS"],
+      "downstream_profiles": [],
+      "scenario_ids": ["time_calendar_corpus", "time_cli_artifacts", "time_database_roundtrip"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-TIME-RFC3339"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-TIME-RFC3339"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-TIME-RFC3339"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-TIME-RFC3339"},
+        "cancellation_cleanup": {"disposition": "NOT_APPLICABLE", "reason": "UTC conversion and formatting are synchronous and own no asynchronous resource."},
+        "recovery": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-5z2scg.6.7", "reason": "CLI artifacts, persisted traces, database values, negative years, leap rules, and cross-version recovery need the complete time corpus."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "A nanoseconds-to-RFC3339 vector is only a foundation and cannot authorize removal of chrono/time before public and persisted parity."
+    },
+    {
+      "capability_id": "CAP-SERDE-GENERIC",
+      "baseline_state": "EXECUTABLE_COMPLETE",
+      "parity_modes": ["PUBLIC_COMPILE", "EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE"],
+      "evidence_ids": ["EVD-CONSUMER-DEFAULT"],
+      "downstream_profiles": ["consumer-default"],
+      "scenario_ids": ["generic_serde_downstream", "cross_version_artifact"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-CONSUMER-DEFAULT"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-CONSUMER-DEFAULT"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-CONSUMER-DEFAULT"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-CONSUMER-DEFAULT"},
+        "cancellation_cleanup": {"disposition": "NOT_APPLICABLE", "reason": "The generic Serde codec is synchronous and owns no asynchronous lifecycle."},
+        "recovery": {"disposition": "EVIDENCE", "evidence_id": "EVD-CONSUMER-DEFAULT"}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "A representative arbitrary downstream enum/map/binary type preserves genericity evidence but is not a finite substitute for all Serde data models or versions."
+    },
+    {
+      "capability_id": "CAP-PERSISTED-TRACE-SNAPSHOT",
+      "baseline_state": "EXECUTABLE_COMPLETE",
+      "parity_modes": ["EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "LIFECYCLE", "OPERATOR_UX"],
+      "evidence_ids": ["EVD-TRACE-GOLDENS"],
+      "downstream_profiles": [],
+      "scenario_ids": ["trace_snapshot_migration", "trace_cli_replay", "artifact_rollback"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-TRACE-GOLDENS"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-TRACE-GOLDENS"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-TRACE-GOLDENS"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-TRACE-GOLDENS"},
+        "cancellation_cleanup": {"disposition": "NOT_APPLICABLE", "reason": "The golden decode contract is synchronous; writer interruption is tracked by the E2E artifact scenario."},
+        "recovery": {"disposition": "EVIDENCE", "evidence_id": "EVD-TRACE-GOLDENS"}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Current historical goldens do not authorize deleting any accepted artifact; migration, rollback, and new-version cutover remain independently gated."
+    },
+    {
+      "capability_id": "CAP-CONFIG-TOML-JSON",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "SECURITY_POLICY", "OPERATOR_UX"],
+      "evidence_ids": ["EVD-CONFIG-FORMATS", "EVD-CONSUMER-DEFAULT"],
+      "downstream_profiles": ["consumer-default", "consumer-full"],
+      "scenario_ids": ["config_toml_json_roundtrip", "config_precedence", "atpd_config_user"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-CONFIG-FORMATS"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-CONSUMER-DEFAULT"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-CONFIG-FORMATS"},
+        "resource_limit": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-5z2scg.4.3", "reason": "Depth, input-size, string-size, and duplicate-key limits need explicit format policy."},
+        "cancellation_cleanup": {"disposition": "NOT_APPLICABLE", "reason": "Configuration parsing is synchronous; daemon reload lifecycle is an atpd E2E concern."},
+        "recovery": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-5z2scg.4.5", "reason": "TOML comments, unknown fields, data preservation, precedence, JSON migration, and atpd reload/rollback need no-loss E2E proof."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Adding or testing JSON does not permit narrowing accepted TOML, losing comments or unknown data, or changing source precedence."
+    },
+    {
+      "capability_id": "CAP-SCENARIO-YAML-JSON",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "LIFECYCLE"],
+      "evidence_ids": ["EVD-SCENARIO-FORMATS", "EVD-LAB-DETERMINISM"],
+      "downstream_profiles": [],
+      "scenario_ids": ["lab_scenario_yaml", "scenario_cross_format", "scenario_replay"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-SCENARIO-FORMATS"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-SCENARIO-FORMATS"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-SCENARIO-FORMATS"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-LAB-DETERMINISM"},
+        "cancellation_cleanup": {"disposition": "EVIDENCE", "evidence_id": "EVD-LAB-DETERMINISM"},
+        "recovery": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-5z2scg.5.5", "reason": "Cross-format YAML/JSON preservation, deterministic replay, comments/anchors policy, and rollback need the format E2E campaign."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "A typed JSON schema is additive and cannot authorize deleting, lossy-converting, or silently reinterpreting accepted YAML."
+    },
+    {
+      "capability_id": "CAP-PROTOBUF-GENERIC",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["PUBLIC_COMPILE", "EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "LIFECYCLE", "SERVICE_INTEROP"],
+      "evidence_ids": ["EVD-CONSUMER-DEFAULT", "EVD-PROTOBUF-WIRE"],
+      "downstream_profiles": ["consumer-default"],
+      "scenario_ids": ["protobuf_generic_consumer", "protobuf_cross_language", "grpc_streaming"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-CONSUMER-DEFAULT"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-PROTOBUF-WIRE"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-PROTOBUF-WIRE"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-CONSUMER-DEFAULT"},
+        "cancellation_cleanup": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-5z2scg.1.7", "reason": "Streaming decode, backpressure, cancellation, and partially consumed frame cleanup need campaign E2E evidence."},
+        "recovery": {"disposition": "BLOCKED_EXTERNAL", "owner_bead": "asupersync-5z2scg.1.7", "reason": "Cross-language unknown-field, oneof, packed, map, and schema-evolution recovery needs pinned external implementations."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "One downstream map/oneof message and varint corpus preserve genericity but cannot replace arbitrary downstream Prost types or cross-language compatibility."
+    },
+    {
+      "capability_id": "CAP-OTLP-ECOSYSTEM",
+      "baseline_state": "BLOCKED_EXTERNAL",
+      "parity_modes": ["EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "LIFECYCLE", "SERVICE_INTEROP", "SECURITY_POLICY"],
+      "evidence_ids": ["EVD-OTLP-METRICS", "EVD-CONSUMER-FULL"],
+      "downstream_profiles": ["consumer-full"],
+      "scenario_ids": ["otlp_metrics", "otlp_traces", "otlp_logs", "otlp_external_sdk_adapter", "otlp_failure_matrix"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-OTLP-METRICS"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-OTLP-METRICS"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-OTLP-METRICS"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-OTLP-METRICS"},
+        "cancellation_cleanup": {"disposition": "BLOCKED_EXTERNAL", "owner_bead": "asupersync-5z2scg.2.9", "reason": "Exporter timeout, retry, flush, shutdown, backpressure, and collector disconnect need a pinned real collector."},
+        "recovery": {"disposition": "BLOCKED_EXTERNAL", "owner_bead": "asupersync-5z2scg.2.9", "reason": "Metrics, traces, logs, external SDK/provider adapters, collector versions, partial success, and restart recovery remain unproven."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Metrics request bytes and an in-memory exporter do not prove traces, logs, provider ecosystem, transport lifecycle, or real collector parity."
+    },
+    {
+      "capability_id": "CAP-REGEX-PRIVACY",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["PUBLIC_COMPILE", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "SECURITY_POLICY"],
+      "evidence_ids": ["EVD-CONSUMER-FULL", "EVD-DIAGNOSTICS"],
+      "downstream_profiles": ["consumer-full"],
+      "scenario_ids": ["regex_custom_patterns", "privacy_multisignal_redaction", "regex_adversarial_limits"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-CONSUMER-FULL"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-CONSUMER-FULL"},
+        "malformed_error": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-5z2scg.8.3.7", "reason": "Invalid syntax, Unicode, capture, alternation, repetition, anchoring, and error spans need a declared accepted-language corpus."},
+        "resource_limit": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-5z2scg.8.3.7", "reason": "Pattern/input limits, compilation bounds, adversarial linear-time behavior, memory, and caching need explicit acceptance gates."},
+        "cancellation_cleanup": {"disposition": "NOT_APPLICABLE", "reason": "Individual regex matching is synchronous; signal/export lifecycle is classified under telemetry and diagnostics."},
+        "recovery": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-5z2scg.8.5", "reason": "Multi-signal redaction and invalid user-pattern recovery require end-to-end operator workflows."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "One custom pattern and automatic PII examples do not define or narrow the accepted regex language; fixed scanners are not a general replacement."
+    },
+    {
+      "capability_id": "CAP-NKEY-AUTH",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "SECURITY_POLICY", "LIFECYCLE", "SERVICE_INTEROP"],
+      "evidence_ids": ["EVD-NKEY-SIGNED-PROFILE"],
+      "downstream_profiles": [],
+      "scenario_ids": ["nkey_all_forms", "nkey_nats_auth", "nkey_jwt_authorization", "nkey_secret_redaction"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-NKEY-SIGNED-PROFILE"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-NKEY-SIGNED-PROFILE"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-NKEY-SIGNED-PROFILE"},
+        "resource_limit": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-dep-p4-nkeys-poc60v.1.6", "reason": "Length, decode-work, memory, key zeroization, and adversarial input limits need the security corpus."},
+        "cancellation_cleanup": {"disposition": "BLOCKED_EXTERNAL", "owner_bead": "asupersync-dep-p4-nkeys-poc60v.5", "reason": "Nonce signing and connection cancellation with secret cleanup require a real NATS authentication flow."},
+        "recovery": {"disposition": "BLOCKED_EXTERNAL", "owner_bead": "asupersync-dep-p4-nkeys-poc60v.5", "reason": "All NKey forms, Curve keys, JWT signer policy, rotation, reconnect, and authorization recovery need pinned cross-implementation evidence."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Signed-profile evidence does not cover the full NKey format, Curve keys, JWT policy, secret handling, downstream API, or real NATS authentication."
+    },
+    {
+      "capability_id": "CAP-AUTH-CREDENTIALS",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "SECURITY_POLICY", "LIFECYCLE", "SERVICE_INTEROP"],
+      "evidence_ids": ["EVD-AUTH-POLICY", "EVD-NKEY-SIGNED-PROFILE"],
+      "downstream_profiles": [],
+      "scenario_ids": ["authentication_matrix", "credential_redaction", "auth_cancel_cleanup"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-AUTH-POLICY"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-AUTH-POLICY"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-AUTH-POLICY"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-AUTH-POLICY"},
+        "cancellation_cleanup": {"disposition": "BLOCKED_EXTERNAL", "owner_bead": "asupersync-dep-p1-foundations-upksjk.6.3", "reason": "Cancelled authentication across NATS, databases, TLS, Kafka, and ATP needs real-service cleanup evidence."},
+        "recovery": {"disposition": "BLOCKED_EXTERNAL", "owner_bead": "asupersync-dep-p1-foundations-upksjk.6.3", "reason": "Rotation, retry, downgrade resistance, reconnect, lockout, and service-version behavior need the pinned service matrix."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Local policy and one signed-profile path cannot establish another protocol's security, downgrade resistance, lifecycle, or recovery parity."
+    },
+    {
+      "capability_id": "CAP-CLI-ASUPERSYNC",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "LIFECYCLE", "OPERATOR_UX"],
+      "evidence_ids": ["EVD-CLI-GOLDENS"],
+      "downstream_profiles": [],
+      "scenario_ids": ["cli_asupersync_help", "cli_asupersync_errors", "cli_asupersync_trace_config"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-CLI-GOLDENS"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-CLI-GOLDENS"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-CLI-GOLDENS"},
+        "resource_limit": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-5z2scg.7.6", "reason": "Large trace/config input, argument count, path length, pipe, and terminal-width limits need the CLI corpus."},
+        "cancellation_cleanup": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-5z2scg.7.11", "reason": "Installed process interruption and partial-output cleanup need no-mock CLI workflows."},
+        "recovery": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-5z2scg.7.11", "reason": "Installed binary, shell/OsString, accessibility, config/trace workflow, and deterministic retry evidence is pending."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Current help/error goldens are not installed-binary parity and do not cover every option, alias, parser constraint, shell boundary, accessibility mode, or real workflow."
+    },
+    {
+      "capability_id": "CAP-CLI-ATP",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "SECURITY_POLICY", "LIFECYCLE", "OPERATOR_UX"],
+      "evidence_ids": ["EVD-CLI-GOLDENS", "EVD-QUIC-ATP"],
+      "downstream_profiles": [],
+      "scenario_ids": ["cli_atp_help", "cli_atp_transfer", "cli_atp_resume_cancel", "cli_atp_security_errors"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-CLI-GOLDENS"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-CLI-GOLDENS"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-CLI-GOLDENS"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-QUIC-ATP"},
+        "cancellation_cleanup": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-5z2scg.7.11", "reason": "Installed ATP interruption, partial destination cleanup, resume state, and signal semantics need real process workflows."},
+        "recovery": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-5z2scg.7.11", "reason": "Installed transfer, TLS, lossy network, resume, shell/OsString, and package-path recovery remain pending."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Parser and selected UDP transfer evidence do not prove the installed CLI's TLS, resume, cancellation, cleanup, accessibility, or packaging behavior."
+    },
+    {
+      "capability_id": "CAP-CLI-ATPD",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "SECURITY_POLICY", "LIFECYCLE", "OPERATOR_UX"],
+      "evidence_ids": ["EVD-CLI-GOLDENS", "EVD-SIGNALS"],
+      "downstream_profiles": [],
+      "scenario_ids": ["cli_atpd_help", "cli_atpd_start_ready_shutdown", "cli_atpd_signal_failure"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-CLI-GOLDENS"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-CLI-GOLDENS"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-CLI-GOLDENS"},
+        "resource_limit": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-5z2scg.7.8", "reason": "Connection, queue, config, file-descriptor, memory, and log bounds need the daemon matrix."},
+        "cancellation_cleanup": {"disposition": "EVIDENCE", "evidence_id": "EVD-SIGNALS"},
+        "recovery": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-5z2scg.7.11", "reason": "Installed daemon readiness, signal failure, restart, config recovery, and residual-process cleanup are pending."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "The atpd feature remains gated; parser and Unix signal evidence do not claim production readiness or installed-daemon lifecycle parity."
+    },
+    {
+      "capability_id": "CAP-CLI-OFFLINE-TUNER",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "LIFECYCLE", "PLATFORM_MATRIX", "OPERATOR_UX"],
+      "evidence_ids": ["EVD-CLI-GOLDENS", "EVD-HOST-TOPOLOGY"],
+      "downstream_profiles": [],
+      "scenario_ids": ["cli_offline_tuner_help", "cli_offline_tuner_report", "cli_offline_tuner_interrupt"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-CLI-GOLDENS"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-CLI-GOLDENS"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-CLI-GOLDENS"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-HOST-TOPOLOGY"},
+        "cancellation_cleanup": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-5z2scg.7.11", "reason": "Installed long-running tuner interruption, output atomicity, and child cleanup need real process evidence."},
+        "recovery": {"disposition": "BLOCKED_PLATFORM", "owner_bead": "asupersync-5z2scg.7.11", "reason": "Cross-platform host discovery, deterministic report provenance, verbosity/privacy, and interrupted-run recovery are pending."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Help goldens and host corpus do not establish installed tuning behavior, performance validity, privacy, report provenance, or cross-platform parity."
+    },
+    {
+      "capability_id": "CAP-SQLITE",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["PUBLIC_COMPILE", "EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "SECURITY_POLICY", "LIFECYCLE", "SERVICE_INTEROP"],
+      "evidence_ids": ["EVD-SQLITE-WAL"],
+      "downstream_profiles": [],
+      "scenario_ids": ["sqlite_install_query", "sqlite_transaction_savepoint", "sqlite_cancel_interrupt", "sqlite_restart_rollback"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-SQLITE-WAL"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-SQLITE-WAL"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-SQLITE-WAL"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-SQLITE-WAL"},
+        "cancellation_cleanup": {"disposition": "EVIDENCE", "evidence_id": "EVD-SQLITE-WAL"},
+        "recovery": {"disposition": "BLOCKED_EXTERNAL", "owner_bead": "asupersync-ym2wtv.3.5", "reason": "Neutral synthesized-consumer parity against FrankenSQLite, restart, rollback, extensions, and platform/service versions is pending."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "FrankenSQLite is a reverse dependency and may not enter asupersync's graph; current WAL conformance does not prove neutral-consumer integration or feature parity."
+    },
+    {
+      "capability_id": "CAP-KAFKA",
+      "baseline_state": "BLOCKED_EXTERNAL",
+      "parity_modes": ["PUBLIC_COMPILE", "EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "SECURITY_POLICY", "LIFECYCLE", "SERVICE_INTEROP"],
+      "evidence_ids": ["EVD-KAFKA-AUTH"],
+      "downstream_profiles": [],
+      "scenario_ids": ["kafka_produce_consume", "kafka_transactions", "kafka_group_rebalance", "kafka_security_fault_matrix"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-KAFKA-AUTH"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-KAFKA-AUTH"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-KAFKA-AUTH"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-KAFKA-AUTH"},
+        "cancellation_cleanup": {"disposition": "BLOCKED_EXTERNAL", "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13", "reason": "Producer, consumer, transaction, rebalance, coordinator, retry, timeout, and shutdown behavior need real brokers."},
+        "recovery": {"disposition": "BLOCKED_EXTERNAL", "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13", "reason": "Pinned broker versions, partitions, leaders, groups, idempotence, transactions, security, faults, and restart recovery are pending."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "SASL configuration evidence is not a Kafka client; librdkafka remains until the complete protocol and real-broker campaign passes."
+    },
+    {
+      "capability_id": "CAP-TLS-X509",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "SECURITY_POLICY", "LIFECYCLE", "SERVICE_INTEROP"],
+      "evidence_ids": ["EVD-X509-QUIC"],
+      "downstream_profiles": [],
+      "scenario_ids": ["tls_cross_implementation", "quic_tls", "atp_tls_pinning", "x509_adversarial_corpus"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-X509-QUIC"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-X509-QUIC"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-X509-QUIC"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-X509-QUIC"},
+        "cancellation_cleanup": {"disposition": "EVIDENCE", "evidence_id": "EVD-X509-QUIC"},
+        "recovery": {"disposition": "BLOCKED_EXTERNAL", "owner_bead": "asupersync-0h6myr.3.8", "reason": "Cross-implementation chains, DER canonicality, time, KU/EKU, BasicConstraints, critical/duplicate extensions, revocation policy, pinning, and handshake restart remain pending."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Native X.509 handshake verification does not authorize owning certificate validation or cryptography; rustls/webpki remains authoritative unless the security epic passes."
+    },
+    {
+      "capability_id": "CAP-HTTP-COMPRESSION",
+      "baseline_state": "EXECUTABLE_COMPLETE",
+      "parity_modes": ["EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "SECURITY_POLICY", "LIFECYCLE", "SERVICE_INTEROP"],
+      "evidence_ids": ["EVD-HTTP-COMPRESSION"],
+      "downstream_profiles": ["consumer-full"],
+      "scenario_ids": ["web_compression", "compression_cross_implementation", "compression_cancel_bomb"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-HTTP-COMPRESSION"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-HTTP-COMPRESSION"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-HTTP-COMPRESSION"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-HTTP-COMPRESSION"},
+        "cancellation_cleanup": {"disposition": "EVIDENCE", "evidence_id": "EVD-HTTP-COMPRESSION"},
+        "recovery": {"disposition": "EVIDENCE", "evidence_id": "EVD-HTTP-COMPRESSION"}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "The incumbent baseline preserves gzip, deflate, and Brotli behavior; it is not replacement parity and Brotli cannot be silently dropped."
+    },
+    {
+      "capability_id": "CAP-TRACE-LZ4",
+      "baseline_state": "EXECUTABLE_COMPLETE",
+      "parity_modes": ["EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "LIFECYCLE"],
+      "evidence_ids": ["EVD-TRACE-LZ4"],
+      "downstream_profiles": [],
+      "scenario_ids": ["lz4_trace_replay", "lz4_cross_version_artifact", "lz4_malformed_limits"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-TRACE-LZ4"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-TRACE-LZ4"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-TRACE-LZ4"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-TRACE-LZ4"},
+        "cancellation_cleanup": {"disposition": "NOT_APPLICABLE", "reason": "The focused codec contract is synchronous; interrupted trace writer cleanup is tracked under persisted trace E2E."},
+        "recovery": {"disposition": "EVIDENCE", "evidence_id": "EVD-TRACE-LZ4"}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Fresh roundtrip and historical goldens are incumbent evidence, not proof of a replacement or permission to discard any accepted compressed artifact."
+    },
+    {
+      "capability_id": "CAP-SIGNALS",
+      "baseline_state": "BLOCKED_PLATFORM",
+      "parity_modes": ["SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "SECURITY_POLICY", "LIFECYCLE", "PLATFORM_MATRIX", "OPERATOR_UX"],
+      "evidence_ids": ["EVD-SIGNALS"],
+      "downstream_profiles": [],
+      "scenario_ids": ["signal_graceful_shutdown", "signal_repeated_escalation", "signal_permission_pid_reuse"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-SIGNALS"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-SIGNALS"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-SIGNALS"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-SIGNALS"},
+        "cancellation_cleanup": {"disposition": "EVIDENCE", "evidence_id": "EVD-SIGNALS"},
+        "recovery": {"disposition": "BLOCKED_PLATFORM", "owner_bead": "asupersync-3u3tej.1.7", "reason": "Windows control events, Unix variants, cross-process permission/liveness, PID reuse, handler reinstall, and escalation recovery need the platform E2E matrix."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Unix self-signal evidence does not cover Windows control events, all Unix signals, cross-process permissions, or PID reuse."
+    },
+    {
+      "capability_id": "CAP-HOST-INTROSPECTION",
+      "baseline_state": "BLOCKED_PLATFORM",
+      "parity_modes": ["SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "SECURITY_POLICY", "PLATFORM_MATRIX", "OPERATOR_UX"],
+      "evidence_ids": ["EVD-HOST-TOPOLOGY"],
+      "downstream_profiles": [],
+      "scenario_ids": ["host_snapshot_cross_platform", "host_process_liveness", "host_container_limits"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-HOST-TOPOLOGY"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-HOST-TOPOLOGY"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-HOST-TOPOLOGY"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-HOST-TOPOLOGY"},
+        "cancellation_cleanup": {"disposition": "NOT_APPLICABLE", "reason": "Snapshot and liveness queries are synchronous and own no background task."},
+        "recovery": {"disposition": "BLOCKED_PLATFORM", "owner_bead": "asupersync-3u3tej.2.7", "reason": "Linux procfs, macOS, Windows, containers/cgroups, permissions, disappearing processes, and field fallback require real-platform evidence."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "The synthetic topology corpus and Linux host do not justify dropping macOS/Windows fields, process semantics, container limits, or sysinfo."
+    },
+    {
+      "capability_id": "CAP-XATTR",
+      "baseline_state": "BLOCKED_PLATFORM",
+      "parity_modes": ["EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "SECURITY_POLICY", "LIFECYCLE", "PLATFORM_MATRIX"],
+      "evidence_ids": ["EVD-XATTR-ATP"],
+      "downstream_profiles": [],
+      "scenario_ids": ["xattr_follow_nofollow", "xattr_atp_transfer", "xattr_permission_size_race"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-XATTR-ATP"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-XATTR-ATP"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-XATTR-ATP"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-XATTR-ATP"},
+        "cancellation_cleanup": {"disposition": "EVIDENCE", "evidence_id": "EVD-XATTR-ATP"},
+        "recovery": {"disposition": "BLOCKED_PLATFORM", "owner_bead": "asupersync-3u3tej.3.5", "reason": "Linux/macOS/BSD signatures, options, follow/nofollow, permission, namespace, size race, unsupported filesystem, and ATP restart recovery need real-platform fixtures."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "An xattr-capable host test must report unsupported as typed; it does not cover macOS/BSD APIs, symlink policy, permissions, namespaces, or all filesystems."
+    },
+    {
+      "capability_id": "CAP-POLLING-SOCKET",
+      "baseline_state": "BLOCKED_PLATFORM",
+      "parity_modes": ["PUBLIC_COMPILE", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "SECURITY_POLICY", "LIFECYCLE", "PLATFORM_MATRIX"],
+      "evidence_ids": ["EVD-REACTOR-REGISTRATION"],
+      "downstream_profiles": [],
+      "scenario_ids": ["polling_socket_cross_platform", "socket_cancel_close_race"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-REACTOR-REGISTRATION"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-REACTOR-REGISTRATION"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-REACTOR-REGISTRATION"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-REACTOR-REGISTRATION"},
+        "cancellation_cleanup": {"disposition": "EVIDENCE", "evidence_id": "EVD-REACTOR-REGISTRATION"},
+        "recovery": {"disposition": "BLOCKED_PLATFORM", "owner_bead": "asupersync-dep-p1-foundations-upksjk.6.5", "reason": "epoll, kqueue, IOCP, socket options, readiness races, descriptor reuse, and close recovery require real target/platform evidence."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Host reactor conformance cannot authorize a platform rewrite; the current plan remains KEEP/defer unless every supported platform passes."
+    },
+    {
+      "capability_id": "CAP-SYNC-LOCKS",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["PUBLIC_COMPILE", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "LIFECYCLE", "PLATFORM_MATRIX"],
+      "evidence_ids": ["EVD-SYNC-LOCKS"],
+      "downstream_profiles": [],
+      "scenario_ids": ["sync_lock_poison", "sync_lock_contention", "sync_lock_shutdown"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-SYNC-LOCKS"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-SYNC-LOCKS"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-SYNC-LOCKS"},
+        "resource_limit": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-0h6myr.1.10", "reason": "Throughput, p95-p999, fairness, cancellation latency, RSS, compile time, binary size, and 1/8/32/64-core scaling need acceptance measurements."},
+        "cancellation_cleanup": {"disposition": "EVIDENCE", "evidence_id": "EVD-SYNC-LOCKS"},
+        "recovery": {"disposition": "EVIDENCE", "evidence_id": "EVD-SYNC-LOCKS"}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Safe std wrapper semantics are not cutover evidence without complete API migration, concurrency proof, stable/nightly behavior, and the full performance matrix."
+    },
+    {
+      "capability_id": "CAP-CONCURRENT-QUEUES",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "LIFECYCLE", "PLATFORM_MATRIX"],
+      "evidence_ids": ["EVD-CACHE-QUEUES"],
+      "downstream_profiles": [],
+      "scenario_ids": ["concurrent_queue_model", "concurrent_queue_contention"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-CACHE-QUEUES"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-CACHE-QUEUES"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-CACHE-QUEUES"},
+        "resource_limit": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-0h6myr.2", "reason": "Contention, fairness, tail latency, memory, cache traffic, and 1/8/32/64-core scaling require measured incumbent comparison."},
+        "cancellation_cleanup": {"disposition": "EVIDENCE", "evidence_id": "EVD-CACHE-QUEUES"},
+        "recovery": {"disposition": "EVIDENCE", "evidence_id": "EVD-CACHE-QUEUES"}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Functional queue tests do not make the safe mutex-backed experiment a winner; crossbeam-queue remains unless full correctness and performance gates tie or improve."
+    },
+    {
+      "capability_id": "CAP-CACHE-LAYOUT",
+      "baseline_state": "BLOCKED_PLATFORM",
+      "parity_modes": ["SEMANTIC", "RESOURCE_ENVELOPE", "PLATFORM_MATRIX"],
+      "evidence_ids": ["EVD-CACHE-QUEUES", "EVD-HOST-TOPOLOGY"],
+      "downstream_profiles": [],
+      "scenario_ids": ["cache_layout_correctness", "cache_layout_host_matrix"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-CACHE-QUEUES"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-CACHE-QUEUES"},
+        "malformed_error": {"disposition": "NOT_APPLICABLE", "reason": "Cache padding has no parser or malformed-input surface; structural correctness is covered by queue tests."},
+        "resource_limit": {"disposition": "BLOCKED_PLATFORM", "owner_bead": "asupersync-0h6myr.6", "reason": "Apple Silicon and representative Intel/AMD hosts need per-structure throughput, tail, cache-miss, memory, and cross-core measurements."},
+        "cancellation_cleanup": {"disposition": "EVIDENCE", "evidence_id": "EVD-CACHE-QUEUES"},
+        "recovery": {"disposition": "NOT_APPLICABLE", "reason": "Layout is static; recovery semantics belong to the containing queue or runtime structure."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "There is no global 128-byte padding rule; only a measured per-structure change with a winning host matrix may proceed."
+    },
+    {
+      "capability_id": "CAP-SIMD-RAPTORQ",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "SECURITY_POLICY", "LIFECYCLE", "PLATFORM_MATRIX"],
+      "evidence_ids": ["EVD-RAPTORQ-GOLDEN"],
+      "downstream_profiles": [],
+      "scenario_ids": ["raptorq_transfer", "raptorq_kernel_differential"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-RAPTORQ-GOLDEN"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-RAPTORQ-GOLDEN"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-RAPTORQ-GOLDEN"},
+        "resource_limit": {"disposition": "BLOCKED_PLATFORM", "owner_bead": "asupersync-dep-p1-foundations-upksjk.6.2", "reason": "Scalar, portable SIMD, NEON, AVX2, and AVX-512 throughput/tails on Apple and Intel/AMD hosts require measured differential evidence."},
+        "cancellation_cleanup": {"disposition": "EVIDENCE", "evidence_id": "EVD-RAPTORQ-GOLDEN"},
+        "recovery": {"disposition": "EVIDENCE", "evidence_id": "EVD-RAPTORQ-GOLDEN"}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Correct encoded bytes do not establish performance; portable SIMD may scalarize and unsafe kernels remain ledgered, opt-in, and target-gated."
+    },
+    {
+      "capability_id": "CAP-NATS-MESSAGING",
+      "baseline_state": "BLOCKED_EXTERNAL",
+      "parity_modes": ["PUBLIC_COMPILE", "EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "SECURITY_POLICY", "LIFECYCLE", "SERVICE_INTEROP"],
+      "evidence_ids": ["EVD-NATS-HANDSHAKE", "EVD-NKEY-SIGNED-PROFILE"],
+      "downstream_profiles": [],
+      "scenario_ids": ["nats_pubsub_request", "nats_nkey_jwt_auth", "nats_reconnect_cancel", "jetstream_ack_flow"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-NATS-HANDSHAKE"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-NATS-HANDSHAKE"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-NATS-HANDSHAKE"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-NATS-HANDSHAKE"},
+        "cancellation_cleanup": {"disposition": "BLOCKED_EXTERNAL", "owner_bead": "asupersync-dep-p1-foundations-upksjk.6.3", "reason": "Real server subscription, request, auth, reconnect, drain, and JetStream cancellation cleanup remain pending."},
+        "recovery": {"disposition": "BLOCKED_EXTERNAL", "owner_bead": "asupersync-dep-p1-foundations-upksjk.6.3", "reason": "Pinned NATS versions, NKey/JWT auth, reconnect, permission changes, server restart, and JetStream ack recovery need the service matrix."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Handshake and signed-profile fixtures do not prove pub/sub, request/reply, JetStream, authentication, reconnect, cancellation, or real-server interoperability."
+    },
+    {
+      "capability_id": "CAP-DATABASE-WIRE",
+      "baseline_state": "BLOCKED_EXTERNAL",
+      "parity_modes": ["PUBLIC_COMPILE", "EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "SECURITY_POLICY", "LIFECYCLE", "SERVICE_INTEROP"],
+      "evidence_ids": ["EVD-DATABASE-WIRE", "EVD-AUTH-POLICY"],
+      "downstream_profiles": [],
+      "scenario_ids": ["postgres_auth_query_cancel", "mysql_auth_query_cancel", "database_transaction_pool"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-DATABASE-WIRE"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-DATABASE-WIRE"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-DATABASE-WIRE"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-DATABASE-WIRE"},
+        "cancellation_cleanup": {"disposition": "BLOCKED_EXTERNAL", "owner_bead": "asupersync-dep-p1-foundations-upksjk.6.3", "reason": "Real PostgreSQL/MySQL query cancellation, transaction state, pool return, disconnect, and shutdown cleanup remain pending."},
+        "recovery": {"disposition": "BLOCKED_EXTERNAL", "owner_bead": "asupersync-dep-p1-foundations-upksjk.6.3", "reason": "Pinned server versions, auth modes, TLS, transactions, failover, restart, and pool recovery need the service matrix."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "Frame goldens and SCRAM policy do not prove public types, server versions, authentication, queries, transactions, pooling, cancellation, or recovery."
+    },
+    {
+      "capability_id": "CAP-QUIC-HTTP3-ATP",
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "parity_modes": ["PUBLIC_COMPILE", "EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "SECURITY_POLICY", "LIFECYCLE", "SERVICE_INTEROP", "PLATFORM_MATRIX"],
+      "evidence_ids": ["EVD-QUIC-ATP", "EVD-X509-QUIC", "EVD-RAPTORQ-GOLDEN"],
+      "downstream_profiles": [],
+      "scenario_ids": ["quic_tls", "http3_interop", "atp_transfer", "atp_resume_lossy", "raptorq_transfer"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-QUIC-ATP"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-QUIC-ATP"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-X509-QUIC"},
+        "resource_limit": {"disposition": "EVIDENCE", "evidence_id": "EVD-RAPTORQ-GOLDEN"},
+        "cancellation_cleanup": {"disposition": "EVIDENCE", "evidence_id": "EVD-QUIC-ATP"},
+        "recovery": {"disposition": "BLOCKED_EXTERNAL", "owner_bead": "asupersync-dep-p1-foundations-upksjk.6.3", "reason": "Cross-implementation QUIC/H3, TLS, QPACK, congestion, loss, migration, ATP resume, restart, and performance need pinned external peers and network profiles."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "One real-UDP transfer plus X.509 and RaptorQ goldens do not prove QUIC/H3 interoperability, congestion, security, loss recovery, or transfer performance."
+    },
+    {
+      "capability_id": "CAP-REAL-SERVICE-E2E",
+      "baseline_state": "BLOCKED_EXTERNAL",
+      "parity_modes": ["SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "SECURITY_POLICY", "LIFECYCLE", "SERVICE_INTEROP", "PLATFORM_MATRIX", "OPERATOR_UX"],
+      "evidence_ids": ["EVD-BASELINE-CONTRACT", "EVD-SQLITE-WAL", "EVD-NATS-HANDSHAKE", "EVD-DATABASE-WIRE", "EVD-QUIC-ATP"],
+      "downstream_profiles": ["consumer-default", "consumer-full"],
+      "scenario_ids": ["dependency_sovereignty_aggregate", "runner_injected_failure", "runner_redaction_canary", "runner_replay"],
+      "cases": {
+        "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-BASELINE-CONTRACT"},
+        "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-BASELINE-CONTRACT"},
+        "malformed_error": {"disposition": "EVIDENCE", "evidence_id": "EVD-BASELINE-CONTRACT"},
+        "resource_limit": {"disposition": "BLOCKED_EXTERNAL", "owner_bead": "asupersync-dep-p1-foundations-upksjk.6.3", "reason": "Service quotas, disk, memory, network, timeout, retry, backpressure, and version matrices need pinned real-service fixtures."},
+        "cancellation_cleanup": {"disposition": "BLOCKED_OWNER", "owner_bead": "asupersync-dep-p1-foundations-upksjk.6.2", "reason": "The aggregate runner must prove child-process cleanup, residual-resource accounting, injected failure, structured logs, redaction canary, and deterministic replay."},
+        "recovery": {"disposition": "BLOCKED_EXTERNAL", "owner_bead": "asupersync-dep-p1-foundations-upksjk.6.3", "reason": "Restart, failover, resume, rollback, version skew, and cross-implementation recovery remain service-specific work."}
+      },
+      "cutover_eligible": false,
+      "no_claim_boundary": "CAP A2 catalogs incumbent and local fixtures; it does not falsely claim the future aggregate runner, pinned services, platform fleet, or cutover evidence already exists."
+    }
+  ],
+  "no_claim_boundaries": [
+    "This artifact is a baseline inventory, not proof that any replacement is SAME-or-BETTER.",
+    "No row authorizes dependency removal, public API narrowing, format deletion, feature removal, service deprecation, unsafe expansion, or cutover.",
+    "EXECUTABLE_COMPLETE means all six baseline case classes are classified with current evidence or a justified non-applicability; it does not mean exhaustive behavior or replacement parity.",
+    "BLOCKED_EXTERNAL, BLOCKED_PLATFORM, and BLOCKED_OWNER are expected typed outcomes and may never be counted as green.",
+    "A successful focused command proves only its declared fixture and observables, not broad workspace health, release readiness, production correctness, performance improvement, or live RCH fleet availability.",
+    "Performance claims require separate fresh host evidence on the declared Apple Silicon and representative high-core-count Intel/AMD systems.",
+    "External-service claims require pinned versions, real processes, no mocks, lifecycle cleanup, redacted structured logs, and deterministic replay."
+  ]
+}

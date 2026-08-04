@@ -27,6 +27,37 @@
 //! - Cancellation during wait: Clean abort, no resource held
 //! - Cancellation while holding: Guard dropped, resource released
 //! - Panic while holding: Guard dropped via unwind (unwind safety)
+//!
+//! # Canonical async acquisition
+//!
+//! <!-- core-api-doctest: sync-primitives -->
+//! ```
+//! use asupersync::{Cx, main};
+//! use asupersync::sync::{Mutex, RwLock, Semaphore};
+//!
+//! #[main]
+//! async fn main(cx: &Cx) {
+//!     let mutex = Mutex::new(1_u8);
+//!     {
+//!         let mut guard = mutex.lock(cx).await.expect("mutex acquisition");
+//!         *guard += 1;
+//!     }
+//!     assert_eq!(*mutex.try_lock().expect("mutex released"), 2);
+//!
+//!     let rwlock = RwLock::new(3_u8);
+//!     {
+//!         let mut guard = rwlock.write(cx).await.expect("write acquisition");
+//!         *guard += 1;
+//!     }
+//!     assert_eq!(*rwlock.read(cx).await.expect("read acquisition"), 4);
+//!
+//!     let semaphore = Semaphore::new(1);
+//!     let permit = semaphore.acquire(cx, 1).await.expect("permit acquisition");
+//!     assert!(semaphore.try_acquire(1).is_err());
+//!     drop(permit);
+//!     assert_eq!(semaphore.try_acquire(1).expect("permit released").count(), 1);
+//! }
+//! ```
 
 /// Redacted, deterministic pressure telemetry for synchronization primitives.
 ///

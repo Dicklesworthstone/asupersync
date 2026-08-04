@@ -225,7 +225,7 @@ pub fn score_persistence(
 /// Compute a deterministic fingerprint for a seed value.
 #[must_use]
 pub fn seed_fingerprint(seed: u64) -> u64 {
-    let mut h = DetHasher::default();
+    let mut h = DetHasher::for_lab();
     seed.hash(&mut h);
     h.finish()
 }

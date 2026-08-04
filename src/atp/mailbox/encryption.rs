@@ -82,7 +82,7 @@ impl ChunkNonce {
 impl EncryptedChunk {
     /// Encrypt data with the given key.
     pub fn encrypt(data: &[u8], key: &MailboxKey) -> Result<Self, String> {
-        use aes_gcm::aead::{AeadInPlace, KeyInit};
+        use aes_gcm::aead::{AeadInOut, KeyInit};
         use aes_gcm::{Aes256Gcm, Nonce};
 
         let cipher = Aes256Gcm::new_from_slice(key.as_bytes())
@@ -90,10 +90,10 @@ impl EncryptedChunk {
         let nonce = ChunkNonce::generate()?;
         let mut encrypted = data.to_vec();
         let tag = cipher
-            .encrypt_in_place_detached(
-                Nonce::from_slice(&nonce.bytes),
+            .encrypt_inout_detached(
+                &Nonce::from(nonce.bytes),
                 MAILBOX_AEAD_AAD,
-                &mut encrypted,
+                encrypted.as_mut_slice().into(),
             )
             .map_err(|err| format!("mailbox encryption failed: {err}"))?;
         let mut tag_bytes = [0u8; 16];
@@ -108,18 +108,18 @@ impl EncryptedChunk {
 
     /// Decrypt chunk with the given key.
     pub fn decrypt(&self, key: &MailboxKey) -> Result<Vec<u8>, String> {
-        use aes_gcm::aead::{AeadInPlace, KeyInit};
+        use aes_gcm::aead::{AeadInOut, KeyInit};
         use aes_gcm::{Aes256Gcm, Nonce, Tag};
 
         let cipher = Aes256Gcm::new_from_slice(key.as_bytes())
             .map_err(|err| format!("invalid mailbox key: {err}"))?;
         let mut decrypted = self.data.clone();
         cipher
-            .decrypt_in_place_detached(
-                Nonce::from_slice(&self.nonce.bytes),
+            .decrypt_inout_detached(
+                &Nonce::from(self.nonce.bytes),
                 MAILBOX_AEAD_AAD,
-                &mut decrypted,
-                Tag::from_slice(&self.tag),
+                decrypted.as_mut_slice().into(),
+                &Tag::from(self.tag),
             )
             .map_err(|_| "mailbox authentication failed".to_string())?;
         Ok(decrypted)

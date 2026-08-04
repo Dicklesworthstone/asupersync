@@ -185,7 +185,7 @@ Early-warning severity model over live wait graph: `none / watch / warning / cri
 
 Source: `src/cancel/progress_certificate.rs`
 
-Drain phase: `warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`. With Freedman/Azuma confidence bounds.
+Drain phase: `warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`, plus conditional range-bounded Freedman/Azuma calculations. Under the implemented range-only cap, raw Freedman is never tighter and the selected envelope equals Azuma. The same-history plug-in makes both current-horizon tails the trivial bound `1`. The separate `converging` flag is an accepted-history empirical status guarded by stall, rebound count and magnitude, latest-step, and dropped-sample checks; it is not a tail-gated probability or termination guarantee. Non-finite or materially negative telemetry is dropped, which also suppresses the remaining-step estimate and terminal phase. Gross credit is diagnostic bookkeeping, not probability evidence.
 
 ## Debugging Workflow
 

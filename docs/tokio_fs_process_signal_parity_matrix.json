@@ -1,7 +1,7 @@
 {
   "bead_id": "asupersync-2oh2u.3.1",
   "title": "[T3.1] Build complete filesystem/process/signal parity matrix",
-  "version": 3,
+  "version": 4,
   "generated_at": "2026-03-03",
   "domains": ["filesystem", "process", "signal"],
   "source_markdown": "docs/tokio_fs_process_signal_parity_matrix.md",
@@ -260,13 +260,14 @@
       "domain": "filesystem",
       "focus": "FS cancel-safety protocol across async operations",
       "pass_criteria": [
-        "File::open and File::create are cancel-safe",
-        "WritePermit pattern documented for cancel-safe writes",
-        "sync_all and sync_data are cancel-safe"
+        "every public filesystem mutator in the scoped File, OpenOptions, path, directory, optional io_uring, and Vfs surfaces has an operation-specific cancellation classification",
+        "direct blocking mutations are documented as soft-cancelled and may commit after future drop",
+        "a deterministic started-write handshake proves late mutation after cancellation",
+        "WritePermit is not presented as filesystem path rollback"
       ],
-      "failure_semantics": "emit FS-G2 diagnostic with owner src/fs/file.rs and the cancel-safety invariant that failed",
-      "owner_modules": ["src/fs/file.rs", "src/fs/mod.rs"],
-      "artifacts": ["src/fs/file.rs", "src/fs/mod.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"],
+      "failure_semantics": "emit FS-G2 diagnostic with the owning filesystem module and the missing or overclaimed cancellation boundary",
+      "owner_modules": ["src/fs/file.rs", "src/fs/open_options.rs", "src/fs/path_ops.rs", "src/fs/dir.rs", "src/fs/uring.rs", "src/fs/vfs.rs", "src/fs/mod.rs"],
+      "artifacts": ["src/fs/file.rs", "src/fs/open_options.rs", "src/fs/path_ops.rs", "src/fs/dir.rs", "src/fs/uring.rs", "src/fs/vfs.rs", "src/fs/mod.rs", "docs/tokio_cancel_safe_fs_process_signal.json", "tests/tokio_cancel_safe_fs_process_signal.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"],
       "contract_tests": ["t37c_02_fs_cancel_safety_protocol"],
       "mapped_gap": "FS-G2",
       "reproduction_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test --test tokio_fs_process_signal_parity_matrix t37c_02 -- --nocapture"
@@ -277,7 +278,9 @@
       "domain": "filesystem",
       "focus": "atomic write and error fidelity",
       "pass_criteria": [
-        "write_atomic exists in path_ops with complete-or-nothing semantics",
+        "stage_write_atomic returns a staged replacement whose drop never mutates the target",
+        "StagedAtomicWrite::commit performs the target rename synchronously with no async cancellation point",
+        "write_atomic stages before committing and deterministic cancellation coverage proves target stability and temporary-file cleanup",
         "try_exists returns io::Result<bool>",
         "IO errors preserve ErrorKind through async boundaries"
       ],
@@ -577,7 +580,7 @@
     "failure_drill_count": 5,
     "scenarios": [
       {"id": "T310-E2E-01", "domain": "filesystem", "focus": "file lifecycle under concurrent access", "owner_modules": ["src/fs/file.rs", "src/fs/path_ops.rs"]},
-      {"id": "T310-E2E-02", "domain": "filesystem", "focus": "atomic write under cancellation", "owner_modules": ["src/fs/path_ops.rs"]},
+      {"id": "T310-E2E-02", "domain": "filesystem", "focus": "target-stable cancellation at atomic post-stage gate", "owner_modules": ["src/fs/path_ops.rs"]},
       {"id": "T310-E2E-03", "domain": "filesystem", "focus": "directory tree operations with symlinks", "owner_modules": ["src/fs/dir.rs", "src/fs/read_dir.rs", "src/fs/path_ops.rs"]},
       {"id": "T310-E2E-04", "domain": "process", "focus": "piped IO and exit code verification", "owner_modules": ["src/process.rs"]},
       {"id": "T310-E2E-05", "domain": "process", "focus": "kill_on_drop cancellation no-zombie", "owner_modules": ["src/process.rs"]},

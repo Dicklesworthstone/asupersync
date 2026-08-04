@@ -18,7 +18,11 @@
 //! - Resume from arbitrary checkpoint positions
 
 use arbitrary::{Arbitrary, Unstructured};
+use asupersync::trace::{
+    FLAG_CHECKSUMMED, ReplayEvent, TRACE_FILE_VERSION, TRACE_MAGIC, TraceMetadata,
+};
 use libfuzzer_sys::fuzz_target;
+use sha2::{Digest, Sha256};
 
 #[derive(Arbitrary, Debug)]
 struct TraceStreamingFuzz {
@@ -78,62 +82,36 @@ const MAX_CHECKPOINT_SIZE: usize = 1024; // 1KB
 fn create_minimal_trace(data: &[u8]) -> Vec<u8> {
     let mut trace = Vec::new();
 
-    // Magic bytes "ASUPERTRACE" (11 bytes)
-    trace.extend_from_slice(b"ASUPERTRACE");
+    trace.extend_from_slice(TRACE_MAGIC);
+    trace.extend_from_slice(&TRACE_FILE_VERSION.to_le_bytes());
+    trace.extend_from_slice(&FLAG_CHECKSUMMED.to_le_bytes());
+    trace.push(0); // No compression.
 
-    // Version (2): u16 little-endian
-    trace.extend_from_slice(&1u16.to_le_bytes());
+    let metadata_bytes =
+        rmp_serde::to_vec(&TraceMetadata::new(66)).expect("serialize fuzz trace metadata");
+    trace.extend_from_slice(&(metadata_bytes.len() as u32).to_le_bytes());
+    let metadata_digest: [u8; 32] = Sha256::digest(&metadata_bytes).into();
+    trace.extend_from_slice(&metadata_digest);
+    trace.extend_from_slice(&metadata_bytes);
 
-    // Flags (2): u16 little-endian (bit 0 = compression)
-    trace.extend_from_slice(&0u16.to_le_bytes());
-
-    // Compression (1): u8 (0=none, 1=LZ4)
-    trace.push(0);
-
-    // Metadata length (4): u32 little-endian
-    let minimal_metadata = create_minimal_metadata();
-    trace.extend_from_slice(&(minimal_metadata.len() as u32).to_le_bytes());
-
-    // Metadata (variable): MessagePack-encoded TraceMetadata
-    trace.extend_from_slice(&minimal_metadata);
-
-    // Event count (8): u64 little-endian
-    let event_count = data.len().min(20) / 4; // Small number of events
+    let event_count = data.len().min(20) / 4;
     trace.extend_from_slice(&(event_count as u64).to_le_bytes());
-
-    // Events (variable): minimal event data
-    for _ in 0..event_count {
-        let event_len = 10u32; // Fixed small event size
-        trace.extend_from_slice(&event_len.to_le_bytes());
-        // Add minimal event data
-        trace.extend_from_slice(&[
-            0x82, 0xa4, b'k', b'i', b'n', b'd', 0x01, 0xa4, b'd', b'a', b't', b'a', 0x80,
-        ]);
+    let mut event_frames = Vec::new();
+    for (index, chunk) in data.chunks(4).take(event_count).enumerate() {
+        let mut seed_bytes = [0u8; 8];
+        seed_bytes[..chunk.len()].copy_from_slice(chunk);
+        seed_bytes[7] = u8::try_from(index).expect("fuzz trace event count is bounded");
+        let event = ReplayEvent::RngSeed {
+            seed: u64::from_le_bytes(seed_bytes),
+        };
+        let event_bytes = rmp_serde::to_vec(&event).expect("serialize fuzz trace event");
+        event_frames.extend_from_slice(&(event_bytes.len() as u32).to_le_bytes());
+        event_frames.extend_from_slice(&event_bytes);
     }
-
+    let event_digest: [u8; 32] = Sha256::digest(&event_frames).into();
+    trace.extend_from_slice(&event_digest);
+    trace.extend_from_slice(&event_frames);
     trace
-}
-
-/// Creates minimal MessagePack metadata for testing
-fn create_minimal_metadata() -> Vec<u8> {
-    // Create a simple map with required fields for TraceMetadata
-    // This is a minimal MessagePack representation
-    vec![
-        0x85, // fixmap with 5 elements
-        0xa4, b's', b'e', b'e', b'd', // "seed"
-        0x42, // positive fixnum 66 (seed value)
-        0xa7, b'v', b'e', b'r', b's', b'i', b'o', b'n', // "version"
-        0x01, // positive fixnum 1
-        0xab, b'r', b'e', b'c', b'o', b'r', b'd', b'e', b'd', b'_', b'a',
-        b't', // "recorded_at"
-        0xce, 0x00, 0x00, 0x00, 0x00, // uint32 timestamp
-        0xab, b'c', b'o', b'n', b'f', b'i', b'g', b'_', b'h', b'a', b's',
-        b'h', // "config_hash"
-        0xcc, 0x42, // uint8 config hash
-        0xab, b'd', b'e', b's', b'c', b'r', b'i', b'p', b't', b'i', b'o',
-        b'n', // "description"
-        0xa4, b't', b'e', b's', b't', // "test"
-    ]
 }
 
 /// Test ReplayProgress calculations and edge cases

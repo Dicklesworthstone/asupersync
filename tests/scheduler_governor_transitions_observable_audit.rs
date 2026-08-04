@@ -1,38 +1,41 @@
 //! Audit + regression test for `src/runtime/scheduler/three_lane.rs`
 //! Lyapunov-governor state observability.
 //!
-//! Operator's question: "when governor enters 'panic' state
-//! (deadlock imminent), are metric labels correctly emitted to
-//! /metrics endpoint? Verify with audit test that governor
+//! Operator's question: "when the governor enters an urgent
+//! drain state, are metric labels correctly emitted to the
+//! /metrics endpoint? Verify with an audit test that governor
 //! transitions are observable."
 //!
 //! Audit findings:
 //!
 //!   The asupersync runtime uses **two distinct enums** to model
-//!   governor state. The operator's "panic" framing maps to one
-//!   of them; the other tracks higher-level scheduling intent.
+//!   governor state. One tracks observed drain diagnostics; the
+//!   other tracks higher-level scheduling intent. Neither is a
+//!   standalone deadlock proof.
 //!
-//!   1. **`SchedulingSuggestion`** (obligation/lyapunov.rs:457).
+//!   1. **`SchedulingSuggestion`** (`obligation/lyapunov.rs`).
 //!      Four variants: `MeetDeadlines`, `DrainObligations`,
 //!      `DrainRegions`, `NoPreference`. ALL FOUR are emitted as
 //!      distinct `action` labels on the evidence sink (and
 //!      hence on /metrics) via `emit_scheduler_evidence`
-//!      (evidence_sink.rs:184) every governor invocation
-//!      (three_lane.rs:4002). String mapping:
+//!      (`evidence_sink.rs`) every governor invocation
+//!      (`three_lane.rs`). String mapping:
 //!        - `MeetDeadlines` → `"meet_deadlines"`
 //!        - `DrainObligations` → `"drain_obligations"`
 //!        - `DrainRegions` → `"drain_regions"`
 //!        - `NoPreference` → `"no_preference"`
 //!
-//!   2. **`DrainPhase`** (cancel/progress_certificate.rs:267).
+//!   2. **`DrainPhase`** (`cancel/progress_certificate.rs`).
 //!      Five variants: `Warmup`, `RapidDrain`, `SlowTail`,
-//!      `Stalled`, `Quiescent`. `Stalled` is the asupersync
-//!      equivalent of the operator's "panic" / "deadlock
-//!      imminent" state ("No meaningful progress is being
-//!      made" — progress_certificate.rs:274-275).
+//!      `Stalled`, `Quiescent`. `Stalled` means either the
+//!      configured consecutive non-decreasing-step threshold
+//!      was reached or accepted history has no meaningful
+//!      gross downward credit. It is an observed-history label,
+//!      not a "panic", future-progress prediction, or deadlock
+//!      proof.
 //!
-//!      `DrainPhase::Stalled` IS detected by the governor
-//!      compute path (three_lane.rs:3975) and forces a
+//!      An explicitly detected stall is handled by the governor
+//!      compute path (`three_lane.rs`) and forces a
 //!      `SchedulingSuggestion::DrainObligations` suggestion.
 //!      So a stalled drain IS observable via /metrics — but
 //!      indirectly: SREs see a sustained `drain_obligations`
@@ -43,7 +46,7 @@
 //!      surfaced as a distinct action label or top_feature
 //!      on the evidence sink today. A direct
 //!      "drain_obligations_stalled" label would let SREs
-//!      alert on the deadlock-imminent transition without
+//!      alert on the configured-stall transition without
 //!      heuristic duration thresholds. This is a known gap;
 //!      filing a follow-up audit opportunity.
 //!
@@ -70,9 +73,8 @@
 //!     `match` (would default-stringify the missing variant
 //!     and break string-equality alerts),
 //!   - removed the DrainPhase::Stalled detection entirely
-//!     (would let real deadlocks pass without forcing
-//!     drain_obligations — both a correctness AND
-//!     observability regression),
+//!     (would suppress the configured-stall escalation input
+//!     and its indirect observability),
 //!     would all be caught here.
 
 use std::path::PathBuf;
@@ -206,12 +208,11 @@ fn emit_scheduler_evidence_maps_each_suggestion_to_canonical_label() {
 }
 
 #[test]
-fn drain_phase_stalled_variant_exists_and_means_no_progress() {
-    // Pin: DrainPhase::Stalled is the asupersync equivalent of
-    // the operator's "panic" / "deadlock imminent" state. The
-    // variant must continue to exist and to mean "no
-    // meaningful progress" — a regression that removed it
-    // would defeat the governor's deadlock-detection logic.
+fn drain_phase_stalled_variant_documents_observed_history_routes() {
+    // Pin: DrainPhase::Stalled records either a configured
+    // non-decreasing tail or no meaningful gross downward
+    // credit. It is an observed-history label, not a claim that
+    // deadlock is imminent.
     let source = read_progress_cert_source();
 
     let enum_marker = "pub enum DrainPhase {";
@@ -222,21 +223,23 @@ fn drain_phase_stalled_variant_exists_and_means_no_progress() {
     assert!(
         body.contains("Stalled,"),
         "REGRESSION: DrainPhase no longer has the Stalled \
-         variant. The Stalled state is the deadlock-imminent \
-         signal that forces a DrainObligations suggestion — \
-         removing it would let real deadlocks pass without \
-         intervention.\n\nenum body:\n{body}",
+         variant. The explicit configured-stall signal feeds the \
+         DrainObligations escalation path; removing it would \
+         suppress that observed-history diagnostic.\n\nenum body:\n{body}",
     );
 
     // Doc above the variant must explain its semantics.
-    let doc_marker = "/// No meaningful progress is being made.";
+    let threshold_marker =
+        "/// The configured consecutive non-decreasing-step threshold was reached,";
+    let credit_marker = "/// or accepted history has no meaningful gross downward credit.";
     assert!(
-        body.contains(doc_marker),
+        body.contains(threshold_marker) && body.contains(credit_marker),
         "REGRESSION: DrainPhase::Stalled doc no longer says \
-         'No meaningful progress is being made'. The doc is \
-         the public contract; if the semantics changed, \
-         dashboards and alerts based on this state may need \
-         updating.",
+         that either the configured non-decreasing-step \
+         threshold fired or accepted history had no meaningful \
+         gross downward credit. The doc is the public heuristic \
+         contract; if the semantics changed, dashboards and \
+         alerts may need updating.",
     );
 
     // The Display impl must produce "stalled" for the metric
@@ -260,7 +263,7 @@ fn governor_compute_path_handles_drain_phase_stalled() {
     // suggestion. This is the indirect /metrics signal an SRE
     // sees: a stalled drain elevates drain_obligations
     // frequency. A regression that removed the detection
-    // would let real deadlocks pass through.
+    // would suppress the configured-stall escalation input.
     let source = read_three_lane_source();
 
     assert!(
@@ -282,7 +285,7 @@ fn governor_compute_path_handles_drain_phase_stalled() {
         "REGRESSION: the Stalled match arm no longer assigns \
          SchedulingSuggestion::DrainObligations. Without the \
          escalation, a stalled drain would propagate the \
-         original suggestion, hiding the 'panic' transition \
+         original suggestion, hiding the configured-stall transition \
          from /metrics.\n\narm window:\n{arm_window}",
     );
 }

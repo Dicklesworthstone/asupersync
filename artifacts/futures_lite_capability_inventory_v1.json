@@ -1,0 +1,894 @@
+{
+  "schema_version": 1,
+  "artifact_id": "futures-lite-capability-inventory-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-d24mms.6.1",
+  "capability_id": "CAP-FUTURES-STREAMS",
+  "captured_date_utc": "2026-07-24",
+  "baseline_revision": "ed1c0c3ae4ba68947cd2c0212f1aab2242f60724",
+  "authority_revision": "295136459f9e3e38e7373394e713866ec0693a8d",
+  "authority": {
+    "adr_id": "DEP-ADR-008",
+    "adr_path": "docs/adr/dep_plan_adr_008_futures_streams.md",
+    "capability_registry_path": "artifacts/dependency_capability_registry_v1.json",
+    "marginal_ledger_path": "artifacts/dependency_marginal_ledger_v1.json",
+    "api_surface_map_path": "artifacts/api_surface_map_v1.json",
+    "decision": "KEEP_UNTIL_PARITY",
+    "disposition": "PRESERVE_AND_REPLACE_IF_PARITY",
+    "cutover_state": "BLOCKED_PENDING_EVIDENCE",
+    "dependency_exit_allowed": false
+  },
+  "policy": {
+    "zero_unknown_required": true,
+    "unknown_rows": 0,
+    "allowed_inventory_states": [
+      "FROZEN",
+      "EXPLICIT_ADJACENT",
+      "COMMENT_ONLY",
+      "PLANNED",
+      "BLOCKED_GAP"
+    ],
+    "allowed_evidence_states": [
+      "SOURCE_BASELINED",
+      "EXECUTED_CONTRACT",
+      "EXISTING_TEST",
+      "PLANNED",
+      "BLOCKED_GAP",
+      "EXPLICIT_ADJACENT"
+    ],
+    "baseline_source_roots": [
+      "src",
+      "tests",
+      "benches",
+      "examples",
+      "asupersync-tokio-compat",
+      "fuzz"
+    ],
+    "baseline_exclusions": [
+      "tests/tests",
+      "target",
+      "tests/futures_lite_capability_inventory_contract.rs"
+    ],
+    "default_action": "Keep futures-lite on the root normal edge and the compatibility-member dev edge until A10 records SAME-or-BETTER public, runtime, test, marginal-graph, and rollback evidence."
+  },
+  "dependency_resolution": {
+    "root_manifest": {
+      "path": "Cargo.toml",
+      "table": "dependencies",
+      "requirement": "2.6",
+      "optional": false,
+      "target_condition": null,
+      "feature_gate": null,
+      "default_features": [
+        "race",
+        "std"
+      ],
+      "resolved_version": "2.6.1",
+      "edge_kind": "normal",
+      "inventory_state": "FROZEN",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    "tokio_compat_manifest": {
+      "path": "asupersync-tokio-compat/Cargo.toml",
+      "table": "dev-dependencies",
+      "requirement": "2",
+      "optional": false,
+      "target_condition": null,
+      "feature_gate": "cfg(test)",
+      "resolved_version": "2.6.1",
+      "edge_kind": "dev",
+      "normal_build_contains_edge": false,
+      "inventory_state": "FROZEN",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    "lockfiles": [
+      {
+        "path": "Cargo.lock",
+        "resolved_version": "2.6.1",
+        "reason": "root workspace normal edge plus compatibility-member dev edge"
+      },
+      {
+        "path": "fuzz/Cargo.lock",
+        "resolved_version": "2.6.1",
+        "reason": "excluded fuzz workspace depends on the root crate by path; fuzz targets have no direct futures-lite edge"
+      },
+      {
+        "path": "asupersync-wasm/Cargo.lock",
+        "resolved_version": "2.6.1",
+        "reason": "excluded wasm workspace depends on the root crate by path with no default root features; the unconditional normal edge remains"
+      }
+    ],
+    "manifest_comment_drift": {
+      "current_text": "Lightweight async helpers used by web handler adapter shims.",
+      "classification": "INCOMPLETE",
+      "omitted_surfaces": [
+        "public ATP ecosystem Stream impls",
+        "public synchronous Router::handle executor",
+        "reload and shutdown signal listener threads",
+        "repository-wide unit, integration, benchmark, example, and compatibility-test executor use"
+      ],
+      "gap_id": "FUT-GAP-06"
+    }
+  },
+  "cargo_built_profiles": [
+    {
+      "profile_id": "FUT-PROFILE-ROOT-NORMAL",
+      "cargo_package": "asupersync",
+      "edge_kind": "normal",
+      "features": "all root feature selections, including --no-default-features",
+      "targets": "all targets on which the root crate is admitted",
+      "semantic_surface_ids": [
+        "FUT-PROD-ATP-STREAM",
+        "FUT-PROD-MIDDLEWARE-CATCH",
+        "FUT-PROD-NEGOTIATE-CATCH",
+        "FUT-PROD-ROUTER-BLOCK",
+        "FUT-PROD-RELOAD-BLOCK",
+        "FUT-PROD-SHUTDOWN-BLOCK"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "profile_id": "FUT-PROFILE-ROOT-UNIT",
+      "cargo_package": "asupersync",
+      "edge_kind": "normal dependency visible to cfg(test)",
+      "features": "each unit-test feature cell",
+      "targets": "host test targets",
+      "semantic_surface_ids": [
+        "FUT-TEST-EXECUTOR",
+        "FUT-TEST-COMBINATORS",
+        "FUT-PUBLIC-NOTIFY-DOCTEST"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "profile_id": "FUT-PROFILE-ROOT-INTEGRATION",
+      "cargo_package": "asupersync",
+      "edge_kind": "normal dependency visible to integration targets",
+      "features": "default, test-internals, and focused feature matrices",
+      "targets": "tests/*.rs",
+      "semantic_surface_ids": [
+        "FUT-TEST-EXECUTOR",
+        "FUT-TEST-COMBINATORS"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "profile_id": "FUT-PROFILE-ROOT-BENCH",
+      "cargo_package": "asupersync",
+      "edge_kind": "normal dependency visible to benchmark targets",
+      "features": "benchmark-adapters and benchmark-specific selections",
+      "targets": "benches/*.rs",
+      "semantic_surface_ids": [
+        "FUT-TEST-EXECUTOR"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "profile_id": "FUT-PROFILE-ROOT-EXAMPLE",
+      "cargo_package": "asupersync",
+      "edge_kind": "normal dependency visible to example targets",
+      "features": "example-specific selections",
+      "targets": "examples/*.rs",
+      "semantic_surface_ids": [
+        "FUT-TEST-EXECUTOR"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "profile_id": "FUT-PROFILE-TOKIO-COMPAT-NORMAL",
+      "cargo_package": "asupersync-tokio-compat",
+      "edge_kind": "none",
+      "features": "default or bridge features",
+      "targets": "library targets",
+      "semantic_surface_ids": [],
+      "inventory_state": "FROZEN",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "profile_id": "FUT-PROFILE-TOKIO-COMPAT-TEST",
+      "cargo_package": "asupersync-tokio-compat",
+      "edge_kind": "direct dev dependency",
+      "features": "test targets with any bridge feature",
+      "targets": "inline unit tests",
+      "semantic_surface_ids": [
+        "FUT-TEST-EXECUTOR"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "profile_id": "FUT-PROFILE-FUZZ",
+      "cargo_package": "asupersync-fuzz",
+      "edge_kind": "transitive through root path dependency",
+      "features": "fuzz quarantine all-feature root selection",
+      "targets": "fuzz/fuzz_targets/*.rs",
+      "semantic_surface_ids": [],
+      "note": "Two textual mentions are comments; no fuzz target directly calls futures-lite.",
+      "inventory_state": "EXPLICIT_ADJACENT",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "profile_id": "FUT-PROFILE-WASM",
+      "cargo_package": "asupersync-wasm",
+      "edge_kind": "transitive through root path dependency",
+      "features": "root --no-default-features",
+      "targets": "wasm32 boundary workspace",
+      "semantic_surface_ids": [],
+      "note": "The root dependency is unconditional, so disabling root features does not remove it.",
+      "inventory_state": "EXPLICIT_ADJACENT",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "profile_id": "FUT-PROFILE-CONFORMANCE",
+      "cargo_package": "asupersync-conformance",
+      "edge_kind": "transitive through root path dependency",
+      "features": "conformance-selected root features",
+      "targets": "conformance member",
+      "semantic_surface_ids": [],
+      "note": "No conformance source file directly names futures-lite.",
+      "inventory_state": "EXPLICIT_ADJACENT",
+      "evidence_state": "SOURCE_BASELINED"
+    }
+  ],
+  "occurrence_census": {
+    "token": "futures_lite",
+    "unit": "non-overlapping textual token occurrences in tracked Rust source at the baseline revision",
+    "ordering": "bytewise path order; digest input is path, tab, decimal count, newline",
+    "baseline_file_count": 310,
+    "baseline_token_count": 1362,
+    "baseline_digest_sha256": "899a9f62fd77ce8843c00a37902efa5ccc447ead46018a8fe14cdf2d0a241d9c",
+    "scope_rows": [
+      {
+        "scope": "src",
+        "file_count": 150,
+        "token_count": 817,
+        "digest_sha256": "dd32ff79caeb3180ae805ad183df80a6003f8ae84001958e3c93c545ffea1871",
+        "production_token_count": 6,
+        "public_doctest_token_count": 2,
+        "test_token_count": 809
+      },
+      {
+        "scope": "tests",
+        "file_count": 151,
+        "token_count": 534,
+        "digest_sha256": "c8f8463ca93dcd7ca649bf754bac8b39410a9df29fa16df7b298e5d8379286b4",
+        "classification": "integration-test-only"
+      },
+      {
+        "scope": "benches",
+        "file_count": 3,
+        "token_count": 3,
+        "digest_sha256": "f9e5a615b424aa8d46976e11588ade9a29db7efe282488451d35f254adad334a",
+        "classification": "benchmark-only"
+      },
+      {
+        "scope": "examples",
+        "file_count": 1,
+        "token_count": 1,
+        "digest_sha256": "ac6854be3e45bc271b3d3434510f18c0aa4d95bd637bc112219b48db906d5ad4",
+        "classification": "example-target"
+      },
+      {
+        "scope": "asupersync-tokio-compat",
+        "file_count": 3,
+        "token_count": 5,
+        "digest_sha256": "4b683da32edc8ec80b28d24e377bb7c715efaff7ca76469848005d5e0d24d7ce",
+        "dependency_api_token_count": 3,
+        "local_helper_name_token_count": 2,
+        "classification": "dev-test plus identifier-only"
+      },
+      {
+        "scope": "fuzz",
+        "file_count": 2,
+        "token_count": 2,
+        "digest_sha256": "666119285e1ae804e6b859a2fb54aed4bd29c60fe4b92243d3b3cbab5964264d",
+        "classification": "comment-only"
+      }
+    ],
+    "post_baseline_evidence_rows": [
+      {
+        "path": "tests/futures_lite_capability_inventory_contract.rs",
+        "expected_token_count": 1,
+        "classification": "temporary dev-oracle evidence owned by FUT A1 and excluded from the baseline census"
+      }
+    ],
+    "inventory_state": "FROZEN",
+    "evidence_state": "EXECUTED_CONTRACT"
+  },
+  "production_surfaces": [
+    {
+      "surface_id": "FUT-PROD-ATP-STREAM",
+      "path": "src/net/atp/sdk/stream.rs",
+      "token_occurrences": 1,
+      "behavioral_impl_count": 2,
+      "api": "futures_lite::Stream",
+      "public_symbols": [
+        "asupersync::net::atp::sdk::AtpWriter",
+        "asupersync::net::atp::sdk::AtpReader"
+      ],
+      "item_type": "TransferProgress",
+      "feature_gate": null,
+      "target_gate": null,
+      "poll_semantics": "try_recv returns one progress item; Empty self-wakes and returns Pending; Disconnected or Cancelled returns Ready(None)",
+      "cancellation_drop_semantics": "dropping either SDK stream best-effort sends cancellation and resolves an outstanding graded obligation as Abort",
+      "send_lifetime_semantics": "the foreign Stream trait itself adds no Send, Sync, Unpin, or static bound",
+      "public_exposure": "foreign trait implementation is downstream-observable even though futures-lite is not re-exported",
+      "inventory_state": "FROZEN",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "surface_id": "FUT-PROD-MIDDLEWARE-CATCH",
+      "path": "src/web/middleware.rs",
+      "token_occurrences": 1,
+      "behavioral_impl_count": 1,
+      "api": "FutureExt::catch_unwind",
+      "public_symbols": [
+        "CatchPanicMiddleware::call"
+      ],
+      "poll_semantics": "a separate std catch_unwind contains construction panic; the futures-lite adapter contains every poll panic",
+      "cancellation_drop_semantics": "normal future drop remains cancellation; a poll panic becomes Err and the wrapper is dropped without repoll",
+      "send_lifetime_semantics": "the boxed Handler future remains Send and borrows self for its existing lifetime",
+      "public_exposure": "behavioral error boundary with stable ASUP-E502 response",
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "surface_id": "FUT-PROD-NEGOTIATE-CATCH",
+      "path": "src/web/negotiate.rs",
+      "token_occurrences": 1,
+      "behavioral_impl_count": 1,
+      "api": "FutureExt::catch_unwind",
+      "public_symbols": [
+        "ErrorHandlerMiddleware::call"
+      ],
+      "poll_semantics": "the adapter catches poll-phase panic only; handler construction occurs before the adapter is created",
+      "cancellation_drop_semantics": "normal future drop remains cancellation; a poll panic becomes Err and is formatted as an internal-server response",
+      "send_lifetime_semantics": "the boxed Handler future remains Send and borrows self for its existing lifetime",
+      "public_exposure": "behavioral error-formatting boundary",
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "surface_id": "FUT-PROD-ROUTER-BLOCK",
+      "path": "src/web/router.rs",
+      "token_occurrences": 1,
+      "behavioral_impl_count": 1,
+      "api": "future::block_on",
+      "public_symbols": [
+        "Router::handle"
+      ],
+      "thread_context": "caller thread; no ambient runtime required",
+      "wake_source": "future wakers unpark the caller-thread Parker",
+      "nesting": "recursive block_on on the same thread receives a fresh Parker and Waker",
+      "send_lifetime_semantics": "no Send or static bound; the future may borrow the router and locally-created Cx",
+      "public_exposure": "public synchronous entry point",
+      "inventory_state": "FROZEN",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "surface_id": "FUT-PROD-RELOAD-BLOCK",
+      "path": "src/signal/shutdown.rs",
+      "token_occurrences": 1,
+      "behavioral_impl_count": 1,
+      "api": "future::block_on",
+      "public_symbols": [
+        "ReloadController::listen_for_sighup"
+      ],
+      "thread_context": "dedicated asupersync-reload-sighup std thread",
+      "wake_source": "signal stream receive future",
+      "nesting": "outside the asupersync runtime",
+      "send_lifetime_semantics": "the moved listener state must satisfy std thread ownership; block_on itself adds no bound",
+      "public_exposure": "operator-visible reload behavior",
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "surface_id": "FUT-PROD-SHUTDOWN-BLOCK",
+      "path": "src/signal/shutdown.rs",
+      "token_occurrences": 1,
+      "behavioral_impl_count": 1,
+      "api": "future::block_on",
+      "public_symbols": [
+        "ShutdownController::listen_for_signals"
+      ],
+      "thread_context": "one dedicated named std thread per watched signal kind",
+      "wake_source": "signal stream receive future",
+      "nesting": "outside the asupersync runtime",
+      "send_lifetime_semantics": "the moved listener state must satisfy std thread ownership; block_on itself adds no bound",
+      "public_exposure": "operator-visible shutdown behavior",
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    }
+  ],
+  "public_doctest_surfaces": [
+    {
+      "surface_id": "FUT-PUBLIC-NOTIFY-DOCTEST",
+      "path": "src/sync/notify.rs",
+      "token_occurrences": 2,
+      "public_symbols": [
+        "Notify::notify_one",
+        "Notify::notified"
+      ],
+      "classification": "public documentation compiled as doctests",
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    }
+  ],
+  "consumed_api_semantics": [
+    {
+      "api_id": "FUT-API-BLOCK-ON",
+      "api": "future::block_on",
+      "classification": "CONSUMED",
+      "poll_order": "poll once, then park the current thread after each Pending result",
+      "wake_behavior": "a cached thread-local Parker/Waker pair unparks the thread; recursive calls allocate a fresh pair",
+      "completion": "returns the future output and drops the pinned future",
+      "cancellation": "external cancellation is only by unwinding or abandoning the calling thread; no task is spawned",
+      "panic": "panic propagates to the caller",
+      "send_lifetime": "accepts any Future by value with no Send, Unpin, or static bound",
+      "replacement_owner": "asupersync-d24mms.6.3"
+    },
+    {
+      "api_id": "FUT-API-POLL-FN",
+      "api": "future::poll_fn",
+      "classification": "CONSUMED",
+      "poll_order": "calls the FnMut closure exactly once per wrapper poll",
+      "wake_behavior": "forwards the caller Context unchanged",
+      "completion": "returns the closure's Ready value",
+      "cancellation": "drop discards the closure and its captured state",
+      "panic": "panic propagates",
+      "send_lifetime": "inherits closure captures; adds no Send or static bound",
+      "replacement_owner": "asupersync-d24mms.6.4"
+    },
+    {
+      "api_id": "FUT-API-POLL-ONCE",
+      "api": "future::poll_once",
+      "classification": "CONSUMED",
+      "poll_order": "polls the inner future once",
+      "wake_behavior": "forwards the caller Context but never waits for a wake",
+      "completion": "Ready(value) becomes Some(value); Pending becomes Ready(None)",
+      "cancellation": "the inner future is dropped after the one-shot wrapper completes",
+      "panic": "panic propagates",
+      "send_lifetime": "inherits the inner future; adds no Send or static bound",
+      "replacement_owner": "asupersync-d24mms.6.4"
+    },
+    {
+      "api_id": "FUT-API-YIELD-NOW",
+      "api": "future::yield_now",
+      "classification": "CONSUMED",
+      "poll_order": "first poll self-wakes and returns Pending; second and later poll returns Ready",
+      "wake_behavior": "wake_by_ref exactly on the first poll",
+      "completion": "unit",
+      "cancellation": "drop before repoll abandons the yield",
+      "panic": "no intrinsic panic path",
+      "send_lifetime": "zero-capture future",
+      "replacement_owner": "asupersync-d24mms.6.4"
+    },
+    {
+      "api_id": "FUT-API-ZIP",
+      "api": "future::zip",
+      "classification": "CONSUMED",
+      "poll_order": "polls left then right on every wrapper poll while each remains incomplete",
+      "wake_behavior": "both children receive the same caller Context",
+      "completion": "stores each completed output, drops each completed future, then returns the ordered pair",
+      "cancellation": "dropping zip drops any pending child plus stored outputs; it does not drain",
+      "panic": "panic from either child propagates",
+      "send_lifetime": "inherits both children; adds no Send or static bound",
+      "replacement_owner": "asupersync-d24mms.6.4"
+    },
+    {
+      "api_id": "FUT-API-RACE",
+      "api": "future::race",
+      "classification": "CONSUMED",
+      "poll_order": "randomizes which child is polled first on every wrapper poll",
+      "wake_behavior": "both attempted children receive the same caller Context",
+      "completion": "returns the first Ready output",
+      "cancellation": "drops the losing future immediately when the race wrapper is dropped; no loser drain or quiescence proof exists",
+      "panic": "panic from a polled child propagates",
+      "send_lifetime": "inherits both children; std and race features are required",
+      "replacement_owner": "asupersync-d24mms.6.4"
+    },
+    {
+      "api_id": "FUT-API-OR",
+      "api": "future::or",
+      "classification": "CONSUMED",
+      "poll_order": "always polls left before right and therefore prefers left when both are Ready",
+      "wake_behavior": "both attempted children receive the same caller Context",
+      "completion": "returns the first Ready output",
+      "cancellation": "drops the losing future immediately; no loser drain occurs",
+      "panic": "panic from a polled child propagates",
+      "send_lifetime": "inherits both children; adds no Send or static bound",
+      "replacement_owner": "asupersync-d24mms.6.4"
+    },
+    {
+      "api_id": "FUT-API-PENDING",
+      "api": "future::pending",
+      "classification": "CONSUMED",
+      "poll_order": "always returns Pending",
+      "wake_behavior": "never schedules a wake",
+      "completion": "never completes",
+      "cancellation": "drop is the only termination",
+      "panic": "no intrinsic panic path",
+      "send_lifetime": "core::future re-export",
+      "replacement_owner": "asupersync-d24mms.6.4"
+    },
+    {
+      "api_id": "FUT-API-CATCH-UNWIND",
+      "api": "FutureExt::catch_unwind",
+      "classification": "CONSUMED",
+      "poll_order": "polls the inner future once per wrapper poll inside std::panic::catch_unwind",
+      "wake_behavior": "forwards the caller Context unchanged",
+      "completion": "normal Ready becomes Ok; a poll panic becomes Err(Box<dyn Any + Send>)",
+      "cancellation": "drop discards the inner future; after panic the web wrappers consume Err and do not repoll",
+      "panic": "requires UnwindSafe at the adapter boundary and internally asserts unwind safety around each poll",
+      "send_lifetime": "inherits the inner future and preserves its borrow; no static bound",
+      "replacement_owner": "asupersync-d24mms.6.5"
+    },
+    {
+      "api_id": "FUT-API-STREAM",
+      "api": "futures_lite::Stream",
+      "classification": "CONSUMED",
+      "poll_order": "delegated to downstream poll_next calls",
+      "wake_behavior": "implementations own wake registration; the ATP impls currently self-wake on Empty",
+      "completion": "Ready(None) terminates; ATP maps disconnected and cancelled progress channels to termination",
+      "cancellation": "drop semantics belong to the stream implementation; ATP drop signals cancellation and aborts its obligation",
+      "panic": "trait supplies no panic containment",
+      "send_lifetime": "re-export of futures_core::Stream with no Send, Sync, Unpin, or static supertrait",
+      "replacement_owner": "asupersync-d24mms.6.2"
+    },
+    {
+      "api_id": "FUT-API-JOIN-ALL-MENTION",
+      "api": "future::join_all",
+      "classification": "COMMENT_ONLY",
+      "poll_order": "not applicable",
+      "wake_behavior": "not applicable",
+      "completion": "not applicable",
+      "cancellation": "not applicable",
+      "panic": "not applicable",
+      "send_lifetime": "not applicable",
+      "note": "The only repository match is a stale comment in src/sync/notify_metamorphic.rs; futures-lite 2.6.1 exports no future::join_all function.",
+      "replacement_owner": "asupersync-d24mms.6.4"
+    }
+  ],
+  "migration_reservation_groups": [
+    {
+      "group_id": "FUT-A6-CORE",
+      "owner_bead": "asupersync-d24mms.6.6",
+      "selection": "baseline src paths not selected by A7, A8, or A9",
+      "file_count": 42,
+      "token_count": 258,
+      "digest_sha256": "372833b61f3c143f47579b1df31954988027cc11a07543a7ee1bdbf77b654ecc",
+      "subsystems": [
+        "actor",
+        "cancel",
+        "channel",
+        "combinator",
+        "cx",
+        "epoch",
+        "gen_server",
+        "lab",
+        "obligation",
+        "runtime",
+        "service",
+        "session",
+        "stream",
+        "sync",
+        "test_utils",
+        "tracing_compat"
+      ],
+      "reservation_rule": "reserve every exact path in the digest projection before editing"
+    },
+    {
+      "group_id": "FUT-A7-IO",
+      "owner_bead": "asupersync-d24mms.6.7",
+      "selection": "src/fs, src/io, non-ATP src/net, src/process.rs, src/signal, src/time, and src/tls",
+      "file_count": 31,
+      "token_count": 145,
+      "digest_sha256": "c16da35f2d3bf8c20a4ed6f028d7e8cfbb67b998dfd8ce8830fe9348085ae8e9",
+      "subsystems": [
+        "filesystem",
+        "io",
+        "network",
+        "process",
+        "signal",
+        "time",
+        "tls"
+      ],
+      "reservation_rule": "reserve every exact path in the digest projection before editing"
+    },
+    {
+      "group_id": "FUT-A8-SERVICES",
+      "owner_bead": "asupersync-d24mms.6.8",
+      "selection": "src/web, src/http, src/grpc, src/database, src/messaging, and src/distributed",
+      "file_count": 33,
+      "token_count": 196,
+      "digest_sha256": "8db5f6c31bb7744c77b96f850574290db52245cdb8897a22e785911c57020a66",
+      "subsystems": [
+        "web",
+        "http",
+        "grpc",
+        "database",
+        "messaging",
+        "distributed"
+      ],
+      "reservation_rule": "reserve every exact path in the digest projection before editing"
+    },
+    {
+      "group_id": "FUT-A9-ATP-DEV",
+      "owner_bead": "asupersync-d24mms.6.9",
+      "selection": "src/atp, src/net/atp, src/transport, root src real/conformance test modules, tests, benches, examples, compatibility-member sources, and fuzz comments",
+      "file_count": 204,
+      "token_count": 763,
+      "digest_sha256": "2d80db732b2db49c3b3cc34d2e886c3a74c39fa7b8653d21416d1c91d1dc2219",
+      "subsystems": [
+        "atp",
+        "transport",
+        "root integration and conformance test modules",
+        "integration tests",
+        "benchmarks",
+        "examples",
+        "tokio compatibility tests",
+        "fuzz comments"
+      ],
+      "reservation_rule": "reserve every exact path in the digest projection before editing"
+    }
+  ],
+  "marginal_counterfactual": {
+    "edge_id": "normal:futures-lite",
+    "ledger_profile_count": 13,
+    "ledger_target_count": 4,
+    "cell_count": 52,
+    "marginal_count_histogram": {
+      "0": 4,
+      "3": 21,
+      "4": 13,
+      "5": 14
+    },
+    "zero_marginal_cells": [
+      "workspace-dev-build-audit@aarch64-apple-darwin",
+      "workspace-dev-build-audit@wasm32-unknown-unknown",
+      "workspace-dev-build-audit@x86_64-pc-windows-msvc",
+      "workspace-dev-build-audit@x86_64-unknown-linux-gnu"
+    ],
+    "possible_unique_packages": [
+      "futures-lite@2.6.1",
+      "futures-io@0.3.33",
+      "parking@2.2.1",
+      "futures-core@0.3.33",
+      "pin-project-lite@0.2.17"
+    ],
+    "native_code": "none",
+    "build_scripts": "none",
+    "proc_macros": "none",
+    "production_exit_interpretation": "Removing the root normal edge can remove three to five package versions in consumer-style cells, depending on target and sharing.",
+    "dev_oracle_retention_interpretation": "The four workspace-dev-build-audit cells remove zero package versions because workspace dev/test edges, including the compatibility-member dev dependency, retain the incumbent. Production exit and dev-oracle retirement are therefore separate gates.",
+    "inventory_state": "FROZEN",
+    "evidence_state": "SOURCE_BASELINED",
+    "no_claim": "Package-count marginals do not prove source parity, behavior, performance, security, release readiness, or that the root edge may be removed."
+  },
+  "downstream_and_e2e": [
+    {
+      "journey_id": "FUT-JOURNEY-OWNED-STREAM",
+      "surface": "downstream-authored asupersync::stream::Stream plus StreamExt",
+      "fixture": "tests/fixtures/dependency-capability-baseline-consumer",
+      "state": "EXISTING_TEST",
+      "gap": "This fixture never references futures-lite and cannot detect breakage of the ATP foreign Stream impls."
+    },
+    {
+      "journey_id": "FUT-JOURNEY-ECOSYSTEM-STREAM",
+      "surface": "downstream generic function bounded on futures_lite::Stream consuming AtpWriter and AtpReader",
+      "scenario_id": "public_stream_consumer",
+      "owner_bead": "asupersync-d24mms.6.10",
+      "state": "PLANNED",
+      "required_outcomes": [
+        "compile-pass for both ATP SDK types",
+        "extension-method usability",
+        "Pending, wake, item, EOF, channel cancellation, and drop behavior",
+        "no task or obligation leak and region-close quiescence"
+      ]
+    },
+    {
+      "journey_id": "FUT-JOURNEY-STREAM-CANCEL",
+      "surface": "ATP progress stream backpressure and cancellation",
+      "scenario_id": "stream_cancel_backpressure",
+      "owner_bead": "asupersync-d24mms.6.10",
+      "state": "PLANNED",
+      "required_outcomes": [
+        "bounded progress queue",
+        "cancel signal on drop",
+        "obligation resolution",
+        "loser cleanup",
+        "region-close quiescence"
+      ]
+    },
+    {
+      "journey_id": "FUT-JOURNEY-TEST-BLOCK",
+      "surface": "blocking executor available to every unit, integration, benchmark, example, and compatibility test target without ambient runtime setup",
+      "scenario_id": "test_block_on",
+      "owner_bead": "asupersync-d24mms.6.10",
+      "state": "PLANNED",
+      "required_outcomes": [
+        "borrowed non-Send future",
+        "recursive block_on",
+        "wake-after-Pending",
+        "panic propagation",
+        "runtime and blocking-pool call contexts",
+        "no spin, deadlock, orphan task, or obligation leak"
+      ]
+    }
+  ],
+  "gaps": [
+    {
+      "gap_id": "FUT-GAP-01",
+      "summary": "Capability registry source owners omit every production futures-lite site.",
+      "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.1",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-GAP-02",
+      "summary": "The public ecosystem Stream impls have no behavioral test.",
+      "owner_bead": "asupersync-d24mms.6.5",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-GAP-03",
+      "summary": "The existing downstream fixture proves only the owned Stream trait.",
+      "owner_bead": "asupersync-d24mms.6.10",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-GAP-04",
+      "summary": "Capability registry features incorrectly imply the unconditional edge is feature-gated.",
+      "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.1",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-GAP-05",
+      "summary": "Governance artifacts disagree about whether the baseline is planned or executable.",
+      "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.2",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-GAP-06",
+      "summary": "The root manifest comment describes only the two web sites and omits the other production and test surfaces.",
+      "owner_bead": "asupersync-d24mms.6.1",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-GAP-07",
+      "summary": "ATP SDK types are the only foreign Stream implementations and have no adapter to the owned trait.",
+      "owner_bead": "asupersync-d24mms.6.2",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-A1-GAP-08",
+      "summary": "The ADR census drifted from roughly 796 references in 148 src files to 817 references in 150 src files at the A1 baseline.",
+      "owner_bead": "asupersync-d24mms.6.9",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-A1-GAP-09",
+      "summary": "The ADR calls future::join_all consumed, but it is comment-only and absent from futures-lite 2.6.1; future::or is consumed but omitted.",
+      "owner_bead": "asupersync-d24mms.6.4",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-A1-GAP-10",
+      "summary": "The ATP foreign Stream impls self-wake on Empty, which can create wake churn and has no focused pending/wake test.",
+      "owner_bead": "asupersync-d24mms.6.2",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-A1-GAP-11",
+      "summary": "The ADR treats the root edge as the whole dependency story and omits the compatibility-member direct dev edge.",
+      "owner_bead": "asupersync-d24mms.6.9",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-A1-GAP-12",
+      "summary": "fuzz targets contain two stale futures-lite comments but no direct futures-lite call or manifest edge.",
+      "owner_bead": "asupersync-d24mms.6.9",
+      "state": "BLOCKED_GAP"
+    }
+  ],
+  "source_pins": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
+      "line_count": 991
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "9fa12e8af1e6b15a3070d88d62b2b81b8ba49c0e9d8592c1d1682f1cd72a4461",
+      "line_count": 4664
+    },
+    {
+      "path": "asupersync-tokio-compat/Cargo.toml",
+      "sha256": "fca13737334e95f75083d3e037ab234404d9a9402c5e2a8ed7f4bcb9f6574cac",
+      "line_count": 68
+    },
+    {
+      "path": "src/net/atp/sdk/stream.rs",
+      "sha256": "43f2b985e39451e925632f59cf41da6a3a1b80c87b9c88bda107846d06341e02",
+      "line_count": 685
+    },
+    {
+      "path": "src/web/middleware.rs",
+      "sha256": "979a0b3b3665bba209f8ad84a929a35e70008d8c37096c577f91780d1ba51fff",
+      "line_count": 6029
+    },
+    {
+      "path": "src/web/negotiate.rs",
+      "sha256": "24ba9ffb298491566eabb934c009dbec8c54f79b74246de153210d22cfa04cbd",
+      "line_count": 867
+    },
+    {
+      "path": "src/web/router.rs",
+      "sha256": "d31de4ab5694c39d45374577a549ff190a4bbd8539bfc0b646d6751bd32400f2",
+      "line_count": 2475
+    },
+    {
+      "path": "src/signal/shutdown.rs",
+      "sha256": "6cefc1120b4113225008aa9e669b0877b3f691e73d7f177cc1067995aa729d14",
+      "line_count": 1150
+    },
+    {
+      "path": "src/sync/notify.rs",
+      "sha256": "11d85d8cc9bcd7ec6c21245dba5b58f381b3aa4c54dc3d8d17d01f68b213a3ef",
+      "line_count": 6872
+    },
+    {
+      "path": "docs/adr/dep_plan_adr_008_futures_streams.md",
+      "sha256": "2bbf81b3a69887eefc84ba456090757cd996f34b62e9e557560352df0b111422",
+      "line_count": 160
+    },
+    {
+      "path": "artifacts/dependency_capability_registry_v1.json",
+      "sha256": "4d91239e2f2e83069414ca36eafc4aaba283cd3f89576fbb5e75f3374bd41b11",
+      "line_count": 1887
+    },
+    {
+      "path": "artifacts/dependency_marginal_ledger_v1.json",
+      "sha256": "832e8d68eefe9400a246ea619a250ea91bcf16a57d5fe728a6ce45e25bbdb4a6",
+      "line_count": 187712
+    },
+    {
+      "path": "artifacts/api_surface_map_v1.json",
+      "sha256": "a00b61fe82326d766cde69e2392bc493a67d3c62f9d5cd83e3e02f8b5bf5535a",
+      "line_count": 4650
+    },
+    {
+      "path": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml",
+      "sha256": "51368bfe60c10a87532cf77155bb18103bd51db5dd26d7cb37be775ead44507a",
+      "line_count": 29
+    },
+    {
+      "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
+      "sha256": "9016a1e0ed3bfeb1f2eb1c3e287323d64488a16077300a7c817269b30b719da6",
+      "line_count": 354
+    }
+  ],
+  "rollback_triggers": [
+    "AtpWriter or AtpReader no longer satisfies the ecosystem Stream trait before downstream evidence approves the break",
+    "Router::handle requires an ambient runtime or changes from a synchronous entry point",
+    "signal listeners cease using runtime-independent dedicated threads",
+    "construction-phase or poll-phase web panic escapes",
+    "a helper changes poll order, wake behavior, panic propagation, Send or lifetime acceptance, or drop semantics without explicit parity evidence",
+    "a test, benchmark, example, fuzz, wasm, conformance, or compatibility Cargo profile silently loses its executor",
+    "a race migration claims loser drain while merely dropping the loser",
+    "production graph exit is conflated with dev-oracle retirement"
+  ],
+  "no_claim_boundaries": [
+    "This inventory does not authorize changing or removing futures-lite.",
+    "Source pins and executable probes do not prove broad workspace health, release readiness, performance parity, or live RCH fleet availability.",
+    "The occurrence census classifies textual references and Cargo-built profiles; it does not claim every reference is behaviorally covered.",
+    "The incumbent future::race and future::or drop losers; this inventory does not treat drop as project-level loser drain or quiescence.",
+    "The existing downstream fixture does not prove the public ATP ecosystem Stream journey.",
+    "Marginal package counts do not prove behavioral replacement parity.",
+    "No local Cargo fallback is approved when a remote-required proof lane is blocked."
+  ]
+}

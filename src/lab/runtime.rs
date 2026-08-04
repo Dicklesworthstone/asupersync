@@ -43,6 +43,11 @@ use std::{fmt, future::Future};
 
 const AUTO_ARTIFACTS_ENV: &str = "ASUPERSYNC_AUTO_ARTIFACTS";
 const TEST_ARTIFACTS_DIR_ENV: &str = "ASUPERSYNC_TEST_ARTIFACTS_DIR";
+const LAB_TEST_SEED_ENV: &str = "ASUPERSYNC_LAB_TEST_SEED";
+const LAB_TEST_WORKERS_ENV: &str = "ASUPERSYNC_WORKERS";
+const LAB_TEST_MAX_STEPS_ENV: &str = "ASUPERSYNC_MAX_STEPS";
+#[cfg(test)]
+const PLAIN_RUNNER_FAILURE_PROBE_ENV: &str = "ASUPERSYNC_PLAIN_RUNNER_FAILURE_PROBE";
 
 /// Summary of a trace certificate built from the current trace buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,10 +144,12 @@ pub struct LabRunReport {
     pub trace_certificate: LabTraceCertificateSummary,
     /// Unified oracle report (stable ordering, serializable).
     pub oracle_report: crate::lab::oracle::OracleReport,
-    /// Runtime invariant violations detected by `LabRuntime::check_invariants()`.
+    /// Runtime invariant violations detected by `LabRuntime::check_invariants()`
+    /// plus stable `oracle:<name>` mirrors for every failed oracle-suite row.
     ///
-    /// This is distinct from the oracle suite: it's a small set of runtime-level
-    /// checks (e.g., obligation leaks, futurelocks, quiescence violations).
+    /// Runtime checks remain distinct from the oracle suite; the `oracle:` rows
+    /// are stable references to failed suite entries for consumers of this
+    /// aggregate channel.
     pub invariant_violations: Vec<String>,
     /// Temporal-oracle invariants that failed in this report.
     pub temporal_invariant_failures: Vec<String>,
@@ -357,7 +364,7 @@ impl LabConfigSummary {
         use std::hash::{Hash, Hasher};
         // DefaultHasher is NOT stable across Rust versions; DetHasher uses a
         // fixed algorithm and seed for cross-version deterministic hashing.
-        let mut h = crate::util::DetHasher::default();
+        let mut h = crate::util::DetHasher::for_lab();
         self.seed.hash(&mut h);
         self.entropy_seed.hash(&mut h);
         self.worker_count.hash(&mut h);
@@ -612,10 +619,11 @@ impl SporkHarnessReport {
     // Agent UX convenience methods (bd-f262i)
     // -------------------------------------------------------------------------
 
-    /// Quick pass/fail verdict: all oracles passed and no invariant violations.
+    /// Quick pass/fail verdict: quiescent, with all oracles passed and no
+    /// invariant violations.
     #[must_use]
     pub fn passed(&self) -> bool {
-        self.run.oracle_report.all_passed() && self.run.invariant_violations.is_empty()
+        self.run.lab_test_passed()
     }
 
     /// The canonical trace fingerprint for this run.
@@ -654,9 +662,10 @@ impl SporkHarnessReport {
             config_hash: self.config_hash(),
             worker_count: self.config.worker_count,
             max_steps: self.config.max_steps,
-            commit_hash: None,
+            test_name: None,
+            commit_hash: compiled_commit_hash(),
         };
-        let replay = ReplayCommand::from_config(&crash_config, Some(path.as_str()));
+        let replay = ReplayCommand::from_config(&crash_config);
         Some(CrashpackLink {
             id: format!(
                 "crashpack-{seed:016x}-{fingerprint:016x}",
@@ -787,6 +796,13 @@ pub struct LabRuntime {
     virtual_clock: Arc<VirtualClock>,
     /// Number of steps executed.
     steps: u64,
+    /// Number of steps that actually dispatched a task.
+    ///
+    /// GH#55: `steps` counts loop turns, including turns where the scheduler
+    /// reported pending work but nothing was dispatchable. Progress-based
+    /// bailouts must key off this counter, not `steps`, or a task stranded in
+    /// `LabScheduler::scheduled` spins forever while looking busy.
+    dispatches: u64,
     /// Chaos RNG for deterministic fault injection.
     chaos_rng: Option<ChaosRng>,
     /// Statistics about chaos injections.
@@ -872,6 +888,7 @@ impl LabRuntime {
             virtual_time: Time::ZERO,
             virtual_clock,
             steps: 0,
+            dispatches: 0,
             chaos_rng,
             chaos_stats: ChaosStats::new(),
             seen_reactor_chaos_stats: ChaosStats::new(),
@@ -1143,8 +1160,22 @@ impl LabRuntime {
             // Run until the scheduler is empty
             let is_empty = self.scheduler.lock().is_empty();
             if !is_empty {
-                stuck_counter = 0;
+                // GH#55: reset the stall counter only when the step actually
+                // dispatched something. `is_empty()` reads `scheduled`, which
+                // can retain a task that is no longer queued in any worker
+                // lane; resetting unconditionally made `StuckBailout`
+                // unreachable, turning that strand into an unbounded spin
+                // bounded only by `max_steps`.
+                let before = self.dispatches;
                 self.step();
+                if self.dispatches != before {
+                    stuck_counter = 0;
+                } else {
+                    stuck_counter = stuck_counter.saturating_add(1);
+                    if stuck_counter > 1000 {
+                        break AutoAdvanceTermination::StuckBailout;
+                    }
+                }
                 continue;
             }
 
@@ -1368,7 +1399,7 @@ impl LabRuntime {
     /// Returns `None` for passing reports.
     #[must_use]
     pub fn build_crashpack_for_report(&self, run: &LabRunReport) -> Option<CrashPack> {
-        self.build_crashpack_for_report_with_outcome(run, None, None)
+        self.build_crashpack_for_report_with_outcome(run, None, None, None, None)
     }
 
     /// Write a deterministic crashpack for a failing lab-test report.
@@ -1381,7 +1412,7 @@ impl LabRuntime {
         test_name: &str,
         run: &LabRunReport,
     ) -> Result<Option<LabAutoCrashpack>, LabAutoCrashpackError> {
-        self.write_auto_crashpack(test_name, run, None, None)
+        self.write_auto_crashpack(test_name, run, None, None, None)
     }
 
     /// Write a deterministic crashpack for a panic observed by a lab test body.
@@ -1396,6 +1427,7 @@ impl LabRuntime {
         self.write_auto_crashpack(
             test_name,
             run,
+            None,
             Some(FailureOutcome::Panicked {
                 message: panic_message.to_string(),
             }),
@@ -1403,10 +1435,29 @@ impl LabRuntime {
         )
     }
 
+    fn write_auto_crashpack_for_task_failure(
+        &self,
+        test_name: &str,
+        run: &LabRunReport,
+        task: TaskId,
+        region: RegionId,
+        outcome: FailureOutcome,
+        failure_detail: &str,
+    ) -> Result<Option<LabAutoCrashpack>, LabAutoCrashpackError> {
+        self.write_auto_crashpack(
+            test_name,
+            run,
+            Some((task, region)),
+            Some(outcome),
+            Some(format!("task_failure:{failure_detail}")),
+        )
+    }
+
     fn write_auto_crashpack(
         &self,
         test_name: &str,
         run: &LabRunReport,
+        failure_identity: Option<(TaskId, RegionId)>,
         forced_outcome: Option<FailureOutcome>,
         extra_violation: Option<String>,
     ) -> Result<Option<LabAutoCrashpack>, LabAutoCrashpackError> {
@@ -1414,9 +1465,13 @@ impl LabRuntime {
             return Ok(None);
         }
 
-        let Some(mut pack) =
-            self.build_crashpack_for_report_with_outcome(run, forced_outcome, extra_violation)
-        else {
+        let Some(mut pack) = self.build_crashpack_for_report_with_outcome(
+            run,
+            Some(test_name),
+            failure_identity,
+            forced_outcome,
+            extra_violation,
+        ) else {
             return Ok(None);
         };
 
@@ -1426,9 +1481,7 @@ impl LabRuntime {
             source,
         })?;
 
-        let path = dir.join(artifact_filename(&pack));
-        let path = path.to_string_lossy().into_owned();
-        let replay = pack.replay_command(Some(&path));
+        let replay = pack.replay_command();
         pack.replay = Some(replay.clone());
 
         let writer = FileCrashPackWriter::new(dir);
@@ -1443,11 +1496,14 @@ impl LabRuntime {
     fn build_crashpack_for_report_with_outcome(
         &self,
         run: &LabRunReport,
+        test_name: Option<&str>,
+        failure_identity: Option<(TaskId, RegionId)>,
         forced_outcome: Option<FailureOutcome>,
         extra_violation: Option<String>,
     ) -> Option<CrashPack> {
         let has_failure = !run.oracle_report.all_passed()
             || !run.invariant_violations.is_empty()
+            || !run.quiescent
             || run.refinement_firewall_rule_id.is_some()
             || forced_outcome.is_some();
         if !has_failure {
@@ -1460,32 +1516,54 @@ impl LabRuntime {
             config_hash: config_summary.config_hash(),
             worker_count: self.config.worker_count,
             max_steps: self.config.max_steps,
-            commit_hash: None,
+            test_name: test_name.map(str::to_owned),
+            commit_hash: compiled_commit_hash(),
         };
 
-        let (task, region) = self
-            .state
-            .tasks_iter()
-            .find(|(_, task)| !task.state.is_terminal())
-            .map(|(_, task)| (task.id, task.owner))
+        let failed_task = self.state.tasks_iter().find_map(|(_, task)| {
+            let outcome = match &task.state {
+                TaskState::Completed(crate::types::Outcome::Err(_)) => FailureOutcome::Err,
+                TaskState::Completed(crate::types::Outcome::Cancelled(reason)) => {
+                    FailureOutcome::Cancelled {
+                        cancel_kind: reason.kind(),
+                    }
+                }
+                TaskState::Completed(crate::types::Outcome::Panicked(payload)) => {
+                    FailureOutcome::Panicked {
+                        message: payload.message().to_owned(),
+                    }
+                }
+                _ => return None,
+            };
+            Some((task.id, task.owner, outcome))
+        });
+        let (task, region, inferred_outcome) = failure_identity
+            .map(|(task, region)| (task, region, None))
+            .or_else(|| failed_task.map(|(task, region, outcome)| (task, region, Some(outcome))))
+            .or_else(|| {
+                self.state
+                    .tasks_iter()
+                    .find(|(_, task)| !task.state.is_terminal())
+                    .map(|(_, task)| (task.id, task.owner, None))
+            })
             .or_else(|| {
                 self.state
                     .obligations_iter()
                     .find(|(_, obligation)| obligation.is_pending())
-                    .map(|(_, obligation)| (obligation.holder, obligation.region))
+                    .map(|(_, obligation)| (obligation.holder, obligation.region, None))
             })
             .or_else(|| {
                 self.state
                     .regions_iter()
                     .next()
-                    .map(|(_, region)| (TaskId::testing_default(), region.id))
+                    .map(|(_, region)| (TaskId::testing_default(), region.id, None))
             })
             .or_else(|| {
                 self.state
                     .root_region
-                    .map(|root| (TaskId::testing_default(), root))
+                    .map(|root| (TaskId::testing_default(), root, None))
             })
-            .unwrap_or((TaskId::testing_default(), RegionId::testing_default()));
+            .unwrap_or((TaskId::testing_default(), RegionId::testing_default(), None));
 
         let mut oracle_violations = run.invariant_violations.clone();
         oracle_violations.extend(
@@ -1513,12 +1591,14 @@ impl LabRuntime {
             .failure(FailureInfo {
                 task,
                 region,
-                outcome: forced_outcome.unwrap_or(FailureOutcome::Err),
+                outcome: forced_outcome
+                    .or(inferred_outcome)
+                    .unwrap_or(FailureOutcome::Err),
                 virtual_time: Time::from_nanos(run.now_nanos),
             })
             .created_at(run.now_nanos)
             .oracle_violations(oracle_violations)
-            .replay(ReplayCommand::from_config(&crash_config, None));
+            .replay(ReplayCommand::from_config(&crash_config));
 
         let divergent_prefix = self.auto_divergent_prefix();
         if !divergent_prefix.is_empty() {
@@ -1587,11 +1667,15 @@ impl LabRuntime {
 
         self.oracles.hydrate_temporal_from_state(&self.state, now);
         let oracle_report = self.oracles.report(now);
-        let temporal_invariant_failures = oracle_report
+        let oracle_invariant_failures = oracle_report
             .failures()
             .into_iter()
-            .filter(|entry| TEMPORAL_ORACLE_INVARIANTS.contains(&entry.invariant.as_str()))
             .map(|entry| entry.invariant.clone())
+            .collect::<Vec<_>>();
+        let temporal_invariant_failures = oracle_invariant_failures
+            .iter()
+            .filter(|invariant| TEMPORAL_ORACLE_INVARIANTS.contains(&invariant.as_str()))
+            .cloned()
             .collect::<Vec<_>>();
         let temporal_counterexample_prefix_len = if temporal_invariant_failures.is_empty() {
             None
@@ -1629,6 +1713,9 @@ impl LabRuntime {
             .into_iter()
             .map(|v| v.to_string())
             .collect::<Vec<_>>();
+        for invariant in &oracle_invariant_failures {
+            invariant_violations.push(format!("oracle:{invariant}"));
+        }
         for invariant in &temporal_invariant_failures {
             invariant_violations.push(format!("temporal:{invariant}"));
         }
@@ -1784,6 +1871,13 @@ impl LabRuntime {
         // `schedule_cancel(task_id, priority)` far below, which the current
         // nightly no longer back-infers through the `&mut tasks`/`&mut delegated`
         // shared `target` binding (E0282).
+        //
+        // The break is configuration-dependent, not universal: it first showed
+        // up building asupersync as a *path dependency of FrankenSQLite*, whose
+        // narrower downstream feature set gives inference less to work with than
+        // this crate's own `cargo check`. So a green build here does NOT prove
+        // the annotation is redundant — drop it and the downstream consumer is
+        // what breaks, not us.
         let mut tasks: Vec<(
             TaskId,
             u8,
@@ -1942,6 +2036,8 @@ impl LabRuntime {
                 return;
             }
         };
+
+        self.dispatches = self.dispatches.saturating_add(1);
 
         // Record task scheduling in certificate and replay recorder
         self.certificate.record(task_id, dispatch_lane, self.steps);
@@ -2944,7 +3040,8 @@ impl LabRuntime {
 
             assert!(
                 !self.config.panic_on_futurelock,
-                "[ASUP-E402] futurelock detected: {task} in {region} idle={idle_steps} held={held:?} last_checkpoint={}",
+                "[ASUP-E402] futurelock detected: seed={} {task} in {region} idle={idle_steps} held={held:?} last_checkpoint={}",
+                self.config.seed,
                 format_futurelock_checkpoint(last_checkpoint_message.as_deref())
             );
         }
@@ -2955,15 +3052,16 @@ impl LabRuntime {
 ///
 /// This is the runtime half of the `#[lab_test]` macro. It creates a root
 /// region, spawns one task under a current [`crate::cx::Cx`], drives the lab to
-/// quiescence, and returns the task output together with the structured
-/// [`LabRunReport`].
+/// quiescence, and returns the task output together with the passing structured
+/// [`LabRunReport`]. Any failed lab-test contract attempts to write an automatic
+/// crashpack before panicking when auto-artifacts are enabled.
 ///
 /// # Panics
 ///
 /// Panics if the task cannot be spawned, does not finish after the lab run, is
-/// cancelled, or panics. Test harness callers should treat those panics as
-/// deterministic failures; the returned report is for successful task
-/// completion plus oracle/invariant inspection.
+/// cancelled, panics, fails an oracle or runtime invariant, or does not reach
+/// quiescence. Test harness callers should treat those panics as deterministic
+/// failures; a returned report always satisfies the lab-test success contract.
 ///
 /// # Examples
 ///
@@ -2996,8 +3094,8 @@ where
 /// Run an async task under a fresh [`LabRuntime`] using an explicit config.
 ///
 /// This variant lets test macros and harnesses enable deterministic chaos or
-/// tune step limits while preserving the same root-task execution contract as
-/// [`run_async_under_lab`].
+/// tune step limits while preserving the same strict root-task execution and
+/// automatic-crashpack contract as [`run_async_under_lab`].
 ///
 /// # Panics
 ///
@@ -3009,36 +3107,11 @@ where
     Fut: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    let seed = config.seed;
-    let mut runtime = LabRuntime::new(config);
-    let root = runtime
-        .state
-        .create_root_region(crate::types::Budget::INFINITE);
-    let (task_id, mut handle, spawn_effects) = runtime
-        .state
-        .create_task_with_deferred_spawn_effects(root, crate::types::Budget::INFINITE, async move {
-            let cx = crate::cx::Cx::current()
-                .unwrap_or_else(|| panic!("lab task started without current Cx for seed {seed}"));
-            task(cx).await
-        })
-        .unwrap_or_else(|error| panic!("failed to spawn lab task for seed {seed}: {error}"));
-    runtime
-        .scheduler
-        .lock()
-        .schedule(task_id, crate::types::Budget::INFINITE.priority);
-    spawn_effects.dispatch();
-
-    let report = runtime.run_until_quiescent_with_report();
-    let output = handle
-        .try_join()
-        .unwrap_or_else(|error| panic!("lab task failed for seed {seed}: {error}"))
-        .unwrap_or_else(|| {
-            panic!(
-                "lab task did not finish for seed {seed}: quiescent={}, steps_total={}",
-                report.quiescent, report.steps_total
-            )
-        });
-    (output, report)
+    let test_name = std::thread::current()
+        .name()
+        .unwrap_or("run_async_under_lab")
+        .to_owned();
+    run_async_lab_test_with_config(config, &test_name, task)
 }
 
 /// Run an async `#[lab_test]` body under a fresh [`LabRuntime`].
@@ -3052,6 +3125,11 @@ where
 ///
 /// Panics when the async body fails, does not finish, or when the final
 /// [`LabRunReport`] violates the lab-test success contract.
+///
+/// Replay configuration overrides are applied from the environment before the
+/// runtime is constructed. Generated test harnesses resolve the seed override
+/// separately so seed-derived chaos configuration remains internally
+/// consistent.
 #[must_use]
 pub fn run_async_lab_test_with_config<F, Fut, T>(
     config: LabConfig,
@@ -3063,6 +3141,7 @@ where
     Fut: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
+    let config = lab_test_config_from_env(config);
     let seed = config.seed;
     let mut runtime = LabRuntime::new(config);
     let root = runtime
@@ -3090,7 +3169,14 @@ where
                 "lab task did not finish for seed {seed}: quiescent={}, steps_total={}",
                 report.quiescent, report.steps_total
             );
-            let artifact = runtime.write_auto_crashpack_for_panic(test_name, &report, &cause);
+            let artifact = runtime.write_auto_crashpack_for_task_failure(
+                test_name,
+                &report,
+                task_id,
+                root,
+                FailureOutcome::Err,
+                &cause,
+            );
             panic!(
                 "{}",
                 lab_auto_failure_message(test_name, seed, &cause, artifact)
@@ -3098,7 +3184,10 @@ where
         }
         Err(error) => {
             let cause = format!("lab task failed for seed {seed}: {error}");
-            let artifact = runtime.write_auto_crashpack_for_panic(test_name, &report, &cause);
+            let outcome = failure_outcome_from_join_error(&error);
+            let artifact = runtime.write_auto_crashpack_for_task_failure(
+                test_name, &report, task_id, root, outcome, &cause,
+            );
             panic!(
                 "{}",
                 lab_auto_failure_message(test_name, seed, &cause, artifact)
@@ -3118,6 +3207,95 @@ where
     (output, report)
 }
 
+fn failure_outcome_from_join_error(error: &crate::runtime::JoinError) -> FailureOutcome {
+    match error {
+        crate::runtime::JoinError::Cancelled(reason) => FailureOutcome::Cancelled {
+            cancel_kind: reason.kind(),
+        },
+        crate::runtime::JoinError::Panicked(payload) => FailureOutcome::Panicked {
+            message: payload.message().to_owned(),
+        },
+        crate::runtime::JoinError::PolledAfterCompletion => FailureOutcome::Err,
+    }
+}
+
+/// Read the replay seed override consumed by generated lab-test harnesses.
+///
+/// # Panics
+///
+/// Panics when the variable is present but is not a valid `u64`.
+#[doc(hidden)]
+#[must_use]
+pub fn lab_test_seed_override() -> Option<u64> {
+    let value = lab_test_env_value(LAB_TEST_SEED_ENV)?;
+    Some(value.parse::<u64>().unwrap_or_else(|error| {
+        panic!("{LAB_TEST_SEED_ENV} must be a u64, got {value:?}: {error}")
+    }))
+}
+
+/// Apply crashpack replay overrides to a lab-test configuration.
+///
+/// `ASUPERSYNC_MAX_STEPS=none` restores an unlimited step budget. Generated
+/// harnesses resolve the seed before configuration construction; this helper
+/// also updates seed-derived entropy and chaos seeds for direct callers while
+/// preserving explicitly decoupled seeds.
+///
+/// # Panics
+///
+/// Panics when an override is present but malformed.
+#[doc(hidden)]
+#[must_use]
+pub fn lab_test_config_from_env(mut config: LabConfig) -> LabConfig {
+    if let Some(seed) = lab_test_seed_override() {
+        let original_seed = config.seed;
+        config.seed = seed;
+        if config.entropy_seed == original_seed {
+            config.entropy_seed = seed;
+        }
+        if let Some(chaos) = config.chaos.take() {
+            config.chaos = Some(if chaos.seed == original_seed {
+                chaos.with_seed(seed)
+            } else {
+                chaos
+            });
+        }
+    }
+
+    if let Some(value) = lab_test_env_value(LAB_TEST_WORKERS_ENV) {
+        let workers = value.parse::<usize>().unwrap_or_else(|error| {
+            panic!("{LAB_TEST_WORKERS_ENV} must be a positive integer, got {value:?}: {error}")
+        });
+        assert!(
+            workers > 0,
+            "{LAB_TEST_WORKERS_ENV} must be greater than zero"
+        );
+        config = config.worker_count(workers);
+    }
+
+    if let Some(value) = lab_test_env_value(LAB_TEST_MAX_STEPS_ENV) {
+        config = if value == "none" {
+            config.no_step_limit()
+        } else {
+            let steps = value.parse::<u64>().unwrap_or_else(|error| {
+                panic!("{LAB_TEST_MAX_STEPS_ENV} must be a u64 or 'none', got {value:?}: {error}")
+            });
+            config.max_steps(steps)
+        };
+    }
+
+    config
+}
+
+fn lab_test_env_value(name: &str) -> Option<String> {
+    match std::env::var(name) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("{name} must contain valid Unicode")
+        }
+    }
+}
+
 fn lab_auto_failure_message(
     test_name: &str,
     seed: u64,
@@ -3126,7 +3304,7 @@ fn lab_auto_failure_message(
 ) -> String {
     let mut message = format!(
         "lab_test failed for {test_name} seed {seed}; rerun: \
-         ASUPERSYNC_LAB_TEST_SEED={seed} cargo test {test_name} -- --nocapture; \
+         ASUPERSYNC_LAB_TEST_SEED={seed} cargo test {test_name} -- --exact --nocapture; \
          cause: {cause}"
     );
     match artifact {
@@ -3156,6 +3334,10 @@ fn lab_report_failure_summary(report: &LabRunReport) -> String {
 
 fn auto_artifacts_enabled() -> bool {
     std::env::var(AUTO_ARTIFACTS_ENV).map_or(true, |value| value != "0")
+}
+
+fn compiled_commit_hash() -> Option<String> {
+    option_env!("ASUPERSYNC_BUILD_GIT_COMMIT").map(str::to_owned)
 }
 
 fn auto_crashpack_dir(test_name: &str, pack: &CrashPack) -> PathBuf {
@@ -3209,7 +3391,10 @@ pub struct LabScheduler {
     scheduled: DetHashSet<TaskId>,
     pending_spurious_wakes: DetHashMap<TaskId, PendingSpuriousWake>,
     /// Task → worker assignment, indexed by arena slot.
-    assignments: Vec<Option<usize>>,
+    /// Task → worker assignment, indexed by arena slot and tagged with the
+    /// generation the assignment was recorded for (GH#55). The generation tag
+    /// keeps slot reuse from aliasing a live task's routing.
+    assignments: Vec<Option<(u32, usize)>>,
     next_worker: usize,
     cancel_streak: Vec<usize>,
     cancel_streak_limit: usize,
@@ -3254,22 +3439,35 @@ impl LabScheduler {
         if slot >= self.assignments.len() {
             self.assignments.resize(slot + 1, None);
         }
-        self.assignments[slot] = Some(worker);
+        self.assignments[slot] = Some((task.arena_index().generation(), worker));
+    }
+
+    /// Returns the worker owning `task`, but only when the recorded assignment
+    /// belongs to this exact task generation.
+    ///
+    /// GH#55: `assignments` is indexed by arena slot, while `scheduled` and the
+    /// per-worker queues are keyed by the full `TaskId` (slot + generation).
+    /// Without the generation check, a task that reuses a slot aliases the
+    /// previous occupant's assignment and can be routed to a worker that does
+    /// not hold its queue entry.
+    #[inline]
+    fn assignment_for(&self, task: TaskId) -> Option<usize> {
+        let slot = task.arena_index().index() as usize;
+        match self.assignments.get(slot) {
+            Some(&Some((generation, worker))) if generation == task.arena_index().generation() => {
+                Some(worker)
+            }
+            _ => None,
+        }
     }
 
     fn assign_worker(&mut self, task: TaskId) -> usize {
-        let slot = task.arena_index().index() as usize;
-        if slot < self.assignments.len() {
-            if let Some(worker) = self.assignments[slot] {
-                return worker;
-            }
+        if let Some(worker) = self.assignment_for(task) {
+            return worker;
         }
         let worker = self.next_worker % self.workers.len();
         self.next_worker = self.next_worker.wrapping_add(1);
-        if slot >= self.assignments.len() {
-            self.assignments.resize(slot + 1, None);
-        }
-        self.assignments[slot] = Some(worker);
+        self.set_assignment(task, worker);
         worker
     }
 
@@ -3324,9 +3522,16 @@ impl LabScheduler {
             return;
         }
 
-        let slot = task.arena_index().index() as usize;
-        if let Some(&Some(worker)) = self.assignments.get(slot) {
+        // GH#55: the task is already in `scheduled`, so `is_empty()` reports
+        // work pending. If we cannot promote it we must still queue it
+        // somewhere, or it is stranded — present in `scheduled` with no entry
+        // in any worker lane — and the runtime spins forever waiting for work
+        // that can never be dispatched.
+        if let Some(worker) = self.assignment_for(task) {
             self.workers[worker].move_to_cancel_lane(task, priority);
+        } else {
+            let worker = self.assign_worker(task);
+            self.workers[worker].schedule_cancel(task, priority);
         }
     }
 
@@ -3421,8 +3626,12 @@ impl LabScheduler {
     fn forget_task(&mut self, task: TaskId) {
         self.scheduled.remove(&task);
         self.pending_spurious_wakes.remove(&task);
-        let slot = task.arena_index().index() as usize;
-        if slot < self.assignments.len() {
+        // GH#55: only clear the slot when the recorded assignment belongs to
+        // this generation. `scheduled` and the worker lanes are keyed by the
+        // full `TaskId`, so clearing on slot alone would drop the routing of a
+        // still-live task that merely reuses the arena slot.
+        if self.assignment_for(task).is_some() {
+            let slot = task.arena_index().index() as usize;
             self.assignments[slot] = None;
         }
         for worker in &mut self.workers {
@@ -5082,6 +5291,12 @@ mod tests {
             true,
             message.contains("last_checkpoint=\"waiting on downstream permit\"")
         );
+        crate::assert_with_log!(
+            message.contains("seed=42"),
+            "futurelock panic seed",
+            true,
+            message.contains("seed=42")
+        );
         crate::test_complete!("futurelock_panic_includes_last_checkpoint_message");
     }
 
@@ -5424,6 +5639,15 @@ mod tests {
             false,
             obligation_leak.passed
         );
+        for failed in report.oracle_report.failures() {
+            let marker = format!("oracle:{}", failed.invariant);
+            crate::assert_with_log!(
+                report.invariant_violations.contains(&marker),
+                "every failed oracle has aggregate marker",
+                true,
+                report.invariant_violations.contains(&marker)
+            );
+        }
         crate::test_complete!("report_hydrates_quiescence_from_finalizers_and_obligations");
     }
 
@@ -6109,7 +6333,201 @@ mod tests {
         assert_eq!(report.to_json()["verdict"], "pass");
         assert!(report.summary_line().starts_with("[PASS]"));
 
+        let mut truncated = report.clone();
+        truncated.run.quiescent = false;
+        assert!(!truncated.passed());
+        assert_eq!(truncated.to_json()["verdict"], "fail");
+        assert!(truncated.summary_line().starts_with("[FAIL]"));
+        let runtime = LabRuntime::with_seed(42);
+        assert!(runtime.build_crashpack_for_report(&truncated.run).is_some());
+
         crate::test_complete!("contract_verdict_reflects_oracle_state");
+    }
+
+    #[test]
+    fn crashpack_prefers_failed_terminal_task_over_live_task() {
+        init_test("crashpack_prefers_failed_terminal_task_over_live_task");
+        let mut runtime = LabRuntime::with_seed(0x4b_78);
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+
+        let live_idx = runtime.state.insert_task(TaskRecord::new(
+            TaskId::testing_default(),
+            root,
+            Budget::INFINITE,
+        ));
+        let live_task = TaskId::from_arena(live_idx);
+        runtime.state.task_mut(live_task).unwrap().id = live_task;
+
+        let failed_idx = runtime.state.insert_task(TaskRecord::new(
+            TaskId::testing_default(),
+            root,
+            Budget::INFINITE,
+        ));
+        let failed_task = TaskId::from_arena(failed_idx);
+        runtime.state.task_mut(failed_task).unwrap().id = failed_task;
+        runtime
+            .state
+            .update_task(failed_task, |record| {
+                record.complete(Outcome::Panicked(crate::types::PanicPayload::new(
+                    "intentional crashpack attribution panic",
+                )))
+            })
+            .expect("complete failed task");
+
+        let report = runtime.report();
+        let crashpack = runtime
+            .build_crashpack_for_report(&report)
+            .expect("live task should make the report fail");
+        assert_eq!(crashpack.failure.task, failed_task);
+        assert_eq!(crashpack.failure.region, root);
+        assert!(matches!(
+            crashpack.failure.outcome,
+            FailureOutcome::Panicked { ref message }
+                if message == "intentional crashpack attribution panic"
+        ));
+        crate::test_complete!("crashpack_prefers_failed_terminal_task_over_live_task");
+    }
+
+    #[test]
+    fn crashpack_preserves_cancelled_terminal_task_kind() {
+        init_test("crashpack_preserves_cancelled_terminal_task_kind");
+        let mut runtime = LabRuntime::with_seed(0x4b_79);
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+
+        let live_idx = runtime.state.insert_task(TaskRecord::new(
+            TaskId::testing_default(),
+            root,
+            Budget::INFINITE,
+        ));
+        let live_task = TaskId::from_arena(live_idx);
+        runtime.state.task_mut(live_task).unwrap().id = live_task;
+
+        let cancelled_idx = runtime.state.insert_task(TaskRecord::new(
+            TaskId::testing_default(),
+            root,
+            Budget::INFINITE,
+        ));
+        let cancelled_task = TaskId::from_arena(cancelled_idx);
+        runtime.state.task_mut(cancelled_task).unwrap().id = cancelled_task;
+        runtime
+            .state
+            .update_task(cancelled_task, |record| {
+                record.complete(Outcome::Cancelled(crate::types::CancelReason::timeout()))
+            })
+            .expect("complete cancelled task");
+
+        let report = runtime.report();
+        let crashpack = runtime
+            .build_crashpack_for_report(&report)
+            .expect("live task should make the report fail");
+        assert_eq!(crashpack.failure.task, cancelled_task);
+        assert_eq!(crashpack.failure.region, root);
+        assert_eq!(
+            crashpack.failure.outcome,
+            FailureOutcome::Cancelled {
+                cancel_kind: crate::types::CancelKind::Timeout,
+            }
+        );
+        crate::test_complete!("crashpack_preserves_cancelled_terminal_task_kind");
+    }
+
+    const PLAIN_RUNNER_FAILURE_PROBE: &str = "lab::runtime::tests::plain_runner_failure_probe";
+    const PLAIN_RUNNER_FAILURE_SEED: u64 = 0x4b_78_0003;
+
+    fn trigger_plain_runner_failure_probe() {
+        panic!("intentional plain-runner failure probe"); // ubs:ignore — deliberate subprocess failure injection in a test-only helper
+    }
+
+    #[test]
+    #[ignore = "subprocess-only probe for plain-runner crashpack emission"]
+    fn plain_runner_failure_probe() {
+        if std::env::var_os(PLAIN_RUNNER_FAILURE_PROBE_ENV).is_none() {
+            return;
+        }
+        let _ = run_async_under_lab(PLAIN_RUNNER_FAILURE_SEED, |_cx| async move {
+            trigger_plain_runner_failure_probe();
+        });
+    }
+
+    #[test]
+    fn plain_runner_failure_writes_crashpack() {
+        init_test("plain_runner_failure_writes_crashpack");
+        let now = std::time::SystemTime::now(); // ubs:ignore — test-directory uniqueness only, not a security token
+        let nonce = now
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let artifact_root = std::env::temp_dir().join(format!(
+            "asupersync-fgdb-4bxh-{}-{nonce}",
+            std::process::id()
+        ));
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--ignored",
+                "--exact",
+                PLAIN_RUNNER_FAILURE_PROBE,
+                "--nocapture",
+            ])
+            .env(AUTO_ARTIFACTS_ENV, "1")
+            .env(TEST_ARTIFACTS_DIR_ENV, &artifact_root)
+            .env(PLAIN_RUNNER_FAILURE_PROBE_ENV, "1")
+            .env_remove(LAB_TEST_SEED_ENV)
+            .env_remove(LAB_TEST_WORKERS_ENV)
+            .env_remove(LAB_TEST_MAX_STEPS_ENV)
+            .output()
+            .expect("run plain-runner failure probe");
+        assert!(!output.status.success(), "failure probe must fail");
+
+        let mut transcript = String::from_utf8_lossy(&output.stdout).into_owned();
+        transcript.push_str(&String::from_utf8_lossy(&output.stderr));
+        assert!(
+            transcript.contains(&format!("seed {PLAIN_RUNNER_FAILURE_SEED}")),
+            "failure transcript must name the replay seed: {transcript}"
+        );
+        let crashpack_path = transcript
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("crashpack: "))
+            .expect("failure transcript must name the crashpack path");
+        assert!(
+            std::path::Path::new(crashpack_path).is_file(),
+            "crashpack path must exist: {crashpack_path}"
+        );
+        let crashpack_json = std::fs::read_to_string(crashpack_path)
+            .expect("plain-runner crashpack must be readable");
+        let crashpack: serde_json::Value =
+            serde_json::from_str(&crashpack_json).expect("plain-runner crashpack JSON");
+        assert_eq!(
+            crashpack["manifest"]["config"]["seed"],
+            PLAIN_RUNNER_FAILURE_SEED
+        );
+        assert_eq!(
+            crashpack["failure"]["outcome"]["Panicked"]["message"].as_str(),
+            Some("intentional plain-runner failure probe")
+        );
+        crate::test_complete!("plain_runner_failure_writes_crashpack");
+    }
+
+    #[test]
+    fn join_error_crashpack_outcome_preserves_kind_and_payload() {
+        init_test("join_error_crashpack_outcome_preserves_kind_and_payload");
+        let cancelled = crate::runtime::JoinError::Cancelled(crate::types::CancelReason::timeout());
+        assert_eq!(
+            failure_outcome_from_join_error(&cancelled),
+            FailureOutcome::Cancelled {
+                cancel_kind: crate::types::CancelKind::Timeout,
+            }
+        );
+
+        let panicked = crate::runtime::JoinError::Panicked(crate::types::PanicPayload::new(
+            "exact panic payload",
+        ));
+        assert_eq!(
+            failure_outcome_from_join_error(&panicked),
+            FailureOutcome::Panicked {
+                message: "exact panic payload".to_owned(),
+            }
+        );
+        crate::test_complete!("join_error_crashpack_outcome_preserves_kind_and_payload");
     }
 
     /// Agent UX convenience methods return consistent values.

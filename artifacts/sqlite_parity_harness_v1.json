@@ -1,0 +1,269 @@
+{
+  "schema_version": 1,
+  "bead_id": "asupersync-ym2wtv.2.1",
+  "capability_id": "CAP-SQLITE",
+  "placement": {
+    "kind": "neutral_standalone_consumer",
+    "manifest": "tests/fixtures/sqlite-parity-consumer/Cargo.toml",
+    "workspace_member": false,
+    "independent_lockfile": "tests/fixtures/sqlite-parity-consumer/Cargo.lock",
+    "dependency_direction": "consumer_to_asupersync_and_frankensqlite_only",
+    "asupersync_root_has_frankensqlite_edge": false,
+    "runtime_unification": "[patch.crates-io] asupersync points to the same local source as the direct dependency"
+  },
+  "pins": {
+    "asupersync": {
+      "source": "local_path",
+      "revision": "57b95c31df8bd5b2541a7427cbd6a6bccb78f2e5",
+      "features": [
+        "sqlite"
+      ]
+    },
+    "frankensqlite": {
+      "source": "https://github.com/Dicklesworthstone/frankensqlite.git",
+      "revision": "92f9e9833f859ebcbe27e9fef16d9cad4372bbd7",
+      "release_tag": "v0.1.18",
+      "package": "fsqlite",
+      "features": [
+        "native"
+      ]
+    },
+    "lockfile_sha256": "4eb02a45afc9cca1d6149530ad83800c6e56c2cbe0c4eb07b1982d2bae503a3a",
+    "cargo_profile": "dev",
+    "target": "x86_64-unknown-linux-gnu",
+    "host": "linux-x86_64-rch-worker"
+  },
+  "vector_contract": {
+    "path": "artifacts/sqlite_conformance_vectors_v1.json",
+    "sha256": "1aebfcf33decb88cd359d507f9b504fcd5f0f35d5e47795e445bba42dcb0e856",
+    "schema_version": 1,
+    "deterministic_validation": "tests/sqlite_parity_harness_contract.rs",
+    "smoke_vector": "SQLITE-PARITY-SMOKE-001",
+    "fields": [
+      "setup",
+      "operation_sequence",
+      "expected_values",
+      "expected_errors",
+      "transaction_state",
+      "cancellation_state",
+      "resource_state",
+      "normalization",
+      "unsupported_capability"
+    ]
+  },
+  "execution": {
+    "status": "PASS",
+    "worker": "vmi1227854",
+    "remote_exit_code": 0,
+    "remote_command_elapsed_ms": 375263,
+    "clean_overlay": {
+      "base": "57b95c31df8bd5b2541a7427cbd6a6bccb78f2e5",
+      "overlay_paths": [],
+      "no_overlay": true
+    },
+    "command": "RCH_WORKER=vmi1227854 RCH_REQUIRE_REMOTE=1 rch exec --base 57b95c31df8bd5b2541a7427cbd6a6bccb78f2e5 --clean-overlay --no-overlay -- env ASUPERSYNC_SOURCE_REVISION=57b95c31df8bd5b2541a7427cbd6a6bccb78f2e5 SQLITE_PARITY_TARGET=x86_64-unknown-linux-gnu SQLITE_PARITY_HOST=linux-x86_64-rch-worker CARGO_TARGET_DIR=/tmp/rch_target_sqlite_parity_consumer CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo run --locked --manifest-path tests/fixtures/sqlite-parity-consumer/Cargo.toml",
+    "evidence": {
+      "evidence_schema_version": 1,
+      "vector_schema_version": 1,
+      "suite_id": "sqlite-neutral-parity-v1",
+      "capability_id": "CAP-SQLITE",
+      "provenance": {
+        "asupersync_revision": "57b95c31df8bd5b2541a7427cbd6a6bccb78f2e5",
+        "frankensqlite_revision": "92f9e9833f859ebcbe27e9fef16d9cad4372bbd7",
+        "asupersync_features": [
+          "sqlite"
+        ],
+        "frankensqlite_features": [
+          "native"
+        ],
+        "cargo_profile": "dev",
+        "target": "x86_64-unknown-linux-gnu",
+        "host": "linux-x86_64-rch-worker"
+      },
+      "engine_results": [
+        {
+          "engine": "asupersync",
+          "vectors": [
+            {
+              "vector_id": "SQLITE-PARITY-SMOKE-001",
+              "setup": [
+                {
+                  "id": "create-table",
+                  "status": "ok"
+                }
+              ],
+              "operations": [
+                {
+                  "sequence": 1,
+                  "id": "insert-two",
+                  "outcome": {
+                    "status": "ok",
+                    "affected_rows": 2,
+                    "values": [],
+                    "error_class": null,
+                    "transaction_state": "none",
+                    "cancellation_state": "not_requested",
+                    "resource_state": {
+                      "connection": "open",
+                      "open_transactions": 0,
+                      "background_work": "none_observed"
+                    }
+                  }
+                },
+                {
+                  "sequence": 2,
+                  "id": "query-beta",
+                  "outcome": {
+                    "status": "ok",
+                    "affected_rows": null,
+                    "values": [
+                      {
+                        "type": "integer",
+                        "value": 2
+                      },
+                      {
+                        "type": "text",
+                        "value": "beta"
+                      }
+                    ],
+                    "error_class": null,
+                    "transaction_state": "none",
+                    "cancellation_state": "not_requested",
+                    "resource_state": {
+                      "connection": "open",
+                      "open_transactions": 0,
+                      "background_work": "none_observed"
+                    }
+                  }
+                }
+              ],
+              "final_state": {
+                "transaction_state": "none",
+                "cancellation_state": "not_requested",
+                "resource_state": {
+                  "connection": "closed",
+                  "open_transactions": 0,
+                  "background_work": "none_observed"
+                }
+              },
+              "unsupported": []
+            }
+          ]
+        },
+        {
+          "engine": "frankensqlite",
+          "vectors": [
+            {
+              "vector_id": "SQLITE-PARITY-SMOKE-001",
+              "setup": [
+                {
+                  "id": "create-table",
+                  "status": "ok"
+                }
+              ],
+              "operations": [
+                {
+                  "sequence": 1,
+                  "id": "insert-two",
+                  "outcome": {
+                    "status": "ok",
+                    "affected_rows": 2,
+                    "values": [],
+                    "error_class": null,
+                    "transaction_state": "none",
+                    "cancellation_state": "not_requested",
+                    "resource_state": {
+                      "connection": "open",
+                      "open_transactions": 0,
+                      "background_work": "none_observed"
+                    }
+                  }
+                },
+                {
+                  "sequence": 2,
+                  "id": "query-beta",
+                  "outcome": {
+                    "status": "ok",
+                    "affected_rows": null,
+                    "values": [
+                      {
+                        "type": "integer",
+                        "value": 2
+                      },
+                      {
+                        "type": "text",
+                        "value": "beta"
+                      }
+                    ],
+                    "error_class": null,
+                    "transaction_state": "none",
+                    "cancellation_state": "not_requested",
+                    "resource_state": {
+                      "connection": "open",
+                      "open_transactions": 0,
+                      "background_work": "none_observed"
+                    }
+                  }
+                }
+              ],
+              "final_state": {
+                "transaction_state": "none",
+                "cancellation_state": "not_requested",
+                "resource_state": {
+                  "connection": "closed",
+                  "open_transactions": 0,
+                  "background_work": "none_observed"
+                }
+              },
+              "unsupported": []
+            }
+          ]
+        }
+      ],
+      "comparison": {
+        "comparable": true,
+        "compared_vectors": 1,
+        "mismatches": []
+      }
+    }
+  },
+  "validation_frontier": {
+    "newer_revision": "31fc4a3b3a108dc49243157ea29fb1ddfcb06fdc",
+    "status": "BLOCKED_UPSTREAM_COMPILE",
+    "receipt": "A clean remote native-feature compile failed in fsqlite-btree because synchronous cursor adapters received Future-returning pager operations. The harness therefore pins the newest checked release tag used by this receipt instead of misreporting the current remote tip as runnable.",
+    "no_claim": "This receipt diagnoses only the selected combined graph and does not establish that every feature profile or later FrankenSQLite revision is unbuildable."
+  },
+  "verification": {
+    "consumer_clippy": {
+      "status": "PASS",
+      "remote_exit_code": 0,
+      "worker": "vmi1227854",
+      "base": "57b95c31df8bd5b2541a7427cbd6a6bccb78f2e5",
+      "command": "cargo clippy --locked --manifest-path tests/fixtures/sqlite-parity-consumer/Cargo.toml -- -D warnings"
+    },
+    "repository_contract": {
+      "status": "PASS",
+      "passed": 5,
+      "failed": 0,
+      "worker": "vmi1227854",
+      "command": "cargo test -p asupersync --test sqlite_parity_harness_contract -- --nocapture"
+    },
+    "local_structural_checks": [
+      "rustfmt --edition 2024 --check on both owned Rust files",
+      "jq empty on both owned JSON artifacts",
+      "git diff --check on all owned paths"
+    ]
+  },
+  "combined_graph_budget": {
+    "artifact": "artifacts/sqlite_combined_graph_budget_v1.json",
+    "terminal_outcome": "DEFER",
+    "reason": "The unified consumer removes the duplicate-runtime coherence defect, but the measured proposal adds 33 unique crates. Binary-size and compile-time cells remain explicitly blocked by the recorded RCH root constraint."
+  },
+  "no_claims": [
+    "No dependency cutover or rusqlite/sqlparser removal is authorized.",
+    "This smoke vector does not establish the eight-family semantic parity campaign.",
+    "none_observed background work is not a proof of global task or resource quiescence.",
+    "The graph-budget DEFER remains terminal for this prerequisite and is not converted to PASS by a smoke run.",
+    "No claim is made about FrankenSQLite performance, maturity, or release readiness."
+  ]
+}

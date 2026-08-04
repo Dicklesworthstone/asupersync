@@ -1,0 +1,1169 @@
+{
+  "schema_version": 1,
+  "artifact_id": "regex-syntax-grammar-contract-v1",
+  "grammar_id": "ASUP-REGEX-SYNTAX-V1",
+  "language_version": 1,
+  "bead_id": "asupersync-5z2scg.8.3.1.1",
+  "program_id": "asupersync-ir2uf0",
+  "capability_id": "CAP-REGEX-PRIVACY",
+  "captured_date_utc": "2026-07-25",
+  "baseline_revision": "731ee16786ab047258c0a493a24f08dc868e3b0c",
+  "r1_evidence_revision": "8b399fa722e47e55950164655dd18276d9fc85fc",
+  "decision": {
+    "incumbent_state": "KEEP_INCUMBENT",
+    "candidate_state": "SPECIFIED_NOT_IMPLEMENTED",
+    "cutover_eligible": false,
+    "unknown_rows": 0,
+    "accepted_unsupported_rows": 0,
+    "on_unknown_or_accepted_unsupported": "KEEP_OR_DEFER",
+    "authority": "DEP-ADR-012"
+  },
+  "source_pins": [
+    {
+      "path": "artifacts/regex_privacy_capability_inventory_v1.json",
+      "sha256": "eb4058b888b33a152975d7be576d117663f8560ed55a634369991d091f76d6ea",
+      "line_count": 1025,
+      "role": "R1 executable syntax and negative-class inventory"
+    },
+    {
+      "path": "docs/regex_privacy_capability_inventory.md",
+      "sha256": "da24b52abe71fb30ac2821c116e64dbf199b73fc7938ec297e91714278d92236",
+      "line_count": 226,
+      "role": "R1 operator-readable inventory"
+    },
+    {
+      "path": "docs/adr/dep_plan_adr_012_regex_privacy.md",
+      "sha256": "76456b9192cc828f59b9c9a5bb19d20b31dc7e8171554e73bc8f4391c892301c",
+      "line_count": 145,
+      "role": "capability and cutover authority"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
+      "line_count": 991,
+      "role": "direct dependency and feature declaration"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "9fa12e8af1e6b15a3070d88d62b2b81b8ba49c0e9d8592c1d1682f1cd72a4461",
+      "line_count": 4664,
+      "role": "resolved incumbent versions and checksums"
+    }
+  ],
+  "upstream_specifications": [
+    {
+      "source_id": "REGEX-SPEC-1",
+      "package": "regex",
+      "version": "1.13.1",
+      "checksum": "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d",
+      "url": "https://docs.rs/regex/1.13.1/regex/#syntax",
+      "package_path": "src/lib.rs",
+      "package_path_sha256": "e87192b2e862d3a01777307584c7c898b189c4d78e6f7a800f52d7e84c3aab1c",
+      "role": "independent published syntax, precedence, Unicode, and byte-mode specification"
+    },
+    {
+      "source_id": "REGEX-SPEC-2",
+      "package": "regex-syntax",
+      "version": "0.8.11",
+      "checksum": "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4",
+      "url": "https://docs.rs/regex-syntax/0.8.11/regex_syntax/ast/index.html",
+      "package_path": "src/ast/mod.rs",
+      "package_path_sha256": "38df06574a3816eae2796c757d9d268b7b42ce3fb1feee86750e7d04de7649c7",
+      "role": "independent AST and typed diagnostic taxonomy"
+    },
+    {
+      "source_id": "REGEX-SPEC-3",
+      "package": "Unicode Technical Standard #18",
+      "version": "revision-25",
+      "url": "https://www.unicode.org/reports/tr18/tr18-25.html",
+      "role": "independent Unicode regular-expression terminology; incumbent behavior remains controlling"
+    }
+  ],
+  "input_contract": {
+    "pattern_type": "UTF-8 Rust &str",
+    "haystack_type": "UTF-8 Rust &str",
+    "default_unicode": true,
+    "default_anchor_mode": "UNANCHORED",
+    "match_preference": "LEFTMOST_FIRST_WITH_ALTERNATION_ORDER",
+    "match_offsets": "UTF8_BYTE_OFFSETS",
+    "octal_escapes": "DISABLED",
+    "byte_mode": {
+      "public_bytes_api_consumed": false,
+      "unicode_flag_may_be_disabled": true,
+      "allowed_only_when_utf8_invariant_is_preserved": true,
+      "accepted_inventory_example": "(?-u:\\b)",
+      "rejected_example": "(?-u:.)",
+      "rejected_category": "RGX-DIAG-INVALID-UTF8"
+    }
+  },
+  "version_contract": {
+    "identity": "ASUP-REGEX-SYNTAX-V1",
+    "immutable_fields": [
+      "language_version",
+      "input_contract",
+      "precedence",
+      "flags",
+      "grammar_productions",
+      "constructs",
+      "limits",
+      "diagnostic_categories"
+    ],
+    "language_version_bump_required_for": [
+      "accepted or rejected syntax changes",
+      "precedence or associativity changes",
+      "normalized AST shape changes",
+      "diagnostic category or source-span policy changes",
+      "limit value or limit outcome changes",
+      "Unicode or byte-mode semantic changes"
+    ],
+    "wording_is_not_stable": true,
+    "normalized_diagnostic_categories_are_stable": true,
+    "source_spans_are_half_open_utf8_byte_ranges": true,
+    "drift_outcome": "KEEP_OR_DEFER_PENDING_EXPLICIT_REVIEW"
+  },
+  "precedence": [
+    {
+      "precedence_id": "RGX-PREC-ATOM",
+      "rank": 1,
+      "most_binding": true,
+      "operators": [
+        "literal",
+        "escape",
+        "dot",
+        "class",
+        "assertion",
+        "group"
+      ],
+      "associativity": "NONE"
+    },
+    {
+      "precedence_id": "RGX-PREC-REPETITION",
+      "rank": 2,
+      "operators": [
+        "?",
+        "*",
+        "+",
+        "{n}",
+        "{n,}",
+        "{n,m}"
+      ],
+      "associativity": "POSTFIX_ON_IMMEDIATELY_PRECEDING_ATOM",
+      "greed_suffix": "?"
+    },
+    {
+      "precedence_id": "RGX-PREC-CONCATENATION",
+      "rank": 3,
+      "operators": [
+        "implicit concatenation"
+      ],
+      "associativity": "ORDERED_FLAT_SEQUENCE"
+    },
+    {
+      "precedence_id": "RGX-PREC-ALTERNATION",
+      "rank": 4,
+      "least_binding": true,
+      "operators": [
+        "|"
+      ],
+      "associativity": "ORDERED_LEFT_TO_RIGHT_PRIORITY"
+    }
+  ],
+  "class_precedence": [
+    {
+      "precedence_id": "RGX-CLASS-PREC-RANGE",
+      "rank": 1,
+      "operators": [
+        "-"
+      ],
+      "associativity": "PAIR"
+    },
+    {
+      "precedence_id": "RGX-CLASS-PREC-UNION",
+      "rank": 2,
+      "operators": [
+        "adjacency"
+      ],
+      "associativity": "ORDERED_FLAT_SEQUENCE"
+    },
+    {
+      "precedence_id": "RGX-CLASS-PREC-SET",
+      "rank": 3,
+      "operators": [
+        "&&",
+        "--",
+        "~~"
+      ],
+      "associativity": "LEFT"
+    },
+    {
+      "precedence_id": "RGX-CLASS-PREC-NEGATION",
+      "rank": 4,
+      "operators": [
+        "^"
+      ],
+      "associativity": "PREFIX_WHOLE_CLASS"
+    }
+  ],
+  "flags": [
+    {
+      "flag": "i",
+      "meaning": "Unicode-aware simple case folding",
+      "default": false
+    },
+    {
+      "flag": "m",
+      "meaning": "^ and $ also match line boundaries",
+      "default": false
+    },
+    {
+      "flag": "s",
+      "meaning": "dot matches newline",
+      "default": false
+    },
+    {
+      "flag": "R",
+      "meaning": "CRLF-aware line anchors when multiline is enabled",
+      "default": false
+    },
+    {
+      "flag": "U",
+      "meaning": "swap greedy and lazy repetition defaults",
+      "default": false
+    },
+    {
+      "flag": "u",
+      "meaning": "Unicode mode",
+      "default": true
+    },
+    {
+      "flag": "x",
+      "meaning": "ignore unescaped whitespace and line comments",
+      "default": false
+    }
+  ],
+  "grammar_productions": [
+    {
+      "production_id": "RGX-GRAMMAR-ROOT",
+      "lhs": "Regex",
+      "rhs": "Alternation"
+    },
+    {
+      "production_id": "RGX-GRAMMAR-ALTERNATION",
+      "lhs": "Alternation",
+      "rhs": "Concatenation ('|' Concatenation)*"
+    },
+    {
+      "production_id": "RGX-GRAMMAR-CONCATENATION",
+      "lhs": "Concatenation",
+      "rhs": "Repetition*"
+    },
+    {
+      "production_id": "RGX-GRAMMAR-REPETITION",
+      "lhs": "Repetition",
+      "rhs": "Atom Quantifier?"
+    },
+    {
+      "production_id": "RGX-GRAMMAR-QUANTIFIER",
+      "lhs": "Quantifier",
+      "rhs": "('?' | '*' | '+' | Counted) '?'?"
+    },
+    {
+      "production_id": "RGX-GRAMMAR-COUNTED",
+      "lhs": "Counted",
+      "rhs": "'{' Decimal ('}' | ',' Decimal? '}')"
+    },
+    {
+      "production_id": "RGX-GRAMMAR-ATOM",
+      "lhs": "Atom",
+      "rhs": "Literal | Dot | Escape | Assertion | Class | Group"
+    },
+    {
+      "production_id": "RGX-GRAMMAR-GROUP",
+      "lhs": "Group",
+      "rhs": "'(' Alternation ')' | '(?:' Alternation ')' | '(?P<' Name '>' Alternation ')' | '(?<' Name '>' Alternation ')' | '(?' FlagDelta ')' | '(?' FlagDelta ':' Alternation ')'"
+    },
+    {
+      "production_id": "RGX-GRAMMAR-FLAGS",
+      "lhs": "FlagDelta",
+      "rhs": "Flag+ ('-' Flag*)? | '-' Flag+"
+    },
+    {
+      "production_id": "RGX-GRAMMAR-CLASS",
+      "lhs": "Class",
+      "rhs": "'[' '^'? ClassExpression ']' | PerlClass | UnicodeClass | PosixClass"
+    },
+    {
+      "production_id": "RGX-GRAMMAR-CLASS-EXPRESSION",
+      "lhs": "ClassExpression",
+      "rhs": "ClassUnion (('&&' | '--' | '~~') ClassUnion)*"
+    },
+    {
+      "production_id": "RGX-GRAMMAR-CLASS-UNION",
+      "lhs": "ClassUnion",
+      "rhs": "(ClassRange | ClassAtom)+"
+    },
+    {
+      "production_id": "RGX-GRAMMAR-ESCAPE",
+      "lhs": "Escape",
+      "rhs": "EscapedPunctuation | ControlEscape | HexEscape | UnicodeEscape | PerlClass | UnicodeClass | AssertionEscape"
+    },
+    {
+      "production_id": "RGX-GRAMMAR-ASSERTION",
+      "lhs": "Assertion",
+      "rhs": "'^' | '$' | '\\A' | '\\z' | '\\b' | '\\B' | '\\b{start}' | '\\b{end}' | '\\b{start-half}' | '\\b{end-half}' | '\\<' | '\\>'"
+    }
+  ],
+  "constructs": [
+    {
+      "construct_id": "RGX-CONSTRUCT-LITERAL-CONCAT",
+      "state": "REQUIRED",
+      "description": "Unicode scalar literals and ordered concatenation"
+    },
+    {
+      "construct_id": "RGX-CONSTRUCT-ALTERNATION",
+      "state": "REQUIRED",
+      "description": "ordered leftmost-first alternation"
+    },
+    {
+      "construct_id": "RGX-CONSTRUCT-CAPTURE-NUMBERED",
+      "state": "REQUIRED",
+      "description": "numbered capturing groups"
+    },
+    {
+      "construct_id": "RGX-CONSTRUCT-CAPTURE-NAMED",
+      "state": "REQUIRED",
+      "description": "named capturing groups in ?P<name> and ?<name> forms"
+    },
+    {
+      "construct_id": "RGX-CONSTRUCT-GROUP-NONCAPTURE",
+      "state": "REQUIRED",
+      "description": "noncapturing groups"
+    },
+    {
+      "construct_id": "RGX-CONSTRUCT-FLAGS",
+      "state": "REQUIRED",
+      "description": "global and scoped i,m,s,R,U,u,x flag deltas"
+    },
+    {
+      "construct_id": "RGX-CONSTRUCT-REPETITION",
+      "state": "REQUIRED",
+      "description": "greedy and lazy ?,*,+ and counted repetition"
+    },
+    {
+      "construct_id": "RGX-CONSTRUCT-ANCHOR",
+      "state": "REQUIRED",
+      "description": "line and absolute anchors"
+    },
+    {
+      "construct_id": "RGX-CONSTRUCT-WORD-BOUNDARY",
+      "state": "REQUIRED",
+      "description": "Unicode and ASCII word-boundary assertions"
+    },
+    {
+      "construct_id": "RGX-CONSTRUCT-DOT",
+      "state": "REQUIRED",
+      "description": "Unicode scalar wildcard with dotall flag semantics"
+    },
+    {
+      "construct_id": "RGX-CONSTRUCT-CLASS-BRACKET",
+      "state": "REQUIRED",
+      "description": "bracketed classes, ranges, nesting, union, and negation"
+    },
+    {
+      "construct_id": "RGX-CONSTRUCT-CLASS-SET-OPS",
+      "state": "REQUIRED",
+      "description": "intersection, direct difference, and symmetric difference"
+    },
+    {
+      "construct_id": "RGX-CONSTRUCT-CLASS-POSIX",
+      "state": "REQUIRED",
+      "description": "ASCII POSIX classes and their negations"
+    },
+    {
+      "construct_id": "RGX-CONSTRUCT-CLASS-PERL",
+      "state": "REQUIRED",
+      "description": "Unicode-aware d,D,s,S,w,W classes"
+    },
+    {
+      "construct_id": "RGX-CONSTRUCT-CLASS-UNICODE",
+      "state": "REQUIRED",
+      "description": "Unicode properties, scripts, and negations"
+    },
+    {
+      "construct_id": "RGX-CONSTRUCT-ESCAPE",
+      "state": "REQUIRED",
+      "description": "punctuation, control, two-digit hex, and Unicode scalar escapes"
+    },
+    {
+      "construct_id": "RGX-CONSTRUCT-EMPTY",
+      "state": "REQUIRED",
+      "description": "empty regex and zero-width matching"
+    },
+    {
+      "construct_id": "RGX-CONSTRUCT-UNICODE-DISABLED-UTF8-SAFE",
+      "state": "REQUIRED",
+      "description": "scoped Unicode disablement only when string UTF-8 invariants remain valid"
+    },
+    {
+      "construct_id": "RGX-CONSTRUCT-NESTED-REPETITION",
+      "state": "REQUIRED",
+      "description": "nested repetition accepted with linear-time engine behavior"
+    },
+    {
+      "construct_id": "RGX-CONSTRUCT-LOOKAROUND",
+      "state": "REJECTED",
+      "diagnostic_category": "RGX-DIAG-UNSUPPORTED-LOOKAROUND"
+    },
+    {
+      "construct_id": "RGX-CONSTRUCT-BACKREFERENCE",
+      "state": "REJECTED",
+      "diagnostic_category": "RGX-DIAG-UNSUPPORTED-BACKREFERENCE"
+    },
+    {
+      "construct_id": "RGX-CONSTRUCT-MALFORMED-GROUP",
+      "state": "REJECTED",
+      "diagnostic_category": "RGX-DIAG-UNCLOSED-GROUP"
+    },
+    {
+      "construct_id": "RGX-CONSTRUCT-MALFORMED-CLASS",
+      "state": "REJECTED",
+      "diagnostic_category": "RGX-DIAG-UNCLOSED-CLASS"
+    },
+    {
+      "construct_id": "RGX-CONSTRUCT-INVALID-REPETITION",
+      "state": "REJECTED",
+      "diagnostic_category": "RGX-DIAG-INVALID-REPETITION"
+    },
+    {
+      "construct_id": "RGX-CONSTRUCT-INVALID-FLAG",
+      "state": "REJECTED",
+      "diagnostic_category": "RGX-DIAG-INVALID-FLAG"
+    }
+  ],
+  "inventory_case_map": [
+    {
+      "case_id": "RGX-SYN-001",
+      "compile_state": "ACCEPTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-LITERAL-CONCAT",
+        "RGX-CONSTRUCT-CLASS-BRACKET",
+        "RGX-CONSTRUCT-REPETITION"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-002",
+      "compile_state": "ACCEPTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-LITERAL-CONCAT",
+        "RGX-CONSTRUCT-CLASS-BRACKET",
+        "RGX-CONSTRUCT-REPETITION"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-003",
+      "compile_state": "ACCEPTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-ALTERNATION",
+        "RGX-CONSTRUCT-LITERAL-CONCAT"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-004",
+      "compile_state": "ACCEPTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-CAPTURE-NAMED",
+        "RGX-CONSTRUCT-CLASS-PERL",
+        "RGX-CONSTRUCT-REPETITION"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-005",
+      "compile_state": "ACCEPTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-GROUP-NONCAPTURE",
+        "RGX-CONSTRUCT-REPETITION"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-006",
+      "compile_state": "ACCEPTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-ANCHOR",
+        "RGX-CONSTRUCT-LITERAL-CONCAT"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-007",
+      "compile_state": "ACCEPTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-FLAGS",
+        "RGX-CONSTRUCT-ANCHOR"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-008",
+      "compile_state": "ACCEPTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-FLAGS",
+        "RGX-CONSTRUCT-DOT",
+        "RGX-CONSTRUCT-REPETITION"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-009",
+      "compile_state": "ACCEPTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-FLAGS",
+        "RGX-CONSTRUCT-ANCHOR"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-010",
+      "compile_state": "ACCEPTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-FLAGS",
+        "RGX-CONSTRUCT-LITERAL-CONCAT"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-011",
+      "compile_state": "ACCEPTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-FLAGS",
+        "RGX-CONSTRUCT-CLASS-PERL",
+        "RGX-CONSTRUCT-REPETITION"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-012",
+      "compile_state": "ACCEPTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-FLAGS",
+        "RGX-CONSTRUCT-REPETITION"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-013",
+      "compile_state": "ACCEPTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-CLASS-UNICODE",
+        "RGX-CONSTRUCT-REPETITION"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-014",
+      "compile_state": "ACCEPTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-CLASS-PERL",
+        "RGX-CONSTRUCT-REPETITION"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-015",
+      "compile_state": "ACCEPTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-CLASS-POSIX",
+        "RGX-CONSTRUCT-REPETITION"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-016",
+      "compile_state": "ACCEPTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-CLASS-BRACKET",
+        "RGX-CONSTRUCT-CLASS-SET-OPS",
+        "RGX-CONSTRUCT-REPETITION"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-017",
+      "compile_state": "ACCEPTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-CLASS-SET-OPS",
+        "RGX-CONSTRUCT-REPETITION"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-018",
+      "compile_state": "ACCEPTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-CLASS-SET-OPS",
+        "RGX-CONSTRUCT-REPETITION"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-019",
+      "compile_state": "ACCEPTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-WORD-BOUNDARY",
+        "RGX-CONSTRUCT-LITERAL-CONCAT"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-020",
+      "compile_state": "ACCEPTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-WORD-BOUNDARY",
+        "RGX-CONSTRUCT-FLAGS",
+        "RGX-CONSTRUCT-UNICODE-DISABLED-UTF8-SAFE"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-021",
+      "compile_state": "ACCEPTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-ESCAPE",
+        "RGX-CONSTRUCT-LITERAL-CONCAT"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-022",
+      "compile_state": "ACCEPTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-EMPTY"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-023",
+      "compile_state": "ACCEPTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-ANCHOR",
+        "RGX-CONSTRUCT-EMPTY"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-024",
+      "compile_state": "ACCEPTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-CLASS-BRACKET",
+        "RGX-CONSTRUCT-CLASS-SET-OPS"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-025",
+      "compile_state": "ACCEPTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-CAPTURE-NUMBERED",
+        "RGX-CONSTRUCT-REPETITION",
+        "RGX-CONSTRUCT-NESTED-REPETITION",
+        "RGX-CONSTRUCT-ANCHOR"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-026",
+      "compile_state": "REJECTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-LOOKAROUND"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-027",
+      "compile_state": "REJECTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-BACKREFERENCE"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-028",
+      "compile_state": "REJECTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-MALFORMED-GROUP"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-029",
+      "compile_state": "REJECTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-MALFORMED-CLASS"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-030",
+      "compile_state": "REJECTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-INVALID-REPETITION"
+      ]
+    },
+    {
+      "case_id": "RGX-SYN-031",
+      "compile_state": "REJECTED",
+      "construct_ids": [
+        "RGX-CONSTRUCT-INVALID-FLAG"
+      ]
+    }
+  ],
+  "limits": [
+    {
+      "limit_id": "RGX-LIMIT-PATTERN-BYTES",
+      "scope": "candidate lexer and parser",
+      "incumbent_value": null,
+      "candidate_value": 1048576,
+      "unit": "UTF-8 bytes",
+      "on_exceed": "RGX-DIAG-PATTERN-TOO-LARGE",
+      "parity_state": "CUTOVER_BLOCKER_UNTIL_POLICY_AND_CORPUS_PROVE_ACCEPTABLE"
+    },
+    {
+      "limit_id": "RGX-LIMIT-TOKENS",
+      "scope": "candidate lexer",
+      "incumbent_value": null,
+      "candidate_value": 1048576,
+      "unit": "tokens",
+      "on_exceed": "RGX-DIAG-TOKEN-LIMIT",
+      "parity_state": "CUTOVER_BLOCKER_UNTIL_POLICY_AND_CORPUS_PROVE_ACCEPTABLE"
+    },
+    {
+      "limit_id": "RGX-LIMIT-AST-NODES",
+      "scope": "candidate parser",
+      "incumbent_value": null,
+      "candidate_value": 1048576,
+      "unit": "nodes",
+      "on_exceed": "RGX-DIAG-AST-LIMIT",
+      "parity_state": "CUTOVER_BLOCKER_UNTIL_POLICY_AND_CORPUS_PROVE_ACCEPTABLE"
+    },
+    {
+      "limit_id": "RGX-LIMIT-NESTING",
+      "scope": "incumbent and candidate parser",
+      "incumbent_value": 250,
+      "candidate_value": 250,
+      "unit": "nested AST depth",
+      "on_exceed": "RGX-DIAG-NEST-LIMIT",
+      "parity_state": "PARITY_REQUIRED"
+    },
+    {
+      "limit_id": "RGX-LIMIT-REPETITION-COUNT",
+      "scope": "incumbent and candidate parser",
+      "incumbent_value": 4294967295,
+      "candidate_value": 4294967295,
+      "unit": "count",
+      "on_exceed": "RGX-DIAG-INVALID-REPETITION",
+      "parity_state": "PARITY_REQUIRED"
+    },
+    {
+      "limit_id": "RGX-LIMIT-COMPILED-NFA-BYTES",
+      "scope": "incumbent compiler and future compiler",
+      "incumbent_value": 10485760,
+      "candidate_value": 10485760,
+      "unit": "bytes",
+      "on_exceed": "RGX-DIAG-COMPILED-SIZE-LIMIT",
+      "parity_state": "PARITY_REQUIRED"
+    },
+    {
+      "limit_id": "RGX-LIMIT-HYBRID-CACHE-BYTES",
+      "scope": "incumbent matcher and future matcher",
+      "incumbent_value": 2097152,
+      "candidate_value": 2097152,
+      "unit": "bytes",
+      "on_exceed": "FALL_BACK_TO_NON_HYBRID_ENGINE",
+      "parity_state": "PERFORMANCE_POLICY_NOT_SYNTAX_ACCEPTANCE"
+    }
+  ],
+  "diagnostic_categories": [
+    {
+      "category_id": "RGX-DIAG-UNSUPPORTED-LOOKAROUND",
+      "class": "UNSUPPORTED_EXTENSION"
+    },
+    {
+      "category_id": "RGX-DIAG-UNSUPPORTED-BACKREFERENCE",
+      "class": "UNSUPPORTED_EXTENSION"
+    },
+    {
+      "category_id": "RGX-DIAG-UNCLOSED-GROUP",
+      "class": "MALFORMED_STRUCTURE"
+    },
+    {
+      "category_id": "RGX-DIAG-UNCLOSED-CLASS",
+      "class": "MALFORMED_STRUCTURE"
+    },
+    {
+      "category_id": "RGX-DIAG-INVALID-REPETITION",
+      "class": "MALFORMED_REPETITION"
+    },
+    {
+      "category_id": "RGX-DIAG-INVALID-FLAG",
+      "class": "MALFORMED_FLAG"
+    },
+    {
+      "category_id": "RGX-DIAG-INVALID-UTF8",
+      "class": "STRING_UTF8_INVARIANT"
+    },
+    {
+      "category_id": "RGX-DIAG-TRAILING-ESCAPE",
+      "class": "MALFORMED_ESCAPE"
+    },
+    {
+      "category_id": "RGX-DIAG-PATTERN-TOO-LARGE",
+      "class": "RESOURCE_LIMIT"
+    },
+    {
+      "category_id": "RGX-DIAG-TOKEN-LIMIT",
+      "class": "RESOURCE_LIMIT"
+    },
+    {
+      "category_id": "RGX-DIAG-AST-LIMIT",
+      "class": "RESOURCE_LIMIT"
+    },
+    {
+      "category_id": "RGX-DIAG-NEST-LIMIT",
+      "class": "RESOURCE_LIMIT"
+    },
+    {
+      "category_id": "RGX-DIAG-COMPILED-SIZE-LIMIT",
+      "class": "RESOURCE_LIMIT"
+    }
+  ],
+  "golden_cases": [
+    {
+      "case_id": "RGX-GOLDEN-001",
+      "source_id": "REGEX-SPEC-1",
+      "pattern": "sam|samwise",
+      "expected_state": "ACCEPTED",
+      "expected_ast": "alt(lit(\"sam\"),lit(\"samwise\"))",
+      "ast_span": {
+        "start": 0,
+        "end": 11
+      },
+      "haystack": "samwise",
+      "match_span": {
+        "start": 0,
+        "end": 3
+      }
+    },
+    {
+      "case_id": "RGX-GOLDEN-002",
+      "source_id": "REGEX-SPEC-1",
+      "pattern": "samwise|sam",
+      "expected_state": "ACCEPTED",
+      "expected_ast": "alt(lit(\"samwise\"),lit(\"sam\"))",
+      "ast_span": {
+        "start": 0,
+        "end": 11
+      },
+      "haystack": "samwise",
+      "match_span": {
+        "start": 0,
+        "end": 7
+      }
+    },
+    {
+      "case_id": "RGX-GOLDEN-003",
+      "source_id": "REGEX-SPEC-1",
+      "pattern": "ab+?c",
+      "expected_state": "ACCEPTED",
+      "expected_ast": "concat(lit(\"a\"),repeat(lit(\"b\"),one_or_more,lazy),lit(\"c\"))",
+      "ast_span": {
+        "start": 0,
+        "end": 5
+      },
+      "haystack": "abbbc",
+      "match_span": {
+        "start": 0,
+        "end": 5
+      }
+    },
+    {
+      "case_id": "RGX-GOLDEN-004",
+      "source_id": "R1-INVENTORY",
+      "pattern": "(?P<kind>secret)-\\d+",
+      "expected_state": "ACCEPTED",
+      "expected_ast": "concat(named_capture(\"kind\",lit(\"secret\")),lit(\"-\"),repeat(perl(\"d\"),one_or_more,greedy))",
+      "ast_span": {
+        "start": 0,
+        "end": 20
+      },
+      "haystack": "secret-42",
+      "match_span": {
+        "start": 0,
+        "end": 9
+      }
+    },
+    {
+      "case_id": "RGX-GOLDEN-005",
+      "source_id": "R1-INVENTORY",
+      "pattern": "(?:ab){2,3}",
+      "expected_state": "ACCEPTED",
+      "expected_ast": "repeat(noncapture(concat(lit(\"a\"),lit(\"b\"))),bounded(2,3),greedy)",
+      "ast_span": {
+        "start": 0,
+        "end": 11
+      },
+      "haystack": "zzababzz",
+      "match_span": {
+        "start": 2,
+        "end": 6
+      }
+    },
+    {
+      "case_id": "RGX-GOLDEN-006",
+      "source_id": "REGEX-SPEC-1",
+      "pattern": "(?im-s:^x.$)",
+      "expected_state": "ACCEPTED",
+      "expected_ast": "flags(set=[i,m],clear=[s],concat(start_line,folded_lit(\"x\"),dot,end_line))",
+      "ast_span": {
+        "start": 0,
+        "end": 12
+      },
+      "haystack": "Xz",
+      "match_span": {
+        "start": 0,
+        "end": 2
+      }
+    },
+    {
+      "case_id": "RGX-GOLDEN-007",
+      "source_id": "R1-INVENTORY",
+      "pattern": "[a-z&&[^aeiou]]+",
+      "expected_state": "ACCEPTED",
+      "expected_ast": "repeat(class_intersect(range(\"a\",\"z\"),negate(union(\"aeiou\"))),one_or_more,greedy)",
+      "ast_span": {
+        "start": 0,
+        "end": 16
+      },
+      "haystack": "rhythm",
+      "match_span": {
+        "start": 0,
+        "end": 6
+      }
+    },
+    {
+      "case_id": "RGX-GOLDEN-008",
+      "source_id": "R1-INVENTORY",
+      "pattern": "\\p{Greek}+",
+      "expected_state": "ACCEPTED",
+      "expected_ast": "repeat(unicode_property(\"Greek\"),one_or_more,greedy)",
+      "ast_span": {
+        "start": 0,
+        "end": 10
+      },
+      "haystack": "κρυφό",
+      "match_span": {
+        "start": 0,
+        "end": 10
+      }
+    },
+    {
+      "case_id": "RGX-GOLDEN-009",
+      "source_id": "R1-INVENTORY",
+      "pattern": "\\x73\\u{65}cret",
+      "expected_state": "ACCEPTED",
+      "expected_ast": "concat(hex(\"73\"),unicode_hex(\"65\"),lit(\"cret\"))",
+      "ast_span": {
+        "start": 0,
+        "end": 14
+      },
+      "haystack": "secret",
+      "match_span": {
+        "start": 0,
+        "end": 6
+      }
+    },
+    {
+      "case_id": "RGX-GOLDEN-010",
+      "source_id": "R1-INVENTORY",
+      "pattern": "(?-u:\\b)secret(?-u:\\b)",
+      "expected_state": "ACCEPTED",
+      "expected_ast": "concat(flags(clear=[u],ascii_word_boundary),lit(\"secret\"),flags(clear=[u],ascii_word_boundary))",
+      "ast_span": {
+        "start": 0,
+        "end": 22
+      },
+      "haystack": "$$secret$$",
+      "match_span": {
+        "start": 2,
+        "end": 8
+      }
+    },
+    {
+      "case_id": "RGX-GOLDEN-011",
+      "source_id": "REGEX-SPEC-1",
+      "pattern": "",
+      "expected_state": "ACCEPTED",
+      "expected_ast": "empty",
+      "ast_span": {
+        "start": 0,
+        "end": 0
+      },
+      "haystack": "💩",
+      "match_span": {
+        "start": 0,
+        "end": 0
+      }
+    },
+    {
+      "case_id": "RGX-GOLDEN-012",
+      "source_id": "R1-INVENTORY",
+      "pattern": "(a+)+$",
+      "expected_state": "ACCEPTED",
+      "expected_ast": "concat(repeat(capture(repeat(lit(\"a\"),one_or_more,greedy)),one_or_more,greedy),end_line)",
+      "ast_span": {
+        "start": 0,
+        "end": 6
+      },
+      "haystack": "aaaa!",
+      "match_span": null
+    },
+    {
+      "case_id": "RGX-GOLDEN-013",
+      "source_id": "R1-INVENTORY",
+      "pattern": "(?=secret)",
+      "expected_state": "REJECTED",
+      "diagnostic_category": "RGX-DIAG-UNSUPPORTED-LOOKAROUND",
+      "error_span": {
+        "start": 0,
+        "end": 3
+      },
+      "error_contains": "look-around"
+    },
+    {
+      "case_id": "RGX-GOLDEN-014",
+      "source_id": "R1-INVENTORY",
+      "pattern": "(secret)\\1",
+      "expected_state": "REJECTED",
+      "diagnostic_category": "RGX-DIAG-UNSUPPORTED-BACKREFERENCE",
+      "error_span": {
+        "start": 8,
+        "end": 10
+      },
+      "error_contains": "backreferences"
+    },
+    {
+      "case_id": "RGX-GOLDEN-015",
+      "source_id": "R1-INVENTORY",
+      "pattern": "(",
+      "expected_state": "REJECTED",
+      "diagnostic_category": "RGX-DIAG-UNCLOSED-GROUP",
+      "error_span": {
+        "start": 0,
+        "end": 1
+      },
+      "error_contains": "unclosed group"
+    },
+    {
+      "case_id": "RGX-GOLDEN-016",
+      "source_id": "R1-INVENTORY",
+      "pattern": "[",
+      "expected_state": "REJECTED",
+      "diagnostic_category": "RGX-DIAG-UNCLOSED-CLASS",
+      "error_span": {
+        "start": 0,
+        "end": 1
+      },
+      "error_contains": "unclosed character class"
+    },
+    {
+      "case_id": "RGX-GOLDEN-017",
+      "source_id": "R1-INVENTORY",
+      "pattern": "a{3,2}",
+      "expected_state": "REJECTED",
+      "diagnostic_category": "RGX-DIAG-INVALID-REPETITION",
+      "error_span": {
+        "start": 1,
+        "end": 6
+      },
+      "error_contains": "invalid repetition count range"
+    },
+    {
+      "case_id": "RGX-GOLDEN-018",
+      "source_id": "R1-INVENTORY",
+      "pattern": "(?q)secret",
+      "expected_state": "REJECTED",
+      "diagnostic_category": "RGX-DIAG-INVALID-FLAG",
+      "error_span": {
+        "start": 2,
+        "end": 3
+      },
+      "error_contains": "unrecognized flag"
+    },
+    {
+      "case_id": "RGX-GOLDEN-019",
+      "source_id": "REGEX-SPEC-1",
+      "pattern": "(?-u:.)",
+      "expected_state": "REJECTED",
+      "diagnostic_category": "RGX-DIAG-INVALID-UTF8",
+      "error_span": {
+        "start": 0,
+        "end": 7
+      },
+      "error_contains": "pattern can match invalid UTF-8"
+    },
+    {
+      "case_id": "RGX-GOLDEN-020",
+      "source_id": "REGEX-SPEC-2",
+      "pattern": "\\",
+      "expected_state": "REJECTED",
+      "diagnostic_category": "RGX-DIAG-TRAILING-ESCAPE",
+      "error_span": {
+        "start": 0,
+        "end": 1
+      },
+      "error_contains": "incomplete escape sequence"
+    }
+  ],
+  "unsupported_extensions": [
+    {
+      "extension_id": "RGX-UNSUPPORTED-LOOKAROUND",
+      "examples": [
+        "(?=x)",
+        "(?!x)",
+        "(?<=x)",
+        "(?<!x)"
+      ],
+      "state": "REJECTED_BY_INCUMBENT_AND_CANDIDATE"
+    },
+    {
+      "extension_id": "RGX-UNSUPPORTED-BACKREFERENCE",
+      "examples": [
+        "(x)\\1",
+        "\\k<name>"
+      ],
+      "state": "REJECTED_BY_INCUMBENT_AND_CANDIDATE"
+    },
+    {
+      "extension_id": "RGX-UNSUPPORTED-ATOMIC-OR-POSSESSIVE",
+      "examples": [
+        "(?>x)",
+        "x++"
+      ],
+      "state": "REJECTED_BY_INCUMBENT_AND_CANDIDATE"
+    },
+    {
+      "extension_id": "RGX-UNSUPPORTED-CONDITIONAL-OR-RECURSION",
+      "examples": [
+        "(?(1)x|y)",
+        "(?R)"
+      ],
+      "state": "REJECTED_BY_INCUMBENT_AND_CANDIDATE"
+    }
+  ],
+  "unknown_constructs": [],
+  "downstream_contract": {
+    "next_consumer": "asupersync-5z2scg.8.3.1.2",
+    "required_outputs": [
+      "token kinds and source spans match ASUP-REGEX-SYNTAX-V1",
+      "all limits return stable diagnostic categories",
+      "unknown grammar IDs fail closed",
+      "no production dependency cutover occurs"
+    ],
+    "canonical_e2e_owner": "asupersync-5z2scg.8.5",
+    "canonical_scenario": "regex_adversarial_limits"
+  },
+  "rollback_triggers": [
+    "any R1 syntax case lacks exactly one inventory mapping row",
+    "any accepted R1 case maps only to rejected constructs",
+    "an incumbent-accepted golden pattern is rejected",
+    "an incumbent-rejected golden pattern is accepted",
+    "alternation order or match byte spans drift",
+    "a grammar, precedence, limit, or diagnostic category changes without a language-version review",
+    "an UNKNOWN or accepted-unsupported construct appears",
+    "a proposed candidate-only bound is treated as parity evidence"
+  ],
+  "no_claim_boundaries": [
+    "This artifact does not implement a lexer, parser, compiler, or matcher.",
+    "This artifact does not authorize changing or removing regex.",
+    "The normalized AST strings are contract fixtures, not evidence that a candidate parser exists.",
+    "Diagnostic categories and spans are stable; incumbent human-readable wording is not promised.",
+    "The candidate-only pattern, token, and AST bounds are explicit cutover blockers, not incumbent parity.",
+    "No performance, cancellation, memory, fuzz, privacy-completeness, or broad workspace claim is made.",
+    "No canonical dependency-sovereignty E2E result is claimed.",
+    "No bytes::Regex public capability is claimed because Asupersync consumes only string Regex."
+  ]
+}

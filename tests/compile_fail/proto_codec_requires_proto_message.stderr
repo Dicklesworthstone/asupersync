@@ -1,0 +1,22 @@
+error[E0599]: the method `encode` exists for struct `ProtoCodec<NotAMessage, NotAMessage>`, but its trait bounds were not satisfied
+  --> tests/compile_fail/proto_codec_requires_proto_message.rs:15:19
+   |
+11 | struct NotAMessage;
+   | ------------------ doesn't satisfy `NotAMessage: ProtoMessage`
+...
+15 |     let _ = codec.encode(&NotAMessage);
+   |                   ^^^^^^ method cannot be called on `ProtoCodec<NotAMessage, NotAMessage>` due to unsatisfied trait bounds
+   |
+  ::: src/grpc/protobuf.rs
+   |
+   | pub struct ProtoCodec<T, U> {
+   | --------------------------- doesn't satisfy `_: Codec`
+   |
+   = note: the following trait bounds were not satisfied:
+           `NotAMessage: ProtoMessage`
+           which is required by `ProtoCodec<NotAMessage, NotAMessage>: asupersync::grpc::Codec`
+note: the trait `ProtoMessage` must be implemented
+  --> src/grpc/protobuf.rs
+   |
+   | pub trait ProtoMessage: Default + Send + Sized + 'static {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

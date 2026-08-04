@@ -23,6 +23,7 @@ use crate::record::distributed_region::{
 };
 use crate::record::region::{RegionRecord, RegionState};
 use crate::remote::NodeId;
+use crate::security::AuthKey;
 use crate::types::budget::Budget;
 use crate::types::cancel::CancelReason;
 use crate::types::{RegionId, TaskId, Time};
@@ -888,6 +889,20 @@ impl RegionBridge {
             metadata: vec![],
             auth_tag: crate::security::AuthenticationTag::zero(), // Requires signing with key
         }
+    }
+
+    /// Creates and authenticates a snapshot for transfer or durable recovery.
+    ///
+    /// The regular [`Self::create_snapshot`] surface remains useful for local
+    /// inspection. Any snapshot crossing a trust boundary must use this method
+    /// so its serialized bytes carry a verifiable authentication tag.
+    #[must_use]
+    pub fn create_authenticated_snapshot(
+        &mut self,
+        now: Time,
+        snapshot_auth_key: &AuthKey,
+    ) -> RegionSnapshot {
+        self.create_snapshot(now).signed(snapshot_auth_key)
     }
 
     /// Applies a recovered snapshot to this bridge.

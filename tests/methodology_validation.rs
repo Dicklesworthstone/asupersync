@@ -176,14 +176,38 @@ fn baseline_values_are_sane() {
 /// Verify that golden_checksums.json has the correct schema.
 #[test]
 fn golden_checksum_schema_validity() {
+    const EXPECTED_SCENARIOS: [&str; 14] = [
+        "budget/combine_chain",
+        "budget/deadline_check_matrix",
+        "cancel/cancel_budgets",
+        "cancel/tree_propagation_depth_5",
+        "channel/mpsc_multi_producer_interleave",
+        "channel/mpsc_try_send_recv_1000",
+        "channel/oneshot_send_recv_sequence",
+        "lab/deterministic_schedule_seed_1337",
+        "lab/deterministic_schedule_seed_42",
+        "obligation/region_cancel_propagation",
+        "obligation/send_permit_lifecycle",
+        "scheduler/global_inject_then_pop_50",
+        "scheduler/mixed_cancel_ready_timed_200",
+        "scheduler/priority_lane_ordering_100",
+    ];
+
     let contents = std::fs::read_to_string("artifacts/golden_checksums.json")
         .expect("golden_checksums.json must exist");
     let golden: serde_json::Value =
         serde_json::from_str(&contents).expect("golden_checksums.json must be valid JSON");
 
+    assert_eq!(
+        golden["schema_version"].as_u64(),
+        Some(1),
+        "golden registry schema must be exactly version 1"
+    );
     assert!(
-        golden.get("schema_version").is_some(),
-        "must have schema_version"
+        golden["generated_by"]
+            .as_str()
+            .is_some_and(|value| !value.trim().is_empty()),
+        "golden registry generated_by must be non-empty"
     );
     assert!(
         golden.get("checksums").is_some(),
@@ -193,23 +217,48 @@ fn golden_checksum_schema_validity() {
     let checksums = golden["checksums"]
         .as_object()
         .expect("checksums is object");
-    assert!(!checksums.is_empty(), "checksums must not be empty");
+    let actual: std::collections::BTreeSet<&str> = checksums.keys().map(String::as_str).collect();
+    let expected: std::collections::BTreeSet<&str> = EXPECTED_SCENARIOS.into_iter().collect();
+    assert_eq!(
+        actual, expected,
+        "golden registry must contain the exact benchmark scenario set"
+    );
 
-    // Each entry must have output_hash
+    // Every accepted row is a concrete SHA-256 hash with complete provenance.
     for (name, entry) in checksums {
-        assert!(
-            entry.get("output_hash").is_some(),
-            "checksum entry '{name}' must have output_hash"
-        );
-        let hash = entry["output_hash"].as_str().unwrap();
+        let hash = entry["output_hash"]
+            .as_str()
+            .unwrap_or_else(|| panic!("checksum entry '{name}' must have output_hash"));
         assert_eq!(
             hash.len(),
             64,
             "checksum '{name}' hash must be 64 hex chars (SHA-256)"
         );
         assert!(
-            hash.chars().all(|c| c.is_ascii_hexdigit()),
-            "checksum '{name}' hash must be valid hex"
+            hash.bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "checksum '{name}' hash must be lowercase hex, never a sentinel"
+        );
+
+        let git_sha = entry["git_sha"]
+            .as_str()
+            .unwrap_or_else(|| panic!("checksum entry '{name}' must have git_sha"));
+        assert_eq!(git_sha.len(), 40, "checksum '{name}' git_sha must be full");
+        assert!(
+            git_sha
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "checksum '{name}' git_sha must be lowercase hex"
+        );
+
+        let generated_at = entry["generated_at"]
+            .as_str()
+            .unwrap_or_else(|| panic!("checksum entry '{name}' must have generated_at"));
+        assert!(
+            generated_at.strip_suffix('Z').is_some_and(|seconds| {
+                !seconds.is_empty() && seconds.bytes().all(|byte| byte.is_ascii_digit())
+            }),
+            "checksum '{name}' generated_at must be Unix seconds followed by Z"
         );
     }
 }
@@ -630,6 +679,16 @@ fn ci_gates_workflow_exists() {
     assert!(
         workflow.contains("proof-note-gate"),
         "workflow must define proof-note-gate job"
+    );
+    assert!(
+        workflow.contains(
+            "rch exec --base HEAD --clean-overlay --no-overlay -- env GOLDEN_UPDATE=1 GOLDEN_REVIEWED_GIT_SHA="
+        ),
+        "workflow remediation must place update controls inside the strict remote environment"
+    );
+    assert!(
+        !workflow.contains("GOLDEN_UPDATE=1 rch exec -- env"),
+        "workflow must not use the stale local-only GOLDEN_UPDATE placement"
     );
 }
 

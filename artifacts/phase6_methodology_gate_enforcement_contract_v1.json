@@ -52,6 +52,7 @@
         "tracked_metric": "p50_ns",
         "max_regression_pct": 5,
         "threshold_semantics": "fail_when_strictly_greater",
+        "ci95_noise_floor": "fail limit is max(p50_ns * 1.05, ci95_upper_ns * 1.02, p50_ns + 0.6ns); rows without a recorded ci95_upper_ns keep the relative and absolute terms, malformed bounds fail closed (br-asupersync-87h3es)",
         "missing_tracked_candidate_row": "fail_closed",
         "duplicate_or_invalid_row": "fail_closed",
         "untracked_candidate_row": "ignore_until_tracked",

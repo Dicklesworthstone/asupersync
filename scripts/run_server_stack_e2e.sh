@@ -27,11 +27,14 @@
 # Environment:
 #   SERVER_STACK_RUN_ID         Run id under target/e2e-results/server_stack.
 #   SERVER_STACK_OUTPUT_ROOT    Output root for summary.json + events.ndjson.
-#   SERVER_STACK_CARGO_TARGET_DIR  Shared Cargo target dir for the RCH worker.
+#   SERVER_STACK_CARGO_TARGET_DIR  Optional custom Cargo target dir. Default
+#                               EMPTY (RCH shared warm pool; avoids RCH-E309
+#                               artifact-retrieval failures — br-asupersync-qj4rmf).
 #   RCH_BIN                     RCH executable (default: rch).
 #   RCH_REQUIRE_REMOTE          Remote-only RCH policy (default: 1).
 #   TEST_SEED                   Deterministic seed (default: 0xDEADBEEF).
-#   FIXTURE_TIMEOUT_SECS        Per-fixture-run wall cap (default: 120).
+#   FIXTURE_TIMEOUT_SECS        Per-fixture-run wall cap (default: 300; must
+#                               absorb a cold-worker example build, qj4rmf).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,9 +48,23 @@ EVENTS_NDJSON="${OUTPUT_DIR}/events.ndjson"
 SUMMARY_JSON="${OUTPUT_DIR}/summary.json"
 RCH_BIN="${RCH_BIN:-rch}"
 RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
-SERVER_STACK_TARGET_DIR="${SERVER_STACK_CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_asupersync_server_stack}"
+# br-asupersync-qj4rmf: SERVER_STACK_CARGO_TARGET_DIR is empty by default.
+# A custom CARGO_TARGET_DIR makes RCH sync the multi-GB target dir back
+# after every remote command; over WAN that retrieval times out (RCH-E309)
+# and turns a SUCCESSFUL remote build/run into exit 102 — and on the run
+# stage it would mask the fixture's real exit code. This lane never
+# consumes local artifacts (both stages execute remotely), so the shared
+# warm pool target is correct as well as faster. Set the env only if you
+# genuinely need retrieved artifacts and accept the E309 exposure.
+SERVER_STACK_TARGET_DIR="${SERVER_STACK_CARGO_TARGET_DIR:-}"
 TEST_SEED="${TEST_SEED:-0xDEADBEEF}"
-FIXTURE_TIMEOUT_SECS="${FIXTURE_TIMEOUT_SECS:-120}"
+# br-asupersync-qj4rmf: 300s default. The cap bounds the fixture's remote
+# wall (boot/self-probe/drain plus a cargo freshness check); the worker
+# lottery can still land the run on a colder worker than the build stage
+# warmed, and the example+sqlite edge build must fit inside the cap in
+# that worst case. 120s could not (cold compile alone ~180s), so the lane
+# structurally exited 124 under defaults.
+FIXTURE_TIMEOUT_SECS="${FIXTURE_TIMEOUT_SECS:-300}"
 DRY_RUN=0
 
 # scenario_id | description | state (run|skip) | skip_reason
@@ -127,6 +144,45 @@ emit_event() {
         >>"$EVENTS_NDJSON"
 }
 
+# br-asupersync-qj4rmf: build the fixture example FIRST, without the fixture
+# wall cap. FIXTURE_TIMEOUT_SECS previously wrapped the remote `cargo run`,
+# so the cap covered cold compilation of the sqlite-feature example (~180s
+# on a cold worker even warm-adjacent) — the lane exited 124 with zero
+# artifacts before the fixture ever booted. The build stage rides RCH's own
+# build timeout instead; the fixture cap then covers essentially only the
+# fixture's boot/self-probe/drain execution (plus a warm no-op cargo check),
+# which is what the cap was for.
+BUILD_LOG=""
+build_fixture() {
+    BUILD_LOG="${OUTPUT_DIR}/fixture_build.log"
+    local -a cmd=(
+        env
+        "RCH_REQUIRE_REMOTE=${RCH_REQUIRE_REMOTE}"
+        "$RCH_BIN"
+        exec
+        --
+        env
+    )
+    # Custom target dir only on explicit request (see the E309 note above).
+    if [[ -n "$SERVER_STACK_TARGET_DIR" ]]; then
+        cmd+=("CARGO_TARGET_DIR=${SERVER_STACK_TARGET_DIR}")
+    fi
+    cmd+=(
+        "CARGO_INCREMENTAL=0"
+        cargo build --quiet --example production_service --features sqlite
+    )
+    local rendered
+    rendered="$(command_string "${cmd[@]}")"
+    echo "command: ${rendered}" >"$BUILD_LOG"
+    emit_event "fixture" "build" "running" "$rendered"
+    set +e
+    "${cmd[@]}" >>"$BUILD_LOG" 2>&1
+    local rc=$?
+    set -e
+    emit_event "fixture" "build" "exit:${rc}" "$BUILD_LOG"
+    return "$rc"
+}
+
 # Run the self-driving fixture once via RCH; capture combined output to a log and
 # return the fixture exit code. The fixture boots, self-probes, drains, exits.
 FIXTURE_LOG=""
@@ -139,7 +195,12 @@ run_fixture() {
         exec
         --
         env
-        "CARGO_TARGET_DIR=${SERVER_STACK_TARGET_DIR}"
+    )
+    # Custom target dir only on explicit request (see the E309 note above).
+    if [[ -n "$SERVER_STACK_TARGET_DIR" ]]; then
+        cmd+=("CARGO_TARGET_DIR=${SERVER_STACK_TARGET_DIR}")
+    fi
+    cmd+=(
         "CARGO_INCREMENTAL=0"
         "TEST_SEED=${TEST_SEED}"
         timeout "${FIXTURE_TIMEOUT_SECS}"
@@ -234,10 +295,31 @@ done
 # One self-driving fixture run powers S1 (baseline) and S4 (drain).
 emit_event "S1-baseline" "scenario" "start" "shared lifecycle fixture run"
 emit_event "S4-sigterm-drain" "scenario" "start" "shared lifecycle fixture run"
-set +e
-run_fixture
-FIXTURE_RC=$?
-set -e
+# br-asupersync-qj4rmf: uncapped build first, timed fixture run second. A
+# build failure fails both scenarios closed (the run is skipped and the
+# scenario asserts read the build log, so the missing-marker details plus
+# fixture-exit!=0 name the real cause instead of a misleading 124).
+# The calls are if-guarded rather than `set +e`-wrapped: the fixture
+# helpers re-enable errexit internally (set is process-global, not
+# function-scoped), so a bare nonzero `return` after their internal
+# `set -e` killed the script before any fail-closed event was emitted —
+# the same latent shape that previously ate the run_fixture exit path.
+if build_fixture; then
+    BUILD_RC=0
+else
+    BUILD_RC=$?
+fi
+if [[ "$BUILD_RC" -eq 0 ]]; then
+    if run_fixture; then
+        FIXTURE_RC=0
+    else
+        FIXTURE_RC=$?
+    fi
+else
+    FIXTURE_RC="$BUILD_RC"
+    FIXTURE_LOG="${OUTPUT_DIR}/fixture_build.log"
+    emit_event "fixture" "run" "skipped" "fixture build failed (rc=${BUILD_RC}); see fixture_build.log"
+fi
 
 scenario_s1_baseline
 scenario_s4_drain

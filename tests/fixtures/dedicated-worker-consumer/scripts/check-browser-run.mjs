@@ -441,9 +441,62 @@ try {
     bootstrap.runtimeSelectionRecovered.outcome === "ok",
     `recovered runtime selection must return ok, got ${bootstrap.runtimeSelectionRecovered.outcome ?? "missing"}`,
   );
+  const fetchAuthority = bootstrap.fetchAuthorityExercise;
+  assert(
+    fetchAuthority?.defaultDeniedCode === "capability_denied"
+      && fetchAuthority?.unlistedDeniedCode === "capability_denied"
+      && fetchAuthority?.credentialsDeniedCode === "capability_denied",
+    `fetch authority denials drifted: ${JSON.stringify(fetchAuthority ?? null)}`,
+  );
+  assert(
+    fetchAuthority?.hostCallsAfterDefaultDeny === 0
+      && fetchAuthority?.hostCallsAfterPolicyDenials === 0,
+    "default, unlisted-origin, and credential denials must not invoke host fetch",
+  );
+  assert(
+    fetchAuthority?.allowedOutcome === "ok"
+      && fetchAuthority?.hostFetchCount === 1,
+    `listed fetch must invoke host fetch exactly once: ${JSON.stringify(fetchAuthority ?? null)}`,
+  );
+  assert(
+    fetchAuthority?.hostCall?.url === "https://api.example.com/records?limit=1"
+      && fetchAuthority?.hostCall?.method === "GET"
+      && fetchAuthority?.hostCall?.credentials === "omit",
+    `authorized fetch must use the exact canonical URL and explicit credential mode: ${JSON.stringify(fetchAuthority?.hostCall ?? null)}`,
+  );
   assert(
     bootstrap.storageExercise?.backend === "indexeddb",
     `worker storage exercise must use indexeddb, got ${bootstrap.storageExercise?.backend ?? "missing"}`,
+  );
+  const blockedUpgrade = bootstrap.storageExercise?.blockedUpgradeExercise;
+  assert(
+    blockedUpgrade?.blockedCount === 1,
+    `blocked IndexedDB upgrade must emit one progress callback, got ${blockedUpgrade?.blockedCount ?? "missing"}`,
+  );
+  assert(
+    blockedUpgrade?.blockedProgress?.reason === "blocked_upgrade"
+      && blockedUpgrade?.blockedProgress?.dbName === "asupersync-blocked-upgrade-fixture"
+      && blockedUpgrade?.blockedProgress?.storeName === "blocked-upgrade-v2"
+      && blockedUpgrade?.blockedProgress?.version === 2,
+    `blocked IndexedDB progress metadata drifted: ${JSON.stringify(blockedUpgrade?.blockedProgress ?? null)}`,
+  );
+  assert(
+    blockedUpgrade?.pendingWhileBlocked === true,
+    "blocked IndexedDB upgrade must remain pending until the older connection closes",
+  );
+  assert(
+    blockedUpgrade?.terminalState === "resolved"
+      && blockedUpgrade?.terminalCount === 1,
+    `blocked IndexedDB upgrade must resolve exactly once, got ${blockedUpgrade?.terminalState ?? "missing"}/${blockedUpgrade?.terminalCount ?? "missing"}`,
+  );
+  assert(
+    blockedUpgrade?.upgradedStoreRoundtrip === true
+      && blockedUpgrade?.upgradedStoresPresent === true,
+    "blocked IndexedDB upgrade must run the schema migration and preserve its stored value",
+  );
+  assert(
+    blockedUpgrade?.postSuccessBlockedCount === 0,
+    `later IndexedDB upgrade must not be blocked by an orphan connection, got ${blockedUpgrade?.postSuccessBlockedCount ?? "missing"} blocked events`,
   );
   assert(
     bootstrap.storageExercise?.illFormedValidationBeforeIndexedDbAccess === true,

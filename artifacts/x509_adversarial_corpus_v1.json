@@ -1,0 +1,395 @@
+{
+  "schema_version": 1,
+  "artifact_id": "x509-adversarial-corpus-v1",
+  "bead_id": "asupersync-0h6myr.3.5",
+  "program_id": "dependency-sovereignty",
+  "capability_id": "CAP-TLS-X509",
+  "captured_date_utc": "2026-07-27",
+  "authority": {
+    "state": "A5_EVIDENCE_ONLY",
+    "statement": "This packet records adversarial parser, differential, delegated-verifier, and bounded-fuzz evidence. It grants no call-site migration or dependency-cutover authority."
+  },
+  "provenance": [
+    {
+      "provenance_id": "A5-PROV-REPO-TLS",
+      "kind": "existing_generated_repository_fixture",
+      "path": "tests/fixtures/tls/server.crt",
+      "subject": "C=US, ST=Test, L=Test, O=AsuperSync Test, CN=localhost",
+      "validity_utc": [
+        "2026-04-17T15:35:49Z",
+        "2027-04-17T15:35:49Z"
+      ],
+      "sha256_fingerprint": "8D856B1A7DB22DC7C560FF69BE2B82F16912715A90871441D378DB9E8A28E05D"
+    },
+    {
+      "provenance_id": "A5-PROV-OPENSSL-20260727",
+      "kind": "independently_generated_fixture_set",
+      "tool": "OpenSSL 3.5.3 16 Sep 2025",
+      "generated_at_utc": "2026-07-27T10:50:00Z",
+      "generation_key_input": "tests/fixtures/tls/server.key",
+      "key_reuse_boundary": "The pre-existing test-only RSA key is reused solely to make compact deterministic-chain fixtures. This is not production key guidance.",
+      "fixed_validity_start_utc": "2026-07-27T00:00:00Z",
+      "commands": [
+        "openssl req -new -key tests/fixtures/tls/server.key -subj /CN=Asupersync A5 Constrained Root -addext basicConstraints=critical,CA:TRUE,pathlen:0 -addext keyUsage=critical,keyCertSign,cRLSign -addext nameConstraints=critical,permitted;DNS:.allowed.example",
+        "openssl x509 -req -signkey tests/fixtures/tls/server.key -set_serial 0xA501 -not_before 20260727000000Z -not_after 20360727000000Z -copy_extensions copyall -sha256",
+        "openssl req/x509 leaf recipes use fixed serials 0xA502 and 0xA503, CA signing, CA:FALSE, digitalSignature plus keyEncipherment, serverAuth, and exact DNS SANs",
+        "openssl req/x509 wildcard recipe uses fixed serial 0xA504, self-signing, CA:FALSE, digitalSignature plus keyEncipherment, serverAuth, and DNS:*.example.com"
+      ],
+      "fixtures": [
+        {
+          "path": "tests/fixtures/x509_adversarial/ca.crt",
+          "serial_hex": "A501",
+          "sha256_fingerprint": "8826842CEDB7E6422ADA07B772861541008E4FAD68AC0BF0FFDF3F8EE4EE0336"
+        },
+        {
+          "path": "tests/fixtures/x509_adversarial/allowed.crt",
+          "serial_hex": "A502",
+          "sha256_fingerprint": "1AF9238AFD782A72EFF2BF64265BBD7013A6AB992F82EE77CE95F06B04EDED89"
+        },
+        {
+          "path": "tests/fixtures/x509_adversarial/blocked.crt",
+          "serial_hex": "A503",
+          "sha256_fingerprint": "653173B854477B2080D0212AC35761DB1A2B3A4AB84FFEA23F6DF69472B796A9"
+        },
+        {
+          "path": "tests/fixtures/x509_adversarial/wildcard.crt",
+          "serial_hex": "A504",
+          "sha256_fingerprint": "94B60C2A9DCC1A9FD1DC9B791C8E99AF98C90ED3D013C969A191E2EF955B326F"
+        }
+      ]
+    },
+    {
+      "provenance_id": "A5-PROV-DER-BUILDER",
+      "kind": "deterministic_generated_recipe",
+      "path": "src/tls/der_min.rs",
+      "generator": "inline cfg(test) canonical DER builders",
+      "determinism": "Every recipe is pure bytes with fixed tags, lengths, OIDs, values, and mutation offsets."
+    },
+    {
+      "provenance_id": "A5-PROV-DELEGATED-FIXTURES",
+      "kind": "existing_rustls_webpki_delegation_fixtures",
+      "path": "src/net/quic_native/handshake_driver.rs",
+      "tests": [
+        "exact_leaf_shape_enforces_validity_bounds",
+        "exact_leaf_shape_requires_server_auth_and_digital_signature",
+        "exact_leaf_shape_rejects_missing_eku_and_trailing_der",
+        "exact_leaf_fallback_never_overrides_standard_signature_or_name_errors"
+      ]
+    },
+    {
+      "provenance_id": "A5-PROV-FUZZ-SEEDS",
+      "kind": "durable_repository_seed_set",
+      "paths": [
+        "fuzz/seeds/tls",
+        "tests/fixtures/x509_adversarial"
+      ],
+      "oracle_policy": "Seeds are raw bytes or PEM certificates only. The fuzz target asserts determinism and bounded errors, never an incumbent accept/reject oracle."
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "X509-A5-REAL-VALID-CHAIN",
+      "class": "valid real chain",
+      "provenance_id": "A5-PROV-REPO-TLS",
+      "evidence_test": "real_certificate_matches_the_complete_x509_parser_overlap plus valid_test_ca_certificate_confirms_client_handshake",
+      "expected_security_outcome": "complete parse and delegated localhost verification succeed at the pinned valid time",
+      "divergence": "NONE"
+    },
+    {
+      "case_id": "X509-A5-DER-LENGTH",
+      "class": "DER indefinite, nonminimal, overflow, bounds, and EOF length tricks",
+      "provenance_id": "A5-PROV-DER-BUILDER",
+      "evidence_test": "tag_and_length_boundaries_are_canonical_and_deterministic",
+      "expected_security_outcome": "der_min rejects with the exact closed length or bounds class before exposure",
+      "divergence": "NONE_WITHIN_COMPLETE_DER_OVERLAP"
+    },
+    {
+      "case_id": "X509-A5-DER-TAG",
+      "class": "high-tag and constructed-bit ambiguity",
+      "provenance_id": "A5-PROV-DER-BUILDER",
+      "evidence_test": "tag_and_length_boundaries_are_canonical_and_deterministic",
+      "expected_security_outcome": "der_min rejects the ambiguous tag framing",
+      "divergence": "NONE_WITHIN_COMPLETE_DER_OVERLAP"
+    },
+    {
+      "case_id": "X509-A5-DUPLICATE-SAN-EXTENSION",
+      "class": "duplicate SAN and duplicate extension OID",
+      "provenance_id": "A5-PROV-DER-BUILDER",
+      "evidence_test": "extension_duplicates_and_criticality_are_fail_closed plus differential_divergences_are_narrow_and_explained",
+      "expected_security_outcome": "der_min rejects duplicates for every profile",
+      "divergence": "INTENTIONAL_STRICTER_DER_MIN_REJECTION_THAN_STRUCTURAL_X509_PARSER"
+    },
+    {
+      "case_id": "X509-A5-UNKNOWN-CRITICAL",
+      "class": "unknown critical extension",
+      "provenance_id": "A5-PROV-DER-BUILDER",
+      "evidence_test": "extension_duplicates_and_criticality_are_fail_closed plus differential_divergences_are_narrow_and_explained",
+      "expected_security_outcome": "pinned-leaf residue rejects; other profiles make no critical-extension acceptance claim",
+      "divergence": "INTENTIONAL_PROFILE_SCOPED_STRICTER_REJECTION"
+    },
+    {
+      "case_id": "X509-A5-ABSENT-SAN",
+      "class": "absent SAN",
+      "provenance_id": "A5-PROV-DER-BUILDER",
+      "evidence_test": "four_profiles_return_only_approved_borrowed_facts",
+      "expected_security_outcome": "der_min returns an explicit Absent fact and makes no name-admission decision",
+      "divergence": "AUTHORITY_SPLIT_NOT_DIVERGENCE"
+    },
+    {
+      "case_id": "X509-A5-EXPIRED",
+      "class": "expired certificate",
+      "provenance_id": "A5-PROV-DELEGATED-FIXTURES",
+      "evidence_test": "exact_leaf_shape_enforces_validity_bounds plus expired_certificate_time_fails_closed",
+      "expected_security_outcome": "der_min returns validity facts; rustls/WebPKI policy rejects at an expired time",
+      "divergence": "AUTHORITY_SPLIT_NOT_DIVERGENCE"
+    },
+    {
+      "case_id": "X509-A5-FUTURE",
+      "class": "not-yet-valid certificate",
+      "provenance_id": "A5-PROV-DELEGATED-FIXTURES",
+      "evidence_test": "exact_leaf_shape_enforces_validity_bounds",
+      "expected_security_outcome": "der_min returns validity facts; delegated policy rejects before notBefore",
+      "divergence": "AUTHORITY_SPLIT_NOT_DIVERGENCE"
+    },
+    {
+      "case_id": "X509-A5-WRONG-EKU",
+      "class": "clientAuth-only or absent serverAuth EKU",
+      "provenance_id": "A5-PROV-DELEGATED-FIXTURES",
+      "evidence_test": "exact_leaf_shape_requires_server_auth_and_digital_signature plus exact_leaf_shape_rejects_missing_eku_and_trailing_der",
+      "expected_security_outcome": "der_min reports false or Absent facts; caller-owned exact-pin policy rejects",
+      "divergence": "AUTHORITY_SPLIT_NOT_DIVERGENCE"
+    },
+    {
+      "case_id": "X509-A5-WRONG-KU",
+      "class": "KeyUsage without digitalSignature",
+      "provenance_id": "A5-PROV-DELEGATED-FIXTURES",
+      "evidence_test": "exact_leaf_shape_requires_server_auth_and_digital_signature",
+      "expected_security_outcome": "der_min reports digitalSignature=false; caller-owned exact-pin policy rejects",
+      "divergence": "AUTHORITY_SPLIT_NOT_DIVERGENCE"
+    },
+    {
+      "case_id": "X509-A5-CA-TRUE",
+      "class": "BasicConstraints cA true",
+      "provenance_id": "A5-PROV-OPENSSL-20260727",
+      "evidence_test": "generated_fixture_profiles_document_intentional_strictness",
+      "expected_security_outcome": "root profile reports Present ca=true without making trust-anchor admission",
+      "divergence": "NONE"
+    },
+    {
+      "case_id": "X509-A5-CA-FALSE",
+      "class": "BasicConstraints cA false",
+      "provenance_id": "A5-PROV-OPENSSL-20260727",
+      "evidence_test": "generated_fixture_profiles_document_intentional_strictness",
+      "expected_security_outcome": "root profile reports Present ca=false without making admission",
+      "divergence": "NONE"
+    },
+    {
+      "case_id": "X509-A5-MALFORMED-SPKI",
+      "class": "malformed SubjectPublicKeyInfo framing",
+      "provenance_id": "A5-PROV-DER-BUILDER",
+      "evidence_test": "differential_divergences_are_narrow_and_explained",
+      "expected_security_outcome": "der_min and complete x509-parser overlap both reject",
+      "divergence": "NONE"
+    },
+    {
+      "case_id": "X509-A5-WILDCARD-VALID",
+      "class": "one-label wildcard match",
+      "provenance_id": "A5-PROV-OPENSSL-20260727",
+      "evidence_test": "delegated_wildcard_semantics_are_one_label_only",
+      "expected_security_outcome": "rustls/WebPKI accepts api.example.com for *.example.com",
+      "divergence": "DELEGATED_POLICY_OUTSIDE_DER_MIN"
+    },
+    {
+      "case_id": "X509-A5-WILDCARD-DEPTH",
+      "class": "wildcard apex, multi-label depth, and unrelated suffix",
+      "provenance_id": "A5-PROV-OPENSSL-20260727",
+      "evidence_test": "delegated_wildcard_semantics_are_one_label_only",
+      "expected_security_outcome": "rustls/WebPKI rejects all non-one-label matches",
+      "divergence": "DELEGATED_POLICY_OUTSIDE_DER_MIN"
+    },
+    {
+      "case_id": "X509-A5-NAME-CONSTRAINT-ALLOWED",
+      "class": "permitted DNS subtree",
+      "provenance_id": "A5-PROV-OPENSSL-20260727",
+      "evidence_test": "delegated_name_constraints_accept_only_the_permitted_subtree",
+      "expected_security_outcome": "rustls/WebPKI accepts api.allowed.example under the constrained root",
+      "divergence": "DELEGATED_POLICY_OUTSIDE_DER_MIN"
+    },
+    {
+      "case_id": "X509-A5-NAME-CONSTRAINT-BLOCKED",
+      "class": "name-constraint violation",
+      "provenance_id": "A5-PROV-OPENSSL-20260727",
+      "evidence_test": "delegated_name_constraints_accept_only_the_permitted_subtree",
+      "expected_security_outcome": "rustls/WebPKI rejects blocked.example under the constrained root",
+      "divergence": "DELEGATED_POLICY_OUTSIDE_DER_MIN"
+    },
+    {
+      "case_id": "X509-A5-OVERSIZED",
+      "class": "certificate, SPKI, extension, string, OID, INTEGER, BIT STRING, count, depth, and node limits",
+      "provenance_id": "A5-PROV-DER-BUILDER",
+      "evidence_test": "every_configured_resource_budget_fails_before_unbounded_work",
+      "expected_security_outcome": "der_min rejects before unbounded traversal, slice exposure, or collection insertion",
+      "divergence": "RESOURCE_CONTRACT_OUTSIDE_X509_PARSER_ORACLE"
+    },
+    {
+      "case_id": "X509-A5-TRAILING-DER",
+      "class": "complete certificate followed by trailing bytes",
+      "provenance_id": "A5-PROV-DER-BUILDER",
+      "evidence_test": "full_consumption_and_every_truncation_offset_fail_closed plus differential_divergences_are_narrow_and_explained",
+      "expected_security_outcome": "der_min rejects and the x509-parser overlap oracle is counted as reject unless its remainder is empty",
+      "divergence": "NONE_AFTER_COMPLETE_CONSUMPTION_NORMALIZATION"
+    }
+  ],
+  "differential_contract": {
+    "x509_parser_scope": "Structural acceptance is compared only after requiring one complete certificate and empty remainder. Signature, trust, time, name, wildcard, constraints, EKU/KU admission, and revocation are excluded.",
+    "delegated_scope": "rustls/WebPKI owns chain signatures, trust anchors, time, DNS wildcard matching, and name constraints. Local exact-pin policy owns the approved facts after standard-first UnknownIssuer fallback.",
+    "intentional_differential_divergences": [
+      "der_min rejects duplicate extension OIDs even when x509-parser can structurally decode them",
+      "the pinned-leaf profile rejects critical extensions outside its KU, SAN, and EKU allow-set",
+      "der_min emits time, EKU, KU, SAN, and BasicConstraints facts without applying caller policy"
+    ],
+    "unexplained_divergence_count": 0
+  },
+  "fuzz_contract": {
+    "target": "x509_der_residue",
+    "source": "fuzz/fuzz_targets/x509_der_residue.rs",
+    "exact_source_include": "../../src/tls/der_min.rs",
+    "max_len": 1048577,
+    "max_pem_certificates_per_input": 4,
+    "seed_paths": [
+      "fuzz/seeds/tls",
+      "tests/fixtures/x509_adversarial"
+    ],
+    "assertions": [
+      "same bytes and profile produce an identical result",
+      "every error offset is at most input length",
+      "numeric observed and limit detail never exceed the certificate cap",
+      "PEM extraction is input-size bounded and certificate-count bounded"
+    ],
+    "forbidden_oracles": [
+      "x509-parser",
+      "rustls/WebPKI accept or reject",
+      "network access",
+      "filesystem access from the fuzz callback",
+      "wall clock"
+    ],
+    "resource_claim": "The target demonstrates bounded parser behavior only under the recorded max_len, corpus, elapsed run, and process RSS receipt. It is not a throughput or exhaustive-security proof."
+  },
+  "source_pins": [
+    {
+      "path": "src/tls/der_min.rs",
+      "sha256": "7dd184fc463c637185af372e28e7196468378cfe60be6f53834e9f2c59ccc64d",
+      "line_count": 2086
+    },
+    {
+      "path": "fuzz/Cargo.toml",
+      "sha256": "857925379ab7068f3faf94435e44b87adfc96c2d716f19b5c1cfdffbbfbd580d",
+      "line_count": 6233
+    },
+    {
+      "path": "fuzz/fuzz_targets/x509_der_residue.rs",
+      "sha256": "5348028bd20bb5760dbea547b60a5eeee1eba46346d7ce81d69116cf6463cab4",
+      "line_count": 68
+    },
+    {
+      "path": "tests/fixtures/tls/server.crt",
+      "sha256": "a9de13854e63f0a3492a156959b6b89cbb2df056c5d67dc9519307f9d816e004",
+      "line_count": 21
+    },
+    {
+      "path": "tests/fixtures/x509_adversarial/allowed.crt",
+      "sha256": "703c68e92c81b6b384d7253629c3936d5a3839ce0ddeec139c0221220e73e812",
+      "line_count": 20
+    },
+    {
+      "path": "tests/fixtures/x509_adversarial/blocked.crt",
+      "sha256": "3104bf5ed9e9f237aad033ca9790f72a64875082cdcce1bf14803e33141ffff1",
+      "line_count": 20
+    },
+    {
+      "path": "tests/fixtures/x509_adversarial/ca.crt",
+      "sha256": "0f693f140f920dda509aefae26d02562966ec930a4d962f75dc4c7d12e496093",
+      "line_count": 20
+    },
+    {
+      "path": "tests/fixtures/x509_adversarial/wildcard.crt",
+      "sha256": "014407aa74eec796b4a1f613e13e27117c41e446242269af90e6e30b95ce6718",
+      "line_count": 19
+    }
+  ],
+  "execution_receipts": [
+    {
+      "receipt_id": "A5-DER-MIN-FOCUSED",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --clean-overlay ... cargo test -p asupersync --lib --features tls der_min",
+      "status": "PENDING",
+      "exit_code": null
+    },
+    {
+      "receipt_id": "A5-DELEGATED-CORPUS",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --clean-overlay ... cargo test -p asupersync --test x509_adversarial_corpus_contract --features tls delegated_",
+      "status": "PENDING",
+      "exit_code": null
+    },
+    {
+      "receipt_id": "A5-CORPUS-CONTRACT",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --clean-overlay ... cargo test -p asupersync --test x509_adversarial_corpus_contract --features tls",
+      "status": "PENDING",
+      "exit_code": null
+    },
+    {
+      "receipt_id": "A5-FUZZ-BUILD",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --clean-overlay ... cargo check --manifest-path fuzz/Cargo.toml --bin x509_der_residue",
+      "status": "PENDING",
+      "exit_code": null
+    },
+    {
+      "receipt_id": "A5-FUZZ-RUN",
+      "command": "remote cargo fuzz run x509_der_residue with max_total_time and max_len",
+      "status": "PENDING",
+      "exit_code": null
+    },
+    {
+      "receipt_id": "A5-UBS",
+      "command": "ubs on A5 Rust sources",
+      "status": "PENDING",
+      "exit_code": null
+    },
+    {
+      "receipt_id": "A5-ALL-TARGET-CHECK",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --clean-overlay ... cargo check --all-targets",
+      "status": "PENDING",
+      "exit_code": null
+    },
+    {
+      "receipt_id": "A5-ALL-TARGET-CLIPPY",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --clean-overlay ... cargo clippy --all-targets -- -D warnings",
+      "status": "PENDING",
+      "exit_code": null
+    }
+  ],
+  "rollback_triggers": [
+    "any unexplained accept/reject divergence inside the normalized complete-DER overlap",
+    "any generated fixture whose recorded fingerprint, validity, serial, or extension set drifts",
+    "any fuzz crash, panic, hang, out-of-bounds offset, or unbounded numeric detail",
+    "any fuzz target oracle dependency on x509-parser or rustls/WebPKI",
+    "any critical-extension policy broader than the approved A3 profile contract",
+    "any delegated wildcard or name-constraint case that no longer fails closed"
+  ],
+  "downstream_handoff": {
+    "owner": "asupersync-0h6myr.3.6",
+    "state": "PLANNED",
+    "scope": "A6 may use this A5 corpus as regression evidence while serially migrating call sites. A5 itself grants no migration authority."
+  },
+  "no_claim_boundaries": [
+    "no release-readiness claim",
+    "no broad workspace-health claim",
+    "no A6 call-site migration claim",
+    "no x509-parser dependency-removal or cutover claim",
+    "no runtime behavior change outside test-only fixtures and fuzzing",
+    "no exhaustive certificate-language or security proof",
+    "no throughput or performance-improvement claim",
+    "no live RCH fleet-availability claim",
+    "no local Cargo fallback approval",
+    "no permission to delete files"
+  ]
+}

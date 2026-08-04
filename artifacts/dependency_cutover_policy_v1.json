@@ -1,0 +1,1220 @@
+{
+  "schema_version": 1,
+  "artifact_id": "dependency-cutover-policy-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-dep-p1-foundations-upksjk.5.3",
+  "policy_as_of_release": "0.3.9",
+  "policy_as_of_date_utc": "2026-07-24",
+  "purpose": "Define the fail-closed, capability-preserving decision, coexistence, migration, rollback, and dependency-exit policy for every dependency-sovereignty campaign.",
+  "source_contracts": [
+    {
+      "artifact_id": "dependency-safety-taxonomy-v1",
+      "path": "artifacts/dependency_safety_taxonomy_v1.json",
+      "role": "Classify replacement eligibility and unsafe review sensitivity."
+    },
+    {
+      "artifact_id": "dependency-marginal-ledger-v1",
+      "path": "artifacts/dependency_marginal_ledger_v1.json",
+      "role": "Measure current and counterfactual package, native, build, and feature-profile cost."
+    },
+    {
+      "artifact_id": "dependency-oracle-policy-v1",
+      "path": "artifacts/dependency_oracle_policy_v1.json",
+      "role": "Constrain differential-oracle placement, cycles, activation, expiry, and retirement."
+    },
+    {
+      "artifact_id": "dependency-capability-registry-v1",
+      "path": "artifacts/dependency_capability_registry_v1.json",
+      "role": "Own the stable capability IDs, user journeys, public surfaces, evidence owners, and no-loss boundaries."
+    },
+    {
+      "artifact_id": "dependency-capability-baseline-v1",
+      "path": "artifacts/dependency_capability_baseline_v1.json",
+      "role": "Own incumbent case evidence, parity modes, typed blockers, and standalone downstream profiles."
+    }
+  ],
+  "policy": {
+    "dependency_exit_is_not_capability_exit": "Removing a package edge never authorizes removing, narrowing, hiding, or silently degrading an API, feature, format, protocol, platform behavior, diagnostic, security property, cancellation guarantee, downstream integration, or user journey.",
+    "unknown_is_blocking": "Missing, stale, zero-test, inconclusive, unsupported, or unowned evidence is not parity. It keeps the incumbent in production and yields DEFER or BLOCKED.",
+    "same_or_better_only": "REPLACE requires every affected capability, required parity mode, required case class, feature profile, supported platform, service version, and downstream journey to be SAME or BETTER with current evidence.",
+    "keep_is_success": "KEEP is a successful engineering outcome when the incumbent is safer, more complete, more maintainable, or better performing than the proposed replacement.",
+    "defer_is_success": "DEFER is a successful evidence outcome when required hardware, platform, service, upstream, or owner evidence is unavailable. It never permits a partial production switch.",
+    "blocked_is_not_closed": "BLOCKED records an unresolved required decision or contradiction. The incumbent remains, no cutover occurs, and the campaign does not close until the blocker is resolved or converted to a justified KEEP or DEFER receipt.",
+    "serialization_rule": "Source implementation, shadowing, and evidence may proceed in the owning DAG, but the production switch and manifest dependency exit are serialized last after CAP A4, VER A6, campaign gates, rollback rehearsal, and owner decisions.",
+    "rollback_rule": "Every REPLACE decision names an exact pre-cutover revision and lockfile boundary, observable rollback triggers, compatibility of artifacts created during overlap, deterministic incumbent restore steps, cleanup checks, and a rehearsed verification command.",
+    "stateful_rule": "Stateful, persisted, configuration, wire, database, and downstream-relocation changes require a versioned reader or reversible migrator and an overlap strategy. Durable compatibility is product functionality, not a deprecated API shim.",
+    "no_compat_shim_rule": "The project does not retain deprecated source-level compatibility shims. This does not permit dropping accepted persisted data, wire versions, configuration inputs, credentials, or official downstream workflows.",
+    "user_experience_rule": "REPLACE requires the replacement path to be at least as discoverable and operable: public compile surface, help, errors, diagnostics, examples, installation, configuration, migration, recovery, and rollback documentation are gates.",
+    "no_deletion_rule": "This policy grants no permission to delete source, tests, fixtures, old-format readers, user data, configuration, logs, or retained evidence."
+  },
+  "parity_results": [
+    {
+      "result": "BETTER",
+      "advances_cutover": true,
+      "meaning": "All incumbent semantics are preserved and at least one measured or reviewed property improves without a regression elsewhere."
+    },
+    {
+      "result": "SAME",
+      "advances_cutover": true,
+      "meaning": "The complete required observable contract is equivalent within its declared parity mode and resource envelope."
+    },
+    {
+      "result": "WORSE",
+      "advances_cutover": false,
+      "meaning": "At least one required behavior, safety property, resource bound, platform, interoperability mode, or user journey regresses."
+    },
+    {
+      "result": "UNKNOWN",
+      "advances_cutover": false,
+      "meaning": "Evidence is absent, stale, inconclusive, zero-test, unowned, or does not cover the claimed surface."
+    },
+    {
+      "result": "NOT_APPLICABLE",
+      "advances_cutover": false,
+      "meaning": "The property has no meaningful operation for this capability and carries a specific reviewed reason; it cannot substitute for required evidence."
+    }
+  ],
+  "evidence_outcomes": [
+    {
+      "outcome": "PASS",
+      "green": true,
+      "meaning": "The exact declared assertion ran and met its acceptance threshold."
+    },
+    {
+      "outcome": "FAIL",
+      "green": false,
+      "meaning": "The assertion ran and did not meet its correctness, safety, compatibility, resource, or performance threshold."
+    },
+    {
+      "outcome": "BLOCKED_EXTERNAL",
+      "green": false,
+      "meaning": "A required external service, corpus, portfolio, credential-free fixture, or infrastructure prerequisite was unavailable."
+    },
+    {
+      "outcome": "BLOCKED_PLATFORM",
+      "green": false,
+      "meaning": "A required supported target, operating system, architecture, CPU family, browser, or filesystem was unavailable."
+    },
+    {
+      "outcome": "BLOCKED_OWNER",
+      "green": false,
+      "meaning": "A required product, security, API, interoperability, or performance decision has no completed owner receipt."
+    },
+    {
+      "outcome": "UNSUPPORTED",
+      "green": false,
+      "meaning": "The candidate does not support a required current surface; this is explicit feature loss and blocks REPLACE."
+    },
+    {
+      "outcome": "NO_WIN",
+      "green": false,
+      "meaning": "An evidence-gated candidate is correct but does not meet the complete performance or maintenance threshold; the terminal outcome is KEEP."
+    }
+  ],
+  "terminal_verdicts": [
+    {
+      "verdict": "REPLACE",
+      "campaign_may_close": true,
+      "production_switch_allowed": true,
+      "incumbent_must_remain": false,
+      "required_conditions": [
+        "Every affected stable capability ID is mapped.",
+        "Every required parity mode and case class is SAME or BETTER with PASS evidence.",
+        "No unresolved regression, unsupported required surface, silent skip, or unknown remains.",
+        "All class-specific gates, graph budgets, oracle disposition, documentation, downstream, owner, and final no-loss gates pass.",
+        "Migration and rollback are rehearsed when required.",
+        "The production switch follows the state machine and is serialized last."
+      ],
+      "no_claim_boundary": "REPLACE applies only to the named candidate, capabilities, profiles, platforms, versions, and evidence revision; it is not broad release-readiness proof."
+    },
+    {
+      "verdict": "KEEP",
+      "campaign_may_close": true,
+      "production_switch_allowed": false,
+      "incumbent_must_remain": true,
+      "required_conditions": [
+        "The KEEP reason names the safety, completeness, maintenance, performance, interoperability, or marginal-cost evidence.",
+        "Any prototype remains isolated from production profiles.",
+        "No partial feature switch or dependency exit remains enabled.",
+        "Future reconsideration conditions are explicit when useful."
+      ],
+      "no_claim_boundary": "KEEP does not claim the incumbent is perfect or permanently exempt from later measured review."
+    },
+    {
+      "verdict": "DEFER",
+      "campaign_may_close": true,
+      "production_switch_allowed": false,
+      "incumbent_must_remain": true,
+      "required_conditions": [
+        "The missing hardware, platform, service, upstream, or owner evidence is typed.",
+        "Resume conditions and an evidence owner are recorded.",
+        "No partial production switch, platform narrowing, or dependency exit remains enabled."
+      ],
+      "no_claim_boundary": "DEFER is not evidence of parity, failure, or future authorization."
+    },
+    {
+      "verdict": "BLOCKED",
+      "campaign_may_close": false,
+      "production_switch_allowed": false,
+      "incumbent_must_remain": true,
+      "required_conditions": [
+        "Every blocking contradiction or required decision is named with an owner.",
+        "The production graph remains on the incumbent.",
+        "The campaign stays open until an owner resolves the blocker or records a justified KEEP or DEFER."
+      ],
+      "no_claim_boundary": "BLOCKED is not a green result and cannot be counted as completion or cutover evidence."
+    }
+  ],
+  "global_gate_ids": [
+    "GATE-CAPABILITY-MAP",
+    "GATE-BASELINE-FRESHNESS",
+    "GATE-SAFETY",
+    "GATE-MARGINAL-GRAPH",
+    "GATE-UNIT-INVARIANTS",
+    "GATE-DOWNSTREAM",
+    "GATE-E2E",
+    "GATE-ORACLE",
+    "GATE-ROLLBACK",
+    "GATE-UX-DOCS",
+    "GATE-OWNER",
+    "GATE-FINAL-NO-LOSS"
+  ],
+  "gate_required_fields": [
+    "gate_id",
+    "owner_role",
+    "purpose",
+    "required_for_classes",
+    "advance_outcomes",
+    "failure_behavior"
+  ],
+  "gate_catalog": [
+    {
+      "gate_id": "GATE-CAPABILITY-MAP",
+      "owner_role": "capability_registry_and_candidate_bead",
+      "purpose": "Map every affected capability, generic extension point, feature/profile, platform, format, protocol, diagnostic, and user journey.",
+      "required_for_classes": ["ALL"],
+      "advance_outcomes": ["PASS"],
+      "failure_behavior": "BLOCKED; unmapped or multiply owned behavior cannot cut over."
+    },
+    {
+      "gate_id": "GATE-BASELINE-FRESHNESS",
+      "owner_role": "capability_baseline_and_candidate_bead",
+      "purpose": "Re-run or explicitly refresh the incumbent baseline at the candidate source revision and classify drift.",
+      "required_for_classes": ["ALL"],
+      "advance_outcomes": ["PASS"],
+      "failure_behavior": "DEFER when infrastructure is unavailable; otherwise BLOCKED."
+    },
+    {
+      "gate_id": "GATE-SAFETY",
+      "owner_role": "safety_taxonomy_and_security_review",
+      "purpose": "Enforce SAFE-OWN, boundary-unsafe, algorithmic-unsafe exception, input-bound, and fail-closed review requirements.",
+      "required_for_classes": ["ALL"],
+      "advance_outcomes": ["PASS"],
+      "failure_behavior": "KEEP or BLOCKED; safety is not traded for package count."
+    },
+    {
+      "gate_id": "GATE-MARGINAL-GRAPH",
+      "owner_role": "marginal_ledger_and_candidate_bead",
+      "purpose": "Measure per-profile and per-target marginal package, trusted-upstream, native, build, compile-time, and binary-size change using package IDs.",
+      "required_for_classes": ["ALL"],
+      "advance_outcomes": ["PASS"],
+      "failure_behavior": "KEEP or DEFER; a closure-size slogan is not evidence."
+    },
+    {
+      "gate_id": "GATE-UNIT-INVARIANTS",
+      "owner_role": "candidate_bead_and_ver_a1",
+      "purpose": "Cover happy, empty, boundary, maximum, malformed, error, panic where applicable, cancellation, race, shutdown, leak, quiescence, recovery, and risk-selected property/differential/fuzz/model evidence.",
+      "required_for_classes": ["ALL"],
+      "advance_outcomes": ["PASS"],
+      "failure_behavior": "BLOCKED until the invariant evidence is complete."
+    },
+    {
+      "gate_id": "GATE-DOWNSTREAM",
+      "owner_role": "candidate_bead_and_ver_a5",
+      "purpose": "Compile and execute public synthesized consumers, known portfolio consumers, generic downstream implementations, and sparse feature profiles without test-internals.",
+      "required_for_classes": ["ALL"],
+      "advance_outcomes": ["PASS"],
+      "failure_behavior": "BLOCKED_EXTERNAL or BLOCKED; no known consumer is not proof of no user."
+    },
+    {
+      "gate_id": "GATE-E2E",
+      "owner_role": "candidate_bead_and_ver_a2_a3_a5",
+      "purpose": "Exercise every user-visible, service, wire, persisted, platform, security, and operational journey through maintained no-mock scenarios with retained redacted replay artifacts.",
+      "required_for_classes": ["ALL"],
+      "advance_outcomes": ["PASS"],
+      "failure_behavior": "Typed BLOCKED outcome or BLOCKED; silent skip and zero-test success are forbidden."
+    },
+    {
+      "gate_id": "GATE-ORACLE",
+      "owner_role": "oracle_policy_and_candidate_retirement_bead",
+      "purpose": "Prove cycle-safe oracle placement, native quarantine, fixture provenance, graph isolation, expiry, extension, and retirement disposition.",
+      "required_for_classes": ["ALL"],
+      "advance_outcomes": ["PASS"],
+      "failure_behavior": "KEEP; an ungoverned oracle cannot justify dependency exit."
+    },
+    {
+      "gate_id": "GATE-ROLLBACK",
+      "owner_role": "candidate_cutover_bead",
+      "purpose": "Rehearse the exact rollback boundary, triggers, data compatibility, incumbent restoration, cleanup, verification, and operator path.",
+      "required_for_classes": ["ALL"],
+      "advance_outcomes": ["PASS"],
+      "failure_behavior": "BLOCKED; rollback is required even for stateless manifest cutovers."
+    },
+    {
+      "gate_id": "GATE-UX-DOCS",
+      "owner_role": "candidate_ux_and_documentation_bead",
+      "purpose": "Preserve or improve discoverability, public compile ergonomics, errors, diagnostics, help, examples, installation, configuration, migration, recovery, and rollback instructions.",
+      "required_for_classes": ["ALL"],
+      "advance_outcomes": ["PASS"],
+      "failure_behavior": "BLOCKED; documentation is part of the product path."
+    },
+    {
+      "gate_id": "GATE-OWNER",
+      "owner_role": "named_product_security_api_or_performance_owner",
+      "purpose": "Resolve explicit product-scope, public-API, security, interoperability, performance-regression, or data-migration choices without delegated guesswork.",
+      "required_for_classes": ["ALL"],
+      "advance_outcomes": ["PASS"],
+      "failure_behavior": "BLOCKED_OWNER."
+    },
+    {
+      "gate_id": "GATE-FINAL-NO-LOSS",
+      "owner_role": "cap_a4_and_ver_a6",
+      "purpose": "Audit the complete graph and evidence packet for bypasses, feature loss, unsupported required cells, stale evidence, or cutover-before-proof edges.",
+      "required_for_classes": ["ALL"],
+      "advance_outcomes": ["PASS"],
+      "failure_behavior": "BLOCKED; production switch and dependency exit remain disabled."
+    },
+    {
+      "gate_id": "GATE-PUBLIC-COMPILE",
+      "owner_role": "candidate_api_bead_and_ver_a5",
+      "purpose": "Preserve names, paths, generic bounds, trait behavior, error types, feature combinations, invalid UTF-8 and OsString where applicable, and third-party implementations.",
+      "required_for_classes": ["SOURCE_API", "CLI_OPERATOR", "SECURITY_SENSITIVE"],
+      "advance_outcomes": ["PASS"],
+      "failure_behavior": "BLOCKED; finite in-repo replacements cannot narrow a generic public surface."
+    },
+    {
+      "gate_id": "GATE-MIGRATION",
+      "owner_role": "candidate_migration_bead",
+      "purpose": "Provide versioned read, reversible conversion, coexistence, data-preservation receipts, and explicit deletion authority for durable or user-authored inputs.",
+      "required_for_classes": ["VERSIONED_DATA", "CONFIG_LANGUAGE", "WIRE_PROTOCOL", "DOWNSTREAM_RELOCATION"],
+      "advance_outcomes": ["PASS"],
+      "failure_behavior": "KEEP or BLOCKED; old accepted inputs and state remain supported."
+    },
+    {
+      "gate_id": "GATE-SERVICE-MATRIX",
+      "owner_role": "candidate_service_bead_and_ver_a3",
+      "purpose": "Test pinned real service and peer versions, auth, TLS, limits, faults, restart, failover, cancellation, and cleanup.",
+      "required_for_classes": ["SERVICE_INTEROP", "DOWNSTREAM_RELOCATION"],
+      "advance_outcomes": ["PASS"],
+      "failure_behavior": "BLOCKED_EXTERNAL or DEFER; mocks and wire parsing alone are insufficient."
+    },
+    {
+      "gate_id": "GATE-PLATFORM-MATRIX",
+      "owner_role": "candidate_platform_bead_and_ver_a5",
+      "purpose": "Exercise every supported target/OS/architecture/browser/filesystem cell and report unsupported cells explicitly.",
+      "required_for_classes": ["PLATFORM_BOUNDARY", "CONCURRENCY_PERFORMANCE"],
+      "advance_outcomes": ["PASS"],
+      "failure_behavior": "BLOCKED_PLATFORM or DEFER; one host never stands in for the platform matrix."
+    },
+    {
+      "gate_id": "GATE-SECURITY",
+      "owner_role": "candidate_security_bead_and_independent_reviewer",
+      "purpose": "Prove delegate-first design, independent vectors, malformed/adversarial/fuzz coverage, redaction, resource bounds, downgrade resistance, secret lifecycle, and error mapping.",
+      "required_for_classes": ["SECURITY_SENSITIVE"],
+      "advance_outcomes": ["PASS"],
+      "failure_behavior": "KEEP or BLOCKED; ambiguous input fails closed."
+    },
+    {
+      "gate_id": "GATE-PERFORMANCE",
+      "owner_role": "candidate_benchmark_bead_and_performance_owner",
+      "purpose": "Measure throughput, p50/p95/p99/p999, fairness/starvation, cancellation latency, allocations, RSS, cache traffic, compile time, binary size, and required core/CPU-family scaling with reproducible statistics.",
+      "required_for_classes": ["CONCURRENCY_PERFORMANCE"],
+      "advance_outcomes": ["PASS"],
+      "failure_behavior": "NO_WIN maps to KEEP; inconclusive or unavailable host evidence maps to DEFER."
+    },
+    {
+      "gate_id": "GATE-CYCLE-SAFE-RELOCATION",
+      "owner_role": "downstream_or_neutral_harness_bead",
+      "purpose": "Keep reverse dependencies out of the asupersync workspace, pin independent lockfiles, measure the combined graph, and prove an official no-worse user path before deprecation.",
+      "required_for_classes": ["DOWNSTREAM_RELOCATION"],
+      "advance_outcomes": ["PASS"],
+      "failure_behavior": "KEEP; a cargo cycle or unofficial downstream workaround cannot authorize relocation."
+    },
+    {
+      "gate_id": "GATE-VERIFICATION-INTEGRITY",
+      "owner_role": "verification_epic",
+      "purpose": "Preserve nonzero test execution, deterministic replay, injected-failure classification, redaction, cleanup, RCH provenance, and no-local-fallback semantics.",
+      "required_for_classes": ["VERIFICATION_INFRASTRUCTURE"],
+      "advance_outcomes": ["PASS"],
+      "failure_behavior": "BLOCKED; the program cannot weaken its own proof surface."
+    }
+  ],
+  "migration_class_required_fields": [
+    "class_id",
+    "description",
+    "additional_gate_ids",
+    "coexistence_mode",
+    "write_policy",
+    "rollback_mode",
+    "deletion_policy"
+  ],
+  "migration_classes": [
+    {
+      "class_id": "GUARD_ONLY",
+      "description": "A cross-cutting capability that every candidate must preserve but that is not independently cut over.",
+      "additional_gate_ids": [],
+      "coexistence_mode": "The guard remains continuously enforced across incumbent, shadow, candidate, and replacement states.",
+      "write_policy": "Not applicable; the guard validates other transitions.",
+      "rollback_mode": "A failed guard returns the candidate to its prior state and keeps the incumbent.",
+      "deletion_policy": "The guard, its evidence, and its discoverability cannot be removed by a dependency campaign."
+    },
+    {
+      "class_id": "SOURCE_API",
+      "description": "Public or downstream-compilable Rust source, traits, macros, generic extension points, and errors.",
+      "additional_gate_ids": ["GATE-PUBLIC-COMPILE"],
+      "coexistence_mode": "Compile and execute incumbent and candidate consumers against the same accepted downstream corpus before the final source switch.",
+      "write_policy": "No source-level compatibility shim is required, but the replacement API must preserve the complete accepted capability and user path.",
+      "rollback_mode": "Restore the exact incumbent manifest/source revision and re-run public consumer and rustdoc/API-map checks.",
+      "deletion_policy": "No public surface, generic capability, test, or example is deleted as a shortcut to parity."
+    },
+    {
+      "class_id": "STATELESS_SEMANTIC",
+      "description": "Pure codec, parser, collection, metadata, or helper behavior without durable cross-run state.",
+      "additional_gate_ids": [],
+      "coexistence_mode": "Run incumbent and candidate differentially over golden, boundary, malformed, property, and fuzz corpora.",
+      "write_policy": "Candidate output becomes primary only after all exact-byte and semantic modes pass.",
+      "rollback_mode": "Restore the incumbent package/source revision and replay the same corpus.",
+      "deletion_policy": "Reference fixtures remain governed by the oracle policy; source deletion requires the ordinary repository permission rule."
+    },
+    {
+      "class_id": "STATEFUL_RUNTIME",
+      "description": "Runtime state, async lifecycle, identifiers, temporary resources, queues, or cancellation-sensitive behavior.",
+      "additional_gate_ids": [],
+      "coexistence_mode": "Use deterministic shadow/model comparison where possible and isolate candidate state from incumbent state.",
+      "write_policy": "No production state owner changes until cancellation, leak, quiescence, recovery, and resource invariants pass.",
+      "rollback_mode": "Drain candidate work, prove zero residual obligations/resources, restore the incumbent, and replay recovery scenarios.",
+      "deletion_policy": "No cleanup path, recovery fixture, or invariant test is removed to make the candidate pass."
+    },
+    {
+      "class_id": "VERSIONED_DATA",
+      "description": "Persisted artifacts, snapshots, traces, timestamps, or compression whose bytes outlive a process.",
+      "additional_gate_ids": ["GATE-MIGRATION"],
+      "coexistence_mode": "Read every accepted old version, write a new version only after validation, and shadow round-trip/replay across the overlap window.",
+      "write_policy": "New writes are version-tagged and atomic; old readers or reversible migrators remain until rollback and retention gates pass.",
+      "rollback_mode": "Restore the incumbent while retaining readable candidate-era artifacts or apply a proven lossless reverse migrator.",
+      "deletion_policy": "Old artifacts and readers are not deleted without explicit owner permission and retention evidence."
+    },
+    {
+      "class_id": "CONFIG_LANGUAGE",
+      "description": "User-authored configuration, scenario languages, pattern languages, defaults, precedence, comments, anchors, scalar distinctions, and diagnostics.",
+      "additional_gate_ids": ["GATE-PUBLIC-COMPILE", "GATE-MIGRATION"],
+      "coexistence_mode": "Dual-read all accepted formats and run semantic plus presentation-loss reports before changing the canonical writer.",
+      "write_policy": "Conversion is versioned, deterministic, and non-destructive; comments, anchors, scalar distinctions, unknown fields, and precedence are inventoried rather than silently discarded.",
+      "rollback_mode": "Keep original inputs untouched, restore incumbent parsing, and verify the same user workflows and errors.",
+      "deletion_policy": "No user-authored file or old-format reader is deleted without explicit written owner permission."
+    },
+    {
+      "class_id": "WIRE_PROTOCOL",
+      "description": "Wire bytes, negotiated formats, generic protocol messages, compression, or cross-language interoperability.",
+      "additional_gate_ids": ["GATE-MIGRATION"],
+      "coexistence_mode": "Negotiate or dual-decode incumbent and candidate versions and test independent peers in both directions.",
+      "write_policy": "Emit candidate bytes only when peers negotiate support or exact compatibility is proven.",
+      "rollback_mode": "Revert emission to incumbent bytes while continuing to accept candidate-era bytes for the declared rollback window.",
+      "deletion_policy": "No accepted wire version, codec, or cross-language fixture is removed before explicit protocol retirement."
+    },
+    {
+      "class_id": "SERVICE_INTEROP",
+      "description": "Real external servers, brokers, databases, telemetry collectors, transports, or peer implementations.",
+      "additional_gate_ids": ["GATE-SERVICE-MATRIX"],
+      "coexistence_mode": "Shadow or dual-run against pinned real service versions with bounded credentials, faults, restart, and cleanup.",
+      "write_policy": "Production traffic changes only after complete protocol and lifecycle parity; a parser-only or mock-only implementation stays experimental.",
+      "rollback_mode": "Route back to the incumbent client/stack, reconcile in-flight state, and verify idempotence, offsets, transactions, acks, or resume state.",
+      "deletion_policy": "No service mode, authentication form, protocol feature, or operational workflow is removed because no known consumer was found."
+    },
+    {
+      "class_id": "SECURITY_SENSITIVE",
+      "description": "Credentials, authentication, certificate validation, privacy patterns, trust decisions, and security-sensitive parsing.",
+      "additional_gate_ids": ["GATE-PUBLIC-COMPILE", "GATE-SECURITY"],
+      "coexistence_mode": "Delegate to the mature validator where possible and compare bounded candidate residue against independent vectors without exposing secrets.",
+      "write_policy": "Ambiguity, downgrade, unsupported syntax, duplicate critical data, invalid time, and resource overflow fail closed.",
+      "rollback_mode": "Restore the incumbent trust/credential path, revoke or zeroize candidate state, and verify exact error/redaction behavior.",
+      "deletion_policy": "No validation check, auth form, privacy rule, security fixture, or error mapping is dropped without explicit security-owner approval."
+    },
+    {
+      "class_id": "CLI_OPERATOR",
+      "description": "Installed binaries, argv and OsString handling, help, aliases, exits, configuration, stdout/stderr, diagnostics, interruption, and operator recovery.",
+      "additional_gate_ids": ["GATE-PUBLIC-COMPILE"],
+      "coexistence_mode": "Run old and candidate binaries over the complete golden and installed-process corpus, including invalid UTF-8 and interrupted workflows.",
+      "write_policy": "No command, option, alias, environment variable, output contract, or exit semantic changes without a capability-preserving owner decision.",
+      "rollback_mode": "Restore the incumbent binary and parser, preserve partial-output/data rules, and replay installation plus recovery journeys.",
+      "deletion_policy": "No CLI capability or documentation is removed to reduce parser scope."
+    },
+    {
+      "class_id": "DOWNSTREAM_RELOCATION",
+      "description": "Capability moves to a FrankenSuite or other downstream project that already depends on asupersync.",
+      "additional_gate_ids": ["GATE-MIGRATION", "GATE-SERVICE-MATRIX", "GATE-CYCLE-SAFE-RELOCATION"],
+      "coexistence_mode": "Use a neutral synthesized consumer or the downstream repository with an independent lockfile; never add the reverse dependency to the asupersync workspace.",
+      "write_policy": "The official downstream adapter and documentation ship before the old path changes, with semantic parity and combined-graph evidence.",
+      "rollback_mode": "Restore the asupersync incumbent path without data loss and verify both engines against the same versioned conformance vectors.",
+      "deletion_policy": "No incumbent feature is removed until the official no-worse path is installed, tested, documented, and reversible."
+    },
+    {
+      "class_id": "PLATFORM_BOUNDARY",
+      "description": "Operating-system, target, architecture, browser, socket, signal, filesystem, metadata, or host-introspection behavior.",
+      "additional_gate_ids": ["GATE-PLATFORM-MATRIX"],
+      "coexistence_mode": "Keep platform backends independently selectable until every supported matrix cell passes.",
+      "write_policy": "Unsupported cells are explicit typed outcomes and cannot silently fall back to reduced behavior.",
+      "rollback_mode": "Restore the incumbent backend per platform and verify handles, permissions, close/cancel, restart, and resource cleanup.",
+      "deletion_policy": "No platform or field is removed because it was unavailable on the implementation host."
+    },
+    {
+      "class_id": "CONCURRENCY_PERFORMANCE",
+      "description": "Synchronization, queues, cache layout, or SIMD kernels whose correctness and value depend on concurrency, architecture, or performance.",
+      "additional_gate_ids": ["GATE-PLATFORM-MATRIX", "GATE-PERFORMANCE"],
+      "coexistence_mode": "Keep the incumbent default while model, deterministic, differential, and canary benchmark lanes exercise the candidate.",
+      "write_policy": "Candidate becomes default only after correctness and every tracked tail/resource/core/CPU-family threshold passes.",
+      "rollback_mode": "Flip the measured structure or kernel back to the incumbent, drain in-flight work, and verify deterministic outputs and no leaks.",
+      "deletion_policy": "NO_WIN yields KEEP; benchmarks or supported ISA paths are not removed to manufacture a win."
+    },
+    {
+      "class_id": "VERIFICATION_INFRASTRUCTURE",
+      "description": "Testing, deterministic replay, proof profiles, logs, runners, and evidence packaging used to trust the program.",
+      "additional_gate_ids": ["GATE-VERIFICATION-INTEGRITY"],
+      "coexistence_mode": "Run old and candidate proof paths together until normalized results, injected failures, cleanup, and replay agree.",
+      "write_policy": "A proof path never silently falls back, converts blocked to green, accepts zero tests, or omits source/toolchain/service provenance.",
+      "rollback_mode": "Restore the prior proof runner and preserve all receipts for diagnosis without deleting failed evidence.",
+      "deletion_policy": "No verification surface, failure fixture, log, or replay artifact is removed to obtain a green result."
+    },
+    {
+      "class_id": "OPERATOR_UX",
+      "description": "Stable diagnostics, error codes, structured logs, redaction, and operator-facing recovery guidance.",
+      "additional_gate_ids": [],
+      "coexistence_mode": "Compare stable tokens, structured fields, redaction, ordering, and recovery guidance across success and failure paths.",
+      "write_policy": "Core code remains quiet; candidate diagnostics preserve stable codes, context, sources, privacy, and deterministic rendering.",
+      "rollback_mode": "Restore incumbent mappings and replay diagnostic, failure, and redaction fixtures.",
+      "deletion_policy": "No stable error, diagnostic field, privacy protection, or runbook path is silently removed."
+    }
+  ],
+  "cutover_state_machine": {
+    "initial_state": "INCUMBENT_PRIMARY",
+    "production_states": ["INCUMBENT_PRIMARY", "REPLACEMENT_PRIMARY", "INCUMBENT_RESTORED", "DEPENDENCY_EXITED"],
+    "non_production_states": ["PROTOTYPE_ISOLATED", "SHADOW", "COEXISTENCE", "CUTOVER_CANDIDATE", "DEPENDENCY_EXIT_PENDING", "ROLLBACK_ACTIVE"],
+    "states": [
+      {
+        "state": "INCUMBENT_PRIMARY",
+        "meaning": "The incumbent owns production behavior and remains in the applicable graph."
+      },
+      {
+        "state": "PROTOTYPE_ISOLATED",
+        "meaning": "Candidate code or harness exists outside production defaults and cannot narrow behavior."
+      },
+      {
+        "state": "SHADOW",
+        "meaning": "Candidate observes or replays bounded incumbent inputs without owning production output."
+      },
+      {
+        "state": "COEXISTENCE",
+        "meaning": "Both paths execute under the class-specific dual-read, dual-engine, negotiated, adapter, or platform overlap policy."
+      },
+      {
+        "state": "CUTOVER_CANDIDATE",
+        "meaning": "All evidence is assembled, but no production switch or manifest dependency exit has occurred."
+      },
+      {
+        "state": "REPLACEMENT_PRIMARY",
+        "meaning": "The candidate owns production behavior during an explicit rollback observation window."
+      },
+      {
+        "state": "DEPENDENCY_EXIT_PENDING",
+        "meaning": "The observation window passed and oracle, rollback, graph, and artifact compatibility are re-audited before removing the package edge."
+      },
+      {
+        "state": "DEPENDENCY_EXITED",
+        "meaning": "The production package edge is absent; any retained oracle is class-permitted, bounded, and separately governed."
+      },
+      {
+        "state": "ROLLBACK_ACTIVE",
+        "meaning": "A rollback trigger fired; candidate work is drained and compatible state is reconciled."
+      },
+      {
+        "state": "INCUMBENT_RESTORED",
+        "meaning": "The incumbent again owns production behavior and post-rollback verification is complete."
+      }
+    ],
+    "transitions": [
+      {
+        "from": "INCUMBENT_PRIMARY",
+        "to": "PROTOTYPE_ISOLATED",
+        "required_gate_ids": ["GATE-CAPABILITY-MAP", "GATE-BASELINE-FRESHNESS", "GATE-SAFETY"],
+        "production_switch": false
+      },
+      {
+        "from": "PROTOTYPE_ISOLATED",
+        "to": "SHADOW",
+        "required_gate_ids": ["GATE-UNIT-INVARIANTS", "GATE-ORACLE"],
+        "production_switch": false
+      },
+      {
+        "from": "SHADOW",
+        "to": "COEXISTENCE",
+        "required_gate_ids": ["GATE-DOWNSTREAM", "GATE-E2E"],
+        "production_switch": false
+      },
+      {
+        "from": "COEXISTENCE",
+        "to": "CUTOVER_CANDIDATE",
+        "required_gate_ids": ["GATE-MARGINAL-GRAPH", "GATE-ROLLBACK", "GATE-UX-DOCS", "GATE-OWNER", "GATE-FINAL-NO-LOSS"],
+        "production_switch": false
+      },
+      {
+        "from": "CUTOVER_CANDIDATE",
+        "to": "REPLACEMENT_PRIMARY",
+        "required_gate_ids": ["GATE-FINAL-NO-LOSS"],
+        "production_switch": true
+      },
+      {
+        "from": "REPLACEMENT_PRIMARY",
+        "to": "DEPENDENCY_EXIT_PENDING",
+        "required_gate_ids": ["GATE-ROLLBACK", "GATE-ORACLE", "GATE-MARGINAL-GRAPH"],
+        "production_switch": false
+      },
+      {
+        "from": "DEPENDENCY_EXIT_PENDING",
+        "to": "DEPENDENCY_EXITED",
+        "required_gate_ids": ["GATE-ORACLE", "GATE-FINAL-NO-LOSS"],
+        "production_switch": false
+      },
+      {
+        "from": "REPLACEMENT_PRIMARY",
+        "to": "ROLLBACK_ACTIVE",
+        "required_gate_ids": [],
+        "production_switch": false
+      },
+      {
+        "from": "DEPENDENCY_EXIT_PENDING",
+        "to": "ROLLBACK_ACTIVE",
+        "required_gate_ids": [],
+        "production_switch": false
+      },
+      {
+        "from": "DEPENDENCY_EXITED",
+        "to": "ROLLBACK_ACTIVE",
+        "required_gate_ids": [],
+        "production_switch": false
+      },
+      {
+        "from": "ROLLBACK_ACTIVE",
+        "to": "INCUMBENT_RESTORED",
+        "required_gate_ids": ["GATE-ROLLBACK", "GATE-E2E"],
+        "production_switch": true
+      },
+      {
+        "from": "INCUMBENT_RESTORED",
+        "to": "PROTOTYPE_ISOLATED",
+        "required_gate_ids": ["GATE-CAPABILITY-MAP", "GATE-BASELINE-FRESHNESS", "GATE-SAFETY"],
+        "production_switch": false
+      }
+    ],
+    "forbidden_transitions": [
+      "INCUMBENT_PRIMARY->CUTOVER_CANDIDATE",
+      "INCUMBENT_PRIMARY->REPLACEMENT_PRIMARY",
+      "PROTOTYPE_ISOLATED->REPLACEMENT_PRIMARY",
+      "SHADOW->REPLACEMENT_PRIMARY",
+      "COEXISTENCE->REPLACEMENT_PRIMARY",
+      "REPLACEMENT_PRIMARY->DEPENDENCY_EXITED",
+      "ROLLBACK_ACTIVE->DEPENDENCY_EXITED"
+    ]
+  },
+  "rollback_required_fields": [
+    "status",
+    "pre_cutover_revision",
+    "pre_cutover_lockfile_digest",
+    "trigger_thresholds",
+    "artifact_compatibility",
+    "incumbent_restore_steps",
+    "state_reconciliation",
+    "cleanup_assertions",
+    "verification_command",
+    "operator_owner",
+    "maximum_recovery_time",
+    "rehearsal_receipt"
+  ],
+  "rollback_contract": {
+    "required_for_replace": true,
+    "status_required": "PASS",
+    "revision_rule": "The pre-cutover source revision and lockfile digest are exact and fetchable; a branch name or moving tag is insufficient.",
+    "trigger_rule": "Correctness, security, interoperability, unsupported-platform, data-integrity, cancellation/leak, resource, tail-latency, and operator-UX thresholds are observable and fail closed.",
+    "artifact_rule": "Candidate-era data is readable by the restored incumbent or transformed by a proven lossless reverse migrator before rollback is declared complete.",
+    "restore_rule": "The operator path restores the incumbent without deleting evidence or user data and verifies no residual candidate tasks, processes, handles, obligations, partial writes, or secret state.",
+    "rehearsal_rule": "A deterministic or real-service rehearsal runs before cutover and retains source, toolchain, service, feature, platform, timing, redaction, cleanup, and replay provenance."
+  },
+  "coexistence_required_fields": [
+    "mode",
+    "incumbent_remains_primary",
+    "input_selection",
+    "output_comparison",
+    "side_effect_isolation",
+    "resource_budget",
+    "cancellation_cleanup",
+    "observation_window",
+    "promotion_criteria",
+    "rollback_trigger"
+  ],
+  "decision_receipt_required_fields": [
+    "candidate_id",
+    "affected_capability_ids",
+    "requested_verdict",
+    "decision_reason",
+    "resume_conditions",
+    "blocking_owners",
+    "source_revision",
+    "evidence_as_of_utc",
+    "parity_results",
+    "case_results",
+    "gate_results",
+    "feature_loss",
+    "api_narrowing",
+    "format_rejection",
+    "unresolved_regressions",
+    "downstream_receipts",
+    "migration_plan",
+    "rollback_plan",
+    "platform_matrix",
+    "service_matrix",
+    "security_review",
+    "performance_review",
+    "oracle_disposition",
+    "documentation_receipt",
+    "owner_signoffs",
+    "state_transition",
+    "production_switch_requested",
+    "campaign_close_requested",
+    "incumbent_action",
+    "no_claim_boundaries"
+  ],
+  "capability_binding_required_fields": [
+    "capability_id",
+    "binding_role",
+    "migration_class",
+    "registry_cutover_state",
+    "dependency_exit_allowed",
+    "rationale"
+  ],
+  "capability_bindings": [
+    {
+      "capability_id": "CAP-PUBLIC-API-TOPOLOGY",
+      "binding_role": "GUARD_ONLY",
+      "migration_class": "GUARD_ONLY",
+      "registry_cutover_state": "NOT_A_CUTOVER",
+      "dependency_exit_allowed": false,
+      "rationale": "Every candidate must preserve the root public topology, generic bounds, errors, and blessed entry points."
+    },
+    {
+      "capability_id": "CAP-STRUCTURED-CONCURRENCY",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "STATEFUL_RUNTIME",
+      "registry_cutover_state": "BLOCKED_PENDING_EVIDENCE",
+      "dependency_exit_allowed": false,
+      "rationale": "Task ownership, obligations, cancellation, loser draining, and quiescence are stateful runtime contracts."
+    },
+    {
+      "capability_id": "CAP-PROC-MACROS",
+      "binding_role": "GUARD_ONLY",
+      "migration_class": "SOURCE_API",
+      "registry_cutover_state": "NOT_A_CUTOVER",
+      "dependency_exit_allowed": false,
+      "rationale": "Macro syntax, expansion diagnostics, supported signatures, and downstream compilation remain source API."
+    },
+    {
+      "capability_id": "CAP-LAB-DETERMINISM",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "VERIFICATION_INFRASTRUCTURE",
+      "registry_cutover_state": "BLOCKED_PENDING_EVIDENCE",
+      "dependency_exit_allowed": false,
+      "rationale": "Deterministic scheduling, seed replay, oracles, and failure artifacts are proof infrastructure."
+    },
+    {
+      "capability_id": "CAP-BROWSER-RUNTIME",
+      "binding_role": "GUARD_ONLY",
+      "migration_class": "PLATFORM_BOUNDARY",
+      "registry_cutover_state": "NOT_A_CUTOVER",
+      "dependency_exit_allowed": false,
+      "rationale": "Browser, worker, wasm, storage, event, and stream behavior require their real platform matrix."
+    },
+    {
+      "capability_id": "CAP-TOWER-COMPAT",
+      "binding_role": "GUARD_ONLY",
+      "migration_class": "SOURCE_API",
+      "registry_cutover_state": "NOT_A_CUTOVER",
+      "dependency_exit_allowed": false,
+      "rationale": "Third-party Tower Service readiness and call behavior are a downstream source/API contract."
+    },
+    {
+      "capability_id": "CAP-DIAGNOSTICS",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "OPERATOR_UX",
+      "registry_cutover_state": "BLOCKED_PENDING_EVIDENCE",
+      "dependency_exit_allowed": false,
+      "rationale": "Stable codes, structured fields, sources, redaction, deterministic output, and remediation are product behavior."
+    },
+    {
+      "capability_id": "CAP-VERIFICATION-PROFILES",
+      "binding_role": "GUARD_ONLY",
+      "migration_class": "VERIFICATION_INFRASTRUCTURE",
+      "registry_cutover_state": "NOT_A_CUTOVER",
+      "dependency_exit_allowed": false,
+      "rationale": "Sparse, target, service, fuzz, stable, and production graph profiles guard every decision."
+    },
+    {
+      "capability_id": "CAP-DEPENDENCY-LEDGER",
+      "binding_role": "GUARD_ONLY",
+      "migration_class": "GUARD_ONLY",
+      "registry_cutover_state": "NOT_A_CUTOVER",
+      "dependency_exit_allowed": false,
+      "rationale": "The package-ID marginal ledger and native evidence policy govern candidate value and graph truth."
+    },
+    {
+      "capability_id": "CAP-DOWNSTREAM-CONSUMERS",
+      "binding_role": "GUARD_ONLY",
+      "migration_class": "GUARD_ONLY",
+      "registry_cutover_state": "NOT_A_CUTOVER",
+      "dependency_exit_allowed": false,
+      "rationale": "Published, synthesized, and portfolio consumers must remain valid for every cutover."
+    },
+    {
+      "capability_id": "CAP-HASH-MAPS",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "STATEFUL_RUNTIME",
+      "registry_cutover_state": "BLOCKED_PENDING_EVIDENCE",
+      "dependency_exit_allowed": false,
+      "rationale": "Map identity, hashing, ordering assumptions, reactor churn, memory, and cancellation-adjacent state require lifecycle evidence."
+    },
+    {
+      "capability_id": "CAP-HOST-BENCH-METADATA",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "PLATFORM_BOUNDARY",
+      "registry_cutover_state": "BLOCKED_PENDING_EVIDENCE",
+      "dependency_exit_allowed": false,
+      "rationale": "Host and CPU metadata fields differ by operating system, topology, permissions, and containers."
+    },
+    {
+      "capability_id": "CAP-TEMP-ARTIFACTS",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "STATEFUL_RUNTIME",
+      "registry_cutover_state": "BLOCKED_PENDING_EVIDENCE",
+      "dependency_exit_allowed": false,
+      "rationale": "Atomic creation, permissions, collision handling, interruption, cleanup, and retained failure evidence are stateful."
+    },
+    {
+      "capability_id": "CAP-FUTURES-STREAMS",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "SOURCE_API",
+      "registry_cutover_state": "BLOCKED_PENDING_EVIDENCE",
+      "dependency_exit_allowed": false,
+      "rationale": "Downstream-authored Future and Stream implementations, pending behavior, fusion, cancellation, and backpressure are generic APIs."
+    },
+    {
+      "capability_id": "CAP-VISIBILITY-MACRO",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "SOURCE_API",
+      "registry_cutover_state": "BLOCKED_PENDING_EVIDENCE",
+      "dependency_exit_allowed": false,
+      "rationale": "Attribute syntax, cfg behavior, diagnostics, and test-internals visibility affect downstream compilation."
+    },
+    {
+      "capability_id": "CAP-TOKEN-SLAB",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "STATEFUL_RUNTIME",
+      "registry_cutover_state": "BLOCKED_PENDING_EVIDENCE",
+      "dependency_exit_allowed": false,
+      "rationale": "Token identity, reuse, stale handles, capacity, churn, and cancellation cleanup are stateful."
+    },
+    {
+      "capability_id": "CAP-HEX-CODEC",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "STATELESS_SEMANTIC",
+      "registry_cutover_state": "BLOCKED_PENDING_EVIDENCE",
+      "dependency_exit_allowed": false,
+      "rationale": "Encoding, case, malformed input, public errors, and protocol artifacts are bounded differential semantics."
+    },
+    {
+      "capability_id": "CAP-BASE64-CODEC",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "STATELESS_SEMANTIC",
+      "registry_cutover_state": "BLOCKED_PENDING_EVIDENCE",
+      "dependency_exit_allowed": false,
+      "rationale": "All accepted alphabets, padding modes, malformed input, protocol bytes, and public errors must remain exact."
+    },
+    {
+      "capability_id": "CAP-ATP-VERSION-SCANNER",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "STATELESS_SEMANTIC",
+      "registry_cutover_state": "BLOCKED_PENDING_EVIDENCE",
+      "dependency_exit_allowed": false,
+      "rationale": "Accepted grammar, boundary inputs, fail-closed errors, and artifact scanning remain parser semantics."
+    },
+    {
+      "capability_id": "CAP-TIME-UTC-RFC3339",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "VERSIONED_DATA",
+      "registry_cutover_state": "BLOCKED_PENDING_EVIDENCE",
+      "dependency_exit_allowed": false,
+      "rationale": "Timestamp parsing, formatting, calendar bounds, serde, database, CLI, and persisted representations cross process versions."
+    },
+    {
+      "capability_id": "CAP-SERDE-GENERIC",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "SOURCE_API",
+      "registry_cutover_state": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "rationale": "Arbitrary downstream Serialize and Deserialize types cannot be replaced by a finite in-repo schema."
+    },
+    {
+      "capability_id": "CAP-PERSISTED-TRACE-SNAPSHOT",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "VERSIONED_DATA",
+      "registry_cutover_state": "BLOCKED_PENDING_EVIDENCE",
+      "dependency_exit_allowed": false,
+      "rationale": "Historical trace and snapshot artifacts require versioned read, replay, migration, rollback, and registry-consumer proof."
+    },
+    {
+      "capability_id": "CAP-CONFIG-TOML-JSON",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "CONFIG_LANGUAGE",
+      "registry_cutover_state": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "rationale": "TOML inputs, precedence, errors, comments, unknown fields, CLI and daemon workflows remain accepted until a lossless reviewed migration."
+    },
+    {
+      "capability_id": "CAP-SCENARIO-YAML-JSON",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "CONFIG_LANGUAGE",
+      "registry_cutover_state": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "rationale": "YAML scenarios, anchors, aliases, scalar distinctions, comments, replay hashes, and JSON parity require corpus-wide preservation."
+    },
+    {
+      "capability_id": "CAP-PROTOBUF-GENERIC",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "WIRE_PROTOCOL",
+      "registry_cutover_state": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "rationale": "Arbitrary downstream Prost messages, unknown fields, limits, maps, oneofs, cross-language bytes, and streaming cannot narrow to a finite message set."
+    },
+    {
+      "capability_id": "CAP-OTLP-ECOSYSTEM",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "SERVICE_INTEROP",
+      "registry_cutover_state": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "rationale": "Metrics, traces, logs, external SDK/provider integration, collectors, failure behavior, and Tokio quarantine are all retained."
+    },
+    {
+      "capability_id": "CAP-REGEX-PRIVACY",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "SECURITY_SENSITIVE",
+      "registry_cutover_state": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "rationale": "Arbitrary accepted patterns and privacy redaction must fail closed under adversarial syntax and input limits."
+    },
+    {
+      "capability_id": "CAP-NKEY-AUTH",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "SECURITY_SENSITIVE",
+      "registry_cutover_state": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "rationale": "All NKey forms, prefixes, Base32, CRC, signing, JWT/NATS interoperability, zeroization, and redaction are security-sensitive."
+    },
+    {
+      "capability_id": "CAP-AUTH-CREDENTIALS",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "SECURITY_SENSITIVE",
+      "registry_cutover_state": "BLOCKED_PENDING_EVIDENCE",
+      "dependency_exit_allowed": false,
+      "rationale": "Credential forms, authorization, secrets, redaction, cancellation, expiry, and recovery require full security and service evidence."
+    },
+    {
+      "capability_id": "CAP-CLI-ASUPERSYNC",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "CLI_OPERATOR",
+      "registry_cutover_state": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "rationale": "The complete asupersync command, option, help, error, config, trace, shell, and exit contract remains."
+    },
+    {
+      "capability_id": "CAP-CLI-ATP",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "CLI_OPERATOR",
+      "registry_cutover_state": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "rationale": "ATP transfer, TLS, resume, cancellation, lossy-network, shell, path, diagnostics, and exit behavior remain."
+    },
+    {
+      "capability_id": "CAP-CLI-ATPD",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "CLI_OPERATOR",
+      "registry_cutover_state": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "rationale": "Daemon start, readiness, config, signals, failure, restart, child cleanup, logging, and exit behavior remain."
+    },
+    {
+      "capability_id": "CAP-CLI-OFFLINE-TUNER",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "CLI_OPERATOR",
+      "registry_cutover_state": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "rationale": "Host discovery, deterministic reports, verbosity, privacy, interruption, output atomicity, and platform behavior remain."
+    },
+    {
+      "capability_id": "CAP-SQLITE",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "DOWNSTREAM_RELOCATION",
+      "registry_cutover_state": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "rationale": "FrankenSQLite already depends on asupersync; parity must run downstream or neutral, preserve the official async API and database semantics, and avoid a Cargo cycle."
+    },
+    {
+      "capability_id": "CAP-KAFKA",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "SERVICE_INTEROP",
+      "registry_cutover_state": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "rationale": "Produce/consume, groups, rebalance, idempotence, transactions, offsets, compression, TLS/SASL, faults, versions, and restart remain; absence of a known consumer cannot remove the feature."
+    },
+    {
+      "capability_id": "CAP-TLS-X509",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "SECURITY_SENSITIVE",
+      "registry_cutover_state": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "rationale": "Delegate chain/name/EKU validation to rustls/webpki first; any owned DER residue retains canonicality, full consumption, time, KU/EKU, constraints, SAN, SPKI pinning, critical extensions, limits, and errors."
+    },
+    {
+      "capability_id": "CAP-HTTP-COMPRESSION",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "WIRE_PROTOCOL",
+      "registry_cutover_state": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "rationale": "gzip, deflate, Brotli, content negotiation, streaming, cancellation, bomb limits, HTTP and ATP manifest interoperability remain."
+    },
+    {
+      "capability_id": "CAP-TRACE-LZ4",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "VERSIONED_DATA",
+      "registry_cutover_state": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "rationale": "Historical compressed traces require exact decode, bounded malformed handling, versioning, cross-version replay, and rollback."
+    },
+    {
+      "capability_id": "CAP-SIGNALS",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "PLATFORM_BOUNDARY",
+      "registry_cutover_state": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "rationale": "Unix signals, Windows control events, escalation, permissions, PID reuse, handler reinstall, shutdown, and cleanup require real platforms."
+    },
+    {
+      "capability_id": "CAP-HOST-INTROSPECTION",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "PLATFORM_BOUNDARY",
+      "registry_cutover_state": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "rationale": "Linux procfs, macOS, Windows, containers, cgroups, permissions, liveness races, and field fallback require real platforms."
+    },
+    {
+      "capability_id": "CAP-XATTR",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "PLATFORM_BOUNDARY",
+      "registry_cutover_state": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "rationale": "Follow/nofollow semantics, namespace, permissions, size races, unsupported filesystems, metadata preservation, and restart require real filesystems."
+    },
+    {
+      "capability_id": "CAP-POLLING-SOCKET",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "PLATFORM_BOUNDARY",
+      "registry_cutover_state": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "rationale": "epoll, kqueue, IOCP, socket options, readiness races, descriptor reuse, close, cancellation, and recovery require the supported platform matrix."
+    },
+    {
+      "capability_id": "CAP-SYNC-LOCKS",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "CONCURRENCY_PERFORMANCE",
+      "registry_cutover_state": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "rationale": "Mutex, RwLock, Condvar, poisoning semantics, fairness, cancellation, memory, tails, stable lane, and core scaling all gate replacement."
+    },
+    {
+      "capability_id": "CAP-CONCURRENT-QUEUES",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "CONCURRENCY_PERFORMANCE",
+      "registry_cutover_state": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "rationale": "Linearizability, memory reclamation, contention, fairness, weak memory, cancellation, and high-core performance make this experiment-only until proven."
+    },
+    {
+      "capability_id": "CAP-CACHE-LAYOUT",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "CONCURRENCY_PERFORMANCE",
+      "registry_cutover_state": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "rationale": "Padding is structure- and CPU-family-specific; cache misses, memory cost, tails, and cross-core scaling must justify any change."
+    },
+    {
+      "capability_id": "CAP-SIMD-RAPTORQ",
+      "binding_role": "GUARD_ONLY",
+      "migration_class": "CONCURRENCY_PERFORMANCE",
+      "registry_cutover_state": "NOT_A_CUTOVER",
+      "dependency_exit_allowed": false,
+      "rationale": "Bit-exact outputs, scalar fallback, safe baseline, ISA dispatch, platform support, and measured kernels guard dependency work."
+    },
+    {
+      "capability_id": "CAP-NATS-MESSAGING",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "SERVICE_INTEROP",
+      "registry_cutover_state": "BLOCKED_PENDING_EVIDENCE",
+      "dependency_exit_allowed": false,
+      "rationale": "Pub/sub, request/reply, NKey/JWT auth, permissions, reconnect, drain, JetStream acks, cancellation, and server restart require real NATS."
+    },
+    {
+      "capability_id": "CAP-DATABASE-WIRE",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "SERVICE_INTEROP",
+      "registry_cutover_state": "BLOCKED_PENDING_EVIDENCE",
+      "dependency_exit_allowed": false,
+      "rationale": "PostgreSQL and MySQL auth, TLS, query, transactions, cancellation, pooling, failover, restart, and typed rows require real databases."
+    },
+    {
+      "capability_id": "CAP-QUIC-HTTP3-ATP",
+      "binding_role": "CUTOVER_TARGET",
+      "migration_class": "SERVICE_INTEROP",
+      "registry_cutover_state": "BLOCKED_PENDING_EVIDENCE",
+      "dependency_exit_allowed": false,
+      "rationale": "QUIC, HTTP/3, TLS, QPACK, congestion, loss, migration, ATP resume, RaptorQ, peers, restart, and performance require cross-implementation evidence."
+    },
+    {
+      "capability_id": "CAP-REAL-SERVICE-E2E",
+      "binding_role": "GUARD_ONLY",
+      "migration_class": "VERIFICATION_INFRASTRUCTURE",
+      "registry_cutover_state": "NOT_A_CUTOVER",
+      "dependency_exit_allowed": false,
+      "rationale": "Pinned services, lifecycle, failure injection, retained logs, redaction, cleanup, provenance, and replay guard all service cutovers."
+    }
+  ],
+  "special_case_contracts": [
+    {
+      "case_id": "GENERIC-SERDE-PROST-REGEX",
+      "capability_ids": ["CAP-SERDE-GENERIC", "CAP-PROTOBUF-GENERIC", "CAP-REGEX-PRIVACY"],
+      "rule": "Arbitrary downstream types or accepted pattern syntax cannot be replaced by a finite in-repo message set or fixed scanner. Narrowing requires a separate explicit product-scope decision outside dependency removal; until then KEEP."
+    },
+    {
+      "case_id": "CONFIG-DATA-PRESERVATION",
+      "capability_ids": ["CAP-CONFIG-TOML-JSON", "CAP-SCENARIO-YAML-JSON"],
+      "rule": "Dual-read old formats, preserve original files, enumerate comments/anchors/scalar/unknown-field/precedence effects per file, run semantic goldens, obtain manual review, and require explicit written permission before deletion."
+    },
+    {
+      "case_id": "FRANKENSQLITE-CYCLE",
+      "capability_ids": ["CAP-SQLITE"],
+      "rule": "FrankenSQLite cannot enter the asupersync workspace graph because it depends on asupersync. Use a neutral consumer or downstream harness, measure the combined graph, preserve the official user path, and prove semantic plus rollback parity before any old-path change."
+    },
+    {
+      "case_id": "KAFKA-CAPABILITY",
+      "capability_ids": ["CAP-KAFKA"],
+      "rule": "No-known-consumer evidence cannot remove Kafka functionality. KEEP rdkafka until the complete strictly safe native client passes protocol, broker, security, lifecycle, performance, downstream, and rollback gates."
+    },
+    {
+      "case_id": "OTLP-ECOSYSTEM",
+      "capability_ids": ["CAP-OTLP-ECOSYSTEM"],
+      "rule": "Preserve metrics, traces, logs, external SDK/provider/exporter integrations, collector interoperability, bounded Cx export, failure behavior, and default/metrics no-Tokio guarantees."
+    },
+    {
+      "case_id": "BROTLI-INTEROPERABILITY",
+      "capability_ids": ["CAP-HTTP-COMPRESSION"],
+      "rule": "Brotli is a current HTTP and ATP manifest capability. DEFLATE or gzip parity cannot remove it; KEEP until a same-or-better implementation passes."
+    },
+    {
+      "case_id": "X509-DELEGATE-FIRST",
+      "capability_ids": ["CAP-TLS-X509"],
+      "rule": "Delegate standard validation to rustls/webpki. Own only non-delegable residue after inventory and preserve canonical DER, full consumption, time, KU/EKU, BasicConstraints, SAN, SPKI pinning, duplicate/critical extension, depth/resource, error, and handshake behavior."
+    },
+    {
+      "case_id": "PLATFORM-NON-SUBSTITUTION",
+      "capability_ids": ["CAP-BROWSER-RUNTIME", "CAP-SIGNALS", "CAP-HOST-INTROSPECTION", "CAP-XATTR", "CAP-POLLING-SOCKET"],
+      "rule": "Linux or the controller host cannot stand in for macOS, Windows, BSD, browsers, kqueue, IOCP, control events, filesystem namespaces, permissions, or host fields."
+    },
+    {
+      "case_id": "PERFORMANCE-NO-WIN",
+      "capability_ids": ["CAP-SYNC-LOCKS", "CAP-CONCURRENT-QUEUES", "CAP-CACHE-LAYOUT", "CAP-SIMD-RAPTORQ"],
+      "rule": "Correctness is necessary but not sufficient. A regression on any tracked throughput, tail, fairness, cancellation, allocation, RSS, cache, compile, size, core, CPU-family, or determinism axis yields KEEP unless the owner explicitly accepts it."
+    },
+    {
+      "case_id": "CLI-COMPLETE-SURFACE",
+      "capability_ids": ["CAP-CLI-ASUPERSYNC", "CAP-CLI-ATP", "CAP-CLI-ATPD", "CAP-CLI-OFFLINE-TUNER"],
+      "rule": "Preserve every command, alias, option, environment variable, OsString and invalid-UTF-8 behavior, help, error, exit, config, output, accessibility, interruption, installation, and recovery journey."
+    }
+  ],
+  "validation": {
+    "contract_path": "tests/dependency_cutover_policy_contract.rs",
+    "documentation_path": "docs/dependency_cutover_policy.md",
+    "runner_path": "scripts/run_dependency_cutover_policy.sh",
+    "scenario_id": "dependency_cutover_policy_contract_v1",
+    "aggregate_e2e_owner": "asupersync-dep-p1-foundations-upksjk.6.2",
+    "aggregate_negative_fixture_owner": "asupersync-dep-p1-foundations-upksjk.6.6",
+    "graph_audit_owner": "asupersync-dep-p1-foundations-upksjk.5.4",
+    "phase_one_signoff_owner": "asupersync-dep-p1-foundations-upksjk.4",
+    "minimum_contract_tests": 30,
+    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_dependency_cutover_policy\" cargo test -p asupersync --test dependency_cutover_policy_contract -- --nocapture",
+    "runner_commands": [
+      "RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_cutover_policy.sh contract",
+      "RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_cutover_policy.sh catalog"
+    ],
+    "retained_artifact_root": "target/e2e-results/dependency-cutover-policy",
+    "required_retained_files": [
+      "summary.json",
+      "events.ndjson",
+      "stdout.log",
+      "stderr.log",
+      "provenance.json",
+      "replay.sh",
+      "steps/<step_id>/stdout.log",
+      "steps/<step_id>/stderr.log"
+    ],
+    "required_log_fields": [
+      "schema",
+      "run_id",
+      "bead_id",
+      "scenario_id",
+      "step_id",
+      "source_revision",
+      "exact_command",
+      "fixture_manifest",
+      "fixture_digest",
+      "features",
+      "target",
+      "host",
+      "toolchain",
+      "rch_worker",
+      "execution_tree",
+      "outcome",
+      "command_exit",
+      "observed_tests",
+      "minimum_tests",
+      "duration_ms",
+      "redaction_status",
+      "cleanup_status",
+      "residual_children",
+      "generated_paths",
+      "replay_pointer",
+      "no_claim_boundary"
+    ],
+    "no_claim_boundary": "The focused contract proves policy structure and fail-closed decision fixtures only. It does not prove a candidate has parity, authorize a production switch or dependency exit, prove broad workspace or release health, or replace campaign-specific unit, downstream, platform, service, security, performance, migration, and rollback evidence."
+  },
+  "no_claim_boundaries": [
+    "This artifact authorizes no current replacement, production switch, manifest cutover, feature removal, API narrowing, format rejection, platform reduction, or file deletion.",
+    "A structurally valid hypothetical REPLACE receipt is not evidence that any real candidate meets it.",
+    "CAP A4 must audit graph-wide mapping and bypasses; VER A1 through VER A6 must establish their owned evidence surfaces.",
+    "Campaign-specific security, performance, service, platform, downstream, data-migration, and rollback gates remain mandatory.",
+    "Passing the focused contract is not broad workspace health, release readiness, performance improvement, or live RCH fleet proof."
+  ]
+}

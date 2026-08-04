@@ -213,8 +213,9 @@ fn descendant_propagation_does_not_strip_parent_message() {
     // into the child's cause. The string is never stripped.
     let source = read("src/runtime/state.rs");
 
-    let fn_marker = "pub fn cancel_request(";
-    let pos = source.find(fn_marker).expect("cancel_request fn");
+    // E2 S4c-2c-ii/iv (br-asupersync-m9wsza): anchor at the core.
+    let fn_marker = "fn cancel_request_in(";
+    let pos = source.find(fn_marker).expect("cancel_request_in core");
     let body_window = &source[pos..pos + 8000];
 
     assert!(
@@ -326,12 +327,13 @@ fn truncation_sets_explicit_flag_for_diagnostic_visibility() {
 #[test]
 fn cancel_request_inline_test_pins_message_carries_through() {
     // Pin: the inline test cancel_request_builds_cause_chains
-    // (state.rs:6720) uses
+    // (now in src/runtime/state_tests.rs — the runtime-state test module
+    // was split out of state.rs) uses
     // `CancelReason::deadline().with_message("budget exhausted")`
     // and asserts the message reaches grandchild_task via
     // root_cause(). If the test is removed, message
     // propagation regression can pass CI.
-    let source = read("src/runtime/state.rs");
+    let source = read("src/runtime/state_tests.rs");
 
     assert!(
         source.contains("fn cancel_request_builds_cause_chains()"),

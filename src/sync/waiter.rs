@@ -51,7 +51,7 @@ pub struct WaiterChain<T = ()> {
     positions: PositionMap,
     head: Option<usize>,
     tail: Option<usize>,
-    next_id: WaiterId,
+    next_id: Option<WaiterId>,
 }
 
 #[derive(Debug, Clone)]
@@ -139,7 +139,7 @@ impl<T> WaiterChain<T> {
             positions: HashMap::with_capacity_and_hasher(4, BuildHasherDefault::default()),
             head: None,
             tail: None,
-            next_id: 0,
+            next_id: Some(0),
         }
     }
 
@@ -363,13 +363,15 @@ impl<T> WaiterChain<T> {
 
     #[inline]
     fn next_id(&mut self) -> WaiterId {
-        loop {
-            let id = self.next_id;
-            self.next_id = self.next_id.wrapping_add(1);
-            if !self.positions.contains_key(&id) {
-                return id;
-            }
-        }
+        let id = self
+            .next_id
+            .expect("WaiterChain exhausted its stable waiter ID space");
+        self.next_id = id.checked_add(1);
+        debug_assert!(
+            !self.positions.contains_key(&id),
+            "monotonic waiter IDs must never alias a live waiter"
+        );
+        id
     }
 }
 
@@ -388,6 +390,7 @@ impl WaiterChain<()> {
 #[cfg(test)]
 mod tests {
     use super::WaiterChain;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::Waker;
@@ -525,7 +528,7 @@ mod tests {
     #[test]
     fn waiter_ids_are_stable_across_32_bit_boundary() {
         let mut chain = WaiterChain::new();
-        chain.next_id = u64::from(u32::MAX) - 1;
+        chain.next_id = Some(u64::from(u32::MAX) - 1);
 
         let stale_id = chain.push_back(noop_waker());
         assert_eq!(stale_id, u64::from(u32::MAX) - 1);
@@ -540,6 +543,31 @@ mod tests {
         assert_eq!(boundary_id, u64::from(u32::MAX));
         assert_eq!(after_boundary_id, u64::from(u32::MAX) + 1);
         assert_ne!(stale_id, after_boundary_id);
+    }
+
+    #[test]
+    fn waiter_id_exhaustion_fails_closed_before_stale_identity_repeats() {
+        let mut chain = WaiterChain::new();
+        let stale_id = chain.push_back(noop_waker());
+        assert_eq!(stale_id, 0);
+        assert_eq!(
+            chain.pop_front().map(|(id, _, tag)| (id, tag)),
+            Some((stale_id, ()))
+        );
+
+        chain.next_id = Some(u64::MAX);
+        let terminal_id = chain.push_back(noop_waker());
+        assert_eq!(terminal_id, u64::MAX);
+
+        let exhausted = catch_unwind(AssertUnwindSafe(|| chain.push_back(noop_waker())));
+        assert!(exhausted.is_err(), "the exhausted counter must not wrap");
+        assert!(chain.remove(stale_id).is_none());
+        assert!(chain.contains(terminal_id));
+        assert_eq!(
+            chain.pop_front().map(|(id, _, tag)| (id, tag)),
+            Some((terminal_id, ()))
+        );
+        assert!(chain.is_empty());
     }
 
     #[test]

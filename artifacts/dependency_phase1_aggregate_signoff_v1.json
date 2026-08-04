@@ -1,0 +1,327 @@
+{
+  "schema_version": 1,
+  "artifact_id": "dependency-phase1-aggregate-signoff-v1",
+  "bead_id": "asupersync-dep-p1-foundations-upksjk.4",
+  "program_id": "asupersync-ir2uf0",
+  "purpose": "Content-pinned, fail-closed reconciliation of the Phase-1 safety taxonomy, Cargo marginal ledger, oracle policy, capability/no-loss contracts, verification baseline, and tracker gate. This packet releases downstream evidence work only.",
+  "source_contracts": [
+    {
+      "bead_id": "asupersync-dep-p1-foundations-upksjk.1",
+      "role": "SAFETY_TAXONOMY",
+      "path": "artifacts/dependency_safety_taxonomy_v1.json",
+      "sha256": "f52111dee493e7bfb77acbfe079fa902ae14cbecc54e13aa5e8232824d89e5a6"
+    },
+    {
+      "bead_id": "asupersync-dep-p1-foundations-upksjk.2",
+      "role": "MARGINAL_LEDGER",
+      "path": "artifacts/dependency_marginal_ledger_v1.json",
+      "sha256": "832e8d68eefe9400a246ea619a250ea91bcf16a57d5fe728a6ce45e25bbdb4a6"
+    },
+    {
+      "bead_id": "asupersync-dep-p1-foundations-upksjk.3",
+      "role": "ORACLE_POLICY",
+      "path": "artifacts/dependency_oracle_policy_v1.json",
+      "sha256": "f75c1fd5aa130a98d693c768da3b79285b7305b76bc02015ef6667ca0cac4784"
+    },
+    {
+      "bead_id": "asupersync-dep-p1-foundations-upksjk.5.4",
+      "role": "CAPABILITY_REGISTRY_AND_GRAPH_SIGNOFF",
+      "path": "artifacts/dependency_capability_registry_v1.json",
+      "sha256": "82a73ec1c14fbe317611f6d592af480d75d002cbe9333045ab74840bcaf1c081",
+      "repin_note": "Re-pinned 2026-07-25 under br-asupersync-dvgpji: 17 source_owners rows corrected, CAP-NKEY-AUTH dependency_owners de-invented (base32/crc16 do not exist), the 'tls' feature removed from CAP-DATABASE-WIRE dependency_owners, the encoding::/decoding:: selectors re-pointed away from CAP-SERDE-GENERIC, and two structural checks added so the class cannot recur. Corrections only; no capability, disposition, evidence state or cutover state changed."
+    },
+    {
+      "bead_id": "asupersync-dep-p1-foundations-upksjk.5.2",
+      "role": "CAPABILITY_BASELINE",
+      "path": "artifacts/dependency_capability_baseline_v1.json",
+      "sha256": "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8"
+    },
+    {
+      "bead_id": "asupersync-dep-p1-foundations-upksjk.5.3",
+      "role": "NO_LOSS_CUTOVER_POLICY",
+      "path": "artifacts/dependency_cutover_policy_v1.json",
+      "sha256": "9a786ff93cc198a91b74d5e52f60ede00a2fac190977841482959aad6891cf5b"
+    },
+    {
+      "bead_id": "asupersync-dep-p1-foundations-upksjk.6.1",
+      "role": "INVARIANT_TO_EVIDENCE_MATRIX",
+      "path": "artifacts/dependency_verification_matrix_v1.json",
+      "sha256": "586e31ad462e8bac2ea9bc8f20619cfce9fcb71e2ffa46af057e30e376a0267f"
+    },
+    {
+      "bead_id": "asupersync-dep-p1-foundations-upksjk.6.6",
+      "role": "VERIFICATION_FINAL_SIGNOFF",
+      "path": "artifacts/dependency_verification_final_signoff_v1.json",
+      "sha256": "250d4fe56543db3fa0a971bb8f7c2a4cacf5b356b159afdfdc048bea9f787a3e"
+    }
+  ],
+  "baseline_provenance": {
+    "ledger_source_commit": "f606e28983199a1b51af11e6f65bb9b00686ceb3",
+    "capability_baseline_revision": "6a0d2c79eaf989b649ad0b63dcbec9a1169e3abf",
+    "tracker_plan_semantic_sha256": "f83003c1b99336b90d3237e5002d50d3b0c7695393288760829539b8fe3229ec",
+    "cargo_version": "cargo 1.98.0-nightly (a335d47ff 2026-06-26)",
+    "rustc_version": "rustc 1.98.0-nightly (c397dae80 2026-07-02)",
+    "host_triple": "x86_64-unknown-linux-gnu",
+    "feature_profiles": [
+      "minimal",
+      "default",
+      "tls",
+      "sqlite",
+      "kafka",
+      "metrics",
+      "cli",
+      "compression",
+      "trace-compression",
+      "io-uring",
+      "loom-tests",
+      "fuzz-quarantine",
+      "workspace-dev-build-audit"
+    ],
+    "target_triples": [
+      "x86_64-unknown-linux-gnu",
+      "aarch64-apple-darwin",
+      "x86_64-pc-windows-msvc",
+      "wasm32-unknown-unknown"
+    ],
+    "graph_cell_count": 52,
+    "marginal_measurement_count": 2401,
+    "counterfactual_rule": "Every active direct root edge is removed from a second valid synthesized manifest and independently re-resolved by Cargo; deletion from an already-resolved graph is forbidden.",
+    "upstream_identity_rule": "Registry/checksum, git URL plus immutable revision, normalized repository URL, or fail-closed unknown full package identity.",
+    "native_evidence_states": [
+      "active",
+      "declared-inactive",
+      "unknown",
+      "none"
+    ]
+  },
+  "inventory_reconciliation": {
+    "taxonomy_candidate_count": 33,
+    "ledger_projected_candidate_count": 32,
+    "capability_count": 50,
+    "oracle_registry_count": 24,
+    "implementation_only_candidate_ids": [
+      "simd-dispatch-boundary"
+    ],
+    "no_oracle_required_candidate_ids": [
+      "atp-version-scanner",
+      "cache-padded-experiment",
+      "extended-attributes",
+      "inline-storage",
+      "lock-free-queue",
+      "pin-projection",
+      "polling-reactor",
+      "raw-lock-parking-protocol",
+      "safe-queue-prototype",
+      "signal-platform",
+      "simd-dispatch-boundary",
+      "socket-platform"
+    ],
+    "no_oracle_required_dispositions": [
+      {
+        "candidate_id": "atp-version-scanner",
+        "reason": "The bounded scanner uses independent protocol fixtures and does not retain semver as a differential oracle."
+      },
+      {
+        "candidate_id": "cache-padded-experiment",
+        "reason": "This is a measured layout experiment with KEEP-on-no-win semantics, not a behavioral oracle replacement."
+      },
+      {
+        "candidate_id": "extended-attributes",
+        "reason": "Platform and ATP metadata interoperability fixtures own parity; the incumbent is not retained in an ordinary workspace oracle lane."
+      },
+      {
+        "candidate_id": "inline-storage",
+        "reason": "The algorithmic-unsafe replacement class is prohibited; the incumbent remains KEEP."
+      },
+      {
+        "candidate_id": "lock-free-queue",
+        "reason": "The algorithmic-unsafe replacement class is prohibited; the incumbent remains KEEP."
+      },
+      {
+        "candidate_id": "pin-projection",
+        "reason": "The algorithmic-unsafe replacement class is prohibited; the incumbent remains KEEP."
+      },
+      {
+        "candidate_id": "polling-reactor",
+        "reason": "The cross-platform boundary is KEEP unless the separate platform decision gate supplies complete evidence."
+      },
+      {
+        "candidate_id": "raw-lock-parking-protocol",
+        "reason": "The algorithmic-unsafe replacement class is prohibited by default and has no approved exception."
+      },
+      {
+        "candidate_id": "safe-queue-prototype",
+        "reason": "A benchmarked safe experiment compares retained artifacts and keeps crossbeam-queue unless SAME-or-BETTER."
+      },
+      {
+        "candidate_id": "signal-platform",
+        "reason": "Platform behavior and process E2E fixtures own parity; no ordinary workspace reference oracle is authorized."
+      },
+      {
+        "candidate_id": "simd-dispatch-boundary",
+        "reason": "This implementation-specific boundary has no direct incumbent Cargo edge and remains unsafe-ledger evidence-gated."
+      },
+      {
+        "candidate_id": "socket-platform",
+        "reason": "The cross-platform boundary is KEEP unless the separate platform decision gate supplies complete evidence."
+      }
+    ],
+    "quarantine_only_oracle_candidate_ids": [
+      "kafka-native-client",
+      "sqlite-cycle-safe-integration"
+    ],
+    "quarantine_candidate_capability_bindings": [
+      {
+        "candidate_id": "kafka-native-client",
+        "capability_ids": [
+          "CAP-KAFKA"
+        ]
+      },
+      {
+        "candidate_id": "sqlite-cycle-safe-integration",
+        "capability_ids": [
+          "CAP-SQLITE"
+        ]
+      }
+    ]
+  },
+  "oracle_gate": {
+    "native_or_reverse_release_policy": "FORBIDDEN",
+    "reverse_dependency_cycle_policy": "FAIL_CLOSED",
+    "expired_active_oracle_policy": "FAIL_CLOSED",
+    "pure_rust_retention_limit": "CUTOVER_RELEASE_PLUS_2_MAX unless a separately approved, current extension receipt exists",
+    "native_or_c_allowed_locations": [
+      "external-cargo-harness",
+      "frozen-fixture-only"
+    ],
+    "reverse_dependency_allowed_locations": [
+      "downstream-project",
+      "neutral-synthesized-consumer",
+      "frozen-fixture-only"
+    ],
+    "required_forbidden_profiles": [
+      "workspace-normal",
+      "workspace-dev",
+      "workspace-build",
+      "workspace-release",
+      "workspace-fuzz-quarantine"
+    ]
+  },
+  "graph_gate": {
+    "gate_bead_id": "asupersync-dep-p1-foundations-upksjk.4",
+    "direct_blocked_issue_count": 65,
+    "later_matrix_row_count": 320,
+    "later_implementation_row_count": 104,
+    "later_role_counts": {
+      "architecture": 14,
+      "decision": 15,
+      "implementation": 104,
+      "verification": 187
+    },
+    "direct_dependency_edge_type": "blocks",
+    "transitive_dependency_edge_types": [
+      "blocks",
+      "parent-child"
+    ],
+    "blocking_graph_cycle_count": 0,
+    "bypass_policy": "Every non-Phase-1 row in the checked verification matrix must transitively depend on this gate through blocks and parent-child ancestry; every direct edge from a later issue to this gate must be a blocks edge."
+  },
+  "operator_summary": {
+    "authorized_work": {
+      "scope": "DOWNSTREAM_EVIDENCE_WORK_ONLY",
+      "direct_issue_count": 65,
+      "dependency_exit_allowed": false,
+      "cutover_allowed": false
+    },
+    "evidence_gated_capabilities": {
+      "state": "BLOCKED_PENDING_EVIDENCE",
+      "count": 18
+    },
+    "keep_incumbent_capabilities": {
+      "state": "KEEP_INCUMBENT",
+      "count": 23
+    },
+    "guard_only_capabilities": {
+      "state": "NOT_A_CUTOVER",
+      "count": 9
+    },
+    "blocked_owner_cases": {
+      "state": "BLOCKED_OWNER",
+      "count": 35,
+      "owner_count": 21
+    },
+    "unknown_native_evidence": {
+      "disposition": "EXPLICITLY_BLOCKED_NOT_GREEN",
+      "measurement_rows": 1716,
+      "observation_count": 2117,
+      "meaning": "Unknown custom-build/native attribution is retained as a blocker and cannot support safety, absence, implementation, or cutover claims."
+    }
+  },
+  "negative_fixture_catalog": [
+    {
+      "fixture_id": "NEG-P1-MISSING-TAXONOMY",
+      "mutation": "remove one planned candidate from the safety taxonomy",
+      "expected_error": "missing_taxonomy_row"
+    },
+    {
+      "fixture_id": "NEG-P1-STALE-LEDGER-PROFILE",
+      "mutation": "remove one canonical feature profile from the ledger",
+      "expected_error": "stale_ledger_profile"
+    },
+    {
+      "fixture_id": "NEG-P1-NATIVE-ORACLE-RELEASE",
+      "mutation": "allow a native/C oracle in workspace-release",
+      "expected_error": "native_oracle_in_release_lane"
+    },
+    {
+      "fixture_id": "NEG-P1-REVERSE-CYCLE",
+      "mutation": "place a reverse-dependency oracle inside the upstream workspace graph",
+      "expected_error": "reverse_dependency_cycle"
+    },
+    {
+      "fixture_id": "NEG-P1-UNKNOWN-NATIVE",
+      "mutation": "remove the explicit blocked disposition from unknown native evidence",
+      "expected_error": "unknown_native_evidence"
+    },
+    {
+      "fixture_id": "NEG-P1-EXPIRED-ORACLE",
+      "mutation": "mark an active oracle expired without a current extension",
+      "expected_error": "expired_oracle"
+    }
+  ],
+  "canonical_commands": {
+    "ledger_regeneration": "set -o pipefail; GENERATOR_COMMIT=f606e28983199a1b51af11e6f65bb9b00686ceb3; RCH_REQUIRE_REMOTE=1 rch exec -q --base \"$GENERATOR_COMMIT\" --clean-overlay --no-overlay -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_dependency_marginal_ledger_generate\" CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run -j 8 --quiet -p asupersync --bin dependency_marginal_ledger --no-default-features --features dependency-ledger -- --source-commit \"$GENERATOR_COMMIT\" --jobs 8 --output - 2>&1 | sed '/^\\[RCH\\] remote /d' > artifacts/dependency_marginal_ledger_v1.json",
+    "focused_foundation_and_aggregate_contracts": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_dependency_phase1_aggregate_signoff\" cargo test -p asupersync --test dependency_safety_taxonomy_contract --test dependency_marginal_ledger_contract --test dependency_oracle_policy_contract --test dependency_phase1_aggregate_signoff_contract -- --nocapture",
+    "verification_final_contract": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_dependency_verification_final_signoff\" cargo test -p asupersync --test dependency_verification_final_signoff_contract -- --nocapture",
+    "live_prerequisite_audit": "br show asupersync-dep-p1-foundations-upksjk.1 asupersync-dep-p1-foundations-upksjk.2 asupersync-dep-p1-foundations-upksjk.3 asupersync-dep-p1-foundations-upksjk.5.4 asupersync-dep-p1-foundations-upksjk.6.6 --json",
+    "live_graph_audit": "br dep cycles && br show asupersync-dep-p1-foundations-upksjk.4 --json"
+  },
+  "verdict": {
+    "outcome": "PASS_SCOPED_FOUNDATIONS_ONLY",
+    "foundation_artifacts_reconciled": true,
+    "downstream_evidence_work_released": true,
+    "dependency_exit_allowed": false,
+    "cutover_authority": false,
+    "unknown_or_blocked_promoted_to_green": false
+  },
+  "validation": {
+    "contract_test": "tests/dependency_phase1_aggregate_signoff_contract.rs",
+    "operator_summary": "docs/dependency_phase1_aggregate_signoff.md",
+    "required_foundation_contracts": [
+      "tests/dependency_safety_taxonomy_contract.rs",
+      "tests/dependency_marginal_ledger_contract.rs",
+      "tests/dependency_oracle_policy_contract.rs"
+    ],
+    "minimum_aggregate_tests": 8,
+    "remote_required": true,
+    "local_cargo_fallback_allowed": false
+  },
+  "no_claim_boundaries": [
+    "PASS_SCOPED_FOUNDATIONS_ONLY does not authorize dependency exit, manifest cutover, or feature/API/format/protocol/platform/diagnostic/user-journey narrowing.",
+    "This signoff does not prove implementation parity, runtime correctness, performance improvement, or no regression.",
+    "This signoff does not prove release readiness, broad workspace health, or live RCH fleet availability.",
+    "Unknown native evidence, blocked external/platform/owner cases, planned evidence, KEEP, and DEFER remain non-green.",
+    "This signoff does not prove unavailable service/platform execution or downstream behavior beyond the exact checked artifacts.",
+    "This signoff does not grant permission to delete files."
+  ]
+}

@@ -13,7 +13,7 @@ use asupersync::distributed::encoding::{EncodedState, EncodingConfig, StateEncod
 use asupersync::distributed::recovery::{RecoveryDecodingConfig, StateDecoder};
 use asupersync::distributed::snapshot::{BudgetSnapshot, RegionSnapshot, TaskSnapshot, TaskState};
 use asupersync::record::region::RegionState;
-use asupersync::security::{AuthenticatedSymbol, AuthenticationTag, SecurityContext};
+use asupersync::security::{AuthKey, AuthenticatedSymbol, AuthenticationTag, SecurityContext};
 use asupersync::trace::distributed::vclock::VectorClock;
 use asupersync::types::{RegionId, TaskId, Time};
 use asupersync::util::DetRng;
@@ -69,6 +69,11 @@ fn make_realistic_snapshot(task_count: usize, child_count: usize) -> RegionSnaps
         metadata,
         auth_tag: AuthenticationTag::zero(),
     }
+    .signed(&snapshot_auth_key())
+}
+
+fn snapshot_auth_key() -> AuthKey {
+    AuthKey::from_seed(TEST_AUTH_SEED ^ 0x5A5A_5A5A)
 }
 
 fn encode_snapshot(snapshot: &RegionSnapshot, symbol_size: u16, seed: u64) -> EncodedState {
@@ -89,6 +94,7 @@ fn test_security_context() -> SecurityContext {
 fn decoding_config_with_test_auth() -> RecoveryDecodingConfig {
     RecoveryDecodingConfig {
         auth_context: Some(test_security_context()),
+        snapshot_auth_key: Some(snapshot_auth_key()),
         ..RecoveryDecodingConfig::default()
     }
 }

@@ -599,18 +599,21 @@ pub struct Receiver<T> {
 
 impl<T> Receiver<T> {
     pub(crate) fn clear_waiter_registration(&self, waiter: &mut Option<ArenaIndex>) {
-        if let Some(token) = waiter.take() {
+        let retired_waker = waiter.take().and_then(|token| {
             let mut inner = self.channel.inner.lock();
-            inner.wakers.remove(token);
-        }
+            inner.wakers.remove(token)
+        });
+        drop(retired_waker);
     }
 
     fn clear_waiter_registration_and_record_cancellation(&self, waiter: &mut Option<ArenaIndex>) {
-        let mut inner = self.channel.inner.lock();
-        if let Some(token) = waiter.take() {
-            inner.wakers.remove(token);
-        }
-        inner.record_cancellation();
+        let retired_waker = {
+            let mut inner = self.channel.inner.lock();
+            let retired_waker = waiter.take().and_then(|token| inner.wakers.remove(token));
+            inner.record_cancellation();
+            retired_waker
+        };
+        drop(retired_waker);
     }
 
     /// Builds an opt-in redacted telemetry snapshot.
@@ -693,100 +696,124 @@ impl<T: Clone> Receiver<T> {
     }
 
     #[inline]
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn poll_recv_with_waiter<Caps>(
         &mut self,
         cx: &Cx<Caps>,
         task_cx: &Context<'_>,
         waiter: &mut Option<ArenaIndex>,
     ) -> Poll<Result<T, RecvError>> {
-        if cx.checkpoint().is_err() {
-            cx.trace("broadcast::recv cancelled");
-            self.clear_waiter_registration_and_record_cancellation(waiter);
-            return Poll::Ready(Err(RecvError::Cancelled));
-        }
-
-        let mut inner = self.channel.inner.lock();
-
-        // 1. Check for lag
-        let earliest = inner.buffer.front().map_or(inner.total_sent, |s| s.index);
-
-        if self.next_index < earliest {
-            let missed = earliest - self.next_index;
-            self.next_index = earliest;
-            inner.update_receiver_cursor(self.receiver_token, self.next_index);
-            if let Some(token) = waiter.take() {
-                inner.wakers.remove(token);
+        // br-asupersync-h0id2o: a Waker's clone and destructor vtables are
+        // arbitrary external callbacks. Keep both operations outside `inner`,
+        // then revalidate the receive state after cloning so a send in the
+        // unlocked window cannot be missed. Keeping every transition in this
+        // loop makes that revalidation protocol explicit.
+        let mut replacement_waker = None;
+        loop {
+            if cx.checkpoint().is_err() {
+                cx.trace("broadcast::recv cancelled");
+                self.clear_waiter_registration_and_record_cancellation(waiter);
+                drop(replacement_waker);
+                return Poll::Ready(Err(RecvError::Cancelled));
             }
-            return Poll::Ready(Err(RecvError::Lagged(missed)));
-        }
 
-        // 2. Try to get message.
-        //
-        // Use checked conversion to avoid `u64 -> usize` truncation on 32-bit
-        // targets. A large `next_index - earliest` delta must not wrap and
-        // incorrectly index into the front of the ring buffer.
-        let delta = self.next_index.saturating_sub(earliest);
-        if let Ok(offset) = usize::try_from(delta) {
-            if let Some(slot) = inner.buffer.get(offset) {
-                let msg = Arc::clone(&slot.msg);
-                let index = slot.index;
-                drop(inner);
+            let mut inner = self.channel.inner.lock();
 
-                // Clone user data only after releasing the shared mutex. The
-                // cursor remains unchanged if cloning unwinds.
-                let msg = msg.lock().clone();
+            // 1. Check for lag
+            let earliest = inner.buffer.front().map_or(inner.total_sent, |s| s.index);
 
-                let mut inner = self.channel.inner.lock();
-                debug_assert_eq!(self.next_index, index);
-                self.next_index = index + 1;
+            if self.next_index < earliest {
+                let missed = earliest - self.next_index;
+                self.next_index = earliest;
                 inner.update_receiver_cursor(self.receiver_token, self.next_index);
-                if let Some(token) = waiter.take() {
-                    inner.wakers.remove(token);
+                let retired_waker = waiter.take().and_then(|token| inner.wakers.remove(token));
+                drop(inner);
+                drop(retired_waker);
+                drop(replacement_waker);
+                return Poll::Ready(Err(RecvError::Lagged(missed)));
+            }
+
+            // 2. Try to get message.
+            //
+            // Use checked conversion to avoid `u64 -> usize` truncation on 32-bit
+            // targets. A large `next_index - earliest` delta must not wrap and
+            // incorrectly index into the front of the ring buffer.
+            let delta = self.next_index.saturating_sub(earliest);
+            if let Ok(offset) = usize::try_from(delta) {
+                if let Some(slot) = inner.buffer.get(offset) {
+                    let msg = Arc::clone(&slot.msg);
+                    let index = slot.index;
+                    drop(inner);
+
+                    // `T::clone` is arbitrary user code and may block, panic, or
+                    // re-enter the channel. The retained Arc keeps this exact
+                    // message alive if a concurrent send evicts its ring slot.
+                    let msg = msg.lock().clone();
+
+                    let mut inner = self.channel.inner.lock();
+                    debug_assert_eq!(self.next_index, index);
+                    self.next_index = index + 1;
+                    inner.update_receiver_cursor(self.receiver_token, self.next_index);
+                    let retired_waker = waiter.take().and_then(|token| inner.wakers.remove(token));
+                    drop(inner);
+                    drop(retired_waker);
+                    drop(replacement_waker);
+                    return Poll::Ready(Ok(msg));
                 }
-                return Poll::Ready(Ok(msg));
             }
-        }
 
-        // 3. Check if closed
-        if self.channel.sender_count.load(Ordering::Acquire) == 0 {
-            if let Some(token) = waiter.take() {
-                inner.wakers.remove(token);
+            // 3. Check if closed
+            if self.channel.sender_count.load(Ordering::Acquire) == 0 {
+                let retired_waker = waiter.take().and_then(|token| inner.wakers.remove(token));
+                drop(inner);
+                drop(retired_waker);
+                drop(replacement_waker);
+                return Poll::Ready(Err(RecvError::Closed));
             }
-            return Poll::Ready(Err(RecvError::Closed));
-        }
 
-        // 4. Wait - register or update waker
-        //
-        // br-asupersync-53aqtf: factor the two insert paths through a
-        // single closure so the Waker::clone is paid AT MOST ONCE per
-        // poll, and only when we actually need to allocate a new slab
-        // entry. Steady-state polls hit the existing-token branch
-        // below where `will_wake` short-circuits any clone (the fast
-        // path the bead's "5-10% throughput at high N" estimate
-        // depends on). The remaining clone — fired only on first
-        // poll OR on stale-token recovery after slab reuse — is
-        // unavoidable: the slab takes ownership of the Waker and
-        // current_waker is borrowed from task_cx.
-        let current_waker = task_cx.waker();
-        let needs_fresh_insert = match *waiter {
-            Some(token) => match inner.wakers.get_mut(token) {
-                Some(waker) => {
-                    if !waker.will_wake(current_waker) {
-                        waker.clone_from(current_waker);
+            // 4. Wait - register or update waker.
+            //
+            // The common same-waker repoll performs no clone. A new candidate
+            // is cloned only after releasing `inner`; the loop then rechecks
+            // lag/value/close before moving the candidate into the arena.
+            let current_waker = task_cx.waker();
+            match *waiter {
+                Some(token) => match inner.wakers.get_mut(token) {
+                    Some(stored_waker) if stored_waker.will_wake(current_waker) => {
+                        drop(inner);
+                        drop(replacement_waker);
+                        return Poll::Pending;
                     }
-                    false
+                    Some(stored_waker) => {
+                        if let Some(replacement) = replacement_waker.take() {
+                            let retired_waker = std::mem::replace(stored_waker, replacement);
+                            drop(inner);
+                            drop(retired_waker);
+                            return Poll::Pending;
+                        }
+                    }
+                    None => {
+                        if let Some(replacement) = replacement_waker.take() {
+                            let token = inner.wakers.insert(replacement);
+                            *waiter = Some(token);
+                            drop(inner);
+                            return Poll::Pending;
+                        }
+                    }
+                },
+                None => {
+                    if let Some(replacement) = replacement_waker.take() {
+                        let token = inner.wakers.insert(replacement);
+                        *waiter = Some(token);
+                        drop(inner);
+                        return Poll::Pending;
+                    }
                 }
-                None => true, // stale token — slab slot was reaped
-            },
-            None => true,
-        };
-        if needs_fresh_insert {
-            let token = inner.wakers.insert(current_waker.clone()); // ubs:ignore - internal token
-            *waiter = Some(token);
-        }
+            }
 
-        drop(inner);
-        Poll::Pending
+            drop(inner);
+            replacement_waker = Some(current_waker.clone());
+        }
     }
 }
 
@@ -890,7 +917,7 @@ mod tests {
     use std::future::Future;
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
     use std::task::{Context, Poll, Waker};
 
     fn init_test(name: &str) {
@@ -939,6 +966,46 @@ mod tests {
         fn wake_by_ref(self: &Arc<Self>) {
             self.wakes.fetch_add(1, AtomicOrdering::AcqRel);
         }
+    }
+
+    #[derive(Debug)]
+    struct WakerDropLockProbe {
+        channel: std::sync::Weak<Channel<i32>>,
+        drop_count: Arc<AtomicUsize>,
+        lock_was_free: Arc<AtomicBool>,
+    }
+
+    #[allow(clippy::manual_noop_waker)]
+    impl std::task::Wake for WakerDropLockProbe {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for WakerDropLockProbe {
+        fn drop(&mut self) {
+            let lock_was_free = self
+                .channel
+                .upgrade()
+                .is_none_or(|channel| channel.inner.try_lock().is_some());
+            self.lock_was_free
+                .store(lock_was_free, AtomicOrdering::Release);
+            self.drop_count.fetch_add(1, AtomicOrdering::AcqRel);
+        }
+    }
+
+    fn waker_drop_lock_probe(tx: &Sender<i32>) -> (Waker, Arc<AtomicUsize>, Arc<AtomicBool>) {
+        let drop_count = Arc::new(AtomicUsize::new(0));
+        let lock_was_free = Arc::new(AtomicBool::new(false));
+        let probe = Arc::new(WakerDropLockProbe {
+            channel: Arc::downgrade(&tx.channel),
+            drop_count: Arc::clone(&drop_count),
+            lock_was_free: Arc::clone(&lock_was_free),
+        });
+        (Waker::from(probe), drop_count, lock_was_free)
+    }
+
+    fn assert_waker_dropped_outside_lock(drop_count: &AtomicUsize, lock_was_free: &AtomicBool) {
+        assert_eq!(drop_count.load(AtomicOrdering::Acquire), 1);
+        assert!(lock_was_free.load(AtomicOrdering::Acquire));
     }
 
     #[derive(Debug)]
@@ -1594,6 +1661,170 @@ mod tests {
         crate::assert_with_log!(got == 7, "received after drop", 7, got);
 
         crate::test_complete!("recv_drop_clears_waiter_registration");
+    }
+
+    #[test]
+    fn recv_future_drop_retires_waker_outside_channel_lock() {
+        init_test("recv_future_drop_retires_waker_outside_channel_lock");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(4);
+        let (waker, drop_count, lock_was_free) = waker_drop_lock_probe(&tx);
+        let mut fut = Box::pin(rx.recv(&cx));
+
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(fut.as_mut().poll(&mut task_cx).is_pending());
+        }
+        drop(waker);
+        drop(fut);
+
+        assert_waker_dropped_outside_lock(&drop_count, &lock_was_free);
+        crate::test_complete!("recv_future_drop_retires_waker_outside_channel_lock");
+    }
+
+    #[test]
+    fn recv_cancellation_retires_waker_outside_channel_lock() {
+        init_test("recv_cancellation_retires_waker_outside_channel_lock");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(4);
+        let (waker, drop_count, lock_was_free) = waker_drop_lock_probe(&tx);
+        let mut fut = Box::pin(rx.recv(&cx));
+
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(fut.as_mut().poll(&mut task_cx).is_pending());
+        }
+        drop(waker);
+
+        cx.set_cancel_requested(true);
+        let noop = Waker::noop();
+        let mut task_cx = Context::from_waker(noop);
+        assert!(matches!(
+            fut.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(RecvError::Cancelled))
+        ));
+
+        assert_waker_dropped_outside_lock(&drop_count, &lock_was_free);
+        crate::test_complete!("recv_cancellation_retires_waker_outside_channel_lock");
+    }
+
+    #[test]
+    fn recv_changed_waker_retires_previous_waker_outside_channel_lock() {
+        init_test("recv_changed_waker_retires_previous_waker_outside_channel_lock");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(4);
+        let (old_waker, drop_count, lock_was_free) = waker_drop_lock_probe(&tx);
+        let mut fut = Box::pin(rx.recv(&cx));
+
+        {
+            let mut task_cx = Context::from_waker(&old_waker);
+            assert!(fut.as_mut().poll(&mut task_cx).is_pending());
+        }
+        drop(old_waker);
+
+        let new_wake_state = CountingWaker::new();
+        let new_waker = Waker::from(new_wake_state);
+        let mut task_cx = Context::from_waker(&new_waker);
+        assert!(fut.as_mut().poll(&mut task_cx).is_pending());
+
+        assert_waker_dropped_outside_lock(&drop_count, &lock_was_free);
+        assert_eq!(tx.channel.inner.lock().wakers.len(), 1);
+        crate::test_complete!("recv_changed_waker_retires_previous_waker_outside_channel_lock");
+    }
+
+    #[test]
+    fn recv_value_cleanup_retires_waker_outside_channel_lock() {
+        init_test("recv_value_cleanup_retires_waker_outside_channel_lock");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(4);
+        let (waker, drop_count, lock_was_free) = waker_drop_lock_probe(&tx);
+        let mut fut = Box::pin(rx.recv(&cx));
+
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(fut.as_mut().poll(&mut task_cx).is_pending());
+        }
+        drop(waker);
+
+        {
+            let mut inner = tx.channel.inner.lock();
+            inner.buffer.push_back(Slot {
+                msg: Arc::new(Mutex::new(17)),
+                index: 0,
+            });
+            inner.total_sent = 1;
+        }
+
+        let noop = Waker::noop();
+        let mut task_cx = Context::from_waker(noop);
+        assert!(matches!(
+            fut.as_mut().poll(&mut task_cx),
+            Poll::Ready(Ok(17))
+        ));
+
+        assert_waker_dropped_outside_lock(&drop_count, &lock_was_free);
+        crate::test_complete!("recv_value_cleanup_retires_waker_outside_channel_lock");
+    }
+
+    #[test]
+    fn recv_lag_cleanup_retires_waker_outside_channel_lock() {
+        init_test("recv_lag_cleanup_retires_waker_outside_channel_lock");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(1);
+        let (waker, drop_count, lock_was_free) = waker_drop_lock_probe(&tx);
+        let mut fut = Box::pin(rx.recv(&cx));
+
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(fut.as_mut().poll(&mut task_cx).is_pending());
+        }
+        drop(waker);
+
+        {
+            let mut inner = tx.channel.inner.lock();
+            inner.buffer.push_back(Slot {
+                msg: Arc::new(Mutex::new(29)),
+                index: 1,
+            });
+            inner.total_sent = 2;
+        }
+
+        let noop = Waker::noop();
+        let mut task_cx = Context::from_waker(noop);
+        assert!(matches!(
+            fut.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(RecvError::Lagged(1)))
+        ));
+
+        assert_waker_dropped_outside_lock(&drop_count, &lock_was_free);
+        crate::test_complete!("recv_lag_cleanup_retires_waker_outside_channel_lock");
+    }
+
+    #[test]
+    fn recv_closed_cleanup_retires_waker_outside_channel_lock() {
+        init_test("recv_closed_cleanup_retires_waker_outside_channel_lock");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(4);
+        let (waker, drop_count, lock_was_free) = waker_drop_lock_probe(&tx);
+        let mut fut = Box::pin(rx.recv(&cx));
+
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(fut.as_mut().poll(&mut task_cx).is_pending());
+        }
+        drop(waker);
+
+        tx.channel.sender_count.store(0, Ordering::Release);
+        let noop = Waker::noop();
+        let mut task_cx = Context::from_waker(noop);
+        assert!(matches!(
+            fut.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(RecvError::Closed))
+        ));
+        tx.channel.sender_count.store(1, Ordering::Release);
+
+        assert_waker_dropped_outside_lock(&drop_count, &lock_was_free);
+        crate::test_complete!("recv_closed_cleanup_retires_waker_outside_channel_lock");
     }
 
     #[test]

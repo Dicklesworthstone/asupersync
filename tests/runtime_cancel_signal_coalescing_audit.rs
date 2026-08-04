@@ -536,7 +536,9 @@ fn task_cancel_trace_waits_for_first_physical_lane_publication() {
     );
 
     let delegated_loop = drain
-        .find("for (task_id, requested_priority, reason, mut task_wakes) in delegated")
+        .find(
+            "for (task_id, requested_priority, reason, mut task_wakes, admitted_slot) in delegated",
+        )
         .expect("delegated publication loop");
     let successful = &drain[delegated_loop..];
     let worker_permit = successful

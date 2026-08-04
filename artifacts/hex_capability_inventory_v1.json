@@ -1,0 +1,960 @@
+{
+  "schema_version": 1,
+  "artifact_id": "hex-capability-inventory-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-d24mms.9.1",
+  "capability_id": "CAP-HEX-CODEC",
+  "baseline_revision": "8793ef7097f23622b2bdea1cd9a60afbb11517f1",
+  "authority_revision": "8793ef7097f23622b2bdea1cd9a60afbb11517f1",
+  "captured_date_utc": "2026-08-02",
+  "authority": {
+    "source": "artifacts/dependency_capability_registry_v1.json#CAP-HEX-CODEC",
+    "registry_disposition": "PRESERVE_AND_REPLACE_IF_PARITY",
+    "current_action": "KEEP_INCUMBENT",
+    "cutover_state": "BLOCKED_PENDING_EVIDENCE",
+    "dependency_exit_allowed": false,
+    "implementation_owner": "asupersync-d24mms.9.2",
+    "migration_owner": "asupersync-d24mms.9.3",
+    "journey_owner": "asupersync-d24mms.9.4",
+    "terminal_cutover_owner": "asupersync-d24mms.9.5"
+  },
+  "policy": {
+    "zero_unknown_required": true,
+    "unknown_rows": 0,
+    "inventory_state": "BASELINED_WITH_ROUTED_GAPS",
+    "evidence_state": "EXECUTABLE_PARTIAL_BLOCKING",
+    "accepted_states": [
+      "BASELINED",
+      "PRESENT",
+      "ABSENT",
+      "PLANNED",
+      "BLOCKED",
+      "ROUTED",
+      "OUT_OF_SCOPE",
+      "NOT_RUN_BY_A1"
+    ]
+  },
+  "source_pin_scope": {
+    "state": "BASELINED",
+    "path_count": 81,
+    "coverage": "dependency and graph authority, compilation gates and nested test ownership, public and manual API definitions and reexports, persisted and wire format producers and consumers, and downstream journey routing",
+    "excludes": "the remaining call-site files are protected by exact lexical path and symbol census rather than full-file hashes"
+  },
+  "source_pins": [
+    {"path":"Cargo.toml","sha256":"f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02","line_count":1038},
+    {"path":"Cargo.lock","sha256":"a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4","line_count":4666},
+    {"path":"conformance/Cargo.toml","sha256":"1b734acb9c81e0bbf10b26c5b8dddbd0131d9e9915d447f349567ce2d4be2bfb","line_count":213},
+    {"path":"tests/conformance/raptorq_rfc6330/golden/Cargo.toml","sha256":"9df3b4755bc7d60b5ab8ae1910211f481d52305ee0a8f7f3f451b8098cb103ec","line_count":30},
+    {"path":"tests/conformance/raptorq_rfc6330/golden/src/lib.rs","sha256":"4ccc6fc3ac9090bcd3f4c2b2f16aaf69ea18e089ffb9dda8b73a8a434eeb6e98","line_count":497},
+    {"path":"tests/conformance/raptorq_rfc6330/golden/src/mod.rs","sha256":"3f341616116b85c479abd1afd4f00a23c7a0aa4d891aade4d5906ac99cf7178a","line_count":16},
+    {"path":"tests/atp_cli_quic_loopback.rs","sha256":"c8a105c22a61caa6b9f482bdec77b7c409301f3dda0647c38efa9e26c10f7fc5","line_count":2677},
+    {"path":"tests/lz4_owned_codec_corpus_contract.rs","sha256":"3adf9aa70e4b303ea59c39bc6e184838c7b9a9ba1b2aec41571d1d47c10b5eef","line_count":427},
+    {"path":"tests/integration/kafka_real_broker.rs","sha256":"f12b3e131f2376617dd6d876dfc09bbffe368f749f1ff25d606d2f0631b204f7","line_count":1883},
+    {"path":"tests/atp_object_journal_e2e_proof_suite.rs","sha256":"8d1fa5786feff8837f22523931d94dda88487e7c51a240de6f4de08b192449ee","line_count":562},
+    {"path":"tests/atp/mod.rs","sha256":"0d09202fdcf597aa3f44686b28623dbe3d31539248355df6601e4958a6bc67e9","line_count":23},
+    {"path":"tests/atp_e2e_proof_suite.rs","sha256":"7771d68ced3eb2432f2d64c560c04caf087815b77b222e5eaf378d28a2ccec97","line_count":1232},
+    {"path":"tests/atp_multi_peer_integration.rs","sha256":"9f2244127378990f0a0597dfbd96045a1551e6f1735783223babb5cdc3904477","line_count":543},
+    {"path":"src/lib.rs","sha256":"22ce17632d6a98843ebd6b9f855a430aef3ea6da07a6657e3311ad87b78c1b7f","line_count":468},
+    {"path":"src/atp/mod.rs","sha256":"098e4acd9abc7df0a9b6e3ba484b07e4eade44235166b98c43bad9a4cb3b327a","line_count":172},
+    {"path":"src/security/mod.rs","sha256":"d1d2277ad254f3a36c4a1751d517d066f4cd7704a44866d4fcbed321288efd72","line_count":85},
+    {"path":"src/observability/mod.rs","sha256":"9008a30ec981e63ef07f2351b5ad80bfcd89dea8d191869fd027d2dd76fd7a80","line_count":1162},
+    {"path":"src/net/mod.rs","sha256":"a0652a2a243499570d274c670dc3c45125584f65909141a36e97fd585e05761e","line_count":118},
+    {"path":"src/net/atp/mod.rs","sha256":"fff6f36cd57f83fc949b9f5a11ad67382367aeb79152a0b6bd62d36b274fb058","line_count":67},
+    {"path":"src/net/atp/sdk/mod.rs","sha256":"9974201b1bfdcead873d840b60a1f1bf00b76277006ffab26e74f2affc6926da","line_count":273},
+    {"path":"src/net/atp/protocol/mod.rs","sha256":"14e7fe3280d097c3f2c173938894b4229419f66c0b49c83af6b16c2cf09c50be","line_count":42},
+    {"path":"src/net/atp/sdk/object.rs","sha256":"5dd1cdf169d9f557520b6f2d2d8f3944319bef3d702896c8170312a6eb6e6ecf","line_count":793},
+    {"path":"src/net/atp/sdk/transfer.rs","sha256":"e66735778cfe5427e8ea197c2b23b6ed1a983dd83dc7d6e57bc17da6ad7f0064","line_count":1378},
+    {"path":"src/database/postgres.rs","sha256":"8794fe1b0ad93d741d576c05aa1ccfe09ddd82eff0a25429ede34a909ce2dc27","line_count":19716},
+    {"path":"src/observability/w3c_trace_context.rs","sha256":"c99618f9c888f88ac2f81c34242c56cc305e1421dd6cf9ce162e8169e7c7a15f","line_count":966},
+    {"path":"src/security/keys/mod.rs","sha256":"51d2b9a90729311d426a75a991706eea9aa9edbeff4ac3233269331c5e105c26","line_count":777},
+    {"path":"src/bin/atp.rs","sha256":"b77dd1e90ae1ab81bf084feac214b31cc8f17557d6f3c476dcdb1868075eee4b","line_count":11912},
+    {"path":"src/net/atp/transport_tcp/mod.rs","sha256":"e16a81819407a21d22c5cb5dc62b2e9d66c9f916c74aee34a20a3a5fa767008c","line_count":5838},
+    {"path":"src/plan/certificate.rs","sha256":"62a0448793b3f98befb9f19ce238ba00c3b3655f86aa5a6f198373b71b1c6974","line_count":2695},
+    {"path":"src/trace/distributed/id.rs","sha256":"56e29a6824b19f4ecea523ffc95d23ba83589f3635f8510a39cb641c104a979b","line_count":441},
+    {"path":"src/console.rs","sha256":"58588faf55ccd530d4e8e7f07f299bb892f9600438ea3372ad7f011972a71078","line_count":1633},
+    {"path":"src/net/atp/transport_common/streaming.rs","sha256":"a9663fa6d68b4f21565a109885386470e47f8686bbbec1e33e1501657d478fdc","line_count":739},
+    {"path":"src/atp/lab/mod.rs","sha256":"980a03ebc3e1191d8937d568483badf451cf2149303a79d3d395075849ca6d0a","line_count":706},
+    {"path":"src/cli/atp_workflows.rs","sha256":"a813070896f9d73f83b4f6f59c8bf2f8d3902805838300a88a9656fa48961125","line_count":1960},
+    {"path":"src/cli/atp_command_tree.rs","sha256":"b79d4f01345274f6260d3ce911e48e2c2d2cd7c0c49ff7562f5ecf1a58d2e603","line_count":1706},
+    {"path":"src/agent_swarm/control_plane.rs","sha256":"f0dcad5544b29eed1c34f864452d06810dd2068931814dd054294d894ab51620","line_count":1328},
+    {"path":"src/agent_swarm/handoff_verifier.rs","sha256":"f3cedee7e171422333516955871701de447f560b9a4eafaa9598ec5f0b3da40e","line_count":1131},
+    {"path":"src/atp/cache/mod.rs","sha256":"b5a2a0c34fca446dc11b27ebd03ed19e3c9fe8280641f3efe568928ee9cdf9c4","line_count":885},
+    {"path":"src/atp/cache/storage.rs","sha256":"db786d274604ee96e3f7a803ca9f19cf7c60b9be12fe25bf012a824a59fc4837","line_count":1384},
+    {"path":"src/atp/directory/mod.rs","sha256":"a39979e8986d3111d7fd4bcb8e7abc01f666f21ba1cdbbb8180a9010e0b216bf","line_count":1265},
+    {"path":"src/atp/grant/manager.rs","sha256":"f864ad432bb77bfc6d1d455d1ea3a591730fde53388941792d61409b1e0f5da3","line_count":752},
+    {"path":"src/atp/grant/pairing.rs","sha256":"a81f13ea8bbdaf662b3a289e9c3dc131a8e267d620ec230fdd68c40e93498aea","line_count":978},
+    {"path":"src/atp/grant/storage.rs","sha256":"003d20bfc56cc7a4b253c0b1b597e8e2de3a1603236c17ee61ae1d17d998d8c2","line_count":920},
+    {"path":"src/atp/identity/mod.rs","sha256":"4f634ef675fc103ef4ba349d1402655d8f2b55f947e7362dfddf6ba283020579","line_count":354},
+    {"path":"src/atp/inbox/mod.rs","sha256":"01d33a1f96d7562f1b0374c7d5cc1e9c3daca0b9e1d50e243994ec7035fa41fc","line_count":2138},
+    {"path":"src/atp/journal/delta_cas.rs","sha256":"c83141dcf02f9d1f6af48e13b08df60482da1b58787183bf10c32d3504da922e","line_count":679},
+    {"path":"src/atp/mailbox/client.rs","sha256":"f4aa3773e729110ba7c9ed70b936dc56336e29bef960eb16fff5f6770f818444","line_count":630},
+    {"path":"src/atp/mailbox/mod.rs","sha256":"1f3960efa69764f2cd569aef5b65176b1b06d4f369af2c1f7d16d45569f734c0","line_count":745},
+    {"path":"src/atp/mailbox/storage.rs","sha256":"beb55b4e96f895ff746de1b89b5c1cc2d41fa0bd2ed9a1a21ff581919d55af56","line_count":1066},
+    {"path":"src/atp/manifest.rs","sha256":"c870f9ff6fcda07065bb4bd58cb2a329152afb98230ea97a86af11fc020edd50","line_count":4086},
+    {"path":"src/atp/object.rs","sha256":"b511bcfd14fa297c903a1cfdc4ae7a4233eeeefec17a47f52b0d1e22a21e2411","line_count":1337},
+    {"path":"src/atp/proof/bundle.rs","sha256":"14cd1bf8451624c44354b536f01f67754fb778c9ddf7a4b0998da3f639ff770f","line_count":2412},
+    {"path":"src/atp/proof/serde_types.rs","sha256":"44d23b1a94daea977c84fc64201fd78e9c601819f597081ff9c813222a2263d0","line_count":182},
+    {"path":"src/atp/repair_scheduler.rs","sha256":"115180d132fdc7450117e3316eb0936e88ac492f259c0bf8eabe0a39e799ff8b","line_count":1773},
+    {"path":"src/atp/sdk.rs","sha256":"ff7cf38a49142dc8a6144fc3558598139ff39052778a00cb7749f5106a212789","line_count":2209},
+    {"path":"src/atp/stream_object.rs","sha256":"daaea458cefc631fb5d3810f495a74db5af3d69c9dc21b19b9441bb42201ef7e","line_count":1797},
+    {"path":"src/atp/sync/mod.rs","sha256":"3e82b2b0d7e294d53f33eb398b9da6560ed673376e84b2a8330402f34eef0abd","line_count":1900},
+    {"path":"src/atp/transfer/mod.rs","sha256":"304161af5c7ad3ce554ab2808171f635da8098a55525c57d9d08f51d44ae2299","line_count":2162},
+    {"path":"src/distributed/consensus/types.rs","sha256":"c8cbca9866e166de502839565e901c4c8e78b9d73b37abb20fa1662735324228","line_count":339},
+    {"path":"src/distributed/snapshot.rs","sha256":"d6e7dc3c5cf90d44435984e5134ac0ff3bb12b47d65d6fd1ecd64e18813f120d","line_count":2678},
+    {"path":"src/lab/crashpack/mod.rs","sha256":"ab683dd67fc81373d9545270b0995d7bb89297d83669541ad19cbeac317b66da","line_count":774},
+    {"path":"src/lab/crashpack/replay.rs","sha256":"fd23aae8304366ea323c077e8cef1f5583e224bbcc68b1e8377d7853373b6acc","line_count":1606},
+    {"path":"src/net/atp/channel_bonding.rs","sha256":"f2fdb7831dd80ca5429cb2e18e29169455616b6cb90b8731aec329562c04855e","line_count":1539},
+    {"path":"src/net/atp/handshake/traces.rs","sha256":"6b7683ac0d5c492c6a8398bea53e23df450c269f9b5a987eaaf7ff576f57cc12","line_count":723},
+    {"path":"src/net/atp/protocol/session.rs","sha256":"bd22f366978e089e9657dc08de5a62a365c6234a2ed78fee0227cae1a0d71bd1","line_count":2746},
+    {"path":"src/net/atp/protocol/transcript.rs","sha256":"fc51615ec79b16ad37079c81351729353cc636d97046e54bb57693408f659cfe","line_count":453},
+    {"path":"src/net/atp/sdk/bonded.rs","sha256":"1a62c23148dba91c50ade09a6c8182e3d600204dba71dcd1c2c7f8f0d6a5db15","line_count":1047},
+    {"path":"src/net/atp/transport_quic/mod.rs","sha256":"01282192055de1910eab74c3c78b77493c9f2254848027152a50194c8e1d3796","line_count":17212},
+    {"path":"src/net/atp/transport_rq/mod.rs","sha256":"2d3f3123d15124a972b9172be3bcd5a9e8010cfde176e723fb2abb215e28ee86","line_count":15242},
+    {"path":"src/net/quic_native/tls.rs","sha256":"0d4452bd8358cf0c23e64b7593db3758d1b084b8f65540333533fd340e8d3e0a","line_count":2266},
+    {"path":"src/raptorq/proof.rs","sha256":"feff2b4696c48604e7e76ad682e1ee51b42fa5f70f1c24f651e70f78c12529b1","line_count":4123},
+    {"path":"src/trace/crashpack.rs","sha256":"76082b54047d2f5a95d1a01a51da2ea462d0545f2e69583350b8c4ef98a8354d","line_count":3668},
+    {"path":"examples/demo_benchmark.rs","sha256":"8525af694bd4d75f2a224200991e3d63d70e611bff435c441b778b439397a2ef","line_count":679},
+    {"path":"benches/golden_output.rs","sha256":"a6dd8fee91a182d24168a45edd47aff95270e59de2747bf885309826b0ff5ed9","line_count":1041},
+    {"path":"artifacts/dependency_capability_registry_v1.json","sha256":"402ed38f8756c32dd34f24680b96390469f87f851a41e968f350d5e14b221996","line_count":6908},
+    {"path":"artifacts/dependency_capability_baseline_v1.json","sha256":"88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8","line_count":1357},
+    {"path":"artifacts/dependency_verification_matrix_v1.json","sha256":"c42345e9bbd771a1fb525504bce4162b2af6caca8a75b642d6e14bbb14f7d36b","line_count":83691},
+    {"path":"artifacts/dependency_marginal_ledger_v1.json","sha256":"9382d8357e59b49b01775f3efad2db95f2186c63bc432b5616ba20f3b9a218a9","line_count":188045},
+    {"path":"artifacts/api_surface_map_v1.json","sha256":"7dfbb239422630e1ef9c875e7542c4cee440211233dc7b734611fa8481d54178","line_count":4824},
+    {"path":"scripts/run_dependency_sovereignty_e2e.sh","sha256":"3d9fd36912939dd480d479c8f60030e4839f81a6315f08fa5a0137b3960807ea","line_count":1251},
+    {"path":"scripts/run_all_e2e.sh","sha256":"183b9cccec81d18909feddad4022c084f5fcac27823191b6ea64a2adba8a6aad","line_count":1259}
+  ],
+  "dependency_resolution": {
+    "manifest_requirement": "0.4",
+    "resolved_version": "0.4.3",
+    "checksum": "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70",
+    "edge_id": "normal:hex",
+    "edge_kind": "normal",
+    "optional": false,
+    "target_condition": null,
+    "root_default_features": true,
+    "upstream_declared_default_features": ["std"],
+    "upstream_default_feature_closure": ["std", "alloc"],
+    "unsafe_exposure_class": "SAFE-OWN",
+    "build_scripts": [],
+    "proc_macros": [],
+    "native_code": [],
+    "canonical_synthesized_consumer_profiles": [
+      "minimal",
+      "default",
+      "tls",
+      "sqlite",
+      "kafka",
+      "metrics",
+      "cli",
+      "compression",
+      "trace-compression",
+      "io-uring",
+      "loom-tests",
+      "fuzz-quarantine"
+    ],
+    "canonical_target_triples": [
+      "aarch64-apple-darwin",
+      "wasm32-unknown-unknown",
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-gnu"
+    ],
+    "synthesized_consumer_cells": 48,
+    "synthesized_consumer_marginal_package": "registry+https://github.com/rust-lang/crates.io-index#hex@0.4.3",
+    "synthesized_consumer_marginal_package_count_per_cell": 1,
+    "workspace_dev_build_audit_cells": 4,
+    "workspace_dev_build_audit_marginal_package_count_per_cell": 0,
+    "workspace_retaining_edge": "sqlx-macros-core -> hex",
+    "distinct_nonreplacement_collision": "const-hex through opentelemetry-proto"
+  },
+  "call_compilation_profiles": [
+    {
+      "profile_id": "portable-library",
+      "state": "PRESENT",
+      "requirements": ["root dependency", "portable target"],
+      "direct_paths": [
+        "src/agent_swarm/control_plane.rs",
+        "src/agent_swarm/handoff_verifier.rs",
+        "src/distributed/consensus/types.rs",
+        "src/lab/crashpack/mod.rs",
+        "src/lab/crashpack/replay.rs",
+        "src/observability/w3c_trace_context.rs",
+        "src/security/keys/mod.rs",
+        "src/trace/crashpack.rs"
+      ],
+      "notes": "The unconditional edge remains reachable with or without root default features."
+    },
+    {
+      "profile_id": "native-atp-library",
+      "state": "PRESENT",
+      "requirements": ["target_arch != wasm32"],
+      "direct_path_prefixes": ["src/atp/", "src/net/atp/"],
+      "notes": "ATP library modules are native-target gated, not feature gated."
+    },
+    {
+      "profile_id": "cli-module",
+      "state": "PRESENT",
+      "requirements": ["feature cli", "target_arch != wasm32"],
+      "direct_paths": ["src/cli/atp_workflows.rs"]
+    },
+    {
+      "profile_id": "atp-cli-binary",
+      "state": "PRESENT",
+      "requirements": ["feature atp-cli", "target_arch != wasm32"],
+      "direct_paths": ["src/bin/atp.rs"]
+    },
+    {
+      "profile_id": "postgres",
+      "state": "PRESENT",
+      "requirements": ["feature postgres", "target_arch != wasm32"],
+      "direct_paths": ["src/database/postgres.rs"]
+    },
+    {
+      "profile_id": "legacy-internal-lib-tests",
+      "state": "PRESENT",
+      "requirements": ["cfg(test)", "feature legacy-internal-test-harnesses"],
+      "direct_paths": [
+        "src/atp/cache_seeding_integration_tests.rs",
+        "src/deterministic_state_golden_tests.rs",
+        "src/golden_artifacts_tests.rs",
+        "src/protocol_serialization_golden_tests.rs",
+        "src/public_api_golden_tests.rs"
+      ]
+    },
+    {
+      "profile_id": "serialization-golden-lib-tests",
+      "state": "PRESENT",
+      "requirements": ["cfg(test)", "feature serialization-golden-harnesses"],
+      "direct_paths": [
+        "src/golden_artifacts_tests.rs",
+        "src/protocol_serialization_golden_tests.rs"
+      ]
+    },
+    {
+      "profile_id": "default-lib-tests",
+      "state": "PRESENT",
+      "requirements": ["cfg(test)"],
+      "direct_paths": [
+        "src/observability/span_id_collision_audit_test.rs",
+        "src/observability/w3c_trace_id_randomness_audit_test.rs"
+      ]
+    },
+    {
+      "profile_id": "test-or-test-internals",
+      "state": "PRESENT",
+      "requirements": ["cfg(any(test, feature = test-internals))"],
+      "direct_paths": ["src/test_logging.rs"]
+    },
+    {
+      "profile_id": "root-auto-ungated",
+      "state": "PRESENT",
+      "requirements": ["auto-discovered Cargo integration-test target", "manifest required-features = []", "crate cfg = []", "direct occurrence cfg = []"],
+      "notes": "Some targets import native ATP APIs and therefore do not compile on wasm32, but they declare no Cargo or crate-level gate."
+    },
+    {
+      "profile_id": "root-auto-atp-cli-windows",
+      "state": "PRESENT",
+      "requirements": ["auto-discovered Cargo integration-test target", "manifest required-features = []", "crate cfg = all(feature atp-cli, feature tls)", "direct occurrence cfg = windows"],
+      "direct_paths": ["tests/atp_cli_quic_loopback.rs"]
+    },
+    {
+      "profile_id": "root-auto-test-internals",
+      "state": "PRESENT",
+      "requirements": ["auto-discovered Cargo integration-test target", "manifest required-features = []", "crate cfg = feature test-internals", "direct occurrence cfg = []"],
+      "direct_paths": ["tests/lz4_owned_codec_corpus_contract.rs"]
+    },
+    {
+      "profile_id": "root-explicit-kafka",
+      "state": "PRESENT",
+      "requirements": ["explicit Cargo test target kafka_real_broker", "manifest required-features = []", "crate cfg = test", "direct occurrence cfg = []"],
+      "direct_paths": ["tests/integration/kafka_real_broker.rs"],
+      "notes": "The source imports feature-gated Kafka APIs despite the empty required-features declaration; live-broker opt-in is a separate journey concern."
+    },
+    {
+      "profile_id": "root-nested-object-journal",
+      "state": "PRESENT",
+      "requirements": ["nested integration-test module", "owner target atp_object_journal_e2e_proof_suite", "manifest required-features = []", "direct occurrence cfg = []"],
+      "direct_paths": ["tests/atp/journal/mod.rs", "tests/atp/object/mod.rs"]
+    },
+    {
+      "profile_id": "root-nested-multi-peer",
+      "state": "PRESENT",
+      "requirements": ["nested integration-test module", "owner targets atp_e2e_proof_suite and atp_multi_peer_integration", "manifest required-features = []", "direct occurrence cfg = []"],
+      "direct_paths": ["tests/atp/multi_peer/contracts.rs"]
+    },
+    {
+      "profile_id": "conformance-workspace",
+      "state": "BLOCKED",
+      "requirements": ["conformance package"],
+      "direct_paths": ["conformance/src/otlp_wire_format.rs"],
+      "reason": "The compiled package source has direct calls but no direct hex manifest edge; A1 did not execute this target."
+    },
+    {
+      "profile_id": "unwired-lexical-fixture",
+      "state": "OUT_OF_SCOPE",
+      "requirements": ["source file is not reachable from its package crate root or binaries"],
+      "direct_paths": [
+        "tests/conformance/raptorq_rfc6330/golden/src/golden_file_manager_simple.rs"
+      ],
+      "reason": "Retained in the lexical migration census but excluded from compiled behavior and manifest-gap claims."
+    },
+    {
+      "profile_id": "examples",
+      "state": "ABSENT",
+      "direct_hex_tokens": 0
+    },
+    {
+      "profile_id": "benches",
+      "state": "ABSENT",
+      "direct_hex_tokens": 0
+    },
+    {
+      "profile_id": "separate-fuzz-workspace",
+      "state": "ABSENT",
+      "direct_hex_tokens": 0,
+      "notes": "Later robustness evidence is owned by A4; A1 performed no execution."
+    }
+  ],
+  "incumbent_api": [
+    {
+      "api": "encode",
+      "signature": "encode<T: AsRef<[u8]>>(data: T) -> String",
+      "feature": "alloc",
+      "used_code_or_type_references": 180
+    },
+    {
+      "api": "decode",
+      "signature": "decode<T: AsRef<[u8]>>(data: T) -> Result<Vec<u8>, FromHexError>",
+      "feature": "alloc",
+      "used_code_or_type_references": 33
+    },
+    {
+      "api": "decode_to_slice",
+      "signature": "decode_to_slice<T: AsRef<[u8]>>(data: T, out: &mut [u8]) -> Result<(), FromHexError>",
+      "feature": "core",
+      "used_code_or_type_references": 11
+    },
+    {
+      "api": "FromHexError",
+      "signature": "enum FromHexError",
+      "feature": "core",
+      "used_code_or_type_references": 4
+    }
+  ],
+  "unused_incumbent_api": [
+    "encode_upper",
+    "encode_to_slice",
+    "ToHex",
+    "FromHex"
+  ],
+  "incumbent_semantics": {
+    "encode": {
+      "alphabet": "0123456789abcdef",
+      "output_case": "lowercase",
+      "prefix": null,
+      "separator": null,
+      "empty_output": "",
+      "output_length": "2 * input byte length",
+      "allocation": "String",
+      "codec_input_limit_bytes": null,
+      "failure_channel": "no Result; allocation failure and unchecked 2N output-length arithmetic at representation limits are outside the Result contract"
+    },
+    "decode": {
+      "accepted_alphabet": "ASCII 0-9, a-f, A-F with mixed case allowed",
+      "whitespace": "rejected",
+      "prefix": "rejected",
+      "empty_output": [],
+      "odd_length_precedence": "OddLength before character validation",
+      "scan_order": "left to right, high nibble before low nibble",
+      "invalid_index_unit": "raw input byte",
+      "invalid_character_mapping": "invalid byte cast directly to char",
+      "partial_result_visibility": "none; partial Vec is dropped",
+      "output_length": "input byte length / 2",
+      "codec_input_limit_bytes": null
+    },
+    "decode_to_slice": {
+      "preflight_order": ["odd input length", "exact destination length"],
+      "odd_error": "OddLength",
+      "destination_mismatch_error": "InvalidStringLength",
+      "preflight_error_mutation": "destination unchanged",
+      "invalid_character_mutation": "completed prefix bytes remain overwritten; current byte and suffix remain unchanged",
+      "rollback": false,
+      "zeroization": false,
+      "allocation": "none",
+      "codec_input_limit_bytes": null
+    },
+    "error": {
+      "derives": ["Debug", "Clone", "Copy", "PartialEq"],
+      "variants": [
+        "InvalidHexCharacter { c: char, index: usize }",
+        "OddLength",
+        "InvalidStringLength"
+      ],
+      "display": {
+        "InvalidHexCharacter": "Invalid character {:?} at position {}",
+        "OddLength": "Odd number of digits",
+        "InvalidStringLength": "Invalid string length"
+      },
+      "std_error_when_feature_std": true
+    }
+  },
+  "semantic_corpus": [
+    {"case_id":"HEX-SEM-01","operation":"encode","input_hex":"","expected":""},
+    {"case_id":"HEX-SEM-02","operation":"encode","input_hex":"000f10abff","expected":"000f10abff"},
+    {"case_id":"HEX-SEM-03","operation":"decode","input":"f9B4Ca","expected_bytes_hex":"f9b4ca"},
+    {"case_id":"HEX-SEM-04","operation":"decode","input":"","expected_bytes_hex":""},
+    {"case_id":"HEX-SEM-05","operation":"decode","input":"g","expected_error":"OddLength"},
+    {"case_id":"HEX-SEM-06","operation":"decode","input":"0g","expected_error":"InvalidHexCharacter { c: 'g', index: 1 }"},
+    {"case_id":"HEX-SEM-07","operation":"decode","input":"0x","expected_error":"InvalidHexCharacter { c: 'x', index: 1 }"},
+    {"case_id":"HEX-SEM-08","operation":"decode","input":"é","expected_error":"InvalidHexCharacter { c: 'Ã', index: 0 }"},
+    {"case_id":"HEX-SEM-09","operation":"decode_to_slice","input":"001","initial_destination_hex":"aabb","expected_error":"OddLength","expected_destination_hex":"aabb"},
+    {"case_id":"HEX-SEM-10","operation":"decode_to_slice","input":"0011","initial_destination_hex":"aabbcc","expected_error":"InvalidStringLength","expected_destination_hex":"aabbcc"},
+    {"case_id":"HEX-SEM-11","operation":"decode_to_slice","input":"0011zz","initial_destination_hex":"aabbcc","expected_error":"InvalidHexCharacter { c: 'z', index: 4 }","expected_destination_hex":"0011cc"},
+    {"case_id":"HEX-SEM-12","operation":"decode_to_slice","input":"f9B4Ca","initial_destination_hex":"000000","expected_destination_hex":"f9b4ca"}
+  ],
+  "occurrence_census": {
+    "roots": ["src", "tests", "examples", "benches", "conformance", "fuzz"],
+    "files": 90,
+    "lexical_tokens": 230,
+    "code_or_type_references": 228,
+    "comment_tokens": 2,
+    "cfg_any_disabled_references": 4,
+    "cfg_test_references_embedded_in_production_files": 25,
+    "test_or_test_internals_module_references": 2,
+    "test_or_conformance_group_references": 102,
+    "active_production_references": 95,
+    "symbols": {
+      "encode": 180,
+      "decode": 35,
+      "decode_to_slice": 11,
+      "FromHexError": 4
+    },
+    "code_or_type_symbols": {
+      "encode": 180,
+      "decode": 33,
+      "decode_to_slice": 11,
+      "FromHexError": 4
+    },
+    "by_root": [
+      {"root":"src","files":50,"lexical_tokens":181},
+      {"root":"tests","files":39,"lexical_tokens":47},
+      {"root":"conformance","files":1,"lexical_tokens":2},
+      {"root":"examples","files":0,"lexical_tokens":0},
+      {"root":"benches","files":0,"lexical_tokens":0},
+      {"root":"fuzz","files":0,"lexical_tokens":0}
+    ],
+    "comment_references": [
+      {"path":"src/database/postgres.rs","line":12714,"symbol":"decode"},
+      {"path":"src/observability/w3c_trace_context.rs","line":576,"symbol":"decode"}
+    ],
+    "cfg_any_disabled_references": [
+      {"path":"src/bin/atp.rs","line":7810,"symbol":"encode"},
+      {"path":"src/bin/atp.rs","line":7992,"symbol":"encode"},
+      {"path":"src/bin/atp.rs","line":8009,"symbol":"decode"},
+      {"path":"src/net/atp/transport_tcp/mod.rs","line":569,"symbol":"decode_to_slice"}
+    ],
+    "cfg_test_embedded_files": [
+      {"path":"src/atp/cache/mod.rs","symbols":{"encode":1}},
+      {"path":"src/atp/sync/mod.rs","symbols":{"encode":2}},
+      {"path":"src/bin/atp.rs","symbols":{"encode":9}},
+      {"path":"src/database/postgres.rs","symbols":{"decode":9}},
+      {"path":"src/net/atp/sdk/transfer.rs","symbols":{"encode":4}}
+    ],
+    "unknown_occurrences": 0
+  },
+  "call_sites": [
+    {"path":"conformance/src/otlp_wire_format.rs","profile":"conformance-workspace","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":2}},
+    {"path":"src/agent_swarm/control_plane.rs","profile":"portable-library","group_id":"HEX-A3-SECURITY-OBSERVABILITY","symbols":{"encode":2,"decode":3}},
+    {"path":"src/agent_swarm/handoff_verifier.rs","profile":"portable-library","group_id":"HEX-A3-SECURITY-OBSERVABILITY","symbols":{"encode":1}},
+    {"path":"src/atp/cache/mod.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":2},"cfg_test_symbols":{"encode":1}},
+    {"path":"src/atp/cache/storage.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":1}},
+    {"path":"src/atp/cache_seeding_integration_tests.rs","profile":"legacy-internal-lib-tests","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"src/atp/directory/mod.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":1,"decode":1}},
+    {"path":"src/atp/grant/manager.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":1}},
+    {"path":"src/atp/grant/pairing.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":1}},
+    {"path":"src/atp/grant/storage.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":1}},
+    {"path":"src/atp/identity/mod.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":1}},
+    {"path":"src/atp/inbox/mod.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":1}},
+    {"path":"src/atp/lab/mod.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":2}},
+    {"path":"src/atp/mailbox/client.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":1,"decode_to_slice":1}},
+    {"path":"src/atp/mailbox/mod.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":1}},
+    {"path":"src/atp/mailbox/storage.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":1,"decode_to_slice":1}},
+    {"path":"src/atp/manifest.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":2}},
+    {"path":"src/atp/object.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":3}},
+    {"path":"src/atp/proof/bundle.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":2}},
+    {"path":"src/atp/proof/serde_types.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":1}},
+    {"path":"src/atp/repair_scheduler.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":2}},
+    {"path":"src/atp/sdk.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":1}},
+    {"path":"src/atp/stream_object.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":1}},
+    {"path":"src/atp/swarm/coordinator.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":1}},
+    {"path":"src/atp/sync/mod.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":5},"cfg_test_symbols":{"encode":2}},
+    {"path":"src/bin/atp.rs","profile":"atp-cli-binary","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":20,"decode":4,"decode_to_slice":1},"cfg_any_disabled_symbols":{"encode":2,"decode":1},"cfg_test_symbols":{"encode":9}},
+    {"path":"src/cli/atp_workflows.rs","profile":"cli-module","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":2}},
+    {"path":"src/database/postgres.rs","profile":"postgres","group_id":"HEX-A3-DATABASE","symbols":{"encode":1,"decode":11},"comment_symbols":{"decode":1},"cfg_test_symbols":{"decode":9}},
+    {"path":"src/deterministic_state_golden_tests.rs","profile":"legacy-internal-lib-tests","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":10}},
+    {"path":"src/distributed/consensus/types.rs","profile":"portable-library","group_id":"HEX-A3-SECURITY-OBSERVABILITY","symbols":{"encode":1}},
+    {"path":"src/golden_artifacts_tests.rs","profile":"serialization-golden-lib-tests","additional_profiles":["legacy-internal-lib-tests"],"group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":17,"decode":3}},
+    {"path":"src/lab/crashpack/mod.rs","profile":"portable-library","group_id":"HEX-A3-SECURITY-OBSERVABILITY","symbols":{"encode":1}},
+    {"path":"src/lab/crashpack/replay.rs","profile":"portable-library","group_id":"HEX-A3-SECURITY-OBSERVABILITY","symbols":{"encode":1}},
+    {"path":"src/net/atp/channel_bonding.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"decode_to_slice":1}},
+    {"path":"src/net/atp/handshake/traces.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":7}},
+    {"path":"src/net/atp/protocol/session.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":3}},
+    {"path":"src/net/atp/protocol/transcript.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":1,"decode":1}},
+    {"path":"src/net/atp/sdk/bonded.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":1,"decode_to_slice":2}},
+    {"path":"src/net/atp/sdk/object.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":1,"decode":1,"FromHexError":2}},
+    {"path":"src/net/atp/sdk/transfer.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":5,"decode":1,"FromHexError":2},"cfg_test_symbols":{"encode":4}},
+    {"path":"src/net/atp/transport_quic/mod.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"decode_to_slice":1}},
+    {"path":"src/net/atp/transport_rq/mod.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"decode_to_slice":1}},
+    {"path":"src/net/atp/transport_tcp/mod.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"decode_to_slice":2},"cfg_any_disabled_symbols":{"decode_to_slice":1}},
+    {"path":"src/observability/span_id_collision_audit_test.rs","profile":"default-lib-tests","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"decode_to_slice":1}},
+    {"path":"src/observability/w3c_trace_context.rs","profile":"portable-library","group_id":"HEX-A3-SECURITY-OBSERVABILITY","symbols":{"encode":2,"decode":3},"comment_symbols":{"decode":1}},
+    {"path":"src/observability/w3c_trace_id_randomness_audit_test.rs","profile":"default-lib-tests","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1,"decode":1}},
+    {"path":"src/protocol_serialization_golden_tests.rs","profile":"serialization-golden-lib-tests","additional_profiles":["legacy-internal-lib-tests"],"group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":18}},
+    {"path":"src/public_api_golden_tests.rs","profile":"legacy-internal-lib-tests","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"src/security/keys/mod.rs","profile":"portable-library","group_id":"HEX-A3-SECURITY-OBSERVABILITY","symbols":{"encode":2,"decode":1}},
+    {"path":"src/test_logging.rs","profile":"test-or-test-internals","group_id":"HEX-A3-SECURITY-OBSERVABILITY","symbols":{"encode":2},"module_gate":"cfg(any(test, feature = test-internals))"},
+    {"path":"src/trace/crashpack.rs","profile":"portable-library","group_id":"HEX-A3-SECURITY-OBSERVABILITY","symbols":{"encode":1}},
+    {"path":"tests/atp/journal/mod.rs","profile":"root-nested-object-journal","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/atp/multi_peer/contracts.rs","profile":"root-nested-multi-peer","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/atp/object/mod.rs","profile":"root-nested-object-journal","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/atp_cli_quic_loopback.rs","profile":"root-auto-atp-cli-windows","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1},"direct_occurrence_gate":"cfg(windows)"},
+    {"path":"tests/atp_e2e_proof_suite.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":2}},
+    {"path":"tests/cache_padded_alignment_experiment_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/config_toml_capability_inventory_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/conformance/raptorq_rfc6330/golden/src/golden_file_manager_simple.rs","profile":"unwired-lexical-fixture","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/crossbeam_queue_safe_experiment_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/deflate_surface_inventory_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/dependency_budget_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/dependency_oracle_policy_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/dependency_supply_chain_policy_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/golden_outputs.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/integration/kafka_real_broker.rs","profile":"root-explicit-kafka","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/lz4_owned_codec_corpus_contract.rs","profile":"root-auto-test-internals","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"decode":1}},
+    {"path":"tests/manual_raptorq_stability_check.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/nkey_normative_spec_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1,"decode":2}},
+    {"path":"tests/raptorq_encoder_stability.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/raptorq_encoder_stability_simple.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/regex_character_semantics_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":2}},
+    {"path":"tests/regex_compiler_terminal_receipt_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/regex_folding_boundary_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/regex_ir_lowering_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":2}},
+    {"path":"tests/regex_ir_schema_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/regex_priority_capture_lowering_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/regex_privacy_capability_inventory_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/regex_semantic_terminal_receipt_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/regex_syntax_grammar_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/regex_syntax_terminal_receipt_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/regex_unicode_table_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/regex_vm_captures_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/regex_vm_core_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/regex_vm_iteration_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":2}},
+    {"path":"tests/regex_vm_terminal_receipt_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/scenario_yaml_capability_inventory_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":2}},
+    {"path":"tests/signal_boundary_inventory_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/stun_ice_golden_artifact_tests.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":2}},
+    {"path":"tests/xattr_boundary_inventory_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}}
+  ],
+  "migration_reservation_groups": [
+    {
+      "group_id": "HEX-A3-ATP-PROTOCOL-CLI",
+      "owner": "asupersync-d24mms.9.3",
+      "files": 33,
+      "lexical_tokens": 94,
+      "projection_sha256": "a1432140334c3763e9823e9ea06286a0308c618f03a13b08095d3a3bd5fc5a80",
+      "sensitivity": "public API, persisted state, wire formats, credentials, and CLI",
+      "journey_owner": "asupersync-d24mms.9.4"
+    },
+    {
+      "group_id": "HEX-A3-SECURITY-OBSERVABILITY",
+      "owner": "asupersync-d24mms.9.3",
+      "files": 9,
+      "lexical_tokens": 21,
+      "projection_sha256": "3238b9a702154b696580eb534ac15bb3e5e10abb42e6769fa43ea54e3d2ce71a",
+      "sensitivity": "key fingerprints, signatures, trace identifiers, evidence hashes, and diagnostics",
+      "journey_owner": "asupersync-d24mms.9.4"
+    },
+    {
+      "group_id": "HEX-A3-DATABASE",
+      "owner": "asupersync-d24mms.9.3",
+      "files": 1,
+      "lexical_tokens": 13,
+      "projection_sha256": "8b1b81a6b635c208085693fb6ed788bca8c50f08aecb8dac07aab0734acc5b0d",
+      "sensitivity": "PostgreSQL bytea wire and persisted values",
+      "journey_owner": "asupersync-d24mms.9.4"
+    },
+    {
+      "group_id": "HEX-A3-TEST-CONFORMANCE",
+      "owner": "asupersync-d24mms.9.3",
+      "files": 47,
+      "lexical_tokens": 102,
+      "projection_sha256": "e766658ca7dd79e2439036e74a8b6e3222048f1c5f1e1a4088474968cff97fe2",
+      "sensitivity": "goldens, evidence fingerprints, integration helpers, and conformance fixtures",
+      "journey_owner": "asupersync-d24mms.9.4"
+    }
+  ],
+  "public_surface": [
+    {
+      "surface_id": "HEX-PUB-OBJECT-HASH",
+      "state": "PRESENT",
+      "path": "asupersync::net::atp::sdk::object::ObjectHash::from_hex",
+      "source_paths": ["src/net/atp/sdk/object.rs"],
+      "signature": "fn(&str) -> Result<ObjectHash, hex::FromHexError>",
+      "external_error_type_exposed": true,
+      "output": "ObjectHash::hex returns 64 lowercase digits",
+      "wrong_decoded_length": "FromHexError::InvalidStringLength",
+      "owner": "asupersync-d24mms.9.3"
+    },
+    {
+      "surface_id": "HEX-PRIVATE-SDK-DECODE-32",
+      "state": "PRESENT",
+      "path": "src/net/atp/sdk/transfer.rs::decode_hex_32",
+      "source_paths": ["src/net/atp/sdk/transfer.rs"],
+      "visibility": "private",
+      "external_error_type_exposed": false,
+      "wrong_decoded_length": "FromHexError::InvalidStringLength",
+      "owner": "asupersync-d24mms.9.3"
+    },
+    {
+      "surface_id": "HEX-PUB-KEY-FINGERPRINT",
+      "state": "PRESENT",
+      "path": "asupersync::security::KeyFingerprint::{from_hex,to_hex,redacted}",
+      "source_paths": ["src/security/keys/mod.rs"],
+      "decode": "mixed case; syntax display embedded in KeyStoreError::InvalidFingerprint; exact 32 bytes",
+      "encode": "64 lowercase digits; redacted uses first 8 bytes",
+      "owner": "asupersync-d24mms.9.3"
+    },
+    {
+      "surface_id": "HEX-PUB-TRANSCRIPT-HASH",
+      "state": "PRESENT",
+      "path": "asupersync::net::TranscriptHash::{from_hex,to_hex}",
+      "source_paths": ["src/net/atp/protocol/transcript.rs"],
+      "decode": "mixed case; syntax collapses to invalid hex encoding; wrong length reports observed byte count",
+      "encode": "64 lowercase digits",
+      "owner": "asupersync-d24mms.9.3"
+    },
+    {
+      "surface_id": "HEX-PUB-PEER-ID",
+      "state": "PRESENT",
+      "path": "asupersync::atp::directory::{peer_id_from_hex,peer_id_to_hex}",
+      "source_paths": ["src/atp/directory/mod.rs"],
+      "decode": "mixed case; all syntax and length failures collapse to DirectoryError::InvalidPeerIdHex",
+      "encode": "64 lowercase digits",
+      "owner": "asupersync-d24mms.9.3"
+    },
+    {
+      "surface_id": "HEX-PUB-W3C-IDS",
+      "state": "PRESENT",
+      "path": "asupersync::observability::{TraceId,W3CSpanId}",
+      "source_paths": ["src/observability/w3c_trace_context.rs"],
+      "decode": "exact 32 or 16 digits, mixed case, fixed owned messages, all-zero rejection",
+      "encode": "lowercase",
+      "owner": "asupersync-d24mms.9.3"
+    },
+    {
+      "surface_id": "HEX-PUB-ATP-FIXED-IDS",
+      "state": "PRESENT",
+      "paths": [
+        "asupersync::atp::object::{ContentId::to_hex,ManifestId::to_hex,ObjectId::as_hex}",
+        "asupersync::atp::manifest::{MerkleRoot::to_hex,CommitId::to_hex}",
+        "asupersync::atp::inbox::ObjectDigest::{to_hex,redacted}"
+      ],
+      "source_paths": ["src/atp/object.rs", "src/atp/manifest.rs", "src/atp/inbox/mod.rs"],
+      "encode": "all full values are 64 lowercase digits; ContentId Display is content: plus 16 digits; ManifestId Display is manifest: plus 16; ObjectId Display delegates to those; MerkleRoot Display is merkle: plus 16; CommitId Display is commit: plus 16; ObjectDigest Display is sha256: plus 16 and redacted is sha256: plus 12 plus ...",
+      "owner": "asupersync-d24mms.9.3"
+    },
+    {
+      "surface_id": "HEX-PUB-ATP-IDENTITY-DIAGNOSTICS",
+      "state": "PRESENT",
+      "paths": [
+        "asupersync::atp::identity::DurablePeerIdentity::peer_id_hex",
+        "asupersync::atp::repair_scheduler::PeerId::as_string",
+        "asupersync::net::atp::protocol::{PeerId::redacted,SessionId::redacted}",
+        "asupersync::distributed::consensus::MessageDigest::fmt"
+      ],
+      "source_paths": [
+        "src/atp/identity/mod.rs",
+        "src/atp/repair_scheduler.rs",
+        "src/net/atp/protocol/session.rs",
+        "src/distributed/consensus/types.rs"
+      ],
+      "encode": "durable peer id is 64 lowercase digits; peer and session diagnostics use 16 lowercase digits; repair peer includes socket# prefix; message digest uses digest: plus 16 lowercase digits",
+      "owner": "asupersync-d24mms.9.3"
+    },
+    {
+      "surface_id": "HEX-PUB-PROOF-CONTENT-ID",
+      "state": "PRESENT",
+      "path": "asupersync::atp::proof::serde_types::SerializableContentId::fmt",
+      "source_paths": ["src/atp/proof/serde_types.rs"],
+      "encode": "Display emits exactly 64 lowercase digits",
+      "owner": "asupersync-d24mms.9.3"
+    },
+    {
+      "surface_id": "HEX-PUB-ATP-REPAIR-AUTH-DOMAIN",
+      "state": "PRESENT",
+      "path": "asupersync::atp::repair_scheduler::PeerInfo::auth_domain",
+      "source_paths": ["src/atp/repair_scheduler.rs"],
+      "behavior": "validation accepts only exact equality with atp-repair: followed by the first 12 SHA-256 bytes as 24 lowercase digits",
+      "owner": "asupersync-d24mms.9.3"
+    },
+    {
+      "surface_id": "HEX-PUB-BONDED-AUTH-KEY",
+      "state": "PRESENT",
+      "path": "asupersync::net::atp::sdk::bonded::BondedTransfer::auth_key_hex",
+      "source_paths": ["src/net/atp/sdk/bonded.rs"],
+      "decode": "resolve_auth trims surrounding whitespace; an optional lowercase 0x prefix is accepted; the remaining input must be exactly 64 mixed-case ASCII hex digits and 32 decoded bytes; owned length, character, decode, and AuthKey strength rejections map to RqError::Authentication",
+      "owner": "asupersync-d24mms.9.3"
+    }
+  ],
+  "manual_collision_surfaces": [
+    {"surface_id":"HEX-COLLISION-PLAN-HASH","state":"PRESENT","path":"asupersync::plan::PlanHash::{to_hex,from_hex}","source_paths":["src/plan/certificate.rs"],"behavior":"64 lowercase output; exact length; mixed-case input despite lowercase-only documentation","disposition":"PRESERVE_OUTSIDE_DIRECT_EDGE"},
+    {"surface_id":"HEX-COLLISION-PROOF-HASH","state":"PRESENT","path":"asupersync::raptorq::ProofHash::{to_hex,from_hex}","source_paths":["src/raptorq/proof.rs"],"behavior":"64 lowercase output; parser is cfg(test), exact length, mixed-case input, Option error","disposition":"PRESERVE_OUTSIDE_DIRECT_EDGE"},
+    {"surface_id":"HEX-COLLISION-DIST-TRACE-ID","state":"PRESENT","path":"asupersync::trace::distributed::DistTraceId::{to_w3c_string,from_w3c_string}","source_paths":["src/trace/distributed/id.rs"],"behavior":"32 lowercase output; exact length; mixed-case input; Option error","disposition":"PRESERVE_OUTSIDE_DIRECT_EDGE"},
+    {"surface_id":"HEX-COLLISION-COLOR","state":"PRESENT","path":"asupersync::console::Color::from_hex","source_paths":["src/console.rs"],"behavior":"trims whitespace, optional leading #, exactly six mixed-case ASCII digits, Option error","disposition":"PRESERVE_OUTSIDE_DIRECT_EDGE"},
+    {"surface_id":"HEX-COLLISION-TRANSPORT-COMMON","state":"PRESENT","path":"asupersync::net::atp::transport_common::hex_encode","source_paths":["src/net/atp/transport_common/streaming.rs"],"behavior":"public generic lowercase encoder; two digits per byte; unchecked capacity multiplication; no explicit cap","disposition":"A2_REVIEW_BEFORE_REUSE"},
+    {"surface_id":"HEX-COLLISION-FIXED-ID-ENCODERS","state":"PRESENT","paths":["TransferId","DeltaChunkId","distributed::ContentHash"],"source_paths":["src/atp/transfer/mod.rs","src/atp/journal/delta_cas.rs","src/distributed/snapshot.rs"],"behavior":"public fixed-width lowercase encoders implemented manually without the direct dependency edge","disposition":"PRESERVE_OUTSIDE_DIRECT_EDGE"},
+    {"surface_id":"HEX-COLLISION-TLS-SHORT","state":"PRESENT","path":"src/net/quic_native/tls.rs::short_hex","source_paths":["src/net/quic_native/tls.rs"],"behavior":"lowercase diagnostic prefix","disposition":"PRESERVE_OUTSIDE_DIRECT_EDGE"},
+    {"surface_id":"HEX-COLLISION-EXAMPLE-BENCH-HELPERS","state":"PRESENT","paths":["examples/demo_benchmark.rs","benches/golden_output.rs"],"source_paths":["examples/demo_benchmark.rs","benches/golden_output.rs"],"behavior":"manual lowercase byte encoders with zero direct incumbent path tokens","disposition":"PRESERVE_OUTSIDE_DIRECT_EDGE"}
+  ],
+  "persisted_and_wire_formats": [
+    {
+      "format_id": "HEX-FMT-W3C-TRACEPARENT",
+      "state": "PRESENT",
+      "paths": ["src/observability/w3c_trace_context.rs"],
+      "contract": "128-byte header cap; exact four fields; version 00; 32-digit trace ID; 16-digit span ID; two-digit flags; mixed-case input; lowercase output; all-zero IDs rejected",
+      "owner": "asupersync-d24mms.9.3",
+      "journey_owner": "asupersync-d24mms.9.4"
+    },
+    {
+      "format_id": "HEX-FMT-POSTGRES-BYTEA",
+      "state": "PRESENT",
+      "paths": ["src/database/postgres.rs"],
+      "contract": "binary-format bytea accepts arbitrary bytes; text-format lowercase \\x output accepts a mixed-case prefixed payload with upstream decode display embedded in PgError::Protocol; valid-UTF-8 unprefixed text is returned as its raw bytes and invalid UTF-8 text is rejected first",
+      "owner": "asupersync-d24mms.9.3",
+      "journey_owner": "asupersync-d24mms.9.4"
+    },
+    {
+      "format_id": "HEX-FMT-MAILBOX-PEER-ID",
+      "state": "PRESENT",
+      "paths": ["src/atp/mailbox/mod.rs"],
+      "contract": "derived peer id text is peer- followed by the first eight digest bytes as 16 lowercase digits",
+      "owner": "asupersync-d24mms.9.3",
+      "journey_owner": "asupersync-d24mms.9.4"
+    },
+    {
+      "format_id": "HEX-FMT-MAILBOX-TRANSFER-ID",
+      "state": "PRESENT",
+      "paths": ["src/atp/mailbox/mod.rs"],
+      "contract": "lowercase UUID-shaped 8-4-4-4-12 output; compact or canonical mixed-case input; source-byte error positions",
+      "owner": "asupersync-d24mms.9.3",
+      "journey_owner": "asupersync-d24mms.9.4"
+    },
+    {
+      "format_id": "HEX-FMT-MAILBOX-SHA256",
+      "state": "PRESENT",
+      "paths": ["src/atp/mailbox/client.rs", "src/atp/mailbox/storage.rs"],
+      "contract": "lowercase SHA-256 metadata and sha256: checksum text; malformed or mismatched values become tamper evidence",
+      "owner": "asupersync-d24mms.9.3",
+      "journey_owner": "asupersync-d24mms.9.4"
+    },
+    {
+      "format_id": "HEX-FMT-ATP-DETACHED-SIGNATURE",
+      "state": "PRESENT",
+      "paths": ["src/net/atp/sdk/transfer.rs"],
+      "contract": "all three JSON fields represent 32 bytes; session_id_hex must exactly match canonical lowercase output, while hash_hex and signature_hex accept mixed case at exactly 64 digits; malformed or mismatched values make verification false",
+      "owner": "asupersync-d24mms.9.3",
+      "journey_owner": "asupersync-d24mms.9.4"
+    },
+    {
+      "format_id": "HEX-FMT-BONDED-AUTH-DESCRIPTOR",
+      "state": "PRESENT",
+      "paths": ["src/net/atp/sdk/bonded.rs"],
+      "contract": "accepted auth-key text is normalized to 64 lowercase digits with no prefix; the non-secret descriptor key id is rq-auth-sha256: followed by the first eight SHA-256 bytes as 16 lowercase digits",
+      "owner": "asupersync-d24mms.9.3",
+      "journey_owner": "asupersync-d24mms.9.4"
+    },
+    {
+      "format_id": "HEX-FMT-ATP-DELTA-ROOTS",
+      "state": "PRESENT",
+      "paths": [
+        "src/net/atp/channel_bonding.rs",
+        "src/net/atp/transport_quic/mod.rs",
+        "src/net/atp/transport_rq/mod.rs",
+        "src/net/atp/transport_tcp/mod.rs"
+      ],
+      "contract": "QUIC and RQ require canonical lowercase; active TCP and channel bonding accept mixed case after exact 64-character validation",
+      "owner": "asupersync-d24mms.9.3",
+      "journey_owner": "asupersync-d24mms.9.4"
+    },
+    {
+      "format_id": "HEX-FMT-ATP-OBJECT-MANIFEST-STATE",
+      "state": "PRESENT",
+      "paths": [
+        "src/atp/object.rs",
+        "src/atp/manifest.rs",
+        "src/atp/cache/mod.rs",
+        "src/atp/cache/storage.rs",
+        "src/atp/proof/bundle.rs",
+        "src/bin/atp.rs"
+      ],
+      "contract": "content, manifest, proof, cache, package, and state identifiers remain byte-for-byte lowercase with their existing widths and separators; cache storage hashes content-hash text and uses a two-digit shard plus a 64-digit filename",
+      "owner": "asupersync-d24mms.9.3",
+      "journey_owner": "asupersync-d24mms.9.4"
+    },
+    {
+      "format_id": "HEX-FMT-ATP-SYNC-PROOFS",
+      "state": "PRESENT",
+      "paths": ["src/atp/sync/mod.rs"],
+      "contract": "manifest_tree_root and final_tree_root are serialized as 64 lowercase digits; replay_pointer is directory-sync: followed by 64 lowercase digits",
+      "owner": "asupersync-d24mms.9.3",
+      "journey_owner": "asupersync-d24mms.9.4"
+    },
+    {
+      "format_id": "HEX-FMT-ATP-STREAM-CONSUMER-SIGNATURE",
+      "state": "PRESENT",
+      "paths": ["src/atp/stream_object.rs"],
+      "contract": "the optional public artifact field consumer_signature_hex is lowercase and exactly twice the signature byte length",
+      "owner": "asupersync-d24mms.9.3",
+      "journey_owner": "asupersync-d24mms.9.4"
+    },
+    {
+      "format_id": "HEX-FMT-ATP-GRANT-STATE",
+      "state": "PRESENT",
+      "paths": ["src/atp/grant/manager.rs", "src/atp/grant/pairing.rs", "src/atp/grant/storage.rs"],
+      "contract": "grant ids are grant- plus 32 lowercase digits; paired ids are paired- plus 32 lowercase digits; persisted filenames are grants/ plus the SHA-256 of grant-id text as 64 lowercase digits plus .json",
+      "owner": "asupersync-d24mms.9.3",
+      "journey_owner": "asupersync-d24mms.9.4"
+    },
+    {
+      "format_id": "HEX-FMT-ATP-SESSION-STATE",
+      "state": "PRESENT",
+      "paths": ["src/atp/sdk.rs", "src/net/atp/protocol/session.rs"],
+      "contract": "AtpSession.session_id is atp-session- plus 32 lowercase digits; peer and session redactions use 16 lowercase digits; transcript redaction uses 24 lowercase digits",
+      "owner": "asupersync-d24mms.9.3",
+      "journey_owner": "asupersync-d24mms.9.4"
+    },
+    {
+      "format_id": "HEX-FMT-ATP-HANDSHAKE-TRACE",
+      "state": "PRESENT",
+      "paths": ["src/net/atp/handshake/traces.rs"],
+      "contract": "JSON connection ids, original/destination/source ids, retry tokens, and transport-parameter values use lowercase variable-width hex",
+      "owner": "asupersync-d24mms.9.3",
+      "journey_owner": "asupersync-d24mms.9.4"
+    },
+    {
+      "format_id": "HEX-FMT-ATP-REPAIR-AUTH-DOMAIN",
+      "state": "PRESENT",
+      "paths": ["src/atp/repair_scheduler.rs"],
+      "contract": "public PeerInfo.auth_domain is accepted only when it is atp-repair: followed by 24 lowercase digits derived from the first 12 digest bytes",
+      "owner": "asupersync-d24mms.9.3",
+      "journey_owner": "asupersync-d24mms.9.4"
+    },
+    {
+      "format_id": "HEX-FMT-ATP-LAB-ARTIFACTS",
+      "state": "PRESENT",
+      "paths": ["src/atp/lab/mod.rs"],
+      "contract": "AtpLabReplayMetadata.fingerprint_hex and AtpLabAttachment.sha256_hex are 64 lowercase digits; minimization_key embeds the first 12 fingerprint digits after atp-lab-<scenario>-",
+      "owner": "asupersync-d24mms.9.3",
+      "journey_owner": "asupersync-d24mms.9.4"
+    },
+    {
+      "format_id": "HEX-FMT-CLI-WORKFLOW-ARTIFACTS",
+      "state": "PRESENT",
+      "paths": ["src/cli/atp_workflows.rs", "src/cli/atp_command_tree.rs"],
+      "contract": "workflow content_hash and archive checksum values are persisted, compared, used in paths, and emitted as raw 64 lowercase SHA-256 digits; the current unit assertion expecting a sha256: prefix is contradictory and routed separately",
+      "owner": "asupersync-d24mms.9.3",
+      "journey_owner": "asupersync-d24mms.9.4"
+    },
+    {
+      "format_id": "HEX-FMT-KEYS-SIGNATURES-EVIDENCE",
+      "state": "PRESENT",
+      "paths": [
+        "src/security/keys/mod.rs",
+        "src/agent_swarm/control_plane.rs",
+        "src/agent_swarm/handoff_verifier.rs",
+        "src/lab/crashpack/mod.rs",
+        "src/lab/crashpack/replay.rs",
+        "src/trace/crashpack.rs"
+      ],
+      "contract": "KeyFingerprint full output is 64 lowercase digits and redacted output is 16; AgentCredentials.signature requires the exact nkey_ed25519. prefix then a mixed-case-decodable suffix whose length and content are enforced by upstream signature verification; issued bearer tokens are agent_token_v1.<agent_id>.<issued>.<expires>.<64 lowercase HMAC digits>, while verification accepts mixed-case HMAC text; certificate SHA-256 and handoff content_hash values are 64; lab journal refs are sha256: plus 64; trace CrashPack content_checksum is 64",
+      "owner": "asupersync-d24mms.9.3",
+      "journey_owner": "asupersync-d24mms.9.4"
+    },
+    {
+      "format_id": "HEX-FMT-GOLDEN-EVIDENCE-DIGESTS",
+      "state": "PRESENT",
+      "group_ids": ["HEX-A3-TEST-CONFORMANCE"],
+      "contract": "golden bytes and SHA-256 source or evidence fingerprints remain lowercase and byte-identical",
+      "owner": "asupersync-d24mms.9.3",
+      "journey_owner": "asupersync-d24mms.9.4"
+    }
+  ],
+  "downstream_and_e2e": {
+    "unit_owner": "asupersync-d24mms.9.2",
+    "migration_owner": "asupersync-d24mms.9.3",
+    "journey_owner": "asupersync-d24mms.9.4",
+    "cutover_owner": "asupersync-d24mms.9.5",
+    "consumer_fixture": {
+      "state": "BLOCKED",
+      "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
+      "missing_surface": "ObjectHash::from_hex and hex::FromHexError"
+    },
+    "baseline_evidence": {
+      "state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "evidence_id": "EVD-HEX-GOLDENS",
+      "downstream_profiles": [],
+      "observed_gap": "named fixtures contain valid and self-generated material but no malformed or oversized decode case"
+    },
+    "registry_scenarios": [
+      {"scenario_id":"hex_public_api","state":"PLANNED","runner_registration":"ABSENT","owner":"asupersync-d24mms.9.4"},
+      {"scenario_id":"hex_protocol_artifact","state":"PLANNED","runner_registration":"ABSENT","owner":"asupersync-d24mms.9.4"},
+      {"scenario_id":"hex_protocols","state":"PLANNED","runner_registration":"ABSENT","owner":"asupersync-d24mms.9.4"}
+    ],
+    "matrix_scenarios": [
+      {"scenario_id":"dep-sovereignty-asupersync_d24mms_9_1_4939213e52e5","state":"PLANNED","owner":"asupersync-d24mms.9.1"},
+      {"scenario_id":"dep-sovereignty-asupersync_d24mms_9_3_a9d28abfe142","state":"PLANNED","owner":"asupersync-d24mms.9.3"},
+      {"scenario_id":"dep-sovereignty-asupersync_d24mms_9_4_662600494c81","state":"PLANNED","owner":"asupersync-d24mms.9.4"},
+      {"scenario_id":"dep-sovereignty-asupersync_d24mms_9_5_392fdc9ab884","state":"PLANNED","owner":"asupersync-d24mms.9.5"}
+    ],
+    "a1_execution_state": "NOT_RUN_BY_A1"
+  },
+  "gaps": [
+    {"gap_id":"HEX-A1-GAP-01","state":"ROUTED","finding":"registry source owner src/encoding.rs has no direct hex reference and is not an encapsulation boundary","owner":"asupersync-d24mms.9.5"},
+    {"gap_id":"HEX-A1-GAP-02","state":"ROUTED","finding":"registry profile list omits unconditional graph reachability and actual atp-cli, postgres, golden, test, and conformance surfaces","owner":"asupersync-d24mms.9.5"},
+    {"gap_id":"HEX-A1-GAP-03","state":"ROUTED","finding":"registry target policy says bounded allocation and no partial-secret output, while incumbent allocating APIs have no explicit cap and slice decode exposes prefix mutation","owner":"asupersync-d24mms.9.2"},
+    {"gap_id":"HEX-A1-GAP-04","state":"ROUTED","finding":"EVD-HEX-GOLDENS claims malformed and resource coverage absent from its named fixtures","owner":"asupersync-d24mms.9.4"},
+    {"gap_id":"HEX-A1-GAP-05","state":"ROUTED","finding":"baseline downstream profile list is empty and the consumer fixture omits ObjectHash::from_hex","owner":"asupersync-d24mms.9.4"},
+    {"gap_id":"HEX-A1-GAP-06","state":"ROUTED","finding":"public ObjectHash::from_hex exposes the third-party error while the root-only API map contains no nested ATP entry","owner":"asupersync-d24mms.9.3"},
+    {"gap_id":"HEX-A1-GAP-07","state":"ROUTED","finding":"registry aliases and matrix journey IDs have no runner registration","owner":"asupersync-d24mms.9.4"},
+    {"gap_id":"HEX-A1-GAP-08","state":"ROUTED","finding":"the reachable conformance package directly calls the codec without a direct package manifest edge","owner":"asupersync-d24mms.9.5"},
+    {"gap_id":"HEX-A1-GAP-09","state":"ROUTED","finding":"four references remain under cfg(any()) and must not be counted as active parity behavior","owner":"asupersync-d24mms.9.3"},
+    {"gap_id":"HEX-A1-GAP-10","state":"ROUTED","finding":"generic public manual hex_encode and other manual format implementations overlap the capability but are outside the direct dependency edge","owner":"asupersync-d24mms.9.2"},
+    {"gap_id":"HEX-A1-GAP-11","state":"ROUTED","finding":"no application-level input or allocation maximum exists for the incumbent allocating APIs, and encode uses unchecked 2N output-length arithmetic at representation limits","owner":"asupersync-d24mms.9.2"},
+    {"gap_id":"HEX-A1-GAP-12","state":"ROUTED","finding":"A1 intentionally produced no live contract, downstream, protocol, database, trace, or artifact journey result","owner":"asupersync-d24mms.9.4"},
+    {"gap_id":"HEX-A1-GAP-13","state":"ROUTED","finding":"the nested golden_file_manager_simple.rs path contains a lexical call but is not reachable from its package crate root or binaries","owner":"asupersync-d24mms.9.3"},
+    {"gap_id":"HEX-A1-GAP-14","state":"ROUTED","finding":"the explicit kafka_real_broker test target imports Kafka APIs but declares an empty Cargo required-features list","owner":"asupersync-d24mms.9.5"},
+    {"gap_id":"HEX-A1-GAP-15","state":"ROUTED","finding":"the CLI workflow implementation emits raw 64-digit content hashes while its current unit assertion expects a sha256: prefix","owner":"asupersync-d24mms.9.3"}
+  ],
+  "rollback_triggers": [
+    "any encoded byte or lowercase-canonical output changes",
+    "empty or mixed-case input behavior changes",
+    "odd-length precedence changes",
+    "invalid character or byte index changes",
+    "error variants or Display text change before owned-error migration is documented",
+    "destination preflight or partial-prefix mutation changes without an explicit BETTER row",
+    "a public signature or owned error mapping changes without downstream evidence",
+    "a persisted or wire representation changes",
+    "a direct call-site file is omitted from its reservation group",
+    "a required Cargo profile or target silently skips"
+  ],
+  "no_claim_boundaries": [
+    "This inventory does not authorize implementing, migrating, or removing the dependency.",
+    "No Cargo, remote compilation, scenario, or robustness lane was executed by A1.",
+    "Static source pins and lexical counts do not prove compilation or runtime correctness.",
+    "The partial golden baseline does not prove malformed, allocation, public-error, credential, persisted-format, or protocol parity.",
+    "No performance, constant-time behavior, secret zeroization, or security-completeness claim is made.",
+    "The conformance manifest gap remains blocked rather than inferred green.",
+    "Null codec limits mean the incumbent defines no application-level cap; they do not assert a host allocation maximum.",
+    "Manual collision surfaces are preservation obligations, not evidence that they should become the replacement kernel.",
+    "Planned journey identifiers are routing metadata, not terminal execution evidence.",
+    "Broad workspace health, release readiness, and live worker availability are outside this contract."
+  ]
+}

@@ -1972,12 +1972,22 @@ pub trait FixtureService: std::fmt::Debug {
     fn stop(&mut self) -> Result<(), Box<dyn std::error::Error>>;
     /// Returns `true` if the service is healthy.
     fn is_healthy(&self) -> bool;
+    /// Returns `true` while this fixture still owns a live external resource.
+    ///
+    /// The default matches the health state, which is sufficient for
+    /// in-process fixtures. Process and container fixtures override this so a
+    /// crashed or unhealthy service cannot be mistaken for a completed
+    /// teardown.
+    fn has_live_resource(&self) -> bool {
+        self.is_healthy()
+    }
 }
 
 #[derive(Debug)]
 struct ServiceEntry {
     service: Box<dyn FixtureService>,
-    started_at: Instant,
+    started_at: Option<Instant>,
+    started: bool,
 }
 
 /// Structured metadata about the test environment.
@@ -2055,6 +2065,8 @@ pub struct TestEnvironment {
     ports: PortAllocator,
     services: Vec<ServiceEntry>,
     cleanup_fns: Vec<Box<dyn FnOnce()>>,
+    cleanup_ran: bool,
+    teardown_errors: Vec<String>,
     torn_down: bool,
 }
 
@@ -2068,6 +2080,8 @@ impl std::fmt::Debug for TestEnvironment {
                 "cleanup_fns",
                 &format_args!("[{} fns]", self.cleanup_fns.len()),
             )
+            .field("cleanup_ran", &self.cleanup_ran)
+            .field("teardown_errors", &self.teardown_errors)
             .field("torn_down", &self.torn_down)
             .finish()
     }
@@ -2088,6 +2102,8 @@ impl TestEnvironment {
             ports: PortAllocator::new(),
             services: Vec::new(),
             cleanup_fns: Vec::new(),
+            cleanup_ran: false,
+            teardown_errors: Vec::new(),
             torn_down: false,
         }
     }
@@ -2125,16 +2141,76 @@ impl TestEnvironment {
         tracing::debug!(service = %service.name(), "registered fixture service");
         self.services.push(ServiceEntry {
             service,
-            started_at: Instant::now(),
+            started_at: None,
+            started: false,
         });
     }
 
-    /// Start all registered services.
+    /// Start all registered services transactionally.
+    ///
+    /// Held port reservations are released immediately before startup so the
+    /// managed services can bind them. If any start fails, that service and
+    /// every service started before it are stopped in reverse order.
     pub fn start_all_services(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        for entry in &mut self.services {
-            tracing::info!(service = %entry.service.name(), "starting fixture service");
-            entry.service.start()?;
-            entry.started_at = Instant::now();
+        if self.torn_down {
+            return Err("cannot start services after environment teardown".into());
+        }
+
+        self.ports.release_all();
+        for index in 0..self.services.len() {
+            let service_name = self.services[index].service.name().to_string();
+            tracing::info!(service = %service_name, "starting fixture service");
+            match self.services[index].service.start() {
+                Ok(()) => {
+                    self.services[index].started_at = Some(Instant::now());
+                    self.services[index].started = true;
+                }
+                Err(start_error) => {
+                    let mut rollback_errors = Vec::new();
+                    for rollback_index in (0..=index).rev() {
+                        let entry = &mut self.services[rollback_index];
+                        if let Err(stop_error) = entry.service.stop() {
+                            rollback_errors.push(format!("{}: {stop_error}", entry.service.name()));
+                        } else {
+                            entry.started = false;
+                            entry.started_at = None;
+                        }
+                    }
+                    let rollback_suffix = if rollback_errors.is_empty() {
+                        String::new()
+                    } else {
+                        format!("; rollback errors: {}", rollback_errors.join(", "))
+                    };
+                    return Err(
+                        format!("fixture service '{service_name}' failed to start: {start_error}{rollback_suffix}")
+                            .into(),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Start all registered services and require bounded readiness.
+    ///
+    /// Readiness is checked in registration order after startup. A timeout
+    /// follows the same reverse-order rollback path as a start failure.
+    pub fn start_all_services_until_healthy(
+        &mut self,
+        timeout_per_service: Duration,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.start_all_services()?;
+        for index in 0..self.services.len() {
+            if let Err(health_error) =
+                wait_until_healthy(self.services[index].service.as_ref(), timeout_per_service)
+            {
+                let service_name = self.services[index].service.name().to_string();
+                self.teardown();
+                return Err(format!(
+                    "fixture service '{service_name}' failed readiness: {health_error}"
+                )
+                .into());
+            }
         }
         Ok(())
     }
@@ -2182,16 +2258,37 @@ impl TestEnvironment {
         artifact_dir_from_env().map(|dir| self.metadata().write_to_dir(&dir))
     }
 
+    /// Names of services that still own a live resource.
+    #[must_use]
+    pub fn orphaned_services(&self) -> Vec<&str> {
+        self.services
+            .iter()
+            .filter(|entry| entry.started || entry.service.has_live_resource())
+            .map(|entry| entry.service.name())
+            .collect()
+    }
+
+    /// Errors observed during the most recent teardown attempt.
+    #[must_use]
+    pub fn teardown_errors(&self) -> &[String] {
+        &self.teardown_errors
+    }
+
     /// Perform explicit teardown: stop services, release ports, run cleanup fns.
     pub fn teardown(&mut self) {
         if self.torn_down {
             return;
         }
-        self.torn_down = true;
+        self.teardown_errors.clear();
         tracing::info!(test_id = %self.context.test_id, "E2E environment teardown");
 
         for entry in self.services.iter_mut().rev() {
-            let elapsed = entry.started_at.elapsed();
+            if !entry.started && !entry.service.has_live_resource() {
+                continue;
+            }
+            let elapsed = entry
+                .started_at
+                .map_or(Duration::ZERO, |started_at| started_at.elapsed());
             tracing::debug!(
                 service = %entry.service.name(),
                 elapsed_ms = elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
@@ -2199,14 +2296,32 @@ impl TestEnvironment {
             );
             if let Err(e) = entry.service.stop() {
                 tracing::warn!(service = %entry.service.name(), error = %e, "fixture service stop failed");
+                self.teardown_errors
+                    .push(format!("{}: {e}", entry.service.name()));
+            } else {
+                entry.started = false;
+                entry.started_at = None;
             }
         }
         self.ports.release_all();
-        let fns: Vec<_> = self.cleanup_fns.drain(..).collect();
-        for f in fns.into_iter().rev() {
-            f();
+        if !self.cleanup_ran {
+            self.cleanup_ran = true;
+            for f in self.cleanup_fns.drain(..).rev() {
+                f();
+            }
         }
-        tracing::info!(test_id = %self.context.test_id, "E2E environment teardown complete");
+        let orphan_count = self.orphaned_services().len();
+        self.torn_down = self.teardown_errors.is_empty() && orphan_count == 0;
+        if self.torn_down {
+            tracing::info!(test_id = %self.context.test_id, "E2E environment teardown complete");
+        } else {
+            tracing::warn!(
+                test_id = %self.context.test_id,
+                teardown_error_count = self.teardown_errors.len(),
+                orphan_count,
+                "E2E environment teardown incomplete"
+            );
+        }
     }
 }
 
@@ -2293,6 +2408,469 @@ pub fn wait_until_healthy(
     }
 }
 
+/// Verified identity for a managed process fixture.
+///
+/// The executable path must be absolute. Both the binary SHA-256 and the exact
+/// trimmed output of the version probe are checked before the service starts,
+/// preventing an ambient `PATH` entry or silently upgraded binary from
+/// contributing proof.
+#[derive(Debug, Clone)]
+pub struct PinnedProcessIdentity {
+    binary_path: std::path::PathBuf,
+    expected_sha256: String,
+    version_args: Vec<std::ffi::OsString>,
+    expected_version: String,
+}
+
+impl PinnedProcessIdentity {
+    /// Create an identity using `--version` as the version probe.
+    #[must_use]
+    pub fn new(
+        binary_path: impl Into<std::path::PathBuf>,
+        expected_sha256: impl Into<String>,
+        expected_version: impl Into<String>,
+    ) -> Self {
+        Self {
+            binary_path: binary_path.into(),
+            expected_sha256: expected_sha256.into(),
+            version_args: vec![std::ffi::OsString::from("--version")],
+            expected_version: expected_version.into(),
+        }
+    }
+
+    /// Override arguments used to obtain the exact pinned version string.
+    #[must_use]
+    pub fn with_version_args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<std::ffi::OsString>,
+    {
+        self.version_args = args.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Absolute executable path.
+    #[must_use]
+    pub fn binary_path(&self) -> &std::path::Path {
+        &self.binary_path
+    }
+
+    /// Expected lowercase SHA-256 digest.
+    #[must_use]
+    pub fn expected_sha256(&self) -> &str {
+        &self.expected_sha256
+    }
+
+    /// Exact expected version-probe output after trimming whitespace.
+    #[must_use]
+    pub fn expected_version(&self) -> &str {
+        &self.expected_version
+    }
+
+    fn verify(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.binary_path.is_absolute() {
+            return Err(format!(
+                "fixture binary path must be absolute: {}",
+                self.binary_path.display()
+            )
+            .into());
+        }
+        if self.expected_sha256.len() != 64
+            || !self
+                .expected_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err("fixture SHA-256 must be 64 lowercase hexadecimal characters".into());
+        }
+        if self.expected_version.trim().is_empty() {
+            return Err("fixture expected version must not be empty".into());
+        }
+
+        use sha2::Digest as _;
+        let bytes = std::fs::read(&self.binary_path)?;
+        let digest = sha2::Sha256::digest(bytes);
+        let actual_sha256 = hex::encode(digest);
+        if actual_sha256 != self.expected_sha256 {
+            return Err(format!(
+                "fixture binary digest mismatch for {}: expected {}, actual {}",
+                self.binary_path.display(),
+                self.expected_sha256,
+                actual_sha256
+            )
+            .into());
+        }
+
+        let output = std::process::Command::new(&self.binary_path)
+            .args(&self.version_args)
+            .env_clear()
+            .output()?;
+        if !output.status.success() {
+            return Err(format!(
+                "fixture version probe failed for {} with {}",
+                self.binary_path.display(),
+                output.status
+            )
+            .into());
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let actual_version = if stdout.trim().is_empty() {
+            stderr.trim()
+        } else {
+            stdout.trim()
+        };
+        if actual_version != self.expected_version {
+            return Err(format!(
+                "fixture version mismatch for {}: expected {:?}, actual {:?}",
+                self.binary_path.display(),
+                self.expected_version,
+                actual_version
+            )
+            .into());
+        }
+        Ok(())
+    }
+}
+
+/// Readiness condition for a managed process fixture.
+#[derive(Debug, Clone, Copy)]
+pub enum ProcessReadiness {
+    /// The child must remain alive for one readiness polling interval.
+    Running,
+    /// A TCP connection to the managed loopback endpoint must succeed.
+    Tcp(std::net::SocketAddr),
+}
+
+/// Sanitized stdout/stderr captured from a managed fixture.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FixtureLogs {
+    /// Redacted standard output.
+    pub stdout: String,
+    /// Redacted standard error.
+    pub stderr: String,
+}
+
+/// A pinned, isolated process fixture with bounded readiness and log capture.
+pub struct ProcessFixtureService {
+    service_name: String,
+    identity: PinnedProcessIdentity,
+    args: Vec<std::ffi::OsString>,
+    env_vars: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    secret_values: Vec<String>,
+    current_dir: Option<std::path::PathBuf>,
+    log_dir: std::path::PathBuf,
+    readiness: ProcessReadiness,
+    startup_timeout: Duration,
+    child: Mutex<Option<std::process::Child>>,
+    stdout_path: std::path::PathBuf,
+    stderr_path: std::path::PathBuf,
+}
+
+impl std::fmt::Debug for ProcessFixtureService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProcessFixtureService")
+            .field("service_name", &self.service_name)
+            .field("identity", &self.identity)
+            .field("arg_count", &self.args.len())
+            .field("env_key_count", &self.env_vars.len())
+            .field("secret_count", &self.secret_values.len())
+            .field("current_dir", &self.current_dir)
+            .field("log_dir", &self.log_dir)
+            .field("readiness", &self.readiness)
+            .field("startup_timeout", &self.startup_timeout)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ProcessFixtureService {
+    /// Create a pinned process fixture.
+    #[must_use]
+    pub fn new(
+        service_name: impl Into<String>,
+        identity: PinnedProcessIdentity,
+        log_dir: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        let service_name = service_name.into();
+        let log_dir = log_dir.into();
+        let current_dir = Some(log_dir.clone());
+        let safe_name: String = service_name
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        Self {
+            service_name,
+            identity,
+            args: Vec::new(),
+            env_vars: Vec::new(),
+            secret_values: Vec::new(),
+            current_dir,
+            stdout_path: log_dir.join(format!("{safe_name}.stdout.log")),
+            stderr_path: log_dir.join(format!("{safe_name}.stderr.log")),
+            log_dir,
+            readiness: ProcessReadiness::Running,
+            startup_timeout: Duration::from_secs(10),
+            child: Mutex::new(None),
+        }
+    }
+
+    /// Set process arguments.
+    #[must_use]
+    pub fn with_args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<std::ffi::OsString>,
+    {
+        self.args = args.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Add a non-secret environment variable.
+    #[must_use]
+    pub fn with_env(
+        mut self,
+        key: impl Into<std::ffi::OsString>,
+        value: impl Into<std::ffi::OsString>,
+    ) -> Self {
+        self.env_vars.push((key.into(), value.into()));
+        self
+    }
+
+    /// Add an environment variable whose value must be redacted from logs.
+    #[must_use]
+    pub fn with_secret_env(
+        mut self,
+        key: impl Into<std::ffi::OsString>,
+        value: impl Into<std::ffi::OsString>,
+    ) -> Self {
+        let value = value.into();
+        let rendered = value.to_string_lossy().into_owned();
+        if !rendered.is_empty() {
+            self.secret_values.push(rendered);
+        }
+        self.env_vars.push((key.into(), value));
+        self
+    }
+
+    /// Set the isolated working directory.
+    #[must_use]
+    pub fn with_current_dir(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.current_dir = Some(path.into());
+        self
+    }
+
+    /// Set readiness policy.
+    #[must_use]
+    pub fn with_readiness(mut self, readiness: ProcessReadiness) -> Self {
+        self.readiness = readiness;
+        self
+    }
+
+    /// Set the bounded startup timeout.
+    #[must_use]
+    pub fn with_startup_timeout(mut self, timeout: Duration) -> Self {
+        self.startup_timeout = timeout;
+        self
+    }
+
+    /// Return redacted captured logs. Missing log files yield empty strings.
+    #[must_use]
+    pub fn captured_logs(&self) -> FixtureLogs {
+        FixtureLogs {
+            stdout: self.redact(&std::fs::read_to_string(&self.stdout_path).unwrap_or_default()),
+            stderr: self.redact(&std::fs::read_to_string(&self.stderr_path).unwrap_or_default()),
+        }
+    }
+
+    fn redact(&self, text: &str) -> String {
+        self.secret_values
+            .iter()
+            .fold(text.to_string(), |output, secret| {
+                output.replace(secret, "<redacted>")
+            })
+    }
+
+    fn sanitize_log_files(&self) -> std::io::Result<()> {
+        for path in [&self.stdout_path, &self.stderr_path] {
+            if path.is_file() {
+                let raw = std::fs::read_to_string(path)?;
+                std::fs::write(path, self.redact(&raw))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn readiness_satisfied(&self) -> bool {
+        match self.readiness {
+            ProcessReadiness::Running => true,
+            ProcessReadiness::Tcp(addr) => {
+                addr.ip().is_loopback()
+                    && std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50))
+                        .is_ok()
+            }
+        }
+    }
+
+    fn stop_child(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut child_slot = self.child.lock();
+        if let Some(child) = child_slot.as_mut() {
+            if child.try_wait()?.is_none() {
+                child.kill()?;
+                let _status = child.wait()?;
+            }
+            child_slot.take();
+        }
+        drop(child_slot);
+        self.sanitize_log_files()?;
+        Ok(())
+    }
+}
+
+impl FixtureService for ProcessFixtureService {
+    fn name(&self) -> &str {
+        &self.service_name
+    }
+
+    fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.has_live_resource() {
+            return Err(
+                format!("fixture process '{}' is already running", self.service_name).into(),
+            );
+        }
+        if !self.log_dir.is_absolute() {
+            return Err(format!(
+                "fixture log directory must be absolute: {}",
+                self.log_dir.display()
+            )
+            .into());
+        }
+        self.identity.verify()?;
+        if let ProcessReadiness::Tcp(addr) = self.readiness
+            && !addr.ip().is_loopback()
+        {
+            return Err(
+                format!("fixture TCP readiness address must be loopback, got {addr}").into(),
+            );
+        }
+
+        std::fs::create_dir_all(&self.log_dir)?;
+        let current_dir = self
+            .current_dir
+            .as_ref()
+            .ok_or("fixture process requires an isolated working directory")?;
+        if !current_dir.is_absolute() || !current_dir.is_dir() {
+            return Err(format!(
+                "fixture working directory must be an existing absolute directory: {}",
+                current_dir.display()
+            )
+            .into());
+        }
+        let stdout = std::fs::File::create(&self.stdout_path)?;
+        let stderr = std::fs::File::create(&self.stderr_path)?;
+        let mut command = std::process::Command::new(self.identity.binary_path());
+        command
+            .args(&self.args)
+            .env_clear()
+            .envs(self.env_vars.iter().cloned())
+            .stdin(std::process::Stdio::null())
+            .stdout(stdout)
+            .stderr(stderr);
+        command.current_dir(current_dir);
+
+        tracing::info!(
+            service = %self.service_name,
+            binary = %self.identity.binary_path().display(),
+            sha256 = %self.identity.expected_sha256(),
+            version = %self.identity.expected_version(),
+            arg_count = self.args.len(),
+            env_key_count = self.env_vars.len(),
+            "starting pinned process fixture"
+        );
+        *self.child.lock() = Some(command.spawn()?);
+
+        let readiness_started = Instant::now();
+        let deadline = readiness_started + self.startup_timeout;
+        loop {
+            {
+                let mut child_slot = self.child.lock();
+                if let Some(child) = child_slot.as_mut()
+                    && let Some(status) = child.try_wait()?
+                {
+                    *child_slot = None;
+                    drop(child_slot);
+                    self.sanitize_log_files()?;
+                    let logs = self.captured_logs();
+                    return Err(format!(
+                        "fixture process '{}' exited before readiness with {status}; stdout={:?}; stderr={:?}",
+                        self.service_name, logs.stdout, logs.stderr
+                    )
+                    .into());
+                }
+            }
+            let ready = match self.readiness {
+                ProcessReadiness::Running => {
+                    readiness_started.elapsed() >= Duration::from_millis(25)
+                }
+                ProcessReadiness::Tcp(_) => self.readiness_satisfied(),
+            };
+            if ready {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                self.stop_child()?;
+                let logs = self.captured_logs();
+                return Err(format!(
+                    "fixture process '{}' readiness timed out after {:?}; stdout={:?}; stderr={:?}",
+                    self.service_name, self.startup_timeout, logs.stdout, logs.stderr
+                )
+                .into());
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    fn stop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.stop_child()
+    }
+
+    fn is_healthy(&self) -> bool {
+        self.has_live_resource() && self.readiness_satisfied()
+    }
+
+    fn has_live_resource(&self) -> bool {
+        let mut child_slot = self.child.lock();
+        let Some(child) = child_slot.as_mut() else {
+            return false;
+        };
+        match child.try_wait() {
+            Ok(None) => true,
+            Ok(Some(_)) => {
+                *child_slot = None;
+                false
+            }
+            Err(_) => true,
+        }
+    }
+}
+
+impl Drop for ProcessFixtureService {
+    fn drop(&mut self) {
+        if let Err(error) = self.stop_child() {
+            tracing::warn!(
+                service = %self.service_name,
+                error = %error,
+                "process fixture drop cleanup failed"
+            );
+        }
+    }
+}
+
 /// A fixture service backed by a Docker container.
 ///
 /// Launches a container with `docker run`, removes it on stop, and health
@@ -2302,38 +2880,80 @@ pub fn wait_until_healthy(
 /// # Example
 ///
 /// ```ignore
-/// let mut redis = DockerFixtureService::new("redis", "redis:7-alpine")
+/// let mut redis = DockerFixtureService::new(
+///     "redis",
+///     "redis@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+/// )
 ///     .with_port_map(port, 6379)
 ///     .with_health_cmd(vec!["redis-cli", "ping"]);
 /// redis.start()?;
 /// wait_until_healthy(&redis, Duration::from_secs(10))?;
 /// ```
-#[derive(Debug)]
 pub struct DockerFixtureService {
     service_name: String,
     image: String,
     container_name: String,
     port_maps: Vec<(u16, u16)>,
     env_vars: Vec<(String, String)>,
+    secret_values: Vec<String>,
     health_cmd: Option<Vec<String>>,
+    log_dir: Option<std::path::PathBuf>,
+    captured_logs: Mutex<FixtureLogs>,
     started: bool,
 }
 
+impl std::fmt::Debug for DockerFixtureService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DockerFixtureService")
+            .field("service_name", &self.service_name)
+            .field("image", &self.image)
+            .field("container_name", &self.container_name)
+            .field("port_maps", &self.port_maps)
+            .field("env_key_count", &self.env_vars.len())
+            .field("secret_count", &self.secret_values.len())
+            .field("health_cmd", &self.health_cmd)
+            .field("log_dir", &self.log_dir)
+            .field("started", &self.started)
+            .finish()
+    }
+}
+
 impl DockerFixtureService {
-    /// Create a new Docker fixture with a service name and image.
+    /// Create a new Docker fixture with a service name and immutable image.
     ///
-    /// A unique container name is generated from the service name and process
-    /// ID to avoid collisions between parallel test runs.
+    /// Startup rejects images that are not pinned by a full `sha256` digest.
+    /// A unique container name is generated from the service name, process ID,
+    /// and a process-local sequence to avoid collisions between parallel
+    /// fixtures.
     #[must_use]
     pub fn new(service_name: &str, image: &str) -> Self {
-        let container_name = format!("asupersync-test-{}-{}", service_name, std::process::id());
+        static NEXT_CONTAINER_ID: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
+        let sequence = NEXT_CONTAINER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let safe_name: String = service_name
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                    ch
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let container_name = format!(
+            "asupersync-test-{safe_name}-{}-{sequence}",
+            std::process::id()
+        );
         Self {
             service_name: service_name.to_string(),
             image: image.to_string(),
             container_name,
             port_maps: Vec::new(),
             env_vars: Vec::new(),
+            secret_values: Vec::new(),
             health_cmd: None,
+            log_dir: None,
+            captured_logs: Mutex::new(FixtureLogs::default()),
             started: false,
         }
     }
@@ -2352,11 +2972,28 @@ impl DockerFixtureService {
         self
     }
 
+    /// Set an environment variable whose value must be redacted from logs.
+    #[must_use]
+    pub fn with_secret_env(mut self, key: &str, value: &str) -> Self {
+        if !value.is_empty() {
+            self.secret_values.push(value.to_string());
+        }
+        self.env_vars.push((key.to_string(), value.to_string()));
+        self
+    }
+
     /// Set a custom health check command to run inside the container via
     /// `docker exec`.
     #[must_use]
     pub fn with_health_cmd(mut self, cmd: Vec<&str>) -> Self {
         self.health_cmd = Some(cmd.into_iter().map(String::from).collect());
+        self
+    }
+
+    /// Persist sanitized container stdout/stderr under this directory.
+    #[must_use]
+    pub fn with_log_dir(mut self, log_dir: impl Into<std::path::PathBuf>) -> Self {
+        self.log_dir = Some(log_dir.into());
         self
     }
 
@@ -2366,9 +3003,56 @@ impl DockerFixtureService {
         &self.container_name
     }
 
+    /// Return the most recently captured, redacted container logs.
+    #[must_use]
+    pub fn captured_logs(&self) -> FixtureLogs {
+        self.captured_logs.lock().clone()
+    }
+
+    /// Whether an image reference contains a full immutable SHA-256 digest.
+    #[must_use]
+    pub fn image_is_pinned(image: &str) -> bool {
+        image.rsplit_once("@sha256:").is_some_and(|(name, digest)| {
+            !name.is_empty()
+                && digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
+    }
+
     fn run_docker_cmd(args: &[&str]) -> Result<std::process::Output, Box<dyn std::error::Error>> {
         let output = std::process::Command::new("docker").args(args).output()?;
         Ok(output)
+    }
+
+    fn redact(&self, text: &str) -> String {
+        self.secret_values
+            .iter()
+            .fold(text.to_string(), |output, secret| {
+                output.replace(secret, "<redacted>")
+            })
+    }
+
+    fn capture_container_logs(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let output = Self::run_docker_cmd(&["logs", &self.container_name])?;
+        let logs = FixtureLogs {
+            stdout: self.redact(&String::from_utf8_lossy(&output.stdout)),
+            stderr: self.redact(&String::from_utf8_lossy(&output.stderr)),
+        };
+        if let Some(log_dir) = &self.log_dir {
+            std::fs::create_dir_all(log_dir)?;
+            std::fs::write(
+                log_dir.join(format!("{}.stdout.log", self.container_name)),
+                &logs.stdout,
+            )?;
+            std::fs::write(
+                log_dir.join(format!("{}.stderr.log", self.container_name)),
+                &logs.stderr,
+            )?;
+        }
+        *self.captured_logs.lock() = logs;
+        Ok(())
     }
 }
 
@@ -2378,8 +3062,13 @@ impl FixtureService for DockerFixtureService {
     }
 
     fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Remove any stale container with the same name.
-        let _ = Self::run_docker_cmd(&["rm", "-f", &self.container_name]);
+        if !Self::image_is_pinned(&self.image) {
+            return Err(format!(
+                "fixture image must be pinned by sha256 digest: {}",
+                self.image
+            )
+            .into());
+        }
 
         let mut args = vec!["run", "-d", "--name", &self.container_name];
 
@@ -2413,7 +3102,7 @@ impl FixtureService for DockerFixtureService {
 
         let output = Self::run_docker_cmd(&args)?;
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = self.redact(&String::from_utf8_lossy(&output.stderr));
             return Err(format!(
                 "docker run failed for '{}': {}",
                 self.container_name, stderr
@@ -2426,20 +3115,29 @@ impl FixtureService for DockerFixtureService {
     }
 
     fn stop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        if !self.started {
+        if !self.started && !self.has_live_resource() {
             return Ok(());
         }
         tracing::info!(container = %self.container_name, "stopping docker container");
+        let log_error = self.capture_container_logs().err();
         let output = Self::run_docker_cmd(&["rm", "-f", &self.container_name])?;
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = self.redact(&String::from_utf8_lossy(&output.stderr));
             tracing::warn!(
                 container = %self.container_name,
                 error = %stderr,
                 "docker rm failed"
             );
+            return Err(format!("docker rm failed for '{}': {stderr}", self.container_name).into());
         }
         self.started = false;
+        if let Some(error) = log_error {
+            return Err(format!(
+                "capturing logs for container '{}' failed: {error}",
+                self.container_name
+            )
+            .into());
+        }
         Ok(())
     }
 
@@ -2474,6 +3172,27 @@ impl FixtureService for DockerFixtureService {
                 }
             },
         )
+    }
+
+    fn has_live_resource(&self) -> bool {
+        match Self::run_docker_cmd(&["inspect", &self.container_name]) {
+            Ok(output) => output.status.success(),
+            Err(_) => self.started,
+        }
+    }
+}
+
+impl Drop for DockerFixtureService {
+    fn drop(&mut self) {
+        if (self.started || self.has_live_resource())
+            && let Err(error) = FixtureService::stop(self)
+        {
+            tracing::warn!(
+                container = %self.container_name,
+                error = %error,
+                "docker fixture drop cleanup failed"
+            );
+        }
     }
 }
 
@@ -3439,6 +4158,83 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct RecordingFixture {
+        name: String,
+        events: Arc<Mutex<Vec<String>>>,
+        live: Arc<AtomicBool>,
+        fail_start: bool,
+        healthy_after_start: bool,
+        stop_failures_remaining: Arc<AtomicUsize>,
+    }
+
+    impl RecordingFixture {
+        fn new(name: &str, events: Arc<Mutex<Vec<String>>>) -> Self {
+            Self {
+                name: name.to_string(),
+                events,
+                live: Arc::new(AtomicBool::new(false)),
+                fail_start: false,
+                healthy_after_start: true,
+                stop_failures_remaining: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn failing_start(mut self) -> Self {
+            self.fail_start = true;
+            self
+        }
+
+        fn unhealthy(mut self) -> Self {
+            self.healthy_after_start = false;
+            self
+        }
+
+        fn failing_stop_once(mut self) -> Self {
+            self.stop_failures_remaining = Arc::new(AtomicUsize::new(1));
+            self
+        }
+    }
+
+    impl FixtureService for RecordingFixture {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+            self.events.lock().push(format!("start:{}", self.name));
+            self.live.store(true, Ordering::SeqCst);
+            if self.fail_start {
+                return Err(format!("injected start failure for {}", self.name).into());
+            }
+            Ok(())
+        }
+
+        fn stop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+            if self
+                .stop_failures_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                self.events.lock().push(format!("stop-error:{}", self.name));
+                return Err(format!("injected stop failure for {}", self.name).into());
+            }
+            self.events.lock().push(format!("stop:{}", self.name));
+            self.live.store(false, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn is_healthy(&self) -> bool {
+            self.live.load(Ordering::SeqCst) && self.healthy_after_start
+        }
+
+        fn has_live_resource(&self) -> bool {
+            self.live.load(Ordering::SeqCst)
+        }
+    }
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -4662,6 +5458,92 @@ mod tests {
     }
 
     #[test]
+    fn test_environment_start_failure_rolls_back_in_reverse_order() {
+        init_test("test_environment_start_failure_rolls_back_in_reverse_order");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut env = TestEnvironment::new(TestContext::new("start_rollback", 2));
+        env.register_service(Box::new(RecordingFixture::new("first", events.clone())));
+        env.register_service(Box::new(
+            RecordingFixture::new("second", events.clone()).failing_start(),
+        ));
+
+        let error = env
+            .start_all_services()
+            .expect_err("second fixture must fail startup");
+        assert!(error.to_string().contains("second"));
+        assert_eq!(
+            *events.lock(),
+            ["start:first", "start:second", "stop:second", "stop:first"]
+        );
+        assert!(
+            env.orphaned_services().is_empty(),
+            "transactional rollback must not leak resources"
+        );
+        crate::test_complete!("test_environment_start_failure_rolls_back_in_reverse_order");
+    }
+
+    #[test]
+    fn test_environment_readiness_failure_stops_every_service() {
+        init_test("test_environment_readiness_failure_stops_every_service");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut env = TestEnvironment::new(TestContext::new("readiness_rollback", 3));
+        env.register_service(Box::new(RecordingFixture::new("ready", events.clone())));
+        env.register_service(Box::new(
+            RecordingFixture::new("unhealthy", events.clone()).unhealthy(),
+        ));
+
+        let error = env
+            .start_all_services_until_healthy(Duration::ZERO)
+            .expect_err("unhealthy fixture must fail");
+        assert!(
+            error.to_string().contains("failed readiness"),
+            "readiness failure remains distinct from start failure: {error}"
+        );
+        assert_eq!(
+            *events.lock(),
+            [
+                "start:ready",
+                "start:unhealthy",
+                "stop:unhealthy",
+                "stop:ready"
+            ]
+        );
+        assert!(env.orphaned_services().is_empty());
+        crate::test_complete!("test_environment_readiness_failure_stops_every_service");
+    }
+
+    #[test]
+    fn test_environment_retries_failed_teardown_and_reports_orphan() {
+        init_test("test_environment_retries_failed_teardown_and_reports_orphan");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let callback_count = Arc::new(AtomicUsize::new(0));
+        let callback_count_for_teardown = callback_count.clone();
+        let mut env = TestEnvironment::new(TestContext::new("teardown_retry", 4));
+        env.register_service(Box::new(
+            RecordingFixture::new("retry", events.clone()).failing_stop_once(),
+        ));
+        env.on_teardown(move || {
+            callback_count_for_teardown.fetch_add(1, Ordering::SeqCst);
+        });
+        env.start_all_services().expect("start fixture");
+
+        env.teardown();
+        assert_eq!(env.orphaned_services(), ["retry"]);
+        assert_eq!(env.teardown_errors().len(), 1);
+        assert_eq!(callback_count.load(Ordering::SeqCst), 1);
+
+        env.teardown();
+        assert!(env.orphaned_services().is_empty());
+        assert!(env.teardown_errors().is_empty());
+        assert_eq!(callback_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *events.lock(),
+            ["start:retry", "stop-error:retry", "stop:retry"]
+        );
+        crate::test_complete!("test_environment_retries_failed_teardown_and_reports_orphan");
+    }
+
+    #[test]
     fn test_environment_port_isolation() {
         init_test("test_environment_port_isolation");
         let mut env_a = TestEnvironment::new(TestContext::new("env_a", 1));
@@ -4750,6 +5632,140 @@ mod tests {
         crate::test_complete!("test_wait_until_healthy_timeout");
     }
 
+    #[cfg(unix)]
+    fn shell_identity() -> PinnedProcessIdentity {
+        use sha2::Digest as _;
+        let binary = std::path::PathBuf::from("/bin/sh");
+        let digest = sha2::Sha256::digest(std::fs::read(&binary).expect("read /bin/sh"));
+        PinnedProcessIdentity::new(binary, hex::encode(digest), "asupersync-fixture-shell-v1")
+            .with_version_args(["-c", "printf asupersync-fixture-shell-v1"])
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_process_fixture_pinned_lifecycle_and_redacted_logs() {
+        init_test("test_process_fixture_pinned_lifecycle_and_redacted_logs");
+        let log_dir = tempfile::tempdir().expect("fixture log dir");
+        let mut fixture = ProcessFixtureService::new(
+            "shell-service",
+            shell_identity(),
+            log_dir.path(),
+        )
+        .with_secret_env("FIXTURE_SECRET", "fixture-secret-123")
+        .with_args([
+            "-c",
+            "printf '%s' \"$FIXTURE_SECRET\"; printf '%s' \"$FIXTURE_SECRET\" >&2; exec /bin/sleep 5",
+        ])
+        .with_startup_timeout(Duration::from_secs(1));
+
+        fixture.start().expect("start pinned fixture");
+        assert!(fixture.is_healthy());
+        assert!(fixture.has_live_resource());
+        fixture.stop().expect("stop pinned fixture");
+        fixture.stop().expect("repeated stop is idempotent");
+        assert!(!fixture.has_live_resource());
+
+        let logs = fixture.captured_logs();
+        assert_eq!(logs.stdout, "<redacted>");
+        assert_eq!(logs.stderr, "<redacted>");
+        assert!(!logs.stdout.contains("fixture-secret-123"));
+        assert!(!logs.stderr.contains("fixture-secret-123"));
+        crate::test_complete!("test_process_fixture_pinned_lifecycle_and_redacted_logs");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_process_fixture_rejects_digest_and_version_drift() {
+        init_test("test_process_fixture_rejects_digest_and_version_drift");
+        let log_dir = tempfile::tempdir().expect("fixture log dir");
+        let wrong_digest =
+            PinnedProcessIdentity::new("/bin/sh", "0".repeat(64), "asupersync-fixture-shell-v1")
+                .with_version_args(["-c", "printf asupersync-fixture-shell-v1"]);
+        let mut digest_fixture =
+            ProcessFixtureService::new("digest-drift", wrong_digest, log_dir.path());
+        let digest_error = digest_fixture
+            .start()
+            .expect_err("digest drift must fail closed");
+        assert!(digest_error.to_string().contains("digest mismatch"));
+        assert!(!digest_fixture.has_live_resource());
+
+        let mut version_identity = shell_identity();
+        version_identity.expected_version = "different-version".to_string();
+        let mut version_fixture =
+            ProcessFixtureService::new("version-drift", version_identity, log_dir.path());
+        let version_error = version_fixture
+            .start()
+            .expect_err("version drift must fail closed");
+        assert!(version_error.to_string().contains("version mismatch"));
+        assert!(!version_fixture.has_live_resource());
+        crate::test_complete!("test_process_fixture_rejects_digest_and_version_drift");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_process_fixture_rejects_ambient_working_directory() {
+        init_test("test_process_fixture_rejects_ambient_working_directory");
+        let mut relative_logs =
+            ProcessFixtureService::new("relative-logs", shell_identity(), "relative-fixture-logs");
+        let error = relative_logs
+            .start()
+            .expect_err("relative log directory must fail closed");
+        assert!(error.to_string().contains("log directory must be absolute"));
+        assert!(!relative_logs.has_live_resource());
+
+        let log_dir = tempfile::tempdir().expect("fixture log dir");
+        let missing_work_dir = log_dir.path().join("missing");
+        let mut missing =
+            ProcessFixtureService::new("missing-work-dir", shell_identity(), log_dir.path())
+                .with_current_dir(&missing_work_dir);
+        let error = missing
+            .start()
+            .expect_err("missing working directory must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("working directory must be an existing absolute directory")
+        );
+        assert!(!missing_work_dir.exists());
+        assert!(!missing.has_live_resource());
+        crate::test_complete!("test_process_fixture_rejects_ambient_working_directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_process_fixture_captures_crash_and_readiness_timeout() {
+        init_test("test_process_fixture_captures_crash_and_readiness_timeout");
+        let crash_logs = tempfile::tempdir().expect("crash log dir");
+        let mut crashing =
+            ProcessFixtureService::new("crashing", shell_identity(), crash_logs.path())
+                .with_args(["-c", "printf crash-detail >&2; exit 17"])
+                .with_startup_timeout(Duration::from_secs(1));
+        let crash_error = crashing
+            .start()
+            .expect_err("early process exit must fail readiness");
+        assert!(crash_error.to_string().contains("exited before readiness"));
+        assert!(crash_error.to_string().contains("crash-detail"));
+        assert!(!crashing.has_live_resource());
+
+        let timeout_logs = tempfile::tempdir().expect("timeout log dir");
+        let unavailable: std::net::SocketAddr =
+            "127.0.0.1:0".parse().expect("loopback socket address");
+        let mut timing_out =
+            ProcessFixtureService::new("timing-out", shell_identity(), timeout_logs.path())
+                .with_args(["-c", "exec /bin/sleep 5"])
+                .with_readiness(ProcessReadiness::Tcp(unavailable))
+                .with_startup_timeout(Duration::from_millis(75));
+        let timeout_error = timing_out
+            .start()
+            .expect_err("unavailable readiness port must time out");
+        assert!(timeout_error.to_string().contains("readiness timed out"));
+        assert!(!timing_out.has_live_resource());
+        timing_out
+            .stop()
+            .expect("timeout cleanup remains idempotent");
+        crate::test_complete!("test_process_fixture_captures_crash_and_readiness_timeout");
+    }
+
     #[test]
     fn test_temp_dir_fixture_lifecycle() {
         init_test("test_temp_dir_fixture_lifecycle");
@@ -4823,7 +5839,7 @@ mod tests {
         init_test("test_docker_fixture_service_name_and_container");
         let svc = DockerFixtureService::new("redis", "redis:7-alpine")
             .with_port_map(16379, 6379)
-            .with_env("REDIS_PASSWORD", "test")
+            .with_secret_env("REDIS_PASSWORD", "fixture-secret")
             .with_health_cmd(vec!["redis-cli", "ping"]);
 
         assert_eq!(svc.name(), "redis");
@@ -4833,6 +5849,17 @@ mod tests {
             svc.container_name()
         );
         assert!(!svc.is_healthy(), "not started yet");
+        assert!(
+            !DockerFixtureService::image_is_pinned("redis:7-alpine"),
+            "mutable tags must not qualify as pinned fixture identities"
+        );
+        assert!(DockerFixtureService::image_is_pinned(
+            "redis@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        ));
+        assert!(
+            !format!("{svc:?}").contains("fixture-secret"),
+            "debug output must not expose secret environment values"
+        );
         crate::test_complete!("test_docker_fixture_service_name_and_container");
     }
 

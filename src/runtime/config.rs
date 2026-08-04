@@ -1863,22 +1863,27 @@ impl ArenaLocalityReport {
 /// reduces lock contention on multi-worker schedulers by splitting the
 /// unified RuntimeState into independently-locked Tasks/Regions/Obligations
 /// shards. The shape switch is wired through this enum so consumers can
-/// opt in once the scheduler-side integration lands.
+/// opt in once the builder-side integration lands.
 ///
 /// Default is `Unified` — the historical single-mutex backing store —
-/// to preserve current behavior. `Sharded` opt-in is gated at build
-/// time until the `ThreeLaneScheduler` accepts an `&Arc<ShardedState>`
-/// constructor (see br-asupersync-8fuxnt acceptance criteria).
+/// until the E1.3 bench/bake evidence supports a default flip
+/// (br-asupersync-sched-hot-path-perf-bt4y5f.2.3). `Sharded` is a
+/// supported public opt-in
+/// (br-asupersync-sched-hot-path-perf-bt4y5f.2.2): the builder routes it
+/// to `ThreeLaneScheduler::new_with_sharded_state`, workers dispatch
+/// against ShardedState's Arc-shared shard A, and semantics are proven
+/// identical across shapes by the replay-fingerprint corpus (11 tasks x
+/// workers={1,2}).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RuntimeStateShape {
     /// Single-lock unified RuntimeState. Default; matches all behavior
     /// shipped before br-asupersync-8fuxnt.
     #[default]
     Unified,
-    /// Independently-locked Tasks/Regions/Obligations shards. Production
-    /// runtime path is currently gated on the matching scheduler
-    /// integration (br-asupersync-8fuxnt); the build will return a
-    /// ConfigError until that lands.
+    /// Independently-locked Tasks/Regions/Obligations shards. Public
+    /// opt-in via `RuntimeBuilder::with_sharded_state(true)`; workers
+    /// dispatch against shard A while the unified state remains the
+    /// region/obligation lifecycle owner (E1.2, 8fuxnt gate flipped).
     Sharded,
 }
 
@@ -2016,9 +2021,9 @@ pub struct RuntimeConfig {
     /// Backing-state shape (Unified vs Sharded). See [`RuntimeStateShape`].
     ///
     /// Default `Unified` matches all pre-br-asupersync-8fuxnt behavior.
-    /// `Sharded` selection is currently gated at `RuntimeBuilder::build()`
-    /// pending the scheduler-side integration (also tracked under
-    /// br-asupersync-8fuxnt).
+    /// `Sharded` is a supported public opt-in
+    /// (br-asupersync-sched-hot-path-perf-bt4y5f.2.2; the 8fuxnt build
+    /// gate flipped once the replay-fingerprint identity proof landed).
     pub runtime_state_shape: RuntimeStateShape,
     /// Security configuration for authorization.
     pub security: SecurityConfig,
@@ -2229,8 +2234,9 @@ impl Default for RuntimeConfig {
             enable_adaptive_cancel_streak: true,
             adaptive_cancel_streak_epoch_steps: 128,
             // br-asupersync-8fuxnt: default is the unified single-mutex
-            // backing store to preserve all pre-bead behavior. Opt in to
-            // Sharded once the scheduler-side wire-up lands.
+            // backing store to preserve all pre-bead behavior. Sharded is
+            // a supported public opt-in (bt4y5f.2.2); the default flips
+            // only on E1.3 bench/bake evidence (bt4y5f.2.3).
             runtime_state_shape: RuntimeStateShape::Unified,
             security: SecurityConfig::default(),
         }

@@ -4358,8 +4358,6 @@ where
         let admitted_slot = Arc::new(AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(
             gateway,
         )));
-        let pending_cancel_reason =
-            crate::runtime::spawn_mailbox::register_pending_cancel_rendezvous(&admitted_slot);
 
         let parent = self.clone();
         let factory_tx = Arc::clone(&shared_tx);
@@ -4453,7 +4451,6 @@ where
         }
         let handle = crate::runtime::TaskHandle::new_pending(provisional, result_rx, admitted_slot);
         crate::runtime::spawn_mailbox::enqueue_local_spawn(request);
-        drop(pending_cancel_reason);
         Ok(handle)
     }
 
@@ -4493,8 +4490,6 @@ where
         let admitted_slot = Arc::new(AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(
             gateway,
         )));
-        let pending_cancel_reason =
-            crate::runtime::spawn_mailbox::register_pending_cancel_rendezvous(&admitted_slot);
 
         // Parent snapshot for capability inheritance (cheap Arc clones).
         let parent = self.clone();
@@ -4579,7 +4574,6 @@ where
 
         let handle = crate::runtime::TaskHandle::new_pending(provisional, result_rx, admitted_slot);
         gateway.enqueue_and_notify(request)?;
-        drop(pending_cancel_reason);
         Ok(handle)
     }
 

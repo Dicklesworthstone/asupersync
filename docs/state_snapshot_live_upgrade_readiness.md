@@ -30,10 +30,15 @@ handoff claim can be made:
 | `logical_time` | deterministic replay and timestamp checks |
 | `quiescence_proof` | success requires closed regions to have no live children |
 
-Until a migration table exists, only exact schema-version matches are eligible.
-Unknown versions, content hash mismatches, orphan references, cyclic region
-trees, non-quiescent closed regions, and unresolved handoff obligations reject
-the handoff.
+The current lab foundation uses `ASUPSNAP` envelope version `1` and state schema
+version `2`. Exact current-schema snapshots are eligible for this foundation.
+Legacy schema-1 JSON is admitted only through the explicit validated
+`RestorableSnapshot::migrate_to_current` path; the source remains the rollback
+anchor and the migrated target is installed separately through
+`asupersync::fs::write_atomic`. Unknown versions and implicit migration remain
+ineligible. Content hash mismatches, orphan references, cyclic region trees,
+non-quiescent closed regions, and unresolved handoff obligations reject the
+handoff.
 
 <!-- STATE-SNAPSHOT-LIVE-UPGRADE:MATRIX -->
 

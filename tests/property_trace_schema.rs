@@ -832,7 +832,7 @@ impl TraceMigration for IdentityMigration {
     }
 }
 
-/// Dropping migration: drops all events (for testing filter behavior).
+/// Rejecting migration: proves an attempted event drop fails the whole migration.
 struct DroppingMigration {
     from: u32,
     to: u32,
@@ -889,9 +889,9 @@ proptest! {
         prop_assert_eq!(new_events.len(), events.len());
     }
 
-    /// Dropping migration produces empty events.
+    /// A migration that attempts to drop an event is rejected.
     #[test]
-    fn migrator_dropping_removes_all(
+    fn migrator_rejects_event_loss(
         events in prop::collection::vec(arb_replay_event(), 1..=10),
     ) {
         init_test_logging();
@@ -901,8 +901,7 @@ proptest! {
         let mut meta = TraceMetadata::new(42);
         meta.version = 1;
         let result = migrator.migrate(meta, events, 2);
-        let (_, new_events) = result.unwrap();
-        prop_assert!(new_events.is_empty(), "dropping migration should remove all events");
+        prop_assert!(result.is_none(), "event-dropping migration must fail closed");
     }
 
     /// can_migrate is consistent with migrate: if can_migrate is true, migrate succeeds.

@@ -149,9 +149,11 @@ fn cancel_request_root_region_gets_exact_original_reason() {
     // transformation, no stripping.
     let source = read("src/runtime/state.rs");
 
-    let fn_marker = "pub fn cancel_request(";
-    let pos = source.find(fn_marker).expect("cancel_request fn");
-    let body_window = &source[pos..pos + 4000];
+    // E2 S4c-2c-ii/iv (br-asupersync-m9wsza): the walk lives in the
+    // cancel_request_in core; anchor there.
+    let fn_marker = "fn cancel_request_in(";
+    let pos = source.find(fn_marker).expect("cancel_request_in core");
+    let body_window = &source[pos..pos + 5000];
 
     assert!(
         body_window.contains("if rid == region_id {") && body_window.contains("reason.clone()"),
@@ -167,8 +169,9 @@ fn cancel_request_descendants_get_parent_cancelled_chained() {
     // chain via with_cause_limited.
     let source = read("src/runtime/state.rs");
 
-    let fn_marker = "pub fn cancel_request(";
-    let pos = source.find(fn_marker).expect("cancel_request fn");
+    // E2 S4c-2c-ii/iv (br-asupersync-m9wsza): anchor at the core.
+    let fn_marker = "fn cancel_request_in(";
+    let pos = source.find(fn_marker).expect("cancel_request_in core");
     let body_window = &source[pos..pos + 8000];
 
     assert!(
@@ -190,9 +193,12 @@ fn cancel_request_descendants_get_parent_cancelled_chained() {
 fn cancel_request_preserves_timestamp_through_descendants() {
     let source = read("src/runtime/state.rs");
 
-    let fn_marker = "pub fn cancel_request(";
-    let pos = source.find(fn_marker).expect("cancel_request fn");
-    let body_window = &source[pos..pos + 5000];
+    // E2 S4c-2c-ii (br-asupersync-m9wsza): the walk lives in the
+    // cancel_request_in core; anchor there (the pub wrapper is a
+    // delegating shim pinned by the walks-region-tree audit).
+    let fn_marker = "fn cancel_request_in(";
+    let pos = source.find(fn_marker).expect("cancel_request_in core");
+    let body_window = &source[pos..pos + 8000];
 
     assert!(
         body_window.contains(".with_timestamp(reason.timestamp)"),
@@ -237,9 +243,11 @@ fn cancel_request_recovers_from_missing_parent_with_self_rooted_placeholder() {
          the silent-fallback bug it fixes.",
     );
 
-    let fn_marker = "pub fn cancel_request(";
-    let pos = source.find(fn_marker).expect("cancel_request fn");
-    let body_window = &source[pos..pos + 5000];
+    // E2 S4c-2c-ii (br-asupersync-m9wsza): the walk lives in the
+    // cancel_request_in core; anchor there.
+    let fn_marker = "fn cancel_request_in(";
+    let pos = source.find(fn_marker).expect("cancel_request_in core");
+    let body_window = &source[pos..pos + 8000];
 
     assert!(
         body_window
@@ -362,7 +370,8 @@ fn task_cancel_requested_state_carries_chained_reason() {
 
 #[test]
 fn inline_test_cancel_request_builds_cause_chains_retained() {
-    let source = read("src/runtime/state.rs");
+    // Split to the sibling state_tests.rs by br-asupersync-diczyk (0.3.10).
+    let source = read("src/runtime/state_tests.rs");
 
     assert!(
         source.contains("fn cancel_request_builds_cause_chains()"),
@@ -374,7 +383,8 @@ fn inline_test_cancel_request_builds_cause_chains_retained() {
 
 #[test]
 fn inline_test_chain_depth_limit_retained() {
-    let source = read("src/runtime/state.rs");
+    // Split to the sibling state_tests.rs by br-asupersync-diczyk (0.3.10).
+    let source = read("src/runtime/state_tests.rs");
 
     assert!(
         source.contains("fn cancel_request_respects_chain_depth_limit()"),
@@ -385,7 +395,8 @@ fn inline_test_chain_depth_limit_retained() {
 
 #[test]
 fn inline_test_truncates_large_tree_retained() {
-    let source = read("src/runtime/state.rs");
+    // Split to the sibling state_tests.rs by br-asupersync-diczyk (0.3.10).
+    let source = read("src/runtime/state_tests.rs");
 
     assert!(
         source.contains("fn cancel_request_truncates_large_tree()"),

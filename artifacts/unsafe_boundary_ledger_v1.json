@@ -9,6 +9,7 @@
     "notes": [
       "The repository had peer-owned dirty source files at generation time; this ledger inventories committed HEAD so the artifact is reproducible from the source revision recorded here.",
       "UNSAFE-2 catch-up refreshed operation_locators to exact committed-source line numbers and added rows for src/bin/atp.rs and tests/net_unix_stream_ancillary.rs.",
+      "asupersync-ntizv refreshed the src/process.rs live locators and safety contract for exact-image Windows pipes, process attributes, CreateProcessW, and Job Object ownership.",
       "Passing the contract proves source/ledger locator alignment only; category evidence still controls any safety claim."
     ]
   },
@@ -79,15 +80,18 @@
     "process-signal-ffi": {
       "required_evidence": [
         "Process lifecycle tests that tolerate exit races and verify cleanup.",
-        "Platform notes for PID, process group, wait, signal, or Windows event behavior."
+        "Platform notes for PID, process group, wait, signal, or Windows event behavior.",
+        "Exact-image boundaries require no-interpreter-fallback, exact environment and stdio, tree-containment, and cleanup tests plus explicit compile and native-host coverage notes."
       ],
       "review_workflow": [
         "Verify signal or process operations are bounded to owned children or documented probes.",
-        "Document any unavoidable global process-state assumptions."
+        "Document any unavoidable global process-state assumptions.",
+        "For exact-image spawning, trace every descriptor or handle to one owner and verify executable selection and tree assignment cannot fall back to a shell, search path, or uncontained execution window."
       ],
       "explicit_no_claims": [
         "Process-signal evidence does not prove general scheduler cancellation.",
-        "Unix signal proof does not prove Windows event behavior."
+        "Unix signal proof does not prove Windows event behavior.",
+        "Cross-target compilation proves cfg and type integrity only; it does not execute host process creation, inheritance, or cancellation behavior."
       ]
     },
     "env-var-mutation": {
@@ -331,10 +335,10 @@
   },
   "summary": {
     "boundary_rows": 97,
-    "operation_count": 858,
+    "operation_count": 873,
     "operation_kind_counts": {
       "allow_unsafe_code": 100,
-      "unsafe_block": 636,
+      "unsafe_block": 651,
       "unsafe_fn": 102,
       "unsafe_impl": 20,
       "unsafe_trait": 0
@@ -2455,12 +2459,13 @@
       "path": "src/process.rs",
       "category": "process-signal-ffi",
       "scope": "file-or-item-boundary",
-      "feature_or_platform_gate": "see source cfg attributes and Cargo feature gates",
-      "why_safe_rust_is_insufficient": "Initial inventory row: this path contains one or more unsafe operations or unsafe-code allow scopes. UNSAFE-2 must enforce exact live-site matching and may split this row into narrower item rows where useful.",
-      "safety_invariant": "PIDs, process groups, signal handles, and wait status pointers must refer to live OS resources at the call boundary; signal/kill/wait operations must tolerate races with process exit.",
-      "expected_evidence": "Category-specific evidence is defined in docs/unsafe_boundary_ledger.md; this inventory row records the current boundary and must be refined before closing UNSAFE-2 if exact per-block enforcement needs a narrower row.",
+      "feature_or_platform_gate": "Unix process lifecycle operations plus cfg(windows) exact-image CreateProcessW, inherited-pipe, attribute-list, and Job Object operations",
+      "why_safe_rust_is_insufficient": "Safe std does not expose every Unix process/signal operation used by the general process wrapper and cannot atomically create a Windows process inside a kill-on-close Job Object with an explicit inherited-handle allowlist. The exact-image Windows path therefore owns narrow raw Win32 calls and immediately transfers returned handles into OwnedHandle.",
+      "safety_invariant": "PIDs and process groups must identify owned children at each signal/wait boundary. Every successful Win32 handle creation must acquire exactly one OwnedHandle owner, parent pipe handles must be non-inheritable, child inheritance must be restricted to the three stdio handles, attribute storage must outlive CreateProcessW, and Job membership must be atomic with creation before the child can execute.",
+      "expected_evidence": "Category-specific evidence is defined in docs/unsafe_boundary_ledger.md: process lifecycle tests for exact argv/environment/stdio, no-interpreter fallback, process-group isolation, tree kill, and cleanup; Windows cross-target check plus a native Windows exact-image lifecycle lane before claiming the Win32 path executed.",
       "explicit_no_claims": [
-        "This row is an inventory and schema baseline, not fresh execution proof for every platform path.",
+        "Linux or macOS process tests do not execute the Windows handle, attribute-list, CreateProcessW, or Job Object path.",
+        "A Windows cross-target check proves type and cfg integrity only, not native process lifecycle behavior.",
         "Test-only, conformance, fuzz, and compat-boundary rows do not prove core runtime production safety."
       ],
       "operation_locators": [
@@ -2471,102 +2476,177 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 64,
+          "line": 66,
           "pattern": "let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 68,
+          "line": 70,
           "pattern": "let ret = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 277,
+          "line": 279,
           "pattern": "if unsafe { libc::setpgid(0, 0) } == 0 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 284,
+          "line": 286,
           "pattern": "if unsafe { libc::setsid() } >= 0 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 343,
+          "line": 345,
           "pattern": "let ret = unsafe { libc::kill(target, sig) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 494,
+          "line": 496,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 892,
+          "line": 1187,
+          "pattern": "if unsafe { GetExitCodeProcess(self.process.as_raw_handle(), &mut code) } == 0 {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1208,
+          "pattern": "let wait = unsafe { WaitForSingleObject(self.process.as_raw_handle(), 0) };"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1219,
+          "pattern": "let wait = unsafe { WaitForSingleObject(self.process.as_raw_handle(), INFINITE) };"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1232,
+          "pattern": "if unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) } == 0 {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1255,
+          "pattern": "let _ = unsafe {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1267,
+          "pattern": "if unsafe { InitializeProcThreadAttributeList(pointer, attribute_count, 0, &mut bytes) }"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1288,
+          "pattern": "if unsafe {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1315,
+          "pattern": "unsafe { DeleteProcThreadAttributeList(self.pointer) };"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1326,
+          "pattern": "let _ = unsafe { CloseHandle(handle) };"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1344,
+          "pattern": "Ok(unsafe { OwnedHandle::from_raw_handle(handle) })"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1363,
+          "pattern": "if unsafe { CreatePipe(&mut read, &mut write, &mut security, 0) } == 0 {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1379,
+          "pattern": "if unsafe { SetHandleInformation(handle.as_raw_handle(), HANDLE_FLAG_INHERIT, 0) } == 0 {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1398,
+          "pattern": "let raw = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1402,
+          "pattern": "if unsafe {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1602,
+          "pattern": "if unsafe {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 2018,
           "pattern": "unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1947,
+          "line": 3073,
           "pattern": "let _ = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2778,
+          "line": 4044,
           "pattern": "let _ = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2818,
+          "line": 4084,
           "pattern": "let _ = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 3002,
+          "line": 4268,
           "pattern": "let waited = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 3045,
+          "line": 4311,
           "pattern": "let waited = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 3471,
+          "line": 4737,
           "pattern": "let sigterm_result = unsafe { libc::kill(pid.cast_signed(), libc::SIGTERM) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 3483,
+          "line": 4749,
           "pattern": "let still_alive = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 3494,
+          "line": 4760,
           "pattern": "let sigkill_result = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 3564,
+          "line": 4830,
           "pattern": "let process_gone = unsafe { libc::kill(pid.cast_signed(), 0) == -1 }"
         },
         {
           "kind": "unsafe_block",
-          "line": 3640,
+          "line": 4906,
           "pattern": "let our_pgid = unsafe { libc::getpgid(0) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 3645,
+          "line": 4911,
           "pattern": "let read_isolated_pgid = || -> libc::pid_t { unsafe { libc::getpgid(isolated_pid) } };"
         },
         {
           "kind": "unsafe_block",
-          "line": 3699,
+          "line": 4965,
           "pattern": "let read_target_pgid = || -> libc::pid_t { unsafe { libc::getpgid(target_pid) } };"
         },
         {
           "kind": "unsafe_block",
-          "line": 3763,
+          "line": 5029,
           "pattern": "let child_alive = unsafe { libc::kill(isolated_pid, 0) == 0 };"
         }
       ]

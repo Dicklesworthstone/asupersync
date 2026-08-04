@@ -40,8 +40,8 @@ chacha20poly1305 = "0.10.1"
 # For MessagePack serialization in trace streaming tests
 rmp-serde = "1.3"
 
-# For direct LZ4 trace chunk fuzzing
-lz4_flex = "0.13"
+# Pinned incumbent oracle for the owned trace-block differential target.
+lz4_flex = "=0.14.0"
 
 # For concurrency limit metamorphic testing
 pin-project = "1"
@@ -618,6 +618,14 @@ bench = false
 [[bin]]
 name = "tls_x509"
 path = "fuzz_targets/tls_x509.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-0h6myr.3.5 — exact-source bounded DER residue fuzzer.
+[[bin]]
+name = "x509_der_residue"
+path = "fuzz_targets/x509_der_residue.rs"
 test = false
 doc = false
 bench = false
@@ -6223,4 +6231,3 @@ path = "fuzz_targets/replay_minimization_invariants.rs"
 test = false
 doc = false
 bench = false
-

@@ -316,17 +316,36 @@ fn can_region_finalize_requires_all_tasks_terminal_for_quiescence() {
     // quiescence" — no detached pathway can bypass.
     let source = read("src/runtime/state.rs");
 
+    // E2 S4b-1a (br-asupersync-m9wsza) split the finalize gate into a
+    // target-threaded core: the public wrapper delegates to
+    // can_region_finalize_in, which owns the per-task terminal scan. Pin
+    // both links so the chain public-entry → core → task_ids/is_terminal
+    // stays intact regardless of the wrapper/core split.
     let fn_marker = "pub fn can_region_finalize(&self, region_id: RegionId) -> bool {";
     let start = source.find(fn_marker).expect("can_region_finalize fn");
-    let body_end = source[start..]
+    let wrapper_end = source[start..]
         .find("\n    }\n")
         .expect("can_region_finalize close");
-    let body = &source[start..start + body_end];
+    let wrapper_body = &source[start..start + wrapper_end];
+    assert!(
+        wrapper_body.contains("can_region_finalize_in("),
+        "REGRESSION: can_region_finalize no longer delegates to the \
+         target-threaded core; the terminal-scan pins below anchor on \
+         the core and the two can drift.",
+    );
+
+    let core_marker = "fn can_region_finalize_in(";
+    let core_start = source
+        .find(core_marker)
+        .expect("can_region_finalize_in core");
+    let core_end = source[core_start..]
+        .find("\n    }\n")
+        .expect("can_region_finalize_in close");
+    let body = &source[core_start..core_start + core_end];
 
     assert!(
-        body.contains("region\n            .task_ids()\n            .iter()")
-            || body.contains("task_ids()"),
-        "REGRESSION: can_region_finalize no longer iterates \
+        body.contains("task_ids()"),
+        "REGRESSION: the finalize gate no longer iterates \
          region.task_ids(). Region close no longer waits \
          for all owned tasks to reach terminal state — \
          orphan pathway opened.",
@@ -334,7 +353,7 @@ fn can_region_finalize_requires_all_tasks_terminal_for_quiescence() {
 
     assert!(
         body.contains("t.state.is_terminal()"),
-        "REGRESSION: can_region_finalize no longer checks \
+        "REGRESSION: the finalize gate no longer checks \
          is_terminal() on each owned task. Detached tasks \
          could outlive the region.",
     );

@@ -88,9 +88,9 @@ Source base: `src/` (~377K lines, 499 files)
 
 ### prog.cancel.drains
 
-- **Intent**: Cancelled tasks eventually complete (drain within bounded budget).
-- **Primary citation**: `src/types/cancel.rs:13-19` (cleanup budget table bounds drain time).
-- **Certificate tracking**: `src/cancel/progress_certificate.rs` (statistical certificates for drain progress).
+- **Intent**: Covered cooperative cancellation paths complete when their published responsiveness assumptions hold and sufficient cleanup budget is available; non-cooperative work has no universal drain bound.
+- **Primary citation**: `src/types/cancel.rs:13-19` (per-kind cleanup policy values, not a proof of a universal time bound).
+- **Certificate tracking**: `src/cancel/progress_certificate.rs` (empirical phase/stall diagnostics and conditional signed-step range calculations).
 - **Oracle**: `src/lab/oracle/cancellation_protocol.rs:679` (`fn check` comprehensive invariant checking).
 - **Charter ref**: SEM-INV-003
 
@@ -411,9 +411,9 @@ Source base: `src/` (~377K lines, 499 files)
 
 ### def.budget.combine_semiring
 
-- **Intent**: Budget combine uses product semiring: min on core fields, max (or min) on priority.
-- **Primary citation**: `src/types/budget.rs:322-410` (`fn combine` — componentwise min for deadline/poll_quota/cost_quota/priority).
-- **Alias**: `src/types/budget.rs:412-432` (`fn meet` = `fn combine`).
+- **Intent**: Budget combine uses product semantics: min on deadline/poll/cost constraints and max on priority.
+- **Primary citation**: `src/types/budget.rs` (`Budget::combine_untraced` — min for deadline/poll/cost and max for priority).
+- **Alias**: `src/types/budget.rs` (`Budget::meet` delegates to `Budget::combine`).
 
 ### def.region.state_machine
 

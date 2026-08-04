@@ -30,12 +30,26 @@ use std::ops::{Deref, DerefMut, RangeBounds};
 /// let frozen = buf.freeze();
 /// assert_eq!(&frozen[..], b"hello world");
 /// ```
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub struct BytesMut {
     /// The backing storage.
     data: Vec<u8>,
     /// Start offset of the active byte range in `data`.
     start: usize,
+}
+
+impl Clone for BytesMut {
+    /// Clone the logical active bytes into an independent, normalized buffer.
+    ///
+    /// Consumed prefix bytes and spare capacity are representation history, not
+    /// part of the value, so the clone always starts at offset zero.
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            data: self.active().to_vec(),
+            start: 0,
+        }
+    }
 }
 
 impl BytesMut {
@@ -926,6 +940,38 @@ mod tests {
         stream.advance(3);
         crate::assert_with_log!(stream.is_empty(), "fully drained", true, stream.is_empty());
         crate::test_complete!("bytes_mut_advance_matches_split_to_remainder");
+    }
+
+    #[test]
+    fn bytes_mut_clone_copies_only_active_view() {
+        init_test("bytes_mut_clone_copies_only_active_view");
+        const SUFFIX: &[u8] = b"tail";
+
+        for prefix_len in [0, 1, 4096] {
+            let mut source = BytesMut::with_capacity(prefix_len + SUFFIX.len());
+            source.resize(prefix_len, b'p');
+            source.put_slice(SUFFIX);
+            source.advance(prefix_len);
+
+            assert_eq!(source.start, prefix_len);
+            assert_eq!(source.data.len(), prefix_len + SUFFIX.len());
+
+            let mut cloned = source.clone();
+            assert_eq!(&cloned[..], SUFFIX);
+            assert_eq!(cloned.start, 0, "clone must normalize its active offset");
+            assert_eq!(
+                cloned.data.len(),
+                source.len(),
+                "clone backing must contain only the logical value"
+            );
+            assert_eq!(cloned.data.as_slice(), SUFFIX);
+
+            cloned[0] = b'X';
+            assert_eq!(&source[..], SUFFIX, "clone must remain mutably independent");
+            assert_ne!(cloned[0], source[0]);
+        }
+
+        crate::test_complete!("bytes_mut_clone_copies_only_active_view");
     }
 
     #[test]

@@ -6984,11 +6984,13 @@ mod tests {
         let child_task = supervisor.started[0].task_id;
         assert_eq!(registry.lock().whereis("panic_svc"), Some(child_task));
 
-        // Drive the child once so it crashes in on_start.
+        // Drive the child once so it crashes in on_start. The supervisor
+        // region intentionally remains open with a pending name-cleanup
+        // finalizer, so this phase is idle rather than quiescent.
         {
             runtime.scheduler.lock().schedule(child_task, 0);
         }
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
 
         // Region stop must still clean the registry + resolve the lease.
         let cancel_effects = runtime.state.cancel_request(

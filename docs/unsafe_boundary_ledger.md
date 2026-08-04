@@ -138,6 +138,19 @@ regression evidence is
 `cargo check -p asupersync` does not execute it, and Linux evidence does not
 prove every Unix CMSG layout.
 
+Exact-image process FFI note for `src/process.rs`: the
+`unsafe-src-process-rs` row also covers the Windows-only exact-image spawn
+boundary. Three inheritable pipe ends are created for child stdio while the
+parent ends have inheritance cleared; `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`
+restricts inheritance to those three handles, and
+`PROC_THREAD_ATTRIBUTE_JOB_LIST` atomically places the child in a
+kill-on-close Job Object before it can execute. Every successful raw handle is
+immediately transferred to one `OwnedHandle`, the initialized attribute-list
+allocation outlives `CreateProcessW`, and the application path is passed
+explicitly rather than resolved or interpreted. Native Unix lifecycle tests
+and a Windows cross-target check do not execute these Win32 calls; a native
+Windows lifecycle lane is required before claiming runtime coverage.
+
 breakage rehearsal for unsafe review changes:
 
 1. Add a temporary unledgered unsafe site in a local throwaway edit.

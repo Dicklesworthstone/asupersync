@@ -249,8 +249,10 @@ fn lock_metric(name: &str, p95_wait_ns: u64, p99_wait_ns: u64) -> SwarmContentio
         p50_wait_ns: p95_wait_ns / 4,
         p95_wait_ns,
         p99_wait_ns,
+        wait_percentile_sample_count: Some(64),
         p95_hold_ns: 2_000,
         p99_hold_ns: 5_000,
+        hold_percentile_sample_count: Some(64),
         instrumentation_mode: "fifth_wave_fixture".to_string(),
     }
 }

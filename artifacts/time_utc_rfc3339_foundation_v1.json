@@ -1,0 +1,91 @@
+{
+  "artifact_id": "time-utc-rfc3339-foundation-v1",
+  "schema_version": 1,
+  "bead_id": "asupersync-d24mms.4",
+  "capability_ids": [
+    "CAP-TIME-UTC-RFC3339"
+  ],
+  "governing_adr": "DEP-ADR-011",
+  "observed_at_utc": "2026-08-02T18:34:40Z",
+  "decision": {
+    "state": "KEEP_PENDING_SPARSE_GRAPH_AND_LEDGER_PROOF",
+    "checkpoint_allowed": true,
+    "close_bead_allowed": false,
+    "dependency_action": "RETAIN_TIME_EDGE",
+    "reason": "The current CLI timestamp conversion can move to an owned deterministic formatter without changing the accepted dependency graph. Dependency exit remains blocked on the broader formatter, graph, and ledger evidence required by DEP-ADR-011."
+  },
+  "formatter_contract": {
+    "source": "src/time/utc.rs",
+    "function": "asupersync::time::format_unix_nanos_rfc3339",
+    "input": "u64 nonnegative Unix nanoseconds",
+    "supported_years": "1970..=2554",
+    "timezone_suffix": "Z",
+    "fraction_policy": "omit zero fraction; otherwise render exact nanoseconds and trim trailing zeroes",
+    "zero_formatter_result": "1970-01-01T00:00:00Z",
+    "clock_reads": 0
+  },
+  "cli_contract": {
+    "source": "src/bin/asupersync.rs",
+    "command": "asupersync --format <json|human> --color never trace info <trace>",
+    "zero_recorded_at_policy": "created_at is absent",
+    "nonzero_recorded_at_policy": "created_at is the owned formatter result",
+    "fixture_recorded_at": 1582979696123456789,
+    "fixture_created_at": "2020-02-29T12:34:56.123456789Z",
+    "human_created_line": "Created: 2020-02-29T12:34:56.123456789Z"
+  },
+  "vectors": [
+    {
+      "unix_nanos": 0,
+      "rfc3339": "1970-01-01T00:00:00Z"
+    },
+    {
+      "unix_nanos": 1,
+      "rfc3339": "1970-01-01T00:00:00.000000001Z"
+    },
+    {
+      "unix_nanos": 100000000,
+      "rfc3339": "1970-01-01T00:00:00.1Z"
+    },
+    {
+      "unix_nanos": 120000000,
+      "rfc3339": "1970-01-01T00:00:00.12Z"
+    },
+    {
+      "unix_nanos": 951782400000000000,
+      "rfc3339": "2000-02-29T00:00:00Z"
+    },
+    {
+      "unix_nanos": 1582979696123456789,
+      "rfc3339": "2020-02-29T12:34:56.123456789Z"
+    },
+    {
+      "unix_nanos": 4107542400000000000,
+      "rfc3339": "2100-03-01T00:00:00Z"
+    },
+    {
+      "unix_nanos": 18446744073709551615,
+      "rfc3339": "2554-07-21T23:34:33.709551615Z"
+    }
+  ],
+  "evidence": {
+    "contract": "tests/time_utc_rfc3339_foundation_contract.rs",
+    "documentation": "docs/time_utc_rfc3339_foundation.md",
+    "runner": "scripts/run_dependency_sovereignty_e2e.sh",
+    "scenario_id": "dep-sovereignty-asupersync_d24mms_4_b6e90e93b1e8",
+    "stable_test_name": "dep_sovereignty_asupersync_d24mms_4_b6e90e93b1e8",
+    "profile": "current-cli-owned-formatter-keep",
+    "features": [
+      "cli"
+    ]
+  },
+  "no_claims": [
+    "negative Unix timestamps",
+    "timestamp parsing or offset conversion",
+    "time-zone database behavior",
+    "leap-second representation",
+    "ambient clock access",
+    "chrono-backed public or persisted representations",
+    "removal of time or chrono dependencies",
+    "broad workspace health"
+  ]
+}

@@ -313,13 +313,26 @@ fn inject_ready_routes_cross_thread_spawns_through_global_injector() {
         .expect("inject_ready close");
     let body = &source[start..start + body_end];
 
+    // The inject_global_ready_checked helper was folded into an atomic
+    // check-and-inject under the task-table lock (TOCTOU hardening): the
+    // global-injector routing witness is now the direct
+    // `self.global.inject_ready` call inside that critical section, and
+    // the locality guarantee is the fail-closed local-task refusal.
     assert!(
-        body.contains("self.inject_global_ready_checked(task, priority);"),
-        "REGRESSION: Scheduler::inject_ready no longer calls \
-         inject_global_ready_checked. Cross-thread spawns \
+        body.contains("self.global.inject_ready(task, priority);"),
+        "REGRESSION: Scheduler::inject_ready no longer routes into the \
+         global injector. Cross-thread spawns \
          (e.g., from main(), from a non-worker thread) need \
          to land in the global injector since they have no \
          worker's CURRENT_QUEUE binding.\n\nfn body:\n{body}",
+    );
+
+    assert!(
+        body.contains("Local tasks cannot be globally injected")
+            && body.contains("refusing to globally inject local task"),
+        "REGRESSION: Scheduler::inject_ready no longer refuses local \
+         (!Send) tasks fail-closed. Injecting a local task globally \
+         allows wrong-thread polling — UB.\n\nfn body:\n{body}",
     );
 }
 

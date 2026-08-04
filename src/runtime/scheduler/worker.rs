@@ -37,14 +37,18 @@ pub type WorkerId = usize;
 pub const MAX_SEEN_IO_TOKENS: usize = 65_536;
 
 #[derive(Debug, Default)]
-struct SeenIoTokens {
+#[doc(hidden)] // pub ONLY for the io_token_dedup comparator bench
+// (br-asupersync-sched-hot-path-perf-bt4y5f.9); not a supported API.
+pub struct SeenIoTokens {
     latest_generation: HashMap<u64, u64>,
     generation_order: VecDeque<(u64, u64)>,
     next_generation: u64,
 }
 
 impl SeenIoTokens {
-    fn with_capacity(capacity: usize) -> Self {
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
         Self {
             latest_generation: HashMap::with_capacity(capacity),
             generation_order: VecDeque::with_capacity(capacity),
@@ -52,7 +56,8 @@ impl SeenIoTokens {
         }
     }
 
-    fn observe(&mut self, token: u64) -> bool {
+    #[doc(hidden)]
+    pub fn observe(&mut self, token: u64) -> bool {
         let generation = self.allocate_generation();
         let is_first_observation = match self.latest_generation.entry(token) {
             Entry::Occupied(mut entry) => {
@@ -158,6 +163,13 @@ impl std::fmt::Debug for Worker {
 
 impl Worker {
     /// Creates a new worker with the provided queues and state.
+    ///
+    /// Extracts the E/D instrumentation handles from `state` in one brief
+    /// acquisition and delegates to [`new_with_handles`](Self::new_with_handles).
+    /// Callers constructing many workers should extract the handles once and
+    /// call `new_with_handles` directly so construction does not serialize on
+    /// the runtime-state mutex per worker
+    /// (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2, row W01).
     pub fn new(
         id: WorkerId,
         stealers: Vec<Stealer>,
@@ -176,7 +188,37 @@ impl Worker {
                 guard.metrics_provider(),
             )
         };
+        Self::new_with_handles(
+            id,
+            stealers,
+            global,
+            state,
+            shutdown,
+            io_driver,
+            trace,
+            timer_driver,
+            metrics,
+        )
+    }
 
+    /// Creates a new worker from pre-extracted instrumentation handles,
+    /// performing zero `RuntimeState` mutex acquisitions
+    /// (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2, row W01).
+    ///
+    /// The `state` Arc is retained for the worker's runtime-table access
+    /// paths but is not locked during construction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_handles(
+        id: WorkerId,
+        stealers: Vec<Stealer>,
+        global: Arc<GlobalQueue>,
+        state: Arc<ContendedMutex<RuntimeState>>,
+        shutdown: Arc<AtomicBool>,
+        io_driver: Option<IoDriverHandle>,
+        trace: TraceBufferHandle,
+        timer_driver: Option<TimerDriverHandle>,
+        metrics: Arc<dyn MetricsProvider>,
+    ) -> Self {
         let panic_isolator =
             PanicIsolator::new(PanicIsolationConfig::default(), Arc::clone(&metrics));
 
@@ -1043,10 +1085,50 @@ impl Parker {
         self.inner.cvar.notify_one();
     }
 
+    /// Publishes a permit only when a thread is currently parked or preparing
+    /// to park on this instance.
+    ///
+    /// The optimistic waiter-count check keeps the common non-waiting scan
+    /// lock-free. The second check runs under the condvar mutex, binding the
+    /// observed waiter to the notification: a timed-out waiter decrements its
+    /// count before releasing this mutex, while a waiter still preparing to
+    /// sleep will consume the published permit before entering the condvar.
+    ///
+    /// Returns `true` only when this call published a new permit for a live
+    /// waiter. An already-notified waiter returns `false`, allowing a
+    /// coordinator to try another parked worker instead of wasting the wake.
+    #[inline]
+    pub(crate) fn unpark_if_waiting(&self) -> bool {
+        if self.inner.waiting.load(Ordering::Acquire) == 0 {
+            return false;
+        }
+
+        let _guard = self.lock_unpoisoned();
+        if self.inner.waiting.load(Ordering::Acquire) == 0
+            || self
+                .inner
+                .notified
+                .compare_exchange(false, true, Ordering::Release, Ordering::Relaxed)
+                .is_err()
+        {
+            return false;
+        }
+
+        crate::runtime::metrics::record_worker_unpark();
+        self.inner.cvar.notify_one();
+        true
+    }
+
     #[cfg(test)]
     #[must_use]
     pub(crate) fn notification_pending_for_test(&self) -> bool {
         self.inner.notified.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn waiting_count_for_test(&self) -> usize {
+        self.inner.waiting.load(Ordering::Acquire)
     }
 }
 
@@ -1797,6 +1879,74 @@ mod tests {
         assert_eq!(
             finalizer_record.owner, region,
             "async finalizer should stay attached to the closing region"
+        );
+    }
+
+    #[test]
+    fn sync_finalizer_runs_after_runtime_state_lock_is_released() {
+        use crate::runtime::RuntimeState;
+        use crate::sync::ContendedMutex;
+        use crate::types::Budget;
+
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let global = Arc::new(GlobalQueue::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let finalizer_ran = Arc::new(AtomicBool::new(false));
+        let lock_was_available = Arc::new(AtomicBool::new(false));
+
+        let region = {
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let region = guard.create_root_region(Budget::INFINITE);
+            let state_for_finalizer = Arc::clone(&state);
+            let ran_for_finalizer = Arc::clone(&finalizer_ran);
+            let available_for_finalizer = Arc::clone(&lock_was_available);
+            assert!(guard.register_sync_finalizer(region, move || {
+                ran_for_finalizer.store(true, Ordering::SeqCst);
+                available_for_finalizer
+                    .store(state_for_finalizer.try_lock().is_ok(), Ordering::SeqCst);
+            }));
+            assert!(
+                guard
+                    .region(region)
+                    .expect("region should exist")
+                    .begin_close(None)
+            );
+
+            guard.advance_region_state(region);
+            assert!(
+                !finalizer_ran.load(Ordering::SeqCst),
+                "region progression beneath the state lock must not invoke user code"
+            );
+            region
+        };
+
+        let worker = Worker::new(
+            0,
+            Vec::new(),
+            Arc::clone(&global),
+            Arc::clone(&state),
+            Arc::clone(&shutdown),
+        );
+        assert!(
+            worker.schedule_ready_finalizers(),
+            "sync finalizer should cross the scheduler task boundary"
+        );
+        let finalizer_task = global.pop().expect("finalizer task should be published");
+        worker.execute(finalizer_task);
+
+        assert!(finalizer_ran.load(Ordering::SeqCst));
+        assert!(
+            lock_was_available.load(Ordering::SeqCst),
+            "sync finalizer must be able to reacquire runtime state"
+        );
+        let guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            guard.region(region).is_none(),
+            "region should close after its scheduled finalizer completes"
         );
     }
 

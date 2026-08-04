@@ -225,8 +225,9 @@ pub const fn otlp_tail_based_sampling_scope() -> OtlpTailSamplingScope {
 
 /// Bounded export queue with oldest-drop load shedding.
 ///
-/// **PERFORMANCE**: Uses lock-free ArrayQueue to eliminate mutex contention
-/// under high-frequency span creation (100K+ spans/sec).
+/// Uses a lock-free `ArrayQueue` so producers do not serialize through a
+/// queue-wide mutex. Throughput depends on the workload and host; this type
+/// makes no fixed rate or speedup claim.
 #[derive(Debug)]
 pub struct BoundedExportQueue<T> {
     queue: ArrayQueue<T>,
@@ -264,7 +265,8 @@ impl<T> BoundedExportQueue<T> {
 
     /// Dequeue the oldest item.
     ///
-    /// **LOCK-FREE**: Uses atomic operations for zero-contention access.
+    /// Delegates to the lock-free `ArrayQueue::pop`; concurrent callers can
+    /// still contend on the queue's atomic state.
     pub fn dequeue(&self) -> Option<T> {
         self.queue.pop()
     }

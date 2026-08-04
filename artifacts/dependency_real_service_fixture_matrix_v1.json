@@ -1,0 +1,353 @@
+{
+  "schema_version": 1,
+  "artifact_id": "dependency-real-service-fixture-matrix-v1",
+  "bead_id": "asupersync-dep-p1-foundations-upksjk.6.3",
+  "capability_ids": [
+    "CAP-REAL-SERVICE-E2E",
+    "CAP-VERIFICATION-PROFILES"
+  ],
+  "canonical_suite": {
+    "suite_id": "dependency-sovereignty",
+    "scenario_id": "real-service-fixture-contract",
+    "command": "RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh --scenario real-service-fixture-contract",
+    "receipt_schema": "dependency-real-service-fixture-receipt-v1"
+  },
+  "outcome_taxonomy": [
+    "EXECUTABLE_COMPLETE",
+    "BLOCKED_EXTERNAL",
+    "UNSUPPORTED"
+  ],
+  "required_service_family_ids": [
+    "kafka",
+    "nats-nkey",
+    "otlp",
+    "sqlite",
+    "frankensqlite",
+    "http-compression",
+    "tls-x509",
+    "downstream-consumers"
+  ],
+  "fixture_contract": {
+    "ambient_services_forbidden": true,
+    "mock_substitution_forbidden": true,
+    "binary_identity": "absolute-path-plus-sha256-plus-exact-version-output",
+    "container_identity": "repository-at-sha256-digest",
+    "port_policy": "OS-assigned loopback reservation released immediately before managed startup",
+    "directory_policy": "per-run isolated temporary directory",
+    "startup_policy": "bounded readiness with crash detection and sanitized failure logs",
+    "teardown_policy": "reverse order, retryable, idempotent, with orphan detection",
+    "redaction_policy": "fixture logs redact declared secret values; the canonical retained-evidence runner additionally redacts credential-bearing URI, bearer, private-key, and NKey patterns",
+    "blocked_policy": "missing pin, platform, tool, network, service, credential, or external owner emits BLOCKED_EXTERNAL or UNSUPPORTED and never passes"
+  },
+  "lifecycle_tests": [
+    "test_port_allocator_allocates_unique_ports",
+    "test_environment_start_failure_rolls_back_in_reverse_order",
+    "test_environment_readiness_failure_stops_every_service",
+    "test_wait_until_healthy_immediate",
+    "test_wait_until_healthy_timeout",
+    "test_process_fixture_pinned_lifecycle_and_redacted_logs",
+    "test_process_fixture_rejects_digest_and_version_drift",
+    "test_process_fixture_rejects_ambient_working_directory",
+    "test_process_fixture_captures_crash_and_readiness_timeout",
+    "test_environment_retries_failed_teardown_and_reports_orphan",
+    "test_environment_teardown_idempotent"
+  ],
+  "service_families": [
+    {
+      "family_id": "kafka",
+      "smoke_scenario_id": "fixture-smoke-kafka",
+      "fixture_kind": "docker",
+      "declared_outcome": "BLOCKED_EXTERNAL",
+      "proof_source": "managed pinned Kafka brokers",
+      "provenance": {
+        "version": null,
+        "identity": null,
+        "source": "scripts/provision_kafka_test_env.rs currently names mutable confluentinc/cp-kafka:7.4.0 and tests/integration/kafka_real_broker.rs permits an ambient bootstrap server"
+      },
+      "cells": [
+        {
+          "cell_id": "kafka-oldest-supported-plaintext",
+          "mode": "plaintext",
+          "declared_outcome": "BLOCKED_EXTERNAL"
+        },
+        {
+          "cell_id": "kafka-newest-supported-plaintext",
+          "mode": "plaintext",
+          "declared_outcome": "BLOCKED_EXTERNAL"
+        },
+        {
+          "cell_id": "kafka-supported-sasl-tls",
+          "mode": "sasl-tls",
+          "declared_outcome": "BLOCKED_EXTERNAL"
+        }
+      ],
+      "directions": [
+        "asupersync-produce-reference-consume",
+        "reference-produce-asupersync-consume"
+      ],
+      "restart_reconnect_required": true,
+      "smoke_command": null,
+      "blocker": "The repository has no approved supported-version policy or immutable image digests for the required Kafka version and security matrix.",
+      "unblock_requirements": [
+        "approve oldest and newest supported broker versions",
+        "pin every image by sha256 digest",
+        "replace ambient bootstrap URLs with DockerFixtureService-owned loopback brokers",
+        "record plaintext and SASL/TLS readiness, reconnect, logs, and reverse teardown"
+      ]
+    },
+    {
+      "family_id": "nats-nkey",
+      "smoke_scenario_id": "fixture-smoke-nats-nkey",
+      "fixture_kind": "process",
+      "declared_outcome": "BLOCKED_EXTERNAL",
+      "proof_source": "managed pinned nats-server with NKey authentication",
+      "provenance": {
+        "version": "v2.12.5",
+        "identity": null,
+        "source": "scripts/nats_jetstream_broker_parity_proof_runner.sh downloads a versioned archive but does not verify an archive or binary digest and permits PATH or external URL overrides"
+      },
+      "cells": [
+        {
+          "cell_id": "nats-core-nkey",
+          "mode": "nkey",
+          "declared_outcome": "BLOCKED_EXTERNAL"
+        },
+        {
+          "cell_id": "nats-jetstream-nkey-reconnect",
+          "mode": "nkey-jetstream",
+          "declared_outcome": "BLOCKED_EXTERNAL"
+        }
+      ],
+      "directions": [
+        "asupersync-publish-reference-subscribe",
+        "reference-publish-asupersync-subscribe"
+      ],
+      "restart_reconnect_required": true,
+      "smoke_command": null,
+      "blocker": "The current runner has a version pin but no SHA-256 identity pin, and NKey credentials are not provisioned by an isolated managed fixture.",
+      "unblock_requirements": [
+        "pin the release archive and extracted binary SHA-256",
+        "start only through PinnedProcessIdentity and ProcessFixtureService",
+        "generate per-run NKey credentials inside the isolated directory",
+        "exercise both directions and JetStream reconnect with redacted logs"
+      ]
+    },
+    {
+      "family_id": "otlp",
+      "smoke_scenario_id": "fixture-smoke-otlp",
+      "fixture_kind": "docker-or-process",
+      "declared_outcome": "BLOCKED_EXTERNAL",
+      "proof_source": "managed OTLP collector plus reference SDK and provider",
+      "provenance": {
+        "version": null,
+        "identity": null,
+        "source": "Cargo.lock pins opentelemetry_sdk 0.32.1 and opentelemetry-proto 0.32.0, but no pinned external collector fixture exists"
+      },
+      "cells": [
+        {
+          "cell_id": "otlp-metrics-bidirectional",
+          "mode": "metrics",
+          "declared_outcome": "BLOCKED_EXTERNAL"
+        },
+        {
+          "cell_id": "otlp-traces-bidirectional",
+          "mode": "traces",
+          "declared_outcome": "BLOCKED_EXTERNAL"
+        },
+        {
+          "cell_id": "otlp-logs-bidirectional",
+          "mode": "logs",
+          "declared_outcome": "BLOCKED_EXTERNAL"
+        }
+      ],
+      "directions": [
+        "asupersync-export-collector-reference-read",
+        "reference-export-collector-asupersync-read"
+      ],
+      "restart_reconnect_required": true,
+      "smoke_command": null,
+      "blocker": "The current OTLP smoke surfaces are in-memory or inventory contracts; there is no immutable collector identity or managed reference reader/provider path.",
+      "unblock_requirements": [
+        "pin an OTLP collector image or binary by SHA-256",
+        "pin reference metrics, traces, and logs SDK/provider paths",
+        "allocate isolated endpoints and collector storage",
+        "exercise reconnect and failure-log capture without in-memory substitution"
+      ]
+    },
+    {
+      "family_id": "sqlite",
+      "smoke_scenario_id": "fixture-smoke-sqlite-real-disk",
+      "fixture_kind": "in-process-real-file",
+      "declared_outcome": "EXECUTABLE_COMPLETE",
+      "proof_source": "real filesystem SQLite WAL fixture",
+      "provenance": {
+        "version": "rusqlite 0.40.1 / libsqlite3-sys 0.38.1 bundled",
+        "identity": "Cargo.lock checksums 11438310b19e3109b6446c33d1ed5e889428cf2e278407bc7896bc4aaea43323 and f6c19a05435c21ac299d71b6a9c13db3e3f47c520517d58990a462a1397a61db",
+        "source": "Cargo.lock and tests/sqlite_real_disk_cancel_rollback.rs"
+      },
+      "cells": [
+        {
+          "cell_id": "sqlite-real-disk-wal-cancel-rollback",
+          "mode": "real-file-wal",
+          "declared_outcome": "EXECUTABLE_COMPLETE"
+        }
+      ],
+      "directions": [
+        "asupersync-write-fresh-connection-read",
+        "fresh-connection-write-asupersync-read"
+      ],
+      "restart_reconnect_required": true,
+      "smoke_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_fixture_smoke_sqlite cargo test -p asupersync --features sqlite,test-internals --test sqlite_real_disk_cancel_rollback -- --nocapture --test-threads=1",
+      "blocker": null,
+      "unblock_requirements": []
+    },
+    {
+      "family_id": "frankensqlite",
+      "smoke_scenario_id": "fixture-smoke-frankensqlite",
+      "fixture_kind": "downstream-repository",
+      "declared_outcome": "UNSUPPORTED",
+      "proof_source": "FrankenSQLite downstream parity consumer",
+      "provenance": {
+        "version": null,
+        "identity": null,
+        "source": "docs/dependency_oracle_policy.md assigns this reverse-dependency fixture to FrankenSQLite or a neutral consumer"
+      },
+      "cells": [
+        {
+          "cell_id": "frankensqlite-real-file-parity",
+          "mode": "external-downstream",
+          "declared_outcome": "UNSUPPORTED"
+        }
+      ],
+      "directions": [
+        "sqlite-to-frankensqlite",
+        "frankensqlite-to-sqlite"
+      ],
+      "restart_reconnect_required": true,
+      "smoke_command": null,
+      "blocker": "Adding FrankenSQLite to this workspace creates a reverse Cargo dependency cycle.",
+      "external_owner": "FrankenSQLite repository or neutral synthesized consumer",
+      "unblock_requirements": [
+        "run from the downstream repository or neutral consumer with an independent lockfile",
+        "return pinned source revision, engine identity, bidirectional file corpus, and cleanup receipt"
+      ]
+    },
+    {
+      "family_id": "http-compression",
+      "smoke_scenario_id": "fixture-smoke-http-compression",
+      "fixture_kind": "process",
+      "declared_outcome": "BLOCKED_EXTERNAL",
+      "proof_source": "managed independent HTTP compression peer",
+      "provenance": {
+        "version": "flate2 1.1.9 / brotli 8.0.4",
+        "identity": "Cargo.lock checksums 843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c and 5cc91aac060a7a1e25823bdccbfb6af1875b88f17c6daac97894eed8207166b3",
+        "source": "Cargo.lock pins incumbent codecs, but no independent pinned HTTP peer process exists"
+      },
+      "cells": [
+        {
+          "cell_id": "http-gzip-bidirectional",
+          "mode": "gzip",
+          "declared_outcome": "BLOCKED_EXTERNAL"
+        },
+        {
+          "cell_id": "http-deflate-bidirectional",
+          "mode": "deflate",
+          "declared_outcome": "BLOCKED_EXTERNAL"
+        },
+        {
+          "cell_id": "http-brotli-bidirectional",
+          "mode": "brotli",
+          "declared_outcome": "BLOCKED_EXTERNAL"
+        }
+      ],
+      "directions": [
+        "asupersync-encode-reference-decode",
+        "reference-encode-asupersync-decode"
+      ],
+      "restart_reconnect_required": false,
+      "smoke_command": null,
+      "blocker": "Existing HTTP E2E coverage negotiates internal codecs and does not manage an independently pinned peer for gzip, deflate, and Brotli.",
+      "unblock_requirements": [
+        "pin an independent peer binary by SHA-256 and exact version",
+        "exercise request and response encoding in both directions",
+        "retain bounded decompression and malformed-stream receipts"
+      ]
+    },
+    {
+      "family_id": "tls-x509",
+      "smoke_scenario_id": "fixture-smoke-tls-x509",
+      "fixture_kind": "process",
+      "declared_outcome": "BLOCKED_EXTERNAL",
+      "proof_source": "managed independent TLS and X.509 server/client peers",
+      "provenance": {
+        "version": "rustls 0.23.42",
+        "identity": "Cargo.lock checksum 3c54fcab019b409d04215d3a17cb438fd7fbf192ee61461f20f4fe18704bc138",
+        "source": "Cargo.lock pins the incumbent library, while current focused tests use in-process or virtual peers"
+      },
+      "cells": [
+        {
+          "cell_id": "tls-asupersync-client-reference-server",
+          "mode": "x509-server-auth",
+          "declared_outcome": "BLOCKED_EXTERNAL"
+        },
+        {
+          "cell_id": "tls-reference-client-asupersync-server",
+          "mode": "x509-server-auth",
+          "declared_outcome": "BLOCKED_EXTERNAL"
+        }
+      ],
+      "directions": [
+        "asupersync-client-reference-server",
+        "reference-client-asupersync-server"
+      ],
+      "restart_reconnect_required": true,
+      "smoke_command": null,
+      "blocker": "No independently pinned TLS process fixture currently proves both client/server directions over managed loopback sockets.",
+      "unblock_requirements": [
+        "pin the independent peer binary by SHA-256 and exact version",
+        "generate per-run certificates and keys inside the isolated directory",
+        "exercise positive chain validation, hostname failure, restart, and reconnect",
+        "redact private keys and credentials from retained logs"
+      ]
+    },
+    {
+      "family_id": "downstream-consumers",
+      "smoke_scenario_id": "fixture-smoke-downstream-consumers",
+      "fixture_kind": "external-repositories",
+      "declared_outcome": "UNSUPPORTED",
+      "proof_source": "downstream capability-row consumer tools",
+      "provenance": {
+        "version": null,
+        "identity": null,
+        "source": "dependency capability rows require downstream owner revisions that are not present in this workspace"
+      },
+      "cells": [
+        {
+          "cell_id": "downstream-capability-consumer-smoke",
+          "mode": "external-owner",
+          "declared_outcome": "UNSUPPORTED"
+        }
+      ],
+      "directions": [
+        "asupersync-to-downstream",
+        "downstream-to-asupersync"
+      ],
+      "restart_reconnect_required": false,
+      "smoke_command": null,
+      "blocker": "The downstream repositories, their exact revisions, and owner-provided replay commands are outside this workspace.",
+      "external_owner": "capability registry downstream owners",
+      "unblock_requirements": [
+        "supply exact downstream repository revision and independent lockfile",
+        "run the owner-provided no-mock command",
+        "return redacted provenance, result, and cleanup receipt"
+      ]
+    }
+  ],
+  "no_claims": [
+    "Contract-test success is not real-service interoperability success.",
+    "BLOCKED_EXTERNAL and UNSUPPORTED cells are not passing skips.",
+    "The matrix does not prove broad workspace health, release readiness, performance, dependency cutover, or live RCH fleet availability.",
+    "Internal, virtual, scripted-protocol, or in-memory peers do not satisfy an external real-service row.",
+    "No result authorizes ambient developer services, mutable container tags, unverified binaries, local Cargo fallback, or leaked credentials."
+  ]
+}

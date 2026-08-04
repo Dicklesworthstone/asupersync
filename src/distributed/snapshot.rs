@@ -191,7 +191,8 @@ impl RegionSnapshot {
     /// Creates an empty snapshot for testing and edge-case handling.
     ///
     /// Note: The auth_tag is initialized to zero (invalid). Call
-    /// [`Self::to_bytes_with_key`] to compute a valid signature.
+    /// [`Self::sign`] or [`Self::to_bytes_with_key`] before sending the
+    /// snapshot across a trust boundary.
     #[must_use]
     pub fn empty(region_id: RegionId) -> Self {
         Self {
@@ -215,6 +216,22 @@ impl RegionSnapshot {
             metadata: Vec::new(),
             auth_tag: AuthenticationTag::zero(),
         }
+    }
+
+    /// Signs this snapshot in place with a domain-separated HMAC-SHA256 tag.
+    ///
+    /// Callers that retain a [`RegionSnapshot`] for transport should use this
+    /// method before computing its [`ContentHash`] or serializing it with
+    /// [`Self::to_bytes`].
+    pub fn sign(&mut self, key: &AuthKey) {
+        self.auth_tag = self.authentication_tag(key);
+    }
+
+    /// Returns this snapshot with a fresh domain-separated authentication tag.
+    #[must_use]
+    pub fn signed(mut self, key: &AuthKey) -> Self {
+        self.sign(key);
+        self
     }
 
     /// Serializes the snapshot to a deterministic binary format with authentication.
@@ -242,25 +259,25 @@ impl RegionSnapshot {
     /// - 32 bytes HMAC-SHA256 authentication tag
     #[must_use]
     pub fn to_bytes_with_key(&self, key: &AuthKey) -> Vec<u8> {
+        let auth_tag = self.authentication_tag(key);
+        let mut buf = self.to_bytes_unsigned();
+        buf.extend_from_slice(auth_tag.as_bytes());
+        buf
+    }
+
+    fn authentication_tag(&self, key: &AuthKey) -> AuthenticationTag {
         use hmac::{Hmac, KeyInit, Mac};
         use sha2::Sha256;
 
         type HmacSha256 = Hmac<Sha256>;
 
-        // Serialize content without signature
         let content = self.to_bytes_unsigned();
-
-        // Compute HMAC-SHA256 over content
         let mut mac =
             HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
         mac.update(SNAPSHOT_AUTH_DOMAIN);
         mac.update(&content);
         let auth_tag: [u8; 32] = mac.finalize().into_bytes().into();
-
-        // Append signature
-        let mut buf = content;
-        buf.extend_from_slice(&auth_tag);
-        buf
+        AuthenticationTag::from_bytes(auth_tag)
     }
 
     /// Serializes the snapshot to a deterministic binary format without authentication.

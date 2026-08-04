@@ -1254,7 +1254,7 @@ impl ScheduleCertificate {
 
     /// Record a scheduling decision: task dispatched from a lane at a step.
     pub fn record(&mut self, task: TaskId, lane: DispatchLane, step: u64) {
-        let mut hasher = DetHasher::default();
+        let mut hasher = DetHasher::for_lab();
         self.hash.hash(&mut hasher);
         // Pack the arena index for deterministic hashing.
         let idx = task.0;

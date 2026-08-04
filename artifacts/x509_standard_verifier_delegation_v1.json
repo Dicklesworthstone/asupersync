@@ -1,0 +1,345 @@
+{
+  "schema_version": 1,
+  "artifact_id": "x509-standard-verifier-delegation-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-0h6myr.3.2",
+  "capability_id": "CAP-TLS-X509",
+  "baseline_revision": "1612be2345100c3ecf5adc67f6af43e39a3ad985",
+  "captured_date_utc": "2026-07-27",
+  "decision": {
+    "state": "STANDARD_FIRST_SHARED_EXACT_LEAF_POLICY",
+    "standard_validation_owner": "rustls-0.23.42/rustls-webpki-0.103.13",
+    "shared_fallback_owner": "src/net/quic_native/handshake_driver.rs::WebPkiOrPinnedEndEntityVerifier",
+    "atp_duplicate_parser_removed": true,
+    "runtime_behavior_changed": true,
+    "dependency_exit_allowed": false,
+    "manifest_changed": false,
+    "lockfile_changed": false,
+    "cutover_authorized": false
+  },
+  "source_contracts": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "b6789b10b8e984a98004cde19952c6b73418afdde30aa61e1c5a6a45377f17bb",
+      "line_count": 1015,
+      "role": "dependency and feature baseline"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "c670712ab8713897bacc9591c170db2d030df83011dc7b9d092f16099f1540dd",
+      "line_count": 4666,
+      "role": "resolved dependency baseline"
+    },
+    {
+      "path": "src/net/quic_native/handshake_driver.rs",
+      "sha256": "51e50620ca4e6006485e31d1b8ece4fc56d29fc36e7a346258c4607af1fa3548",
+      "line_count": 1438,
+      "role": "shared standard-first exact-leaf verifier and focused tests"
+    },
+    {
+      "path": "src/bin/atp.rs",
+      "sha256": "b77dd1e90ae1ab81bf084feac214b31cc8f17557d6f3c476dcdb1868075eee4b",
+      "line_count": 11912,
+      "role": "ATP delegation caller and preserved CLI error mapping"
+    },
+    {
+      "path": "artifacts/x509_validation_ownership_inventory_v1.json",
+      "sha256": "288196669bd9b7da09e34e5aae4881a30b45c5fc3cbbed7ea8b5ed93d45f1b63",
+      "line_count": 1062,
+      "role": "A1 ownership, residue, and routed-gap inventory"
+    },
+    {
+      "path": "docs/x509_validation_ownership_inventory.md",
+      "sha256": "ad4ea53a2711adab303b202c3ca5fd89726899298668d8c800a76ee6d8c57ce3",
+      "line_count": 298,
+      "role": "A1 operator inventory"
+    },
+    {
+      "path": "tests/x509_validation_ownership_inventory_contract.rs",
+      "sha256": "7927c120342ce6ef3ae819a0125bf4c308aa3df7a147804cc6aa12cc37fd7f7b",
+      "line_count": 873,
+      "role": "A1 fail-closed ownership contract"
+    }
+  ],
+  "verifier_paths": [
+    {
+      "path_id": "X509-A2-NATIVE-QUIC",
+      "caller": "src/net/quic_native/handshake_driver.rs::client_config",
+      "configuration": "webpki_server_verifier_with_exact_leaf_fallback",
+      "standard_first": true,
+      "fallback_error_class": "CertificateError::UnknownIssuer",
+      "pin_predicate": "complete presented leaf DER exactly equals a configured CertificateDer",
+      "handshake_signatures_delegated": true,
+      "error_mapping": "existing handshake_failure client_verifier_build and redacted native QUIC handshake codes",
+      "state": "ACTIVE"
+    },
+    {
+      "path_id": "X509-A2-ATP-CLI",
+      "caller": "src/bin/atp.rs::quic_cli_client_config",
+      "configuration": "delegates to webpki_server_verifier_with_exact_leaf_fallback",
+      "standard_first": true,
+      "fallback_error_class": "CertificateError::UnknownIssuer",
+      "pin_predicate": "complete presented leaf DER exactly equals a typed configured CertificateDer",
+      "handshake_signatures_delegated": true,
+      "error_mapping": "client_verifier_build_failed and existing native-link redaction preserved",
+      "state": "ACTIVE"
+    }
+  ],
+  "standard_delegation_matrix": [
+    {
+      "check_id": "X509-A2-CHAIN-PATH",
+      "ordinary_path_owner": "rustls-webpki",
+      "fallback_behavior": "exact leaf pin replaces issuer path trust only after UnknownIssuer",
+      "state": "STANDARD_FIRST_PIN_EXCEPTION"
+    },
+    {
+      "check_id": "X509-A2-CERT-SIGNATURE",
+      "ordinary_path_owner": "rustls-webpki",
+      "fallback_behavior": "a bad certificate signature error is returned unchanged and cannot enter fallback",
+      "state": "DELEGATED"
+    },
+    {
+      "check_id": "X509-A2-HANDSHAKE-SIGNATURE",
+      "ordinary_path_owner": "rustls WebPkiServerVerifier",
+      "fallback_behavior": "TLS 1.2 and TLS 1.3 CertificateVerify plus supported schemes delegate to the inner verifier",
+      "state": "DELEGATED"
+    },
+    {
+      "check_id": "X509-A2-TRUST-ANCHOR",
+      "ordinary_path_owner": "rustls RootCertStore and rustls-webpki",
+      "fallback_behavior": "configured exact leaf bytes are the explicit trust decision only after UnknownIssuer",
+      "state": "STANDARD_FIRST_PIN_EXCEPTION"
+    },
+    {
+      "check_id": "X509-A2-VALIDITY",
+      "ordinary_path_owner": "rustls-webpki",
+      "fallback_behavior": "shared local leaf not-before and not-after checks",
+      "state": "PRESERVED_SHARED_RESIDUE"
+    },
+    {
+      "check_id": "X509-A2-EKU",
+      "ordinary_path_owner": "rustls-webpki serverAuth policy",
+      "fallback_behavior": "shared local explicit serverAuth requirement; missing EKU and clientAuth-only fail",
+      "state": "PRESERVED_SHARED_RESIDUE"
+    },
+    {
+      "check_id": "X509-A2-KEY-USAGE",
+      "ordinary_path_owner": "rustls-webpki intentionally does not enforce certificate KeyUsage",
+      "fallback_behavior": "shared local digitalSignature requirement when KeyUsage is present",
+      "state": "INTENTIONAL_STRICTER_PIN_POLICY"
+    },
+    {
+      "check_id": "X509-A2-SERVER-NAME",
+      "ordinary_path_owner": "rustls-webpki DNS/IP SAN matching",
+      "fallback_behavior": "shared local exact case-insensitive DNS or exact IP SAN; no wildcard expansion",
+      "state": "INTENTIONAL_STRICTER_PIN_POLICY"
+    },
+    {
+      "check_id": "X509-A2-CA-POLICY",
+      "ordinary_path_owner": "rustls-webpki path-role BasicConstraints",
+      "fallback_behavior": "exact pinned leaf has no built CA path; local pre-insertion CA=true admission remains separate",
+      "state": "RETAIN_LOCAL_PRETRUST_POLICY"
+    },
+    {
+      "check_id": "X509-A2-CRITICAL-CONSTRAINT-REVOCATION",
+      "ordinary_path_owner": "rustls-webpki for ordinary paths and every non-UnknownIssuer failure",
+      "fallback_behavior": "no broad parity claim for the exact-pin UnknownIssuer branch; A5 and A8 own adversarial and real-peer evidence",
+      "state": "ROUTED_NO_CLAIM"
+    }
+  ],
+  "fallback_invariants": {
+    "webpki_invoked_first": true,
+    "allowed_webpki_error_classes": [
+      "CertificateError::UnknownIssuer"
+    ],
+    "exact_complete_leaf_der_required": true,
+    "trailing_der_rejected": true,
+    "validity_required": true,
+    "explicit_server_auth_required": true,
+    "digital_signature_required_when_key_usage_present": true,
+    "exact_dns_or_ip_san_required": true,
+    "tls12_signature_delegated": true,
+    "tls13_signature_delegated": true,
+    "supported_schemes_delegated": true,
+    "root_hints_delegated": true,
+    "all_other_webpki_errors_returned_unchanged": true
+  },
+  "retained_local_policy": [
+    {
+      "residue_id": "X509-R2-CA-ADMISSION",
+      "reason": "rustls exposes no identical pre-insertion CA=true policy with the existing operator diagnostics",
+      "downstream_owner": "asupersync-0h6myr.3.8",
+      "state": "KEEP_A8_E2E_PENDING"
+    },
+    {
+      "residue_id": "X509-R3-ACCEPTOR-PREFLIGHT",
+      "reason": "rustls does not authenticate its own configured chain or expose the same date and subject-presence operator diagnostics",
+      "downstream_owner": "asupersync-0h6myr.3.8",
+      "state": "KEEP_A8_E2E_PENDING"
+    },
+    {
+      "residue_id": "X509-R4-NATIVE-PIN-FALLBACK",
+      "reason": "the exact leaf pin deliberately replaces issuer-path trust and needs a bounded leaf-shape policy",
+      "downstream_owner": "asupersync-0h6myr.3.3",
+      "state": "SHARED_POLICY_ACTIVE_A3_READER_PENDING"
+    },
+    {
+      "residue_id": "X509-R5-ATP-PIN-FALLBACK",
+      "reason": "the duplicate ATP reader and verifier were removed",
+      "downstream_owner": "asupersync-0h6myr.3.2",
+      "state": "RESOLVED_BY_DELEGATION_TO_X509-R4"
+    }
+  ],
+  "routed_gap_disposition": [
+    {
+      "gap_id": "X509-GAP-02",
+      "state": "CLOSED_BY_A2_SHARED_POLICY",
+      "evidence": "both paths use the same UnknownIssuer-only fallback"
+    },
+    {
+      "gap_id": "X509-GAP-03",
+      "state": "CLOSED_BY_A2_SHARED_POLICY",
+      "evidence": "both paths use explicit serverAuth and conditional digitalSignature"
+    },
+    {
+      "gap_id": "X509-GAP-04",
+      "state": "A2_DECIDED_KEEP_A8_E2E_PENDING",
+      "evidence": "the stricter pin-only KeyUsage check is intentional"
+    },
+    {
+      "gap_id": "X509-GAP-05",
+      "state": "A2_DECIDED_KEEP_A8_E2E_PENDING",
+      "evidence": "pre-insertion CA=true policy and diagnostics stay local"
+    },
+    {
+      "gap_id": "X509-GAP-06",
+      "state": "A2_DECIDED_KEEP_A8_E2E_PENDING",
+      "evidence": "server-chain operator preflight and diagnostics stay local"
+    },
+    {
+      "gap_id": "X509-GAP-11",
+      "state": "A2_DECIDED_KEEP_A8_E2E_PENDING",
+      "evidence": "no OCSP or CRL claim is made for the exact-pin branch"
+    }
+  ],
+  "focused_test_matrix": [
+    {
+      "test": "exact_leaf_shape_enforces_validity_bounds",
+      "covers": [
+        "future leaf",
+        "expired leaf"
+      ],
+      "result": "PASS"
+    },
+    {
+      "test": "exact_leaf_shape_requires_server_auth_and_digital_signature",
+      "covers": [
+        "wrong EKU",
+        "wrong KeyUsage"
+      ],
+      "result": "PASS"
+    },
+    {
+      "test": "exact_leaf_shape_rejects_missing_eku_and_trailing_der",
+      "covers": [
+        "missing EKU",
+        "trailing DER"
+      ],
+      "result": "PASS"
+    },
+    {
+      "test": "exact_leaf_fallback_never_overrides_standard_signature_or_name_errors",
+      "covers": [
+        "bad certificate signature",
+        "wrong server name",
+        "standard error preservation"
+      ],
+      "result": "PASS"
+    },
+    {
+      "test": "exact_pinned_leaf_still_rejects_wrong_server_name",
+      "covers": [
+        "wrong server name through live TLS 1.3 handshake"
+      ],
+      "result": "PASS"
+    },
+    {
+      "test": "test_is_ca_certificate_rejects_self_signed_leaf and add_root_certificate_strict_ca_rejects_self_signed_leaf",
+      "covers": [
+        "non-CA trust-anchor admission"
+      ],
+      "result": "EXISTING_FOCUSED_OWNER"
+    },
+    {
+      "test": "valid_test_ca_certificate_confirms_client_handshake and empty_presented_chain_fails_closed",
+      "covers": [
+        "valid chain",
+        "empty chain"
+      ],
+      "result": "EXISTING_STANDARD_OWNER"
+    }
+  ],
+  "execution_receipts": [
+    {
+      "lane": "shared-exact-leaf-focused",
+      "command": "cargo test --quiet -p asupersync --features tls --lib exact_leaf -- --nocapture",
+      "passed": 4,
+      "failed": 0,
+      "exit_code": 0
+    },
+    {
+      "lane": "atp-config-focused",
+      "command": "cargo test --quiet -p asupersync --features atp-cli --bin atp quic_cli_client_config -- --nocapture",
+      "passed": 2,
+      "failed": 0,
+      "exit_code": 0
+    },
+    {
+      "lane": "a1-inventory-reconciliation",
+      "command": "cargo test --quiet -p asupersync --features tls --test x509_validation_ownership_inventory_contract -- --nocapture",
+      "passed": 11,
+      "failed": 0,
+      "exit_code": 0
+    },
+    {
+      "lane": "retained-ca-admission-policy",
+      "command": "cargo test --quiet -p asupersync --features tls --lib self_signed_leaf -- --nocapture",
+      "passed": 2,
+      "failed": 0,
+      "exit_code": 0
+    },
+    {
+      "lane": "retained-acceptor-preflight-policy",
+      "command": "cargo test --quiet -p asupersync --features tls --lib certificate_validation -- --nocapture",
+      "passed": 4,
+      "failed": 0,
+      "exit_code": 0
+    }
+  ],
+  "downstream_e2e_contract": {
+    "scenario_id": "tls_x509_interop",
+    "runner": "scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario tls_x509_interop",
+    "owner": "asupersync-0h6myr.3.8",
+    "state": "PLANNED"
+  },
+  "rollback_triggers": [
+    "either caller stops using webpki_server_verifier_with_exact_leaf_fallback",
+    "fallback eligibility broadens beyond CertificateError::UnknownIssuer",
+    "the exact complete leaf byte predicate is weakened",
+    "trailing DER, validity, explicit serverAuth, conditional digitalSignature, or exact SAN checks disappear",
+    "TLS handshake signature verification stops delegating to WebPkiServerVerifier",
+    "ATP restores an independent x509-parser verifier",
+    "Cargo.toml or Cargo.lock changes under this scoped decision",
+    "the A1 inventory and A2 decision packet disagree about residue or gap state"
+  ],
+  "no_claim_boundaries": [
+    "This packet does not authorize removing x509-parser or changing dependency features.",
+    "It does not authorize a capability cutover, manifest change, lockfile change, or file deletion.",
+    "It does not prove rustls, rustls-webpki, x509-parser, ring, or the certificate fixtures correct.",
+    "It does not claim issuer-path validation for an exact pinned leaf after UnknownIssuer; the exact byte pin is the explicit trust decision.",
+    "It does not claim OCSP validation or CRL enforcement on the exact-pin branch.",
+    "It does not prove unknown-critical, duplicate-extension, constraint, depth, allocation, or canonicality parity beyond the cited focused checks.",
+    "It does not prove the planned A8 real-peer TLS, mTLS, QUIC, ATP, platform, cancellation, reconnect, or shutdown matrix.",
+    "It does not prove performance, broad workspace health, release readiness, or live RCH fleet availability."
+  ]
+}

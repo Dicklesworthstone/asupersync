@@ -16,6 +16,9 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
+/// Sentinel used by the intrusive active-waiter FIFO.
+const NO_ACTIVE_WAITER: usize = usize::MAX;
+
 /// A notify primitive for signaling events.
 ///
 /// `Notify` provides a mechanism for tasks to wait for events and for
@@ -57,10 +60,11 @@ struct WaiterSlab {
     /// Number of active waiters (those with a waker set). Maintained
     /// incrementally so `active_count()` is O(1) instead of a linear scan.
     active: usize,
-    /// Lower-bound hint for the first potentially-active (non-notified, has-waker)
-    /// entry. `notify_one` starts scanning from here instead of index 0,
-    /// making sequential notifications O(1) amortized instead of O(n).
-    scan_start: usize,
+    /// Head and tail of the active-waiter FIFO. Queue order is independent
+    /// of reusable slab indices so filling a middle hole cannot leapfrog an
+    /// older waiter.
+    active_head: usize,
+    active_tail: usize,
 }
 
 /// A reusable waiter slot and the epoch the next occupant must receive.
@@ -75,6 +79,10 @@ struct FreeSlot {
 struct WaiterEntry {
     /// The waker to call when notified.
     waker: Option<Waker>,
+    /// Intrusive links in registration order while this entry is active.
+    /// Both are [`NO_ACTIVE_WAITER`] after selection or removal.
+    active_prev: usize,
+    active_next: usize,
     /// Whether this entry has been notified.
     notified: bool,
     /// Generation at which this waiter was registered.
@@ -101,7 +109,8 @@ impl WaiterSlab {
             entries: SmallVec::new(),
             free_slots: SmallVec::new(),
             active: 0,
-            scan_start: 0,
+            active_head: NO_ACTIVE_WAITER,
+            active_tail: NO_ACTIVE_WAITER,
         }
     }
 
@@ -124,6 +133,62 @@ impl WaiterSlab {
         }
     }
 
+    /// Append an occupied slab slot to the active FIFO.
+    #[inline]
+    fn link_active_tail(&mut self, index: usize) {
+        debug_assert!(index < self.entries.len());
+        debug_assert!(self.entries[index].waker.is_some());
+        debug_assert!(!self.entries[index].notified);
+        debug_assert_eq!(self.entries[index].active_prev, NO_ACTIVE_WAITER);
+        debug_assert_eq!(self.entries[index].active_next, NO_ACTIVE_WAITER);
+
+        let previous_tail = self.active_tail;
+        self.entries[index].active_prev = previous_tail;
+        if previous_tail == NO_ACTIVE_WAITER {
+            debug_assert_eq!(self.active_head, NO_ACTIVE_WAITER);
+            self.active_head = index;
+        } else {
+            self.entries[previous_tail].active_next = index;
+        }
+        self.active_tail = index;
+        self.active += 1;
+    }
+
+    /// Detach an active slab slot from the FIFO in O(1).
+    #[inline]
+    fn unlink_active(&mut self, index: usize) {
+        debug_assert!(index < self.entries.len());
+        debug_assert!(self.entries[index].waker.is_some());
+
+        let previous = self.entries[index].active_prev;
+        let next = self.entries[index].active_next;
+
+        if previous == NO_ACTIVE_WAITER {
+            debug_assert_eq!(self.active_head, index);
+            self.active_head = next;
+        } else {
+            debug_assert_eq!(self.entries[previous].active_next, index);
+            self.entries[previous].active_next = next;
+        }
+
+        if next == NO_ACTIVE_WAITER {
+            debug_assert_eq!(self.active_tail, index);
+            self.active_tail = previous;
+        } else {
+            debug_assert_eq!(self.entries[next].active_prev, index);
+            self.entries[next].active_prev = previous;
+        }
+
+        self.entries[index].active_prev = NO_ACTIVE_WAITER;
+        self.entries[index].active_next = NO_ACTIVE_WAITER;
+        self.active -= 1;
+        debug_assert_eq!(
+            self.active_head == NO_ACTIVE_WAITER,
+            self.active_tail == NO_ACTIVE_WAITER
+        );
+        debug_assert_eq!(self.active == 0, self.active_head == NO_ACTIVE_WAITER);
+    }
+
     /// Insert a waiter entry, reusing a free slot if available.
     ///
     /// Returns `(slot_index, slot_epoch)`. The caller (a `Notified`
@@ -133,7 +198,8 @@ impl WaiterSlab {
     #[inline]
     fn insert(&mut self, mut entry: WaiterEntry) -> (usize, u64) {
         let is_active = entry.waker.is_some();
-        let had_active = self.active > 0;
+        entry.active_prev = NO_ACTIVE_WAITER;
+        entry.active_next = NO_ACTIVE_WAITER;
         let (index, slot_epoch) = loop {
             if let Some(free) = self.free_slots.pop() {
                 if free.index < self.entries.len() {
@@ -161,13 +227,7 @@ impl WaiterSlab {
             }
         };
         if is_active {
-            self.active += 1;
-            // Reused low slots must not leapfrog older active waiters.
-            // Lower the cursor only when this waiter is the sole active entry;
-            // otherwise notify_one's wrap scan will find it after older waiters drain.
-            if !had_active && index < self.scan_start {
-                self.scan_start = index;
-            }
+            self.link_active_tail(index);
         }
         (index, slot_epoch)
     }
@@ -182,10 +242,12 @@ impl WaiterSlab {
             self.free_slots.reserve(1);
             let next_epoch = self.entries[index].slot_epoch.wrapping_add(1);
             if self.entries[index].waker.is_some() {
-                self.active -= 1;
+                self.unlink_active(index);
             }
             retired_waker = self.entries[index].waker.take();
             self.entries[index].notified = false;
+            self.entries[index].active_prev = NO_ACTIVE_WAITER;
+            self.entries[index].active_next = NO_ACTIVE_WAITER;
             self.free_slots.push(FreeSlot { index, next_epoch });
         }
 
@@ -213,38 +275,19 @@ impl WaiterSlab {
 
     #[inline]
     fn take_next_active_waker(&mut self) -> Option<Waker> {
-        let len = self.entries.len();
-        let start = self.scan_start.min(len);
-
-        for i in start..len {
-            if let Some(waker) = self.take_active_waker_at(i) {
-                return Some(waker);
-            }
+        let index = self.active_head;
+        if index == NO_ACTIVE_WAITER {
+            debug_assert_eq!(self.active, 0);
+            debug_assert_eq!(self.active_tail, NO_ACTIVE_WAITER);
+            return None;
         }
 
-        for i in 0..start {
-            if let Some(waker) = self.take_active_waker_at(i) {
-                return Some(waker);
-            }
-        }
-
-        self.scan_start = len;
-        None
-    }
-
-    #[inline]
-    fn take_active_waker_at(&mut self, index: usize) -> Option<Waker> {
+        self.unlink_active(index);
         let entry = &mut self.entries[index];
-        if !entry.notified && entry.waker.is_some() {
-            entry.notified = true;
-            let waker = entry.waker.take();
-            if waker.is_some() {
-                self.active -= 1;
-                self.scan_start = index + 1;
-            }
-            return waker;
-        }
-        None
+        entry.notified = true;
+        let waker = entry.waker.take();
+        debug_assert!(waker.is_some());
+        waker
     }
 }
 
@@ -423,19 +466,24 @@ impl Notify {
         let wakers: SmallVec<[Waker; 8]> = {
             let mut waiters = self.waiters.lock();
 
-            let wakers: SmallVec<[Waker; 8]> = waiters
-                .entries
-                .iter_mut()
-                .filter_map(|entry| {
-                    // Only active waiters have wakers. Free slots are ignored.
-                    if entry.generation < new_generation && entry.waker.is_some() {
-                        entry.generation = new_generation;
-                        entry.notified = true;
-                        return entry.waker.take();
+            // Reserve before detaching any Waker so allocation failure cannot
+            // retire a user payload while the waiter mutex is held.
+            let mut wakers: SmallVec<[Waker; 8]> = SmallVec::with_capacity(waiters.active);
+
+            let mut index = waiters.active_head;
+            while index != NO_ACTIVE_WAITER {
+                let next = waiters.entries[index].active_next;
+                if waiters.entries[index].generation < new_generation {
+                    waiters.unlink_active(index);
+                    let entry = &mut waiters.entries[index];
+                    entry.generation = new_generation;
+                    entry.notified = true;
+                    if let Some(waker) = entry.waker.take() {
+                        wakers.push(waker);
                     }
-                    None
-                })
-                .collect();
+                }
+                index = next;
+            }
             if !wakers.is_empty() {
                 for entry in &mut waiters.entries {
                     if entry.generation < new_generation && entry.notified && entry.waker.is_none()
@@ -444,13 +492,29 @@ impl Notify {
                     }
                 }
             }
-            waiters.active -= wakers.len();
             wakers
         };
 
-        // Wake all.
+        // Wake all. Isolate each detached wake so one hostile safe Waker cannot
+        // strand the later waiters: they have already had their wakers taken and
+        // their generation advanced under the lock, so they can only re-poll to
+        // Ready if they are actually woken (br-asupersync-cnl0jn). Retain the
+        // first panic, finish the fanout, then resume it once so exactly one
+        // payload propagates.
+        let mut first_panic: Option<Box<dyn std::any::Any + Send>> = None;
         for waker in wakers {
-            waker.wake();
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                    waker.wake();
+                }))
+            {
+                if first_panic.is_none() {
+                    first_panic = Some(payload);
+                }
+            }
+        }
+        if let Some(payload) = first_panic {
+            std::panic::resume_unwind(payload);
         }
     }
 
@@ -522,27 +586,35 @@ impl Drop for Notify {
 
         let wakers = {
             let mut waiters = self.waiters.lock();
-            let mut wakers = Vec::new();
+            let mut wakers = Vec::with_capacity(waiters.active);
 
-            // Collect all pending waiter wakers
-            while let Some(entry) = waiters.entries.iter_mut().find(|e| e.waker.is_some()) {
-                if let Some(waker) = entry.waker.take() {
-                    wakers.push(waker);
-                }
+            // Detach all pending waiter wakers in registration order.
+            while let Some(waker) = waiters.take_next_active_waker() {
+                wakers.push(waker);
             }
 
             // Clear the waiters since the Notify is being dropped
             waiters.entries.clear();
             waiters.active = 0;
-            waiters.scan_start = 0;
+            waiters.active_head = NO_ACTIVE_WAITER;
+            waiters.active_tail = NO_ACTIVE_WAITER;
 
             wakers
         };
 
-        // Wake all pending waiters outside the lock
-        // They will see the Notify as dropped when they poll
+        // Wake all pending waiters outside the lock. They will see the Notify
+        // as dropped when they poll. Isolate each wake so one panicking safe
+        // Waker cannot strand the later detached waiters (br-asupersync-b3td9n,
+        // same class as notify_waiters/br-asupersync-cnl0jn). Unlike
+        // notify_waiters, the payload is SUPPRESSED, never resumed: Drop can
+        // run during an existing unwind, where a second panic aborts the
+        // process — fail closed on teardown.
         for waker in wakers {
-            waker.wake();
+            drop(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                move || {
+                    waker.wake();
+                },
+            )));
         }
     }
 }
@@ -669,6 +741,8 @@ impl Notified<'_> {
                             .take()
                             .expect("Notify registration waker must be available"),
                     ),
+                    active_prev: NO_ACTIVE_WAITER,
+                    active_next: NO_ACTIVE_WAITER,
                     notified: false,
                     generation: observed_generation,
                     broadcast_covered_peer: false,
@@ -906,6 +980,20 @@ mod tests {
         }))
     }
 
+    /// A hostile-but-safe Waker that panics on wake, used to prove the broadcast
+    /// fanout isolates one panicking peer from the others.
+    struct PanickingWaker;
+
+    impl std::task::Wake for PanickingWaker {
+        fn wake(self: Arc<Self>) {
+            panic!("hostile notify waker panics on wake");
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            panic!("hostile notify waker panics on wake");
+        }
+    }
+
     fn poll_with_waker<F>(fut: &mut F, waker: &Waker) -> Poll<F::Output>
     where
         F: Future + Unpin,
@@ -1084,6 +1172,173 @@ mod tests {
         drop(notified);
         assert_eq!(notify.waiter_count(), 0);
         crate::test_complete!("notified_reuses_full_inline_hole_without_spilling");
+    }
+
+    /// br-asupersync-notify-middle-slot-reuse-breaks-fifo-rrn7m6: reusable
+    /// slab indices are storage locations, not queue positions. A younger
+    /// waiter inserted into a cancelled middle slot must remain behind every
+    /// older active waiter.
+    #[test]
+    fn notify_one_fifo_survives_middle_slot_reuse() {
+        init_test("notify_one_fifo_survives_middle_slot_reuse");
+        let notify = Notify::new();
+        let mut oldest = notify.notified();
+        let mut middle = notify.notified();
+        let mut older_tail = notify.notified();
+
+        assert!(poll_once(&mut oldest).is_pending());
+        assert!(poll_once(&mut middle).is_pending());
+        assert!(poll_once(&mut older_tail).is_pending());
+        let (middle_index, middle_epoch) = middle
+            .waiter_index
+            .expect("middle waiter must have a registered slot");
+
+        // Select and observe the oldest, then create a reusable hole between
+        // its slot and the still-active older tail.
+        assert!(notify.notify_one());
+        assert!(poll_once(&mut oldest).is_ready());
+        drop(middle);
+
+        let mut replacement = notify.notified();
+        assert!(poll_once(&mut replacement).is_pending());
+        assert_eq!(
+            replacement.waiter_index,
+            Some((middle_index, middle_epoch.wrapping_add(1))),
+            "the younger waiter must exercise the cancelled middle slot"
+        );
+
+        // Storage-index scanning selected `replacement` here. FIFO selection
+        // must instead detach the older tail that registered first.
+        assert!(notify.notify_one());
+        assert!(poll_once(&mut older_tail).is_ready());
+        assert!(poll_once(&mut replacement).is_pending());
+        assert_eq!(notify.waiter_count(), 1);
+
+        assert!(notify.notify_one());
+        assert!(poll_once(&mut replacement).is_ready());
+        assert_eq!(notify.waiter_count(), 0);
+        crate::test_complete!("notify_one_fifo_survives_middle_slot_reuse");
+    }
+
+    /// The cancellation baton follows the same registration FIFO as direct
+    /// `notify_one` selection, including after a younger waiter reuses a
+    /// cancelled middle slot.
+    #[test]
+    fn notify_one_baton_fifo_survives_middle_slot_reuse() {
+        init_test("notify_one_baton_fifo_survives_middle_slot_reuse");
+        let notify = Notify::new();
+        let mut selected = notify.notified();
+        let mut middle = notify.notified();
+        let mut older_tail = notify.notified();
+
+        assert!(poll_once(&mut selected).is_pending());
+        assert!(poll_once(&mut middle).is_pending());
+        assert!(poll_once(&mut older_tail).is_pending());
+        let middle_slot = middle
+            .waiter_index
+            .expect("middle waiter must have a registered slot");
+
+        assert!(notify.notify_one());
+        drop(middle);
+
+        let mut replacement = notify.notified();
+        assert!(poll_once(&mut replacement).is_pending());
+        assert_eq!(
+            replacement.waiter_index,
+            Some((middle_slot.0, middle_slot.1.wrapping_add(1)))
+        );
+
+        // Cancelling the selected waiter passes its in-flight permit to the
+        // older tail, never to the younger occupant of the reused slot.
+        drop(selected);
+        assert!(poll_once(&mut older_tail).is_ready());
+        assert!(poll_once(&mut replacement).is_pending());
+        assert_eq!(notify.waiter_count(), 1);
+
+        assert!(notify.notify_one());
+        assert!(poll_once(&mut replacement).is_ready());
+        assert_eq!(notify.waiter_count(), 0);
+        crate::test_complete!("notify_one_baton_fifo_survives_middle_slot_reuse");
+    }
+
+    /// br-asupersync-cnl0jn: notify_waiters detaches every matching waiter (takes
+    /// its waker and advances its generation) under the mutex, then wakes them.
+    /// A first safe Waker panic must not strand the later waiters -- they can
+    /// only re-poll to Ready if actually woken. The later waiter must be woken,
+    /// the first panic resumed once, and both futures then poll Ready.
+    #[test]
+    fn notify_waiters_wake_panic_still_notifies_peers_then_resumes() {
+        init_test("notify_waiters_wake_panic_still_notifies_peers_then_resumes");
+        let notify = Notify::new();
+        let mut fut_a = notify.notified();
+        let mut fut_b = notify.notified();
+
+        // A registers a panicking Waker; B registers a counting Waker.
+        let panic_waker = Waker::from(Arc::new(PanickingWaker));
+        let counter = Arc::new(AtomicUsize::new(0));
+        let count_waker = CountingWaker::from_counter(Arc::clone(&counter));
+
+        let a_parked = poll_with_waker(&mut fut_a, &panic_waker).is_pending();
+        let b_parked = poll_with_waker(&mut fut_b, &count_waker).is_pending();
+        assert!(a_parked, "waiter A parks");
+        assert!(b_parked, "waiter B parks");
+
+        // Broadcast: A's Waker panics, but B must still be woken; the first panic
+        // then propagates.
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| notify.notify_waiters()));
+        assert!(result.is_err(), "notify_waiters resumes the wake panic");
+        assert!(
+            counter.load(Ordering::SeqCst) >= 1,
+            "later waiter B still woken despite earlier panic"
+        );
+
+        // Both futures now observe the notification and poll Ready.
+        assert!(poll_once(&mut fut_a).is_ready(), "waiter A polls Ready");
+        assert!(poll_once(&mut fut_b).is_ready(), "waiter B polls Ready");
+        crate::test_complete!("notify_waiters_wake_panic_still_notifies_peers_then_resumes");
+    }
+
+    /// br-asupersync-b3td9n: `Drop for Notify` detaches every pending waiter
+    /// under the mutex, then wakes them in a fanout. A first panicking safe
+    /// Waker must not strand the later detached waiters, and the panic must be
+    /// SUPPRESSED, never resumed -- Drop can run during an existing unwind,
+    /// where a second panic aborts the process. The populate-slab-then-drop
+    /// path is reachable in safe code: `mem::forget` on a registered
+    /// `Notified` ends the borrow without running its destructor, so the slab
+    /// entry (and its Waker) survives into `Notify::drop`.
+    #[test]
+    fn drop_wake_panic_still_wakes_peers_and_is_suppressed() {
+        init_test("drop_wake_panic_still_wakes_peers_and_is_suppressed");
+        let notify = Notify::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        // A registers a panicking Waker, B a counting Waker; leak both while
+        // registered so their wakers stay in the slab across drop.
+        let mut fut_a = notify.notified();
+        let mut fut_b = notify.notified();
+        let panic_waker = Waker::from(Arc::new(PanickingWaker));
+        let count_waker = CountingWaker::from_counter(Arc::clone(&counter));
+        assert!(
+            poll_with_waker(&mut fut_a, &panic_waker).is_pending(),
+            "waiter A parks"
+        );
+        assert!(
+            poll_with_waker(&mut fut_b, &count_waker).is_pending(),
+            "waiter B parks"
+        );
+        std::mem::forget(fut_a);
+        std::mem::forget(fut_b);
+
+        // Drop fanout: A's Waker panics first (slot order), B must still be
+        // woken, and no panic may escape Drop.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(notify)));
+        assert!(result.is_ok(), "no panic escapes Notify::drop");
+        assert!(
+            counter.load(Ordering::SeqCst) >= 1,
+            "later waiter still woken despite earlier wake panic"
+        );
+        crate::test_complete!("drop_wake_panic_still_wakes_peers_and_is_suppressed");
     }
 
     fn broadcast_with_middle_hole_signature(
@@ -3085,7 +3340,7 @@ mod tests {
     /// Verifies that rapid consecutive notify_one() calls in a tight loop
     /// maintain strict FIFO ordering and never allow "leapfrogging" where
     /// a later-queued waiter wakes before an earlier-queued waiter.
-    /// This tests for race conditions in the scan_start optimization.
+    /// This tests the active FIFO under rapid head detachment.
     #[test]
     fn audit_notify_one_tight_loop_no_leapfrog() {
         init_test("audit_notify_one_tight_loop_no_leapfrog");

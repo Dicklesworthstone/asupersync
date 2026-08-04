@@ -299,7 +299,7 @@ run_high_priority_gates() {
 
     # P6: Dogfooding Validation
     run_proof_lane "P6" "HIGH" "Dogfooding Validation" \
-        'scripts/atp_dogfood_coordinator.sh full --dry-run && cargo test --test atp_dogfood_integration' \
+        'scripts/atp_dogfood_coordinator.sh full --dry-run && rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_p6" cargo test --test atp_dogfood_integration' \
         900
 
     # P7: Relay Protocol

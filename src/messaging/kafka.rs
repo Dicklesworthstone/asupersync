@@ -3375,6 +3375,64 @@ mod tests {
         });
     }
 
+    /// Re-homes the duplicate-offset property deleted in 17e1226da
+    /// (br-asupersync-d8aiqa).
+    ///
+    /// `enable_idempotence(true)` configures the *client*. It does not make the
+    /// crate-local deterministic broker validate producer-id + sequence-number
+    /// pairs, because that harness is not a Kafka broker. Sending a byte-identical
+    /// key+payload twice therefore appends twice and yields two distinct offsets.
+    ///
+    /// This is a boundary test, not an aspiration: it pins the harness's actual
+    /// semantics so `enable_idempotence(true)` can never be mistaken for
+    /// exactly-once delivery against it. If real dedup is ever implemented here,
+    /// this test must fail and be rewritten deliberately rather than silently
+    /// drifting.
+    #[cfg(not(feature = "kafka"))]
+    #[test]
+    fn deterministic_broker_does_not_deduplicate_idempotent_retries() {
+        let _broker = deterministic_broker_guard();
+        crate::test_utils::run_test_with_cx(|cx| async move {
+            let topic = "idempotence-retry-dedup-boundary";
+            // The deterministic broker is process-global; anchor on the current
+            // end offset rather than assuming an empty partition.
+            let before = deterministic_broker_end_offset(topic, 0);
+
+            let producer = KafkaProducer::new(
+                ProducerConfig::default()
+                    .enable_idempotence(true)
+                    .retries(3),
+            )
+            .unwrap();
+            assert!(
+                producer.config.enable_idempotence,
+                "precondition: the producer must actually claim idempotence"
+            );
+
+            let first = producer
+                .send(&cx, topic, Some(b"key1"), b"message1", None)
+                .await
+                .unwrap();
+            let second = producer
+                .send(&cx, topic, Some(b"key1"), b"message1", None)
+                .await
+                .unwrap();
+
+            assert_eq!(first.offset, before, "first send appends at the end offset");
+            assert_eq!(
+                second.offset,
+                before + 1,
+                "a byte-identical retry must NOT collapse onto the first offset: \
+                 the deterministic harness does not implement idempotent dedup"
+            );
+            assert_eq!(
+                deterministic_broker_end_offset(topic, 0),
+                before + 2,
+                "both records are durable in the partition log"
+            );
+        });
+    }
+
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn transactional_fallback_abort_discards_staged_offsets() {
@@ -3962,9 +4020,71 @@ mod tests {
 
             let client_config = build_client_config(&test_config, None);
 
-            // Note: We can't directly inspect ClientConfig values, but we verify
-            // the configuration is passed correctly by checking the build process
-            // doesn't panic and the producer can be created
+            // Assert on the rdkafka key mapping directly. A previous comment
+            // here claimed "we can't directly inspect ClientConfig values" and
+            // then asserted on `producer.config()` instead -- which only proves
+            // the `ProducerConfig` struct field round-trips and never touches
+            // `build_client_config` at all. That claim is false for the pinned
+            // dependency: `rdkafka::ClientConfig::get(&str) -> Option<&str>`
+            // (rdkafka-0.39.0/src/config.rs:265) reads back exactly what `set`
+            // stored, so the binding is now used for the thing it was created
+            // for. Without this, a typo in any key string ("batch_size" for
+            // "batch.size") would ship silently, because librdkafka ignores
+            // unknown keys and the crate does not validate them at build time.
+            assert_eq!(
+                client_config.get("batch.size"),
+                Some("8192"),
+                "batch_size must reach rdkafka under the exact `batch.size` key"
+            );
+            assert_eq!(
+                client_config.get("linger.ms"),
+                Some("15"),
+                "linger_ms must reach rdkafka under the exact `linger.ms` key"
+            );
+
+            // Exactly-once plumbing. This is the only place in the tree where
+            // the idempotence mapping is reachable without a live broker: the
+            // real-broker assertions in tests/integration/kafka_real_broker.rs
+            // are env-gated behind REAL_KAFKA_TESTS.
+            let idem = build_client_config(
+                &ProducerConfig::new(vec!["localhost:9092".into()]).enable_idempotence(true),
+                None,
+            );
+            assert_eq!(
+                idem.get("enable.idempotence"),
+                Some("true"),
+                "enable_idempotence(true) must map to `enable.idempotence=true`"
+            );
+            let non_idem = build_client_config(
+                &ProducerConfig::new(vec!["localhost:9092".into()]).enable_idempotence(false),
+                None,
+            );
+            assert_eq!(
+                non_idem.get("enable.idempotence"),
+                Some("false"),
+                "enable_idempotence(false) must map to `enable.idempotence=false`"
+            );
+
+            // A transactional producer must force idempotence on regardless of
+            // what the caller asked for -- transactions are undefined without
+            // it. Nothing else in the tree covers this override.
+            let txn_cfg = TransactionalConfig::new(
+                ProducerConfig::new(vec!["localhost:9092".into()]).enable_idempotence(false),
+                "audit-txn-1".to_string(),
+            );
+            let txn = build_client_config(&txn_cfg.producer, Some(&txn_cfg));
+            assert_eq!(
+                txn.get("enable.idempotence"),
+                Some("true"),
+                "transactional producers must force idempotence on even when the \
+                 caller configured it off"
+            );
+            assert_eq!(
+                txn.get("transactional.id"),
+                Some("audit-txn-1"),
+                "transaction_id must reach rdkafka under the exact `transactional.id` key"
+            );
+
             let producer_result = KafkaProducer::new(test_config.clone());
 
             // Should succeed if configuration is valid

@@ -13,20 +13,52 @@
 //!
 //! # Quick Start
 //!
-//! ```ignore
-//! use asupersync::lab::{LabConfig, LabRuntime};
-//! use asupersync::types::Budget;
+//! [`LabConfig`] makes the seed explicit, while [`LabRuntime`] reports
+//! quiescence and oracle results without depending on wall time.
 //!
-//! let mut runtime = LabRuntime::new(LabConfig::new(42));
-//! let region = runtime.state.create_root_region(Budget::INFINITE);
+//! <!-- core-api-doctest: lab-runtime-config -->
+//! ```
+//! use asupersync::{Budget, Cx, LabConfig, LabRuntime, Outcome, main};
+//! use asupersync::record::ObligationKind;
+//! use asupersync::record::region::RegionState;
 //!
-//! let (task_id, _handle) = runtime
-//!     .state
-//!     .create_task(region, Budget::INFINITE, async { 42 })
-//!     .expect("create task");
+//! #[main]
+//! async fn main(cx: &Cx) {
+//!     cx.checkpoint().expect("example starts active");
 //!
-//! runtime.scheduler.lock().schedule(task_id, 0);
-//! runtime.run_until_quiescent();
+//!     let mut empty = LabRuntime::new(LabConfig::new(7));
+//!     let empty_report = empty.run_until_quiescent_with_report();
+//!     assert!(empty_report.quiescent);
+//!
+//!     let mut lab = LabRuntime::new(LabConfig::new(7).panic_on_leak(false));
+//!     let region = lab.state.create_root_region(Budget::INFINITE);
+//!     let (task, _handle) = lab
+//!         .state
+//!         .create_task(region, Budget::INFINITE, async {})
+//!         .expect("create lab task");
+//!     lab.state
+//!         .create_obligation(
+//!             ObligationKind::SendPermit,
+//!             task,
+//!             region,
+//!             Some("deliberate doctest leak".to_string()),
+//!         )
+//!         .expect("create obligation");
+//!     lab.state
+//!         .update_task(task, |record| record.complete(Outcome::Ok(())))
+//!         .expect("complete task");
+//!     lab.state
+//!         .region(region)
+//!         .expect("region exists")
+//!         .set_state(RegionState::Closed);
+//!
+//!     let report = lab.report();
+//!     let leak = report
+//!         .oracle_report
+//!         .entry("obligation_leak")
+//!         .expect("leak oracle is registered");
+//!     assert!(!leak.passed, "the lab must report the deliberate leak");
+//! }
 //! ```
 //!
 //! # Chaos Testing
@@ -207,8 +239,8 @@ pub use replay::{
 pub use runtime::{
     AutoAdvanceTermination, HarnessAttachmentKind, HarnessAttachmentRef, LabAutoCrashpack,
     LabAutoCrashpackError, LabConfigSummary, LabRunReport, LabRuntime, LabTraceCertificateSummary,
-    SporkHarnessReport, VirtualTimeReport, run_async_lab_test_with_config, run_async_under_lab,
-    run_async_under_lab_with_config,
+    SporkHarnessReport, VirtualTimeReport, lab_test_config_from_env, lab_test_seed_override,
+    run_async_lab_test_with_config, run_async_under_lab, run_async_under_lab_with_config,
 };
 pub use scenario::{
     CancellationSection, CancellationStrategy, ChaosSection, FaultAction, FaultEvent, IncludeRef,
@@ -220,7 +252,9 @@ pub use scenario_runner::{
     ScenarioRunner, ScenarioRunnerError as FrankenLabRunnerError, TraceCertificateSnapshot,
 };
 pub use snapshot_restore::{
-    RestorableSnapshot, RestoreError, SnapshotRestore, SnapshotStats, ValidationResult,
+    IncrementalSnapshot, RestorableSnapshot, RestoreError, SNAPSHOT_ARTIFACT_MAGIC,
+    SNAPSHOT_ARTIFACT_VERSION, SnapshotArtifact, SnapshotArtifactKind, SnapshotCodecError,
+    SnapshotLimits, SnapshotRestore, SnapshotStats, ValidationResult,
 };
 pub use spork_harness::{
     HarnessError, ScenarioRunnerError, SporkAppHarness, SporkScenarioConfig, SporkScenarioResult,

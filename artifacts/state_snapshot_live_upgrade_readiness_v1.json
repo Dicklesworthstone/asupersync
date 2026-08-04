@@ -36,7 +36,13 @@
     "version_field": "RestorableSnapshot::schema_version",
     "current_schema_version_source": "RestorableSnapshot::SCHEMA_VERSION",
     "content_integrity_field": "RestorableSnapshot::content_hash",
-    "compatible_upgrade_policy": "Only exact schema-version matches are eligible for restart-style handoff until an explicit migration table exists.",
+    "compatible_upgrade_policy": "Exact current-schema snapshots are eligible for this lab foundation. Legacy schema 1 is admitted only through the explicit validated RestorableSnapshot::migrate_to_current path to schema 2; no implicit or unknown-version migration is eligible.",
+    "supported_schema_range": [
+      1,
+      2
+    ],
+    "current_schema_version": 2,
+    "artifact_envelope": "ASUPSNAP version 1 full or incremental",
     "required_sections": [
       "schema_version",
       "content_hash",
@@ -113,11 +119,13 @@
       ],
       "evidence": [
         "RestorableSnapshot carries schema_version and content_hash",
-        "validate() checks orphan references, region-tree cycles, non-quiescent closed regions, duplicate ids, and timestamps"
+        "validate() checks orphan references, region-tree cycles, non-quiescent closed regions, duplicate ids, and timestamps",
+        "ASUPSNAP version 1 carries full or incremental schema-2 state with checksum and admission limits",
+        "legacy schema-1 JSON is validated before explicit reversible migration and atomic installation"
       ],
       "next_steps": [
-        "rerun the focused contract after snapshot_restore source overlap",
-        "add migration-table rows before accepting cross-version snapshots"
+        "bind the focused snapshot codec receipt into an operator handoff report",
+        "add external historical corpus and real restart-consumer evidence before broader cross-version claims"
       ],
       "no_claims": [
         "does not prove production live upgrade",

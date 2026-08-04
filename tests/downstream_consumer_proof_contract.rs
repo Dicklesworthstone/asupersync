@@ -85,6 +85,13 @@ fn artifact_profile_entries(artifact: &Value) -> Vec<&Value> {
     entries
 }
 
+fn profile_source_path(profile: &Value) -> Option<&str> {
+    profile
+        .get("bin_path")
+        .or_else(|| profile.get("test_path"))
+        .and_then(Value::as_str)
+}
+
 #[test]
 fn fixture_is_external_workspace_and_does_not_enable_test_internals() {
     let artifact = json(ARTIFACT_PATH);
@@ -111,6 +118,9 @@ fn fixture_is_external_workspace_and_does_not_enable_test_internals() {
         fixture_manifest
             .contains("channel-mpsc-select-e2e-profile = [\"asupersync/channel-mpsc-select-e2e\"]")
     );
+    assert!(fixture_manifest.contains("kafka = [\"asupersync/kafka\"]"));
+    assert!(fixture_manifest.contains("name = \"kafka_default_feature_surface\""));
+    assert!(fixture_manifest.contains("path = \"../../kafka_producer_idempotence_audit.rs\""));
     assert!(
         !fixture_manifest.contains("test-internals"),
         "the downstream fixture must not opt into internal test helpers"
@@ -125,7 +135,13 @@ fn fixture_sources_keep_positive_and_negative_surfaces_separate() {
     assert!(!lib_source.contains("test_utils"));
 
     for profile in array(&artifact, "positive_profiles") {
-        let source = read_repo_file(string(profile, "bin_path"));
+        let source_path = profile_source_path(profile).unwrap_or_else(|| {
+            panic!(
+                "{} must declare a bin_path or test_path",
+                string(profile, "profile_id")
+            )
+        });
+        let source = read_repo_file(source_path);
         assert!(
             !source.contains("test_utils"),
             "{} must stay on public API only",
@@ -137,6 +153,28 @@ fn fixture_sources_keep_positive_and_negative_surfaces_separate() {
     let negative_source = read_repo_file(string(negative, "bin_path"));
     assert!(negative_source.contains(string(negative, "forbidden_reference")));
     assert_eq!(string(negative, "expected_error_code"), "E0433");
+}
+
+#[test]
+fn kafka_profile_executes_the_public_default_feature_boundary() {
+    let artifact = json(ARTIFACT_PATH);
+    let profile = array(&artifact, "positive_profiles")
+        .iter()
+        .find(|entry| entry["profile_id"].as_str() == Some("default-kafka-fail-closed-test"))
+        .expect("default Kafka profile");
+    let source = read_repo_file(string(profile, "test_path"));
+
+    assert_eq!(string(profile, "test"), "kafka_default_feature_surface");
+    assert!(array(profile, "fixture_features").is_empty());
+    assert!(array(profile, "root_feature_flags").is_empty());
+    assert!(string(profile, "command").contains(
+        "cargo test --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --test kafka_default_feature_surface"
+    ));
+    assert!(source.contains("RuntimeBuilder::current_thread()"));
+    assert!(source.contains("Cx::current()"));
+    assert!(source.contains("Err(KafkaError::FeatureDisabled)"));
+    assert!(!source.contains("run_test_with_cx"));
+    assert!(!source.contains("lock_deterministic_broker_for_tests"));
 }
 
 #[test]
@@ -174,10 +212,10 @@ fn proof_manifest_lanes_match_downstream_profiles() {
             string_set(lane, "source_paths").contains(FIXTURE_MANIFEST_PATH),
             "{lane_id}: source paths must include fixture manifest"
         );
-        if let Some(bin_path) = profile.get("bin_path").and_then(Value::as_str) {
+        if let Some(source_path) = profile_source_path(profile) {
             assert!(
-                string_set(lane, "source_paths").contains(bin_path),
-                "{lane_id}: source paths must include profile bin"
+                string_set(lane, "source_paths").contains(source_path),
+                "{lane_id}: source paths must include profile source"
             );
         }
         assert!(

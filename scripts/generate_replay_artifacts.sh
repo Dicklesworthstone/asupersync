@@ -224,8 +224,12 @@ capture_cargo_config() {
         cp .cargo/config.toml "$REPLAY_DIR/.cargo/"
     fi
 
-    # Generate dependency tree
-    cargo tree --format "{p} {f}" > "$REPLAY_DIR/dependency_tree.txt" 2>/dev/null || echo "Failed to generate dependency tree" > "$REPLAY_DIR/dependency_tree.txt"
+    # Generate dependency tree. Routed through rch with an explicit target dir
+    # like every other Cargo invocation in this repo (AGENTS.md); `cargo tree`
+    # resolves the graph rather than compiling, but the rule is unconditional and
+    # the no-tokio verification lanes route `cargo tree` the same way.
+    rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_replay_dependency_tree" \
+        cargo tree --format "{p} {f}" > "$REPLAY_DIR/dependency_tree.txt" 2>/dev/null || echo "Failed to generate dependency tree" > "$REPLAY_DIR/dependency_tree.txt"
 }
 
 # Execute test with tracing

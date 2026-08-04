@@ -1,0 +1,2122 @@
+{
+  "schema_version": 1,
+  "artifact_id": "kafka-k1-aggregate-evidence-gate-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-dep-p7-kafka-removal-sarszu.2.1.5",
+  "parent_bead_id": "asupersync-dep-p7-kafka-removal-sarszu.2.1",
+  "capability_id": "CAP-KAFKA",
+  "adr_id": "DEP-ADR-009",
+  "captured_date_utc": "2026-08-04",
+  "baseline_revision": "375d8f626f34378ab75279851ef6db18a47994e4",
+  "inventory_state": "K1_5_AGGREGATE_EVIDENCE_COEXISTENCE_ROLLBACK_GATE_FROZEN_KEEP_INCUMBENT",
+  "policy": {
+    "mode": "STATIC_ONLY_FAIL_CLOSED",
+    "canonicalization_id": "KAFKA_K1_5_AGGREGATE_EVIDENCE_GATE_V1",
+    "child_definition_rule": "K1.1 through K1.4 remain the sole definition authorities for their rows. K1.5 stores typed references and joins only; a repeated child ID is never a second obligation definition.",
+    "input_pin_rule": "Every child artifact, companion document, and checked-in contract source is pinned by exact repository bytes, logical-record count, and SHA-256.",
+    "shared_input_rule": "When child packets pin the same path, every observed SHA-256 must agree. A missing pin or a second hash for one path is a blocking conflict.",
+    "obligation_rule": "The seven K1.1 obligation domains partition exactly 279 typed rows. Missing, extra, duplicate, conflicting, or unowned rows keep the incumbent.",
+    "evidence_rule": "Unit, executable model, property, fuzz, independent, and real-service vectors are separate required evidence classes. Planned, static, local-model, wire-only, compile-only, NOT_RUN, UNKNOWN, BLOCKED, or silent-skip state is never execution evidence.",
+    "protocol_rule": "Only rows explicitly typed MESSAGE_SET or CONFIG_MAPPING by the accepted child or K1.5 adjudication may claim protocol bindings. LOCAL_ONLY, ABSENT_GAP, INVENTORY_ONLY, and REFERENCE_ONLY rows must not acquire invented Kafka messages.",
+    "typed_binding_adjudication_rule": "K1.2 binding-group membership is historical input, not semantic proof. K1.5 must type each corrected row as MESSAGE_SET, CONFIG_MAPPING, LOCAL_ONLY, INVENTORY_ONLY, or REFERENCE_ONLY and must retain every displaced coarse reference in the conflict ledger.",
+    "state_owner_rule": "Every accepted route names a typed state-owner role separately from implementation and evidence roles; no effect, resource, residue, generation, offset, transaction, or delivery state may be ownerless. If state_owner reuses any route-local unit, model, property, or fuzz owner ID, an explicit overlap reason is required. Sharing among non-state evidence roles is permitted and never collapses independent or real-service ownership.",
+    "coexistence_rule": "The incumbent remains the only production path. Future native observation requires an explicit isolated mode owned by K14 and may not narrow the public no-feature or feature=kafka surfaces.",
+    "shadow_rule": "Offline-pure, broker-read, resource-construction-observe-only, isolated-side-effecting, duplicate-forbidden, and non-comparable operations are distinct. No side-effecting request or resource construction may be duplicated against the same production identity or namespace.",
+    "rollback_rule": "Ambiguous broker-visible outcomes are reconciled by their named owner before retry, replay, identity reuse, or incumbent resumption. Rollback never means blind duplicate execution.",
+    "missing_input_state": "BLOCKING_MISSING",
+    "missing_row_state": "BLOCKING_MISSING",
+    "extra_row_state": "BLOCKING_UNDECLARED_EXTRA",
+    "duplicate_row_state": "BLOCKING_DUPLICATE",
+    "conflicting_row_state": "BLOCKING_CONFLICT",
+    "unowned_row_state": "BLOCKING_UNOWNED",
+    "unknown_state": "BLOCKING_KEEP_INCUMBENT",
+    "planned_counts_as_executed": false,
+    "static_counts_as_runtime": false,
+    "silent_skip_counts_as_pass": false,
+    "shadow_counts_as_parity": false,
+    "child_closure_counts_as_cutover": false
+  },
+  "authority": {
+    "registry_disposition": "KEEP_UNTIL_PARITY",
+    "current_action": "KEEP_INCUMBENT",
+    "k1_1_artifact": "artifacts/kafka_k1_obligation_index_v1.json",
+    "k1_2_artifact": "artifacts/kafka_k1_protocol_security_support_policy_v1.json",
+    "k1_3_artifact": "artifacts/kafka_k1_public_api_contract_v1.json",
+    "k1_4_artifact": "artifacts/kafka_k1_resource_lifecycle_contract_v1.json",
+    "aggregate_contract_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.5",
+    "independent_protocol_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.1",
+    "state_model_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
+    "fuzz_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.3",
+    "security_review_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
+    "independent_terminal_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+    "real_service_harness_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.1",
+    "real_service_terminal_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+    "claim_time_refresh_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+    "shadow_comparison_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
+    "stop_trigger_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.4",
+    "rollback_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.5",
+    "sole_conditional_cutover_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.15",
+    "dependency_exit_allowed": false,
+    "feature_removal_allowed": false,
+    "api_removal_allowed": false,
+    "capability_removal_allowed": false,
+    "file_deletion_allowed": false,
+    "production_wiring_allowed": false,
+    "shadow_execution_allowed": false,
+    "oracle_retirement_allowed": false,
+    "cutover_allowed": false
+  },
+  "authority_inputs": [
+    {
+      "input_id": "K1-5-INPUT-K1-1-ARTIFACT",
+      "stage": "K1.1",
+      "role": "AUTHORITY_NAMESPACE_AND_OBLIGATION_PACKET",
+      "path": "artifacts/kafka_k1_obligation_index_v1.json",
+      "byte_count": 42551,
+      "record_count": 737,
+      "sha256": "7c8b4b00f18e84abd5ae9cb671a5c5822699eace98bbf82d1d0adb0969f50635"
+    },
+    {
+      "input_id": "K1-5-INPUT-K1-1-DOCUMENT",
+      "stage": "K1.1",
+      "role": "AUTHORITY_NAMESPACE_OPERATOR_DOCUMENT",
+      "path": "docs/kafka_k1_client_contract.md",
+      "byte_count": 12809,
+      "record_count": 291,
+      "sha256": "7d6c2e4e13c0c1204592ff0c654dd1c603c11593dd6e2497d6ddea33ffc9331c"
+    },
+    {
+      "input_id": "K1-5-INPUT-K1-1-CONTRACT",
+      "stage": "K1.1",
+      "role": "AUTHORITY_NAMESPACE_STATIC_CONTRACT_SOURCE",
+      "path": "tests/kafka_k1_client_contract.rs",
+      "byte_count": 96045,
+      "record_count": 2647,
+      "sha256": "e3187237d4bc5d5b57f3fc6e03423368e4726fb3a349f480e18a048c31a96b66"
+    },
+    {
+      "input_id": "K1-5-INPUT-K1-2-ARTIFACT",
+      "stage": "K1.2",
+      "role": "PROTOCOL_SECURITY_AND_SUPPORT_PACKET",
+      "path": "artifacts/kafka_k1_protocol_security_support_policy_v1.json",
+      "byte_count": 82178,
+      "record_count": 1399,
+      "sha256": "fc63047f2d57c514ebd662cf836c85ccf6186c7f56bf9c5e0c49c135fb8fb33a"
+    },
+    {
+      "input_id": "K1-5-INPUT-K1-2-DOCUMENT",
+      "stage": "K1.2",
+      "role": "PROTOCOL_SECURITY_OPERATOR_DOCUMENT",
+      "path": "docs/kafka_k1_protocol_security_support_policy.md",
+      "byte_count": 13539,
+      "record_count": 280,
+      "sha256": "d28f1b08f273a71ecd4ba303e9efc197d5394d3ae0f3a6e2efb7eebe83b8d5df"
+    },
+    {
+      "input_id": "K1-5-INPUT-K1-2-CONTRACT",
+      "stage": "K1.2",
+      "role": "PROTOCOL_SECURITY_STATIC_CONTRACT_SOURCE",
+      "path": "tests/kafka_k1_protocol_security_support_policy_contract.rs",
+      "byte_count": 51663,
+      "record_count": 1476,
+      "sha256": "29d53bdab9217434575d89170e581b752227b4bff817a696d4e84c701173aa79"
+    },
+    {
+      "input_id": "K1-5-INPUT-K1-3-ARTIFACT",
+      "stage": "K1.3",
+      "role": "PUBLIC_API_CONFIGURATION_ERROR_AND_MIGRATION_PACKET",
+      "path": "artifacts/kafka_k1_public_api_contract_v1.json",
+      "byte_count": 37860,
+      "record_count": 753,
+      "sha256": "0c6a395f0a43f451491e52c26c452a5d69f0103ae3e49b431d826f889275ac9f"
+    },
+    {
+      "input_id": "K1-5-INPUT-K1-3-DOCUMENT",
+      "stage": "K1.3",
+      "role": "PUBLIC_API_OPERATOR_DOCUMENT",
+      "path": "docs/kafka_k1_public_api_contract.md",
+      "byte_count": 16803,
+      "record_count": 338,
+      "sha256": "ee938c6af5aa904c824b46697a996973c6248fdc6de56bf6db1d158ab54ba153"
+    },
+    {
+      "input_id": "K1-5-INPUT-K1-3-CONTRACT",
+      "stage": "K1.3",
+      "role": "PUBLIC_API_STATIC_CONTRACT_SOURCE",
+      "path": "tests/kafka_k1_public_api_contract.rs",
+      "byte_count": 63209,
+      "record_count": 1650,
+      "sha256": "edc1724fb1bac8b3d3766f17fee71a3e54dd025e0a60edd6eefcb9e3e1d5f31d"
+    },
+    {
+      "input_id": "K1-5-INPUT-K1-4-ARTIFACT",
+      "stage": "K1.4",
+      "role": "RESOURCE_AND_LIFECYCLE_PACKET",
+      "path": "artifacts/kafka_k1_resource_lifecycle_contract_v1.json",
+      "byte_count": 196050,
+      "record_count": 1901,
+      "sha256": "c47731ebfa593d64b47b16a0b1ecf0aabba7a47613f4c48ce850f67313f8d367"
+    },
+    {
+      "input_id": "K1-5-INPUT-K1-4-DOCUMENT",
+      "stage": "K1.4",
+      "role": "RESOURCE_AND_LIFECYCLE_OPERATOR_DOCUMENT",
+      "path": "docs/kafka_k1_resource_lifecycle_contract.md",
+      "byte_count": 21013,
+      "record_count": 373,
+      "sha256": "1c10719363ac92627c4ad260625ff47e8aef70d7cb641d7994f4a230d6aa9de9"
+    },
+    {
+      "input_id": "K1-5-INPUT-K1-4-CONTRACT",
+      "stage": "K1.4",
+      "role": "RESOURCE_AND_LIFECYCLE_STATIC_CONTRACT_SOURCE",
+      "path": "tests/kafka_k1_resource_lifecycle_contract.rs",
+      "byte_count": 75270,
+      "record_count": 2089,
+      "sha256": "acbaab2d44a9d0b97df55ba115dcacf8171a18139ee0feecbf61657cd058e86c"
+    }
+  ],
+  "child_packet_receipts": [
+    {
+      "stage": "K1.1",
+      "bead_id": "asupersync-dep-p7-kafka-removal-sarszu.2.1.1",
+      "artifact_id": "kafka-k1-obligation-index-v1",
+      "artifact_path": "artifacts/kafka_k1_obligation_index_v1.json",
+      "content_commit": "8e6987a20",
+      "required_tracker_status": "closed",
+      "static_contract_state": "ACCEPTED_STATIC_AUTHORITY",
+      "obligation_row_count": 279,
+      "obligation_projection_sha256": "cd4ff24ac2deed867d81d1fb9d81c08f31e57de5c7e77c84e1ea3657e2fa0f37",
+      "low_evidence_row_count": 446,
+      "unowned_row_count": 0,
+      "disposition": "KEEP_INCUMBENT"
+    },
+    {
+      "stage": "K1.2",
+      "bead_id": "asupersync-dep-p7-kafka-removal-sarszu.2.1.2",
+      "artifact_id": "kafka-k1-protocol-security-support-policy-v1",
+      "artifact_path": "artifacts/kafka_k1_protocol_security_support_policy_v1.json",
+      "content_commit": "82468f2d3",
+      "required_tracker_status": "closed",
+      "static_contract_state": "ACCEPTED_STATIC_POLICY",
+      "policy_cell_count": 90,
+      "protocol_binding_group_count": 10,
+      "promoted_supported_cell_count": 0,
+      "unowned_row_count": 0,
+      "disposition": "KEEP_INCUMBENT"
+    },
+    {
+      "stage": "K1.3",
+      "bead_id": "asupersync-dep-p7-kafka-removal-sarszu.2.1.3",
+      "artifact_id": "kafka-k1-public-api-contract-v1",
+      "artifact_path": "artifacts/kafka_k1_public_api_contract_v1.json",
+      "content_commit": "b09a2670f",
+      "required_tracker_status": "closed",
+      "static_contract_state": "ACCEPTED_STATIC_API_CONTRACT",
+      "combined_contract_row_count": 179,
+      "combined_contract_sha256": "36c6470809d8f8ed98291f0265db34d6003462889c730d1c029cf84690126cc3",
+      "authority_conflict_count": 5,
+      "unowned_row_count": 0,
+      "disposition": "KEEP_INCUMBENT"
+    },
+    {
+      "stage": "K1.4",
+      "bead_id": "asupersync-dep-p7-kafka-removal-sarszu.2.1.4",
+      "artifact_id": "kafka-k1-resource-lifecycle-contract-v1",
+      "artifact_path": "artifacts/kafka_k1_resource_lifecycle_contract_v1.json",
+      "content_commit": "4290cb3e3",
+      "required_tracker_status": "closed",
+      "static_contract_state": "ACCEPTED_STATIC_RESOURCE_CONTRACT",
+      "resource_class_count": 42,
+      "lifecycle_operation_count": 19,
+      "transition_cell_count": 133,
+      "unowned_row_count": 0,
+      "disposition": "KEEP_INCUMBENT"
+    }
+  ],
+  "lineage_and_conflict_ledger": {
+    "join_identity_rule": "artifact_id, bead_id, capability_id, ADR ID, exact input pins, and typed row IDs define the join. program_id is a producer lineage label and is never an obligation key.",
+    "producer_lineages": [
+      {
+        "program_id": "asupersync-ir2uf0",
+        "stages": ["K1.1", "K1.3", "K1.4", "K1.5"],
+        "state": "PRIMARY_KAFKA_CAMPAIGN_LINEAGE"
+      },
+      {
+        "program_id": "dependency-sovereignty-rev5",
+        "stages": ["K1.2"],
+        "state": "ACCEPTED_PRODUCER_LABEL_ALIAS_NOT_AN_OBLIGATION_IDENTITY"
+      }
+    ],
+    "observed_cross_child_reconciliation_conflict_count": 4,
+    "unresolved_cross_child_reconciliation_conflict_count": 0,
+    "preserved_child_blocker_count": 5,
+    "program_id_mismatch_count": 1,
+    "identity_consistency_claimed": false,
+    "migration_blocking_reconciliation_row_count": 2,
+    "rows": [
+      {
+        "conflict_id": "K1-5-CONFLICT-001-PROGRAM-LABEL",
+        "subject": "child program_id variance",
+        "observed_state": "K1.2 uses dependency-sovereignty-rev5 while K1.1, K1.3, and K1.4 use asupersync-ir2uf0.",
+        "resolution": "CHILD_METADATA_VARIANCE_RETAINED_FOR_KEEP_ONLY_GATE",
+        "resolution_rule": "The labels are retained verbatim and excluded from obligation identity; all typed joins use the exact authority tuple named by join_identity_rule. Identity consistency is not claimed, and promotion remains blocked pending explicit normalization or approval.",
+        "blocks_static_aggregation_after_adjudication": false,
+        "blocks_migration": true
+      },
+      {
+        "conflict_id": "K1-5-CONFLICT-002-SIBLING-PIN",
+        "subject": "K1.2 hidden selected-sibling authority edge",
+        "observed_state": "K1.2 pins the exact K1.3 artifact as K1-2-INPUT-K1-3 even though K1.2 and K1.3 are sibling tracker nodes.",
+        "resolution": "REDUNDANT_UNDECLARED_SIBLING_BYTE_PIN",
+        "resolution_rule": "K1.5 preserves and checks the exact K1.2-to-K1.3 byte pin; it does not reinterpret that content edge as tracker ordering, semantic authority, completion authority, or independent parallel production.",
+        "semantic_reference_count": 0,
+        "completion_authority": false,
+        "blocks_static_aggregation_after_adjudication": false,
+        "blocks_migration": false
+      },
+      {
+        "conflict_id": "K1-5-CONFLICT-003-COARSE-BINDINGS",
+        "subject": "K1.2 FETCH, GROUP, and OFFSETS authority-row joins",
+        "observed_state": "The three historical groups contain untyped cross-domain rows and omit direct poll, subscription/rebalance/close, commit/seek, and offset accessor semantics.",
+        "resolution": "CORRECTED_BY_K1_5_TYPED_SEMANTIC_OVERLAY",
+        "resolution_rule": "semantic_binding_adjudication retains every historical row, classifies direct/config/local/inventory/reference roles, and is authoritative for K1.5 evidence routing only.",
+        "blocks_static_aggregation_after_adjudication": false,
+        "blocks_migration": false
+      },
+      {
+        "conflict_id": "K1-5-CONFLICT-004-HISTORICAL-SNAPSHOTS",
+        "subject": "child-local completion snapshots and preserved K1.3 authority conflicts",
+        "observed_state": "Child packets captured sibling completion at different times, and K1.3 preserves five reviewed-evolution conflicts.",
+        "resolution": "PRESERVE_CHILD_LOCAL_HISTORY_AND_DOWNSTREAM_BLOCKERS",
+        "resolution_rule": "K1.5 checks each child's own accepted static state and current tracker closure, but does not force historical sibling booleans to agree or promote any K1.3 conflict to parity.",
+        "blocks_static_aggregation_after_adjudication": false,
+        "blocks_migration": true
+      }
+    ],
+    "preserved_child_blockers": [
+      {
+        "conflict_id": "KAFKA-K1-3-CONFLICT-001",
+        "subject": "consumer auto-commit policy",
+        "owners": [
+          "asupersync-dep-p7-kafka-removal-sarszu.2.9",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.10.2",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.11.2"
+        ],
+        "gate_state": "BLOCKING_REVIEWED_EVOLUTION"
+      },
+      {
+        "conflict_id": "KAFKA-K1-3-CONFLICT-002",
+        "subject": "insecure transport bypass cfg",
+        "owners": [
+          "asupersync-dep-p7-kafka-removal-sarszu.2.10.2",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.12.4"
+        ],
+        "gate_state": "BLOCKING_REVIEWED_EVOLUTION"
+      },
+      {
+        "conflict_id": "KAFKA-K1-3-CONFLICT-003",
+        "subject": "credential redaction and zeroization scope",
+        "owners": [
+          "asupersync-dep-p7-kafka-removal-sarszu.2.3.2",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.3.3",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.10.4",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.12.4"
+        ],
+        "gate_state": "BLOCKING_REVIEWED_EVOLUTION"
+      },
+      {
+        "conflict_id": "KAFKA-K1-3-CONFLICT-004",
+        "subject": "downstream inventory status",
+        "owners": [
+          "asupersync-dep-p7-kafka-removal-sarszu.2.10.5",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+        ],
+        "gate_state": "BLOCKING_CLAIM_REFRESH"
+      },
+      {
+        "conflict_id": "KAFKA-K1-3-CONFLICT-005",
+        "subject": "consumer commit method documentation",
+        "owners": ["asupersync-dep-p7-kafka-removal-sarszu.2.10.5"],
+        "gate_state": "BLOCKING_DOCUMENTATION_REPAIR"
+      }
+    ],
+    "source_owner_reconciliation": {
+      "historical_gap_id": "KFK-GAP-01",
+      "historical_gap_state": "RESOLVED_BY_K0_1",
+      "current_registry_source_owners": [
+        "src/messaging/kafka.rs",
+        "src/messaging/kafka_consumer.rs",
+        "Cargo.toml"
+      ],
+      "consumer_source_present": true,
+      "rule": "The resolved historical omission remains provenance but is not a current CAP-KAFKA source-owner conflict. Any future omission is blocking authority drift."
+    }
+  },
+  "cross_child_join_model": {
+    "definition_authority": "artifacts/kafka_k1_obligation_index_v1.json#/namespace_projection/k1_obligation_projection",
+    "definition_reference_rule": "The K1.1 typed tuple is the unique obligation definition. K1.2 policy cells, K1.3 dispositions, K1.4 resource/lifecycle rows, and K1.5 evidence routes are references or overlays with independent namespaces.",
+    "obligation_row_count": 279,
+    "obligation_partitions": [
+      {
+        "domain": "public_symbols",
+        "row_count": 30,
+        "definition_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.1",
+        "policy_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.3",
+        "evidence_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+        "join_state": "EXACT_REFERENCE_NO_REDEFINITION"
+      },
+      {
+        "domain": "semantic_rows",
+        "row_count": 97,
+        "definition_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.1",
+        "policy_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.3",
+        "overlay_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.4",
+        "evidence_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
+        "join_state": "EXACT_API_AND_RESOURCE_OVERLAY"
+      },
+      {
+        "domain": "shared_semantic_keys",
+        "row_count": 12,
+        "definition_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.1",
+        "aggregate_join_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.5",
+        "evidence_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+        "join_state": "EXACT_TWO_SEVEN_THREE_POLICY_SPLIT"
+      },
+      {
+        "domain": "explicit_absences",
+        "row_count": 2,
+        "definition_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.1",
+        "policy_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.3",
+        "evidence_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+        "join_state": "ADDITIVE_GAPS_BLOCK_PARITY"
+      },
+      {
+        "domain": "downstream_journeys",
+        "row_count": 15,
+        "definition_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.1",
+        "policy_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.3",
+        "evidence_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.5",
+        "terminal_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+        "join_state": "PRESERVE_BLOCKING_WHILE_LOW_EVIDENCE"
+      },
+      {
+        "domain": "fixture_vectors",
+        "row_count": 36,
+        "definition_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.1",
+        "policy_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.2",
+        "evidence_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.5",
+        "realization_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.2.1",
+        "terminal_owners": [
+          "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
+        ],
+        "join_state": "VECTOR_SPECIFIC_BLOCKING_WHERE_LOW_EVIDENCE"
+      },
+      {
+        "domain": "routed_gaps_and_findings",
+        "row_count": 87,
+        "definition_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.1",
+        "policy_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.1",
+        "route_owner_edge_count": 126,
+        "route_owner_count": 49,
+        "route_owner_source": "K1.1 exact route-ownership receipt",
+        "join_state": "ROUTED_WITHOUT_CLOSURE_PROMOTION"
+      }
+    ],
+    "shared_semantic_policy_split": [
+      {
+        "policy_stage": "K1.2",
+        "policy_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.2",
+        "row_count": 2,
+        "obligation_ids": [
+          "KAFKA-K1-SHARED-009",
+          "KAFKA-K1-SHARED-011"
+        ]
+      },
+      {
+        "policy_stage": "K1.3",
+        "policy_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.3",
+        "row_count": 7,
+        "obligation_ids": [
+          "KAFKA-K1-SHARED-001",
+          "KAFKA-K1-SHARED-002",
+          "KAFKA-K1-SHARED-004",
+          "KAFKA-K1-SHARED-005",
+          "KAFKA-K1-SHARED-006",
+          "KAFKA-K1-SHARED-007",
+          "KAFKA-K1-SHARED-008"
+        ]
+      },
+      {
+        "policy_stage": "K1.4",
+        "policy_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.4",
+        "row_count": 3,
+        "obligation_ids": [
+          "KAFKA-K1-SHARED-003",
+          "KAFKA-K1-SHARED-010",
+          "KAFKA-K1-SHARED-012"
+        ]
+      }
+    ],
+    "child_namespace_counts": {
+      "k1_2_policy_cells": 90,
+      "k1_2_protocol_binding_groups": 10,
+      "k1_3_contract_rows": 179,
+      "k1_4_resource_rows": 42,
+      "k1_4_lifecycle_rows": 19,
+      "k1_4_transition_rows": 133,
+      "namespace_collision_count": 0
+    },
+    "shared_child_input_consistency": {
+      "child_input_row_count": 51,
+      "unique_path_count": 24,
+      "shared_path_count": 13,
+      "conflicting_path_count": 0,
+      "conflicting_paths": [],
+      "state": "EXACT_SHARED_PINS_AGREE"
+    },
+    "k1_3_k1_4_semantic_resource_lifecycle_join": {
+      "semantic_authority_via_child_stage": "K1.3",
+      "semantic_authority_path": "artifacts/kafka_incumbent_semantics_matrix_v1.json",
+      "semantic_authority_byte_count": 228933,
+      "semantic_authority_record_count": 2560,
+      "semantic_authority_sha256": "fec9ac1a1e9ac63ce25393962c843f9169cae804c16c470ada2bf670ab0fc4ec",
+      "semantic_row_count": 97,
+      "classification_counts": {
+        "RESOURCE": 43,
+        "RESOURCE_AND_LIFECYCLE": 26,
+        "CONTEXT_ONLY_NOT_A_DISTINCT_LONG_LIVED_OPERATION": 28
+      },
+      "classification_projection_sha256": "6bfbbd0e034be578cc508b99b2f7256f9511650632249fa485c5ab5bf1519e35",
+      "missing_semantic_count": 0,
+      "duplicate_semantic_count": 0,
+      "resource_semantic_binding_count": 43,
+      "resource_semantic_binding_sha256": "bc625fbcca3de75d72d2bc2919cecc7636a94d6b25943bb37743d6c92b63ead9",
+      "config_to_resource_edge_count": 61,
+      "config_to_resource_edge_sha256": "9f790461b8d57091300ca27366a9759f7462e0064a1277df21d4e18a7d8ca6f3",
+      "config_to_resource_edge_rule": "For every K1.4 semantic_resource_bindings row, emit semantic_id, one TAB, each resource_id, and one LF; bytewise sort complete edge rows before SHA-256.",
+      "lifecycle_semantic_target_edge_count": 119,
+      "lifecycle_semantic_target_edge_sha256": "16774cada71f64fe1d8b55519f219eddd98d58c6a7f7039d0805e8bc2c486874",
+      "lifecycle_semantic_target_edge_rule": "For each of the 26 RESOURCE_AND_LIFECYCLE IDs, emit semantic_id, TAB, resource, TAB, resource_id for every resource_classes source-authority match and semantic_id, TAB, lifecycle, TAB, operation_id for every lifecycle_operations match; bytewise sort unique rows, append one LF per row, and SHA-256.",
+      "context_direct_resource_or_lifecycle_reference_count": 0,
+      "join_state": "EXACT_DISJOINT_EXHAUSTIVE_STATIC_JOIN"
+    },
+    "missing_obligation_count": 0,
+    "extra_obligation_count": 0,
+    "duplicate_definition_count": 0,
+    "conflicting_obligation_count": 0,
+    "unowned_obligation_count": 0
+  },
+  "semantic_binding_adjudication": {
+    "authority_rule": "The K1.2 groups remain immutable historical policy inputs. The typed overlays below replace only their K1.5 evidence-routing interpretation; they neither rewrite child bytes nor claim protocol execution.",
+    "historical_binding_group_count": 10,
+    "row_typed_binding_group_count": 10,
+    "historical_row_typing_edge_count": 52,
+    "historical_row_typing_projection_sha256": "ce317ee496fa450c1676161c21eeb0221041e502450d211504fbcfb333ca7a01",
+    "historical_row_typing_projection_rule": "For every historical_row_typing edge, emit binding_ref, TAB, authority_row_id, TAB, kind; bytewise sort all 52 rows, append one LF per row, and SHA-256.",
+    "membership_adjudicated_binding_group_count": 3,
+    "historical_membership_preserved_group_count": 7,
+    "observed_misjoined_group_count": 3,
+    "unresolved_misjoined_group_count": 0,
+    "zero_message_set_edge_group_count": 2,
+    "unresolved_zero_message_set_edge_group_count": 2,
+    "per_message_attribution_complete": false,
+    "per_message_attribution_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.2.1",
+    "allowed_binding_kinds": [
+      "MESSAGE_SET",
+      "CONFIG_MAPPING",
+      "LOCAL_ONLY",
+      "ABSENT_GAP",
+      "INVENTORY_ONLY",
+      "REFERENCE_ONLY"
+    ],
+    "historical_row_typing": [
+      {
+        "binding_ref": "KAFKA-K1-2-BIND-001-PRODUCER",
+        "source_pointer": "/protocol_binding_groups/0",
+        "typed_edges": [
+          {"authority_row_id": "KPR-OP-003", "kind": "CONFIG_MAPPING"},
+          {"authority_row_id": "KPR-OP-004", "kind": "MESSAGE_SET"},
+          {"authority_row_id": "KPR-OP-005", "kind": "LOCAL_ONLY"},
+          {"authority_row_id": "KPR-OP-006", "kind": "LOCAL_ONLY"}
+        ],
+        "message_names_attribution_state": "ATTRIBUTED_ONLY_TO_MESSAGE_SET_EDGES"
+      },
+      {
+        "binding_ref": "KAFKA-K1-2-BIND-002-IDEMPOTENCE",
+        "source_pointer": "/protocol_binding_groups/1",
+        "typed_edges": [
+          {"authority_row_id": "KPR-CFG-006", "kind": "CONFIG_MAPPING"},
+          {"authority_row_id": "KPR-CFG-007", "kind": "CONFIG_MAPPING"},
+          {"authority_row_id": "KPR-OP-004", "kind": "MESSAGE_SET"}
+        ],
+        "message_names_attribution_state": "ATTRIBUTED_ONLY_TO_MESSAGE_SET_EDGES"
+      },
+      {
+        "binding_ref": "KAFKA-K1-2-BIND-003-TRANSACTION",
+        "source_pointer": "/protocol_binding_groups/2",
+        "typed_edges": [
+          {"authority_row_id": "KPR-OP-010", "kind": "MESSAGE_SET"},
+          {"authority_row_id": "KPR-OP-011", "kind": "LOCAL_ONLY"},
+          {"authority_row_id": "KPR-OP-012", "kind": "MESSAGE_SET"},
+          {"authority_row_id": "KPR-OP-013", "kind": "MESSAGE_SET"},
+          {"authority_row_id": "KPR-OP-014", "kind": "MESSAGE_SET"},
+          {"authority_row_id": "KAFKA-ABS-001", "kind": "ABSENT_GAP"}
+        ],
+        "message_names_attribution_state": "ATTRIBUTED_ONLY_TO_MESSAGE_SET_EDGES_WITH_ABSENCE_PRESERVED"
+      },
+      {
+        "binding_ref": "KAFKA-K1-2-BIND-004-FETCH",
+        "source_pointer": "/protocol_binding_groups/3",
+        "typed_edges": [
+          {"authority_row_id": "KCO-OP-003", "kind": "CONFIG_MAPPING"},
+          {"authority_row_id": "KCO-OP-004", "kind": "MESSAGE_SET"},
+          {"authority_row_id": "KCO-OP-005", "kind": "LOCAL_ONLY"},
+          {"authority_row_id": "KAFKA-ENUM-006", "kind": "REFERENCE_ONLY"},
+          {"authority_row_id": "KAFKA-ENUM-007", "kind": "REFERENCE_ONLY"}
+        ],
+        "message_names_attribution_state": "SUPERSEDED_BY_TYPED_MEMBERSHIP_OVERLAY"
+      },
+      {
+        "binding_ref": "KAFKA-K1-2-BIND-005-GROUP",
+        "source_pointer": "/protocol_binding_groups/4",
+        "typed_edges": [
+          {"authority_row_id": "KCO-OP-001", "kind": "LOCAL_ONLY"},
+          {"authority_row_id": "KCO-OP-002", "kind": "LOCAL_ONLY"},
+          {"authority_row_id": "KCO-OP-006", "kind": "MESSAGE_SET"},
+          {"authority_row_id": "KCO-OP-007", "kind": "MESSAGE_SET"},
+          {"authority_row_id": "KCO-OP-008", "kind": "LOCAL_ONLY"}
+        ],
+        "message_names_attribution_state": "SUPERSEDED_BY_TYPED_MEMBERSHIP_OVERLAY"
+      },
+      {
+        "binding_ref": "KAFKA-K1-2-BIND-006-OFFSETS",
+        "source_pointer": "/protocol_binding_groups/5",
+        "typed_edges": [
+          {"authority_row_id": "KCO-OP-009", "kind": "MESSAGE_SET"},
+          {"authority_row_id": "KCO-OP-010", "kind": "LOCAL_ONLY"},
+          {"authority_row_id": "KCO-OP-011", "kind": "LOCAL_ONLY"},
+          {"authority_row_id": "KCO-OP-012", "kind": "LOCAL_ONLY"},
+          {"authority_row_id": "KCO-OP-013", "kind": "LOCAL_ONLY"}
+        ],
+        "message_names_attribution_state": "SUPERSEDED_BY_TYPED_MEMBERSHIP_OVERLAY"
+      },
+      {
+        "binding_ref": "KAFKA-K1-2-BIND-007-METADATA",
+        "source_pointer": "/protocol_binding_groups/6",
+        "typed_edges": [
+          {"authority_row_id": "KPR-CFG-001", "kind": "CONFIG_MAPPING"},
+          {"authority_row_id": "KCO-CFG-001", "kind": "CONFIG_MAPPING"}
+        ],
+        "message_names_attribution_state": "BLOCKING_NO_DIRECT_MESSAGE_AUTHORITY_ROW"
+      },
+      {
+        "binding_ref": "KAFKA-K1-2-BIND-008-TLS",
+        "source_pointer": "/protocol_binding_groups/7",
+        "typed_edges": [
+          {"authority_row_id": "KAFKA-K1-SHARED-009", "kind": "CONFIG_MAPPING"},
+          {"authority_row_id": "KAFKA-K1-SHARED-011", "kind": "LOCAL_ONLY"},
+          {"authority_row_id": "KPR-CFG-015", "kind": "CONFIG_MAPPING"},
+          {"authority_row_id": "KPR-CFG-016", "kind": "CONFIG_MAPPING"},
+          {"authority_row_id": "KPR-CFG-017", "kind": "CONFIG_MAPPING"},
+          {"authority_row_id": "KPR-CFG-018", "kind": "CONFIG_MAPPING"},
+          {"authority_row_id": "KAFKA-ENUM-005", "kind": "REFERENCE_ONLY"},
+          {"authority_row_id": "KAFKA-K0-4-UNKNOWN-007", "kind": "INVENTORY_ONLY"}
+        ],
+        "message_names_attribution_state": "NOT_APPLICABLE_CONFIG_MAPPING_GROUP"
+      },
+      {
+        "binding_ref": "KAFKA-K1-2-BIND-009-SASL",
+        "source_pointer": "/protocol_binding_groups/8",
+        "typed_edges": [
+          {"authority_row_id": "KAFKA-K1-SHARED-009", "kind": "CONFIG_MAPPING"},
+          {"authority_row_id": "KAFKA-K1-SHARED-011", "kind": "LOCAL_ONLY"},
+          {"authority_row_id": "KPR-CFG-019", "kind": "CONFIG_MAPPING"},
+          {"authority_row_id": "KPR-CFG-020", "kind": "CONFIG_MAPPING"},
+          {"authority_row_id": "KPR-CFG-021", "kind": "CONFIG_MAPPING"},
+          {"authority_row_id": "KPR-CFG-022", "kind": "CONFIG_MAPPING"},
+          {"authority_row_id": "KAFKA-ENUM-004", "kind": "REFERENCE_ONLY"},
+          {"authority_row_id": "KAFKA-ENUM-005", "kind": "REFERENCE_ONLY"},
+          {"authority_row_id": "KAFKA-K0-4-UNKNOWN-007", "kind": "INVENTORY_ONLY"}
+        ],
+        "message_names_attribution_state": "BLOCKING_NO_DIRECT_MESSAGE_AUTHORITY_ROW"
+      },
+      {
+        "binding_ref": "KAFKA-K1-2-BIND-010-LOCAL",
+        "source_pointer": "/protocol_binding_groups/9",
+        "typed_edges": [
+          {"authority_row_id": "KAFKA-K1-SHARED-011", "kind": "LOCAL_ONLY"},
+          {"authority_row_id": "KPR-OP-001", "kind": "LOCAL_ONLY"},
+          {"authority_row_id": "KPR-OP-002", "kind": "LOCAL_ONLY"},
+          {"authority_row_id": "KAFKA-ENUM-003", "kind": "REFERENCE_ONLY"},
+          {"authority_row_id": "KAFKA-ABS-002", "kind": "ABSENT_GAP"}
+        ],
+        "message_names_attribution_state": "NOT_APPLICABLE_LOCAL_ONLY_GROUP_WITH_ABSENCE_PRESERVED"
+      }
+    ],
+    "absence_routes": [
+      {
+        "authority_row_id": "KAFKA-ABS-001",
+        "binding_ref": "KAFKA-K1-2-BIND-003-TRANSACTION",
+        "kind": "ABSENT_GAP",
+        "shipped_state": "ABSENT_NOT_PARITY",
+        "gate_state": "BLOCKING_UNTIL_IMPLEMENTED_AND_VERIFIED",
+        "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.6.3",
+        "disposition_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+        "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.3",
+        "real_service_scenario_ids": [],
+        "inherits_group_route": false
+      },
+      {
+        "authority_row_id": "KAFKA-ABS-002",
+        "binding_ref": "KAFKA-K1-2-BIND-010-LOCAL",
+        "kind": "ABSENT_GAP",
+        "shipped_state": "ABSENT_NOT_PARITY",
+        "gate_state": "BLOCKING_UNTIL_REVIEWED_DISPOSITION_AND_EVIDENCE",
+        "api_contract_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.10.1",
+        "disposition_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+        "implementation_owner": null,
+        "implementation_owner_state": "NOT_ALLOCATED_PENDING_API_DISPOSITION",
+        "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+        "real_service_scenario_ids": [],
+        "inherits_group_route": false
+      }
+    ],
+    "absence_route_rule": "ABSENT_GAP rows never inherit a coarse binding-group capability route, state owner, implementation owner, or real-service scenario. They remain additive blocking decisions with their exact row-local owners.",
+    "shared_support_edges": [
+      {
+        "authority_row_id": "KCO-OP-003",
+        "kind": "CONFIG_MAPPING",
+        "applies_to_binding_refs": [
+          "KAFKA-K1-2-BIND-004-FETCH",
+          "KAFKA-K1-2-BIND-005-GROUP",
+          "KAFKA-K1-2-BIND-006-OFFSETS"
+        ],
+        "rule": "Consumer construction realizes shared configuration for the three consumer routes but is never a Kafka message-set claim."
+      }
+    ],
+    "overlays": [
+      {
+        "binding_ref": "KAFKA-K1-2-BIND-004-FETCH",
+        "source_pointer": "/protocol_binding_groups/3",
+        "subject": "consumer fetch, position isolation, and leader recovery",
+        "message_set_rows": ["KCO-OP-006"],
+        "config_mapping_rows": [
+          "KCO-CFG-006",
+          "KCO-CFG-009",
+          "KCO-CFG-010",
+          "KCO-CFG-011",
+          "KCO-CFG-012",
+          "KCO-CFG-013"
+        ],
+        "local_only_rows": ["KCO-OP-016"],
+        "inventory_only_rows": [],
+        "reference_only_rows": ["KAFKA-ENUM-006", "KAFKA-ENUM-007"],
+        "superseded_authority_rows": ["KCO-OP-003", "KCO-OP-004", "KCO-OP-005", "KAFKA-ENUM-006", "KAFKA-ENUM-007"],
+        "message_names": ["ApiVersions", "Metadata", "Fetch", "ListOffsets", "OffsetForLeaderEpoch"],
+        "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.7",
+        "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
+        "state": "TYPED_STATIC_ROUTING_ONLY_BLOCKING_EXECUTION_EVIDENCE"
+      },
+      {
+        "binding_ref": "KAFKA-K1-2-BIND-005-GROUP",
+        "source_pointer": "/protocol_binding_groups/4",
+        "subject": "consumer group membership and caller-driven rebalance",
+        "message_set_rows": ["KCO-OP-004", "KCO-OP-006", "KCO-OP-009"],
+        "config_mapping_rows": ["KCO-CFG-002", "KCO-CFG-003", "KCO-CFG-004", "KCO-CFG-005"],
+        "local_only_rows": ["KCO-OP-005", "KCO-OP-011", "KCO-OP-012", "KCO-OP-013", "KCO-OP-014", "KCO-OP-017", "KAFKA-K1-SHARED-002"],
+        "inventory_only_rows": [],
+        "reference_only_rows": [],
+        "superseded_authority_rows": ["KCO-OP-001", "KCO-OP-002", "KCO-OP-006", "KCO-OP-007", "KCO-OP-008"],
+        "message_names": ["FindCoordinator", "JoinGroup", "SyncGroup", "Heartbeat", "LeaveGroup"],
+        "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.8",
+        "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
+        "state": "TYPED_STATIC_ROUTING_ONLY_BLOCKING_EXECUTION_EVIDENCE"
+      },
+      {
+        "binding_ref": "KAFKA-K1-2-BIND-006-OFFSETS",
+        "source_pointer": "/protocol_binding_groups/5",
+        "subject": "offset fetch, commit, seek, and restart recovery",
+        "message_set_rows": ["KCO-OP-006", "KCO-OP-007"],
+        "config_mapping_rows": ["KCO-CFG-002", "KCO-CFG-005", "KCO-CFG-006", "KCO-CFG-007", "KCO-CFG-008", "KCO-CFG-016", "KAFKA-K1-SHARED-001", "KAFKA-K1-SHARED-006"],
+        "local_only_rows": ["KCO-OP-002", "KCO-OP-008", "KCO-OP-015", "KCO-OP-016"],
+        "inventory_only_rows": [],
+        "reference_only_rows": ["KAFKA-ENUM-006"],
+        "superseded_authority_rows": ["KCO-OP-009", "KCO-OP-010", "KCO-OP-011", "KCO-OP-012", "KCO-OP-013"],
+        "message_names": ["FindCoordinator", "OffsetFetch", "OffsetCommit", "ListOffsets"],
+        "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.9",
+        "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
+        "state": "TYPED_STATIC_ROUTING_ONLY_BLOCKING_EXECUTION_EVIDENCE"
+      }
+    ],
+    "routing_rule": "K1.5 route refs for FETCH, GROUP, and OFFSETS resolve through these typed overlays. Deliberate cross-group typed-reference overlap is permitted because overlays are references, never duplicate definitions. The seven unaffected K1.2 group refs retain their child policy meaning but remain non-executed evidence.",
+    "adjudication_state": "COMPLETE_MEMBERSHIP_AND_ROW_TYPING_WITH_TWO_ZERO_MESSAGE_SET_GROUPS_AND_NO_PER_MESSAGE_ATTRIBUTION_CLAIM"
+  },
+  "capability_evidence_contract": {
+    "capability_id": "CAP-KAFKA",
+    "registry_evidence_state": "BASELINE_PLANNED",
+    "registry_cutover_state": "KEEP_INCUMBENT",
+    "protocol_binding_refs": [
+      "KAFKA-K1-2-BIND-001-PRODUCER",
+      "KAFKA-K1-2-BIND-002-IDEMPOTENCE",
+      "KAFKA-K1-2-BIND-003-TRANSACTION",
+      "KAFKA-K1-2-BIND-004-FETCH",
+      "KAFKA-K1-2-BIND-005-GROUP",
+      "KAFKA-K1-2-BIND-006-OFFSETS",
+      "KAFKA-K1-2-BIND-007-METADATA",
+      "KAFKA-K1-2-BIND-008-TLS",
+      "KAFKA-K1-2-BIND-009-SASL",
+      "KAFKA-K1-2-BIND-010-LOCAL"
+    ],
+    "state_owners": [
+      "asupersync-dep-p7-kafka-removal-sarszu.2.3.2",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.3.3",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.3.4",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.5.3",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.5.4",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.6.1",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.6.4",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.7.4",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.8.3",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.9",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.10.3",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.11.1",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.11.2",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.11.3",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.14.5"
+    ],
+    "implementation_owners": [
+      "asupersync-dep-p7-kafka-removal-sarszu.2.2.1",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.2.2",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.2.3",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.2.4",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.3.2",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.3.3",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.3.4",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.5",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.6",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.7",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.8",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.9",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.10",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.11"
+    ],
+    "accepted_evidence_namespace": {
+      "authority_via_child_stage": "K1.1",
+      "authority_via_k0_aggregate": "artifacts/kafka_k0_baseline_disposition_v1.json#/child_packets[K0.4]",
+      "authority_path": "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
+      "authority_byte_count": 119245,
+      "authority_record_count": 2187,
+      "authority_sha256": "03406fe1146345ef7c50ec5e4077f0c6131db963e3776215629e9d34a781a643",
+      "executable_vector_count": 36,
+      "executable_vector_id_set_sha256": "73491562ae3df3f7ea6729c30834cf3cb134a002ec5d682255277df5e508e73f",
+      "vector_category_mapping_sha256": "180bb499a516f563cea8367a3e4b28e0fc74d19373b01e61dc0c3a399e3555e2",
+      "vector_category_mapping_rule": "Emit vector_id, TAB, category_id, and LF for the exact category_routes membership; bytewise sort unique rows and SHA-256.",
+      "vector_category_counts": {
+        "LOCKED_DEPENDENCY": 3,
+        "NATIVE_BUILD": 5,
+        "BROKER_API_VERSION": 7,
+        "COMPRESSION": 5,
+        "TRANSPORT_AUTH": 6,
+        "TOPOLOGY": 4,
+        "FAULT_LIFECYCLE": 6
+      },
+      "category_routes": [
+        {
+          "category_id": "LOCKED_DEPENDENCY",
+          "vector_ids": [
+            "KAFKA-K0-4-DEP-001-FEATURE-EDGE",
+            "KAFKA-K0-4-DEP-002-RDKAFKA",
+            "KAFKA-K0-4-DEP-003-RDKAFKA-SYS"
+          ],
+          "required_evidence_class_ids": ["K1E-INDEPENDENT", "K1E-REAL-SERVICE"],
+          "real_service_scenario_ids": ["kafka_produce_consume", "kafka_transactions", "kafka_group_rebalance", "kafka_security_fault_matrix"],
+          "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.12.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6", "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"]
+        },
+        {
+          "category_id": "NATIVE_BUILD",
+          "vector_ids": [
+            "KAFKA-K0-4-NATIVE-001-PACKAGE-SOURCE",
+            "KAFKA-K0-4-NATIVE-002-PKG-CONFIG",
+            "KAFKA-K0-4-NATIVE-003-ACTUAL-LIBRARY",
+            "KAFKA-K0-4-NATIVE-004-BUILD-FLAGS",
+            "KAFKA-K0-4-NATIVE-005-HOST-IDENTITY"
+          ],
+          "required_evidence_class_ids": ["K1E-INDEPENDENT", "K1E-REAL-SERVICE"],
+          "real_service_scenario_ids": ["kafka_produce_consume", "kafka_transactions", "kafka_group_rebalance", "kafka_security_fault_matrix"],
+          "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.12.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6", "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"]
+        },
+        {
+          "category_id": "BROKER_API_VERSION",
+          "vector_ids": [
+            "KAFKA-K0-4-BROKER-001-MUTABLE-7-4",
+            "KAFKA-K0-4-BROKER-002-AMBIENT",
+            "KAFKA-K0-4-BROKER-003-OLDEST",
+            "KAFKA-K0-4-BROKER-004-CURRENT",
+            "KAFKA-K0-4-API-001-NEGOTIATION",
+            "KAFKA-K0-4-API-002-REQUEST-RANGES",
+            "KAFKA-K0-4-API-003-RESPONSE-RANGES"
+          ],
+          "required_evidence_class_ids": ["K1E-INDEPENDENT", "K1E-REAL-SERVICE"],
+          "real_service_scenario_ids": ["kafka_produce_consume", "kafka_transactions", "kafka_group_rebalance", "kafka_security_fault_matrix"],
+          "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.2.5", "asupersync-dep-p7-kafka-removal-sarszu.2.12.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6", "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"]
+        },
+        {
+          "category_id": "COMPRESSION",
+          "vector_ids": [
+            "KAFKA-K0-4-CODEC-001-NONE",
+            "KAFKA-K0-4-CODEC-002-GZIP",
+            "KAFKA-K0-4-CODEC-003-SNAPPY",
+            "KAFKA-K0-4-CODEC-004-LZ4",
+            "KAFKA-K0-4-CODEC-005-ZSTD"
+          ],
+          "required_evidence_class_ids": ["K1E-PROPERTY", "K1E-FUZZ", "K1E-INDEPENDENT", "K1E-REAL-SERVICE"],
+          "real_service_scenario_ids": ["kafka_produce_consume", "kafka_transactions"],
+          "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.4.7", "asupersync-dep-p7-kafka-removal-sarszu.2.12.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6", "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"]
+        },
+        {
+          "category_id": "TRANSPORT_AUTH",
+          "vector_ids": [
+            "KAFKA-K0-4-AUTH-001-PLAINTEXT",
+            "KAFKA-K0-4-AUTH-002-TLS",
+            "KAFKA-K0-4-AUTH-003-SCRAM-SHA-256",
+            "KAFKA-K0-4-AUTH-004-SCRAM-SHA-512",
+            "KAFKA-K0-4-AUTH-005-PROOF-REPORTING",
+            "KAFKA-K0-4-AUTH-006-NEGATIVE-MATRIX"
+          ],
+          "required_evidence_class_ids": ["K1E-PROPERTY", "K1E-INDEPENDENT", "K1E-REAL-SERVICE"],
+          "real_service_scenario_ids": ["kafka_security_fault_matrix"],
+          "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.3.5", "asupersync-dep-p7-kafka-removal-sarszu.2.12.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6", "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"]
+        },
+        {
+          "category_id": "TOPOLOGY",
+          "vector_ids": [
+            "KAFKA-K0-4-TOPO-001-SINGLE-BROKER",
+            "KAFKA-K0-4-TOPO-002-GROUP",
+            "KAFKA-K0-4-TOPO-003-TRANSACTION",
+            "KAFKA-K0-4-TOPO-004-MULTI-BROKER"
+          ],
+          "required_evidence_class_ids": ["K1E-MODEL", "K1E-PROPERTY", "K1E-REAL-SERVICE"],
+          "real_service_scenario_ids": ["kafka_produce_consume", "kafka_transactions", "kafka_group_rebalance"],
+          "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.6.5", "asupersync-dep-p7-kafka-removal-sarszu.2.8.6", "asupersync-dep-p7-kafka-removal-sarszu.2.12.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6", "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"]
+        },
+        {
+          "category_id": "FAULT_LIFECYCLE",
+          "vector_ids": [
+            "KAFKA-K0-4-FAULT-001-NETWORK-LABEL",
+            "KAFKA-K0-4-FAULT-002-SYNTHETIC-UNAVAILABLE",
+            "KAFKA-K0-4-FAULT-003-RESTART",
+            "KAFKA-K0-4-FAULT-004-ROLLING-VERSION",
+            "KAFKA-K0-4-FAULT-005-TEARDOWN",
+            "KAFKA-K0-4-FAULT-006-CANCELLATION-RECONCILIATION"
+          ],
+          "required_evidence_class_ids": ["K1E-MODEL", "K1E-PROPERTY", "K1E-INDEPENDENT", "K1E-REAL-SERVICE"],
+          "real_service_scenario_ids": ["kafka_produce_consume", "kafka_transactions", "kafka_group_rebalance", "kafka_security_fault_matrix"],
+          "terminal_gates": ["asupersync-dep-p7-kafka-removal-sarszu.2.11.4", "asupersync-dep-p7-kafka-removal-sarszu.2.12.5", "asupersync-dep-p7-kafka-removal-sarszu.2.13.6", "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"]
+        }
+      ],
+      "source_owner_rule": "Each vector retains its exact K0.4 executable_owner and refresh_owner; category routing adds evidence classes, scenarios, and terminal gates without replacing row-local owners.",
+      "knowledge_state_counts": {"KNOWN": 13, "UNKNOWN": 12, "BLOCKED": 11},
+      "execution_state_counts": {"NOT_RUN": 25, "BLOCKED": 11},
+      "executed_vector_count": 0,
+      "fixture_inventory_receipt": {
+        "fixture_count": 67,
+        "fixture_id_set_sha256": "bb8f922cc63f97efcfb0c76a6e26fdf923775650af8cd613f50da55c95cbb376",
+        "fixture_profile_count": 8,
+        "fixture_profile_id_set_sha256": "b1848945221e425d78007ee47bced23e62b700a5e43fc6a8300124d42c8d8d09",
+        "environment_count": 8,
+        "environment_id_set_sha256": "372de832a4de112e3ee8bc45b3af978d749b24c3f825416bd8e8b2d4523d831e",
+        "independent_protocol_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.1",
+        "real_service_harness_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.1",
+        "real_service_terminal_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
+      },
+      "routed_gap_receipt": {
+        "route_row_count": 87,
+        "route_row_sha256": "efbc7795ffa4c5144ffcedf6ac2659603e9a298800b6d7130df1081d47722b43",
+        "route_owner_edge_count": 126,
+        "route_owner_edge_sha256": "78ac2d846c8c21a1ed741ddb6a17c13c73cc57da86ae97a28577d2a061670dbc",
+        "owner_id_count": 49,
+        "owner_id_set_sha256": "8eb70d75bda5b08007d844cee45bca48383d875ddf795610c9e0f936d1f92e88",
+        "state": "REFERENCES_K1_1_EXACT_ROUTING_WITHOUT_REPLACEMENT"
+      }
+    },
+    "evidence_vector_classes": [
+      {
+        "vector_class_id": "K1E-UNIT",
+        "class": "UNIT_AND_COMPONENT",
+        "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+        "route_local_owners_required": true,
+        "required_cases": [
+          "happy",
+          "empty",
+          "boundary",
+          "maximum",
+          "malformed",
+          "typed_error",
+          "cancellation",
+          "shutdown",
+          "residue"
+        ],
+        "current_state": "PLANNED_BLOCKING"
+      },
+      {
+        "vector_class_id": "K1E-MODEL",
+        "class": "EXECUTABLE_STATE_MODEL",
+        "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
+        "required_cases": [
+          "producer_epoch_sequence",
+          "transaction_fencing_ambiguity",
+          "fetch_cursor_isolation",
+          "group_generation_ownership",
+          "offset_restart_recovery"
+        ],
+        "current_state": "PLANNED_BLOCKING"
+      },
+      {
+        "vector_class_id": "K1E-PROPERTY",
+        "class": "PROPERTY_AND_METAMORPHIC",
+        "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
+        "protocol_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.1",
+        "required_cases": [
+          "roundtrip_where_defined",
+          "ordering",
+          "idempotence",
+          "resource_monotonicity",
+          "cancel_prefix",
+          "restart_equivalence"
+        ],
+        "current_state": "PLANNED_BLOCKING"
+      },
+      {
+        "vector_class_id": "K1E-FUZZ",
+        "class": "BOUNDED_FUZZ",
+        "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.3",
+        "required_cases": [
+          "wire_framing",
+          "versioned_schema",
+          "record_batch_and_compression",
+          "state_transition",
+          "limit_and_residue"
+        ],
+        "current_state": "PLANNED_BLOCKING"
+      },
+      {
+        "vector_class_id": "K1E-INDEPENDENT",
+        "class": "INDEPENDENT_CORPUS_AND_SECURITY",
+        "owners": [
+          "asupersync-dep-p7-kafka-removal-sarszu.2.12.1",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.12.5"
+        ],
+        "required_cases": [
+          "independent_wire_vectors",
+          "independent_state_oracle",
+          "credential_and_downgrade_negatives",
+          "ownership_privacy_review",
+          "oracle_quarantine"
+        ],
+        "current_state": "PLANNED_BLOCKING"
+      },
+      {
+        "vector_class_id": "K1E-REAL-SERVICE",
+        "class": "PINNED_REAL_SERVICE",
+        "harness_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.1",
+        "terminal_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+        "required_cases": [
+          "producer_and_codec_matrix",
+          "transaction_offset_restart_matrix",
+          "group_rebalance_matrix",
+          "security_version_fault_matrix",
+          "teardown_replay_and_residue"
+        ],
+        "current_state": "BASELINE_PLANNED_BLOCKING"
+      }
+    ],
+    "real_service_scenarios": [
+      {
+        "scenario_id": "kafka_produce_consume",
+        "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.2",
+        "aggregate_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+        "current_state": "BASELINE_PLANNED",
+        "counts_as_evidence": false
+      },
+      {
+        "scenario_id": "kafka_transactions",
+        "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.3",
+        "aggregate_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+        "current_state": "BASELINE_PLANNED",
+        "counts_as_evidence": false
+      },
+      {
+        "scenario_id": "kafka_group_rebalance",
+        "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.4",
+        "aggregate_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+        "current_state": "BASELINE_PLANNED",
+        "counts_as_evidence": false
+      },
+      {
+        "scenario_id": "kafka_security_fault_matrix",
+        "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.5",
+        "aggregate_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+        "current_state": "BASELINE_PLANNED",
+        "counts_as_evidence": false
+      }
+    ],
+    "per_route_evidence_class_accounting": [
+      {
+        "vector_class_id": "K1E-UNIT",
+        "route_field": "unit_owner",
+        "requirement": "REQUIRED_EVERY_ROUTE"
+      },
+      {
+        "vector_class_id": "K1E-MODEL",
+        "route_field": "model_owner",
+        "requirement": "REQUIRED_EVERY_ROUTE"
+      },
+      {
+        "vector_class_id": "K1E-PROPERTY",
+        "route_field": "property_owner",
+        "requirement": "REQUIRED_EVERY_ROUTE"
+      },
+      {
+        "vector_class_id": "K1E-FUZZ",
+        "route_field": "fuzz_owner",
+        "requirement": "REQUIRED_EVERY_ROUTE"
+      },
+      {
+        "vector_class_id": "K1E-INDEPENDENT",
+        "route_terminal_gate": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+        "requirement": "REQUIRED_EVERY_ROUTE_VIA_INDEPENDENT_TERMINAL"
+      },
+      {
+        "vector_class_id": "K1E-REAL-SERVICE",
+        "route_fields": ["real_service_scenario_ids", "real_service_owners"],
+        "route_terminal_gate": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+        "requirement": "REQUIRED_EVERY_ROUTE"
+      }
+    ],
+    "global_terminal_gates": [
+      "asupersync-dep-p7-kafka-removal-sarszu.2.2.5",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.3.5",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.4.7",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.5.5",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.6.5",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.7.5",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.8.6",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.9",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.10.5",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.11.4",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.14.5",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.15"
+    ],
+    "route_terminal_gates": [
+      "asupersync-dep-p7-kafka-removal-sarszu.2.3.5",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.5.5",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.6.5",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.7.5",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.8.6",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.9",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.10.5",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
+    ],
+    "rollback_state_owners": [
+      "asupersync-dep-p7-kafka-removal-sarszu.2.3.4",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.5.3",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.6.4",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.8.3",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.9",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.11.1",
+      "asupersync-dep-p7-kafka-removal-sarszu.2.14.5"
+    ],
+    "route_state": "COMPLETE_STATIC_ROUTING_WITH_ZERO_EXECUTED_EVIDENCE"
+  },
+  "capability_routes": [
+    {
+      "route_id": "K1E-ROUTE-PRODUCER",
+      "protocol_binding_ref": "KAFKA-K1-2-BIND-001-PRODUCER",
+      "state_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.5.3",
+      "role_overlap_reason": "NONE_STATE_AND_UNIT_OWNERS_ARE_DISTINCT",
+      "unit_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.5.1",
+      "model_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
+      "property_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
+      "fuzz_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.3",
+      "real_service_scenario_ids": ["kafka_produce_consume"],
+      "real_service_owners": ["asupersync-dep-p7-kafka-removal-sarszu.2.13.2"],
+      "terminal_gates": [
+        "asupersync-dep-p7-kafka-removal-sarszu.2.5.5",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
+      ],
+      "current_state": "BLOCKING_PLANNED"
+    },
+    {
+      "route_id": "K1E-ROUTE-IDEMPOTENCE",
+      "protocol_binding_ref": "KAFKA-K1-2-BIND-002-IDEMPOTENCE",
+      "state_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.5.4",
+      "role_overlap_reason": "The scoped idempotence bead owns both its state ledger and unit evidence; model and property share a separate K12.2 owner, while fuzz, independent, and real-service roles remain separately owned.",
+      "unit_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.5.4",
+      "model_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
+      "property_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
+      "fuzz_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.3",
+      "real_service_scenario_ids": ["kafka_produce_consume"],
+      "real_service_owners": ["asupersync-dep-p7-kafka-removal-sarszu.2.13.2"],
+      "terminal_gates": [
+        "asupersync-dep-p7-kafka-removal-sarszu.2.5.5",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
+      ],
+      "current_state": "BLOCKING_PLANNED"
+    },
+    {
+      "route_id": "K1E-ROUTE-TRANSACTION",
+      "protocol_binding_ref": "KAFKA-K1-2-BIND-003-TRANSACTION",
+      "state_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.6.1",
+      "role_overlap_reason": "The scoped transaction-state bead owns both state modeling and its unit slice; independent and real-service terminals remain separate.",
+      "unit_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.6.1",
+      "model_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
+      "property_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
+      "fuzz_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.3",
+      "real_service_scenario_ids": ["kafka_transactions"],
+      "real_service_owners": ["asupersync-dep-p7-kafka-removal-sarszu.2.13.3"],
+      "terminal_gates": [
+        "asupersync-dep-p7-kafka-removal-sarszu.2.6.5",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
+      ],
+      "current_state": "BLOCKING_PLANNED"
+    },
+    {
+      "route_id": "K1E-ROUTE-FETCH",
+      "protocol_binding_ref": "KAFKA-K1-2-BIND-004-FETCH",
+      "state_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.7.4",
+      "role_overlap_reason": "NONE_STATE_AND_UNIT_OWNERS_ARE_DISTINCT",
+      "unit_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.7.2",
+      "model_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
+      "property_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
+      "fuzz_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.3",
+      "real_service_scenario_ids": ["kafka_produce_consume", "kafka_transactions"],
+      "real_service_owners": [
+        "asupersync-dep-p7-kafka-removal-sarszu.2.13.2",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.13.3"
+      ],
+      "terminal_gates": [
+        "asupersync-dep-p7-kafka-removal-sarszu.2.7.5",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
+      ],
+      "current_state": "BLOCKING_PLANNED"
+    },
+    {
+      "route_id": "K1E-ROUTE-GROUP",
+      "protocol_binding_ref": "KAFKA-K1-2-BIND-005-GROUP",
+      "state_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.8.3",
+      "role_overlap_reason": "NONE_STATE_AND_UNIT_OWNERS_ARE_DISTINCT",
+      "unit_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.8.1",
+      "model_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
+      "property_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
+      "fuzz_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.3",
+      "real_service_scenario_ids": ["kafka_group_rebalance"],
+      "real_service_owners": ["asupersync-dep-p7-kafka-removal-sarszu.2.13.4"],
+      "terminal_gates": [
+        "asupersync-dep-p7-kafka-removal-sarszu.2.8.6",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
+      ],
+      "current_state": "BLOCKING_PLANNED"
+    },
+    {
+      "route_id": "K1E-ROUTE-OFFSETS",
+      "protocol_binding_ref": "KAFKA-K1-2-BIND-006-OFFSETS",
+      "state_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.9",
+      "role_overlap_reason": "K9 is the serialized offset owner and therefore owns its state and unit evidence; independent and real-service terminals remain separate.",
+      "unit_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.9",
+      "model_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
+      "property_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
+      "fuzz_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.3",
+      "real_service_scenario_ids": ["kafka_transactions", "kafka_group_rebalance"],
+      "real_service_owners": [
+        "asupersync-dep-p7-kafka-removal-sarszu.2.13.3",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.13.4"
+      ],
+      "terminal_gates": [
+        "asupersync-dep-p7-kafka-removal-sarszu.2.9",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
+      ],
+      "current_state": "BLOCKING_PLANNED"
+    },
+    {
+      "route_id": "K1E-ROUTE-METADATA",
+      "protocol_binding_ref": "KAFKA-K1-2-BIND-007-METADATA",
+      "state_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.3.4",
+      "role_overlap_reason": "The metadata-routing bead owns both route state and unit evidence; independent and real-service terminals remain separate.",
+      "unit_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.3.4",
+      "model_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
+      "property_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.1",
+      "fuzz_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.3",
+      "real_service_scenario_ids": ["kafka_produce_consume", "kafka_security_fault_matrix"],
+      "real_service_owners": [
+        "asupersync-dep-p7-kafka-removal-sarszu.2.13.2",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.13.5"
+      ],
+      "terminal_gates": [
+        "asupersync-dep-p7-kafka-removal-sarszu.2.3.5",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
+      ],
+      "current_state": "BLOCKING_PLANNED"
+    },
+    {
+      "route_id": "K1E-ROUTE-TLS",
+      "protocol_binding_ref": "KAFKA-K1-2-BIND-008-TLS",
+      "state_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.3.2",
+      "role_overlap_reason": "The TLS bead owns both transport state and unit evidence; protocol, independent-security, and real-service roles remain separate.",
+      "unit_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.3.2",
+      "model_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
+      "property_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.1",
+      "fuzz_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.3",
+      "real_service_scenario_ids": ["kafka_security_fault_matrix"],
+      "real_service_owners": ["asupersync-dep-p7-kafka-removal-sarszu.2.13.5"],
+      "terminal_gates": [
+        "asupersync-dep-p7-kafka-removal-sarszu.2.3.5",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
+      ],
+      "current_state": "BLOCKING_PLANNED"
+    },
+    {
+      "route_id": "K1E-ROUTE-SASL",
+      "protocol_binding_ref": "KAFKA-K1-2-BIND-009-SASL",
+      "state_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.3.3",
+      "role_overlap_reason": "The SASL bead owns both credential/authentication state and unit evidence; protocol, independent-security, and real-service roles remain separate.",
+      "unit_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.3.3",
+      "model_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
+      "property_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.1",
+      "fuzz_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.3",
+      "real_service_scenario_ids": ["kafka_security_fault_matrix"],
+      "real_service_owners": ["asupersync-dep-p7-kafka-removal-sarszu.2.13.5"],
+      "terminal_gates": [
+        "asupersync-dep-p7-kafka-removal-sarszu.2.3.5",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
+      ],
+      "current_state": "BLOCKING_PLANNED"
+    },
+    {
+      "route_id": "K1E-ROUTE-LOCAL",
+      "protocol_binding_ref": "KAFKA-K1-2-BIND-010-LOCAL",
+      "state_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.10.3",
+      "role_overlap_reason": "NONE_STATE_AND_UNIT_OWNERS_ARE_DISTINCT",
+      "unit_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.10.1",
+      "model_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
+      "property_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.2",
+      "fuzz_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.3",
+      "real_service_scenario_ids": [
+        "kafka_produce_consume",
+        "kafka_transactions",
+        "kafka_group_rebalance",
+        "kafka_security_fault_matrix"
+      ],
+      "real_service_owners": [
+        "asupersync-dep-p7-kafka-removal-sarszu.2.13.2",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.13.3",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.13.4",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.13.5"
+      ],
+      "terminal_gates": [
+        "asupersync-dep-p7-kafka-removal-sarszu.2.10.5",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.13.6"
+      ],
+      "current_state": "BLOCKING_PLANNED"
+    }
+  ],
+  "feature_coexistence_modes": [
+    {
+      "mode_id": "K1C-INCUMBENT-ONLY",
+      "production": true,
+      "currently_allowed": true,
+      "native_effects_allowed": false,
+      "rule": "The existing feature=kafka path and no-feature typed facade remain unchanged; rdkafka and librdkafka remain the incumbent implementation."
+    },
+    {
+      "mode_id": "K1C-NATIVE-OFFLINE-ISOLATED",
+      "production": false,
+      "currently_allowed": false,
+      "native_effects_allowed": false,
+      "future_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
+      "rule": "A future explicit test-only or evidence-only selector may compare pure codec, configuration, and state-model outputs without broker contact or production wiring."
+    },
+    {
+      "mode_id": "K1C-DUAL-READ-PROBE",
+      "production": false,
+      "currently_allowed": false,
+      "native_effects_allowed": false,
+      "future_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
+      "rule": "A future bounded isolated connection may compare non-mutating broker reads only after K13 provenance, credential, rate, and teardown gates are admitted."
+    },
+    {
+      "mode_id": "K1C-ISOLATED-SIDE-EFFECT-CANARY",
+      "production": false,
+      "currently_allowed": false,
+      "native_effects_allowed": false,
+      "future_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
+      "rule": "A future canary must use dedicated topics, groups, transactional IDs, principals, offsets, and quotas. It may not duplicate a production effect."
+    },
+    {
+      "mode_id": "K1C-NATIVE-PRODUCTION",
+      "production": true,
+      "currently_allowed": false,
+      "native_effects_allowed": false,
+      "future_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.15",
+      "rule": "No production default, dependency, feature, API, or capability switch exists before the serialized K15 gate and any separately authorized file/dependency changes."
+    }
+  ],
+  "feature_profile_contract": {
+    "incumbent_feature_id": "kafka",
+    "native_feature_id": null,
+    "native_feature_allocation_state": "UNALLOCATED_BLOCKING",
+    "allocation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.2",
+    "profile_count": 7,
+    "source_compilation_profile_count": 13,
+    "source_compilation_profile_authority_via_child_stage": "K1.3",
+    "source_compilation_profile_authority_path": "artifacts/kafka_capability_inventory_v1.json#/compilation_profiles",
+    "source_compilation_profile_id_set_sha256": "882b6f73ee7c5abfe73080804fcd082c05dddd9c4002ee61ff9336f0a0d439eb",
+    "source_compilation_profile_canonical_rows_sha256": "8a2b2437daa7b2b4c8189875502bf5d4b049d6c9ce408d390279deaf8d8b5815",
+    "source_to_policy_profile_mapping_sha256": "4bc88aad41381aa47eb2962f8f270399e0dfd3b2f3af2835459835c859a5d90e",
+    "source_to_policy_profile_mapping_rule": "Emit source compilation profile ID, TAB, policy profile ID, and LF for every source_profile_ids membership; bytewise sort unique rows and SHA-256.",
+    "missing_source_compilation_profile_count": 0,
+    "duplicate_source_compilation_profile_count": 0,
+    "profiles": [
+      {
+        "profile_id": "K1FP-NO-KAFKA-FEATURE",
+        "incumbent_feature_enabled": false,
+        "native_feature_enabled": false,
+        "source_profile_ids": [
+          "KAFKA-PROFILE-NATIVE-DEFAULT-RELEASE",
+          "KAFKA-PROFILE-NATIVE-DEFAULT-DEBUG",
+          "KAFKA-PROFILE-DOWNSTREAM-NO-KAFKA"
+        ],
+        "current_state": "PRESERVE_TYPED_FACADE_AND_FEATURE_DISABLED_ORDERING",
+        "production_allowed": true,
+        "native_effects_allowed": false
+      },
+      {
+        "profile_id": "K1FP-INCUMBENT-KAFKA",
+        "incumbent_feature_enabled": true,
+        "native_feature_enabled": false,
+        "source_profile_ids": [
+          "KAFKA-PROFILE-NATIVE-KAFKA-RELEASE",
+          "KAFKA-PROFILE-NATIVE-KAFKA-DEBUG",
+          "KAFKA-PROFILE-NATIVE-ALL-FEATURES"
+        ],
+        "current_state": "SOLE_CURRENT_PRODUCTION_IMPLEMENTATION",
+        "production_allowed": true,
+        "native_effects_allowed": false
+      },
+      {
+        "profile_id": "K1FP-FUTURE-NATIVE-ONLY",
+        "incumbent_feature_enabled": false,
+        "native_feature_enabled": true,
+        "source_profile_ids": [],
+        "current_state": "BLOCKED_NATIVE_FEATURE_UNALLOCATED",
+        "production_allowed": false,
+        "native_effects_allowed": false
+      },
+      {
+        "profile_id": "K1FP-FUTURE-BOTH",
+        "incumbent_feature_enabled": true,
+        "native_feature_enabled": true,
+        "source_profile_ids": [],
+        "current_state": "BLOCKED_NATIVE_FEATURE_UNALLOCATED_AND_SHADOW_UNAUTHORIZED",
+        "production_allowed": false,
+        "native_effects_allowed": false
+      },
+      {
+        "profile_id": "K1FP-TEST",
+        "incumbent_feature_enabled": "MATRIX_INPUT",
+        "native_feature_enabled": false,
+        "source_profile_ids": [
+          "KAFKA-PROFILE-UNIT-NO-KAFKA",
+          "KAFKA-PROFILE-UNIT-WITH-KAFKA",
+          "KAFKA-PROFILE-TEST-INTERNALS-NO-KAFKA",
+          "KAFKA-PROFILE-CI-CROSS-PLATFORM"
+        ],
+        "current_state": "PRESERVE_CURRENT_CFG_AND_DETERMINISTIC_TEST_SEMANTICS",
+        "production_allowed": false,
+        "native_effects_allowed": false
+      },
+      {
+        "profile_id": "K1FP-FUZZ-OR-BENCH",
+        "incumbent_feature_enabled": "EXPLICIT_MATRIX_INPUT_ONLY",
+        "native_feature_enabled": false,
+        "source_profile_ids": ["KAFKA-PROFILE-FUZZ-WORKSPACE"],
+        "current_state": "NO_NATIVE_QUARANTINE_ALLOCATED_AND_NO_EVIDENCE_EXECUTED",
+        "production_allowed": false,
+        "native_effects_allowed": false
+      },
+      {
+        "profile_id": "K1FP-WASM",
+        "incumbent_feature_enabled": "MATRIX_INPUT",
+        "native_feature_enabled": false,
+        "source_profile_ids": ["KAFKA-PROFILE-WASM-NO-KAFKA", "KAFKA-PROFILE-WASM-WITH-KAFKA"],
+        "current_state": "PRESERVE_MESSAGING_ABSENT_WITHOUT_KAFKA_AND_HARD_COMPILE_ERROR_WITH_KAFKA",
+        "production_allowed": "SOURCE_PROFILE_DEPENDENT",
+        "source_profile_expected_states": [
+          {
+            "source_profile_id": "KAFKA-PROFILE-WASM-NO-KAFKA",
+            "surface_state": "MESSAGING_MODULE_ABSENT",
+            "backend_state": "NOT_APPLICABLE",
+            "production_allowed": true
+          },
+          {
+            "source_profile_id": "KAFKA-PROFILE-WASM-WITH-KAFKA",
+            "surface_state": "HARD_COMPILE_ERROR",
+            "backend_state": "NOT_APPLICABLE",
+            "production_allowed": false
+          }
+        ],
+        "native_effects_allowed": false
+      }
+    ],
+    "rule": "Neither this packet nor a future implementation may overload feature=kafka, silently substitute a native backend, or infer a native-only/both/test/fuzz/wasm profile before an explicit feature allocation and owner-approved graph update."
+  },
+  "shadow_classes": [
+    {
+      "class_id": "K1S-LOCAL-PURE",
+      "side_effect_level": "NONE",
+      "comparable": true,
+      "required_isolation": "Exact input bytes and frozen configuration; no network, broker, filesystem mutation, clock oracle, or ambient authority.",
+      "allowed_comparison": "Exact or canonically normalized result, typed error class, bounds, and state transition.",
+      "current_execution_authorized": false
+    },
+    {
+      "class_id": "K1S-BROKER-READ-PROBE",
+      "side_effect_level": "BROKER_OBSERVABLE_NO_APPLICATION_MUTATION",
+      "comparable": true,
+      "required_isolation": "Dedicated connection/principal, bounded rate and deadline, pinned broker identity, no group membership, no offset commit, and teardown receipt.",
+      "allowed_comparison": "Version, metadata, coordinator, error class, and bounded response after volatile field normalization.",
+      "current_execution_authorized": false
+    },
+    {
+      "class_id": "K1S-RESOURCE-CONSTRUCTION-OBSERVE-ONLY",
+      "side_effect_level": "RESOURCE_AND_CONNECTION_OBSERVABLE",
+      "comparable": true,
+      "required_isolation": "Dedicated client, connection, credential, transactional identity, thread/task, quota, resource ledger, and teardown receipt; no shared production identity.",
+      "allowed_comparison": "Construction result, applied configuration, typed failure, resource ownership, and teardown residue under isolated identities.",
+      "current_execution_authorized": false
+    },
+    {
+      "class_id": "K1S-ISOLATED-SIDE-EFFECT-CANARY",
+      "side_effect_level": "MUTATES_DEDICATED_CANARY_STATE",
+      "comparable": true,
+      "required_isolation": "Dedicated namespace, principal, group, transactional ID, offsets, quotas, cleanup owner, and residue receipt.",
+      "allowed_comparison": "Business outcome and broker state only within the isolated canary identity.",
+      "current_execution_authorized": false
+    },
+    {
+      "class_id": "K1S-DUPLICATE-FORBIDDEN",
+      "side_effect_level": "PRODUCTION_OR_IDENTITY_MUTATION",
+      "comparable": false,
+      "required_isolation": "No dual execution against the same topic, partition, group, transactional ID, producer identity, or offset namespace.",
+      "allowed_comparison": "Retained incumbent receipt versus separately generated canary evidence; never duplicate live effects.",
+      "current_execution_authorized": false
+    },
+    {
+      "class_id": "K1S-NON-COMPARABLE",
+      "side_effect_level": "OBSERVATION_OR_SCHEDULING_SENSITIVE",
+      "comparable": false,
+      "required_isolation": "Compare only a separately reviewed semantic projection; raw timing, callback order, thread topology, or diagnostic text is not parity.",
+      "allowed_comparison": "Reviewed normalized invariant only.",
+      "current_execution_authorized": false
+    }
+  ],
+  "shadow_semantic_operation_partition": {
+    "authority_path": "artifacts/kafka_incumbent_semantics_matrix_v1.json#/operations",
+    "authority_via_child_stage": "K1.3",
+    "authority_file_sha256": "fec9ac1a1e9ac63ce25393962c843f9169cae804c16c470ada2bf670ab0fc4ec",
+    "authority_semantic_row_count": 38,
+    "semantic_operation_id_set_sha256": "01a40fb40520c2ee2016e0b6c51ca9083fd6cb019bbb369d28e86fca73f88eed",
+    "semantic_operation_id_set_rule": "Bytewise sort 38 unique UTF-8 semantic IDs, append one LF per ID, and SHA-256.",
+    "operational_subtype_mapping_sha256": "a3bc7018bb1f69beac51f09685644976a422d4e7cc94a859faf725e308bb06b1",
+    "operational_subtype_mapping_rule": "Emit semantic_id, TAB, partition_class_id, and LF for all 38 rows; bytewise sort unique rows and SHA-256.",
+    "shadow_class_mapping_sha256": "8c2562a4b3b09ca575b7e5a4163725dfc6a99bf12553bf84317020fec673c4ac",
+    "shadow_class_mapping_rule": "Emit semantic_id, TAB, K1S shadow_class_id, and LF for the exact nested shadow-class subpartitions; bytewise sort unique rows and SHA-256.",
+    "classification_basis": "MAXIMUM_EFFECT_ACROSS_ACCEPTED_PROFILES",
+    "partition_class_count": 5,
+    "partitioned_semantic_operation_count": 38,
+    "missing_semantic_operation_count": 0,
+    "extra_semantic_operation_count": 0,
+    "duplicate_semantic_operation_count": 0,
+    "classification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
+    "stop_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.4",
+    "rollback_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.5",
+    "cutover_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.15",
+    "per_operation_owner_routing_complete": false,
+    "per_operation_owner_routing_gate": "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
+    "current_execution_authorized": false,
+    "classes": [
+      {
+        "partition_class_id": "LOCAL_PURE_OR_ACCESSOR",
+        "row_count": 19,
+        "shadow_class_ids": ["K1S-LOCAL-PURE"],
+        "same_target_dual_allowed": false,
+        "frozen_snapshot_or_identical_replay_comparison_allowed": true,
+        "comparator": "Exact or reviewed canonical local value, typed error, configuration projection, or accessor projection; no runtime parity is inferred from a static match.",
+        "isolation": "Frozen inputs and local state only; no broker contact, filesystem mutation, ambient clock oracle, or external identity.",
+        "semantic_ids": [
+          "KPR-OP-001", "KPR-OP-002", "KPR-OP-007", "KPR-OP-008", "KPR-OP-011", "KPR-OP-015", "KPR-OP-016", "KPR-OP-018", "KPR-OP-019",
+          "KCO-OP-001", "KCO-OP-002", "KCO-OP-010", "KCO-OP-011", "KCO-OP-012", "KCO-OP-013", "KCO-OP-014", "KCO-OP-015", "KCO-OP-016", "KCO-OP-017"
+        ],
+        "terminal_gates": [
+          "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.14.4",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.14.5",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.15"
+        ]
+      },
+      {
+        "partition_class_id": "RESOURCE_CONSTRUCTION_ISOLATED",
+        "row_count": 4,
+        "shadow_class_ids": ["K1S-RESOURCE-CONSTRUCTION-OBSERVE-ONLY"],
+        "same_target_dual_allowed": false,
+        "comparator": "Construction result, applied configuration, resource ledger, and typed failure under separately isolated client identities.",
+        "isolation": "Distinct client identities, connections, quotas, and teardown ledgers; construction is not side-effect-free and may not share a production target.",
+        "semantic_ids": ["KPR-OP-003", "KPR-OP-009", "KPR-OP-017", "KCO-OP-003"],
+        "terminal_gates": [
+          "asupersync-dep-p7-kafka-removal-sarszu.2.11.4",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.14.4",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.14.5",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.15"
+        ]
+      },
+      {
+        "partition_class_id": "STATEFUL_READ_ISOLATED_OR_REPLAY_ONLY",
+        "row_count": 1,
+        "shadow_class_ids": ["K1S-ISOLATED-SIDE-EFFECT-CANARY"],
+        "same_target_dual_allowed": false,
+        "comparator": "Record, cursor, assignment snapshot, typed failure, and residue receipt from a dedicated group or immutable replay corpus.",
+        "isolation": "Dedicated group, client, assignment, cursor, connection, deadline, and teardown receipt; poll changes consumer position/session state and is not a side-effect-free read.",
+        "semantic_ids": ["KCO-OP-006"],
+        "terminal_gates": [
+          "asupersync-dep-p7-kafka-removal-sarszu.2.7.5",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.8.6",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.14.4",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.14.5",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.15"
+        ]
+      },
+      {
+        "partition_class_id": "MUTATING_ISOLATED_OR_REPLAY_ONLY",
+        "row_count": 10,
+        "shadow_class_ids": ["K1S-DUPLICATE-FORBIDDEN", "K1S-ISOLATED-SIDE-EFFECT-CANARY"],
+        "shadow_class_subpartitions": [
+          {
+            "shadow_class_id": "K1S-DUPLICATE-FORBIDDEN",
+            "semantic_ids": ["KPR-OP-004", "KPR-OP-010", "KPR-OP-012", "KPR-OP-013", "KPR-OP-014", "KCO-OP-007"]
+          },
+          {
+            "shadow_class_id": "K1S-ISOLATED-SIDE-EFFECT-CANARY",
+            "semantic_ids": ["KPR-OP-020", "KCO-OP-004", "KCO-OP-005", "KCO-OP-008"]
+          }
+        ],
+        "same_target_dual_allowed": false,
+        "comparator": "Business outcome plus delivery, transaction, assignment, offset, cursor, and residue state under separate canary identities or immutable replay.",
+        "isolation": "Dedicated topics, groups, producer and transactional identities, partitions, offsets, principals, quotas, and cleanup owners; never duplicate an incumbent effect.",
+        "semantic_ids": [
+          "KPR-OP-004", "KPR-OP-010", "KPR-OP-012", "KPR-OP-013", "KPR-OP-014", "KPR-OP-020",
+          "KCO-OP-004", "KCO-OP-005", "KCO-OP-007", "KCO-OP-008"
+        ],
+        "terminal_gates": [
+          "asupersync-dep-p7-kafka-removal-sarszu.2.5.5",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.6.5",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.8.6",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.9",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.14.4",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.14.5",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.15"
+        ]
+      },
+      {
+        "partition_class_id": "LIFECYCLE_OR_AMBIGUOUS_NOT_DUAL_EXECUTABLE",
+        "row_count": 4,
+        "shadow_class_ids": ["K1S-NON-COMPARABLE"],
+        "same_target_dual_allowed": false,
+        "comparator": "Owner-scoped completion, quiescence, finalization, ambiguity, and residue receipts; raw timing or callback order is not parity.",
+        "isolation": "No shared producer, transaction, consumer, group, connection, or in-flight identity; close, flush, and drop-recovery behavior must be observed only in a separately owned lane.",
+        "semantic_ids": ["KPR-OP-005", "KPR-OP-006", "KPR-OP-021", "KCO-OP-009"],
+        "terminal_gates": [
+          "asupersync-dep-p7-kafka-removal-sarszu.2.11.4",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.14.4",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.14.5",
+          "asupersync-dep-p7-kafka-removal-sarszu.2.15"
+        ]
+      }
+    ],
+    "partition_state": "EXACT_STATIC_OPERATION_COVERAGE_ZERO_SHADOW_AUTHORIZATION"
+  },
+  "shadow_operations": [
+    {
+      "operation_id": "K1SO-001-OFFLINE-CODEC",
+      "operation": "offline request response and RecordBatch encode decode",
+      "class_id": "K1S-LOCAL-PURE",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
+      "stop_condition_ids": ["K1STOP-001-AUTHORITY-DRIFT", "K1STOP-003-SEMANTIC-DIVERGENCE"]
+    },
+    {
+      "operation_id": "K1SO-002-CONFIG",
+      "operation": "configuration validation default and typed-error projection",
+      "class_id": "K1S-LOCAL-PURE",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
+      "stop_condition_ids": ["K1STOP-001-AUTHORITY-DRIFT", "K1STOP-003-SEMANTIC-DIVERGENCE", "K1STOP-008-PRIVACY"]
+    },
+    {
+      "operation_id": "K1SO-003-API-VERSIONS",
+      "operation": "ApiVersions probe",
+      "class_id": "K1S-BROKER-READ-PROBE",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
+      "stop_condition_ids": ["K1STOP-002-PROVENANCE", "K1STOP-004-PROTOCOL", "K1STOP-007-RESOURCE"]
+    },
+    {
+      "operation_id": "K1SO-004-METADATA",
+      "operation": "metadata controller coordinator and leader read",
+      "class_id": "K1S-BROKER-READ-PROBE",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
+      "stop_condition_ids": ["K1STOP-002-PROVENANCE", "K1STOP-004-PROTOCOL", "K1STOP-007-RESOURCE"]
+    },
+    {
+      "operation_id": "K1SO-005-FETCH",
+      "operation": "fetch and cursor observation",
+      "class_id": "K1S-ISOLATED-SIDE-EFFECT-CANARY",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
+      "stop_condition_ids": ["K1STOP-005-AMBIGUOUS-EFFECT", "K1STOP-006-OWNERSHIP", "K1STOP-007-RESOURCE"]
+    },
+    {
+      "operation_id": "K1SO-006-PRODUCE",
+      "operation": "produce delivery and retry",
+      "class_id": "K1S-DUPLICATE-FORBIDDEN",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
+      "stop_condition_ids": ["K1STOP-003-SEMANTIC-DIVERGENCE", "K1STOP-005-AMBIGUOUS-EFFECT", "K1STOP-009-DUPLICATE-EFFECT"]
+    },
+    {
+      "operation_id": "K1SO-007-TRANSACTION",
+      "operation": "transaction begin produce offset enrollment commit abort",
+      "class_id": "K1S-DUPLICATE-FORBIDDEN",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
+      "stop_condition_ids": ["K1STOP-005-AMBIGUOUS-EFFECT", "K1STOP-006-OWNERSHIP", "K1STOP-009-DUPLICATE-EFFECT"]
+    },
+    {
+      "operation_id": "K1SO-008-OFFSET",
+      "operation": "offset commit seek and restart recovery",
+      "class_id": "K1S-DUPLICATE-FORBIDDEN",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
+      "stop_condition_ids": ["K1STOP-005-AMBIGUOUS-EFFECT", "K1STOP-006-OWNERSHIP", "K1STOP-009-DUPLICATE-EFFECT"]
+    },
+    {
+      "operation_id": "K1SO-009-GROUP",
+      "operation": "group join sync heartbeat rebalance and leave",
+      "class_id": "K1S-ISOLATED-SIDE-EFFECT-CANARY",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
+      "stop_condition_ids": ["K1STOP-005-AMBIGUOUS-EFFECT", "K1STOP-006-OWNERSHIP", "K1STOP-010-TEARDOWN"]
+    },
+    {
+      "operation_id": "K1SO-010-AUTH-NEGATIVE",
+      "operation": "TLS SASL and downgrade negative authentication",
+      "class_id": "K1S-ISOLATED-SIDE-EFFECT-CANARY",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
+      "stop_condition_ids": ["K1STOP-002-PROVENANCE", "K1STOP-008-PRIVACY", "K1STOP-011-SECURITY"]
+    },
+    {
+      "operation_id": "K1SO-011-LIFECYCLE",
+      "operation": "timeout cancellation panic shutdown restart and quiescence observation",
+      "class_id": "K1S-NON-COMPARABLE",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
+      "stop_condition_ids": ["K1STOP-005-AMBIGUOUS-EFFECT", "K1STOP-006-OWNERSHIP", "K1STOP-010-TEARDOWN"]
+    },
+    {
+      "operation_id": "K1SO-012-OBSERVABILITY",
+      "operation": "metrics traces diagnostics callback order and timing",
+      "class_id": "K1S-NON-COMPARABLE",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
+      "stop_condition_ids": ["K1STOP-003-SEMANTIC-DIVERGENCE", "K1STOP-008-PRIVACY", "K1STOP-012-PERFORMANCE"]
+    },
+    {
+      "operation_id": "K1SO-013-RESOURCE-CONSTRUCTION",
+      "operation": "producer transactional producer client and consumer resource construction",
+      "class_id": "K1S-RESOURCE-CONSTRUCTION-OBSERVE-ONLY",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
+      "stop_condition_ids": ["K1STOP-001-AUTHORITY-DRIFT", "K1STOP-002-PROVENANCE", "K1STOP-006-OWNERSHIP", "K1STOP-007-RESOURCE", "K1STOP-010-TEARDOWN"]
+    }
+  ],
+  "stop_conditions": [
+    {
+      "stop_condition_id": "K1STOP-001-AUTHORITY-DRIFT",
+      "trigger": "Any pinned child, accepted row, public/profile projection, owner, or terminal gate is missing, added, duplicated, conflicting, or changed without reviewed versioning.",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.4",
+      "action": "Stop native comparison, retain the incumbent, refresh K1/K14 authority, and do not reinterpret prior evidence."
+    },
+    {
+      "stop_condition_id": "K1STOP-002-PROVENANCE",
+      "trigger": "Broker, client, native package, host, feature, configuration, credential scope, corpus, or service identity is mutable, missing, or mismatched.",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.4",
+      "action": "Reject the receipt and fence the native lane before any further request."
+    },
+    {
+      "stop_condition_id": "K1STOP-003-SEMANTIC-DIVERGENCE",
+      "trigger": "Accepted bytes, records, ordering, defaults, typed outcomes, public behavior, or reviewed normalized observations diverge.",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.4",
+      "action": "Stop promotion, record both outcomes, retain the incumbent, and route the divergence to its implementation and independent owners."
+    },
+    {
+      "stop_condition_id": "K1STOP-004-PROTOCOL",
+      "trigger": "Unsupported version, unknown reachable schema, correlation mismatch, tag loss, framing error, downgrade, or hostile-input bound failure occurs.",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.4",
+      "action": "Close the native connection, preserve the failing bytes/provenance, and keep K2/K3 terminal gates blocking."
+    },
+    {
+      "stop_condition_id": "K1STOP-005-AMBIGUOUS-EFFECT",
+      "trigger": "Delivery, transaction, offset, assignment, authentication, or other broker-visible outcome lacks a definitive or explicitly owned ambiguous receipt.",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.4",
+      "action": "Fence retry and identity reuse; transfer the residue to the named rollback owner before any continuation."
+    },
+    {
+      "stop_condition_id": "K1STOP-006-OWNERSHIP",
+      "trigger": "A connection, task, request, batch, queue entry, transaction, group generation, offset, timer, callback, waiter, or residue becomes ownerless or releases twice.",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.4",
+      "action": "Fence admission, drain only under the K11 ledger, and reject quiescence or rollback completion."
+    },
+    {
+      "stop_condition_id": "K1STOP-007-RESOURCE",
+      "trigger": "A required cap, deadline, backpressure outcome, retry budget, memory bound, cardinality bound, or decompression bound is unknown, bypassed, or exceeded.",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.4",
+      "action": "Stop the lane, retain the incumbent, and preserve the saturation receipt without increasing limits implicitly."
+    },
+    {
+      "stop_condition_id": "K1STOP-008-PRIVACY",
+      "trigger": "Credentials, keys, endpoints, records, topic/group identity, or unbounded-cardinality values escape the reviewed redaction and retention policy.",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.4",
+      "action": "Stop collection, quarantine the receipt under the privacy owner, and do not retain or publish unsafe material."
+    },
+    {
+      "stop_condition_id": "K1STOP-009-DUPLICATE-EFFECT",
+      "trigger": "Incumbent and native paths can act on the same production record, producer identity, transaction, group, assignment, or offset.",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.4",
+      "action": "Fence the native path immediately; do not replay; reconcile broker state and residue before incumbent continuation."
+    },
+    {
+      "stop_condition_id": "K1STOP-010-TEARDOWN",
+      "trigger": "Cancellation, shutdown, panic, restart, service teardown, or rollback leaves live resources, tasks, group ownership, transactions, offsets, or unidentified residue.",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.4",
+      "action": "Keep the environment isolated, reject the run, and require K11.4/K13.6 reconciliation."
+    },
+    {
+      "stop_condition_id": "K1STOP-011-SECURITY",
+      "trigger": "Authentication bypass, trust downgrade, credential lifecycle failure, authorization confusion, hostile-frame escape, or transaction-fencing failure occurs.",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.4",
+      "action": "Stop the lane, revoke the canary identity where applicable, preserve redacted evidence, and keep K12.4/K13.5 blocking."
+    },
+    {
+      "stop_condition_id": "K1STOP-012-PERFORMANCE",
+      "trigger": "An accepted latency, throughput, memory, CPU, allocation, broker-load, or tail-behavior gate regresses or lacks comparable evidence.",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.4",
+      "action": "Stop rollout progression and retain the incumbent; absence of a comparable measurement is not a pass."
+    }
+  ],
+  "rollback_contract": {
+    "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.5",
+    "trigger_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.4",
+    "current_need": "NO_ROLLBACK_REQUIRED_BECAUSE_NO_PRODUCTION_CHANGE",
+    "global_sequence": [
+      "fence new native admission",
+      "retain incumbent availability without duplicating ambiguous effects",
+      "classify every in-flight effect as definitive no-effect, definitive success, definitive failure, or owned ambiguous residue",
+      "drain or transfer all native resources and background work",
+      "reconcile broker-visible identities and state",
+      "validate teardown and retained evidence",
+      "resume only the incumbent until a new owner-approved gate"
+    ],
+    "in_flight_cases": [
+      {
+        "case_id": "K1RB-001-LOCAL",
+        "subject": "offline pure work",
+        "required_action": "Discard the uncommitted native result after preserving the comparable input and outcome; no broker reconciliation is needed.",
+        "state_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.5"
+      },
+      {
+        "case_id": "K1RB-002-READ",
+        "subject": "broker read probe",
+        "required_action": "Close the isolated connection, drain requests, and retain provenance; do not promote cached metadata or cursor state into production.",
+        "state_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.3.4"
+      },
+      {
+        "case_id": "K1RB-003-PRODUCE",
+        "subject": "in-flight delivery",
+        "required_action": "Do not blindly replay. Reconcile correlation, producer identity, partition, offset, and delivery certainty before retry or incumbent resumption.",
+        "state_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.5.3"
+      },
+      {
+        "case_id": "K1RB-004-TRANSACTION",
+        "subject": "active or ambiguous transaction",
+        "required_action": "Fence the transactional identity; resolve commit or abort certainty and enrolled partitions/offsets before reuse. Never switch implementations mid-transaction.",
+        "state_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.6.4"
+      },
+      {
+        "case_id": "K1RB-005-GROUP",
+        "subject": "active group assignment or rebalance",
+        "required_action": "Fence polling, drain or revoke owned partitions, leave or expire the canary member, and prove no overlapping ownership before incumbent consumption.",
+        "state_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.8.3"
+      },
+      {
+        "case_id": "K1RB-006-OFFSET",
+        "subject": "ambiguous offset commit or seek",
+        "required_action": "Query and reconcile broker position under the isolated group identity; never issue a duplicate commit or assume the local cursor is durable.",
+        "state_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.9"
+      },
+      {
+        "case_id": "K1RB-007-SECURITY-AND-RESIDUE",
+        "subject": "connection credential callback task timer or diagnostic residue",
+        "required_action": "Close and drain resources, revoke isolated credentials where required, preserve only redacted evidence, and reject rollback completion until the K11 ledger balances.",
+        "state_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.11.1"
+      }
+    ],
+    "rollback_complete_requires": [
+      "no duplicate broker-visible effect",
+      "no shared native/incumbent identity ownership",
+      "all ambiguous outcomes have named residue owners",
+      "all resources and tasks have terminal receipts",
+      "all retained evidence is pinned and redacted",
+      "K11.4 and K13.6 teardown gates are satisfied for any executed future lane"
+    ],
+    "rollback_claimed_complete": false
+  },
+  "approval_gates": [
+    {
+      "approval_id": "K1APP-001-STATIC-K1",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.5",
+      "scope": "aggregate the four static K1 packets and freeze KEEP_INCUMBENT routing",
+      "state": "SATISFIED_BY_THIS_STATIC_PACKET",
+      "authorizes_cutover": false
+    },
+    {
+      "approval_id": "K1APP-002-IMPLEMENTATION",
+      "owners": [
+        "asupersync-dep-p7-kafka-removal-sarszu.2.2.5",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.3.5",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.4.7",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.5.5",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.6.5",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.7.5",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.8.6",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.9",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.10.5",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.11.4"
+      ],
+      "scope": "complete implementation-owned terminal receipts without accepted capability loss",
+      "state": "BLOCKING_PENDING",
+      "authorizes_cutover": false
+    },
+    {
+      "approval_id": "K1APP-003-INDEPENDENT",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+      "scope": "independent protocol state fuzz security and oracle disposition terminal",
+      "state": "BLOCKING_PENDING",
+      "authorizes_cutover": false
+    },
+    {
+      "approval_id": "K1APP-004-REAL-SERVICE",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+      "scope": "pinned multi-version real-service matrix teardown replay and terminal receipt",
+      "state": "BLOCKING_PENDING",
+      "authorizes_cutover": false
+    },
+    {
+      "approval_id": "K1APP-005-REFRESH",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+      "scope": "claim-time downstream source API profile broker and evidence refresh",
+      "state": "BLOCKING_PENDING",
+      "authorizes_cutover": false
+    },
+    {
+      "approval_id": "K1APP-006-ROLLOUT-ROLLBACK",
+      "owners": [
+        "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.14.4",
+        "asupersync-dep-p7-kafka-removal-sarszu.2.14.5"
+      ],
+      "scope": "safe shadow classification stop triggers staged enablement and lossless rollback drills",
+      "state": "BLOCKING_PENDING",
+      "authorizes_cutover": false
+    },
+    {
+      "approval_id": "K1APP-007-CUTOVER",
+      "owner": "asupersync-dep-p7-kafka-removal-sarszu.2.15",
+      "scope": "sole serialized performance graph no-loss and conditional dependency cutover decision",
+      "state": "BLOCKING_PENDING",
+      "authorizes_cutover": false
+    }
+  ],
+  "coverage_receipt": {
+    "authority_input_count": 12,
+    "child_packet_count": 4,
+    "obligation_partition_count": 7,
+    "obligation_row_count": 279,
+    "shared_semantic_split_count": 12,
+    "protocol_binding_reference_count": 10,
+    "row_typed_binding_group_count": 10,
+    "historical_binding_row_typing_edge_count": 52,
+    "membership_adjudicated_binding_group_count": 3,
+    "zero_message_set_edge_group_count": 2,
+    "absence_route_count": 2,
+    "evidence_vector_class_count": 6,
+    "per_route_evidence_class_accounting_count": 6,
+    "real_service_scenario_count": 4,
+    "accepted_executable_vector_count": 36,
+    "accepted_executable_vector_category_count": 7,
+    "accepted_fixture_count": 67,
+    "accepted_fixture_profile_count": 8,
+    "accepted_environment_count": 8,
+    "capability_route_count": 10,
+    "state_owner_registry_count": 15,
+    "global_terminal_gate_count": 15,
+    "route_terminal_gate_count": 9,
+    "rollback_state_owner_count": 7,
+    "coexistence_mode_count": 5,
+    "feature_profile_count": 7,
+    "source_compilation_profile_count": 13,
+    "shadow_class_count": 6,
+    "shadow_policy_summary_count": 13,
+    "shadow_semantic_partition_class_count": 5,
+    "shadow_semantic_operation_count": 38,
+    "stop_condition_count": 12,
+    "rollback_case_count": 7,
+    "approval_gate_count": 7,
+    "shared_child_input_row_count": 51,
+    "shared_child_unique_path_count": 24,
+    "shared_child_repeated_path_count": 13,
+    "missing_obligation_count": 0,
+    "extra_obligation_count": 0,
+    "duplicate_definition_count": 0,
+    "conflicting_obligation_count": 0,
+    "unowned_obligation_count": 0,
+    "conflicting_child_input_path_count": 0,
+    "observed_lineage_or_reference_conflict_count": 4,
+    "unresolved_lineage_or_reference_conflict_count": 0,
+    "preserved_child_blocker_count": 5,
+    "program_id_mismatch_count": 1,
+    "identity_consistency_claimed": false,
+    "adjudicated_binding_group_count": 3,
+    "unresolved_misjoined_binding_group_count": 0,
+    "unresolved_zero_message_set_edge_group_count": 2,
+    "executed_evidence_count": 0,
+    "current_shadow_authorization_count": 0,
+    "validation_mode": "STATIC_JSON_HASH_EXACT_JOIN_TRACKER_IDENTITY_AND_DOCUMENT_INSPECTION_ONLY",
+    "dynamic_execution_claimed": false,
+    "projection_hash_rules": {
+      "ROW_SET_V1": "First reject duplicate stable IDs and count drift; then recursively key-sort and compactly serialize each selected row, bytewise sort all serialized rows without deduplication, append one LF per row, and SHA-256.",
+      "VALUE_V1": "Recursively key-sort and compactly serialize the complete selected value while preserving array order, append one LF, and SHA-256.",
+      "STRING_SET_V1": "First reject duplicate strings and count drift; then bytewise sort all UTF-8 strings without deduplication, append one LF per string, and SHA-256."
+    },
+    "projection_scopes": {
+      "authority_input_projection_sha256": {"pointer": "/authority_inputs", "rule": "ROW_SET_V1"},
+      "child_receipt_projection_sha256": {"pointer": "/child_packet_receipts", "rule": "ROW_SET_V1"},
+      "lineage_conflict_projection_sha256": {"pointer": "/lineage_and_conflict_ledger", "rule": "VALUE_V1"},
+      "obligation_partition_projection_sha256": {"pointer": "/cross_child_join_model/obligation_partitions", "rule": "ROW_SET_V1"},
+      "semantic_resource_lifecycle_join_projection_sha256": {"pointer": "/cross_child_join_model/k1_3_k1_4_semantic_resource_lifecycle_join", "rule": "VALUE_V1"},
+      "semantic_binding_adjudication_projection_sha256": {"pointer": "/semantic_binding_adjudication", "rule": "VALUE_V1"},
+      "capability_evidence_contract_projection_sha256": {"pointer": "/capability_evidence_contract", "rule": "VALUE_V1"},
+      "capability_route_projection_sha256": {"pointer": "/capability_routes", "rule": "ROW_SET_V1"},
+      "feature_coexistence_mode_projection_sha256": {"pointer": "/feature_coexistence_modes", "rule": "ROW_SET_V1"},
+      "feature_profile_projection_sha256": {"pointer": "/feature_profile_contract", "rule": "VALUE_V1"},
+      "shadow_class_projection_sha256": {"pointer": "/shadow_classes", "rule": "ROW_SET_V1"},
+      "shadow_policy_summary_projection_sha256": {"pointer": "/shadow_operations", "rule": "ROW_SET_V1"},
+      "shadow_semantic_partition_projection_sha256": {"pointer": "/shadow_semantic_operation_partition", "rule": "VALUE_V1"},
+      "stop_condition_projection_sha256": {"pointer": "/stop_conditions", "rule": "ROW_SET_V1"},
+      "rollback_contract_projection_sha256": {"pointer": "/rollback_contract", "rule": "VALUE_V1"},
+      "approval_projection_sha256": {"pointer": "/approval_gates", "rule": "ROW_SET_V1"},
+      "no_claim_boundary_sha256": {"pointer": "/no_claim_boundaries", "rule": "STRING_SET_V1"}
+    },
+    "authority_input_projection_sha256": "04a3e92508804b98db05f99348f6ae23613892cf2bc9e621294d61bfd2c6ca1b",
+    "child_receipt_projection_sha256": "64626f739641a6821591cfc0efd08b7556e759d4c3f70f7d8496b682ca880938",
+    "lineage_conflict_projection_sha256": "9548fc723b4803575fd901618b66f45931e657c116ef00a287cfd5b75d733acc",
+    "obligation_partition_projection_sha256": "960794c3f3e4a66dc614147e083772c38bdec23bc0fa5b8b75f1864659c5ccbe",
+    "semantic_resource_lifecycle_join_projection_sha256": "ecdb3c7849849e16a80541f2842ade8547399a46c9f329d839cd4e1642d35a5f",
+    "semantic_binding_adjudication_projection_sha256": "d272517d070a5da6b107cd5739d521a8ed2a1c39abd287acaf36f1f50d741f1b",
+    "capability_evidence_contract_projection_sha256": "593d61f6cfcfa4eeb229aa04835140d9cf388962658ffa4670b1605d4e8ec7bb",
+    "capability_route_projection_sha256": "68ec5cf270f773130e1de1c294f4d314d1b65b81cd0d470fc2a9a4ece8c7f9f3",
+    "feature_coexistence_mode_projection_sha256": "d7907da645683a56469b9dc387bd8d4f29738d88f368ab3421be8979f4632dac",
+    "feature_profile_projection_sha256": "0fc0221918113296ff7645368113990a0694240623473b01b408ca914af5934d",
+    "shadow_class_projection_sha256": "554238c682c0ed42fce9f5bfd0c297676eb56aac8743c24f29841d2478939910",
+    "shadow_policy_summary_projection_sha256": "fb58778caa811fbfe2888c147adb0dd9a6187099c6183cba4707402fd2127b63",
+    "shadow_semantic_partition_projection_sha256": "5d7005385d046c14f813642147a34c65bed22e4c75cc8c1160c01a7e95bc4b37",
+    "stop_condition_projection_sha256": "b7526e84e8bbbe7a171803fb0b1f4e69fbeef5f5d15d7fce1b5530d2e9efd88c",
+    "rollback_contract_projection_sha256": "2450727dc3b250431f0c6849a097269cac6a377d4e3ad24aaf4618aed61771e8",
+    "approval_projection_sha256": "7a68a3d0697e605104acc1f38e9fe0e041e29edb3be0f4e78d844e1c02e809fb",
+    "no_claim_boundary_sha256": "5c626eb148630a40e1c003fa94e2296fbdb89a05fc0014b745a565e99b2ae1bb"
+  },
+  "disposition_receipt": {
+    "k1_1_complete": true,
+    "k1_2_static_policy_packet_complete": true,
+    "k1_2_coarse_semantic_binding_claim_accepted": false,
+    "k1_3_complete": true,
+    "k1_4_complete": true,
+    "k1_5_typed_binding_membership_adjudication_complete": true,
+    "k1_5_per_message_attribution_complete": false,
+    "k1_5_static_gate_complete": true,
+    "k1_parent_static_contract_complete": true,
+    "downstream_contract_work_allowed": true,
+    "native_feature_allocated": false,
+    "identity_consistency_claimed": false,
+    "per_operation_shadow_owner_routing_complete": false,
+    "runtime_protocol_proven": false,
+    "runtime_resource_lifecycle_proven": false,
+    "unit_model_property_fuzz_evidence_executed": false,
+    "real_service_evidence_executed": false,
+    "coexistence_executed": false,
+    "shadow_execution_authorized": false,
+    "rollback_drill_executed": false,
+    "owner_cutover_approvals_complete": false,
+    "incumbent_disposition": "KEEP_INCUMBENT",
+    "migration_eligible": false,
+    "production_wiring_allowed": false,
+    "dependency_exit_allowed": false,
+    "feature_removal_allowed": false,
+    "api_removal_allowed": false,
+    "capability_removal_allowed": false,
+    "file_deletion_allowed": false,
+    "oracle_retirement_allowed": false,
+    "cutover_allowed": false,
+    "on_any_missing_extra_duplicate_conflicting_unowned_unknown_low_evidence_divergence_unsafe_shadow_or_rollback_gap": "KEEP_INCUMBENT"
+  },
+  "no_claim_boundaries": [
+    "This packet proves only checked-in static child pins, explicit conflict adjudications, typed joins, exact operation partitioning, owner routing, coexistence and rollback policy, explicit low-evidence state, and the KEEP_INCUMBENT disposition.",
+    "The K1.5 typed overlay corrects evidence routing for three coarse K1.2 groups; it does not rewrite the K1.2 child, prove every K1.2 binding semantically correct, or create protocol evidence.",
+    "K1.5 does not claim exact per-row/per-message attribution. Two groups have zero direct MESSAGE_SET edges, and K2.1 remains the attribution owner.",
+    "The retained K1.2 program-label variance and five K1.3 authority conflicts remain migration blockers even though they do not prevent this KEEP-only aggregate packet from being statically complete.",
+    "No compiler, formatter, linter, test, fuzz harness, benchmark, runtime, broker, service, container, network, remote job, or dynamic validation was executed or is claimed by this packet.",
+    "No Kafka protocol, version negotiation, correlation, framing, RecordBatch, compression, producer, transaction, fetch, group, offset, TLS, SASL, or interoperability correctness is proved.",
+    "No configured quantity is promoted to an effective bound, and no admission, backpressure, deadline, cancellation, shutdown, restart, residue, leak-freedom, or quiescence behavior is proved.",
+    "No planned unit, model, property, fuzz, independent, security, or real-service vector counts as executed evidence.",
+    "The exact 38-operation shadow partition is classification policy only. No shadow operation is authorized, and the taxonomy does not permit broker contact, duplicate effects, canary creation, or production observation.",
+    "Per-operation shadow owner routing remains pending K14.3; class-level owners and terminal gates are not execution admission.",
+    "No feature coexistence mode other than the unchanged incumbent-only mode is currently authorized.",
+    "No native feature ID has been allocated. Native-only, both-enabled, test, fuzz-or-bench, and wasm profiles cannot be inferred as native execution lanes.",
+    "No owner approval beyond this scoped static K1 gate is satisfied, and K15 remains the sole conditional cutover owner.",
+    "No public API, configuration, default, error, diagnostic, feature, platform, broker, security mechanism, user journey, or explicit absence may be narrowed or normalized for implementation convenience.",
+    "No dependency, feature, API, capability, oracle, fixture, corpus, evidence, rollback artifact, source file, or other file may be removed, retired, deleted, or switched by this packet.",
+    "No performance improvement, no-regression result, memory bound, throughput, latency, reliability, release readiness, broad workspace health, or absence of defects is claimed.",
+    "A later execution or green child receipt cannot reinterpret this static packet as latent cutover authority; any GO proposal requires a fresh serialized K15 decision."
+  ]
+}

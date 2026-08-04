@@ -1,0 +1,658 @@
+{
+  "schema_version": 1,
+  "artifact_id": "cache-padded-alignment-experiment-v1",
+  "bead_id": "asupersync-0h6myr.6",
+  "capability_id": "CAP-CACHE-LAYOUT",
+  "authority": "EXPERIMENT_EVIDENCE_ONLY",
+  "captured_date_utc": "2026-07-27",
+  "production_policy": {
+    "global_alignment_bytes": 64,
+    "global_change_made": false,
+    "per_structure_change_made": false,
+    "adoption_requires_separate_bead": true
+  },
+  "verdict": {
+    "status": "DEFER",
+    "scope": "per-structure 64-versus-128-byte alignment experiment",
+    "reason": "The admitted AMD host produced mixed results and materially different 8-worker write ratios across the uninstrumented and counter-instrumented runs; 128-byte cells double footprint, while Apple Silicon and a second x86 vendor remain unmeasured.",
+    "available_host_interpretation": "Do not adopt 128-byte alignment on the measured AMD host without a separate repeatability campaign.",
+    "adoption_beads": []
+  },
+  "inventory": [
+    {
+      "candidate_id": "CACHE-WRAPPER-POLICY",
+      "source_path": "src/util/cache.rs",
+      "structure": "CachePadded<T>",
+      "fields": [
+        "value"
+      ],
+      "current_alignment_bytes": 64,
+      "current_invariant": "Every value starts at a 64-byte boundary and the wrapper size is a multiple of 64.",
+      "benchmark_workloads": [
+        "independent_hot_counters",
+        "snapshot_scan_density"
+      ],
+      "correctness_boundary": "The experiment does not change this global public layout."
+    },
+    {
+      "candidate_id": "CACHE-GLOBAL-FIFO-COUNTERS",
+      "source_path": "src/runtime/scheduler/global_queue.rs",
+      "structure": "GlobalFifoQueue<T>",
+      "fields": [
+        "count",
+        "published"
+      ],
+      "padded_field_count": 2,
+      "current_padded_bytes": 128,
+      "experimental_padded_bytes": 256,
+      "access_pattern": "Independent producer and consumer advisory counters.",
+      "benchmark_workloads": [
+        "independent_hot_counters"
+      ],
+      "correctness_boundary": "Count saturation and published reservation ordering are outside the synthetic layout probe."
+    },
+    {
+      "candidate_id": "CACHE-READY-COMBINER-METRICS",
+      "source_path": "src/runtime/scheduler/global_injector.rs",
+      "structure": "ReadyCombiner",
+      "fields": [
+        "active",
+        "in_flight",
+        "direct_injections",
+        "deferred_injections",
+        "combined_injections",
+        "fallback_injections",
+        "combiner_claim_failures",
+        "mode_entries",
+        "mode_exits",
+        "flushes",
+        "max_batch",
+        "max_in_flight"
+      ],
+      "padded_field_count": 12,
+      "current_padded_bytes": 768,
+      "experimental_padded_bytes": 1536,
+      "access_pattern": "Hot independent writes plus cold snapshot scans.",
+      "benchmark_workloads": [
+        "independent_hot_counters",
+        "snapshot_scan_density"
+      ],
+      "correctness_boundary": "Combiner admission, pending-buffer locking, and scheduling semantics are not modeled."
+    },
+    {
+      "candidate_id": "CACHE-TIMED-LANE-PAIR",
+      "source_path": "src/runtime/scheduler/global_injector.rs",
+      "structure": "GlobalInjector",
+      "fields": [
+        "timed_count",
+        "cached_earliest_deadline"
+      ],
+      "padded_field_count": 2,
+      "current_padded_bytes": 128,
+      "experimental_padded_bytes": 256,
+      "access_pattern": "Independent advisory count and cached-deadline writes with frequent reads.",
+      "benchmark_workloads": [
+        "independent_hot_counters"
+      ],
+      "correctness_boundary": "EDF heap locking and stale-cache correctness are outside the synthetic layout probe."
+    },
+    {
+      "candidate_id": "CACHE-WORKER-WAKE-INDEX",
+      "source_path": "src/runtime/scheduler/three_lane.rs",
+      "structure": "WorkerCoordinator",
+      "fields": [
+        "next_wake"
+      ],
+      "padded_field_count": 1,
+      "current_padded_bytes": 64,
+      "experimental_padded_bytes": 128,
+      "access_pattern": "One contended round-robin index adjacent to read-mostly coordinator state.",
+      "benchmark_workloads": [
+        "independent_hot_counters"
+      ],
+      "correctness_boundary": "Worker selection, parker wakeups, and fairness semantics are not modeled."
+    },
+    {
+      "candidate_id": "CACHE-SPAWN-ID-SHARDS",
+      "source_path": "src/runtime/spawn_mailbox.rs",
+      "structure": "SpawnIdAllocator",
+      "fields": [
+        "shards[0..8]"
+      ],
+      "padded_field_count": 8,
+      "current_padded_bytes": 512,
+      "experimental_padded_bytes": 1024,
+      "access_pattern": "Per-thread relaxed increments on independent shard counters.",
+      "benchmark_workloads": [
+        "independent_hot_counters"
+      ],
+      "correctness_boundary": "Task-id namespace layout, exhaustion checks, and uniqueness are not modeled."
+    },
+    {
+      "candidate_id": "CACHE-EPOCH-PIN-VECTOR",
+      "source_path": "src/runtime/epoch_tracking.rs",
+      "structure": "SafePointDetector",
+      "fields": [
+        "thread_pins"
+      ],
+      "padded_field_count": "one per registered thread",
+      "current_padded_bytes_at_64_entries": 4096,
+      "experimental_padded_bytes_at_64_entries": 8192,
+      "access_pattern": "Per-thread state updates plus sequential safe-point scans.",
+      "benchmark_workloads": [
+        "independent_hot_counters",
+        "snapshot_scan_density"
+      ],
+      "correctness_boundary": "SeqCst fencing, pin lifetime, and reclamation safety are not modeled."
+    },
+    {
+      "candidate_id": "CACHE-LAB-IOCAP-SHARDS",
+      "source_path": "src/io/cap.rs",
+      "structure": "LabIoCap",
+      "fields": [
+        "submitted_shards[0..8]",
+        "completed_shards[0..8]"
+      ],
+      "padded_field_count": 16,
+      "current_padded_bytes": 1024,
+      "experimental_padded_bytes": 2048,
+      "access_pattern": "Thread-local shard writes plus cold aggregate reads.",
+      "benchmark_workloads": [
+        "record_submit",
+        "submit_complete_mixed",
+        "independent_hot_counters",
+        "snapshot_scan_density"
+      ],
+      "correctness_boundary": "The existing production benchmark remains the behavioral and throughput reference; the 128-byte layout is synthetic."
+    },
+    {
+      "candidate_id": "CACHE-CONTENDED-MUTEX-METRICS",
+      "source_path": "src/sync/contended_mutex.rs",
+      "structure": "Metrics",
+      "fields": [
+        "lock-path counters",
+        "unlock-path counters",
+        "sample vectors"
+      ],
+      "current_alignment_bytes": 64,
+      "experimental_padded_bytes": null,
+      "access_pattern": "Two manually separated cache-line regions plus dynamically sized sample vectors.",
+      "benchmark_workloads": [],
+      "correctness_boundary": "This private mixed-size type is inventory-only; the atomic-cell probe cannot model its mutex and vector layout.",
+      "status": "NO_CLAIM_UNMODELED_PRIVATE_LAYOUT"
+    }
+  ],
+  "benchmark_contract": {
+    "harness": "benches/lab_iocap_contention.rs",
+    "profile_id": "cache-alignment-bounded-v1",
+    "production_reference_workloads": [
+      "io_cap/record_submit",
+      "io_cap/submit_complete_mixed"
+    ],
+    "synthetic_workloads": [
+      "independent_hot_counters",
+      "snapshot_scan_density"
+    ],
+    "alignment_cells": [
+      64,
+      128
+    ],
+    "core_scaling_cells": [
+      1,
+      2,
+      4,
+      8,
+      16,
+      32,
+      64
+    ],
+    "required_axes": [
+      "throughput_ops_per_second",
+      "p50_ns",
+      "p95_ns",
+      "p99_ns",
+      "p999_ns",
+      "fairness_millionths",
+      "entry_and_array_footprint_bytes"
+    ],
+    "latency_sampling": "Write percentiles are per-operation nanoseconds normalized from fixed 256-operation chunks; scan percentiles are per-entry nanoseconds normalized from one complete scan.",
+    "optional_axes": [
+      "cache_references",
+      "cache_misses",
+      "process_rss_kib"
+    ],
+    "bounds": {
+      "default_operations_per_writer": 65536,
+      "chunk_operations": 256,
+      "maximum_workers": 64,
+      "maximum_operations_per_writer": 4194304
+    },
+    "unexecuted_core_cells_are_no_claims": true
+  },
+  "measurement_receipt": {
+    "schema_version": 1,
+    "profile_id": "cache-alignment-bounded-v1",
+    "target_os": "linux",
+    "target_arch": "x86_64",
+    "available_parallelism": 8,
+    "operations_per_writer": 65536,
+    "chunk_operations": 256,
+    "layouts": [
+      {
+        "alignment_bytes": 64,
+        "entry_bytes": 64,
+        "array_8_bytes": 512,
+        "array_16_bytes": 1024,
+        "array_64_bytes": 4096
+      },
+      {
+        "alignment_bytes": 128,
+        "entry_bytes": 128,
+        "array_8_bytes": 1024,
+        "array_16_bytes": 2048,
+        "array_64_bytes": 8192
+      }
+    ],
+    "rows": [
+      {
+        "workload_id": "independent_hot_counters",
+        "alignment_bytes": 64,
+        "workers": 1,
+        "entries": 1,
+        "operations": 65536,
+        "elapsed_ns": 163849,
+        "throughput_ops_per_second": 399978028,
+        "p50_ns": 2,
+        "p95_ns": 2,
+        "p99_ns": 2,
+        "p999_ns": 2,
+        "fairness_millionths": 1000000
+      },
+      {
+        "workload_id": "independent_hot_counters",
+        "alignment_bytes": 128,
+        "workers": 1,
+        "entries": 1,
+        "operations": 65536,
+        "elapsed_ns": 146306,
+        "throughput_ops_per_second": 447937883,
+        "p50_ns": 2,
+        "p95_ns": 2,
+        "p99_ns": 2,
+        "p999_ns": 2,
+        "fairness_millionths": 1000000
+      },
+      {
+        "workload_id": "independent_hot_counters",
+        "alignment_bytes": 64,
+        "workers": 2,
+        "entries": 2,
+        "operations": 131072,
+        "elapsed_ns": 158599,
+        "throughput_ops_per_second": 826436484,
+        "p50_ns": 2,
+        "p95_ns": 2,
+        "p99_ns": 2,
+        "p999_ns": 3,
+        "fairness_millionths": 947250
+      },
+      {
+        "workload_id": "independent_hot_counters",
+        "alignment_bytes": 128,
+        "workers": 2,
+        "entries": 2,
+        "operations": 131072,
+        "elapsed_ns": 167366,
+        "throughput_ops_per_second": 783145919,
+        "p50_ns": 2,
+        "p95_ns": 2,
+        "p99_ns": 3,
+        "p999_ns": 3,
+        "fairness_millionths": 944749
+      },
+      {
+        "workload_id": "independent_hot_counters",
+        "alignment_bytes": 64,
+        "workers": 4,
+        "entries": 4,
+        "operations": 262144,
+        "elapsed_ns": 194607,
+        "throughput_ops_per_second": 1347043014,
+        "p50_ns": 2,
+        "p95_ns": 3,
+        "p99_ns": 3,
+        "p999_ns": 3,
+        "fairness_millionths": 813423
+      },
+      {
+        "workload_id": "independent_hot_counters",
+        "alignment_bytes": 128,
+        "workers": 4,
+        "entries": 4,
+        "operations": 262144,
+        "elapsed_ns": 191732,
+        "throughput_ops_per_second": 1367241774,
+        "p50_ns": 2,
+        "p95_ns": 2,
+        "p99_ns": 3,
+        "p999_ns": 3,
+        "fairness_millionths": 812988
+      },
+      {
+        "workload_id": "independent_hot_counters",
+        "alignment_bytes": 64,
+        "workers": 8,
+        "entries": 8,
+        "operations": 524288,
+        "elapsed_ns": 195118,
+        "throughput_ops_per_second": 2687030412,
+        "p50_ns": 2,
+        "p95_ns": 2,
+        "p99_ns": 3,
+        "p999_ns": 3,
+        "fairness_millionths": 753482
+      },
+      {
+        "workload_id": "independent_hot_counters",
+        "alignment_bytes": 128,
+        "workers": 8,
+        "entries": 8,
+        "operations": 524288,
+        "elapsed_ns": 384326,
+        "throughput_ops_per_second": 1364175205,
+        "p50_ns": 2,
+        "p95_ns": 2,
+        "p99_ns": 3,
+        "p999_ns": 3,
+        "fairness_millionths": 393220
+      },
+      {
+        "workload_id": "snapshot_scan_density",
+        "alignment_bytes": 64,
+        "workers": 1,
+        "entries": 8,
+        "operations": 65536,
+        "elapsed_ns": 667621,
+        "throughput_ops_per_second": 98163478,
+        "p50_ns": 3,
+        "p95_ns": 5,
+        "p99_ns": 5,
+        "p999_ns": 15,
+        "fairness_millionths": 1000000
+      },
+      {
+        "workload_id": "snapshot_scan_density",
+        "alignment_bytes": 128,
+        "workers": 1,
+        "entries": 8,
+        "operations": 65536,
+        "elapsed_ns": 599953,
+        "throughput_ops_per_second": 109235223,
+        "p50_ns": 3,
+        "p95_ns": 5,
+        "p99_ns": 5,
+        "p999_ns": 5,
+        "fairness_millionths": 1000000
+      },
+      {
+        "workload_id": "snapshot_scan_density",
+        "alignment_bytes": 64,
+        "workers": 1,
+        "entries": 16,
+        "operations": 65536,
+        "elapsed_ns": 318822,
+        "throughput_ops_per_second": 205556705,
+        "p50_ns": 1,
+        "p95_ns": 2,
+        "p99_ns": 3,
+        "p999_ns": 3,
+        "fairness_millionths": 1000000
+      },
+      {
+        "workload_id": "snapshot_scan_density",
+        "alignment_bytes": 128,
+        "workers": 1,
+        "entries": 16,
+        "operations": 65536,
+        "elapsed_ns": 302041,
+        "throughput_ops_per_second": 216977165,
+        "p50_ns": 1,
+        "p95_ns": 2,
+        "p99_ns": 2,
+        "p999_ns": 2,
+        "fairness_millionths": 1000000
+      },
+      {
+        "workload_id": "snapshot_scan_density",
+        "alignment_bytes": 64,
+        "workers": 1,
+        "entries": 32,
+        "operations": 65536,
+        "elapsed_ns": 174850,
+        "throughput_ops_per_second": 374812696,
+        "p50_ns": 1,
+        "p95_ns": 1,
+        "p99_ns": 1,
+        "p999_ns": 1,
+        "fairness_millionths": 1000000
+      },
+      {
+        "workload_id": "snapshot_scan_density",
+        "alignment_bytes": 128,
+        "workers": 1,
+        "entries": 32,
+        "operations": 65536,
+        "elapsed_ns": 166776,
+        "throughput_ops_per_second": 392958219,
+        "p50_ns": 1,
+        "p95_ns": 1,
+        "p99_ns": 1,
+        "p999_ns": 1,
+        "fairness_millionths": 1000000
+      },
+      {
+        "workload_id": "snapshot_scan_density",
+        "alignment_bytes": 64,
+        "workers": 1,
+        "entries": 64,
+        "operations": 131072,
+        "elapsed_ns": 225055,
+        "throughput_ops_per_second": 582399857,
+        "p50_ns": 0,
+        "p95_ns": 1,
+        "p99_ns": 1,
+        "p999_ns": 1,
+        "fairness_millionths": 1000000
+      },
+      {
+        "workload_id": "snapshot_scan_density",
+        "alignment_bytes": 128,
+        "workers": 1,
+        "entries": 64,
+        "operations": 131072,
+        "elapsed_ns": 207180,
+        "throughput_ops_per_second": 632647938,
+        "p50_ns": 0,
+        "p95_ns": 1,
+        "p99_ns": 1,
+        "p999_ns": 1,
+        "fairness_millionths": 1000000
+      }
+    ]
+  },
+  "platform_matrix": [
+    {
+      "cell_id": "REMOTE-X86-AVAILABLE",
+      "architecture": "x86_64",
+      "vendor": "AuthenticAMD / AMD EPYC-Milan Processor",
+      "worker": "hz1",
+      "topology": {
+        "online_logical_cpus": 8,
+        "threads_per_core": 2,
+        "cores_per_socket": 4,
+        "sockets": 1,
+        "numa_nodes": 1,
+        "l1d": "128 KiB across 4 instances",
+        "l2": "2 MiB across 4 instances",
+        "l3": "32 MiB in 1 instance",
+        "memory_kib": 32082120,
+        "kernel": "Linux 7.0.0-22-generic x86_64"
+      },
+      "profile_id": "cache-alignment-bounded-v1",
+      "status": "MEASURED",
+      "result_summary": {
+        "uninstrumented_write_throughput_ratio_128_to_64": {
+          "1_worker": 1.1199,
+          "2_workers": 0.9476,
+          "4_workers": 1.015,
+          "8_workers": 0.5077
+        },
+        "uninstrumented_scan_throughput_ratio_128_to_64": {
+          "8_entries": 1.1128,
+          "16_entries": 1.0556,
+          "32_entries": 1.0484,
+          "64_entries": 1.0863
+        },
+        "counter_instrumented_write_throughput_ratio_128_to_64": {
+          "1_worker": 1.029106,
+          "2_workers": 0.999286,
+          "4_workers": 0.935663,
+          "8_workers": 0.975396
+        },
+        "counter_instrumented_scan_throughput_ratio_128_to_64": {
+          "8_entries": 0.956531,
+          "16_entries": 1.005296,
+          "32_entries": 0.937877,
+          "64_entries": 0.915567
+        },
+        "repeatability": "The 8-worker write ratio changed from 0.5077 to 0.975396, so the same-host effect is not stable enough for adoption.",
+        "unexecuted_core_cells": [
+          16,
+          32,
+          64
+        ],
+        "footprint_ratio_128_to_64": 2.0
+      },
+      "cache_counters": {
+        "scope": "counter-instrumented complete benchmark rerun",
+        "cache_references": 37051507,
+        "cache_misses": 10000119,
+        "cache_miss_ratio": 0.269898,
+        "availability": "MEASURED"
+      },
+      "process_rss_kib": 19900
+    },
+    {
+      "cell_id": "APPLE-SILICON-128-LINE",
+      "architecture": "aarch64",
+      "vendor": "Apple",
+      "worker": null,
+      "topology": null,
+      "profile_id": "cache-alignment-bounded-v1",
+      "status": "NO_CLAIM_MISSING_HOST",
+      "result_summary": null,
+      "cache_counters": "NO_CLAIM",
+      "process_rss_kib": null
+    },
+    {
+      "cell_id": "SECOND-X86-VENDOR",
+      "architecture": "x86_64",
+      "vendor": "vendor different from REMOTE-X86-AVAILABLE",
+      "worker": null,
+      "topology": null,
+      "profile_id": "cache-alignment-bounded-v1",
+      "status": "NO_CLAIM_NOT_RUN",
+      "result_summary": null,
+      "cache_counters": "NO_CLAIM",
+      "process_rss_kib": null
+    }
+  ],
+  "execution_receipts": [
+    {
+      "receipt_id": "CACHE-ALIGNMENT-BENCH-CHECK",
+      "status": "PASS",
+      "exit_code": 0
+    },
+    {
+      "receipt_id": "CACHE-ALIGNMENT-AVAILABLE-HOST-RUN",
+      "status": "PASS",
+      "exit_code": 0
+    },
+    {
+      "receipt_id": "CACHE-ALIGNMENT-CONTRACT",
+      "status": "PASS",
+      "exit_code": 0
+    },
+    {
+      "receipt_id": "CACHE-ALIGNMENT-ALL-TARGET-CHECK",
+      "status": "PASS",
+      "exit_code": 0
+    },
+    {
+      "receipt_id": "CACHE-ALIGNMENT-ALL-TARGET-CLIPPY",
+      "status": "PASS",
+      "exit_code": 0
+    }
+  ],
+  "source_pins": [
+    {
+      "path": ".gitignore",
+      "sha256": "f8d38e2db6c23515925a253f98c45ccb439632a950ced378def28d9183c8d055",
+      "line_count": 550
+    },
+    {
+      "path": "benches/lab_iocap_contention.rs",
+      "sha256": "253ddf51f20837b40bbba47367d86a25ace1f430cc9f89154ed25202a155e526",
+      "line_count": 496
+    },
+    {
+      "path": "src/util/cache.rs",
+      "sha256": "cbb719ddba7b0eef393a0e11167d5f6fefd6b494a2fa9201cb2c7faa98670880",
+      "line_count": 170
+    },
+    {
+      "path": "src/runtime/scheduler/global_queue.rs",
+      "sha256": "432b4b1b845fec0bd37210b4b6559e51f715ae87e370b8c7bb62b48b56e42180",
+      "line_count": 1134
+    },
+    {
+      "path": "src/runtime/scheduler/global_injector.rs",
+      "sha256": "14a3e9c9e87ebfcfa28920314a7bb5e5e79ab5daff409fd9d5008760c28ac283",
+      "line_count": 1341
+    },
+    {
+      "path": "src/runtime/scheduler/three_lane.rs",
+      "sha256": "840da9f9a86c9d62b142c11810d7b3c5bcac246cc10477777f96c8fb549cd568",
+      "line_count": 18768
+    },
+    {
+      "path": "src/runtime/spawn_mailbox.rs",
+      "sha256": "b5f18c95eb3a5cf2cd74a10f70e7aabf2d17536738a04ec7ab402d54768c1c5d",
+      "line_count": 4809
+    },
+    {
+      "path": "src/runtime/epoch_tracking.rs",
+      "sha256": "bbff605169a5ec1efa4396c315a7d41c3d9a5ac04f1965cb4660645d77886961",
+      "line_count": 1035
+    },
+    {
+      "path": "src/io/cap.rs",
+      "sha256": "a9a1cd9d8c5f5a21e6482d037d22a60d23c55541ae55287ddaa8d1c48e0db266",
+      "line_count": 3245
+    },
+    {
+      "path": "src/sync/contended_mutex.rs",
+      "sha256": "55ac901c5f13f91fd32e11e58cd415bc082eaddc303c2b0e078587aa75f112b5",
+      "line_count": 1190
+    }
+  ],
+  "no_claim_boundaries": [
+    "No global 128-byte alignment recommendation.",
+    "No production source layout change.",
+    "No Apple Silicon result without an executed Apple Silicon cell.",
+    "No second-vendor x86 result without an executed second-vendor cell.",
+    "No cache-miss or false-sharing counter claim when perf counters are unavailable.",
+    "No scheduler correctness, fairness, or throughput claim outside the recorded workloads.",
+    "No release-readiness, broad-workspace-health, or production-on-by-default claim."
+  ]
+}

@@ -296,8 +296,8 @@ Env	net/atp/transport_rq/mod.rs	13021	std::env::var_os(	let trace_commit = std::
 Env	net/atp/transport_rq/mod.rs	470	std::env::var_os(	*ENABLED.get_or_init(|| std::env::var_os().is_some())
 Env	net/atp/transport_rq/mod.rs	477	std::env::var_os(	if std::env::var_os().is_some() {
 Env	net/atp/transport_rq/mod.rs	487	std::env::var_os(	if std::env::var_os().is_some() {
-Env	net/quic_native/connection.rs	1342	std::env::var_os(	if std::env::var_os().is_some() {
-Env	net/quic_native/connection.rs	307	std::env::var_os(	if std::env::var_os().is_some() {
+Env	net/quic_native/connection.rs	1350	std::env::var_os(	if std::env::var_os().is_some() {
+Env	net/quic_native/connection.rs	315	std::env::var_os(	if std::env::var_os().is_some() {
 Env	net/quic_native/endpoint.rs	458	std::env::var_os(	let kernel_snapshot = if std::env::var_os().is_some()
 Env	net/quic_native/endpoint.rs	459	std::env::var_os(	|| std::env::var_os().is_some()
 Env	net/quic_native/endpoint_api.rs	70	std::env::var_os(	if std::env::var_os().is_some() {
@@ -337,12 +337,12 @@ Io	database/postgres.rs	8489	std::net::TcpStream	fn fuzz_test_connection_with_pe
 Io	database/postgres.rs	8490	std::net::TcpListener	let listener = match std::net::TcpListener::bind() {
 Io	database/postgres.rs	8498	std::net::TcpStream	let std_stream = match std::net::TcpStream::connect(addr) {
 Io	database/postgres.rs	8506	TcpStream::	let stream = match crate::net::TcpStream::from_std(std_stream) {
-Io	grpc/server.rs	1617	std::net::TcpListener	let listener = std::net::TcpListener::bind(addr).map_err(|error| {
+Io	grpc/server.rs	1846	std::net::TcpListener	let listener = std::net::TcpListener::bind(addr).map_err(|error| {
 Io	http/h1/http_client.rs	2019	TcpStream::	TcpStream::connect_socket_addr(socket_addr)
 Io	http/h1/http_client.rs	2024	TcpStream::	TcpStream::connect(addr)
 Io	http/h1/http_client.rs	2532	TcpStream::	let mut stream = TcpStream::connect(addr)
 Io	http/h1/listener.rs	373	TcpListener::	let tcp_listener = TcpListener::bind(addr).await?;
-Io	http/h2/listener.rs	1858	TcpListener::	let tcp_listener = TcpListener::bind(addr).await?;
+Io	http/h2/listener.rs	1994	TcpListener::	let tcp_listener = TcpListener::bind(addr).await?;
 Io	messaging/nats.rs	1623	TcpStream::	let stream = TcpStream::connect(addr).await?;
 Io	messaging/redis.rs	1922	TcpStream::	let tcp_stream = TcpStream::connect(addr).await?;
 Io	messaging/stream.rs	532	File::open(	let file = File::open(path).map_err(|error| StreamError::wal_io(, path, &error))?;
@@ -459,7 +459,7 @@ Output	net/atp/transport_rq/mod.rs	12129	eprintln!(	eprintln!(
 Output	net/atp/transport_rq/mod.rs	12145	eprintln!(	eprintln!(
 Output	net/atp/transport_rq/mod.rs	478	eprintln!(	eprintln!(, format!($($arg)*));
 Output	net/atp/transport_rq/mod.rs	488	eprintln!(	eprintln!(, format!($($arg)*));
-Output	net/quic_native/connection.rs	308	eprintln!(	eprintln!(, format!($($arg)*));
+Output	net/quic_native/connection.rs	316	eprintln!(	eprintln!(, format!($($arg)*));
 Output	net/quic_native/endpoint_api.rs	71	eprintln!(	eprintln!(, format!($($arg)*));
 Spawn	database/mysql.rs	1810	std::thread::Builder	std::thread::Builder::new()
 Spawn	observability/debt_runtime_integration.rs	107	thread::spawn	let handle = thread::spawn(move || {
@@ -677,7 +677,7 @@ Time	cancel/protocol_validator_test_suite.rs	422	Instant::now()	let op_start = I
 Time	channel/verification_suite.rs	111	Instant::now()	start_time: Instant::now(),
 Time	channel/verification_suite.rs	118	Instant::now()	self.start_time = Instant::now();
 Time	decoding.rs	271	Instant::now()	let started = Instant::now();
-Time	grpc/server.rs	23	Instant::now()	Instant::now()
+Time	grpc/server.rs	38	Instant::now()	Instant::now()
 Time	messaging/jetstream.rs	1823	SystemTime::now()	let now_ns = SystemTime::now()
 Time	messaging/nats.rs	862	std::time::SystemTime::now()	let now_secs = std::time::SystemTime::now()
 Time	net/atp/chunk/dedupe.rs	511	std::time::SystemTime::now()	last_accessed: std::time::SystemTime::now(),
@@ -891,14 +891,14 @@ Time	observability/swarm_pressure_governor.rs	3340	Instant::now()	let workload_p
 Time	observability/swarm_pressure_governor.rs	3401	Instant::now()	let now = Instant::now();
 Time	observability/swarm_pressure_governor.rs	4502	Instant::now()	timestamp: Instant::now(),
 Time	observability/swarm_pressure_governor.rs	457	Instant::now()	reported_at: Instant::now(),
-Time	raptorq/decoder.rs	1513	Instant::now()	let now = Instant::now();
-Time	raptorq/decoder.rs	75	Instant::now()	last_access: Instant::now(),
+Time	raptorq/decoder.rs	1536	Instant::now()	let now = Instant::now();
+Time	raptorq/decoder.rs	78	Instant::now()	last_access: Instant::now(),
 Time	runtime/deadline_monitor.rs	17	Instant::now()	Instant::now()
 Time	runtime/epoch_gc.rs	467	Instant::now()	enqueued_at: Instant::now(),
 Time	runtime/epoch_gc.rs	486	Instant::now()	let start_time = Instant::now();
 Time	runtime/epoch_gc.rs	72	Instant::now()	last_advance: ContendedMutex::new(, Instant::now()),
 Time	runtime/epoch_gc.rs	86	Instant::now()	let now = Instant::now();
-Time	runtime/epoch_tracker.rs	484	std::time::Instant::now()	let processing_start = std::time::Instant::now();
+Time	runtime/epoch_tracker.rs	1104	std::time::Instant::now()	let processing_start = std::time::Instant::now();
 Time	runtime/epoch_tracking.rs	148	Instant::now()	let now_nanos = instant_to_nanos(Instant::now());
 Time	runtime/epoch_tracking.rs	170	Instant::now()	let now = Instant::now();
 Time	runtime/epoch_tracking.rs	193	Instant::now()	let now = Instant::now();

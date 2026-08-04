@@ -219,12 +219,7 @@ proptest! {
         let json = scenario.to_json().expect("serialize to JSON");
         let parsed = Scenario::from_json(&json).expect("parse from JSON");
 
-        prop_assert_eq!(&scenario.id, &parsed.id);
-        prop_assert_eq!(scenario.schema_version, parsed.schema_version);
-        prop_assert_eq!(scenario.lab.seed, parsed.lab.seed);
-        prop_assert_eq!(scenario.lab.worker_count, parsed.lab.worker_count);
-        prop_assert_eq!(scenario.faults.len(), parsed.faults.len());
-        prop_assert_eq!(scenario.participants.len(), parsed.participants.len());
+        prop_assert_eq!(scenario, parsed);
     }
 
     #[test]
@@ -232,12 +227,7 @@ proptest! {
         let yaml = serde_yaml::to_string(&scenario).expect("serialize to YAML");
         let parsed: Scenario = serde_yaml::from_str(&yaml).expect("parse from YAML");
 
-        prop_assert_eq!(&scenario.id, &parsed.id);
-        prop_assert_eq!(scenario.schema_version, parsed.schema_version);
-        prop_assert_eq!(scenario.lab.seed, parsed.lab.seed);
-        prop_assert_eq!(scenario.lab.worker_count, parsed.lab.worker_count);
-        prop_assert_eq!(scenario.faults.len(), parsed.faults.len());
-        prop_assert_eq!(scenario.participants.len(), parsed.participants.len());
+        prop_assert_eq!(scenario, parsed);
     }
 
     #[test]
@@ -245,6 +235,81 @@ proptest! {
         let errors = scenario.validate();
         prop_assert!(errors.is_empty(), "Validation failed: {:?}", errors);
     }
+}
+
+#[test]
+fn canonical_contract_preserves_yaml_replay_identity() {
+    let yaml = r"
+id: canonical-replay-identity
+description: Canonical encoding preserves typed scenario meaning
+lab:
+  seed: 9001
+  entropy_seed: 9002
+  worker_count: 2
+participants:
+  - name: alice
+    role: sender
+    properties:
+      zone: west
+  - name: bob
+    role: receiver
+faults:
+  - at_ms: 10
+    action: partition
+    args:
+      from: alice
+      to: bob
+oracles:
+  - task_leak
+  - obligation_leak
+cancellation:
+  strategy: first_n
+  count: 2
+resource_caps:
+  max_fault_events: 1
+  max_counterexample_events: 1
+expected_invariants:
+  - quiescence
+  - no_obligation_leaks
+  - deterministic_replay
+minimization:
+  enabled: true
+  max_evaluations: 3
+  max_counterexample_events: 1
+golden_projection:
+  format: json
+  canonicalized: true
+  redacted: true
+metadata:
+  seed_lineage_id: canonical-replay-identity.seed.v1
+  surface_contract_version: canonical-replay-identity.v1
+  surface_id: canonical-replay-identity
+";
+    let authored: Scenario = serde_yaml::from_str(yaml).expect("parse authored YAML");
+    assert!(authored.validate().is_empty());
+
+    let canonical = authored.to_json().expect("encode canonical JSON");
+    let reparsed = Scenario::from_json(&canonical).expect("parse canonical JSON");
+
+    assert_eq!(authored, reparsed);
+    assert_eq!(authored.lab.seed, reparsed.lab.seed);
+    assert_eq!(authored.lab.entropy_seed, reparsed.lab.entropy_seed);
+    assert_eq!(authored.oracles, reparsed.oracles);
+    assert_eq!(authored.faults, reparsed.faults);
+    assert_eq!(authored.expected_invariants, reparsed.expected_invariants);
+
+    let authored_run = ScenarioRunner::run(&authored).expect("run authored scenario");
+    let reparsed_run = ScenarioRunner::run(&reparsed).expect("run canonical scenario");
+    assert_eq!(authored_run.seed, reparsed_run.seed);
+    assert_eq!(authored_run.certificate, reparsed_run.certificate);
+    assert_eq!(
+        authored_run.lab_report.trace_fingerprint,
+        reparsed_run.lab_report.trace_fingerprint
+    );
+    assert_eq!(
+        authored_run.oracle_report.to_json(),
+        reparsed_run.oracle_report.to_json()
+    );
 }
 
 // ============================================================================

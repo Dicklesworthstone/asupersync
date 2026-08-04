@@ -1,0 +1,715 @@
+{
+  "schema_version": 1,
+  "artifact_id": "signal-boundary-inventory-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-3u3tej.1.1",
+  "capability_id": "CAP-SIGNALS",
+  "baseline_revision": "1d8c77755daac957c52438d09d1dfca9b9c6cfc4",
+  "captured_date_utc": "2026-07-25",
+  "authority": {
+    "plan": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md",
+    "registry": "artifacts/dependency_capability_registry_v1.json",
+    "registry_disposition": "KEEP_UNTIL_PARITY",
+    "registry_evidence_state": "BASELINE_PLANNED",
+    "registry_cutover_state": "KEEP_INCUMBENT",
+    "gate_decision": "DEFER",
+    "gate_state": "TERMINAL",
+    "decision_basis": "The incumbent has bounded marginal graph cost and no active C compilation, while replacement would assume mature cross-platform async-signal-safe registration, handler chaining, lifecycle, Windows event, and process-authority obligations. Current defects are material but repairable while retaining the incumbent, and the required cross-platform runtime baselines do not exist.",
+    "dependency_exit_allowed": false,
+    "implementation_children_authorized": false,
+    "owner_review_required_to_change": true
+  },
+  "policy": {
+    "zero_unknown_required": true,
+    "unknown_rows": 0,
+    "inventory_state": "BASELINED_WITH_ROUTED_GAPS",
+    "evidence_state": "MEASURED_TERMINAL_DEFER",
+    "accepted_states": [
+      "PRESENT",
+      "ABSENT",
+      "PARTIAL",
+      "PLANNED",
+      "BLOCKED",
+      "ROUTED",
+      "OUT_OF_SCOPE",
+      "UNSUPPORTED",
+      "DEFER"
+    ],
+    "missing_evidence_is_parity": false,
+    "source_changes_authorized": false
+  },
+  "source_pins": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
+      "line_count": 991
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "9fa12e8af1e6b15a3070d88d62b2b81b8ba49c0e9d8592c1d1682f1cd72a4461",
+      "line_count": 4664
+    },
+    {
+      "path": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md",
+      "sha256": "401b39c99f4909a7e805e0992327d2408fe54aed65610783830031b66083b7b0",
+      "line_count": 332
+    },
+    {
+      "path": "artifacts/dependency_capability_registry_v1.json",
+      "sha256": "82a73ec1c14fbe317611f6d592af480d75d002cbe9333045ab74840bcaf1c081",
+      "line_count": 6907
+    },
+    {
+      "path": "artifacts/dependency_marginal_ledger_v1.json",
+      "sha256": "832e8d68eefe9400a246ea619a250ea91bcf16a57d5fe728a6ce45e25bbdb4a6",
+      "line_count": 187712
+    },
+    {
+      "path": "artifacts/api_surface_map_v1.json",
+      "sha256": "a00b61fe82326d766cde69e2392bc493a67d3c62f9d5cd83e3e02f8b5bf5535a",
+      "line_count": 4650
+    },
+    {
+      "path": "artifacts/unsafe_boundary_ledger_v1.json",
+      "sha256": "d18e2e1ee44a00695f54f596e48de6efa1715b24b5e1172579637c7528e0afae",
+      "line_count": 6217
+    },
+    {
+      "path": "src/signal/mod.rs",
+      "sha256": "6022a9a614dcb6ba89fb96f6cb8e2a61ae3e85a4d773eeb00108a1998b4d3ef1",
+      "line_count": 87
+    },
+    {
+      "path": "src/signal/kind.rs",
+      "sha256": "31fa41d6b5b37579e086cf921b653e1150e2f14ec4aa4bff8c3ab39d0bac1c0d",
+      "line_count": 401
+    },
+    {
+      "path": "src/signal/signal.rs",
+      "sha256": "9b691e5a7ed50c070775563b6aeaa3b59ae409e41428e96931a880d56e6eb866",
+      "line_count": 1634
+    },
+    {
+      "path": "src/signal/ctrl_c.rs",
+      "sha256": "3c300a6f27e90c9a77d52e794f77c5dd68771a6b0a29a0596cefbc694454f247",
+      "line_count": 135
+    },
+    {
+      "path": "src/signal/shutdown.rs",
+      "sha256": "6cefc1120b4113225008aa9e669b0877b3f691e73d7f177cc1067995aa729d14",
+      "line_count": 1150
+    },
+    {
+      "path": "src/signal/graceful.rs",
+      "sha256": "649e9607797586c1d3bc8cb68ba8157c1538e4b274ff4962ca0ebf5039ed3b1e",
+      "line_count": 1020
+    },
+    {
+      "path": "src/cli/signal.rs",
+      "sha256": "08cb30f55216a64d49649652b08aecdcb47e2edf8a2962036e0878a62454a884",
+      "line_count": 360
+    },
+    {
+      "path": "src/bin/atpd.rs",
+      "sha256": "8d969a0669bcd865be9589f5a408cab2b861c1a14ab0a3e5a9e8b1f1fb731cf8",
+      "line_count": 2333
+    },
+    {
+      "path": "src/process.rs",
+      "sha256": "90fe4feb116838840b62fec8b5825bc35b6af050439dd8fec3e0c736dea26aa8",
+      "line_count": 3854
+    },
+    {
+      "path": "src/atp/daemon_control.rs",
+      "sha256": "90045a5ac0edf3aecf3732edf3ecf218953737c7b9a36bc90cd42ddc59947986",
+      "line_count": 773
+    },
+    {
+      "path": "tests/e2e_signal.rs",
+      "sha256": "aefaec539b8fad026ee8f310605985bc91ff687ec7dffab6073dc4cdfce744c5",
+      "line_count": 233
+    },
+    {
+      "path": "tests/tokio_fs_process_signal_e2e.rs",
+      "sha256": "c0f45af810d3ce13e9386d95a27d776cb9af7b3738cae514c6e37e4b4bc5b07e",
+      "line_count": 841
+    },
+    {
+      "path": "tests/windows_platform_completeness.rs",
+      "sha256": "a6700ca0ca6d2251bd00928c0b241e9975b1d02f2c95784ffbb94670053347f2",
+      "line_count": 337
+    },
+    {
+      "path": "scripts/run_dependency_sovereignty_e2e.sh",
+      "sha256": "59ccb2212cb55b9fae8c28ec880fff532ab762a69669277f26940008ebd01af2",
+      "line_count": 1077
+    }
+  ],
+  "dependency_resolution": {
+    "manifest_requirement": "0.4",
+    "resolved_signal_hook": "0.4.4",
+    "resolved_signal_hook_registry": "1.4.8",
+    "edge_kind": "target-normal",
+    "target_condition": "cfg(not(target_arch = \"wasm32\"))",
+    "optional": false,
+    "upstream_default_features": [
+      "channel",
+      "iterator"
+    ],
+    "extended_siginfo_raw_enabled": false,
+    "build_script_present": true,
+    "build_script_current_effect": "no-op without extended-siginfo-raw",
+    "active_c_compilation": false,
+    "proc_macro": false
+  },
+  "marginal_graph": {
+    "measurement_cells": 39,
+    "profiles": [
+      "cli",
+      "compression",
+      "default",
+      "fuzz-quarantine",
+      "io-uring",
+      "kafka",
+      "loom-tests",
+      "metrics",
+      "minimal",
+      "sqlite",
+      "tls",
+      "trace-compression",
+      "workspace-dev-build-audit"
+    ],
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-gnu"
+    ],
+    "marginal_package_version_counts": [
+      1,
+      2,
+      3
+    ],
+    "marginal_package_sets": {
+      "linux_or_macos_maximal": [
+        "signal-hook@0.4.4",
+        "signal-hook-registry@1.4.8"
+      ],
+      "windows_maximal": [
+        "errno@0.3.14",
+        "signal-hook@0.4.4",
+        "signal-hook-registry@1.4.8"
+      ],
+      "workspace_retention_minimal": [
+        "signal-hook@0.4.4"
+      ]
+    },
+    "marginal_native_status": "declared-inactive",
+    "build_script_count_per_cell": 1,
+    "proc_macro_count_per_cell": 0,
+    "measured_graph_benefit": "SMALL"
+  },
+  "occurrence_census": [
+    {
+      "occurrence_id": "SIG-OCC-FACADE",
+      "state": "PRESENT",
+      "paths": [
+        "src/signal/mod.rs",
+        "src/signal/kind.rs",
+        "src/signal/signal.rs",
+        "src/signal/ctrl_c.rs"
+      ],
+      "classification": "public receive facade and platform kind mapping"
+    },
+    {
+      "occurrence_id": "SIG-OCC-SHUTDOWN",
+      "state": "PRESENT",
+      "paths": [
+        "src/signal/shutdown.rs",
+        "src/signal/graceful.rs"
+      ],
+      "classification": "runtime shutdown and reload state machines fed by signal streams"
+    },
+    {
+      "occurrence_id": "SIG-OCC-CLI-MODEL",
+      "state": "PRESENT",
+      "paths": [
+        "src/cli/signal.rs"
+      ],
+      "classification": "public CLI signal bookkeeping model; no OS registration"
+    },
+    {
+      "occurrence_id": "SIG-OCC-ATPD",
+      "state": "PRESENT",
+      "paths": [
+        "src/bin/atpd.rs"
+      ],
+      "classification": "independent signal-hook registration plus raw kill, PID polling, and Windows taskkill"
+    },
+    {
+      "occurrence_id": "SIG-OCC-DAEMON-CONTROL",
+      "state": "PRESENT",
+      "paths": [
+        "src/atp/daemon_control.rs"
+      ],
+      "classification": "sysinfo process discovery and kill_with plus Windows taskkill"
+    },
+    {
+      "occurrence_id": "SIG-OCC-PROCESS",
+      "state": "PRESENT",
+      "paths": [
+        "src/process.rs"
+      ],
+      "classification": "owned child and process-group raw signal delivery, escalation, and reaping"
+    },
+    {
+      "occurrence_id": "SIG-OCC-TESTS-DOCS",
+      "state": "PRESENT",
+      "paths": [
+        "tests/e2e_signal.rs",
+        "tests/tokio_fs_process_signal_e2e.rs",
+        "tests/windows_platform_completeness.rs",
+        "scripts/run_dependency_sovereignty_e2e.sh"
+      ],
+      "classification": "modeled receive tests, one real Unix child-send journey, static Windows tokens, and missing canonical scenarios"
+    }
+  ],
+  "public_and_operator_surfaces": [
+    {
+      "surface_id": "SIG-PUB-KIND",
+      "state": "PRESENT",
+      "path": "asupersync::signal::SignalKind",
+      "semantics": "non-exhaustive ten-kind enum; Unix maps all ten, Windows maps Interrupt, Terminate, and Quit/SIGBREAK"
+    },
+    {
+      "surface_id": "SIG-PUB-STREAM",
+      "state": "PRESENT",
+      "path": "asupersync::signal::Signal",
+      "semantics": "per-kind counted stream over process-global dispatcher emissions"
+    },
+    {
+      "surface_id": "SIG-PUB-CONSTRUCTORS",
+      "state": "PRESENT",
+      "path": "asupersync::signal::{signal,ctrl_c,sigterm,sigquit,sighup,sigusr1,sigusr2,sigchld,sigwinch,sigpipe,sigalrm}",
+      "semantics": "cross-platform core constructors plus Unix-only constructors"
+    },
+    {
+      "surface_id": "SIG-PUB-MASK",
+      "state": "PRESENT",
+      "path": "asupersync::signal::SignalMask",
+      "semantics": "Unix thread-local mask mutation with exact prior-mask restoration; unsupported elsewhere"
+    },
+    {
+      "surface_id": "SIG-PUB-SHUTDOWN",
+      "state": "PRESENT",
+      "path": "asupersync::signal::{ShutdownController,ReloadController,GracefulShutdown}",
+      "semantics": "state transitions and detached blocking listener threads"
+    },
+    {
+      "surface_id": "SIG-PUB-CLI",
+      "state": "PRESENT",
+      "path": "asupersync::cli::signal",
+      "semantics": "portable signal count, cancellation, and escalation model without OS handler installation"
+    },
+    {
+      "surface_id": "SIG-PUB-PROCESS",
+      "state": "PRESENT",
+      "path": "asupersync::process::Child::{signal,kill,start_kill}",
+      "semantics": "owned child or process-group delivery and graceful-to-force cancellation drain"
+    },
+    {
+      "surface_id": "SIG-OP-ATPD",
+      "state": "PRESENT",
+      "path": "atpd daemon start/stop/reload/status",
+      "semantics": "separate Unix iterator or Windows atomic flags plus raw kill/taskkill process control"
+    },
+    {
+      "surface_id": "SIG-OP-ATP-DAEMON",
+      "state": "PRESENT",
+      "path": "ATP daemon control",
+      "semantics": "sysinfo-backed state and signals plus Windows taskkill"
+    }
+  ],
+  "semantic_matrix": [
+    {
+      "semantic_id": "SIG-SEM-DELIVERY",
+      "state": "PARTIAL",
+      "observed": "Unix signal-hook iterator uses async-signal-safe registration and a self-pipe; Windows uses low-level CRT handlers and Win32 events. Asupersync fans recorded emissions out by kind.",
+      "contract_boundary": "Recorded dispatcher emissions are delivered to streams; raw OS arrival cardinality is not preserved.",
+      "route": "incumbent hardening and documentation"
+    },
+    {
+      "semantic_id": "SIG-SEM-COALESCING",
+      "state": "PRESENT",
+      "observed": "standard signals and pending slots may collate repeated same-kind arrivals before iterator observation",
+      "contract_boundary": "coalescing is allowed before the Asupersync counter",
+      "route": "document and add real-process baseline"
+    },
+    {
+      "semantic_id": "SIG-SEM-ORDER",
+      "state": "PRESENT",
+      "observed": "cross-kind iterator order is arbitrary and Asupersync exposes independent per-kind streams",
+      "contract_boundary": "no total cross-kind order is promised",
+      "route": "document and test"
+    },
+    {
+      "semantic_id": "SIG-SEM-REPEATED",
+      "state": "PARTIAL",
+      "observed": "dispatcher counters preserve repeated iterator emissions; upstream pending collation can reduce raw arrivals; shutdown listeners exit after first observed event",
+      "contract_boundary": "repeated escalation behavior differs by surface",
+      "route": "incumbent hardening and canonical scenario"
+    },
+    {
+      "semantic_id": "SIG-SEM-LIFETIME",
+      "state": "PARTIAL",
+      "observed": "the global dispatcher and its thread live for the process; shutdown and reload add detached threads; reload can remain blocked after controller drop until another signal",
+      "contract_boundary": "listener cancellation does not unregister process handlers or join all listener threads",
+      "route": "incumbent lifecycle hardening"
+    },
+    {
+      "semantic_id": "SIG-SEM-IGNORED-DEFAULT",
+      "state": "PARTIAL",
+      "observed": "signal-hook preserves/chains an existing non-default, non-ignore handler, but removing the last action does not restore the prior/default disposition",
+      "contract_boundary": "first registration changes OS disposition for the process lifetime",
+      "route": "document and narrow registrations"
+    },
+    {
+      "semantic_id": "SIG-SEM-EAGER-REGISTRATION",
+      "state": "PRESENT",
+      "observed": "the first Unix Signal stream registers all ten supported kinds, including kinds never requested",
+      "contract_boundary": "constructing one listener can change default behavior for unrelated signals",
+      "route": "incumbent hardening"
+    },
+    {
+      "semantic_id": "SIG-SEM-REGISTRATION-RACE",
+      "state": "PARTIAL",
+      "observed": "registration must occur before arrivals and competing handlers; Windows CRT registration and re-registration can race with delivery/default handling",
+      "contract_boundary": "no zero-race registration guarantee exists",
+      "route": "platform proof and explicit contract"
+    },
+    {
+      "semantic_id": "SIG-SEM-THREAD-MASK",
+      "state": "PRESENT",
+      "observed": "Unix SignalMask changes only the calling thread and restores the exact previous mask",
+      "contract_boundary": "a signal blocked in all threads is not delivered; non-Unix masking is unsupported",
+      "route": "retain incumbent and current nix path"
+    },
+    {
+      "semantic_id": "SIG-SEM-FORK",
+      "state": "BLOCKED",
+      "observed": "no retained fork-after-registration or child-reinitialization contract or runtime evidence was found",
+      "contract_boundary": "fork behavior is explicitly unclaimed",
+      "route": "future Unix platform baseline"
+    },
+    {
+      "semantic_id": "SIG-SEM-PROCESS-EXISTENCE",
+      "state": "PARTIAL",
+      "observed": "atpd uses kill(pid, 0) on Unix and sysinfo elsewhere; daemon_control uses sysinfo; Child owns a spawned process handle/PID",
+      "contract_boundary": "existence observations race with exit and PID reuse",
+      "route": "process-control hardening"
+    },
+    {
+      "semantic_id": "SIG-SEM-PERMISSION",
+      "state": "PARTIAL",
+      "observed": "atpd status treats EPERM as alive, while one stop polling loop treats any nonzero kill(pid,0) as gone; sysinfo kill_with collapses unsupported, absence, and failure into Option<bool>",
+      "contract_boundary": "permission and absence are not uniformly classified",
+      "route": "incumbent process-control hardening"
+    },
+    {
+      "semantic_id": "SIG-SEM-STALE-PID",
+      "state": "PARTIAL",
+      "observed": "atpd stop/reload signal the PID-file value without identity verification; daemon_control checks executable identity before signaling but basename matching is weak",
+      "contract_boundary": "a reused atpd PID can direct authority at an unrelated process",
+      "route": "security hardening before any replacement work"
+    },
+    {
+      "semantic_id": "SIG-SEM-CANCEL-TEARDOWN",
+      "state": "PARTIAL",
+      "observed": "Signal::recv is cancel-safe relative to recorded counts, but stream/controller cancellation does not tear down the global registration and all detached listeners",
+      "contract_boundary": "cancel-safe receive is not process-handler teardown",
+      "route": "documentation and lifecycle hardening"
+    },
+    {
+      "semantic_id": "SIG-SEM-PROCESS-GROUP",
+      "state": "PRESENT",
+      "observed": "Unix Child signaling can target the child PID or configured process group and cancellation escalates TERM to KILL before reaping",
+      "contract_boundary": "Windows Child kill is TerminateProcess semantics, not graceful console signaling",
+      "route": "retain platform-specific behavior and test explicitly"
+    }
+  ],
+  "platform_matrix": [
+    {
+      "platform_id": "SIG-PLAT-LINUX",
+      "state": "PARTIAL",
+      "receive": "signal-hook iterator/self-pipe and global fanout",
+      "send": "raw libc kill, nix/sysinfo wrappers, and Child process-group signaling",
+      "evidence": "inline and modeled tests plus one real child SIGTERM send journey; no canonical full receive/daemon matrix"
+    },
+    {
+      "platform_id": "SIG-PLAT-MACOS",
+      "state": "BLOCKED",
+      "receive": "generic cfg(unix) signal-hook path",
+      "send": "generic cfg(unix) raw kill and process path",
+      "evidence": "metadata graph only; no fresh runtime receipt"
+    },
+    {
+      "platform_id": "SIG-PLAT-BSD",
+      "state": "BLOCKED",
+      "receive": "generic cfg(unix) path is intended",
+      "send": "generic cfg(unix) path is intended",
+      "evidence": "registry declaration only; no fresh build or runtime receipt"
+    },
+    {
+      "platform_id": "SIG-PLAT-WINDOWS",
+      "state": "PARTIAL",
+      "receive": "CRT SIGINT/SIGTERM/SIGBREAK handlers wake Win32 events; atpd separately polls atomic flags",
+      "send": "taskkill or Child TerminateProcess; reload is unsupported",
+      "evidence": "source-token completeness checks only; no real Windows console-control runtime receipt"
+    },
+    {
+      "platform_id": "SIG-PLAT-OTHER-NATIVE",
+      "state": "UNSUPPORTED",
+      "receive": "unsupported platform error",
+      "send": "platform-specific process fallbacks only",
+      "evidence": "explicit cfg fallbacks"
+    },
+    {
+      "platform_id": "SIG-PLAT-WASM",
+      "state": "OUT_OF_SCOPE",
+      "receive": "signal module is native-only",
+      "send": "OS process signaling is unavailable",
+      "evidence": "manifest target exclusion"
+    }
+  ],
+  "journey_inventory": [
+    {
+      "journey_id": "SIG-JOURNEY-PUBLIC-RECV",
+      "state": "PARTIAL",
+      "path": "Signal constructors and recv",
+      "evidence": "inline tests use dispatcher injection; no retained external-process multi-kind order/coalescing/lifetime receipt"
+    },
+    {
+      "journey_id": "SIG-JOURNEY-SHUTDOWN",
+      "state": "PARTIAL",
+      "path": "ShutdownController and graceful state",
+      "evidence": "tests drive controller methods or injected events; failure to register is not surfaced by listen_for_signals"
+    },
+    {
+      "journey_id": "SIG-JOURNEY-RELOAD",
+      "state": "PARTIAL",
+      "path": "ReloadController and atpd SIGHUP",
+      "evidence": "state behavior exists; controller-drop thread lifetime and real process reload are not covered"
+    },
+    {
+      "journey_id": "SIG-JOURNEY-CHILD-SEND",
+      "state": "PRESENT",
+      "path": "Child::signal",
+      "evidence": "Unix e2e spawns a child, sends SIGTERM, and observes signal exit; receive parity is not covered"
+    },
+    {
+      "journey_id": "SIG-JOURNEY-ATPD-STOP",
+      "state": "PARTIAL",
+      "path": "atpd stop",
+      "evidence": "TERM/poll/KILL and taskkill logic is source-covered; stale PID identity and permission semantics are not end-to-end covered"
+    },
+    {
+      "journey_id": "SIG-JOURNEY-ATP-DAEMON",
+      "state": "PARTIAL",
+      "path": "ATP daemon control",
+      "evidence": "sysinfo state and signal/taskkill paths exist; cross-platform errno and PID-reuse equivalence is absent"
+    },
+    {
+      "journey_id": "SIG-JOURNEY-WINDOWS-CONSOLE",
+      "state": "BLOCKED",
+      "path": "Windows console interrupt/break",
+      "evidence": "static token assertions are not runtime delivery or teardown evidence"
+    },
+    {
+      "journey_id": "SIG-JOURNEY-CANONICAL-E2E",
+      "state": "PLANNED",
+      "path": "dependency-sovereignty suite",
+      "evidence": "registry names three scenarios, but the runner implements none of them and the recorded signal_shutdown command is not executable today"
+    },
+    {
+      "journey_id": "SIG-JOURNEY-FORK",
+      "state": "BLOCKED",
+      "path": "fork after signal registration",
+      "evidence": "no retained test or operator contract found"
+    }
+  ],
+  "unsafe_cost": {
+    "existing_ledger_rows": [
+      "unsafe-src-signal-signal-rs",
+      "unsafe-src-bin-atpd-rs",
+      "unsafe-src-process-rs"
+    ],
+    "current_first_party_surfaces": [
+      "Win32 event create/set/wait/close and Send/Sync assertions",
+      "raw Unix kill, errno, waitpid, process group, and descriptor operations",
+      "signal-hook low-level registration on Windows"
+    ],
+    "incumbent_absorbed_surfaces": [
+      "async-signal-safe global registry",
+      "previous-handler chaining",
+      "concurrent registration and unregistration",
+      "pending delivery and self-pipe wakeup",
+      "Unix and Windows signal ABI details"
+    ],
+    "replacement_delta": "HIGH",
+    "ledger_quality_gap": "atpd operation line locators have drifted and atpd/process retain broad file-level unsafe allows",
+    "conclusion": "A first-party replacement expands the most failure-sensitive unsafe and process-global surface while saving at most three marginal package versions in measured cells."
+  },
+  "gaps": [
+    {
+      "gap_id": "SIG-A1-GAP-01",
+      "severity": "HIGH",
+      "state": "ROUTED",
+      "finding": "Signal::recv documentation says no delivered notification is lost without stating that signal-hook and the OS may coalesce raw arrivals.",
+      "owner": "signal facade hardening",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "SIG-A1-GAP-02",
+      "severity": "HIGH",
+      "state": "ROUTED",
+      "finding": "the first Unix listener eagerly registers all ten kinds and changes default disposition for unrelated signals",
+      "owner": "signal registration lifecycle hardening",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "SIG-A1-GAP-03",
+      "severity": "HIGH",
+      "state": "ROUTED",
+      "finding": "global and controller listener threads/registrations are not joined or unregistered on listener cancellation; reload can outlive its controller until another signal",
+      "owner": "structured shutdown lifecycle hardening",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "SIG-A1-GAP-04",
+      "severity": "HIGH",
+      "state": "ROUTED",
+      "finding": "Windows CRT signal registration has race and semantic limitations, and source-token tests do not prove console-control delivery",
+      "owner": "Windows platform proof owner",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "SIG-A1-GAP-05",
+      "severity": "CRITICAL",
+      "state": "ROUTED",
+      "finding": "atpd stop and reload signal a PID-file value without process identity fencing; PID reuse can target an unrelated process",
+      "owner": "atpd process-authority hardening",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "SIG-A1-GAP-06",
+      "severity": "HIGH",
+      "state": "ROUTED",
+      "finding": "raw kill, sysinfo kill_with, taskkill, and Child signaling expose divergent permission, absence, timeout, escalation, and error semantics",
+      "owner": "process-control contract owner",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "SIG-A1-GAP-07",
+      "severity": "HIGH",
+      "state": "ROUTED",
+      "finding": "macOS, supported BSD, and Windows lack fresh runtime delivery and lifecycle receipts",
+      "owner": "cross-platform E2E owner",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "SIG-A1-GAP-08",
+      "severity": "MEDIUM",
+      "state": "ROUTED",
+      "finding": "several tests described as real signal or e2e drive controller state or inject internal emissions instead of exercising OS delivery",
+      "owner": "signal test owner",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "SIG-A1-GAP-09",
+      "severity": "HIGH",
+      "state": "ROUTED",
+      "finding": "the three CAP-SIGNALS dependency-sovereignty scenarios and the registry command are planned but not implemented by the runner",
+      "owner": "CAP-SIGNALS E2E owner",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "SIG-A1-GAP-10",
+      "severity": "MEDIUM",
+      "state": "ROUTED",
+      "finding": "fork-after-registration and child reinitialization behavior are untested and explicitly unclaimed",
+      "owner": "Unix platform proof owner",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "SIG-A1-GAP-11",
+      "severity": "MEDIUM",
+      "state": "ROUTED",
+      "finding": "the capability registry source-owner list omits shutdown, graceful, CLI signal, process, and daemon_control surfaces",
+      "owner": "dependency capability registry owner",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "SIG-A1-GAP-12",
+      "severity": "MEDIUM",
+      "state": "ROUTED",
+      "finding": "unsafe ledger locators have source drift and broad file-level unsafe scopes remain in atpd and process",
+      "owner": "unsafe boundary ledger owner",
+      "replacement_required": false
+    },
+    {
+      "gap_id": "SIG-A1-GAP-13",
+      "severity": "MEDIUM",
+      "state": "ROUTED",
+      "finding": "atpd bypasses the Asupersync signal facade and installs a second independent signal-hook registration model",
+      "owner": "atpd and signal facade owners",
+      "replacement_required": false
+    }
+  ],
+  "reconsideration_triggers": [
+    {
+      "trigger_id": "SIG-RECONSIDER-01",
+      "condition": "a reproducible supported-platform production defect is attributable to the incumbent and cannot be fixed upstream or while retaining it",
+      "required_evidence": "minimal reproduction, upstream disposition, affected-platform runtime receipt, and owner review"
+    },
+    {
+      "trigger_id": "SIG-RECONSIDER-02",
+      "condition": "the incumbent receives an applicable security advisory or becomes unmaintained",
+      "required_evidence": "advisory or maintenance record, affected dependency graph, mitigation analysis, and owner review"
+    },
+    {
+      "trigger_id": "SIG-RECONSIDER-03",
+      "condition": "the canonical marginal ledger records an explicit dependency/native-code budget violation rather than the current small declared-inactive cost",
+      "required_evidence": "fresh all-profile ledger diff, native provenance, and owner-approved budget"
+    },
+    {
+      "trigger_id": "SIG-RECONSIDER-04",
+      "condition": "the full Linux, macOS, supported-BSD, and Windows semantic matrix has executable baseline receipts and an owner accepts the exact replacement contract",
+      "required_evidence": "delivery, coalescing, ordering, repeated, lifetime, handler chaining, masks, fork, process permission, stale PID, cancellation, and teardown receipts"
+    },
+    {
+      "trigger_id": "SIG-RECONSIDER-05",
+      "condition": "an independent unsafe review finds a narrower first-party design whose process-global and platform ABI burden is no greater than the incumbent boundary",
+      "required_evidence": "design, unsafe ledger delta, async-signal-safety proof, rollback plan, and owner signoff"
+    }
+  ],
+  "decision": {
+    "outcome": "DEFER",
+    "terminal_for_bead": true,
+    "dependency_retained": "signal-hook",
+    "implementation_authority": "NONE",
+    "children_unblocked": [],
+    "required_next_action": "Route the thirteen gaps as incumbent hardening or proof work. Do not begin replacement design or implementation unless a reconsideration trigger produces a new owner-reviewed gate.",
+    "rollback": "No source or dependency change was made; retain the incumbent and this inventory as the claim-time baseline."
+  },
+  "no_claim_boundaries": [
+    "This inventory does not prove raw OS arrival cardinality, total ordering, or absence of coalescing.",
+    "Linux source and test evidence does not prove macOS, BSD, or Windows runtime behavior.",
+    "Static Windows token checks do not prove console-control delivery, races, or teardown.",
+    "A Unix self-pipe design does not cover Windows control events or process permission and liveness semantics.",
+    "Modeled controller transitions and injected dispatcher emissions are not real-process signal E2E evidence.",
+    "The one real child SIGTERM send journey does not prove signal receive parity.",
+    "This inventory does not prove fork safety, PID identity safety, or uniform permission classification.",
+    "The marginal graph ledger does not prove runtime correctness, release readiness, or performance.",
+    "DEFER does not bless current defects; it routes them without authorizing dependency replacement.",
+    "No file deletion, dependency removal, replacement child, or cutover is authorized."
+  ]
+}

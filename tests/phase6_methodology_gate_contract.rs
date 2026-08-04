@@ -7,6 +7,11 @@ use std::path::{Path, PathBuf};
 const README_PATH: &str = "README.md";
 const WORKFLOW_PATH: &str = ".github/workflows/methodology-gates.yml";
 const CONTRACT_PATH: &str = "artifacts/phase6_methodology_gate_enforcement_contract_v1.json";
+const METHODOLOGY_BENCH_PATH: &str = "benches/methodology_baselines.rs";
+const PHASE6_GATE_PATH: &str = "benches/phase6_gate.rs";
+const GOLDEN_BENCH_PATH: &str = "benches/golden_output.rs";
+const GOLDEN_REGISTRY_PATH: &str = "benches/golden_registry.rs";
+const CARGO_TOML_PATH: &str = "Cargo.toml";
 
 fn repo_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -43,6 +48,26 @@ fn string_array(value: &JsonValue, key: &str) -> Vec<String> {
                 .to_string()
         })
         .collect()
+}
+
+fn local_gate<'a>(contract: &'a JsonValue, gate_id: &str) -> &'a JsonValue {
+    contract
+        .get("direct_main_local_gates")
+        .and_then(JsonValue::as_array)
+        .expect("direct_main_local_gates array")
+        .iter()
+        .find(|gate| gate.get("gate_id").and_then(JsonValue::as_str) == Some(gate_id))
+        .unwrap_or_else(|| panic!("missing direct-main gate {gate_id}"))
+}
+
+fn cargo_bench_stanza<'a>(cargo_toml: &'a str, bench_name: &str) -> &'a str {
+    let marker = format!("name = \"{bench_name}\"");
+    let start = cargo_toml
+        .find(&marker)
+        .unwrap_or_else(|| panic!("Cargo.toml must declare bench {bench_name}"));
+    let tail = &cargo_toml[start..];
+    let end = tail.find("\n[[").unwrap_or(tail.len());
+    &tail[..end]
 }
 
 #[test]
@@ -109,7 +134,10 @@ fn local_gate_commands_are_rch_backed_and_scoped() {
         let gate_id = nonempty_string(gate, "gate_id");
         let command = nonempty_string(gate, "rch_command");
         assert!(
-            command.starts_with("rch exec -- "),
+            command.starts_with("rch exec -- ")
+                || command.starts_with("RCH_REQUIRE_REMOTE=1 rch exec -- ")
+                || command
+                    .starts_with("RCH_BUILD_TIMEOUT_SEC=5400 RCH_REQUIRE_REMOTE=1 rch exec -- "),
             "{gate_id}: command must be rch-backed: {command}"
         );
         assert!(
@@ -151,6 +179,313 @@ fn local_gate_commands_are_rch_backed_and_scoped() {
             "{gate_id}: artifact locations must stay in repo artifact/test surfaces"
         );
     }
+}
+
+#[test]
+fn direct_main_benchmark_commands_and_comparator_are_executable_and_fail_closed() {
+    let contract = contract();
+    assert_eq!(
+        contract.get("repair_bead_id").and_then(JsonValue::as_str),
+        Some("asupersync-phase6-direct-main-benchmark-gate-drift-3kn86z")
+    );
+
+    let baseline = local_gate(&contract, "baseline-benchmarks");
+    let baseline_command = nonempty_string(baseline, "rch_command");
+    for required in [
+        "RCH_REQUIRE_REMOTE=1 rch exec --",
+        "RCH_BUILD_TIMEOUT_SEC=5400",
+        "CARGO_TARGET_DIR=",
+        "ASUPERSYNC_PHASE6_BASELINE=artifacts/baseline.json",
+        "ASUPERSYNC_PHASE6_MAX_REGRESSION_PCT=5",
+        "cargo bench -p asupersync --bench methodology_baselines",
+        "--features test-internals,criterion-benches",
+    ] {
+        assert!(
+            baseline_command.contains(required),
+            "baseline command must contain {required:?}: {baseline_command}"
+        );
+    }
+
+    let comparison = baseline
+        .get("comparison_contract")
+        .expect("baseline comparison_contract");
+    assert_eq!(
+        nonempty_string(comparison, "runner"),
+        "benches/methodology_baselines.rs post-benchmark gate"
+    );
+    assert_eq!(
+        nonempty_string(comparison, "tracked_baseline"),
+        "artifacts/baseline.json"
+    );
+    assert_eq!(
+        nonempty_string(comparison, "candidate_metric"),
+        "median.point_estimate"
+    );
+    assert_eq!(nonempty_string(comparison, "tracked_metric"), "p50_ns");
+    assert_eq!(
+        comparison
+            .get("max_regression_pct")
+            .and_then(JsonValue::as_u64),
+        Some(5)
+    );
+    assert_eq!(
+        nonempty_string(comparison, "threshold_semantics"),
+        "fail_when_strictly_greater"
+    );
+    // br-asupersync-87h3es: the comparator's fail limit is
+    // max(p50 * 1.05, ci95_upper * 1.02, p50 + 0.6ns). Ambient same-host
+    // noise exceeds 5% on few-ns rows (and quick-mode CIs can collapse to
+    // [p50, p50], encoding no volatility), so the recorded ci95 envelope
+    // plus an absolute sub-ns floor form the per-row noise allowance; the
+    // artifact must document it so the README/workflow story and the live
+    // comparator cannot drift apart silently.
+    let noise_floor = nonempty_string(comparison, "ci95_noise_floor");
+    assert!(
+        noise_floor.contains("max(p50_ns * 1.05, ci95_upper_ns * 1.02, p50_ns + 0.6ns)"),
+        "ci95_noise_floor must pin the envelope formula, got {noise_floor:?}"
+    );
+    assert!(
+        noise_floor.contains("fail closed"),
+        "ci95_noise_floor must state malformed bounds fail closed, got {noise_floor:?}"
+    );
+    assert_eq!(
+        nonempty_string(comparison, "missing_tracked_candidate_row"),
+        "fail_closed"
+    );
+    assert_eq!(
+        nonempty_string(comparison, "duplicate_or_invalid_row"),
+        "fail_closed"
+    );
+    assert_eq!(
+        nonempty_string(comparison, "untracked_candidate_row"),
+        "ignore_until_tracked"
+    );
+    assert_eq!(
+        comparison
+            .get("no_local_fallback")
+            .and_then(JsonValue::as_bool),
+        Some(true)
+    );
+
+    for gate_id in ["golden-checksums-bench", "flamegraph"] {
+        let command = nonempty_string(local_gate(&contract, gate_id), "rch_command");
+        assert!(
+            command.contains("RCH_REQUIRE_REMOTE=1 rch exec -- "),
+            "{gate_id} must require remote RCH execution"
+        );
+        assert!(
+            command.contains("--features test-internals,criterion-benches"),
+            "{gate_id} must enable every Cargo-required benchmark feature"
+        );
+    }
+
+    let golden_test_command = nonempty_string(
+        local_gate(&contract, "golden-checksums-test"),
+        "rch_command",
+    );
+    assert!(
+        golden_test_command.contains("cargo test -j 4 "),
+        "golden-checksums-test must fit the pinned-nightly RCH worker capacity"
+    );
+    assert!(
+        golden_test_command.contains("RCH_REQUIRE_REMOTE=1 rch exec -- "),
+        "golden-checksums-test must require remote RCH execution"
+    );
+
+    let cargo_toml = read_repo_file(CARGO_TOML_PATH);
+    for bench_name in ["methodology_baselines", "golden_output"] {
+        let stanza = cargo_bench_stanza(&cargo_toml, bench_name);
+        assert!(
+            stanza.contains("required-features = [\"test-internals\", \"criterion-benches\"]"),
+            "{bench_name} must retain the feature requirements checked by direct-main commands"
+        );
+    }
+
+    // The comparator was extracted from the methodology_baselines binary
+    // into the shared benches/phase6_gate.rs module (bt4y5f.1); the gate
+    // pins moved with it. This block was red at pristine HEAD from the
+    // extraction until br-asupersync-87h3es re-pointed it (stale
+    // source-text pin, same class as the 6t47fx audit-pin sweep).
+    let gate = read_repo_file(PHASE6_GATE_PATH);
+    for required in [
+        "PHASE6_BASELINE_ENV",
+        "PHASE6_THRESHOLD_ENV",
+        "criterion_home()",
+        "operation.replacen('/', \"_\", 1)",
+        "baseline.baselines",
+        "new/estimates.json",
+        // br-asupersync-87h3es: the fail decision compares the candidate
+        // against the per-row limit max(p50*1.05, ci95_upper*1.02,
+        // p50+0.6ns) instead of the bare relative delta.
+        "candidate_p50_ns > limit_ns",
+        "fn row_limit_ns",
+        "PHASE6_CI95_HEADROOM: f64 = 1.02",
+        "PHASE6_ABSOLUTE_NOISE_FLOOR_NS: f64 = 0.6",
+    ] {
+        assert!(
+            gate.contains(required),
+            "Phase 6 gate module must preserve {required:?}"
+        );
+    }
+    let runner = read_repo_file(METHODOLOGY_BENCH_PATH);
+    for required in [
+        "mod phase6_gate;",
+        "run_phase6_p50_gate(\"methodology/\")",
+        "std::process::exit(2)",
+    ] {
+        assert!(
+            runner.contains(required),
+            "Phase 6 baseline runner must preserve {required:?}"
+        );
+    }
+
+    let readme = read_repo_file(README_PATH);
+    for gate_id in [
+        "baseline-benchmarks",
+        "golden-checksums-bench",
+        "golden-checksums-test",
+        "flamegraph",
+    ] {
+        let command = nonempty_string(local_gate(&contract, gate_id), "rch_command");
+        assert!(
+            readme.contains(command),
+            "README must publish the checked {gate_id} command verbatim"
+        );
+    }
+}
+
+#[test]
+fn golden_registry_and_reviewed_update_flow_fail_closed() {
+    let contract = contract();
+    assert_eq!(
+        contract
+            .get("golden_registry_repair_bead_id")
+            .and_then(JsonValue::as_str),
+        Some("asupersync-golden-registry-fail-closed-provenance-xzv2c4")
+    );
+
+    let gate = local_gate(&contract, "golden-checksums-bench");
+    let normal = gate
+        .get("normal_mode_contract")
+        .expect("golden normal_mode_contract");
+    assert_eq!(
+        normal
+            .get("tracked_registry_required")
+            .and_then(JsonValue::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        normal.get("scenario_set").and_then(JsonValue::as_str),
+        Some("exact")
+    );
+    for field in [
+        "duplicate_scenario",
+        "missing_scenario",
+        "extra_scenario",
+        "generate_sentinel",
+        "malformed_hash_or_provenance",
+    ] {
+        assert_eq!(
+            normal.get(field).and_then(JsonValue::as_str),
+            Some("fail_closed"),
+            "{field} must fail closed"
+        );
+    }
+
+    let update = gate
+        .get("reviewed_update_contract")
+        .expect("golden reviewed_update_contract");
+    let update_command = nonempty_string(update, "rch_command");
+    for required in [
+        "RCH_BUILD_TIMEOUT_SEC=5400 RCH_REQUIRE_REMOTE=1 rch exec",
+        "--base HEAD --clean-overlay --no-overlay",
+        "-- env GOLDEN_UPDATE=1 GOLDEN_REVIEWED_GIT_SHA=$(git rev-parse HEAD)",
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_update",
+        "cargo bench -p asupersync --bench golden_output",
+        "--features test-internals,criterion-benches",
+    ] {
+        assert!(
+            update_command.contains(required),
+            "reviewed update command must contain {required:?}: {update_command}"
+        );
+    }
+    for boolean in [
+        "requires_clean_tracked_tree",
+        "requires_reviewed_sha_equal_to_head",
+        "candidate_contains_only_fresh_exact_scenario_set",
+        "promotion_requires_separate_reviewed_commit",
+    ] {
+        assert_eq!(
+            update.get(boolean).and_then(JsonValue::as_bool),
+            Some(true),
+            "{boolean} must be true"
+        );
+    }
+    assert_eq!(
+        update
+            .get("tracked_registry_mutated_by_benchmark")
+            .and_then(JsonValue::as_bool),
+        Some(false)
+    );
+    assert_eq!(nonempty_string(update, "write_mode"), "atomic_candidate");
+    assert_eq!(
+        nonempty_string(update, "candidate_location"),
+        "${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_update/criterion/golden-update/golden_checksums.json"
+    );
+
+    let registry = read_repo_file(GOLDEN_REGISTRY_PATH);
+    for required in [
+        "const GOLDEN_SCENARIOS: [&str; 14]",
+        "load_golden_registry_from_path",
+        "duplicate golden checksum scenario",
+        "git_sha: String",
+        "generated_at: String",
+        "build_update_candidate",
+    ] {
+        assert!(
+            registry.contains(required),
+            "golden registry must preserve fail-closed anchor {required:?}"
+        );
+    }
+
+    let cargo_toml = read_repo_file(CARGO_TOML_PATH);
+    assert!(
+        cargo_toml.contains("autobenches = false"),
+        "bench support modules must not be auto-discovered as standalone bench targets"
+    );
+
+    let bench = read_repo_file(GOLDEN_BENCH_PATH);
+    for required in [
+        "mod golden_registry;",
+        "GOLDEN_REVIEWED_GIT_SHA",
+        "write_json_atomically",
+        "finalize_golden_run",
+    ] {
+        assert!(
+            bench.contains(required),
+            "golden bench must preserve fail-closed anchor {required:?}"
+        );
+    }
+    for forbidden in [
+        "fn inline_registry()",
+        "expected == \"GENERATE\"",
+        "std::fs::write(GOLDEN_CHECKSUMS_PATH",
+    ] {
+        assert!(
+            !bench.contains(forbidden) && !registry.contains(forbidden),
+            "golden bench/registry must not restore stale behavior {forbidden:?}"
+        );
+    }
+
+    let readme = read_repo_file(README_PATH);
+    assert!(
+        readme.contains("-- env GOLDEN_UPDATE=1 GOLDEN_REVIEWED_GIT_SHA=${GOLDEN_REVIEWED_SHA}"),
+        "README must place reviewed update controls inside the remote environment"
+    );
+    assert!(
+        readme.contains("criterion/golden-update/golden_checksums.json"),
+        "README must name the retrieved candidate"
+    );
 }
 
 #[test]
