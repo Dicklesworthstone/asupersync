@@ -1,15 +1,16 @@
 //! Fail-closed YAML scenario capability inventory contract.
 //!
 //! Beads: asupersync-5z2scg.5.1, asupersync-5z2scg.5.2,
-//! asupersync-5z2scg.5.3.1, asupersync-5z2scg.5.3.2
+//! asupersync-5z2scg.5.3.1, asupersync-5z2scg.5.3.2,
+//! asupersync-5z2scg.5.4
 //! Scenario: scenario-yaml-capability-inventory-contract
 //! Fixture: artifacts/scenario_yaml_capability_inventory_v1.json
 //!
 //! This proves source-pinned loader, typed-schema, observed grammar, checked-in
 //! corpus, canonical JSON, workflow, diagnostic, resource, current YAML
 //! consumers/writers, acceptance-satisfiability, the durable KEEP receipt,
-//! A4/A5 authority handoff, execution-consumption, child-owner, and gap
-//! inventories. It does not prove
+//! A4/A5 authority handoff, source-level example-registry alignment,
+//! execution-consumption, child-owner, and gap inventories. It does not prove
 //! arbitrary YAML, parser replacement, runtime semantics for validation-only
 //! fields, CLI conversion UX, or permission to remove the incumbent
 //! `serde_yaml` dependency.
@@ -33,6 +34,11 @@ const A3_BEAD_ID: &str = "asupersync-5z2scg.5.3.1";
 const A3_PARENT_BEAD_ID: &str = "asupersync-5z2scg.5.3";
 const A3_RECEIPT_BEAD_ID: &str = "asupersync-5z2scg.5.3.2";
 const A3_RECEIPT_ID: &str = "SCN-A3-KEEP-INCUMBENT-V1";
+const A4_BEAD_ID: &str = "asupersync-5z2scg.5.4";
+const A4_PROGRESS_ID: &str = "SCN-A4-GAP-13-REGISTRY-SOURCE-V1";
+const EXAMPLES_METADATA_PATH: &str = "examples/metadata.json";
+const EXAMPLES_README_PATH: &str = "examples/README.md";
+const EXAMPLES_METADATA_CONTRACT_PATH: &str = "tests/examples_metadata_contract.rs";
 const A3_AUDIT_LANDED_COMMIT: &str = "d7bd450dc53647723a5e9aaa360d0e044794a4b2";
 const A3_AUDIT_ARTIFACT_SHA256: &str =
     "17c529577e582dfeb8cef597cdd844b5d965c6a8c9f3a45c20d76d370a373ace";
@@ -1757,6 +1763,217 @@ fn validate_a3_keep_incumbent_receipt(inventory: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_a4_source_progress(inventory: &Value) -> Result<(), String> {
+    let progress = inventory
+        .get("a4_source_progress")
+        .ok_or_else(|| "a4_source_progress is required".to_owned())?;
+    for (key, expected) in [
+        ("progress_id", A4_PROGRESS_ID),
+        ("bead_id", A4_BEAD_ID),
+        ("recorded_date_utc", "2026-08-04"),
+        ("scope", "EXAMPLE_REGISTRY_ALIGNMENT"),
+        ("gap_id", "SCN-GAP-13"),
+        ("source_state", "SOURCE_ALIGNED_STATIC"),
+        ("execution_state", "NOT_RUN_BY_STATIC_LANE"),
+    ] {
+        if progress.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("A4 progress {key} must be {expected}"));
+        }
+    }
+    if progress
+        .get("source_alignment_complete")
+        .and_then(Value::as_bool)
+        != Some(true)
+        || progress
+            .get("dynamic_contract_executed")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return Err("A4 progress must distinguish source alignment from execution".to_owned());
+    }
+
+    let registry_value = progress.get("registry").expect("A4 registry");
+    let registry = object(progress, "registry");
+    for (key, expected) in [
+        ("metadata_path", EXAMPLES_METADATA_PATH),
+        ("documentation_path", EXAMPLES_README_PATH),
+        ("contract_path", EXAMPLES_METADATA_CONTRACT_PATH),
+    ] {
+        if registry.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("A4 registry {key} must be {expected}"));
+        }
+    }
+    let expected_roots: BTreeSet<String> = [
+        "examples/scenarios",
+        "frankenlab/examples/scenarios",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if string_set(registry_value, "scenario_roots") != expected_roots
+        || registry.get("root_scenario_count").and_then(Value::as_u64) != Some(10)
+        || registry
+            .get("frankenlab_scenario_count")
+            .and_then(Value::as_u64)
+            != Some(3)
+        || registry
+            .get("total_scenario_count")
+            .and_then(Value::as_u64)
+            != Some(13)
+    {
+        return Err("A4 registry roots or counts drifted".to_owned());
+    }
+    let expected_frankenlab_paths: BTreeSet<String> = [
+        "frankenlab/examples/scenarios/01_race_condition.yaml",
+        "frankenlab/examples/scenarios/02_obligation_leak.yaml",
+        "frankenlab/examples/scenarios/03_saga_partition.yaml",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if string_set(registry_value, "registered_frankenlab_paths")
+        != expected_frankenlab_paths
+    {
+        return Err("A4 registry must name the exact three FrankenLab scenarios".to_owned());
+    }
+
+    let metadata = parse_repo_json(EXAMPLES_METADATA_PATH);
+    let metadata_registry = metadata
+        .get("scenario_registry")
+        .expect("metadata scenario_registry");
+    for (key, expected) in [
+        ("owner_bead", A4_BEAD_ID),
+        ("source_state", "SOURCE_ALIGNED_STATIC"),
+        ("execution_state", "NOT_RUN_BY_STATIC_LANE"),
+    ] {
+        if metadata_registry.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("example metadata registry {key} must be {expected}"));
+        }
+    }
+    if string_set(metadata_registry, "roots") != expected_roots
+        || !text(metadata_registry, "no_claim").contains("does not prove")
+    {
+        return Err("example metadata must retain exact roots and no-claim boundary".to_owned());
+    }
+
+    let metadata_rows = array(&metadata, "examples");
+    let metadata_scenario_paths: BTreeSet<String> = metadata_rows
+        .iter()
+        .filter(|row| row.get("kind").and_then(Value::as_str) == Some("scenario-yaml"))
+        .map(|row| text(row, "file").to_owned())
+        .collect();
+    let corpus_paths: BTreeSet<String> = array(inventory, "corpus_files")
+        .iter()
+        .map(|row| text(row, "path").to_owned())
+        .collect();
+    if metadata_scenario_paths != corpus_paths || metadata_scenario_paths.len() != 13 {
+        return Err("example metadata must register the exact typed Scenario corpus".to_owned());
+    }
+    for path in &expected_frankenlab_paths {
+        let row = find_row(metadata_rows, "file", path);
+        if text(row, "kind") != "scenario-yaml"
+            || !text(row, "description").contains("does not establish runner effects")
+        {
+            return Err(format!("{path} metadata must remain truthful and scenario-typed"));
+        }
+        let loc = object(row, "loc");
+        let current_line_count = read_repo_file(path).lines().count() as u64;
+        if loc.get("start").and_then(Value::as_u64) != Some(1)
+            || loc.get("end").and_then(Value::as_u64) != Some(current_line_count)
+        {
+            return Err(format!("{path} metadata span drifted"));
+        }
+    }
+
+    let examples_readme = read_repo_file(EXAMPLES_README_PATH);
+    if !examples_readme.contains("not evidence that the runner simulates") {
+        return Err("examples index must retain its runtime no-claim warning".to_owned());
+    }
+    for path in &expected_frankenlab_paths {
+        let file_name = path.rsplit('/').next().expect("scenario file name");
+        if !examples_readme.contains(file_name) {
+            return Err(format!("examples index must link {file_name}"));
+        }
+    }
+
+    let metadata_contract = read_repo_file(EXAMPLES_METADATA_CONTRACT_PATH);
+    for marker in [
+        "SCENARIO_REGISTRY_BEAD_ID",
+        "SCENARIO_ROOTS",
+        "scenario_registry_covers_the_exact_thirteen_typed_fixtures",
+        "frankenlab/examples/scenarios",
+    ] {
+        if !metadata_contract.contains(marker) {
+            return Err(format!("example metadata contract is missing {marker}"));
+        }
+    }
+
+    let preservation = object(progress, "preservation");
+    for key in [
+        "accepted_yaml_narrowed",
+        "dependency_removed",
+        "yaml_capability_removed",
+        "yaml_file_removed",
+        "runtime_behavior_changed",
+        "terminal_decision_issued",
+    ] {
+        if preservation.get(key).and_then(Value::as_bool) != Some(false) {
+            return Err(format!("A4 progress preservation.{key} must remain false"));
+        }
+    }
+    let a4_handoff = object(
+        inventory
+            .get("a3_keep_incumbent_receipt")
+            .expect("A3 receipt")
+            .get("authority_handoff")
+            .expect("A3 authority handoff"),
+        "a4",
+    );
+    if string_set(progress, "remaining_blocked_a4_gap_ids")
+        != string_set(
+            inventory
+                .get("a3_keep_incumbent_receipt")
+                .expect("A3 receipt")
+                .get("authority_handoff")
+                .expect("A3 authority handoff")
+                .get("a4")
+                .expect("A4 handoff"),
+            "routed_gap_ids",
+        )
+        || a4_handoff.get("may_continue").and_then(Value::as_bool) != Some(true)
+    {
+        return Err("A4 progress must retain every blocked routed gap".to_owned());
+    }
+
+    let gap = find_row(array(inventory, "known_gaps"), "gap_id", "SCN-GAP-13");
+    if text(gap, "evidence_state") != "BLOCKED_GAP"
+        || !text(gap, "finding").contains("not executed")
+    {
+        return Err("SCN-GAP-13 must remain fail-closed until execution evidence exists".to_owned());
+    }
+    let a4_child = find_row(
+        array(inventory, "child_capability_rows"),
+        "owner_bead",
+        A4_BEAD_ID,
+    );
+    if text(a4_child, "evidence_state") != "SOURCE_PROGRESS_STATIC"
+        || text(a4_child, "progress_pointer") != "a4_source_progress"
+        || !string_set(
+            inventory.get("policy").expect("policy"),
+            "allowed_evidence_states",
+        )
+        .contains("SOURCE_PROGRESS_STATIC")
+    {
+        return Err("A4 child must point to the static source-progress row".to_owned());
+    }
+    if !text(progress, "no_claim_boundary").contains("does not prove parsing")
+        || !text(inventory, "no_claim_boundary").contains("SCN-GAP-13 remains blocked")
+    {
+        return Err("A4 progress and root no-claim boundaries are required".to_owned());
+    }
+    Ok(())
+}
+
 fn validate_inventory(inventory: &Value) -> Result<(), String> {
     if inventory.get("schema_version").and_then(Value::as_u64) != Some(1) {
         return Err("schema_version must be 1".to_owned());
@@ -1975,6 +2192,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     }
     validate_a3_acceptance_satisfiability(inventory)?;
     validate_a3_keep_incumbent_receipt(inventory)?;
+    validate_a4_source_progress(inventory)?;
     Ok(())
 }
 
@@ -2555,6 +2773,8 @@ fn documentation_workflows_and_no_claim_boundary_are_complete() {
         A3_BEAD_ID,
         A3_RECEIPT_BEAD_ID,
         A3_RECEIPT_ID,
+        A4_BEAD_ID,
+        A4_PROGRESS_ID,
         A3_AUDIT_LANDED_COMMIT,
         BASELINE_REVISION,
         A3_CAPTURED_REVISION,
@@ -2564,6 +2784,8 @@ fn documentation_workflows_and_no_claim_boundary_are_complete() {
         "OWNER_POLICY_REQUIRED",
         "dependency_exit_allowed=false",
         "A3.1 did not rerun",
+        "SOURCE_ALIGNED_STATIC",
+        "SCN-GAP-13 remains blocked",
         "13 files",
         "validation-only",
         "does not schedule an application workload",
@@ -2740,6 +2962,29 @@ fn fail_closed_mutations_reject_cutover_unknown_missing_surface_bound_and_policy
     forbidden_verdict["a3_keep_incumbent_receipt"]["decision"]["replacement_verdict"] =
         Value::String("REPLACE".to_owned());
     assert!(validate_inventory(&forbidden_verdict).is_err());
+
+    let mut invented_a4_execution = inventory.clone();
+    invented_a4_execution["a4_source_progress"]["dynamic_contract_executed"] =
+        Value::Bool(true);
+    assert!(validate_inventory(&invented_a4_execution).is_err());
+
+    let mut a4_removal = inventory.clone();
+    a4_removal["a4_source_progress"]["preservation"]["yaml_file_removed"] =
+        Value::Bool(true);
+    assert!(validate_inventory(&a4_removal).is_err());
+
+    let mut missing_a4_registration = inventory.clone();
+    missing_a4_registration["a4_source_progress"]["registry"]
+        ["registered_frankenlab_paths"]
+        .as_array_mut()
+        .expect("registered FrankenLab paths")
+        .pop();
+    assert!(validate_inventory(&missing_a4_registration).is_err());
+
+    let mut premature_a4_gap_closure = inventory.clone();
+    premature_a4_gap_closure["known_gaps"][12]["evidence_state"] =
+        Value::String("EXECUTED".to_owned());
+    assert!(validate_inventory(&premature_a4_gap_closure).is_err());
 
     let mut unrouted = inventory;
     unrouted["known_gaps"][0]["owner_bead"] = Value::String(String::new());
