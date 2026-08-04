@@ -1156,20 +1156,12 @@ fn after_optional_visibility(value: &str) -> &str {
     remainder
 }
 
-fn use_declaration_tail(value: &str) -> Option<&str> {
-    strip_keyword(after_optional_visibility(value), "use")
-}
-
-fn extern_crate_declaration_tail(value: &str) -> Option<&str> {
-    let remainder = strip_keyword(after_optional_visibility(value), "extern")?;
-    strip_keyword(remainder, "crate")
-}
-
 fn starts_direct_crate_path(value: &str, crate_name: &str) -> bool {
     let value = value.trim_start();
     let value = value
         .strip_prefix("::")
         .map_or(value, str::trim_start);
+    let value = value.strip_prefix("r#").unwrap_or(value);
     let Some(remainder) = value.strip_prefix(crate_name) else {
         return false;
     };
@@ -1213,6 +1205,49 @@ fn direct_crate_use_tree(value: &str, crate_name: &str) -> bool {
         || root_use_group_contains_crate(value, crate_name)
 }
 
+fn find_last_keyword(value: &str, keyword: &str) -> Option<usize> {
+    let bytes = value.as_bytes();
+    value
+        .match_indices(keyword)
+        .rev()
+        .find_map(|(index, _)| {
+            let end = index + keyword.len();
+            let left_boundary = index == 0 || !is_identifier_byte(bytes[index - 1]);
+            let right_boundary = end == bytes.len() || !is_identifier_byte(bytes[end]);
+            let raw_identifier = index >= 2 && bytes.get(index - 2..index) == Some(b"r#");
+            (left_boundary && right_boundary && !raw_identifier).then_some(index)
+        })
+}
+
+fn statement_line(statement: &str, start_line: u64, keyword_index: usize) -> u64 {
+    start_line
+        + statement[..keyword_index]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count() as u64
+}
+
+fn direct_chrono_binding_line(
+    statement: &str,
+    start_line: u64,
+    chrono_name: &str,
+) -> Option<u64> {
+    if let Some(use_index) = find_last_keyword(statement, "use")
+        && direct_crate_use_tree(&statement[use_index + "use".len()..], chrono_name)
+    {
+        return Some(statement_line(statement, start_line, use_index));
+    }
+    if let Some(extern_index) = find_last_keyword(statement, "extern") {
+        let remainder = &statement[extern_index + "extern".len()..];
+        if let Some(crate_tail) = strip_keyword(remainder, "crate")
+            && starts_direct_crate_path(crate_tail, chrono_name)
+        {
+            return Some(statement_line(statement, start_line, extern_index));
+        }
+    }
+    None
+}
+
 #[derive(Default)]
 struct RustLexState {
     block_comment_depth: usize,
@@ -1238,6 +1273,28 @@ fn raw_string_open(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
         return None;
     }
     Some((cursor + 1 - start, cursor - hash_start))
+}
+
+fn char_literal_consumed(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start) != Some(&b'\'') {
+        return None;
+    }
+    let content = start + 1;
+    let closing = if bytes.get(content) == Some(&b'\\') {
+        match (bytes.get(content + 1), bytes.get(content + 2)) {
+            (Some(b'u'), Some(b'{')) => {
+                let end = bytes.get(content + 3..)?.iter().position(|byte| *byte == b'}')?;
+                content + 4 + end
+            }
+            (Some(b'x'), _) => content + 4,
+            (Some(_), _) => content + 2,
+            _ => return None,
+        }
+    } else {
+        let character = std::str::from_utf8(bytes.get(content..)?).ok()?.chars().next()?;
+        content + character.len_utf8()
+    };
+    (bytes.get(closing) == Some(&b'\'')).then_some(closing + 1 - start)
 }
 
 fn strip_rust_non_code(line: &str, state: &mut RustLexState) -> String {
@@ -1287,6 +1344,9 @@ fn strip_rust_non_code(line: &str, state: &mut RustLexState) -> String {
             state.raw_string_hashes = Some(hash_count);
             index += consumed;
             output.push(b' ');
+        } else if let Some(consumed) = char_literal_consumed(bytes, index) {
+            index += consumed;
+            output.push(b' ');
         } else if bytes[index] == b'"' {
             state.in_quoted_string = true;
             state.quoted_escape = false;
@@ -1326,8 +1386,8 @@ fn validate_alias_sources(inventory: &Value) -> Result<(), String> {
             .to_string_lossy()
             .replace('\\', "/");
         let mut lex_state = RustLexState::default();
-        let mut pending_use: Option<(u64, String)> = None;
-        let mut pending_extern: Option<(u64, String)> = None;
+        let mut statement = String::new();
+        let mut statement_start_line = 1_u64;
         for (index, line) in source.lines().enumerate() {
             let line_number = index as u64 + 1;
             let code = strip_rust_non_code(line, &mut lex_state);
@@ -1340,52 +1400,34 @@ fn validate_alias_sources(inventory: &Value) -> Result<(), String> {
                 ));
             }
 
-            if let Some((start_line, use_tree)) = pending_use.as_mut() {
-                use_tree.push(' ');
-                use_tree.push_str(trimmed);
-                if trimmed.contains(';') {
-                    if direct_crate_use_tree(use_tree, chrono_name) {
-                        actual_binding_lines.insert((relative.clone(), *start_line));
+            let mut remainder = code.as_str();
+            loop {
+                if statement.is_empty() {
+                    statement_start_line = line_number;
+                }
+                if let Some(end) = remainder.find(';') {
+                    statement.push_str(&remainder[..=end]);
+                    if let Some(binding_line) =
+                        direct_chrono_binding_line(&statement, statement_start_line, chrono_name)
+                    {
+                        actual_binding_lines.insert((relative.clone(), binding_line));
                     }
-                    pending_use = None;
-                }
-                continue;
-            }
-            if let Some((start_line, crate_tail)) = pending_extern.as_mut() {
-                crate_tail.push(' ');
-                crate_tail.push_str(trimmed);
-                if trimmed.contains(';') {
-                    if starts_direct_crate_path(crate_tail, chrono_name) {
-                        actual_binding_lines.insert((relative.clone(), *start_line));
+                    statement.clear();
+                    remainder = &remainder[end + 1..];
+                    if remainder.is_empty() {
+                        break;
                     }
-                    pending_extern = None;
-                }
-                continue;
-            }
-
-            if let Some(use_tree) = use_declaration_tail(trimmed) {
-                if direct_crate_use_tree(use_tree, chrono_name) {
-                    actual_binding_lines.insert((relative.clone(), line_number));
-                } else if !use_tree.contains(';') {
-                    pending_use = Some((line_number, use_tree.to_owned()));
-                }
-            } else if let Some(crate_tail) = extern_crate_declaration_tail(trimmed) {
-                if starts_direct_crate_path(crate_tail, chrono_name) {
-                    actual_binding_lines.insert((relative.clone(), line_number));
-                } else if !crate_tail.contains(';') {
-                    pending_extern = Some((line_number, crate_tail.to_owned()));
+                } else {
+                    statement.push_str(remainder);
+                    statement.push('\n');
+                    break;
                 }
             }
         }
-        if let Some((start_line, use_tree)) = pending_use
-            && direct_crate_use_tree(&use_tree, chrono_name)
+        if let Some(binding_line) =
+            direct_chrono_binding_line(&statement, statement_start_line, chrono_name)
         {
-            actual_binding_lines.insert((relative.clone(), start_line));
-        }
-        if let Some((start_line, crate_tail)) = pending_extern
-            && starts_direct_crate_path(&crate_tail, chrono_name)
-        {
-            actual_binding_lines.insert((relative, start_line));
+            actual_binding_lines.insert((relative, binding_line));
         }
     }
     let expected_binding_lines: BTreeSet<_> = bindings
@@ -2062,6 +2104,37 @@ fn time_utc_inventory_rejects_cutover_and_completeness_drift() {
         .expect("census paths must be an array")
         .pop();
     assert!(validate_inventory(&path).is_err());
+}
+
+#[test]
+fn time_utc_alias_binding_lexer_covers_legal_lexical_forms() {
+    let chrono_name = CHRONO_TOKEN.trim_end_matches("::");
+    let cases = [
+        (format!("use {chrono_name};"), 11_u64, 11_u64),
+        (format!("pub(crate) use ::r#{chrono_name};"), 12, 12),
+        (format!("use {{other, {chrono_name}}};"), 13, 13),
+        (format!("use other; use {chrono_name};"), 14, 14),
+        (format!("fn local() {{ use {chrono_name}; }}"), 15, 15),
+        (format!("extern\ncrate {chrono_name};"), 16, 16),
+        (format!("#[cfg(test)]\nuse {chrono_name};"), 17, 18),
+    ];
+    for (statement, start_line, expected_line) in cases {
+        assert_eq!(
+            direct_chrono_binding_line(&statement, start_line, chrono_name),
+            Some(expected_line)
+        );
+    }
+
+    for source in [
+        format!("let text = \"use {chrono_name};\"; use {chrono_name};"),
+        format!("let text = r#\"use {chrono_name};\"#; use {chrono_name};"),
+        format!("/* use {chrono_name}; */ use {chrono_name};"),
+        format!("let marker = ';'; use {chrono_name};"),
+    ] {
+        let mut state = RustLexState::default();
+        let code = strip_rust_non_code(&source, &mut state);
+        assert_eq!(direct_chrono_binding_line(&code, 1, chrono_name), Some(1));
+    }
 }
 
 #[test]
