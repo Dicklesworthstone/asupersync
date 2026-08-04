@@ -146,8 +146,8 @@
     },
     {
       "path": "tests/scenario_yaml_capability_inventory_contract.rs",
-      "sha256": "2d3cedfe7a9c51718aa30c16b9822d32920006082629cb40496ad93a23c6bb5e",
-      "line_count": 3296
+      "sha256": "4501c514cd4f27959a5aec272f2c3c22993511ccaa899e7c6477e7b951cfc53e",
+      "line_count": 3334
     },
     {
       "path": "tests/phase6_methodology_gate_contract.rs",
