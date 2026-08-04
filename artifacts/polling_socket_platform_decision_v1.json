@@ -458,7 +458,7 @@
     {
       "semantic_id": "POLLING-READINESS-TRANSLATION",
       "state": "PRESENT_WITH_PLATFORM_DIFFERENCES",
-      "current_semantics": "Epoll maps read, write, error, HUP, and priority with registered-interest masking. Kqueue derives a narrower read/write/HUP view. Windows maps only read and write.",
+      "current_semantics": "Epoll masks read and write by registered interest, preserves error and HUP sidebands, and filters priority. Kqueue derives a narrower read/write/HUP view. Windows maps only read and write.",
       "anchors": [
         "src/runtime/reactor/epoll.rs",
         "src/runtime/reactor/kqueue.rs",
@@ -517,7 +517,7 @@
     {
       "semantic_id": "SOCKET-ABSTRACT-UNIX",
       "state": "PRESENT_WITH_BOUNDARY_GAPS",
-      "current_semantics": "Linux abstract Unix connect encodes a leading NUL into SockAddr::unix and interoperates with a std listener. Empty, maximum-length, and embedded-NUL boundary cases are not retained in this packet.",
+      "current_semantics": "Linux abstract Unix connect encodes a leading NUL into SockAddr::unix, and source contains a std-listener interoperability path. Empty, maximum-length, and embedded-NUL boundary cases are not retained in this packet.",
       "anchors": [
         "src/net/unix/stream.rs"
       ]
