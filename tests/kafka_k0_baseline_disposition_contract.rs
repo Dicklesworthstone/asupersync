@@ -18,10 +18,8 @@ use std::path::PathBuf;
 const ARTIFACT_PATH: &str = "artifacts/kafka_k0_baseline_disposition_v1.json";
 const DOC_PATH: &str = "docs/kafka_k0_baseline_disposition.md";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
-const ARTIFACT_SHA256: &str =
-    "010093127dee0aecf9ba63160bb78f525fe34c2e23877855d1f978e0a1fdc24b";
-const DOC_SHA256: &str =
-    "1ad9d98beea995dfcedc1a55400f61c24567e3b881202968c5f1f7adcb68ec75";
+const ARTIFACT_SHA256: &str = "010093127dee0aecf9ba63160bb78f525fe34c2e23877855d1f978e0a1fdc24b";
+const DOC_SHA256: &str = "1ad9d98beea995dfcedc1a55400f61c24567e3b881202968c5f1f7adcb68ec75";
 const ARTIFACT_ID: &str = "kafka-k0-baseline-disposition-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const BEAD_ID: &str = "asupersync-dep-p7-kafka-removal-sarszu.1.5";
@@ -61,10 +59,8 @@ const ROUTE_OWNER_COUNT: usize = 49;
 const EXPLICIT_OWNED_UNKNOWN_COUNT: usize = 17;
 const REDUCED_UNKNOWN_SELECTOR_COUNT: usize = 142;
 
-const PRIMARY_ID_SHA256: &str =
-    "38eb986feff75d2e1e172e444e7d488c765ab42910b6b470056852dea3b0cb6e";
-const CORE_ID_SHA256: &str =
-    "43d9deb2ff6bfa772ec058e8e32e4eb4fb3be099d93c3b152685721be05d4eea";
+const PRIMARY_ID_SHA256: &str = "38eb986feff75d2e1e172e444e7d488c765ab42910b6b470056852dea3b0cb6e";
+const CORE_ID_SHA256: &str = "43d9deb2ff6bfa772ec058e8e32e4eb4fb3be099d93c3b152685721be05d4eea";
 const CONTRADICTION_ID_SHA256: &str =
     "60a656176b398a9b045b8c5cc1c2f2cede611683d3330c2a519a70ebf9bb72f0";
 const K0_1_SYMBOL_ID_SHA256: &str =
@@ -91,12 +87,9 @@ const SOURCE_PIN_PATH_SHA256: &str =
     "d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3";
 const SOURCE_PIN_OVERLAP_SHA256: &str =
     "401cc0ed50ca786de031643b8faf34376fde06a2c2aa2f9badcde66cca19c414";
-const JOURNEY_ID_SHA256: &str =
-    "c5a9f1947a5ecf55898c61414bb39bf753cd236fe33157083994acd63176367f";
-const VECTOR_ID_SHA256: &str =
-    "73491562ae3df3f7ea6729c30834cf3cb134a002ec5d682255277df5e508e73f";
-const FIXTURE_ID_SHA256: &str =
-    "bb8f922cc63f97efcfb0c76a6e26fdf923775650af8cd613f50da55c95cbb376";
+const JOURNEY_ID_SHA256: &str = "c5a9f1947a5ecf55898c61414bb39bf753cd236fe33157083994acd63176367f";
+const VECTOR_ID_SHA256: &str = "73491562ae3df3f7ea6729c30834cf3cb134a002ec5d682255277df5e508e73f";
+const FIXTURE_ID_SHA256: &str = "bb8f922cc63f97efcfb0c76a6e26fdf923775650af8cd613f50da55c95cbb376";
 const FIXTURE_PATH_SHA256: &str =
     "d9542095b391dbd44a0f8d855d6cfb87e41b981642430a0de662a2965ad26db0";
 const FIXTURE_PROFILE_ID_SHA256: &str =
@@ -502,9 +495,7 @@ fn compare_record_ids(left: &Value, right: &Value) -> std::cmp::Ordering {
     }
 }
 
-fn canonical_record_projection_sha256(
-    mut records: Vec<(String, String, Value, Value)>,
-) -> String {
+fn canonical_record_projection_sha256(mut records: Vec<(String, String, Value, Value)>) -> String {
     records.sort_by(|left, right| {
         left.0
             .cmp(&right.0)
@@ -555,8 +546,7 @@ fn validate_live_child_file_pins() -> Result<(), String> {
         let source = std::str::from_utf8(&bytes)
             .map_err(|error| format!("{} must be UTF-8: {error}", pin.path))?;
         if sha256_hex(&bytes) != pin.sha256
-            || u64::try_from(bytes.len()).expect("child byte count must fit u64")
-                != pin.byte_count
+            || u64::try_from(bytes.len()).expect("child byte count must fit u64") != pin.byte_count
             || u64::try_from(source.lines().count()).expect("child line count must fit u64")
                 != pin.record_count
         {
@@ -625,11 +615,17 @@ fn validate_aggregate_child_packet_pins(packet: &Value) -> Result<(), String> {
             || text(child, "authority_revision_state") != expected.authority_revision_state
             || text(child, "inventory_state") != expected.inventory_state
         {
-            return Err(format!("{} aggregate child identity drifted", expected.packet_id));
+            return Err(format!(
+                "{} aggregate child identity drifted",
+                expected.packet_id
+            ));
         }
         let files = array(child, "files");
         if files.len() != 3 {
-            return Err(format!("{} must pin exactly three files", expected.packet_id));
+            return Err(format!(
+                "{} must pin exactly three files",
+                expected.packet_id
+            ));
         }
         require_unique_string_field(files, "role", expected.packet_id)?;
         for expected_file in CHILD_FILE_PINS
@@ -684,7 +680,9 @@ fn validate_one_source_pin(
         .expect("source record count must fit u64")
     };
     if unsigned(pin, "record_count") != expected_records {
-        return Err(format!("{stage} source pin record count drifted for {path}"));
+        return Err(format!(
+            "{stage} source pin record count drifted for {path}"
+        ));
     }
     if let Some(byte_count) = pin.get("byte_count").and_then(Value::as_u64)
         && byte_count != u64::try_from(bytes.len()).expect("source byte count must fit u64")
@@ -763,9 +761,8 @@ fn validate_source_pin_rollup(children: &ChildArtifacts) -> Result<(), String> {
         .iter()
         .filter(|(_, rows)| rows.len() > 1)
         .flat_map(|(path, rows)| {
-            rows.iter().map(move |(child, pin_id, hash, _)| {
-                format!("{path}\t{child}\t{pin_id}\t{hash}")
-            })
+            rows.iter()
+                .map(move |(child, pin_id, hash, _)| format!("{path}\t{child}\t{pin_id}\t{hash}"))
         })
         .collect::<Vec<_>>();
     if overlap_pin_rows.len() != 34
@@ -944,8 +941,7 @@ fn validate_definition_census(children: &ChildArtifacts) -> Result<(), String> {
     }
     if sorted_newline_sha256(primary.iter().map(|definition| definition.tuple()))
         != PRIMARY_ID_SHA256
-        || sorted_newline_sha256(core.iter().map(|definition| definition.tuple()))
-            != CORE_ID_SHA256
+        || sorted_newline_sha256(core.iter().map(|definition| definition.tuple())) != CORE_ID_SHA256
         || sorted_newline_sha256(contradictions.iter().map(|definition| definition.tuple()))
             != CONTRADICTION_ID_SHA256
     {
@@ -966,11 +962,8 @@ fn validate_definition_census(children: &ChildArtifacts) -> Result<(), String> {
     if collisions.len() != AUTHORITY_REFERENCE_COUNT {
         return Err("sanctioned raw-ID collision-group count drifted".to_owned());
     }
-    if sorted_newline_sha256(
-        collisions
-            .iter()
-            .map(|group| group[0].raw_id.to_owned()),
-    ) != AUTHORITY_REFERENCE_ID_SHA256
+    if sorted_newline_sha256(collisions.iter().map(|group| group[0].raw_id.to_owned()))
+        != AUTHORITY_REFERENCE_ID_SHA256
     {
         return Err("authority-reference ID set drifted".to_owned());
     }
@@ -1000,7 +993,10 @@ fn validate_definition_census(children: &ChildArtifacts) -> Result<(), String> {
                     "configuration_fields" | "enum_semantics" | "operations" | "callable_helpers"
                 ));
         if !valid {
-            return Err(format!("unsanctioned raw-ID collision for {}", reference.raw_id));
+            return Err(format!(
+                "unsanctioned raw-ID collision for {}",
+                reference.raw_id
+            ));
         }
         authority_mapping.push(format!(
             "{}\t{}\t{}\tK0.3\t{}\t{}",
@@ -1100,7 +1096,10 @@ fn validate_exact_typed_joins(children: &ChildArtifacts) -> Result<(), String> {
             _ => false,
         };
         if !valid {
-            return Err(format!("fixture {} has an invalid typed pin join", text(fixture, "fixture_id")));
+            return Err(format!(
+                "fixture {} has an invalid typed pin join",
+                text(fixture, "fixture_id")
+            ));
         }
         fixture_projection.push(format!(
             "{}\t{}\t{}\t{}",
@@ -1142,8 +1141,7 @@ fn validate_exact_typed_joins(children: &ChildArtifacts) -> Result<(), String> {
         || !fixture_profile_references
             .iter()
             .all(|profile| profile_ids.contains(profile))
-        || sorted_newline_sha256(fixture_profile_projection)
-            != FIXTURE_PROFILE_MAPPING_SHA256
+        || sorted_newline_sha256(fixture_profile_projection) != FIXTURE_PROFILE_MAPPING_SHA256
     {
         return Err("K0.4 fixture classification-profile join drifted".to_owned());
     }
@@ -1152,9 +1150,7 @@ fn validate_exact_typed_joins(children: &ChildArtifacts) -> Result<(), String> {
 
 fn validate_child_coverage_ids(children: &ChildArtifacts) -> Result<(), String> {
     let journeys = ids(array(&children.k0_3, "user_journeys"), "journey_id");
-    if journeys.len() != 15
-        || sorted_newline_sha256(journeys) != JOURNEY_ID_SHA256
-    {
+    if journeys.len() != 15 || sorted_newline_sha256(journeys) != JOURNEY_ID_SHA256 {
         return Err("downstream journey ID set drifted".to_owned());
     }
 
@@ -1175,9 +1171,7 @@ fn validate_child_coverage_ids(children: &ChildArtifacts) -> Result<(), String> 
         }
         vector_ids.extend(ids(rows, "vector_id"));
     }
-    if vector_ids.len() != 36
-        || sorted_newline_sha256(vector_ids) != VECTOR_ID_SHA256
-    {
+    if vector_ids.len() != 36 || sorted_newline_sha256(vector_ids) != VECTOR_ID_SHA256 {
         return Err("K0.4 vector ID set drifted".to_owned());
     }
 
@@ -1194,18 +1188,14 @@ fn validate_child_coverage_ids(children: &ChildArtifacts) -> Result<(), String> 
         array(&children.k0_4, "fixture_classification_profiles"),
         "classification_profile_id",
     );
-    if profiles.len() != 8
-        || sorted_newline_sha256(profiles) != FIXTURE_PROFILE_ID_SHA256
-    {
+    if profiles.len() != 8 || sorted_newline_sha256(profiles) != FIXTURE_PROFILE_ID_SHA256 {
         return Err("K0.4 fixture profile ID set drifted".to_owned());
     }
     let environments = ids(
         array(&children.k0_4, "environment_identities"),
         "environment_id",
     );
-    if environments.len() != 8
-        || sorted_newline_sha256(environments) != ENVIRONMENT_ID_SHA256
-    {
+    if environments.len() != 8 || sorted_newline_sha256(environments) != ENVIRONMENT_ID_SHA256 {
         return Err("K0.4 environment ID set drifted".to_owned());
     }
     Ok(())
@@ -1300,12 +1290,7 @@ fn collect_route_records(children: &ChildArtifacts) -> Vec<(String, String, Valu
     let mut records = Vec::new();
     for (child, artifact, collection, id_field) in [
         ("K0.1", &children.k0_1, "routed_gaps", "gap_id"),
-        (
-            "K0.2",
-            &children.k0_2,
-            "routed_findings",
-            "finding_id",
-        ),
+        ("K0.2", &children.k0_2, "routed_findings", "finding_id"),
         ("K0.3", &children.k0_3, "routed_gaps", "gap_id"),
         ("K0.4", &children.k0_4, "routed_gaps", "gap_id"),
     ] {
@@ -1338,7 +1323,10 @@ fn tracker_ids() -> Result<BTreeSet<String>, String> {
     Ok(ids)
 }
 
-fn validate_gap_routes(children: &ChildArtifacts, tracker: &BTreeSet<String>) -> Result<(), String> {
+fn validate_gap_routes(
+    children: &ChildArtifacts,
+    tracker: &BTreeSet<String>,
+) -> Result<(), String> {
     let row_count = array(&children.k0_1, "routed_gaps").len()
         + array(&children.k0_2, "routed_findings").len()
         + array(&children.k0_3, "routed_gaps").len()
@@ -1346,7 +1334,12 @@ fn validate_gap_routes(children: &ChildArtifacts, tracker: &BTreeSet<String>) ->
     let edges = collect_route_edges(children)?;
     let owners = edges
         .iter()
-        .map(|edge| edge.rsplit_once('\t').expect("route tuple has owner").1.to_owned())
+        .map(|edge| {
+            edge.rsplit_once('\t')
+                .expect("route tuple has owner")
+                .1
+                .to_owned()
+        })
         .collect::<BTreeSet<_>>();
     let child_handoff_owners = expected_set(&[
         "asupersync-dep-p7-kafka-removal-sarszu.1.2",
@@ -1356,10 +1349,7 @@ fn validate_gap_routes(children: &ChildArtifacts, tracker: &BTreeSet<String>) ->
     let internal_handoffs = edges
         .iter()
         .filter(|edge| {
-            let owner = edge
-                .rsplit_once('\t')
-                .expect("route tuple has owner")
-                .1;
+            let owner = edge.rsplit_once('\t').expect("route tuple has owner").1;
             child_handoff_owners.contains(owner)
         })
         .cloned()
@@ -1376,12 +1366,11 @@ fn validate_gap_routes(children: &ChildArtifacts, tracker: &BTreeSet<String>) ->
     {
         return Err("gap route row/edge/owner receipt drifted".to_owned());
     }
-    let missing = owners
-        .difference(tracker)
-        .cloned()
-        .collect::<Vec<_>>();
+    let missing = owners.difference(tracker).cloned().collect::<Vec<_>>();
     if !missing.is_empty() {
-        return Err(format!("gap route owners missing from tracker: {missing:?}"));
+        return Err(format!(
+            "gap route owners missing from tracker: {missing:?}"
+        ));
     }
     Ok(())
 }
@@ -1433,12 +1422,11 @@ fn validate_explicit_unknowns(
     if sorted_newline_sha256(owners.iter().cloned()) != EXPLICIT_UNKNOWN_OWNER_ID_SHA256 {
         return Err("explicit UNKNOWN resolution-owner digest drifted".to_owned());
     }
-    let missing = owners
-        .difference(tracker)
-        .cloned()
-        .collect::<Vec<_>>();
+    let missing = owners.difference(tracker).cloned().collect::<Vec<_>>();
     if !missing.is_empty() {
-        return Err(format!("UNKNOWN resolution owners missing from tracker: {missing:?}"));
+        return Err(format!(
+            "UNKNOWN resolution owners missing from tracker: {missing:?}"
+        ));
     }
     Ok(())
 }
@@ -2137,7 +2125,10 @@ fn validate_aggregate_unknown_disposition(
 
     for selector in array(unknown, "selectors") {
         if !bool_field(selector, "blocking") {
-            return Err(format!("{} must remain blocking", text(selector, "selector_id")));
+            return Err(format!(
+                "{} must remain blocking",
+                text(selector, "selector_id")
+            ));
         }
         for owner_key in ["required_owner", "refresh_owner"] {
             if let Some(owner) = selector.get(owner_key).and_then(Value::as_str)
@@ -2162,11 +2153,10 @@ fn validate_aggregate_unknown_disposition(
     for selector in collect_reduced_unknown_selectors(children) {
         let fields = selector.split('\t').collect::<Vec<_>>();
         let owner = fields[3];
-        if owner != "NO_OWNER"
-            && !route_owners.contains(owner)
-            && !terminal_gates.contains(owner)
-        {
-            return Err(format!("selected UNKNOWN owner {owner} has no route or terminal gate"));
+        if owner != "NO_OWNER" && !route_owners.contains(owner) && !terminal_gates.contains(owner) {
+            return Err(format!(
+                "selected UNKNOWN owner {owner} has no route or terminal gate"
+            ));
         }
     }
     let evidence = find_row(
@@ -2256,9 +2246,7 @@ fn child_claim_records(children: &ChildArtifacts) -> Vec<(String, String, Value,
                     (
                         child.to_owned(),
                         "no_claim_boundaries".to_owned(),
-                        Value::from(
-                            u64::try_from(index).expect("no-claim index must fit in u64"),
-                        ),
+                        Value::from(u64::try_from(index).expect("no-claim index must fit in u64")),
                         row.clone(),
                     )
                 }),
@@ -2494,7 +2482,9 @@ fn validate_docs(doc: &str) -> Result<(), String> {
         "permission to remove or delete",
     ] {
         if !doc.contains(required) {
-            return Err(format!("K0.5 documentation lacks required phrase {required}"));
+            return Err(format!(
+                "K0.5 documentation lacks required phrase {required}"
+            ));
         }
     }
     Ok(())

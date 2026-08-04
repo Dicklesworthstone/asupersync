@@ -20,16 +20,13 @@ const DOC_PATH: &str = "docs/kafka_downstream_user_journey_inventory.md";
 const K0_1_PATH: &str = "artifacts/kafka_capability_inventory_v1.json";
 const K0_2_PATH: &str = "artifacts/kafka_incumbent_semantics_matrix_v1.json";
 const ADR_REGISTRY_PATH: &str = "artifacts/dependency_api_adr_registry_v1.json";
-const ARTIFACT_SHA256: &str =
-    "52f8dc9a2695a170b14c85c9b29b6e60f95e05bd013d3d9db0dab8d94a1ced09";
-const DOC_SHA256: &str =
-    "12ccb95710c004751634d7c41218a0d6855675870b4246ab680aa0eb63d90434";
+const ARTIFACT_SHA256: &str = "52f8dc9a2695a170b14c85c9b29b6e60f95e05bd013d3d9db0dab8d94a1ced09";
+const DOC_SHA256: &str = "12ccb95710c004751634d7c41218a0d6855675870b4246ab680aa0eb63d90434";
 const ARTIFACT_ID: &str = "kafka-downstream-user-journey-inventory-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const BEAD_ID: &str = "asupersync-dep-p7-kafka-removal-sarszu.1.3";
 const REFRESH_BEAD_ID: &str = "asupersync-dep-p7-kafka-removal-sarszu.2.14.1";
-const DOCUMENTATION_OWNER_BEAD_ID: &str =
-    "asupersync-dep-p7-kafka-removal-sarszu.2.10.5";
+const DOCUMENTATION_OWNER_BEAD_ID: &str = "asupersync-dep-p7-kafka-removal-sarszu.2.10.5";
 const BASELINE_REVISION: &str = "ae22e710d87412b38e546b32e9702106619481d5";
 const CAPTURED_DATE_UTC: &str = "2026-08-03";
 const OCCURRENCE_PATH_COUNT: usize = 245;
@@ -208,10 +205,7 @@ fn pin_paths(inventory: &Value) -> BTreeMap<String, String> {
         .collect()
 }
 
-fn local_row_source_is_accounted(
-    row: &Value,
-    pins: &BTreeMap<String, String>,
-) -> bool {
+fn local_row_source_is_accounted(row: &Value, pins: &BTreeMap<String, String>) -> bool {
     match row.get("source_pin_id") {
         Some(Value::String(pin_id)) => pins
             .get(pin_id)
@@ -443,7 +437,9 @@ fn validate_authority_and_policy(inventory: &Value) -> Result<(), String> {
         "migration eligibility",
     ] {
         if !boundary_text.contains(required) {
-            return Err(format!("no-claim boundaries lost required phrase: {required}"));
+            return Err(format!(
+                "no-claim boundaries lost required phrase: {required}"
+            ));
         }
     }
     Ok(())
@@ -503,11 +499,7 @@ fn validate_taxonomies(inventory: &Value) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_state_row(
-    row: &Value,
-    label: &str,
-    taxonomies: &Value,
-) -> Result<(), String> {
+fn validate_state_row(row: &Value, label: &str, taxonomies: &Value) -> Result<(), String> {
     for key in [
         "execution_state",
         "knowledge_state",
@@ -545,29 +537,41 @@ fn validate_state_row(
     if evidence == Some("REAL_BROKER_CAPABLE")
         && !matches!(execution, Some("NOT_RUN") | Some("BLOCKED"))
     {
-        return Err(format!("{label} capability cannot masquerade as broker proof"));
+        return Err(format!(
+            "{label} capability cannot masquerade as broker proof"
+        ));
     }
     if wiring == Some("UNWIRED") && execution != Some("NOT_RUN") {
         return Err(format!("{label} unwired source must remain NOT_RUN"));
     }
     if execution == Some("BLOCKED")
-        && ["blocker", "skip_or_blocker", "limitation", "proof_scope_note"]
-            .iter()
-            .all(|key| row.get(*key).and_then(Value::as_str).is_none_or(str::is_empty))
+        && [
+            "blocker",
+            "skip_or_blocker",
+            "limitation",
+            "proof_scope_note",
+        ]
+        .iter()
+        .all(|key| {
+            row.get(*key)
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+        })
     {
         return Err(format!("{label} BLOCKED state requires a stated blocker"));
     }
-    if disposition == Some("CURRENT") && freshness.is_some_and(|state| state != "CURRENT_SOURCE_PINNED")
+    if disposition == Some("CURRENT")
+        && freshness.is_some_and(|state| state != "CURRENT_SOURCE_PINNED")
     {
         return Err(format!("{label} CURRENT claim is not source-current"));
     }
     if disposition == Some("STALE") && freshness.is_some_and(|state| state != "STALE") {
         return Err(format!("{label} STALE claim has incompatible freshness"));
     }
-    if disposition == Some("HISTORICAL")
-        && freshness.is_some_and(|state| state != "HISTORICAL")
-    {
-        return Err(format!("{label} HISTORICAL claim has incompatible freshness"));
+    if disposition == Some("HISTORICAL") && freshness.is_some_and(|state| state != "HISTORICAL") {
+        return Err(format!(
+            "{label} HISTORICAL claim has incompatible freshness"
+        ));
     }
     Ok(())
 }
@@ -773,7 +777,9 @@ fn validate_local_joins(inventory: &Value) -> Result<(), String> {
         if let Some(consumer_id) = row.get("consumer_id").and_then(Value::as_str)
             && !consumers.contains(consumer_id)
         {
-            return Err(format!("{row_id} references unknown consumer {consumer_id}"));
+            return Err(format!(
+                "{row_id} references unknown consumer {consumer_id}"
+            ));
         }
         let row_journeys = string_set(row, "journey_ids");
         if row_journeys.len() != array(row, "journey_ids").len() {
@@ -818,7 +824,9 @@ fn validate_local_joins(inventory: &Value) -> Result<(), String> {
         )?;
         let local_row_id = text(case, "local_row_id");
         if !local_row_ids.contains(local_row_id) {
-            return Err(format!("{case_id} references unknown local row {local_row_id}"));
+            return Err(format!(
+                "{case_id} references unknown local row {local_row_id}"
+            ));
         }
         let pin_id = text(case, "source_pin_id");
         let expected_path = pin_paths
@@ -854,7 +862,9 @@ fn validate_local_joins(inventory: &Value) -> Result<(), String> {
         }
         let case_journeys = string_set(case, "journey_ids");
         if case_journeys.is_empty() || case_journeys.len() != array(case, "journey_ids").len() {
-            return Err(format!("{case_id} journey references must be nonempty and unique"));
+            return Err(format!(
+                "{case_id} journey references must be nonempty and unique"
+            ));
         }
         for journey in case_journeys {
             if !journeys.contains(&journey) {
@@ -894,7 +904,9 @@ fn validate_local_joins(inventory: &Value) -> Result<(), String> {
         if journey_local_rows.is_empty()
             || journey_local_rows.len() != array(journey, "local_row_ids").len()
         {
-            return Err(format!("{journey_id} local row references must be nonempty and unique"));
+            return Err(format!(
+                "{journey_id} local row references must be nonempty and unique"
+            ));
         }
         for row_id in journey_local_rows {
             if !local_row_ids.contains(&row_id) {
@@ -918,7 +930,9 @@ fn validate_local_joins(inventory: &Value) -> Result<(), String> {
         }
         for case_id in declared_cases {
             if !atomic_case_ids.contains(&case_id) {
-                return Err(format!("{journey_id} references unknown atomic case {case_id}"));
+                return Err(format!(
+                    "{journey_id} references unknown atomic case {case_id}"
+                ));
             }
         }
     }
@@ -937,14 +951,16 @@ fn validate_local_joins(inventory: &Value) -> Result<(), String> {
             return Err(format!("{claim_id} must retain at least one claim path"));
         }
         let claim_pin_ids = string_set(claim, "source_pin_ids");
-        if claim_pin_ids.is_empty()
-            || claim_pin_ids.len() != array(claim, "source_pin_ids").len()
-        {
-            return Err(format!("{claim_id} source pins must be nonempty and unique"));
+        if claim_pin_ids.is_empty() || claim_pin_ids.len() != array(claim, "source_pin_ids").len() {
+            return Err(format!(
+                "{claim_id} source pins must be nonempty and unique"
+            ));
         }
         for pin_id in claim_pin_ids {
             if !pin_ids.contains(&pin_id) {
-                return Err(format!("documentation claim references unknown pin {pin_id}"));
+                return Err(format!(
+                    "documentation claim references unknown pin {pin_id}"
+                ));
             }
             let path = pin_paths
                 .get(&pin_id)
@@ -1034,7 +1050,9 @@ fn validate_profiles_and_cells(inventory: &Value) -> Result<(), String> {
             return Err(format!("{profile_id} must reference known source pins"));
         }
         if text(profile, "execution_state") != "NOT_RUN" {
-            return Err(format!("{profile_id} has no creation-session compile receipt"));
+            return Err(format!(
+                "{profile_id} has no creation-session compile receipt"
+            ));
         }
         let derived_vec = string_vec(profile, "derived_from_profile_ids");
         let derived = derived_vec.iter().cloned().collect::<BTreeSet<_>>();
@@ -1043,7 +1061,9 @@ fn validate_profiles_and_cells(inventory: &Value) -> Result<(), String> {
             || text(profile, "surface_state").is_empty()
             || text(profile, "evidence_class").is_empty()
         {
-            return Err(format!("{profile_id} semantic profile fields must be explicit"));
+            return Err(format!(
+                "{profile_id} semantic profile fields must be explicit"
+            ));
         }
         profile_semantic_tuples.insert(format!(
             "{profile_id}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
@@ -1091,8 +1111,7 @@ fn validate_profiles_and_cells(inventory: &Value) -> Result<(), String> {
     if canonical_k0_1 != expected_k0_1 {
         return Err("canonical K0.1 profile coverage drifted".to_owned());
     }
-    if sorted_newline_sha256(&profile_semantic_tuples)
-        != COMPILATION_PROFILE_SEMANTIC_TUPLE_SHA256
+    if sorted_newline_sha256(&profile_semantic_tuples) != COMPILATION_PROFILE_SEMANTIC_TUPLE_SHA256
     {
         return Err("compilation profile target/cfg/surface/evidence joins drifted".to_owned());
     }
@@ -1202,7 +1221,9 @@ fn validate_profiles_and_cells(inventory: &Value) -> Result<(), String> {
             return Err(format!("{cell_id} must reference known source pins"));
         }
         if text(cell, "execution_state") != "NOT_RUN" || text(cell, "blocker").is_empty() {
-            return Err(format!("{cell_id} must remain blocked on fresh target evidence"));
+            return Err(format!(
+                "{cell_id} must remain blocked on fresh target evidence"
+            ));
         }
         let (_, platform, feature_state, target_ids, surface_state) = expected_cells
             .iter()
@@ -1218,12 +1239,16 @@ fn validate_profiles_and_cells(inventory: &Value) -> Result<(), String> {
             || text(cell, "surface_state") != *surface_state
             || text(cell, "evidence_class") != "COMPILE_ONLY"
         {
-            return Err(format!("{cell_id} platform/feature/target/surface mapping drifted"));
+            return Err(format!(
+                "{cell_id} platform/feature/target/surface mapping drifted"
+            ));
         }
     }
     let state = object(inventory, "feature_platform_evidence_state");
     if state.get("knowledge_state").and_then(Value::as_str) != Some("UNKNOWN")
-        || state.get("linux_real_service_runtime").and_then(Value::as_str)
+        || state
+            .get("linux_real_service_runtime")
+            .and_then(Value::as_str)
             != Some("BLOCKED_EXTERNAL")
         || state.get("no_cross_compile_claim").and_then(Value::as_bool) != Some(true)
         || state.get("no_runtime_claim").and_then(Value::as_bool) != Some(true)
@@ -1347,7 +1372,9 @@ fn validate_canonical_journeys(inventory: &Value) -> Result<(), String> {
             .iter()
             .find(|row| row.get("journey_id").and_then(Value::as_str) == Some(journey_id))
             .ok_or_else(|| format!("missing canonical journey {journey_id}"))?;
-        if journey.get("canonical_source_pin_id").and_then(Value::as_str)
+        if journey
+            .get("canonical_source_pin_id")
+            .and_then(Value::as_str)
             != Some("KAFKA-K0-3-PIN-API-ADR-REGISTRY")
             || string_vec(journey, "ordered_public_entry_points")
                 != expected_entries
@@ -1540,9 +1567,7 @@ fn validate_evidence_and_external(inventory: &Value) -> Result<(), String> {
         ),
     ]
     .into_iter()
-    .map(|(id, class, execution, freshness, contact)| {
-        (id, (class, execution, freshness, contact))
-    })
+    .map(|(id, class, execution, freshness, contact)| (id, (class, execution, freshness, contact)))
     .collect::<BTreeMap<_, _>>();
     for evidence in evidence_claims {
         let evidence_id = text(evidence, "evidence_id");
@@ -1586,7 +1611,9 @@ fn validate_evidence_and_external(inventory: &Value) -> Result<(), String> {
             || text(evidence, "result_summary").is_empty()
             || text(evidence, "limitation").is_empty()
         {
-            return Err(format!("{evidence_id} evidence distinction or receipt boundary drifted"));
+            return Err(format!(
+                "{evidence_id} evidence distinction or receipt boundary drifted"
+            ));
         }
     }
     if evidence_claims
@@ -1667,7 +1694,9 @@ fn validate_evidence_and_external(inventory: &Value) -> Result<(), String> {
             || text(row, "resolution_gate").is_empty()
             || text(row, "resolution_owner_bead").is_empty()
         {
-            return Err(format!("{unknown_id} must remain owned and migration-blocking"));
+            return Err(format!(
+                "{unknown_id} must remain owned and migration-blocking"
+            ));
         }
     }
     for row in array(inventory, "routed_gaps") {
@@ -1689,9 +1718,18 @@ fn validate_handoff_and_receipt(inventory: &Value) -> Result<(), String> {
             .get("baseline_counts_authoritative_at_claim_time")
             .and_then(Value::as_bool)
             != Some(false)
-        || handoff.get("unknown_blocks_migration").and_then(Value::as_bool) != Some(true)
-        || handoff.get("regression_blocks_migration").and_then(Value::as_bool) != Some(true)
-        || handoff.get("may_authorize_deletion").and_then(Value::as_bool) != Some(false)
+        || handoff
+            .get("unknown_blocks_migration")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || handoff
+            .get("regression_blocks_migration")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || handoff
+            .get("may_authorize_deletion")
+            .and_then(Value::as_bool)
+            != Some(false)
     {
         return Err("K14.1 handoff drifted".to_owned());
     }
@@ -1952,8 +1990,7 @@ fn validate_handoff_and_receipt(inventory: &Value) -> Result<(), String> {
         .count();
     if missing_k0_1 != 9 || missing_k0_2 != 22 || real_broker_without_receipt != 15 {
         return Err(
-            "K0 call-coverage gaps or real-broker-capable atomic case count drifted"
-                .to_owned(),
+            "K0 call-coverage gaps or real-broker-capable atomic case count drifted".to_owned(),
         );
     }
     let documentation_scope = inventory
@@ -1961,13 +1998,22 @@ fn validate_handoff_and_receipt(inventory: &Value) -> Result<(), String> {
         .unwrap_or_else(|| panic!("documentation_claim_scope must exist"));
     let numeric_receipts = [
         ("baseline_occurrence_path_count", OCCURRENCE_PATH_COUNT),
-        ("occurrence_disposition_group_count", occurrence_groups.len()),
-        ("local_row_referenced_path_count", disposition_count("LOCAL_ROW_REFERENCED")),
+        (
+            "occurrence_disposition_group_count",
+            occurrence_groups.len(),
+        ),
+        (
+            "local_row_referenced_path_count",
+            disposition_count("LOCAL_ROW_REFERENCED"),
+        ),
         (
             "documentation_claim_referenced_path_count",
             disposition_count("DOCUMENTATION_CLAIM_REFERENCED"),
         ),
-        ("call_site_referenced_path_count", disposition_count("CALL_SITE_REFERENCED")),
+        (
+            "call_site_referenced_path_count",
+            disposition_count("CALL_SITE_REFERENCED"),
+        ),
         (
             "non_consumer_dispositioned_path_count",
             disposition_count("NON_CONSUMER_DISPOSITIONED"),
@@ -1982,7 +2028,10 @@ fn validate_handoff_and_receipt(inventory: &Value) -> Result<(), String> {
             DOCUMENTATION_ACTUAL_SURFACE_COUNT,
         ),
         ("documentation_claim_virtual_surface_count", 1),
-        ("documentation_claim_surface_count", DOCUMENTATION_SURFACE_COUNT),
+        (
+            "documentation_claim_surface_count",
+            DOCUMENTATION_SURFACE_COUNT,
+        ),
         (
             "documentation_claim_literal_occurrence_count",
             DOCUMENTATION_OCCURRENCE_COUNT,
@@ -2078,7 +2127,9 @@ fn validate_handoff_and_receipt(inventory: &Value) -> Result<(), String> {
     if documentation_scope
         .get("literal_occurrence_count")
         .and_then(Value::as_u64)
-        != receipt.get("documentation_claim_literal_occurrence_count").and_then(Value::as_u64)
+        != receipt
+            .get("documentation_claim_literal_occurrence_count")
+            .and_then(Value::as_u64)
     {
         return Err("documentation receipt/source scope count drifted".to_owned());
     }
@@ -2138,7 +2189,10 @@ fn validate_handoff_and_receipt(inventory: &Value) -> Result<(), String> {
             unmapped_k0_1_profiles.is_empty() && mapped_profiles.len() == expected_profiles.len(),
         ),
         ("all_k0_2_semantics_dispositioned_by_exact_join_rule", true),
-        ("all_user_journeys_mapped", unmapped_user_journeys.is_empty()),
+        (
+            "all_user_journeys_mapped",
+            unmapped_user_journeys.is_empty(),
+        ),
         ("local_static_scope_complete", local_static_complete),
         ("inventory_receipt_complete", local_static_complete),
         ("migration_eligible", false),
@@ -2164,18 +2218,26 @@ fn validate_handoff_and_receipt(inventory: &Value) -> Result<(), String> {
         || receipt
             .get("local_static_scope_definition")
             .and_then(Value::as_str)
-            != Some("the exact 245-path five-tier occurrence partition, 936 named declarations across exact test and tokio::test attributes, 16 atomic overrides, 1,363-node candidate call-site grammar, and 8,636-occurrence documentation-claim identity and ownership partition are complete; 266 call-site candidates are explicit exclusions and 8,599 documentation occurrences remain semantically UNKNOWN")
+            != Some(
+                "the exact 245-path five-tier occurrence partition, 936 named declarations across exact test and tokio::test attributes, 16 atomic overrides, 1,363-node candidate call-site grammar, and 8,636-occurrence documentation-claim identity and ownership partition are complete; 266 call-site candidates are explicit exclusions and 8,599 documentation occurrences remain semantically UNKNOWN",
+            )
         || receipt
             .get("test_declaration_classification_rule")
             .and_then(Value::as_str)
-            != Some("every named exact #[test] or #[tokio::test] declaration inherits its exact path-and-source-pin group classification unless that group lists its case ID as an atomic override")
+            != Some(
+                "every named exact #[test] or #[tokio::test] declaration inherits its exact path-and-source-pin group classification unless that group lists its case ID as an atomic override",
+            )
         || receipt
             .get("contract_source_execution_claimed")
             .and_then(Value::as_bool)
             != Some(false)
-        || receipt.get("creation_session_validation_mode").and_then(Value::as_str)
+        || receipt
+            .get("creation_session_validation_mode")
+            .and_then(Value::as_str)
             != Some("STATIC_INSPECTION_ONLY")
-        || receipt.get("contract_execution_evidence").and_then(Value::as_str)
+        || receipt
+            .get("contract_execution_evidence")
+            .and_then(Value::as_str)
             != Some("NOT_RECORDED_IN_THIS_ARTIFACT")
     {
         return Err("static honesty receipt drifted".to_owned());
@@ -2246,7 +2308,10 @@ fn validate_baseline_occurrence_paths(inventory: &Value) -> Result<(), String> {
 
     if scope.get("scope_basis").and_then(Value::as_str) != Some("BASELINE_GIT_TREE_RECEIPT")
         || scope.get("baseline_revision").and_then(Value::as_str) != Some(BASELINE_REVISION)
-        || scope.get("current_worktree_claimed").and_then(Value::as_bool) != Some(false)
+        || scope
+            .get("current_worktree_claimed")
+            .and_then(Value::as_bool)
+            != Some(false)
     {
         return Err("search scope must remain an immutable baseline-tree receipt".to_owned());
     }
@@ -2318,18 +2383,12 @@ fn validate_occurrence_disposition_groups(inventory: &Value) -> Result<(), Strin
         "occurrence disposition groups",
     )?;
     let expected_dispositions = [
-        (
-            "KAFKA-K0-3-OCCURRENCE-GROUP-001",
-            "LOCAL_ROW_REFERENCED",
-        ),
+        ("KAFKA-K0-3-OCCURRENCE-GROUP-001", "LOCAL_ROW_REFERENCED"),
         (
             "KAFKA-K0-3-OCCURRENCE-GROUP-002",
             "DOCUMENTATION_CLAIM_REFERENCED",
         ),
-        (
-            "KAFKA-K0-3-OCCURRENCE-GROUP-003",
-            "CALL_SITE_REFERENCED",
-        ),
+        ("KAFKA-K0-3-OCCURRENCE-GROUP-003", "CALL_SITE_REFERENCED"),
         (
             "KAFKA-K0-3-OCCURRENCE-GROUP-004",
             "NON_CONSUMER_DISPOSITIONED",
@@ -2599,9 +2658,7 @@ fn validate_documentation_claim_census(inventory: &Value) -> Result<(), String> 
                 let occurrence_id = format!(
                     "KAFKA-K0-3-DOC-OCC-{surface_ordinal:03}-L{line_number:06}-M{match_ordinal:03}"
                 );
-                occurrence_tuples.push(format!(
-                    "{path}\t{line_number}\t{match_ordinal}"
-                ));
+                occurrence_tuples.push(format!("{path}\t{line_number}\t{match_ordinal}"));
                 occurrence_path.insert(occurrence_id.clone(), path.clone());
                 occurrence_ids_by_surface
                     .entry(surface_ordinal)
@@ -2629,9 +2686,7 @@ fn validate_documentation_claim_census(inventory: &Value) -> Result<(), String> 
         "documentation_claim_scope.actual_candidate_extension_counts",
     )?;
     for (extension, count) in &expected_extensions {
-        if declared_extensions
-            .get(extension)
-            .and_then(Value::as_u64)
+        if declared_extensions.get(extension).and_then(Value::as_u64)
             != Some(count_u64(*count, "documentation extension"))
         {
             return Err(format!(
@@ -2707,7 +2762,9 @@ fn validate_documentation_claim_census(inventory: &Value) -> Result<(), String> 
             != "CURATED_CLAIM_PROJECTION_ONLY when the surface has a canonical projection and no set-difference remainder; CURATED_AND_OWNED_UNRESOLVED_CLAIMS when it has both; otherwise OWNED_UNRESOLVED_CLAIM_SURFACE"
         || text(derivation, "owner_bead") != DOCUMENTATION_OWNER_BEAD_ID
         || text(derivation, "refresh_owner_bead") != REFRESH_BEAD_ID
-        || derivation.get("derived_surface_count").and_then(Value::as_u64)
+        || derivation
+            .get("derived_surface_count")
+            .and_then(Value::as_u64)
             != Some(count_u64(candidate_paths.len(), "documentation surfaces"))
         || text(derivation, "derived_surface_id_path_tuple_sha256")
             != DOCUMENTATION_ACTUAL_SURFACE_TUPLE_SHA256
@@ -2756,7 +2813,10 @@ fn validate_documentation_claim_census(inventory: &Value) -> Result<(), String> 
         || text(virtual_surface, "absence_anchor")
             != "baseline revision + search_scope roots entry examples + search_scope matcher; no tracked candidate path or non-binary content occurrence"
         || text(virtual_surface, "source_pin_digest_token") != "EXACT_BASELINE_ABSENCE"
-        || virtual_surface.get("occurrence_count").and_then(Value::as_u64) != Some(0)
+        || virtual_surface
+            .get("occurrence_count")
+            .and_then(Value::as_u64)
+            != Some(0)
         || text(virtual_surface, "occurrence_id_list_sha256") != sha256_hex(b"")
         || text(virtual_surface, "owner_bead") != DOCUMENTATION_OWNER_BEAD_ID
         || text(virtual_surface, "refresh_owner_bead") != REFRESH_BEAD_ID
@@ -2767,9 +2827,8 @@ fn validate_documentation_claim_census(inventory: &Value) -> Result<(), String> 
         return Err("documentation virtual absence surface drifted".to_owned());
     }
     surface_tuples.push("KAFKA-K0-3-DOC-SURFACE-150\texamples/".to_owned());
-    source_pin_tuples.push(
-        "KAFKA-K0-3-DOC-SURFACE-150\texamples/\tEXACT_BASELINE_ABSENCE".to_owned(),
-    );
+    source_pin_tuples
+        .push("KAFKA-K0-3-DOC-SURFACE-150\texamples/\tEXACT_BASELINE_ABSENCE".to_owned());
     if newline_sha256(&surface_tuples) != DOCUMENTATION_SURFACE_TUPLE_SHA256
         || newline_sha256(&source_pin_tuples) != DOCUMENTATION_SOURCE_PIN_TUPLE_SHA256
     {
@@ -2806,8 +2865,7 @@ fn validate_documentation_claim_census(inventory: &Value) -> Result<(), String> 
         ],
         "documentation canonical group inheritance",
     )?;
-    if text(canonical_inheritance, "classification")
-        != "CANONICAL_DOCUMENTATION_CLAIM_PROJECTION"
+    if text(canonical_inheritance, "classification") != "CANONICAL_DOCUMENTATION_CLAIM_PROJECTION"
         || text(canonical_inheritance, "owner_join_rule")
             != "documentation_claims row with matching claim_id supplies owner_bead"
         || text(canonical_inheritance, "semantic_state_join_rule")
@@ -2858,7 +2916,9 @@ fn validate_documentation_claim_census(inventory: &Value) -> Result<(), String> 
                 .get(&id)
                 .ok_or_else(|| format!("{group_id} references unknown occurrence {id}"))?;
             if !claim_paths.contains(path) || !canonical_id_set.insert(id.clone()) {
-                return Err(format!("{group_id} occurrence path or disjointness drifted"));
+                return Err(format!(
+                    "{group_id} occurrence path or disjointness drifted"
+                ));
             }
             canonical_ids.push(id);
         }
@@ -2884,13 +2944,10 @@ fn validate_documentation_claim_census(inventory: &Value) -> Result<(), String> 
             .filter(|id| !canonical_id_set.contains(id))
             .collect::<Vec<_>>();
         if remainder.is_empty() {
-            zero_remainder_surface_ids.insert(format!(
-                "KAFKA-K0-3-DOC-SURFACE-{surface_ordinal:03}"
-            ));
+            zero_remainder_surface_ids
+                .insert(format!("KAFKA-K0-3-DOC-SURFACE-{surface_ordinal:03}"));
         } else {
-            remainder_group_ids.push(format!(
-                "KAFKA-K0-3-DOC-OCC-GROUP-R{surface_ordinal:03}"
-            ));
+            remainder_group_ids.push(format!("KAFKA-K0-3-DOC-OCC-GROUP-R{surface_ordinal:03}"));
             remainder_ids.extend(remainder);
         }
     }
@@ -2929,12 +2986,10 @@ fn validate_documentation_claim_census(inventory: &Value) -> Result<(), String> 
         || string_set(derived, "zero_remainder_surface_ids") != zero_remainder_surface_ids
         || derived.get("derived_group_count").and_then(Value::as_u64)
             != Some(count_u64(remainder_group_ids.len(), "remainder groups"))
-        || text(derived, "derived_group_id_list_sha256")
-            != DOCUMENTATION_REMAINDER_GROUP_SHA256
+        || text(derived, "derived_group_id_list_sha256") != DOCUMENTATION_REMAINDER_GROUP_SHA256
         || derived.get("occurrence_count").and_then(Value::as_u64)
             != Some(count_u64(remainder_ids.len(), "remainder occurrences"))
-        || text(derived, "occurrence_id_list_sha256")
-            != DOCUMENTATION_REMAINDER_ID_SHA256
+        || text(derived, "occurrence_id_list_sha256") != DOCUMENTATION_REMAINDER_ID_SHA256
         || text(derived, "classification") != "OWNED_UNRESOLVED_CLAIM"
         || text(derived, "semantic_state") != "UNKNOWN"
         || text(derived, "evidence_class") != "NON_BROKER_STATIC_IDENTITY_ONLY"
@@ -2979,37 +3034,64 @@ fn validate_documentation_claim_census(inventory: &Value) -> Result<(), String> 
         partition,
         "canonical_and_remainder_union_equals_all_literal_occurrences",
     ) || !bool_field(partition, "canonical_claim_reverse_join_is_bijective")
-        || partition.get("expected_union_occurrence_count").and_then(Value::as_u64)
-            != Some(count_u64(occurrence_ids.len(), "documentation partition union"))
+        || partition
+            .get("expected_union_occurrence_count")
+            .and_then(Value::as_u64)
+            != Some(count_u64(
+                occurrence_ids.len(),
+                "documentation partition union",
+            ))
         || text(partition, "expected_union_occurrence_id_list_sha256")
             != DOCUMENTATION_OCCURRENCE_ID_SHA256
-        || partition.get("expected_group_count").and_then(Value::as_u64)
-            != Some(count_u64(canonical_group_ids.len(), "documentation partition groups"))
-        || text(partition, "expected_group_id_list_sha256")
-            != DOCUMENTATION_GROUP_ID_SHA256
+        || partition
+            .get("expected_group_count")
+            .and_then(Value::as_u64)
+            != Some(count_u64(
+                canonical_group_ids.len(),
+                "documentation partition groups",
+            ))
+        || text(partition, "expected_group_id_list_sha256") != DOCUMENTATION_GROUP_ID_SHA256
     {
         return Err("documentation occurrence partition receipt drifted".to_owned());
     }
 
     for (key, expected) in [
-        ("actual_candidate_surface_count", DOCUMENTATION_ACTUAL_SURFACE_COUNT),
+        (
+            "actual_candidate_surface_count",
+            DOCUMENTATION_ACTUAL_SURFACE_COUNT,
+        ),
         ("virtual_surface_count", 1),
         ("total_surface_count", DOCUMENTATION_SURFACE_COUNT),
         ("literal_occurrence_count", occurrence_ids.len()),
         ("matching_line_count", line_tuples.len()),
-        ("canonical_documentation_claim_count", canonical_groups.len()),
-        ("canonical_projection_occurrence_count", canonical_id_set.len()),
+        (
+            "canonical_documentation_claim_count",
+            canonical_groups.len(),
+        ),
+        (
+            "canonical_projection_occurrence_count",
+            canonical_id_set.len(),
+        ),
         ("owned_unresolved_occurrence_count", remainder_ids.len()),
         ("occurrence_group_count", canonical_group_ids.len()),
-        ("source_pin_count_for_actual_candidate_surfaces", candidate_paths.len()),
+        (
+            "source_pin_count_for_actual_candidate_surfaces",
+            candidate_paths.len(),
+        ),
     ] {
         if scope.get(key).and_then(Value::as_u64) != Some(count_u64(expected, key)) {
             return Err(format!("documentation_claim_scope.{key} is not derived"));
         }
     }
     for (key, expected) in [
-        ("actual_candidate_path_list_sha256", DOCUMENTATION_PATH_SHA256),
-        ("surface_id_path_tuple_sha256", DOCUMENTATION_SURFACE_TUPLE_SHA256),
+        (
+            "actual_candidate_path_list_sha256",
+            DOCUMENTATION_PATH_SHA256,
+        ),
+        (
+            "surface_id_path_tuple_sha256",
+            DOCUMENTATION_SURFACE_TUPLE_SHA256,
+        ),
         (
             "surface_id_path_source_pin_tuple_sha256",
             DOCUMENTATION_SOURCE_PIN_TUPLE_SHA256,
@@ -3022,7 +3104,10 @@ fn validate_documentation_claim_census(inventory: &Value) -> Result<(), String> 
             "matching_line_locator_tuple_sha256",
             DOCUMENTATION_LINE_TUPLE_SHA256,
         ),
-        ("occurrence_id_list_sha256", DOCUMENTATION_OCCURRENCE_ID_SHA256),
+        (
+            "occurrence_id_list_sha256",
+            DOCUMENTATION_OCCURRENCE_ID_SHA256,
+        ),
         (
             "canonical_projection_occurrence_id_list_sha256",
             DOCUMENTATION_CANONICAL_ID_SHA256,
@@ -3031,7 +3116,10 @@ fn validate_documentation_claim_census(inventory: &Value) -> Result<(), String> 
             "owned_unresolved_occurrence_id_list_sha256",
             DOCUMENTATION_REMAINDER_ID_SHA256,
         ),
-        ("occurrence_group_id_list_sha256", DOCUMENTATION_GROUP_ID_SHA256),
+        (
+            "occurrence_group_id_list_sha256",
+            DOCUMENTATION_GROUP_ID_SHA256,
+        ),
     ] {
         if scope.get(key).and_then(Value::as_str) != Some(expected) {
             return Err(format!("documentation_claim_scope.{key} drifted"));
@@ -3065,9 +3153,7 @@ fn literal_test_declarations(path: &str) -> Result<BTreeSet<TestDeclaration>, St
         };
         if let Some(attribute_kind) = attribute_kind {
             if pending_test_attribute.is_some() {
-                return Err(format!(
-                    "{path} has consecutive unresolved test attributes"
-                ));
+                return Err(format!("{path} has consecutive unresolved test attributes"));
             }
             pending_test_attribute = Some((
                 attribute_kind,
@@ -3113,8 +3199,7 @@ fn literal_test_declarations(path: &str) -> Result<BTreeSet<TestDeclaration>, St
         }
         let line_number = u64::try_from(index + 1)
             .map_err(|error| format!("{path} test line overflow: {error}"))?;
-        let explicit_attribute_line =
-            (attribute_kind == "tokio::test").then_some(attribute_line);
+        let explicit_attribute_line = (attribute_kind == "tokio::test").then_some(attribute_line);
         if !declarations.insert((
             name.clone(),
             line_number,
@@ -3162,8 +3247,7 @@ fn validate_test_declaration_groups(inventory: &Value) -> Result<(), String> {
         ],
         "test_declaration_scope",
     )?;
-    if text(declaration_scope, "scope_id")
-        != "KAFKA-K0-3-TEST-DECLARATION-CENSUS-001"
+    if text(declaration_scope, "scope_id") != "KAFKA-K0-3-TEST-DECLARATION-CENSUS-001"
         || text(declaration_scope, "baseline_revision") != BASELINE_REVISION
         || string_set(declaration_scope, "included_attribute_kinds")
             != expected_set(&["test", "tokio::test"])
@@ -3195,21 +3279,14 @@ fn validate_test_declaration_groups(inventory: &Value) -> Result<(), String> {
         .collect::<BTreeSet<_>>();
     let group_path_pins = groups
         .iter()
-        .map(|group| {
-            format!(
-                "{}\t{}",
-                text(group, "path"),
-                text(group, "source_pin_id")
-            )
-        })
+        .map(|group| format!("{}\t{}", text(group, "path"), text(group, "source_pin_id")))
         .collect::<BTreeSet<_>>();
     if groups.len() != TEST_DECLARATION_GROUP_COUNT
         || scope_pin_ids.len() != TEST_DECLARATION_GROUP_COUNT
         || group_pin_ids != scope_pin_ids
         || group_paths.len() != groups.len()
         || sorted_newline_sha256(&group_paths) != TEST_DECLARATION_GROUP_PATH_SHA256
-        || sorted_newline_sha256(&group_path_pins)
-            != TEST_DECLARATION_GROUP_PATH_PIN_SHA256
+        || sorted_newline_sha256(&group_path_pins) != TEST_DECLARATION_GROUP_PATH_PIN_SHA256
     {
         return Err("test declaration scope/group set drifted".to_owned());
     }
@@ -3235,11 +3312,15 @@ fn validate_test_declaration_groups(inventory: &Value) -> Result<(), String> {
         )?;
         let pin_id = text(group, "source_pin_id");
         if pins.get(pin_id).map(String::as_str) != Some(path) {
-            return Err(format!("test declaration group {path} does not match {pin_id}"));
+            return Err(format!(
+                "test declaration group {path} does not match {pin_id}"
+            ));
         }
         require_owner(group, path)?;
         if text(group, "refresh_owner_bead") != REFRESH_BEAD_ID {
-            return Err(format!("test declaration group {path} lost its refresh owner"));
+            return Err(format!(
+                "test declaration group {path} lost its refresh owner"
+            ));
         }
         let mut declared = BTreeSet::new();
         for test in array(group, "tests") {
@@ -3264,9 +3345,7 @@ fn validate_test_declaration_groups(inventory: &Value) -> Result<(), String> {
                     .get("attribute_line")
                     .and_then(Value::as_u64)
                     .ok_or_else(|| format!("{path}::{name} lacks its attribute line"))?;
-                tokio_tuples.insert(format!(
-                    "{path}\t{attribute_line}\ttokio::test\t{name}"
-                ));
+                tokio_tuples.insert(format!("{path}\t{attribute_line}\ttokio::test\t{name}"));
                 Some(attribute_line)
             } else if attribute_kind == "test" {
                 exact_test_count += 1;
@@ -3285,7 +3364,9 @@ fn validate_test_declaration_groups(inventory: &Value) -> Result<(), String> {
                 return Err(format!("{path} has a duplicate or empty test declaration"));
             }
             if !atomic_test_ids.insert(format!("{path}::{name}")) {
-                return Err(format!("duplicate stable test declaration ID {path}::{name}"));
+                return Err(format!(
+                    "duplicate stable test declaration ID {path}::{name}"
+                ));
             }
         }
         let live = literal_test_declarations(path)?;
@@ -3327,9 +3408,9 @@ fn validate_test_declaration_groups(inventory: &Value) -> Result<(), String> {
     ]);
     let mut source_required_test_paths = BTreeSet::new();
     for call_group in array(inventory, "call_site_groups") {
-        let has_relevant_candidate = array(call_group, "atomic_sites").iter().any(|site| {
-            source_relevant_resolutions.contains(text(site, "resolution_state"))
-        });
+        let has_relevant_candidate = array(call_group, "atomic_sites")
+            .iter()
+            .any(|site| source_relevant_resolutions.contains(text(site, "resolution_state")));
         if has_relevant_candidate {
             let path = text(call_group, "path");
             if !literal_test_declarations(path)?.is_empty() {
@@ -3337,12 +3418,10 @@ fn validate_test_declaration_groups(inventory: &Value) -> Result<(), String> {
             }
         }
     }
-    if source_required_test_paths.len() != 20
-        || !source_required_test_paths.is_subset(&group_paths)
+    if source_required_test_paths.len() != 20 || !source_required_test_paths.is_subset(&group_paths)
     {
         return Err(
-            "every test-bearing resolved or unresolved call-site path must be declared"
-                .to_owned(),
+            "every test-bearing resolved or unresolved call-site path must be declared".to_owned(),
         );
     }
 
@@ -3356,7 +3435,9 @@ fn validate_test_declaration_groups(inventory: &Value) -> Result<(), String> {
             text(case, "path"),
             text(case, "test_name")
         )) {
-            return Err(format!("{case_id} duplicates an atomic test classification"));
+            return Err(format!(
+                "{case_id} duplicates an atomic test classification"
+            ));
         }
         if !declarations_by_path
             .get(text(case, "path"))
@@ -3366,15 +3447,15 @@ fn validate_test_declaration_groups(inventory: &Value) -> Result<(), String> {
                     .any(|(name, line, _, _)| name == expected_name && *line == expected_line)
             })
         {
-            return Err(format!("{case_id} does not anchor an exact test declaration"));
+            return Err(format!(
+                "{case_id} does not anchor an exact test declaration"
+            ));
         }
     }
     Ok(())
 }
 
-fn validate_test_declaration_group_classifications(
-    inventory: &Value,
-) -> Result<(), String> {
+fn validate_test_declaration_group_classifications(inventory: &Value) -> Result<(), String> {
     let groups = array(inventory, "test_declaration_groups");
     let group_keys = groups
         .iter()
@@ -3462,7 +3543,9 @@ fn validate_test_declaration_group_classifications(
         if overrides.len() != array(row, "atomic_case_ids").len()
             || !overrides.is_subset(&atomic_case_ids)
         {
-            return Err(format!("{path} atomic overrides must be unique known cases"));
+            return Err(format!(
+                "{path} atomic overrides must be unique known cases"
+            ));
         }
         let expected_overrides = atomic_cases
             .iter()
@@ -3470,11 +3553,15 @@ fn validate_test_declaration_group_classifications(
             .map(|case| text(case, "case_id").to_owned())
             .collect::<BTreeSet<_>>();
         if overrides != expected_overrides {
-            return Err(format!("{path} atomic overrides do not match same-path cases"));
+            return Err(format!(
+                "{path} atomic overrides do not match same-path cases"
+            ));
         }
         for case_id in overrides {
             if classified_atomic_cases.contains(&case_id) {
-                return Err(format!("atomic override {case_id} is classified more than once"));
+                return Err(format!(
+                    "atomic override {case_id} is classified more than once"
+                ));
             }
             classified_atomic_cases.insert(case_id);
         }
@@ -3538,7 +3625,10 @@ fn validate_call_site_locator(
     }
 
     if let Some(rest) = locator.strip_prefix("bytes ") {
-        if matches!(kind, "TRAIT_METHOD_PROJECTION" | "CONTEXT_INFERRED_DEFAULT_CALL") {
+        if matches!(
+            kind,
+            "TRAIT_METHOD_PROJECTION" | "CONTEXT_INFERRED_DEFAULT_CALL"
+        ) {
             return Err(format!(
                 "{site_id} trait projection must use a line/ordinal locator"
             ));
@@ -3561,8 +3651,7 @@ fn validate_call_site_locator(
             .split_once(':')
             .ok_or_else(|| format!("{site_id} end position is malformed"))?;
         let start_line = parse_usize_field(start_line, &format!("{site_id} start line"))?;
-        let start_column =
-            parse_usize_field(start_column, &format!("{site_id} start column"))?;
+        let start_column = parse_usize_field(start_column, &format!("{site_id} start column"))?;
         let end_line = parse_usize_field(end_line, &format!("{site_id} end line"))?;
         let end_column = parse_usize_field(end_column, &format!("{site_id} end column"))?;
         if start >= end || end > source.len() {
@@ -3595,9 +3684,7 @@ fn validate_call_site_locator(
             "STRUCT_LITERAL_CONSTRUCTION" => format!("{token} {{...}}"),
             _ => return Err(format!("{site_id} cannot use a byte locator")),
         };
-        let expected_id = format!(
-            "KAFKA-K0-3-CS-{group_ordinal:03}-{kind_code}-B{start}-E{end}"
-        );
+        let expected_id = format!("KAFKA-K0-3-CS-{group_ordinal:03}-{kind_code}-B{start}-E{end}");
         if literal != expected_literal || site_id != expected_id {
             return Err(format!(
                 "{site_id} byte locator, stable ID, or source literal drifted"
@@ -3617,20 +3704,18 @@ fn validate_call_site_locator(
         .ok_or_else(|| format!("{site_id} line occurrence locator is malformed"))?;
     let line = parse_usize_field(line, &format!("{site_id} line"))?;
     let occurrence = parse_usize_field(occurrence, &format!("{site_id} occurrence"))?;
-    if line == 0 || occurrence == 0 || call_site_kind_code(kind).is_none()
-    {
-        return Err(format!("{site_id} line/ordinal locator has an invalid domain"));
+    if line == 0 || occurrence == 0 || call_site_kind_code(kind).is_none() {
+        return Err(format!(
+            "{site_id} line/ordinal locator has an invalid domain"
+        ));
     }
     if literal != callee
-        || locator
-            != format!(
-                "line {line}; callee {callee}; same-line occurrence {occurrence}"
-            )
+        || locator != format!("line {line}; callee {callee}; same-line occurrence {occurrence}")
     {
         return Err(format!("{site_id} line locator and literal disagree"));
     }
-    let source = std::str::from_utf8(source)
-        .map_err(|error| format!("{path} is not UTF-8: {error}"))?;
+    let source =
+        std::str::from_utf8(source).map_err(|error| format!("{path} is not UTF-8: {error}"))?;
     let source_line = source
         .lines()
         .nth(line - 1)
@@ -3659,12 +3744,10 @@ fn validate_call_site_locator(
                         .all(|character| character.is_ascii_alphanumeric() || character == '_')
             })
             .map(str::to_owned),
-        "TRAIT_METHOD_PROJECTION" if source_token.starts_with('.') => source_token
-            .strip_prefix('.')
-            .map(str::to_owned),
-        "TRAIT_METHOD_PROJECTION" | "ASSOCIATED_CALL" => {
-            Some(source_token.replace("::", "_"))
+        "TRAIT_METHOD_PROJECTION" if source_token.starts_with('.') => {
+            source_token.strip_prefix('.').map(str::to_owned)
         }
+        "TRAIT_METHOD_PROJECTION" | "ASSOCIATED_CALL" => Some(source_token.replace("::", "_")),
         "FREE_FUNCTION_CALL" | "STRUCT_LITERAL_CONSTRUCTION" => source_token
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || character == '_')
@@ -3746,9 +3829,7 @@ fn provider_candidate_tuples(
             let bytes = line.as_bytes();
             let mut emit = |kind: &str, token: String, count: usize| {
                 for ordinal in 1..=count {
-                    tuples.insert(format!(
-                        "{kind}\t{path}\t{line_number}\t{token}\t{ordinal}"
-                    ));
+                    tuples.insert(format!("{kind}\t{path}\t{line_number}\t{token}\t{ordinal}"));
                     *kind_counts.entry(kind.to_owned()).or_default() += 1;
                 }
             };
@@ -3762,8 +3843,7 @@ fn provider_candidate_tuples(
                     }
                     let identifier_start = start + prefix.len();
                     let mut identifier_end = identifier_start;
-                    while identifier_end < bytes.len()
-                        && is_identifier_byte(bytes[identifier_end])
+                    while identifier_end < bytes.len() && is_identifier_byte(bytes[identifier_end])
                     {
                         identifier_end += 1;
                     }
@@ -3775,10 +3855,8 @@ fn provider_candidate_tuples(
                         suffix += 1;
                     }
                     if suffix < bytes.len() && bytes[suffix] == b'(' {
-                        let token = format!(
-                            "{type_token}::{}",
-                            &line[identifier_start..identifier_end]
-                        );
+                        let token =
+                            format!("{type_token}::{}", &line[identifier_start..identifier_end]);
                         *tokens.entry(token).or_default() += 1;
                     }
                 }
@@ -3822,11 +3900,7 @@ fn provider_candidate_tuples(
                         !line[..*start].trim_end().ends_with("->")
                     })
                     .count();
-                emit(
-                    "STRUCT_LITERAL_CONSTRUCTION",
-                    type_token.clone(),
-                    positions,
-                );
+                emit("STRUCT_LITERAL_CONSTRUCTION", type_token.clone(), positions);
             }
             emit(
                 "INFERRED_DEFAULT_CALL",
@@ -3856,10 +3930,7 @@ fn provider_candidate_tuples(
     Ok((tuples, kind_counts))
 }
 
-fn validate_downstream_helper_receipt(
-    inventory: &Value,
-    receipt: &Value,
-) -> Result<(), String> {
+fn validate_downstream_helper_receipt(inventory: &Value, receipt: &Value) -> Result<(), String> {
     require_exact_keys(
         receipt,
         &[
@@ -3891,9 +3962,9 @@ fn validate_downstream_helper_receipt(
             .unwrap_or_else(|| panic!("search_scope must exist")),
         "baseline_occurrence_paths",
     )
-        .into_iter()
-        .filter(|path| path.ends_with(".rs") && !excluded.contains(path))
-        .collect::<BTreeSet<_>>();
+    .into_iter()
+    .filter(|path| path.ends_with(".rs") && !excluded.contains(path))
+    .collect::<BTreeSet<_>>();
     let mut tuples = BTreeSet::new();
     for path in paths {
         for (line_index, line) in read_repo_file(&path).lines().enumerate() {
@@ -3901,9 +3972,7 @@ fn validate_downstream_helper_receipt(
             for helper in &helper_tokens {
                 let count = call_token_positions(line, helper, true).len();
                 for ordinal in 1..=count {
-                    tuples.insert(format!(
-                        "{path}\t{line_number}\t{helper}\t{ordinal}"
-                    ));
+                    tuples.insert(format!("{path}\t{line_number}\t{helper}\t{ordinal}"));
                 }
             }
         }
@@ -4155,8 +4224,18 @@ fn validate_call_site_scope_and_groups(inventory: &Value) -> Result<(), String> 
         return Err("provider declaration exclusion regions drifted".to_owned());
     }
     for (row, path, excluded, included) in [
-        (&provider_exclusions[0], "src/messaging/kafka.rs", "lines 1-2724", "lines 2725-4335"),
-        (&provider_exclusions[1], "src/messaging/kafka_consumer.rs", "lines 1-1672", "lines 1673-2757"),
+        (
+            &provider_exclusions[0],
+            "src/messaging/kafka.rs",
+            "lines 1-2724",
+            "lines 2725-4335",
+        ),
+        (
+            &provider_exclusions[1],
+            "src/messaging/kafka_consumer.rs",
+            "lines 1-1672",
+            "lines 1673-2757",
+        ),
     ] {
         require_exact_keys(
             row,
@@ -4188,10 +4267,8 @@ fn validate_call_site_scope_and_groups(inventory: &Value) -> Result<(), String> 
     let mut binding_resolved_instance_sites = 0_usize;
     let mut lexical_binding_overlap = 0_usize;
     let mut unmatched_lexical_instance_candidates = 0_usize;
-    let provider_paths = expected_set(&[
-        "src/messaging/kafka.rs",
-        "src/messaging/kafka_consumer.rs",
-    ]);
+    let provider_paths =
+        expected_set(&["src/messaging/kafka.rs", "src/messaging/kafka_consumer.rs"]);
     let mut provider_site_tuples = BTreeSet::new();
     let mut provider_resolution_counts = BTreeMap::<String, usize>::new();
 
@@ -4235,7 +4312,9 @@ fn validate_call_site_scope_and_groups(inventory: &Value) -> Result<(), String> 
             || text(group, "evidence_class") == "REAL_BROKER_RECEIPT"
             || !allowed_group_dispositions.contains(text(group, "call_site_disposition"))
         {
-            return Err(format!("{group_id} ownership or static classification drifted"));
+            return Err(format!(
+                "{group_id} ownership or static classification drifted"
+            ));
         }
         let sites = array(group, "atomic_sites");
         if sites.is_empty() {
@@ -4310,7 +4389,9 @@ fn validate_call_site_scope_and_groups(inventory: &Value) -> Result<(), String> 
             if k0_2.len() != array(site, "k0_2_semantic_ids").len()
                 || !k0_2.is_subset(&semantic_ids)
             {
-                return Err(format!("{site_id} K0.2 references must be unique and known"));
+                return Err(format!(
+                    "{site_id} K0.2 references must be unique and known"
+                ));
             }
             let no_k0_2_reason = site.get("no_k0_2_reason");
             if (k0_2.is_empty()
@@ -4373,9 +4454,7 @@ fn validate_call_site_scope_and_groups(inventory: &Value) -> Result<(), String> 
                 Some("UNRESOLVED_STALE_SURFACE") => {
                     ("UNRESOLVED_STALE_SURFACE", "UNRESOLVED_STALE_SURFACE")
                 }
-                Some("EXCLUDED_PATTERN_ONLY") => {
-                    ("EXCLUDED_PATTERN_ONLY", "EXCLUDED_PATTERN_ONLY")
-                }
+                Some("EXCLUDED_PATTERN_ONLY") => ("EXCLUDED_PATTERN_ONLY", "EXCLUDED_PATTERN_ONLY"),
                 Some("EXCLUDED_COMMENT_OR_STRING") => {
                     ("EXCLUDED_COMMENT_OR_STRING", "EXCLUDED_COMMENT_OR_STRING")
                 }
@@ -4548,7 +4627,13 @@ fn validate_call_site_scope_and_groups(inventory: &Value) -> Result<(), String> 
         return Err("provider test scanner region count drifted".to_owned());
     }
     for (row, path, first, last, count) in [
-        (&regions[0], "src/messaging/kafka.rs", 2_725_u64, 4_335_u64, 341_u64),
+        (
+            &regions[0],
+            "src/messaging/kafka.rs",
+            2_725_u64,
+            4_335_u64,
+            341_u64,
+        ),
         (
             &regions[1],
             "src/messaging/kafka_consumer.rs",
@@ -4570,8 +4655,7 @@ fn validate_call_site_scope_and_groups(inventory: &Value) -> Result<(), String> 
             return Err(format!("provider scanner region {path} drifted"));
         }
     }
-    let (provider_tuples, provider_kind_counts) =
-        provider_candidate_tuples(provider_receipt)?;
+    let (provider_tuples, provider_kind_counts) = provider_candidate_tuples(provider_receipt)?;
     let expected_provider_kind_counts = [
         ("ASSOCIATED_CANDIDATE", 254_usize),
         ("FREE_FUNCTION_CALL", 5),
@@ -4595,13 +4679,14 @@ fn validate_call_site_scope_and_groups(inventory: &Value) -> Result<(), String> 
     .collect::<BTreeMap<_, _>>();
     if provider_tuples.len() != 635
         || provider_site_tuples != provider_tuples
-        || sorted_newline_sha256(&provider_tuples)
-            != PROVIDER_TEST_CANDIDATE_TUPLE_SHA256
+        || sorted_newline_sha256(&provider_tuples) != PROVIDER_TEST_CANDIDATE_TUPLE_SHA256
         || provider_kind_counts != expected_provider_kind_counts
         || provider_resolution_counts != expected_provider_resolution_counts
-        || provider_receipt.get("candidate_count").and_then(Value::as_u64) != Some(635)
-        || text(provider_receipt, "tuple_sha256")
-            != PROVIDER_TEST_CANDIDATE_TUPLE_SHA256
+        || provider_receipt
+            .get("candidate_count")
+            .and_then(Value::as_u64)
+            != Some(635)
+        || text(provider_receipt, "tuple_sha256") != PROVIDER_TEST_CANDIDATE_TUPLE_SHA256
     {
         return Err("provider test candidate source census drifted".to_owned());
     }
@@ -4699,7 +4784,9 @@ fn validate_call_site_scope_and_groups(inventory: &Value) -> Result<(), String> 
                 actual.get(name).and_then(Value::as_u64) != Some(count_u64(*count, name))
             })
         {
-            return Err(format!("call_site_scope.derived_counts.{key} is not derived"));
+            return Err(format!(
+                "call_site_scope.derived_counts.{key} is not derived"
+            ));
         }
     }
     Ok(())
@@ -4771,7 +4858,9 @@ fn validate_k0_disposition_table(
             || !bool_field(row, "synthesis_required")
             || text(row, "owner_bead") != REFRESH_BEAD_ID
         {
-            return Err(format!("{id} lost its exact K14 preserve-and-recheck disposition"));
+            return Err(format!(
+                "{id} lost its exact K14 preserve-and-recheck disposition"
+            ));
         }
 
         let local = string_set(row, "local_row_ids");
@@ -4793,7 +4882,9 @@ fn validate_k0_disposition_table(
             "UNKNOWN"
         };
         if text(row, "usage_knowledge_state") != expected_state {
-            return Err(format!("{id} usage knowledge does not match its references"));
+            return Err(format!(
+                "{id} usage knowledge does not match its references"
+            ));
         }
         local_references.insert(id.to_owned(), local);
         atomic_references.insert(id.to_owned(), atomic);
@@ -4801,10 +4892,7 @@ fn validate_k0_disposition_table(
     Ok((local_references, atomic_references))
 }
 
-fn reverse_references(
-    references: &ReferenceMap,
-    referenced_id: &str,
-) -> BTreeSet<String> {
+fn reverse_references(references: &ReferenceMap, referenced_id: &str) -> BTreeSet<String> {
     references
         .iter()
         .filter(|(_, ids)| ids.contains(referenced_id))
@@ -4863,9 +4951,7 @@ fn validate_k0_dispositions(inventory: &Value) -> Result<(), String> {
             .get("k0_1_public_symbol_id_set_sha256")
             .and_then(Value::as_str)
             != Some(K0_1_SYMBOL_MAP_SHA256)
-        || joins
-            .get("k0_2_semantic_row_count")
-            .and_then(Value::as_u64)
+        || joins.get("k0_2_semantic_row_count").and_then(Value::as_u64)
             != Some(
                 u64::try_from(K0_2_SEMANTIC_COUNT)
                     .unwrap_or_else(|error| panic!("K0.2 semantic count overflow: {error}")),
@@ -4874,11 +4960,10 @@ fn validate_k0_dispositions(inventory: &Value) -> Result<(), String> {
             .get("k0_2_semantic_id_set_sha256")
             .and_then(Value::as_str)
             != Some(K0_2_SEMANTIC_MAP_SHA256)
+        || joins.get("default_gap_owner_bead").and_then(Value::as_str) != Some(REFRESH_BEAD_ID)
         || joins
-            .get("default_gap_owner_bead")
+            .get("public_symbol_usage_rule")
             .and_then(Value::as_str)
-            != Some(REFRESH_BEAD_ID)
-        || joins.get("public_symbol_usage_rule").and_then(Value::as_str)
             != Some(
                 "every K0.1 ID is preserved and rechecked at K14; references record only proven local observations, while empty references remain UNKNOWN and require synthesis",
             )
@@ -4967,17 +5052,19 @@ fn all_source_pins_match_live_bytes_and_record_counts() {
             expected_count,
             "{pin_id} record count drifted"
         );
-        assert_eq!(sha256_hex(&bytes), text(pin, "sha256"), "{pin_id} hash drifted");
+        assert_eq!(
+            sha256_hex(&bytes),
+            text(pin, "sha256"),
+            "{pin_id} hash drifted"
+        );
     }
 }
 
 #[test]
 fn baseline_occurrence_receipt_is_explicitly_and_exhaustively_dispositioned() {
     let inventory = artifact();
-    validate_baseline_occurrence_paths(&inventory)
-        .unwrap_or_else(|error| panic!("{error}"));
-    validate_occurrence_disposition_groups(&inventory)
-        .unwrap_or_else(|error| panic!("{error}"));
+    validate_baseline_occurrence_paths(&inventory).unwrap_or_else(|error| panic!("{error}"));
+    validate_occurrence_disposition_groups(&inventory).unwrap_or_else(|error| panic!("{error}"));
 }
 
 #[test]
@@ -4993,11 +5080,15 @@ fn k0_1_public_symbols_and_k0_2_semantics_are_exactly_joined() {
 
     let joins = object(&inventory, "coverage_joins");
     assert_eq!(
-        joins.get("k0_1_public_symbol_count").and_then(Value::as_u64),
+        joins
+            .get("k0_1_public_symbol_count")
+            .and_then(Value::as_u64),
         Some(30)
     );
     assert_eq!(
-        joins.get("k0_1_public_symbol_id_set_sha256").and_then(Value::as_str),
+        joins
+            .get("k0_1_public_symbol_id_set_sha256")
+            .and_then(Value::as_str),
         Some(K0_1_SYMBOL_MAP_SHA256)
     );
     assert_eq!(
@@ -5005,7 +5096,9 @@ fn k0_1_public_symbols_and_k0_2_semantics_are_exactly_joined() {
         Some(97)
     );
     assert_eq!(
-        joins.get("k0_2_semantic_id_set_sha256").and_then(Value::as_str),
+        joins
+            .get("k0_2_semantic_id_set_sha256")
+            .and_then(Value::as_str),
         Some(K0_2_SEMANTIC_MAP_SHA256)
     );
 }
@@ -5020,8 +5113,7 @@ fn test_declaration_scope_and_atomic_cases_are_exactly_pinned() {
 
 #[test]
 fn documentation_claim_identity_ownership_and_partition_are_source_derived() {
-    validate_documentation_claim_census(&artifact())
-        .unwrap_or_else(|error| panic!("{error}"));
+    validate_documentation_claim_census(&artifact()).unwrap_or_else(|error| panic!("{error}"));
 }
 
 #[test]
@@ -5059,7 +5151,10 @@ fn companion_document_and_packet_bytes_are_pinned() {
         TOKIO_TEST_DECLARATION_TUPLE_SHA256,
         "provides no permission to remove",
     ] {
-        assert!(doc.contains(phrase), "documentation phrase missing: {phrase}");
+        assert!(
+            doc.contains(phrase),
+            "documentation phrase missing: {phrase}"
+        );
     }
 }
 
@@ -5101,8 +5196,7 @@ fn fail_closed_mutations_are_rejected() {
     assert!(validate_handoff_and_receipt(&missing_handoff).is_err());
 
     let mut self_attested_incomplete = inventory.clone();
-    self_attested_incomplete["coverage_receipt"]["inventory_receipt_complete"] =
-        Value::Bool(false);
+    self_attested_incomplete["coverage_receipt"]["inventory_receipt_complete"] = Value::Bool(false);
     assert!(validate_handoff_and_receipt(&self_attested_incomplete).is_err());
 
     let mut migration_promoted = inventory.clone();
@@ -5110,8 +5204,8 @@ fn fail_closed_mutations_are_rejected() {
     assert!(validate_handoff_and_receipt(&migration_promoted).is_err());
 
     let mut inherited_count_drift = inventory.clone();
-    inherited_count_drift["coverage_receipt"]
-        ["test_declarations_with_inherited_group_classification"] = Value::from(919_u64);
+    inherited_count_drift["coverage_receipt"]["test_declarations_with_inherited_group_classification"] =
+        Value::from(919_u64);
     assert!(validate_handoff_and_receipt(&inherited_count_drift).is_err());
 }
 
@@ -5131,8 +5225,8 @@ fn baseline_partition_and_test_census_mutations_are_rejected() {
     assert!(validate_baseline_occurrence_paths(&live_claim).is_err());
 
     let mut duplicate_disposition = inventory.clone();
-    let duplicate_path = duplicate_disposition["occurrence_disposition_groups"][0]["paths"][0]
-        .clone();
+    let duplicate_path =
+        duplicate_disposition["occurrence_disposition_groups"][0]["paths"][0].clone();
     duplicate_disposition["occurrence_disposition_groups"][1]["paths"]
         .as_array_mut()
         .unwrap_or_else(|| panic!("occurrence group paths must be an array"))
@@ -5157,8 +5251,8 @@ fn baseline_partition_and_test_census_mutations_are_rejected() {
     assert!(validate_test_declaration_groups(&atomic_anchor_drift).is_err());
 
     let mut tokio_attribute_line_drift = inventory.clone();
-    tokio_attribute_line_drift["test_declaration_groups"][32]["tests"][0]
-        ["attribute_line"] = Value::from(1_u64);
+    tokio_attribute_line_drift["test_declaration_groups"][32]["tests"][0]["attribute_line"] =
+        Value::from(1_u64);
     assert!(validate_test_declaration_groups(&tokio_attribute_line_drift).is_err());
 
     let mut test_scope_rule_drift = inventory.clone();
@@ -5171,9 +5265,7 @@ fn baseline_partition_and_test_census_mutations_are_rejected() {
         .as_array_mut()
         .unwrap_or_else(|| panic!("test_declaration_group_classifications must be an array"))
         .pop();
-    assert!(
-        validate_test_declaration_group_classifications(&classification_removed).is_err()
-    );
+    assert!(validate_test_declaration_group_classifications(&classification_removed).is_err());
 
     let mut cross_path_override = inventory.clone();
     cross_path_override["test_declaration_group_classifications"][0]["atomic_case_ids"]
@@ -5188,28 +5280,28 @@ fn documentation_and_call_site_receipt_mutations_are_rejected() {
     let inventory = artifact();
 
     let mut virtual_sentinel_drift = inventory.clone();
-    virtual_sentinel_drift["documentation_claim_surfaces"]["virtual_surfaces"][0]
-        ["source_pin_digest_token"] = Value::String("ABSENT".to_owned());
+    virtual_sentinel_drift["documentation_claim_surfaces"]["virtual_surfaces"][0]["source_pin_digest_token"] =
+        Value::String("ABSENT".to_owned());
     assert!(validate_documentation_claim_census(&virtual_sentinel_drift).is_err());
 
     let mut documentation_owner_removed = inventory.clone();
-    documentation_owner_removed["documentation_claim_occurrence_groups"]
-        ["derived_remainder_groups"]["owner_bead"] = Value::Null;
+    documentation_owner_removed["documentation_claim_occurrence_groups"]["derived_remainder_groups"]
+        ["owner_bead"] = Value::Null;
     assert!(validate_documentation_claim_census(&documentation_owner_removed).is_err());
 
     let mut extension_count_drift = inventory.clone();
-    extension_count_drift["documentation_claim_scope"]
-        ["actual_candidate_extension_counts"]["md"] = Value::from(89_u64);
+    extension_count_drift["documentation_claim_scope"]["actual_candidate_extension_counts"]["md"] =
+        Value::from(89_u64);
     assert!(validate_documentation_claim_census(&extension_count_drift).is_err());
 
     let mut provider_region_drift = inventory.clone();
-    provider_region_drift["call_site_scope"]["provider_test_candidate_receipt"]
-        ["regions"][0]["first_line"] = Value::from(2_724_u64);
+    provider_region_drift["call_site_scope"]["provider_test_candidate_receipt"]["regions"][0]["first_line"] =
+        Value::from(2_724_u64);
     assert!(validate_call_site_scope_and_groups(&provider_region_drift).is_err());
 
     let mut helper_digest_drift = inventory.clone();
-    helper_digest_drift["call_site_scope"]["downstream_helper_call_receipt"]
-        ["tuple_sha256"] = Value::String("0".repeat(64));
+    helper_digest_drift["call_site_scope"]["downstream_helper_call_receipt"]["tuple_sha256"] =
+        Value::String("0".repeat(64));
     assert!(validate_call_site_scope_and_groups(&helper_digest_drift).is_err());
 }
 
@@ -5250,13 +5342,11 @@ fn disposition_owner_journey_and_state_mutations_are_rejected() {
     assert!(validate_profiles_and_cells(&profile_owner_removed).is_err());
 
     let mut profile_cfg_drift = inventory.clone();
-    profile_cfg_drift["compilation_profiles"][0]["cfg"] =
-        Value::String("feature=kafka".to_owned());
+    profile_cfg_drift["compilation_profiles"][0]["cfg"] = Value::String("feature=kafka".to_owned());
     assert!(validate_profiles_and_cells(&profile_cfg_drift).is_err());
 
     let mut cell_pins_removed = inventory.clone();
-    cell_pins_removed["feature_platform_cells"][0]["source_pin_ids"] =
-        Value::Array(Vec::new());
+    cell_pins_removed["feature_platform_cells"][0]["source_pin_ids"] = Value::Array(Vec::new());
     assert!(validate_profiles_and_cells(&cell_pins_removed).is_err());
 
     let mut cell_target_drift = inventory.clone();

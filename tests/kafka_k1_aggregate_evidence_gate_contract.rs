@@ -147,9 +147,21 @@ const SHADOW_CLASS_MAPPING_SHA256: &str =
     "8c2562a4b3b09ca575b7e5a4163725dfc6a99bf12553bf84317020fec673c4ac";
 
 const PROJECTION_SCOPES: [(&str, &str, &str); 17] = [
-    ("authority_input_projection_sha256", "/authority_inputs", "ROW_SET_V1"),
-    ("child_receipt_projection_sha256", "/child_packet_receipts", "ROW_SET_V1"),
-    ("lineage_conflict_projection_sha256", "/lineage_and_conflict_ledger", "VALUE_V1"),
+    (
+        "authority_input_projection_sha256",
+        "/authority_inputs",
+        "ROW_SET_V1",
+    ),
+    (
+        "child_receipt_projection_sha256",
+        "/child_packet_receipts",
+        "ROW_SET_V1",
+    ),
+    (
+        "lineage_conflict_projection_sha256",
+        "/lineage_and_conflict_ledger",
+        "VALUE_V1",
+    ),
     (
         "obligation_partition_projection_sha256",
         "/cross_child_join_model/obligation_partitions",
@@ -170,24 +182,56 @@ const PROJECTION_SCOPES: [(&str, &str, &str); 17] = [
         "/capability_evidence_contract",
         "VALUE_V1",
     ),
-    ("capability_route_projection_sha256", "/capability_routes", "ROW_SET_V1"),
+    (
+        "capability_route_projection_sha256",
+        "/capability_routes",
+        "ROW_SET_V1",
+    ),
     (
         "feature_coexistence_mode_projection_sha256",
         "/feature_coexistence_modes",
         "ROW_SET_V1",
     ),
-    ("feature_profile_projection_sha256", "/feature_profile_contract", "VALUE_V1"),
-    ("shadow_class_projection_sha256", "/shadow_classes", "ROW_SET_V1"),
-    ("shadow_policy_summary_projection_sha256", "/shadow_operations", "ROW_SET_V1"),
+    (
+        "feature_profile_projection_sha256",
+        "/feature_profile_contract",
+        "VALUE_V1",
+    ),
+    (
+        "shadow_class_projection_sha256",
+        "/shadow_classes",
+        "ROW_SET_V1",
+    ),
+    (
+        "shadow_policy_summary_projection_sha256",
+        "/shadow_operations",
+        "ROW_SET_V1",
+    ),
     (
         "shadow_semantic_partition_projection_sha256",
         "/shadow_semantic_operation_partition",
         "VALUE_V1",
     ),
-    ("stop_condition_projection_sha256", "/stop_conditions", "ROW_SET_V1"),
-    ("rollback_contract_projection_sha256", "/rollback_contract", "VALUE_V1"),
-    ("approval_projection_sha256", "/approval_gates", "ROW_SET_V1"),
-    ("no_claim_boundary_sha256", "/no_claim_boundaries", "STRING_SET_V1"),
+    (
+        "stop_condition_projection_sha256",
+        "/stop_conditions",
+        "ROW_SET_V1",
+    ),
+    (
+        "rollback_contract_projection_sha256",
+        "/rollback_contract",
+        "VALUE_V1",
+    ),
+    (
+        "approval_projection_sha256",
+        "/approval_gates",
+        "ROW_SET_V1",
+    ),
+    (
+        "no_claim_boundary_sha256",
+        "/no_claim_boundaries",
+        "STRING_SET_V1",
+    ),
 ];
 
 struct Inputs {
@@ -296,7 +340,9 @@ fn expect_set(actual: &[Value], expected: &[&str], label: &str) -> Result<(), St
         .map(|value| (*value).to_owned())
         .collect::<BTreeSet<_>>();
     if actual != expected {
-        return Err(format!("{label} drift: expected {expected:?}, got {actual:?}"));
+        return Err(format!(
+            "{label} drift: expected {expected:?}, got {actual:?}"
+        ));
     }
     Ok(())
 }
@@ -351,8 +397,10 @@ fn canonical_value_sha256(value: &Value) -> Result<String, String> {
 
 fn validate_file_pin(root: &Path, row: &Value) -> Result<(), String> {
     let path = text(row, "path")?;
-    let bytes = fs::read(root.join(path)).map_err(|error| format!("failed to read {path}: {error}"))?;
-    let content = std::str::from_utf8(&bytes).map_err(|error| format!("{path} is not UTF-8: {error}"))?;
+    let bytes =
+        fs::read(root.join(path)).map_err(|error| format!("failed to read {path}: {error}"))?;
+    let content =
+        std::str::from_utf8(&bytes).map_err(|error| format!("{path} is not UTF-8: {error}"))?;
     if bytes.len() != count(row, "byte_count")?
         || content.lines().count() != count(row, "record_count")?
         || sha256(&bytes) != text(row, "sha256")?
@@ -366,8 +414,7 @@ fn validate_identity_and_inputs(inputs: &Inputs, artifact: &Value) -> Result<(),
     if count(artifact, "schema_version")? != 1
         || text(artifact, "artifact_id")? != "kafka-k1-aggregate-evidence-gate-v1"
         || text(artifact, "program_id")? != "asupersync-ir2uf0"
-        || text(artifact, "bead_id")?
-            != "asupersync-dep-p7-kafka-removal-sarszu.2.1.5"
+        || text(artifact, "bead_id")? != "asupersync-dep-p7-kafka-removal-sarszu.2.1.5"
         || text(artifact, "capability_id")? != "CAP-KAFKA"
         || text(artifact, "adr_id")? != "DEP-ADR-009"
     {
@@ -409,7 +456,8 @@ fn validate_identity_and_inputs(inputs: &Inputs, artifact: &Value) -> Result<(),
             .iter()
             .find(|row| row.get("input_id").and_then(Value::as_str) == Some(input_id))
             .ok_or_else(|| format!("missing exact direct input {input_id}"))?;
-        if text(row, "stage")? != stage || text(row, "role")? != role || text(row, "path")? != path {
+        if text(row, "stage")? != stage || text(row, "role")? != role || text(row, "path")? != path
+        {
             return Err(format!("direct input identity drift: {input_id}"));
         }
     }
@@ -501,7 +549,10 @@ fn validate_conflicts_and_obligations(inputs: &Inputs, artifact: &Value) -> Resu
     let rows = array(ledger, "rows")?;
     if rows.len() != 4
         || count(ledger, "observed_cross_child_reconciliation_conflict_count")? != 4
-        || count(ledger, "unresolved_cross_child_reconciliation_conflict_count")? != 0
+        || count(
+            ledger,
+            "unresolved_cross_child_reconciliation_conflict_count",
+        )? != 0
         || count(ledger, "preserved_child_blocker_count")? != 5
         || flag(ledger, "identity_consistency_claimed")?
     {
@@ -511,8 +562,7 @@ fn validate_conflicts_and_obligations(inputs: &Inputs, artifact: &Value) -> Resu
         .iter()
         .filter(|row| row.get("blocks_migration").and_then(Value::as_bool) == Some(true))
         .count();
-    if migration_blockers != 2
-        || count(ledger, "migration_blocking_reconciliation_row_count")? != 2
+    if migration_blockers != 2 || count(ledger, "migration_blocking_reconciliation_row_count")? != 2
     {
         return Err("migration-blocking reconciliation count drift".to_owned());
     }
@@ -568,8 +618,7 @@ fn validate_conflicts_and_obligations(inputs: &Inputs, artifact: &Value) -> Resu
     let sibling_pin = rows
         .iter()
         .find(|row| {
-            row.get("conflict_id").and_then(Value::as_str)
-                == Some("K1-5-CONFLICT-002-SIBLING-PIN")
+            row.get("conflict_id").and_then(Value::as_str) == Some("K1-5-CONFLICT-002-SIBLING-PIN")
         })
         .ok_or_else(|| "missing sibling-pin conflict".to_owned())?;
     if count(sibling_pin, "semantic_reference_count")? != 0
@@ -586,7 +635,11 @@ fn validate_conflicts_and_obligations(inputs: &Inputs, artifact: &Value) -> Resu
     }
     expect_set(
         array(source_owner, "current_registry_source_owners")?,
-        &["Cargo.toml", "src/messaging/kafka.rs", "src/messaging/kafka_consumer.rs"],
+        &[
+            "Cargo.toml",
+            "src/messaging/kafka.rs",
+            "src/messaging/kafka_consumer.rs",
+        ],
         "CAP-KAFKA source owners",
     )?;
     let child_conflicts = &inputs.children["K1.3"]["authority_conflicts"];
@@ -663,7 +716,11 @@ fn validate_conflicts_and_obligations(inputs: &Inputs, artifact: &Value) -> Resu
         (
             "K1.4",
             "asupersync-dep-p7-kafka-removal-sarszu.2.1.4",
-            &["KAFKA-K1-SHARED-003", "KAFKA-K1-SHARED-010", "KAFKA-K1-SHARED-012"],
+            &[
+                "KAFKA-K1-SHARED-003",
+                "KAFKA-K1-SHARED-010",
+                "KAFKA-K1-SHARED-012",
+            ],
         ),
     ];
     let mut split = Vec::new();
@@ -675,7 +732,11 @@ fn validate_conflicts_and_obligations(inputs: &Inputs, artifact: &Value) -> Resu
         if text(row, "policy_owner")? != owner || count(row, "row_count")? != expected_ids.len() {
             return Err(format!("shared policy owner/count drift for {stage}"));
         }
-        expect_set(array(row, "obligation_ids")?, expected_ids, "shared policy split IDs")?;
+        expect_set(
+            array(row, "obligation_ids")?,
+            expected_ids,
+            "shared policy split IDs",
+        )?;
         let row_ids = string_set(array(row, "obligation_ids")?, "shared split IDs")?;
         split.extend(row_ids);
     }
@@ -707,12 +768,18 @@ fn validate_semantic_resource_join(inputs: &Inputs, artifact: &Value) -> Result<
     {
         return Err("97-to-43/26/28 semantic classification drift".to_owned());
     }
-    let receipt = &artifact["cross_child_join_model"]
-        ["k1_3_k1_4_semantic_resource_lifecycle_join"];
+    let receipt = &artifact["cross_child_join_model"]["k1_3_k1_4_semantic_resource_lifecycle_join"];
     let semantic_id_sha256 = sorted_newline_sha256(all_ids.clone());
     let classification_sha256 = canonical_rows_sha256(classifications)?;
-    if semantic_id_sha256 != text(&inputs.children["K1.3"]["semantic_contract"], "semantic_id_set_sha256")?
-        || count(&inputs.children["K1.3"]["semantic_contract"], "semantic_row_count")? != all_ids.len()
+    if semantic_id_sha256
+        != text(
+            &inputs.children["K1.3"]["semantic_contract"],
+            "semantic_id_set_sha256",
+        )?
+        || count(
+            &inputs.children["K1.3"]["semantic_contract"],
+            "semantic_row_count",
+        )? != all_ids.len()
         || classification_sha256 != text(coverage, "classification_projection_sha256")?
         || classification_sha256 != text(receipt, "classification_projection_sha256")?
         || count(coverage, "classified_row_count")? != all_ids.len()
@@ -768,7 +835,11 @@ fn validate_semantic_resource_join(inputs: &Inputs, artifact: &Value) -> Result<
     let mut seen_lifecycle = BTreeSet::new();
     let mut context_refs = 0usize;
     for (kind, rows, id_key) in [
-        ("resource", array(&inputs.children["K1.4"], "resource_classes")?, "resource_id"),
+        (
+            "resource",
+            array(&inputs.children["K1.4"], "resource_classes")?,
+            "resource_id",
+        ),
         (
             "lifecycle",
             array(&inputs.children["K1.4"], "lifecycle_operations")?,
@@ -816,7 +887,10 @@ fn validate_semantic_resource_join(inputs: &Inputs, artifact: &Value) -> Result<
         || count(receipt, "duplicate_semantic_count")? != 0
         || count(receipt, "config_to_resource_edge_count")? != 61
         || count(receipt, "lifecycle_semantic_target_edge_count")? != 119
-        || count(receipt, "context_direct_resource_or_lifecycle_reference_count")? != 0
+        || count(
+            receipt,
+            "context_direct_resource_or_lifecycle_reference_count",
+        )? != 0
         || text(receipt, "join_state")? != "EXACT_DISJOINT_EXHAUSTIVE_STATIC_JOIN"
     {
         return Err("semantic-resource-lifecycle receipt drift".to_owned());
@@ -830,10 +904,13 @@ fn overlay_set(overlay: &Value, key: &str, expected: &[&str]) -> Result<(), Stri
 
 fn validate_bindings(inputs: &Inputs, artifact: &Value) -> Result<(), String> {
     let adjudication = &artifact["semantic_binding_adjudication"];
-    let allowed = object(&inputs.children["K1.1"]["protocol_binding_model"], "allowed_kinds")?
-        .keys()
-        .cloned()
-        .collect::<BTreeSet<_>>();
+    let allowed = object(
+        &inputs.children["K1.1"]["protocol_binding_model"],
+        "allowed_kinds",
+    )?
+    .keys()
+    .cloned()
+    .collect::<BTreeSet<_>>();
     if allowed
         != BTreeSet::from([
             "ABSENT_GAP".to_owned(),
@@ -843,8 +920,10 @@ fn validate_bindings(inputs: &Inputs, artifact: &Value) -> Result<(), String> {
             "MESSAGE_SET".to_owned(),
             "REFERENCE_ONLY".to_owned(),
         ])
-        || string_set(array(adjudication, "allowed_binding_kinds")?, "allowed binding kinds")?
-            != allowed
+        || string_set(
+            array(adjudication, "allowed_binding_kinds")?,
+            "allowed binding kinds",
+        )? != allowed
     {
         return Err("binding kind allowset drift".to_owned());
     }
@@ -915,11 +994,15 @@ fn validate_bindings(inputs: &Inputs, artifact: &Value) -> Result<(), String> {
             .iter()
             .find(|row| row.get("cell_id").and_then(Value::as_str) == Some(binding))
             .ok_or_else(|| format!("overlay has unknown binding {binding}"))?;
-        if string_set(array(overlay, "superseded_authority_rows")?, "superseded rows")?
-            != string_set(array(child, "authority_rows")?, "child authority rows")?
+        if string_set(
+            array(overlay, "superseded_authority_rows")?,
+            "superseded rows",
+        )? != string_set(array(child, "authority_rows")?, "child authority rows")?
             || array(overlay, "message_names")? != array(child, "message_names")?
         {
-            return Err(format!("superseded membership or message-name drift for {binding}"));
+            return Err(format!(
+                "superseded membership or message-name drift for {binding}"
+            ));
         }
         let mut categorized_rows = Vec::new();
         for key in [
@@ -947,8 +1030,12 @@ fn validate_bindings(inputs: &Inputs, artifact: &Value) -> Result<(), String> {
                     overlay,
                     "config_mapping_rows",
                     &[
-                        "KCO-CFG-006", "KCO-CFG-009", "KCO-CFG-010", "KCO-CFG-011",
-                        "KCO-CFG-012", "KCO-CFG-013",
+                        "KCO-CFG-006",
+                        "KCO-CFG-009",
+                        "KCO-CFG-010",
+                        "KCO-CFG-011",
+                        "KCO-CFG-012",
+                        "KCO-CFG-013",
                     ],
                 )?;
                 overlay_set(overlay, "inventory_only_rows", &[])?;
@@ -959,7 +1046,11 @@ fn validate_bindings(inputs: &Inputs, artifact: &Value) -> Result<(), String> {
                 )?;
             }
             "KAFKA-K1-2-BIND-005-GROUP" => {
-                overlay_set(overlay, "message_set_rows", &["KCO-OP-004", "KCO-OP-006", "KCO-OP-009"])?;
+                overlay_set(
+                    overlay,
+                    "message_set_rows",
+                    &["KCO-OP-004", "KCO-OP-006", "KCO-OP-009"],
+                )?;
                 overlay_set(
                     overlay,
                     "config_mapping_rows",
@@ -969,8 +1060,13 @@ fn validate_bindings(inputs: &Inputs, artifact: &Value) -> Result<(), String> {
                     overlay,
                     "local_only_rows",
                     &[
-                        "KCO-OP-005", "KCO-OP-011", "KCO-OP-012", "KCO-OP-013",
-                        "KCO-OP-014", "KCO-OP-017", "KAFKA-K1-SHARED-002",
+                        "KCO-OP-005",
+                        "KCO-OP-011",
+                        "KCO-OP-012",
+                        "KCO-OP-013",
+                        "KCO-OP-014",
+                        "KCO-OP-017",
+                        "KAFKA-K1-SHARED-002",
                     ],
                 )?;
                 overlay_set(overlay, "inventory_only_rows", &[])?;
@@ -982,8 +1078,13 @@ fn validate_bindings(inputs: &Inputs, artifact: &Value) -> Result<(), String> {
                     overlay,
                     "config_mapping_rows",
                     &[
-                        "KCO-CFG-002", "KCO-CFG-005", "KCO-CFG-006", "KCO-CFG-007",
-                        "KCO-CFG-008", "KCO-CFG-016", "KAFKA-K1-SHARED-001",
+                        "KCO-CFG-002",
+                        "KCO-CFG-005",
+                        "KCO-CFG-006",
+                        "KCO-CFG-007",
+                        "KCO-CFG-008",
+                        "KCO-CFG-016",
+                        "KAFKA-K1-SHARED-001",
                         "KAFKA-K1-SHARED-006",
                     ],
                 )?;
@@ -1028,7 +1129,8 @@ fn validate_bindings(inputs: &Inputs, artifact: &Value) -> Result<(), String> {
     let gaps = typed_groups
         .iter()
         .filter(|row| {
-            row.get("message_names_attribution_state").and_then(Value::as_str)
+            row.get("message_names_attribution_state")
+                .and_then(Value::as_str)
                 == Some("BLOCKING_NO_DIRECT_MESSAGE_AUTHORITY_ROW")
         })
         .map(|row| text(row, "binding_ref").map(str::to_owned))
@@ -1053,7 +1155,10 @@ fn validate_bindings(inputs: &Inputs, artifact: &Value) -> Result<(), String> {
     {
         return Err("absence route ID set drift".to_owned());
     }
-    let source_absences = array(&inputs.children["K1.3"]["explicit_absence_contract"], "rows")?;
+    let source_absences = array(
+        &inputs.children["K1.3"]["explicit_absence_contract"],
+        "rows",
+    )?;
     for route in absence_routes {
         let id = text(route, "authority_row_id")?;
         let source = source_absences
@@ -1084,7 +1189,9 @@ fn validate_bindings(inputs: &Inputs, artifact: &Value) -> Result<(), String> {
                     || text(route, "api_contract_owner")? != text(source, "api_contract_owner")?
                     || text(route, "implementation_owner_state")?
                         != text(source, "implementation_owner_state")?
-                    || !route.get("implementation_owner").is_some_and(Value::is_null)
+                    || !route
+                        .get("implementation_owner")
+                        .is_some_and(Value::is_null)
                 {
                     return Err("KAFKA-ABS-002 owner route drift".to_owned());
                 }
@@ -1141,9 +1248,12 @@ fn validate_evidence_routes(inputs: &Inputs, artifact: &Value) -> Result<(), Str
     {
         return Err("36-vector authority drift".to_owned());
     }
-    let class_ids = ids(array(contract, "evidence_vector_classes")?, "vector_class_id")?
-        .into_iter()
-        .collect::<BTreeSet<_>>();
+    let class_ids = ids(
+        array(contract, "evidence_vector_classes")?,
+        "vector_class_id",
+    )?
+    .into_iter()
+    .collect::<BTreeSet<_>>();
     let scenario_ids = ids(array(contract, "real_service_scenarios")?, "scenario_id")?
         .into_iter()
         .collect::<BTreeSet<_>>();
@@ -1262,7 +1372,10 @@ fn validate_evidence_routes(inputs: &Inputs, artifact: &Value) -> Result<(), Str
         .map(|row| text(row, "cell_id").map(str::to_owned))
         .collect::<Result<BTreeSet<_>, _>>()?;
     let state_owners = string_set(array(contract, "state_owners")?, "state owner registry")?;
-    let route_gates = string_set(array(contract, "route_terminal_gates")?, "route terminal gates")?;
+    let route_gates = string_set(
+        array(contract, "route_terminal_gates")?,
+        "route terminal gates",
+    )?;
     let routes = array(artifact, "capability_routes")?;
     let route_refs = routes
         .iter()
@@ -1273,7 +1386,10 @@ fn validate_evidence_routes(inputs: &Inputs, artifact: &Value) -> Result<(), Str
     }
     for route in routes {
         if !state_owners.contains(text(route, "state_owner")?) {
-            return Err(format!("unregistered route state owner: {}", text(route, "route_id")?));
+            return Err(format!(
+                "unregistered route state owner: {}",
+                text(route, "route_id")?
+            ));
         }
         for field in ["unit_owner", "model_owner", "property_owner", "fuzz_owner"] {
             text(route, field)?;
@@ -1283,19 +1399,28 @@ fn validate_evidence_routes(inputs: &Inputs, artifact: &Value) -> Result<(), Str
             || !terminals.contains("asupersync-dep-p7-kafka-removal-sarszu.2.12.5")
             || !terminals.contains("asupersync-dep-p7-kafka-removal-sarszu.2.13.6")
         {
-            return Err(format!("route terminal coverage drift: {}", text(route, "route_id")?));
+            return Err(format!(
+                "route terminal coverage drift: {}",
+                text(route, "route_id")?
+            ));
         }
         if array(route, "real_service_scenario_ids")?.is_empty()
             || array(route, "real_service_owners")?.is_empty()
         {
-            return Err(format!("route lacks real-service mapping: {}", text(route, "route_id")?));
+            return Err(format!(
+                "route lacks real-service mapping: {}",
+                text(route, "route_id")?
+            ));
         }
         let state = text(route, "state_owner")?;
         let overlaps = ["unit_owner", "model_owner", "property_owner", "fuzz_owner"]
             .iter()
             .any(|field| route.get(*field).and_then(Value::as_str) == Some(state));
         if overlaps && text(route, "role_overlap_reason")?.starts_with("NONE_") {
-            return Err(format!("unexplained state-owner overlap: {}", text(route, "route_id")?));
+            return Err(format!(
+                "unexplained state-owner overlap: {}",
+                text(route, "route_id")?
+            ));
         }
     }
     Ok(())
@@ -1324,12 +1449,12 @@ fn validate_profiles_and_shadow(inputs: &Inputs, artifact: &Value) -> Result<(),
             mapping.push(format!("{source}\t{policy_id}"));
             mapped.push(source);
         }
-        if matches!(
-            policy_id,
-            "K1FP-FUTURE-NATIVE-ONLY" | "K1FP-FUTURE-BOTH"
-        ) && !array(row, "source_profile_ids")?.is_empty()
+        if matches!(policy_id, "K1FP-FUTURE-NATIVE-ONLY" | "K1FP-FUTURE-BOTH")
+            && !array(row, "source_profile_ids")?.is_empty()
         {
-            return Err(format!("unallocated native profile acquired source rows: {policy_id}"));
+            return Err(format!(
+                "unallocated native profile acquired source rows: {policy_id}"
+            ));
         }
     }
     ensure_unique(&mapped, "13-to-policy profile memberships")?;
@@ -1381,12 +1506,14 @@ fn validate_profiles_and_shadow(inputs: &Inputs, artifact: &Value) -> Result<(),
     let coexistence_ids = ids(coexistence, "mode_id")?;
     ensure_unique(&coexistence_ids, "coexistence mode IDs")?;
     if coexistence.len() != 5
-        || coexistence.iter().filter(|row| {
-            row.get("currently_allowed").and_then(Value::as_bool) == Some(true)
-        }).count() != 1
-        || coexistence.iter().any(|row| {
-            row.get("native_effects_allowed").and_then(Value::as_bool) != Some(false)
-        })
+        || coexistence
+            .iter()
+            .filter(|row| row.get("currently_allowed").and_then(Value::as_bool) == Some(true))
+            .count()
+            != 1
+        || coexistence
+            .iter()
+            .any(|row| row.get("native_effects_allowed").and_then(Value::as_bool) != Some(false))
         || !coexistence.iter().any(|row| {
             row.get("mode_id").and_then(Value::as_str) == Some("K1C-INCUMBENT-ONLY")
                 && row.get("currently_allowed").and_then(Value::as_bool) == Some(true)
@@ -1412,11 +1539,16 @@ fn validate_profiles_and_shadow(inputs: &Inputs, artifact: &Value) -> Result<(),
             subtype_ids.push(semantic.clone());
             subtype_mapping.push(format!("{semantic}\t{subtype}"));
         }
-        if let Some(subpartitions) = class.get("shadow_class_subpartitions").and_then(Value::as_array) {
+        if let Some(subpartitions) = class
+            .get("shadow_class_subpartitions")
+            .and_then(Value::as_array)
+        {
             let mut nested = Vec::new();
             for sub in subpartitions {
                 let class_id = text(sub, "shadow_class_id")?;
-                for semantic in string_set(array(sub, "semantic_ids")?, "shadow class subpartition")? {
+                for semantic in
+                    string_set(array(sub, "semantic_ids")?, "shadow class subpartition")?
+                {
                     nested.push(semantic.clone());
                     shadow_mapping.push(format!("{semantic}\t{class_id}"));
                 }
@@ -1447,8 +1579,7 @@ fn validate_profiles_and_shadow(inputs: &Inputs, artifact: &Value) -> Result<(),
         || operation_id_sha256 != SHADOW_OPERATION_ID_SHA256
         || text(shadow, "semantic_operation_id_set_sha256")? != SHADOW_OPERATION_ID_SHA256
         || subtype_sha256 != SHADOW_OPERATIONAL_SUBTYPE_SHA256
-        || text(shadow, "operational_subtype_mapping_sha256")?
-            != SHADOW_OPERATIONAL_SUBTYPE_SHA256
+        || text(shadow, "operational_subtype_mapping_sha256")? != SHADOW_OPERATIONAL_SUBTYPE_SHA256
         || shadow_mapping_sha256 != SHADOW_CLASS_MAPPING_SHA256
         || text(shadow, "shadow_class_mapping_sha256")? != SHADOW_CLASS_MAPPING_SHA256
         || flag(shadow, "per_operation_owner_routing_complete")?
@@ -1469,7 +1600,9 @@ fn validate_profiles_and_shadow(inputs: &Inputs, artifact: &Value) -> Result<(),
             "K1S-NON-COMPARABLE".to_owned(),
         ])
         || array(artifact, "shadow_classes")?.iter().any(|row| {
-            row.get("current_execution_authorized").and_then(Value::as_bool) != Some(false)
+            row.get("current_execution_authorized")
+                .and_then(Value::as_bool)
+                != Some(false)
         })
     {
         return Err("shadow class authorization drift".to_owned());
@@ -1486,7 +1619,11 @@ fn validate_profiles_and_shadow(inputs: &Inputs, artifact: &Value) -> Result<(),
         .collect::<Result<BTreeSet<_>, _>>()?;
     let used_classes = shadow_mapping
         .iter()
-        .map(|row| row.split_once('\t').map(|(_, class)| class.to_owned()).unwrap())
+        .map(|row| {
+            row.split_once('\t')
+                .map(|(_, class)| class.to_owned())
+                .unwrap()
+        })
         .collect::<BTreeSet<_>>();
     if !used_classes.is_subset(&summary_classes) || !summary_classes.is_subset(&declared_classes) {
         return Err("shadow class/summary routing drift".to_owned());
@@ -1496,11 +1633,17 @@ fn validate_profiles_and_shadow(inputs: &Inputs, artifact: &Value) -> Result<(),
         .collect::<BTreeSet<_>>();
     for summary in summary_rows {
         if text(summary, "owner")? != "asupersync-dep-p7-kafka-removal-sarszu.2.14.3" {
-            return Err(format!("shadow summary owner drift: {}", text(summary, "operation_id")?));
+            return Err(format!(
+                "shadow summary owner drift: {}",
+                text(summary, "operation_id")?
+            ));
         }
         let refs = string_set(array(summary, "stop_condition_ids")?, "shadow stop refs")?;
         if refs.is_empty() || !refs.is_subset(&stop_ids) {
-            return Err(format!("unresolved shadow stop refs: {}", text(summary, "operation_id")?));
+            return Err(format!(
+                "unresolved shadow stop refs: {}",
+                text(summary, "operation_id")?
+            ));
         }
     }
     Ok(())
@@ -1575,7 +1718,10 @@ fn validate_rollback_approval_and_disposition(artifact: &Value) -> Result<(), St
     if text(disposition, "incumbent_disposition")? != "KEEP_INCUMBENT"
         || !flag(disposition, "k1_5_static_gate_complete")?
         || !flag(disposition, "k1_parent_static_contract_complete")?
-        || !flag(disposition, "k1_5_typed_binding_membership_adjudication_complete")?
+        || !flag(
+            disposition,
+            "k1_5_typed_binding_membership_adjudication_complete",
+        )?
         || flag(disposition, "k1_5_per_message_attribution_complete")?
     {
         return Err("scoped K1.5 disposition drift".to_owned());
@@ -1600,7 +1746,9 @@ fn validate_rollback_approval_and_disposition(artifact: &Value) -> Result<(), St
         "cutover_allowed",
     ] {
         if flag(disposition, permission)? {
-            return Err(format!("forbidden permission or claim enabled: {permission}"));
+            return Err(format!(
+                "forbidden permission or claim enabled: {permission}"
+            ));
         }
     }
     Ok(())
@@ -1652,7 +1800,9 @@ fn validate_projections(artifact: &Value) -> Result<(), String> {
         };
         let expected = text(coverage, field)?;
         if expected.len() != 64
-            || !expected.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            || !expected
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
             || actual != expected
         {
             return Err(format!("projection digest drift: {field}"));
@@ -1660,7 +1810,8 @@ fn validate_projections(artifact: &Value) -> Result<(), String> {
     }
     let serialized = serde_json::to_string(artifact)
         .map_err(|error| format!("failed to serialize artifact: {error}"))?;
-    if serialized.contains("PENDING_STATIC_DIGEST") || flag(coverage, "dynamic_execution_claimed")? {
+    if serialized.contains("PENDING_STATIC_DIGEST") || flag(coverage, "dynamic_execution_claimed")?
+    {
         return Err("pending digest or dynamic execution claim found".to_owned());
     }
     Ok(())
@@ -1739,8 +1890,8 @@ fn kafka_k1_aggregate_gate_rejects_representative_mutations() {
     mutations.push(("conflict blocker", conflict));
 
     let mut binding = inputs.artifact.clone();
-    binding["semantic_binding_adjudication"]["historical_row_typing"][9]["typed_edges"][4]
-        ["kind"] = Value::String("MESSAGE_SET".to_owned());
+    binding["semantic_binding_adjudication"]["historical_row_typing"][9]["typed_edges"][4]["kind"] =
+        Value::String("MESSAGE_SET".to_owned());
     mutations.push(("fake absence message binding", binding));
 
     let mut vector = inputs.artifact.clone();
@@ -1752,8 +1903,8 @@ fn kafka_k1_aggregate_gate_rejects_representative_mutations() {
     mutations.push(("vector omission", vector));
 
     let mut profile = inputs.artifact.clone();
-    let duplicate = profile["feature_profile_contract"]["profiles"][0]["source_profile_ids"][0]
-        .clone();
+    let duplicate =
+        profile["feature_profile_contract"]["profiles"][0]["source_profile_ids"][0].clone();
     profile["feature_profile_contract"]["profiles"][1]["source_profile_ids"]
         .as_array_mut()
         .expect("profile ID array")
@@ -1770,8 +1921,7 @@ fn kafka_k1_aggregate_gate_rejects_representative_mutations() {
     mutations.push(("rollback completion", rollback));
 
     let mut digest = inputs.artifact.clone();
-    digest["coverage_receipt"]["authority_input_projection_sha256"] =
-        Value::String("f".repeat(64));
+    digest["coverage_receipt"]["authority_input_projection_sha256"] = Value::String("f".repeat(64));
     mutations.push(("projection digest", digest));
 
     let mut permission = inputs.artifact.clone();

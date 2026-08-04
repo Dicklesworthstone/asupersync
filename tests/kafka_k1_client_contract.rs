@@ -18,10 +18,8 @@ use std::path::{Path, PathBuf};
 const ARTIFACT_PATH: &str = "artifacts/kafka_k1_obligation_index_v1.json";
 const DOC_PATH: &str = "docs/kafka_k1_client_contract.md";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
-const ARTIFACT_SHA256: &str =
-    "7c8b4b00f18e84abd5ae9cb671a5c5822699eace98bbf82d1d0adb0969f50635";
-const DOC_SHA256: &str =
-    "7d6c2e4e13c0c1204592ff0c654dd1c603c11593dd6e2497d6ddea33ffc9331c";
+const ARTIFACT_SHA256: &str = "7c8b4b00f18e84abd5ae9cb671a5c5822699eace98bbf82d1d0adb0969f50635";
+const DOC_SHA256: &str = "7d6c2e4e13c0c1204592ff0c654dd1c603c11593dd6e2497d6ddea33ffc9331c";
 
 const ARTIFACT_ID: &str = "kafka-k1-obligation-index-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
@@ -31,8 +29,7 @@ const CAPABILITY_ID: &str = "CAP-KAFKA";
 const ADR_ID: &str = "DEP-ADR-009";
 const CAPTURED_DATE_UTC: &str = "2026-08-03";
 const BASELINE_REVISION: &str = "03dea9e1556eac3d60a393a61bbcf875d49a96dd";
-const INVENTORY_STATE: &str =
-    "K1_1_AUTHORITY_AND_OBLIGATION_NAMESPACE_FROZEN_KEEP_INCUMBENT";
+const INVENTORY_STATE: &str = "K1_1_AUTHORITY_AND_OBLIGATION_NAMESPACE_FROZEN_KEEP_INCUMBENT";
 
 const K0_1_PATH: &str = "artifacts/kafka_capability_inventory_v1.json";
 const K0_2_PATH: &str = "artifacts/kafka_incumbent_semantics_matrix_v1.json";
@@ -51,10 +48,8 @@ const K0_5_AGGREGATE_ID_COUNT: usize = 31;
 const K1_OBLIGATION_COUNT: usize = 279;
 const LOW_EVIDENCE_STATE_COUNT: usize = 446;
 
-const PRIMARY_ID_SHA256: &str =
-    "38eb986feff75d2e1e172e444e7d488c765ab42910b6b470056852dea3b0cb6e";
-const CORE_ID_SHA256: &str =
-    "43d9deb2ff6bfa772ec058e8e32e4eb4fb3be099d93c3b152685721be05d4eea";
+const PRIMARY_ID_SHA256: &str = "38eb986feff75d2e1e172e444e7d488c765ab42910b6b470056852dea3b0cb6e";
+const CORE_ID_SHA256: &str = "43d9deb2ff6bfa772ec058e8e32e4eb4fb3be099d93c3b152685721be05d4eea";
 const CONTRADICTION_ID_SHA256: &str =
     "60a656176b398a9b045b8c5cc1c2f2cede611683d3330c2a519a70ebf9bb72f0";
 const AUTHORITY_REFERENCE_ID_SHA256: &str =
@@ -69,8 +64,7 @@ const SOURCE_PRECISE_OBLIGATION_SHA256: &str =
     "846a643da80fa9ad9dd78b9e13520981ef8811b91839686608ec7c80a45a4414";
 const LOW_EVIDENCE_STATE_SHA256: &str =
     "8d8e318ffbbcd5e26cb5320ba3fc03075624a974b214ea0cf2d10e769838543f";
-const EXPOSURE_SHA256: &str =
-    "cec04b907f94b381e8c1e4e9c38a5cdee6d0d89508f52aab5f2c92eab15fb70f";
+const EXPOSURE_SHA256: &str = "cec04b907f94b381e8c1e4e9c38a5cdee6d0d89508f52aab5f2c92eab15fb70f";
 const COARSE_EXPOSURE_SHA256: &str =
     "d1ebf84a5bd4654ec12cedb880eab9f7f1751fbd758267ce4395549de8affade";
 const DERIVED_SHARED_SHA256: &str =
@@ -290,10 +284,7 @@ fn object<'a>(value: &'a Value, name: &str) -> Result<&'a Map<String, Value>, St
         .ok_or_else(|| format!("{name} must be an object"))
 }
 
-fn object_mut<'a>(
-    value: &'a mut Value,
-    name: &str,
-) -> Result<&'a mut Map<String, Value>, String> {
+fn object_mut<'a>(value: &'a mut Value, name: &str) -> Result<&'a mut Map<String, Value>, String> {
     value
         .as_object_mut()
         .ok_or_else(|| format!("{name} must be an object"))
@@ -352,11 +343,7 @@ fn at_uint(value: &Value, pointer: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("{pointer} must be an unsigned integer"))
 }
 
-fn find_unique<'a>(
-    rows: &'a [Value],
-    field: &str,
-    expected: &str,
-) -> Result<&'a Value, String> {
+fn find_unique<'a>(rows: &'a [Value], field: &str, expected: &str) -> Result<&'a Value, String> {
     let matches = rows
         .iter()
         .filter(|row| row.get(field).and_then(Value::as_str) == Some(expected))
@@ -435,7 +422,10 @@ fn validate_root_identity_and_policy(packet: &Value) -> Result<(), String> {
         ("missing_input_state", "BLOCKING_MISSING"),
         ("missing_row_state", "BLOCKING_MISSING"),
         ("extra_row_state", "BLOCKING_UNDECLARED_EXTRA"),
-        ("duplicate_definition_state", "BLOCKING_DUPLICATE_DEFINITION"),
+        (
+            "duplicate_definition_state",
+            "BLOCKING_DUPLICATE_DEFINITION",
+        ),
         ("unowned_row_state", "BLOCKING_UNOWNED"),
         ("invalid_reference_state", "BLOCKING_INVALID_REFERENCE"),
     ] {
@@ -460,8 +450,7 @@ fn validate_root_identity_and_policy(packet: &Value) -> Result<(), String> {
         .ok_or_else(|| "authority is missing".to_owned())?;
     if text(authority, "registry_disposition")? != "KEEP_UNTIL_PARITY"
         || text(authority, "current_action")? != "KEEP_INCUMBENT"
-        || text(authority, "k1_terminal_bead")?
-            != "asupersync-dep-p7-kafka-removal-sarszu.2.1.5"
+        || text(authority, "k1_terminal_bead")? != "asupersync-dep-p7-kafka-removal-sarszu.2.1.5"
         || text(authority, "sole_conditional_cutover_bead")?
             != "asupersync-dep-p7-kafka-removal-sarszu.2.15"
     {
@@ -575,17 +564,14 @@ fn selected_pin_rows<'a>(
         .iter()
         .filter(|row| row.get("capability_id").and_then(Value::as_str) == Some(CAPABILITY_ID))
         .collect()),
-        "K1-ROW-CAPABILITY-JOURNEY" => Ok(array(
-            &inputs.capability_registry,
-            "journey_inventory",
-        )?
-        .iter()
-        .filter(|row| {
-            row.get("capability_ids")
-                .and_then(Value::as_array)
-                .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(CAPABILITY_ID)))
-        })
-        .collect()),
+        "K1-ROW-CAPABILITY-JOURNEY" => Ok(array(&inputs.capability_registry, "journey_inventory")?
+            .iter()
+            .filter(|row| {
+                row.get("capability_ids")
+                    .and_then(Value::as_array)
+                    .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(CAPABILITY_ID)))
+            })
+            .collect()),
         "K1-ROW-ADR-ROSTER" => Ok(array(&inputs.adr_registry, "roster")?
             .iter()
             .filter(|row| row.get("adr_id").and_then(Value::as_str) == Some(ADR_ID))
@@ -602,10 +588,7 @@ fn selected_pin_rows<'a>(
     }
 }
 
-fn validate_authority_row_pins(
-    packet: &Value,
-    inputs: &AuthorityInputs,
-) -> Result<(), String> {
+fn validate_authority_row_pins(packet: &Value, inputs: &AuthorityInputs) -> Result<(), String> {
     let pins = array(packet, "authority_row_pins")?;
     let expected_ids = [
         "K1-ROW-CAPABILITY",
@@ -654,7 +637,12 @@ fn validate_governing_authority(inputs: &AuthorityInputs) -> Result<(), String> 
         return Err("live CAP-KAFKA authority drifted".to_owned());
     }
     let owners = exact_text_set(capability, "dependency_owners")?;
-    if owners != ["librdkafka", "rdkafka"].into_iter().map(str::to_owned).collect() {
+    if owners
+        != ["librdkafka", "rdkafka"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    {
         return Err("CAP-KAFKA dependency owners drifted".to_owned());
     }
 
@@ -670,12 +658,9 @@ fn validate_governing_authority(inputs: &AuthorityInputs) -> Result<(), String> 
     if text(&inputs.k0_5, "artifact_id")? != "kafka-k0-baseline-disposition-v1"
         || text(&inputs.k0_5, "capability_id")? != CAPABILITY_ID
         || at_text(&inputs.k0_5, "/authority/current_action")? != "KEEP_INCUMBENT"
-        || at_text(&inputs.k0_5, "/disposition_receipt/incumbent_disposition")?
-            != "KEEP_INCUMBENT"
-        || at(&inputs.k0_5, "/disposition_receipt/migration_eligible")?.as_bool()
-            != Some(false)
-        || at(&inputs.k0_5, "/disposition_receipt/cutover_allowed")?.as_bool()
-            != Some(false)
+        || at_text(&inputs.k0_5, "/disposition_receipt/incumbent_disposition")? != "KEEP_INCUMBENT"
+        || at(&inputs.k0_5, "/disposition_receipt/migration_eligible")?.as_bool() != Some(false)
+        || at(&inputs.k0_5, "/disposition_receipt/cutover_allowed")?.as_bool() != Some(false)
     {
         return Err("K0.5 governing disposition drifted".to_owned());
     }
@@ -776,7 +761,11 @@ fn collect_definitions(inputs: &AuthorityInputs) -> Result<Vec<Definition>, Stri
     }
     for (collection, id_field, contradiction_input) in [
         ("direct_source_pins", "pin_id", false),
-        ("fixture_classification_profiles", "classification_profile_id", false),
+        (
+            "fixture_classification_profiles",
+            "classification_profile_id",
+            false,
+        ),
         ("fixture_census", "fixture_id", false),
         ("environment_identities", "environment_id", false),
         ("locked_dependency_identity", "vector_id", false),
@@ -804,10 +793,7 @@ fn collect_definitions(inputs: &AuthorityInputs) -> Result<Vec<Definition>, Stri
     Ok(definitions)
 }
 
-fn validate_full_definition_census(
-    packet: &Value,
-    inputs: &AuthorityInputs,
-) -> Result<(), String> {
+fn validate_full_definition_census(packet: &Value, inputs: &AuthorityInputs) -> Result<(), String> {
     let definitions = collect_definitions(inputs)?;
     if definitions.len() != ALL_DEFINITION_AND_REFERENCE_COUNT {
         return Err("full K0 definition/reference row count drifted".to_owned());
@@ -853,10 +839,8 @@ fn validate_full_definition_census(
     {
         return Err("primary raw IDs are not unique".to_owned());
     }
-    if sorted_newline_sha256(primary.iter().map(|row| row.tuple()).collect())
-        != PRIMARY_ID_SHA256
-        || sorted_newline_sha256(core.iter().map(|row| row.tuple()).collect())
-            != CORE_ID_SHA256
+    if sorted_newline_sha256(primary.iter().map(|row| row.tuple()).collect()) != PRIMARY_ID_SHA256
+        || sorted_newline_sha256(core.iter().map(|row| row.tuple()).collect()) != CORE_ID_SHA256
         || sorted_newline_sha256(contradictions.iter().map(|row| row.tuple()).collect())
             != CONTRADICTION_ID_SHA256
     {
@@ -910,7 +894,10 @@ fn validate_full_definition_census(
                     "configuration_fields" | "enum_semantics" | "operations" | "callable_helpers"
                 ));
         if !valid {
-            return Err(format!("unsanctioned authority reference for {}", reference.raw_id));
+            return Err(format!(
+                "unsanctioned authority reference for {}",
+                reference.raw_id
+            ));
         }
         mapping.push(format!(
             "{}\t{}\t{}\tK0.3\t{}\t{}",
@@ -929,8 +916,7 @@ fn validate_full_definition_census(
     if uint(census, "all_definition_and_reference_row_count")?
         != ALL_DEFINITION_AND_REFERENCE_COUNT as u64
         || uint(census, "primary_definition_count")? != PRIMARY_DEFINITION_COUNT as u64
-        || uint(census, "sanctioned_authority_reference_count")?
-            != AUTHORITY_REFERENCE_COUNT as u64
+        || uint(census, "sanctioned_authority_reference_count")? != AUTHORITY_REFERENCE_COUNT as u64
         || text(census, "sanctioned_authority_reference_id_set_sha256")?
             != AUTHORITY_REFERENCE_ID_SHA256
         || text(census, "sanctioned_authority_reference_mapping_sha256")?
@@ -941,8 +927,7 @@ fn validate_full_definition_census(
     let primary_receipt = at(packet, "/namespace_projection/primary_definitions")?;
     if uint(primary_receipt, "primary_stable_id_count")? != PRIMARY_DEFINITION_COUNT as u64
         || uint(primary_receipt, "core_definition_count")? != CORE_DEFINITION_COUNT as u64
-        || uint(primary_receipt, "contradiction_input_count")?
-            != CONTRADICTION_INPUT_COUNT as u64
+        || uint(primary_receipt, "contradiction_input_count")? != CONTRADICTION_INPUT_COUNT as u64
         || text(primary_receipt, "all_primary_typed_tuple_sha256")? != PRIMARY_ID_SHA256
         || text(primary_receipt, "core_definition_typed_tuple_sha256")? != CORE_ID_SHA256
         || text(primary_receipt, "contradiction_input_typed_tuple_sha256")?
@@ -976,9 +961,7 @@ fn validate_k0_5_aggregate_namespace(
     rows.extend(
         array(at(&inputs.k0_5, "/unknown_disposition")?, "selectors")?
             .iter()
-            .map(|row| {
-                text(row, "selector_id").map(|id| format!("unknown_selectors\t{id}"))
-            })
+            .map(|row| text(row, "selector_id").map(|id| format!("unknown_selectors\t{id}")))
             .collect::<Result<Vec<_>, _>>()?,
     );
     rows.extend(
@@ -1159,8 +1142,7 @@ fn validate_inherited_k0_5_receipts(
     let claims = at(packet, "/namespace_projection/claims_projection")?;
     if text(claims, "migration_claim_state")? != "BLOCKED"
         || text(claims, "incumbent_claim_state")? != "KEEP_INCUMBENT"
-        || text(claims, "native_scope_state")?
-            != "PREEXISTING_NATIVE_EPIC_INVESTIGATION_ONLY"
+        || text(claims, "native_scope_state")? != "PREEXISTING_NATIVE_EPIC_INVESTIGATION_ONLY"
     {
         return Err("inherited K0.5 claim states drifted".to_owned());
     }
@@ -1201,13 +1183,7 @@ fn collect_source_precise_obligations(
         "operations",
         "callable_helpers",
     ] {
-        add_obligations(
-            &mut rows,
-            "K0.2",
-            &inputs.k0_2,
-            collection,
-            "semantic_id",
-        )?;
+        add_obligations(&mut rows, "K0.2", &inputs.k0_2, collection, "semantic_id")?;
     }
     for key in object(
         inputs
@@ -1247,21 +1223,9 @@ fn collect_source_precise_obligations(
         "topology_vectors",
         "fault_lifecycle_vectors",
     ] {
-        add_obligations(
-            &mut rows,
-            "K0.4",
-            &inputs.k0_4,
-            collection,
-            "vector_id",
-        )?;
+        add_obligations(&mut rows, "K0.4", &inputs.k0_4, collection, "vector_id")?;
     }
-    add_obligations(
-        &mut rows,
-        "K0.1",
-        &inputs.k0_1,
-        "routed_gaps",
-        "gap_id",
-    )?;
+    add_obligations(&mut rows, "K0.1", &inputs.k0_1, "routed_gaps", "gap_id")?;
     add_obligations(
         &mut rows,
         "K0.2",
@@ -1269,20 +1233,8 @@ fn collect_source_precise_obligations(
         "routed_findings",
         "finding_id",
     )?;
-    add_obligations(
-        &mut rows,
-        "K0.3",
-        &inputs.k0_3,
-        "routed_gaps",
-        "gap_id",
-    )?;
-    add_obligations(
-        &mut rows,
-        "K0.4",
-        &inputs.k0_4,
-        "routed_gaps",
-        "gap_id",
-    )?;
+    add_obligations(&mut rows, "K0.3", &inputs.k0_3, "routed_gaps", "gap_id")?;
+    add_obligations(&mut rows, "K0.4", &inputs.k0_4, "routed_gaps", "gap_id")?;
     Ok(rows)
 }
 
@@ -1473,16 +1425,15 @@ fn validate_named_view_metadata(packet: &Value) -> Result<(), String> {
                 .unwrap_or(Value::Null)
         });
         if actual_metadata != expected {
-            return Err(format!("named definition view metadata drifted for {view_id}"));
+            return Err(format!(
+                "named definition view metadata drifted for {view_id}"
+            ));
         }
     }
     Ok(())
 }
 
-fn validate_obligation_projection(
-    packet: &Value,
-    inputs: &AuthorityInputs,
-) -> Result<(), String> {
+fn validate_obligation_projection(packet: &Value, inputs: &AuthorityInputs) -> Result<(), String> {
     let source_rows = collect_source_precise_obligations(inputs)?;
     if source_rows.len() != K1_OBLIGATION_COUNT
         || source_rows
@@ -1531,8 +1482,7 @@ fn validate_obligation_projection(
         || uint(receipt, "stable_k0_definition_row_count")? != 267
         || uint(receipt, "derived_unided_k0_2_shared_key_count")? != 12
         || text(receipt, "normalized_projection_sha256")? != NORMALIZED_OBLIGATION_SHA256
-        || text(receipt, "source_precise_projection_sha256")?
-            != SOURCE_PRECISE_OBLIGATION_SHA256
+        || text(receipt, "source_precise_projection_sha256")? != SOURCE_PRECISE_OBLIGATION_SHA256
     {
         return Err("packet K1 obligation receipt drifted".to_owned());
     }
@@ -1679,7 +1629,9 @@ fn validate_derived_shared_obligations(
         let source_key = text(row, "source_key")?;
         let owner = text(row, "k1_policy_owner")?;
         let binding = text(row, "protocol_binding_policy")?;
-        if !row_keys.insert(source_key.to_owned()) || !obligation_ids.insert(obligation_id.to_owned()) {
+        if !row_keys.insert(source_key.to_owned())
+            || !obligation_ids.insert(obligation_id.to_owned())
+        {
             return Err("derived shared obligation duplicated".to_owned());
         }
         if !matches!(binding, "MESSAGE_SET" | "LOCAL_ONLY" | "CONFIG_MAPPING") {
@@ -1782,7 +1734,9 @@ fn validate_cross_authority_references(
         let view_id = text(&expected, "view_id")?.to_owned();
         let actual = find_unique(views, "view_id", &view_id)?;
         if actual != &expected {
-            return Err(format!("cross-authority reference view drifted for {view_id}"));
+            return Err(format!(
+                "cross-authority reference view drifted for {view_id}"
+            ));
         }
     }
     Ok(())
@@ -1823,8 +1777,7 @@ fn validate_exposure_and_binding(packet: &Value, inputs: &AuthorityInputs) -> Re
             ("MODULE_PUBLIC", 12),
         ])
         || sorted_newline_sha256(detailed_rows) != EXPOSURE_SHA256
-        || coarse_counts
-            != BTreeMap::from([("FACADE_REEXPORTED", 15), ("MODULE_PUBLIC_ONLY", 15)])
+        || coarse_counts != BTreeMap::from([("FACADE_REEXPORTED", 15), ("MODULE_PUBLIC_ONLY", 15)])
         || sorted_newline_sha256(coarse_rows) != COARSE_EXPOSURE_SHA256
     {
         return Err("live public exposure projection drifted".to_owned());
@@ -1834,8 +1787,7 @@ fn validate_exposure_and_binding(packet: &Value, inputs: &AuthorityInputs) -> Re
         .ok_or_else(|| "exposure_model missing".to_owned())?;
     if uint(exposure, "row_count")? != 30
         || text(exposure, "projection_sha256")? != EXPOSURE_SHA256
-        || at_text(exposure, "/coarse_projection/projection_sha256")?
-            != COARSE_EXPOSURE_SHA256
+        || at_text(exposure, "/coarse_projection/projection_sha256")? != COARSE_EXPOSURE_SHA256
     {
         return Err("packet exposure projection drifted".to_owned());
     }
@@ -1899,28 +1851,14 @@ fn walk_low_evidence_states(
         Value::Object(map) => {
             for (key, nested) in map {
                 path.push(Value::String(key.clone()));
-                walk_low_evidence_states(
-                    child,
-                    nested,
-                    path,
-                    rows,
-                    child_counts,
-                    state_counts,
-                )?;
+                walk_low_evidence_states(child, nested, path, rows, child_counts, state_counts)?;
                 path.pop();
             }
         }
         Value::Array(items) => {
             for (index, nested) in items.iter().enumerate() {
                 path.push(json!(index));
-                walk_low_evidence_states(
-                    child,
-                    nested,
-                    path,
-                    rows,
-                    child_counts,
-                    state_counts,
-                )?;
+                walk_low_evidence_states(child, nested, path, rows, child_counts, state_counts)?;
                 path.pop();
             }
         }
@@ -1963,11 +1901,7 @@ fn validate_low_evidence_state_projection(
     if rows.len() != LOW_EVIDENCE_STATE_COUNT
         || rows.iter().collect::<BTreeSet<_>>().len() != rows.len()
         || sorted_newline_sha256(rows) != LOW_EVIDENCE_STATE_SHA256
-        || child_counts
-            != BTreeMap::from([
-                ("K0.3".to_owned(), 314),
-                ("K0.4".to_owned(), 132),
-            ])
+        || child_counts != BTreeMap::from([("K0.3".to_owned(), 314), ("K0.4".to_owned(), 132)])
         || state_counts
             != BTreeMap::from([
                 ("BLOCKED".to_owned(), 77),
@@ -2050,19 +1984,24 @@ fn validate_low_evidence_state_projection(
             .into_iter()
             .map(str::to_owned)
             .collect()
-        || exact_text_set(state_model, "promoted_states_forbidden_without_terminal_receipt")?
-            != [
-                "ACTUAL_BINARY_RECEIPT",
-                "EXECUTED",
-                "MIGRATION_ELIGIBLE",
-                "PASS",
-                "REAL_BROKER_RECEIPT",
-                "SUPPORTED",
-            ]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
-        || !flag(state_model, "target_policy_does_not_rewrite_current_evidence")?
+        || exact_text_set(
+            state_model,
+            "promoted_states_forbidden_without_terminal_receipt",
+        )? != [
+            "ACTUAL_BINARY_RECEIPT",
+            "EXECUTED",
+            "MIGRATION_ELIGIBLE",
+            "PASS",
+            "REAL_BROKER_RECEIPT",
+            "SUPPORTED",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+        || !flag(
+            state_model,
+            "target_policy_does_not_rewrite_current_evidence",
+        )?
         || flag(state_model, "unknown_defaults_to_supported")?
         || flag(state_model, "blocked_defaults_to_supported")?
         || flag(state_model, "static_defaults_to_runtime")?
@@ -2188,10 +2127,8 @@ fn validate_tracker_topology(packet: &Value, inputs: &AuthorityInputs) -> Result
         || uint(receipt, "child_estimate_minutes")? != 1_920
         || uint(receipt, "active_cycle_count")? != 0
         || text(receipt, "projection_sha256")? != TRACKER_PROJECTION_SHA256
-        || text(receipt, "k2_epic_gate")?
-            != "asupersync-dep-p7-kafka-removal-sarszu.2.1.5"
-        || text(receipt, "k2_schema_gate")?
-            != "asupersync-dep-p7-kafka-removal-sarszu.2.1.2"
+        || text(receipt, "k2_epic_gate")? != "asupersync-dep-p7-kafka-removal-sarszu.2.1.5"
+        || text(receipt, "k2_schema_gate")? != "asupersync-dep-p7-kafka-removal-sarszu.2.1.2"
         || text(receipt, "k2_codec_aggregate_gate")?
             != "asupersync-dep-p7-kafka-removal-sarszu.2.1.5"
     {
@@ -2233,7 +2170,9 @@ fn validate_owner_references(packet: &Value, inputs: &AuthorityInputs) -> Result
     collect_bead_references(packet, false, &mut refs);
     let missing = refs.difference(&tracker_ids).cloned().collect::<Vec<_>>();
     if !missing.is_empty() {
-        return Err(format!("packet references missing tracker owners: {missing:?}"));
+        return Err(format!(
+            "packet references missing tracker owners: {missing:?}"
+        ));
     }
     let handoffs = array(packet, "k1_owner_handoffs")?;
     if handoffs.len() != 5 {
@@ -2522,20 +2461,18 @@ fn kafka_k1_packet_mutations_fail_closed() {
 
     let mut owner = packet.clone();
     *owner
-        .pointer_mut(
-            "/namespace_projection/derived_shared_obligations/rows/0/k1_policy_owner",
-        )
+        .pointer_mut("/namespace_projection/derived_shared_obligations/rows/0/k1_policy_owner")
         .expect("derived owner") = json!("");
     mutations.push(("missing derived owner", owner));
 
     let mut reassigned_view = packet.clone();
     *reassigned_view
-        .pointer_mut(
-            "/namespace_projection/named_definition_views/0/k1_policy_owner",
-        )
-        .expect("named view owner") =
-        json!("asupersync-dep-p7-kafka-removal-sarszu.2.1.4");
-    mutations.push(("named view reassigned to another valid bead", reassigned_view));
+        .pointer_mut("/namespace_projection/named_definition_views/0/k1_policy_owner")
+        .expect("named view owner") = json!("asupersync-dep-p7-kafka-removal-sarszu.2.1.4");
+    mutations.push((
+        "named view reassigned to another valid bead",
+        reassigned_view,
+    ));
 
     let mut promoted_reference = packet.clone();
     *promoted_reference
@@ -2543,13 +2480,14 @@ fn kafka_k1_packet_mutations_fail_closed() {
             "/namespace_projection/cross_authority_reference_views/1/current_evidence_state",
         )
         .expect("cross-authority evidence state") = json!("EXECUTED");
-    mutations.push(("planned cross-authority reference promoted", promoted_reference));
+    mutations.push((
+        "planned cross-authority reference promoted",
+        promoted_reference,
+    ));
 
     let mut selected_state = packet.clone();
     *selected_state
-        .pointer_mut(
-            "/namespace_projection/low_evidence_state_projection/selected_states/0",
-        )
+        .pointer_mut("/namespace_projection/low_evidence_state_projection/selected_states/0")
         .expect("selected low-evidence state") = json!("SUPPORTED");
     mutations.push(("low-evidence selector promoted", selected_state));
 

@@ -22,10 +22,8 @@ const K0_2_PATH: &str = "artifacts/kafka_incumbent_semantics_matrix_v1.json";
 const K0_3_PATH: &str = "artifacts/kafka_downstream_user_journey_inventory_v1.json";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
 
-const ARTIFACT_SHA256: &str =
-    "0c6a395f0a43f451491e52c26c452a5d69f0103ae3e49b431d826f889275ac9f";
-const DOC_SHA256: &str =
-    "ee938c6af5aa904c824b46697a996973c6248fdc6de56bf6db1d158ab54ba153";
+const ARTIFACT_SHA256: &str = "0c6a395f0a43f451491e52c26c452a5d69f0103ae3e49b431d826f889275ac9f";
+const DOC_SHA256: &str = "ee938c6af5aa904c824b46697a996973c6248fdc6de56bf6db1d158ab54ba153";
 
 const ARTIFACT_ID: &str = "kafka-k1-public-api-contract-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
@@ -41,45 +39,31 @@ const INVENTORY_STATE: &str =
 const CORE_COUNT: usize = 129;
 const SUPPORTING_COUNT: usize = 50;
 const COMBINED_COUNT: usize = 179;
-const CORE_SHA256: &str =
-    "f1ebad598d91e38b86206686c8d35ec6f013bbf93cd422f4b68308fbf89efb7a";
-const SUPPORTING_SHA256: &str =
-    "1deac57a9c2330e41f67afccffb2353998e5719f3663ba39bde926090f262265";
-const COMBINED_SHA256: &str =
-    "36c6470809d8f8ed98291f0265db34d6003462889c730d1c029cf84690126cc3";
+const CORE_SHA256: &str = "f1ebad598d91e38b86206686c8d35ec6f013bbf93cd422f4b68308fbf89efb7a";
+const SUPPORTING_SHA256: &str = "1deac57a9c2330e41f67afccffb2353998e5719f3663ba39bde926090f262265";
+const COMBINED_SHA256: &str = "36c6470809d8f8ed98291f0265db34d6003462889c730d1c029cf84690126cc3";
 
-const PUBLIC_ID_SHA256: &str =
-    "307956cfcb2a4e1de2b1a45d9db3767aa88e5be090815bc9ae1a77c8ad3add28";
-const PUBLIC_ROW_SHA256: &str =
-    "18ba7fa4a9db025263b9df4ae5ce5f36641ca5e9334d4eeaf8fd64b2bb66e4f2";
-const EXPOSURE_SHA256: &str =
-    "cec04b907f94b381e8c1e4e9c38a5cdee6d0d89508f52aab5f2c92eab15fb70f";
+const PUBLIC_ID_SHA256: &str = "307956cfcb2a4e1de2b1a45d9db3767aa88e5be090815bc9ae1a77c8ad3add28";
+const PUBLIC_ROW_SHA256: &str = "18ba7fa4a9db025263b9df4ae5ce5f36641ca5e9334d4eeaf8fd64b2bb66e4f2";
+const EXPOSURE_SHA256: &str = "cec04b907f94b381e8c1e4e9c38a5cdee6d0d89508f52aab5f2c92eab15fb70f";
 const FACADE_EXPORT_SHA256: &str =
     "8a63a3ae3410057e3aedcd063187e491529cd0bb978804c7cc41a8bffb9a7e5e";
 const RENAMED_ALIAS_SHA256: &str =
     "eee9f608a39846d1df1ec81a830c0f7b079667a09f923a3a398c2cdd64ca1fb1";
 
-const SEMANTIC_ID_SHA256: &str =
-    "a9967c47346ee6386e9e8836d73e819a784f829baa6d255eb24e55aae1950cf7";
+const SEMANTIC_ID_SHA256: &str = "a9967c47346ee6386e9e8836d73e819a784f829baa6d255eb24e55aae1950cf7";
 const SEMANTIC_ROW_SHA256: &str =
     "d19103e0fb6dd8b291405b1925c15d14cfacdf970901c766c10e06fcdbd7beab";
-const SHARED_ID_SHA256: &str =
-    "92ab055d5d14e4971daf298e54c9f5036ecf71c490d579270f4789b889fc86a5";
+const SHARED_ID_SHA256: &str = "92ab055d5d14e4971daf298e54c9f5036ecf71c490d579270f4789b889fc86a5";
 const SHARED_OBJECT_SHA256: &str =
     "558e38b863ad5a8e423a7d2f3731ada112a7d0bea16cf60484fd5c383efdfcb0";
-const ABSENCE_ROW_SHA256: &str =
-    "9892212d2641f933ded02b730993ff3c81f21ea65f7565b74b4a038b5a69afc5";
-const JOURNEY_ROW_SHA256: &str =
-    "3124cf3daff343142b56bbadceba66f8d0fb21862f771957e667f4d6c393260f";
-const JOURNEY_ID_SHA256: &str =
-    "c5a9f1947a5ecf55898c61414bb39bf753cd236fe33157083994acd63176367f";
-const FINDING_ROW_SHA256: &str =
-    "cb04492d3a8e82d415833d06533ec311b72159c1a5e2b9051469e7b6e74ecae5";
+const ABSENCE_ROW_SHA256: &str = "9892212d2641f933ded02b730993ff3c81f21ea65f7565b74b4a038b5a69afc5";
+const JOURNEY_ROW_SHA256: &str = "3124cf3daff343142b56bbadceba66f8d0fb21862f771957e667f4d6c393260f";
+const JOURNEY_ID_SHA256: &str = "c5a9f1947a5ecf55898c61414bb39bf753cd236fe33157083994acd63176367f";
+const FINDING_ROW_SHA256: &str = "cb04492d3a8e82d415833d06533ec311b72159c1a5e2b9051469e7b6e74ecae5";
 
-const PROFILE_ROW_SHA256: &str =
-    "8a2b2437daa7b2b4c8189875502bf5d4b049d6c9ce408d390279deaf8d8b5815";
-const PROFILE_ID_SHA256: &str =
-    "882b6f73ee7c5abfe73080804fcd082c05dddd9c4002ee61ff9336f0a0d439eb";
+const PROFILE_ROW_SHA256: &str = "8a2b2437daa7b2b4c8189875502bf5d4b049d6c9ce408d390279deaf8d8b5815";
+const PROFILE_ID_SHA256: &str = "882b6f73ee7c5abfe73080804fcd082c05dddd9c4002ee61ff9336f0a0d439eb";
 const PROFILE_GROUP_ROW_SHA256: &str =
     "75bedc39680e2df6ea1be48212fa6a0f9c397767cab43dcae769d29e99526c29";
 const PROFILE_GROUP_ID_SHA256: &str =
@@ -94,10 +78,8 @@ const FINDING_OWNER_EDGE_SHA256: &str =
     "1e4aea3a7dbe623f8e4c2c51b5bb5edbdec3e6ac0b002f5261d79edbcbc4a860";
 const CONFLICT_ROW_SHA256: &str =
     "f684298a32b76973e88f91fc243e16ecba70a11b709832873792cbaf396fb390";
-const HANDOFF_ROW_SHA256: &str =
-    "e41627d1890e05487e9f76055d95015ff4309701e141f2f443b71bfd830df89b";
-const NO_CLAIM_SHA256: &str =
-    "761b33cf8a1c0e8a3c83ffb8f4597e1c2f526e14a6689e05d8113e09b917d7a6";
+const HANDOFF_ROW_SHA256: &str = "e41627d1890e05487e9f76055d95015ff4309701e141f2f443b71bfd830df89b";
+const NO_CLAIM_SHA256: &str = "761b33cf8a1c0e8a3c83ffb8f4597e1c2f526e14a6689e05d8113e09b917d7a6";
 
 const DOC_BEGIN: &str = "<!-- BEGIN KAFKA K1.3 PUBLIC API CONTRACT -->";
 const DOC_END: &str = "<!-- END KAFKA K1.3 PUBLIC API CONTRACT -->";
@@ -327,7 +309,10 @@ fn row_by_id<'a>(rows: &'a [Value], key: &str, id: &str) -> Result<&'a Value, St
         .collect::<Vec<_>>();
     match matches.as_slice() {
         [row] => Ok(row),
-        _ => Err(format!("expected exactly one {key}={id}, found {}", matches.len())),
+        _ => Err(format!(
+            "expected exactly one {key}={id}, found {}",
+            matches.len()
+        )),
     }
 }
 
@@ -350,7 +335,11 @@ fn validate_array_view(
         canonical_rows_sha256(rows)?,
         "domain canonical row hash",
     )?;
-    assert_eq_value(text(view, "disposition")?, disposition, "domain disposition")?;
+    assert_eq_value(
+        text(view, "disposition")?,
+        disposition,
+        "domain disposition",
+    )?;
     Ok(())
 }
 
@@ -378,7 +367,10 @@ fn disposition_rows(inputs: &Inputs) -> Result<(Vec<String>, Vec<String>), Strin
     let mut supporting = Vec::new();
 
     for row in array(&inputs.k0_1, "public_symbols")? {
-        core.push(format!("public_symbols\t{}\tPRESERVE", text(row, "symbol_id")?));
+        core.push(format!(
+            "public_symbols\t{}\tPRESERVE",
+            text(row, "symbol_id")?
+        ));
     }
     for (collection, domain) in SEMANTIC_COLLECTIONS {
         for row in array(&inputs.k0_2, collection)? {
@@ -396,7 +388,10 @@ fn disposition_rows(inputs: &Inputs) -> Result<(Vec<String>, Vec<String>), Strin
         supporting.push(format!("shared_semantics\t{key}\tPRESERVE"));
     }
     for row in array(&inputs.k0_3, "user_journeys")? {
-        supporting.push(format!("user_journeys\t{}\tPRESERVE", text(row, "journey_id")?));
+        supporting.push(format!(
+            "user_journeys\t{}\tPRESERVE",
+            text(row, "journey_id")?
+        ));
     }
     for row in array(&inputs.k0_2, "routed_findings")? {
         supporting.push(format!(
@@ -418,15 +413,39 @@ fn validate_identity(artifact: &Value) -> Result<(), String> {
     assert_eq_value(text(artifact, "artifact_id")?, ARTIFACT_ID, "artifact id")?;
     assert_eq_value(text(artifact, "program_id")?, PROGRAM_ID, "program id")?;
     assert_eq_value(text(artifact, "bead_id")?, BEAD_ID, "bead id")?;
-    assert_eq_value(text(artifact, "parent_bead_id")?, PARENT_BEAD_ID, "parent bead")?;
-    assert_eq_value(text(artifact, "capability_id")?, CAPABILITY_ID, "capability id")?;
+    assert_eq_value(
+        text(artifact, "parent_bead_id")?,
+        PARENT_BEAD_ID,
+        "parent bead",
+    )?;
+    assert_eq_value(
+        text(artifact, "capability_id")?,
+        CAPABILITY_ID,
+        "capability id",
+    )?;
     assert_eq_value(text(artifact, "adr_id")?, ADR_ID, "ADR id")?;
-    assert_eq_value(text(artifact, "captured_date_utc")?, CAPTURED_DATE_UTC, "capture date")?;
-    assert_eq_value(text(artifact, "baseline_revision")?, BASELINE_REVISION, "baseline")?;
-    assert_eq_value(text(artifact, "inventory_state")?, INVENTORY_STATE, "inventory state")?;
+    assert_eq_value(
+        text(artifact, "captured_date_utc")?,
+        CAPTURED_DATE_UTC,
+        "capture date",
+    )?;
+    assert_eq_value(
+        text(artifact, "baseline_revision")?,
+        BASELINE_REVISION,
+        "baseline",
+    )?;
+    assert_eq_value(
+        text(artifact, "inventory_state")?,
+        INVENTORY_STATE,
+        "inventory state",
+    )?;
 
     let policy = artifact.get("policy").ok_or("policy missing")?;
-    assert_eq_value(text(policy, "mode")?, "STATIC_ONLY_FAIL_CLOSED", "policy mode")?;
+    assert_eq_value(
+        text(policy, "mode")?,
+        "STATIC_ONLY_FAIL_CLOSED",
+        "policy mode",
+    )?;
     assert_eq_value(
         text(policy, "canonicalization_id")?,
         "KAFKA_K1_3_PUBLIC_API_CONTRACT_V1",
@@ -444,11 +463,23 @@ fn validate_identity(artifact: &Value) -> Result<(), String> {
     }
     for (key, phrase) in [
         ("current_contract_rule", "Every accepted present"),
-        ("two_axis_rule", "Contract disposition and gate state are independent"),
-        ("evolution_rule", "current behavior, target behavior, migration impact"),
+        (
+            "two_axis_rule",
+            "Contract disposition and gate state are independent",
+        ),
+        (
+            "evolution_rule",
+            "current behavior, target behavior, migration impact",
+        ),
         ("unknown_rule", "migration-blocking"),
-        ("profile_rule", "Native no-feature builds retain the typed facade"),
-        ("alias_rule", "Facade aliases and module-public names are distinct"),
+        (
+            "profile_rule",
+            "Native no-feature builds retain the typed facade",
+        ),
+        (
+            "alias_rule",
+            "Facade aliases and module-public names are distinct",
+        ),
     ] {
         if !text(policy, key)?.contains(phrase) {
             return Err(format!("policy {key} omits {phrase:?}"));
@@ -497,20 +528,37 @@ fn validate_authority_inputs(root: &Path, artifact: &Value) -> Result<(), String
     for row in rows {
         let path = text(row, "path")?;
         let bytes = read_bytes(root, path)?;
-        assert_eq_value(bytes.len(), count(row, "byte_count")?, &format!("{path} bytes"))?;
+        assert_eq_value(
+            bytes.len(),
+            count(row, "byte_count")?,
+            &format!("{path} bytes"),
+        )?;
         let record_count = std::str::from_utf8(&bytes)
             .map_err(|error| format!("{path} is not UTF-8: {error}"))?
             .lines()
             .count();
-        assert_eq_value(record_count, count(row, "record_count")?, &format!("{path} records"))?;
-        assert_eq_value(sha256_bytes(&bytes), text(row, "sha256")?.to_owned(), &format!("{path} hash"))?;
+        assert_eq_value(
+            record_count,
+            count(row, "record_count")?,
+            &format!("{path} records"),
+        )?;
+        assert_eq_value(
+            sha256_bytes(&bytes),
+            text(row, "sha256")?.to_owned(),
+            &format!("{path} hash"),
+        )?;
     }
     Ok(())
 }
 
 fn validate_coverage(inputs: &Inputs) -> Result<(), String> {
-    let coverage = inputs.artifact.get("coverage_model").ok_or("coverage_model missing")?;
-    let core_contract = coverage.get("core_contract").ok_or("core_contract missing")?;
+    let coverage = inputs
+        .artifact
+        .get("coverage_model")
+        .ok_or("coverage_model missing")?;
+    let core_contract = coverage
+        .get("core_contract")
+        .ok_or("core_contract missing")?;
     let supporting_contract = coverage
         .get("supporting_contract")
         .ok_or("supporting_contract missing")?;
@@ -527,7 +575,11 @@ fn validate_coverage(inputs: &Inputs) -> Result<(), String> {
     assert_eq_value(core.len(), CORE_COUNT, "core row count")?;
     assert_eq_value(supporting.len(), SUPPORTING_COUNT, "supporting row count")?;
     assert_eq_value(combined.len(), COMBINED_COUNT, "combined row count")?;
-    assert_eq_value(count(core_contract, "row_count")?, CORE_COUNT, "recorded core count")?;
+    assert_eq_value(
+        count(core_contract, "row_count")?,
+        CORE_COUNT,
+        "recorded core count",
+    )?;
     assert_eq_value(
         count(supporting_contract, "row_count")?,
         SUPPORTING_COUNT,
@@ -538,7 +590,11 @@ fn validate_coverage(inputs: &Inputs) -> Result<(), String> {
         COMBINED_COUNT,
         "recorded combined count",
     )?;
-    assert_eq_value(sorted_newline_sha256(core), CORE_SHA256.to_owned(), "core hash")?;
+    assert_eq_value(
+        sorted_newline_sha256(core),
+        CORE_SHA256.to_owned(),
+        "core hash",
+    )?;
     assert_eq_value(
         sorted_newline_sha256(supporting),
         SUPPORTING_SHA256.to_owned(),
@@ -549,7 +605,11 @@ fn validate_coverage(inputs: &Inputs) -> Result<(), String> {
         COMBINED_SHA256.to_owned(),
         "combined hash",
     )?;
-    assert_eq_value(text(core_contract, "projection_sha256")?, CORE_SHA256, "recorded core hash")?;
+    assert_eq_value(
+        text(core_contract, "projection_sha256")?,
+        CORE_SHA256,
+        "recorded core hash",
+    )?;
     assert_eq_value(
         text(supporting_contract, "projection_sha256")?,
         SUPPORTING_SHA256,
@@ -602,7 +662,11 @@ fn validate_coverage(inputs: &Inputs) -> Result<(), String> {
         .get("shared_semantics")
         .ok_or("shared_semantics missing")?;
     let shared_keys = object_key_set(shared)?;
-    assert_eq_value(count(shared_view, "row_count")?, shared_keys.len(), "shared view count")?;
+    assert_eq_value(
+        count(shared_view, "row_count")?,
+        shared_keys.len(),
+        "shared view count",
+    )?;
     assert_eq_value(
         text(shared_view, "id_set_sha256")?.to_owned(),
         sorted_newline_sha256(shared_keys.iter().cloned().collect()),
@@ -613,7 +677,11 @@ fn validate_coverage(inputs: &Inputs) -> Result<(), String> {
         sha256_bytes(format!("{}\n", canonical_json(shared)?).as_bytes()),
         "shared view object hash",
     )?;
-    assert_eq_value(text(shared_view, "disposition")?, "PRESERVE", "shared disposition")?;
+    assert_eq_value(
+        text(shared_view, "disposition")?,
+        "PRESERVE",
+        "shared disposition",
+    )?;
     let sum = views
         .iter()
         .map(|view| count(view, "row_count"))
@@ -638,8 +706,16 @@ fn validate_public_surface(inputs: &Inputs) -> Result<(), String> {
     assert_eq_value(rows.len(), 30, "public symbol count")?;
     let symbol_ids = ids(rows, "symbol_id")?;
     unique(&symbol_ids, "public symbol IDs")?;
-    assert_eq_value(sorted_newline_sha256(symbol_ids), PUBLIC_ID_SHA256.to_owned(), "public ID hash")?;
-    assert_eq_value(canonical_rows_sha256(rows)?, PUBLIC_ROW_SHA256.to_owned(), "public row hash")?;
+    assert_eq_value(
+        sorted_newline_sha256(symbol_ids),
+        PUBLIC_ID_SHA256.to_owned(),
+        "public ID hash",
+    )?;
+    assert_eq_value(
+        canonical_rows_sha256(rows)?,
+        PUBLIC_ROW_SHA256.to_owned(),
+        "public row hash",
+    )?;
 
     let mut exposure_rows = Vec::new();
     let mut exposure_counts = BTreeMap::<String, usize>::new();
@@ -669,34 +745,67 @@ fn validate_public_surface(inputs: &Inputs) -> Result<(), String> {
                 .first()
                 .and_then(Value::as_str)
                 .ok_or("public declaration must be text")?;
-            let module_name = declaration.split('@').next().ok_or("missing declaration name")?;
+            let module_name = declaration
+                .split('@')
+                .next()
+                .ok_or("missing declaration name")?;
             for facade_name in names {
                 if facade_name != module_name {
                     let mut alias = Map::new();
                     alias.insert("symbol_id".to_owned(), Value::String(id.to_owned()));
-                    alias.insert("module_name".to_owned(), Value::String(module_name.to_owned()));
-                    alias.insert("facade_name".to_owned(), Value::String(facade_name.to_owned()));
+                    alias.insert(
+                        "module_name".to_owned(),
+                        Value::String(module_name.to_owned()),
+                    );
+                    alias.insert(
+                        "facade_name".to_owned(),
+                        Value::String(facade_name.to_owned()),
+                    );
                     aliases.push(Value::Object(alias));
                 }
             }
         }
     }
-    assert_eq_value(sorted_newline_sha256(exposure_rows), EXPOSURE_SHA256.to_owned(), "exposure hash")?;
-    assert_eq_value(sorted_newline_sha256(facade_rows), FACADE_EXPORT_SHA256.to_owned(), "facade hash")?;
-    assert_eq_value(exposure_counts.get("FACADE").copied(), Some(15), "facade count")?;
+    assert_eq_value(
+        sorted_newline_sha256(exposure_rows),
+        EXPOSURE_SHA256.to_owned(),
+        "exposure hash",
+    )?;
+    assert_eq_value(
+        sorted_newline_sha256(facade_rows),
+        FACADE_EXPORT_SHA256.to_owned(),
+        "facade hash",
+    )?;
+    assert_eq_value(
+        exposure_counts.get("FACADE").copied(),
+        Some(15),
+        "facade count",
+    )?;
     assert_eq_value(
         exposure_counts.get("MODULE_PUBLIC").copied(),
         Some(12),
         "module-public count",
     )?;
-    assert_eq_value(exposure_counts.get("CFG_TEST_ONLY").copied(), Some(2), "test-only count")?;
-    assert_eq_value(exposure_counts.get("CFG_FUZZING").copied(), Some(1), "fuzz count")?;
+    assert_eq_value(
+        exposure_counts.get("CFG_TEST_ONLY").copied(),
+        Some(2),
+        "test-only count",
+    )?;
+    assert_eq_value(
+        exposure_counts.get("CFG_FUZZING").copied(),
+        Some(1),
+        "fuzz count",
+    )?;
 
     let public_contract = inputs
         .artifact
         .get("public_api_contract")
         .ok_or("public_api_contract missing")?;
-    assert_eq_value(count(public_contract, "public_symbol_count")?, 30, "recorded public count")?;
+    assert_eq_value(
+        count(public_contract, "public_symbol_count")?,
+        30,
+        "recorded public count",
+    )?;
     assert_eq_value(
         text(public_contract, "canonical_public_row_sha256")?,
         PUBLIC_ROW_SHA256,
@@ -706,7 +815,11 @@ fn validate_public_surface(inputs: &Inputs) -> Result<(), String> {
         .get("exposure_projection")
         .ok_or("exposure_projection missing")?;
     assert_eq_value(count(exposure, "row_count")?, 30, "recorded exposure count")?;
-    assert_eq_value(text(exposure, "projection_sha256")?, EXPOSURE_SHA256, "recorded exposure hash")?;
+    assert_eq_value(
+        text(exposure, "projection_sha256")?,
+        EXPOSURE_SHA256,
+        "recorded exposure hash",
+    )?;
     let recorded_counts = object(exposure, "class_counts")?;
     for (class, expected) in [
         ("FACADE", 15),
@@ -726,11 +839,19 @@ fn validate_public_surface(inputs: &Inputs) -> Result<(), String> {
         .get("facade_export_projection")
         .ok_or("facade_export_projection missing")?;
     assert_eq_value(count(facade, "row_count")?, 15, "recorded facade count")?;
-    assert_eq_value(text(facade, "projection_sha256")?, FACADE_EXPORT_SHA256, "recorded facade hash")?;
+    assert_eq_value(
+        text(facade, "projection_sha256")?,
+        FACADE_EXPORT_SHA256,
+        "recorded facade hash",
+    )?;
     let alias_contract = public_contract
         .get("renamed_facade_aliases")
         .ok_or("renamed_facade_aliases missing")?;
-    assert_eq_value(count(alias_contract, "row_count")?, 2, "recorded alias count")?;
+    assert_eq_value(
+        count(alias_contract, "row_count")?,
+        2,
+        "recorded alias count",
+    )?;
     assert_eq_value(
         text(alias_contract, "projection_sha256")?,
         RENAMED_ALIAS_SHA256,
@@ -761,7 +882,11 @@ fn validate_public_surface(inputs: &Inputs) -> Result<(), String> {
     )?;
 
     let kafka_client = row_by_id(rows, "symbol_id", "KPR-PUB-022")?;
-    assert_eq_value(array(kafka_client, "declarations")?.len(), 2, "KafkaClient declarations")?;
+    assert_eq_value(
+        array(kafka_client, "declarations")?.len(),
+        2,
+        "KafkaClient declarations",
+    )?;
     if !text(kafka_client, "cfg")?.contains("mutually exclusive") {
         return Err("KafkaClient cfg no longer states mutual exclusion".to_owned());
     }
@@ -799,7 +924,11 @@ fn validate_semantics_and_profiles(inputs: &Inputs) -> Result<(), String> {
         .artifact
         .get("semantic_contract")
         .ok_or("semantic_contract missing")?;
-    assert_eq_value(count(semantic_contract, "semantic_row_count")?, 97, "recorded semantic count")?;
+    assert_eq_value(
+        count(semantic_contract, "semantic_row_count")?,
+        97,
+        "recorded semantic count",
+    )?;
     assert_eq_value(
         text(semantic_contract, "semantic_id_set_sha256")?,
         SEMANTIC_ID_SHA256,
@@ -856,14 +985,32 @@ fn validate_semantics_and_profiles(inputs: &Inputs) -> Result<(), String> {
             .ok_or_else(|| format!("missing recorded configuration owner {owner}"))?;
         assert_eq_value(recorded, expected, &format!("recorded {owner}"))?;
     }
-    assert_eq_value(text(row_by_id(config_rows, "semantic_id", "KPR-CFG-006")?, "default")?, "true", "idempotence default")?;
     assert_eq_value(
-        text(row_by_id(config_rows, "semantic_id", "KCO-CFG-007")?, "default")?,
+        text(
+            row_by_id(config_rows, "semantic_id", "KPR-CFG-006")?,
+            "default",
+        )?,
+        "true",
+        "idempotence default",
+    )?;
+    assert_eq_value(
+        text(
+            row_by_id(config_rows, "semantic_id", "KCO-CFG-007")?,
+            "default",
+        )?,
         "false, manual commit",
         "manual commit default",
     )?;
-    let rebalance = row_by_id(array(&inputs.k0_2, "operations")?, "semantic_id", "KCO-OP-005")?;
-    assert_eq_value(text(rebalance, "surface")?, "KafkaConsumer caller-driven rebalance", "rebalance surface")?;
+    let rebalance = row_by_id(
+        array(&inputs.k0_2, "operations")?,
+        "semantic_id",
+        "KCO-OP-005",
+    )?;
+    assert_eq_value(
+        text(rebalance, "surface")?,
+        "KafkaConsumer caller-driven rebalance",
+        "rebalance surface",
+    )?;
     let invariants = array(semantic_contract, "headline_invariants")?;
     assert_eq_value(invariants.len(), 4, "headline invariant count")?;
     unique(&ids(invariants, "invariant_id")?, "headline invariant IDs")?;
@@ -935,13 +1082,21 @@ fn validate_semantics_and_profiles(inputs: &Inputs) -> Result<(), String> {
     let shared_contract = semantic_contract
         .get("shared_semantics")
         .ok_or("semantic shared contract missing")?;
-    assert_eq_value(count(shared_contract, "row_count")?, 12, "recorded shared count")?;
+    assert_eq_value(
+        count(shared_contract, "row_count")?,
+        12,
+        "recorded shared count",
+    )?;
     assert_eq_value(
         string_set(array(shared_contract, "keys")?)?,
         shared_keys,
         "recorded shared keys",
     )?;
-    assert_eq_value(text(shared_contract, "id_set_sha256")?, SHARED_ID_SHA256, "recorded shared ID hash")?;
+    assert_eq_value(
+        text(shared_contract, "id_set_sha256")?,
+        SHARED_ID_SHA256,
+        "recorded shared ID hash",
+    )?;
     assert_eq_value(
         text(shared_contract, "canonical_object_sha256")?,
         SHARED_OBJECT_SHA256,
@@ -955,7 +1110,11 @@ fn validate_semantics_and_profiles(inputs: &Inputs) -> Result<(), String> {
         PROFILE_ID_SHA256.to_owned(),
         "profile ID hash",
     )?;
-    assert_eq_value(canonical_rows_sha256(profiles)?, PROFILE_ROW_SHA256.to_owned(), "profile hash")?;
+    assert_eq_value(
+        canonical_rows_sha256(profiles)?,
+        PROFILE_ROW_SHA256.to_owned(),
+        "profile hash",
+    )?;
     let profile_groups = array(&inputs.k0_2, "profile_disposition_groups")?;
     assert_eq_value(profile_groups.len(), 17, "profile group count")?;
     assert_eq_value(
@@ -973,7 +1132,9 @@ fn validate_semantics_and_profiles(inputs: &Inputs) -> Result<(), String> {
     for group in profile_groups {
         let group_id = text(group, "profile_group_id")?;
         for semantic_id in array(group, "semantic_ids")? {
-            let semantic_id = semantic_id.as_str().ok_or("semantic profile member must be text")?;
+            let semantic_id = semantic_id
+                .as_str()
+                .ok_or("semantic profile member must be text")?;
             memberships.push(format!("{semantic_id}\t{group_id}"));
             seen_semantics.push(semantic_id.to_owned());
         }
@@ -994,7 +1155,11 @@ fn validate_semantics_and_profiles(inputs: &Inputs) -> Result<(), String> {
         .artifact
         .get("profile_contract")
         .ok_or("profile_contract missing")?;
-    assert_eq_value(count(profile_contract, "compilation_profile_count")?, 13, "recorded profile count")?;
+    assert_eq_value(
+        count(profile_contract, "compilation_profile_count")?,
+        13,
+        "recorded profile count",
+    )?;
     assert_eq_value(
         text(profile_contract, "compilation_profile_id_set_sha256")?,
         PROFILE_ID_SHA256,
@@ -1035,7 +1200,11 @@ fn validate_semantics_and_profiles(inputs: &Inputs) -> Result<(), String> {
         .artifact
         .get("error_and_outcome_contract")
         .ok_or("error_and_outcome_contract missing")?;
-    let error_row = row_by_id(array(&inputs.k0_1, "public_symbols")?, "symbol_id", "KPR-PUB-001")?;
+    let error_row = row_by_id(
+        array(&inputs.k0_1, "public_symbols")?,
+        "symbol_id",
+        "KPR-PUB-001",
+    )?;
     assert_eq_value(
         array(error_contract, "required_variants")?,
         array(error_row, "public_variants")?,
@@ -1087,7 +1256,11 @@ fn validate_absences_conflicts_and_journeys(inputs: &Inputs) -> Result<(), Strin
         .artifact
         .get("explicit_absence_contract")
         .ok_or("explicit_absence_contract missing")?;
-    assert_eq_value(count(absence_contract, "row_count")?, 2, "recorded absence count")?;
+    assert_eq_value(
+        count(absence_contract, "row_count")?,
+        2,
+        "recorded absence count",
+    )?;
     assert_eq_value(
         text(absence_contract, "canonical_source_row_sha256")?,
         ABSENCE_ROW_SHA256,
@@ -1096,7 +1269,9 @@ fn validate_absences_conflicts_and_journeys(inputs: &Inputs) -> Result<(), Strin
     let absence_rows = array(absence_contract, "rows")?;
     assert_eq_value(absence_rows.len(), 2, "contract absence count")?;
     assert_eq_value(
-        ids(absence_rows, "absence_id")?.into_iter().collect::<BTreeSet<_>>(),
+        ids(absence_rows, "absence_id")?
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
         ids(source_absences, "absence_id")?.into_iter().collect(),
         "absence IDs",
     )?;
@@ -1116,18 +1291,33 @@ fn validate_absences_conflicts_and_journeys(inputs: &Inputs) -> Result<(), Strin
                 assert_eq_value(row.get(key), Some(expected), &format!("absence {key}"))?;
             }
         }
-        assert_eq_value(text(row, "disposition")?, "ADDITIVE_GAP", "absence disposition")?;
+        assert_eq_value(
+            text(row, "disposition")?,
+            "ADDITIVE_GAP",
+            "absence disposition",
+        )?;
         if !text(row, "gate_state")?.starts_with("BLOCKING") {
-            return Err(format!("absence {} is not blocking", text(row, "absence_id")?));
+            return Err(format!(
+                "absence {} is not blocking",
+                text(row, "absence_id")?
+            ));
         }
     }
-    assert_eq_value(bool_field(absence_contract, "normalization_forbidden")?, true, "absence normalization")?;
+    assert_eq_value(
+        bool_field(absence_contract, "normalization_forbidden")?,
+        true,
+        "absence normalization",
+    )?;
     assert_eq_value(
         bool_field(absence_contract, "absence_authorizes_removal")?,
         false,
         "absence removal",
     )?;
-    assert_eq_value(bool_field(absence_contract, "absence_counts_as_parity")?, false, "absence parity")?;
+    assert_eq_value(
+        bool_field(absence_contract, "absence_counts_as_parity")?,
+        false,
+        "absence parity",
+    )?;
 
     let conflicts = inputs
         .artifact
@@ -1144,10 +1334,16 @@ fn validate_absences_conflicts_and_journeys(inputs: &Inputs) -> Result<(), Strin
     unique(&ids(conflict_rows, "conflict_id")?, "conflict IDs")?;
     for row in conflict_rows {
         if !text(row, "gate_state")?.starts_with("BLOCKING") {
-            return Err(format!("conflict {} is not blocking", text(row, "conflict_id")?));
+            return Err(format!(
+                "conflict {} is not blocking",
+                text(row, "conflict_id")?
+            ));
         }
         if array(row, "current_authority_refs")?.is_empty() || array(row, "owners")?.is_empty() {
-            return Err(format!("conflict {} lacks authority or owner", text(row, "conflict_id")?));
+            return Err(format!(
+                "conflict {} lacks authority or owner",
+                text(row, "conflict_id")?
+            ));
         }
     }
 
@@ -1158,18 +1354,30 @@ fn validate_absences_conflicts_and_journeys(inputs: &Inputs) -> Result<(), Strin
         JOURNEY_ID_SHA256.to_owned(),
         "journey ID hash",
     )?;
-    assert_eq_value(canonical_rows_sha256(journeys)?, JOURNEY_ROW_SHA256.to_owned(), "journey hash")?;
+    assert_eq_value(
+        canonical_rows_sha256(journeys)?,
+        JOURNEY_ROW_SHA256.to_owned(),
+        "journey hash",
+    )?;
     let journey_contract = inputs
         .artifact
         .get("journey_migration_contract")
         .ok_or("journey_migration_contract missing")?;
-    assert_eq_value(count(journey_contract, "journey_count")?, 15, "recorded journey count")?;
+    assert_eq_value(
+        count(journey_contract, "journey_count")?,
+        15,
+        "recorded journey count",
+    )?;
     assert_eq_value(
         text(journey_contract, "journey_id_set_sha256")?,
         JOURNEY_ID_SHA256,
         "recorded journey ID hash",
     )?;
-    assert_eq_value(text(journey_contract, "canonical_journey_row_sha256")?, JOURNEY_ROW_SHA256, "recorded journey hash")?;
+    assert_eq_value(
+        text(journey_contract, "canonical_journey_row_sha256")?,
+        JOURNEY_ROW_SHA256,
+        "recorded journey hash",
+    )?;
 
     let usage = journey_contract
         .get("usage_coverage")
@@ -1188,26 +1396,72 @@ fn validate_absences_conflicts_and_journeys(inputs: &Inputs) -> Result<(), Strin
         .iter()
         .map(|row| text(row, "usage_knowledge_state").map(str::to_owned))
         .collect::<Result<BTreeSet<_>, _>>()?;
-    assert_eq_value(public_usage_states, allowed_usage_states.clone(), "public usage states")?;
-    assert_eq_value(semantic_usage_states, allowed_usage_states, "semantic usage states")?;
+    assert_eq_value(
+        public_usage_states,
+        allowed_usage_states.clone(),
+        "public usage states",
+    )?;
+    assert_eq_value(
+        semantic_usage_states,
+        allowed_usage_states,
+        "semantic usage states",
+    )?;
     let public_known = public_dispositions
         .iter()
-        .filter(|row| row.get("usage_knowledge_state").and_then(Value::as_str) == Some("KNOWN_LOCAL_REFERENCES"))
+        .filter(|row| {
+            row.get("usage_knowledge_state").and_then(Value::as_str)
+                == Some("KNOWN_LOCAL_REFERENCES")
+        })
         .count();
     let semantic_known = semantic_dispositions
         .iter()
-        .filter(|row| row.get("usage_knowledge_state").and_then(Value::as_str) == Some("KNOWN_LOCAL_REFERENCES"))
+        .filter(|row| {
+            row.get("usage_knowledge_state").and_then(Value::as_str)
+                == Some("KNOWN_LOCAL_REFERENCES")
+        })
         .count();
     assert_eq_value(public_known, 17, "known public usage")?;
-    assert_eq_value(public_dispositions.len() - public_known, 13, "unknown public usage")?;
+    assert_eq_value(
+        public_dispositions.len() - public_known,
+        13,
+        "unknown public usage",
+    )?;
     assert_eq_value(semantic_known, 45, "known semantic usage")?;
-    assert_eq_value(semantic_dispositions.len() - semantic_known, 52, "unknown semantic usage")?;
-    assert_eq_value(count(usage, "public_known_local_references")?, 17, "recorded public known")?;
-    assert_eq_value(count(usage, "public_symbol_rows")?, 30, "recorded public usage rows")?;
-    assert_eq_value(count(usage, "public_unknown")?, 13, "recorded public unknown")?;
-    assert_eq_value(count(usage, "semantic_known_local_references")?, 45, "recorded semantic known")?;
-    assert_eq_value(count(usage, "semantic_rows")?, 97, "recorded semantic usage rows")?;
-    assert_eq_value(count(usage, "semantic_unknown")?, 52, "recorded semantic unknown")?;
+    assert_eq_value(
+        semantic_dispositions.len() - semantic_known,
+        52,
+        "unknown semantic usage",
+    )?;
+    assert_eq_value(
+        count(usage, "public_known_local_references")?,
+        17,
+        "recorded public known",
+    )?;
+    assert_eq_value(
+        count(usage, "public_symbol_rows")?,
+        30,
+        "recorded public usage rows",
+    )?;
+    assert_eq_value(
+        count(usage, "public_unknown")?,
+        13,
+        "recorded public unknown",
+    )?;
+    assert_eq_value(
+        count(usage, "semantic_known_local_references")?,
+        45,
+        "recorded semantic known",
+    )?;
+    assert_eq_value(
+        count(usage, "semantic_rows")?,
+        97,
+        "recorded semantic usage rows",
+    )?;
+    assert_eq_value(
+        count(usage, "semantic_unknown")?,
+        52,
+        "recorded semantic unknown",
+    )?;
 
     let mut public_edges = Vec::new();
     for row in public_dispositions {
@@ -1215,7 +1469,9 @@ fn validate_absences_conflicts_and_journeys(inputs: &Inputs) -> Result<(), Strin
         for journey_id in array(row, "journey_ids")? {
             public_edges.push(format!(
                 "{symbol_id}\t{}",
-                journey_id.as_str().ok_or("public journey ID must be text")?
+                journey_id
+                    .as_str()
+                    .ok_or("public journey ID must be text")?
             ));
         }
     }
@@ -1225,7 +1481,9 @@ fn validate_absences_conflicts_and_journeys(inputs: &Inputs) -> Result<(), Strin
         for journey_id in array(row, "journey_ids")? {
             semantic_edges.push(format!(
                 "{semantic_id}\t{}",
-                journey_id.as_str().ok_or("semantic journey ID must be text")?
+                journey_id
+                    .as_str()
+                    .ok_or("semantic journey ID must be text")?
             ));
         }
     }
@@ -1233,7 +1491,11 @@ fn validate_absences_conflicts_and_journeys(inputs: &Inputs) -> Result<(), Strin
     unique(&semantic_edges, "semantic journey edges")?;
     assert_eq_value(public_edges.len(), 109, "public journey edge count")?;
     assert_eq_value(semantic_edges.len(), 216, "semantic journey edge count")?;
-    assert_eq_value(count(usage, "public_journey_edge_count")?, 109, "recorded public edge count")?;
+    assert_eq_value(
+        count(usage, "public_journey_edge_count")?,
+        109,
+        "recorded public edge count",
+    )?;
     assert_eq_value(
         count(usage, "semantic_journey_edge_count")?,
         216,
@@ -1264,11 +1526,19 @@ fn validate_absences_conflicts_and_journeys(inputs: &Inputs) -> Result<(), Strin
         false,
         "usage completeness claim",
     )?;
-    assert_eq_value(bool_field(usage, "unknown_blocks_migration")?, true, "unknown gate")?;
+    assert_eq_value(
+        bool_field(usage, "unknown_blocks_migration")?,
+        true,
+        "unknown gate",
+    )?;
 
     let findings = array(&inputs.k0_2, "routed_findings")?;
     assert_eq_value(findings.len(), 23, "finding count")?;
-    assert_eq_value(canonical_rows_sha256(findings)?, FINDING_ROW_SHA256.to_owned(), "finding hash")?;
+    assert_eq_value(
+        canonical_rows_sha256(findings)?,
+        FINDING_ROW_SHA256.to_owned(),
+        "finding hash",
+    )?;
     let mut owner_edges = Vec::new();
     for row in findings {
         let finding_id = text(row, "finding_id")?;
@@ -1290,13 +1560,21 @@ fn validate_absences_conflicts_and_journeys(inputs: &Inputs) -> Result<(), Strin
         .artifact
         .get("ownership_and_gates")
         .ok_or("ownership_and_gates missing")?;
-    assert_eq_value(count(ownership, "finding_owner_edge_count")?, 62, "recorded owner edge count")?;
+    assert_eq_value(
+        count(ownership, "finding_owner_edge_count")?,
+        62,
+        "recorded owner edge count",
+    )?;
     assert_eq_value(
         text(ownership, "finding_owner_edge_sha256")?,
         FINDING_OWNER_EDGE_SHA256,
         "recorded owner edge hash",
     )?;
-    assert_eq_value(count(ownership, "unowned_row_count")?, 0, "unowned row count")?;
+    assert_eq_value(
+        count(ownership, "unowned_row_count")?,
+        0,
+        "unowned row count",
+    )?;
     for (key, expected) in [
         ("policy_owner", BEAD_ID),
         (
@@ -1358,9 +1636,18 @@ fn validate_absences_conflicts_and_journeys(inputs: &Inputs) -> Result<(), Strin
     }
     let public_owners = object(ownership, "public_surface_owners")?;
     for (key, expected) in [
-        ("api_and_cfg_contract", "asupersync-dep-p7-kafka-removal-sarszu.2.10.1"),
-        ("configuration_and_defaults", "asupersync-dep-p7-kafka-removal-sarszu.2.10.2"),
-        ("typed_errors_and_outcomes", "asupersync-dep-p7-kafka-removal-sarszu.2.10.3"),
+        (
+            "api_and_cfg_contract",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.10.1",
+        ),
+        (
+            "configuration_and_defaults",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.10.2",
+        ),
+        (
+            "typed_errors_and_outcomes",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.10.3",
+        ),
         (
             "telemetry_privacy_and_redaction",
             "asupersync-dep-p7-kafka-removal-sarszu.2.10.4",
@@ -1370,7 +1657,11 @@ fn validate_absences_conflicts_and_journeys(inputs: &Inputs) -> Result<(), Strin
             "asupersync-dep-p7-kafka-removal-sarszu.2.10.5",
         ),
     ] {
-        assert_eq_value(public_owners.get(key).and_then(Value::as_str), Some(expected), key)?;
+        assert_eq_value(
+            public_owners.get(key).and_then(Value::as_str),
+            Some(expected),
+            key,
+        )?;
     }
 
     let handoffs = array(journey_contract, "ordered_handoffs")?;
@@ -1389,7 +1680,9 @@ fn validate_absences_conflicts_and_journeys(inputs: &Inputs) -> Result<(), Strin
     let standalone = array(journey_contract, "standalone_owner_boundaries")?;
     assert_eq_value(standalone.len(), 3, "standalone owner count")?;
     assert_eq_value(
-        ids(standalone, "bead_id")?.into_iter().collect::<BTreeSet<_>>(),
+        ids(standalone, "bead_id")?
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
         [
             "asupersync-messaging-resp3-kafka-commit-o9ujbk",
             "asupersync-ne8jdw",
@@ -1451,7 +1744,10 @@ fn validate_gates_and_docs(root: &Path, artifact: &Value) -> Result<(), String> 
         ("k1_1_bead", "asupersync-dep-p7-kafka-removal-sarszu.2.1.1"),
         ("registry_disposition", "KEEP_UNTIL_PARITY"),
         ("current_action", "KEEP_INCUMBENT"),
-        ("k1_terminal_bead", "asupersync-dep-p7-kafka-removal-sarszu.2.1.5"),
+        (
+            "k1_terminal_bead",
+            "asupersync-dep-p7-kafka-removal-sarszu.2.1.5",
+        ),
         (
             "verification_terminal_bead",
             "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
@@ -1481,15 +1777,36 @@ fn validate_gates_and_docs(root: &Path, artifact: &Value) -> Result<(), String> 
         "oracle_retirement_allowed",
         "cutover_allowed",
     ] {
-        assert_eq_value(bool_field(authority, key)?, false, &format!("authority {key}"))?;
+        assert_eq_value(
+            bool_field(authority, key)?,
+            false,
+            &format!("authority {key}"),
+        )?;
         assert_eq_value(bool_field(receipt, key)?, false, &format!("receipt {key}"))?;
     }
-    assert_eq_value(bool_field(receipt, "k1_3_contract_complete")?, true, "K1.3 completion")?;
-    for key in ["k1_2_complete", "k1_4_complete", "k1_5_complete", "k1_parent_complete"] {
+    assert_eq_value(
+        bool_field(receipt, "k1_3_contract_complete")?,
+        true,
+        "K1.3 completion",
+    )?;
+    for key in [
+        "k1_2_complete",
+        "k1_4_complete",
+        "k1_5_complete",
+        "k1_parent_complete",
+    ] {
         assert_eq_value(bool_field(receipt, key)?, false, key)?;
     }
-    assert_eq_value(bool_field(receipt, "migration_eligible")?, false, "migration eligibility")?;
-    assert_eq_value(text(receipt, "incumbent_disposition")?, "KEEP_INCUMBENT", "incumbent")?;
+    assert_eq_value(
+        bool_field(receipt, "migration_eligible")?,
+        false,
+        "migration eligibility",
+    )?;
+    assert_eq_value(
+        text(receipt, "incumbent_disposition")?,
+        "KEEP_INCUMBENT",
+        "incumbent",
+    )?;
 
     let boundaries = array(artifact, "no_claim_boundaries")?;
     assert_eq_value(boundaries.len(), 7, "no-claim boundary count")?;
@@ -1528,9 +1845,18 @@ fn validate_gates_and_docs(root: &Path, artifact: &Value) -> Result<(), String> 
 
     let artifact_bytes = read_bytes(root, ARTIFACT_PATH)?;
     let doc_bytes = read_bytes(root, DOC_PATH)?;
-    assert_eq_value(sha256_bytes(&artifact_bytes), ARTIFACT_SHA256.to_owned(), "artifact hash")?;
-    assert_eq_value(sha256_bytes(&doc_bytes), DOC_SHA256.to_owned(), "document hash")?;
-    let doc = String::from_utf8(doc_bytes).map_err(|error| format!("document is not UTF-8: {error}"))?;
+    assert_eq_value(
+        sha256_bytes(&artifact_bytes),
+        ARTIFACT_SHA256.to_owned(),
+        "artifact hash",
+    )?;
+    assert_eq_value(
+        sha256_bytes(&doc_bytes),
+        DOC_SHA256.to_owned(),
+        "document hash",
+    )?;
+    let doc =
+        String::from_utf8(doc_bytes).map_err(|error| format!("document is not UTF-8: {error}"))?;
     assert_eq_value(doc.matches(DOC_BEGIN).count(), 1, "document begin marker")?;
     assert_eq_value(doc.matches(DOC_END).count(), 1, "document end marker")?;
     for phrase in [
@@ -1572,7 +1898,10 @@ fn changed_disposition_fails_closed() {
     inputs.artifact["coverage_model"]["domain_views"][0]["disposition"] =
         Value::String("REMOVE".to_owned());
     let error = validate(&root, &inputs).expect_err("changed disposition must fail");
-    assert!(error.contains("domain disposition"), "unexpected error: {error}");
+    assert!(
+        error.contains("domain disposition"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
@@ -1584,7 +1913,10 @@ fn missing_conflict_fails_closed() {
         .expect("conflict rows must be an array")
         .pop();
     let error = validate(&root, &inputs).expect_err("missing conflict must fail");
-    assert!(error.contains("conflict count"), "unexpected error: {error}");
+    assert!(
+        error.contains("conflict count"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
@@ -1593,7 +1925,10 @@ fn cutover_permission_fails_closed() {
     let mut inputs = load_inputs(&root).expect("static K1.3 inputs must parse");
     inputs.artifact["disposition_receipt"]["cutover_allowed"] = Value::Bool(true);
     let error = validate(&root, &inputs).expect_err("cutover permission must fail");
-    assert!(error.contains("cutover_allowed"), "unexpected error: {error}");
+    assert!(
+        error.contains("cutover_allowed"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
@@ -1617,31 +1952,46 @@ fn high_risk_policy_mutations_fail_closed() {
     profile.artifact["profile_contract"]["semantic_profile_membership_sha256"] =
         Value::String("0".repeat(64));
     let error = validate(&root, &profile).expect_err("profile drift must fail");
-    assert!(error.contains("recorded profile membership hash"), "unexpected error: {error}");
+    assert!(
+        error.contains("recorded profile membership hash"),
+        "unexpected error: {error}"
+    );
 
     let mut absence = original.clone();
     absence.artifact["explicit_absence_contract"]["rows"][0]["implementation_owner"] =
         Value::String(BEAD_ID.to_owned());
     let error = validate(&root, &absence).expect_err("absence owner drift must fail");
-    assert!(error.contains("absence implementation_owner"), "unexpected error: {error}");
+    assert!(
+        error.contains("absence implementation_owner"),
+        "unexpected error: {error}"
+    );
 
     let mut conflict = original.clone();
     conflict.artifact["authority_conflicts"]["rows"][0]["claim"] =
         Value::String("normalized away".to_owned());
     let error = validate(&root, &conflict).expect_err("conflict drift must fail");
-    assert!(error.contains("conflict row hash"), "unexpected error: {error}");
+    assert!(
+        error.contains("conflict row hash"),
+        "unexpected error: {error}"
+    );
 
     let mut journey = original.clone();
-    journey.artifact["journey_migration_contract"]["usage_coverage"]
-        ["public_journey_edge_sha256"] = Value::String("0".repeat(64));
+    journey.artifact["journey_migration_contract"]["usage_coverage"]["public_journey_edge_sha256"] =
+        Value::String("0".repeat(64));
     let error = validate(&root, &journey).expect_err("journey edge drift must fail");
-    assert!(error.contains("recorded public edge hash"), "unexpected error: {error}");
+    assert!(
+        error.contains("recorded public edge hash"),
+        "unexpected error: {error}"
+    );
 
     let mut handoff = original.clone();
     handoff.artifact["journey_migration_contract"]["ordered_handoffs"][6]["owner"] =
         Value::String(BEAD_ID.to_owned());
     let error = validate(&root, &handoff).expect_err("handoff drift must fail");
-    assert!(error.contains("handoff row hash"), "unexpected error: {error}");
+    assert!(
+        error.contains("handoff row hash"),
+        "unexpected error: {error}"
+    );
 
     let mut boundary = original;
     boundary.artifact["no_claim_boundaries"][0] = Value::String("claim widened".to_owned());

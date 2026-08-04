@@ -21,10 +21,8 @@ const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const BEAD_ID: &str = "asupersync-dep-p7-kafka-removal-sarszu.1.2";
 const CAPABILITY_ID: &str = "CAP-KAFKA";
 const BASELINE_REVISION: &str = "b4997e8fe4de098a5a30ff468418460b59ca414a";
-const ARTIFACT_SHA256: &str =
-    "fec9ac1a1e9ac63ce25393962c843f9169cae804c16c470ada2bf670ab0fc4ec";
-const DOC_SHA256: &str =
-    "7cf46fb6eaa7ded66b6d1d04a7c711f4ce687252bb42eaa05d77e3a5e4b79ff5";
+const ARTIFACT_SHA256: &str = "fec9ac1a1e9ac63ce25393962c843f9169cae804c16c470ada2bf670ab0fc4ec";
+const DOC_SHA256: &str = "7cf46fb6eaa7ded66b6d1d04a7c711f4ce687252bb42eaa05d77e3a5e4b79ff5";
 const SOURCE_PIN_MAP_SHA256: &str =
     "2d0297b10099c4e490ab13eb21843e237c07a1c8e9005c34d6d2f1fbf6bc0c56";
 const ALL_ROW_SOURCE_ANCHOR_MAP_SHA256: &str =
@@ -201,7 +199,9 @@ fn expected_set(expected: &[&str]) -> BTreeSet<String> {
 }
 
 fn numbered_ids(prefix: &str, end: usize) -> BTreeSet<String> {
-    (1..=end).map(|number| format!("{prefix}{number:03}")).collect()
+    (1..=end)
+        .map(|number| format!("{prefix}{number:03}"))
+        .collect()
 }
 
 fn find_row<'a>(rows: &'a [Value], key: &str, expected: &str) -> &'a Value {
@@ -231,10 +231,7 @@ fn parse_anchor_line(value: &str, row_id: &str) -> Result<usize, String> {
     Ok(line)
 }
 
-fn anchored_source(
-    row: &Value,
-    sources: &BTreeMap<String, String>,
-) -> Result<String, String> {
+fn anchored_source(row: &Value, sources: &BTreeMap<String, String>) -> Result<String, String> {
     let row_id = text(row, "semantic_id");
     let anchor = text(row, "source_anchor");
     let anchor_segments: Vec<&str> = anchor.split(';').collect();
@@ -346,9 +343,7 @@ fn validate_source_anchors(matrix: &Value) -> Result<(), String> {
                 let entry = entry
                     .as_str()
                     .ok_or_else(|| format!("{collection} entry point must be text"))?;
-                let declaration_path = entry
-                    .split_once('(')
-                    .map_or(entry, |(path, _)| path);
+                let declaration_path = entry.split_once('(').map_or(entry, |(path, _)| path);
                 let function = declaration_path
                     .rsplit("::")
                     .next()
@@ -564,8 +559,10 @@ fn validate_source_pins(matrix: &Value) -> Result<(), String> {
         "docs/adr/dep_plan_adr_009_kafka_client.md",
         "artifacts/dependency_capability_registry_v1.json",
     ]);
-    let actual_paths: BTreeSet<String> =
-        pins.iter().map(|pin| text(pin, "path").to_owned()).collect();
+    let actual_paths: BTreeSet<String> = pins
+        .iter()
+        .map(|pin| text(pin, "path").to_owned())
+        .collect();
     if actual_paths != expected_paths {
         return Err("source pin path set drifted".to_owned());
     }
@@ -629,9 +626,10 @@ fn validate_required_row_shape(rows: &[Value], label: &str) -> Result<(), String
                 return Err(format!("{label} {id} has empty {key}"));
             }
         }
-        if array(row, "public_entry_points").iter().any(|entry| {
-            entry.as_str().is_none_or(|entry| entry.trim().is_empty())
-        }) {
+        if array(row, "public_entry_points")
+            .iter()
+            .any(|entry| entry.as_str().is_none_or(|entry| entry.trim().is_empty()))
+        {
             return Err(format!("{label} {id} has an invalid public entry point"));
         }
         let owners = array(row, "gap_owners");
@@ -642,7 +640,9 @@ fn validate_required_row_shape(rows: &[Value], label: &str) -> Result<(), String
                     .is_none_or(|owner| !allowed_owners.contains(owner))
             })
         {
-            return Err(format!("{label} {id} must have exact Asupersync gap owners"));
+            return Err(format!(
+                "{label} {id} must have exact Asupersync gap owners"
+            ));
         }
     }
     Ok(())
@@ -724,8 +724,7 @@ fn validate_configuration_coverage(matrix: &Value) -> Result<(), String> {
     let manual = find_row(rows, "semantic_id", "KCO-CFG-007");
     if text(manual, "default") != "false, manual commit"
         || !text(manual, "success_outcome").contains("stores before returning")
-        || !text(manual, "shutdown_rule")
-            .contains("no explicit real-broker auto-commit flush")
+        || !text(manual, "shutdown_rule").contains("no explicit real-broker auto-commit flush")
     {
         return Err("manual/auto commit incumbent semantics drifted".to_owned());
     }
@@ -748,8 +747,7 @@ fn validate_configuration_coverage(matrix: &Value) -> Result<(), String> {
         let harness = find_row(rows, "semantic_id", id);
         let serialized = serde_json::to_string(harness)
             .map_err(|error| format!("failed to serialize {id}: {error}"))?;
-        if !serialized.contains("release test-internals") || !serialized.contains("panic guard")
-        {
+        if !serialized.contains("release test-internals") || !serialized.contains("panic guard") {
             return Err(format!("{id} release harness guard must remain explicit"));
         }
     }
@@ -849,7 +847,9 @@ fn validate_profile_dispositions(matrix: &Value) -> Result<(), String> {
             .map(|member| string_value(member, "profile semantic ID"))
             .collect();
         if members.is_empty() || members.len() != member_set.len() {
-            return Err(format!("{group_id} semantic IDs must be nonempty and unique"));
+            return Err(format!(
+                "{group_id} semantic IDs must be nonempty and unique"
+            ));
         }
         covered_ids.extend(member_set.iter().cloned());
         canonical_membership.push_str(group_id);
@@ -864,7 +864,9 @@ fn validate_profile_dispositions(matrix: &Value) -> Result<(), String> {
             .collect();
         if owners.is_empty()
             || owners.len() != owner_set.len()
-            || owner_set.iter().any(|owner| !allowed_owners.contains(owner))
+            || owner_set
+                .iter()
+                .any(|owner| !allowed_owners.contains(owner))
         {
             return Err(format!("{group_id} gap owners must be unique and allowed"));
         }
@@ -903,8 +905,7 @@ fn validate_profile_dispositions(matrix: &Value) -> Result<(), String> {
     let client_consumer = find_row(groups, "profile_group_id", "KAFKA-PROFILE-011");
     if string_set(client_consumer, "semantic_ids") != expected_set(&["KPR-OP-020"])
         || !text(client_consumer, "deterministic_behavior").contains("crate-test cfg branch")
-        || !text(client_consumer, "release_test_internals_behavior")
-            .contains("FeatureDisabled")
+        || !text(client_consumer, "release_test_internals_behavior").contains("FeatureDisabled")
     {
         return Err("parallel-client consumer profile disposition drifted".to_owned());
     }
@@ -933,8 +934,7 @@ fn validate_high_risk_semantics(matrix: &Value) -> Result<(), String> {
             "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
         ],
     )?;
-    if text(key_password, "source_anchor")
-        != "src/messaging/kafka.rs:934-956,988-993,1169-1171"
+    if text(key_password, "source_anchor") != "src/messaging/kafka.rs:934-956,988-993,1169-1171"
         || !text(key_password, "credential_payload_rule").contains("not ZeroizeOnDrop")
         || !text(key_password, "credential_payload_rule").contains("plaintext copies")
     {
@@ -967,7 +967,7 @@ fn validate_high_risk_semantics(matrix: &Value) -> Result<(), String> {
     if text(producer_admission, "source_anchor")
         != "src/messaging/kafka.rs:627-745,1229-1231,1250-1251,1386-1410,1605-1609,1672-1676,1903-1918"
         || !text(producer_admission, "broker_mapping")
-        .contains("gates KafkaProducer send and TransactionalProducer::begin_transaction")
+            .contains("gates KafkaProducer send and TransactionalProducer::begin_transaction")
         || !text(producer_admission, "broker_mapping")
             .contains("already-created Transaction handle do not recheck")
         || !text(producer_admission, "error_outcome")
@@ -1010,7 +1010,9 @@ fn validate_high_risk_semantics(matrix: &Value) -> Result<(), String> {
         "Kafka cargo feature is required by this config but is not enabled; rebuild with --features kafka",
     ] {
         if !text(feature_requirement, "broker_mapping").contains(diagnostic) {
-            return Err(format!("feature diagnostic must retain exact text: {diagnostic}"));
+            return Err(format!(
+                "feature diagnostic must retain exact text: {diagnostic}"
+            ));
         }
     }
 
@@ -1130,8 +1132,7 @@ fn validate_high_risk_semantics(matrix: &Value) -> Result<(), String> {
         let row = find_row(operations, "semantic_id", id);
         if !text(row, "source_owner").contains("src/runtime/spawn_blocking.rs")
             || !text(row, "source_owner").contains("src/runtime/blocking_pool.rs")
-            || !text(row, "resource_bound")
-                .contains("successfully spawned blocking threads at 256")
+            || !text(row, "resource_bound").contains("successfully spawned blocking threads at 256")
             || !text(row, "resource_bound").contains("SegQueue")
             || !text(row, "resource_bound").contains("uncapped")
             || !text(row, "cancellation_rule").contains("no-pool")
@@ -1165,8 +1166,7 @@ fn validate_high_risk_semantics(matrix: &Value) -> Result<(), String> {
     let consumer_constructor = find_row(operations, "semantic_id", "KCO-OP-003");
     if !text(consumer_constructor, "broker_mapping").contains("enable.partition.eof=true")
         || !text(consumer_constructor, "error_outcome").contains("ClientCreation")
-        || !text(consumer_constructor, "credential_payload_rule")
-            .contains("can expose a password")
+        || !text(consumer_constructor, "credential_payload_rule").contains("can expose a password")
     {
         return Err("consumer construction semantics drifted".to_owned());
     }
@@ -1180,10 +1180,8 @@ fn validate_high_risk_semantics(matrix: &Value) -> Result<(), String> {
     ] {
         let row = find_row(operations, "semantic_id", id);
         if !text(row, "source_owner").contains("src/runtime/spawn_blocking.rs")
-            || !text(row, "resource_bound")
-                .contains("successfully spawned blocking threads at 256")
-            || !text(row, "cancellation_rule")
-                .contains("without consulting this operation Cx")
+            || !text(row, "resource_bound").contains("successfully spawned blocking threads at 256")
+            || !text(row, "cancellation_rule").contains("without consulting this operation Cx")
             || !text(row, "error_outcome").contains("blocking-closure panic")
             || !text(row, "resource_bound").contains("inline on the async worker")
         {
@@ -1219,12 +1217,8 @@ fn validate_exact_owner_maps(matrix: &Value) -> Result<(), String> {
         "semantic_id",
         "gap_owners",
     )?;
-    let finding_digest = canonical_owner_map(
-        matrix,
-        &["routed_findings"],
-        "finding_id",
-        "owner_beads",
-    )?;
+    let finding_digest =
+        canonical_owner_map(matrix, &["routed_findings"], "finding_id", "owner_beads")?;
     let profile_owner_digest = canonical_owner_map(
         matrix,
         &["profile_disposition_groups"],
@@ -1391,26 +1385,19 @@ fn validate_helpers_and_absences(matrix: &Value) -> Result<(), String> {
     }
     let offsets = find_row(absences, "absence_id", "KAFKA-ABS-001");
     if text(offsets, "shipped_state") != "ABSENT_NOT_PARITY"
-        || text(offsets, "disposition_owner")
-            != "asupersync-dep-p7-kafka-removal-sarszu.2.12.5"
-        || text(offsets, "implementation_owner")
-            != "asupersync-dep-p7-kafka-removal-sarszu.2.6.3"
-        || text(offsets, "verification_owner")
-            != "asupersync-dep-p7-kafka-removal-sarszu.2.13.3"
+        || text(offsets, "disposition_owner") != "asupersync-dep-p7-kafka-removal-sarszu.2.12.5"
+        || text(offsets, "implementation_owner") != "asupersync-dep-p7-kafka-removal-sarszu.2.6.3"
+        || text(offsets, "verification_owner") != "asupersync-dep-p7-kafka-removal-sarszu.2.13.3"
         || !text(offsets, "no_claim").contains("not consume-process-produce exactly-once")
     {
         return Err("transactional offset absence must remain explicit".to_owned());
     }
     let admin = find_row(absences, "absence_id", "KAFKA-ABS-002");
     if text(admin, "shipped_state") != "ABSENT_NOT_PARITY"
-        || text(admin, "disposition_owner")
-            != "asupersync-dep-p7-kafka-removal-sarszu.2.12.5"
-        || text(admin, "api_contract_owner")
-            != "asupersync-dep-p7-kafka-removal-sarszu.2.10.1"
-        || text(admin, "implementation_owner_state")
-            != "NOT_ALLOCATED_PENDING_API_DISPOSITION"
-        || text(admin, "verification_owner")
-            != "asupersync-dep-p7-kafka-removal-sarszu.2.12.5"
+        || text(admin, "disposition_owner") != "asupersync-dep-p7-kafka-removal-sarszu.2.12.5"
+        || text(admin, "api_contract_owner") != "asupersync-dep-p7-kafka-removal-sarszu.2.10.1"
+        || text(admin, "implementation_owner_state") != "NOT_ALLOCATED_PENDING_API_DISPOSITION"
+        || text(admin, "verification_owner") != "asupersync-dep-p7-kafka-removal-sarszu.2.12.5"
         || admin.get("implementation_owner").is_some()
         || !text(admin, "no_claim").contains("does not invent")
     {
@@ -1463,8 +1450,7 @@ fn validate_shared_semantics_and_findings(matrix: &Value) -> Result<(), String> 
     let expected_finding_ids: BTreeSet<String> = (1..=23)
         .map(|number| format!("KAFKA-K0-2-GAP-{number:02}"))
         .collect();
-    if findings.len() != 23 || row_ids(findings, "finding_id") != expected_finding_ids
-    {
+    if findings.len() != 23 || row_ids(findings, "finding_id") != expected_finding_ids {
         return Err("routed finding ID set drifted".to_owned());
     }
     let allowed_owners = expected_set(ALLOWED_GAP_OWNERS);
@@ -1477,7 +1463,9 @@ fn validate_shared_semantics_and_findings(matrix: &Value) -> Result<(), String> 
         if text(finding, "state") != "ROUTED"
             || owners.is_empty()
             || owners.len() != owner_set.len()
-            || owner_set.iter().any(|owner| !allowed_owners.contains(owner))
+            || owner_set
+                .iter()
+                .any(|owner| !allowed_owners.contains(owner))
         {
             return Err(format!(
                 "{} must be routed to exact owners",
@@ -1507,15 +1495,27 @@ fn validate_shared_semantics_and_findings(matrix: &Value) -> Result<(), String> 
     for (id, markers) in [
         (
             "KAFKA-K0-2-GAP-19",
-            ["uncapped pending SegQueue", "shutdown enqueue rejection", "256"],
+            [
+                "uncapped pending SegQueue",
+                "shutdown enqueue rejection",
+                "256",
+            ],
         ),
         (
             "KAFKA-K0-2-GAP-20",
-            ["without an ordering fence", "older buffered snapshot", "revoked"],
+            [
+                "without an ordering fence",
+                "older buffered snapshot",
+                "revoked",
+            ],
         ),
         (
             "KAFKA-K0-2-GAP-21",
-            ["rejected configuration value", "without redaction", "plaintext credentials"],
+            [
+                "rejected configuration value",
+                "without redaction",
+                "plaintext credentials",
+            ],
         ),
         (
             "KAFKA-K0-2-GAP-22",
@@ -1523,7 +1523,11 @@ fn validate_shared_semantics_and_findings(matrix: &Value) -> Result<(), String> 
         ),
         (
             "KAFKA-K0-2-GAP-23",
-            ["phase Active", "no handle or Drop hook", "no public recovery path"],
+            [
+                "phase Active",
+                "no handle or Drop hook",
+                "no public recovery path",
+            ],
         ),
     ] {
         let finding = find_row(findings, "finding_id", id);

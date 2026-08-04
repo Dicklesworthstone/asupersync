@@ -18,22 +18,18 @@ use std::path::PathBuf;
 const ARTIFACT_PATH: &str = "artifacts/kafka_broker_fixture_provenance_matrix_v1.json";
 const DOC_PATH: &str = "docs/kafka_broker_fixture_provenance_matrix.md";
 const K0_3_PATH: &str = "artifacts/kafka_downstream_user_journey_inventory_v1.json";
-const ARTIFACT_SHA256: &str =
-    "03406fe1146345ef7c50ec5e4077f0c6131db963e3776215629e9d34a781a643";
-const DOC_SHA256: &str =
-    "e9b4e04d8d3dd5ccf967182dabcb9f1e16cb712e7a154123d82bfe0318a201a9";
+const ARTIFACT_SHA256: &str = "03406fe1146345ef7c50ec5e4077f0c6131db963e3776215629e9d34a781a643";
+const DOC_SHA256: &str = "e9b4e04d8d3dd5ccf967182dabcb9f1e16cb712e7a154123d82bfe0318a201a9";
 const ARTIFACT_ID: &str = "kafka-broker-fixture-provenance-matrix-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const BEAD_ID: &str = "asupersync-dep-p7-kafka-removal-sarszu.1.4";
 const CAPABILITY_ID: &str = "CAP-KAFKA";
 const BASELINE_REVISION: &str = "012c13714db267a4fba928db9f900b70d6c1d25a";
 const CAPTURED_DATE_UTC: &str = "2026-08-03";
-const INVENTORY_STATE: &str =
-    "K0_4_STATIC_FIXTURE_AND_PROVENANCE_MATRIX_FROZEN_RUNTIME_UNKNOWN";
+const INVENTORY_STATE: &str = "K0_4_STATIC_FIXTURE_AND_PROVENANCE_MATRIX_FROZEN_RUNTIME_UNKNOWN";
 const K0_3_ARTIFACT_ID: &str = "kafka-downstream-user-journey-inventory-v1";
 const K0_3_BASELINE_REVISION: &str = "ae22e710d87412b38e546b32e9702106619481d5";
-const K0_3_SHA256: &str =
-    "52f8dc9a2695a170b14c85c9b29b6e60f95e05bd013d3d9db0dab8d94a1ced09";
+const K0_3_SHA256: &str = "52f8dc9a2695a170b14c85c9b29b6e60f95e05bd013d3d9db0dab8d94a1ced09";
 const K0_3_TEST_GROUP_COUNT: usize = 35;
 const K0_3_TEST_DECLARATION_COUNT: usize = 936;
 const K0_3_EXACT_TEST_DECLARATION_COUNT: usize = 888;
@@ -565,11 +561,7 @@ fn tuple_sha256(rows: &[Value], fields: &[&str]) -> String {
         .map(|row| {
             fields
                 .iter()
-                .map(|field| {
-                    row.get(*field)
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                })
+                .map(|field| row.get(*field).and_then(Value::as_str).unwrap_or(""))
                 .collect::<Vec<_>>()
                 .join("\t")
         })
@@ -710,8 +702,7 @@ fn validate_identity_authority_policy(matrix: &Value) -> Result<(), String> {
     }
 
     let taxonomies = object(matrix, "taxonomies");
-    if string_set(&Value::Object(taxonomies.clone()), "truth_class")
-        != expected_set(TRUTH_CLASSES)
+    if string_set(&Value::Object(taxonomies.clone()), "truth_class") != expected_set(TRUTH_CLASSES)
         || string_set(&Value::Object(taxonomies.clone()), "evidence_class")
             != expected_set(EVIDENCE_CLASSES)
         || string_set(&Value::Object(taxonomies.clone()), "knowledge_state")
@@ -757,8 +748,7 @@ fn validate_direct_source_pins(matrix: &Value) -> Result<BTreeMap<String, String
         let path = text(pin, "path");
         let bytes = read_repo_bytes(path);
         if !pin_id.starts_with("KAFKA-K0-4-PIN-")
-            || pin.get("byte_count").and_then(Value::as_u64)
-                != Some(count_u64(bytes.len(), path))
+            || pin.get("byte_count").and_then(Value::as_u64) != Some(count_u64(bytes.len(), path))
             || text(pin, "sha256") != sha256_hex(&bytes)
         {
             return Err(format!("{pin_id} byte/hash receipt drifted"));
@@ -772,7 +762,11 @@ fn validate_direct_source_pins(matrix: &Value) -> Result<BTreeMap<String, String
                 path,
             ),
             "BINARY_FILE" => u64::from(!bytes.is_empty()),
-            other => return Err(format!("{pin_id} has unsupported record_count_rule {other}")),
+            other => {
+                return Err(format!(
+                    "{pin_id} has unsupported record_count_rule {other}"
+                ));
+            }
         };
         if pin.get("record_count").and_then(Value::as_u64) != Some(expected_records) {
             return Err(format!("{pin_id} record-count receipt drifted"));
@@ -847,8 +841,7 @@ fn validate_k0_3_import_and_fixture_scope(matrix: &Value) -> Result<(), String> 
 
     let group_paths = row_ids(groups, "path");
     if sorted_newline_sha256(&group_paths) != K0_3_TEST_GROUP_PATH_SHA256
-        || tuple_sha256(groups, &["path", "source_pin_id"])
-            != K0_3_TEST_GROUP_PATH_PIN_SHA256
+        || tuple_sha256(groups, &["path", "source_pin_id"]) != K0_3_TEST_GROUP_PATH_PIN_SHA256
         || tuple_sha256(local_rows, &["row_id", "path", "source_pin_id"])
             != K0_3_LOCAL_ROW_TUPLE_SHA256
         || tuple_sha256(atomic_cases, &["case_id", "path", "test_name"])
@@ -881,7 +874,10 @@ fn validate_k0_3_import_and_fixture_scope(matrix: &Value) -> Result<(), String> 
             "tokio_test_declaration_tuple_sha256",
             K0_3_TOKIO_DECLARATION_TUPLE_SHA256,
         ),
-        ("local_inventory_row_tuple_sha256", K0_3_LOCAL_ROW_TUPLE_SHA256),
+        (
+            "local_inventory_row_tuple_sha256",
+            K0_3_LOCAL_ROW_TUPLE_SHA256,
+        ),
         ("atomic_case_tuple_sha256", K0_3_ATOMIC_CASE_TUPLE_SHA256),
     ] {
         if imported.get(key).and_then(Value::as_str) != Some(expected) {
@@ -891,7 +887,10 @@ fn validate_k0_3_import_and_fixture_scope(matrix: &Value) -> Result<(), String> 
     for (key, expected) in [
         ("test_declaration_group_count", K0_3_TEST_GROUP_COUNT),
         ("test_declaration_count", K0_3_TEST_DECLARATION_COUNT),
-        ("exact_test_declaration_count", K0_3_EXACT_TEST_DECLARATION_COUNT),
+        (
+            "exact_test_declaration_count",
+            K0_3_EXACT_TEST_DECLARATION_COUNT,
+        ),
         (
             "exact_tokio_test_declaration_count",
             K0_3_TOKIO_TEST_DECLARATION_COUNT,
@@ -969,8 +968,7 @@ fn validate_k0_3_import_and_fixture_scope(matrix: &Value) -> Result<(), String> 
     }
 
     let baseline_paths = string_set(
-        k0_3
-            .get("search_scope")
+        k0_3.get("search_scope")
             .ok_or_else(|| "K0.3 search_scope is required".to_owned())?,
         "baseline_occurrence_paths",
     );
@@ -996,7 +994,10 @@ fn validate_k0_3_import_and_fixture_scope(matrix: &Value) -> Result<(), String> 
         let source = find_row(groups, "path", text(fixture, "path"));
         if text(fixture, "source_pin_id") != text(source, "source_pin_id")
             || fixture.get("declared_test_count").and_then(Value::as_u64)
-                != Some(count_u64(array(source, "tests").len(), "group declarations"))
+                != Some(count_u64(
+                    array(source, "tests").len(),
+                    "group declarations",
+                ))
         {
             return Err(format!("fixture group {} drifted", text(fixture, "path")));
         }
@@ -1093,7 +1094,9 @@ fn validate_environments_and_matrix_rows(matrix: &Value) -> Result<(), String> {
             || !string_set(environment, "broker_coordinate_ids").is_subset(&broker_ids)
             || environment.get("receipt_id") != Some(&Value::Null)
         {
-            return Err(format!("{environment_id} identity/reference receipt drifted"));
+            return Err(format!(
+                "{environment_id} identity/reference receipt drifted"
+            ));
         }
     }
 
@@ -1129,12 +1132,13 @@ fn validate_environments_and_matrix_rows(matrix: &Value) -> Result<(), String> {
                 || !string_set(row, "environment_ids").is_subset(&environment_ids)
                 || !string_set(row, "unknown_ids").is_subset(&unknown_ids)
             {
-                return Err(format!("{row_id} owner/provenance/environment join drifted"));
+                return Err(format!(
+                    "{row_id} owner/provenance/environment join drifted"
+                ));
             }
             if !expected_set(TRUTH_CLASSES).contains(text(row, "truth_class"))
                 || !expected_set(EVIDENCE_CLASSES).contains(text(row, "evidence_class"))
-                || !expected_set(&["KNOWN", "UNKNOWN"])
-                    .contains(text(row, "knowledge_state"))
+                || !expected_set(&["KNOWN", "UNKNOWN"]).contains(text(row, "knowledge_state"))
                 || !expected_set(&["NOT_RUN", "PASS", "FAIL", "BLOCKED", "UNSUPPORTED"])
                     .contains(text(row, "execution_state"))
                 || !expected_set(&[
@@ -1152,7 +1156,9 @@ fn validate_environments_and_matrix_rows(matrix: &Value) -> Result<(), String> {
                     || text(row, "execution_state") != "BLOCKED"
                     || string_set(row, "unknown_ids").is_empty())
             {
-                return Err(format!("{row_id} UNKNOWN must fail closed as owned BLOCKED"));
+                return Err(format!(
+                    "{row_id} UNKNOWN must fail closed as owned BLOCKED"
+                ));
             }
         }
     }
@@ -1167,11 +1173,9 @@ fn require_blocked_unknown(
     let row_id = row
         .as_object()
         .and_then(|values| {
-            values.iter().find_map(|(key, value)| {
-                key.ends_with("_id")
-                    .then(|| value.as_str())
-                    .flatten()
-            })
+            values
+                .iter()
+                .find_map(|(key, value)| key.ends_with("_id").then(|| value.as_str()).flatten())
         })
         .unwrap_or("required-cell");
     if text(row, "truth_class") != "BLOCKED"
@@ -1233,7 +1237,11 @@ fn validate_required_cells(matrix: &Value) -> Result<(), String> {
 
 fn cargo_lock_package<'a>(lock: &'a str, name: &str) -> &'a str {
     lock.split("[[package]]")
-        .find(|block| block.lines().any(|line| line == format!("name = \"{name}\"")))
+        .find(|block| {
+            block
+                .lines()
+                .any(|line| line == format!("name = \"{name}\""))
+        })
         .unwrap_or_else(|| panic!("Cargo.lock package {name} is missing"))
 }
 
@@ -1265,7 +1273,9 @@ fn validate_package_and_real_receipt_boundaries(matrix: &Value) -> Result<(), St
             || text(row, "cargo_lock_checksum") != checksum
             || text(row, "provenance_class") != "PACKAGE_SOURCE_EXPECTATION"
             || row.get("actual_binary_receipt_id") != Some(&Value::Null)
-            || !block.lines().any(|line| line == format!("version = \"{version}\""))
+            || !block
+                .lines()
+                .any(|line| line == format!("version = \"{version}\""))
             || !block
                 .lines()
                 .any(|line| line == format!("checksum = \"{checksum}\""))
@@ -1294,11 +1304,14 @@ fn validate_package_and_real_receipt_boundaries(matrix: &Value) -> Result<(), St
     ] {
         for row in array(matrix, collection) {
             if row.get("truth_class").and_then(Value::as_str) == Some("REAL")
-                || row.get("evidence_class").and_then(Value::as_str)
-                    == Some("EXECUTED_REAL_BROKER")
-                || row.get("receipt_id").is_some_and(|receipt| !receipt.is_null())
+                || row.get("evidence_class").and_then(Value::as_str) == Some("EXECUTED_REAL_BROKER")
+                || row
+                    .get("receipt_id")
+                    .is_some_and(|receipt| !receipt.is_null())
             {
-                return Err(format!("{collection} cannot claim executed real-broker evidence"));
+                return Err(format!(
+                    "{collection} cannot claim executed real-broker evidence"
+                ));
             }
             if matches!(
                 row.get("evidence_class").and_then(Value::as_str),
@@ -1361,7 +1374,10 @@ fn validate_vectors_unknowns_and_contradictions(matrix: &Value) -> Result<(), St
             || !later_owners.contains(text(unknown, "resolution_owner_bead"))
             || string_set(unknown, "subject_ids").is_empty()
         {
-            return Err(format!("{} must be owned and migration-blocking", text(unknown, "unknown_id")));
+            return Err(format!(
+                "{} must be owned and migration-blocking",
+                text(unknown, "unknown_id")
+            ));
         }
     }
 
@@ -1390,8 +1406,7 @@ fn validate_vectors_unknowns_and_contradictions(matrix: &Value) -> Result<(), St
         }
         if !expected_set(TRUTH_CLASSES).contains(text(vector, "truth_class"))
             || !expected_set(EVIDENCE_CLASSES).contains(text(vector, "evidence_class"))
-            || !expected_set(&["KNOWN", "UNKNOWN"])
-                .contains(text(vector, "knowledge_state"))
+            || !expected_set(&["KNOWN", "UNKNOWN"]).contains(text(vector, "knowledge_state"))
             || !expected_set(&["NOT_RUN", "PASS", "FAIL", "BLOCKED", "UNSUPPORTED"])
                 .contains(text(vector, "execution_state"))
             || !expected_set(&[
@@ -1474,9 +1489,7 @@ fn validate_receipt_schema_and_coverage(matrix: &Value) -> Result<(), String> {
         return Err("negative fixture invariant set drifted".to_owned());
     }
     for negative in negatives {
-        if text(negative, "mutation").is_empty()
-            || text(negative, "expected_failure").is_empty()
-        {
+        if text(negative, "mutation").is_empty() || text(negative, "expected_failure").is_empty() {
             return Err("negative fixture rows require mutation and expected_failure".to_owned());
         }
     }
@@ -1501,8 +1514,7 @@ fn validate_receipt_schema_and_coverage(matrix: &Value) -> Result<(), String> {
         != Some(count_u64(DIRECT_SOURCE_PIN_COUNT, "source pins"))
         || receipt.get("fixture_path_count").and_then(Value::as_u64)
             != Some(count_u64(FIXTURE_PATH_COUNT, "fixture paths"))
-        || receipt.get("fixture_path_sha256").and_then(Value::as_str)
-            != Some(FIXTURE_PATH_SHA256)
+        || receipt.get("fixture_path_sha256").and_then(Value::as_str) != Some(FIXTURE_PATH_SHA256)
         || receipt
             .get("current_real_broker_receipt_count")
             .and_then(Value::as_u64)
@@ -1547,8 +1559,7 @@ fn validate_receipt_schema_and_coverage(matrix: &Value) -> Result<(), String> {
         let rows = array(matrix, collection);
         let ids = row_ids(rows, id_key);
         let row = find_row(collection_receipts, "collection", collection);
-        if row.get("row_count").and_then(Value::as_u64)
-            != Some(count_u64(rows.len(), collection))
+        if row.get("row_count").and_then(Value::as_u64) != Some(count_u64(rows.len(), collection))
             || text(row, "id_set_sha256") != sorted_newline_sha256(&ids)
         {
             return Err(format!("{collection} coverage count/digest drifted"));
@@ -1598,7 +1609,9 @@ fn validate_no_claims_and_docs(matrix: &Value) -> Result<(), String> {
         "does not authorize migration, removal, or deletion",
     ] {
         if !doc.contains(phrase) {
-            return Err(format!("documentation must retain no-claim phrase: {phrase}"));
+            return Err(format!(
+                "documentation must retain no-claim phrase: {phrase}"
+            ));
         }
     }
     if sha256_hex(&read_repo_bytes(ARTIFACT_PATH)) != ARTIFACT_SHA256
@@ -1868,8 +1881,7 @@ fn actual_validate_source_scope(matrix: &Value) -> Result<(), String> {
         let path = text(pin, "path");
         let bytes = read_repo_bytes(path);
         if text(pin, "sha256") != sha256_hex(&bytes)
-            || pin.get("byte_count").and_then(Value::as_u64)
-                != Some(count_u64(bytes.len(), path))
+            || pin.get("byte_count").and_then(Value::as_u64) != Some(count_u64(bytes.len(), path))
             || pin.get("record_count").and_then(Value::as_u64)
                 != Some(actual_record_count(path, &bytes)?)
         {
@@ -1970,7 +1982,9 @@ fn actual_validate_source_scope(matrix: &Value) -> Result<(), String> {
         ),
     ] {
         if derivation.get(key).and_then(Value::as_str) != Some(expected) {
-            return Err(format!("source_scope.fixture_scope_derivation.{key} drifted"));
+            return Err(format!(
+                "source_scope.fixture_scope_derivation.{key} drifted"
+            ));
         }
     }
     let anchor = scope
@@ -2115,8 +2129,7 @@ fn actual_validate_source_scope(matrix: &Value) -> Result<(), String> {
 
     let mut expected_paths = row_ids(array(&k0_3, "test_declaration_groups"), "path");
     for path in string_set(
-        k0_3
-            .get("search_scope")
+        k0_3.get("search_scope")
             .ok_or_else(|| "K0.3 search_scope is required".to_owned())?,
         "baseline_occurrence_paths",
     ) {
@@ -2443,7 +2456,9 @@ fn actual_source_ref_resolves(reference: &str, known_ids: &BTreeSet<String>) -> 
     if reference.starts_with("rdkafka-sys-4.10.0+2.12.1/") {
         return true;
     }
-    let path = reference.split_once(':').map_or(reference, |(path, _)| path);
+    let path = reference
+        .split_once(':')
+        .map_or(reference, |(path, _)| path);
     repo_root().join(path).is_file()
 }
 
@@ -2526,7 +2541,7 @@ fn actual_validate_vectors(matrix: &Value) -> Result<BTreeSet<String>, String> {
                 return Err(format!("{vector_id} vector contract drifted"));
             }
             if text(row, "execution_state") == "PASS"
-            || matches!(
+                || matches!(
                     text(row, "truth_class"),
                     "ACTUAL_BINARY_RECEIPT" | "REAL_BROKER_RECEIPT"
                 )
@@ -2546,7 +2561,11 @@ fn actual_validate_vectors(matrix: &Value) -> Result<BTreeSet<String>, String> {
                     text(row, "truth_class").to_owned(),
                     text(row, "knowledge_state").to_owned(),
                     text(row, "execution_state").to_owned(),
-                    row_environments.iter().cloned().collect::<Vec<_>>().join(","),
+                    row_environments
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(","),
                     row_provenance.iter().cloned().collect::<Vec<_>>().join(","),
                     text(row, "inventory_owner").to_owned(),
                     text(row, "executable_owner").to_owned(),
@@ -2556,8 +2575,7 @@ fn actual_validate_vectors(matrix: &Value) -> Result<BTreeSet<String>, String> {
             );
         }
     }
-    if sorted_newline_sha256(&state_owner_environment_tuples)
-        != VECTOR_STATE_OWNER_ENV_TUPLE_SHA256
+    if sorted_newline_sha256(&state_owner_environment_tuples) != VECTOR_STATE_OWNER_ENV_TUPLE_SHA256
     {
         return Err("vector state/owner/environment matrix drifted".to_owned());
     }
@@ -2577,7 +2595,10 @@ fn actual_validate_vectors(matrix: &Value) -> Result<BTreeSet<String>, String> {
         for row in array(matrix, collection) {
             for reference in actual_string_vec(row, "source_refs") {
                 if !actual_source_ref_resolves(&reference, &known_source_ids) {
-                    return Err(format!("{} has unresolved source ref {reference}", text(row, "vector_id")));
+                    return Err(format!(
+                        "{} has unresolved source ref {reference}",
+                        text(row, "vector_id")
+                    ));
                 }
             }
         }
@@ -2858,7 +2879,9 @@ fn actual_validate_fixture_census(matrix: &Value) -> Result<(), String> {
             || string_set(profile, "environment_ids") != expected_set(environments)
             || text(profile, "executable_owner") != *owner
         {
-            return Err(format!("fixture profile {profile_id} classification drifted"));
+            return Err(format!(
+                "fixture profile {profile_id} classification drifted"
+            ));
         }
     }
 
@@ -3076,7 +3099,10 @@ fn actual_validate_claims_unknowns_and_routes(matrix: &Value) -> Result<(), Stri
             || !later_owners.contains(text(unknown, "resolution_owner_bead"))
             || text(unknown, "subject").is_empty()
         {
-            return Err(format!("{} ownership/state drifted", text(unknown, "unknown_id")));
+            return Err(format!(
+                "{} ownership/state drifted",
+                text(unknown, "unknown_id")
+            ));
         }
     }
 
@@ -3111,7 +3137,10 @@ fn actual_validate_claims_unknowns_and_routes(matrix: &Value) -> Result<(), Stri
             || (owner != BEAD_ID && !later_owners.contains(owner))
             || string_set(contradiction, "source_refs").is_empty()
         {
-            return Err(format!("{} contradiction drifted", text(contradiction, "contradiction_id")));
+            return Err(format!(
+                "{} contradiction drifted",
+                text(contradiction, "contradiction_id")
+            ));
         }
         for reference in actual_string_vec(contradiction, "source_refs") {
             if !actual_source_ref_resolves(&reference, &source_ids) {
@@ -3130,7 +3159,13 @@ fn actual_validate_claims_unknowns_and_routes(matrix: &Value) -> Result<(), Stri
     for claim in claims {
         actual_require_keys(
             claim,
-            &["claim_id", "evidence_class", "limitation", "source_refs", "statement"],
+            &[
+                "claim_id",
+                "evidence_class",
+                "limitation",
+                "source_refs",
+                "statement",
+            ],
             text(claim, "claim_id"),
         )?;
         if !expected_set(EVIDENCE_CLASSES).contains(text(claim, "evidence_class"))
@@ -3142,11 +3177,17 @@ fn actual_validate_claims_unknowns_and_routes(matrix: &Value) -> Result<(), Stri
             || text(claim, "limitation").is_empty()
             || string_set(claim, "source_refs").is_empty()
         {
-            return Err(format!("{} evidence claim drifted", text(claim, "claim_id")));
+            return Err(format!(
+                "{} evidence claim drifted",
+                text(claim, "claim_id")
+            ));
         }
         for reference in actual_string_vec(claim, "source_refs") {
             if !actual_source_ref_resolves(&reference, &source_ids) {
-                return Err(format!("{} has unresolved source ref {reference}", text(claim, "claim_id")));
+                return Err(format!(
+                    "{} has unresolved source ref {reference}",
+                    text(claim, "claim_id")
+                ));
             }
         }
     }
@@ -3171,18 +3212,19 @@ fn actual_validate_claims_unknowns_and_routes(matrix: &Value) -> Result<(), Stri
             }
             Some(_) => return Err(format!("{} relation must be text", text(gap, "gap_id"))),
             None if standalone.contains(owner) => {
-                return Err(format!("{} standalone relation is missing", text(gap, "gap_id")));
+                return Err(format!(
+                    "{} standalone relation is missing",
+                    text(gap, "gap_id")
+                ));
             }
             None => {}
         }
     }
-    let cancellation = find_row(
-        routed,
-        "gap_id",
-        "KAFKA-K0-4-GAP-012-GROUPS",
-    );
+    let cancellation = find_row(routed, "gap_id", "KAFKA-K0-4-GAP-012-GROUPS");
     if text(cancellation, "owner_bead") != K13_OWNERS[3]
-        || !text(cancellation, "route").to_ascii_lowercase().contains("cancellation")
+        || !text(cancellation, "route")
+            .to_ascii_lowercase()
+            .contains("cancellation")
     {
         return Err("cancellation obligation routing drifted".to_owned());
     }
@@ -3220,7 +3262,13 @@ fn actual_validate_future_receipt_fields(matrix: &Value) -> Result<(), String> {
         .ok_or_else(|| "required_future_receipt_fields is required".to_owned())?;
     actual_require_keys(
         required,
-        &["broker", "execution", "native_build", "redaction", "teardown"],
+        &[
+            "broker",
+            "execution",
+            "native_build",
+            "redaction",
+            "teardown",
+        ],
         "required_future_receipt_fields",
     )?;
     for (group, expected) in [
@@ -3274,7 +3322,10 @@ fn actual_validate_coverage_and_no_claims(matrix: &Value) -> Result<(), String> 
         ("source_revision", BASELINE_REVISION),
         ("fixture_path_digest_sha256", FIXTURE_PATH_SHA256),
         ("validation_mode", "STATIC_JSON_AND_EXACT_FILE_DIFF_ONLY"),
-        ("status", "STATIC_INVENTORY_COMPLETE_RUNTIME_PROVENANCE_BLOCKED"),
+        (
+            "status",
+            "STATIC_INVENTORY_COMPLETE_RUNTIME_PROVENANCE_BLOCKED",
+        ),
     ] {
         if coverage.get(key).and_then(Value::as_str) != Some(expected) {
             return Err(format!("coverage_receipt.{key} drifted"));
@@ -3327,7 +3378,9 @@ fn actual_validate_coverage_and_no_claims(matrix: &Value) -> Result<(), String> 
         "does not authorize migration, removal, or deletion",
     ] {
         if !doc.contains(phrase) {
-            return Err(format!("documentation must retain no-claim phrase: {phrase}"));
+            return Err(format!(
+                "documentation must retain no-claim phrase: {phrase}"
+            ));
         }
     }
     if sha256_hex(&read_repo_bytes(ARTIFACT_PATH)) != ARTIFACT_SHA256
@@ -3367,16 +3420,14 @@ fn source_scope_is_exactly_k0_3_plus_nineteen_direct_fixture_pins() {
 #[test]
 fn no_static_or_skippable_evidence_can_be_promoted_to_real_broker_evidence() {
     let matrix = artifact();
-    actual_validate_vectors(&matrix)
-        .expect("vector evidence must remain static and fail closed");
+    actual_validate_vectors(&matrix).expect("vector evidence must remain static and fail closed");
     actual_validate_coverage_and_no_claims(&matrix)
         .expect("real-broker and actual-binary receipts must remain absent");
 
     let mut promoted = matrix.clone();
     promoted["locked_dependency_identity"][0]["truth_class"] =
         Value::String("REAL_BROKER_RECEIPT".to_owned());
-    promoted["locked_dependency_identity"][0]["execution_state"] =
-        Value::String("PASS".to_owned());
+    promoted["locked_dependency_identity"][0]["execution_state"] = Value::String("PASS".to_owned());
     assert!(actual_validate_vectors(&promoted).is_err());
 
     let mut package_promoted = matrix.clone();
@@ -3400,8 +3451,9 @@ fn unknown_environment_and_source_scope_mutations_fail_closed() {
     assert!(actual_validate_vectors(&orphan_environment).is_err());
 
     let mut scope_drift = matrix.clone();
-    scope_drift["source_scope"]["fixture_path_digest_sha256"] =
-        Value::String("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned());
+    scope_drift["source_scope"]["fixture_path_digest_sha256"] = Value::String(
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned(),
+    );
     assert!(actual_validate_source_scope(&scope_drift).is_err());
 
     let mut exit_promoted = matrix;

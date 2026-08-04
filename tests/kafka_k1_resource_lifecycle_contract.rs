@@ -23,10 +23,8 @@ const K0_4_PATH: &str = "artifacts/kafka_broker_fixture_provenance_matrix_v1.jso
 const K1_2_PATH: &str = "artifacts/kafka_k1_protocol_security_support_policy_v1.json";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
 
-const ARTIFACT_SHA256: &str =
-    "c47731ebfa593d64b47b16a0b1ecf0aabba7a47613f4c48ce850f67313f8d367";
-const DOC_SHA256: &str =
-    "1c10719363ac92627c4ad260625ff47e8aef70d7cb641d7994f4a230d6aa9de9";
+const ARTIFACT_SHA256: &str = "c47731ebfa593d64b47b16a0b1ecf0aabba7a47613f4c48ce850f67313f8d367";
+const DOC_SHA256: &str = "1c10719363ac92627c4ad260625ff47e8aef70d7cb641d7994f4a230d6aa9de9";
 
 const ARTIFACT_ID: &str = "kafka-k1-resource-lifecycle-contract-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
@@ -36,8 +34,7 @@ const CAPABILITY_ID: &str = "CAP-KAFKA";
 const ADR_ID: &str = "DEP-ADR-009";
 const CAPTURED_DATE_UTC: &str = "2026-08-04";
 const BASELINE_REVISION: &str = "4b99ef71dbb1b7adbfbef4a3a9a4c2377fcbd6dd";
-const INVENTORY_STATE: &str =
-    "K1_4_RESOURCE_LIFECYCLE_OWNERSHIP_CONTRACT_FROZEN_KEEP_INCUMBENT";
+const INVENTORY_STATE: &str = "K1_4_RESOURCE_LIFECYCLE_OWNERSHIP_CONTRACT_FROZEN_KEEP_INCUMBENT";
 
 const RESOURCE_COUNT: usize = 42;
 const RESOURCE_SEMANTIC_BINDING_COUNT: usize = 43;
@@ -50,8 +47,7 @@ const SEMANTIC_COUNT: usize = 97;
 const AUTHORITY_REFERENCE_COUNT: usize = 63;
 const AUTHORITY_INPUT_COUNT: usize = 15;
 
-const RESOURCE_ID_SHA256: &str =
-    "e21f2fbe16b7d974b60cda3958e35e7cd0736eaa62c7003a8b7f6a0dbb194fcd";
+const RESOURCE_ID_SHA256: &str = "e21f2fbe16b7d974b60cda3958e35e7cd0736eaa62c7003a8b7f6a0dbb194fcd";
 const RESOURCE_CONTRACT_SHA256: &str =
     "7a7ecaaf1815c011b63a549623a33ecea4272f287f507adf49dba7a2f8617e5d";
 const SEMANTIC_RESOURCE_BINDING_SHA256: &str =
@@ -84,10 +80,8 @@ const DISPOSITION_RECEIPT_SHA256: &str =
     "a07ad3388a220f670c68c8c01a3b4e7bc99aaf0ed641d4aacdf1556758f72023";
 const PROJECTION_RULE_SHA256: &str =
     "582e80ec017c82800001a82312074b53957d79c8c688c50ed3c93a751b284718";
-const NO_CLAIM_SHA256: &str =
-    "bc5703ea9ef717f0796db249350ceafac85544acc31ef47f2da2b6ac33be9ce3";
-const SEMANTIC_ID_SHA256: &str =
-    "a9967c47346ee6386e9e8836d73e819a784f829baa6d255eb24e55aae1950cf7";
+const NO_CLAIM_SHA256: &str = "bc5703ea9ef717f0796db249350ceafac85544acc31ef47f2da2b6ac33be9ce3";
+const SEMANTIC_ID_SHA256: &str = "a9967c47346ee6386e9e8836d73e819a784f829baa6d255eb24e55aae1950cf7";
 const SEMANTIC_ROW_SHA256: &str =
     "d19103e0fb6dd8b291405b1925c15d14cfacdf970901c766c10e06fcdbd7beab";
 const SEMANTIC_CLASSIFICATION_SHA256: &str =
@@ -104,8 +98,7 @@ const FAULT_VECTOR_ROW_SHA256: &str =
     "42e6f63b2040dea01e488ebd3f50b023ff3033ba18e25a3dd039ceac02237bf4";
 const NEGOTIATION_ID_SHA256: &str =
     "851cd1f07553e7e8d3be8ae41b72ec95adf828b28140faa35e6c34890be802cd";
-const BINDING_ID_SHA256: &str =
-    "68a0173f6078475c82b908ba1c47daaa30e02a4cbf60aec3e000a707f47dd376";
+const BINDING_ID_SHA256: &str = "68a0173f6078475c82b908ba1c47daaa30e02a4cbf60aec3e000a707f47dd376";
 
 const DOC_BEGIN: &str = "<!-- BEGIN KAFKA K1.4 RESOURCE LIFECYCLE CONTRACT -->";
 const DOC_END: &str = "<!-- END KAFKA K1.4 RESOURCE LIFECYCLE CONTRACT -->";
@@ -399,22 +392,8 @@ const RESOURCE_CLASSES: &[&str] = &[
 ];
 
 const COMPOSITE_RESOURCE_IDS: &[&str] = &[
-    "K1R-003",
-    "K1R-005",
-    "K1R-007",
-    "K1R-011",
-    "K1R-013",
-    "K1R-014",
-    "K1R-015",
-    "K1R-016",
-    "K1R-018",
-    "K1R-019",
-    "K1R-020",
-    "K1R-022",
-    "K1R-025",
-    "K1R-026",
-    "K1R-041",
-    "K1R-042",
+    "K1R-003", "K1R-005", "K1R-007", "K1R-011", "K1R-013", "K1R-014", "K1R-015", "K1R-016",
+    "K1R-018", "K1R-019", "K1R-020", "K1R-022", "K1R-025", "K1R-026", "K1R-041", "K1R-042",
 ];
 
 const OPERATIONS: &[&str] = &[
@@ -526,10 +505,10 @@ fn canonical_json(value: &Value) -> Result<String, String> {
 }
 
 fn canonical_rows_sha256(rows: &[Value]) -> Result<String, String> {
-    let canonical_rows =
-        rows.iter()
-            .map(canonical_json)
-            .collect::<Result<Vec<_>, _>>()?;
+    let canonical_rows = rows
+        .iter()
+        .map(canonical_json)
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(sorted_newline_sha256(canonical_rows))
 }
 
@@ -583,8 +562,7 @@ fn number(value: &Value, key: &str) -> Result<u64, String> {
 }
 
 fn count(value: &Value, key: &str) -> Result<usize, String> {
-    usize::try_from(number(value, key)?)
-        .map_err(|_| format!("{key} does not fit in usize"))
+    usize::try_from(number(value, key)?).map_err(|_| format!("{key} does not fit in usize"))
 }
 
 fn bool_field(value: &Value, key: &str) -> Result<bool, String> {
@@ -806,9 +784,7 @@ fn validate_authority_views(inputs: &Inputs) -> Result<BTreeSet<String>, String>
         .and_then(Value::as_array)
         .ok_or_else(|| "K1.1 derived shared obligations are missing".to_owned())?
         .iter()
-        .filter(|row| {
-            row.get("k1_policy_owner").and_then(Value::as_str) == Some(BEAD_ID)
-        })
+        .filter(|row| row.get("k1_policy_owner").and_then(Value::as_str) == Some(BEAD_ID))
         .map(|row| {
             Ok(json!({
                 "obligation_id": text(row, "obligation_id")?,
@@ -843,11 +819,7 @@ fn validate_authority_views(inputs: &Inputs) -> Result<BTreeSet<String>, String>
         .ok_or_else(|| "k0_2_semantic_rows view is missing".to_owned())?;
     expect_number(semantic_view, "row_count", 97)?;
     expect_text(semantic_view, "id_set_sha256", SEMANTIC_ID_SHA256)?;
-    expect_text(
-        semantic_view,
-        "canonical_row_sha256",
-        SEMANTIC_ROW_SHA256,
-    )?;
+    expect_text(semantic_view, "canonical_row_sha256", SEMANTIC_ROW_SHA256)?;
 
     let coverage = inputs
         .artifact
@@ -927,11 +899,7 @@ fn validate_authority_views(inputs: &Inputs) -> Result<BTreeSet<String>, String>
         .ok_or_else(|| "k0_4_fault_vectors view is missing".to_owned())?;
     expect_number(fault_view, "row_count", 6)?;
     expect_text(fault_view, "id_set_sha256", FAULT_VECTOR_ID_SHA256)?;
-    expect_text(
-        fault_view,
-        "canonical_row_sha256",
-        FAULT_VECTOR_ROW_SHA256,
-    )?;
+    expect_text(fault_view, "canonical_row_sha256", FAULT_VECTOR_ROW_SHA256)?;
     if string_set(array(fault_view, "required_ids")?, "required fault IDs")?
         != fault_ids.iter().cloned().collect()
     {
@@ -940,9 +908,7 @@ fn validate_authority_views(inputs: &Inputs) -> Result<BTreeSet<String>, String>
 
     let negotiation = array(&inputs.k1_2, "negotiation_transition_cells")?;
     let negotiation_ids = ids(negotiation, "cell_id")?;
-    if negotiation.len() != 10
-        || sorted_newline_sha256(negotiation_ids) != NEGOTIATION_ID_SHA256
-    {
+    if negotiation.len() != 10 || sorted_newline_sha256(negotiation_ids) != NEGOTIATION_ID_SHA256 {
         return Err("K1.2 negotiation-transition authority drift".to_owned());
     }
     let negotiation_view = views
@@ -994,16 +960,16 @@ fn optional_u64(value: &Value, key: &str) -> Result<Option<u64>, String> {
     }
 }
 
-fn validate_numeric_order(
-    row: &Value,
-    prefix: &str,
-    row_id: &str,
-) -> Result<(), String> {
+fn validate_numeric_order(row: &Value, prefix: &str, row_id: &str) -> Result<(), String> {
     let minimum = optional_u64(row, &format!("{prefix}_minimum"))?;
     let default = optional_u64(row, &format!("{prefix}_default"))?;
     let maximum = optional_u64(row, &format!("{prefix}_maximum_or_hard_cap"))?;
-    if minimum.zip(default).is_some_and(|(min, default)| min > default)
-        || default.zip(maximum).is_some_and(|(default, max)| default > max)
+    if minimum
+        .zip(default)
+        .is_some_and(|(min, default)| min > default)
+        || default
+            .zip(maximum)
+            .is_some_and(|(default, max)| default > max)
         || minimum.zip(maximum).is_some_and(|(min, max)| min > max)
     {
         return Err(format!("{row_id} has invalid {prefix} numeric ordering"));
@@ -1074,14 +1040,19 @@ fn validate_resource_rows(
             optional_u64(row, "required_maximum_or_hard_cap")?,
         ];
         if required_numbers.iter().any(Option::is_none) && !required_state.contains("BLOCKING") {
-            return Err(format!("{row_id} has an unblocked null required numeric field"));
+            return Err(format!(
+                "{row_id} has an unblocked null required numeric field"
+            ));
         }
         if required_state.contains("HARD_CAP")
             && optional_u64(row, "required_maximum_or_hard_cap")?.is_none()
         {
             return Err(format!("{row_id} removed its declared required hard cap"));
         }
-        let refs = string_set(array(row, "source_authority_ids")?, "resource authority IDs")?;
+        let refs = string_set(
+            array(row, "source_authority_ids")?,
+            "resource authority IDs",
+        )?;
         if refs.is_empty() || !refs.is_subset(authority_ids) {
             return Err(format!("{row_id} has unresolved source authority"));
         }
@@ -1207,8 +1178,7 @@ fn validate_resource_semantic_bindings(
     let lifecycle_semantic_ids = classifications
         .iter()
         .find(|row| {
-            row.get("classification").and_then(Value::as_str)
-                == Some("RESOURCE_AND_LIFECYCLE")
+            row.get("classification").and_then(Value::as_str) == Some("RESOURCE_AND_LIFECYCLE")
         })
         .ok_or_else(|| "RESOURCE_AND_LIFECYCLE semantic classification is missing".to_owned())
         .and_then(|row| {
@@ -1249,7 +1219,9 @@ fn validate_resource_semantic_bindings(
     let binding_ids = ids(bindings, "semantic_id")?;
     ensure_unique(&binding_ids, "resource semantic binding IDs")?;
     if binding_ids.iter().cloned().collect::<BTreeSet<_>>() != resource_semantic_ids {
-        return Err("RESOURCE semantic classification is not exactly bound to resources".to_owned());
+        return Err(
+            "RESOURCE semantic classification is not exactly bound to resources".to_owned(),
+        );
     }
 
     let mut by_semantic = BTreeMap::new();
@@ -1262,7 +1234,9 @@ fn validate_resource_semantic_bindings(
         let semantic_id = text(row, "semantic_id")?;
         let bound = string_set(array(row, "resource_ids")?, "bound resource IDs")?;
         if bound.is_empty() || !bound.is_subset(&resource_ids) {
-            return Err(format!("{semantic_id} has an empty or unresolved resource binding"));
+            return Err(format!(
+                "{semantic_id} has an empty or unresolved resource binding"
+            ));
         }
         by_semantic.insert(semantic_id, bound);
     }
@@ -1313,7 +1287,9 @@ fn validate_resource_semantic_bindings(
             || is_promoted_state(required_state)
             || !required_state.starts_with("BLOCKING_")
         {
-            return Err(format!("{resource_id}/{dimension_id} promoted a limit state"));
+            return Err(format!(
+                "{resource_id}/{dimension_id} promoted a limit state"
+            ));
         }
         dimension_resource_ids.insert(resource_id.to_owned());
     }
@@ -1413,7 +1389,10 @@ fn validate_operation_rows(
     }
     let operations = ids(rows, "operation")?;
     ensure_unique(&operations, "lifecycle operation names")?;
-    if operations.iter().map(String::as_str).collect::<BTreeSet<_>>()
+    if operations
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>()
         != OPERATIONS.iter().copied().collect()
     {
         return Err("lifecycle operation set drift".to_owned());
@@ -1423,8 +1402,13 @@ fn validate_operation_rows(
         .iter()
         .copied()
         .collect::<BTreeSet<_>>();
-    if string_set(array(artifact, "transition_dimensions")?, "transition dimensions")?
-        != required_dimensions.iter().map(|value| (*value).to_owned()).collect()
+    if string_set(
+        array(artifact, "transition_dimensions")?,
+        "transition dimensions",
+    )? != required_dimensions
+        .iter()
+        .map(|value| (*value).to_owned())
+        .collect()
     {
         return Err("root transition dimension set drift".to_owned());
     }
@@ -1445,12 +1429,14 @@ fn validate_operation_rows(
         if !matches!(
             text(row, "current_evidence_state")?,
             "DEPENDENCY_OWNED_UNKNOWN" | "ROUTED_GAP" | "STATIC_SOURCE_GAP"
-        )
-            || text(row, "gate_state")? != "BLOCKING_KEEP_INCUMBENT"
+        ) || text(row, "gate_state")? != "BLOCKING_KEEP_INCUMBENT"
         {
             return Err(format!("{operation_id} promoted lifecycle evidence"));
         }
-        let refs = string_set(array(row, "source_authority_ids")?, "operation authority IDs")?;
+        let refs = string_set(
+            array(row, "source_authority_ids")?,
+            "operation authority IDs",
+        )?;
         if refs.is_empty() || !refs.is_subset(authority_ids) {
             return Err(format!("{operation_id} has unresolved source authority"));
         }
@@ -1508,7 +1494,9 @@ fn validate_operation_rows(
             total_transitions += 1;
         }
         if dimensions != required_dimensions {
-            return Err(format!("{operation_id} transition dimension coverage drift"));
+            return Err(format!(
+                "{operation_id} transition dimension coverage drift"
+            ));
         }
     }
     if total_transitions != TRANSITION_COUNT {
@@ -1555,8 +1543,7 @@ fn validate_cross_cutting_and_gates(
         .collect::<BTreeSet<_>>();
     let is_resolved = |value: &Value| {
         value.as_str().is_some_and(|id| {
-            id.starts_with("asupersync-dep-p7-kafka-removal-sarszu.2.")
-                && tracker_ids.contains(id)
+            id.starts_with("asupersync-dep-p7-kafka-removal-sarszu.2.") && tracker_ids.contains(id)
         })
     };
 
@@ -1568,7 +1555,9 @@ fn validate_cross_cutting_and_gates(
                 || row
                     .get("terminal_gates")
                     .and_then(Value::as_array)
-                    .is_none_or(|gates| gates.is_empty() || gates.iter().any(|gate| !is_resolved(gate)))
+                    .is_none_or(|gates| {
+                        gates.is_empty() || gates.iter().any(|gate| !is_resolved(gate))
+                    })
         })
         .count();
     let unowned_operation_count = operation_rows
@@ -1579,7 +1568,9 @@ fn validate_cross_cutting_and_gates(
                 || row
                     .get("terminal_gates")
                     .and_then(Value::as_array)
-                    .is_none_or(|gates| gates.is_empty() || gates.iter().any(|gate| !is_resolved(gate)))
+                    .is_none_or(|gates| {
+                        gates.is_empty() || gates.iter().any(|gate| !is_resolved(gate))
+                    })
                 || row
                     .get("transitions")
                     .and_then(Value::as_array)
@@ -1610,7 +1601,9 @@ fn validate_cross_cutting_and_gates(
         .ok_or_else(|| "authority is missing".to_owned())?;
     for key in AUTHORITY_KEYS.iter().filter(|key| key.ends_with("_owner")) {
         if !authority.get(*key).is_some_and(&is_resolved) {
-            return Err(format!("authority field {key} has an unresolved tracker owner"));
+            return Err(format!(
+                "authority field {key} has an unresolved tracker owner"
+            ));
         }
     }
 
@@ -1620,7 +1613,9 @@ fn validate_cross_cutting_and_gates(
     exact_keys(gates, OWNERSHIP_KEYS, "ownership_and_gates")?;
     for key in OWNERSHIP_KEYS.iter().filter(|key| key.ends_with("_owner")) {
         if !gates.get(*key).is_some_and(&is_resolved) {
-            return Err(format!("ownership field {key} has an unresolved tracker owner"));
+            return Err(format!(
+                "ownership field {key} has an unresolved tracker owner"
+            ));
         }
     }
     expect_number(
@@ -1659,10 +1654,7 @@ fn validate_coverage_receipt(
         ("lifecycle_operation_count", 19),
         ("transition_dimension_count", 7),
         ("transition_cell_count", 133),
-        (
-            "unique_source_authority_reference_count",
-            63,
-        ),
+        ("unique_source_authority_reference_count", 63),
     ] {
         expect_number(receipt, key, expected)?;
     }
@@ -1854,7 +1846,12 @@ fn validate_disposition_and_doc(root: &Path, artifact: &Value) -> Result<(), Str
         .get("disposition_receipt")
         .ok_or_else(|| "disposition_receipt is missing".to_owned())?;
     exact_keys(disposition, DISPOSITION_KEYS, "disposition_receipt")?;
-    for key in ["k1_1_complete", "k1_2_complete", "k1_3_complete", "k1_4_static_contract_complete"] {
+    for key in [
+        "k1_1_complete",
+        "k1_2_complete",
+        "k1_3_complete",
+        "k1_4_static_contract_complete",
+    ] {
         expect_bool(disposition, key, true)?;
     }
     for key in [
@@ -1918,11 +1915,8 @@ fn validate(root: &Path, inputs: &Inputs) -> Result<(), String> {
     let resource_rows = validate_resource_rows(&inputs.artifact, &authority_ids)?;
     let (operation_rows, transition_rows) =
         validate_operation_rows(&inputs.artifact, &authority_ids)?;
-    let (binding_rows, limit_dimension_rows) = validate_resource_semantic_bindings(
-        &inputs.artifact,
-        &resource_rows,
-        &operation_rows,
-    )?;
+    let (binding_rows, limit_dimension_rows) =
+        validate_resource_semantic_bindings(&inputs.artifact, &resource_rows, &operation_rows)?;
     validate_cross_cutting_and_gates(
         &inputs.artifact,
         &inputs.tracker,
@@ -2010,8 +2004,7 @@ fn arbitrary_owner_text_fails_closed() {
 #[test]
 fn promoted_resource_and_lifecycle_states_fail_closed() {
     assert_mutation_rejected(|artifact| {
-        artifact["resource_classes"][0]["required_numeric_state"] =
-            json!("BLOCKING_SUPPORTED");
+        artifact["resource_classes"][0]["required_numeric_state"] = json!("BLOCKING_SUPPORTED");
     });
     assert_mutation_rejected(|artifact| {
         artifact["resource_classes"][0]["required_numeric_state"] =

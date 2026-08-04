@@ -219,8 +219,7 @@ fn validate_identity_and_authority(inventory: &Value) -> Result<(), String> {
         }
     }
     if policy.get("routed_gap_state").and_then(Value::as_str) != Some("ROUTED")
-        || policy.get("missing_row_state").and_then(Value::as_str)
-            != Some("BLOCKING_MISSING")
+        || policy.get("missing_row_state").and_then(Value::as_str) != Some("BLOCKING_MISSING")
     {
         return Err("policy gap states drifted".to_owned());
     }
@@ -336,8 +335,7 @@ fn validate_dependency_and_profiles(inventory: &Value) -> Result<(), String> {
         "resolved packages",
     )?;
     if text(find_row(packages, "package", "rdkafka"), "version") != "0.39.0"
-        || text(find_row(packages, "package", "rdkafka-sys"), "version")
-            != "4.10.0+2.12.1"
+        || text(find_row(packages, "package", "rdkafka-sys"), "version") != "4.10.0+2.12.1"
     {
         return Err("resolved package versions drifted".to_owned());
     }
@@ -456,12 +454,7 @@ fn validate_public_surface(inventory: &Value) -> Result<(), String> {
         .iter()
         .map(|row| text(row, "owner_path").to_owned())
         .collect();
-    if owner_paths
-        != expected_set(&[
-            "src/messaging/kafka.rs",
-            "src/messaging/kafka_consumer.rs",
-        ])
-    {
+    if owner_paths != expected_set(&["src/messaging/kafka.rs", "src/messaging/kafka_consumer.rs"]) {
         return Err("public symbol owner set drifted".to_owned());
     }
     let field_count = symbols
@@ -596,7 +589,10 @@ fn validate_behavior_and_routing(inventory: &Value) -> Result<(), String> {
                 .and_then(Value::as_str)
                 .is_none_or(str::is_empty)
         {
-            return Err(format!("{} must remain routed and owned", text(gap, "gap_id")));
+            return Err(format!(
+                "{} must remain routed and owned",
+                text(gap, "gap_id")
+            ));
         }
     }
     let owners: BTreeSet<String> = gaps
@@ -683,10 +679,13 @@ fn validate_registry_reconciliation(inventory: &Value) -> Result<(), String> {
     require_exact_strings(mapping, "capability_ids", &[CAPABILITY_ID])?;
 
     let registry = parse_repo_json(REGISTRY_PATH);
-    let capability = find_row(array(&registry, "capabilities"), "capability_id", CAPABILITY_ID);
+    let capability = find_row(
+        array(&registry, "capabilities"),
+        "capability_id",
+        CAPABILITY_ID,
+    );
     if capability.get("inventory_artifact").and_then(Value::as_str) != Some(ARTIFACT_PATH)
-        || capability.get("disposition").and_then(Value::as_str)
-            != Some("KEEP_UNTIL_PARITY")
+        || capability.get("disposition").and_then(Value::as_str) != Some("KEEP_UNTIL_PARITY")
         || capability.get("cutover_state").and_then(Value::as_str) != Some("KEEP_INCUMBENT")
     {
         return Err("live CAP-KAFKA authority drifted".to_owned());
@@ -724,8 +723,7 @@ fn validate_registry_reconciliation(inventory: &Value) -> Result<(), String> {
         "non_epic_work_count",
         "mapping_rule_count",
     ] {
-        if graph.get(key).and_then(Value::as_u64)
-            != expected_graph.get(key).and_then(Value::as_u64)
+        if graph.get(key).and_then(Value::as_u64) != expected_graph.get(key).and_then(Value::as_u64)
         {
             return Err(format!("graph signoff {key} disagrees with inventory"));
         }
@@ -791,10 +789,7 @@ fn validate_static_source_and_docs(inventory: &Value) -> Result<(), String> {
         return Err("capability registry document lost Kafka reconciliation".to_owned());
     }
     let adr = read_repo_file(ADR_PATH);
-    if !adr.contains("KFK-GAP-01")
-        || !adr.contains(BEAD_ID)
-        || !adr.contains("pkg-config")
-    {
+    if !adr.contains("KFK-GAP-01") || !adr.contains(BEAD_ID) || !adr.contains("pkg-config") {
         return Err("DEP-ADR-009 lost K0.1 reconciliation".to_owned());
     }
 

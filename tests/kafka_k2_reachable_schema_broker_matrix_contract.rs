@@ -17,10 +17,8 @@ use std::path::{Path, PathBuf};
 
 const ARTIFACT_PATH: &str = "artifacts/kafka_k2_reachable_schema_broker_matrix_v1.json";
 const DOC_PATH: &str = "docs/kafka_k2_reachable_schema_broker_matrix.md";
-const ARTIFACT_SHA256: &str =
-    "0b453b88004dd8f9e6acea7d141d60368faf2a3242e8374a4a3638d2b59d2d40";
-const DOC_SHA256: &str =
-    "12c1b04d3fbeed70cbf843e85a5caad8063ae6e46138cb8daaf5905a8e1c2c50";
+const ARTIFACT_SHA256: &str = "0b453b88004dd8f9e6acea7d141d60368faf2a3242e8374a4a3638d2b59d2d40";
+const DOC_SHA256: &str = "12c1b04d3fbeed70cbf843e85a5caad8063ae6e46138cb8daaf5905a8e1c2c50";
 
 const DOC_BEGIN: &str = "<!-- BEGIN KAFKA K2.1 REACHABLE SCHEMA BROKER MATRIX -->";
 const DOC_END: &str = "<!-- END KAFKA K2.1 REACHABLE SCHEMA BROKER MATRIX -->";
@@ -114,29 +112,13 @@ const EXPECTED_APIS: &[(u64, &str, bool, u64, &str, &str, Option<u64>)] = &[
     (17, "SaslHandshake", true, 1, "0-1", "0-1", None),
     (18, "ApiVersions", true, 3, "0-4", "0-3", Some(3)),
     (22, "InitProducerId", true, 4, "0-6", "0-4", Some(2)),
-    (
-        23,
-        "OffsetForLeaderEpoch",
-        true,
-        2,
-        "2-4",
-        "2",
-        Some(4),
-    ),
+    (23, "OffsetForLeaderEpoch", true, 2, "2-4", "2", Some(4)),
     (24, "AddPartitionsToTxn", true, 0, "0-5", "0", Some(3)),
     (25, "AddOffsetsToTxn", true, 0, "0-4", "0", Some(3)),
     (26, "EndTxn", true, 1, "0-5", "0-1", Some(3)),
     (28, "TxnOffsetCommit", true, 3, "0-5", "0-3", Some(3)),
     (36, "SaslAuthenticate", true, 1, "0-2", "0-1", Some(2)),
-    (
-        71,
-        "GetTelemetrySubscriptions",
-        false,
-        0,
-        "0",
-        "0",
-        Some(0),
-    ),
+    (71, "GetTelemetrySubscriptions", false, 0, "0", "0", Some(0)),
     (72, "PushTelemetry", false, 0, "0", "0", Some(0)),
 ];
 
@@ -501,9 +483,7 @@ fn expect_number(value: &Value, key: &str, expected: u64) -> Result<(), String> 
     if actual == expected {
         Ok(())
     } else {
-        Err(format!(
-            "{key} mismatch: expected {expected}, got {actual}"
-        ))
+        Err(format!("{key} mismatch: expected {expected}, got {actual}"))
     }
 }
 
@@ -512,9 +492,7 @@ fn expect_boolean(value: &Value, key: &str, expected: bool) -> Result<(), String
     if actual == expected {
         Ok(())
     } else {
-        Err(format!(
-            "{key} mismatch: expected {expected}, got {actual}"
-        ))
+        Err(format!("{key} mismatch: expected {expected}, got {actual}"))
     }
 }
 
@@ -622,8 +600,8 @@ fn validate_authority_inputs(artifact: &Value, root: &Path) -> Result<(), String
 
     for row in inputs {
         let path = text(row, "path")?;
-        let bytes = fs::read(root.join(path))
-            .map_err(|error| format!("failed to read {path}: {error}"))?;
+        let bytes =
+            fs::read(root.join(path)).map_err(|error| format!("failed to read {path}: {error}"))?;
         let byte_count = u64::try_from(bytes.len())
             .map_err(|error| format!("byte count overflow for {path}: {error}"))?;
         let record_count = u64::try_from(String::from_utf8_lossy(&bytes).lines().count())
@@ -639,7 +617,10 @@ fn validate_authority_inputs(artifact: &Value, root: &Path) -> Result<(), String
 fn validate_external_authorities(artifact: &Value) -> Result<(), String> {
     let rows = array(artifact, "external_authorities")?;
     if rows.len() != 5 {
-        return Err(format!("expected five external authorities, got {}", rows.len()));
+        return Err(format!(
+            "expected five external authorities, got {}",
+            rows.len()
+        ));
     }
 
     for (authority_id, tag, tag_object, commit) in EXTERNAL_SOURCE_ROWS {
@@ -724,9 +705,7 @@ fn validate_reachable_rows(artifact: &Value) -> Result<(), String> {
     }
     let allowed_journeys = JOURNEY_CLASSES.iter().copied().collect::<BTreeSet<_>>();
 
-    for (api_key, name, k1_seed, client_max, valid, intersection, flex_first) in
-        EXPECTED_APIS
-    {
+    for (api_key, name, k1_seed, client_max, valid, intersection, flex_first) in EXPECTED_APIS {
         let row = rows
             .iter()
             .find(|row| row.get("api_key").and_then(Value::as_u64) == Some(*api_key))
@@ -739,7 +718,10 @@ fn validate_reachable_rows(artifact: &Value) -> Result<(), String> {
         expect_text(row, "apache_4_3_1_valid_versions", valid)?;
         expect_text(row, "candidate_current_intersection", intersection)?;
         let (expected_reachability, expected_probe) = match *api_key {
-            17 | 36 => ("CURRENT_EXPLICIT_BLOCKED_NATIVE_CAPABILITY", "BLOCKED_EXTERNAL"),
+            17 | 36 => (
+                "CURRENT_EXPLICIT_BLOCKED_NATIVE_CAPABILITY",
+                "BLOCKED_EXTERNAL",
+            ),
             25 | 28 => ("REQUIRED_ADDITIVE_ABSENT", "BLOCKED_NOT_SHIPPED"),
             71 | 72 => ("CURRENT_IMPLICIT_DEFAULT_TELEMETRY", "NOT_RUN"),
             _ => ("CURRENT_EXPLICIT", "NOT_RUN"),
@@ -755,7 +737,9 @@ fn validate_reachable_rows(artifact: &Value) -> Result<(), String> {
                 .as_str()
                 .ok_or_else(|| format!("API key {api_key} journey class must be text"))?;
             if !allowed_journeys.contains(journey) {
-                return Err(format!("API key {api_key} has unknown journey class {journey:?}"));
+                return Err(format!(
+                    "API key {api_key} has unknown journey class {journey:?}"
+                ));
             }
         }
         if row.get("accepted_version_range") != Some(&Value::Null) {
@@ -770,17 +754,24 @@ fn validate_reachable_rows(artifact: &Value) -> Result<(), String> {
 
         let reaches_flexible = flex_first.is_some_and(|first| first <= *client_max);
         let expected_request_headers: &[u64] = if reaches_flexible { &[1, 2] } else { &[1] };
-        let expected_response_headers: &[u64] =
-            if *api_key == 18 || !reaches_flexible { &[0] } else { &[0, 1] };
+        let expected_response_headers: &[u64] = if *api_key == 18 || !reaches_flexible {
+            &[0]
+        } else {
+            &[0, 1]
+        };
         if numeric_array(row, "candidate_request_header_versions")?.as_slice()
             != expected_request_headers
         {
-            return Err(format!("API key {api_key} request header selection changed"));
+            return Err(format!(
+                "API key {api_key} request header selection changed"
+            ));
         }
         if numeric_array(row, "candidate_response_header_versions")?.as_slice()
             != expected_response_headers
         {
-            return Err(format!("API key {api_key} response header selection changed"));
+            return Err(format!(
+                "API key {api_key} response header selection changed"
+            ));
         }
         expect_text(
             row,
@@ -791,7 +782,12 @@ fn validate_reachable_rows(artifact: &Value) -> Result<(), String> {
 
     let telemetry = rows
         .iter()
-        .filter(|row| matches!(row.get("api_key").and_then(Value::as_u64), Some(71) | Some(72)))
+        .filter(|row| {
+            matches!(
+                row.get("api_key").and_then(Value::as_u64),
+                Some(71) | Some(72)
+            )
+        })
         .collect::<Vec<_>>();
     if telemetry.len() != 2 {
         return Err("telemetry reachability rows are incomplete".to_owned());
@@ -902,7 +898,10 @@ fn validate_schema_sources(artifact: &Value) -> Result<(), String> {
         .iter()
         .map(|row| number(row, "api_key"))
         .collect::<Result<BTreeSet<_>, _>>()?;
-    let expected = EXPECTED_APIS.iter().map(|row| row.0).collect::<BTreeSet<_>>();
+    let expected = EXPECTED_APIS
+        .iter()
+        .map(|row| row.0)
+        .collect::<BTreeSet<_>>();
     if keys != expected {
         return Err("schema pair keys do not match the reachability frontier".to_owned());
     }
@@ -961,12 +960,7 @@ fn validate_schema_sources(artifact: &Value) -> Result<(), String> {
         .map(|(path, object_id, byte_count)| format!("{path}\t{object_id}\t{byte_count}\n"))
         .collect::<String>();
     let projection_sha256 = sha256_bytes(projection.as_bytes());
-    if projection_sha256
-        != text(
-            identity,
-            "sorted_path_object_id_size_projection_sha256",
-        )?
-    {
+    if projection_sha256 != text(identity, "sorted_path_object_id_size_projection_sha256")? {
         return Err("schema source identity projection digest changed".to_owned());
     }
     Ok(())
@@ -982,9 +976,14 @@ fn validate_blocked_evidence(artifact: &Value) -> Result<(), String> {
     let header = artifact
         .get("header_contract")
         .ok_or_else(|| "header_contract must exist".to_owned())?;
-    if numeric_array(header, "reachable_request_header_versions_in_22_row_frontier")? != [1, 2]
-        || numeric_array(header, "reachable_response_header_versions_in_22_row_frontier")?
-            != [0, 1]
+    if numeric_array(
+        header,
+        "reachable_request_header_versions_in_22_row_frontier",
+    )? != [1, 2]
+        || numeric_array(
+            header,
+            "reachable_response_header_versions_in_22_row_frontier",
+        )? != [0, 1]
     {
         return Err("header frontier changed".to_owned());
     }
@@ -1023,7 +1022,10 @@ fn validate_blocked_evidence(artifact: &Value) -> Result<(), String> {
 
     let brokers = array(artifact, "broker_profile_rows")?;
     if brokers.len() != 4 {
-        return Err(format!("expected four blocked broker profiles, got {}", brokers.len()));
+        return Err(format!(
+            "expected four blocked broker profiles, got {}",
+            brokers.len()
+        ));
     }
     let versions = brokers
         .iter()
@@ -1048,17 +1050,16 @@ fn validate_blocked_evidence(artifact: &Value) -> Result<(), String> {
     let probe = artifact
         .get("existing_probe_disposition")
         .ok_or_else(|| "existing_probe_disposition must exist".to_owned())?;
-    expect_text(
-        probe,
-        "path",
-        "scripts/kafka_broker_parity_proof_runner.sh",
-    )?;
+    expect_text(probe, "path", "scripts/kafka_broker_parity_proof_runner.sh")?;
     expect_text(probe, "classification", "PROOF_ONLY_NONTERMINAL")?;
     expect_boolean(probe, "executed_for_k2_1", false)?;
 
     let gaps = array(artifact, "completion_gaps")?;
     if gaps.len() != 7 {
-        return Err(format!("expected seven completion gaps, got {}", gaps.len()));
+        return Err(format!(
+            "expected seven completion gaps, got {}",
+            gaps.len()
+        ));
     }
     let gap_ids = gaps
         .iter()
@@ -1164,10 +1165,7 @@ fn validate_document(root: &Path) -> Result<(), String> {
 }
 
 fn validate_checked_in_hashes(root: &Path) -> Result<(), String> {
-    for (path, expected) in [
-        (ARTIFACT_PATH, ARTIFACT_SHA256),
-        (DOC_PATH, DOC_SHA256),
-    ] {
+    for (path, expected) in [(ARTIFACT_PATH, ARTIFACT_SHA256), (DOC_PATH, DOC_SHA256)] {
         let bytes =
             fs::read(root.join(path)).map_err(|error| format!("failed to read {path}: {error}"))?;
         let actual = sha256_bytes(&bytes);
@@ -1229,7 +1227,10 @@ fn kafka_k2_packet_rejects_completion_inflation() -> Result<(), String> {
         .and_then(|rows| rows.first_mut())
         .and_then(Value::as_object_mut)
         .ok_or_else(|| "reachable API mutation target missing".to_owned())?;
-    first_api.insert("accepted_version_range".to_owned(), Value::String("3-10".to_owned()));
+    first_api.insert(
+        "accepted_version_range".to_owned(),
+        Value::String("3-10".to_owned()),
+    );
     expect_invalid(&invented_range, &root, "invented accepted range")?;
 
     let mut admitted_broker = artifact.clone();

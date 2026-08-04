@@ -22,10 +22,8 @@ const MANIFEST_PATH: &str = "Cargo.toml";
 const ADR_PATH: &str = "docs/adr/dep_plan_adr_009_kafka_client.md";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
 
-const ARTIFACT_SHA256: &str =
-    "fc63047f2d57c514ebd662cf836c85ccf6186c7f56bf9c5e0c49c135fb8fb33a";
-const DOC_SHA256: &str =
-    "d28f1b08f273a71ecd4ba303e9efc197d5394d3ae0f3a6e2efb7eebe83b8d5df";
+const ARTIFACT_SHA256: &str = "fc63047f2d57c514ebd662cf836c85ccf6186c7f56bf9c5e0c49c135fb8fb33a";
+const DOC_SHA256: &str = "d28f1b08f273a71ecd4ba303e9efc197d5394d3ae0f3a6e2efb7eebe83b8d5df";
 
 const ARTIFACT_ID: &str = "kafka-k1-protocol-security-support-policy-v1";
 const PROGRAM_ID: &str = "dependency-sovereignty-rev5";
@@ -35,12 +33,9 @@ const CAPABILITY_ID: &str = "CAP-KAFKA";
 const ADR_ID: &str = "DEP-ADR-009";
 const CAPTURED_DATE_UTC: &str = "2026-08-03";
 const BASELINE_REVISION: &str = "f3a02fe6e6e5d0dca6db91204fcf2da53c22a5c7";
-const INVENTORY_STATE: &str =
-    "K1_2_PROTOCOL_BROKER_AND_SECURITY_POLICY_FROZEN_KEEP_INCUMBENT";
-const POLICY_ROW_SHA256: &str =
-    "a95fe46e59be4859e5fd1d7b106d6e2542a7adba4314050fc2d6616bb91ed60e";
-const NO_CLAIM_SHA256: &str =
-    "0de9d792c3348c6fc5c76e1f54d2dd8fbf9bec3f87e9700de27ca08ce2f2345e";
+const INVENTORY_STATE: &str = "K1_2_PROTOCOL_BROKER_AND_SECURITY_POLICY_FROZEN_KEEP_INCUMBENT";
+const POLICY_ROW_SHA256: &str = "a95fe46e59be4859e5fd1d7b106d6e2542a7adba4314050fc2d6616bb91ed60e";
+const NO_CLAIM_SHA256: &str = "0de9d792c3348c6fc5c76e1f54d2dd8fbf9bec3f87e9700de27ca08ce2f2345e";
 
 const DOC_BEGIN: &str = "<!-- BEGIN KAFKA K1.2 PROTOCOL SECURITY SUPPORT POLICY -->";
 const DOC_END: &str = "<!-- END KAFKA K1.2 PROTOCOL SECURITY SUPPORT POLICY -->";
@@ -285,7 +280,9 @@ fn expect_text(value: &Value, key: &str, expected: &str) -> Result<(), String> {
     if actual == expected {
         Ok(())
     } else {
-        Err(format!("{key} mismatch: expected {expected:?}, got {actual:?}"))
+        Err(format!(
+            "{key} mismatch: expected {expected:?}, got {actual:?}"
+        ))
     }
 }
 
@@ -431,14 +428,8 @@ fn check_metadata(artifact: &Value) -> Result<(), String> {
             "connectivity_owner",
             "asupersync-dep-p7-kafka-removal-sarszu.2.3.1",
         ),
-        (
-            "tls_owner",
-            "asupersync-dep-p7-kafka-removal-sarszu.2.3.2",
-        ),
-        (
-            "sasl_owner",
-            "asupersync-dep-p7-kafka-removal-sarszu.2.3.3",
-        ),
+        ("tls_owner", "asupersync-dep-p7-kafka-removal-sarszu.2.3.2"),
+        ("sasl_owner", "asupersync-dep-p7-kafka-removal-sarszu.2.3.3"),
         (
             "metadata_routing_owner",
             "asupersync-dep-p7-kafka-removal-sarszu.2.3.4",
@@ -519,8 +510,8 @@ fn check_input_pins(root: &Path, artifact: &Value) -> Result<(), String> {
         }
 
         let bytes = read_bytes(root, path)?;
-        let source = std::str::from_utf8(&bytes)
-            .map_err(|error| format!("{path} is not UTF-8: {error}"))?;
+        let source =
+            std::str::from_utf8(&bytes).map_err(|error| format!("{path} is not UTF-8: {error}"))?;
         let expected_bytes = usize::try_from(number(row, "byte_count")?)
             .map_err(|_| format!("byte_count for {path} does not fit usize"))?;
         let expected_records = usize::try_from(number(row, "record_count")?)
@@ -631,7 +622,9 @@ fn check_authority_views(artifact: &Value) -> Result<(), String> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     if semantic_ids != ["KAFKA-ENUM-004", "KAFKA-ENUM-005"] {
-        return Err(format!("unexpected security semantic IDs: {semantic_ids:?}"));
+        return Err(format!(
+            "unexpected security semantic IDs: {semantic_ids:?}"
+        ));
     }
     Ok(())
 }
@@ -688,10 +681,14 @@ fn check_tracker_routes(root: &Path, artifact: &Value) -> Result<(), String> {
     }
     for reference in references {
         if !reference.starts_with("asupersync-dep-p7-kafka-removal-sarszu.2.") {
-            return Err(format!("out-of-program owner or terminal reference {reference}"));
+            return Err(format!(
+                "out-of-program owner or terminal reference {reference}"
+            ));
         }
         if !tracker_ids.contains(&reference) {
-            return Err(format!("owner or terminal reference is absent from tracker: {reference}"));
+            return Err(format!(
+                "owner or terminal reference is absent from tracker: {reference}"
+            ));
         }
     }
     Ok(())
@@ -863,9 +860,12 @@ fn check_policy_cells(artifact: &Value) -> Result<(), String> {
                 }
             }
             if let Some(real_service_owner) = row.get("real_service_owner") {
-                let owner = real_service_owner.as_str().filter(|value| !value.is_empty()).ok_or_else(
-                    || format!("cell {cell_id} real_service_owner must be non-empty text"),
-                )?;
+                let owner = real_service_owner
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        format!("cell {cell_id} real_service_owner must be non-empty text")
+                    })?;
                 if !owner.starts_with("asupersync-dep-p7-kafka-removal-sarszu.2.") {
                     return Err(format!(
                         "cell {cell_id} has out-of-program real_service_owner {owner}"
@@ -883,7 +883,9 @@ fn check_policy_cells(artifact: &Value) -> Result<(), String> {
                     .filter(|value| !value.is_empty())
                     .ok_or_else(|| format!("cell {cell_id} has an empty terminal gate"))?;
                 if !gate.starts_with("asupersync-dep-p7-kafka-removal-sarszu.2.") {
-                    return Err(format!("cell {cell_id} has out-of-program terminal gate {gate}"));
+                    return Err(format!(
+                        "cell {cell_id} has out-of-program terminal gate {gate}"
+                    ));
                 }
             }
             let authority_key = if *collection == "protocol_binding_groups" {
@@ -944,10 +946,15 @@ fn check_policy_cells(artifact: &Value) -> Result<(), String> {
             .collect::<Vec<_>>(),
     );
     if api_pair_digest != "3aca9d044b63403f051110d8e9d76173b5c61403f494bd269176c892309dafad" {
-        return Err(format!("semantic API-key projection drift: {api_pair_digest}"));
+        return Err(format!(
+            "semantic API-key projection drift: {api_pair_digest}"
+        ));
     }
 
-    let api_names = API_KEYS.iter().map(|(_, name)| *name).collect::<BTreeSet<_>>();
+    let api_names = API_KEYS
+        .iter()
+        .map(|(_, name)| *name)
+        .collect::<BTreeSet<_>>();
     for row in array(artifact, "protocol_binding_groups")? {
         let cell_id = text(row, "cell_id")?;
         for message in array(row, "message_names")? {
@@ -1341,9 +1348,9 @@ fn check_source_and_document(root: &Path) -> Result<(), String> {
     }
 
     let manifest = read_text(root, MANIFEST_PATH)?;
-    if !manifest.contains(
-        "rdkafka = { version = \"0.39\", default-features = false, optional = true }",
-    ) {
+    if !manifest
+        .contains("rdkafka = { version = \"0.39\", default-features = false, optional = true }")
+    {
         return Err("root rdkafka declaration drifted".to_owned());
     }
 
@@ -1390,8 +1397,7 @@ fn kafka_k1_2_mutations_fail_closed() {
     );
 
     let mut invented_range = artifact.clone();
-    invented_range["api_key_cells"][0]["accepted_version_range"] =
-        json!({"min": 0, "max": 9});
+    invented_range["api_key_cells"][0]["accepted_version_range"] = json!({"min": 0, "max": 9});
     assert!(
         check_policy_cells(&invented_range).is_err(),
         "an invented production version range must fail closed"
@@ -1414,8 +1420,7 @@ fn kafka_k1_2_mutations_fail_closed() {
     let cleartext_index = transport_cells
         .iter()
         .position(|row| {
-            row.get("cell_id").and_then(Value::as_str)
-                == Some("KAFKA-K1-2-SEC-007-SASL-PLAINTEXT")
+            row.get("cell_id").and_then(Value::as_str) == Some("KAFKA-K1-2-SEC-007-SASL-PLAINTEXT")
         })
         .expect("cleartext authentication cell must exist");
     transport_cells[cleartext_index]["required_state"] = json!("ACCEPTED");
