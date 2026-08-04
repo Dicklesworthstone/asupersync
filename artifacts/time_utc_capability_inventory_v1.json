@@ -33,7 +33,7 @@
     "unknown_rows": 0,
     "unclassified_chrono_paths": 0,
     "a1_execution_state": "NOT_EXECUTED_THIS_TURN",
-    "source_classification_state": "LITERAL_AND_DIRECT_ALIAS_PER_USE_COMPLETE_DERIVED_CONSUMERS_PARTIAL",
+    "source_classification_state": "LITERAL_DIRECT_ALIAS_AND_DECLARED_IN_FILE_DERIVED_CLASSIFIED_REMAINDER_OPEN",
     "bead_acceptance_state": "PARTIAL_STATIC_INVENTORY_ONLY",
     "bead_close_allowed": false,
     "unresolved_behavioral_gap_count": 7,
@@ -1151,20 +1151,31 @@
     ]
   },
   "per_use_classification": {
-    "state": "LITERAL_AND_DIRECT_ALIAS_PER_USE_COMPLETE_DERIVED_CONSUMERS_PARTIAL",
+    "state": "LITERAL_DIRECT_ALIAS_AND_DECLARED_IN_FILE_DERIVED_CLASSIFIED_REMAINDER_OPEN",
     "inheritance_rule": "Each literal Chrono line receives its semantic operation from the first ordered literal_operation_rule whose needle occurs on that line. Every literal, import-backed, and derived anchor receives profile, migration group, and owner metadata from its unique path_classification_set; literal overrides and alias binding or operation rows may narrow wiring, exposure, and association without changing that ownership route.",
     "path_count": 71,
     "literal_line_count": 159,
     "direct_alias_line_count": 32,
     "literal_alias_overlap_line_count": 1,
     "literal_or_alias_unique_line_count": 190,
-    "derived_operation_anchor_count": 8,
-    "classified_anchor_count": 198,
+    "derived_operation_anchor_count": 40,
+    "classified_anchor_count": 230,
     "literal_use_override_count": 36,
-    "additional_derived_operation_anchor_count": 0,
+    "additional_derived_operation_anchor_count": 32,
     "literal_operation_projection_sha256": "a533497be94a3a8c649a061117053acff88821c102e9cedbe16cb4da0b66990b",
+    "literal_source_projection_sha256": "5c4020cfe41d10dbfcab19c64f3677ee78941c65441c12da93dc7e3cd6946f2d",
     "path_classification_projection_sha256": "5f60bb8b7deb36b1aac2123747fd1be426f1888fc759f46afe3baae103dc3b63",
     "literal_override_projection_sha256": "81f3549c7644361eabee937044ba098315b3aeffbd079d9c644eb1d60ccc3f84",
+    "additional_derived_projection_sha256": "b4188bf022ce336bb51b36e24bc011be879fb9bfd18d3b10f506ef1c1116659a",
+    "semantic_consumer_boundary": "Include nonliteral consumers through the first semantic compare, arithmetic, format, serialize, persist, retain, return, extract, or embed boundary in a Chrono-bearing source path; exclude cross-file propagation, external consumers, and later container or arbitrary-byte taint.",
+    "derived_consumer_category_ids": [
+      "TIME-CONSUMER-CLI-CUTOFF-EXPIRY",
+      "TIME-CONSUMER-CONFORMANCE-OUTPUT",
+      "TIME-CONSUMER-DATABASE-MESSAGING-ARITHMETIC",
+      "TIME-CONSUMER-JETSTREAM-WIRE-INSERTION",
+      "TIME-CONSUMER-REAL-E2E-BOUNDARY",
+      "TIME-CONSUMER-STANDALONE-PERSISTENCE"
+    ],
     "literal_operation_rules": [
       {
         "precedence": 1,
@@ -1935,8 +1946,462 @@
         "persistence_or_public_association": "regression snapshot temporal operations"
       }
     ],
-    "additional_derived_operation_rows": [],
-    "no_claim": "The literal and direct-alias classification is complete, but downstream nonliteral consumers beyond the eight declared imported-alias arithmetic, comparison, association, or ordering anchors are not exhaustively enumerated. No profile resolution, compilation, execution, byte preservation, or behavioral evidence follows."
+    "additional_derived_operation_rows": [
+      {
+        "use_id": "TIME-DERIVED-CLI-CI-EXPIRY-MOVE-0251",
+        "derivation_sources": [
+          "src/cli/atp_workflows.rs:236"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-CLI-CUTOFF-EXPIRY",
+        "path": "src/cli/atp_workflows.rs",
+        "line": 251,
+        "source_anchor": "expires_at,",
+        "operation": "move the computed optional expiry into a public serialized CI artifact",
+        "cfg_or_wiring": "FEATURE_CLI_NATIVE_ONLY",
+        "exposure": "PUBLIC_AND_PERSISTED_FEATURE_GATED_PRODUCTION",
+        "persistence_or_public_association": "AtpCiArtifact.expires_at"
+      },
+      {
+        "use_id": "TIME-DERIVED-CLI-CI-CLEAN-CUTOFF-0409",
+        "derivation_sources": [
+          "src/cli/atp_workflows.rs:398",
+          "src/cli/atp_workflows.rs:399"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-CLI-CUTOFF-EXPIRY",
+        "path": "src/cli/atp_workflows.rs",
+        "line": 409,
+        "source_anchor": "if artifact.timestamp > cutoff {",
+        "operation": "compare a stored artifact timestamp with the derived cleanup cutoff",
+        "cfg_or_wiring": "FEATURE_CLI_NATIVE_ONLY",
+        "exposure": "PRIVATE_CLI_RETENTION_FILTER",
+        "persistence_or_public_association": "CI index deletion selection"
+      },
+      {
+        "use_id": "TIME-DERIVED-CLI-CI-LIST-CUTOFF-0467",
+        "derivation_sources": [
+          "src/cli/atp_workflows.rs:457",
+          "src/cli/atp_workflows.rs:458"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-CLI-CUTOFF-EXPIRY",
+        "path": "src/cli/atp_workflows.rs",
+        "line": 467,
+        "source_anchor": "if artifact.timestamp < cutoff {",
+        "operation": "compare a stored artifact timestamp with the derived recent-list cutoff",
+        "cfg_or_wiring": "FEATURE_CLI_NATIVE_ONLY",
+        "exposure": "PRIVATE_CLI_RETENTION_FILTER",
+        "persistence_or_public_association": "CI recent-list selection"
+      },
+      {
+        "use_id": "TIME-DERIVED-CLI-ARCHIVE-EXPIRY-MOVE-1308",
+        "derivation_sources": [
+          "src/cli/atp_workflows.rs:1297",
+          "src/cli/atp_workflows.rs:1298"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-CLI-CUTOFF-EXPIRY",
+        "path": "src/cli/atp_workflows.rs",
+        "line": 1308,
+        "source_anchor": "expires_at,",
+        "operation": "move the computed optional expiry into a public serialized archive entry",
+        "cfg_or_wiring": "FEATURE_CLI_NATIVE_ONLY",
+        "exposure": "PUBLIC_AND_PERSISTED_FEATURE_GATED_PRODUCTION",
+        "persistence_or_public_association": "AtpArchiveEntry.expires_at"
+      },
+      {
+        "use_id": "TIME-DERIVED-POSTGRES-MIDNIGHT-CONSTRUCTION-18088",
+        "derivation_sources": [
+          "src/database/postgres.rs:18086"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-DATABASE-MESSAGING-ARITHMETIC",
+        "path": "src/database/postgres.rs",
+        "line": 18088,
+        "source_anchor": ".and_hms_opt(0, 0, 0)",
+        "operation": "extend the PostgreSQL calendar epoch date to a midnight timestamp",
+        "cfg_or_wiring": "FEATURE_POSTGRES_AND_CFG_TEST_IN_MODULE",
+        "exposure": "PRIVATE_UNIT_DIFFERENTIAL_ORACLE",
+        "persistence_or_public_association": "TIMESTAMP binary-decoder reference epoch"
+      },
+      {
+        "use_id": "TIME-DERIVED-KAFKA-BROKER-RECENCY-COMPARE-1147",
+        "derivation_sources": [
+          "tests/integration/kafka_real_broker.rs:1145"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-DATABASE-MESSAGING-ARITHMETIC",
+        "path": "tests/integration/kafka_real_broker.rs",
+        "line": 1147,
+        "source_anchor": "(now - ts).abs() < 10_000,",
+        "operation": "subtract the broker timestamp from current UTC milliseconds and enforce a ten-second recency bound",
+        "cfg_or_wiring": "EXPLICIT_CARGO_TEST_TARGET",
+        "exposure": "PRIVATE_REAL_BROKER_ASSERTION",
+        "persistence_or_public_association": "Kafka RecordMetadata timestamp recency assertion"
+      },
+      {
+        "use_id": "TIME-DERIVED-JETSTREAM-START-TIME-PAYLOAD-0360",
+        "derivation_sources": [
+          "tests/integration/jetstream_real_server.rs:358",
+          "tests/integration/jetstream_real_server.rs:359"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-JETSTREAM-WIRE-INSERTION",
+        "path": "tests/integration/jetstream_real_server.rs",
+        "line": 360,
+        "source_anchor": "format!(",
+        "operation": "embed the nanosecond RFC3339 start time in a raw consumer-create JSON payload",
+        "cfg_or_wiring": "WIRED_BY_TESTS_JETSTREAM_REAL_SERVER_RS",
+        "exposure": "REAL_SERVER_TEST_WIRE_PAYLOAD",
+        "persistence_or_public_association": "opt_start_time in raw NATS JetStream request"
+      },
+      {
+        "use_id": "TIME-REAL-E2E-DERIVED-FS-URING-0085",
+        "derivation_sources": [
+          "src/real_fs_uring_e2e_tests.rs:80"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-REAL-E2E-BOUNDARY",
+        "path": "src/real_fs_uring_e2e_tests.rs",
+        "line": 85,
+        "source_anchor": "eprintln!(\"{}\", serde_json::to_string(&entry).unwrap());",
+        "operation": "serialize and emit timestamp-bearing JSON diagnostic",
+        "cfg_or_wiring": "DORMANT_SOURCE_AT_PINNED_REVISION",
+        "exposure": "UNWIRED_TEST_SOURCE_ONLY",
+        "persistence_or_public_association": "private stderr diagnostic output"
+      },
+      {
+        "use_id": "TIME-REAL-E2E-DERIVED-FS-URING-0086",
+        "derivation_sources": [
+          "src/real_fs_uring_e2e_tests.rs:80"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-REAL-E2E-BOUNDARY",
+        "path": "src/real_fs_uring_e2e_tests.rs",
+        "line": 86,
+        "source_anchor": "self.log_entries.lock().unwrap().push(entry);",
+        "operation": "retain timestamp-bearing JSON diagnostic",
+        "cfg_or_wiring": "DORMANT_SOURCE_AT_PINNED_REVISION",
+        "exposure": "UNWIRED_TEST_SOURCE_ONLY",
+        "persistence_or_public_association": "private in-memory test log"
+      },
+      {
+        "use_id": "TIME-REAL-E2E-DERIVED-GRPC-BIDIRECTIONAL-0136",
+        "derivation_sources": [
+          "src/real_grpc_bidirectional_e2e_tests.rs:131"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-REAL-E2E-BOUNDARY",
+        "path": "src/real_grpc_bidirectional_e2e_tests.rs",
+        "line": 136,
+        "source_anchor": "eprintln!(\"{}\", serde_json::to_string(&entry).unwrap());",
+        "operation": "serialize and emit timestamp-bearing JSON diagnostic",
+        "cfg_or_wiring": "DORMANT_SOURCE_AT_PINNED_REVISION",
+        "exposure": "UNWIRED_TEST_SOURCE_ONLY",
+        "persistence_or_public_association": "private stderr diagnostic output"
+      },
+      {
+        "use_id": "TIME-REAL-E2E-DERIVED-GRPC-BIDIRECTIONAL-0137",
+        "derivation_sources": [
+          "src/real_grpc_bidirectional_e2e_tests.rs:131"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-REAL-E2E-BOUNDARY",
+        "path": "src/real_grpc_bidirectional_e2e_tests.rs",
+        "line": 137,
+        "source_anchor": "self.log_entries.lock().unwrap().push(entry);",
+        "operation": "retain timestamp-bearing JSON diagnostic",
+        "cfg_or_wiring": "DORMANT_SOURCE_AT_PINNED_REVISION",
+        "exposure": "UNWIRED_TEST_SOURCE_ONLY",
+        "persistence_or_public_association": "private in-memory test log"
+      },
+      {
+        "use_id": "TIME-REAL-E2E-DERIVED-HTTP2-LOAD-0106",
+        "derivation_sources": [
+          "src/real_http_h2_concurrent_load_e2e_tests.rs:101"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-REAL-E2E-BOUNDARY",
+        "path": "src/real_http_h2_concurrent_load_e2e_tests.rs",
+        "line": 106,
+        "source_anchor": "eprintln!(\"{}\", serde_json::to_string(&entry).unwrap());",
+        "operation": "serialize and emit timestamp-bearing JSON diagnostic",
+        "cfg_or_wiring": "DORMANT_SOURCE_AT_PINNED_REVISION",
+        "exposure": "UNWIRED_TEST_SOURCE_ONLY",
+        "persistence_or_public_association": "private stderr diagnostic output"
+      },
+      {
+        "use_id": "TIME-REAL-E2E-DERIVED-HTTP2-LOAD-0107",
+        "derivation_sources": [
+          "src/real_http_h2_concurrent_load_e2e_tests.rs:101"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-REAL-E2E-BOUNDARY",
+        "path": "src/real_http_h2_concurrent_load_e2e_tests.rs",
+        "line": 107,
+        "source_anchor": "self.log_entries.lock().unwrap().push(entry);",
+        "operation": "retain timestamp-bearing JSON diagnostic",
+        "cfg_or_wiring": "DORMANT_SOURCE_AT_PINNED_REVISION",
+        "exposure": "UNWIRED_TEST_SOURCE_ONLY",
+        "persistence_or_public_association": "private in-memory test log"
+      },
+      {
+        "use_id": "TIME-REAL-E2E-DERIVED-DNS-0081",
+        "derivation_sources": [
+          "src/real_net_dns_e2e_tests.rs:76"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-REAL-E2E-BOUNDARY",
+        "path": "src/real_net_dns_e2e_tests.rs",
+        "line": 81,
+        "source_anchor": "eprintln!(\"{}\", serde_json::to_string(&entry).unwrap());",
+        "operation": "serialize and emit timestamp-bearing JSON diagnostic",
+        "cfg_or_wiring": "DORMANT_SOURCE_AT_PINNED_REVISION",
+        "exposure": "UNWIRED_TEST_SOURCE_ONLY",
+        "persistence_or_public_association": "private stderr diagnostic output"
+      },
+      {
+        "use_id": "TIME-REAL-E2E-DERIVED-DNS-0082",
+        "derivation_sources": [
+          "src/real_net_dns_e2e_tests.rs:76"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-REAL-E2E-BOUNDARY",
+        "path": "src/real_net_dns_e2e_tests.rs",
+        "line": 82,
+        "source_anchor": "self.log_entries.lock().unwrap().push(entry);",
+        "operation": "retain timestamp-bearing JSON diagnostic",
+        "cfg_or_wiring": "DORMANT_SOURCE_AT_PINNED_REVISION",
+        "exposure": "UNWIRED_TEST_SOURCE_ONLY",
+        "persistence_or_public_association": "private in-memory test log"
+      },
+      {
+        "use_id": "TIME-REAL-E2E-DERIVED-RAPTORQ-0088",
+        "derivation_sources": [
+          "src/real_raptorq_systematic_e2e_tests.rs:83"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-REAL-E2E-BOUNDARY",
+        "path": "src/real_raptorq_systematic_e2e_tests.rs",
+        "line": 88,
+        "source_anchor": "eprintln!(\"{}\", serde_json::to_string(&entry).unwrap());",
+        "operation": "serialize and emit timestamp-bearing JSON diagnostic",
+        "cfg_or_wiring": "DORMANT_SOURCE_AT_PINNED_REVISION",
+        "exposure": "UNWIRED_TEST_SOURCE_ONLY",
+        "persistence_or_public_association": "private stderr diagnostic output"
+      },
+      {
+        "use_id": "TIME-REAL-E2E-DERIVED-RAPTORQ-0089",
+        "derivation_sources": [
+          "src/real_raptorq_systematic_e2e_tests.rs:83"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-REAL-E2E-BOUNDARY",
+        "path": "src/real_raptorq_systematic_e2e_tests.rs",
+        "line": 89,
+        "source_anchor": "self.log_entries.lock().unwrap().push(entry);",
+        "operation": "retain timestamp-bearing JSON diagnostic",
+        "cfg_or_wiring": "DORMANT_SOURCE_AT_PINNED_REVISION",
+        "exposure": "UNWIRED_TEST_SOURCE_ONLY",
+        "persistence_or_public_association": "private in-memory test log"
+      },
+      {
+        "use_id": "TIME-REAL-E2E-DERIVED-SUPERVISION-0046",
+        "derivation_sources": [
+          "src/real_supervision_e2e_tests.rs:41"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-REAL-E2E-BOUNDARY",
+        "path": "src/real_supervision_e2e_tests.rs",
+        "line": 46,
+        "source_anchor": "eprintln!(\"{}\", serde_json::to_string(&entry).unwrap());",
+        "operation": "serialize and emit timestamp-bearing JSON diagnostic",
+        "cfg_or_wiring": "DORMANT_SOURCE_AT_PINNED_REVISION",
+        "exposure": "UNWIRED_TEST_SOURCE_ONLY",
+        "persistence_or_public_association": "private stderr diagnostic output"
+      },
+      {
+        "use_id": "TIME-REAL-E2E-DERIVED-SUPERVISION-0047",
+        "derivation_sources": [
+          "src/real_supervision_e2e_tests.rs:41"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-REAL-E2E-BOUNDARY",
+        "path": "src/real_supervision_e2e_tests.rs",
+        "line": 47,
+        "source_anchor": "self.log_entries.lock().unwrap().push(entry);",
+        "operation": "retain timestamp-bearing JSON diagnostic",
+        "cfg_or_wiring": "DORMANT_SOURCE_AT_PINNED_REVISION",
+        "exposure": "UNWIRED_TEST_SOURCE_ONLY",
+        "persistence_or_public_association": "private in-memory test log"
+      },
+      {
+        "use_id": "TIME-REAL-E2E-DERIVED-TIMER-EXTENDED-0055",
+        "derivation_sources": [
+          "src/real_timer_extended_e2e_tests.rs:50"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-REAL-E2E-BOUNDARY",
+        "path": "src/real_timer_extended_e2e_tests.rs",
+        "line": 55,
+        "source_anchor": "eprintln!(\"{}\", serde_json::to_string(&entry).unwrap());",
+        "operation": "serialize and emit timestamp-bearing JSON diagnostic",
+        "cfg_or_wiring": "DORMANT_SOURCE_AT_PINNED_REVISION",
+        "exposure": "UNWIRED_TEST_SOURCE_ONLY",
+        "persistence_or_public_association": "private stderr diagnostic output"
+      },
+      {
+        "use_id": "TIME-REAL-E2E-DERIVED-TIMER-EXTENDED-0056",
+        "derivation_sources": [
+          "src/real_timer_extended_e2e_tests.rs:50"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-REAL-E2E-BOUNDARY",
+        "path": "src/real_timer_extended_e2e_tests.rs",
+        "line": 56,
+        "source_anchor": "self.log_entries.lock().unwrap().push(entry);",
+        "operation": "retain timestamp-bearing JSON diagnostic",
+        "cfg_or_wiring": "DORMANT_SOURCE_AT_PINNED_REVISION",
+        "exposure": "UNWIRED_TEST_SOURCE_ONLY",
+        "persistence_or_public_association": "private in-memory test log"
+      },
+      {
+        "use_id": "TIME-REAL-E2E-DERIVED-HTTP2-KAFKA-0420",
+        "derivation_sources": [
+          "src/real_http_h2_server_messaging_kafka_e2e_tests.rs:417"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-REAL-E2E-BOUNDARY",
+        "path": "src/real_http_h2_server_messaging_kafka_e2e_tests.rs",
+        "line": 420,
+        "source_anchor": "Bytes::from(message.to_string())",
+        "operation": "serialize timestamp-bearing Kafka JSON and return payload bytes",
+        "cfg_or_wiring": "DORMANT_SOURCE_AT_PINNED_REVISION",
+        "exposure": "UNWIRED_TEST_SOURCE_ONLY",
+        "persistence_or_public_association": "intended private HTTP-to-Kafka message payload"
+      },
+      {
+        "use_id": "TIME-REAL-E2E-DERIVED-REDIS-0177",
+        "derivation_sources": [
+          "src/real_fs_file_messaging_redis_stream_durability_rdb_e2e_tests.rs:168"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-REAL-E2E-BOUNDARY",
+        "path": "src/real_fs_file_messaging_redis_stream_durability_rdb_e2e_tests.rs",
+        "line": 177,
+        "source_anchor": "\"entry_id\": entry_id,",
+        "operation": "embed a UTC-derived Redis-style millisecond ID in stream-entry JSON",
+        "cfg_or_wiring": "DORMANT_SOURCE_AT_PINNED_REVISION",
+        "exposure": "UNWIRED_DATABASE_MESSAGING_E2E_SOURCE",
+        "persistence_or_public_association": "simulated file-backed Redis stream record"
+      },
+      {
+        "use_id": "TIME-REAL-E2E-DERIVED-REDIS-0179",
+        "derivation_sources": [
+          "src/real_fs_file_messaging_redis_stream_durability_rdb_e2e_tests.rs:74"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-REAL-E2E-BOUNDARY",
+        "path": "src/real_fs_file_messaging_redis_stream_durability_rdb_e2e_tests.rs",
+        "line": 179,
+        "source_anchor": "\"timestamp\": entry.timestamp,",
+        "operation": "embed a UTC-derived unsigned millisecond timestamp in stream-entry JSON",
+        "cfg_or_wiring": "DORMANT_SOURCE_AT_PINNED_REVISION",
+        "exposure": "UNWIRED_DATABASE_MESSAGING_E2E_SOURCE",
+        "persistence_or_public_association": "simulated file-backed Redis stream record"
+      },
+      {
+        "use_id": "TIME-REAL-E2E-DERIVED-REDIS-0202",
+        "derivation_sources": [
+          "src/real_fs_file_messaging_redis_stream_durability_rdb_e2e_tests.rs:168"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-REAL-E2E-BOUNDARY",
+        "path": "src/real_fs_file_messaging_redis_stream_durability_rdb_e2e_tests.rs",
+        "line": 202,
+        "source_anchor": "println!(\"Added stream entry {} to {}\", entry_id, stream);",
+        "operation": "emit a UTC-derived Redis-style millisecond ID",
+        "cfg_or_wiring": "DORMANT_SOURCE_AT_PINNED_REVISION",
+        "exposure": "UNWIRED_DATABASE_MESSAGING_E2E_SOURCE",
+        "persistence_or_public_association": "private test stdout diagnostic"
+      },
+      {
+        "use_id": "TIME-REAL-E2E-DERIVED-REDIS-0203",
+        "derivation_sources": [
+          "src/real_fs_file_messaging_redis_stream_durability_rdb_e2e_tests.rs:168"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-REAL-E2E-BOUNDARY",
+        "path": "src/real_fs_file_messaging_redis_stream_durability_rdb_e2e_tests.rs",
+        "line": 203,
+        "source_anchor": "Ok(entry_id)",
+        "operation": "return a UTC-derived Redis-style millisecond ID",
+        "cfg_or_wiring": "DORMANT_SOURCE_AT_PINNED_REVISION",
+        "exposure": "UNWIRED_DATABASE_MESSAGING_E2E_SOURCE",
+        "persistence_or_public_association": "private simulated XADD result"
+      },
+      {
+        "use_id": "TIME-REAL-E2E-DERIVED-REDIS-0249",
+        "derivation_sources": [
+          "src/real_fs_file_messaging_redis_stream_durability_rdb_e2e_tests.rs:244"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-REAL-E2E-BOUNDARY",
+        "path": "src/real_fs_file_messaging_redis_stream_durability_rdb_e2e_tests.rs",
+        "line": 249,
+        "source_anchor": "let metadata_bytes = serde_json::to_vec(&metadata)?;",
+        "operation": "serialize a UTC-derived checkpoint timestamp with RDB metadata",
+        "cfg_or_wiring": "DORMANT_SOURCE_AT_PINNED_REVISION",
+        "exposure": "UNWIRED_DATABASE_MESSAGING_E2E_SOURCE",
+        "persistence_or_public_association": "simulated RDB checkpoint metadata bytes"
+      },
+      {
+        "use_id": "TIME-REAL-E2E-DERIVED-REDIS-0638",
+        "derivation_sources": [
+          "src/real_fs_file_messaging_redis_stream_durability_rdb_e2e_tests.rs:643"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-REAL-E2E-BOUNDARY",
+        "path": "src/real_fs_file_messaging_redis_stream_durability_rdb_e2e_tests.rs",
+        "line": 638,
+        "source_anchor": "large_dataset.push(TestStreamEntry::new(",
+        "operation": "embed and retain a UTC-derived RFC3339 field in a test stream entry",
+        "cfg_or_wiring": "DORMANT_SOURCE_AT_PINNED_REVISION",
+        "exposure": "UNWIRED_DATABASE_MESSAGING_E2E_SOURCE",
+        "persistence_or_public_association": "private large-dataset stream fixture"
+      },
+      {
+        "use_id": "TIME-DERIVED-CONFORMANCE-DATA-END-STREAM-RENDER-0461",
+        "derivation_sources": [
+          "conformance/src/h2_data_end_stream_conformance.rs:186"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-CONFORMANCE-OUTPUT",
+        "path": "conformance/src/h2_data_end_stream_conformance.rs",
+        "line": 461,
+        "source_anchor": "output.push_str(&format!(\"**Timestamp:** {}\\n\", report.timestamp));",
+        "operation": "render the typed report timestamp into public Markdown output",
+        "cfg_or_wiring": "PUBLIC_CONFORMANCE_LIBRARY_MODULE",
+        "exposure": "PUBLIC_SERDE_SCHEMA_AND_OPTIONAL_REPORT_OUTPUT",
+        "persistence_or_public_association": "DataEndStreamComplianceReport Markdown report"
+      },
+      {
+        "use_id": "TIME-DERIVED-EXCLUDED-CONFORMANCE-PING-RENDER-0631",
+        "derivation_sources": [
+          "fuzz/conformance/src/h2_ping_rtt_measurement_conformance.rs:534",
+          "fuzz/conformance/src/h2_ping_rtt_measurement_conformance.rs:565"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-CONFORMANCE-OUTPUT",
+        "path": "fuzz/conformance/src/h2_ping_rtt_measurement_conformance.rs",
+        "line": 631,
+        "source_anchor": "output.push_str(&format!(\"Timestamp: {}\\n\", results.timestamp));",
+        "operation": "render either generated report timestamp into summary text",
+        "cfg_or_wiring": "EXCLUDED_WORKSPACE_SOURCE",
+        "exposure": "SEPARATE_WORKSPACE_REPORT_OUTPUT",
+        "persistence_or_public_association": "H2 PING RTT summary report"
+      },
+      {
+        "use_id": "TIME-DERIVED-STANDALONE-GOLDEN-SERIALIZE-0197",
+        "derivation_sources": [
+          "tests/conformance/raptorq_rfc6330/golden/src/fixture_generator.rs:191"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-STANDALONE-PERSISTENCE",
+        "path": "tests/conformance/raptorq_rfc6330/golden/src/fixture_generator.rs",
+        "line": 197,
+        "source_anchor": "let json = serde_json::to_string_pretty(&fixture_data)?;",
+        "operation": "serialize the timestamp-bearing standalone fixture before filesystem persistence",
+        "cfg_or_wiring": "NESTED_STANDALONE_WORKSPACE",
+        "exposure": "PRIVATE_SERIALIZED_TEST_ARTIFACT",
+        "persistence_or_public_association": "RFC 6330 golden fixture JSON"
+      },
+      {
+        "use_id": "TIME-DERIVED-STANDALONE-SNAPSHOT-SERIALIZE-0287",
+        "derivation_sources": [
+          "tests/conformance/raptorq_rfc6330/reporting/src/regression_detection.rs:281"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-STANDALONE-PERSISTENCE",
+        "path": "tests/conformance/raptorq_rfc6330/reporting/src/regression_detection.rs",
+        "line": 287,
+        "source_anchor": "let json = serde_json::to_string_pretty(&snapshot)",
+        "operation": "serialize the timestamp-bearing conformance snapshot before filesystem persistence",
+        "cfg_or_wiring": "NESTED_STANDALONE_LIBRARY",
+        "exposure": "PUBLIC_STANDALONE_SERDE_SCHEMA_AND_FILESYSTEM_OUTPUT",
+        "persistence_or_public_association": "standalone conformance snapshot JSON"
+      }
+    ],
+    "no_claim": "The literal and direct-alias classification is complete, and the declared in-file downstream rows are exact through the stated semantic boundary. Cross-file propagation, external consumers, and later container or arbitrary-byte taint remain open. No profile resolution, compilation, execution, byte preservation, or behavioral evidence follows."
   },
   "alias_aware_chrono_uses": {
     "scope": "Bounded lexical inventory of every direct Chrono import binding, every line that directly references an imported Chrono symbol in the five census roots, and every adjacent derived temporal arithmetic, comparison, association, or ordering anchor discovered for those bindings.",
@@ -3903,14 +4368,19 @@
   "static_inventory_gaps": [
     {
       "gap_id": "TIME-STATIC-GAP-DERIVED-CONSUMER-CLASSIFICATION",
-      "summary": "All 159 literal Chrono lines and all 32 direct imported-symbol lines now have deterministic operation and path-routing classifications, with the corrected one-line overlap and 190-line union. Eight adjacent imported-alias arithmetic, comparison, association, or ordering anchors are exact. A static review also found broader nonliteral consumers across report rendering, serialization, persistence, retention, and timestamp-derived identifier paths; those consumers are not yet exhaustively enumerated.",
-      "representative_unclassified_consumers": [
+      "summary": "All 159 literal Chrono lines, all 32 direct imported-symbol lines, eight imported-alias anchors, and the declared in-file downstream consumers through the first semantic boundary have deterministic source-linked classifications. Cross-file propagation, external consumers, and second-order container or byte propagation remain outside this bounded static tranche.",
+      "newly_classified_consumer_categories": [
         "CLI cutoff comparisons and optional-expiry moves",
         "PostgreSQL midnight construction and Kafka recency arithmetic",
         "JetStream timestamp insertion into a wire payload",
-        "real-E2E diagnostic serialization and retention",
-        "conformance report rendering and optional file output",
+        "real-E2E serialization, retention, return, and embedding boundaries",
+        "conformance report rendering and output",
         "standalone golden and reporting persistence paths"
+      ],
+      "representative_unclassified_consumers": [
+        "cross-file consumers outside Chrono-bearing paths",
+        "external consumers not present in the repository snapshot",
+        "second-order container and byte propagation beyond the first semantic boundary"
       ],
       "effect": "A1 zero-unclassified-use acceptance remains unmet and the bead must stay open.",
       "owner_bead": "asupersync-5z2scg.6.1"
@@ -3927,6 +4397,12 @@
       "detail_id": "TIME-STATIC-RESOLVED-DIRECT-PER-USE-CLASSIFICATION",
       "summary": "All 159 literal Chrono lines and all 32 direct imported-symbol lines have deterministic operation, wiring, exposure, profile, migration, and owner classifications. Their corrected one-line overlap yields 190 unique direct-use lines; eight imported-alias arithmetic, comparison, association, or ordering anchors are also frozen without claiming exhaustive downstream-consumer coverage.",
       "state": "RESOLVED_BY_STATIC_DIRECT_PER_USE_CLASSIFICATION",
+      "owner_bead": "asupersync-5z2scg.6.1"
+    },
+    {
+      "detail_id": "TIME-STATIC-RESOLVED-DECLARED-DERIVED-CONSUMERS",
+      "summary": "Thirty-two declared in-file consumer anchors across six categories are linked to 28 unique direct source anchors, source-matched, category-routed, and frozen through the stated first semantic boundary. The wider remainder stays explicit in static_inventory_gaps.",
+      "state": "RESOLVED_BY_STATIC_DECLARED_DERIVED_CLASSIFICATION",
       "owner_bead": "asupersync-5z2scg.6.1"
     }
   ],
@@ -3984,8 +4460,9 @@
       "workspace filesystem source search",
       "direct Chrono import and imported-symbol reconciliation",
       "manifest and authority inspection",
-      "path, matching-line, literal-operation and classification projection hashing",
-      "literal override and derived-anchor source matching",
+      "path, matching-line, literal-operation, literal-source and classification projection hashing",
+      "literal override, declared derived-row and lineage projection hashing",
+      "derived-anchor source matching and direct-source lineage validation",
       "source file hashing",
       "manual cross-review"
     ]

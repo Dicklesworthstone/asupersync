@@ -24,7 +24,7 @@ const CAPABILITY_ID: &str = "CAP-TIME-UTC-RFC3339";
 const ADR_ID: &str = "DEP-ADR-011";
 const BASELINE_REVISION: &str = "1afde84d564bd8ea876459624116f90028b80835";
 const ARTIFACT_SHA256: &str =
-    "9e367dc6e4d9dc2602687126c52fb4a98ea73235c7abb07fe3dfbed0e3131b16";
+    "1ac799332e035d80ec5ff439b9b323600d193d06ad90908e45a0a32eb8713f96";
 const DOC_BEGIN: &str = "<!-- BEGIN TIME UTC CAPABILITY INVENTORY -->";
 const DOC_END: &str = "<!-- END TIME UTC CAPABILITY INVENTORY -->";
 const CHRONO_TOKEN: &str = concat!("chrono", "::");
@@ -35,12 +35,22 @@ const CENSUS_PATHS_SHA256: &str =
     "f16dea3b2143a0502579cdde842a5b00694031ec504eb674750554f6030f9700";
 const LITERAL_OPERATION_PROJECTION_SHA256: &str =
     "a533497be94a3a8c649a061117053acff88821c102e9cedbe16cb4da0b66990b";
+const LITERAL_SOURCE_PROJECTION_SHA256: &str =
+    "5c4020cfe41d10dbfcab19c64f3677ee78941c65441c12da93dc7e3cd6946f2d";
 const PATH_CLASSIFICATION_PROJECTION_SHA256: &str =
     "5f60bb8b7deb36b1aac2123747fd1be426f1888fc759f46afe3baae103dc3b63";
 const LITERAL_OVERRIDE_PROJECTION_SHA256: &str =
     "81f3549c7644361eabee937044ba098315b3aeffbd079d9c644eb1d60ccc3f84";
 const ALIAS_CLASSIFICATION_PROJECTION_SHA256: &str =
     "867c7f39911b829635b5a28413179e8cc2d4156f0cfe2a1218fbb3f4819c5118";
+const ADDITIONAL_DERIVED_PROJECTION_SHA256: &str =
+    "b4188bf022ce336bb51b36e24bc011be879fb9bfd18d3b10f506ef1c1116659a";
+const SEMANTIC_CONSUMER_BOUNDARY: &str = concat!(
+    "Include nonliteral consumers through the first semantic compare, arithmetic, format, ",
+    "serialize, persist, retain, return, extract, or embed boundary in a Chrono-bearing ",
+    "source path; exclude cross-file propagation, external consumers, and later container ",
+    "or arbitrary-byte taint.",
+);
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -220,7 +230,9 @@ fn validate_identity(inventory: &Value) -> Result<(), String> {
         || policy.get("a1_execution_state").and_then(Value::as_str)
             != Some("NOT_EXECUTED_THIS_TURN")
         || policy.get("source_classification_state").and_then(Value::as_str)
-            != Some("LITERAL_AND_DIRECT_ALIAS_PER_USE_COMPLETE_DERIVED_CONSUMERS_PARTIAL")
+            != Some(
+                "LITERAL_DIRECT_ALIAS_AND_DECLARED_IN_FILE_DERIVED_CLASSIFIED_REMAINDER_OPEN",
+            )
         || policy.get("bead_acceptance_state").and_then(Value::as_str)
             != Some("PARTIAL_STATIC_INVENTORY_ONLY")
         || policy.get("bead_close_allowed").and_then(Value::as_bool) != Some(false)
@@ -474,6 +486,7 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
         "detail_id",
         &[
             "TIME-STATIC-RESOLVED-ALIAS-BINDINGS",
+            "TIME-STATIC-RESOLVED-DECLARED-DERIVED-CONSUMERS",
             "TIME-STATIC-RESOLVED-DIRECT-PER-USE-CLASSIFICATION",
         ],
         "resolved static details",
@@ -486,13 +499,18 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
     )?;
     let resolved_alias = &array(inventory, "resolved_static_details")[0];
     let resolved_per_use = &array(inventory, "resolved_static_details")[1];
+    let resolved_derived = &array(inventory, "resolved_static_details")[2];
     let derived_gap = &array(inventory, "static_inventory_gaps")[0];
     let nondependency_boundary = &array(inventory, "scope_boundaries")[0];
     if text(resolved_alias, "state") != "RESOLVED_BY_STATIC_ALIAS_INVENTORY"
         || text(resolved_per_use, "state")
             != "RESOLVED_BY_STATIC_DIRECT_PER_USE_CLASSIFICATION"
-        || array(derived_gap, "representative_unclassified_consumers").len() != 6
-        || string_set(derived_gap, "representative_unclassified_consumers").len() != 6
+        || text(resolved_derived, "state")
+            != "RESOLVED_BY_STATIC_DECLARED_DERIVED_CLASSIFICATION"
+        || array(derived_gap, "newly_classified_consumer_categories").len() != 6
+        || string_set(derived_gap, "newly_classified_consumer_categories").len() != 6
+        || array(derived_gap, "representative_unclassified_consumers").len() != 3
+        || string_set(derived_gap, "representative_unclassified_consumers").len() != 3
         || text(derived_gap, "effect").is_empty()
         || text(derived_gap, "owner_bead") != BEAD_ID
         || text(nondependency_boundary, "semantic_contract_id")
@@ -500,6 +518,27 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
     {
         return Err("resolved detail or scope-boundary routing drifted".to_owned());
     }
+    require_exact_strings(
+        derived_gap,
+        "newly_classified_consumer_categories",
+        &[
+            "CLI cutoff comparisons and optional-expiry moves",
+            "JetStream timestamp insertion into a wire payload",
+            "PostgreSQL midnight construction and Kafka recency arithmetic",
+            "conformance report rendering and output",
+            "real-E2E serialization, retention, return, and embedding boundaries",
+            "standalone golden and reporting persistence paths",
+        ],
+    )?;
+    require_exact_strings(
+        derived_gap,
+        "representative_unclassified_consumers",
+        &[
+            "cross-file consumers outside Chrono-bearing paths",
+            "external consumers not present in the repository snapshot",
+            "second-order container and byte propagation beyond the first semantic boundary",
+        ],
+    )?;
     Ok(())
 }
 
@@ -885,6 +924,20 @@ fn actual_literal_lines() -> Vec<(String, u64, String)> {
     rows
 }
 
+fn literal_source_projection(rows: &[(String, u64, String)]) -> Vec<u8> {
+    let mut projection = Vec::new();
+    for (path, line, source) in rows {
+        projection.extend_from_slice(path.as_bytes());
+        projection.push(0);
+        let line_text = line.to_string();
+        projection.extend_from_slice(line_text.as_bytes());
+        projection.push(0);
+        projection.extend_from_slice(source.as_bytes());
+        projection.push(0);
+    }
+    projection
+}
+
 fn source_line(path: &str, line: u64) -> Result<String, String> {
     let index = line
         .checked_sub(1)
@@ -929,6 +982,29 @@ fn literal_override_projection(overrides: &[Value]) -> String {
             format!(
                 "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 text(row, "use_id"),
+                text(row, "path"),
+                number(row, "line"),
+                text(row, "source_anchor"),
+                text(row, "operation"),
+                text(row, "cfg_or_wiring"),
+                text(row, "exposure"),
+                text(row, "persistence_or_public_association"),
+            )
+        })
+        .collect();
+    rows.sort();
+    rows.concat()
+}
+
+fn additional_derived_projection(rows: &[Value]) -> String {
+    let mut rows: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                text(row, "use_id"),
+                sorted_strings(row, "derivation_sources"),
+                text(row, "consumer_category_id"),
                 text(row, "path"),
                 number(row, "line"),
                 text(row, "source_anchor"),
@@ -1025,27 +1101,41 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
     let per_use = &inventory["per_use_classification"];
     let alias = &inventory["alias_aware_chrono_uses"];
     if text(per_use, "state")
-        != "LITERAL_AND_DIRECT_ALIAS_PER_USE_COMPLETE_DERIVED_CONSUMERS_PARTIAL"
+        != "LITERAL_DIRECT_ALIAS_AND_DECLARED_IN_FILE_DERIVED_CLASSIFIED_REMAINDER_OPEN"
         || number(per_use, "path_count") != 71
         || number(per_use, "literal_line_count") != 159
         || number(per_use, "direct_alias_line_count") != 32
         || number(per_use, "literal_alias_overlap_line_count") != 1
         || number(per_use, "literal_or_alias_unique_line_count") != 190
-        || number(per_use, "derived_operation_anchor_count") != 8
-        || number(per_use, "classified_anchor_count") != 198
         || number(per_use, "literal_use_override_count") != 36
-        || number(per_use, "additional_derived_operation_anchor_count") != 0
         || text(per_use, "literal_operation_projection_sha256")
             != LITERAL_OPERATION_PROJECTION_SHA256
+        || text(per_use, "literal_source_projection_sha256")
+            != LITERAL_SOURCE_PROJECTION_SHA256
         || text(per_use, "path_classification_projection_sha256")
             != PATH_CLASSIFICATION_PROJECTION_SHA256
         || text(per_use, "literal_override_projection_sha256")
             != LITERAL_OVERRIDE_PROJECTION_SHA256
+        || text(per_use, "additional_derived_projection_sha256")
+            != ADDITIONAL_DERIVED_PROJECTION_SHA256
+        || text(per_use, "semantic_consumer_boundary") != SEMANTIC_CONSUMER_BOUNDARY
         || text(per_use, "inheritance_rule").is_empty()
         || text(per_use, "no_claim").is_empty()
     {
         return Err("per-use classification receipt drifted".to_owned());
     }
+    require_exact_strings(
+        per_use,
+        "derived_consumer_category_ids",
+        &[
+            "TIME-CONSUMER-CLI-CUTOFF-EXPIRY",
+            "TIME-CONSUMER-CONFORMANCE-OUTPUT",
+            "TIME-CONSUMER-DATABASE-MESSAGING-ARITHMETIC",
+            "TIME-CONSUMER-JETSTREAM-WIRE-INSERTION",
+            "TIME-CONSUMER-REAL-E2E-BOUNDARY",
+            "TIME-CONSUMER-STANDALONE-PERSISTENCE",
+        ],
+    )?;
 
     let mut group_by_path = BTreeMap::new();
     for group in array(&inventory["chrono_census"], "classification_groups") {
@@ -1250,6 +1340,9 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
     if literal_rows.len() != 159 || literal_pairs.len() != 159 {
         return Err("literal per-use source set drifted".to_owned());
     }
+    if sha256_hex(&literal_source_projection(&literal_rows)) != LITERAL_SOURCE_PROJECTION_SHA256 {
+        return Err("literal source projection drifted".to_owned());
+    }
     let mut rule_counts: BTreeMap<String, u64> = BTreeMap::new();
     let mut projection = String::new();
     for (path, line, source) in &literal_rows {
@@ -1321,6 +1414,10 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
     {
         return Err("literal-or-alias union drifted".to_owned());
     }
+    let direct_source_ids: BTreeSet<_> = direct_union
+        .iter()
+        .map(|(path, line)| format!("{path}:{line}"))
+        .collect();
 
     let mut derived_pairs: BTreeSet<_> = array(alias, "derived_operation_rows")
         .iter()
@@ -1332,18 +1429,28 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
     let additional_derived = array(per_use, "additional_derived_operation_rows");
     if number(per_use, "additional_derived_operation_anchor_count")
         != additional_derived.len() as u64
-        || !additional_derived.is_empty()
         || row_ids(additional_derived, "use_id").len() != additional_derived.len()
+        || sha256_hex(additional_derived_projection(additional_derived).as_bytes())
+            != ADDITIONAL_DERIVED_PROJECTION_SHA256
     {
-        return Err("additional derived identity or total drifted".to_owned());
+        return Err("additional derived identity, total, or projection drifted".to_owned());
     }
+    let declared_categories = string_set(per_use, "derived_consumer_category_ids");
+    let mut actual_categories = BTreeSet::new();
     for row in additional_derived {
         let path = text(row, "path");
         let line = number(row, "line");
         let pair = (path.to_owned(), line);
+        let derivation_sources = array(row, "derivation_sources");
+        let derivation_source_set = string_set(row, "derivation_sources");
+        let category = text(row, "consumer_category_id");
         if direct_union.contains(&pair)
             || !derived_pairs.insert(pair)
             || !classified_paths.contains_key(path)
+            || derivation_sources.is_empty()
+            || derivation_sources.len() != derivation_source_set.len()
+            || !derivation_source_set.is_subset(&direct_source_ids)
+            || !declared_categories.contains(category)
             || text(row, "source_anchor") != source_line(path, line)?
             || text(row, "operation").is_empty()
             || text(row, "cfg_or_wiring").is_empty()
@@ -1352,6 +1459,10 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
         {
             return Err(format!("{} additional derived row drifted", text(row, "use_id")));
         }
+        actual_categories.insert(category.to_owned());
+    }
+    if actual_categories != declared_categories {
+        return Err("derived consumer category coverage drifted".to_owned());
     }
     if number(per_use, "derived_operation_anchor_count") != derived_pairs.len() as u64
         || number(per_use, "classified_anchor_count")
@@ -2647,7 +2758,10 @@ fn time_utc_inventory_is_exact_and_source_pinned() {
         "190 unique",
         "Thirteen ordered literal-operation rules",
         "one same-line overlap",
-        "derived-consumer classification gap",
+        "derived-consumer remainder",
+        "32 exact rows",
+        "230 classified",
+        "literal-source",
         "bounded lexical scan of production source finds zero external",
         "This is not compiler-resolved name analysis.",
         "17 public Chrono-backed timestamp fields",
@@ -2738,6 +2852,32 @@ fn time_utc_inventory_rejects_cutover_and_completeness_drift() {
     path_route["per_use_classification"]["path_classification_sets"][0]["exposure"] =
         Value::String("NONEMPTY_ROUTE_DRIFT".to_owned());
     assert!(validate_inventory(&path_route).is_err());
+
+    let mut derived_semantic = inventory.clone();
+    derived_semantic["per_use_classification"]["additional_derived_operation_rows"][0]
+        ["operation"] = Value::String("nonempty derived semantic drift".to_owned());
+    assert!(validate_inventory(&derived_semantic).is_err());
+
+    let mut duplicate_derivation_source = inventory.clone();
+    let duplicate_source = duplicate_derivation_source["per_use_classification"]
+        ["additional_derived_operation_rows"][0]["derivation_sources"][0]
+        .clone();
+    duplicate_derivation_source["per_use_classification"]
+        ["additional_derived_operation_rows"][0]["derivation_sources"]
+        .as_array_mut()
+        .expect("derivation sources must be an array")
+        .push(duplicate_source);
+    assert!(validate_inventory(&duplicate_derivation_source).is_err());
+
+    let mut orphan_derivation_source = inventory.clone();
+    orphan_derivation_source["per_use_classification"]["additional_derived_operation_rows"][0]
+        ["derivation_sources"][0] = Value::String("src/cli/atp_workflows.rs:1".to_owned());
+    assert!(validate_inventory(&orphan_derivation_source).is_err());
+
+    let mut derived_category = inventory.clone();
+    derived_category["per_use_classification"]["additional_derived_operation_rows"][0]
+        ["consumer_category_id"] = Value::String("TIME-CONSUMER-UNDECLARED".to_owned());
+    assert!(validate_inventory(&derived_category).is_err());
 
     let mut alias_route = inventory.clone();
     for binding in alias_route["alias_aware_chrono_uses"]["bindings"]

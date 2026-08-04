@@ -13,13 +13,12 @@ The governing `DEP-ADR-011` decision remains additive coexistence:
 `dependency_exit_allowed=false`. This inventory changes none of those states.
 It classifies source and routes evidence work; it is not a cutover packet.
 The A1 bead's full A1 acceptance remains unmet: the result is a
-partial static inventory with seven behavioral evidence gaps and one broader
-derived-consumer classification gap, and the bead must not be closed from this
-artifact.
+partial static inventory with seven behavioral evidence gaps and one bounded
+derived-consumer remainder, and the bead must not be closed from this artifact.
 
 ## Pinned static result
 
-Six facts at the pinned revision supersede stale counts in the ADR and global
+Seven facts at the pinned revision supersede stale counts in the ADR and global
 registry without mutating those shared authorities:
 
 1. A bounded lexical scan of production source finds zero external
@@ -43,6 +42,10 @@ registry without mutating those shared authorities:
    reported overlaps have their literal `chrono::Duration` call on the
    preceding line. The corrected literal-or-alias union is therefore 190
    unique lines.
+7. Thirty-two declared in-file consumer anchors across six categories link to
+   28 unique direct source anchors. Together with eight imported-alias anchors,
+   the artifact freezes 40 derived anchors and 230 classified direct-plus-
+   derived anchors. This is a source-linked static count, not runtime coverage.
 
 The direct `time` edge remains present under `cli`, and Chrono remains present
 under `cli`, `benchmark-adapters`, dev targets, the conformance member, and
@@ -125,14 +128,15 @@ direct bindings, 32 direct alias rows, one same-line overlap, and eight
 imported-alias arithmetic, comparison, association, or ordering anchors are
 also exact.
 
-The remaining static gap is narrower but real: independent review found
-additional nonliteral consumers that serialize, render, persist, retain,
-compare, or embed Chrono-derived values. Representative examples include CLI
-cutoff comparisons, PostgreSQL midnight construction, Kafka recency
-arithmetic, JetStream wire insertion, real-E2E diagnostic retention, and
-conformance report output. Those downstream consumers are not yet exhaustively
-enumerated, so A1's zero-unclassified-use acceptance remains unmet and the bead
-stays open.
+The declared downstream tranche now freezes 32 exact rows across CLI
+cutoff/expiry handling, PostgreSQL and Kafka arithmetic, JetStream wire
+insertion, real-E2E serialization/retention/return/embedding, conformance
+rendering, and standalone fixture serialization. Every row names its direct
+source anchor and stops at the declared first semantic boundary. The remaining
+static gap is narrower but real: cross-file consumers outside Chrono-bearing
+paths, external consumers absent from this snapshot, and later container or
+arbitrary-byte propagation are not enumerated. A1's zero-unclassified-use
+acceptance remains unmet and the bead stays open.
 
 Most `src/real_*` files in the census are dormant source rather than declared
 modules. The Chrono-bearing H3 server/websocket suite is feature-wired. In the
@@ -350,11 +354,14 @@ Direct Chrono calls in the Redis module are also test-only diagnostics. The
 simulated Redis durability source uses millisecond and string records; it is
 not proof of real Redis or RDB temporal behavior.
 
-The exact literal-source operation projection, path routing, line-specific
-overrides, direct alias binding/reference discovery, and eight declared
-imported-alias arithmetic, comparison, association, or ordering anchors are
-frozen in the artifact.
-Broader downstream-consumer classification remains the declared static gap.
+The exact text of all 159 literal source lines, their operation projection,
+path routing, line-specific overrides, direct alias binding/reference
+discovery, eight imported-alias anchors, and 32 declared source-linked
+downstream anchors are frozen in the artifact. The downstream boundary admits
+the first semantic compare, arithmetic, format, serialization, persistence,
+retention, return, extraction, or embedding consumer in a Chrono-bearing path.
+Cross-file propagation, external consumers, and later container or
+arbitrary-byte taint remain the declared static gap.
 Later owners must prove each admitted profile separately rather than borrowing
 a green result from another crate or feature set.
 
@@ -391,14 +398,15 @@ The artifact routes, without mutating shared authority files:
 Every reconciliation row has an explicit owner and
 `ROUTED_NOT_MUTATED_BY_A1` state. There are no unclassified literal Chrono
 paths or undiscovered direct Chrono import bindings in the pinned census, but
-broader derived-consumer detail remains partial.
+derived-consumer coverage beyond the 32 declared in-file rows remains partial.
 
 ## Validation and no-claim boundary
 
 A1 used workspace-filesystem source search, direct-import reconciliation,
 manifest and authority inspection, SHA-256 source pins, path/count and
-literal-operation projections, and independent static cross-review. It did not execute the
-companion contract. This remains a partial static inventory only; full A1
+literal-operation, literal-source, and derived-row projections, and independent
+static cross-review. It did not execute the companion contract. This remains a
+partial static inventory only; full A1
 acceptance is unmet,
 `bead_close_allowed=false`, and the bead must not be closed from this packet.
 
