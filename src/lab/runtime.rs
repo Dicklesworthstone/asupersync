@@ -6435,7 +6435,7 @@ mod tests {
     const PLAIN_RUNNER_FAILURE_SEED: u64 = 0x4b_78_0003;
 
     fn trigger_plain_runner_failure_probe() {
-        panic!("intentional plain-runner failure probe");
+        panic!("intentional plain-runner failure probe"); // ubs:ignore — deliberate subprocess failure injection in a test-only helper
     }
 
     #[test]
@@ -6452,7 +6452,8 @@ mod tests {
     #[test]
     fn plain_runner_failure_writes_crashpack() {
         init_test("plain_runner_failure_writes_crashpack");
-        let nonce = std::time::SystemTime::now()
+        let now = std::time::SystemTime::now(); // ubs:ignore — test-directory uniqueness only, not a security token
+        let nonce = now
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock after Unix epoch")
             .as_nanos();
