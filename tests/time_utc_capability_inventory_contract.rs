@@ -24,7 +24,7 @@ const CAPABILITY_ID: &str = "CAP-TIME-UTC-RFC3339";
 const ADR_ID: &str = "DEP-ADR-011";
 const BASELINE_REVISION: &str = "1afde84d564bd8ea876459624116f90028b80835";
 const ARTIFACT_SHA256: &str =
-    "6984ba7e7ad070209c392b25b66c0cc18b8af1edbf41156265022f2746c44a09";
+    "9e367dc6e4d9dc2602687126c52fb4a98ea73235c7abb07fe3dfbed0e3131b16";
 const DOC_BEGIN: &str = "<!-- BEGIN TIME UTC CAPABILITY INVENTORY -->";
 const DOC_END: &str = "<!-- END TIME UTC CAPABILITY INVENTORY -->";
 const CHRONO_TOKEN: &str = concat!("chrono", "::");
@@ -33,6 +33,14 @@ const CENSUS_PROJECTION_SHA256: &str =
     "f8fd5086d737eb83440e89530d8929d8bcd25dc68449e16ea57f12fcd116c7de";
 const CENSUS_PATHS_SHA256: &str =
     "f16dea3b2143a0502579cdde842a5b00694031ec504eb674750554f6030f9700";
+const LITERAL_OPERATION_PROJECTION_SHA256: &str =
+    "a533497be94a3a8c649a061117053acff88821c102e9cedbe16cb4da0b66990b";
+const PATH_CLASSIFICATION_PROJECTION_SHA256: &str =
+    "5f60bb8b7deb36b1aac2123747fd1be426f1888fc759f46afe3baae103dc3b63";
+const LITERAL_OVERRIDE_PROJECTION_SHA256: &str =
+    "81f3549c7644361eabee937044ba098315b3aeffbd079d9c644eb1d60ccc3f84";
+const ALIAS_CLASSIFICATION_PROJECTION_SHA256: &str =
+    "867c7f39911b829635b5a28413179e8cc2d4156f0cfe2a1218fbb3f4819c5118";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -212,7 +220,7 @@ fn validate_identity(inventory: &Value) -> Result<(), String> {
         || policy.get("a1_execution_state").and_then(Value::as_str)
             != Some("NOT_EXECUTED_THIS_TURN")
         || policy.get("source_classification_state").and_then(Value::as_str)
-            != Some("PATH_COUNT_AND_ALIAS_REFERENCES_COMPLETE_PER_USE_DETAIL_PARTIAL")
+            != Some("LITERAL_AND_DIRECT_ALIAS_PER_USE_COMPLETE_DERIVED_CONSUMERS_PARTIAL")
         || policy.get("bead_acceptance_state").and_then(Value::as_str)
             != Some("PARTIAL_STATIC_INVENTORY_ONLY")
         || policy.get("bead_close_allowed").and_then(Value::as_bool) != Some(false)
@@ -224,9 +232,11 @@ fn validate_identity(inventory: &Value) -> Result<(), String> {
             .get("unresolved_static_detail_gap_count")
             .and_then(Value::as_u64)
             != Some(1)
+        || policy.get("static_zero_unclassified_use_met").and_then(Value::as_bool)
+            != Some(false)
         || policy.get("acceptance_zero_unknown_met").and_then(Value::as_bool) != Some(false)
         || policy.get("alias_aware_use_inventory_state").and_then(Value::as_str)
-            != Some("IMPORT_BINDINGS_AND_DIRECT_REFERENCES_COMPLETE_DERIVED_CLASSIFICATION_PARTIAL")
+            != Some("IMPORT_BINDINGS_DIRECT_REFERENCES_AND_DECLARED_DERIVED_ANCHORS_COMPLETE")
         || contains_unclassified_value(inventory)
     {
         return Err("classification or execution policy drifted".to_owned());
@@ -456,13 +466,16 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
     require_exact_ids(
         array(inventory, "static_inventory_gaps"),
         "gap_id",
-        &["TIME-STATIC-GAP-PER-USE-CLASSIFICATION"],
+        &["TIME-STATIC-GAP-DERIVED-CONSUMER-CLASSIFICATION"],
         "static inventory gaps",
     )?;
     require_exact_ids(
         array(inventory, "resolved_static_details"),
         "detail_id",
-        &["TIME-STATIC-RESOLVED-ALIAS-BINDINGS"],
+        &[
+            "TIME-STATIC-RESOLVED-ALIAS-BINDINGS",
+            "TIME-STATIC-RESOLVED-DIRECT-PER-USE-CLASSIFICATION",
+        ],
         "resolved static details",
     )?;
     require_exact_ids(
@@ -472,8 +485,16 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
         "scope boundaries",
     )?;
     let resolved_alias = &array(inventory, "resolved_static_details")[0];
+    let resolved_per_use = &array(inventory, "resolved_static_details")[1];
+    let derived_gap = &array(inventory, "static_inventory_gaps")[0];
     let nondependency_boundary = &array(inventory, "scope_boundaries")[0];
     if text(resolved_alias, "state") != "RESOLVED_BY_STATIC_ALIAS_INVENTORY"
+        || text(resolved_per_use, "state")
+            != "RESOLVED_BY_STATIC_DIRECT_PER_USE_CLASSIFICATION"
+        || array(derived_gap, "representative_unclassified_consumers").len() != 6
+        || string_set(derived_gap, "representative_unclassified_consumers").len() != 6
+        || text(derived_gap, "effect").is_empty()
+        || text(derived_gap, "owner_bead") != BEAD_ID
         || text(nondependency_boundary, "semantic_contract_id")
             != "TIME-SEM-NONDEPENDENCY-TEMPORAL-SCHEMAS"
     {
@@ -836,20 +857,532 @@ fn validate_census(inventory: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn actual_literal_lines() -> Vec<(String, u64, String)> {
+    let root = repo_root();
+    let mut files = Vec::new();
+    for scope in ["src", "tests", "benches", "conformance", "fuzz/conformance"] {
+        collect_rs_files(&root.join(scope), &mut files);
+    }
+    files.sort();
+    files.dedup();
+
+    let mut rows = Vec::new();
+    for path in files {
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let relative = path
+            .strip_prefix(&root)
+            .expect("literal path must be repository-relative")
+            .to_string_lossy()
+            .replace('\\', "/");
+        for (index, line) in source.lines().enumerate() {
+            if line.contains(CHRONO_TOKEN) {
+                rows.push((relative.clone(), index as u64 + 1, line.to_owned()));
+            }
+        }
+    }
+    rows.sort();
+    rows
+}
+
+fn source_line(path: &str, line: u64) -> Result<String, String> {
+    let index = line
+        .checked_sub(1)
+        .ok_or_else(|| format!("{path} line numbers are one-based"))?;
+    let index = usize::try_from(index).map_err(|_| format!("{path}:{line} overflowed usize"))?;
+    read_repo_file(path)
+        .lines()
+        .nth(index)
+        .map(str::trim)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("{path}:{line} is outside the source file"))
+}
+
+fn path_classification_projection(path_sets: &[Value]) -> String {
+    let mut rows = Vec::new();
+    for set in path_sets {
+        for path in array(set, "paths") {
+            let path = path
+                .as_str()
+                .expect("path classification entries must be strings");
+            rows.push(format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                text(set, "set_id"),
+                text(set, "group_id"),
+                path,
+                text(set, "profile_id"),
+                text(set, "migration_group_id"),
+                text(set, "cfg_or_wiring"),
+                text(set, "exposure"),
+                text(set, "owner_bead"),
+            ));
+        }
+    }
+    rows.sort();
+    rows.concat()
+}
+
+fn literal_override_projection(overrides: &[Value]) -> String {
+    let mut rows: Vec<_> = overrides
+        .iter()
+        .map(|row| {
+            format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                text(row, "use_id"),
+                text(row, "path"),
+                number(row, "line"),
+                text(row, "source_anchor"),
+                text(row, "operation"),
+                text(row, "cfg_or_wiring"),
+                text(row, "exposure"),
+                text(row, "persistence_or_public_association"),
+            )
+        })
+        .collect();
+    rows.sort();
+    rows.concat()
+}
+
+fn sorted_strings(value: &Value, key: &str) -> String {
+    string_set(value, key)
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn sorted_numbers(value: &Value, key: &str) -> String {
+    number_set(value, key)
+        .into_iter()
+        .map(|number| number.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn alias_classification_projection(alias: &Value) -> String {
+    let mut rows = Vec::new();
+    for binding in array(alias, "bindings") {
+        rows.push(format!(
+            "binding\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            text(binding, "binding_id"),
+            text(binding, "path"),
+            number(binding, "import_line"),
+            text(binding, "import_source"),
+            sorted_strings(binding, "imported_symbols"),
+            text(binding, "profile_id"),
+            text(binding, "cfg_or_wiring"),
+            text(binding, "exposure"),
+            text(binding, "migration_group_id"),
+            text(binding, "owner_bead"),
+            sorted_numbers(binding, "direct_reference_lines"),
+            number(binding, "imported_symbol_occurrence_count"),
+            sorted_numbers(binding, "literal_namespace_overlap_lines"),
+            sorted_numbers(binding, "derived_operation_lines"),
+            sorted_numbers(binding, "excluded_nonchrono_shadow_lines"),
+        ));
+    }
+    for row in array(alias, "operation_rows") {
+        rows.push(format!(
+            "direct\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            text(row, "use_id"),
+            text(row, "binding_id"),
+            text(row, "path"),
+            number(row, "line"),
+            sorted_strings(row, "imported_symbols_used"),
+            text(row, "operation"),
+            text(row, "exposure"),
+            text(row, "persistence_or_public_association"),
+            text(row, "profile_id"),
+            text(row, "cfg_or_wiring"),
+            text(row, "migration_group_id"),
+            text(row, "owner_bead"),
+            row.get("literal_namespace_overlap")
+                .and_then(Value::as_bool)
+                .expect("literal_namespace_overlap must be a bool"),
+        ));
+    }
+    for row in array(alias, "derived_operation_rows") {
+        rows.push(format!(
+            "derived\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            text(row, "use_id"),
+            text(row, "binding_id"),
+            text(row, "path"),
+            number(row, "line"),
+            text(row, "source_anchor"),
+            text(row, "operation"),
+            text(row, "exposure"),
+            text(row, "persistence_or_public_association"),
+            text(row, "profile_id"),
+            text(row, "cfg_or_wiring"),
+            text(row, "migration_group_id"),
+            text(row, "owner_bead"),
+        ));
+    }
+    rows.sort();
+    rows.concat()
+}
+
+fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
+    let per_use = &inventory["per_use_classification"];
+    let alias = &inventory["alias_aware_chrono_uses"];
+    if text(per_use, "state")
+        != "LITERAL_AND_DIRECT_ALIAS_PER_USE_COMPLETE_DERIVED_CONSUMERS_PARTIAL"
+        || number(per_use, "path_count") != 71
+        || number(per_use, "literal_line_count") != 159
+        || number(per_use, "direct_alias_line_count") != 32
+        || number(per_use, "literal_alias_overlap_line_count") != 1
+        || number(per_use, "literal_or_alias_unique_line_count") != 190
+        || number(per_use, "derived_operation_anchor_count") != 8
+        || number(per_use, "classified_anchor_count") != 198
+        || number(per_use, "literal_use_override_count") != 36
+        || number(per_use, "additional_derived_operation_anchor_count") != 0
+        || text(per_use, "literal_operation_projection_sha256")
+            != LITERAL_OPERATION_PROJECTION_SHA256
+        || text(per_use, "path_classification_projection_sha256")
+            != PATH_CLASSIFICATION_PROJECTION_SHA256
+        || text(per_use, "literal_override_projection_sha256")
+            != LITERAL_OVERRIDE_PROJECTION_SHA256
+        || text(per_use, "inheritance_rule").is_empty()
+        || text(per_use, "no_claim").is_empty()
+    {
+        return Err("per-use classification receipt drifted".to_owned());
+    }
+
+    let mut group_by_path = BTreeMap::new();
+    for group in array(&inventory["chrono_census"], "classification_groups") {
+        for row in array(group, "paths") {
+            let path = text(row, "path").to_owned();
+            let metadata = (
+                text(group, "group_id").to_owned(),
+                text(group, "profile_id").to_owned(),
+                text(group, "migration_group_id").to_owned(),
+            );
+            if group_by_path.insert(path.clone(), metadata).is_some() {
+                return Err(format!("duplicate classified path {path}"));
+            }
+        }
+    }
+
+    let path_sets = array(per_use, "path_classification_sets");
+    let profiles = row_ids(array(inventory, "dependency_profiles"), "profile_id");
+    let migrations = row_ids(array(inventory, "migration_groups"), "group_id");
+    require_exact_ids(
+        path_sets,
+        "set_id",
+        &[
+            "TIME-PATHSET-AUTOMATIC-INTEGRATION-TARGETS",
+            "TIME-PATHSET-BENCHMARK-ADAPTERS",
+            "TIME-PATHSET-CLI-PRODUCTION",
+            "TIME-PATHSET-CONFORMANCE-BINS",
+            "TIME-PATHSET-CONFORMANCE-LIBRARY",
+            "TIME-PATHSET-CONFORMANCE-RAPTORQ-REPORTING",
+            "TIME-PATHSET-CONFORMANCE-ROOT-MODULE",
+            "TIME-PATHSET-DORMANT-CODEC-CONFORMANCE",
+            "TIME-PATHSET-DORMANT-REAL-E2E-DATABASE-MESSAGING",
+            "TIME-PATHSET-DORMANT-REAL-E2E-DOWNSTREAM",
+            "TIME-PATHSET-EXCLUDED-CONFORMANCE",
+            "TIME-PATHSET-H3-WEBSOCKET-E2E",
+            "TIME-PATHSET-HPACK-DIFFERENTIAL",
+            "TIME-PATHSET-HPACK-FIXTURES",
+            "TIME-PATHSET-JETSTREAM-INTEGRATION",
+            "TIME-PATHSET-KAFKA-INTEGRATION",
+            "TIME-PATHSET-POSTGRES-UNIT-ORACLE",
+            "TIME-PATHSET-REDIS-UNIT-DIAGNOSTICS",
+            "TIME-PATHSET-ROOT-BENCH",
+            "TIME-PATHSET-STANDALONE-GOLDEN",
+            "TIME-PATHSET-STANDALONE-REPORTING-BINS",
+            "TIME-PATHSET-STANDALONE-REPORTING-LIBRARY",
+        ],
+        "per-use path classification sets",
+    )?;
+    if sha256_hex(path_classification_projection(path_sets).as_bytes())
+        != PATH_CLASSIFICATION_PROJECTION_SHA256
+    {
+        return Err("per-use path classification projection drifted".to_owned());
+    }
+    let mut classified_paths = BTreeMap::new();
+    for set in path_sets {
+        let group_id = text(set, "group_id");
+        let profile_id = text(set, "profile_id");
+        let migration_group_id = text(set, "migration_group_id");
+        let cfg_or_wiring = text(set, "cfg_or_wiring");
+        let exposure = text(set, "exposure");
+        let owner_bead = text(set, "owner_bead");
+        if !profiles.contains(profile_id)
+            || !migrations.contains(migration_group_id)
+            || cfg_or_wiring.is_empty()
+            || exposure.is_empty()
+            || !owner_bead.starts_with("asupersync-")
+        {
+            return Err(format!("{} metadata drifted", text(set, "set_id")));
+        }
+        let paths = string_set(set, "paths");
+        if paths.is_empty() || paths.len() != array(set, "paths").len() {
+            return Err(format!("{} path set drifted", text(set, "set_id")));
+        }
+        for path in paths {
+            let Some((actual_group, _, _)) = group_by_path.get(&path)
+            else {
+                return Err(format!("{} references non-census path {path}", text(set, "set_id")));
+            };
+            if actual_group.as_str() != group_id {
+                return Err(format!("{} group route drifted for {path}", text(set, "set_id")));
+            }
+            let metadata = (
+                actual_group.clone(),
+                profile_id.to_owned(),
+                migration_group_id.to_owned(),
+                cfg_or_wiring.to_owned(),
+                exposure.to_owned(),
+                owner_bead.to_owned(),
+            );
+            if classified_paths.insert(path.clone(), metadata).is_some() {
+                return Err(format!("duplicate per-use path classification {path}"));
+            }
+        }
+    }
+    let expected_paths: BTreeSet<_> = group_by_path.keys().cloned().collect();
+    let actual_paths: BTreeSet<_> = classified_paths.keys().cloned().collect();
+    if actual_paths != expected_paths || actual_paths.len() != 71 {
+        return Err("per-use path coverage drifted".to_owned());
+    }
+
+    let rules = array(per_use, "literal_operation_rules");
+    let expected_rules = [
+        (
+            "DIRECT_IMPORT_BINDING",
+            concat!("use ", "chrono", "::"),
+            "direct Chrono symbol binding",
+            4_u64,
+        ),
+        (
+            "UTC_DATETIME_TYPE",
+            concat!("chrono", "::DateTime<", "chrono", "::Utc>"),
+            "concrete UTC datetime type exposure",
+            22,
+        ),
+        (
+            "SYSTEM_TIME_TO_UTC",
+            concat!("chrono", "::DateTime::<", "chrono", "::Utc>::from"),
+            "system time converted to UTC datetime",
+            1,
+        ),
+        (
+            "UNIX_TIMESTAMP_TO_DATETIME",
+            concat!("chrono", "::DateTime::from_timestamp"),
+            "Unix seconds and nanoseconds converted to datetime",
+            1,
+        ),
+        (
+            "RFC3339_NANOSECOND_RENDER",
+            concat!("chrono", "::SecondsFormat::Nanos"),
+            "UTC datetime rendered as RFC3339 with nanosecond precision",
+            1,
+        ),
+        (
+            "CALENDAR_DATE_CONSTRUCTION",
+            concat!("chrono", "::NaiveDate::from_ymd_opt"),
+            "PostgreSQL calendar epoch construction",
+            2,
+        ),
+        (
+            "CALENDAR_ARITHMETIC",
+            concat!("chrono", "::TimeDelta::"),
+            "PostgreSQL day or microsecond calendar arithmetic",
+            2,
+        ),
+        (
+            "STD_DURATION_CONVERSION",
+            concat!("chrono", "::Duration::from_std"),
+            "standard duration converted to signed calendar duration",
+            4,
+        ),
+        (
+            "AMBIENT_UTC_TO_UNIX_MILLIS",
+            concat!("chrono", "::Utc::now().timestamp_millis()"),
+            "ambient UTC acquired and converted to Unix milliseconds",
+            3,
+        ),
+        (
+            "AMBIENT_UTC_TO_UNIX_SECONDS",
+            concat!("chrono", "::Utc::now().timestamp()"),
+            "ambient UTC acquired and converted to Unix seconds",
+            1,
+        ),
+        (
+            "AMBIENT_UTC_FIXED_FORMAT",
+            concat!("chrono", "::Utc::now().format("),
+            "ambient UTC acquired and rendered with a fixed format",
+            9,
+        ),
+        (
+            "AMBIENT_UTC_RFC3339",
+            concat!("chrono", "::Utc::now().to_rfc3339()"),
+            "ambient UTC acquired and rendered as RFC3339",
+            86,
+        ),
+        (
+            "AMBIENT_UTC_TYPED",
+            concat!("chrono", "::Utc::now()"),
+            "ambient UTC acquired as a typed datetime",
+            23,
+        ),
+    ];
+    if rules.len() != expected_rules.len() {
+        return Err("literal operation rule precedence drifted".to_owned());
+    }
+    for (index, (rule, expected)) in rules.iter().zip(expected_rules.iter()).enumerate() {
+        let &(operation_id, needle, operation, matching_line_count) = expected;
+        if number(rule, "precedence") != index as u64 + 1
+            || text(rule, "operation_id") != operation_id
+            || text(rule, "needle") != needle
+            || text(rule, "operation") != operation
+            || number(rule, "matching_line_count") != matching_line_count
+        {
+            return Err(format!("{} rule metadata drifted", text(rule, "operation_id")));
+        }
+    }
+
+    let literal_rows = actual_literal_lines();
+    let literal_pairs: BTreeSet<_> = literal_rows
+        .iter()
+        .map(|(path, line, _)| (path.clone(), *line))
+        .collect();
+    if literal_rows.len() != 159 || literal_pairs.len() != 159 {
+        return Err("literal per-use source set drifted".to_owned());
+    }
+    let mut rule_counts: BTreeMap<String, u64> = BTreeMap::new();
+    let mut projection = String::new();
+    for (path, line, source) in &literal_rows {
+        if !classified_paths.contains_key(path) {
+            return Err(format!("literal use lacks a path classification at {path}:{line}"));
+        }
+        let Some(rule) = rules
+            .iter()
+            .find(|rule| source.contains(text(rule, "needle")))
+        else {
+            return Err(format!("literal use lacks an operation at {path}:{line}"));
+        };
+        let operation_id = text(rule, "operation_id");
+        *rule_counts.entry(operation_id.to_owned()).or_default() += 1;
+        projection.push_str(&format!("{path}\t{line}\t{operation_id}\n"));
+    }
+    for rule in rules {
+        if rule_counts.get(text(rule, "operation_id")).copied().unwrap_or(0)
+            != number(rule, "matching_line_count")
+        {
+            return Err(format!("{} rule count drifted", text(rule, "operation_id")));
+        }
+    }
+    if sha256_hex(projection.as_bytes()) != LITERAL_OPERATION_PROJECTION_SHA256 {
+        return Err("literal operation projection drifted".to_owned());
+    }
+
+    let mut override_pairs = BTreeSet::new();
+    let literal_overrides = array(per_use, "literal_use_overrides");
+    if number(per_use, "literal_use_override_count") != 36
+        || literal_overrides.len() != 36
+        || row_ids(literal_overrides, "use_id").len() != literal_overrides.len()
+        || sha256_hex(literal_override_projection(literal_overrides).as_bytes())
+            != LITERAL_OVERRIDE_PROJECTION_SHA256
+    {
+        return Err("literal override identity, total, or projection drifted".to_owned());
+    }
+    for row in literal_overrides {
+        let path = text(row, "path");
+        let line = number(row, "line");
+        let pair = (path.to_owned(), line);
+        if !literal_pairs.contains(&pair)
+            || !override_pairs.insert(pair)
+            || !classified_paths.contains_key(path)
+            || text(row, "source_anchor") != source_line(path, line)?
+            || text(row, "operation").is_empty()
+            || text(row, "cfg_or_wiring").is_empty()
+            || text(row, "exposure").is_empty()
+            || text(row, "persistence_or_public_association").is_empty()
+        {
+            return Err(format!("{} literal override drifted", text(row, "use_id")));
+        }
+    }
+
+    let direct_pairs: BTreeSet<_> = array(alias, "operation_rows")
+        .iter()
+        .map(|row| (text(row, "path").to_owned(), number(row, "line")))
+        .collect();
+    let overlap_pairs: BTreeSet<_> = literal_pairs.intersection(&direct_pairs).cloned().collect();
+    if overlap_pairs.len() != 1
+        || number(per_use, "literal_alias_overlap_line_count") != overlap_pairs.len() as u64
+    {
+        return Err("literal and alias overlap drifted".to_owned());
+    }
+    let mut direct_union = literal_pairs.clone();
+    direct_union.extend(direct_pairs);
+    if direct_union.len() != 190
+        || number(per_use, "literal_or_alias_unique_line_count") != direct_union.len() as u64
+    {
+        return Err("literal-or-alias union drifted".to_owned());
+    }
+
+    let mut derived_pairs: BTreeSet<_> = array(alias, "derived_operation_rows")
+        .iter()
+        .map(|row| (text(row, "path").to_owned(), number(row, "line")))
+        .collect();
+    if !derived_pairs.is_disjoint(&direct_union) {
+        return Err("derived alias anchors overlap direct uses".to_owned());
+    }
+    let additional_derived = array(per_use, "additional_derived_operation_rows");
+    if number(per_use, "additional_derived_operation_anchor_count")
+        != additional_derived.len() as u64
+        || !additional_derived.is_empty()
+        || row_ids(additional_derived, "use_id").len() != additional_derived.len()
+    {
+        return Err("additional derived identity or total drifted".to_owned());
+    }
+    for row in additional_derived {
+        let path = text(row, "path");
+        let line = number(row, "line");
+        let pair = (path.to_owned(), line);
+        if direct_union.contains(&pair)
+            || !derived_pairs.insert(pair)
+            || !classified_paths.contains_key(path)
+            || text(row, "source_anchor") != source_line(path, line)?
+            || text(row, "operation").is_empty()
+            || text(row, "cfg_or_wiring").is_empty()
+            || text(row, "exposure").is_empty()
+            || text(row, "persistence_or_public_association").is_empty()
+        {
+            return Err(format!("{} additional derived row drifted", text(row, "use_id")));
+        }
+    }
+    if number(per_use, "derived_operation_anchor_count") != derived_pairs.len() as u64
+        || number(per_use, "classified_anchor_count")
+            != (direct_union.len() + derived_pairs.len()) as u64
+    {
+        return Err("classified anchor totals drifted".to_owned());
+    }
+    Ok(())
+}
+
 fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
     let alias = &inventory["alias_aware_chrono_uses"];
     if text(alias, "state")
-        != "IMPORT_BINDINGS_AND_DIRECT_REFERENCES_COMPLETE_DERIVED_CLASSIFICATION_PARTIAL"
+        != "IMPORT_BINDINGS_DIRECT_REFERENCES_AND_DECLARED_DERIVED_ANCHORS_COMPLETE"
         || number(alias, "binding_path_count") != 4
         || number(alias, "binding_count") != 4
         || number(alias, "direct_reference_line_count") != 32
         || number(alias, "imported_symbol_occurrence_count") != 45
-        || number(alias, "literal_namespace_overlap_line_count") != 4
-        || number(alias, "new_line_count_beyond_literal_census") != 28
-        || number(alias, "literal_or_alias_unique_line_count") != 187
+        || number(alias, "literal_namespace_overlap_line_count") != 1
+        || number(alias, "new_line_count_beyond_literal_census") != 31
+        || number(alias, "literal_or_alias_unique_line_count") != 190
         || number(alias, "derived_operation_anchor_line_count") != 8
+        || text(alias, "classification_projection_sha256")
+            != ALIAS_CLASSIFICATION_PROJECTION_SHA256
     {
         return Err("alias-aware inventory totals drifted".to_owned());
+    }
+    if sha256_hex(alias_classification_projection(alias).as_bytes())
+        != ALIAS_CLASSIFICATION_PROJECTION_SHA256
+    {
+        return Err("alias classification projection drifted".to_owned());
     }
     require_exact_strings(
         alias,
@@ -923,6 +1456,22 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
 
     let profiles = row_ids(array(inventory, "dependency_profiles"), "profile_id");
     let migrations = row_ids(array(inventory, "migration_groups"), "group_id");
+    let mut path_routes = BTreeMap::new();
+    for set in array(
+        &inventory["per_use_classification"],
+        "path_classification_sets",
+    ) {
+        let route = (
+            text(set, "profile_id").to_owned(),
+            text(set, "migration_group_id").to_owned(),
+            text(set, "owner_bead").to_owned(),
+        );
+        for source_path in string_set(set, "paths") {
+            if path_routes.insert(source_path.clone(), route.clone()).is_some() {
+                return Err(format!("duplicate per-use route for {source_path}"));
+            }
+        }
+    }
     let mut binding_paths = BTreeSet::new();
     let mut direct_pairs = BTreeSet::new();
     let mut overlap_pairs = BTreeSet::new();
@@ -932,7 +1481,13 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
     for binding in bindings {
         let path = text(binding, "path");
         binding_paths.insert(path.to_owned());
-        if !profiles.contains(text(binding, "profile_id"))
+        let Some((route_profile, route_migration, route_owner)) = path_routes.get(path) else {
+            return Err(format!("{} lacks a per-use path route", text(binding, "binding_id")));
+        };
+        if text(binding, "profile_id") != route_profile.as_str()
+            || text(binding, "migration_group_id") != route_migration.as_str()
+            || text(binding, "owner_bead") != route_owner.as_str()
+            || !profiles.contains(text(binding, "profile_id"))
             || !migrations.contains(text(binding, "migration_group_id"))
             || text(binding, "cfg_or_wiring").is_empty()
             || text(binding, "exposure").is_empty()
@@ -975,13 +1530,13 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
     }
     if binding_paths.len() != 4
         || direct_pairs.len() != 32
-        || overlap_pairs.len() != 4
+        || overlap_pairs.len() != 1
         || derived_pairs.len() != 8
         || declared_occurrences != 45
     {
         return Err("alias binding aggregates drifted".to_owned());
     }
-    let expected_overlap_pairs: BTreeSet<_> = [236_u64, 399, 458, 1298]
+    let expected_overlap_pairs: BTreeSet<_> = [236_u64]
         .into_iter()
         .map(|line| ("src/cli/atp_workflows.rs".to_owned(), line))
         .collect();
@@ -1060,7 +1615,10 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
         }
         let used_symbols = string_set(row, "imported_symbols_used");
         let imported_symbols = string_set(binding, "imported_symbols");
-        if used_symbols.is_empty() || !used_symbols.is_subset(&imported_symbols) {
+        if used_symbols.is_empty()
+            || used_symbols.len() != array(row, "imported_symbols_used").len()
+            || !used_symbols.is_subset(&imported_symbols)
+        {
             return Err(format!("{} imported-symbol set drifted", text(row, "use_id")));
         }
         operation_occurrences += used_symbols.len();
@@ -1076,6 +1634,37 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
         return Err(
             "direct alias references lack one-to-one operation and symbol rows".to_owned(),
         );
+    }
+
+    let derived_rows = array(alias, "derived_operation_rows");
+    if derived_rows.len() != 8 || row_ids(derived_rows, "use_id").len() != derived_rows.len() {
+        return Err("derived alias operation row identity drifted".to_owned());
+    }
+    let mut classified_derived_pairs = BTreeSet::new();
+    for row in derived_rows {
+        let binding_id = text(row, "binding_id");
+        let Some(binding) = binding_by_id.get(binding_id).copied() else {
+            return Err(format!("{} references an unknown binding", text(row, "use_id")));
+        };
+        let pair = (text(row, "path").to_owned(), number(row, "line"));
+        if !classified_derived_pairs.insert(pair.clone()) || !derived_pairs.contains(&pair) {
+            return Err(format!("{} derived-use pair drifted", text(row, "use_id")));
+        }
+        if text(row, "path") != text(binding, "path")
+            || text(row, "profile_id") != text(binding, "profile_id")
+            || text(row, "cfg_or_wiring") != text(binding, "cfg_or_wiring")
+            || text(row, "migration_group_id") != text(binding, "migration_group_id")
+            || text(row, "owner_bead") != text(binding, "owner_bead")
+            || text(row, "source_anchor").is_empty()
+            || text(row, "operation").is_empty()
+            || text(row, "exposure").is_empty()
+            || text(row, "persistence_or_public_association").is_empty()
+        {
+            return Err(format!("{} derived classification drifted", text(row, "use_id")));
+        }
+    }
+    if classified_derived_pairs != derived_pairs {
+        return Err("derived alias anchors lack one-to-one operation rows".to_owned());
     }
     Ok(())
 }
@@ -1526,6 +2115,20 @@ fn validate_alias_sources(inventory: &Value) -> Result<(), String> {
                 return Err(format!("{} source classification drifted", text(row, "use_id")));
             }
         }
+        for row in array(alias, "derived_operation_rows")
+            .iter()
+            .filter(|row| text(row, "binding_id") == text(binding, "binding_id"))
+        {
+            let line_number = number(row, "line");
+            let index = usize::try_from(line_number - 1)
+                .map_err(|_| format!("{path}:{line_number} overflowed usize"))?;
+            let line = lines
+                .get(index)
+                .ok_or_else(|| format!("{path}:{line_number} is outside the source file"))?;
+            if line.trim() != text(row, "source_anchor") {
+                return Err(format!("{} source anchor drifted", text(row, "use_id")));
+            }
+        }
     }
     if actual_occurrences != number(alias, "imported_symbol_occurrence_count") {
         return Err("direct imported-symbol occurrence total drifted".to_owned());
@@ -1535,7 +2138,7 @@ fn validate_alias_sources(inventory: &Value) -> Result<(), String> {
 
 fn validate_source_pins(inventory: &Value) -> Result<(), String> {
     let pins = array(&inventory["source_snapshot"], "files");
-    if pins.len() != 67 {
+    if pins.len() != 68 {
         return Err("source pin count drifted".to_owned());
     }
     let mut paths = BTreeSet::new();
@@ -2018,6 +2621,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     validate_locked_packages(inventory)?;
     validate_public_and_persisted_counts(inventory)?;
     expected_census(inventory)?;
+    validate_per_use_classification(inventory)?;
     validate_alias_inventory(inventory)?;
     validate_foundation_boundary(inventory)?;
     Ok(())
@@ -2040,7 +2644,10 @@ fn time_utc_inventory_is_exact_and_source_pinned() {
         "12 concrete Chrono UTC fields",
         "four timestamp-bearing JSON families",
         "32 alias-bearing code lines",
-        "187 unique",
+        "190 unique",
+        "Thirteen ordered literal-operation rules",
+        "one same-line overlap",
+        "derived-consumer classification gap",
         "bounded lexical scan of production source finds zero external",
         "This is not compiler-resolved name analysis.",
         "17 public Chrono-backed timestamp fields",
@@ -2092,6 +2699,79 @@ fn time_utc_inventory_rejects_cutover_and_completeness_drift() {
         .expect("alias operations must be an array")
         .pop();
     assert!(validate_inventory(&alias_operation).is_err());
+
+    let mut alias_derived = inventory.clone();
+    alias_derived["alias_aware_chrono_uses"]["derived_operation_rows"]
+        .as_array_mut()
+        .expect("derived alias operations must be an array")
+        .pop();
+    assert!(validate_inventory(&alias_derived).is_err());
+
+    let mut alias_semantic = inventory.clone();
+    alias_semantic["alias_aware_chrono_uses"]["derived_operation_rows"][0]["operation"] =
+        Value::String("nonempty alias semantic drift".to_owned());
+    assert!(validate_inventory(&alias_semantic).is_err());
+
+    let mut alias_duplicate_symbol = inventory.clone();
+    alias_duplicate_symbol["alias_aware_chrono_uses"]["operation_rows"][0]
+        ["imported_symbols_used"]
+        .as_array_mut()
+        .expect("imported symbols must be an array")
+        .push(Value::String("Utc".to_owned()));
+    assert!(validate_inventory(&alias_duplicate_symbol).is_err());
+
+    let mut literal_override = inventory.clone();
+    literal_override["per_use_classification"]["literal_use_overrides"]
+        .as_array_mut()
+        .expect("literal overrides must be an array")
+        .pop();
+    literal_override["per_use_classification"]["literal_use_override_count"] =
+        Value::from(35_u64);
+    assert!(validate_inventory(&literal_override).is_err());
+
+    let mut rule_definition = inventory.clone();
+    rule_definition["per_use_classification"]["literal_operation_rules"][0]["operation"] =
+        Value::String("nonempty semantic drift".to_owned());
+    assert!(validate_inventory(&rule_definition).is_err());
+
+    let mut path_route = inventory.clone();
+    path_route["per_use_classification"]["path_classification_sets"][0]["exposure"] =
+        Value::String("NONEMPTY_ROUTE_DRIFT".to_owned());
+    assert!(validate_inventory(&path_route).is_err());
+
+    let mut alias_route = inventory.clone();
+    for binding in alias_route["alias_aware_chrono_uses"]["bindings"]
+        .as_array_mut()
+        .expect("alias bindings must be an array")
+    {
+        if binding["binding_id"] == "TIME-ALIAS-STANDALONE-MAINTENANCE" {
+            binding["profile_id"] = Value::String("TIME-PROFILE-ROOT-DEV".to_owned());
+            binding["migration_group_id"] =
+                Value::String("TIME-MIG-DOWNSTREAM-CORPUS".to_owned());
+            binding["owner_bead"] = Value::String("asupersync-5z2scg.6.6".to_owned());
+        }
+    }
+    for collection in ["operation_rows", "derived_operation_rows"] {
+        for row in alias_route["alias_aware_chrono_uses"][collection]
+            .as_array_mut()
+            .expect("alias operation rows must be an array")
+        {
+            if row["binding_id"] == "TIME-ALIAS-STANDALONE-MAINTENANCE" {
+                row["profile_id"] = Value::String("TIME-PROFILE-ROOT-DEV".to_owned());
+                row["migration_group_id"] =
+                    Value::String("TIME-MIG-DOWNSTREAM-CORPUS".to_owned());
+                row["owner_bead"] = Value::String("asupersync-5z2scg.6.6".to_owned());
+            }
+        }
+    }
+    assert!(validate_inventory(&alias_route).is_err());
+
+    let mut static_gap = inventory.clone();
+    static_gap["static_inventory_gaps"]
+        .as_array_mut()
+        .expect("static inventory gaps must be an array")
+        .clear();
+    assert!(validate_inventory(&static_gap).is_err());
 
     let mut alias_total = inventory.clone();
     alias_total["alias_aware_chrono_uses"]["direct_reference_line_count"] =

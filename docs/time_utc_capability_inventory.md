@@ -14,7 +14,8 @@ The governing `DEP-ADR-011` decision remains additive coexistence:
 It classifies source and routes evidence work; it is not a cutover packet.
 The A1 bead's full A1 acceptance remains unmet: the result is a
 partial static inventory with seven behavioral evidence gaps and one broader
-per-use classification gap, and the bead must not be closed from this artifact.
+derived-consumer classification gap, and the bead must not be closed from this
+artifact.
 
 ## Pinned static result
 
@@ -37,9 +38,11 @@ registry without mutating those shared authorities:
    timestamp strings, so the ADR's claim that nothing owned parses RFC3339 is
    no longer true.
 6. Four files directly import Chrono symbols. Those bindings account for 32
-   alias-bearing code lines and 45 imported-symbol occurrences; four lines also
-   contain a literal Chrono namespace reference, so the literal-or-alias union
-   is 187 unique lines rather than 191.
+   alias-bearing code lines and 45 imported-symbol occurrences. One line also
+   contains a literal Chrono namespace reference; the other three formerly
+   reported overlaps have their literal `chrono::Duration` call on the
+   preceding line. The corrected literal-or-alias union is therefore 190
+   unique lines.
 
 The direct `time` edge remains present under `cli`, and Chrono remains present
 under `cli`, `benchmark-adapters`, dev targets, the conformance member, and
@@ -102,10 +105,10 @@ freezes every matching path and per-path matching-line count.
 | standalone reporting workspace | 7 | 11 | conformance tools |
 
 The direct-import companion inventory finds four binding paths, 32
-alias-bearing code lines, and 45 imported-symbol occurrences. Four workflow
-lines contain both an imported `Utc` reference and a literal
-`chrono::Duration` reference. The alias scan therefore exposes 28 additional
-lines beyond the literal census and reconciles to 187 unique literal-or-alias
+alias-bearing code lines, and 45 imported-symbol occurrences. Only workflow
+line 236 contains both an imported `Utc` reference and a literal
+`chrono::Duration` reference. The alias scan therefore exposes 31 additional
+lines beyond the literal census and reconciles to 190 unique literal-or-alias
 lines. Every direct import binding and direct imported-symbol reference is
 enumerated with its profile, wiring, operation, exposure, association,
 migration group, and owner. No `use chrono as ...`, `extern crate chrono`,
@@ -113,13 +116,23 @@ Chrono-backed type alias, or renamed Chrono import was found in the bounded
 five-root scan.
 
 The 159-line table remains a textual namespace projection, not a dynamic call
-count or activated feature graph. Of the 20 literal matching lines in the four
-root production owner files, one is a module-local benchmark test comparison;
-19 are in non-test feature code. Broader per-use classification remains
-incomplete because most of the 71 census paths are group-classified rather
-than having every direct and derived temporal operation assigned an exact cfg
-or wiring state, operation, exposure, and owner. That single static-detail gap
-prevents A1's zero-unclassified-use acceptance and keeps the bead open.
+count or activated feature graph. Thirteen ordered literal-operation rules
+classify every literal line with no remainder. Twenty-two exact path sets map
+all 71 paths to a profile, migration group, wiring state, exposure, and owner;
+36 line-specific overrides preserve composite operations, private `cfg(test)`
+fixtures, public-field nuances, and database or wire associations. The four
+direct bindings, 32 direct alias rows, one same-line overlap, and eight
+imported-alias arithmetic, comparison, association, or ordering anchors are
+also exact.
+
+The remaining static gap is narrower but real: independent review found
+additional nonliteral consumers that serialize, render, persist, retain,
+compare, or embed Chrono-derived values. Representative examples include CLI
+cutoff comparisons, PostgreSQL midnight construction, Kafka recency
+arithmetic, JetStream wire insertion, real-E2E diagnostic retention, and
+conformance report output. Those downstream consumers are not yet exhaustively
+enumerated, so A1's zero-unclassified-use acceptance remains unmet and the bead
+stays open.
 
 Most `src/real_*` files in the census are dormant source rather than declared
 modules. The Chrono-bearing H3 server/websocket suite is feature-wired. In the
@@ -337,11 +350,13 @@ Direct Chrono calls in the Redis module are also test-only diagnostics. The
 simulated Redis durability source uses millisecond and string records; it is
 not proof of real Redis or RDB temporal behavior.
 
-The exact literal-source path/count map and the explicitly detailed wiring
-rows are frozen in the artifact. Direct alias binding and reference discovery
-is also frozen; broader direct-and-derived per-use classification remains a
-declared static gap. Later owners must prove each admitted profile separately
-rather than borrowing a green result from another crate or feature set.
+The exact literal-source operation projection, path routing, line-specific
+overrides, direct alias binding/reference discovery, and eight declared
+imported-alias arithmetic, comparison, association, or ordering anchors are
+frozen in the artifact.
+Broader downstream-consumer classification remains the declared static gap.
+Later owners must prove each admitted profile separately rather than borrowing
+a green result from another crate or feature set.
 
 ## Migration ownership
 
@@ -376,13 +391,13 @@ The artifact routes, without mutating shared authority files:
 Every reconciliation row has an explicit owner and
 `ROUTED_NOT_MUTATED_BY_A1` state. There are no unclassified literal Chrono
 paths or undiscovered direct Chrono import bindings in the pinned census, but
-broader direct-and-derived use-level detail remains partial.
+broader derived-consumer detail remains partial.
 
 ## Validation and no-claim boundary
 
 A1 used workspace-filesystem source search, direct-import reconciliation,
-manifest and authority inspection, SHA-256 source pins, a path/count
-projection, and independent static cross-review. It did not execute the
+manifest and authority inspection, SHA-256 source pins, path/count and
+literal-operation projections, and independent static cross-review. It did not execute the
 companion contract. This remains a partial static inventory only; full A1
 acceptance is unmet,
 `bead_close_allowed=false`, and the bead must not be closed from this packet.
