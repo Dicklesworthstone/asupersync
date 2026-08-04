@@ -1,14 +1,15 @@
 //! Fail-closed YAML scenario capability inventory contract.
 //!
 //! Beads: asupersync-5z2scg.5.1, asupersync-5z2scg.5.2,
-//! asupersync-5z2scg.5.3.1
+//! asupersync-5z2scg.5.3.1, asupersync-5z2scg.5.3.2
 //! Scenario: scenario-yaml-capability-inventory-contract
 //! Fixture: artifacts/scenario_yaml_capability_inventory_v1.json
 //!
 //! This proves source-pinned loader, typed-schema, observed grammar, checked-in
 //! corpus, canonical JSON, workflow, diagnostic, resource, current YAML
-//! consumers/writers, and acceptance-satisfiability,
-//! execution-consumption, child-owner, and gap inventories. It does not prove
+//! consumers/writers, acceptance-satisfiability, the durable KEEP receipt,
+//! A4/A5 authority handoff, execution-consumption, child-owner, and gap
+//! inventories. It does not prove
 //! arbitrary YAML, parser replacement, runtime semantics for validation-only
 //! fields, CLI conversion UX, or permission to remove the incumbent
 //! `serde_yaml` dependency.
@@ -30,6 +31,15 @@ const API_SURFACE_MAP_PATH: &str = "artifacts/api_surface_map_v1.json";
 const BEAD_ID: &str = "asupersync-5z2scg.5.1";
 const A3_BEAD_ID: &str = "asupersync-5z2scg.5.3.1";
 const A3_PARENT_BEAD_ID: &str = "asupersync-5z2scg.5.3";
+const A3_RECEIPT_BEAD_ID: &str = "asupersync-5z2scg.5.3.2";
+const A3_RECEIPT_ID: &str = "SCN-A3-KEEP-INCUMBENT-V1";
+const A3_AUDIT_LANDED_COMMIT: &str = "d7bd450dc53647723a5e9aaa360d0e044794a4b2";
+const A3_AUDIT_ARTIFACT_SHA256: &str =
+    "17c529577e582dfeb8cef597cdd844b5d965c6a8c9f3a45c20d76d370a373ace";
+const A3_AUDIT_DOCUMENTATION_SHA256: &str =
+    "eec327b57bdce6d50d31061c967bb91db72ba966948f11f8f6ced5be32328295";
+const A3_AUDIT_CONTRACT_SHA256: &str =
+    "22b7d43bc133e280a05006b66dc7c367bd780d29a06a1aa437513d557cf4dec9";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const CAPABILITY_ID: &str = "CAP-SCENARIO-YAML-JSON";
 const BASELINE_REVISION: &str = "295136459f9e3e38e7373394e713866ec0693a8d";
@@ -155,7 +165,6 @@ fn validate_a3_acceptance_satisfiability(inventory: &Value) -> Result<(), String
             return Err(format!("a3 audit {key} must be {expected}"));
         }
     }
-
     let authority = object(audit, "authority");
     for (key, expected) in [
         ("current_disposition", "KEEP_INCUMBENT"),
@@ -1117,6 +1126,637 @@ fn validate_a3_acceptance_satisfiability(inventory: &Value) -> Result<(), String
     Ok(())
 }
 
+fn validate_a3_keep_incumbent_receipt(inventory: &Value) -> Result<(), String> {
+    let receipt = inventory
+        .get("a3_keep_incumbent_receipt")
+        .ok_or_else(|| "a3_keep_incumbent_receipt is required".to_owned())?;
+    for (key, expected) in [
+        ("receipt_id", A3_RECEIPT_ID),
+        ("bead_id", A3_RECEIPT_BEAD_ID),
+        ("parent_bead_id", A3_PARENT_BEAD_ID),
+        ("recorded_date_utc", "2026-08-04"),
+        ("receipt_state", "RECORDED"),
+        ("evidence_state", "SOURCE_BASELINED"),
+        (
+            "evidence_kind",
+            "STATIC_SOURCE_PINNED_GOVERNANCE_RECEIPT",
+        ),
+        ("execution_state", "NOT_RUN_BY_A3_2_STATIC_LANE"),
+    ] {
+        if receipt.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("A3.2 receipt {key} must be {expected}"));
+        }
+    }
+    if receipt.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        return Err("A3.2 receipt schema_version must be 1".to_owned());
+    }
+    if string_set(receipt, "mapped_capability_ids")
+        != [CAPABILITY_ID, "CAP-LAB-DETERMINISM"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    {
+        return Err("A3.2 receipt must retain both mapped capabilities".to_owned());
+    }
+
+    let source = object(receipt, "source_audit");
+    for (key, expected) in [
+        ("bead_id", A3_BEAD_ID),
+        ("landed_commit", A3_AUDIT_LANDED_COMMIT),
+        ("audited_source_revision", A3_CAPTURED_REVISION),
+        (
+            "a1_inventory_commit",
+            "b89b713164e161ca58697e17d129229c94e2254e",
+        ),
+        (
+            "a2_canonical_json_commit",
+            "bf5bdd619a087e8a9aef1c983726cbee7adea7fd",
+        ),
+        (
+            "source_pin_path_projection_sha256",
+            A3_SOURCE_PIN_PATHS_SHA256,
+        ),
+        ("root_authority_object", "authority"),
+        ("source_object", "a3_acceptance_satisfiability_audit"),
+        (
+            "decision_object",
+            "a3_acceptance_satisfiability_audit.satisfiability_decision",
+        ),
+        ("artifact_path", ARTIFACT_PATH),
+        (
+            "artifact_sha256_at_landed_commit",
+            A3_AUDIT_ARTIFACT_SHA256,
+        ),
+        ("documentation_path", DOC_PATH),
+        (
+            "documentation_sha256_at_landed_commit",
+            A3_AUDIT_DOCUMENTATION_SHA256,
+        ),
+        (
+            "contract_path",
+            "tests/scenario_yaml_capability_inventory_contract.rs",
+        ),
+        (
+            "contract_sha256_at_landed_commit",
+            A3_AUDIT_CONTRACT_SHA256,
+        ),
+    ] {
+        if source.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("A3.2 source join {key} must be {expected}"));
+        }
+    }
+    if source.get("source_pin_count").and_then(Value::as_u64) != Some(32)
+        || source
+            .get("all_source_pin_rows_required")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || array(inventory, "source_pins").len() != 32
+    {
+        return Err("A3.2 source join must retain all thirty-two source pins".to_owned());
+    }
+    let receipt_revisions = object(
+        receipt.get("source_audit").expect("source audit"),
+        "authority_source_revisions",
+    );
+    let audit_revisions = object(
+        inventory
+            .get("a3_acceptance_satisfiability_audit")
+            .expect("A3.1 audit"),
+        "authority_source_revisions",
+    );
+    if receipt_revisions != audit_revisions {
+        return Err("A3.2 authority revision join drifted from A3.1".to_owned());
+    }
+
+    let root_authority = object(inventory, "authority");
+    for (key, expected) in [
+        (
+            "a3_acceptance_audit_pointer",
+            "a3_acceptance_satisfiability_audit",
+        ),
+        ("a3_keep_receipt_pointer", "a3_keep_incumbent_receipt"),
+        ("a4_additive_authority_bead", "asupersync-5z2scg.5.4"),
+        ("a5_terminal_authority_bead", "asupersync-5z2scg.5.5"),
+    ] {
+        if root_authority.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("root authority {key} must be {expected}"));
+        }
+    }
+
+    let decision = object(receipt, "decision");
+    for (key, expected) in [
+        ("disposition", "KEEP_INCUMBENT"),
+        ("replacement_disposition", "KEEP_INCUMBENT"),
+        ("cutover_disposition", "NOT_AUTHORIZED"),
+        ("dependency_disposition", "RETAIN"),
+        ("yaml_capability_disposition", "RETAIN"),
+        ("file_disposition", "NO_REMOVAL_AUTHORIZED"),
+        ("on_missing_or_regressed_row", "KEEP_INCUMBENT"),
+    ] {
+        if decision.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("A3.2 decision {key} must be {expected}"));
+        }
+    }
+    for forbidden_key in ["replacement_verdict", "cutover_verdict"] {
+        if decision.contains_key(forbidden_key) {
+            return Err(format!("A3.2 decision must reject {forbidden_key}"));
+        }
+    }
+    if decision
+        .get("owner_policy_required")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Err("A3.2 decision owner_policy_required must remain true".to_owned());
+    }
+    for key in [
+        "decision_terminal",
+        "owner_policy_receipt_present",
+        "all_required_gates_satisfied",
+        "replacement_authorized",
+        "terminal_cutover_authorized",
+        "dependency_exit_allowed",
+        "input_narrowing_allowed",
+        "owned_parser_claimed",
+        "owned_writer_claimed",
+        "file_removal_allowed",
+        "removed_dependency",
+        "removed_yaml_capability",
+        "removed_file",
+    ] {
+        if decision.get(key).and_then(Value::as_bool) != Some(false) {
+            return Err(format!("A3.2 decision {key} must remain false"));
+        }
+    }
+    if decision
+        .get("satisfied_required_gate_count")
+        .and_then(Value::as_u64)
+        != Some(0)
+        || decision
+            .get("blocking_required_gate_count")
+            .and_then(Value::as_u64)
+            != Some(5)
+        || decision
+            .get("mapped_unresolved_row_count")
+            .and_then(Value::as_u64)
+            != Some(7)
+        || !array(receipt.get("decision").expect("receipt decision"), "removed_paths")
+            .is_empty()
+        || !array(
+            receipt.get("decision").expect("receipt decision"),
+            "removed_dependency_edges",
+        )
+        .is_empty()
+    {
+        return Err("A3.2 decision counts or preservation arrays drifted".to_owned());
+    }
+
+    let audit = inventory
+        .get("a3_acceptance_satisfiability_audit")
+        .expect("A3.1 audit");
+    let audit_authority = object(audit, "authority");
+    let audit_decision = object(audit, "satisfiability_decision");
+    if audit_authority
+        .get("required_disposition")
+        .and_then(Value::as_str)
+        != decision.get("disposition").and_then(Value::as_str)
+        || audit_decision
+            .get("required_disposition")
+            .and_then(Value::as_str)
+            != decision.get("disposition").and_then(Value::as_str)
+        || audit_authority
+            .get("dependency_exit_allowed")
+            .and_then(Value::as_bool)
+            != decision
+                .get("dependency_exit_allowed")
+                .and_then(Value::as_bool)
+    {
+        return Err("A3.2 decision must be derived from A3.1 authority".to_owned());
+    }
+
+    let gates = array(receipt, "blocking_requirements");
+    let expected_gate_ids: BTreeSet<String> = [
+        "SCN-A3-KEEP-GATE-ACCEPTANCE-PARSER-PARITY",
+        "SCN-A3-KEEP-GATE-BOUNDS-POLICY",
+        "SCN-A3-KEEP-GATE-CONSUMER-CUTOVER",
+        "SCN-A3-KEEP-GATE-DIAGNOSTIC-PARITY",
+        "SCN-A3-KEEP-GATE-WRITER-PARITY",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if gates.len() != 5 || row_ids(gates, "gate_id") != expected_gate_ids {
+        return Err("A3.2 receipt must retain exactly five blocking gates".to_owned());
+    }
+    for (gate_id, requirement_class, required_state) in [
+        (
+            "SCN-A3-KEEP-GATE-BOUNDS-POLICY",
+            "BOUNDS_POLICY",
+            "OWNER_POLICY_APPROVED_AND_ALL_FINITE_APPLICATION_BOUNDS_DEFINED",
+        ),
+        (
+            "SCN-A3-KEEP-GATE-ACCEPTANCE-PARSER-PARITY",
+            "ACCEPTANCE_PARSER_PARITY",
+            "OWNED_CANDIDATE_PRESENT_AND_ACCEPTANCE_SAME_OR_BETTER",
+        ),
+        (
+            "SCN-A3-KEEP-GATE-DIAGNOSTIC-PARITY",
+            "DIAGNOSTIC_PARITY",
+            "SAME_OR_BETTER",
+        ),
+        (
+            "SCN-A3-KEEP-GATE-WRITER-PARITY",
+            "WRITER_PARITY",
+            "OWNED_WRITER_PRESENT_AND_SAME_OR_BETTER",
+        ),
+        (
+            "SCN-A3-KEEP-GATE-CONSUMER-CUTOVER",
+            "CONSUMER_CUTOVER",
+            "ALL_CONSUMERS_PROVEN_AND_A5_AUTHORIZED",
+        ),
+    ] {
+        let gate = find_row(gates, "gate_id", gate_id);
+        if text(gate, "requirement_class") != requirement_class
+            || text(gate, "required_state") != required_state
+            || gate.get("blocking").and_then(Value::as_bool) != Some(true)
+            || gate.get("satisfied").and_then(Value::as_bool) != Some(false)
+        {
+            return Err(format!("A3.2 gate {gate_id} drifted"));
+        }
+    }
+
+    let unresolved = array(audit, "unresolved_rows");
+    let mut mapped_unresolved = BTreeSet::new();
+    let mut mapped_unresolved_count = 0;
+    for gate in gates {
+        let ids = array(gate, "source_unresolved_row_ids");
+        mapped_unresolved_count += ids.len();
+        for id in ids {
+            let id = id
+                .as_str()
+                .ok_or_else(|| "receipt unresolved IDs must be strings".to_owned())?;
+            mapped_unresolved.insert(id.to_owned());
+        }
+    }
+    if mapped_unresolved_count != 7
+        || mapped_unresolved != row_ids(unresolved, "row_id")
+        || unresolved
+            .iter()
+            .any(|row| row.get("blocking").and_then(Value::as_bool) != Some(true))
+    {
+        return Err("A3.2 gates must map every blocking A3.1 row exactly once".to_owned());
+    }
+
+    let bounds_gate = find_row(gates, "gate_id", "SCN-A3-KEEP-GATE-BOUNDS-POLICY");
+    let finite_limit_ids: BTreeSet<String> = array(audit, "application_limit_matrix")
+        .iter()
+        .filter(|row| {
+            row.get("finite_replacement_bound_required")
+                .and_then(Value::as_bool)
+                == Some(true)
+        })
+        .map(|row| text(row, "limit_id").to_owned())
+        .collect();
+    if finite_limit_ids.len() != 7
+        || string_set(bounds_gate, "source_unresolved_row_ids")
+            != ["SCN-A3-UNRESOLVED-OWNER-INPUT-POLICY"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        || string_set(bounds_gate, "source_limit_ids") != finite_limit_ids
+        || string_set(bounds_gate, "source_gap_ids")
+            != ["SCN-GAP-10"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+    {
+        return Err("A3.2 bounds gate must derive all seven finite limits".to_owned());
+    }
+    let parser_gate = find_row(
+        gates,
+        "gate_id",
+        "SCN-A3-KEEP-GATE-ACCEPTANCE-PARSER-PARITY",
+    );
+    if string_set(parser_gate, "source_gap_ids")
+        != ["SCN-GAP-11", "SCN-GAP-14"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        || string_set(parser_gate, "source_sections")
+            != ["corpus_join", "grammar_partition", "unknown_field_contract"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        || string_set(parser_gate, "source_unresolved_row_ids")
+            != [
+                "SCN-A3-UNRESOLVED-GRAMMAR-DIFFERENTIAL",
+                "SCN-A3-UNRESOLVED-OWNED-PARSER",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    {
+        return Err("A3.2 acceptance/parser gate source join drifted".to_owned());
+    }
+    let diagnostic_gate = find_row(
+        gates,
+        "gate_id",
+        "SCN-A3-KEEP-GATE-DIAGNOSTIC-PARITY",
+    );
+    if string_set(diagnostic_gate, "source_gap_ids")
+        != ["SCN-GAP-15"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        || string_set(diagnostic_gate, "source_unresolved_row_ids")
+            != ["SCN-A3-UNRESOLVED-DIAGNOSTIC-PARITY"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        || string_set(diagnostic_gate, "source_sections")
+            != ["diagnostic_matrix"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+    {
+        return Err("A3.2 diagnostic gate source join drifted".to_owned());
+    }
+    let writer_gate = find_row(gates, "gate_id", "SCN-A3-KEEP-GATE-WRITER-PARITY");
+    let consumer_gate = find_row(gates, "gate_id", "SCN-A3-KEEP-GATE-CONSUMER-CUTOVER");
+    if string_set(writer_gate, "source_unresolved_row_ids")
+        != [
+            "SCN-A3-UNRESOLVED-OWNED-WRITER",
+            "SCN-A3-UNRESOLVED-WRITER-PARITY",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+        || string_set(consumer_gate, "source_unresolved_row_ids")
+            != ["SCN-A3-UNRESOLVED-CONSUMER-CUTOVER"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        || !array(writer_gate, "source_limit_ids").is_empty()
+        || !array(writer_gate, "source_gap_ids").is_empty()
+        || !array(consumer_gate, "source_limit_ids").is_empty()
+        || !array(consumer_gate, "source_gap_ids").is_empty()
+        || string_set(writer_gate, "source_sections")
+            != ["writer_matrix"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        || string_set(consumer_gate, "source_sections")
+            != ["consumer_matrix", "dependency_edges"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+    {
+        return Err("A3.2 writer or consumer gate source join drifted".to_owned());
+    }
+    let mapped_gap_ids: BTreeSet<String> = gates
+        .iter()
+        .flat_map(|gate| string_set(gate, "source_gap_ids"))
+        .collect();
+    if mapped_gap_ids
+        != ["SCN-GAP-10", "SCN-GAP-11", "SCN-GAP-14", "SCN-GAP-15"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    {
+        return Err("A3.2 gate-to-gap projection drifted".to_owned());
+    }
+    for gap_id in mapped_gap_ids {
+        if text(find_row(array(inventory, "known_gaps"), "gap_id", &gap_id), "evidence_state")
+            != "BLOCKED_GAP"
+        {
+            return Err(format!("A3.2 mapped gap {gap_id} must remain blocked"));
+        }
+    }
+
+    let fail_closed = object(receipt, "fail_closed_rule");
+    let blocking_states = string_set(
+        receipt
+            .get("fail_closed_rule")
+            .expect("fail-closed rule"),
+        "blocking_states",
+    );
+    if blocking_states
+        != [
+        "ABSENT",
+        "BLOCKED",
+        "BLOCKED_GAP",
+        "MISSING",
+        "NOT_AUTHORIZED",
+        "NOT_PROVEN",
+        "NOT_RUN",
+        "PLANNED",
+        "REGRESSED",
+        "UNKNOWN",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+        || fail_closed.get("on_any_blocker").and_then(Value::as_str)
+            != Some("KEEP_INCUMBENT")
+        || fail_closed
+            .get("replacement_disposition")
+            .and_then(Value::as_str)
+            != Some("KEEP_INCUMBENT")
+        || fail_closed
+            .get("cutover_disposition")
+            .and_then(Value::as_str)
+            != Some("NOT_AUTHORIZED")
+    {
+        return Err("A3.2 fail-closed state rule drifted".to_owned());
+    }
+    let unresolved_states: BTreeSet<String> = unresolved
+        .iter()
+        .map(|row| text(row, "state").to_owned())
+        .collect();
+    if !unresolved_states.is_subset(&blocking_states) {
+        return Err("every current A3.1 unresolved state must fail closed".to_owned());
+    }
+    for key in [
+        "dependency_exit_allowed",
+        "input_narrowing_allowed",
+        "file_removal_allowed",
+    ] {
+        if fail_closed.get(key).and_then(Value::as_bool) != Some(false) {
+            return Err(format!("A3.2 fail-closed {key} must remain false"));
+        }
+    }
+    let handoff = receipt
+        .get("authority_handoff")
+        .expect("A3.2 authority handoff");
+    if object(handoff, "a4").get("bead_id").and_then(Value::as_str)
+        == object(handoff, "a5").get("bead_id").and_then(Value::as_str)
+        || object(receipt, "authority_handoff")
+            .get("authority_is_disjoint")
+            .and_then(Value::as_bool)
+            != Some(true)
+    {
+        return Err("A3.2 A4/A5 authority must remain disjoint".to_owned());
+    }
+    let a4 = object(handoff, "a4");
+    for (key, expected) in [
+        ("bead_id", "asupersync-5z2scg.5.4"),
+        ("role", "ADDITIVE_AUTHORING_ONLY"),
+    ] {
+        if a4.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("A3.2 A4 {key} must be {expected}"));
+        }
+    }
+    if a4.get("may_continue").and_then(Value::as_bool) != Some(true)
+        || string_set(handoff.get("a4").expect("A4 handoff"), "allowed_work")
+            != [
+                "ATOMIC_ARTIFACT_OUTPUT",
+                "DIAGNOSTICS",
+                "DOCUMENTATION",
+                "EXAMPLES",
+                "INCLUDE_TRUTH",
+                "VALIDATION",
+                "YAML_JSON_CONVERSION",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        || string_set(handoff.get("a4").expect("A4 handoff"), "required_properties")
+            != [
+                "NON_DESTRUCTIVE",
+                "PRESERVE_CURRENT_YAML_INPUTS_FILES_AND_ACCEPTED_LANGUAGE",
+                "PRESERVE_SCHEMA_VERSION_DEFAULTS_SEEDS_ORACLES_AND_REPLAY_FINGERPRINTS",
+                "REVERSIBLE",
+                "SEMANTIC",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        || string_set(handoff.get("a4").expect("A4 handoff"), "routed_gap_ids")
+            != [
+                "SCN-GAP-01",
+                "SCN-GAP-06",
+                "SCN-GAP-09",
+                "SCN-GAP-12",
+                "SCN-GAP-13",
+                "SCN-GAP-15",
+                "SCN-GAP-16",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    {
+        return Err("A3.2 A4 additive scope drifted".to_owned());
+    }
+    for key in [
+        "may_narrow_yaml_acceptance",
+        "may_remove_dependency",
+        "may_remove_yaml_capability",
+        "may_remove_yaml_files",
+        "may_approve_owner_input_policy",
+        "may_promote_scoped_parity_to_terminal",
+        "may_issue_terminal_decision",
+    ] {
+        if a4.get(key).and_then(Value::as_bool) != Some(false) {
+            return Err(format!("A3.2 A4 {key} must remain false"));
+        }
+    }
+    for gap_id in string_set(handoff.get("a4").expect("A4 handoff"), "routed_gap_ids") {
+        if text(
+            find_row(array(inventory, "known_gaps"), "gap_id", &gap_id),
+            "owner_bead",
+        ) != "asupersync-5z2scg.5.4"
+        {
+            return Err(format!("A3.2 A4 gap {gap_id} owner drifted"));
+        }
+    }
+
+    let a5 = object(handoff, "a5");
+    for (key, expected) in [
+        ("bead_id", "asupersync-5z2scg.5.5"),
+        ("role", "SOLE_TERMINAL_KEEP_DEFER_OR_CUTOVER_AUTHORITY"),
+        ("on_any_unsatisfied_or_regressed_prerequisite", "KEEP_OR_DEFER"),
+    ] {
+        if a5.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("A3.2 A5 {key} must be {expected}"));
+        }
+    }
+    for key in ["may_issue_terminal_decision", "may_issue_keep_or_defer_now"] {
+        if a5.get(key).and_then(Value::as_bool) != Some(true) {
+            return Err(format!("A3.2 A5 {key} must remain true"));
+        }
+    }
+    for key in [
+        "terminal_cutover_authorized_now",
+        "dependency_exit_authorized_now",
+        "may_remove_yaml_capability",
+        "may_remove_yaml_files",
+    ] {
+        if a5.get(key).and_then(Value::as_bool) != Some(false) {
+            return Err(format!("A3.2 A5 {key} must remain false"));
+        }
+    }
+    if string_set(handoff.get("a5").expect("A5 handoff"), "prerequisites")
+        != [
+            "ALL_REQUIRED_ROWS_AT_REQUIRED_STATE",
+            "CLAIM_TIME_SOURCE_DEPENDENCY_WRITER_AND_CONSUMER_REFRESH",
+            "DEPENDENCY_GRAPH_ORACLE_AND_REPLAY_FINGERPRINT_DISPOSITION",
+            "FULL_CORPUS_AND_DOWNSTREAM_E2E",
+            "OWNER_APPROVED_FINITE_INPUT_POLICY",
+            "REVERSIBLE_NON_DESTRUCTIVE_MIGRATION_AND_ROLLBACK",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    {
+        return Err("A3.2 A5 cutover prerequisites drifted".to_owned());
+    }
+
+    let rollback = object(receipt, "rollback");
+    if rollback
+        .get("repository_change_requires_rollback")
+        .and_then(Value::as_bool)
+        != Some(false)
+        || text(receipt, "no_claim_boundary").trim().is_empty()
+        || !text(receipt, "no_claim_boundary").contains("was not executed")
+    {
+        return Err("A3.2 rollback and no-claim boundary must remain explicit".to_owned());
+    }
+    let a3_child = find_row(
+        array(inventory, "child_capability_rows"),
+        "owner_bead",
+        A3_PARENT_BEAD_ID,
+    );
+    if text(a3_child, "evidence_state") != "SOURCE_BASELINED"
+        || text(a3_child, "receipt_state") != "RECORDED"
+        || !text(a3_child, "no_claim").contains("A3.2")
+        || !text(a3_child, "no_claim").contains("DEFER")
+        || !text(inventory, "no_claim_boundary").contains("A3.2")
+    {
+        return Err("A3.2 child evidence or top-level no-claim drifted".to_owned());
+    }
+    let a5_child = find_row(
+        array(inventory, "child_capability_rows"),
+        "owner_bead",
+        "asupersync-5z2scg.5.5",
+    );
+    if !text(a5_child, "responsibility").contains("DEFER")
+        || !text(a5_child, "no_claim").contains("terminal KEEP or DEFER")
+    {
+        return Err("A3.2 A5 child routing must distinguish KEEP/DEFER from CUTOVER".to_owned());
+    }
+    if !text(
+        audit
+            .get("downstream_handoff")
+            .expect("A3.1 downstream handoff"),
+        "a3_2",
+    )
+    .contains("a3_keep_incumbent_receipt")
+    {
+        return Err("A3.1 handoff must point at the recorded A3.2 receipt".to_owned());
+    }
+    Ok(())
+}
+
 fn validate_inventory(inventory: &Value) -> Result<(), String> {
     if inventory.get("schema_version").and_then(Value::as_u64) != Some(1) {
         return Err("schema_version must be 1".to_owned());
@@ -1334,6 +1974,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         return Err("top-level no-claim boundary is required".to_owned());
     }
     validate_a3_acceptance_satisfiability(inventory)?;
+    validate_a3_keep_incumbent_receipt(inventory)?;
     Ok(())
 }
 
@@ -1912,6 +2553,9 @@ fn documentation_workflows_and_no_claim_boundary_are_complete() {
         "CAP-LAB-DETERMINISM",
         BEAD_ID,
         A3_BEAD_ID,
+        A3_RECEIPT_BEAD_ID,
+        A3_RECEIPT_ID,
+        A3_AUDIT_LANDED_COMMIT,
         BASELINE_REVISION,
         A3_CAPTURED_REVISION,
         "KEEP_UNTIL_PARITY",
@@ -1931,6 +2575,7 @@ fn documentation_workflows_and_no_claim_boundary_are_complete() {
     ] {
         assert!(doc.contains(marker), "documentation must retain {marker}");
     }
+    assert!(!doc.contains("A3.2 durable receipt pending"));
 
     let workflows = array(&inventory, "author_workflows");
     for command in [
@@ -2018,6 +2663,83 @@ fn fail_closed_mutations_reject_cutover_unknown_missing_surface_bound_and_policy
     false_satisfiability["a3_acceptance_satisfiability_audit"]["satisfiability_decision"]
         ["dependency_exit_allowed"] = Value::Bool(true);
     assert!(validate_inventory(&false_satisfiability).is_err());
+
+    let mut replacement = inventory.clone();
+    replacement["a3_keep_incumbent_receipt"]["decision"]["replacement_disposition"] =
+        Value::String("REPLACE_INCUMBENT".to_owned());
+    assert!(validate_inventory(&replacement).is_err());
+
+    let mut replacement_authorized = inventory.clone();
+    replacement_authorized["a3_keep_incumbent_receipt"]["decision"]
+        ["replacement_authorized"] = Value::Bool(true);
+    assert!(validate_inventory(&replacement_authorized).is_err());
+
+    let mut cutover_authorized = inventory.clone();
+    cutover_authorized["a3_keep_incumbent_receipt"]["decision"]
+        ["terminal_cutover_authorized"] = Value::Bool(true);
+    assert!(validate_inventory(&cutover_authorized).is_err());
+
+    let mut receipt_exit = inventory.clone();
+    receipt_exit["a3_keep_incumbent_receipt"]["decision"]["dependency_exit_allowed"] =
+        Value::Bool(true);
+    assert!(validate_inventory(&receipt_exit).is_err());
+
+    let mut falsely_satisfied = inventory.clone();
+    falsely_satisfied["a3_keep_incumbent_receipt"]["decision"]
+        ["all_required_gates_satisfied"] = Value::Bool(true);
+    assert!(validate_inventory(&falsely_satisfied).is_err());
+
+    let mut missing_receipt_gate = inventory.clone();
+    missing_receipt_gate["a3_keep_incumbent_receipt"]["blocking_requirements"]
+        .as_array_mut()
+        .expect("blocking requirements")
+        .pop();
+    assert!(validate_inventory(&missing_receipt_gate).is_err());
+
+    let mut duplicate_receipt_blocker = inventory.clone();
+    duplicate_receipt_blocker["a3_keep_incumbent_receipt"]["blocking_requirements"][1]
+        ["source_unresolved_row_ids"]
+        .as_array_mut()
+        .expect("source unresolved row IDs")
+        .push(Value::String(
+            "SCN-A3-UNRESOLVED-OWNER-INPUT-POLICY".to_owned(),
+        ));
+    assert!(validate_inventory(&duplicate_receipt_blocker).is_err());
+
+    let mut missing_receipt_bound = inventory.clone();
+    missing_receipt_bound["a3_keep_incumbent_receipt"]["blocking_requirements"][0]
+        ["source_limit_ids"]
+        .as_array_mut()
+        .expect("source limit IDs")
+        .pop();
+    assert!(validate_inventory(&missing_receipt_bound).is_err());
+
+    let mut a4_terminal = inventory.clone();
+    a4_terminal["a3_keep_incumbent_receipt"]["authority_handoff"]["a4"]
+        ["may_issue_terminal_decision"] = Value::Bool(true);
+    assert!(validate_inventory(&a4_terminal).is_err());
+
+    let mut a5_authority_drift = inventory.clone();
+    a5_authority_drift["a3_keep_incumbent_receipt"]["authority_handoff"]["a5"]
+        ["bead_id"] = Value::String("asupersync-5z2scg.5.4".to_owned());
+    assert!(validate_inventory(&a5_authority_drift).is_err());
+
+    let mut source_join_drift = inventory.clone();
+    source_join_drift["a3_keep_incumbent_receipt"]["source_audit"]["landed_commit"] =
+        Value::String(A3_CAPTURED_REVISION.to_owned());
+    assert!(validate_inventory(&source_join_drift).is_err());
+
+    let mut removed_path = inventory.clone();
+    removed_path["a3_keep_incumbent_receipt"]["decision"]["removed_paths"]
+        .as_array_mut()
+        .expect("removed paths")
+        .push(Value::String("examples/scenarios/smoke_happy_path.yaml".to_owned()));
+    assert!(validate_inventory(&removed_path).is_err());
+
+    let mut forbidden_verdict = inventory.clone();
+    forbidden_verdict["a3_keep_incumbent_receipt"]["decision"]["replacement_verdict"] =
+        Value::String("REPLACE".to_owned());
+    assert!(validate_inventory(&forbidden_verdict).is_err());
 
     let mut unrouted = inventory;
     unrouted["known_gaps"][0]["owner_bead"] = Value::String(String::new());

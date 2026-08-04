@@ -20,7 +20,11 @@
     "decision": "ADDITIVE_COEXISTENCE",
     "disposition": "KEEP_UNTIL_PARITY",
     "cutover_state": "KEEP_INCUMBENT",
-    "dependency_exit_allowed": false
+    "dependency_exit_allowed": false,
+    "a3_acceptance_audit_pointer": "a3_acceptance_satisfiability_audit",
+    "a3_keep_receipt_pointer": "a3_keep_incumbent_receipt",
+    "a4_additive_authority_bead": "asupersync-5z2scg.5.4",
+    "a5_terminal_authority_bead": "asupersync-5z2scg.5.5"
   },
   "policy": {
     "zero_unknown_required": true,
@@ -141,8 +145,8 @@
     },
     {
       "path": "tests/scenario_yaml_capability_inventory_contract.rs",
-      "sha256": "22b7d43bc133e280a05006b66dc7c367bd780d29a06a1aa437513d557cf4dec9",
-      "line_count": 2025
+      "sha256": "7cc0bc38c573cea18ed4cf377db8e9a9c76375f763285097f105887d36bffc18",
+      "line_count": 2747
     },
     {
       "path": "tests/phase6_methodology_gate_contract.rs",
@@ -1654,13 +1658,258 @@
       }
     ],
     "downstream_handoff": {
-      "a3_2": "record the durable KEEP_INCUMBENT receipt and fail-closed governance projection",
+      "a3_2": "recorded as a3_keep_incumbent_receipt with a fail-closed governance projection",
       "a4": "may continue additive YAML/JSON authoring, diagnostics, migration, example, and include-truth work without narrowing YAML",
       "a5": "retains sole terminal cutover authority after owner-approved bounds and complete SAME-or-BETTER evidence",
       "on_missing_or_regressed_row": "KEEP_INCUMBENT",
       "dependency_exit_allowed": false
     },
     "no_claim_boundary": "This A3.1 section is a static, source-pinned acceptance-satisfiability audit. It implements no owned YAML parser or production Scenario YAML writer, proves no complete parity, performance, resource, security, broad-health, or release claim, and authorizes no input narrowing, dependency or file removal, tracker closure, or cutover. KEEP_INCUMBENT and dependency_exit_allowed=false remain mandatory; only A5 may authorize terminal cutover after owner-approved bounds and complete SAME-or-BETTER evidence."
+  },
+  "a3_keep_incumbent_receipt": {
+    "receipt_id": "SCN-A3-KEEP-INCUMBENT-V1",
+    "schema_version": 1,
+    "bead_id": "asupersync-5z2scg.5.3.2",
+    "parent_bead_id": "asupersync-5z2scg.5.3",
+    "recorded_date_utc": "2026-08-04",
+    "receipt_state": "RECORDED",
+    "evidence_state": "SOURCE_BASELINED",
+    "evidence_kind": "STATIC_SOURCE_PINNED_GOVERNANCE_RECEIPT",
+    "execution_state": "NOT_RUN_BY_A3_2_STATIC_LANE",
+    "mapped_capability_ids": [
+      "CAP-LAB-DETERMINISM",
+      "CAP-SCENARIO-YAML-JSON"
+    ],
+    "source_audit": {
+      "bead_id": "asupersync-5z2scg.5.3.1",
+      "landed_commit": "d7bd450dc53647723a5e9aaa360d0e044794a4b2",
+      "audited_source_revision": "207a435d59bad452239caa773f3a7c64c8b5edbc",
+      "a1_inventory_commit": "b89b713164e161ca58697e17d129229c94e2254e",
+      "a2_canonical_json_commit": "bf5bdd619a087e8a9aef1c983726cbee7adea7fd",
+      "source_pin_count": 32,
+      "source_pin_path_projection_sha256": "1c532b020668307d39cec4db9c5c66e52442f1fd433546a7a2b7ce78c50e985b",
+      "all_source_pin_rows_required": true,
+      "authority_source_revisions": {
+        "capability_registry_revision": "5f208e04f24d8addaa051c9bf7465f7b398848fe",
+        "capability_baseline_revision": "7390d33f4ac297cd28138c8e1ece38f60b278660",
+        "api_surface_map_revision": "2c7f2dd883cbbac1df6581f65673cf23eb40ee3d"
+      },
+      "root_authority_object": "authority",
+      "source_object": "a3_acceptance_satisfiability_audit",
+      "decision_object": "a3_acceptance_satisfiability_audit.satisfiability_decision",
+      "artifact_path": "artifacts/scenario_yaml_capability_inventory_v1.json",
+      "artifact_sha256_at_landed_commit": "17c529577e582dfeb8cef597cdd844b5d965c6a8c9f3a45c20d76d370a373ace",
+      "documentation_path": "docs/scenario_yaml_capability_inventory.md",
+      "documentation_sha256_at_landed_commit": "eec327b57bdce6d50d31061c967bb91db72ba966948f11f8f6ced5be32328295",
+      "contract_path": "tests/scenario_yaml_capability_inventory_contract.rs",
+      "contract_sha256_at_landed_commit": "22b7d43bc133e280a05006b66dc7c367bd780d29a06a1aa437513d557cf4dec9"
+    },
+    "decision": {
+      "disposition": "KEEP_INCUMBENT",
+      "replacement_disposition": "KEEP_INCUMBENT",
+      "cutover_disposition": "NOT_AUTHORIZED",
+      "dependency_disposition": "RETAIN",
+      "yaml_capability_disposition": "RETAIN",
+      "file_disposition": "NO_REMOVAL_AUTHORIZED",
+      "decision_terminal": false,
+      "owner_policy_required": true,
+      "owner_policy_receipt_present": false,
+      "all_required_gates_satisfied": false,
+      "satisfied_required_gate_count": 0,
+      "blocking_required_gate_count": 5,
+      "mapped_unresolved_row_count": 7,
+      "replacement_authorized": false,
+      "terminal_cutover_authorized": false,
+      "dependency_exit_allowed": false,
+      "input_narrowing_allowed": false,
+      "owned_parser_claimed": false,
+      "owned_writer_claimed": false,
+      "file_removal_allowed": false,
+      "removed_dependency": false,
+      "removed_yaml_capability": false,
+      "removed_file": false,
+      "removed_paths": [],
+      "removed_dependency_edges": [],
+      "on_missing_or_regressed_row": "KEEP_INCUMBENT"
+    },
+    "blocking_requirements": [
+      {
+        "gate_id": "SCN-A3-KEEP-GATE-BOUNDS-POLICY",
+        "requirement_class": "BOUNDS_POLICY",
+        "source_unresolved_row_ids": [
+          "SCN-A3-UNRESOLVED-OWNER-INPUT-POLICY"
+        ],
+        "source_limit_ids": [
+          "SCN-A3-LIMIT-ALIAS-REPETITION",
+          "SCN-A3-LIMIT-DOCUMENT-BYTES",
+          "SCN-A3-LIMIT-MAPPING-COUNT",
+          "SCN-A3-LIMIT-NESTING",
+          "SCN-A3-LIMIT-PARSE-WORK",
+          "SCN-A3-LIMIT-SCALAR-LENGTH",
+          "SCN-A3-LIMIT-SEQUENCE-COUNT"
+        ],
+        "source_gap_ids": [
+          "SCN-GAP-10"
+        ],
+        "required_state": "OWNER_POLICY_APPROVED_AND_ALL_FINITE_APPLICATION_BOUNDS_DEFINED",
+        "blocking": true,
+        "satisfied": false
+      },
+      {
+        "gate_id": "SCN-A3-KEEP-GATE-ACCEPTANCE-PARSER-PARITY",
+        "requirement_class": "ACCEPTANCE_PARSER_PARITY",
+        "source_unresolved_row_ids": [
+          "SCN-A3-UNRESOLVED-GRAMMAR-DIFFERENTIAL",
+          "SCN-A3-UNRESOLVED-OWNED-PARSER"
+        ],
+        "source_limit_ids": [],
+        "source_gap_ids": [
+          "SCN-GAP-11",
+          "SCN-GAP-14"
+        ],
+        "source_sections": [
+          "corpus_join",
+          "grammar_partition",
+          "unknown_field_contract"
+        ],
+        "required_state": "OWNED_CANDIDATE_PRESENT_AND_ACCEPTANCE_SAME_OR_BETTER",
+        "blocking": true,
+        "satisfied": false
+      },
+      {
+        "gate_id": "SCN-A3-KEEP-GATE-DIAGNOSTIC-PARITY",
+        "requirement_class": "DIAGNOSTIC_PARITY",
+        "source_unresolved_row_ids": [
+          "SCN-A3-UNRESOLVED-DIAGNOSTIC-PARITY"
+        ],
+        "source_limit_ids": [],
+        "source_gap_ids": [
+          "SCN-GAP-15"
+        ],
+        "source_sections": [
+          "diagnostic_matrix"
+        ],
+        "required_state": "SAME_OR_BETTER",
+        "blocking": true,
+        "satisfied": false
+      },
+      {
+        "gate_id": "SCN-A3-KEEP-GATE-WRITER-PARITY",
+        "requirement_class": "WRITER_PARITY",
+        "source_unresolved_row_ids": [
+          "SCN-A3-UNRESOLVED-OWNED-WRITER",
+          "SCN-A3-UNRESOLVED-WRITER-PARITY"
+        ],
+        "source_limit_ids": [],
+        "source_gap_ids": [],
+        "source_sections": [
+          "writer_matrix"
+        ],
+        "required_state": "OWNED_WRITER_PRESENT_AND_SAME_OR_BETTER",
+        "blocking": true,
+        "satisfied": false
+      },
+      {
+        "gate_id": "SCN-A3-KEEP-GATE-CONSUMER-CUTOVER",
+        "requirement_class": "CONSUMER_CUTOVER",
+        "source_unresolved_row_ids": [
+          "SCN-A3-UNRESOLVED-CONSUMER-CUTOVER"
+        ],
+        "source_limit_ids": [],
+        "source_gap_ids": [],
+        "source_sections": [
+          "consumer_matrix",
+          "dependency_edges"
+        ],
+        "required_state": "ALL_CONSUMERS_PROVEN_AND_A5_AUTHORIZED",
+        "blocking": true,
+        "satisfied": false
+      }
+    ],
+    "fail_closed_rule": {
+      "blocking_states": [
+        "ABSENT",
+        "MISSING",
+        "UNKNOWN",
+        "PLANNED",
+        "BLOCKED",
+        "BLOCKED_GAP",
+        "NOT_RUN",
+        "NOT_PROVEN",
+        "NOT_AUTHORIZED",
+        "REGRESSED"
+      ],
+      "on_any_blocker": "KEEP_INCUMBENT",
+      "replacement_disposition": "KEEP_INCUMBENT",
+      "cutover_disposition": "NOT_AUTHORIZED",
+      "dependency_exit_allowed": false,
+      "input_narrowing_allowed": false,
+      "file_removal_allowed": false
+    },
+    "authority_handoff": {
+      "a4": {
+        "bead_id": "asupersync-5z2scg.5.4",
+        "role": "ADDITIVE_AUTHORING_ONLY",
+        "may_continue": true,
+        "allowed_work": [
+          "YAML_JSON_CONVERSION",
+          "VALIDATION",
+          "DIAGNOSTICS",
+          "DOCUMENTATION",
+          "EXAMPLES",
+          "INCLUDE_TRUTH",
+          "ATOMIC_ARTIFACT_OUTPUT"
+        ],
+        "required_properties": [
+          "SEMANTIC",
+          "REVERSIBLE",
+          "NON_DESTRUCTIVE",
+          "PRESERVE_CURRENT_YAML_INPUTS_FILES_AND_ACCEPTED_LANGUAGE",
+          "PRESERVE_SCHEMA_VERSION_DEFAULTS_SEEDS_ORACLES_AND_REPLAY_FINGERPRINTS"
+        ],
+        "routed_gap_ids": [
+          "SCN-GAP-01",
+          "SCN-GAP-06",
+          "SCN-GAP-09",
+          "SCN-GAP-12",
+          "SCN-GAP-13",
+          "SCN-GAP-15",
+          "SCN-GAP-16"
+        ],
+        "may_narrow_yaml_acceptance": false,
+        "may_remove_dependency": false,
+        "may_remove_yaml_capability": false,
+        "may_remove_yaml_files": false,
+        "may_approve_owner_input_policy": false,
+        "may_promote_scoped_parity_to_terminal": false,
+        "may_issue_terminal_decision": false
+      },
+      "a5": {
+        "bead_id": "asupersync-5z2scg.5.5",
+        "role": "SOLE_TERMINAL_KEEP_DEFER_OR_CUTOVER_AUTHORITY",
+        "may_issue_terminal_decision": true,
+        "may_issue_keep_or_defer_now": true,
+        "terminal_cutover_authorized_now": false,
+        "dependency_exit_authorized_now": false,
+        "may_remove_yaml_capability": false,
+        "may_remove_yaml_files": false,
+        "prerequisites": [
+          "OWNER_APPROVED_FINITE_INPUT_POLICY",
+          "ALL_REQUIRED_ROWS_AT_REQUIRED_STATE",
+          "CLAIM_TIME_SOURCE_DEPENDENCY_WRITER_AND_CONSUMER_REFRESH",
+          "FULL_CORPUS_AND_DOWNSTREAM_E2E",
+          "DEPENDENCY_GRAPH_ORACLE_AND_REPLAY_FINGERPRINT_DISPOSITION",
+          "REVERSIBLE_NON_DESTRUCTIVE_MIGRATION_AND_ROLLBACK"
+        ],
+        "on_any_unsatisfied_or_regressed_prerequisite": "KEEP_OR_DEFER"
+      },
+      "authority_is_disjoint": true
+    },
+    "rollback": {
+      "repository_change_requires_rollback": false,
+      "reason": "The receipt changes governance evidence only; it removes no dependency, YAML capability, or file and authorizes no cutover."
+    },
+    "no_claim_boundary": "This A3.2 receipt is static governance evidence for the current KEEP_INCUMBENT disposition. Its contract is authored but was not executed in this static lane. It does not rerun A1/A2 evidence, implement an owned parser or writer, approve input bounds, prove parity, runtime behavior, performance, resource, or security properties, authorize dependency exit or YAML/file removal, close or unblock the tracker, establish broad health or release readiness, or exercise A5 terminal authority."
   },
   "child_capability_rows": [
     {
@@ -1696,7 +1945,8 @@
         "durable KEEP_INCUMBENT receipt with A4/A5 handoff"
       ],
       "evidence_state": "SOURCE_BASELINED",
-      "no_claim": "A3.1 is static decision evidence only; A3.2 remains required and only A5 may authorize terminal cutover."
+      "receipt_state": "RECORDED",
+      "no_claim": "A3.1 and A3.2 are static decision and governance evidence only; only A5 may issue a terminal KEEP, DEFER, or CUTOVER decision."
     },
     {
       "owner_bead": "asupersync-5z2scg.5.4",
@@ -1711,7 +1961,7 @@
     },
     {
       "owner_bead": "asupersync-5z2scg.5.5",
-      "responsibility": "run real validate, execute, explore, replay, migration, rollback, and terminal KEEP-or-cutover journeys",
+      "responsibility": "run real validate, execute, explore, replay, migration, rollback, and terminal KEEP, DEFER, or CUTOVER journeys",
       "required_evidence": [
         "all typed corpus files",
         "real binary workflows",
@@ -1720,7 +1970,7 @@
         "terminal decision"
       ],
       "evidence_state": "PLANNED",
-      "no_claim": "Only complete SAME-or-BETTER evidence can authorize a terminal decision."
+      "no_claim": "Only CUTOVER and dependency exit require every prerequisite; incomplete or regressed evidence forces terminal KEEP or DEFER with the incumbent retained."
     }
   ],
   "known_gaps": [
@@ -1825,7 +2075,7 @@
     {
       "lane": "scenario-yaml-capability-inventory-contract",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path artifacts/scenario_yaml_capability_inventory_v1.json --overlay-path docs/scenario_yaml_capability_inventory.md --overlay-path tests/scenario_yaml_capability_inventory_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_scenario_yaml_capability_inventory\" cargo test -p asupersync --test scenario_yaml_capability_inventory_contract -- --nocapture",
-      "claim": "source pins, typed schema, observed grammar, exact corpus, loaders, workflows, diagnostics, routed gaps, docs markers, and negative mutations"
+      "claim": "source pins, typed schema, observed grammar, exact corpus, loaders, workflows, diagnostics, routed gaps, durable KEEP receipt gate derivation, A4/A5 authority handoff, docs markers, and negative mutations"
     },
     {
       "lane": "existing-root-scenario-integration",
@@ -1838,5 +2088,5 @@
       "claim": "existing frankenlab example author journey only"
     }
   ],
-  "no_claim_boundary": "This A1/A2/A3.1 packet combines the earlier executable inventory and canonical-JSON evidence with a current static acceptance-satisfiability audit. A3.1 did not rerun executable lanes or implement an owned YAML parser or production Scenario YAML writer. It proves no complete parity, performance, resource, security, broad-health, release, or terminal decision, and authorizes no input narrowing, dependency or file removal, tracker closure, or cutover. It grants no permission to remove serde_yaml, serde, any accepted field, error, document, or workflow. It also does not implement include merging, network or cancellation simulation, participant workloads, full fault effects, atomic artifact output, resource-policy bounds, or stable located semantic diagnostics. KEEP_INCUMBENT and dependency_exit_allowed=false remain mandatory; only A5 may authorize terminal cutover after owner-approved bounds and complete SAME-or-BETTER evidence."
+  "no_claim_boundary": "This A1/A2/A3.1/A3.2 packet combines the earlier executable inventory and canonical-JSON evidence with a current static acceptance-satisfiability audit and fail-closed KEEP_INCUMBENT governance receipt. A3.1 and A3.2 did not rerun executable lanes or implement an owned YAML parser or production Scenario YAML writer. It proves no complete parity, performance, resource, security, broad-health, release, or terminal decision, and authorizes no input narrowing, dependency or file removal, tracker closure, or cutover. It grants no permission to remove serde_yaml, serde, any accepted field, error, document, or workflow. It also does not implement include merging, network or cancellation simulation, participant workloads, full fault effects, atomic artifact output, resource-policy bounds, or stable located semantic diagnostics. KEEP_INCUMBENT and dependency_exit_allowed=false remain mandatory. Only A5 may issue a terminal KEEP, DEFER, or CUTOVER decision; CUTOVER and dependency exit remain unauthorized until every declared prerequisite is satisfied."
 }

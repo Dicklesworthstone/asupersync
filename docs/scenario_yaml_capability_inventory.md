@@ -337,11 +337,49 @@ parity.
 
 ### A3 handoff
 
-A3.2 owns the durable fail-closed `KEEP_INCUMBENT` receipt. A4 may continue
-additive YAML/JSON authoring, diagnostics, migration, example, and include-truth
-work, but may not narrow YAML acceptance. A5 remains the sole terminal cutover
-authority and can act only after owner-approved bounds and complete
-SAME-or-BETTER evidence. Any missing or regressed row keeps the incumbent.
+A3.2 (`asupersync-5z2scg.5.3.2`) records the durable fail-closed receipt as
+`SCN-A3-KEEP-INCUMBENT-V1`. Its basis is the landed A3.1
+commit `d7bd450dc53647723a5e9aaa360d0e044794a4b2`; the receipt pins that commit's
+artifact, documentation, and contract SHA-256 values. This makes the KEEP
+decision traceable to the exact static audit rather than to mutable prose.
+
+The receipt groups five blocking gates whose union is all seven unresolved A3.1
+rows:
+
+| Required row | Class | Current state | State required before adoption/cutover |
+| --- | --- | --- | --- |
+| `SCN-A3-UNRESOLVED-OWNER-INPUT-POLICY` | finite application bounds | missing | owner-approved input policy plus all finite byte, scalar, mapping, sequence, work, nesting, and alias bounds |
+| `SCN-A3-UNRESOLVED-OWNED-PARSER` | owned parser | absent | present and source-pinned owned candidate |
+| `SCN-A3-UNRESOLVED-OWNED-WRITER` | owned writer | absent | present and source-pinned owned writer |
+| `SCN-A3-UNRESOLVED-GRAMMAR-DIFFERENTIAL` | grammar parity | not run | SAME-or-BETTER |
+| `SCN-A3-UNRESOLVED-DIAGNOSTIC-PARITY` | diagnostic parity | not proven | SAME-or-BETTER |
+| `SCN-A3-UNRESOLVED-WRITER-PARITY` | writer parity | not proven | SAME-or-BETTER |
+| `SCN-A3-UNRESOLVED-CONSUMER-CUTOVER` | consumer cutover | not authorized | every consumer proven and A5 authorized |
+
+All seven rows are blocking and none is satisfied. The durable result is
+therefore `KEEP_INCUMBENT`, `dependency_exit_allowed=false`,
+`input_narrowing_allowed=false`, and `terminal_cutover_authorized=false`.
+Any missing or regressed row keeps the A3 receipt at `KEEP_INCUMBENT`.
+
+The authority handoff is deliberately asymmetric:
+
+| Child | Authority now | Explicit prohibitions |
+| --- | --- | --- |
+| A4 (`asupersync-5z2scg.5.4`) | may continue additive YAML/JSON conversion, validation, diagnostics, documentation, examples, include-truth, and atomic-output work | may not approve input narrowing, promote scoped evidence to a terminal verdict, narrow YAML acceptance, remove the dependency/capability/files, or issue a terminal decision |
+| A5 (`asupersync-5z2scg.5.5`) | remains the sole terminal KEEP, DEFER, or CUTOVER authority and may issue KEEP/DEFER while blockers remain | CUTOVER and dependency exit are not authorized now; they first need every declared prerequisite, including an owner-approved finite input policy and every required row at its declared state |
+
+A4 conversion work must remain semantic, reversible, and non-destructive. It
+must preserve current YAML inputs, files, accepted language, schema versions,
+defaults, seeds, oracle sets, and replay fingerprints. A5 CUTOVER additionally
+requires a claim-time source/dependency/writer/consumer refresh, complete
+cross-format corpus and downstream evidence, dependency-graph/oracle/replay
+disposition, and migration/rollback evidence. Any missing, absent, unknown,
+planned, blocked, blocked-gap, unrun, unproven, unauthorized, or regressed row
+forces KEEP or DEFER.
+
+This is a static governance receipt. A3.2 did not rerun A1/A2 evidence, approve
+bounds, implement a parser/writer, prove parity or runtime behavior, remove a
+dependency/YAML capability/file, close the tracker, or exercise A5 authority.
 
 ## Child routing
 
@@ -349,12 +387,12 @@ SAME-or-BETTER evidence. Any missing or regressed row keeps the incumbent.
 | --- | --- | --- |
 | A1 | loaders, schema, grammar, corpus, workflows, diagnostics, consumption, gaps | executed contract |
 | A2 | one versioned typed model and additive canonical JSON | executed contract |
-| A3 | incumbent KEEP or complete bounded owned parser/writer parity | A3.1 static audit complete; A3.2 durable receipt pending |
+| A3 | incumbent KEEP or complete bounded owned parser/writer parity | A3.1 static audit and A3.2 durable receipt recorded; tracker state is separate |
 | A4 | located diagnostics, migration, examples, include truth, atomic output, docs | planned |
-| A5 | real validate/run/explore/replay journeys and terminal KEEP-or-cutover decision | planned |
+| A5 | real validate/run/explore/replay journeys and terminal KEEP, DEFER, or CUTOVER decision | planned |
 
-Only A5 is terminal. Any missing, planned, blocked, regressed, or
-non-SAME-or-BETTER row forces KEEP.
+Only A5 is terminal. Any missing, planned, blocked, regressed, or not-at-required
+state row forces KEEP or DEFER with the incumbent retained.
 
 ## Known gaps
 
@@ -385,7 +423,8 @@ diagnostic, resource, consumer, child, or gap rows.
 ## Validation
 
 Run the focused source-pin, typed-schema, parser-behavior, corpus, routing,
-documentation, and negative-mutation contract:
+durable-receipt gate derivation, A4/A5 authority, documentation, and
+negative-mutation contract:
 
 ```bash
 RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay \
@@ -405,17 +444,19 @@ checked scenarios and workflows; they do not close the routed execution gaps.
 
 ## No-claim boundary
 
-This A1/A2/A3.1 packet combines the earlier executable inventory/canonical-JSON
-evidence with a current static acceptance-satisfiability audit. A3.1 did not
-rerun those executable lanes or implement an owned YAML parser or production
+This A1/A2/A3.1/A3.2 packet combines the earlier executable
+inventory/canonical-JSON evidence with a current static
+acceptance-satisfiability audit and fail-closed KEEP receipt. A3.1 and A3.2 did
+not rerun those executable lanes or implement an owned YAML parser or production
 Scenario YAML writer. It proves no complete parity, performance, resource,
 security, broad-health, release, or terminal decision, and authorizes no input
 narrowing, dependency or file removal, tracker closure, or cutover. It also does
-not implement include
-merging, network or cancellation simulation, participant workloads, full fault
-effects, atomic artifact output, resource-policy bounds, or stable located
-semantic diagnostics. `KEEP_INCUMBENT` and `dependency_exit_allowed=false`
-remain mandatory; only A5 may authorize terminal cutover after owner-approved
-bounds and complete SAME-or-BETTER evidence.
+not implement include merging, network or cancellation simulation, participant
+workloads, full fault effects, atomic artifact output, resource-policy bounds,
+or stable located semantic diagnostics. `KEEP_INCUMBENT` and
+`dependency_exit_allowed=false`
+remain mandatory. Only A5 may issue a terminal KEEP, DEFER, or CUTOVER decision;
+CUTOVER and dependency exit remain unauthorized until every declared
+prerequisite is satisfied.
 
 <!-- END SCENARIO YAML CAPABILITY INVENTORY -->
