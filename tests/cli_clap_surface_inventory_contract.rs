@@ -338,6 +338,130 @@ fn every_indexed_command_variant_is_present_and_reachability_is_explicit() {
 }
 
 #[test]
+fn bounded_field_normalization_cohort_is_exact_and_source_anchored() {
+    let artifact = repo_json(ARTIFACT_PATH);
+    let scope = Value::Object(object(&artifact, "scope").clone());
+    assert_eq!(
+        text(&scope, "argument_surface_state"),
+        "FIELD_NORMALIZED_FOR_3_OF_6_PRIMARY_SOURCES"
+    );
+    let normalization = Value::Object(object(&artifact, "field_normalization").clone());
+    assert_eq!(
+        text(&normalization, "status"),
+        "PARTIAL_3_OF_6_PRIMARY_SOURCES"
+    );
+    assert_eq!(
+        string_set(&normalization, "normalized_primary_sources"),
+        expected_set(&[
+            "src/bin/atpd.rs",
+            "src/bin/offline_tuner.rs",
+            "src/cli/args.rs",
+        ])
+    );
+    assert_eq!(
+        string_set(&normalization, "remaining_primary_sources"),
+        expected_set(&[
+            "src/bin/asupersync.rs",
+            "src/bin/atp.rs",
+            "src/cli/atp_command_tree.rs",
+        ])
+    );
+    assert_eq!(unsigned(&normalization, "annotated_arg_attribute_count"), 53);
+    assert_eq!(unsigned(&normalization, "implicit_positional_count"), 2);
+    assert_eq!(unsigned(&normalization, "normalized_field_count"), 55);
+    assert!(text(&normalization, "spelling_policy").contains("not byte-capture evidence"));
+
+    let rows = array(&normalization, "rows");
+    assert_eq!(rows.len(), 55);
+    for (path, expected_count) in [
+        ("src/bin/atpd.rs", 20_usize),
+        ("src/bin/offline_tuner.rs", 15),
+        ("src/cli/args.rs", 20),
+    ] {
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.get("source_path").and_then(Value::as_str) == Some(path))
+                .count(),
+            expected_count,
+            "normalized row count drift: {path}"
+        );
+    }
+
+    let mut field_ids = BTreeSet::new();
+    let mut annotated = 0_u64;
+    let mut implicit = 0_u64;
+    let mut parsed_unused = BTreeSet::new();
+    for row in rows {
+        let field_id = text(row, "field_id");
+        assert!(field_ids.insert(field_id.to_owned()), "duplicate field id {field_id}");
+        let path = text(row, "source_path");
+        let source = read_repo_file(path);
+        for key in [
+            "owner_type",
+            "rust_field",
+            "field_declaration",
+            "cli_spelling",
+            "argument_kind",
+            "spelling_basis",
+            "field_type",
+            "source_default",
+            "cardinality",
+            "scope",
+            "consumer_state",
+        ] {
+            assert!(!text(row, key).is_empty(), "{field_id} missing {key}");
+        }
+        assert!(
+            source.contains(text(row, "field_declaration")),
+            "{field_id} field declaration drift"
+        );
+        let source_attribute = text(row, "source_attribute");
+        if source_attribute == "NONE_IMPLICIT_POSITIONAL" {
+            implicit += 1;
+            assert_eq!(text(row, "argument_kind"), "POSITIONAL");
+            assert!(text(row, "spelling_basis").starts_with("IMPLICIT_POSITIONAL"));
+        } else {
+            annotated += 1;
+            assert!(
+                source.contains(source_attribute),
+                "{field_id} source attribute drift"
+            );
+        }
+        assert!(
+            !array(row, "consumer_anchors").is_empty(),
+            "{field_id} needs a consumer or gap anchor"
+        );
+        if text(row, "consumer_state") == "PARSED_UNUSED_GAP" {
+            parsed_unused.insert(field_id.to_owned());
+        }
+    }
+    assert_eq!(annotated, 53);
+    assert_eq!(implicit, 2);
+    assert_eq!(
+        parsed_unused,
+        expected_set(&["CLI-ATPD-ROOT-FOREGROUND"])
+    );
+
+    let gaps = array(&normalization, "observed_gaps");
+    assert_eq!(
+        gaps.iter()
+            .map(|row| text(row, "gap_id").to_owned())
+            .collect::<BTreeSet<_>>(),
+        expected_set(&[
+            "CLI-FIELD-GAP-01",
+            "CLI-FIELD-GAP-02",
+            "CLI-FIELD-GAP-03",
+            "CLI-FIELD-GAP-04",
+        ])
+    );
+    for gap in gaps {
+        assert!(text(gap, "state").starts_with("SOURCE_OBSERVED"));
+        assert!(!text(gap, "contract").is_empty());
+        assert!(!array(gap, "anchors").is_empty());
+    }
+}
+
+#[test]
 fn feature_environment_config_and_exit_boundaries_fail_closed() {
     let artifact = repo_json(ARTIFACT_PATH);
     let authority = Value::Object(object(&artifact, "authority").clone());
@@ -446,6 +570,7 @@ fn byte_golden_matrix_is_required_but_not_fabricated() {
     for marker in [
         "No byte-level help",
         "No binary or parser was executed",
+        "Field normalization is partial",
         "does not authorize clap replacement",
         "does not prove compilation",
     ] {
@@ -464,6 +589,10 @@ fn documentation_and_adr_keep_the_partial_state_visible() {
         BEAD_ID,
         "159",
         "108",
+        "55",
+        "53",
+        "PARTIAL_3_OF_6_PRIMARY_SOURCES",
+        "PARSED_UNUSED_GAP",
         "zero captured byte goldens",
         "LIBRARY_EXPORTED_NO_BINARY_PARSER_ROOT",
         "MISSING_EXECUTION_RECEIPTS",
@@ -477,6 +606,7 @@ fn documentation_and_adr_keep_the_partial_state_visible() {
         ARTIFACT_PATH,
         DOC_PATH,
         "STATIC_SURFACE_FROZEN_BYTE_GOLDENS_MISSING",
+        "PARTIAL_3_OF_6_PRIMARY_SOURCES",
         "MISSING_EXECUTION_RECEIPTS",
     ] {
         assert!(adr.contains(marker), "ADR missing {marker}");

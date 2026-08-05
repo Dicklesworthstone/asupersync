@@ -181,6 +181,17 @@ inspection cannot establish stdout bytes, stderr bytes, or process exit status.
 The A1 bead remains open until the admitted incumbent binaries populate the
 required byte-capture matrix.
 
+The field-normalization state is
+`PARTIAL_3_OF_6_PRIMARY_SOURCES`. A bounded static cohort now expands all 53
+`#[arg]` declarations in `atpd`, `offline_tuner`, and
+`src/cli/args.rs`, plus the two implicit `atpd identity import/export`
+positionals, into 55 source-anchored rows. It records explicit versus derived
+spellings separately and exposes three behavior distinctions that source hashes
+alone hid: `atpd --foreground` is parsed but unused; tuner weight range prose
+has no matching parser or runtime range validation; shared ATP verify/replay
+ratios do have post-parse range validation. The other three primary sources
+remain type-indexed only, and none of these rows is byte-golden evidence.
+
 ## Rollback
 
 Triggered by any removed or renamed command, alias, option or short form; any
@@ -200,8 +211,9 @@ RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBU
 
 This ADR is a frozen decision and public-surface inventory only. It does not
 prove that the planned evidence has run, that the recorded command vocabulary is
-exhaustive, that help or error text is stable, that non-UTF-8 argv is handled
-correctly, that exit codes behave as documented on any binary other than
+exhaustive beyond the explicitly normalized cohort, that derived spellings equal
+rendered parser bytes, that help or error text is stable, that non-UTF-8 argv is
+handled correctly, that exit codes behave as documented on any binary other than
 `asupersync`, that an owned parser could reach parity, or that `clap` may be
 removed. It also does not certify the capability registry's CAP-CLI source-owner
 rows, environment-variable list, hidden-command names or feature claims, which

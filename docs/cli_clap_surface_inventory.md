@@ -29,8 +29,14 @@ The artifact indexes every parser-derived type, argument-group type,
 subcommand enum, command variant, and value enum. Exact source hashes make all
 fields, doc comments, positional declarations, defaults, short forms, value
 parsers, delimiters, actions, and other clap attributes part of the frozen
-snapshot even though this first static slice does not normalize 490 individual
-`#[arg]` attributes into independent semantic rows.
+snapshot.
+
+The field-level state is now explicitly partial. A first normalization cohort
+covers all 53 `#[arg]` attributes in `atpd`, `offline_tuner`, and the shared
+argument file, plus the two implicit identity path positionals in `atpd`.
+The remaining 437 `#[arg]` attributes in `asupersync`, standalone `atp`,
+and the detached ATP tree remain source-pinned and type-indexed rather than
+field-normalized.
 
 There are 159 indexed command variants across the six files. Only 108 belong
 to binary-root command trees. The remaining 51 are the detached shared ATP
@@ -83,6 +89,44 @@ The tuner has `optimize`, `candidates`, `emit-profile`, `validate`, and
 `--output-dir`. The admitted binary requires both `cli` and
 `simd-intrinsics`, while architecture-specific implementation selection occurs
 after parsing.
+
+## Field-normalization cohort
+
+The machine artifact records 55 field rows under
+`PARTIAL_3_OF_6_PRIMARY_SOURCES`:
+
+| Source | Annotated fields | Implicit positionals | Normalized rows |
+|---|---:|---:|---:|
+| `src/bin/atpd.rs` | 18 | 2 | 20 |
+| `src/bin/offline_tuner.rs` | 15 | 0 | 15 |
+| `src/cli/args.rs` | 20 | 0 | 20 |
+| **Cohort total** | **53** | **2** | **55** |
+
+Each row records a stable field ID, owner type, Rust field declaration, option
+or positional shape, source attribute, explicit default, cardinality, scope,
+consumer classification, and source anchors. Names copied from explicit
+`long =`, `value_name =`, or short-character attributes are labeled
+explicit. Names expected from a bare `long` or `short`, and implicit
+positional value names, are labeled derived. Derived names are static review
+expectations only; they are not accepted as rendered help, usage, or parser
+byte evidence.
+
+The cohort makes four previously compressed distinctions visible:
+
+- `atpd --foreground` is `PARSED_UNUSED_GAP`: parsing populates the field,
+  but the post-parse code has no consumer.
+- `atpd identity import` and `identity export` each take one required
+  implicit `PathBuf` positional even though neither field has an `#[arg]`
+  attribute.
+- The tuner describes its three weights as `0.0-1.0`, but those fields and
+  the minimum-improvement threshold have no clap range parser and no runtime
+  range validation before `OptimizationCriteria` is built.
+- The shared ATP verify `--min-coverage` and replay
+  `--reduction-target` fields also use plain `f64` parsing, but their
+  handlers do perform inclusive runtime range checks.
+
+These observations freeze gaps; they do not authorize silently fixing them in
+the inventory bead.
 
 ## Detached shared ATP tree
 
@@ -161,8 +205,9 @@ explicitly missing; it is not green and is not silently skipped.
 
 `tests/cli_clap_surface_inventory_contract.rs` is authored to verify source
 fingerprints, line counts, declaration and attribute counts, indexed command
-variants, feature/environment/config/exit boundary markers, documentation
-markers, and the empty fail-closed golden state.
+variants, the 55-row partial field-normalization cohort, feature/environment/
+config/exit boundary markers, documentation markers, and the empty fail-closed
+golden state.
 
 In this safety lane the contract was not executed. Validation was limited to
 JSON parsing, hashes, textual counts, and Git whitespace checks. Consequently,
@@ -177,9 +222,10 @@ stderr routing, process exit behavior, non-UTF-8 handling, platform parity,
 compilation, runtime correctness, performance, release readiness, or broad
 workspace health.
 
-The argument surface is source-pinned and type-indexed, not yet normalized
-field by field. The bead therefore remains open, `clap` remains
-`KEEP_UNTIL_PARITY`, and no dependency exit or parser replacement is
+Field normalization covers only three of six primary sources. The other three
+remain source-pinned and type-indexed, and even the normalized rows do not
+substitute for captured parser bytes. The bead therefore remains open, `clap`
+remains `KEEP_UNTIL_PARITY`, and no dependency exit or parser replacement is
 authorized.
 
 <!-- END CLI CLAP SURFACE INVENTORY -->
