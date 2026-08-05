@@ -31,6 +31,9 @@ const HOST_METADATA_BEAD_ID: &str = "asupersync-d24mms.2";
 const HOST_METADATA_AUDIT_ID: &str = "CAP-HOST-BENCH-METADATA-STATIC-AUDIT-V1";
 const NUM_CPUS_CALL: &str = concat!("num_cpus", "::get()");
 const WHOAMI_CALL: &str = concat!("whoami", "::distro()");
+const VISIBILITY_BEAD_ID: &str = "asupersync-d24mms.7";
+const VISIBILITY_AUDIT_ID: &str = "CAP-VISIBILITY-MACRO-STATIC-AUDIT-V1";
+const VISIBILITY_MAKE_TOKEN: &str = concat!("visibility", "::make(pub)");
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -928,6 +931,10 @@ fn runner_and_docs_expose_replay_logging_and_no_claim_boundaries() {
         "NO_PLATFORM_OR_PROFILE_MATRIX_EXECUTED",
         "KEEP_INCUMBENT",
         "dependency_exit_allowed=false",
+        VISIBILITY_AUDIT_ID,
+        VISIBILITY_BEAD_ID,
+        "NO_MACRO_REPLACEMENT_OR_COMPILE_MATRIX_EXECUTED",
+        "visibility_exit_allowed=false",
         GENERATED_BEGIN,
         GENERATED_END,
     ] {

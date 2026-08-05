@@ -213,6 +213,56 @@ The disposition is `KEEP_INCUMBENT` for both dependencies and
 lockfile, or behavior edits, tracker closure, performance claims, release
 readiness, or broad workspace-health claims.
 
+## Visibility macro static audit
+
+`CAP-VISIBILITY-MACRO-STATIC-AUDIT-V1` records the bounded static audit for
+`asupersync-d24mms.7`. It is `STATIC_SOURCE_PINNED_NOT_EXECUTED`: fourteen
+source pins establish the incumbent feature, macro-crate, attribute, registry,
+runner, consumer, and marginal-ledger topology at revision
+`42a66e7f4e6733c28c59405c052c68f7a32ea0d7`. No macro implementation, source
+migration, manifest or lockfile edit, compiler, formatter, test, Cargo lane,
+RCH lane, or replay scenario ran. Its execution state is
+`NO_MACRO_REPLACEMENT_OR_COMPILE_MATRIX_EXECUTED`.
+
+The current inventory is twelve identical `visibility::make(pub)` tokens
+across four production files, correcting the tracker description's stale
+ten-file count. Eleven attributes widen `pub(crate)` items only under
+`test-internals`; one is attached to the already-public `CurrentCxGuard`.
+Observed shapes are two associated const functions, eight associated
+functions, one receiver method, and one struct. They include generic inherent
+impls, multiline signatures, attributes both before and after `cfg_attr`, and
+a function with target-conditioned body branches.
+
+Static token equality is not expansion parity. There is no owned visibility
+attribute in `asupersync-macros`, no visibility-specific unit or trybuild
+fixture, and no privacy-off fixture. `EVD-PROC-MACROS` covers adjacent owned
+macro surfaces only. The baseline declares `test_internals_consumer`, but the
+retained runner implements only `contract`, `consumer-default`,
+`consumer-full`, and `catalog`; the standalone consumer deliberately excludes
+`test-internals`.
+
+The sparse feature topology is also unresolved. `test-internals` currently
+enables `dep:visibility` but not `dep:asupersync-macros`, while the macro crate
+dev-depends on the root with default features disabled and `test-internals`
+enabled. Rewiring that feature could change the package-cycle topology, so a
+cycle-free sparse compile is a required receipt rather than a static
+assumption.
+
+The marginal ledger contains four older `normal:visibility` rows, all in the
+`workspace-dev-build-audit` profile across Linux, macOS, Windows, and wasm.
+Each reports one marginal package, no native code or build script, and one
+proc macro, but the ledger source revision predates this audit and covers none
+of the required sparse profiles. It is graph context, not cutover evidence.
+
+Only the twelve-occurrence inventory gate is `STATIC_COMPLETE`; downstream
+semantic classification, UI corpus, privacy-off behavior, sparse-feature and
+cycle proof, hygiene/span/diagnostic parity, platform/profile compilation,
+downstream replay, and fresh serialized ledger cutover are `MISSING`. The
+disposition is `KEEP_INCUMBENT` and `visibility_exit_allowed=false`. This
+packet does not authorize macro publication, feature rewiring, source,
+manifest, lockfile, or tracker edits, release readiness, or broad
+workspace-health claims.
+
 ## High-risk boundaries
 
 - SQLite uses the incumbent real-file/WAL corpus, but FrankenSQLite is

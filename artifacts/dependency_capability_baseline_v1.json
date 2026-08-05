@@ -2016,6 +2016,414 @@
       "This audit does not authorize num_cpus or whoami removal, manifest or lockfile edits, source behavior changes, tracker closure, performance claims, release readiness, or broad workspace health claims."
     ]
   },
+  "visibility_macro_static_audit": {
+    "audit_id": "CAP-VISIBILITY-MACRO-STATIC-AUDIT-V1",
+    "bead_id": "asupersync-d24mms.7",
+    "capability_id": "CAP-VISIBILITY-MACRO",
+    "observed_at_revision": "42a66e7f4e6733c28c59405c052c68f7a32ea0d7",
+    "audit_state": "STATIC_SOURCE_PINNED_NOT_EXECUTED",
+    "execution_state": "NO_MACRO_REPLACEMENT_OR_COMPILE_MATRIX_EXECUTED",
+    "decision": {
+      "dependency": "visibility",
+      "candidate": "owned exact-scope attribute in asupersync-macros",
+      "disposition": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "manifest_or_lockfile_edit_allowed": false,
+      "macro_or_source_behavior_change_allowed": false,
+      "tracker_closure_allowed": false,
+      "reason": "All twelve incumbent attributes are statically inventoried, but no owned macro, visibility-specific UI corpus, privacy-off proof, sparse-feature compile, package-cycle proof, downstream consumer scenario, or current replay receipt exists."
+    },
+    "dependency_contract": {
+      "manifest_kind": "optional normal dependency",
+      "manifest_requirement": "0.1",
+      "direct_locked_version": "0.1.1",
+      "root_direct_edge": "normal:visibility",
+      "enabling_feature": "test-internals",
+      "exact_attribute": "cfg_attr(feature = test-internals, visibility::make(pub))",
+      "locked_dependencies": [
+        "proc-macro2",
+        "quote",
+        "syn 2.0.119"
+      ],
+      "security_requirement": "macro emits no unsafe",
+      "normal_build_privacy_requirement": "Every pub(crate) item remains non-public whenever test-internals is disabled."
+    },
+    "source_pins": [
+      {
+        "path": "Cargo.toml",
+        "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+        "line_count": 1038,
+        "role": "default, proc-macros, and test-internals feature edges plus optional dependency declarations"
+      },
+      {
+        "path": "Cargo.lock",
+        "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+        "line_count": 4666,
+        "role": "root dependency edge and visibility 0.1.1 transitive package identity"
+      },
+      {
+        "path": "asupersync-macros/Cargo.toml",
+        "sha256": "69dae442965f4321758cbfb5f9ef1ffb413c474938ccc5d5a0eeed2600c2b26e",
+        "line_count": 36,
+        "role": "owned proc-macro crate dependencies, trybuild harness, and root dev-dependency topology"
+      },
+      {
+        "path": "asupersync-macros/src/lib.rs",
+        "sha256": "4f59758bbc8ab29bebd067bace65ffb60a49210f6ae640e01f8d053c0f7131da",
+        "line_count": 703,
+        "role": "owned proc-macro publication surface with no visibility replacement attribute"
+      },
+      {
+        "path": "asupersync-macros/tests/compile_fail_tests.rs",
+        "sha256": "12c8d89c91ca005cf7ec02535e08e6a2dad7012f6f39b046a8a474cbbdfae79d",
+        "line_count": 7,
+        "role": "existing wildcard trybuild compile-fail harness without visibility fixtures"
+      },
+      {
+        "path": "src/types/id.rs",
+        "sha256": "0c5b561ab7add1eab5ea9e67d557b5ec325df52bf71ec42c6fc239889c3eb484",
+        "line_count": 1013,
+        "role": "two pub(crate) associated const constructors guarded by the incumbent attribute"
+      },
+      {
+        "path": "src/cx/cx.rs",
+        "sha256": "516af14e3110790d510943d4e329c1afb957d8257c73e2f4fb1b29d139b933a8",
+        "line_count": 7391,
+        "role": "one already-public struct, four constructors, and one receiver method guarded by the incumbent attribute"
+      },
+      {
+        "path": "src/cx/scope.rs",
+        "sha256": "4521de4139fbe9aabe42baba8da7b826dde4472025a32149325bd9490b687bec",
+        "line_count": 3529,
+        "role": "three pub(crate) functions in a generic inherent impl guarded by the incumbent attribute"
+      },
+      {
+        "path": "src/net/tcp/stream.rs",
+        "sha256": "ca7fc4cbd26cbf5985c46939c3deea36e25505537b5f494f99de04ef70c45798",
+        "line_count": 2776,
+        "role": "one pub(crate) test constructor with target-conditioned body behavior"
+      },
+      {
+        "path": "artifacts/dependency_capability_registry_v1.json",
+        "sha256": "e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2",
+        "line_count": 6917,
+        "role": "CAP-VISIBILITY-MACRO ownership, semantics, feature, and planned-fixture authority"
+      },
+      {
+        "path": "scripts/run_dependency_capability_baseline.sh",
+        "sha256": "c63e28b3d24fc4b3d78469adaf333eb36def8ece77f25b0f53ab620cc7de1e6e",
+        "line_count": 500,
+        "role": "retained baseline runner whose four implemented scenarios omit test_internals_consumer"
+      },
+      {
+        "path": "artifacts/dependency_marginal_ledger_v1.json",
+        "sha256": "9382d8357e59b49b01775f3efad2db95f2186c63bc432b5616ba20f3b9a218a9",
+        "line_count": 188045,
+        "role": "stale four-target visibility graph opportunity rows"
+      },
+      {
+        "path": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml",
+        "sha256": "51368bfe60c10a87532cf77155bb18103bd51db5dd26d7cb37be775ead44507a",
+        "line_count": 29,
+        "role": "standalone public consumer manifest that deliberately excludes test-internals"
+      },
+      {
+        "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
+        "sha256": "b8f78479ddcd426448b224ef6d627b20787e1d6d25c8a74b786bade7bff8778b",
+        "line_count": 859,
+        "role": "standalone public consumer source with no visibility-specific journey"
+      }
+    ],
+    "attribute_inventory": {
+      "state": "STATIC_COMPLETE_TWELVE_OCCURRENCES_FOUR_FILES",
+      "exact_source_token": "visibility::make(pub)",
+      "occurrence_count": 12,
+      "production_file_count": 4,
+      "pub_crate_item_count": 11,
+      "already_public_item_count": 1,
+      "item_shape_counts": {
+        "inherent_associated_const_fn": 2,
+        "inherent_associated_fn": 8,
+        "inherent_receiver_method": 1,
+        "public_struct": 1
+      },
+      "files": [
+        {
+          "path": "src/types/id.rs",
+          "occurrence_count": 2,
+          "generic_impl_context_count": 0,
+          "items": [
+            "RegionId::from_arena: pub(crate) associated const fn; inline and must_use",
+            "TaskId::from_arena: pub(crate) associated const fn; inline, must_use, and allow(dead_code)"
+          ]
+        },
+        {
+          "path": "src/cx/cx.rs",
+          "occurrence_count": 6,
+          "generic_impl_context_count": 5,
+          "items": [
+            "CurrentCxGuard: already-public struct with documentation attributes on both sides of cfg_attr",
+            "Cx::new: pub(crate) associated fn; must_use and allow(dead_code)",
+            "Cx::new_with_observability: multiline pub(crate) associated fn; must_use",
+            "Cx::new_with_io: multiline pub(crate) associated fn; must_use",
+            "Cx::new_with_drivers: multiline pub(crate) associated fn; must_use and a following clippy allow attribute",
+            "Cx::io_driver_handle: pub(crate) receiver method; inline and must_use"
+          ]
+        },
+        {
+          "path": "src/cx/scope.rs",
+          "occurrence_count": 3,
+          "generic_impl_context_count": 3,
+          "items": [
+            "Scope::new: pub(crate) associated fn in impl<P: Policy> Scope<'_, P>; must_use and allow(dead_code)",
+            "Scope::new_with_capability_budget: multiline pub(crate) associated fn in a generic impl; must_use and allow(dead_code)",
+            "Scope::with_pending_spawn_counter: multiline pub(crate) associated fn with self receiver in a generic impl; must_use and allow(dead_code)"
+          ]
+        },
+        {
+          "path": "src/net/tcp/stream.rs",
+          "occurrence_count": 1,
+          "generic_impl_context_count": 0,
+          "items": [
+            "TcpStream::from_std: pub(crate) associated fn whose body has wasm32 and non-wasm32 cfg branches"
+          ]
+        }
+      ],
+      "unsupported_static_inferences": [
+        "Attribute token equality does not prove identical expansion tokens or spans.",
+        "An already-public input does not prove the candidate preserves incumbent no-op behavior.",
+        "Generic impl placement does not prove candidate hygiene for arbitrary generics or where clauses.",
+        "Target-conditioned function bodies do not prove every target can compile the candidate attribute."
+      ]
+    },
+    "feature_path_inventory": {
+      "default_features": [
+        "nightly-outcome-try",
+        "proc-macros"
+      ],
+      "proc_macros_feature_edges": [
+        "dep:asupersync-macros"
+      ],
+      "test_internals_feature_edges": [
+        "dep:tracing",
+        "dep:tracing-log",
+        "dep:tracing-subscriber",
+        "dep:visibility"
+      ],
+      "test_internals_currently_enables_owned_macro": false,
+      "sparse_no_default_test_internals_currently_uses_visibility": true,
+      "candidate_requires_explicit_owned_macro_edge": true,
+      "default_without_test_internals_must_preserve_privacy": true,
+      "proc_macros_without_test_internals_must_preserve_privacy": true
+    },
+    "owned_macro_topology_assessment": {
+      "owned_crate": "asupersync-macros",
+      "owned_crate_version": "0.3.10",
+      "proc_macro_library": true,
+      "existing_parser_major": "syn 3",
+      "new_parser_dependency_allowed": false,
+      "root_dev_dependency_from_owned_crate": {
+        "path": "..",
+        "default_features": false,
+        "features": [
+          "test-internals"
+        ]
+      },
+      "cycle_risk_state": "UNRESOLVED_REQUIRES_SPARSE_COMPILE_PROOF",
+      "cycle_risk": "Adding dep:asupersync-macros to test-internals changes the existing asupersync-macros dev-dependency topology and may create a package cycle in macro-crate tests.",
+      "published_macro_present": false,
+      "visibility_specific_unit_or_trybuild_fixture_present": false
+    },
+    "downstream_use_assessment": {
+      "state": "PARTIAL_STATIC_TOKEN_SEARCH_NOT_SEMANTICALLY_CLASSIFIED",
+      "observed_consumer_classes": [
+        "root integration and conformance tests",
+        "root benchmark targets",
+        "excluded fuzz workspace targets",
+        "metamorphic and replay harnesses"
+      ],
+      "known_direct_users": [
+        "RegionId::from_arena",
+        "TaskId::from_arena",
+        "Cx::new",
+        "Cx::new_with_observability",
+        "Cx::new_with_drivers",
+        "Cx::io_driver_handle",
+        "Scope::new",
+        "Scope::new_with_capability_budget",
+        "TcpStream::from_std"
+      ],
+      "no_direct_token_match_observed_for": [
+        "Cx::new_with_io",
+        "Scope::with_pending_spawn_counter"
+      ],
+      "classification_gap": "Text search includes similarly named types and does not prove which Cargo target, feature set, or external privacy boundary makes each use compile.",
+      "complete_downstream_inventory_present": false
+    },
+    "existing_evidence_assessment": {
+      "baseline_evidence_id": "EVD-PROC-MACROS",
+      "baseline_feature_profile": "proc-macros",
+      "baseline_fixture_paths": [
+        "asupersync-macros/src/lib.rs",
+        "examples/macros_basic.rs"
+      ],
+      "baseline_state": "EXECUTABLE_PARTIAL_BLOCKING",
+      "coverage_state": "ADJACENT_MACRO_TESTS_NOT_VISIBILITY_REPLACEMENT_PARITY",
+      "covered_statically": [
+        "existing owned proc-macro publication surface",
+        "existing wildcard compile-fail harness",
+        "incumbent attribute source placements"
+      ],
+      "not_covered": [
+        "owned visibility attribute expansion",
+        "positive and privacy-off UI fixtures",
+        "stacked cfg and attribute preservation",
+        "generic impl and where-clause hygiene",
+        "malformed argument and unsupported item diagnostics",
+        "default, proc-macros, and sparse test-internals profiles",
+        "downstream test-internals consumer and real user journey"
+      ],
+      "declared_scenario_id": "test_internals_consumer",
+      "dependency_capability_runner_state": "SCENARIO_NOT_IMPLEMENTED",
+      "visibility_specific_trybuild_fixture_count": 0,
+      "execution_receipt_present": false
+    },
+    "marginal_ledger_assessment": {
+      "artifact_path": "artifacts/dependency_marginal_ledger_v1.json",
+      "ledger_source_commit": "ddea6250aee80357756fa1f39456823df88f7af1",
+      "source_commit_matches_observed_revision": false,
+      "fresh_for_cutover": false,
+      "visibility_measurement_row_count": 4,
+      "feature_profiles": [
+        "workspace-dev-build-audit"
+      ],
+      "target_triples": [
+        "aarch64-apple-darwin",
+        "wasm32-unknown-unknown",
+        "x86_64-pc-windows-msvc",
+        "x86_64-unknown-linux-gnu"
+      ],
+      "marginal_package_version_count_per_row": 1,
+      "marginal_package_version": "visibility@0.1.1",
+      "unsafe_exposure_class": "SAFE-OWN",
+      "marginal_native_code_state": "none",
+      "build_script_count": 0,
+      "proc_macro_count_per_row": 1,
+      "favorable_cutover_verdict": false,
+      "interpretation": "The four rows show a one-package graph opportunity only for an older workspace-dev-build audit; they do not cover the required sparse feature profiles or current source."
+    },
+    "required_evidence_matrix": {
+      "status": "MISSING_NOT_RUN",
+      "captured_case_count": 0,
+      "captured_cases": [],
+      "item_shape_cells": [
+        "pub(crate) associated const fn",
+        "pub(crate) associated fn with single-line and multiline signatures",
+        "pub(crate) receiver method",
+        "already-public struct no-op",
+        "generic inherent impl",
+        "stacked attributes before and after cfg_attr",
+        "generic and where-clause UI fixture",
+        "unsupported item shape"
+      ],
+      "profile_cells": [
+        "default",
+        "proc-macros only",
+        "no-default-features plus test-internals",
+        "default plus test-internals",
+        "asupersync-macros unit and trybuild targets"
+      ],
+      "target_cells": [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+        "wasm32-unknown-unknown"
+      ],
+      "diagnostic_cells": [
+        "empty arguments",
+        "non-pub visibility argument",
+        "malformed visibility tokens",
+        "unsupported syntax",
+        "unsupported placement",
+        "stable error location and message"
+      ],
+      "required_record_fields": [
+        "case_id",
+        "source_revision",
+        "exact_command",
+        "incumbent_and_candidate_identity",
+        "feature_set",
+        "target_and_host_identity",
+        "toolchain_identity",
+        "expanded_or_compiled_fixture_identity",
+        "stdout_and_stderr",
+        "exit_code",
+        "structured_events_ndjson",
+        "redaction_and_replay_result"
+      ],
+      "missing_or_unsupported_policy": "A missing, skipped, stale, cycle-blocked, non-replayable, or diagnostic-regressed cell is not SAME-or-BETTER evidence and keeps visibility."
+    },
+    "cutover_gate": {
+      "required_state": "SAME_OR_BETTER",
+      "rows": [
+        {
+          "row_id": "VISIBILITY-ATTRIBUTE-INVENTORY",
+          "state": "STATIC_COMPLETE",
+          "requirement": "exactly twelve incumbent attributes across four files and all four observed item-shape classes remain source-pinned"
+        },
+        {
+          "row_id": "VISIBILITY-DOWNSTREAM-USE-INVENTORY",
+          "state": "MISSING",
+          "requirement": "every integration, benchmark, fuzz, conformance, and macro-crate consumer is semantically classified by target and feature path"
+        },
+        {
+          "row_id": "VISIBILITY-OWNED-MACRO-UI-CORPUS",
+          "state": "MISSING",
+          "requirement": "owned unit and trybuild fixtures cover every observed shape, stacked attributes, generics, where clauses, malformed arguments, and unsupported syntax"
+        },
+        {
+          "row_id": "VISIBILITY-PRIVACY-OFF-PARITY",
+          "state": "MISSING",
+          "requirement": "default and proc-macros-only consumers prove no pub(crate) surface becomes public without test-internals"
+        },
+        {
+          "row_id": "VISIBILITY-SPARSE-FEATURE-AND-CYCLE-PROOF",
+          "state": "MISSING",
+          "requirement": "no-default test-internals resolves the owned macro explicitly and the macro crate's root dev-dependency remains cycle-free"
+        },
+        {
+          "row_id": "VISIBILITY-HYGIENE-SPAN-DIAGNOSTIC-PARITY",
+          "state": "MISSING",
+          "requirement": "expansion tokens, cfg evaluation, item attributes, hygiene, spans, and located errors are SAME or BETTER"
+        },
+        {
+          "row_id": "VISIBILITY-PLATFORM-PROFILE-MATRIX",
+          "state": "MISSING",
+          "requirement": "all declared target and feature cells compile through the remote-only proof policy"
+        },
+        {
+          "row_id": "VISIBILITY-DOWNSTREAM-E2E-REPLAY",
+          "state": "MISSING",
+          "requirement": "test_internals_consumer and a real user journey retain structured logs, provenance, redaction, cleanup, and replay"
+        },
+        {
+          "row_id": "VISIBILITY-FRESH-LEDGER-SERIALIZED-CUTOVER",
+          "state": "MISSING",
+          "requirement": "a current classified marginal ledger and checked manifest/lock negative scans land only after all parity rows pass"
+        }
+      ],
+      "on_any_missing_or_regressed_row": "KEEP_INCUMBENT",
+      "visibility_exit_allowed": false,
+      "tracker_closure_allowed": false
+    },
+    "no_claims": [
+      "No owned visibility macro, source migration, manifest edit, lockfile edit, compiler, formatter, unit test, trybuild test, downstream test, Cargo lane, RCH lane, or replay scenario was executed.",
+      "A complete twelve-occurrence source inventory does not prove expansion, hygiene, span, diagnostic, privacy, sparse-feature, package-cycle, or downstream parity.",
+      "EVD-PROC-MACROS is adjacent macro-crate evidence, not a visibility replacement receipt.",
+      "The stale four-row marginal ledger quantifies a one-package graph opportunity but does not authorize cutover.",
+      "This audit does not authorize visibility removal, owned macro publication, feature rewiring, source behavior changes, tracker closure, release readiness, or broad workspace-health claims."
+    ]
+  },
   "no_claim_boundaries": [
     "This artifact is a baseline inventory, not proof that any replacement is SAME-or-BETTER.",
     "No row authorizes dependency removal, public API narrowing, format deletion, feature removal, service deprecation, unsafe expansion, or cutover.",
