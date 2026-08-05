@@ -501,6 +501,108 @@
       ]
     }
   ],
+  "artifact_reference_integrity": {
+    "audit_id": "artifact-full-file-hash-cycle-witness-2026-08-05",
+    "audit_scope": "git-tracked artifacts/*.json documents; recursively inspect JSON objects that pair a repository-relative path with a full-file sha256",
+    "full_artifact_corpus_claim": false,
+    "discovery_receipt": {
+      "capture_commit": "15391290dce5d259bf491e676d35f3d46564935a",
+      "capture_date": "2026-08-05",
+      "execution_state": "STATIC_READ_ONLY",
+      "tracked_json_document_count": 354,
+      "parse_failure_count": 0,
+      "unique_full_file_hash_edge_count": 199,
+      "unique_reference_node_count": 105,
+      "cyclic_component_count": 1
+    },
+    "finding_state": "BLOCKED_REFERENCE_CYCLE",
+    "finding": "Three two-edge cycles share dependency_capability_baseline_v1.json. Refreshing any stale reverse pin mutates its source artifact and invalidates the baseline's inbound full-file pin, so blind sequential full-file repinning has no guaranteed terminating order.",
+    "component_members": [
+      "artifacts/base64_capability_inventory_v1.json",
+      "artifacts/dependency_capability_baseline_v1.json",
+      "artifacts/dependency_phase1_aggregate_signoff_v1.json",
+      "artifacts/hex_capability_inventory_v1.json"
+    ],
+    "component_edge_count": 6,
+    "simple_two_edge_cycle_count": 3,
+    "edges": [
+      {
+        "cycle_id": "base64-baseline",
+        "source_artifact": "artifacts/base64_capability_inventory_v1.json",
+        "target_artifact": "artifacts/dependency_capability_baseline_v1.json",
+        "stored_target_sha256": "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8",
+        "stored_target_line_count": 1357,
+        "live_target_sha256": "ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4",
+        "live_target_line_count": 3210,
+        "pin_state_at_capture": "historical"
+      },
+      {
+        "cycle_id": "base64-baseline",
+        "source_artifact": "artifacts/dependency_capability_baseline_v1.json",
+        "target_artifact": "artifacts/base64_capability_inventory_v1.json",
+        "stored_target_sha256": "28171082ff529b93cbe951b9de84db9423b8922fde531c82aa21051b933c83eb",
+        "stored_target_line_count": 417,
+        "live_target_sha256": "28171082ff529b93cbe951b9de84db9423b8922fde531c82aa21051b933c83eb",
+        "live_target_line_count": 417,
+        "pin_state_at_capture": "current"
+      },
+      {
+        "cycle_id": "baseline-phase1-signoff",
+        "source_artifact": "artifacts/dependency_capability_baseline_v1.json",
+        "target_artifact": "artifacts/dependency_phase1_aggregate_signoff_v1.json",
+        "stored_target_sha256": "f99bb9e88291d122b1f075c43480436ed1a94c0389174a472c9684d9b2ebf3c4",
+        "stored_target_line_count": 327,
+        "live_target_sha256": "f99bb9e88291d122b1f075c43480436ed1a94c0389174a472c9684d9b2ebf3c4",
+        "live_target_line_count": 327,
+        "pin_state_at_capture": "current"
+      },
+      {
+        "cycle_id": "baseline-hex",
+        "source_artifact": "artifacts/dependency_capability_baseline_v1.json",
+        "target_artifact": "artifacts/hex_capability_inventory_v1.json",
+        "stored_target_sha256": "abfa1d24ea067fbab58b862f8d5ba0e624589ad313d765f9e88e5e7ebb94d760",
+        "stored_target_line_count": 960,
+        "live_target_sha256": "abfa1d24ea067fbab58b862f8d5ba0e624589ad313d765f9e88e5e7ebb94d760",
+        "live_target_line_count": 960,
+        "pin_state_at_capture": "current"
+      },
+      {
+        "cycle_id": "baseline-phase1-signoff",
+        "source_artifact": "artifacts/dependency_phase1_aggregate_signoff_v1.json",
+        "target_artifact": "artifacts/dependency_capability_baseline_v1.json",
+        "stored_target_sha256": "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8",
+        "stored_target_line_count": null,
+        "live_target_sha256": "ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4",
+        "live_target_line_count": 3210,
+        "pin_state_at_capture": "historical"
+      },
+      {
+        "cycle_id": "baseline-hex",
+        "source_artifact": "artifacts/hex_capability_inventory_v1.json",
+        "target_artifact": "artifacts/dependency_capability_baseline_v1.json",
+        "stored_target_sha256": "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8",
+        "stored_target_line_count": 1357,
+        "live_target_sha256": "ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4",
+        "live_target_line_count": 3210,
+        "pin_state_at_capture": "historical"
+      }
+    ],
+    "remediation": {
+      "required_state": "BREAK_EACH_TWO_EDGE_CYCLE_BEFORE_REPIN",
+      "minimum_full_file_edges_to_replace": 3,
+      "accepted_replacement_kinds": [
+        "immutable_commit_or_blob_provenance",
+        "canonical_semantic_projection"
+      ],
+      "operator_rule": "Replace at least one full-file hash edge in each named two-edge cycle before refreshing mutable pins; preserve the historical hash as provenance rather than relabeling it current."
+    },
+    "no_claim_boundaries": [
+      "does_not_prove_full_corpus_coverage",
+      "does_not_make_cyclic_pins_current",
+      "does_not_authorize_blind_hash_refresh",
+      "does_not_replace_immutable_provenance"
+    ]
+  },
   "negative_fixtures": [
     {
       "fixture_id": "malformed_json",
@@ -521,6 +623,11 @@
       "fixture_id": "self_supersession",
       "input_kind": "rows",
       "must_fail_with": "supersession"
+    },
+    {
+      "fixture_id": "missing_reference_cycle_edge",
+      "input_kind": "artifact_reference_integrity",
+      "must_fail_with": "reference cycle edge set"
     }
   ],
   "summary": {

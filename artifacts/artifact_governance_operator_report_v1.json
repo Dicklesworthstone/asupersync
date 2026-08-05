@@ -48,6 +48,10 @@
       "meaning": "Scanner orphan rows have references but no sufficient governance ledger row.",
       "next_action_rule": "Add a ledger row or explicit non-citeable exclusion before citation."
     },
+    "reference_cycle": {
+      "meaning": "Mutable artifacts pin one another's full-file hashes in a directed cycle, so blind sequential repinning cannot guarantee a current fixed point.",
+      "next_action_rule": "Replace at least one full-file edge in each named cycle with immutable commit/blob provenance or a canonical semantic projection before repinning."
+    },
     "stale_superseded": {
       "meaning": "Historical rows have a successor and must not be cited as current evidence.",
       "next_action_rule": "Cite the successor for current evidence and retain the stale artifact for lineage."
@@ -271,6 +275,40 @@
       ]
     },
     {
+      "action_id": "reference_cycle",
+      "summary": "Break cyclic full-file hash dependencies before repinning.",
+      "items": [
+        {
+          "item_id": "dependency-capability-baseline-reference-cycle",
+          "artifact_path": "artifacts/dependency_capability_baseline_v1.json",
+          "ledger_row": null,
+          "scanner_category": null,
+          "seed_row": null,
+          "owner_beads": [
+            "asupersync-dep-p1-foundations-upksjk.4",
+            "asupersync-dep-p1-foundations-upksjk.5.2",
+            "asupersync-d24mms.9.5",
+            "asupersync-d24mms.10.6"
+          ],
+          "selected_owner": null,
+          "cycle_members": [
+            "artifacts/base64_capability_inventory_v1.json",
+            "artifacts/dependency_capability_baseline_v1.json",
+            "artifacts/dependency_phase1_aggregate_signoff_v1.json",
+            "artifacts/hex_capability_inventory_v1.json"
+          ],
+          "cycle_edge_count": 6,
+          "minimum_full_file_edges_to_replace": 3,
+          "next_action": "Coordinate the four artifact owners, then replace at least one full-file edge in each reciprocal cycle with immutable commit/blob provenance or a canonical semantic projection before any hash refresh.",
+          "no_claim_boundaries": [
+            "does_not_make_cyclic_pins_current",
+            "does_not_authorize_blind_hash_refresh",
+            "does_not_replace_immutable_provenance"
+          ]
+        }
+      ]
+    },
+    {
       "action_id": "stale_superseded",
       "summary": "Retain lineage and cite the successor for current evidence.",
       "items": [
@@ -296,8 +334,8 @@
     }
   ],
   "operator_summary": {
-    "bucket_count": 8,
-    "item_count": 11,
+    "bucket_count": 9,
+    "item_count": 12,
     "citeable_item_count": 2,
     "blocked_item_count": 3,
     "ambiguous_item_count": 1,
@@ -306,14 +344,18 @@
     "excluded_item_count": 1,
     "missing_tests_item_count": 1,
     "operator_context_item_count": 1,
+    "reference_cycle_item_count": 1,
     "first_blocker": "validation-frontier-inventory",
-    "golden_summary": "citeable=2 blocked=3 ambiguous=1 owner_missing=1 stale_superseded=1 excluded=1 missing_tests=1 operator_context=1"
+    "golden_summary": "citeable=2 blocked=3 ambiguous=1 owner_missing=1 reference_cycle=1 stale_superseded=1 excluded=1 missing_tests=1 operator_context=1"
   },
   "no_claim_boundaries": [
     "does_not_prove_full_corpus_coverage",
     "does_not_authorize_deletion",
     "does_not_prove_fresh_rch_pass",
     "does_not_close_artifact_beads",
-    "does_not_prove_release_readiness"
+    "does_not_prove_release_readiness",
+    "does_not_make_cyclic_pins_current",
+    "does_not_authorize_blind_hash_refresh",
+    "does_not_replace_immutable_provenance"
   ]
 }

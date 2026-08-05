@@ -25,9 +25,22 @@ The scanner is intentionally bounded: it validates a representative corpus and d
 | `stale` | `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json` | Superseded by `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json`; retain for lineage only. |
 | `excluded` | `${TMPDIR:-/tmp}/rch_target_*` | Ephemeral RCH target/cache output; exclusion does not authorize deletion. |
 
+## Full-File Hash Cycle Witness
+
+The scanner also carries a static, read-only `BLOCKED_REFERENCE_CYCLE` witness captured at commit `15391290dce5d259bf491e676d35f3d46564935a`. This audit is orthogonal to the representative ownership rows above. Its discovery scope was the 354 Git-tracked JSON documents under `artifacts/`, recursively recognizing objects that pair a repository-relative `path` with a full-file `sha256`; it is not a full-artifact-corpus claim.
+
+The only cyclic component found in that captured scope has four members and six directed edges:
+
+- `artifacts/dependency_capability_baseline_v1.json` pins the Base64 inventory, Hex inventory, and Phase-1 signoff at their current captured bytes.
+- Each of those three artifacts pins an older full-file hash of the dependency capability baseline.
+- The result is three reciprocal two-edge cycles sharing the baseline. Refreshing any stale reverse pin changes its source artifact and invalidates the baseline's corresponding inbound pin.
+
+Blind sequential hash refresh therefore has no guaranteed terminating order. Before repinning, an owner must break at least one full-file edge in each of the three named cycles by using immutable commit/blob provenance or a canonical semantic projection. Historical hashes must remain labeled as historical provenance.
+
 ## Boundaries
 
 - This report is an operator routing aid, not a fresh RCH pass.
 - Orphan does not mean unused, ownerless, or safe to delete.
 - Excluded means outside this durable artifact scanner, not safe to remove.
 - Stale means cite the successor for current evidence and retain the stale path for lineage.
+- The cycle witness does not make cyclic pins current and does not authorize blind hash refresh.

@@ -19,6 +19,7 @@ const REQUIRED_ACTIONS: &[&str] = &[
     "missing_tests",
     "operator_context",
     "owner_missing",
+    "reference_cycle",
     "stale_superseded",
 ];
 
@@ -329,6 +330,33 @@ fn buckets_are_ledger_scanner_and_backfill_aligned() {
             allowed_boundaries.extend(string_set(seed, "no_claim_boundaries"));
         }
 
+        if action_id == "reference_cycle" {
+            let scanner = scanner();
+            let audit = object(&scanner, "artifact_reference_integrity");
+            let audit_value = Value::Object(audit.clone());
+            assert_eq!(
+                string(&audit_value, "finding_state"),
+                "BLOCKED_REFERENCE_CYCLE"
+            );
+            assert_eq!(
+                string_set(&item, "cycle_members"),
+                string_set(&audit_value, "component_members")
+            );
+            assert_eq!(
+                u64_field(&item, "cycle_edge_count"),
+                u64_field(&audit_value, "component_edge_count")
+            );
+            let remediation = object(&audit_value, "remediation");
+            assert_eq!(
+                u64_field(&item, "minimum_full_file_edges_to_replace"),
+                u64_field(
+                    &Value::Object(remediation.clone()),
+                    "minimum_full_file_edges_to_replace"
+                )
+            );
+            assert_eq!(optional_string(&item, "selected_owner"), None);
+        }
+
         for boundary in &no_claims {
             assert!(
                 allowed_boundaries.contains(boundary),
@@ -346,7 +374,7 @@ fn operator_summary_counts_and_golden_text_are_stable() {
 
     assert_eq!(
         u64_field(&Value::Object(summary.clone()), "bucket_count"),
-        8
+        9
     );
     assert_eq!(
         u64_field(&Value::Object(summary.clone()), "item_count"),
@@ -361,6 +389,7 @@ fn operator_summary_counts_and_golden_text_are_stable() {
         ("missing_tests", "missing_tests_item_count", 1),
         ("operator_context", "operator_context_item_count", 1),
         ("owner_missing", "owner_missing_item_count", 1),
+        ("reference_cycle", "reference_cycle_item_count", 1),
         ("stale_superseded", "stale_or_superseded_item_count", 1),
     ];
 
@@ -379,7 +408,7 @@ fn operator_summary_counts_and_golden_text_are_stable() {
 
     assert_eq!(
         string(&Value::Object(summary.clone()), "golden_summary"),
-        "citeable=2 blocked=3 ambiguous=1 owner_missing=1 stale_superseded=1 excluded=1 missing_tests=1 operator_context=1"
+        "citeable=2 blocked=3 ambiguous=1 owner_missing=1 reference_cycle=1 stale_superseded=1 excluded=1 missing_tests=1 operator_context=1"
     );
     assert_eq!(
         string(&Value::Object(summary.clone()), "first_blocker"),
