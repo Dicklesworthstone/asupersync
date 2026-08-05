@@ -3,7 +3,7 @@
   "schema_version": 1,
   "bead_id": "asupersync-sched-hot-path-perf-bt4y5f.4.1",
   "captured_date_utc": "2026-08-05",
-  "base_commit": "874f9564e79213ed2687c3dbfd554f315ec78275",
+  "base_commit": "38856122aa1dcc98a48148b74e96ffb491258682",
   "disposition": "STATIC_INVENTORY_COMPLETE_PRODUCTION_UNCHANGED",
   "validation_state": {
     "source_hashes_checked": true,
@@ -182,8 +182,8 @@
     },
     {
       "path": "docs/perf_runbook.md",
-      "sha256": "6dd52ffe1376239fe72c2b1612a455e1ffe42b6ae1f25914e6ebbf15912c2364",
-      "line_count": 151,
+      "sha256": "d643c03c19cfc3e088fcdb5c088b8abc54fcc1d7b0d1a3f088b0e9ae6633f909",
+      "line_count": 172,
       "role": "baseline ownership, host-family identity, and historical-row migration policy"
     }
   ],
