@@ -6,15 +6,17 @@
 //!
 //! # Structures
 //!
-//! - [`IntrusiveRing`]: FIFO queue with O(1) push_back, pop_front, remove
+//! - [`IntrusiveRing`]: FIFO queue with O(1) push_back/pop_front and bounded
+//!   traversal for exact-instance membership/removal
 //! - [`IntrusiveStack`]: LIFO stack with FIFO steal (work-stealing pattern)
 //!
 //! # Design
 //!
 //! - Links (`next_in_queue`, `prev_in_queue`, `queue_tag`) are stored in `TaskRecord`
 //! - Queues maintain only head/tail indices into the task arena
-//! - Each task can be in at most one queue (enforced by `queue_tag`)
-//! - All operations are O(1) with zero allocations
+//! - Each task can be in at most one queue (enforced by `queue_tag` plus exact
+//!   reachability for ring operations)
+//! - Hot-end operations are O(1); all operations use zero allocations
 //!
 //! # When to Use
 //!
@@ -44,18 +46,21 @@
 //! **INV-1 (Exclusive Access):** Every operation takes `&mut Arena<TaskRecord>`,
 //! guaranteeing no concurrent mutation. This eliminates data races entirely.
 //!
-//! **INV-2 (Tag Consistency):** A task's `queue_tag` equals the queue's `tag`
-//! if and only if the task is logically in that queue. On removal, `clear_queue_links()`
-//! sets `queue_tag = 0` atomically with link erasure.
+//! **INV-2 (Membership Consistency):** A task in a queue has the queue's `tag`,
+//! but multiple queue instances may intentionally share that role tag. Exact
+//! `IntrusiveRing` membership is therefore bounded reachability from that
+//! ring's head, never a tag-only claim. On removal, `clear_queue_links()` sets
+//! `queue_tag = 0` atomically with link erasure.
 //!
 //! **INV-3 (Link Validity):** If `task.next_in_queue = Some(id)`, then `id` is a
 //! valid arena index with `queue_tag == self.tag`. Conversely on removal.
 //!
 //! ## No ABA:
 //! ABA requires a slot to be freed and reallocated while a stale reference exists.
-//! Since we use arena indices (not pointers), and INV-2 ensures `queue_tag` is zeroed
-//! on removal, any stale index would fail the `is_in_queue_tag(tag)` check. The arena
-//! itself is `&mut`-borrowed, preventing concurrent reuse of slots.
+//! Since we use arena indices (not pointers), and INV-2 ensures queue links are
+//! zeroed on removal, a stale index cannot satisfy the ring's bounded
+//! head-reachability check. The arena itself is `&mut`-borrowed, preventing
+//! concurrent reuse of slots.
 //!
 //! ## No Use-After-Free:
 //! Tasks are never freed while in a queue. The arena is `&mut`-borrowed during all
@@ -85,14 +90,16 @@ pub const QUEUE_TAG_CANCEL: u8 = 2;
 /// An intrusive doubly-linked ring queue.
 ///
 /// The queue stores only head/tail indices; the actual links are stored
-/// in `TaskRecord` fields. This provides O(1) operations with zero
-/// per-operation allocations.
+/// in `TaskRecord` fields. End operations are O(1) with zero per-operation
+/// allocations. Exact arbitrary membership/removal performs a bounded walk so
+/// two rings may safely share the same role tag without inflating `TaskRecord`.
 ///
 /// # Invariants
 ///
 /// - If `head.is_none()`, then `tail.is_none()` and `len == 0`
 /// - If `head.is_some()`, then `tail.is_some()` and `len > 0`
-/// - For all tasks in the queue: `task.queue_tag == self.tag`
+/// - For all tasks in the queue: `task.queue_tag == self.tag`; the tag alone
+///   does not establish ownership by this particular ring instance
 /// - The list forms a proper doubly-linked chain from head to tail
 #[derive(Debug)]
 pub struct IntrusiveRing {
@@ -102,7 +109,8 @@ pub struct IntrusiveRing {
     tail: Option<TaskId>,
     /// Number of tasks in the queue.
     len: usize,
-    /// Queue tag for membership detection.
+    /// Queue role tag for coarse membership classification.
+    /// Exact ring ownership additionally requires head reachability.
     tag: u8,
 }
 
@@ -246,17 +254,16 @@ impl IntrusiveRing {
     ///
     /// # Complexity
     ///
-    /// O(1) time, O(0) allocations.
+    /// O(n) membership validation followed by O(1) unlinking, O(0) allocations.
     #[inline]
     pub fn remove(&mut self, task_id: TaskId, arena: &mut Arena<TaskRecord>) -> bool {
+        if !self.contains_linked_task(task_id, arena) {
+            return false;
+        }
+
         let Some(record) = arena.get_mut(task_id.arena_index()) else {
             return false;
         };
-
-        // Check if task is in this queue
-        if !record.is_in_queue_tag(self.tag) {
-            return false;
-        }
 
         let prev = record.prev_in_queue;
         let next = record.next_in_queue;
@@ -298,12 +305,38 @@ impl IntrusiveRing {
     ///
     /// # Complexity
     ///
-    /// O(1) time.
+    /// O(n) time, bounded by the ring's recorded length.
     #[must_use]
     pub fn contains(&self, task_id: TaskId, arena: &Arena<TaskRecord>) -> bool {
-        arena
-            .get(task_id.arena_index())
-            .is_some_and(|record| record.is_in_queue_tag(self.tag))
+        self.contains_linked_task(task_id, arena)
+    }
+
+    /// Validates exact-instance membership without allocating or trusting a
+    /// role tag that another ring may share. The length bound prevents a
+    /// corrupted cycle from looping forever.
+    fn contains_linked_task(&self, task_id: TaskId, arena: &Arena<TaskRecord>) -> bool {
+        let mut current = self.head;
+        let mut expected_prev = None;
+
+        for _ in 0..self.len {
+            let Some(current_id) = current else {
+                return false;
+            };
+            let Some(record) = arena.get(current_id.arena_index()) else {
+                return false;
+            };
+            if !record.is_in_queue_tag(self.tag) || record.prev_in_queue != expected_prev {
+                return false;
+            }
+            if current_id == task_id {
+                return true;
+            }
+
+            expected_prev = Some(current_id);
+            current = record.next_in_queue;
+        }
+
+        false
     }
 
     /// Returns the head task ID without removing it.
@@ -1249,6 +1282,41 @@ mod tests {
         // Can remove from correct queue
         assert!(ready_ring.remove(task(0), &mut arena));
         assert!(cancel_ring.remove(task(2), &mut arena));
+    }
+
+    /// Regression for asupersync-0tv9bv item 7.
+    #[test]
+    fn same_tag_rings_keep_membership_and_removal_isolated() {
+        let mut arena = setup_arena(6);
+        let mut left = IntrusiveRing::new(QUEUE_TAG_READY);
+        let mut right = IntrusiveRing::new(QUEUE_TAG_READY);
+        let mut empty = IntrusiveRing::new(QUEUE_TAG_READY);
+
+        for i in 0..3 {
+            left.push_back(task(i), &mut arena);
+        }
+        for i in 3..6 {
+            right.push_back(task(i), &mut arena);
+        }
+
+        assert!(!empty.remove(task(4), &mut arena));
+        assert_eq!(empty.len(), 0);
+        assert!(!empty.contains(task(4), &arena));
+
+        assert!(left.contains(task(1), &arena));
+        assert!(!left.contains(task(4), &arena));
+        assert!(right.contains(task(4), &arena));
+        assert!(!right.contains(task(1), &arena));
+
+        assert!(!left.remove(task(4), &mut arena));
+        assert!(!right.remove(task(1), &mut arena));
+        assert_eq!(left.len(), 3);
+        assert_eq!(right.len(), 3);
+        assert_eq!(pop_all_ring(&mut left, &mut arena), vec![task(0), task(1), task(2)]);
+        assert_eq!(
+            pop_all_ring(&mut right, &mut arena),
+            vec![task(3), task(4), task(5)]
+        );
     }
 
     #[test]
