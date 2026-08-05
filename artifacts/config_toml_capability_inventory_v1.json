@@ -53,8 +53,8 @@
     },
     {
       "path": "src/runtime/builder.rs",
-      "sha256": "69e52f8b761944edf5fa038ed3b122ecf9a58da05f5ad15f20d1f8e3e1f8adb1",
-      "line_count": 8393
+      "sha256": "ced1fd3901169475f1e390324aa11458f97f52288e8d54bd6f9e91cc0ca3570c",
+      "line_count": 8398
     },
     {
       "path": "src/runtime/env_config_metamorphic_tests.rs",
@@ -1364,6 +1364,38 @@
     ],
     "verification_state": "STATIC_DECISION_AUTHORED_NOT_EXECUTED",
     "no_claim_boundary": "This A3 receipt records the acceptance-criteria KEEP branch from source and artifact review. It does not add or execute a replacement parser or writer, change runtime behavior, prove current contract execution, prove broad workspace health, or authorize dependency removal."
+  },
+  "post_a3_provenance_refresh": {
+    "captured_date_utc": "2026-08-05",
+    "base_commit": "424134f7338f610e36d5047d3d334128ae4275e4",
+    "refresh_state": "STATIC_SOURCE_PIN_MAINTENANCE",
+    "source_pin_path_count": 16,
+    "source_pin_path_set_changed": false,
+    "stale_path_count": 1,
+    "refreshed_path_count": 1,
+    "refreshed_paths": [
+      {
+        "path": "src/runtime/builder.rs",
+        "source_commit": "24eb7ec6c62e9ba037d70fed4a69c4e733785926",
+        "classification": "PUBLIC_REQUEST_CX_VISIBILITY_AND_DOCUMENTATION_ONLY",
+        "previous_sha256": "69e52f8b761944edf5fa038ed3b122ecf9a58da05f5ad15f20d1f8e3e1f8adb1",
+        "previous_line_count": 8393,
+        "current_sha256": "ced1fd3901169475f1e390324aa11458f97f52288e8d54bd6f9e91cc0ca3570c",
+        "current_line_count": 8398,
+        "added_line_count": 6,
+        "deleted_line_count": 1,
+        "unchanged_toml_token_projection_sha256": "20ec2bf53ba17d83d4b4ac205574cbc13513119d5ace0c988a76c6fc745676d7",
+        "toml_entry_points_changed": false,
+        "accepted_toml_contract_changed": false
+      }
+    ],
+    "historical_a1_revision_changed": false,
+    "historical_a3_claim_revision_changed": false,
+    "a3_keep_decision_changed": false,
+    "required_disposition": "KEEP_INCUMBENT",
+    "dependency_exit_allowed": false,
+    "execution_state": "NOT_RUN_STATIC_ONLY",
+    "no_claim_boundary": "This maintenance receipt proves only current source-pin reconciliation and equality of the recorded TOML-token projection before and after the request-Cx visibility change. It does not rerun A1 or A3, add JSON, change accepted TOML behavior, satisfy replacement evidence, authorize dependency exit, or make a broad-health or performance claim."
   },
   "known_gaps": [
     {

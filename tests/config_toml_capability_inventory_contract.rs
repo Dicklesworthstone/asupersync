@@ -122,6 +122,93 @@ fn validate_state_fields(value: &Value, path: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_post_a3_provenance_refresh(inventory: &Value) -> Result<(), String> {
+    let refresh = inventory
+        .get("post_a3_provenance_refresh")
+        .ok_or_else(|| "post_a3_provenance_refresh must be present".to_owned())?;
+    for (key, expected) in [
+        ("captured_date_utc", "2026-08-05"),
+        (
+            "base_commit",
+            "424134f7338f610e36d5047d3d334128ae4275e4",
+        ),
+        ("refresh_state", "STATIC_SOURCE_PIN_MAINTENANCE"),
+        ("required_disposition", "KEEP_INCUMBENT"),
+        ("execution_state", "NOT_RUN_STATIC_ONLY"),
+    ] {
+        if refresh.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("post-A3 refresh {key} must be {expected}"));
+        }
+    }
+    if refresh.get("source_pin_path_count").and_then(Value::as_u64) != Some(16)
+        || refresh.get("stale_path_count").and_then(Value::as_u64) != Some(1)
+        || refresh.get("refreshed_path_count").and_then(Value::as_u64) != Some(1)
+    {
+        return Err("post-A3 refresh counts drifted".to_owned());
+    }
+    for key in [
+        "source_pin_path_set_changed",
+        "historical_a1_revision_changed",
+        "historical_a3_claim_revision_changed",
+        "a3_keep_decision_changed",
+        "dependency_exit_allowed",
+    ] {
+        if refresh.get(key).and_then(Value::as_bool) != Some(false) {
+            return Err(format!("post-A3 refresh {key} must remain false"));
+        }
+    }
+
+    let rows = array(refresh, "refreshed_paths");
+    if rows.len() != 1 {
+        return Err("post-A3 refresh must retain one exact path".to_owned());
+    }
+    let builder = &rows[0];
+    if text(builder, "path") != "src/runtime/builder.rs"
+        || text(builder, "source_commit")
+            != "24eb7ec6c62e9ba037d70fed4a69c4e733785926"
+        || text(builder, "classification")
+            != "PUBLIC_REQUEST_CX_VISIBILITY_AND_DOCUMENTATION_ONLY"
+        || text(builder, "previous_sha256")
+            != "69e52f8b761944edf5fa038ed3b122ecf9a58da05f5ad15f20d1f8e3e1f8adb1"
+        || builder.get("previous_line_count").and_then(Value::as_u64) != Some(8393)
+        || text(builder, "current_sha256")
+            != "ced1fd3901169475f1e390324aa11458f97f52288e8d54bd6f9e91cc0ca3570c"
+        || builder.get("current_line_count").and_then(Value::as_u64) != Some(8398)
+        || builder.get("added_line_count").and_then(Value::as_u64) != Some(6)
+        || builder.get("deleted_line_count").and_then(Value::as_u64) != Some(1)
+        || builder
+            .get("toml_entry_points_changed")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || builder
+            .get("accepted_toml_contract_changed")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return Err("post-A3 RuntimeBuilder provenance drifted".to_owned());
+    }
+
+    let source = read_repo_file("src/runtime/builder.rs");
+    let projection = source
+        .lines()
+        .filter(|line| {
+            line.contains("from_toml") || line.contains("to_toml") || line.contains("toml::")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let projection_sha256 = hex::encode(Sha256::digest(projection.as_bytes()));
+    if text(builder, "unchanged_toml_token_projection_sha256") != projection_sha256.as_str() {
+        return Err("post-A3 TOML token projection drifted".to_owned());
+    }
+    if !text(refresh, "no_claim_boundary").contains("does not rerun A1 or A3")
+        || !text(refresh, "no_claim_boundary").contains("change accepted TOML behavior")
+        || !text(refresh, "no_claim_boundary").contains("dependency exit")
+    {
+        return Err("post-A3 refresh no-claim boundary is incomplete".to_owned());
+    }
+    Ok(())
+}
+
 fn validate_inventory(inventory: &Value) -> Result<(), String> {
     if inventory.get("schema_version").and_then(Value::as_u64) != Some(1) {
         return Err("schema_version must be 1".to_owned());
@@ -499,6 +586,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     if text(inventory, "no_claim_boundary").trim().is_empty() {
         return Err("top-level no-claim boundary is required".to_owned());
     }
+    validate_post_a3_provenance_refresh(inventory)?;
     Ok(())
 }
 
@@ -835,6 +923,8 @@ fn precedence_io_errors_consumers_and_docs_remain_explicit() {
         "A3 incumbent decision",
         "EVIDENCE_BACKED_KEEP",
         "STATIC_DECISION_AUTHORED_NOT_EXECUTED",
+        "request_cx_with_budget",
+        "static source-pin maintenance only",
     ] {
         assert!(doc.contains(marker), "documentation must retain {marker}");
     }
@@ -894,4 +984,9 @@ fn fail_closed_mutations_are_rejected() {
     wrong_cutover_owner["a3_keep_receipt"]["terminal_cutover_owner"] =
         Value::String(A3_BEAD_ID.to_owned());
     assert!(validate_inventory(&wrong_cutover_owner).is_err());
+
+    let mut changed_toml_contract = inventory;
+    changed_toml_contract["post_a3_provenance_refresh"]["refreshed_paths"][0]
+        ["accepted_toml_contract_changed"] = Value::Bool(true);
+    assert!(validate_inventory(&changed_toml_contract).is_err());
 }

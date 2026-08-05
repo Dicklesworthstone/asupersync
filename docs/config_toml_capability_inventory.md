@@ -240,6 +240,17 @@ diff was read and classified before refreshing its hash:
 | `src/bin/dependency_marginal_ledger.rs` | dependency-budget generation growth | existing generic parse/write surface retained |
 | `tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs` | unrelated consumer-fixture growth | none detected |
 
+A 2026-08-05 static provenance pass refreshed the sole later source-pin drift
+against `424134f7338f610e36d5047d3d334128ae4275e4`. Commit
+`24eb7ec6c62e9ba037d70fed4a69c4e733785926` added six lines and removed one
+line in `src/runtime/builder.rs`: it documented the production request-context
+entry point and changed `request_cx_with_budget` from `pub(crate)` to `pub`.
+The ordered `from_toml`, `from_toml_str`, and direct `toml::` token projection
+remained byte-identical. The 16-path pin set, historical A1/A3 revisions,
+`KEEP_INCUMBENT` decision, and all blocked gaps are unchanged. This is static
+source-pin maintenance only; it does not add JSON, rerun either receipt, or
+authorize dependency exit.
+
 The receipt fails closed on seven absent replacement rows: parser parity,
 writer parity, explicit resource bounds, independent comparison, generated
 input coverage, diagnostic precision, and all downstream consumer journeys.
