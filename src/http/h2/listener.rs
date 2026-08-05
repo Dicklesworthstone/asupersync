@@ -301,6 +301,10 @@ const CONNECTION_SPECIFIC_HEADERS: &[&str] = &[
 /// Returns a protocol-level [`H2Error`] when required pseudo-headers are
 /// missing, the method token is invalid, or an unknown request pseudo-header
 /// appears.
+// Currently exercised only by unit tests (production paths go through
+// `request_from_h2_parts` with trailers); keep it compiling under the
+// crate-level `deny(dead_code)` for non-test builds of downstream consumers.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn request_from_h2_headers(
     headers: Vec<Header>,
     body: Vec<u8>,
