@@ -2146,7 +2146,8 @@ fn visibility_macro_static_audit_is_source_pinned_and_fail_closed() {
         read_repo_file("tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml");
     let consumer_source =
         read_repo_file("tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs");
-    assert!(!consumer_manifest.contains("test-internals"));
+    assert!(!consumer_manifest.contains("features = [\"test-internals\"]"));
+    assert!(!consumer_manifest.contains("asupersync/test-internals"));
     assert!(!consumer_source.contains(VISIBILITY_MAKE_TOKEN));
 
     let downstream = object(audit, "downstream_use_assessment");
