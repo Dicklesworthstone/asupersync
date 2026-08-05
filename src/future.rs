@@ -1,4 +1,4 @@
-//! Small, dependency-free future execution primitives.
+//! Small future execution primitives with explicit wake and pinning behavior.
 //!
 //! The blocking entry points in this crate-private `crate::util::future` module
 //! are an alongside-incumbent kernel for `CAP-FUTURES-STREAMS`. They poll on
@@ -92,6 +92,119 @@ impl Future for YieldNow {
 #[must_use]
 pub(crate) const fn yield_now() -> YieldNow {
     YieldNow { yielded: false }
+}
+
+/// Joins two futures, polling left before right until both complete.
+pub(crate) fn zip<F1, F2>(future1: F1, future2: F2) -> Zip<F1, F2>
+where
+    F1: Future,
+    F2: Future,
+{
+    Zip {
+        future1: Some(future1),
+        output1: None,
+        future2: Some(future2),
+        output2: None,
+    }
+}
+
+/// Future returned by [`zip`].
+#[pin_project::pin_project]
+#[derive(Debug)]
+#[must_use = "futures do nothing unless polled or awaited"]
+pub(crate) struct Zip<F1, F2>
+where
+    F1: Future,
+    F2: Future,
+{
+    #[pin]
+    future1: Option<F1>,
+    output1: Option<F1::Output>,
+    #[pin]
+    future2: Option<F2>,
+    output2: Option<F2::Output>,
+}
+
+impl<F1, F2> Future for Zip<F1, F2>
+where
+    F1: Future,
+    F2: Future,
+{
+    type Output = (F1::Output, F2::Output);
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut this = self.project();
+
+        if let Some(future) = this.future1.as_mut().as_pin_mut() {
+            if let Poll::Ready(output) = future.poll(context) {
+                *this.output1 = Some(output);
+                this.future1.set(None);
+            }
+        }
+
+        if let Some(future) = this.future2.as_mut().as_pin_mut() {
+            if let Poll::Ready(output) = future.poll(context) {
+                *this.output2 = Some(output);
+                this.future2.set(None);
+            }
+        }
+
+        take_zip_outputs(this.output1, this.output2)
+    }
+}
+
+fn take_zip_outputs<T1, T2>(
+    output1: &mut Option<T1>,
+    output2: &mut Option<T2>,
+) -> Poll<(T1, T2)> {
+    match (output1.take(), output2.take()) {
+        (Some(output1), Some(output2)) => Poll::Ready((output1, output2)),
+        (remaining1, remaining2) => {
+            *output1 = remaining1;
+            *output2 = remaining2;
+            Poll::Pending
+        }
+    }
+}
+
+/// Returns the first future to complete, preferring `future1` when both are ready.
+pub(crate) fn or<T, F1, F2>(future1: F1, future2: F2) -> Or<F1, F2>
+where
+    F1: Future<Output = T>,
+    F2: Future<Output = T>,
+{
+    Or { future1, future2 }
+}
+
+/// Future returned by [`or`].
+#[pin_project::pin_project]
+#[derive(Debug)]
+#[must_use = "futures do nothing unless polled or awaited"]
+pub(crate) struct Or<F1, F2> {
+    #[pin]
+    future1: F1,
+    #[pin]
+    future2: F2,
+}
+
+impl<T, F1, F2> Future for Or<F1, F2>
+where
+    F1: Future<Output = T>,
+    F2: Future<Output = T>,
+{
+    type Output = T;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.project();
+
+        if let Poll::Ready(output) = this.future1.poll(context) {
+            return Poll::Ready(output);
+        }
+        if let Poll::Ready(output) = this.future2.poll(context) {
+            return Poll::Ready(output);
+        }
+        Poll::Pending
+    }
 }
 
 /// Reason the owned blocking kernel refused to poll a future.
@@ -299,6 +412,37 @@ mod tests {
         }
     }
 
+    struct ReadyDrop {
+        output: u8,
+        polls: Rc<Cell<usize>>,
+        drops: Rc<Cell<usize>>,
+    }
+
+    impl Future for ReadyDrop {
+        type Output = u8;
+
+        fn poll(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Self::Output> {
+            self.polls.set(self.polls.get() + 1);
+            Poll::Ready(self.output)
+        }
+    }
+
+    impl Drop for ReadyDrop {
+        fn drop(&mut self) {
+            self.drops.set(self.drops.get() + 1);
+        }
+    }
+
+    struct DropCounter {
+        drops: Rc<Cell<usize>>,
+    }
+
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.drops.set(self.drops.get() + 1);
+        }
+    }
+
     #[test]
     fn poll_fn_forwards_context_and_calls_once_per_wrapper_poll() {
         let wake_state = Arc::new(CountingWaker::default());
@@ -363,6 +507,118 @@ mod tests {
         assert_eq!(future.as_mut().poll(&mut context), Poll::Pending);
         assert_eq!(future.as_mut().poll(&mut context), Poll::Pending);
         assert_eq!(wake_state.wakes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn zip_polls_left_then_right_and_stops_polling_completed_children() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let left_log = Rc::clone(&log);
+        let left = poll_fn(move |_| {
+            left_log.borrow_mut().push("left");
+            Poll::Ready(47_u8)
+        });
+
+        let right_log = Rc::clone(&log);
+        let right_polls = Rc::new(Cell::new(0_usize));
+        let observed_right_polls = Rc::clone(&right_polls);
+        let right = poll_fn(move |context| {
+            right_log.borrow_mut().push("right");
+            let current = right_polls.get();
+            right_polls.set(current + 1);
+            if current == 0 {
+                context.waker().wake_by_ref();
+                Poll::Pending
+            } else {
+                Poll::Ready(53_u8)
+            }
+        });
+
+        assert_eq!(block_on(zip(left, right)), (47, 53));
+        assert_eq!(&*log.borrow(), &["left", "right", "right"]);
+        assert_eq!(observed_right_polls.get(), 2);
+    }
+
+    #[test]
+    fn dropping_pending_zip_drops_retained_output_and_unfinished_child() {
+        let output_drops = Rc::new(Cell::new(0_usize));
+        let pending_polls = Rc::new(Cell::new(0_usize));
+        let pending_drops = Rc::new(Cell::new(0_usize));
+        let wake_state = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&wake_state));
+        let mut context = Context::from_waker(&waker);
+
+        {
+            let left_output_drops = Rc::clone(&output_drops);
+            let joined = zip(
+                async move {
+                    DropCounter {
+                        drops: left_output_drops,
+                    }
+                },
+                PendingDrop {
+                    polls: Rc::clone(&pending_polls),
+                    drops: Rc::clone(&pending_drops),
+                },
+            );
+            let mut joined = std::pin::pin!(joined);
+
+            assert!(joined.as_mut().poll(&mut context).is_pending());
+            assert_eq!(output_drops.get(), 0);
+            assert_eq!(pending_drops.get(), 0);
+        }
+
+        assert_eq!(output_drops.get(), 1);
+        assert_eq!(pending_polls.get(), 1);
+        assert_eq!(pending_drops.get(), 1);
+        assert_eq!(wake_state.wakes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn or_is_left_biased_and_drops_the_loser_with_the_wrapper() {
+        let left_polls = Rc::new(Cell::new(0_usize));
+        let left_drops = Rc::new(Cell::new(0_usize));
+        let skipped_right_polls = Rc::new(Cell::new(0_usize));
+        let skipped_right_drops = Rc::new(Cell::new(0_usize));
+        let result = block_on(or(
+            ReadyDrop {
+                output: 59,
+                polls: Rc::clone(&left_polls),
+                drops: Rc::clone(&left_drops),
+            },
+            ReadyDrop {
+                output: 61,
+                polls: Rc::clone(&skipped_right_polls),
+                drops: Rc::clone(&skipped_right_drops),
+            },
+        ));
+
+        assert_eq!(result, 59);
+        assert_eq!(left_polls.get(), 1);
+        assert_eq!(left_drops.get(), 1);
+        assert_eq!(skipped_right_polls.get(), 0);
+        assert_eq!(skipped_right_drops.get(), 1);
+
+        let pending_polls = Rc::new(Cell::new(0_usize));
+        let pending_drops = Rc::new(Cell::new(0_usize));
+        let right_polls = Rc::new(Cell::new(0_usize));
+        let right_drops = Rc::new(Cell::new(0_usize));
+        let result = block_on(or(
+            PendingDrop {
+                polls: Rc::clone(&pending_polls),
+                drops: Rc::clone(&pending_drops),
+            },
+            ReadyDrop {
+                output: 67,
+                polls: Rc::clone(&right_polls),
+                drops: Rc::clone(&right_drops),
+            },
+        ));
+
+        assert_eq!(result, 67);
+        assert_eq!(pending_polls.get(), 1);
+        assert_eq!(pending_drops.get(), 1);
+        assert_eq!(right_polls.get(), 1);
+        assert_eq!(right_drops.get(), 1);
     }
 
     #[test]

@@ -161,16 +161,31 @@ the required semantics:
   ready behavior is intentionally distinct from `runtime::yield_now`, whose
   separate runtime-facing contract rejects a post-completion repoll.
 
+At follow-on base revision `da8d632b5ef51ea4074589aed0664cb8f5e33d41`, a
+second static-only increment adds the deterministic two-future combinators:
+
+- the owned `Zip` polls left before right on every wrapper poll, stores each
+  completed output, drops that completed child in place, and never polls it
+  again while the other child remains pending;
+- the owned `Or` polls left first and returns immediately when left is ready,
+  otherwise polling right. Completion leaves the other future to be dropped
+  with the wrapper; it does not claim to drain a losing structured task.
+
+Both combinators use the root crate's existing pin-projection dependency and
+store their state inline; they add no heap allocation or executor.
+
 Inline cases have been authored for Context identity and closure-call count,
 ready and pending one-poll observations, pending-input drop, the exact
-first/second/later yield sequence, and a pending future that never wakes. None
-of those cases has been executed in this static-only increment.
+first/second/later yield sequence, a pending future that never wakes, zip poll
+order and completed-child suppression, retained-output and unfinished-child
+drop, and left-biased `or` selection, fallthrough, and loser drop. None of those
+cases has been executed in these static-only increments.
 
-This increment does not implement `zip`, `race`, or `or`; it does not invent a
-comment-only `join_all` target. It also does not migrate an incumbent call site,
+These increments do not implement randomized `race` and do not invent a
+comment-only `join_all` target. They also do not migrate an incumbent call site,
 change a manifest, authorize cutover, establish differential parity, or provide
-unit, property, lab, DPOR, performance, or loser-drain evidence. Those remaining
-surfaces and their explicit cancellation/quiescence policy keep FUT A4 open.
+unit, property, lab, DPOR, performance, or loser-drain evidence. The remaining
+race surface and its explicit cancellation/quiescence policy keep FUT A4 open.
 
 ## Consumed helper semantics
 
