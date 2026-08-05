@@ -1922,6 +1922,39 @@ fn eof_or_cancelled() -> MySqlError {
     }
 }
 
+/// Read a complete buffer while preserving cancellation precedence at EOF.
+///
+/// Keeping the loop generic over the stream gives deterministic tests a narrow
+/// seam for injecting cancellation from inside `poll_read`, after the guard has
+/// run but before the empty-read classification below.
+async fn read_exact_from<R>(stream: &mut R, buf: &mut [u8]) -> Result<(), MySqlError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut pos = 0;
+    while pos < buf.len() {
+        let mut read_buf = ReadBuf::new(&mut buf[pos..]);
+        std::future::poll_fn(|task_cx| {
+            if Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "cancelled",
+                )));
+            }
+            Pin::new(&mut *stream).poll_read(task_cx, &mut read_buf)
+        })
+        .await
+        .map_err(stream_io_error)?;
+
+        let n = read_buf.filled().len();
+        if n == 0 {
+            return Err(eof_or_cancelled());
+        }
+        pos += n;
+    }
+    Ok(())
+}
+
 impl MySqlConnection {
     /// Connect to a MySQL database.
     ///
@@ -4799,28 +4832,7 @@ impl MySqlConnection {
 
     /// Read exactly `len` bytes.
     async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), MySqlError> {
-        let mut pos = 0;
-        while pos < buf.len() {
-            let mut read_buf = ReadBuf::new(&mut buf[pos..]);
-            std::future::poll_fn(|cx| {
-                if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
-                    return Poll::Ready(Err(std::io::Error::new(
-                        std::io::ErrorKind::Interrupted,
-                        "cancelled",
-                    )));
-                }
-                Pin::new(&mut self.inner.stream).poll_read(cx, &mut read_buf)
-            })
-            .await
-            .map_err(stream_io_error)?;
-
-            let n = read_buf.filled().len();
-            if n == 0 {
-                return Err(eof_or_cancelled());
-            }
-            pos += n;
-        }
-        Ok(())
+        read_exact_from(&mut self.inner.stream, buf).await
     }
 
     /// Read a complete packet.
@@ -6224,18 +6236,67 @@ mod tests {
     // ================================================================
     // br-asupersync-xwanb4: cancellation must dominate Err on the
     // read/write stream paths.
+    // br-asupersync-swxrag: exercise the EOF interleaving deterministically.
     //
-    // These are the deterministic half of that bead. `read_exact`'s
-    // `n == 0` branch is only reachable when a cancel lands inside a
-    // single poll (after the guard, before the length check), which is
-    // a genuine race; extracting `eof_or_cancelled` / `stream_io_error`
-    // makes the *decision* testable without needing that interleaving.
+    // Pre-setting the cancel makes the guard fire first, which would green a
+    // naive test without ever executing the branch under test. The generic
+    // stream seam lets `CancelThenEofReader` request cancellation inside its
+    // poll and return EOF in the same step, deterministically reaching the
+    // classifier after the guard has already passed.
     // ================================================================
 
     fn cancelled_test_cx(kind: CancelKind) -> Cx {
         let cx = Cx::for_testing();
         cx.cancel_fast(kind);
         cx
+    }
+
+    struct CancelThenEofReader {
+        cx: Cx,
+        polls: usize,
+        was_live_before_cancel: bool,
+    }
+
+    impl AsyncRead for CancelThenEofReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _task_cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            this.polls += 1;
+            this.was_live_before_cancel = this.cx.checkpoint().is_ok();
+            this.cx.cancel_fast(CancelKind::User);
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Cancellation requested by the reader itself lands after the top guard
+    /// but before the zero-byte result is classified. The poll counter is the
+    /// anti-false-green check: a guard short-circuit would leave it at zero.
+    #[test]
+    fn mysql_read_exact_cancel_during_eof_poll_reaches_eof_classifier() {
+        let cx = Cx::for_testing();
+        let mut reader = CancelThenEofReader {
+            cx: cx.clone(),
+            polls: 0,
+            was_live_before_cancel: false,
+        };
+        let _guard = Cx::set_current(Some(cx));
+        let mut buf = [0_u8; 1];
+
+        let result = run(read_exact_from(&mut reader, &mut buf));
+
+        assert_eq!(reader.polls, 1, "the read poll must run before cancellation");
+        assert!(
+            reader.was_live_before_cancel,
+            "the reader must inject cancellation after the guard passes"
+        );
+        assert_eq!(buf, [0], "the injected read must be EOF, not data");
+        match result {
+            Err(MySqlError::Cancelled(reason)) => assert_eq!(reason.kind, CancelKind::User),
+            other => panic!("expected Cancelled from the EOF classifier, got: {other:?}"),
+        }
     }
 
     /// A cancel that races the peer's hangup reports `Cancelled`, not the
