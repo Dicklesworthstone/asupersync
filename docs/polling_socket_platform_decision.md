@@ -33,8 +33,8 @@ increase was found.
 
 Taking ownership of this boundary would therefore exchange two reviewed
 portable dependencies for a first-party concurrency, lifecycle, syscall, and
-platform-maintenance program without a measured reason to do so. KEEP is the
-decision, not an unfinished replacement campaign.
+platform-maintenance program without a measured reason to do so.
+KEEP is the decision, not an unfinished replacement campaign.
 
 ## Dependency and graph receipt
 
@@ -67,8 +67,8 @@ All 78 active rows report no marginal native code and empty marginal build
 script and proc-macro sets. That is not a claim that the complete root graph is
 native-code-free: root-native status is `unknown` in 65 rows and `none` in
 thirteen. Removing `polling` would not remove `rustix`; the lock also contains
-independent `tempfile` and `xattr` parents. There is no `rustix`-eviction
-result.
+independent `tempfile` and `xattr` parents.
+There is no `rustix`-eviction result.
 
 ### Ledger freshness
 

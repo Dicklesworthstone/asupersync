@@ -5,7 +5,7 @@
   "bead_id": "asupersync-3u3tej.4",
   "capability_id": "CAP-POLLING-SOCKET",
   "baseline_revision": "e263782a6d5a793b78e53065f70ce7f76605e863",
-  "captured_date_utc": "2026-08-04",
+  "captured_date_utc": "2026-08-05",
   "purpose": "Record the terminal KEEP decision for polling and socket2 after a source-pinned cross-platform surface inventory and canonical marginal-ledger review. This packet performs no replacement implementation and authorizes no source, manifest, lockfile, or dependency change.",
   "authority": {
     "plan": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md",
@@ -86,8 +86,8 @@
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8",
-      "line_count": 1357
+      "sha256": "ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4",
+      "line_count": 3210
     },
     {
       "path": "artifacts/dependency_cutover_policy_v1.json",
