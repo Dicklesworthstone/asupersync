@@ -63,10 +63,11 @@ generic code bounded on `futures_lite::Stream` accepts the two ATP SDK types
 today. `artifacts/api_surface_map_v1.json` maps root exports and therefore does
 not enumerate this nested trait-implementation property.
 
-The existing standalone downstream fixture proves only
-`asupersync::stream::{Stream, StreamExt}`. It does not depend on futures-lite,
-does not mention the ATP SDK types, and cannot catch a break to the foreign
-impls.
+At the original inventory baseline, the standalone downstream fixture proved
+only `asupersync::stream::{Stream, StreamExt}` and did not mention the ATP SDK
+types. The follow-on A2 source contract below adds owned-side ATP assertions,
+but deliberately adds no futures-lite dependency and therefore cannot catch a
+break to the retained foreign impls.
 
 ### FUT A2 static owned-Stream progress
 
@@ -85,17 +86,22 @@ implemented; no downstream break or dependency cutover is authorized.
 
 Inline and public-contract compile assertions have been authored for both ATP
 types under `asupersync::stream::Stream<Item = TransferProgress>`. They have not
-been compiled or executed in this static-only increment. The standalone
-downstream fixture is also unchanged, so it still does not prove ATP extension
-method ergonomics, Pending/wake/item/EOF behavior, cancellation, Drop cleanup,
-or region quiescence.
+been compiled or executed in this static-only increment.
 
-The reviewed ATP source-pin row is refreshed with this increment. The focused
-A1 contract was already non-green at the base revision because seven unrelated
-pins had drifted: `Cargo.toml`, `Cargo.lock`, `src/sync/notify.rs`, the
-capability registry, the marginal ledger, the API surface map, and the
-standalone downstream fixture. Those rows are not blindly repinned here, and
-no focused-contract or broad-health claim is made.
+At follow-on base revision `aa23f536a5c22d3c16ecd592f9c3b743d3e78fc2`,
+the standalone downstream fixture also names both ATP types, asserts the owned
+Stream item contract, and instantiates their `StreamExt::next` function shape.
+This source-authored compile contract does not construct an ATP stream and has
+not been run. It therefore does not prove Pending/wake/item/EOF behavior,
+cancellation, Drop cleanup, region quiescence, or the separately retained
+foreign Stream journey.
+
+The reviewed ATP source-pin row is refreshed in the first increment. At that
+base revision, seven unrelated pins had already drifted. The follow-on
+increment refreshes the reviewed downstream-fixture row, leaving six unrelated
+stale pins: `Cargo.toml`, `Cargo.lock`, `src/sync/notify.rs`, the capability
+registry, the marginal ledger, and the API surface map. Those six rows are not
+blindly repinned here, and no focused-contract or broad-health claim is made.
 
 ## `block_on` context
 

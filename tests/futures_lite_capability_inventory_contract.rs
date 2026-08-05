@@ -342,7 +342,29 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         return Err("all ADR and A1-discovered gaps must remain routed".to_owned());
     }
 
-    if array(inventory, "downstream_and_e2e").len() != 4
+    let journeys = array(inventory, "downstream_and_e2e");
+    let owned_journey = find_row(journeys, "journey_id", "FUT-JOURNEY-OWNED-STREAM");
+    let owned_atp = owned_journey
+        .get("owned_atp_progress_compile_contract")
+        .expect("owned ATP downstream compile contract");
+    let expected_owned_types: BTreeSet<String> = ["AtpWriter", "AtpReader"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    if string_set(owned_atp, "types") != expected_owned_types
+        || owned_atp.get("trait").and_then(Value::as_str)
+            != Some("asupersync::stream::Stream<Item = TransferProgress>")
+        || owned_atp.get("extension_method").and_then(Value::as_str)
+            != Some("StreamExt::next")
+        || owned_atp
+            .get("implementation_state")
+            .and_then(Value::as_str)
+            != Some("SOURCE_AUTHORED_NOT_EXECUTED")
+    {
+        return Err("owned ATP downstream progress must remain source-only".to_owned());
+    }
+
+    if journeys.len() != 4
         || array(inventory, "rollback_triggers").len() < 8
         || array(inventory, "no_claim_boundaries").len() < 7
     {
@@ -749,8 +771,12 @@ fn production_public_and_comment_only_sites_match_source() {
         read_repo_file("tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs");
     assert!(downstream.contains("use asupersync::stream::{Stream, StreamExt};"));
     assert!(!downstream.contains(TOKEN));
-    assert!(!downstream.contains("AtpWriter"));
-    assert!(!downstream.contains("AtpReader"));
+    assert!(downstream.contains("use asupersync::net::atp::sdk::{"));
+    assert!(downstream.contains("AtpReader, AtpWriter, TransferProgress"));
+    assert!(downstream.contains("assert_owned_progress_stream::<AtpWriter>();"));
+    assert!(downstream.contains("assert_owned_progress_stream::<AtpReader>();"));
+    assert!(downstream.contains("next_owned_progress::<AtpWriter>"));
+    assert!(downstream.contains("next_owned_progress::<AtpReader>"));
 }
 
 #[test]
@@ -1005,12 +1031,17 @@ fn public_stream_impls_compile_but_downstream_evidence_remains_planned() {
 
     let inventory = artifact();
     let journeys = array(&inventory, "downstream_and_e2e");
+    let owned_journey = find_row(journeys, "journey_id", "FUT-JOURNEY-OWNED-STREAM");
     assert_eq!(
-        text(
-            find_row(journeys, "journey_id", "FUT-JOURNEY-OWNED-STREAM"),
-            "state"
-        ),
+        text(owned_journey, "state"),
         "EXISTING_TEST"
+    );
+    assert_eq!(
+        owned_journey
+            .get("owned_atp_progress_compile_contract")
+            .and_then(|value| value.get("implementation_state"))
+            .and_then(Value::as_str),
+        Some("SOURCE_AUTHORED_NOT_EXECUTED")
     );
     for journey_id in [
         "FUT-JOURNEY-ECOSYSTEM-STREAM",

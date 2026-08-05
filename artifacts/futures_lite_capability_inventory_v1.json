@@ -683,7 +683,16 @@
       "surface": "downstream-authored asupersync::stream::Stream plus StreamExt",
       "fixture": "tests/fixtures/dependency-capability-baseline-consumer",
       "state": "EXISTING_TEST",
-      "gap": "This fixture never references futures-lite and cannot detect breakage of the ATP foreign Stream impls."
+      "owned_atp_progress_compile_contract": {
+        "types": [
+          "AtpWriter",
+          "AtpReader"
+        ],
+        "trait": "asupersync::stream::Stream<Item = TransferProgress>",
+        "extension_method": "StreamExt::next",
+        "implementation_state": "SOURCE_AUTHORED_NOT_EXECUTED"
+      },
+      "gap": "The fixture still has no futures-lite edge and now source-authors owned ATP Stream and next-method compile assertions, but those assertions are unexecuted and do not cover progress behavior or the foreign Stream journey."
     },
     {
       "journey_id": "FUT-JOURNEY-ECOSYSTEM-STREAM",
@@ -743,7 +752,7 @@
     },
     {
       "gap_id": "FUT-GAP-03",
-      "summary": "The existing downstream fixture proves only the owned Stream trait.",
+      "summary": "The downstream fixture now source-authors owned ATP Stream and next-method compile assertions, but has no executed proof or foreign Stream progress workflow.",
       "owner_bead": "asupersync-d24mms.6.10",
       "state": "BLOCKED_GAP"
     },
@@ -875,8 +884,8 @@
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
-      "sha256": "9016a1e0ed3bfeb1f2eb1c3e287323d64488a16077300a7c817269b30b719da6",
-      "line_count": 354
+      "sha256": "541cbcddab7df36717f441cec05794123b401753512cff346efba8b16aee15ae",
+      "line_count": 881
     }
   ],
   "rollback_triggers": [
@@ -894,7 +903,7 @@
     "Source pins and executable probes do not prove broad workspace health, release readiness, performance parity, or live RCH fleet availability.",
     "The occurrence census classifies textual references and Cargo-built profiles; it does not claim every reference is behaviorally covered.",
     "The incumbent future::race and future::or drop losers; this inventory does not treat drop as project-level loser drain or quiescence.",
-    "The existing downstream fixture does not prove the public ATP ecosystem Stream journey.",
+    "The downstream fixture's source-authored owned ATP compile assertions are unexecuted and do not prove the public ATP ecosystem Stream journey.",
     "Marginal package counts do not prove behavioral replacement parity.",
     "The source-authored owned ATP Stream implementations have not been compiled or behaviorally exercised and do not authorize cutover.",
     "No local Cargo fallback is approved when a remote-required proof lane is blocked."

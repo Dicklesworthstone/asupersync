@@ -9,6 +9,7 @@
 #[cfg(test)]
 mod tests {
     use asupersync::grpc::{Codec, ProstCodec, ProtobufError};
+    use asupersync::net::atp::sdk::{AtpReader, AtpWriter, TransferProgress};
     use asupersync::stream::{Stream, StreamExt};
     use asupersync::types::{
         DeserializationError, Deserializer, SerdeCodec, SerializationError, SerializationFormat,
@@ -670,6 +671,27 @@ mod tests {
         assert_eq!(poll_stream_once(stream.as_mut()), Poll::Ready(Some(6)));
         assert_eq!(poll_stream_once(stream.as_mut()), Poll::Ready(None));
         assert_eq!(poll_stream_once(stream.as_mut()), Poll::Ready(None));
+    }
+
+    #[test]
+    fn atp_sdk_progress_types_expose_the_owned_stream_contract() {
+        fn assert_owned_progress_stream<S>()
+        where
+            S: Stream<Item = TransferProgress> + Unpin,
+        {
+        }
+
+        fn next_owned_progress<S>(stream: &mut S)
+        where
+            S: Stream<Item = TransferProgress> + Unpin,
+        {
+            let _next = stream.next();
+        }
+
+        assert_owned_progress_stream::<AtpWriter>();
+        assert_owned_progress_stream::<AtpReader>();
+        let _writer_next: fn(&mut AtpWriter) = next_owned_progress::<AtpWriter>;
+        let _reader_next: fn(&mut AtpReader) = next_owned_progress::<AtpReader>;
     }
 
     #[test]
