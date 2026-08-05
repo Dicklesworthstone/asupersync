@@ -152,9 +152,9 @@
     },
     {
       "action": "dtolnay/rust-toolchain",
-      "source_ref": "master snapshot 2026-07-16",
+      "source_ref": "upstream branch snapshot 2026-07-16",
       "sha": "2c7215f132e9ebf062739d9130488b56d53c060c",
-      "version_comment": "master snapshot 2026-07-16",
+      "version_comment": "upstream branch snapshot 2026-07-16",
       "occurrences": 39,
       "source_ref_url": "https://github.com/dtolnay/rust-toolchain/tree/2c7215f132e9ebf062739d9130488b56d53c060c",
       "provenance_url": "https://github.com/dtolnay/rust-toolchain/commit/2c7215f132e9ebf062739d9130488b56d53c060c"

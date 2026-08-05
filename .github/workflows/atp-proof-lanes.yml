@@ -107,7 +107,7 @@ jobs:
         persist-credentials: false
 
     - name: Setup pinned Rust toolchain
-      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
+      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
       with:
         toolchain: nightly-2026-07-05
         targets: x86_64-unknown-linux-gnu
@@ -291,7 +291,7 @@ jobs:
       uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
     - name: Setup Rust toolchain
-      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
+      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
       with:
         toolchain: nightly
         components: rustfmt, clippy
@@ -336,7 +336,7 @@ jobs:
       uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
     - name: Setup Rust toolchain
-      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
+      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
       with:
         toolchain: nightly
         components: rustfmt, clippy
@@ -394,7 +394,7 @@ jobs:
       uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
     - name: Setup Rust toolchain
-      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
+      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
       with:
         toolchain: nightly
         components: rustfmt, clippy

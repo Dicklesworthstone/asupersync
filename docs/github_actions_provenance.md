@@ -7,7 +7,7 @@ a readable tag or dated branch-snapshot comment on the same line.
 
 ## Selection policy
 
-A major-version tag such as `@v4`, a branch such as `@master`, and a
+A major-version tag such as `@v4`, a branch such as `@main`, and a
 tool-selecting alias are mutable references and are not admitted. A reviewer
 must resolve the intended upstream reference, inspect the selected action
 source, and write the immutable commit into both the workflow and inventory.
