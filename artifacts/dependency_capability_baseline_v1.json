@@ -1345,6 +1345,390 @@
       "no_claim_boundary": "CAP A2 catalogs incumbent and local fixtures; it does not falsely claim the future aggregate runner, pinned services, platform fleet, or cutover evidence already exists."
     }
   ],
+  "hash_map_static_audit": {
+    "audit_id": "CAP-HASH-MAPS-STATIC-AUDIT-V1",
+    "bead_id": "asupersync-d24mms.1",
+    "capability_id": "CAP-HASH-MAPS",
+    "observed_at_revision": "4d5748b3de2c15985af55e3dfe3c35626d6be543",
+    "audit_state": "STATIC_SOURCE_PINNED_NOT_EXECUTED",
+    "execution_state": "NO_REPLACEMENT_OR_BENCHMARK_MATRIX_EXECUTED",
+    "decision": {
+      "dependency": "hashbrown",
+      "candidate": "std::collections",
+      "disposition": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "manifest_or_lockfile_edit_allowed": false,
+      "source_behavior_change_allowed": false,
+      "tracker_closure_allowed": false,
+      "reason": "The two-file production inventory is statically complete, but replacement execution, collision posture, deterministic replay, platform coverage, allocator behavior, tail latency, and fresh marginal-ledger evidence are absent. Static API compatibility cannot authorize a scheduler/reactor hot-path cutover."
+    },
+    "dependency_contract": {
+      "manifest_kind": "unconditional normal dependency",
+      "manifest_requirement": "0.17",
+      "direct_locked_version": "0.17.1",
+      "coexisting_locked_versions": [
+        "0.16.1",
+        "0.17.1"
+      ],
+      "root_direct_edge": "normal:hashbrown"
+    },
+    "source_pins": [
+      {
+        "path": "Cargo.toml",
+        "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+        "line_count": 1038,
+        "role": "unconditional normal hashbrown dependency declaration and feature profiles"
+      },
+      {
+        "path": "Cargo.lock",
+        "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+        "line_count": 4666,
+        "role": "direct hashbrown 0.17.1 resolution plus transitive 0.16.1 and 0.17.1 graph context"
+      },
+      {
+        "path": "src/runtime/scheduler/mod.rs",
+        "sha256": "00b2b8133aba3e46b0bfe2f1d8b6eec19a38cd1e58785b9a9c243302a571d81b",
+        "line_count": 223,
+        "role": "unconditional local-queue module and public LocalQueue re-export boundary"
+      },
+      {
+        "path": "src/runtime/scheduler/local_queue.rs",
+        "sha256": "74c3895d96057869f0ebdd554c426efe37c2399ca80d20f3f8d09062c4925d66",
+        "line_count": 1798,
+        "role": "scheduler presence HashSet consumer, operations, invariants, and source-local tests"
+      },
+      {
+        "path": "src/runtime/reactor/mod.rs",
+        "sha256": "df1ce75337c1a4c0549e58cedc7b8390ed418edf35fb738d24fb8380411b5427",
+        "line_count": 1325,
+        "role": "Linux and Android epoll platform gate and reactor selection boundary"
+      },
+      {
+        "path": "src/runtime/reactor/epoll.rs",
+        "sha256": "28522a60201582a5bb5d5bacd9be7682d3ffb9c6337f44d91dec277d6dbb3b23",
+        "line_count": 2385,
+        "role": "token and file-descriptor HashMap consumers, Entry path, lifecycle invariants, and source-local tests"
+      },
+      {
+        "path": "tests/e2e_reactor_optin.rs",
+        "sha256": "9004380fe2b18fb5bb75bf81e5c9803f2fd5defd3ce35a94e68d0627f39662ff",
+        "line_count": 99,
+        "role": "real default-platform reactor TCP round-trip surface referenced by baseline evidence"
+      },
+      {
+        "path": "tests/conformance/reactor_conformance.rs",
+        "sha256": "76f47d1726832f1e0b028e7c56fcc022b067b994c6aed43414fd3e27ef6f9427",
+        "line_count": 1114,
+        "role": "mock reactor conformance surface referenced by baseline evidence"
+      },
+      {
+        "path": "tests/metamorphic/local_queue.rs",
+        "sha256": "fae5e0699f1d4625c4c1ee67a95326a208c5f0179841f6b7ad134952a05fb9ed",
+        "line_count": 819,
+        "role": "declared local-queue property and metamorphic test surface without a current execution receipt"
+      },
+      {
+        "path": "artifacts/dependency_capability_registry_v1.json",
+        "sha256": "e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2",
+        "line_count": 6917,
+        "role": "CAP-HASH-MAPS capability, platform, security, lifecycle, and ownership authority"
+      },
+      {
+        "path": "artifacts/dependency_marginal_ledger_v1.json",
+        "sha256": "9382d8357e59b49b01775f3efad2db95f2186c63bc432b5616ba20f3b9a218a9",
+        "line_count": 188045,
+        "role": "stale but source-pinned 52-cell hashbrown marginal package graph"
+      },
+      {
+        "path": "scripts/run_dependency_sovereignty_e2e.sh",
+        "sha256": "388af46854549b837e7de602fbb84f99d26dcf2fef6b7e4f8575f1f6478d33a0",
+        "line_count": 1276,
+        "role": "retained dependency-sovereignty scenario catalog lacking reactor_registration_churn"
+      },
+      {
+        "path": "docs/benchmarking.md",
+        "sha256": "21e7a7e52aff1547334a50db4c5b27390eeb23da24fbf708a377047f2836de0a",
+        "line_count": 760,
+        "role": "historical scheduler allocation note that is not a same-source hashbrown replacement comparison"
+      }
+    ],
+    "call_site_inventory": {
+      "state": "STATIC_COMPLETE_TWO_PRODUCTION_FILES",
+      "search_contract": "production Rust imports and qualified paths rooted at hashbrown across the tracked source tree, excluding nonproduction contract literals",
+      "production_file_count": 2,
+      "dependency_import_count": 3,
+      "public_type_exposure_count": 0,
+      "observable_collection_iteration_count": 0,
+      "files": [
+        {
+          "path": "src/runtime/scheduler/local_queue.rs",
+          "platform_scope": "unconditional scheduler module",
+          "imports": [
+            "hashbrown::HashSet"
+          ],
+          "collection_roles": [
+            "LocalQueueInner.presence: HashSet<TaskId>"
+          ],
+          "operation_counts": {
+            "presence_insert": 4,
+            "presence_remove": 3,
+            "presence_reserve": 1,
+            "default_initialization": 1,
+            "collection_iteration": 0
+          },
+          "observable_contract": "O(1)-style duplicate suppression remains synchronized with LIFO owner pop, FIFO bounded stealing, batch transfer, cached length, and no-loss/no-dup task ownership",
+          "candidate_state": "API_SHAPE_COMPATIBLE_EXECUTION_AND_PERFORMANCE_UNPROVEN"
+        },
+        {
+          "path": "src/runtime/reactor/epoll.rs",
+          "platform_scope": "Linux and Android epoll backend",
+          "imports": [
+            "hashbrown::HashMap",
+            "hashbrown::hash_map::Entry"
+          ],
+          "collection_roles": [
+            "ReactorState.tokens: HashMap<Token, RegistrationInfo>",
+            "ReactorState.fds: HashMap<i32, Token>"
+          ],
+          "operation_counts": {
+            "with_capacity": 2,
+            "contains_key": 2,
+            "insert": 2,
+            "get": 2,
+            "entry": 1,
+            "entry_remove": 1,
+            "entry_into_mut": 1,
+            "remove": 5,
+            "collection_iteration": 0
+          },
+          "observable_contract": "duplicate token and descriptor rejection, atomic dual-map bookkeeping, in-place interest update, stale descriptor cleanup, idempotent orphan recovery, exact registration count, and no leaked or aliased registration",
+          "candidate_state": "API_SHAPE_COMPATIBLE_EXECUTION_AND_PERFORMANCE_UNPROVEN"
+        }
+      ]
+    },
+    "semantic_contract": {
+      "scheduler_required": [
+        "duplicate push remains idempotent without dropping the queued task",
+        "push_many reserves bounded capacity and does not duplicate input IDs",
+        "pop and steal remove presence membership exactly once",
+        "steal_batch transfers membership between source and destination under deterministic lock order",
+        "owner LIFO, thief FIFO, local-only filtering, cached length, cancellation, and quiescence remain unchanged"
+      ],
+      "reactor_required": [
+        "duplicate token and descriptor registrations retain AlreadyExists errors",
+        "missing modify and deregister retain NotFound and idempotent orphan cleanup behavior",
+        "tokens and descriptors remain one-to-one through add, modify, failure, fd reuse, and deregister",
+        "registration_count changes only after successful registration or definitive cleanup",
+        "collection replacement does not widen the existing unsafe fd-lifetime boundary"
+      ],
+      "hash_policy_required": [
+        "hash construction, collision resistance, seed behavior, and denial-of-service posture are explicit",
+        "iteration order remains unobservable",
+        "capacity growth, shrink retention, allocation failure, and adversarial-key behavior are measured",
+        "LabRuntime replay remains deterministic despite process-random hash state where applicable"
+      ]
+    },
+    "existing_evidence_assessment": {
+      "source_declared_test_counts": {
+        "local_queue_unit_tests": 39,
+        "epoll_unit_tests": 36,
+        "local_queue_metamorphic_test_attributes": 10,
+        "local_queue_proptest_blocks": 7,
+        "reactor_mock_conformance_tests": 5,
+        "reactor_e2e_tests": 2
+      },
+      "baseline_evidence_id": "EVD-REACTOR-REGISTRATION",
+      "baseline_feature_profile": "test-internals",
+      "baseline_fixture_paths": [
+        "tests/e2e_reactor_optin.rs",
+        "tests/conformance/reactor_conformance.rs"
+      ],
+      "coverage_state": "ADJACENT_PARTIAL_NOT_REPLACEMENT_PARITY",
+      "covered_statically": [
+        "reactor registration lifecycle source surfaces",
+        "TCP readiness round-trip source surface",
+        "mock registration semantics source surface"
+      ],
+      "not_covered": [
+        "hashbrown-to-std differential execution",
+        "scheduler presence-set replacement execution",
+        "collision and hash-flood posture",
+        "capacity retention and allocation comparison",
+        "Apple Silicon and high-core-count x86 tail latency",
+        "Android epoll replacement behavior",
+        "current-revision dependency-sovereignty receipt"
+      ],
+      "declared_scenario_id": "reactor_registration_churn",
+      "dependency_sovereignty_runner_state": "SCENARIO_NOT_IMPLEMENTED",
+      "execution_receipt_present": false
+    },
+    "marginal_ledger_assessment": {
+      "artifact_path": "artifacts/dependency_marginal_ledger_v1.json",
+      "ledger_source_commit": "ddea6250aee80357756fa1f39456823df88f7af1",
+      "source_commit_matches_observed_revision": false,
+      "fresh_for_cutover": false,
+      "hashbrown_measurement_row_count": 52,
+      "feature_profiles": [
+        "cli",
+        "compression",
+        "default",
+        "fuzz-quarantine",
+        "io-uring",
+        "kafka",
+        "loom-tests",
+        "metrics",
+        "minimal",
+        "sqlite",
+        "tls",
+        "trace-compression",
+        "workspace-dev-build-audit"
+      ],
+      "target_triples": [
+        "aarch64-apple-darwin",
+        "wasm32-unknown-unknown",
+        "x86_64-pc-windows-msvc",
+        "x86_64-unknown-linux-gnu"
+      ],
+      "marginal_package_version_count_distribution": [
+        {
+          "marginal_package_version_count": 0,
+          "row_count": 4
+        },
+        {
+          "marginal_package_version_count": 2,
+          "row_count": 12
+        },
+        {
+          "marginal_package_version_count": 4,
+          "row_count": 36
+        }
+      ],
+      "unsafe_exposure_class": "unclassified-fail-closed",
+      "marginal_native_code_state": "none",
+      "build_script_count": 0,
+      "proc_macro_count": 0,
+      "favorable_cutover_verdict": false,
+      "interpretation": "The 52 counterfactual rows quantify profile-dependent graph opportunity, but their older source commit and fail-closed unsafe classification prevent use as current cutover evidence."
+    },
+    "required_evidence_matrix": {
+      "status": "MISSING_NOT_RUN",
+      "captured_case_count": 0,
+      "captured_cases": [],
+      "platform_cells": [
+        "Linux high-core-count x86 scheduler and epoll",
+        "Linux adversarial collision and registration churn",
+        "Android epoll compile and lifecycle",
+        "Apple Silicon scheduler contention and allocation",
+        "Windows scheduler semantics and contention",
+        "wasm32 scheduler compile profile"
+      ],
+      "profile_cells": [
+        "default",
+        "test-internals",
+        "loom-tests",
+        "workspace all-targets",
+        "minimal and sparse feature profiles"
+      ],
+      "workload_cells": [
+        "empty, duplicate, growth, removal, reinsertion, and capacity reuse",
+        "owner pop, thief steal, and cross-queue batch transfer",
+        "concurrent owner and multiple stealers with cancel and quiescence",
+        "reactor register, modify, deregister, and duplicate rejection",
+        "descriptor close, reuse, stale cleanup, and retry",
+        "adversarial TaskId, Token, and descriptor collision distributions",
+        "allocation failure and retained-capacity envelope",
+        "deterministic replay under repeated process seeds"
+      ],
+      "required_metrics": [
+        "p50 latency",
+        "p95 latency",
+        "p999 latency",
+        "CPU time",
+        "allocation count and bytes",
+        "peak and retained RSS",
+        "capacity and tombstone retention",
+        "lost, duplicated, leaked, or stale entry count"
+      ],
+      "required_record_fields": [
+        "case_id",
+        "source_revision",
+        "exact_command",
+        "candidate_and_incumbent_identity",
+        "feature_set",
+        "target_and_host_identity",
+        "toolchain_identity",
+        "workload_and_seed",
+        "raw_samples_and_summary",
+        "allocation_and_capacity_observations",
+        "stdout_and_stderr",
+        "exit_code",
+        "structured_events_ndjson",
+        "redaction_and_replay_result"
+      ],
+      "missing_or_unsupported_policy": "A missing, skipped, stale, unredacted, non-replayable, or statistically inconclusive cell is not SAME-or-BETTER evidence and keeps hashbrown."
+    },
+    "cutover_gate": {
+      "required_state": "SAME_OR_BETTER",
+      "rows": [
+        {
+          "row_id": "HASHMAP-CALLSITE-INVENTORY",
+          "state": "STATIC_COMPLETE",
+          "requirement": "exactly two production files, three imports, and three internal collection roles remain source-pinned"
+        },
+        {
+          "row_id": "HASHMAP-SCHEDULER-SEMANTICS",
+          "state": "MISSING",
+          "requirement": "replacement execution preserves duplicate suppression, owner/thief order, batch transfer, cancellation, and quiescence"
+        },
+        {
+          "row_id": "HASHMAP-REACTOR-SEMANTICS",
+          "state": "MISSING",
+          "requirement": "replacement execution preserves dual-map registration, errors, stale cleanup, fd reuse, retry, and registration counts"
+        },
+        {
+          "row_id": "HASHMAP-HASH-SECURITY-POLICY",
+          "state": "MISSING",
+          "requirement": "hash construction, collision resistance, seed policy, and adversarial-key limits receive explicit owner approval"
+        },
+        {
+          "row_id": "HASHMAP-DETERMINISM-REPLAY",
+          "state": "MISSING",
+          "requirement": "LabRuntime and repeated-process replay preserve all observable scheduler and reactor outcomes"
+        },
+        {
+          "row_id": "HASHMAP-PLATFORM-PROFILE-MATRIX",
+          "state": "MISSING",
+          "requirement": "all declared platform and sparse-feature cells compile and execute"
+        },
+        {
+          "row_id": "HASHMAP-PERFORMANCE-RESOURCE-RATCHET",
+          "state": "MISSING",
+          "requirement": "Apple Silicon and high-core x86 p50, p95, p999, CPU, allocation, RSS, and retention are SAME or BETTER"
+        },
+        {
+          "row_id": "HASHMAP-E2E-REPLAY-REDACTION",
+          "state": "MISSING",
+          "requirement": "the canonical scheduler/reactor scenarios retain structured logs, cleanup, redaction, and deterministic replay"
+        },
+        {
+          "row_id": "HASHMAP-FRESH-MARGINAL-LEDGER-CUTOVER",
+          "state": "MISSING",
+          "requirement": "a current-revision marginal ledger has favorable classified graph evidence before serialized manifest integration"
+        }
+      ],
+      "on_any_missing_or_regressed_row": "KEEP_INCUMBENT",
+      "hashbrown_exit_allowed": false,
+      "tracker_closure_allowed": false
+    },
+    "no_claims": [
+      "No hash-map replacement, source behavior change, compiler, formatter, unit test, property test, conformance test, E2E test, benchmark, Cargo lane, RCH lane, platform cell, or marginal-ledger regeneration was executed.",
+      "Static std API-shape compatibility does not prove scheduler or reactor semantic parity.",
+      "Declared source tests and EVD-REACTOR-REGISTRATION are existing surfaces, not current replacement execution receipts.",
+      "The historical scheduler allocation note is not a same-source hashbrown-versus-std comparison for these two consumers.",
+      "The stale marginal ledger quantifies graph opportunity but does not authorize cutover.",
+      "This audit does not authorize hashbrown removal, manifest or lockfile edits, source behavior changes, tracker closure, performance claims, release readiness, or broad workspace-health claims."
+    ]
+  },
   "host_benchmark_metadata_static_audit": {
     "audit_id": "CAP-HOST-BENCH-METADATA-STATIC-AUDIT-V1",
     "bead_id": "asupersync-d24mms.2",

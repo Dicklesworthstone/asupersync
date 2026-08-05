@@ -23,6 +23,10 @@ const CONSUMER_SOURCE: &str = "tests/fixtures/dependency-capability-baseline-con
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
 const GENERATED_BEGIN: &str = "<!-- BEGIN GENERATED BASELINE SUMMARY -->";
 const GENERATED_END: &str = "<!-- END GENERATED BASELINE SUMMARY -->";
+const HASH_MAP_BEAD_ID: &str = "asupersync-d24mms.1";
+const HASH_MAP_AUDIT_ID: &str = "CAP-HASH-MAPS-STATIC-AUDIT-V1";
+const HASHBROWN_PATH_TOKEN: &str = concat!("hash", "brown::");
+const MARGINAL_LEDGER_PATH: &str = "artifacts/dependency_marginal_ledger_v1.json";
 const HOST_METADATA_BEAD_ID: &str = "asupersync-d24mms.2";
 const HOST_METADATA_AUDIT_ID: &str = "CAP-HOST-BENCH-METADATA-STATIC-AUDIT-V1";
 const NUM_CPUS_CALL: &str = concat!("num_cpus", "::get()");
@@ -109,6 +113,55 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 fn count_occurrences(source: &str, token: &str) -> u64 {
     u64::try_from(source.matches(token).count()).expect("source token count fits u64")
+}
+
+fn count_trimmed_lines(source: &str, marker: &str) -> u64 {
+    u64::try_from(
+        source
+            .lines()
+            .filter(|line| line.trim() == marker)
+            .count(),
+    )
+    .expect("source line count fits u64")
+}
+
+fn rust_source_paths_with_token(token: &str) -> BTreeSet<String> {
+    let root = repo_root();
+    let mut pending = vec![root.join("src")];
+    let mut matches = BTreeSet::new();
+
+    while let Some(directory) = pending.pop() {
+        let entries = std::fs::read_dir(&directory)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", directory.display()));
+        for entry in entries {
+            let entry = entry.unwrap_or_else(|error| {
+                panic!("failed to inspect {}: {error}", directory.display())
+            });
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .unwrap_or_else(|error| panic!("failed to stat {}: {error}", path.display()));
+            if file_type.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if path.extension().and_then(std::ffi::OsStr::to_str) != Some("rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            if source.contains(token) {
+                let relative = path
+                    .strip_prefix(&root)
+                    .expect("source path must remain under repository root")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                matches.insert(relative);
+            }
+        }
+    }
+
+    matches
 }
 
 fn path_exists(path: &str) -> bool {
@@ -865,6 +918,10 @@ fn runner_and_docs_expose_replay_logging_and_no_claim_boundaries() {
         "No feature loss",
         "consumer-default",
         "consumer-full",
+        HASH_MAP_AUDIT_ID,
+        HASH_MAP_BEAD_ID,
+        "NO_REPLACEMENT_OR_BENCHMARK_MATRIX_EXECUTED",
+        "hashbrown_exit_allowed=false",
         HOST_METADATA_AUDIT_ID,
         HOST_METADATA_BEAD_ID,
         "STATIC_SOURCE_PINNED_NOT_EXECUTED",
@@ -878,6 +935,411 @@ fn runner_and_docs_expose_replay_logging_and_no_claim_boundaries() {
             docs.contains(required),
             "documentation missing required contract token {required}"
         );
+    }
+}
+
+#[test]
+fn hash_map_static_audit_is_source_pinned_and_fail_closed() {
+    let value = artifact();
+    let audit = object(&value, "hash_map_static_audit");
+    assert_eq!(string(audit, "audit_id"), HASH_MAP_AUDIT_ID);
+    assert_eq!(string(audit, "bead_id"), HASH_MAP_BEAD_ID);
+    assert_eq!(string(audit, "capability_id"), "CAP-HASH-MAPS");
+    assert_eq!(
+        string(audit, "audit_state"),
+        "STATIC_SOURCE_PINNED_NOT_EXECUTED"
+    );
+    assert_eq!(
+        string(audit, "execution_state"),
+        "NO_REPLACEMENT_OR_BENCHMARK_MATRIX_EXECUTED"
+    );
+    assert_eq!(
+        string(audit, "observed_at_revision"),
+        "4d5748b3de2c15985af55e3dfe3c35626d6be543"
+    );
+
+    let decision = object(audit, "decision");
+    assert_eq!(string(decision, "dependency"), "hashbrown");
+    assert_eq!(string(decision, "candidate"), "std::collections");
+    assert_eq!(string(decision, "disposition"), "KEEP_INCUMBENT");
+    assert!(!boolean(decision, "dependency_exit_allowed"));
+    assert!(!boolean(decision, "manifest_or_lockfile_edit_allowed"));
+    assert!(!boolean(decision, "source_behavior_change_allowed"));
+    assert!(!boolean(decision, "tracker_closure_allowed"));
+
+    let dependency = object(audit, "dependency_contract");
+    assert_eq!(
+        string(dependency, "manifest_kind"),
+        "unconditional normal dependency"
+    );
+    assert_eq!(string(dependency, "manifest_requirement"), "0.17");
+    assert_eq!(string(dependency, "direct_locked_version"), "0.17.1");
+    assert_eq!(
+        string_set(dependency, "coexisting_locked_versions"),
+        BTreeSet::from(["0.16.1".to_owned(), "0.17.1".to_owned()])
+    );
+    assert_eq!(string(dependency, "root_direct_edge"), "normal:hashbrown");
+    let manifest = read_repo_file("Cargo.toml");
+    assert!(manifest.contains("hashbrown = \"0.17\""));
+    let lock = read_repo_file("Cargo.lock");
+    assert!(lock.contains("\"hashbrown 0.17.1\""));
+    assert!(lock.contains("name = \"hashbrown\"\nversion = \"0.16.1\""));
+    assert!(lock.contains("name = \"hashbrown\"\nversion = \"0.17.1\""));
+
+    let pins = array(audit, "source_pins");
+    assert_eq!(pins.len(), 13);
+    let pinned_paths = pins
+        .iter()
+        .map(|pin| string(pin, "path"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        pinned_paths,
+        BTreeSet::from([
+            "Cargo.lock",
+            "Cargo.toml",
+            "artifacts/dependency_capability_registry_v1.json",
+            "artifacts/dependency_marginal_ledger_v1.json",
+            "docs/benchmarking.md",
+            "scripts/run_dependency_sovereignty_e2e.sh",
+            "src/runtime/reactor/epoll.rs",
+            "src/runtime/reactor/mod.rs",
+            "src/runtime/scheduler/local_queue.rs",
+            "src/runtime/scheduler/mod.rs",
+            "tests/conformance/reactor_conformance.rs",
+            "tests/e2e_reactor_optin.rs",
+            "tests/metamorphic/local_queue.rs",
+        ])
+    );
+    for pin in pins {
+        let path = string(pin, "path");
+        let source = read_repo_file(path);
+        assert_eq!(
+            sha256_hex(&read_repo_bytes(path)),
+            string(pin, "sha256"),
+            "source pin drift for {path}"
+        );
+        assert_eq!(
+            u64::try_from(source.lines().count()).expect("line count fits u64"),
+            unsigned(pin, "line_count"),
+            "line-count drift for {path}"
+        );
+        assert!(!string(pin, "role").trim().is_empty());
+    }
+
+    assert_eq!(
+        rust_source_paths_with_token(HASHBROWN_PATH_TOKEN),
+        BTreeSet::from([
+            "src/runtime/reactor/epoll.rs".to_owned(),
+            "src/runtime/scheduler/local_queue.rs".to_owned(),
+        ])
+    );
+
+    let inventory = object(audit, "call_site_inventory");
+    assert_eq!(
+        string(inventory, "state"),
+        "STATIC_COMPLETE_TWO_PRODUCTION_FILES"
+    );
+    assert_eq!(unsigned(inventory, "production_file_count"), 2);
+    assert_eq!(unsigned(inventory, "dependency_import_count"), 3);
+    assert_eq!(unsigned(inventory, "public_type_exposure_count"), 0);
+    assert_eq!(
+        unsigned(inventory, "observable_collection_iteration_count"),
+        0
+    );
+    let files = array(inventory, "files");
+    assert_eq!(files.len(), 2);
+    let by_path = files
+        .iter()
+        .map(|row| (string(row, "path"), row))
+        .collect::<BTreeMap<_, _>>();
+
+    let local = by_path
+        .get("src/runtime/scheduler/local_queue.rs")
+        .copied()
+        .expect("local queue row");
+    assert_eq!(
+        string_set(local, "imports"),
+        BTreeSet::from([format!("{HASHBROWN_PATH_TOKEN}HashSet")])
+    );
+    assert_eq!(array(local, "collection_roles").len(), 1);
+    let local_operations = object(local, "operation_counts");
+    assert_eq!(unsigned(local_operations, "presence_insert"), 4);
+    assert_eq!(unsigned(local_operations, "presence_remove"), 3);
+    assert_eq!(unsigned(local_operations, "presence_reserve"), 1);
+    assert_eq!(unsigned(local_operations, "default_initialization"), 1);
+    assert_eq!(unsigned(local_operations, "collection_iteration"), 0);
+    let local_source = read_repo_file("src/runtime/scheduler/local_queue.rs");
+    assert!(
+        local_source.contains(&format!("use {HASHBROWN_PATH_TOKEN}HashSet;"))
+    );
+    assert_eq!(count_occurrences(&local_source, "presence.insert"), 4);
+    assert_eq!(count_occurrences(&local_source, "presence.remove"), 3);
+    assert_eq!(count_occurrences(&local_source, "presence.reserve"), 1);
+    assert!(!local_source.contains("presence.iter"));
+    let scheduler_module = read_repo_file("src/runtime/scheduler/mod.rs");
+    assert!(scheduler_module.contains("pub mod local_queue;"));
+    assert!(scheduler_module.contains("pub use local_queue::LocalQueue;"));
+
+    let epoll = by_path
+        .get("src/runtime/reactor/epoll.rs")
+        .copied()
+        .expect("epoll row");
+    assert_eq!(
+        string_set(epoll, "imports"),
+        BTreeSet::from([
+            format!("{HASHBROWN_PATH_TOKEN}HashMap"),
+            format!("{HASHBROWN_PATH_TOKEN}hash_map::Entry"),
+        ])
+    );
+    assert_eq!(array(epoll, "collection_roles").len(), 2);
+    let epoll_operations = object(epoll, "operation_counts");
+    for (operation, expected) in [
+        ("with_capacity", 2),
+        ("contains_key", 2),
+        ("insert", 2),
+        ("get", 2),
+        ("entry", 1),
+        ("entry_remove", 1),
+        ("entry_into_mut", 1),
+        ("remove", 5),
+        ("collection_iteration", 0),
+    ] {
+        assert_eq!(unsigned(epoll_operations, operation), expected);
+    }
+    let epoll_source = read_repo_file("src/runtime/reactor/epoll.rs");
+    assert!(epoll_source.contains(&format!("use {HASHBROWN_PATH_TOKEN}HashMap;")));
+    assert!(
+        epoll_source.contains(&format!("use {HASHBROWN_PATH_TOKEN}hash_map::Entry;"))
+    );
+    let epoll_production = epoll_source
+        .split_once("\n#[cfg(test)]")
+        .map(|(production, _)| production)
+        .expect("epoll source must separate production and tests");
+    assert_eq!(count_occurrences(epoll_production, "HashMap::with_capacity"), 2);
+    assert_eq!(count_occurrences(epoll_production, ".contains_key"), 2);
+    assert_eq!(count_occurrences(epoll_production, ".tokens.insert"), 1);
+    assert_eq!(count_occurrences(epoll_production, ".fds.insert"), 1);
+    assert_eq!(count_occurrences(epoll_production, "tokens.entry"), 1);
+    assert_eq!(count_occurrences(epoll_production, "state.tokens.get"), 2);
+    assert_eq!(count_occurrences(epoll_production, "state.tokens.remove"), 2);
+    assert_eq!(count_occurrences(epoll_production, "fds.remove"), 3);
+    assert_eq!(count_occurrences(epoll_production, "entry.remove()"), 1);
+    assert_eq!(count_occurrences(epoll_production, "entry.into_mut()"), 1);
+    assert!(!epoll_production.contains("tokens.iter"));
+    assert!(!epoll_production.contains("fds.iter"));
+    let reactor_module = read_repo_file("src/runtime/reactor/mod.rs");
+    assert!(reactor_module.contains("#[cfg(any(target_os = \"linux\", target_os = \"android\"))]"));
+    assert!(reactor_module.contains("pub mod epoll;"));
+
+    let registry = registry_rows();
+    let capability = registry.get("CAP-HASH-MAPS").expect("hash-map capability");
+    assert_eq!(
+        string_set(capability, "exposure"),
+        BTreeSet::from(["internal-runtime".to_owned()])
+    );
+    assert_eq!(
+        string_set(capability, "source_owners"),
+        BTreeSet::from([
+            "Cargo.toml".to_owned(),
+            "src/runtime/reactor/epoll.rs".to_owned(),
+            "src/runtime/scheduler/local_queue.rs".to_owned(),
+        ])
+    );
+    assert_eq!(
+        string_set(capability, "replacement_bead_ids"),
+        BTreeSet::from([HASH_MAP_BEAD_ID.to_owned()])
+    );
+    assert_eq!(
+        string(capability, "cutover_state"),
+        "BLOCKED_PENDING_EVIDENCE"
+    );
+    let baseline_index = capability_index(&value, "CAP-HASH-MAPS");
+    let baseline = &value["capability_baselines"][baseline_index];
+    assert!(!boolean(baseline, "cutover_eligible"));
+    assert_eq!(
+        string_set(baseline, "evidence_ids"),
+        BTreeSet::from(["EVD-REACTOR-REGISTRATION".to_owned()])
+    );
+
+    let evidence = object(audit, "existing_evidence_assessment");
+    let declared_counts = object(evidence, "source_declared_test_counts");
+    assert_eq!(
+        count_trimmed_lines(&local_source, "#[test]"),
+        unsigned(declared_counts, "local_queue_unit_tests")
+    );
+    assert_eq!(
+        count_trimmed_lines(&epoll_source, "#[test]"),
+        unsigned(declared_counts, "epoll_unit_tests")
+    );
+    let metamorphic = read_repo_file("tests/metamorphic/local_queue.rs");
+    assert_eq!(
+        count_trimmed_lines(&metamorphic, "#[test]"),
+        unsigned(declared_counts, "local_queue_metamorphic_test_attributes")
+    );
+    assert_eq!(
+        count_trimmed_lines(&metamorphic, "proptest! {"),
+        unsigned(declared_counts, "local_queue_proptest_blocks")
+    );
+    let conformance = read_repo_file("tests/conformance/reactor_conformance.rs");
+    assert_eq!(
+        count_trimmed_lines(&conformance, "#[test]"),
+        unsigned(declared_counts, "reactor_mock_conformance_tests")
+    );
+    let reactor_e2e = read_repo_file("tests/e2e_reactor_optin.rs");
+    assert_eq!(
+        count_trimmed_lines(&reactor_e2e, "#[test]"),
+        unsigned(declared_counts, "reactor_e2e_tests")
+    );
+    assert_eq!(
+        string(evidence, "coverage_state"),
+        "ADJACENT_PARTIAL_NOT_REPLACEMENT_PARITY"
+    );
+    assert_eq!(
+        string(evidence, "dependency_sovereignty_runner_state"),
+        "SCENARIO_NOT_IMPLEMENTED"
+    );
+    assert!(!boolean(evidence, "execution_receipt_present"));
+    let catalog = evidence_rows(&value);
+    let baseline_evidence = catalog
+        .get("EVD-REACTOR-REGISTRATION")
+        .expect("reactor baseline evidence");
+    assert_eq!(
+        string_set(baseline_evidence, "fixture_paths"),
+        BTreeSet::from([
+            "tests/conformance/reactor_conformance.rs".to_owned(),
+            "tests/e2e_reactor_optin.rs".to_owned(),
+        ])
+    );
+    let dependency_runner = read_repo_file("scripts/run_dependency_sovereignty_e2e.sh");
+    assert!(!dependency_runner.contains("reactor_registration_churn"));
+
+    let ledger_assessment = object(audit, "marginal_ledger_assessment");
+    let ledger = parse_json(MARGINAL_LEDGER_PATH);
+    assert_eq!(
+        string(&ledger, "source_commit"),
+        string(ledger_assessment, "ledger_source_commit")
+    );
+    assert!(!boolean(
+        ledger_assessment,
+        "source_commit_matches_observed_revision"
+    ));
+    assert!(!boolean(ledger_assessment, "fresh_for_cutover"));
+    assert!(!boolean(
+        ledger_assessment,
+        "favorable_cutover_verdict"
+    ));
+    let hashbrown_rows = array(&ledger, "marginal_measurements")
+        .iter()
+        .filter(|row| {
+            row.get("direct_root_edge").and_then(Value::as_str) == Some("normal:hashbrown")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        u64::try_from(hashbrown_rows.len()).expect("ledger row count fits u64"),
+        unsigned(ledger_assessment, "hashbrown_measurement_row_count")
+    );
+    assert_eq!(hashbrown_rows.len(), 52);
+    let ledger_profiles = hashbrown_rows
+        .iter()
+        .map(|row| string(row, "feature_profile").to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        ledger_profiles,
+        string_set(ledger_assessment, "feature_profiles")
+    );
+    let ledger_targets = hashbrown_rows
+        .iter()
+        .map(|row| string(row, "target_triple").to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        ledger_targets,
+        string_set(ledger_assessment, "target_triples")
+    );
+    let mut actual_distribution = BTreeMap::<u64, u64>::new();
+    for row in &hashbrown_rows {
+        *actual_distribution
+            .entry(unsigned(row, "marginal_package_version_count"))
+            .or_default() += 1;
+        assert_eq!(
+            string(row, "unsafe_exposure_class"),
+            "unclassified-fail-closed"
+        );
+        assert_eq!(
+            string(object(row, "marginal_native_code"), "status"),
+            "none"
+        );
+        assert!(array(row, "build_scripts").is_empty());
+        assert!(array(row, "proc_macros").is_empty());
+    }
+    let expected_distribution = array(
+        ledger_assessment,
+        "marginal_package_version_count_distribution",
+    )
+    .iter()
+    .map(|row| {
+        (
+            unsigned(row, "marginal_package_version_count"),
+            unsigned(row, "row_count"),
+        )
+    })
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(actual_distribution, expected_distribution);
+    assert_eq!(
+        actual_distribution,
+        BTreeMap::from([(0, 4), (2, 12), (4, 36)])
+    );
+    let historical_benchmarking = read_repo_file("docs/benchmarking.md");
+    assert!(historical_benchmarking.contains("hashbrown::raw::RawTable::reserve_rehash"));
+
+    let matrix = object(audit, "required_evidence_matrix");
+    assert_eq!(string(matrix, "status"), "MISSING_NOT_RUN");
+    assert_eq!(unsigned(matrix, "captured_case_count"), 0);
+    assert!(array(matrix, "captured_cases").is_empty());
+    assert_eq!(array(matrix, "platform_cells").len(), 6);
+    assert_eq!(array(matrix, "profile_cells").len(), 5);
+    assert_eq!(array(matrix, "workload_cells").len(), 8);
+    assert_eq!(array(matrix, "required_metrics").len(), 8);
+    assert_eq!(array(matrix, "required_record_fields").len(), 14);
+
+    let gate = object(audit, "cutover_gate");
+    assert_eq!(string(gate, "required_state"), "SAME_OR_BETTER");
+    let gate_rows = array(gate, "rows");
+    assert_eq!(gate_rows.len(), 9);
+    assert_eq!(
+        gate_rows
+            .iter()
+            .filter(|row| string(row, "state") == "STATIC_COMPLETE")
+            .count(),
+        1
+    );
+    assert_eq!(
+        gate_rows
+            .iter()
+            .filter(|row| string(row, "state") == "MISSING")
+            .count(),
+        8
+    );
+    assert_eq!(
+        string(gate, "on_any_missing_or_regressed_row"),
+        "KEEP_INCUMBENT"
+    );
+    assert!(!boolean(gate, "hashbrown_exit_allowed"));
+    assert!(!boolean(gate, "tracker_closure_allowed"));
+
+    let no_claims = array(audit, "no_claims")
+        .iter()
+        .map(|claim| claim.as_str().expect("no-claim text"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    for required in [
+        "No hash-map replacement",
+        "does not prove scheduler or reactor semantic parity",
+        "not current replacement execution receipts",
+        "not a same-source hashbrown-versus-std comparison",
+        "does not authorize cutover",
+        "does not authorize hashbrown removal",
+    ] {
+        assert!(no_claims.contains(required), "missing no-claim: {required}");
     }
 }
 

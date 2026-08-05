@@ -130,6 +130,52 @@ The later VER A2 aggregate owns
 failure, aggregate service lifecycle, and cross-scenario log packaging. CAP A2
 does not overclaim that future work.
 
+## Hash-map hot-path static audit
+
+`CAP-HASH-MAPS-STATIC-AUDIT-V1` records the bounded static audit for
+`asupersync-d24mms.1`. It is `STATIC_SOURCE_PINNED_NOT_EXECUTED`: thirteen
+source pins establish a complete two-file production inventory at revision
+`4d5748b3de2c15985af55e3dfe3c35626d6be543`, but no replacement, compiler,
+test, benchmark, platform, or E2E lane ran. Its execution state is
+`NO_REPLACEMENT_OR_BENCHMARK_MATRIX_EXECUTED`.
+
+The dependency owns three internal collection roles:
+
+- `LocalQueueInner.presence` is a `HashSet<TaskId>` synchronized with owner
+  push/pop and bounded work stealing. It uses default construction,
+  `reserve`, `insert`, and `remove`; its collection order is not observed.
+- `ReactorState.tokens` and `ReactorState.fds` are Linux/Android epoll maps.
+  They use capacity construction, lookup, insertion, `Entry` mutation, and
+  removal to preserve one-to-one token/descriptor registration and stale-fd
+  cleanup. Their collection order is also not observed.
+
+The APIs have an apparent `std::collections` analogue, but API shape is not
+replacement proof for these hot paths. Source currently declares 39 local-
+queue unit tests, 36 epoll unit tests, ten local-queue metamorphic test
+attributes across seven `proptest!` blocks, five mock reactor conformance
+tests, and two real-reactor E2E tests. None is a current candidate-versus-
+incumbent execution receipt. `EVD-REACTOR-REGISTRATION` is adjacent lifecycle
+evidence only, and the declared `reactor_registration_churn` scenario is not
+implemented in the retained dependency-sovereignty runner.
+
+The marginal ledger contains 52 `normal:hashbrown` profile/target rows across
+thirteen feature profiles and four target triples, with zero, two, or four
+marginal package versions depending on the cell. Its source commit is
+`ddea6250aee80357756fa1f39456823df88f7af1`, not the observed revision, and
+its unsafe exposure remains `unclassified-fail-closed`. It is useful graph
+context, not fresh favorable cutover evidence.
+
+Cutover still requires scheduler and reactor semantic execution, explicit
+collision/hash-seed policy, deterministic replay, Linux/Android/macOS/Windows/
+wasm profile coverage, Apple Silicon and high-core x86 p50/p95/p999 plus CPU,
+allocation and RSS measurements, replayable redacted E2E receipts, and a fresh
+classified marginal ledger. Only the inventory gate is `STATIC_COMPLETE`; the
+other eight gates are `MISSING`.
+
+The disposition is `KEEP_INCUMBENT` and `hashbrown_exit_allowed=false`. This
+packet does not authorize source, manifest, or lockfile edits, tracker closure,
+performance claims, release readiness, or broad workspace-health claims.
+
 ## Host benchmark metadata static audit
 
 `CAP-HOST-BENCH-METADATA-STATIC-AUDIT-V1` records the bounded static audit for
