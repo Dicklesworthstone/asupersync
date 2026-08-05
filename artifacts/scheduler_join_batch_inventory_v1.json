@@ -1,0 +1,709 @@
+{
+  "artifact_id": "scheduler-join-batch-inventory-v1",
+  "schema_version": 1,
+  "bead_id": "asupersync-sched-hot-path-perf-bt4y5f.3.1",
+  "captured_date_utc": "2026-08-05",
+  "base_commit": "0a87eb9c338a2e6f8bba5e6a88d086cdf31f69d1",
+  "disposition": "STATIC_SURFACE_COMPLETE_MEASUREMENT_BLOCKED",
+  "validation_state": {
+    "source_hashes_checked": true,
+    "source_anchors_checked": true,
+    "baseline_registry_inspected": true,
+    "json_shape_checked": true,
+    "rust_contract_authored": true,
+    "rust_contract_executed": false,
+    "compiler_or_toolchain_invoked": false,
+    "tests_executed": false,
+    "benchmarks_executed": false,
+    "remote_jobs_executed": false,
+    "reason": "This packet freezes the current JOIN-BATCH surfaces and the exact evidence gap. The required isolated two-host measurements do not exist, so the bead remains open."
+  },
+  "authority": {
+    "inventory_scope": "legacy RuntimeHandle JoinHandle, canonical Cx TaskHandle, Scope and JoinSet collection, spawn gateway publication, mailbox admission, and incumbent benchmark evidence",
+    "source_revision_authority": "source_pins and exact line anchors at base_commit",
+    "production_behavior_changed": false,
+    "benchmark_behavior_changed": false,
+    "baseline_registry_changed": false,
+    "implementation_authorized": false,
+    "performance_claim_made": false,
+    "completion_candidate_selected": "legacy RuntimeHandle JoinHandle only, with the existing oneshot channel as the first safe experiment",
+    "structured_task_handle_role": "semantic comparator and independently measured incumbent, not an assumed replacement target",
+    "batch_design_owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.3.4",
+    "completion_experiment_owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.3.2",
+    "measurement_blocker": "required p50, p95, allocation, repetition, and admitted two-host observations are absent"
+  },
+  "source_pins": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+      "line_count": 1038,
+      "role": "existing spawn_throughput benchmark registration and feature gate"
+    },
+    {
+      "path": "src/runtime/builder.rs",
+      "sha256": "69e52f8b761944edf5fa038ed3b122ecf9a58da05f5ad15f20d1f8e3e1f8adb1",
+      "line_count": 8393,
+      "role": "legacy RuntimeHandle spawn, JoinHandle state, completion, admission, and shutdown"
+    },
+    {
+      "path": "src/runtime/task_handle.rs",
+      "sha256": "13690666fdb2a4513f1fa2d03a87299be538734f8ab9b0a1ce6bbad251d5b8cf",
+      "line_count": 1742,
+      "role": "canonical TaskHandle and JoinFuture cancellation and terminal semantics"
+    },
+    {
+      "path": "src/channel/oneshot.rs",
+      "sha256": "ca554d1eaa31d17e57f0d532a4c210cf9ad0d0b190b670df219701d27dfe979f",
+      "line_count": 7848,
+      "role": "mutex-backed TaskHandle result transport and persistent receive waiter"
+    },
+    {
+      "path": "src/cx/cx.rs",
+      "sha256": "516af14e3110790d510943d4e329c1afb957d8257c73e2f4fb1b29d139b933a8",
+      "line_count": 7391,
+      "role": "public structured spawn producer and take-once completion sender"
+    },
+    {
+      "path": "src/cx/scope.rs",
+      "sha256": "4521de4139fbe9aabe42baba8da7b826dde4472025a32149325bd9490b687bec",
+      "line_count": 3529,
+      "role": "state-threaded structured spawn and input-order join_all"
+    },
+    {
+      "path": "src/combinator/join_set.rs",
+      "sha256": "5bdf899842da239f70a9c0391fb2b072301cf44ea5a493fc6f2bb767f5ddf2f6",
+      "line_count": 988,
+      "role": "dynamic structured fan-out ordering, cancellation, and drop behavior"
+    },
+    {
+      "path": "src/runtime/spawn_mailbox.rs",
+      "sha256": "f948047d55b9d0ae27b62c2863398e61c1b8ba77a53720bc72a4dc3165b0b655",
+      "line_count": 4962,
+      "role": "per-request producer publication, pending credit, FIFO queue, trace, and denial resolution"
+    },
+    {
+      "path": "src/runtime/scheduler/three_lane.rs",
+      "sha256": "3f04b9034fc4375278109752093b1d9865e9bfcce57e6e94535708488a97598b",
+      "line_count": 8190,
+      "role": "global batch-one and owner-local batch-sixteen consumer policies"
+    },
+    {
+      "path": "src/runtime/state.rs",
+      "sha256": "fc217b1b34219ef2747613e0cf7fe8fa67a166231a5f72e955a7a05a64d5d80e",
+      "line_count": 10160,
+      "role": "admission result taxonomy, canonical identity, quota rollback, and successor publication"
+    },
+    {
+      "path": "src/runtime/config.rs",
+      "sha256": "1e351b452f35c348cff7dbb586263531afaeaab05ce8eba71830b0144f82504a",
+      "line_count": 10769,
+      "role": "direct-versus-mailbox admission mode and current direct default"
+    },
+    {
+      "path": "src/record/region.rs",
+      "sha256": "a7489db8fdfc317afa049e0bfbed41ed471f882e645cbbc5b9a6bf506c0a62c7",
+      "line_count": 3595,
+      "role": "one pending-spawn reservation per request and quiescence accounting"
+    },
+    {
+      "path": "benches/spawn_throughput.rs",
+      "sha256": "7c390a07be53b586b006460f0942c8a443f9e5397335885a7795d91f6795b5ef",
+      "line_count": 833,
+      "role": "existing public spawn, legacy join, JoinSet, and adversarial benchmark harness"
+    },
+    {
+      "path": "benches/methodology_baselines.rs",
+      "sha256": "d7f01c972abef84e6e70121fcddfc7940350137de00726f5f0e1887520b6b47e",
+      "line_count": 713,
+      "role": "historical queue-primitive batch benchmark"
+    },
+    {
+      "path": "artifacts/baseline.json",
+      "sha256": "b13a00196a7a248beb13a60eb5e6ab2917dc0f7feed5a9a47851494006605307",
+      "line_count": 1327,
+      "role": "incumbent baseline registry inspected without modification"
+    }
+  ],
+  "handle_families": [
+    {
+      "family_id": "LEGACY-RUNTIME-JOIN",
+      "public_origin": "RuntimeHandle::spawn and RuntimeHandle::try_spawn",
+      "handle_type": "runtime::builder::JoinHandle<T>",
+      "completion_transport": "Arc<parking_lot::Mutex<JoinState<T>>> with Option<Result<T, panic payload>> and one Waker slot",
+      "task_ownership": "runtime task; dropping the observer has no cancellation hook",
+      "terminal_api": "Future<Output = T>",
+      "cancellation_shape": "cancel-before-admission, shutdown, or executor disappearance is observed as a panic by the awaiter",
+      "panic_shape": "the original task panic payload is resumed in the awaiter",
+      "repoll_shape": "assertion panic after terminal consumption",
+      "selected_for_safe_experiment": true,
+      "anchors": [
+        {"path": "src/runtime/builder.rs", "line": 3683, "fragment": "pub fn spawn<F>(&self, future: F)"},
+        {"path": "src/runtime/builder.rs", "line": 3694, "fragment": "pub fn try_spawn<F>(&self, future: F)"},
+        {"path": "src/runtime/builder.rs", "line": 3799, "fragment": "pub struct JoinHandle<T>"},
+        {"path": "src/runtime/builder.rs", "line": 3823, "fragment": "impl<T> Future for JoinHandle<T>"},
+        {"path": "src/runtime/builder.rs", "line": 4466, "fragment": "struct JoinState<T>"},
+        {"path": "src/runtime/builder.rs", "line": 4484, "fragment": "fn complete_task<T>"}
+      ]
+    },
+    {
+      "family_id": "CANONICAL-CX-TASK",
+      "public_origin": "Cx::spawn, Cx::spawn_in, Cx::spawn_registered_in, and Scope::spawn_registered",
+      "handle_type": "runtime::TaskHandle<T>",
+      "completion_transport": "channel::oneshot Receiver<Result<T, JoinError>> backed by Arc<parking_lot::Mutex<OneShotInner<T>>>",
+      "producer_take_once": "gateway paths additionally share the Sender through Arc<std::sync::Mutex<Option<Sender>>> across completion and denial callbacks",
+      "task_ownership": "region-owned task; dropping TaskHandle alone leaves it running",
+      "terminal_api": "join, try_join, and poll_join return typed JoinError",
+      "cancellation_shape": "abort is a request; admission denial and closed result channel become JoinError::Cancelled",
+      "panic_shape": "JoinError::Panicked(PanicPayload)",
+      "repoll_shape": "JoinError::PolledAfterCompletion",
+      "selected_for_safe_experiment": false,
+      "anchors": [
+        {"path": "src/runtime/task_handle.rs", "line": 14, "fragment": "pub enum JoinError"},
+        {"path": "src/runtime/task_handle.rs", "line": 63, "fragment": "pub struct TaskHandle<T>"},
+        {"path": "src/channel/oneshot.rs", "line": 159, "fragment": "struct OneShotInner<T>"},
+        {"path": "src/channel/oneshot.rs", "line": 391, "fragment": "pub struct Sender<T>"},
+        {"path": "src/channel/oneshot.rs", "line": 1099, "fragment": "pub struct Receiver<T>"},
+        {"path": "src/cx/cx.rs", "line": 4489, "fragment": "let shared_tx = Arc::new(std::sync::Mutex::new(Some(result_tx)))"}
+      ]
+    }
+  ],
+  "semantic_contract": [
+    {
+      "semantic_id": "LEGACY-SYNC-SPAWN-FAILURE",
+      "surface": "LEGACY-RUNTIME-JOIN",
+      "event": "runtime unavailable or direct admission rejection before a handle is returned",
+      "incumbent_contract": "try_spawn returns SpawnError; spawn panics through expect",
+      "must_preserve": "fallible and panicking entry points remain distinct",
+      "anchors": [
+        {"path": "src/runtime/builder.rs", "line": 3683, "fragment": "pub fn spawn<F>(&self, future: F)"},
+        {"path": "src/runtime/builder.rs", "line": 3694, "fragment": "pub fn try_spawn<F>(&self, future: F)"}
+      ]
+    },
+    {
+      "semantic_id": "LEGACY-SUCCESS-SINGLE-TAKE",
+      "surface": "LEGACY-RUNTIME-JOIN",
+      "event": "task completes successfully",
+      "incumbent_contract": "complete_task stores one result; poll takes it once and returns T",
+      "must_preserve": "exactly one terminal value is observable",
+      "anchors": [
+        {"path": "src/runtime/builder.rs", "line": 3833, "fragment": "match guard.result.take()"},
+        {"path": "src/runtime/builder.rs", "line": 4484, "fragment": "fn complete_task<T>"}
+      ]
+    },
+    {
+      "semantic_id": "LEGACY-PENDING-WAKE",
+      "surface": "LEGACY-RUNTIME-JOIN",
+      "event": "poll before completion then publish completion",
+      "incumbent_contract": "one equivalent Waker slot is retained or replaced under the mutex and taken before wake outside the mutex",
+      "must_preserve": "no lost wake and no callback under the completion mutex",
+      "anchors": [
+        {"path": "src/runtime/builder.rs", "line": 3848, "fragment": "guard.waker = Some(cx.waker().clone())"},
+        {"path": "src/runtime/builder.rs", "line": 4484, "fragment": "fn complete_task<T>"}
+      ]
+    },
+    {
+      "semantic_id": "LEGACY-TASK-PANIC",
+      "surface": "LEGACY-RUNTIME-JOIN",
+      "event": "spawned future panics",
+      "incumbent_contract": "CatchUnwind stores the panic payload and the awaiter resumes that payload",
+      "must_preserve": "this family remains panic-based rather than silently converting to typed JoinError",
+      "anchors": [
+        {"path": "src/runtime/builder.rs", "line": 4231, "fragment": "fn spawn<F>(&self, future: F)"},
+        {"path": "src/runtime/builder.rs", "line": 3823, "fragment": "impl<T> Future for JoinHandle<T>"}
+      ]
+    },
+    {
+      "semantic_id": "LEGACY-CANCEL-BEFORE-ADMISSION",
+      "surface": "LEGACY-RUNTIME-JOIN",
+      "event": "mailbox request is cancelled or denied after try_spawn returned a handle",
+      "incumbent_contract": "the unadmitted callback stores an error payload that becomes an awaiter panic",
+      "must_preserve": "the observer resolves exactly once; no typed-cancellation claim is added to this family",
+      "anchors": [
+        {"path": "src/runtime/builder.rs", "line": 4253, "fragment": "if let Some(mailbox) = &self.spawn_mailbox"},
+        {"path": "src/runtime/spawn_mailbox.rs", "line": 1117, "fragment": "pub fn resolve_failed(self, error: SpawnError)"}
+      ]
+    },
+    {
+      "semantic_id": "LEGACY-SHUTDOWN-OR-EXECUTOR-DROP",
+      "surface": "LEGACY-RUNTIME-JOIN",
+      "event": "runtime drain resolves a pending request or executor-side completion state disappears",
+      "incumbent_contract": "runtime drain resolves pending requests; a handle with no result and no executor-side Arc panics when polled",
+      "must_preserve": "is_finished becomes true and a subsequent await does not park forever",
+      "anchors": [
+        {"path": "src/runtime/builder.rs", "line": 4457, "fragment": "while let Some(request) = mailbox.dequeue()"},
+        {"path": "src/runtime/builder.rs", "line": 3814, "fragment": "pub fn is_finished(&self) -> bool"}
+      ]
+    },
+    {
+      "semantic_id": "LEGACY-HANDLE-DROP",
+      "surface": "LEGACY-RUNTIME-JOIN",
+      "event": "JoinHandle is dropped before task completion",
+      "incumbent_contract": "there is no JoinHandle Drop implementation and task execution is not cancelled by observer drop",
+      "must_preserve": "a completion transport replacement must not introduce abort-on-handle-drop",
+      "anchors": [
+        {"path": "src/runtime/builder.rs", "line": 3799, "fragment": "pub struct JoinHandle<T>"}
+      ]
+    },
+    {
+      "semantic_id": "LEGACY-FINISHED-AND-REPOLL",
+      "surface": "LEGACY-RUNTIME-JOIN",
+      "event": "terminal query and poll after terminal consumption",
+      "incumbent_contract": "is_finished checks local completion, stored result, or executor-side disappearance; repoll asserts",
+      "must_preserve": "the query remains non-consuming and repoll remains an explicit failure",
+      "anchors": [
+        {"path": "src/runtime/builder.rs", "line": 3814, "fragment": "pub fn is_finished(&self) -> bool"},
+        {"path": "src/runtime/builder.rs", "line": 3823, "fragment": "impl<T> Future for JoinHandle<T>"}
+      ]
+    },
+    {
+      "semantic_id": "TASK-SYNC-SPAWN-FAILURE",
+      "surface": "CANONICAL-CX-TASK",
+      "event": "gateway or region counter is unavailable before publication",
+      "incumbent_contract": "Cx::spawn and Cx::spawn_in return SpawnError::RuntimeUnavailable and never panic",
+      "must_preserve": "no handle is returned for a request that was never published",
+      "anchors": [
+        {"path": "src/cx/cx.rs", "line": 4006, "fragment": "pub fn spawn<F, Fut>("},
+        {"path": "src/cx/cx.rs", "line": 4069, "fragment": "pub fn spawn_in<F, Fut, P>("}
+      ]
+    },
+    {
+      "semantic_id": "TASK-SUCCESS-SINGLE-TAKE",
+      "surface": "CANONICAL-CX-TASK",
+      "event": "structured task completes successfully",
+      "incumbent_contract": "the completion sender commits Ok(value); join, try_join, or poll_join consumes one terminal result",
+      "must_preserve": "the value is delivered once with no ambient cancellation check on the join receive",
+      "anchors": [
+        {"path": "src/cx/scope.rs", "line": 475, "fragment": "let _ = tx.send_blocking(Ok(result))"},
+        {"path": "src/runtime/task_handle.rs", "line": 421, "fragment": "pub fn try_join(&mut self)"}
+      ]
+    },
+    {
+      "semantic_id": "TASK-PENDING-WAKE",
+      "surface": "CANONICAL-CX-TASK",
+      "event": "join or JoinSet scan observes a pending result",
+      "incumbent_contract": "join owns a temporary uninterruptible waiter; poll_join stores a persistent waiter on Receiver",
+      "must_preserve": "pending JoinSet scans retain at least one live wake registration",
+      "anchors": [
+        {"path": "src/channel/oneshot.rs", "line": 718, "fragment": "fn poll_recv_uninterruptible_with_waiter<T>"},
+        {"path": "src/runtime/task_handle.rs", "line": 475, "fragment": "pub fn poll_join("}
+      ]
+    },
+    {
+      "semantic_id": "TASK-PANIC",
+      "surface": "CANONICAL-CX-TASK",
+      "event": "structured task factory or future panics",
+      "incumbent_contract": "CatchUnwind converts the message to JoinError::Panicked and the task Outcome is Panicked",
+      "must_preserve": "panic stays typed for this family",
+      "anchors": [
+        {"path": "src/runtime/task_handle.rs", "line": 14, "fragment": "pub enum JoinError"},
+        {"path": "src/cx/cx.rs", "line": 4463, "fragment": "fn spawn_via_gateway<F, Fut>("}
+      ]
+    },
+    {
+      "semantic_id": "TASK-CANCEL-OR-ADMISSION-DENIAL",
+      "surface": "CANONICAL-CX-TASK",
+      "event": "cancel-before-admission, region close, quota denial, or result-channel closure",
+      "incumbent_contract": "the completion slot or closed-channel mapping yields JoinError::Cancelled with the strongest available reason",
+      "must_preserve": "every accepted request terminates its handle and preserves cancellation attribution",
+      "anchors": [
+        {"path": "src/cx/cx.rs", "line": 4551, "fragment": "let request = SpawnRequest::new_with_factory"},
+        {"path": "src/runtime/task_handle.rs", "line": 599, "fragment": "impl<T> std::future::Future for JoinFuture"}
+      ]
+    },
+    {
+      "semantic_id": "TASK-EXPLICIT-ABORT",
+      "surface": "CANONICAL-CX-TASK",
+      "event": "TaskHandle::abort or abort_with_reason",
+      "incumbent_contract": "cancellation is requested and strongest reason is cached or published; immediate task termination is not promised",
+      "must_preserve": "abort remains reason-strengthening and admission-race safe",
+      "anchors": [
+        {"path": "src/runtime/task_handle.rs", "line": 532, "fragment": "pub fn abort_with_reason"}
+      ]
+    },
+    {
+      "semantic_id": "TASK-JOIN-FUTURE-DROP",
+      "surface": "CANONICAL-CX-TASK",
+      "event": "JoinFuture is dropped before terminal completion",
+      "incumbent_contract": "drop requests abort unless defused or the receiver is already terminal",
+      "must_preserve": "stop-waiting implies stop-task only for JoinFuture, not for TaskHandle itself",
+      "anchors": [
+        {"path": "src/runtime/task_handle.rs", "line": 555, "fragment": "pub struct JoinFuture<'a, T>"},
+        {"path": "src/runtime/task_handle.rs", "line": 640, "fragment": "impl<T> Drop for JoinFuture<'_, T>"}
+      ]
+    },
+    {
+      "semantic_id": "TASK-HANDLE-DROP",
+      "surface": "CANONICAL-CX-TASK",
+      "event": "TaskHandle is dropped without constructing a JoinFuture",
+      "incumbent_contract": "there is no TaskHandle Drop implementation; the region remains the task owner and quiescence backstop",
+      "must_preserve": "handle drop alone does not request cancellation",
+      "anchors": [
+        {"path": "src/runtime/task_handle.rs", "line": 63, "fragment": "pub struct TaskHandle<T>"}
+      ]
+    },
+    {
+      "semantic_id": "TASK-FINISHED-AND-REPOLL",
+      "surface": "CANONICAL-CX-TASK",
+      "event": "terminal query and consume after a prior terminal consume",
+      "incumbent_contract": "is_finished observes ready, closed, or terminal_consumed; later consumption returns JoinError::PolledAfterCompletion",
+      "must_preserve": "repoll remains typed and is_finished remains non-consuming",
+      "anchors": [
+        {"path": "src/runtime/task_handle.rs", "line": 324, "fragment": "pub fn is_finished(&self) -> bool"},
+        {"path": "src/runtime/task_handle.rs", "line": 421, "fragment": "pub fn try_join(&mut self)"}
+      ]
+    },
+    {
+      "semantic_id": "STRUCTURED-COLLECTION-ORDER",
+      "surface": "Scope and JoinSet",
+      "event": "multiple TaskHandle values are collected",
+      "incumbent_contract": "Scope::join_all and JoinSet::join_all return input or spawn order; JoinSet::join_next returns completion order with earliest-spawned ready tie-break",
+      "must_preserve": "a batch producer cannot change collection ordering",
+      "anchors": [
+        {"path": "src/cx/scope.rs", "line": 1265, "fragment": "pub async fn join_all<T>("},
+        {"path": "src/combinator/join_set.rs", "line": 209, "fragment": "pub async fn join_all"},
+        {"path": "src/combinator/join_set.rs", "line": 227, "fragment": "pub async fn join_next"}
+      ]
+    }
+  ],
+  "batch_path": {
+    "current_public_batch_api": "ABSENT",
+    "absent_symbols_checked": ["Cx::spawn_batch", "Cx::spawn_batch_in", "Scope::spawn_batch", "JoinSet::spawn_all"],
+    "single_spawn_fallback": "Cx::spawn or Cx::spawn_in once per member, then collect TaskHandle values directly or through JoinSet",
+    "producer_now": {
+      "publication": "one provisional TaskId, one pending-spawn reservation, one SpawnRequest enqueue, and one scheduler notification per Send member",
+      "trace": "TaskSpawnEnqueued is recorded before each request becomes visible",
+      "capacity": "global mailbox is unbounded; admission quotas fail later and explicitly",
+      "anchors": [
+        {"path": "src/runtime/spawn_mailbox.rs", "line": 901, "fragment": "pub struct SpawnRequest"},
+        {"path": "src/runtime/spawn_mailbox.rs", "line": 1247, "fragment": "pub fn enqueue(&self, request: SpawnRequest, now: Time)"},
+        {"path": "src/runtime/spawn_mailbox.rs", "line": 1412, "fragment": "pub fn enqueue_and_notify(&self, request: SpawnRequest)"},
+        {"path": "src/cx/cx.rs", "line": 4576, "fragment": "gateway.enqueue_and_notify(request)?"}
+      ]
+    },
+    "consumer_now": {
+      "global_send_lane": "dequeue at most one request per ThreeLaneWorker::next_task selection",
+      "owner_local_lane": "dequeue at most sixteen requests from the thread-local lane per selection",
+      "fairness_boundary": "producer notification amortization does not authorize changing either consumer bound",
+      "anchors": [
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 5576, "fragment": "fn drain_spawn_admissions(&mut self)"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 5577, "fragment": "const SPAWN_ADMISSION_BATCH: usize = 1"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 5695, "fragment": "const LOCAL_SPAWN_ADMISSION_BATCH: usize = 16"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 5844, "fragment": "self.drain_spawn_admissions()"}
+      ]
+    },
+    "identity_and_accounting": {
+      "identity": "each request has an independent provisional identity that admission maps to a canonical arena TaskId",
+      "pending_credit": "one RAII PendingSpawnReservation is acquired before each enqueue and released only after successor visibility or explicit resolution",
+      "admission": "region liveness, task record creation, quota admission, Cx linkage, future storage, canonical identity publication, and runnable publication remain per member",
+      "anchors": [
+        {"path": "src/record/region.rs", "line": 363, "fragment": "pub struct PendingSpawnCounter"},
+        {"path": "src/record/region.rs", "line": 391, "fragment": "pub fn reserve(self: &Arc<Self>)"},
+        {"path": "src/runtime/state.rs", "line": 3939, "fragment": "pub(crate) fn admit_spawn_request_in"},
+        {"path": "src/runtime/state.rs", "line": 4098, "fragment": "fn finish_send_spawn_admission_in"},
+        {"path": "src/runtime/state.rs", "line": 4156, "fragment": "drop(pending_reservation)"}
+      ]
+    },
+    "join_set_now": {
+      "spawn": "each JoinSet::spawn calls Cx::spawn_in once and pushes one TaskHandle",
+      "try_join_next": "earliest spawned ready member",
+      "join_all": "spawn order",
+      "join_next": "completion order with earliest spawned ready tie-break",
+      "cancel_all": "request cancellation for all members, then drain",
+      "drop": "best-effort cancellation request for every uncollected member",
+      "anchors": [
+        {"path": "src/combinator/join_set.rs", "line": 135, "fragment": "pub fn spawn<F, Fut>(&mut self"},
+        {"path": "src/combinator/join_set.rs", "line": 188, "fragment": "pub fn try_join_next(&mut self)"},
+        {"path": "src/combinator/join_set.rs", "line": 264, "fragment": "pub async fn cancel_all"},
+        {"path": "src/combinator/join_set.rs", "line": 348, "fragment": "impl<T, E, P> Drop for JoinSet"}
+      ]
+    },
+    "required_future_contract": [
+      "prefer structured Cx::spawn_batch and Cx::spawn_batch_in plus JoinSet::spawn_all over a new unstructured RuntimeHandle API",
+      "preserve deterministic input order and one TaskId, pending credit, trace event, completion handle, and admission outcome per member",
+      "distinguish batch-wide pre-publication setup failure from later per-member admission denial",
+      "empty input is a successful no-op with no enqueue and no notification",
+      "a bounded maximum and exact boundary behavior must be specified before implementation",
+      "partial construction or publication must return ownership or an explicit outcome for every member and must not silently drop accepted work",
+      "producer amortization may mean an enqueue loop followed by one notification; it must not be described as one queue operation",
+      "global consumer admission remains batch one unless a separate fairness decision authorizes a change",
+      "single-spawn remains the normative fallback and rollback path",
+      "no unsafe code, compatibility shim, or performance claim is authorized"
+    ]
+  },
+  "source_accuracy_findings": [
+    {
+      "finding_id": "JOIN-BENCH-HANDLE-FAMILY-MISMATCH",
+      "severity": "documentation-only",
+      "finding": "The spawn_throughput module comment calls the join-completion values TaskHandle, but join_handle_completion_batch obtains Runtime::current_handle and calls RuntimeHandle::spawn, producing the legacy builder JoinHandle.",
+      "disposition": "the inventory classifies the row by executed source path; benchmark wording is left unchanged in this static slice",
+      "anchors": [
+        {"path": "benches/spawn_throughput.rs", "line": 224, "fragment": "fn join_handle_completion_batch(runtime: &Runtime)"},
+        {"path": "benches/spawn_throughput.rs", "line": 229, "fragment": "joins.push(handle.spawn"}
+      ]
+    }
+  ],
+  "baseline_reconciliation": {
+    "registry_path": "artifacts/baseline.json",
+    "registry_row_count": 105,
+    "required_join_batch_row_count": 0,
+    "methodology_task_spawn_row_count": 12,
+    "methodology_task_spawn_operation_count": 6,
+    "methodology_task_spawn_environments": ["host:fixmydocuments", "host:hetzner2"],
+    "required_measurement_state": "MISSING",
+    "incumbent_surfaces": [
+      {
+        "surface_id": "CURRENT-LEGACY-JOIN-GROUP",
+        "criterion_ids": [
+          "join_handle_completion/spawn_then_await_all/direct",
+          "join_handle_completion/spawn_then_await_all/mailbox"
+        ],
+        "evidence_class": "SOURCE_ONLY_NON_EQUIVALENT",
+        "reason": "each timed iteration includes N=1000 runtime spawn calls, task execution, and ordered collection; it does not isolate completion handoff",
+        "baseline_rows": 0,
+        "anchors": [
+          {"path": "benches/spawn_throughput.rs", "line": 700, "fragment": "fn bench_join_handle_completion"},
+          {"path": "benches/spawn_throughput.rs", "line": 710, "fragment": "BenchmarkId::new(\"spawn_then_await_all\""}
+        ]
+      },
+      {
+        "surface_id": "CURRENT-STRUCTURED-JOINSET-GROUP",
+        "criterion_ids": [
+          "join_set_fanout/join_all/1000",
+          "join_set_fanout/join_next/1000",
+          "join_set_fanout/join_all/10000"
+        ],
+        "evidence_class": "SOURCE_ONLY_NON_EQUIVALENT",
+        "reason": "each row includes Cx spawn, task execution, handle bookkeeping, and collection; none isolates TaskHandle completion transport",
+        "baseline_rows": 0,
+        "anchors": [
+          {"path": "benches/spawn_throughput.rs", "line": 247, "fragment": "fn join_set_join_all_fanout"},
+          {"path": "benches/spawn_throughput.rs", "line": 719, "fragment": "fn bench_join_set_fanout"}
+        ]
+      },
+      {
+        "surface_id": "CURRENT-BROAD-SPAWN-GROUP",
+        "criterion_prefix": "spawn_throughput/",
+        "evidence_class": "SOURCE_ONLY_NON_EQUIVALENT",
+        "reason": "single- and multi-producer rows include task bodies, latches, scheduler progress, and completion observation rather than the future Cx batch-versus-loop API shape",
+        "baseline_rows": 0,
+        "anchors": [
+          {"path": "benches/spawn_throughput.rs", "line": 53, "fragment": "const SPAWNS_PER_ITER: usize = 1_000"},
+          {"path": "benches/spawn_throughput.rs", "line": 551, "fragment": "fn bench_spawn_throughput"}
+        ]
+      },
+      {
+        "surface_id": "METHODOLOGY-LOCAL-QUEUE-1000",
+        "operation": "methodology/task_spawn/local_queue_spawn_batch/1000",
+        "evidence_class": "HISTORICAL_NON_EQUIVALENT",
+        "reason": "the benchmark pushes synthetic TaskId values into LocalQueue; it does not call RuntimeHandle, Cx, the spawn gateway, pending-spawn accounting, task admission, or completion handling",
+        "baseline_rows": 2,
+        "anchors": [
+          {"path": "benches/methodology_baselines.rs", "line": 111, "fragment": "fn bench_task_spawn"},
+          {"path": "benches/methodology_baselines.rs", "line": 142, "fragment": "BenchmarkId::new(\"local_queue_spawn_batch\", count)"},
+          {"path": "artifacts/baseline.json", "line": 57, "fragment": "methodology/task_spawn/local_queue_spawn_batch/1000"},
+          {"path": "artifacts/baseline.json", "line": 1269, "fragment": "methodology/task_spawn/local_queue_spawn_batch/1000"}
+        ]
+      }
+    ],
+    "historical_non_equivalent_rows": [
+      {
+        "operation": "methodology/task_spawn/local_queue_spawn_batch/1000",
+        "environment": "host:fixmydocuments",
+        "p50_ns": 50072.0,
+        "p95_ns": null,
+        "rep_count": null,
+        "allocation_observation": null,
+        "git_sha": "6ad2afbf410b05eedb8a0fe51647716700978923"
+      },
+      {
+        "operation": "methodology/task_spawn/local_queue_spawn_batch/1000",
+        "environment": "host:hetzner2",
+        "p50_ns": 53604.0,
+        "p95_ns": null,
+        "rep_count": 2,
+        "allocation_observation": null,
+        "git_sha": "bd8ca4edff8577e48ba9915b6f2faf822b717db1"
+      }
+    ],
+    "missing_required_evidence": [
+      "isolated legacy JoinHandle completion p50 and p95",
+      "isolated structured TaskHandle completion p50 and p95",
+      "public Cx N=1000 spawn-loop p50 and p95",
+      "allocation observations for all required operations",
+      "at least three retained repetitions per operation and host",
+      "admitted environment identity on at least two host families"
+    ]
+  },
+  "required_measurements": {
+    "harness_path": "benches/spawn_throughput.rs",
+    "harness_policy": "extend the existing harness; do not add a duplicate benchmark binary",
+    "operation_namespace": "sched/join_batch/v1/",
+    "minimum_host_families": 2,
+    "minimum_repetitions_per_host": 3,
+    "required_quantiles": ["p50_ns", "p95_ns"],
+    "required_allocation_fields": ["allocation_count", "allocated_bytes", "allocation_method"],
+    "state": "NOT_RECORDED",
+    "operation_cells": [
+      {
+        "operation_id": "sched/join_batch/v1/legacy_completion_handoff/ready",
+        "handle_family": "LEGACY-RUNTIME-JOIN",
+        "measurement_scope": "publish an already-prepared successful completion through JoinState and consume it; exclude task creation, scheduling, and body execution",
+        "profile_ids": ["single_consumer", "four_consumer_contended"],
+        "baseline_required": true
+      },
+      {
+        "operation_id": "sched/join_batch/v1/legacy_completion_handoff/pending_wake",
+        "handle_family": "LEGACY-RUNTIME-JOIN",
+        "measurement_scope": "registered pending poll through completion publication and wake observation; exclude task creation and body execution",
+        "profile_ids": ["same_waker", "replacement_waker"],
+        "baseline_required": true
+      },
+      {
+        "operation_id": "sched/join_batch/v1/legacy_completion_handoff/drop_observer",
+        "handle_family": "LEGACY-RUNTIME-JOIN",
+        "measurement_scope": "drop the observer while retaining executor-side completion ownership",
+        "profile_ids": ["pending", "already_ready"],
+        "baseline_required": true
+      },
+      {
+        "operation_id": "sched/join_batch/v1/task_handle_completion/ready",
+        "handle_family": "CANONICAL-CX-TASK",
+        "measurement_scope": "publish an already-prepared successful result through the incumbent oneshot path and consume it; exclude task creation, scheduling, and body execution",
+        "profile_ids": ["join", "try_join", "poll_join"],
+        "baseline_required": true
+      },
+      {
+        "operation_id": "sched/join_batch/v1/task_handle_completion/pending_wake",
+        "handle_family": "CANONICAL-CX-TASK",
+        "measurement_scope": "registered pending join or poll_join through send and wake observation",
+        "profile_ids": ["join_future_waiter", "persistent_receiver_waiter"],
+        "baseline_required": true
+      },
+      {
+        "operation_id": "sched/join_batch/v1/task_handle_completion/drop_join_future",
+        "handle_family": "CANONICAL-CX-TASK",
+        "measurement_scope": "drop unfinished and already-terminal JoinFuture values while observing abort publication",
+        "profile_ids": ["unfinished", "already_ready", "defused"],
+        "baseline_required": true
+      },
+      {
+        "operation_id": "sched/join_batch/v1/public_cx_spawn_loop/1000",
+        "handle_family": "CANONICAL-CX-TASK",
+        "measurement_scope": "call public Cx::spawn exactly 1000 times, retain every handle, and report submission separately from terminal collection",
+        "profile_ids": ["submit_only", "submit_then_join_all"],
+        "baseline_required": true
+      },
+      {
+        "operation_id": "sched/join_batch/v1/public_join_set_spawn_loop/1000",
+        "handle_family": "CANONICAL-CX-TASK",
+        "measurement_scope": "call JoinSet::spawn exactly 1000 times and collect in spawn order",
+        "profile_ids": ["submit_only", "join_all"],
+        "baseline_required": true
+      },
+      {
+        "operation_id": "sched/join_batch/v1/public_cx_spawn_batch/1000",
+        "handle_family": "FUTURE-STRUCTURED-BATCH",
+        "measurement_scope": "future candidate using the exact .3.4 API contract; compare only after .3.5 exists",
+        "profile_ids": ["submit_only", "submit_then_join_all"],
+        "baseline_required": false
+      }
+    ],
+    "required_observation_fields": [
+      "operation_id",
+      "profile_id",
+      "comparator_role",
+      "semantic_revision",
+      "work_count",
+      "worker_threads",
+      "producer_threads",
+      "spawn_admission_mode",
+      "runtime_state_shape",
+      "sample_count",
+      "repetition_index",
+      "repetition_count",
+      "p50_ns",
+      "p95_ns",
+      "allocation_count",
+      "allocated_bytes",
+      "allocation_method",
+      "source_revision",
+      "dirty_overlay_digest",
+      "harness_path",
+      "harness_sha256",
+      "toolchain",
+      "target_triple",
+      "build_profile",
+      "feature_set",
+      "environment",
+      "worker_label",
+      "os",
+      "kernel",
+      "architecture",
+      "cpu_model",
+      "physical_cores",
+      "logical_cpus",
+      "numa_nodes",
+      "total_memory_bytes",
+      "allocator",
+      "timer_source",
+      "run_timestamp_utc"
+    ],
+    "timing_rules": [
+      "setup, runtime construction, thread creation, and teardown are outside the timed interval unless the operation_id names them",
+      "completion handoff cells pre-create the transport and payload so they do not become full spawn measurements",
+      "public loop cells retain one independent handle and one semantic checksum per accepted member",
+      "submit-only and submit-plus-collection use different profile IDs and are never averaged together",
+      "every completed sample is retained; failed or interrupted repetitions are recorded separately and never substituted",
+      "comparisons are same-host, same-source, same-harness, same-feature, and same-profile only"
+    ]
+  },
+  "candidate_and_decision_policy": {
+    "join_candidate": {
+      "target": "legacy RuntimeHandle JoinHandle completion transport only",
+      "first_candidate": "reuse the existing channel::oneshot semantics without claiming it is lock-free",
+      "why_safe_first": "the channel already owns single-send, waiter replacement, closed-channel, and wake-after-unlock behavior",
+      "explicit_non_claim": "TaskHandle and its gateway sender slot are also mutex-backed; reuse is a semantic consolidation candidate, not an assumed speedup"
+    },
+    "batch_candidate": {
+      "target": "structured Cx and JoinSet producer surface",
+      "first_candidate": "validate and enqueue one request per member, then issue one final scheduler notification where the .3.4 failure contract permits",
+      "explicit_non_claim": "an enqueue loop plus one notification is not one queue operation and does not change scheduler consumer batching"
+    },
+    "ship_thresholds": [
+      "all mapped semantics and focused lifecycle evidence pass for the exact handle family or batch surface",
+      "paired same-host median p50 improves by at least 5 percent on every required target cell",
+      "paired same-host p95 does not regress by more than 5 percent on any required target cell",
+      "allocation count and allocated bytes do not increase on any required target cell",
+      "at least three retained repetitions on each of at least two admitted host families agree in direction",
+      "no broad scheduler, release, or workspace claim is inferred from these cells"
+    ],
+    "keep_or_no_win_triggers": [
+      "any required semantic differs",
+      "any required measurement or environment field is missing",
+      "p50 improvement is below 5 percent on either admitted host family",
+      "p95 regresses by more than 5 percent on any required cell",
+      "allocations increase",
+      "host families disagree in direction or repeated-run spread prevents a stable conclusion",
+      "the candidate needs unsafe code or a scheduler consumer fairness change"
+    ],
+    "rollback": [
+      "restore the selected production surface to the exact source-pin behavior",
+      "retain the measurement cells and terminal KEEP or no-win receipt",
+      "do not rewrite incumbent baseline values from a failed candidate",
+      "for batch work, keep the single-spawn loop as the normative fallback",
+      "close JOIN and BATCH independently; one lever never greens the other"
+    ]
+  },
+  "no_claims": [
+    "no implementation or production behavior change",
+    "no compilation or formatter result",
+    "no test or lifecycle proof result",
+    "no benchmark, p50, p95, allocation, or throughput result",
+    "no completion improvement or regression claim",
+    "no producer-batch improvement claim",
+    "no scheduler consumer fairness change",
+    "no unsafe-code authorization",
+    "no release readiness, broad runtime correctness, or broad workspace health claim",
+    "no bead closure while required measurements remain absent"
+  ]
+}

@@ -39,6 +39,27 @@ IDs are frozen in `docs/scheduler_hot_read_inventory.md` and
 `artifacts/scheduler_hot_read_inventory_v1.json`. A new semantic path always
 gets a new operation ID rather than rewriting an incumbent row.
 
+The JOIN-BATCH lever has the same evidence rule. Its current source and
+semantic map is frozen in `docs/scheduler_join_batch_inventory.md` and
+`artifacts/scheduler_join_batch_inventory_v1.json`. The registry currently has
+no equivalent rows for isolated legacy `RuntimeHandle` completion, isolated
+structured `TaskHandle` completion, or the public `Cx` N=1000 spawn loop.
+Existing `join_handle_completion`, `join_set_fanout`, and broad
+`spawn_throughput` groups include spawn, execution, or collection work; the
+two-host `methodology/task_spawn/local_queue_spawn_batch/1000` rows exercise a
+queue primitive only and have null p95 values. Preserve those surfaces as
+non-equivalent evidence.
+
+Extend `benches/spawn_throughput.rs` under the new
+`sched/join_batch/v1/` namespace. Completion cells must pre-create their
+transport and payload, and public-loop submission must remain separate from
+submission-plus-collection. Each required operation needs p50, p95,
+allocation count and bytes, at least three retained repetitions, and complete
+same-host environment, source, harness, feature, allocator, and timer identity
+on at least two admitted host families. Until those rows exist, JOIN-BATCH 3.1
+remains measurement-blocked and authorizes no implementation or improvement
+claim.
+
 ## Running one bench (measurement only)
 
 ```bash
