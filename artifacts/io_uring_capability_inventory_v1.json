@@ -1,0 +1,795 @@
+{
+  "artifact_id": "io-uring-capability-inventory-v1",
+  "schema_version": 1,
+  "bead_id": "asupersync-sched-hot-path-perf-bt4y5f.7.1",
+  "captured_date_utc": "2026-08-04",
+  "base_commit": "3630c5e5f88148816bed034b5afa856749316d68",
+  "disposition": "STATIC_INVENTORY_COMPLETE_PRODUCTION_UNCHANGED",
+  "validation_state": {
+    "source_hashes_checked": true,
+    "json_shape_checked": true,
+    "rust_contract_authored": true,
+    "rust_contract_executed": false,
+    "live_kernel_probes_executed": false,
+    "benchmarks_executed": false,
+    "reason": "URING-1 is a static architecture and policy inventory. Executable validation is intentionally outside this lane."
+  },
+  "authority": {
+    "live_module_mapping": "src/runtime/reactor/mod.rs maps public module uring to src/runtime/reactor/io_uring.rs",
+    "historical_non_module_path": "src/runtime/reactor/uring.rs",
+    "runtime_support_authority": "bounded operation probes and their terminal results",
+    "kernel_version_role": "informational metadata only",
+    "unknown_or_probe_error_action": "retain ordinary readiness or epoll when available, otherwise timer-backed or immediate re-polling, and report an exact reason",
+    "production_default_changed": false
+  },
+  "inventory_scope": {
+    "reactor_target_family": "Linux and Android, where io_uring can enter the platform factory",
+    "filesystem_target": "Linux only",
+    "included_live_backends": ["IoUringReactor", "EpollReactor", "no reactor with socket re-poll fallback"],
+    "included_consumer_groups": ["IoDriver", "default and opt-in filesystem", "TCP listener and stream variants", "Bytes and BytesMut", "RuntimeBuilder", "observability", "tests", "benchmark", "boundary ledger"],
+    "excluded_platform_backends": ["BrowserReactor", "IocpReactor", "KqueueReactor", "LabReactor"],
+    "exclusion_reason": "these backends are not reachable as fallbacks from the Linux or Android io_uring factory path"
+  },
+  "source_pins": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+      "line_count": 1038,
+      "role": "io-uring feature and optional dependency edge"
+    },
+    {
+      "path": "src/runtime/reactor/mod.rs",
+      "sha256": "df1ce75337c1a4c0549e58cedc7b8390ed418edf35fb738d24fb8380411b5427",
+      "line_count": 1325,
+      "role": "public backend graph and Linux or Android factory fallback"
+    },
+    {
+      "path": "src/runtime/reactor/io_uring.rs",
+      "sha256": "efc29dca487ebdb6f4b9179e5da1ec3dafec29ce6fbbe136d98f867cd3af242b",
+      "line_count": 2280,
+      "role": "live readiness reactor and classic registered-buffer scaffold"
+    },
+    {
+      "path": "src/runtime/reactor/epoll.rs",
+      "sha256": "28522a60201582a5bb5d5bacd9be7682d3ffb9c6337f44d91dec277d6dbb3b23",
+      "line_count": 2385,
+      "role": "live Linux or Android fallback readiness backend"
+    },
+    {
+      "path": "src/runtime/reactor/uring.rs",
+      "sha256": "0d8e1a67fb5cadd3d8dc1aa21cda7933e0f645b7ae94b61237088de9f0c91c98",
+      "line_count": 95,
+      "role": "historical source file excluded from the compiled module graph"
+    },
+    {
+      "path": "src/runtime/io_driver.rs",
+      "sha256": "187bb4543a3f5fb46f2f549cec24262f671ef9794e2be27617fd614526da0e94",
+      "line_count": 2952,
+      "role": "generic reactor consumer and current inspector surface"
+    },
+    {
+      "path": "src/runtime/builder.rs",
+      "sha256": "69e52f8b761944edf5fa038ed3b122ecf9a58da05f5ad15f20d1f8e3e1f8adb1",
+      "line_count": 8393,
+      "role": "platform-reactor policy, dependency injection and whole-reactor force-off"
+    },
+    {
+      "path": "src/fs/mod.rs",
+      "sha256": "eb7d562867c10eea60383c33962110f79111a93f2c22db06222310f141f264e8",
+      "line_count": 114,
+      "role": "feature-gated IoUringFile module and export"
+    },
+    {
+      "path": "src/fs/file.rs",
+      "sha256": "c293dee58bfcbdd7c5214c8fe7ae8c2706fa1f5a9d5a1322baaea42849973062",
+      "line_count": 821,
+      "role": "default file API with offloaded owned helpers and directly blocking poll traits"
+    },
+    {
+      "path": "src/fs/open_options.rs",
+      "sha256": "5aadc97138ef6ef80ff2b5e913de2fdbf56e45b30704a6c71bf8252cf04fe2a9",
+      "line_count": 273,
+      "role": "default filesystem open path backed by bounded blocking work"
+    },
+    {
+      "path": "src/fs/uring.rs",
+      "sha256": "1638d10796b41861ac62ada0213f337378483343bfbde27f882ccb5f28598d83",
+      "line_count": 2352,
+      "role": "Linux-only file-local rings whose futures synchronously drive ordinary operations"
+    },
+    {
+      "path": "src/fs/path_ops.rs",
+      "sha256": "3cdbb30ce37b4ab2ec7efcd018a526c233aeebcd4ad4473a6b66909bf1509494",
+      "line_count": 1138,
+      "role": "Linux-only independent one-operation rings for selected path mutations"
+    },
+    {
+      "path": "src/fs/dir.rs",
+      "sha256": "b5c11525b9ea6a314db629e61ce2a98f04f479cf41a464f4d057f0e965c589ab",
+      "line_count": 270,
+      "role": "Linux-only independent one-operation rings for selected directory mutations"
+    },
+    {
+      "path": "src/net/tcp/listener.rs",
+      "sha256": "f54336b3b7dc36bfe1ddb3a11c42dcb45d37a43016d91f95609d6a53982a2d07",
+      "line_count": 832,
+      "role": "ordinary nonblocking accept plus one-shot readiness consumer"
+    },
+    {
+      "path": "src/net/tcp/stream.rs",
+      "sha256": "ca7fc4cbd26cbf5985c46939c3deea36e25505537b5f494f99de04ef70c45798",
+      "line_count": 2776,
+      "role": "full TCP stream ordinary socket I/O plus generic readiness"
+    },
+    {
+      "path": "src/net/tcp/split.rs",
+      "sha256": "a32d128838f8b20ed680359d009b6a8cfc8321f691167d3b792e8954945a523e",
+      "line_count": 2656,
+      "role": "owned splits use readiness; borrowed splits use timer-backed or immediate re-wake"
+    },
+    {
+      "path": "src/bytes/bytes.rs",
+      "sha256": "669d5f8d616df63cde711b20aee5342721cf9c45149168af4f43041cfa3d3a8e",
+      "line_count": 1123,
+      "role": "empty, static, or shared heap-backed immutable bytes without kernel lease state"
+    },
+    {
+      "path": "src/bytes/bytes_mut.rs",
+      "sha256": "58cf22ae601b8ff3ee82a7dfc8496dbeaf24699b7a751105d459ad0dd85afd1b",
+      "line_count": 1301,
+      "role": "exclusive Vec-backed mutable byte ownership without kernel lease state"
+    },
+    {
+      "path": "tests/io_uring_capability_inventory_contract.rs",
+      "sha256": "f5582a79953fc2821e95cc2cd33bb6d1d00bf72f339bc87a9215e5066a0892e8",
+      "line_count": 1077,
+      "role": "machine contract for the frozen inventory and decision policy"
+    },
+    {
+      "path": "tests/conformance_io_uring_buffer_pool.rs",
+      "sha256": "f815f8d25382f08b96718dee637596adcfe02d977ec6273f42d6e4dda3d118f7",
+      "line_count": 686,
+      "role": "mock buffer-pool conformance surface, not real fixed-buffer I/O"
+    },
+    {
+      "path": "tests/io_uring_reactor.rs",
+      "sha256": "ee22a33c8216efdeb0fbdd9ca9c4f1e7cda041d81f5588c7a22ff1cfb27ff0df",
+      "line_count": 764,
+      "role": "live readiness reactor integration coverage"
+    },
+    {
+      "path": "tests/io_uring_stress.rs",
+      "sha256": "09a15837e2d4d3b3d2b9149f81e20125cfb6369da32476e1d3e8c6a2aad86d48",
+      "line_count": 697,
+      "role": "live readiness lifecycle and stress coverage"
+    },
+    {
+      "path": "tests/e2e_fs.rs",
+      "sha256": "1e1d1ab8bd5f34d921297d3d0c50cc0bbeac194ab246f51672fa5e056a190b85",
+      "line_count": 2078,
+      "role": "feature-gated filesystem operation and lifecycle evidence"
+    },
+    {
+      "path": "benches/reactor_benchmark.rs",
+      "sha256": "4e68b4603defe4d716bb896bc273769b994dcba8254b40a40056a19298d75b5c",
+      "line_count": 646,
+      "role": "synthetic completion-bookkeeping comparator only"
+    },
+    {
+      "path": "artifacts/unsafe_boundary_ledger_v1.json",
+      "sha256": "498daaf6154c923fed8d62d5c3096c06ad88297ef95c2f0ef317980c2949464a",
+      "line_count": 6297,
+      "role": "machine inventory of low-level reactor and harness boundaries"
+    },
+    {
+      "path": "docs/io_uring_capability_inventory.md",
+      "sha256": "e99f7cfd01150cc2ea684895adcd7632999da2be882eaaaefc6446314b4d89fe",
+      "line_count": 300,
+      "role": "human interpretation, ownership, and no-claim boundary"
+    },
+    {
+      "path": "docs/unsafe_boundary_ledger.md",
+      "sha256": "9f3ff9622ceb69ec37d81a3ce1631df5f37d05b5ce7e6ebc6a37348b1fe80ed2",
+      "line_count": 194,
+      "role": "category-level review and no-claim policy"
+    }
+  ],
+  "surface_matrix": [
+    {
+      "surface_id": "URING-SURFACE-FEATURE",
+      "category": "feature_dependency",
+      "paths": ["Cargo.toml"],
+      "anchors": ["io-uring = [\"dep:io-uring\"]", "io-uring = { version = \"0.7\", optional = true }"],
+      "current_state": "OPTIONAL_LINUX_OR_ANDROID_BUILD_EDGE",
+      "gap": "a compiled feature says nothing about host operation support",
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.2"
+    },
+    {
+      "surface_id": "URING-SURFACE-FACTORY",
+      "category": "backend_factory",
+      "paths": ["src/runtime/reactor/mod.rs"],
+      "anchors": ["pub fn create_reactor() -> io::Result<Arc<dyn Reactor>>", "if let Ok(reactor) = IoUringReactor::new()"],
+      "current_state": "TRY_IO_URING_THEN_SILENT_EPOLL_FALLBACK",
+      "gap": "the discarded construction error cannot be inspected or classified",
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.2"
+    },
+    {
+      "surface_id": "URING-SURFACE-REACTOR",
+      "category": "live_backend",
+      "paths": ["src/runtime/reactor/io_uring.rs"],
+      "anchors": ["pub struct IoUringReactor", "opcode::PollAdd::new", "opcode::PollRemove::new"],
+      "current_state": "LIVE_ONE_SHOT_READINESS_ONLY",
+      "gap": "no fixed-data-plane, buffer-select, multishot or SQPOLL operation is wired",
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.2"
+    },
+    {
+      "surface_id": "URING-SURFACE-EPOLL-FALLBACK",
+      "category": "live_fallback_backend",
+      "paths": ["src/runtime/reactor/mod.rs", "src/runtime/reactor/epoll.rs"],
+      "anchors": ["Ok(Arc::new(EpollReactor::new()?))", "pub struct EpollReactor", "impl Reactor for EpollReactor"],
+      "current_state": "LIVE_LINUX_OR_ANDROID_READINESS_FALLBACK",
+      "gap": "the io_uring construction error is discarded before epoll selection, so the fallback reason is not inspectable",
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.2"
+    },
+    {
+      "surface_id": "URING-SURFACE-BUFFER-SCAFFOLD",
+      "category": "classic_registered_buffer_scaffold",
+      "paths": ["src/runtime/reactor/io_uring.rs"],
+      "anchors": ["pub struct RegisteredBufferPool", "pub fn register_buffer_pool", "pub fn is_buffer_registration_supported"],
+      "current_state": "REGISTERED_MEMORY_AND_MANUAL_IDS_NOT_USED_BY_IO",
+      "gap": "support is hardcoded true and no operation consumes a RegisteredBufferId",
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.3"
+    },
+    {
+      "surface_id": "URING-SURFACE-FS-FILE",
+      "category": "filesystem_consumer",
+      "paths": ["src/fs/mod.rs", "src/fs/uring.rs"],
+      "anchors": ["pub use uring::IoUringFile", "opcode::Read::new", "opcode::Write::new", "opcode::Fsync::new", "fn submit_and_wait"],
+      "current_state": "LINUX_ONLY_FILE_LOCAL_RING_SYNCHRONOUSLY_DRIVEN_IN_POLL",
+      "gap": "not connected to the reactor pool, uses no fixed or selected buffer, and blocks while driving completion",
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.3"
+    },
+    {
+      "surface_id": "URING-SURFACE-FS-DEFAULT",
+      "category": "filesystem_consumer",
+      "paths": ["src/fs/file.rs", "src/fs/open_options.rs"],
+      "anchors": ["pub struct File", "pub struct OpenOptions", "spawn_blocking_io", "Phase 0: Poll-based traits use direct blocking I/O"],
+      "current_state": "OWNED_ASYNC_HELPERS_OFFLOAD_WHILE_POLL_TRAITS_BLOCK_DIRECTLY",
+      "gap": "IoUringFile is a separate opt-in type; the default poll traits still issue direct file syscalls on the caller",
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.7"
+    },
+    {
+      "surface_id": "URING-SURFACE-FS-PATH-DIR",
+      "category": "filesystem_consumer",
+      "paths": ["src/fs/path_ops.rs", "src/fs/dir.rs"],
+      "anchors": ["fn uring_submit_one", "opcode::RenameAt::new", "opcode::UnlinkAt::new", "opcode::MkDirAt::new"],
+      "current_state": "LINUX_ONLY_INDEPENDENT_ONE_OPERATION_RINGS",
+      "gap": "not part of the shared reactor capability or fallback model",
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.2"
+    },
+    {
+      "surface_id": "URING-SURFACE-TCP-ACCEPT",
+      "category": "tcp_consumer",
+      "paths": ["src/net/tcp/listener.rs"],
+      "anchors": ["pub fn poll_accept", "match self.inner.accept()", "fn register_interest"],
+      "current_state": "ORDINARY_NONBLOCKING_ACCEPT_PLUS_READINESS",
+      "gap": "no generation-tagged multishot accept queue or terminal completion state",
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.4"
+    },
+    {
+      "surface_id": "URING-SURFACE-TCP-STREAM",
+      "category": "tcp_consumer",
+      "paths": ["src/net/tcp/stream.rs", "src/net/tcp/split.rs"],
+      "anchors": ["pub struct TcpStream", "fn register_interest", "io_driver_handle()", "pub struct OwnedReadHalf"],
+      "current_state": "FULL_STREAM_AND_OWNED_SPLIT_USE_ORDINARY_IO_AFTER_READINESS",
+      "gap": "no selected-buffer receive, completion lease, or multishot terminal state",
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.5"
+    },
+    {
+      "surface_id": "URING-SURFACE-TCP-BORROWED-SPLIT",
+      "category": "tcp_consumer",
+      "paths": ["src/net/tcp/stream.rs", "src/net/tcp/split.rs"],
+      "anchors": ["No reactor integration for borrowed split - use fallback_rewake", "pub(crate) fn fallback_rewake"],
+      "current_state": "BORROWED_SPLIT_USES_TIMER_BACKOFF_OR_IMMEDIATE_REWAKE",
+      "gap": "no registration lifecycle or advanced receive path exists for borrowed halves",
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.5"
+    },
+    {
+      "surface_id": "URING-SURFACE-BYTES",
+      "category": "buffer_consumer",
+      "paths": ["src/bytes/bytes.rs", "src/bytes/bytes_mut.rs"],
+      "anchors": ["pub struct Bytes", "Static(&'static [u8])", "Shared(Arc<Vec<u8>>)", "pub struct BytesMut", "every `BytesMut` exclusively owns its underlying `Vec<u8>`"],
+      "current_state": "EMPTY_STATIC_OR_SHARED_HEAP_BYTES_PLUS_EXCLUSIVE_MUTABLE_VEC",
+      "gap": "no available, checked-out or kernel-in-flight lease state and no initialized-length handoff",
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.3"
+    },
+    {
+      "surface_id": "URING-SURFACE-BUILDER",
+      "category": "configuration",
+      "paths": ["src/runtime/builder.rs"],
+      "anchors": ["pub fn enable_platform_reactor", "pub fn with_reactor", "runtime_builder_platform_reactor_unavailable"],
+      "current_state": "WHOLE_PLATFORM_REACTOR_ENABLE_OR_INJECT",
+      "gap": "no immutable per-capability request, probe, active or force-off policy",
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.2"
+    },
+    {
+      "surface_id": "URING-SURFACE-NO-REACTOR-FALLBACK",
+      "category": "terminal_fallback",
+      "paths": ["src/runtime/builder.rs", "src/net/tcp/listener.rs", "src/net/tcp/stream.rs", "src/net/tcp/split.rs"],
+      "anchors": ["runtime_builder_platform_reactor_unavailable", "falling back to timer-paced I/O polling", "InterestRegistrationMode::FallbackPoll", "const FALLBACK_IO_BACKOFF: Duration = Duration::from_millis(1)", "fallback_rewake", "wake_by_ref"],
+      "current_state": "RUNTIME_CONTINUES_WITHOUT_REACTOR_AND_SOCKET_PATHS_REPOLL",
+      "gap": "only a startup warning exposes total reactor construction failure; no immutable reason snapshot exists",
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.2"
+    },
+    {
+      "surface_id": "URING-SURFACE-INSPECTOR",
+      "category": "observability",
+      "paths": ["src/runtime/io_driver.rs"],
+      "anchors": ["pub struct IoStats", "pub fn stats(&self) -> IoStats"],
+      "current_state": "GENERIC_OPERATION_COUNTERS_ONLY",
+      "gap": "no backend identity, requested, supported, active or fallback-reason fields",
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.2"
+    },
+    {
+      "surface_id": "URING-SURFACE-EVIDENCE",
+      "category": "tests",
+      "paths": ["tests/conformance_io_uring_buffer_pool.rs", "tests/io_uring_reactor.rs", "tests/io_uring_stress.rs", "tests/e2e_fs.rs"],
+      "anchors": ["MockRegisteredBufferReactor", "IoUringReactor", "io-uring-cancellation-support-boundary"],
+      "current_state": "MOCK_POOL_PLUS_LIVE_READINESS_AND_FILESYSTEM_COVERAGE",
+      "gap": "no real fixed or selected-buffer, multishot, SQPOLL or injected capability-decision matrix",
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.7"
+    },
+    {
+      "surface_id": "URING-SURFACE-BENCH",
+      "category": "benchmark",
+      "paths": ["benches/reactor_benchmark.rs"],
+      "anchors": ["bench_io_uring_cqe_bookkeeping", "bench_process_completion_batch"],
+      "current_state": "SYNTHETIC_CQE_BOOKKEEPING_COMPARATOR_ONLY",
+      "gap": "no real socket, syscall-count, buffer, multishot or SQPOLL comparison",
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.7"
+    },
+    {
+      "surface_id": "URING-SURFACE-BOUNDARY-LEDGER",
+      "category": "boundary_ledger",
+      "paths": ["artifacts/unsafe_boundary_ledger_v1.json", "docs/unsafe_boundary_ledger.md"],
+      "anchors": ["unsafe-src-runtime-reactor-io-uring-rs", "reactor-ffi"],
+      "current_state": "FOUR_ROWS_HAVE_39_LOCATORS_OF_WHICH_33_ARE_STALE",
+      "gap": "six locators remain exact while 33 retain a live pattern at a different line; URING-3 owns alignment when it changes these boundaries",
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.3"
+    },
+    {
+      "surface_id": "URING-SURFACE-HISTORICAL",
+      "category": "non_live_source",
+      "paths": ["src/runtime/reactor/uring.rs", "src/runtime/reactor/mod.rs"],
+      "anchors": ["This file is *not* part of the compiled module graph", "#[path = \"io_uring.rs\"]"],
+      "current_state": "EXCLUDED_BY_EXPLICIT_PATH_MAPPING",
+      "gap": "kernel-version heuristics here are not a runtime support inspector",
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.2"
+    }
+  ],
+  "source_accuracy_scope": "material contradictions in pinned source or evidence labels that affect capability, execution-model, or proof interpretation",
+  "source_accuracy_gaps": [
+    {
+      "gap_id": "URING-ACCURACY-FS-OPCODE-DOC",
+      "path": "src/fs/uring.rs",
+      "recorded_claim": "module header names OPENAT and CLOSE as io_uring opcodes",
+      "pinned_reality": "constructors use libc::openat synchronously and no opcode::OpenAt or opcode::Close consumer exists",
+      "source_anchors": ["`OPENAT`, `FSYNC`, and `CLOSE` opcodes", "let fd = unsafe { libc::openat"],
+      "disposition": "DOCUMENT_AS_STALE_UNTIL_URING_3_TOUCHES_THE_MODULE",
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.3"
+    },
+    {
+      "gap_id": "URING-ACCURACY-BUFFER-SUPPORT",
+      "path": "src/runtime/reactor/io_uring.rs",
+      "recorded_claim": "is_buffer_registration_supported reports runtime support",
+      "pinned_reality": "the method returns Ok(true) without an operation or registration probe",
+      "source_anchors": ["pub fn is_buffer_registration_supported", "Ok(true)"],
+      "disposition": "FAIL_CLOSED_TO_NOT_PROBED",
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.2"
+    },
+    {
+      "gap_id": "URING-ACCURACY-FS-URING-EXECUTION",
+      "path": "src/fs/uring.rs",
+      "recorded_claim": "module header says operations complete asynchronously without blocking threads",
+      "pinned_reality": "futures and poll traits lock the file-local ring and call submit_and_wait through blocking helpers",
+      "source_anchors": ["operations complete asynchronously without blocking threads", "fn blocking_read_at", "submit_and_wait"],
+      "disposition": "QUARANTINE_FROM_ASYNC_COMPARATOR_CLAIMS",
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.3"
+    },
+    {
+      "gap_id": "URING-ACCURACY-FS-DIR-HEADER",
+      "path": "src/fs/dir.rs",
+      "recorded_claim": "module header says operations other than remove_dir use spawn_blocking",
+      "pinned_reality": "create_dir uses MkDirAt when the Linux io-uring feature path is selected",
+      "source_anchors": ["Other operations use", "opcode::MkDirAt::new"],
+      "disposition": "DOCUMENT_AS_STALE_UNTIL_THE_DIRECTORY_SURFACE_IS_TOUCHED",
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.3"
+    },
+    {
+      "gap_id": "URING-ACCURACY-E2E-DEFAULT-FS-LABEL",
+      "path": "tests/e2e_fs.rs",
+      "recorded_claim": "a test comment labels default fs::write and fs::read helpers as io_uring",
+      "pinned_reality": "those helpers exercise the default path-operation API rather than IoUringFile",
+      "source_anchors": ["Uses io_uring path on Linux", "fs::write(&path", "fs::read(&path"],
+      "disposition": "DO_NOT_COUNT_THE_CASE_AS_IO_URING_EVIDENCE",
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.7"
+    }
+  ],
+  "boundary_ledger_reconciliation": [
+    {
+      "site_id": "unsafe-src-fs-dir-rs",
+      "path": "src/fs/dir.rs",
+      "recorded_locator_count": 2,
+      "exact_locator_count": 0,
+      "stale_locator_count": 2,
+      "locators": [
+        {"kind": "allow_unsafe_code", "pattern": "#[allow(unsafe_code)]", "recorded_line": 78, "current_line": 81, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "unsafe {", "recorded_line": 83, "current_line": 86, "status": "STALE_LINE_LIVE_PATTERN"}
+      ],
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.3"
+    },
+    {
+      "site_id": "unsafe-src-fs-path-ops-rs",
+      "path": "src/fs/path_ops.rs",
+      "recorded_locator_count": 2,
+      "exact_locator_count": 0,
+      "stale_locator_count": 2,
+      "locators": [
+        {"kind": "allow_unsafe_code", "pattern": "#[allow(unsafe_code)]", "recorded_line": 354, "current_line": 713, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "unsafe {", "recorded_line": 359, "current_line": 718, "status": "STALE_LINE_LIVE_PATTERN"}
+      ],
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.3"
+    },
+    {
+      "site_id": "unsafe-src-fs-uring-rs",
+      "path": "src/fs/uring.rs",
+      "recorded_locator_count": 17,
+      "exact_locator_count": 1,
+      "stale_locator_count": 16,
+      "locators": [
+        {"kind": "allow_unsafe_code", "pattern": "#![allow(unsafe_code)]", "recorded_line": 24, "current_line": 24, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let result = unsafe { libc::lseek(fd, 0, libc::SEEK_CUR) };", "recorded_line": 259, "current_line": 353, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let fd = unsafe { libc::openat(libc::AT_FDCWD, c_path.as_ptr(), flags, mode) };", "recorded_line": 289, "current_line": 387, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };", "recorded_line": 295, "current_line": 393, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_fn", "pattern": "pub unsafe fn from_raw_fd(fd: RawFd) -> io::Result<Self> {", "recorded_line": 319, "current_line": 417, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };", "recorded_line": 321, "current_line": 419, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let result = unsafe { libc::ftruncate(fd, size_off) };", "recorded_line": 456, "current_line": 561, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let std_file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });", "recorded_line": 472, "current_line": 577, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let std_file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });", "recorded_line": 479, "current_line": 584, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let push_result = unsafe { ring.submission().push(entry) };", "recorded_line": 524, "current_line": 629, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "unsafe {", "recorded_line": 640, "current_line": 763, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let push_result = unsafe { ring.submission().push(&entry) };", "recorded_line": 1471, "current_line": 1735, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let file = unsafe { IoUringFile::from_raw_fd(raw_fd) }.unwrap();", "recorded_line": 1606, "current_line": 1870, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let pipe_result = unsafe { libc::pipe(fds.as_mut_ptr()) };", "recorded_line": 1641, "current_line": 1905, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let err = unsafe { IoUringFile::from_raw_fd(read_fd) }", "recorded_line": 1647, "current_line": 1911, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let close_result = unsafe { libc::close(read_fd) };", "recorded_line": 1656, "current_line": 1920, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let write_close_result = unsafe { libc::close(write_fd) };", "recorded_line": 1670, "current_line": 1934, "status": "STALE_LINE_LIVE_PATTERN"}
+      ],
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.3"
+    },
+    {
+      "site_id": "unsafe-src-runtime-reactor-io-uring-rs",
+      "path": "src/runtime/reactor/io_uring.rs",
+      "recorded_locator_count": 18,
+      "exact_locator_count": 5,
+      "stale_locator_count": 13,
+      "locators": [
+        {"kind": "allow_unsafe_code", "pattern": "#![allow(unsafe_code)]", "recorded_line": 20, "current_line": 20, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "if unsafe { libc::fcntl(raw_fd, libc::F_GETFD) } == -1 {", "recorded_line": 43, "current_line": 43, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };", "recorded_line": 48, "current_line": 48, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "if unsafe { libc::fstat(raw_fd, &mut stat_buf) } != 0 {", "recorded_line": 49, "current_line": 49, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let link_len = unsafe {", "recorded_line": 71, "current_line": 71, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };", "recorded_line": 412, "current_line": 423, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "match unsafe { ring.submitter().register_buffers(&io_vecs) } {", "recorded_line": 497, "current_line": 508, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "if unsafe { libc::fcntl(raw_fd, libc::F_GETFD) } == -1 {", "recorded_line": 621, "current_line": 632, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "if unsafe { libc::fcntl(info.raw_fd, libc::F_GETFD) } == -1 {", "recorded_line": 644, "current_line": 655, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let _ = unsafe {", "recorded_line": 744, "current_line": 775, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "unsafe { libc::write(fd, bytes.as_ptr().cast::<libc::c_void>(), bytes.len()) };", "recorded_line": 790, "current_line": 841, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "unsafe {", "recorded_line": 839, "current_line": 890, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "unsafe {", "recorded_line": 899, "current_line": 950, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };", "recorded_line": 959, "current_line": 1015, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let owned = unsafe { OwnedFd::from_raw_fd(fd) };", "recorded_line": 964, "current_line": 1020, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let pushed = unsafe { ring.submission().push(&entry) };", "recorded_line": 1429, "current_line": 1501, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let n = unsafe {", "recorded_line": 1947, "current_line": 2019, "status": "STALE_LINE_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let n = unsafe {", "recorded_line": 1974, "current_line": 2046, "status": "STALE_LINE_LIVE_PATTERN"}
+      ],
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.3"
+    }
+  ],
+  "evidence_matrix": [
+    {
+      "evidence_id": "URING-EVIDENCE-INLINE-REACTOR",
+      "paths": ["src/runtime/reactor/io_uring.rs"],
+      "state": "SOURCE_PRESENT_NOT_EXECUTED_BY_URING_1",
+      "covers": ["readiness bookkeeping", "classic buffer-pool bookkeeping"],
+      "does_not_cover": ["real fixed I/O", "provided buffers", "multishot operations", "SQPOLL"],
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.7"
+    },
+    {
+      "evidence_id": "URING-EVIDENCE-MOCK-BUFFER-POOL",
+      "paths": ["tests/conformance_io_uring_buffer_pool.rs"],
+      "state": "TEST_LOCAL_SIMULATION_WITH_UNPERSISTED_POOL_CONFIG",
+      "covers": ["intended bounded-pool API shape"],
+      "does_not_cover": ["kernel registration", "live pool acquisition", "real fixed I/O", "lease ownership"],
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.3"
+    },
+    {
+      "evidence_id": "URING-EVIDENCE-READINESS-INTEGRATION",
+      "paths": ["tests/io_uring_reactor.rs", "tests/io_uring_stress.rs"],
+      "state": "LIVE_READINESS_SOURCE_PRESENT_NOT_EXECUTED_BY_URING_1",
+      "covers": ["one-shot readiness", "wake and registration lifecycle", "stale-completion handling"],
+      "does_not_cover": ["fixed or selected buffers", "multishot operations", "SQPOLL"],
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.7"
+    },
+    {
+      "evidence_id": "URING-EVIDENCE-FILESYSTEM-E2E",
+      "paths": ["tests/e2e_fs.rs"],
+      "state": "MIXED_SOURCE_PRESENT_WITH_MISLABELED_DEFAULT_HELPER_CASE_NOT_EXECUTED_BY_URING_1",
+      "covers": ["IoUringFile lifecycle boundary", "completion attribution"],
+      "does_not_cover": ["default fs::write or fs::read using io_uring", "fixed or selected buffers", "network capabilities"],
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.7"
+    },
+    {
+      "evidence_id": "URING-EVIDENCE-SYNTHETIC-CQE-BENCH",
+      "paths": ["benches/reactor_benchmark.rs"],
+      "state": "SYNTHETIC_COMPARATOR_SOURCE_PRESENT_NOT_EXECUTED_BY_URING_1",
+      "covers": ["completion bookkeeping comparator"],
+      "does_not_cover": ["kernel submission", "real sockets", "syscall delta", "advanced-capability performance"],
+      "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.7"
+    }
+  ],
+  "capability_matrix": [
+    {
+      "capability_id": "URING-CAP-FIXED-BUFFERS",
+      "name": "classic fixed registered buffers",
+      "current_state": "SCAFFOLD_ONLY_NOT_USED_BY_DATA_PLANE",
+      "current_evidence": ["register_buffers call", "manual buffer ID pool", "mock conformance suite"],
+      "missing": ["operation probe", "ReadFixed or WriteFixed consumer", "linear lease", "terminal drain", "real comparator"],
+      "implementation_owner": "asupersync-sched-hot-path-perf-bt4y5f.7.3",
+      "terminal_evidence_owner": "asupersync-sched-hot-path-perf-bt4y5f.7.7"
+    },
+    {
+      "capability_id": "URING-CAP-PROVIDED-GROUPS",
+      "name": "provided buffer groups",
+      "current_state": "ABSENT",
+      "current_evidence": [],
+      "missing": ["bounded group registration", "buffer selection", "buffer ID completion", "remove and drain", "lease integration"],
+      "implementation_owner": "asupersync-sched-hot-path-perf-bt4y5f.7.3",
+      "terminal_evidence_owner": "asupersync-sched-hot-path-perf-bt4y5f.7.7"
+    },
+    {
+      "capability_id": "URING-CAP-MAPPED-BUFFER-RING",
+      "name": "mapped provided-buffer ring",
+      "current_state": "ABSENT",
+      "current_evidence": [],
+      "missing": ["bounded mapped ring registration", "memory lifetime", "buffer selection", "return protocol", "unregister drain"],
+      "implementation_owner": "asupersync-sched-hot-path-perf-bt4y5f.7.3",
+      "terminal_evidence_owner": "asupersync-sched-hot-path-perf-bt4y5f.7.7"
+    },
+    {
+      "capability_id": "URING-CAP-MULTISHOT-ACCEPT",
+      "name": "multishot accept",
+      "current_state": "ABSENT",
+      "current_evidence": ["ordinary accept and one-shot readiness fallback"],
+      "missing": ["MORE and terminal state", "generation tags", "bounded accepted-fd queue", "cancel and drain", "fallback parity"],
+      "implementation_owner": "asupersync-sched-hot-path-perf-bt4y5f.7.4",
+      "terminal_evidence_owner": "asupersync-sched-hot-path-perf-bt4y5f.7.7"
+    },
+    {
+      "capability_id": "URING-CAP-MULTISHOT-RECV",
+      "name": "multishot receive with buffer selection",
+      "current_state": "ABSENT",
+      "current_evidence": ["ordinary recv after readiness fallback"],
+      "missing": ["selected-buffer lease", "MORE and terminal state", "bounded queued bytes", "split-half cancellation", "fallback parity"],
+      "implementation_owner": "asupersync-sched-hot-path-perf-bt4y5f.7.5",
+      "terminal_evidence_owner": "asupersync-sched-hot-path-perf-bt4y5f.7.7"
+    },
+    {
+      "capability_id": "URING-CAP-SQPOLL",
+      "name": "submission-queue polling",
+      "current_state": "ABSENT_AND_OFF_BY_DEFAULT",
+      "current_evidence": [],
+      "missing": ["typed opt-in", "validated queue and idle settings", "permission classification", "operator visibility", "explicit rollback", "real comparator"],
+      "implementation_owner": "asupersync-sched-hot-path-perf-bt4y5f.7.6",
+      "terminal_evidence_owner": "asupersync-sched-hot-path-perf-bt4y5f.7.7"
+    }
+  ],
+  "runtime_probe_contract": {
+    "decision_fields": ["requested", "supported", "active", "fallback_reason"],
+    "supported_states": ["SUPPORTED", "UNSUPPORTED", "NOT_PROBED"],
+    "authority_order": ["explicit_force_off", "bounded_operation_probe", "opcode_probe", "kernel_metadata"],
+    "kernel_version_is_sufficient": false,
+    "success_fallback_reason_id": "URING-FB-NONE",
+    "probe_rows": [
+      {
+        "capability_id": "URING-CAP-FIXED-BUFFERS",
+        "probe_sequence": ["create ordinary ring", "query fixed read and write opcodes", "register a bounded buffer table", "complete one fixed operation on a fixture descriptor", "unregister after terminal completion"],
+        "success_condition": "registration, fixed operation, completion identity and unregister all succeed",
+        "fallback_reason_ids": ["URING-FB-RING-CREATE", "URING-FB-OP-UNSUPPORTED", "URING-FB-RESOURCE", "URING-FB-PROBE-ERROR"],
+        "fallback_on_failure": "ordinary buffers and ordinary readiness"
+      },
+      {
+        "capability_id": "URING-CAP-PROVIDED-GROUPS",
+        "probe_sequence": ["create ordinary ring", "query provide and selected-receive operations", "provide one bounded group", "complete one selected-buffer receive", "observe its buffer ID", "remove and drain the group"],
+        "success_condition": "the terminal completion carries the expected buffer ID and group cleanup succeeds",
+        "fallback_reason_ids": ["URING-FB-RING-CREATE", "URING-FB-OP-UNSUPPORTED", "URING-FB-RESOURCE", "URING-FB-PROBE-ERROR"],
+        "fallback_on_failure": "ordinary caller-owned receive buffer"
+      },
+      {
+        "capability_id": "URING-CAP-MAPPED-BUFFER-RING",
+        "probe_sequence": ["create ordinary ring", "register one bounded mapped buffer ring", "complete one selected-buffer receive", "return the lease", "unregister after terminal completion"],
+        "success_condition": "registration, selection, lease return and unregister all succeed",
+        "fallback_reason_ids": ["URING-FB-RING-CREATE", "URING-FB-DEPENDENCY", "URING-FB-OP-UNSUPPORTED", "URING-FB-RESOURCE", "URING-FB-PROBE-ERROR"],
+        "fallback_on_failure": "provided group if independently proven, otherwise ordinary caller-owned buffer"
+      },
+      {
+        "capability_id": "URING-CAP-MULTISHOT-ACCEPT",
+        "probe_sequence": ["bind a bounded loopback listener", "submit one multishot accept", "connect two clients", "observe MORE on nonterminal completions", "cancel", "observe one terminal completion", "close all accepted descriptors"],
+        "success_condition": "two distinct descriptors have one owner each and cancellation reaches one terminal completion",
+        "fallback_reason_ids": ["URING-FB-RING-CREATE", "URING-FB-OP-UNSUPPORTED", "URING-FB-RESOURCE", "URING-FB-PROBE-ERROR"],
+        "fallback_on_failure": "ordinary nonblocking accept plus one-shot readiness"
+      },
+      {
+        "capability_id": "URING-CAP-MULTISHOT-RECV",
+        "probe_sequence": ["establish a bounded loopback stream pair", "attach an independently proven buffer source", "submit one multishot receive", "send two payloads", "observe MORE and unique leases", "cancel", "drain terminal completion and all leases"],
+        "success_condition": "payloads, leases, MORE flags and terminal drain are exact",
+        "fallback_reason_ids": ["URING-FB-RING-CREATE", "URING-FB-DEPENDENCY", "URING-FB-OP-UNSUPPORTED", "URING-FB-RESOURCE", "URING-FB-PROBE-ERROR"],
+        "fallback_on_failure": "ordinary receive plus one-shot readiness"
+      },
+      {
+        "capability_id": "URING-CAP-SQPOLL",
+        "probe_sequence": ["require explicit typed opt-in", "create a separate ring with validated SQPOLL settings", "classify permission or host-policy failure", "submit and complete one NOP", "drop the ring and its polling thread"],
+        "success_condition": "explicit configuration creates an active ring, completes work and shuts down cleanly",
+        "fallback_reason_ids": ["URING-FB-RING-CREATE", "URING-FB-PERMISSION", "URING-FB-RESOURCE", "URING-FB-PROBE-ERROR"],
+        "fallback_on_failure": "ordinary io_uring readiness, then epoll only if ordinary ring creation fails"
+      }
+    ]
+  },
+  "decision_tuple_contract": {
+    "fallback_reason_required": true,
+    "none_reason_id": "URING-FB-NONE",
+    "none_is_active_success_only": true,
+    "invalid_tuple_reason_id": "URING-FB-UNKNOWN",
+    "invalid_tuple_action": "preserve received requested and supported, set active false, retain the incumbent path, and expose URING-FB-UNKNOWN",
+    "reason_precedence": ["URING-FB-NOT-REQUESTED", "URING-FB-FORCED-OFF", "URING-FB-FEATURE-DISABLED", "URING-FB-TARGET-UNSUPPORTED", "URING-FB-DEPENDENCY", "URING-FB-RING-CREATE", "URING-FB-REACTOR-UNAVAILABLE", "URING-FB-OP-UNSUPPORTED", "URING-FB-PERMISSION", "URING-FB-RESOURCE", "URING-FB-PROBE-ERROR", "URING-FB-NO-WIN", "URING-FB-NONE", "URING-FB-UNKNOWN"],
+    "valid_reason_state_map": [
+      {"fallback_reason": "URING-FB-NONE", "requested_states": [true], "supported_states": ["SUPPORTED"], "active": true},
+      {"fallback_reason": "URING-FB-NOT-REQUESTED", "requested_states": [false], "supported_states": ["NOT_PROBED"], "active": false},
+      {"fallback_reason": "URING-FB-FEATURE-DISABLED", "requested_states": [true], "supported_states": ["NOT_PROBED"], "active": false},
+      {"fallback_reason": "URING-FB-TARGET-UNSUPPORTED", "requested_states": [true], "supported_states": ["UNSUPPORTED"], "active": false},
+      {"fallback_reason": "URING-FB-FORCED-OFF", "requested_states": [true], "supported_states": ["NOT_PROBED"], "active": false},
+      {"fallback_reason": "URING-FB-RING-CREATE", "requested_states": [true], "supported_states": ["NOT_PROBED"], "active": false},
+      {"fallback_reason": "URING-FB-REACTOR-UNAVAILABLE", "requested_states": [true], "supported_states": ["NOT_PROBED"], "active": false},
+      {"fallback_reason": "URING-FB-OP-UNSUPPORTED", "requested_states": [true], "supported_states": ["UNSUPPORTED"], "active": false},
+      {"fallback_reason": "URING-FB-PERMISSION", "requested_states": [true], "supported_states": ["NOT_PROBED"], "active": false},
+      {"fallback_reason": "URING-FB-RESOURCE", "requested_states": [true], "supported_states": ["NOT_PROBED"], "active": false},
+      {"fallback_reason": "URING-FB-PROBE-ERROR", "requested_states": [true], "supported_states": ["NOT_PROBED"], "active": false},
+      {"fallback_reason": "URING-FB-DEPENDENCY", "requested_states": [true], "supported_states": ["NOT_PROBED"], "active": false},
+      {"fallback_reason": "URING-FB-NO-WIN", "requested_states": [true], "supported_states": ["SUPPORTED"], "active": false},
+      {"fallback_reason": "URING-FB-UNKNOWN", "requested_states": [false, true], "supported_states": ["NOT_PROBED", "SUPPORTED", "UNSUPPORTED"], "active": false}
+    ],
+    "invariants": [
+      "active implies requested is true, supported is SUPPORTED, and fallback_reason is URING-FB-NONE",
+      "unless fallback_reason is URING-FB-UNKNOWN, requested false implies supported is NOT_PROBED, active is false, and fallback_reason is URING-FB-NOT-REQUESTED",
+      "forced off implies supported is NOT_PROBED, active is false, and fallback_reason is URING-FB-FORCED-OFF",
+      "unless fallback_reason is URING-FB-UNKNOWN, supported UNSUPPORTED implies active is false and fallback_reason identifies the classified unsupported cause",
+      "a dependency-inactive capability is not probed, is inactive, and reports URING-FB-DEPENDENCY",
+      "any tuple violating these rules fails closed as inactive with URING-FB-UNKNOWN",
+      "URING-FB-UNKNOWN is the sole invariant exception: it preserves received requested and supported state while forcing active false"
+    ]
+  },
+  "factory_fallback_contract": {
+    "owner": "asupersync-sched-hot-path-perf-bt4y5f.7.2",
+    "selection_order": ["injected io driver", "injected reactor", "requested ordinary io_uring reactor", "epoll reactor", "no reactor with socket re-poll fallback"],
+    "whole_reactor_force_off_reason_id": "URING-FB-FORCED-OFF",
+    "ordinary_ring_failure_reason_id": "URING-FB-RING-CREATE",
+    "terminal_reactor_failure_reason_id": "URING-FB-REACTOR-UNAVAILABLE",
+    "terminal_runtime_state": "runtime construction continues without an IoDriver; socket paths use one-millisecond timer backoff when a timer driver exists and immediate rewake otherwise",
+    "current_observability": "runtime_builder_platform_reactor_unavailable startup warning only",
+    "missing_observability": "immutable backend and terminal fallback-reason snapshot"
+  },
+  "force_off_contract": {
+    "owner": "asupersync-sched-hot-path-perf-bt4y5f.7.2",
+    "production_source": "typed RuntimeBuilder policy carried into immutable reactor construction",
+    "ambient_environment_read_allowed": false,
+    "global_disable_precedes_probe": true,
+    "per_capability_mask_precedes_probe": true,
+    "deterministic_fixture": "inject requested capability states and probe outcomes without consulting the host",
+    "forced_off_result": {
+      "requested": true,
+      "supported": "NOT_PROBED",
+      "active": false,
+      "fallback_reason": "URING-FB-FORCED-OFF"
+    },
+    "existing_whole_reactor_control": "RuntimeBuilder::enable_platform_reactor(false)",
+    "existing_injection_controls": ["RuntimeBuilder::with_reactor", "RuntimeBuilder::with_io_driver"]
+  },
+  "fallback_reason_registry": [
+    {"id": "URING-FB-NONE", "meaning": "requested capability is supported and active with no fallback"},
+    {"id": "URING-FB-NOT-REQUESTED", "meaning": "capability was not requested"},
+    {"id": "URING-FB-FEATURE-DISABLED", "meaning": "the build excludes the optional feature"},
+    {"id": "URING-FB-TARGET-UNSUPPORTED", "meaning": "the target has no supported backend"},
+    {"id": "URING-FB-FORCED-OFF", "meaning": "typed injected policy disabled the capability"},
+    {"id": "URING-FB-RING-CREATE", "meaning": "ordinary or configured ring creation failed"},
+    {"id": "URING-FB-REACTOR-UNAVAILABLE", "meaning": "preferred and fallback reactor construction failed; sockets use timer-backed or immediate re-polling"},
+    {"id": "URING-FB-OP-UNSUPPORTED", "meaning": "the required operation probe reported unsupported"},
+    {"id": "URING-FB-PERMISSION", "meaning": "host policy or permissions rejected the requested mode"},
+    {"id": "URING-FB-RESOURCE", "meaning": "bounded resource registration or allocation failed"},
+    {"id": "URING-FB-PROBE-ERROR", "meaning": "the bounded probe failed without a narrower classification"},
+    {"id": "URING-FB-DEPENDENCY", "meaning": "a prerequisite capability is inactive"},
+    {"id": "URING-FB-NO-WIN", "meaning": "candidate remains inactive because a correctness, comparability, measurement, or resource gate failed"},
+    {"id": "URING-FB-UNKNOWN", "meaning": "an unknown state failed closed"}
+  ],
+  "observability_contract": {
+    "owner": "asupersync-sched-hot-path-perf-bt4y5f.7.2",
+    "current_inspector": "IoDriverHandle::stats returns generic IoStats counters",
+    "current_fields": ["polls", "events_received", "wakers_dispatched", "unknown_tokens", "registrations", "deregistrations"],
+    "missing_fields": ["backend", "capability_id", "requested", "supported", "active", "fallback_reason"],
+    "required_snapshot_fields": ["backend", "capability_id", "requested", "supported", "active", "fallback_reason"],
+    "bounded_cardinality": true,
+    "free_form_host_error_in_metric_label": false,
+    "raw_error_destination": "bounded startup diagnostic or trace detail, separate from metric labels",
+    "immutability": "one capability snapshot is fixed after reactor construction"
+  },
+  "evidence_ownership": [
+    {"bead_id": "asupersync-sched-hot-path-perf-bt4y5f.7.1", "owns": ["source inventory", "capability taxonomy", "probe contract", "no-win and no-claim policy"]},
+    {"bead_id": "asupersync-sched-hot-path-perf-bt4y5f.7.2", "owns": ["immutable capability model", "live probes", "force-off injection", "fallback observability"]},
+    {"bead_id": "asupersync-sched-hot-path-perf-bt4y5f.7.3", "owns": ["linear buffer leases", "real fixed or selected-buffer I/O", "boundary-ledger alignment"]},
+    {"bead_id": "asupersync-sched-hot-path-perf-bt4y5f.7.4", "owns": ["multishot accept", "accepted descriptor ownership", "ordinary accept fallback"]},
+    {"bead_id": "asupersync-sched-hot-path-perf-bt4y5f.7.5", "owns": ["multishot receive", "buffer obligations", "ordinary receive fallback"]},
+    {"bead_id": "asupersync-sched-hot-path-perf-bt4y5f.7.6", "owns": ["typed SQPOLL opt-in", "operator cost visibility", "one-change rollback"]},
+    {"bead_id": "asupersync-sched-hot-path-perf-bt4y5f.7.7", "owns": ["real-host correctness", "like-for-like measurement", "terminal per-lever disposition"]}
+  ],
+  "no_win_policy": {
+    "owner": "asupersync-sched-hot-path-perf-bt4y5f.7.7",
+    "terminal_states": ["ADOPT", "KEEP", "UNSUPPORTED", "NO_WIN"],
+    "disposition_precedence": ["UNSUPPORTED", "NO_WIN", "ADOPT", "KEEP"],
+    "required_host_families": 2,
+    "host_family_key_fields": ["cpu_vendor", "cpu_family", "cpu_model", "kernel_major_minor", "machine_class"],
+    "host_family_keys_must_be_distinct": true,
+    "minimum_repetitions_per_cell": 5,
+    "primary_metric": {
+      "id": "echo_requests_per_second",
+      "direction": "higher_is_better",
+      "aggregation": "median of per-repetition point estimates",
+      "adopt_improvement_min_pct": 5.0,
+      "keep_improvement_floor_pct": 0.0
+    },
+    "latency_guardrail_regression_max_pct": 5.0,
+    "required_percentiles": ["p50", "p95"],
+    "required_secondary_metrics": ["syscalls_per_request", "cpu_seconds_per_request", "peak_rss_bytes", "additional_threads"],
+    "noise_rule": {
+      "statistic": "relative median absolute deviation of per-repetition echo_requests_per_second",
+      "maximum_pct": 5.0,
+      "exceeded_action": "NO_WIN"
+    },
+    "resource_envelope": {
+      "peak_rss_increase_max_pct": 5.0,
+      "cpu_seconds_per_request_increase_max_pct": 5.0,
+      "additional_threads_max_default": 0,
+      "additional_threads_max_sqpoll_opt_in": 1,
+      "quiescent_descriptor_delta": 0,
+      "quiescent_completion_delta": 0,
+      "quiescent_buffer_lease_delta": 0,
+      "quiescent_obligation_delta": 0
+    },
+    "required_context": ["source revision", "toolchain", "features", "host", "kernel", "configuration", "environment", "workload", "sample count"],
+    "required_correctness_before_measurement": ["active path parity", "forced-fallback parity", "cancellation drain", "zero outstanding descriptors", "zero outstanding completions", "zero outstanding buffer leases", "zero outstanding obligations"],
+    "adopt_when": "all correctness, comparability, noise, latency, and resource gates pass and primary improvement is at least 5 percent on both host families",
+    "adopt_action": "retain the candidate only under its declared policy; this receipt alone cannot change the production default",
+    "keep_when": "complete admissible evidence is nonnegative on both host families but misses the 5 percent adoption threshold on at least one host",
+    "keep_action": "retain the incumbent default; the candidate may remain explicitly opt-in and carries no improvement claim",
+    "unsupported_when": "complete bounded probes report unsupported on every declared target host family",
+    "unsupported_action": "leave the capability inactive and retain its ordinary fallback",
+    "no_win_when": ["primary improvement is negative on either host family", "p50 or p95 regresses by more than 5 percent", "the relative median absolute deviation exceeds 5 percent", "resource use exceeds the numeric resource envelope", "results are missing or incomparable", "correctness or lifecycle evidence is incomplete"],
+    "no_win_action": "retain the incumbent path, mark the lever NO_WIN, preserve rollback and make no improvement claim"
+  },
+  "no_claims": [
+    "This artifact changes no reactor, filesystem, TCP, bytes, builder or observability behavior.",
+    "It does not prove compilation, test success, live-kernel support, capability activation or fallback behavior.",
+    "It does not prove buffer ownership, cancellation drain, descriptor cleanup or low-level boundary correctness.",
+    "It records no benchmark result and proves no latency, throughput, syscall, CPU, memory or efficiency improvement.",
+    "It does not prove broad workspace health, release readiness, production-on-by-default status or fleet availability.",
+    "It does not authorize dependency, capability or file removal, tracker closure, or any terminal ADOPT decision."
+  ]
+}
