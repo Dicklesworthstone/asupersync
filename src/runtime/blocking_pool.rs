@@ -319,7 +319,7 @@ struct BlockingPoolInner {
     shutdown: AtomicBool,
     /// Condition variable for thread parking.
     condvar: Condvar,
-    /// Mutex for condition variable.
+    /// Mutex for condition-variable waits and queue/worker zero-boundary transitions.
     mutex: Mutex<()>,
     /// Idle timeout for excess threads.
     idle_timeout: Duration,
@@ -1187,6 +1187,91 @@ impl fmt::Debug for BlockingPoolOptions {
     }
 }
 
+/// Tasks detached from every queue after the last claimed worker fails to
+/// spawn. Queue accounting is captured alongside the tasks so invariant checks
+/// can run after their user-owned closures have been cancelled and dropped.
+struct StrandedBlockingTasks {
+    tasks: Vec<BlockingTask>,
+    recorded_pending: usize,
+    recorded_cohort_pending: usize,
+    drained_cohort_tasks: usize,
+}
+
+impl StrandedBlockingTasks {
+    fn cancel(self) {
+        let Self {
+            tasks,
+            recorded_pending,
+            recorded_cohort_pending,
+            drained_cohort_tasks,
+        } = self;
+        let drained_tasks = tasks.len();
+
+        // Keep user-owned closure destruction outside the pool mutex: captured
+        // values may re-enter the pool from Drop.
+        for task in tasks {
+            task.cancelled.store(true, Ordering::Release);
+            task.completion.signal_done();
+        }
+
+        debug_assert_eq!(
+            recorded_pending, drained_tasks,
+            "failed worker spawn must drain every pending blocking task"
+        );
+        debug_assert_eq!(
+            recorded_cohort_pending, drained_cohort_tasks,
+            "failed worker spawn must restore every cohort queue count"
+        );
+    }
+}
+
+/// Roll back one claimed worker after OS thread creation fails.
+///
+/// The caller holds `inner.mutex`, which serializes this transition with task
+/// submission, other worker spawns, and idle-retirement claims. If another
+/// worker remains, queued work stays available to it. If this was the last
+/// claim, every queue is detached and its handles are completed as cancelled
+/// after the mutex is released.
+fn rollback_failed_worker_spawn_locked(
+    inner: &BlockingPoolInner,
+) -> Option<StrandedBlockingTasks> {
+    let claimed_workers = inner.active_threads.fetch_sub(1, Ordering::AcqRel);
+    debug_assert!(claimed_workers > 0, "failed spawn must own a worker claim");
+    if claimed_workers != 1 {
+        return None;
+    }
+
+    let mut tasks = Vec::new();
+    while let Some(task) = inner.queue.pop() {
+        tasks.push(task);
+    }
+
+    let mut recorded_cohort_pending = 0usize;
+    let mut drained_cohort_tasks = 0usize;
+    if let Some(affinity) = inner.affinity.as_ref() {
+        for (queue, pending) in affinity
+            .cohort_queues
+            .iter()
+            .zip(&affinity.cohort_pending_counts)
+        {
+            recorded_cohort_pending = recorded_cohort_pending
+                .saturating_add(pending.swap(0, Ordering::AcqRel));
+            while let Some(task) = queue.pop() {
+                drained_cohort_tasks = drained_cohort_tasks.saturating_add(1);
+                tasks.push(task);
+            }
+        }
+    }
+
+    let recorded_pending = inner.pending_count.swap(0, Ordering::AcqRel);
+    Some(StrandedBlockingTasks {
+        tasks,
+        recorded_pending,
+        recorded_cohort_pending,
+        drained_cohort_tasks,
+    })
+}
+
 /// Spawn a new worker thread on the given pool inner.
 fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
     // Build the named thread builder before mutating worker accounting.
@@ -1200,6 +1285,13 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
         .affinity
         .as_ref()
         .map(|affinity| ((thread_id.saturating_sub(1)) as usize) % affinity.cohort_count);
+
+    let mut stranded_tasks = None;
+    let mut finished_handles = Vec::new();
+    // Serialize the worker claim through thread creation and failure recovery.
+    // `try_enqueue_task` uses the same mutex, so observing zero workers here
+    // gives an authoritative boundary for detaching queues.
+    let spawn_guard = inner.mutex.lock();
 
     // Enforce max_threads atomically to prevent overshoot during concurrent spawns
     // Fix TOCTOU race: use Acquire/Release ordering to prevent multiple threads
@@ -1292,22 +1384,26 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
         let _ = guard.retired_with_claim;
     }) {
         Ok(handle) => {
-            let finished_handles = {
-                let mut handles = inner.thread_handles.lock();
-                handles.push(handle);
+            let mut handles = inner.thread_handles.lock();
+            handles.push(handle);
 
-                // Clean up finished thread handles to prevent unbounded memory
-                // growth during workload bursts where threads frequently spawn
-                // and retire.
-                drain_finished_thread_handles(&mut handles)
-            };
-            join_thread_handles(finished_handles);
+            // Clean up finished thread handles to prevent unbounded memory
+            // growth during workload bursts where threads frequently spawn
+            // and retire.
+            finished_handles = drain_finished_thread_handles(&mut handles);
         }
         Err(_) => {
-            // Spawn failed — roll back the counter so active_threads
-            // stays consistent with the actual number of live threads.
-            inner.active_threads.fetch_sub(1, Ordering::Relaxed);
+            // A failed final worker claim cannot leave accepted tasks with
+            // handles that wait forever. Detach them while submissions and
+            // retirement are excluded, then signal them after unlocking.
+            stranded_tasks = rollback_failed_worker_spawn_locked(inner);
         }
+    }
+
+    drop(spawn_guard);
+    join_thread_handles(finished_handles);
+    if let Some(stranded_tasks) = stranded_tasks {
+        stranded_tasks.cancel();
     }
 }
 
@@ -1419,6 +1515,12 @@ fn blocking_worker_loop(inner: &BlockingPoolInner, assigned_cohort: Option<usize
             let elapsed = now.saturating_duration_since(start);
 
             if elapsed >= inner.idle_timeout {
+                // Serialize the zero-worker transition with submission and
+                // worker-spawn failure recovery. Without this guard, a retiree
+                // that has decremented active_threads but not yet rechecked the
+                // queue could race a failed last-worker spawn draining queues.
+                let retirement_guard = inner.mutex.lock();
+
                 // If we've been idle long enough and there's still no work, consider retiring
                 if !blocking_pool_has_pending_work(inner) && try_claim_idle_retirement(inner) {
                     // We claimed the retirement slot, meaning active_threads was decremented.
@@ -1470,6 +1572,7 @@ fn blocking_worker_loop(inner: &BlockingPoolInner, assigned_cohort: Option<usize
                         }
                     }
                 }
+                drop(retirement_guard);
                 // If we couldn't retire (e.g. someone else retired and we hit min_threads),
                 // reset our idle timer so we don't spin.
                 idle_since = None;
@@ -1578,6 +1681,28 @@ mod tests {
             cancelled: Arc::new(AtomicBool::new(false)),
             completion: Arc::new(BlockingTaskCompletion::new(wall_clock_now)),
         }
+    }
+
+    fn tracked_test_blocking_task(
+        preferred_cohort: Option<usize>,
+        executions: Arc<AtomicUsize>,
+    ) -> (
+        BlockingTask,
+        Arc<AtomicBool>,
+        Arc<BlockingTaskCompletion>,
+    ) {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let completion = Arc::new(BlockingTaskCompletion::new(wall_clock_now));
+        let task = BlockingTask {
+            work: Box::new(move || {
+                executions.fetch_add(1, Ordering::Relaxed);
+            }),
+            priority: 128,
+            preferred_cohort,
+            cancelled: Arc::clone(&cancelled),
+            completion: Arc::clone(&completion),
+        };
+        (task, cancelled, completion)
     }
 
     fn test_blocking_inner_with_affinity(
@@ -2502,6 +2627,77 @@ mod tests {
         spawn_thread_on_inner(&inner);
         assert_eq!(inner.active_threads.load(Ordering::Relaxed), 1);
         assert_eq!(inner.thread_handles.lock().len(), 0);
+    }
+
+    #[test]
+    fn failed_last_worker_spawn_cancels_every_stranded_queue() {
+        let inner = test_blocking_inner_with_affinity(
+            BlockingPoolAffinityProfile::CohortBiased {
+                local_queue_soft_limit: 1,
+                spill_check_interval: 1,
+            },
+            Some(2),
+        );
+        let executions = Arc::new(AtomicUsize::new(0));
+        let (local_task, local_cancelled, local_completion) =
+            tracked_test_blocking_task(Some(0), Arc::clone(&executions));
+        let (spill_task, spill_cancelled, spill_completion) =
+            tracked_test_blocking_task(Some(0), Arc::clone(&executions));
+
+        assert!(try_enqueue_task(&inner, local_task));
+        assert!(try_enqueue_task(&inner, spill_task));
+        inner.active_threads.store(1, Ordering::Release);
+
+        let stranded = {
+            let _guard = inner.mutex.lock();
+            rollback_failed_worker_spawn_locked(&inner)
+                .expect("failed final worker claim must detach pending tasks")
+        };
+        stranded.cancel();
+
+        assert_eq!(inner.active_threads.load(Ordering::Acquire), 0);
+        assert_eq!(inner.pending_count.load(Ordering::Acquire), 0);
+        assert!(local_cancelled.load(Ordering::Acquire));
+        assert!(spill_cancelled.load(Ordering::Acquire));
+        assert!(local_completion.is_done());
+        assert!(spill_completion.is_done());
+        assert_eq!(executions.load(Ordering::Relaxed), 0);
+
+        let metrics = blocking_pool_affinity_metrics(&inner);
+        assert_eq!(metrics.cohort_pending_counts, vec![0, 0]);
+        assert_eq!(metrics.global_pending_count, 0);
+    }
+
+    #[test]
+    fn failed_additional_worker_spawn_preserves_work_for_live_worker() {
+        let inner = test_blocking_inner_with_affinity(
+            BlockingPoolAffinityProfile::Disabled,
+            None,
+        );
+        let executions = Arc::new(AtomicUsize::new(0));
+        let (task, cancelled, completion) =
+            tracked_test_blocking_task(None, Arc::clone(&executions));
+        assert!(try_enqueue_task(&inner, task));
+        inner.active_threads.store(2, Ordering::Release);
+
+        let stranded = {
+            let _guard = inner.mutex.lock();
+            rollback_failed_worker_spawn_locked(&inner)
+        };
+
+        assert!(stranded.is_none(), "one live worker can service queued work");
+        assert_eq!(inner.active_threads.load(Ordering::Acquire), 1);
+        assert_eq!(inner.pending_count.load(Ordering::Acquire), 1);
+        assert!(!cancelled.load(Ordering::Acquire));
+        assert!(!completion.is_done());
+
+        let (task, _) = pop_next_blocking_task(&inner, None, false)
+            .expect("surviving worker must retain queued task");
+        inner.pending_count.fetch_sub(1, Ordering::Relaxed);
+        task.cancelled.store(true, Ordering::Release);
+        task.completion.signal_done();
+        drop(task);
+        assert_eq!(executions.load(Ordering::Relaxed), 0);
     }
 
     #[test]
