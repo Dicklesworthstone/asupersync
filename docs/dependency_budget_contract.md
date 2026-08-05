@@ -44,6 +44,48 @@ it is not substituted for a neutral consumer ceiling. The fuzz-quarantine
 profile is a synthesized consumer and remains explicitly quarantined rather
 than becoming a production claim.
 
+## AGENTS key-dependency projection readiness
+
+Bead `asupersync-mnotoo.3.6` owns a future Cargo-built projection of the
+`AGENTS.md` **Key Dependencies** table. That projection is not implemented or
+admitted yet. The current sources expose a concrete metadata gap that must be
+closed before a generator can be truthful:
+
+| Surface | Current checked state | Required projection state |
+| --- | --- | --- |
+| `allowed_direct_dependencies` | 105 exact edge rows with dependency/package name, edge kind, manifest table, target condition, and optionality | Retain these rows as the manifest-membership authority |
+| Documentation metadata | No purpose, feature/profile, documentation tier, display grouping, or display order fields | Add an explicit checked projection object; do not infer prose from crate names or Cargo kinds |
+| `AGENTS.md` table | 14 manually curated rows covering 15 crate names because `serde` and `serde_json` share one row; two columns only | Render the exact checked row set with Crate, Purpose, Feature/Profile, and Tier columns |
+| Cargo generator | `dependency_marginal_ledger` can emit the ledger and budget only | Add one explicit AGENTS render/check mode that reuses the checked budget input |
+| Contract | Pins broad README/AGENTS markers, direct edges, and graph ceilings | Reject missing, extra, duplicate, stale, reordered, or differently rendered projection rows |
+
+The budget artifact must gain one canonical `agents_key_dependencies`
+projection object before AGENTS generation is enabled. Its row schema must
+contain:
+
+- a stable `row_id` and integer `display_order`;
+- one or more exact `dependency_names`, allowing a grouped display row only
+  when the grouping is explicit in metadata;
+- nonempty `purpose` text;
+- one or more checked `feature_profiles` or an explicit dev/build scope; and
+- a `tier` from a closed documented enum such as core runtime, optional
+  production, development/test, or development/benchmark.
+
+Every dependency name in that projection must join to at least one
+`allowed_direct_dependencies` row. A dependency name may occur in only one
+display row, every feature/profile value must join to the budget's canonical
+profile vocabulary, and the rendered row order must equal `display_order`.
+The key-dependency table is intentionally a curated projection, not a
+replacement for the complete 105-edge allowset.
+
+The future renderer must use unique begin/end marker lines, fail on missing,
+duplicate, nested, or reversed markers, and replace only the bytes between
+those markers. Check mode must render in memory and reject drift without
+writing; update mode must use the same renderer and preserve every byte outside
+the marked region. Until the metadata object, renderer, markers, and focused
+contract land together, the table remains manually maintained and this lane
+makes no generated-document or drift-prevention claim.
+
 ## Ratchet behavior
 
 Regeneration compares the fresh ledger projection with the existing budget:
