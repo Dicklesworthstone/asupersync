@@ -167,14 +167,13 @@ fn test_identity_decompression(data: &[u8]) {
 fn test_gzip_decompression(data: &[u8]) {
     // Test various size limits
     let size_limits = [
-        Some(SMALL_DECOMPRESSED_SIZE),
-        Some(MAX_DECOMPRESSED_SIZE),
-        None,
+        SMALL_DECOMPRESSED_SIZE,
+        MAX_DECOMPRESSED_SIZE,
+        DEFAULT_MAX_DECOMPRESSED_SIZE,
     ];
 
     for &max_size in &size_limits {
-        let gzip_limit =
-            DecompressionLimit::new(max_size.unwrap_or(DEFAULT_MAX_DECOMPRESSED_SIZE));
+        let gzip_limit = DecompressionLimit::new(max_size);
         let mut decompressor = GzipDecompressor::new(gzip_limit);
         let mut output = Vec::new();
 
@@ -182,20 +181,18 @@ fn test_gzip_decompression(data: &[u8]) {
         match decompressor.decompress(data, &mut output) {
             Ok(_) => {
                 // Verify size limits
-                if let Some(limit) = max_size {
-                    assert!(
-                        output.len() <= limit,
-                        "Gzip decompressor exceeded size limit: {} > {}",
-                        output.len(),
-                        limit
-                    );
-                }
+                assert!(
+                    output.len() <= max_size,
+                    "Gzip decompressor exceeded size limit: {} > {}",
+                    output.len(),
+                    max_size
+                );
 
                 observe_finish(
                     "gzip finish after success",
                     &mut decompressor,
                     &mut output,
-                    max_size,
+                    Some(max_size),
                 );
             }
             Err(_) => {
@@ -205,7 +202,7 @@ fn test_gzip_decompression(data: &[u8]) {
                     "gzip finish after error",
                     &mut decompressor,
                     &mut output,
-                    max_size,
+                    Some(max_size),
                 );
             }
         }
@@ -222,14 +219,12 @@ fn test_gzip_decompression(data: &[u8]) {
             for chunk in data.chunks(chunk_size) {
                 match stream_decompressor.decompress(chunk, &mut stream_output) {
                     Ok(_) => {
-                        if let Some(limit) = max_size {
-                            assert!(
-                                stream_output.len() <= limit,
-                                "Streaming gzip exceeded size limit: {} > {}",
-                                stream_output.len(),
-                                limit
-                            );
-                        }
+                        assert!(
+                            stream_output.len() <= max_size,
+                            "Streaming gzip exceeded size limit: {} > {}",
+                            stream_output.len(),
+                            max_size
+                        );
                     }
                     Err(_) => break, // Expected for malformed data
                 }
@@ -239,7 +234,7 @@ fn test_gzip_decompression(data: &[u8]) {
                 "streaming gzip finish",
                 &mut stream_decompressor,
                 &mut stream_output,
-                max_size,
+                Some(max_size),
             );
         }
     }

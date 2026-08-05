@@ -762,8 +762,8 @@ mod tests {
     #[cfg(feature = "compression")]
     #[test]
     fn gzip_roundtrip_body_integrity() {
-        use crate::http::compress::Decompressor;
         use crate::http::compress::DecompressionLimit;
+        use crate::http::compress::Decompressor;
         use crate::http::compress::GzipDecompressor;
 
         let policy = CompressionPolicy::default().with_min_body_size(0);

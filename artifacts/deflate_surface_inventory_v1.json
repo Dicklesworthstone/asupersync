@@ -645,12 +645,12 @@
     },
     {
       "path": "src/http/compress.rs",
-      "sha256": "bc26cef9cd41fe0ba826240d2581603387e0e98e8efd62ceab2905912d471720",
-      "line_count": 2606
+      "sha256": "bb86bbc4eba019bd6ad9debecb9e9e20bb46a86b8cd6271e734271386c0cae5a",
+      "line_count": 2600
     },
     {
       "path": "src/web/compress.rs",
-      "sha256": "82a2b78fb5c723ff8a3b056628f440c779e6c2c47244c8c64105f33a10ae1322",
+      "sha256": "370698ccdd25fc787cf3aac321e54954f7f689f0d339b000f4b4653e4bb2d2ad",
       "line_count": 898
     },
     {

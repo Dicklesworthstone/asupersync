@@ -1220,10 +1220,7 @@ mod tests {
 
     #[test]
     fn decompression_limit_default_matches_public_bound() {
-        assert_eq!(
-            DecompressionLimit::default().get(),
-            DEFAULT_MAX_DECOMPRESSED_SIZE
-        );
+        assert_eq!(DecompressionLimit::default().get(), DEFAULT_MAX_DECOMPRESSED_SIZE);
         assert_eq!(DecompressionLimit::new(4096).get(), 4096);
     }
 
