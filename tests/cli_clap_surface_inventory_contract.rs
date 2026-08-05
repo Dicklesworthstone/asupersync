@@ -343,16 +343,17 @@ fn bounded_field_normalization_cohort_is_exact_and_source_anchored() {
     let scope = Value::Object(object(&artifact, "scope").clone());
     assert_eq!(
         text(&scope, "argument_surface_state"),
-        "FIELD_NORMALIZED_FOR_4_OF_6_PRIMARY_SOURCES"
+        "FIELD_NORMALIZED_FOR_5_OF_6_PRIMARY_SOURCES"
     );
     let normalization = Value::Object(object(&artifact, "field_normalization").clone());
     assert_eq!(
         text(&normalization, "status"),
-        "PARTIAL_4_OF_6_PRIMARY_SOURCES"
+        "PARTIAL_5_OF_6_PRIMARY_SOURCES"
     );
     assert_eq!(
         string_set(&normalization, "normalized_primary_sources"),
         expected_set(&[
+            "src/bin/asupersync.rs",
             "src/bin/atp.rs",
             "src/bin/atpd.rs",
             "src/bin/offline_tuner.rs",
@@ -361,16 +362,17 @@ fn bounded_field_normalization_cohort_is_exact_and_source_anchored() {
     );
     assert_eq!(
         string_set(&normalization, "remaining_primary_sources"),
-        expected_set(&["src/bin/asupersync.rs", "src/cli/atp_command_tree.rs"])
+        expected_set(&["src/cli/atp_command_tree.rs"])
     );
-    assert_eq!(unsigned(&normalization, "annotated_arg_attribute_count"), 152);
-    assert_eq!(unsigned(&normalization, "implicit_positional_count"), 12);
-    assert_eq!(unsigned(&normalization, "normalized_field_count"), 164);
+    assert_eq!(unsigned(&normalization, "annotated_arg_attribute_count"), 326);
+    assert_eq!(unsigned(&normalization, "implicit_positional_count"), 37);
+    assert_eq!(unsigned(&normalization, "normalized_field_count"), 363);
     assert!(text(&normalization, "spelling_policy").contains("not byte-capture evidence"));
 
     let rows = array(&normalization, "rows");
-    assert_eq!(rows.len(), 164);
+    assert_eq!(rows.len(), 363);
     for (path, expected_count) in [
+        ("src/bin/asupersync.rs", 199_usize),
         ("src/bin/atp.rs", 109_usize),
         ("src/bin/atpd.rs", 20_usize),
         ("src/bin/offline_tuner.rs", 15),
@@ -405,6 +407,28 @@ fn bounded_field_normalization_cohort_is_exact_and_source_anchored() {
             })
             .count(),
         1
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| {
+                row.get("source_path").and_then(Value::as_str)
+                    == Some("src/bin/asupersync.rs")
+                    && row.get("source_attribute").and_then(Value::as_str)
+                        != Some("NONE_IMPLICIT_POSITIONAL")
+            })
+            .count(),
+        174
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| {
+                row.get("source_path").and_then(Value::as_str)
+                    == Some("src/bin/asupersync.rs")
+                    && row.get("source_attribute").and_then(Value::as_str)
+                        == Some("NONE_IMPLICIT_POSITIONAL")
+            })
+            .count(),
+        25
     );
     assert_eq!(
         rows.iter()
@@ -470,11 +494,14 @@ fn bounded_field_normalization_cohort_is_exact_and_source_anchored() {
             parsed_unused.insert(field_id.to_owned());
         }
     }
-    assert_eq!(annotated, 152);
-    assert_eq!(implicit, 12);
+    assert_eq!(annotated, 326);
+    assert_eq!(implicit, 37);
     assert_eq!(
         parsed_unused,
-        expected_set(&["CLI-ATPD-ROOT-FOREGROUND"])
+        expected_set(&[
+            "CLI-ASUP-DOCTOR-RECIPE-LIST-JSON",
+            "CLI-ATPD-ROOT-FOREGROUND",
+        ])
     );
 
     let gaps = array(&normalization, "observed_gaps");
@@ -491,6 +518,10 @@ fn bounded_field_normalization_cohort_is_exact_and_source_anchored() {
             "CLI-FIELD-GAP-06",
             "CLI-FIELD-GAP-07",
             "CLI-FIELD-GAP-08",
+            "CLI-FIELD-GAP-09",
+            "CLI-FIELD-GAP-10",
+            "CLI-FIELD-GAP-11",
+            "CLI-FIELD-GAP-12",
         ])
     );
     for gap in gaps {
@@ -628,10 +659,11 @@ fn documentation_and_adr_keep_the_partial_state_visible() {
         BEAD_ID,
         "159",
         "108",
-        "164",
-        "152",
+        "363",
+        "326",
+        "199",
         "109",
-        "PARTIAL_4_OF_6_PRIMARY_SOURCES",
+        "PARTIAL_5_OF_6_PRIMARY_SOURCES",
         "PARSED_UNUSED_GAP",
         "zero captured byte goldens",
         "LIBRARY_EXPORTED_NO_BINARY_PARSER_ROOT",
@@ -646,7 +678,7 @@ fn documentation_and_adr_keep_the_partial_state_visible() {
         ARTIFACT_PATH,
         DOC_PATH,
         "STATIC_SURFACE_FROZEN_BYTE_GOLDENS_MISSING",
-        "PARTIAL_4_OF_6_PRIMARY_SOURCES",
+        "PARTIAL_5_OF_6_PRIMARY_SOURCES",
         "MISSING_EXECUTION_RECEIPTS",
     ] {
         assert!(adr.contains(marker), "ADR missing {marker}");

@@ -182,18 +182,23 @@ The A1 bead remains open until the admitted incumbent binaries populate the
 required byte-capture matrix.
 
 The field-normalization state is
-`PARTIAL_4_OF_6_PRIMARY_SOURCES`. A bounded static cohort now expands all 152
-`#[arg]` declarations in standalone `atp`, `atpd`, `offline_tuner`, and
-`src/cli/args.rs`, plus twelve implicit positionals, into 164 source-anchored
-rows. Standalone `atp` contributes 99 annotated and ten implicit fields; its
-rows preserve distinct `recv`/`serve` variants, repeated explicit
-`parse_max_block_size_arg` parsers, and hidden parser fields. Those ATP consumer
-classifications establish parser-struct dispatch only, not independent
-per-field dataflow or behavior. The cohort also records that `atpd
---foreground` is parsed but unused, tuner weight range prose has no matching
-parser or runtime range validation, and shared ATP verify/replay ratios do have
-post-parse range validation. `asupersync` and the detached ATP tree remain
-type-indexed only, and none of these rows is byte-golden evidence.
+`PARTIAL_5_OF_6_PRIMARY_SOURCES`. A bounded static cohort now expands all 326
+`#[arg]` declarations in `asupersync`, standalone `atp`, `atpd`,
+`offline_tuner`, and `src/cli/args.rs`, plus 37 implicit positionals, into 363
+source-anchored rows. `asupersync` contributes 174 annotated and 25 implicit
+fields; its eleven flatten/subcommand plumbing fields are intentionally not
+counted as arguments. The inventory records four root fields copied but not
+dispatched and the parsed-but-unused doctor recipe-list JSON flag. Standalone
+`atp` contributes 99 annotated and ten implicit fields; its rows preserve
+distinct `recv`/`serve` variants, repeated explicit
+`parse_max_block_size_arg` parsers, and hidden parser fields. The `asupersync`
+and standalone ATP consumer classifications establish parser-struct dispatch
+only, not independent per-field dataflow or behavior. The cohort also records
+that `atpd --foreground` is parsed but unused, tuner weight range prose has no
+matching parser or runtime range validation, and shared ATP verify/replay
+ratios do have post-parse range validation. Only the detached ATP tree remains
+type-indexed rather than field-normalized, and none of these rows is
+byte-golden evidence.
 
 ## Rollback
 

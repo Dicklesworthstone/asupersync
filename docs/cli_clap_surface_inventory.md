@@ -32,11 +32,14 @@ parsers, delimiters, actions, and other clap attributes part of the frozen
 snapshot.
 
 The field-level state is now explicitly partial. The normalization cohort
-covers all 152 `#[arg]` attributes in standalone `atp`, `atpd`,
-`offline_tuner`, and the shared argument file, plus twelve implicit
-positionals: ten in standalone `atp` and two identity paths in `atpd`. The
-remaining 338 `#[arg]` attributes in `asupersync` and the detached ATP tree
-remain source-pinned and type-indexed rather than field-normalized.
+covers all 326 `#[arg]` attributes in `asupersync`, standalone `atp`, `atpd`,
+`offline_tuner`, and the shared argument file, plus 37 implicit positionals:
+25 in `asupersync`, ten in standalone `atp`, and two identity paths in
+`atpd`. The remaining 164 `#[arg]` attributes belong exclusively to the
+detached ATP tree and remain source-pinned and type-indexed rather than
+field-normalized. Eleven `asupersync` fields marked only with
+`#[command(flatten/subcommand)]` are parser plumbing, not arguments, and are
+therefore excluded from the 199 field rows for that source.
 
 There are 159 indexed command variants across the six files. Only 108 belong
 to binary-root command trees. The remaining 51 are the detached shared ATP
@@ -97,16 +100,17 @@ after parsing.
 
 ## Field-normalization cohort
 
-The machine artifact records 164 field rows under
-`PARTIAL_4_OF_6_PRIMARY_SOURCES`:
+The machine artifact records 363 field rows under
+`PARTIAL_5_OF_6_PRIMARY_SOURCES`:
 
 | Source | Annotated fields | Implicit positionals | Normalized rows |
 |---|---:|---:|---:|
+| `src/bin/asupersync.rs` | 174 | 25 | 199 |
 | `src/bin/atp.rs` | 99 | 10 | 109 |
 | `src/bin/atpd.rs` | 18 | 2 | 20 |
 | `src/bin/offline_tuner.rs` | 15 | 0 | 15 |
 | `src/cli/args.rs` | 20 | 0 | 20 |
-| **Cohort total** | **152** | **12** | **164** |
+| **Cohort total** | **326** | **37** | **363** |
 
 Each row records a stable field ID, owner type, Rust field declaration, option
 or positional shape, source attribute, explicit default, cardinality, scope,
@@ -119,6 +123,17 @@ byte evidence.
 
 The cohort makes these previously compressed distinctions visible:
 
+- `asupersync` contributes 174 annotated fields and 25 implicit positionals.
+  Its eleven flatten/subcommand plumbing fields are intentionally outside the
+  argument-row count.
+- Root `asupersync` verbosity, quiet, debug, and config values are copied into
+  `CommonArgs`, but only format, color, and the command are used by main
+  dispatch; those four values are classified as
+  `COPIED_TO_COMMON_ARGS_NOT_DISPATCHED`.
+- `asupersync doctor recipe-list --json` is `PARSED_UNUSED_GAP`: the command
+  dispatcher ignores the argument payload.
+- Other `asupersync` rows classified as struct-dispatched establish only the
+  source-level command handoff. They are not per-field consumer proofs.
 - `atpd --foreground` is `PARSED_UNUSED_GAP`: parsing populates the field,
   but the post-parse code has no consumer.
 - `atpd identity import` and `identity export` each take one required
@@ -222,7 +237,7 @@ explicitly missing; it is not green and is not silently skipped.
 
 `tests/cli_clap_surface_inventory_contract.rs` is authored to verify source
 fingerprints, line counts, declaration and attribute counts, indexed command
-variants, the 164-row partial field-normalization cohort, feature/environment/
+variants, the 363-row partial field-normalization cohort, feature/environment/
 config/exit boundary markers, documentation markers, and the empty fail-closed
 golden state.
 
@@ -239,10 +254,10 @@ stderr routing, process exit behavior, non-UTF-8 handling, platform parity,
 compilation, runtime correctness, performance, release readiness, or broad
 workspace health.
 
-Field normalization covers only four of six primary sources. `asupersync` and
-the detached ATP tree remain source-pinned and type-indexed, and even the
-normalized rows do not substitute for captured parser bytes. The standalone
-ATP dispatch classifications are not independent per-field dataflow proof. The
+Field normalization covers only five of six primary sources. The detached ATP
+tree remains source-pinned and type-indexed, and even the normalized rows do
+not substitute for captured parser bytes. The `asupersync` and standalone ATP
+dispatch classifications are not independent per-field dataflow proof. The
 bead therefore remains open, `clap` remains `KEEP_UNTIL_PARITY`, and no
 dependency exit or parser replacement is authorized.
 
