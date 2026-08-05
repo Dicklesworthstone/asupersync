@@ -1852,3 +1852,392 @@ fn sqlite_cycle_policy_remains_visible() {
     assert!(boundary.contains("reverse dependency"));
     assert!(boundary.contains("may not enter asupersync's graph"));
 }
+
+#[test]
+fn visibility_macro_static_audit_is_source_pinned_and_fail_closed() {
+    let value = artifact();
+    let audit = object(&value, "visibility_macro_static_audit");
+    assert_eq!(string(audit, "audit_id"), VISIBILITY_AUDIT_ID);
+    assert_eq!(string(audit, "bead_id"), VISIBILITY_BEAD_ID);
+    assert_eq!(string(audit, "capability_id"), "CAP-VISIBILITY-MACRO");
+    assert_eq!(
+        string(audit, "audit_state"),
+        "STATIC_SOURCE_PINNED_NOT_EXECUTED"
+    );
+    assert_eq!(
+        string(audit, "execution_state"),
+        "NO_MACRO_REPLACEMENT_OR_COMPILE_MATRIX_EXECUTED"
+    );
+    assert_eq!(
+        string(audit, "observed_at_revision"),
+        "42a66e7f4e6733c28c59405c052c68f7a32ea0d7"
+    );
+
+    let decision = object(audit, "decision");
+    assert_eq!(string(decision, "dependency"), "visibility");
+    assert_eq!(
+        string(decision, "candidate"),
+        "owned exact-scope attribute in asupersync-macros"
+    );
+    assert_eq!(string(decision, "disposition"), "KEEP_INCUMBENT");
+    assert!(!boolean(decision, "dependency_exit_allowed"));
+    assert!(!boolean(decision, "manifest_or_lockfile_edit_allowed"));
+    assert!(!boolean(
+        decision,
+        "macro_or_source_behavior_change_allowed"
+    ));
+    assert!(!boolean(decision, "tracker_closure_allowed"));
+
+    let dependency = object(audit, "dependency_contract");
+    assert_eq!(
+        string(dependency, "manifest_kind"),
+        "optional normal dependency"
+    );
+    assert_eq!(string(dependency, "manifest_requirement"), "0.1");
+    assert_eq!(string(dependency, "direct_locked_version"), "0.1.1");
+    assert_eq!(string(dependency, "root_direct_edge"), "normal:visibility");
+    assert_eq!(string(dependency, "enabling_feature"), "test-internals");
+    assert_eq!(
+        string_set(dependency, "locked_dependencies"),
+        BTreeSet::from([
+            "proc-macro2".to_owned(),
+            "quote".to_owned(),
+            "syn 2.0.119".to_owned(),
+        ])
+    );
+    assert_eq!(
+        string(dependency, "security_requirement"),
+        "macro emits no unsafe"
+    );
+
+    let pins = array(audit, "source_pins");
+    assert_eq!(pins.len(), 14);
+    let pinned_paths = pins
+        .iter()
+        .map(|pin| string(pin, "path"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        pinned_paths,
+        BTreeSet::from([
+            "Cargo.lock",
+            "Cargo.toml",
+            "artifacts/dependency_capability_registry_v1.json",
+            "artifacts/dependency_marginal_ledger_v1.json",
+            "asupersync-macros/Cargo.toml",
+            "asupersync-macros/src/lib.rs",
+            "asupersync-macros/tests/compile_fail_tests.rs",
+            "scripts/run_dependency_capability_baseline.sh",
+            "src/cx/cx.rs",
+            "src/cx/scope.rs",
+            "src/net/tcp/stream.rs",
+            "src/types/id.rs",
+            "tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml",
+            "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
+        ])
+    );
+    for pin in pins {
+        let path = string(pin, "path");
+        let source = read_repo_file(path);
+        assert_eq!(
+            sha256_hex(&read_repo_bytes(path)),
+            string(pin, "sha256"),
+            "source pin drift for {path}"
+        );
+        assert_eq!(
+            u64::try_from(source.lines().count()).expect("line count fits u64"),
+            unsigned(pin, "line_count"),
+            "line-count drift for {path}"
+        );
+        assert!(!string(pin, "role").trim().is_empty());
+    }
+
+    assert_eq!(
+        rust_source_paths_with_token(VISIBILITY_MAKE_TOKEN),
+        BTreeSet::from([
+            "src/cx/cx.rs".to_owned(),
+            "src/cx/scope.rs".to_owned(),
+            "src/net/tcp/stream.rs".to_owned(),
+            "src/types/id.rs".to_owned(),
+        ])
+    );
+    let inventory = object(audit, "attribute_inventory");
+    assert_eq!(
+        string(inventory, "state"),
+        "STATIC_COMPLETE_TWELVE_OCCURRENCES_FOUR_FILES"
+    );
+    assert_eq!(string(inventory, "exact_source_token"), VISIBILITY_MAKE_TOKEN);
+    assert_eq!(unsigned(inventory, "occurrence_count"), 12);
+    assert_eq!(unsigned(inventory, "production_file_count"), 4);
+    assert_eq!(unsigned(inventory, "pub_crate_item_count"), 11);
+    assert_eq!(unsigned(inventory, "already_public_item_count"), 1);
+
+    let shapes = object(inventory, "item_shape_counts");
+    assert_eq!(unsigned(shapes, "inherent_associated_const_fn"), 2);
+    assert_eq!(unsigned(shapes, "inherent_associated_fn"), 8);
+    assert_eq!(unsigned(shapes, "inherent_receiver_method"), 1);
+    assert_eq!(unsigned(shapes, "public_struct"), 1);
+
+    let files = array(inventory, "files");
+    assert_eq!(files.len(), 4);
+    let by_path = files
+        .iter()
+        .map(|row| (string(row, "path"), row))
+        .collect::<BTreeMap<_, _>>();
+    for (path, occurrence_count, generic_impl_context_count, item_count) in [
+        ("src/types/id.rs", 2, 0, 2),
+        ("src/cx/cx.rs", 6, 5, 6),
+        ("src/cx/scope.rs", 3, 3, 3),
+        ("src/net/tcp/stream.rs", 1, 0, 1),
+    ] {
+        let row = by_path.get(path).copied().expect("inventory file row");
+        assert_eq!(unsigned(row, "occurrence_count"), occurrence_count);
+        assert_eq!(
+            unsigned(row, "generic_impl_context_count"),
+            generic_impl_context_count
+        );
+        assert_eq!(array(row, "items").len(), item_count);
+        assert_eq!(
+            count_occurrences(&read_repo_file(path), VISIBILITY_MAKE_TOKEN),
+            occurrence_count
+        );
+    }
+
+    let id_source = read_repo_file("src/types/id.rs");
+    assert_eq!(count_occurrences(&id_source, "pub(crate) const fn from_arena"), 2);
+    let cx_source = read_repo_file("src/cx/cx.rs");
+    assert!(cx_source.contains("pub struct CurrentCxGuard"));
+    assert!(cx_source.contains("pub(crate) fn new_with_drivers("));
+    assert!(cx_source.contains("pub(crate) fn io_driver_handle(&self)"));
+    let scope_source = read_repo_file("src/cx/scope.rs");
+    assert!(scope_source.contains("impl<P: Policy> Scope<'_, P>"));
+    assert!(scope_source.contains("pub(crate) fn with_pending_spawn_counter("));
+    let tcp_source = read_repo_file("src/net/tcp/stream.rs");
+    assert!(tcp_source.contains("pub(crate) fn from_std(stream: net::TcpStream)"));
+    assert!(tcp_source.contains("#[cfg(target_arch = \"wasm32\")]"));
+
+    let features = object(audit, "feature_path_inventory");
+    assert_eq!(
+        string_set(features, "default_features"),
+        BTreeSet::from([
+            "nightly-outcome-try".to_owned(),
+            "proc-macros".to_owned(),
+        ])
+    );
+    assert_eq!(
+        string_set(features, "proc_macros_feature_edges"),
+        BTreeSet::from(["dep:asupersync-macros".to_owned()])
+    );
+    assert_eq!(
+        string_set(features, "test_internals_feature_edges"),
+        BTreeSet::from([
+            "dep:tracing".to_owned(),
+            "dep:tracing-log".to_owned(),
+            "dep:tracing-subscriber".to_owned(),
+            "dep:visibility".to_owned(),
+        ])
+    );
+    assert!(!boolean(
+        features,
+        "test_internals_currently_enables_owned_macro"
+    ));
+    assert!(boolean(
+        features,
+        "sparse_no_default_test_internals_currently_uses_visibility"
+    ));
+    assert!(boolean(
+        features,
+        "candidate_requires_explicit_owned_macro_edge"
+    ));
+
+    let manifest = read_repo_file("Cargo.toml");
+    assert!(manifest.contains("default = [\"proc-macros\", \"nightly-outcome-try\"]"));
+    assert!(manifest.contains("proc-macros = [\"dep:asupersync-macros\"]"));
+    assert!(manifest.contains("visibility = { version = \"0.1\", optional = true }"));
+    let test_internals = manifest
+        .split_once("test-internals = [")
+        .expect("test-internals feature starts")
+        .1
+        .split_once("\n]")
+        .expect("test-internals feature ends")
+        .0;
+    assert!(test_internals.contains("\"dep:visibility\""));
+    assert!(!test_internals.contains("dep:asupersync-macros"));
+
+    let lock = read_repo_file("Cargo.lock");
+    assert!(lock.contains("name = \"visibility\"\nversion = \"0.1.1\""));
+    assert!(lock.contains("\"syn 2.0.119\""));
+    let topology = object(audit, "owned_macro_topology_assessment");
+    assert_eq!(string(topology, "owned_crate"), "asupersync-macros");
+    assert_eq!(string(topology, "existing_parser_major"), "syn 3");
+    assert!(!boolean(topology, "new_parser_dependency_allowed"));
+    assert_eq!(
+        string(topology, "cycle_risk_state"),
+        "UNRESOLVED_REQUIRES_SPARSE_COMPILE_PROOF"
+    );
+    assert!(!boolean(topology, "published_macro_present"));
+    assert!(!boolean(
+        topology,
+        "visibility_specific_unit_or_trybuild_fixture_present"
+    ));
+    let macro_manifest = read_repo_file("asupersync-macros/Cargo.toml");
+    assert!(macro_manifest.contains(
+        "asupersync = { path = \"..\", default-features = false, features = [\"test-internals\"] }"
+    ));
+    assert!(macro_manifest.contains("trybuild = \"1.0\""));
+    assert!(!read_repo_file("asupersync-macros/src/lib.rs").contains(VISIBILITY_MAKE_TOKEN));
+    let visibility_fixture_count = std::fs::read_dir(
+        repo_root().join("asupersync-macros/tests/compile_fail"),
+    )
+    .expect("compile-fail fixture directory")
+    .filter_map(Result::ok)
+    .filter(|entry| entry.file_name().to_string_lossy().contains("visibility"))
+    .count();
+    assert_eq!(visibility_fixture_count, 0);
+
+    let registry = registry_rows();
+    let capability = registry
+        .get("CAP-VISIBILITY-MACRO")
+        .expect("visibility capability");
+    assert_eq!(
+        string_set(capability, "dependency_owners"),
+        BTreeSet::from([
+            "asupersync-macros".to_owned(),
+            "visibility".to_owned(),
+        ])
+    );
+    assert_eq!(
+        string_set(capability, "features"),
+        BTreeSet::from(["test-internals".to_owned()])
+    );
+    assert_eq!(
+        string_set(capability, "replacement_bead_ids"),
+        BTreeSet::from([VISIBILITY_BEAD_ID.to_owned()])
+    );
+    assert_eq!(
+        string(capability, "cutover_state"),
+        "BLOCKED_PENDING_EVIDENCE"
+    );
+    let baseline_index = capability_index(&value, "CAP-VISIBILITY-MACRO");
+    let baseline = &value["capability_baselines"][baseline_index];
+    assert_eq!(
+        string_set(baseline, "scenario_ids"),
+        BTreeSet::from(["test_internals_consumer".to_owned()])
+    );
+    assert_eq!(
+        string_set(baseline, "evidence_ids"),
+        BTreeSet::from(["EVD-PROC-MACROS".to_owned()])
+    );
+    assert!(!boolean(baseline, "cutover_eligible"));
+
+    let evidence = object(audit, "existing_evidence_assessment");
+    assert_eq!(string(evidence, "baseline_evidence_id"), "EVD-PROC-MACROS");
+    assert_eq!(
+        string(evidence, "dependency_capability_runner_state"),
+        "SCENARIO_NOT_IMPLEMENTED"
+    );
+    assert_eq!(
+        unsigned(evidence, "visibility_specific_trybuild_fixture_count"),
+        0
+    );
+    assert!(!boolean(evidence, "execution_receipt_present"));
+    let runner = read_repo_file(RUNNER_PATH);
+    assert!(!runner.contains("test_internals_consumer"));
+    let consumer_manifest =
+        read_repo_file("tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml");
+    let consumer_source =
+        read_repo_file("tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs");
+    assert!(!consumer_manifest.contains("test-internals"));
+    assert!(!consumer_source.contains(VISIBILITY_MAKE_TOKEN));
+
+    let downstream = object(audit, "downstream_use_assessment");
+    assert_eq!(
+        string(downstream, "state"),
+        "PARTIAL_STATIC_TOKEN_SEARCH_NOT_SEMANTICALLY_CLASSIFIED"
+    );
+    assert!(!boolean(downstream, "complete_downstream_inventory_present"));
+
+    let marginal = object(audit, "marginal_ledger_assessment");
+    assert_eq!(unsigned(marginal, "visibility_measurement_row_count"), 4);
+    assert!(!boolean(marginal, "source_commit_matches_observed_revision"));
+    assert!(!boolean(marginal, "fresh_for_cutover"));
+    assert!(!boolean(marginal, "favorable_cutover_verdict"));
+    let ledger = parse_json(MARGINAL_LEDGER_PATH);
+    assert_eq!(
+        string(&ledger, "source_commit"),
+        string(marginal, "ledger_source_commit")
+    );
+    let rows = array(&ledger, "marginal_measurements")
+        .iter()
+        .filter(|row| row.get("dependency_name").and_then(Value::as_str) == Some("visibility"))
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 4);
+    assert_eq!(
+        rows.iter()
+            .map(|row| string(row, "feature_profile").to_owned())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["workspace-dev-build-audit".to_owned()])
+    );
+    assert_eq!(
+        rows.iter()
+            .map(|row| string(row, "target_triple").to_owned())
+            .collect::<BTreeSet<_>>(),
+        string_set(marginal, "target_triples")
+    );
+    for row in rows {
+        assert_eq!(string(row, "direct_root_edge"), "normal:visibility");
+        assert_eq!(unsigned(row, "marginal_package_version_count"), 1);
+        assert_eq!(string(row, "unsafe_exposure_class"), "SAFE-OWN");
+        assert!(array(row, "build_scripts").is_empty());
+        assert_eq!(array(row, "proc_macros").len(), 1);
+        assert_eq!(string(object(row, "marginal_native_code"), "status"), "none");
+    }
+
+    let matrix = object(audit, "required_evidence_matrix");
+    assert_eq!(string(matrix, "status"), "MISSING_NOT_RUN");
+    assert_eq!(unsigned(matrix, "captured_case_count"), 0);
+    assert!(array(matrix, "captured_cases").is_empty());
+    assert_eq!(array(matrix, "item_shape_cells").len(), 8);
+    assert_eq!(array(matrix, "profile_cells").len(), 5);
+    assert_eq!(array(matrix, "target_cells").len(), 4);
+    assert_eq!(array(matrix, "diagnostic_cells").len(), 6);
+
+    let gate = object(audit, "cutover_gate");
+    assert_eq!(string(gate, "required_state"), "SAME_OR_BETTER");
+    let gate_rows = array(gate, "rows");
+    assert_eq!(gate_rows.len(), 9);
+    assert_eq!(
+        gate_rows
+            .iter()
+            .filter(|row| row.get("state").and_then(Value::as_str) == Some("STATIC_COMPLETE"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        gate_rows
+            .iter()
+            .filter(|row| row.get("state").and_then(Value::as_str) == Some("MISSING"))
+            .count(),
+        8
+    );
+    assert_eq!(
+        string(gate, "on_any_missing_or_regressed_row"),
+        "KEEP_INCUMBENT"
+    );
+    assert!(!boolean(gate, "visibility_exit_allowed"));
+    assert!(!boolean(gate, "tracker_closure_allowed"));
+
+    let no_claims = array(audit, "no_claims")
+        .iter()
+        .map(|claim| claim.as_str().expect("no-claim text"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    for required in [
+        "No owned visibility macro",
+        "does not prove expansion",
+        "not a visibility replacement receipt",
+        "does not authorize cutover",
+        "does not authorize visibility removal",
+    ] {
+        assert!(no_claims.contains(required), "missing no-claim: {required}");
+    }
+}
