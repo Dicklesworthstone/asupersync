@@ -61,9 +61,14 @@ The current lower-bound contract is deliberately narrow:
 
 | Consumer profile | Declared bound | Current evidence state |
 | --- | --- | --- |
-| Default features | The exact nightly in `rust-toolchain.toml`; default features include `nightly-outcome-try` | Pinned contributor/release toolchain, not a numeric stable MSRV |
+| Default features | `nightly-2026-07-05` from `rust-toolchain.toml`; default features include `nightly-outcome-try` | Pinned contributor/release snapshot, not a numeric stable MSRV or lower-bound proof |
 | Stable subset | A toolchain supporting Edition 2024, with default features disabled and `proc-macros` enabled | Audited stable profile, but no numeric minimum is declared because `[package].rust-version` is absent |
 | Dependency versions | The semver requirements in the consumer's resolved Asupersync manifest | Current-version coverage only; the workspace lock is not a verified minimum-version set |
+
+`nightly-2026-07-05` is a point-in-time toolchain pin, not an MSRV-style
+range. A change to `[toolchain].channel` must update this row and the README
+guidance in the same review. Until a focused drift contract enforces that
+relationship, synchronized review remains an operator obligation.
 
 The synthesized fixture at
 `tests/fixtures/downstream-consumer-proof/Cargo.toml` exercises selected public

@@ -604,10 +604,12 @@ nightly `Outcome` `Try` surface is migrated or disabled by default.
 
 Asupersync's repository `Cargo.lock` governs this workspace; it does not pin a
 downstream consumer's resolution. Default-feature consumers should use the
-exact nightly in `rust-toolchain.toml`. The stable subset currently has no
-numeric MSRV claim because `Cargo.toml` does not declare `rust-version`, and the
-existing synthesized-consumer proof covers current public API profiles rather
-than minimum dependency versions.
+current contributor/release pin, `nightly-2026-07-05`, from
+`rust-toolchain.toml`. That exact snapshot is a compatibility instruction, not
+a numeric stable MSRV or promised lower bound. The stable subset currently has
+no numeric MSRV claim because `Cargo.toml` does not declare `rust-version`, and
+the existing synthesized-consumer proof covers current public API profiles
+rather than minimum dependency versions.
 
 Applications should commit and enforce their own lockfile. Vendoring is an
 optional source-availability control that must be maintained together with that
