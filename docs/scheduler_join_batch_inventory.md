@@ -80,6 +80,12 @@ There is no `Cx::spawn_batch`, `Cx::spawn_batch_in`, `Scope::spawn_batch`, or
 `JoinSet::spawn_all` implementation in the captured tree. `JoinSet::spawn`
 calls `Cx::spawn_in` once and pushes one `TaskHandle`.
 
+The production ambient-free entry to this structured family is
+`Runtime::request_cx_with_budget`. The public-loop baseline must construct its
+`Runtime` and obtain one request-scoped `Cx` before the timed interval. This
+changes setup reachability, not completion semantics, and records no timing
+result.
+
 Each current Send spawn performs all of the following independently:
 
 1. allocate one provisional mailbox `TaskId`;
@@ -169,7 +175,7 @@ The existing `spawn_throughput` binary must gain separate cells under
 | `sched/join_batch/v1/task_handle_completion/ready` | publish and consume a pre-created canonical result through `join`, `try_join`, and `poll_join` profiles |
 | `sched/join_batch/v1/task_handle_completion/pending_wake` | temporary and persistent waiter profiles through send and wake |
 | `sched/join_batch/v1/task_handle_completion/drop_join_future` | unfinished, already-ready, and defused drop profiles |
-| `sched/join_batch/v1/public_cx_spawn_loop/1000` | exactly 1,000 public `Cx::spawn` calls; submission and collection are separate profiles |
+| `sched/join_batch/v1/public_cx_spawn_loop/1000` | pre-create one production request-scoped `Cx` through `Runtime::request_cx_with_budget` outside the timer, then make exactly 1,000 public `Cx::spawn` calls; submission and collection are separate profiles |
 | `sched/join_batch/v1/public_join_set_spawn_loop/1000` | exactly 1,000 `JoinSet::spawn` calls and spawn-order collection |
 
 The later candidate uses

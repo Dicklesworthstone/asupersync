@@ -180,7 +180,7 @@ fn source_pins_and_exact_anchors_match_the_captured_tree() {
     assert!(paths.contains("src/runtime/spawn_mailbox.rs"));
     assert!(paths.contains("src/runtime/scheduler/three_lane.rs"));
 
-    assert_eq!(check_anchor_objects(&artifact), 75);
+    assert_eq!(check_anchor_objects(&artifact), 76);
 }
 
 #[test]
@@ -437,6 +437,15 @@ fn required_measurement_matrix_fails_closed_until_complete() {
         ])
     );
     let cells = array(&measurements_value, "operation_cells");
+    let public_cx_loop = cells
+        .iter()
+        .find(|cell| {
+            text(cell, "operation_id") == "sched/join_batch/v1/public_cx_spawn_loop/1000"
+        })
+        .expect("public Cx loop cell must exist");
+    assert!(
+        text(public_cx_loop, "measurement_scope").contains("request_cx_with_budget")
+    );
     assert_eq!(
         cells
             .iter()
@@ -572,6 +581,7 @@ fn docs_and_existing_harness_use_the_frozen_vocabulary() {
     assert!(doc.contains("STATIC_SURFACE_COMPLETE_MEASUREMENT_BLOCKED"));
     assert!(doc.contains("zero baseline-registry rows"));
     assert!(doc.contains("mutex-backed"));
+    assert!(doc.contains("request_cx_with_budget"));
     assert!(doc.contains("global scheduler consumer deliberately dequeues at most one"));
     for operation in [
         "sched/join_batch/v1/legacy_completion_handoff/ready",
