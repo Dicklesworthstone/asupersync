@@ -152,6 +152,15 @@ boundaries, external consumers absent from this snapshot, and later container
 or arbitrary-byte propagation are not enumerated. A1's
 zero-unclassified-use acceptance remains unmet and the bead stays open.
 
+A 2026-08-05 static provenance pass refreshed one stale authority pin against
+`2f9314377d9418c5819bd6baf656e0f4f19b5200`. The shared capability baseline
+gained 1,853 append-only audit lines while the mapped TIME capability row,
+TIME/CLI evidence rows, registry reference, and runner contract remained
+byte-identical under canonical JSON projections. The 68-path pin set and the
+historical A1 revision are unchanged. This is source-pin maintenance only: it
+does not complete the derived-consumer inventory, rerun A1 evidence, or change
+`bead_close_allowed=false`.
+
 Most `src/real_*` files in the census are dormant source rather than declared
 modules. The Chrono-bearing H3 server/websocket suite is feature-wired. In the
 eight-path root integration group, only codec framing is dormant; HPACK,

@@ -201,8 +201,8 @@
       },
       {
         "path": "artifacts/dependency_capability_baseline_v1.json",
-        "sha256": "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8",
-        "line_count": 1357
+        "sha256": "ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4",
+        "line_count": 3210
       },
       {
         "path": "artifacts/dependency_api_adr_registry_v1.json",
@@ -4808,6 +4808,40 @@
       "owner_bead": "asupersync-5z2scg.6.8"
     }
   ],
+  "post_a1_provenance_refresh": {
+    "captured_date_utc": "2026-08-05",
+    "base_commit": "2f9314377d9418c5819bd6baf656e0f4f19b5200",
+    "refresh_state": "STATIC_SOURCE_PIN_MAINTENANCE",
+    "source_pin_path_count": 68,
+    "source_pin_path_set_changed": false,
+    "stale_path_count": 1,
+    "refreshed_path_count": 1,
+    "refreshed_paths": [
+      {
+        "path": "artifacts/dependency_capability_baseline_v1.json",
+        "classification": "APPEND_ONLY_INDEPENDENT_STATIC_AUDITS",
+        "previous_sha256": "88575b016105828ce8a3687ef6be2509e0412dee949cda8",
+        "previous_line_count": 1357,
+        "current_sha256": "ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4",
+        "current_line_count": 3210,
+        "added_line_count": 1853,
+        "deleted_line_count": 0,
+        "unchanged_time_projection_sha256": {
+          "capability_baseline": "809e86ccbcc413b96ebf6cc9bcc13488ae86c9ce51a62421629689b64d20543b",
+          "time_and_cli_evidence": "c44aa84d1e28042349340011b9b5238fd90c8d9e4814d7f51f2b21fe65ae2dab",
+          "registry_artifact": "823a83454efa037e72659307fbaad0cf4be21eaf47e457e30b28feda27eac76e",
+          "runner_contract": "8d85ab755084182064c6835af47e0db2af00814637ff5c260d61df352a58fb0b"
+        },
+        "time_acceptance_semantics_changed": false
+      }
+    ],
+    "historical_a1_revision_changed": false,
+    "a1_inventory_counts_changed": false,
+    "required_disposition": "KEEP_OPEN",
+    "dependency_exit_allowed": false,
+    "execution_state": "NOT_RUN_STATIC_ONLY",
+    "no_claim_boundary": "This maintenance receipt proves only current source-pin reconciliation and equality of the recorded TIME-specific projections before and after the append-only baseline growth. It does not rerun A1, complete the derived-consumer inventory, satisfy downstream evidence, authorize dependency exit, or make a broad-health or performance claim."
+  },
   "validation": {
     "contract_path": "tests/time_utc_capability_inventory_contract.rs",
     "doc_path": "docs/time_utc_capability_inventory.md",

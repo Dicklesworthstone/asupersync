@@ -24,7 +24,7 @@ const CAPABILITY_ID: &str = "CAP-TIME-UTC-RFC3339";
 const ADR_ID: &str = "DEP-ADR-011";
 const BASELINE_REVISION: &str = "1afde84d564bd8ea876459624116f90028b80835";
 const ARTIFACT_SHA256: &str =
-    "c3a1c30e86c09e42faa749fdb26b3678d170bf44cae363c11ea71d0f74a24e62";
+    "7933b9933127178568ebf34eeeb1189d4b7ba55de7990dbcfda7010fe0c80efe";
 const DOC_BEGIN: &str = "<!-- BEGIN TIME UTC CAPABILITY INVENTORY -->";
 const DOC_END: &str = "<!-- END TIME UTC CAPABILITY INVENTORY -->";
 const CHRONO_TOKEN: &str = concat!("chrono", "::");
@@ -2417,6 +2417,95 @@ fn validate_source_pins(inventory: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_post_a1_provenance_refresh(inventory: &Value) -> Result<(), String> {
+    let refresh = inventory
+        .get("post_a1_provenance_refresh")
+        .ok_or_else(|| "post_a1_provenance_refresh is required".to_owned())?;
+    for (key, expected) in [
+        ("captured_date_utc", "2026-08-05"),
+        (
+            "base_commit",
+            "2f9314377d9418c5819bd6baf656e0f4f19b5200",
+        ),
+        ("refresh_state", "STATIC_SOURCE_PIN_MAINTENANCE"),
+        ("required_disposition", "KEEP_OPEN"),
+        ("execution_state", "NOT_RUN_STATIC_ONLY"),
+    ] {
+        if refresh.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("post-A1 refresh {key} must be {expected}"));
+        }
+    }
+    if refresh.get("source_pin_path_count").and_then(Value::as_u64) != Some(68)
+        || refresh.get("stale_path_count").and_then(Value::as_u64) != Some(1)
+        || refresh.get("refreshed_path_count").and_then(Value::as_u64) != Some(1)
+    {
+        return Err("post-A1 refresh counts drifted".to_owned());
+    }
+    for key in [
+        "source_pin_path_set_changed",
+        "historical_a1_revision_changed",
+        "a1_inventory_counts_changed",
+        "dependency_exit_allowed",
+    ] {
+        if refresh.get(key).and_then(Value::as_bool) != Some(false) {
+            return Err(format!("post-A1 refresh {key} must remain false"));
+        }
+    }
+
+    let rows = array(refresh, "refreshed_paths");
+    if rows.len() != 1 {
+        return Err("post-A1 refresh must retain one exact path".to_owned());
+    }
+    let baseline = &rows[0];
+    if text(baseline, "path") != "artifacts/dependency_capability_baseline_v1.json"
+        || text(baseline, "classification") != "APPEND_ONLY_INDEPENDENT_STATIC_AUDITS"
+        || text(baseline, "previous_sha256")
+            != "88575b016105828ce8a3687ef6be2509e0412dee949cda8"
+        || baseline.get("previous_line_count").and_then(Value::as_u64) != Some(1357)
+        || text(baseline, "current_sha256")
+            != "ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4"
+        || baseline.get("current_line_count").and_then(Value::as_u64) != Some(3210)
+        || baseline.get("added_line_count").and_then(Value::as_u64) != Some(1853)
+        || baseline.get("deleted_line_count").and_then(Value::as_u64) != Some(0)
+        || baseline
+            .get("time_acceptance_semantics_changed")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return Err("post-A1 baseline provenance drifted".to_owned());
+    }
+    let projections = object(baseline, "unchanged_time_projection_sha256");
+    for (key, expected) in [
+        (
+            "capability_baseline",
+            "809e86ccbcc413b96ebf6cc9bcc13488ae86c9ce51a62421629689b64d20543b",
+        ),
+        (
+            "time_and_cli_evidence",
+            "c44aa84d1e28042349340011b9b5238fd90c8d9e4814d7f51f2b21fe65ae2dab",
+        ),
+        (
+            "registry_artifact",
+            "823a83454efa037e72659307fbaad0cf4be21eaf47e457e30b28feda27eac76e",
+        ),
+        (
+            "runner_contract",
+            "8d85ab755084182064c6835af47e0db2af00814637ff5c260d61df352a58fb0b",
+        ),
+    ] {
+        if projections.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("post-A1 projection {key} drifted"));
+        }
+    }
+    if !text(refresh, "no_claim_boundary").contains("does not rerun A1")
+        || !text(refresh, "no_claim_boundary").contains("derived-consumer inventory")
+        || !text(refresh, "no_claim_boundary").contains("dependency exit")
+    {
+        return Err("post-A1 refresh no-claim boundary is incomplete".to_owned());
+    }
+    Ok(())
+}
+
 fn count_matching_lines(source: &str, token: &str) -> usize {
     source.lines().filter(|line| line.contains(token)).count()
 }
@@ -2881,6 +2970,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     validate_per_use_classification(inventory)?;
     validate_alias_inventory(inventory)?;
     validate_foundation_boundary(inventory)?;
+    validate_post_a1_provenance_refresh(inventory)?;
     Ok(())
 }
 
@@ -2915,6 +3005,8 @@ fn time_utc_inventory_is_exact_and_source_pinned() {
         "partial static inventory only",
         "bead_close_allowed=false",
         "the bead must not be closed",
+        "1,853 append-only audit lines",
+        "source-pin maintenance only",
         "No compiler, formatter, test, benchmark, service, remote job, or runtime lane",
     ] {
         assert!(docs.contains(marker), "documentation marker drifted: {marker}");
@@ -2928,6 +3020,11 @@ fn time_utc_inventory_rejects_cutover_and_completeness_drift() {
     let mut cutover = inventory.clone();
     cutover["authority"]["dependency_exit_allowed"] = Value::Bool(true);
     assert!(validate_inventory(&cutover).is_err());
+
+    let mut maintenance_cutover = inventory.clone();
+    maintenance_cutover["post_a1_provenance_refresh"]["dependency_exit_allowed"] =
+        Value::Bool(true);
+    assert!(validate_inventory(&maintenance_cutover).is_err());
 
     let mut unclassified = inventory.clone();
     unclassified["policy"]["unclassified_chrono_paths"] = Value::from(1_u64);
