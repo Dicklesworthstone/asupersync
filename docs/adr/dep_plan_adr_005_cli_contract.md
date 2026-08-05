@@ -182,15 +182,18 @@ The A1 bead remains open until the admitted incumbent binaries populate the
 required byte-capture matrix.
 
 The field-normalization state is
-`PARTIAL_3_OF_6_PRIMARY_SOURCES`. A bounded static cohort now expands all 53
-`#[arg]` declarations in `atpd`, `offline_tuner`, and
-`src/cli/args.rs`, plus the two implicit `atpd identity import/export`
-positionals, into 55 source-anchored rows. It records explicit versus derived
-spellings separately and exposes three behavior distinctions that source hashes
-alone hid: `atpd --foreground` is parsed but unused; tuner weight range prose
-has no matching parser or runtime range validation; shared ATP verify/replay
-ratios do have post-parse range validation. The other three primary sources
-remain type-indexed only, and none of these rows is byte-golden evidence.
+`PARTIAL_4_OF_6_PRIMARY_SOURCES`. A bounded static cohort now expands all 152
+`#[arg]` declarations in standalone `atp`, `atpd`, `offline_tuner`, and
+`src/cli/args.rs`, plus twelve implicit positionals, into 164 source-anchored
+rows. Standalone `atp` contributes 99 annotated and ten implicit fields; its
+rows preserve distinct `recv`/`serve` variants, repeated explicit
+`parse_max_block_size_arg` parsers, and hidden parser fields. Those ATP consumer
+classifications establish parser-struct dispatch only, not independent
+per-field dataflow or behavior. The cohort also records that `atpd
+--foreground` is parsed but unused, tuner weight range prose has no matching
+parser or runtime range validation, and shared ATP verify/replay ratios do have
+post-parse range validation. `asupersync` and the detached ATP tree remain
+type-indexed only, and none of these rows is byte-golden evidence.
 
 ## Rollback
 

@@ -31,12 +31,12 @@ fields, doc comments, positional declarations, defaults, short forms, value
 parsers, delimiters, actions, and other clap attributes part of the frozen
 snapshot.
 
-The field-level state is now explicitly partial. A first normalization cohort
-covers all 53 `#[arg]` attributes in `atpd`, `offline_tuner`, and the shared
-argument file, plus the two implicit identity path positionals in `atpd`.
-The remaining 437 `#[arg]` attributes in `asupersync`, standalone `atp`,
-and the detached ATP tree remain source-pinned and type-indexed rather than
-field-normalized.
+The field-level state is now explicitly partial. The normalization cohort
+covers all 152 `#[arg]` attributes in standalone `atp`, `atpd`,
+`offline_tuner`, and the shared argument file, plus twelve implicit
+positionals: ten in standalone `atp` and two identity paths in `atpd`. The
+remaining 338 `#[arg]` attributes in `asupersync` and the detached ATP tree
+remain source-pinned and type-indexed rather than field-normalized.
 
 There are 159 indexed command variants across the six files. Only 108 belong
 to binary-root command trees. The remaining 51 are the detached shared ATP
@@ -72,7 +72,12 @@ clap alias declaration.
 
 `SendArgs`, `RecvArgs`, and the four bonded-transfer argument types derive
 `Parser` rather than `Args`. That distinction is source-observed and preserved
-in the artifact.
+in the artifact. Together they declare 99 annotated fields and nine implicit
+positionals; the hidden inline `__delta-state-export` command contributes the
+tenth implicit positional, for 109 normalized standalone-ATP rows. Their
+consumer classifications freeze only the parser-struct handoff to the command
+dispatcher, except for the directly dispatched delta-export destination. They
+do not claim independent per-field dataflow or behavior.
 
 ### `atpd`
 
@@ -92,15 +97,16 @@ after parsing.
 
 ## Field-normalization cohort
 
-The machine artifact records 55 field rows under
-`PARTIAL_3_OF_6_PRIMARY_SOURCES`:
+The machine artifact records 164 field rows under
+`PARTIAL_4_OF_6_PRIMARY_SOURCES`:
 
 | Source | Annotated fields | Implicit positionals | Normalized rows |
 |---|---:|---:|---:|
+| `src/bin/atp.rs` | 99 | 10 | 109 |
 | `src/bin/atpd.rs` | 18 | 2 | 20 |
 | `src/bin/offline_tuner.rs` | 15 | 0 | 15 |
 | `src/cli/args.rs` | 20 | 0 | 20 |
-| **Cohort total** | **53** | **2** | **55** |
+| **Cohort total** | **152** | **12** | **164** |
 
 Each row records a stable field ID, owner type, Rust field declaration, option
 or positional shape, source attribute, explicit default, cardinality, scope,
@@ -111,7 +117,7 @@ positional value names, are labeled derived. Derived names are static review
 expectations only; they are not accepted as rendered help, usage, or parser
 byte evidence.
 
-The cohort makes four previously compressed distinctions visible:
+The cohort makes these previously compressed distinctions visible:
 
 - `atpd --foreground` is `PARSED_UNUSED_GAP`: parsing populates the field,
   but the post-parse code has no consumer.
@@ -124,6 +130,17 @@ The cohort makes four previously compressed distinctions visible:
 - The shared ATP verify `--min-coverage` and replay
   `--reduction-target` fields also use plain `f64` parsing, but their
   handlers do perform inclusive runtime range checks.
+- Standalone `atp recv` and `atp serve` are distinct command variants that
+  share `RecvArgs` and dispatch to the same handler with different persistence
+  booleans; `serve` is not a clap alias.
+- All six standalone ATP parser structs use the same explicit
+  `parse_max_block_size_arg` parser and `MaxBlockSizeArg::Auto` default for
+  `--max-block-size`.
+- The standalone tree retains hidden parser surface: two legacy
+  delta-sidecar flags, three auth-key-stdin flags, two double-underscore
+  commands, and the delta-state-export destination positional.
+- Standalone ATP rows classified as struct-dispatched establish only the
+  source-level command handoff. They are not per-field consumer proofs.
 
 These observations freeze gaps; they do not authorize silently fixing them in
 the inventory bead.
@@ -205,7 +222,7 @@ explicitly missing; it is not green and is not silently skipped.
 
 `tests/cli_clap_surface_inventory_contract.rs` is authored to verify source
 fingerprints, line counts, declaration and attribute counts, indexed command
-variants, the 55-row partial field-normalization cohort, feature/environment/
+variants, the 164-row partial field-normalization cohort, feature/environment/
 config/exit boundary markers, documentation markers, and the empty fail-closed
 golden state.
 
@@ -222,10 +239,11 @@ stderr routing, process exit behavior, non-UTF-8 handling, platform parity,
 compilation, runtime correctness, performance, release readiness, or broad
 workspace health.
 
-Field normalization covers only three of six primary sources. The other three
-remain source-pinned and type-indexed, and even the normalized rows do not
-substitute for captured parser bytes. The bead therefore remains open, `clap`
-remains `KEEP_UNTIL_PARITY`, and no dependency exit or parser replacement is
-authorized.
+Field normalization covers only four of six primary sources. `asupersync` and
+the detached ATP tree remain source-pinned and type-indexed, and even the
+normalized rows do not substitute for captured parser bytes. The standalone
+ATP dispatch classifications are not independent per-field dataflow proof. The
+bead therefore remains open, `clap` remains `KEEP_UNTIL_PARITY`, and no
+dependency exit or parser replacement is authorized.
 
 <!-- END CLI CLAP SURFACE INVENTORY -->

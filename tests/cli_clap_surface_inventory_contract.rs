@@ -343,16 +343,17 @@ fn bounded_field_normalization_cohort_is_exact_and_source_anchored() {
     let scope = Value::Object(object(&artifact, "scope").clone());
     assert_eq!(
         text(&scope, "argument_surface_state"),
-        "FIELD_NORMALIZED_FOR_3_OF_6_PRIMARY_SOURCES"
+        "FIELD_NORMALIZED_FOR_4_OF_6_PRIMARY_SOURCES"
     );
     let normalization = Value::Object(object(&artifact, "field_normalization").clone());
     assert_eq!(
         text(&normalization, "status"),
-        "PARTIAL_3_OF_6_PRIMARY_SOURCES"
+        "PARTIAL_4_OF_6_PRIMARY_SOURCES"
     );
     assert_eq!(
         string_set(&normalization, "normalized_primary_sources"),
         expected_set(&[
+            "src/bin/atp.rs",
             "src/bin/atpd.rs",
             "src/bin/offline_tuner.rs",
             "src/cli/args.rs",
@@ -360,20 +361,17 @@ fn bounded_field_normalization_cohort_is_exact_and_source_anchored() {
     );
     assert_eq!(
         string_set(&normalization, "remaining_primary_sources"),
-        expected_set(&[
-            "src/bin/asupersync.rs",
-            "src/bin/atp.rs",
-            "src/cli/atp_command_tree.rs",
-        ])
+        expected_set(&["src/bin/asupersync.rs", "src/cli/atp_command_tree.rs"])
     );
-    assert_eq!(unsigned(&normalization, "annotated_arg_attribute_count"), 53);
-    assert_eq!(unsigned(&normalization, "implicit_positional_count"), 2);
-    assert_eq!(unsigned(&normalization, "normalized_field_count"), 55);
+    assert_eq!(unsigned(&normalization, "annotated_arg_attribute_count"), 152);
+    assert_eq!(unsigned(&normalization, "implicit_positional_count"), 12);
+    assert_eq!(unsigned(&normalization, "normalized_field_count"), 164);
     assert!(text(&normalization, "spelling_policy").contains("not byte-capture evidence"));
 
     let rows = array(&normalization, "rows");
-    assert_eq!(rows.len(), 55);
+    assert_eq!(rows.len(), 164);
     for (path, expected_count) in [
+        ("src/bin/atp.rs", 109_usize),
         ("src/bin/atpd.rs", 20_usize),
         ("src/bin/offline_tuner.rs", 15),
         ("src/cli/args.rs", 20),
@@ -386,6 +384,43 @@ fn bounded_field_normalization_cohort_is_exact_and_source_anchored() {
             "normalized row count drift: {path}"
         );
     }
+    assert_eq!(
+        rows.iter()
+            .filter(|row| {
+                row.get("source_path").and_then(Value::as_str) == Some("src/bin/atp.rs")
+                    && row
+                        .get("consumer_state")
+                        .and_then(Value::as_str)
+                        .is_some_and(|state| state.starts_with("STRUCT_DISPATCHED_TO_"))
+            })
+            .count(),
+        108
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| {
+                row.get("source_path").and_then(Value::as_str) == Some("src/bin/atp.rs")
+                    && row.get("consumer_state").and_then(Value::as_str)
+                        == Some("CONSUMED_BY_EXPORT_DELTA_STATE")
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| {
+                row.get("source_path").and_then(Value::as_str) == Some("src/bin/atp.rs")
+                    && row.get("rust_field").and_then(Value::as_str) == Some("max_block_size")
+                    && row
+                        .get("source_attribute")
+                        .and_then(Value::as_str)
+                        .is_some_and(|attribute| {
+                            attribute.contains("value_parser = parse_max_block_size_arg")
+                        })
+            })
+            .count(),
+        6
+    );
 
     let mut field_ids = BTreeSet::new();
     let mut annotated = 0_u64;
@@ -435,8 +470,8 @@ fn bounded_field_normalization_cohort_is_exact_and_source_anchored() {
             parsed_unused.insert(field_id.to_owned());
         }
     }
-    assert_eq!(annotated, 53);
-    assert_eq!(implicit, 2);
+    assert_eq!(annotated, 152);
+    assert_eq!(implicit, 12);
     assert_eq!(
         parsed_unused,
         expected_set(&["CLI-ATPD-ROOT-FOREGROUND"])
@@ -452,6 +487,10 @@ fn bounded_field_normalization_cohort_is_exact_and_source_anchored() {
             "CLI-FIELD-GAP-02",
             "CLI-FIELD-GAP-03",
             "CLI-FIELD-GAP-04",
+            "CLI-FIELD-GAP-05",
+            "CLI-FIELD-GAP-06",
+            "CLI-FIELD-GAP-07",
+            "CLI-FIELD-GAP-08",
         ])
     );
     for gap in gaps {
@@ -589,9 +628,10 @@ fn documentation_and_adr_keep_the_partial_state_visible() {
         BEAD_ID,
         "159",
         "108",
-        "55",
-        "53",
-        "PARTIAL_3_OF_6_PRIMARY_SOURCES",
+        "164",
+        "152",
+        "109",
+        "PARTIAL_4_OF_6_PRIMARY_SOURCES",
         "PARSED_UNUSED_GAP",
         "zero captured byte goldens",
         "LIBRARY_EXPORTED_NO_BINARY_PARSER_ROOT",
@@ -606,7 +646,7 @@ fn documentation_and_adr_keep_the_partial_state_visible() {
         ARTIFACT_PATH,
         DOC_PATH,
         "STATIC_SURFACE_FROZEN_BYTE_GOLDENS_MISSING",
-        "PARTIAL_3_OF_6_PRIMARY_SOURCES",
+        "PARTIAL_4_OF_6_PRIMARY_SOURCES",
         "MISSING_EXECUTION_RECEIPTS",
     ] {
         assert!(adr.contains(marker), "ADR missing {marker}");
