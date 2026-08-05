@@ -17,13 +17,82 @@
 use std::error::Error as StdError;
 use std::fmt;
 use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Wake, Waker};
+
+/// Builds a future that delegates every poll to an `FnMut` closure.
+///
+/// The standard-library primitive already has the exact consumed semantics, so
+/// the owned dependency-replacement layer adopts it directly rather than
+/// maintaining a second implementation.
+#[allow(unused_imports)]
+pub(crate) use std::future::poll_fn;
+
+/// Builds a future that never completes and never schedules a wake.
+///
+/// This is the standard-library primitive, adopted directly because the
+/// incumbent adds no behavior beyond it.
+#[allow(unused_imports)]
+pub(crate) use std::future::pending;
+
+/// Polls `future` exactly once and resolves immediately with the observation.
+///
+/// `Poll::Ready(value)` becomes `Some(value)`, while `Poll::Pending` becomes
+/// `None` without waiting for a wake. The returned future adds no `Send`,
+/// `Unpin`, or `'static` bound and allocates no heap storage.
+// Preserve the consumed no-`Cx` signature without defining an `async fn`.
+#[allow(clippy::manual_async_fn)]
+pub(crate) fn poll_once<F>(future: F) -> impl Future<Output = Option<F::Output>>
+where
+    F: Future,
+{
+    async move {
+        let mut future = std::pin::pin!(future);
+        poll_fn(|context| {
+            Poll::Ready(match future.as_mut().poll(context) {
+                Poll::Ready(output) => Some(output),
+                Poll::Pending => None,
+            })
+        })
+        .await
+    }
+}
+
+/// Future returned by [`yield_now`].
+#[derive(Debug, Default)]
+pub(crate) struct YieldNow {
+    yielded: bool,
+}
+
+impl Future for YieldNow {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.yielded {
+            Poll::Ready(())
+        } else {
+            self.yielded = true;
+            context.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+}
+
+/// Yields once to the polling executor.
+///
+/// The first poll schedules exactly one wake and returns `Poll::Pending`.
+/// Every later poll returns `Poll::Ready(())` without another wake.
+#[must_use]
+pub(crate) const fn yield_now() -> YieldNow {
+    YieldNow { yielded: false }
+}
 
 /// Reason the owned blocking kernel refused to poll a future.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,6 +264,107 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    #[derive(Default)]
+    struct CountingWaker {
+        wakes: AtomicUsize,
+    }
+
+    impl Wake for CountingWaker {
+        fn wake(self: Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    struct PendingDrop {
+        polls: Rc<Cell<usize>>,
+        drops: Rc<Cell<usize>>,
+    }
+
+    impl Future for PendingDrop {
+        type Output = u8;
+
+        fn poll(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Self::Output> {
+            self.polls.set(self.polls.get() + 1);
+            Poll::Pending
+        }
+    }
+
+    impl Drop for PendingDrop {
+        fn drop(&mut self) {
+            self.drops.set(self.drops.get() + 1);
+        }
+    }
+
+    #[test]
+    fn poll_fn_forwards_context_and_calls_once_per_wrapper_poll() {
+        let wake_state = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&wake_state));
+        let mut context = Context::from_waker(&waker);
+        let polls = Cell::new(0_usize);
+        let mut future = std::pin::pin!(poll_fn(|received_context| {
+            assert!(received_context.waker().will_wake(&waker));
+            let current = polls.get();
+            polls.set(current + 1);
+            if current == 0 {
+                Poll::Pending
+            } else {
+                Poll::Ready(41_u8)
+            }
+        }));
+
+        assert_eq!(future.as_mut().poll(&mut context), Poll::Pending);
+        assert_eq!(polls.get(), 1);
+        assert_eq!(future.as_mut().poll(&mut context), Poll::Ready(41));
+        assert_eq!(polls.get(), 2);
+        assert_eq!(wake_state.wakes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn poll_once_observes_ready_and_pending_without_waiting() {
+        assert_eq!(block_on(poll_once(async { 43_u8 })), Some(43));
+
+        let polls = Rc::new(Cell::new(0_usize));
+        let drops = Rc::new(Cell::new(0_usize));
+        let observed = block_on(poll_once(PendingDrop {
+            polls: Rc::clone(&polls),
+            drops: Rc::clone(&drops),
+        }));
+
+        assert_eq!(observed, None);
+        assert_eq!(polls.get(), 1);
+        assert_eq!(drops.get(), 1);
+    }
+
+    #[test]
+    fn yield_now_wakes_once_then_remains_ready() {
+        let wake_state = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&wake_state));
+        let mut context = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(yield_now());
+
+        assert_eq!(future.as_mut().poll(&mut context), Poll::Pending);
+        assert_eq!(wake_state.wakes.load(Ordering::Relaxed), 1);
+        assert_eq!(future.as_mut().poll(&mut context), Poll::Ready(()));
+        assert_eq!(future.as_mut().poll(&mut context), Poll::Ready(()));
+        assert_eq!(wake_state.wakes.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn pending_never_completes_or_schedules_a_wake() {
+        let wake_state = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&wake_state));
+        let mut context = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(pending::<u8>());
+
+        assert_eq!(future.as_mut().poll(&mut context), Poll::Pending);
+        assert_eq!(future.as_mut().poll(&mut context), Poll::Pending);
+        assert_eq!(wake_state.wakes.load(Ordering::Relaxed), 0);
+    }
+
     #[test]
     fn ready_future_completes_without_parking() {
         let park_calls = Cell::new(0_usize);
@@ -214,7 +384,7 @@ mod tests {
         let output = block_on(async {
             borrowed.set(2);
             let inner_polls = Cell::new(0_usize);
-            let inner = block_on(std::future::poll_fn(|context| {
+            let inner = block_on(poll_fn(|context| {
                 let current = inner_polls.get();
                 inner_polls.set(current + 1);
                 if current == 0 {
@@ -238,7 +408,7 @@ mod tests {
         let polls = Cell::new(0_usize);
         let park_calls = Cell::new(0_usize);
         let output = block_on_with_park(
-            std::future::poll_fn(|context| {
+            poll_fn(|context| {
                 let current = polls.get();
                 polls.set(current + 1);
                 if current == 0 {
@@ -263,7 +433,7 @@ mod tests {
         let polls = Cell::new(0_usize);
         let park_calls = Cell::new(0_usize);
         let output = block_on_with_park(
-            std::future::poll_fn(|_| {
+            poll_fn(|_| {
                 let current = polls.get();
                 polls.set(current + 1);
                 if current == 0 {
@@ -291,7 +461,7 @@ mod tests {
         let first_waker = RefCell::new(None::<Waker>);
         let polls = Cell::new(0_usize);
 
-        block_on(std::future::poll_fn(|context| {
+        block_on(poll_fn(|context| {
             let current = polls.get();
             polls.set(current + 1);
             if current == 0 {
@@ -332,7 +502,7 @@ mod tests {
         });
 
         let mut reported_pending = false;
-        let output = block_on(std::future::poll_fn(|context| {
+        let output = block_on(poll_fn(|context| {
             if ready.load(Ordering::Acquire) {
                 return Poll::Ready(19_u8);
             }
@@ -371,7 +541,7 @@ mod tests {
         });
 
         let mut reported_pending = false;
-        let observed = block_on(std::future::poll_fn(|context| {
+        let observed = block_on(poll_fn(|context| {
             if cancelled.load(Ordering::Acquire) {
                 return Poll::Ready("cancelled");
             }
@@ -409,7 +579,7 @@ mod tests {
         let polls = Cell::new(0_usize);
 
         let result = runtime.block_on(async {
-            try_block_on(std::future::poll_fn(|_| {
+            try_block_on(poll_fn(|_| {
                 polls.set(polls.get() + 1);
                 Poll::Ready(31_u8)
             }))

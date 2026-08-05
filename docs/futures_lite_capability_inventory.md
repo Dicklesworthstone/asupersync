@@ -138,6 +138,40 @@ dependency, manifests, capability registry, source-pinned A1 artifact, and
 cutover state remain unchanged at `KEEP_UNTIL_PARITY` /
 `BLOCKED_PENDING_EVIDENCE`.
 
+### FUT A4 static helper progress
+
+At base revision `050fd0f08e4cf127e348bbf545c1e46cc392f6b5`, bead
+`asupersync-d24mms.6.4` adds the allocation-free helper subset beside the
+incumbent in `crate::util::future`. This is `STATIC_SOURCE_PROGRESS`; its
+executable state is `NOT_RUN_STATIC_ONLY`, and the bead remains open.
+
+The subset deliberately uses the standard library where it already provides
+the required semantics:
+
+- `poll_fn` is a direct adoption of `std::future::poll_fn`, preserving the
+  caller's Context, one closure call per wrapper poll, closure drop, panic
+  propagation, and the absence of extra `Send` or `'static` bounds;
+- `pending` is a direct adoption of `std::future::pending`, so it remains
+  pending without scheduling a wake;
+- the owned `poll_once` pins its input inside the returned future, polls it
+  exactly once, maps `Ready(value)` to `Some(value)`, maps `Pending` to `None`
+  without waiting, and drops the input when that observation completes;
+- the owned `YieldNow` self-wakes and returns `Pending` on its first poll, then
+  returns `Ready(())` on every later poll without another wake. This repeated
+  ready behavior is intentionally distinct from `runtime::yield_now`, whose
+  separate runtime-facing contract rejects a post-completion repoll.
+
+Inline cases have been authored for Context identity and closure-call count,
+ready and pending one-poll observations, pending-input drop, the exact
+first/second/later yield sequence, and a pending future that never wakes. None
+of those cases has been executed in this static-only increment.
+
+This increment does not implement `zip`, `race`, or `or`; it does not invent a
+comment-only `join_all` target. It also does not migrate an incumbent call site,
+change a manifest, authorize cutover, establish differential parity, or provide
+unit, property, lab, DPOR, performance, or loser-drain evidence. Those remaining
+surfaces and their explicit cancellation/quiescence policy keep FUT A4 open.
+
 ## Consumed helper semantics
 
 The live API set is:
