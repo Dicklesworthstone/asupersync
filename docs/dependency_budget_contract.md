@@ -113,6 +113,85 @@ instead use an explicit `development_scope`, which is mutually exclusive with
 | 130 | `key-criterion` | `criterion` -> `target-dev:cfg(not(windows)):criterion` | `development_scope = "benchmark"`; `cfg(not(windows))` | Benchmarking | `development-benchmark` |
 | 140 | `key-rayon` | `rayon` -> `dev:rayon` | `development_scope = "benchmark"` | Data parallelism for CPU-bound work | `development-benchmark` |
 
+### Pinned projection object and table bytes
+
+The future top-level `agents_key_dependencies` value is an object, not a
+second free-form document. It has exactly these object-level fields:
+
+- `schema_version`, fixed at `1`;
+- `bead_id`, fixed at `asupersync-mnotoo.3.6`;
+- `heading`, `begin_marker`, and `end_marker` strings fixed to the values in
+  the renderer interface below;
+- `columns`, fixed in order to `Crate`, `Purpose`, `Feature/Profile`, and
+  `Tier`;
+- `consumer_profile_vocabulary`, equal as a set to the synthesized-consumer
+  profile names in `graph_ceilings` and stored in ascending lexical order;
+- `tier_vocabulary`, fixed in order to `core-runtime`,
+  `optional-production`, `development-test`, and
+  `development-benchmark`; and
+- `rows`, containing the 14 reviewed rows above in ascending
+  `display_order`.
+
+Each row has exactly `row_id`, `display_order`, `dependency_names`,
+`direct_edge_ids`, `purpose`, `optional`, `target_conditions`, `crate_cell`,
+`feature_profile_cell`, and `tier`, plus exactly one of `feature_profiles` or
+`development_scope`. `dependency_names`, `direct_edge_ids`,
+`target_conditions`, and `feature_profiles` are arrays of unique strings.
+Empty `target_conditions` is valid; the other array fields must be nonempty.
+`development_scope` is either `test` or `benchmark`. Unknown fields, nulls,
+duplicate values, and an empty string fail closed rather than being ignored.
+Row IDs and positive display orders must also be unique. Feature profiles are
+stored in ascending lexical order; dependency names retain display order.
+
+The semantic and display fields are deliberately both checked. For example,
+the first row is represented by metadata equivalent to:
+
+```json
+{
+  "row_id": "key-thiserror",
+  "display_order": 10,
+  "dependency_names": ["thiserror"],
+  "direct_edge_ids": ["normal:thiserror"],
+  "purpose": "Ergonomic error type derivation",
+  "optional": false,
+  "target_conditions": [],
+  "feature_profiles": [
+    "cli", "compression", "default", "fuzz-quarantine", "io-uring",
+    "kafka", "loom-tests", "metrics", "minimal", "sqlite", "tls",
+    "trace-compression"
+  ],
+  "crate_cell": "`thiserror`",
+  "feature_profile_cell": "all consumer profiles",
+  "tier": "core-runtime"
+}
+```
+
+The contract must cross-check `crate_cell` against `dependency_names`: one
+dependency is one code span, while an explicitly grouped row joins code spans
+with the literal ` + ` separator in array order. It must cross-check every
+`direct_edge_id` against the named dependency and every target condition
+against those exact allowset rows. The row's `optional` value must equal the
+value on every joined allowset row. `feature_profile_cell` is reviewed
+display metadata, not text inferred from an edge kind; the semantic profile,
+development-scope, optionality, and target-condition fields prove what that
+display text means.
+
+The renderer emits UTF-8 with LF line endings, no leading blank line, and
+exactly one LF after the final row. It emits this fixed header and separator,
+then one row per ascending `display_order`:
+
+```text
+| Crate | Purpose | Feature/Profile | Tier |
+| --- | --- | --- | --- |
+| {crate_cell} | {purpose} | {feature_profile_cell} | `{tier}` |
+```
+
+The braces above describe substitution; they are not emitted. Stored cell
+text must be trimmed and must not contain CR, LF, or a Markdown table
+delimiter (`|`). Render mode emits neither marker line. Check mode compares
+the bytes immediately after the begin marker's LF through the LF immediately
+before the end marker, so whitespace-only drift is still drift.
+
 The future contract must validate each edge string above against
 `allowed_direct_dependencies`, expand each consumer-profile set against the
 graph-ceiling vocabulary, and verify the two target conditions verbatim. The
