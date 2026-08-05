@@ -472,7 +472,7 @@ fn dropped_row_stream_finalizes_statement() -> SqlitePreparedStatementResult {
     const SCENARIO: &str = "SQLITE_PREPARED_STREAM_FINALIZE";
     block_on(async {
         let cx = Cx::for_testing();
-        let conn = match open_memory(
+        let mut conn = match open_memory(
             SCENARIO,
             "row_stream_drop_finalize",
             "drop_stream_after_first_row",

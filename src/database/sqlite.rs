@@ -44,6 +44,7 @@ use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::poll_fn;
+use std::marker::PhantomData;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -1259,6 +1260,11 @@ fn send_sqlite_stream_message(
                 return false;
             }
             Err(mpsc::SendError::Full(())) => {
+                // The SQLite statement still borrows its connection here.
+                // `SqliteRowStream` therefore carries the originating
+                // connection's exclusive lifetime until drop, preventing a
+                // same-connection operation from waiting behind this producer
+                // while the caller waits for that operation (br-asupersync-n0lnu2).
                 std::thread::sleep(SQLITE_ROW_STREAM_FULL_BACKOFF);
             }
         }
@@ -1283,7 +1289,13 @@ fn sqlite_row_from_rusqlite_row(
 }
 
 /// Streaming SQLite query result with bounded row buffering.
-pub struct SqliteRowStream {
+///
+/// The stream exclusively borrows its originating [`SqliteConnection`]. A
+/// SQLite statement borrows that physical connection while rows are stepped,
+/// so another operation cannot safely start until the stream is dropped. The
+/// lifetime makes that constraint explicit and prevents same-connection
+/// lock-order deadlocks in safe Rust (br-asupersync-n0lnu2).
+pub struct SqliteRowStream<'connection> {
     receiver: mpsc::Receiver<SqliteRowStreamMessage>,
     handle: crate::runtime::blocking_pool::BlockingTaskHandle,
     counters: Arc<SqliteRowStreamCounters>,
@@ -1293,9 +1305,11 @@ pub struct SqliteRowStream {
     /// in-flight long VM step instead of letting it run to the next
     /// row boundary.
     interrupt: Arc<rusqlite::InterruptHandle>,
+    /// Type-level ownership of the connection for the statement lifetime.
+    _connection_lease: PhantomData<&'connection mut SqliteConnection>,
 }
 
-impl fmt::Debug for SqliteRowStream {
+impl fmt::Debug for SqliteRowStream<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SqliteRowStream")
             .field("stats", &self.stats())
@@ -1304,7 +1318,7 @@ impl fmt::Debug for SqliteRowStream {
     }
 }
 
-impl SqliteRowStream {
+impl SqliteRowStream<'_> {
     /// Returns the next row, or `None` once the SQLite statement is exhausted.
     pub async fn next(&mut self, cx: &Cx) -> Outcome<Option<SqliteRow>, SqliteError> {
         if self.finished {
@@ -1417,7 +1431,7 @@ impl SqliteRowStream {
     }
 }
 
-impl Drop for SqliteRowStream {
+impl Drop for SqliteRowStream<'_> {
     fn drop(&mut self) {
         self.finish();
     }
@@ -2086,12 +2100,30 @@ impl SqliteConnection {
     /// This API preserves SQLite's native `sqlite3_step()` row-at-a-time
     /// behavior across the blocking-pool boundary. At most one converted row is
     /// buffered between the blocking worker and the async caller.
-    pub async fn query_stream(
-        &self,
+    ///
+    /// The returned stream exclusively borrows this connection. Drop the
+    /// stream before starting another operation on the same connection; this
+    /// prevents a second operation from waiting behind a statement whose row
+    /// delivery is itself waiting for the stream consumer.
+    ///
+    /// ```compile_fail
+    /// use asupersync::database::SqliteConnection;
+    /// use asupersync::{Cx, Outcome};
+    ///
+    /// async fn overlapping_operation(conn: &mut SqliteConnection, cx: &Cx) {
+    ///     let Outcome::Ok(mut rows) = conn.query_stream(cx, "SELECT 1", &[]).await else {
+    ///         return;
+    ///     };
+    ///     let _ = conn.is_open(); // connection remains exclusively borrowed
+    ///     let _ = rows.next(cx).await;
+    /// }
+    /// ```
+    pub async fn query_stream<'connection>(
+        &'connection mut self,
         cx: &Cx,
         sql: &str,
         params: &[SqliteValue],
-    ) -> Outcome<SqliteRowStream, SqliteError> {
+    ) -> Outcome<SqliteRowStream<'connection>, SqliteError> {
         if let Err(err) = ensure_checked_sql_surface(sql) {
             return Outcome::Err(err);
         }
@@ -2100,12 +2132,12 @@ impl SqliteConnection {
 
     /// Execute a trusted raw SQL query and stream rows through a bounded
     /// async receiver.
-    pub async fn query_stream_unchecked(
-        &self,
+    pub async fn query_stream_unchecked<'connection>(
+        &'connection mut self,
         cx: &Cx,
         sql: &str,
         params: &[SqliteValue],
-    ) -> Outcome<SqliteRowStream, SqliteError> {
+    ) -> Outcome<SqliteRowStream<'connection>, SqliteError> {
         if let Err(err) = ensure_unchecked_sql_surface(sql) {
             return Outcome::Err(err);
         }
@@ -2249,6 +2281,7 @@ impl SqliteConnection {
             counters,
             finished: false,
             interrupt: Arc::clone(&self.interrupt),
+            _connection_lease: PhantomData,
         })
     }
 
@@ -3590,7 +3623,7 @@ mod tests {
         init_test_logging();
         let (cx, trace) = traced_cx_with_budget(Budget::INFINITE);
 
-        let conn = block_on(async {
+        let mut conn = block_on(async {
             match SqliteConnection::open_in_memory(&cx).await {
                 Outcome::Ok(conn) => conn,
                 other => panic!("open_in_memory failed: {other:?}"),
@@ -3631,6 +3664,7 @@ mod tests {
                 .any(|m| m.contains("outcome=interrupt_sent") && m.contains("op=row_stream")),
             "expected stream interrupt trace, got {interrupts:?}"
         );
+        drop(stream);
 
         // Drain really released the connection mutex.
         let fresh_cx = create_test_cx();
@@ -3687,7 +3721,7 @@ mod tests {
         init_test_logging();
         let cx = create_test_cx();
 
-        let conn = block_on(async {
+        let mut conn = block_on(async {
             match SqliteConnection::open_in_memory(&cx).await {
                 Outcome::Ok(conn) => conn,
                 other => panic!("open_in_memory failed: {other:?}"),
@@ -4235,7 +4269,7 @@ mod tests {
         let cx = create_test_cx();
 
         block_on(async {
-            let conn = match SqliteConnection::open_in_memory(&cx).await {
+            let mut conn = match SqliteConnection::open_in_memory(&cx).await {
                 Outcome::Ok(conn) => conn,
                 other => panic!("open_in_memory failed: {other:?}"),
             };
@@ -4301,7 +4335,7 @@ mod tests {
         let cx = create_test_cx();
 
         block_on(async {
-            let conn = match SqliteConnection::open_in_memory(&cx).await {
+            let mut conn = match SqliteConnection::open_in_memory(&cx).await {
                 Outcome::Ok(conn) => conn,
                 other => panic!("open_in_memory failed: {other:?}"),
             };
@@ -4347,7 +4381,7 @@ mod tests {
         let cx = create_test_cx();
 
         block_on(async {
-            let conn = match SqliteConnection::open_in_memory(&cx).await {
+            let mut conn = match SqliteConnection::open_in_memory(&cx).await {
                 Outcome::Ok(conn) => conn,
                 other => panic!("open_in_memory failed: {other:?}"),
             };
@@ -4377,7 +4411,7 @@ mod tests {
         let cancel_cx = create_test_cx();
 
         block_on(async {
-            let conn = match SqliteConnection::open_in_memory(&cx).await {
+            let mut conn = match SqliteConnection::open_in_memory(&cx).await {
                 Outcome::Ok(conn) => conn,
                 other => panic!("open_in_memory failed: {other:?}"),
             };
@@ -4406,6 +4440,7 @@ mod tests {
                 Outcome::Cancelled(_) => {}
                 other => panic!("cancelled stream next should return Cancelled: {other:?}"),
             }
+            drop(stream);
 
             let rows = match conn
                 .query(&cx, "SELECT COUNT(*) AS count FROM streamed_cancel", &[])
