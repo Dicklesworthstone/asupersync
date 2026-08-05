@@ -31,15 +31,14 @@ fields, doc comments, positional declarations, defaults, short forms, value
 parsers, delimiters, actions, and other clap attributes part of the frozen
 snapshot.
 
-The field-level state is now explicitly partial. The normalization cohort
-covers all 326 `#[arg]` attributes in `asupersync`, standalone `atp`, `atpd`,
-`offline_tuner`, and the shared argument file, plus 37 implicit positionals:
-25 in `asupersync`, ten in standalone `atp`, and two identity paths in
-`atpd`. The remaining 164 `#[arg]` attributes belong exclusively to the
-detached ATP tree and remain source-pinned and type-indexed rather than
-field-normalized. Eleven `asupersync` fields marked only with
-`#[command(flatten/subcommand)]` are parser plumbing, not arguments, and are
-therefore excluded from the 199 field rows for that source.
+The field-level state is `COMPLETE_6_OF_6_PRIMARY_SOURCES`. The normalization
+cohort covers all 490 `#[arg]` attributes across the six primary sources plus
+37 implicit positionals: 25 in `asupersync`, ten in standalone `atp`, and two
+identity paths in `atpd`. Eleven `asupersync` fields and five detached-tree
+fields marked only with `#[command(flatten/subcommand)]` are parser plumbing,
+not arguments, and are therefore excluded from the 527 field rows. Complete
+here means complete static field normalization for the six pinned sources; it
+does not mean complete byte captures, parser execution, or binary reachability.
 
 There are 159 indexed command variants across the six files. Only 108 belong
 to binary-root command trees. The remaining 51 are the detached shared ATP
@@ -100,8 +99,8 @@ after parsing.
 
 ## Field-normalization cohort
 
-The machine artifact records 363 field rows under
-`PARTIAL_5_OF_6_PRIMARY_SOURCES`:
+The machine artifact records 527 field rows under
+`COMPLETE_6_OF_6_PRIMARY_SOURCES`:
 
 | Source | Annotated fields | Implicit positionals | Normalized rows |
 |---|---:|---:|---:|
@@ -110,7 +109,8 @@ The machine artifact records 363 field rows under
 | `src/bin/atpd.rs` | 18 | 2 | 20 |
 | `src/bin/offline_tuner.rs` | 15 | 0 | 15 |
 | `src/cli/args.rs` | 20 | 0 | 20 |
-| **Cohort total** | **326** | **37** | **363** |
+| `src/cli/atp_command_tree.rs` | 164 | 0 | 164 |
+| **Cohort total** | **490** | **37** | **527** |
 
 Each row records a stable field ID, owner type, Rust field declaration, option
 or positional shape, source attribute, explicit default, cardinality, scope,
@@ -156,6 +156,15 @@ The cohort makes these previously compressed distinctions visible:
   commands, and the delta-state-export destination positional.
 - Standalone ATP rows classified as struct-dispatched establish only the
   source-level command handoff. They are not per-field consumer proofs.
+- The detached tree contributes 164 annotated fields and no implicit
+  positionals. Its five subcommand-plumbing fields are intentionally outside
+  the argument-row count.
+- Of those detached rows, 60 belong to public root command models with no
+  downstream library dispatcher, while 104 belong to CI, dataset, corpus,
+  release, and archive models handed to `AtpWorkflowCoordinator`.
+- Both detached consumer classifications retain the
+  `NO_BINARY_PARSER_ROOT` boundary. Library export or workflow dispatch is not
+  evidence that a binary can parse or expose the corresponding spelling.
 
 These observations freeze gaps; they do not authorize silently fixing them in
 the inventory bead.
@@ -167,6 +176,12 @@ the inventory bead.
 root plus CI, dataset, fuzz, release, and archive children, but it derives no
 `Parser` root and no binary imports the module. `src/cli/atp_config.rs` and
 `src/cli/atp_workflows.rs` consume its types as library models.
+
+All 164 annotated fields are normalized in the artifact. Sixty are classified
+as `DETACHED_PUBLIC_COMMAND_MODEL_NO_BINARY_PARSER_ROOT`; the other 104 are
+classified as `DETACHED_LIBRARY_WORKFLOW_MODEL_NO_BINARY_PARSER_ROOT` and
+anchored to their source-level workflow dispatch. These classifications freeze
+model ownership only. They do not turn the detached tree into a reachable CLI.
 
 This matters in both directions:
 
@@ -237,9 +252,9 @@ explicitly missing; it is not green and is not silently skipped.
 
 `tests/cli_clap_surface_inventory_contract.rs` is authored to verify source
 fingerprints, line counts, declaration and attribute counts, indexed command
-variants, the 363-row partial field-normalization cohort, feature/environment/
-config/exit boundary markers, documentation markers, and the empty fail-closed
-golden state.
+variants, the 527-row complete static field-normalization cohort,
+feature/environment/config/exit boundary markers, documentation markers, and
+the empty fail-closed golden state.
 
 In this safety lane the contract was not executed. Validation was limited to
 JSON parsing, hashes, textual counts, and Git whitespace checks. Consequently,
@@ -254,11 +269,12 @@ stderr routing, process exit behavior, non-UTF-8 handling, platform parity,
 compilation, runtime correctness, performance, release readiness, or broad
 workspace health.
 
-Field normalization covers only five of six primary sources. The detached ATP
-tree remains source-pinned and type-indexed, and even the normalized rows do
-not substitute for captured parser bytes. The `asupersync` and standalone ATP
-dispatch classifications are not independent per-field dataflow proof. The
-bead therefore remains open, `clap` remains `KEEP_UNTIL_PARITY`, and no
-dependency exit or parser replacement is authorized.
+Field normalization covers all six primary sources, but even the 527 normalized
+rows do not substitute for captured parser bytes. The detached tree still has
+no binary parser root, and its 60 public-model plus 104 workflow-model rows do
+not establish user reachability. The `asupersync` and standalone ATP dispatch
+classifications are not independent per-field dataflow proof. The bead
+therefore remains open, `clap` remains `KEEP_UNTIL_PARITY`, and no dependency
+exit or parser replacement is authorized.
 
 <!-- END CLI CLAP SURFACE INVENTORY -->

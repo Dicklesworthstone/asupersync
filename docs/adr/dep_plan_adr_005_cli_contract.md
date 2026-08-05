@@ -182,23 +182,25 @@ The A1 bead remains open until the admitted incumbent binaries populate the
 required byte-capture matrix.
 
 The field-normalization state is
-`PARTIAL_5_OF_6_PRIMARY_SOURCES`. A bounded static cohort now expands all 326
-`#[arg]` declarations in `asupersync`, standalone `atp`, `atpd`,
-`offline_tuner`, and `src/cli/args.rs`, plus 37 implicit positionals, into 363
-source-anchored rows. `asupersync` contributes 174 annotated and 25 implicit
-fields; its eleven flatten/subcommand plumbing fields are intentionally not
-counted as arguments. The inventory records four root fields copied but not
-dispatched and the parsed-but-unused doctor recipe-list JSON flag. Standalone
-`atp` contributes 99 annotated and ten implicit fields; its rows preserve
-distinct `recv`/`serve` variants, repeated explicit
-`parse_max_block_size_arg` parsers, and hidden parser fields. The `asupersync`
-and standalone ATP consumer classifications establish parser-struct dispatch
-only, not independent per-field dataflow or behavior. The cohort also records
-that `atpd --foreground` is parsed but unused, tuner weight range prose has no
+`COMPLETE_6_OF_6_PRIMARY_SOURCES`. The bounded static cohort expands all 490
+`#[arg]` declarations across the six pinned sources, plus 37 implicit
+positionals, into 527 source-anchored rows. `asupersync` contributes 174
+annotated and 25 implicit fields; its eleven flatten/subcommand plumbing fields
+are intentionally not counted as arguments. The inventory records four root
+fields copied but not dispatched and the parsed-but-unused doctor recipe-list
+JSON flag. Standalone `atp` contributes 99 annotated and ten implicit fields;
+its rows preserve distinct `recv`/`serve` variants, repeated explicit
+`parse_max_block_size_arg` parsers, and hidden parser fields. The detached ATP
+tree contributes 164 annotated fields and no implicit positionals; its five
+subcommand-plumbing fields are excluded. Sixty detached rows describe public
+command models and 104 describe library workflow models, with both cohorts
+explicitly marked `NO_BINARY_PARSER_ROOT`. The consumer classifications
+establish only source-level model handoff, not independent per-field dataflow,
+binary reachability, or behavior. The cohort also records that
+`atpd --foreground` is parsed but unused, tuner weight range prose has no
 matching parser or runtime range validation, and shared ATP verify/replay
-ratios do have post-parse range validation. Only the detached ATP tree remains
-type-indexed rather than field-normalized, and none of these rows is
-byte-golden evidence.
+ratios do have post-parse range validation. None of these rows is byte-golden
+evidence.
 
 ## Rollback
 
@@ -219,9 +221,9 @@ RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBU
 
 This ADR is a frozen decision and public-surface inventory only. It does not
 prove that the planned evidence has run, that the recorded command vocabulary is
-exhaustive beyond the explicitly normalized cohort, that derived spellings equal
-rendered parser bytes, that help or error text is stable, that non-UTF-8 argv is
-handled correctly, that exit codes behave as documented on any binary other than
+equivalent to rendered parser bytes, that the detached ATP model has a binary
+parser root, that help or error text is stable, that non-UTF-8 argv is handled
+correctly, that exit codes behave as documented on any binary other than
 `asupersync`, that an owned parser could reach parity, or that `clap` may be
 removed. It also does not certify the capability registry's CAP-CLI source-owner
 rows, environment-variable list, hidden-command names or feature claims, which
