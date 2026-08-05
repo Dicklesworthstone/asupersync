@@ -51,6 +51,30 @@
     ],
     "default_action": "Keep futures-lite on the root normal edge and the compatibility-member dev edge until A10 records SAME-or-BETTER public, runtime, test, marginal-graph, and rollback evidence."
   },
+  "owned_stream_semantics_contract": {
+    "owner_bead": "asupersync-d24mms.6.2",
+    "trait": "asupersync::stream::Stream",
+    "extension_trait": "asupersync::stream::StreamExt",
+    "source_paths": [
+      "src/stream/stream.rs",
+      "src/stream/mod.rs",
+      "src/stream/next.rs"
+    ],
+    "dimensions": [
+      "pinning_and_unpin",
+      "pending_and_latest_waker",
+      "termination_and_fuse",
+      "size_hint_trust_boundary",
+      "cancellation_and_drop",
+      "send_sync_and_lifetimes",
+      "result_item_errors",
+      "forwarding_adapters"
+    ],
+    "next_future_cancellation": "dropping Next releases its mutable borrow but does not roll back state changes made by the underlying poll_next call",
+    "documentation_state": "SOURCE_AUTHORED_NOT_EXECUTED",
+    "behavior_change": false,
+    "cutover_authorized": false
+  },
   "dependency_resolution": {
     "root_manifest": {
       "path": "Cargo.toml",
@@ -904,6 +928,7 @@
     "The occurrence census classifies textual references and Cargo-built profiles; it does not claim every reference is behaviorally covered.",
     "The incumbent future::race and future::or drop losers; this inventory does not treat drop as project-level loser drain or quiescence.",
     "The downstream fixture's source-authored owned ATP compile assertions are unexecuted and do not prove the public ATP ecosystem Stream journey.",
+    "The owned Stream semantics documentation freezes a source contract only; it does not prove that every implementation obeys its wake, pinning, size-hint, cancellation, or drop obligations.",
     "Marginal package counts do not prove behavioral replacement parity.",
     "The source-authored owned ATP Stream implementations have not been compiled or behaviorally exercised and do not authorize cutover.",
     "No local Cargo fallback is approved when a remote-required proof lane is blocked."

@@ -181,6 +181,50 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     }
     validate_state_fields(inventory, "$")?;
 
+    let owned_contract_value = inventory
+        .get("owned_stream_semantics_contract")
+        .expect("owned Stream semantics contract");
+    let expected_owned_sources: BTreeSet<String> = [
+        "src/stream/stream.rs",
+        "src/stream/mod.rs",
+        "src/stream/next.rs",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    let expected_owned_dimensions: BTreeSet<String> = [
+        "pinning_and_unpin",
+        "pending_and_latest_waker",
+        "termination_and_fuse",
+        "size_hint_trust_boundary",
+        "cancellation_and_drop",
+        "send_sync_and_lifetimes",
+        "result_item_errors",
+        "forwarding_adapters",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    let expected_next_cancellation = concat!(
+        "dropping Next releases its mutable borrow but does not roll back state changes ",
+        "made by the underlying poll_next call"
+    );
+    if text(owned_contract_value, "owner_bead") != "asupersync-d24mms.6.2"
+        || text(owned_contract_value, "trait") != "asupersync::stream::Stream"
+        || text(owned_contract_value, "extension_trait")
+            != "asupersync::stream::StreamExt"
+        || string_set(owned_contract_value, "source_paths") != expected_owned_sources
+        || string_set(owned_contract_value, "dimensions") != expected_owned_dimensions
+        || text(owned_contract_value, "next_future_cancellation")
+            != expected_next_cancellation
+        || text(owned_contract_value, "documentation_state")
+            != "SOURCE_AUTHORED_NOT_EXECUTED"
+        || owned_contract_value.get("behavior_change") != Some(&Value::Bool(false))
+        || owned_contract_value.get("cutover_authorized") != Some(&Value::Bool(false))
+    {
+        return Err("owned Stream semantics contract must remain complete and fail closed".into());
+    }
+
     let expected_profiles: BTreeSet<String> = [
         "FUT-PROFILE-ROOT-NORMAL",
         "FUT-PROFILE-ROOT-UNIT",
@@ -537,6 +581,9 @@ fn identity_authority_zero_unknown_and_docs_are_fail_closed() {
         "no `join_all`",
         "`future::or`",
         "Dropping a race loser is not",
+        "documentation-contract base revision",
+        "former blanket claim that every stream poll is losslessly",
+        "source-authored and unexecuted",
         "No-claim boundary",
     ] {
         assert!(doc.contains(required), "missing docs marker: {required}");
@@ -777,6 +824,49 @@ fn production_public_and_comment_only_sites_match_source() {
     assert!(downstream.contains("assert_owned_progress_stream::<AtpReader>();"));
     assert!(downstream.contains("next_owned_progress::<AtpWriter>"));
     assert!(downstream.contains("next_owned_progress::<AtpReader>"));
+}
+
+#[test]
+fn owned_stream_semantics_are_explicit_and_fail_closed() {
+    let stream = read_repo_file("src/stream/stream.rs");
+    for required in [
+        "defines a polling protocol, not a blanket losslessness promise",
+        "P::Target: Unpin",
+        "later poll arriving with a different",
+        "require subsequent polls to keep returning `None`",
+        "must not be used for correctness",
+        "adds no `Send`, `Sync`, `Unpin`, or `'static` requirement",
+        "Item = Result<T, E>",
+        "impl<P> Stream for Pin<P>",
+        "impl<S: Stream + Unpin + ?Sized> Stream for Box<S>",
+        "impl<S: Stream + Unpin + ?Sized> Stream for &mut S",
+    ] {
+        assert!(stream.contains(required), "missing Stream marker: {required}");
+    }
+    assert!(!stream.contains("The Stream trait is inherently cancel-safe"));
+    assert!(!stream.contains("This method is cancel-safe"));
+
+    let extension = read_repo_file("src/stream/mod.rs");
+    for required in [
+        "Neither trait adds a global `Send`, `Sync`, `Unpin`, or `'static` bound",
+        "Cancellation and drop behavior is adapter-specific",
+        "Dropping the returned future before it resolves releases the mutable",
+        "Address-sensitive (`!Unpin`) streams",
+    ] {
+        assert!(
+            extension.contains(required),
+            "missing StreamExt marker: {required}"
+        );
+    }
+
+    let next = read_repo_file("src/stream/next.rs");
+    for required in [
+        "Dropping it before completion releases its mutable borrow",
+        "does not undo state changes",
+        "completed `Next` is fused",
+    ] {
+        assert!(next.contains(required), "missing Next marker: {required}");
+    }
 }
 
 #[test]

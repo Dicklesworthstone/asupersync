@@ -10,6 +10,13 @@ use std::task::{Context, Poll};
 /// A future that returns the next item from a stream.
 ///
 /// Created by [`StreamExt::next`](super::StreamExt::next).
+///
+/// This convenience future requires the underlying stream to be
+/// [`Unpin`](std::marker::Unpin).
+/// Dropping it before completion releases its mutable borrow and leaves the
+/// stream available for another poll, but does not undo state changes made by
+/// the underlying [`Stream::poll_next`] call. A completed `Next` is fused: an
+/// accidental later poll returns `None` without polling the stream again.
 #[derive(Debug)]
 #[must_use = "futures do nothing unless polled"]
 pub struct Next<'a, S: ?Sized> {

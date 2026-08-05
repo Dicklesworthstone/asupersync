@@ -8,6 +8,13 @@
 //! - [`Stream`]: The async equivalent of [`Iterator`], producing values over time
 //! - [`StreamExt`]: Extension trait providing combinator methods
 //!
+//! Neither trait adds a global `Send`, `Sync`, `Unpin`, or `'static` bound.
+//! Individual operations state the bounds they need. In particular,
+//! [`StreamExt::next`] requires `Unpin`; address-sensitive streams can instead
+//! be held behind a pinned pointer and polled through [`Stream::poll_next`].
+//! Cancellation and drop behavior is adapter-specific: dropping a combinator
+//! drops the state it owns unless that combinator documents a drain contract.
+//!
 //! # Combinators
 //!
 //! ## Transformation
@@ -211,8 +218,19 @@ use std::time::Duration;
 /// Extension trait providing combinator methods for streams.
 ///
 /// This trait is automatically implemented for all types that implement [`Stream`].
+/// Consuming adapters require `Self: Sized`; borrowed terminal operations may
+/// add `Unpin`, and concurrent region operations add their own `Send` and
+/// lifetime bounds. Implementing `StreamExt` does not change the marker traits
+/// or lifetime of the underlying stream.
 pub trait StreamExt: Stream {
     /// Returns the next item from the stream.
+    ///
+    /// Dropping the returned future before it resolves releases the mutable
+    /// borrow, so the stream can be polled again. It does not roll back state
+    /// changes made by an earlier `poll_next` call; losslessness therefore
+    /// depends on the underlying stream's documented cancellation contract.
+    /// Address-sensitive (`!Unpin`) streams must be pinned and polled through
+    /// [`Stream::poll_next`] instead of this convenience method.
     fn next(&mut self) -> Next<'_, Self>
     where
         Self: Unpin,

@@ -96,6 +96,29 @@ not been run. It therefore does not prove Pending/wake/item/EOF behavior,
 cancellation, Drop cleanup, region quiescence, or the separately retained
 foreign Stream journey.
 
+At documentation-contract base revision
+`862c58a609c1c7b6087e992903b287d08208d7ad`, the owned trait and `Next`
+documentation now freeze the semantic boundary that A2 requires:
+
+- `poll_next` receives a pinned mutable reference, and `StreamExt::next`
+  requires `Unpin`; a pinned pointer can expose a `!Unpin` target;
+- `Pending` must account for the current waker, while `Ready(None)` is not a
+  fused-stream promise;
+- `size_hint` is an untrusted bound for optimization, never correctness;
+- neither `Stream` nor `StreamExt` globally adds `Send`, `Sync`, `Unpin`, or
+  `'static`, and fallible streams carry `Result<T, E>` as their item;
+- dropping `Next` releases its borrow but cannot roll back poll-side state, and
+  dropping a stream may discard buffers or invoke implementation-specific
+  cleanup; and
+- the `Pin<P>`, `Box<S>`, and `&mut S` adapters forward the underlying polling
+  and size-hint semantics under their stated bounds.
+
+This corrects the former blanket claim that every stream poll is losslessly
+cancel-safe. It changes documentation only. The source contract has not been
+compiled as rustdoc or executed, and it does not prove that every existing
+implementation satisfies the documented wake, pinning, size-hint, cancellation,
+or drop obligations.
+
 The reviewed ATP source-pin row is refreshed in the first increment. At that
 base revision, seven unrelated pins had already drifted. The follow-on
 increment refreshes the reviewed downstream-fixture row, leaving six unrelated
@@ -388,6 +411,7 @@ compatibility, replacement parity, broad workspace health, release readiness,
 performance, no regression, live RCH fleet availability, local Cargo fallback
 approval, or permission to remove futures-lite. Package-count marginals are not
 behavioral evidence. Dropping a race loser is not the project's required loser
-drain.
+drain. The owned Stream semantics and ATP additions described above are
+source-authored and unexecuted; they do not extend the historical proof state.
 
 <!-- END FUTURES LITE CAPABILITY INVENTORY -->
