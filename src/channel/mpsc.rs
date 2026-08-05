@@ -564,6 +564,7 @@ impl<T> Sender<T> {
             sender: self,
             cx,
             waiter_token: None,
+            completed: false,
         }
     }
 
@@ -799,10 +800,13 @@ impl<T> Sender<T> {
 }
 
 /// Future returned by [`Sender::reserve`].
+///
+/// Polling the same future again after it returns [`Poll::Ready`] panics.
 pub struct Reserve<'a, T> {
     sender: &'a Sender<T>,
     cx: &'a Cx,
     waiter_token: Option<SlabToken>,
+    completed: bool,
 }
 
 impl<T> Reserve<'_, T> {
@@ -851,6 +855,10 @@ impl<'a, T> Future for Reserve<'a, T> {
     type Output = Result<SendPermit<'a, T>, SendError<()>>;
 
     fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
+        assert!(
+            !self.completed,
+            "mpsc reserve future polled after completion"
+        );
         let mut prepared_waker = None;
 
         loop {
@@ -858,6 +866,7 @@ impl<'a, T> Future for Reserve<'a, T> {
             // arbitrary clone callback ran without the channel lock and may
             // have changed cancellation or channel state.
             if self.cx.checkpoint().is_err() {
+                self.completed = true;
                 self.cx.trace("mpsc::reserve cancelled");
                 self.sender.shared.inner.lock().record_cancellation();
                 self.cleanup_waiter();
@@ -871,6 +880,7 @@ impl<'a, T> Future for Reserve<'a, T> {
                 // Receiver close/drop already drained the waiter slab and FIFO.
                 drop(inner);
                 self.waiter_token = None;
+                self.completed = true;
                 drop(prepared_waker);
                 return Poll::Ready(Err(SendError::<()>::Disconnected(())));
             }
@@ -902,6 +912,7 @@ impl<'a, T> Future for Reserve<'a, T> {
                 // Update future state before any user-owned Waker destructor or
                 // wake callback can reenter the channel.
                 self.waiter_token = None;
+                self.completed = true;
                 drop(retired_waker);
                 drop(prepared_waker);
                 if let Some(waker) = cascade_waker {
@@ -3186,6 +3197,69 @@ mod tests {
         let value = block_on(rx.recv(&cx)).expect("recv");
         crate::assert_with_log!(value == 5, "recv value", 5, value);
         crate::test_complete!("dropped_permit_releases_capacity");
+    }
+
+    /// Regression for asupersync-0tv9bv item 6.
+    #[test]
+    fn reserve_repoll_after_ready_panics_without_minting_capacity() {
+        init_test("reserve_repoll_after_ready_panics_without_minting_capacity");
+        let (tx, _rx) = channel::<u8>(2);
+        let cx = test_cx();
+        let waker = std::task::Waker::noop().clone();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut reserve = Box::pin(tx.reserve(&cx));
+
+        let permit = match reserve.as_mut().poll(&mut task_cx) {
+            Poll::Ready(Ok(permit)) => permit,
+            _ => panic!("first reserve poll should acquire capacity"),
+        };
+        assert_eq!(
+            tx.telemetry_snapshot(13)
+                .reserved_uncommitted_obligations,
+            1
+        );
+
+        let repoll = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            reserve.as_mut().poll(&mut task_cx)
+        }));
+        let panic = match repoll {
+            Err(panic) => panic,
+            Ok(_) => panic!("completed reserve future must reject a second poll"),
+        };
+        let message = panic
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("<non-string panic payload>");
+        assert!(
+            message.contains("mpsc reserve future polled after completion"),
+            "unexpected repoll panic: {message}"
+        );
+        assert_eq!(
+            tx.telemetry_snapshot(13)
+                .reserved_uncommitted_obligations,
+            1,
+            "rejected repoll must not reserve another slot"
+        );
+        tx.try_reserve()
+            .expect("rejected repoll must leave the second slot available")
+            .abort();
+        assert_eq!(
+            tx.telemetry_snapshot(13)
+                .reserved_uncommitted_obligations,
+            1
+        );
+
+        permit.abort();
+        assert_eq!(
+            tx.telemetry_snapshot(13)
+                .reserved_uncommitted_obligations,
+            0
+        );
+        tx.try_reserve()
+            .expect("capacity should be reusable after abort")
+            .abort();
+        crate::test_complete!("reserve_repoll_after_ready_panics_without_minting_capacity");
     }
 
     #[test]
