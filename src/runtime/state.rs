@@ -4569,6 +4569,32 @@ impl RuntimeState {
             .collect()
     }
 
+    /// Retires one leak-handling frame and advances any regions that became
+    /// eligible while leak mutations were protected from reentrancy.
+    fn finish_obligation_leak_batch(
+        &mut self,
+        regions: &mut AdmissionRegionTarget<'_>,
+        tasks: &AdmissionTaskTarget<'_>,
+        obligations: &mut CompletionObligationTarget<'_>,
+        effects: &mut LifecycleEffectsSink<'_>,
+        leak_ids: &[ObligationId],
+    ) {
+        self.handling_leaks = self.handling_leaks.saturating_sub(1);
+        for &id in leak_ids {
+            self.in_flight_leak_ids.remove(&id);
+        }
+
+        // Only the outermost frame may replay deferred advancements. This
+        // cleanup must also run before a configured leak panic escapes: callers
+        // may catch that panic, and leaving the queue behind can strand a region
+        // in Finalizing indefinitely (br-asupersync-0tv9bv).
+        if self.handling_leaks == 0 && !self.deferred_region_advancements.is_empty() {
+            for region_id in self.take_deferred_region_advancements() {
+                self.advance_region_state_in(regions, tasks, obligations, effects, region_id);
+            }
+        }
+    }
+
     /// Leak-policy handler with the pending dedup read routed through the
     /// completion obligation target (E2 S3b/S4b, br-asupersync-m9wsza).
     /// Only that read is target-aware today: the leak-mark/recover-abort
@@ -4667,10 +4693,13 @@ impl RuntimeState {
                     details = %error,
                     "obligation leaks detected (fail-fast)"
                 );
-                self.handling_leaks = self.handling_leaks.saturating_sub(1);
-                for id in leak_ids {
-                    self.in_flight_leak_ids.remove(&id);
-                }
+                self.finish_obligation_leak_batch(
+                    regions,
+                    tasks,
+                    obligations,
+                    effects,
+                    &leak_ids,
+                );
                 std::panic::panic_any(msg);
             }
             ObligationLeakResponse::Log => {
@@ -4722,19 +4751,7 @@ impl RuntimeState {
             }
         }
 
-        self.handling_leaks = self.handling_leaks.saturating_sub(1);
-        for id in leak_ids {
-            self.in_flight_leak_ids.remove(&id);
-        }
-
-        // Process deferred region advancements after leak handling completes.
-        // This prevents reentrancy during finalizer execution that could violate
-        // the quiescence invariant.
-        if self.handling_leaks == 0 && !self.deferred_region_advancements.is_empty() {
-            for region_id in self.take_deferred_region_advancements() {
-                self.advance_region_state_in(regions, tasks, obligations, effects, region_id);
-            }
-        }
+        self.finish_obligation_leak_batch(regions, tasks, obligations, effects, &leak_ids);
     }
 
     /// Creates and registers an obligation for the given task and region.

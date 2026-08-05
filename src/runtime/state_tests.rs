@@ -6932,6 +6932,65 @@ fn leak_response_panic_panics() {
 }
 
 #[test]
+fn leak_response_panic_drains_deferred_region_advancements_before_unwind() {
+    init_test("leak_response_panic_drains_deferred_region_advancements_before_unwind");
+    let mut state = RuntimeState::new();
+    state.set_obligation_leak_response(ObligationLeakResponse::Panic);
+    let root = state.create_root_region(Budget::INFINITE);
+    let deferred_region = create_child_region(&mut state, root);
+
+    // Model a region deferred by an earlier mutation in the active leak batch.
+    // It is otherwise ready to close, so only the outermost batch cleanup is
+    // needed to finish it.
+    let deferred_record = state
+        .regions
+        .get(deferred_region.arena_index())
+        .expect("deferred region missing");
+    deferred_record.begin_close(None);
+    deferred_record.begin_finalize();
+    assert!(
+        state.deferred_region_advancements.insert(deferred_region),
+        "fixture must add one deferred region"
+    );
+
+    let task = insert_task(&mut state, root);
+    let obligation = state
+        .create_obligation(ObligationKind::SendPermit, task, root, None)
+        .expect("create obligation");
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        complete_task_ok(&mut state, task);
+    }));
+
+    assert!(result.is_err(), "Panic response must still propagate");
+    assert_eq!(state.handling_leaks, 0, "leak frame must be retired");
+    assert!(
+        state.in_flight_leak_ids.is_empty(),
+        "in-flight leak ids must be retired"
+    );
+    assert!(
+        state.deferred_region_advancements.is_empty(),
+        "deferred advancement queue must be drained before unwind escapes"
+    );
+    assert!(
+        state
+            .regions
+            .get(deferred_region.arena_index())
+            .is_none(),
+        "the finalizing region must close before the leak panic escapes"
+    );
+    assert_eq!(
+        state
+            .obligations
+            .get(obligation.arena_index())
+            .expect("obligation missing")
+            .state,
+        ObligationState::Leaked
+    );
+    crate::test_complete!("leak_response_panic_drains_deferred_region_advancements_before_unwind");
+}
+
+#[test]
 fn leak_escalation_from_log_to_panic() {
     init_test("leak_escalation_from_log_to_panic");
     let mut state = RuntimeState::new();
