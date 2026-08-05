@@ -701,6 +701,38 @@ fn offline_tuner_env_logger_audit_is_source_pinned_and_fail_closed() {
         ])
     );
 
+    let correction = Value::Object(
+        object(&audit, "source_pin_measurement_correction").clone(),
+    );
+    assert_eq!(text(&correction, "captured_date_utc"), "2026-08-05");
+    assert_eq!(
+        text(&correction, "base_commit"),
+        "74d7a9a5d8a8931c1165c6df42ea021714150dea"
+    );
+    assert_eq!(text(&correction, "path"), "scripts/run_offline_tuning.sh");
+    assert_eq!(
+        text(&correction, "sha256"),
+        "5092520cbad3aa6289baf4d5e9ce5f135f189fc504c82f00aca2d7382f130836"
+    );
+    assert_eq!(unsigned(&correction, "previous_line_count"), 247);
+    assert_eq!(unsigned(&correction, "corrected_line_count"), 248);
+    assert!(
+        text(&correction, "line_count_semantics").contains("Rust str::lines()")
+    );
+    assert!(!boolean(&correction, "source_ends_with_lf"));
+    assert!(!boolean(&correction, "source_bytes_changed"));
+    assert!(!boolean(&correction, "decision_changed"));
+    assert_eq!(text(&correction, "execution_state"), "NOT_RUN_STATIC_ONLY");
+    assert!(text(&correction, "no_claim_boundary").contains("does not execute"));
+    assert!(text(&correction, "no_claim_boundary").contains("KEEP_INCUMBENT"));
+    assert!(text(&correction, "no_claim_boundary").contains("dependency exit"));
+
+    let corrected_source = read_repo_bytes("scripts/run_offline_tuning.sh");
+    assert!(!corrected_source.ends_with(b"\n"));
+    let corrected_source = std::str::from_utf8(&corrected_source)
+        .expect("corrected source pin must remain UTF-8");
+    assert_eq!(corrected_source.lines().count(), 248);
+
     let observed = Value::Object(object(&audit, "observed_source_contract").clone());
     assert_eq!(text(&observed, "binary"), "offline_tuner");
     assert_eq!(
@@ -929,6 +961,8 @@ fn documentation_and_adr_keep_the_static_completion_boundary_visible() {
         "CLI-OFFLINE-TUNER-ENV-LOGGER-AUDIT-V1",
         "NO_BLACK_BOX_BASELINE_CAPTURED",
         "KEEP_INCUMBENT",
+        "no final LF",
+        "line 248",
         "dependency_exit_allowed=false",
     ] {
         assert!(docs.contains(marker), "documentation missing {marker}");

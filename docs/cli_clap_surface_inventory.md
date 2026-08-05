@@ -256,6 +256,13 @@ Its state is `STATIC_SOURCE_PINNED_NOT_EXECUTED`; the required black-box state
 is `NO_BLACK_BOX_BASELINE_CAPTURED`. The receipt advances source and evidence
 planning without treating source inspection as observable logging behavior.
 
+A 2026-08-05 static correction reconciles the wrapper-script source pin with
+the companion contract's Rust `str::lines()` semantics.
+`scripts/run_offline_tuning.sh` has no final LF, so its final nonempty record is
+line 248 even though newline-byte counting reports 247. Its SHA-256 and bytes
+are unchanged. This measurement correction does not change `KEEP_INCUMBENT`,
+provide black-box evidence, or complete the bead.
+
 The pinned binary parses first, initializes `env_logger` from
 `Env::default()`, selects only the fallback filter from `--verbose`, creates
 the output directory, and then dispatches exactly one of `optimize`,

@@ -7269,7 +7269,7 @@
       {
         "path": "scripts/run_offline_tuning.sh",
         "sha256": "5092520cbad3aa6289baf4d5e9ce5f135f189fc504c82f00aca2d7382f130836",
-        "line_count": 247,
+        "line_count": 248,
         "role": "existing optimize workflow wrapper and verbose forwarding"
       },
       {
@@ -7279,6 +7279,20 @@
         "role": "existing scheduler-recommend smoke wrapper and execution receipt shape"
       }
     ],
+    "source_pin_measurement_correction": {
+      "captured_date_utc": "2026-08-05",
+      "base_commit": "74d7a9a5d8a8931c1165c6df42ea021714150dea",
+      "path": "scripts/run_offline_tuning.sh",
+      "sha256": "5092520cbad3aa6289baf4d5e9ce5f135f189fc504c82f00aca2d7382f130836",
+      "previous_line_count": 247,
+      "corrected_line_count": 248,
+      "line_count_semantics": "UTF-8 Rust str::lines(); a final nonempty line without LF counts as a line",
+      "source_ends_with_lf": false,
+      "source_bytes_changed": false,
+      "decision_changed": false,
+      "execution_state": "NOT_RUN_STATIC_ONLY",
+      "no_claim_boundary": "This correction reconciles one source-pin measurement with the contract's existing Rust str::lines() semantics. It does not execute the offline tuner, supply black-box evidence, change KEEP_INCUMBENT, authorize dependency exit, or complete the bead."
+    },
     "observed_source_contract": {
       "binary": "offline_tuner",
       "required_features": [
