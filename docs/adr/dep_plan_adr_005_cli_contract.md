@@ -166,6 +166,21 @@ Existing coverage is narrower than it looks: the CLI output goldens cover
 `atp` QUIC loopback suite; and `atpd` and `offline_tuner` have no
 `try_parse_from` tests at all.
 
+### CLI A1 static inventory slice
+
+The source-fingerprinted declaration inventory now lives at
+`artifacts/cli_clap_surface_inventory_v1.json`, with operator notes in
+`docs/cli_clap_surface_inventory.md`. Its disposition is
+`STATIC_SURFACE_FROZEN_BYTE_GOLDENS_MISSING`: it indexes the four binary roots,
+the two shared files, all command variants, argument-group and value-enum types,
+feature cells, and adjacent width/environment/config/exit boundaries.
+
+This does not resolve CLI-GAP-06. The artifact deliberately records
+`MISSING_EXECUTION_RECEIPTS` and an empty captured-case array because source
+inspection cannot establish stdout bytes, stderr bytes, or process exit status.
+The A1 bead remains open until the admitted incumbent binaries populate the
+required byte-capture matrix.
+
 ## Rollback
 
 Triggered by any removed or renamed command, alias, option or short form; any

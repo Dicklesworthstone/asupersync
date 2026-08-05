@@ -1,0 +1,185 @@
+# CLI clap surface inventory
+
+<!-- BEGIN CLI CLAP SURFACE INVENTORY -->
+
+This document explains the static inventory in
+`artifacts/cli_clap_surface_inventory_v1.json` (`cli-clap-surface-inventory-v1`)
+for `asupersync-5z2scg.7.1`. It freezes the source shape that future byte-level
+goldens must exercise. It does not replace those goldens.
+
+The current disposition is
+`STATIC_SURFACE_FROZEN_BYTE_GOLDENS_MISSING`. The dependency decision remains
+`KEEP_UNTIL_PARITY`: no parser replacement, command removal, option removal, or
+dependency exit is authorized.
+
+## What is frozen
+
+The primary boundary is exactly four binaries and two shared CLI files:
+
+| Source | Reachability | Required features | Parser / subcommand / args / value-enum derives | Clap arg / command / value attributes | Command variants |
+|---|---|---|---:|---:|---:|
+| `src/bin/asupersync.rs` | binary root | `cli` | 1 / 10 / 52 / 4 | 174 / 12 / 3 | 83 |
+| `src/bin/atp.rs` | binary root | `atp-cli` | 7 / 1 / 0 / 4 | 99 / 8 / 0 | 9 |
+| `src/bin/atpd.rs` | binary root | `atpd-daemon` | 1 / 2 / 3 / 0 | 18 / 5 / 0 | 11 |
+| `src/bin/offline_tuner.rs` | binary root | `cli,simd-intrinsics` | 1 / 1 / 0 / 1 | 15 / 4 / 3 | 5 |
+| `src/cli/args.rs` | shared by the library and `asupersync` | `cli` | 0 / 0 / 4 / 0 | 20 / 0 / 0 | 0 |
+| `src/cli/atp_command_tree.rs` | library-exported, no binary parser root | `cli` | 0 / 6 / 47 / 2 | 164 / 5 / 0 | 51 |
+
+The artifact indexes every parser-derived type, argument-group type,
+subcommand enum, command variant, and value enum. Exact source hashes make all
+fields, doc comments, positional declarations, defaults, short forms, value
+parsers, delimiters, actions, and other clap attributes part of the frozen
+snapshot even though this first static slice does not normalize 490 individual
+`#[arg]` attributes into independent semantic rows.
+
+There are 159 indexed command variants across the six files. Only 108 belong
+to binary-root command trees. The remaining 51 are the detached shared ATP
+tree.
+
+Adjacent fingerprints cover `Cargo.toml`, `src/lib.rs`, `src/cli/output.rs`,
+`src/cli/exit.rs`, `src/cli/atp_config.rs`, `src/cli/mod.rs`, and
+`src/cli/atp_workflows.rs`, because feature admission, format/color policy,
+exit behavior, configuration precedence, exports, and detached-tree consumers
+cannot be interpreted from the six parser files alone.
+
+## Reachable binary trees
+
+### `asupersync`
+
+The root has five families: `atp`, `trace`, `conformance`, `lab`, and `doctor`.
+Their nested command enums contain 83 variants in total. The largest families
+are ATP (including pairing, inbox, directory, and ATP-trace children) and
+Doctor. All are declared in the binary rather than in the exported shared ATP
+tree.
+
+Four argument groups—ATP doctor, verify, replay, and proof—come from
+`src/cli/args.rs`. `CommonArgs` itself is not a clap-derived type; the binary
+uses its own `CommonArgsCli` wrapper and converts it after parsing.
+
+### `atp`
+
+The standalone transfer binary has nine root spellings: `send`, `recv`,
+`serve`, `bond-donate`, `bond-recv`, `bond-pull`, `__bond-descriptor`,
+`rq-keygen`, and `__delta-state-export`. The two double-underscore commands are
+hidden. `serve` is a separate command variant sharing `RecvArgs`; it is not a
+clap alias declaration.
+
+`SendArgs`, `RecvArgs`, and the four bonded-transfer argument types derive
+`Parser` rather than `Args`. That distinction is source-observed and preserved
+in the artifact.
+
+### `atpd`
+
+The daemon root has `start`, `stop`, `status`, `reload`, `init`, `diagnostics`,
+and `identity`; identity adds `show`, `generate`, `import`, and `export`.
+Platform-specific functions provide the root config, data, pid, and log-path
+defaults. The parser surface exists under `atpd-daemon`; the optional `tls`
+feature changes later behavior, not the presence of its QUIC-related flags.
+
+### `offline_tuner`
+
+The tuner has `optimize`, `candidates`, `emit-profile`, `validate`, and
+`scheduler-recommend`. Its two global options are `--verbose` and
+`--output-dir`. The admitted binary requires both `cli` and
+`simd-intrinsics`, while architecture-specific implementation selection occurs
+after parsing.
+
+## Detached shared ATP tree
+
+`src/cli/atp_command_tree.rs` is classified exactly as
+`LIBRARY_EXPORTED_NO_BINARY_PARSER_ROOT`. It defines 51 variants spanning its
+root plus CI, dataset, fuzz, release, and archive children, but it derives no
+`Parser` root and no binary imports the module. `src/cli/atp_config.rs` and
+`src/cli/atp_workflows.rs` consume its types as library models.
+
+This matters in both directions:
+
+- A future refactor must not silently present these 51 variants as existing
+  user-reachable commands.
+- A library consumer may still rely on the exported types, so “unreachable from
+  a binary” is not permission to delete or rename them.
+
+## Width, environment, configuration, and exit boundaries
+
+The static source establishes these boundaries:
+
+- `clap` enables only `derive`; `wrap_help` is absent. A replacement must not
+  invent terminal-width-sensitive behavior before byte captures establish the
+  incumbent output. The future matrix includes `COLUMNS` unset, 40, and 120 so
+  this assumption is checked rather than merely repeated.
+- The clap `env` feature is absent and all six files contain zero
+  `#[arg(env = ...)]` bindings. Environment behavior is hand-written.
+- For `asupersync`, explicit format/color flags bypass auto detection. Auto
+  format consults `CI` and then `ASUPERSYNC_OUTPUT_FORMAT`; auto color consults
+  `NO_COLOR`, then `CLICOLOR_FORCE`, then terminal state.
+- Root-level `asupersync` verbosity, quiet, debug, and config values are parsed
+  and copied into `CommonArgs`, but the current main path consumes only the
+  effective format and color before dispatch. None of those four root values
+  reaches `run`. This is a frozen gap, not an invitation to assign new
+  semantics in the inventory bead.
+- Standalone `atp` reads `ATP_RQ_AUTH_KEY_HEX`, `SSL_CERT_FILE`,
+  `SSL_CERT_DIR`, and `HOME` outside clap. It does not consume the detached
+  ATP configuration manager.
+- `atpd --config` selects a TOML path. Its optional or true `start` flags
+  overlay loaded configuration; missing or unreadable configuration currently
+  falls back to defaults with a warning. `PROGRAMDATA` affects Windows default
+  paths, while diagnostics consults `HOSTNAME` and then `COMPUTERNAME`; none is
+  a clap-populated value.
+- `offline_tuner` initializes `env_logger` from its default environment after
+  parsing, choosing a default filter from `--verbose`.
+- Only `asupersync` consumes the ten-code shared semantic exit registry.
+  Standalone `atp` reduces command errors to `std::process::ExitCode::FAILURE`,
+  `atpd` returns `Result`, and `offline_tuner` uses exit 1 on reported errors.
+
+These are source observations. Exact stream bytes and process statuses remain
+uncaptured.
+
+## Required byte-capture matrix
+
+The artifact records `MISSING_EXECUTION_RECEIPTS` and zero captured byte
+goldens. Source text, derive expansion knowledge, and library documentation are
+not accepted as substitutes for bytes from the admitted incumbent binaries.
+
+Each future record must carry:
+
+- the case ID, binary, exact OS-level argv representation, feature set, target,
+  terminal context, and environment allowlist;
+- exact stdout and stderr bytes represented as hex;
+- the process exit code and source revision.
+
+The required classes include root `--help`, `-h`, and `--version`; help for
+every reachable subcommand; minimally valid leaves; unknown root and nested
+commands; unknown options; missing arguments and option values; invalid enum
+and numeric values; runtime validation errors; and non-UTF-8 argv.
+
+Each class must be checked with terminal and pipe combinations, color-control
+environment cells, the three width cells, admitted feature combinations, and
+the platform cells listed in the artifact. A missing or unsupported cell stays
+explicitly missing; it is not green and is not silently skipped.
+
+## Static contract
+
+`tests/cli_clap_surface_inventory_contract.rs` is authored to verify source
+fingerprints, line counts, declaration and attribute counts, indexed command
+variants, feature/environment/config/exit boundary markers, documentation
+markers, and the empty fail-closed golden state.
+
+In this safety lane the contract was not executed. Validation was limited to
+JSON parsing, hashes, textual counts, and Git whitespace checks. Consequently,
+the contract's presence is not a passing test receipt.
+
+## No-claim boundary
+
+This inventory contains zero captured byte goldens. No binary or parser was
+executed. No compiler, test, formatter, benchmark, or remote proof lane was
+run. The artifact does not prove rendered help or error stability, stdout and
+stderr routing, process exit behavior, non-UTF-8 handling, platform parity,
+compilation, runtime correctness, performance, release readiness, or broad
+workspace health.
+
+The argument surface is source-pinned and type-indexed, not yet normalized
+field by field. The bead therefore remains open, `clap` remains
+`KEEP_UNTIL_PARITY`, and no dependency exit or parser replacement is
+authorized.
+
+<!-- END CLI CLAP SURFACE INVENTORY -->

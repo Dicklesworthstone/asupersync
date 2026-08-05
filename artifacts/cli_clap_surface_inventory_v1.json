@@ -1,0 +1,807 @@
+{
+  "schema_version": 1,
+  "artifact_id": "cli-clap-surface-inventory-v1",
+  "bead_id": "asupersync-5z2scg.7.1",
+  "base_commit": "bf9e52ad358b5f6d1e484e1bd3e8fbcab8e7781c",
+  "capability_ids": [
+    "CAP-CLI-ASUPERSYNC",
+    "CAP-CLI-ATP",
+    "CAP-CLI-ATPD",
+    "CAP-CLI-OFFLINE-TUNER"
+  ],
+  "disposition": "STATIC_SURFACE_FROZEN_BYTE_GOLDENS_MISSING",
+  "authority": {
+    "dependency_decision": "KEEP_UNTIL_PARITY",
+    "dependency_exit_allowed": false,
+    "parser_replacement_allowed": false,
+    "command_or_option_removal_allowed": false,
+    "owner_decision": "DEP-ADR-005",
+    "owner_decision_path": "docs/adr/dep_plan_adr_005_cli_contract.md"
+  },
+  "scope": {
+    "primary_source_count": 6,
+    "binary_count": 4,
+    "shared_source_count": 2,
+    "inventory_method": "manual static source inspection with exact source fingerprints and declaration marker counts",
+    "argument_surface_state": "SOURCE_PINNED_AND_TYPE_INDEXED_NOT_FIELD_NORMALIZED",
+    "byte_golden_state": "MISSING_NOT_INFERRED",
+    "execution_state": "NOT_RUN_STATIC_ONLY",
+    "source_execution_used": false
+  },
+  "source_pins": [
+    {
+      "path": "src/bin/asupersync.rs",
+      "sha256": "397f3800f4a40ccb4f25366bb10ce641d12b4947b9e1b230359db69c5af1e283",
+      "line_count": 16700,
+      "role": "reachable asupersync parser and dispatch"
+    },
+    {
+      "path": "src/bin/atp.rs",
+      "sha256": "b77dd1e90ae1ab81bf084feac214b31cc8f17557d6f3c476dcdb1868075eee4b",
+      "line_count": 11912,
+      "role": "reachable standalone ATP parser and dispatch"
+    },
+    {
+      "path": "src/bin/atpd.rs",
+      "sha256": "8d969a0669bcd865be9589f5a408cab2b861c1a14ab0a3e5a9e8b1f1fb731cf8",
+      "line_count": 2333,
+      "role": "reachable ATP daemon parser and dispatch"
+    },
+    {
+      "path": "src/bin/offline_tuner.rs",
+      "sha256": "f7a240cac88da235924221ed88a93bd4059ee831c4ec530a58f1fa926e47e203",
+      "line_count": 652,
+      "role": "reachable offline tuner parser and dispatch"
+    },
+    {
+      "path": "src/cli/args.rs",
+      "sha256": "0e4f695f5887735a67d944e8f234293373e91079df5c103a023dfab7e026a19a",
+      "line_count": 473,
+      "role": "shared argument groups and hand-written common help"
+    },
+    {
+      "path": "src/cli/atp_command_tree.rs",
+      "sha256": "b79d4f01345274f6260d3ce911e48e2c2d2cd7c0c49ff7562f5ecf1a58d2e603",
+      "line_count": 1706,
+      "role": "exported but binary-detached ATP command model"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+      "line_count": 1038,
+      "role": "clap feature and binary admission boundary"
+    },
+    {
+      "path": "src/lib.rs",
+      "sha256": "22ce17632d6a98843ebd6b9f855a430aef3ea6da07a6657e3311ad87b78c1b7f",
+      "line_count": 468,
+      "role": "cli module feature boundary"
+    },
+    {
+      "path": "src/cli/output.rs",
+      "sha256": "6ae4f717fd64141039fc4a4b6ed34285ded9ccc3274ff61efa63b3b0a06457c6",
+      "line_count": 907,
+      "role": "format color and output-stream policy adjacent to parser"
+    },
+    {
+      "path": "src/cli/exit.rs",
+      "sha256": "e7988c40a76f4a3c56b07e30d6e3102fce9abd69082bed010bbebb4578cc943c",
+      "line_count": 261,
+      "role": "semantic exit registry consumed only by asupersync"
+    },
+    {
+      "path": "src/cli/atp_config.rs",
+      "sha256": "6251a2f39ef6175d8bc9d195adbe5626950ae14261a91aee7e75ad0ee76dd2c2",
+      "line_count": 775,
+      "role": "configuration precedence implementation adjacent to detached ATP tree"
+    },
+    {
+      "path": "src/cli/mod.rs",
+      "sha256": "7217622763af3390324f185ddc4a90e7b86c75d94e2623025a1476f8a4630ea7",
+      "line_count": 318,
+      "role": "shared CLI exports including the detached ATP tree"
+    },
+    {
+      "path": "src/cli/atp_workflows.rs",
+      "sha256": "a813070896f9d73f83b4f6f59c8bf2f8d3902805838300a88a9656fa48961125",
+      "line_count": 1960,
+      "role": "library consumer of detached ATP command types"
+    }
+  ],
+  "primary_sources": [
+    {
+      "path": "src/bin/asupersync.rs",
+      "surface_id": "CLI-ASUPERSYNC",
+      "reachability": "BINARY_ROOT",
+      "binary": "asupersync",
+      "required_features": ["cli"],
+      "root_parser": "Cli",
+      "parser_derived_types": ["Cli"],
+      "argument_group_types": [
+        "CommonArgsCli",
+        "AtpArgs",
+        "AtpDirectoryArgs",
+        "AtpEarlyUsabilityArgs",
+        "AtpGetArgs",
+        "AtpSendArgs",
+        "AtpSyncArgs",
+        "AtpMirrorArgs",
+        "AtpShareArgs",
+        "AtpPairArgs",
+        "AtpSeedArgs",
+        "AtpWatchArgs",
+        "AtpServeArgs",
+        "AtpInboxArgs",
+        "AtpResumeArgs",
+        "AtpCancelArgs",
+        "AtpTransferStatusArgs",
+        "AtpBenchArgs",
+        "AtpTraceArgs",
+        "AtpStatusArgs",
+        "TraceArgs",
+        "ConformanceArgs",
+        "ConformanceMatrixArgs",
+        "LabArgs",
+        "LabRunArgs",
+        "LabValidateArgs",
+        "LabReplayArgs",
+        "LabExploreArgs",
+        "LabDifferentialArgs",
+        "LabDifferentialProfileManifestArgs",
+        "DoctorArgs",
+        "DoctorScanWorkspaceArgs",
+        "DoctorExplainArgs",
+        "DoctorRecipeListArgs",
+        "DoctorValidateFixtureArgs",
+        "DoctorReportArgs",
+        "DoctorAnalyzeInvariantsArgs",
+        "DoctorAnalyzeLockContentionArgs",
+        "DoctorWasmDependencyAuditArgs",
+        "DoctorFrankenExportArgs",
+        "DoctorScenarioCoveragePackSmokeArgs",
+        "DoctorStressSoakSmokeArgs",
+        "DoctorReportExportArgs",
+        "DoctorPackageCliArgs",
+        "DoctorTaskConsoleViewArgs",
+        "TraceInfoArgs",
+        "TraceEventsArgs",
+        "TraceVerifyArgs",
+        "TraceDiffArgs",
+        "TraceExportArgs",
+        "TraceCompressArgs",
+        "TraceMigrateArgs"
+      ],
+      "value_enums": [
+        "LabDifferentialProfile",
+        "DoctorReportExportFormat",
+        "DoctorPackageProfile",
+        "ExportFormat"
+      ],
+      "subcommand_enums": [
+        {
+          "rust_type": "Command",
+          "variants": [
+            "Atp=atp",
+            "Trace=trace",
+            "Conformance=conformance",
+            "Lab=lab",
+            "Doctor=doctor"
+          ]
+        },
+        {
+          "rust_type": "AtpCommand",
+          "variants": [
+            "Doctor=doctor",
+            "Status=status",
+            "Directory=directory",
+            "EarlyUsability=early-usability",
+            "Send=send",
+            "Get=get",
+            "Sync=sync",
+            "Mirror=mirror",
+            "Share=share",
+            "Pair=pair",
+            "Seed=seed",
+            "Watch=watch",
+            "Serve=serve",
+            "Inbox=inbox",
+            "Resume=resume",
+            "Cancel=cancel",
+            "TransferStatus=transfer-status",
+            "Verify=verify",
+            "Replay=replay",
+            "Proof=proof",
+            "Bench=bench",
+            "Trace=trace"
+          ]
+        },
+        {
+          "rust_type": "AtpPairCommand",
+          "variants": ["Initiate=initiate", "Confirm=confirm", "Cancel=cancel", "List=list"]
+        },
+        {
+          "rust_type": "AtpInboxCommand",
+          "variants": ["List=list", "Accept=accept", "Reject=reject", "Clear=clear"]
+        },
+        {
+          "rust_type": "AtpTraceCommand",
+          "variants": ["Analyze=analyze", "Extract=extract", "Compare=compare", "Timeline=timeline"]
+        },
+        {
+          "rust_type": "AtpDirectoryCommand",
+          "variants": [
+            "List=list",
+            "Inspect=inspect",
+            "RenamePeer=rename-peer",
+            "RenameDevice=rename-device",
+            "Revoke=revoke"
+          ]
+        },
+        {
+          "rust_type": "TraceCommand",
+          "variants": [
+            "Info=info",
+            "Events=events",
+            "Verify=verify",
+            "Diff=diff",
+            "Compress=compress",
+            "Migrate=migrate",
+            "Export=export"
+          ]
+        },
+        {
+          "rust_type": "ConformanceCommand",
+          "variants": ["Matrix=matrix"]
+        },
+        {
+          "rust_type": "LabCommand",
+          "variants": [
+            "Run=run",
+            "Validate=validate",
+            "Replay=replay",
+            "Explore=explore",
+            "Differential=differential",
+            "DifferentialProfileManifest=differential-profile-manifest"
+          ]
+        },
+        {
+          "rust_type": "DoctorCommand",
+          "variants": [
+            "Scan=scan",
+            "ScanWorkspace=scan-workspace",
+            "Explain=explain",
+            "RecipeList=recipe-list",
+            "ValidateFixture=validate-fixture",
+            "Report=report",
+            "AnalyzeInvariants=analyze-invariants",
+            "AnalyzeLockContention=analyze-lock-contention",
+            "WasmDependencyAudit=wasm-dependency-audit",
+            "OperatorModel=operator-model",
+            "ScreenContracts=screen-contracts",
+            "LoggingContract=logging-contract",
+            "RemediationContract=remediation-contract",
+            "ReportContract=report-contract",
+            "EvidenceTimelineContract=evidence-timeline-contract",
+            "EvidenceTimelineSmoke=evidence-timeline-smoke",
+            "ScenarioCoveragePackContract=scenario-coverage-pack-contract",
+            "ScenarioCoveragePackSmoke=scenario-coverage-pack-smoke",
+            "StressSoakContract=stress-soak-contract",
+            "StressSoakSmoke=stress-soak-smoke",
+            "ReportExport=report-export",
+            "FrankenExport=franken-export",
+            "PackageCli=package-cli",
+            "TaskConsoleView=task-console-view",
+            "SwarmStatus=swarm-status"
+          ]
+        }
+      ],
+      "command_variant_count": 83,
+      "annotation_counts": {
+        "derive_parser": 1,
+        "derive_subcommand": 10,
+        "derive_args": 52,
+        "derive_value_enum": 4,
+        "arg_attributes": 174,
+        "command_attributes": 12,
+        "value_attributes": 3,
+        "clap_env_attributes": 0
+      }
+    },
+    {
+      "path": "src/bin/atp.rs",
+      "surface_id": "CLI-ATP",
+      "reachability": "BINARY_ROOT",
+      "binary": "atp",
+      "required_features": ["atp-cli"],
+      "root_parser": "Cli",
+      "parser_derived_types": [
+        "Cli",
+        "SendArgs",
+        "RecvArgs",
+        "BondDonateArgs",
+        "BondRecvArgs",
+        "BondPullArgs",
+        "BondDescriptorArgs"
+      ],
+      "argument_group_types": [
+        "SendArgs",
+        "RecvArgs",
+        "BondDonateArgs",
+        "BondRecvArgs",
+        "BondPullArgs",
+        "BondDescriptorArgs"
+      ],
+      "value_enums": ["Transport", "PathPreference", "RemoteShell", "BondDialPreference"],
+      "subcommand_enums": [
+        {
+          "rust_type": "Command",
+          "variants": [
+            "Send=send",
+            "Recv=recv",
+            "Serve=serve",
+            "BondDonate=bond-donate",
+            "BondRecv=bond-recv",
+            "BondPull=bond-pull",
+            "BondDescriptor=__bond-descriptor",
+            "RqKeygen=rq-keygen",
+            "DeltaStateExport=__delta-state-export"
+          ]
+        }
+      ],
+      "command_variant_count": 9,
+      "hidden_command_names": ["__bond-descriptor", "__delta-state-export"],
+      "separate_spelling_same_handler": ["recv", "serve"],
+      "annotation_counts": {
+        "derive_parser": 7,
+        "derive_subcommand": 1,
+        "derive_args": 0,
+        "derive_value_enum": 4,
+        "arg_attributes": 99,
+        "command_attributes": 8,
+        "value_attributes": 0,
+        "clap_env_attributes": 0
+      }
+    },
+    {
+      "path": "src/bin/atpd.rs",
+      "surface_id": "CLI-ATPD",
+      "reachability": "BINARY_ROOT",
+      "binary": "atpd",
+      "required_features": ["atpd-daemon"],
+      "root_parser": "AtpdCli",
+      "parser_derived_types": ["AtpdCli"],
+      "argument_group_types": ["StartArgs", "InitArgs", "IdentityArgs"],
+      "value_enums": [],
+      "subcommand_enums": [
+        {
+          "rust_type": "AtpdCommand",
+          "variants": [
+            "Start=start",
+            "Stop=stop",
+            "Status=status",
+            "Reload=reload",
+            "Init=init",
+            "Diagnostics=diagnostics",
+            "Identity=identity"
+          ]
+        },
+        {
+          "rust_type": "IdentityAction",
+          "variants": ["Show=show", "Generate=generate", "Import=import", "Export=export"]
+        }
+      ],
+      "command_variant_count": 11,
+      "annotation_counts": {
+        "derive_parser": 1,
+        "derive_subcommand": 2,
+        "derive_args": 3,
+        "derive_value_enum": 0,
+        "arg_attributes": 18,
+        "command_attributes": 5,
+        "value_attributes": 0,
+        "clap_env_attributes": 0
+      }
+    },
+    {
+      "path": "src/bin/offline_tuner.rs",
+      "surface_id": "CLI-OFFLINE-TUNER",
+      "reachability": "BINARY_ROOT",
+      "binary": "offline_tuner",
+      "required_features": ["cli", "simd-intrinsics"],
+      "root_parser": "Cli",
+      "parser_derived_types": ["Cli"],
+      "argument_group_types": [],
+      "value_enums": ["ArchitectureArg"],
+      "subcommand_enums": [
+        {
+          "rust_type": "Commands",
+          "variants": [
+            "Optimize=optimize",
+            "Candidates=candidates",
+            "EmitProfile=emit-profile",
+            "Validate=validate",
+            "SchedulerRecommend=scheduler-recommend"
+          ]
+        }
+      ],
+      "command_variant_count": 5,
+      "annotation_counts": {
+        "derive_parser": 1,
+        "derive_subcommand": 1,
+        "derive_args": 0,
+        "derive_value_enum": 1,
+        "arg_attributes": 15,
+        "command_attributes": 4,
+        "value_attributes": 3,
+        "clap_env_attributes": 0
+      }
+    },
+    {
+      "path": "src/cli/args.rs",
+      "surface_id": "CLI-SHARED-ARGS",
+      "reachability": "LIBRARY_SHARED_ASUPERSYNC_BINARY_CONSUMER",
+      "binary": null,
+      "required_features": ["cli"],
+      "root_parser": null,
+      "parser_derived_types": [],
+      "argument_group_types": ["AtpDoctorArgs", "AtpVerifyArgs", "AtpReplayArgs", "AtpProofArgs"],
+      "non_clap_common_type": "CommonArgs",
+      "value_enums": [],
+      "subcommand_enums": [],
+      "command_variant_count": 0,
+      "annotation_counts": {
+        "derive_parser": 0,
+        "derive_subcommand": 0,
+        "derive_args": 4,
+        "derive_value_enum": 0,
+        "arg_attributes": 20,
+        "command_attributes": 0,
+        "value_attributes": 0,
+        "clap_env_attributes": 0
+      }
+    },
+    {
+      "path": "src/cli/atp_command_tree.rs",
+      "surface_id": "CLI-DETACHED-ATP-TREE",
+      "reachability": "LIBRARY_EXPORTED_NO_BINARY_PARSER_ROOT",
+      "binary": null,
+      "required_features": ["cli"],
+      "root_parser": null,
+      "parser_derived_types": [],
+      "argument_group_types": [
+        "AtpSendArgs",
+        "AtpGetArgs",
+        "AtpSyncArgs",
+        "AtpStatusArgs",
+        "AtpBenchArgs",
+        "AtpMirrorArgs",
+        "AtpShareArgs",
+        "AtpWatchArgs",
+        "AtpServeArgs",
+        "AtpInboxArgs",
+        "AtpResumeArgs",
+        "AtpCancelArgs",
+        "AtpConfigArgs",
+        "AtpCiArgs",
+        "AtpCiPushArgs",
+        "AtpCiPullArgs",
+        "AtpCiCleanArgs",
+        "AtpCiListArgs",
+        "AtpCiStatusArgs",
+        "AtpDatasetArgs",
+        "AtpDatasetSeedArgs",
+        "AtpDatasetGetArgs",
+        "AtpDatasetListArgs",
+        "AtpDatasetStatusArgs",
+        "AtpDatasetPinArgs",
+        "AtpDatasetUnpinArgs",
+        "AtpFuzzArgs",
+        "AtpFuzzSyncArgs",
+        "AtpFuzzPushArgs",
+        "AtpFuzzPullArgs",
+        "AtpFuzzMergeArgs",
+        "AtpFuzzMinimizeArgs",
+        "AtpFuzzStatsArgs",
+        "AtpReleaseArgs",
+        "AtpReleasePublishArgs",
+        "AtpReleaseInstallArgs",
+        "AtpReleaseListArgs",
+        "AtpReleaseInfoArgs",
+        "AtpReleaseVerifyArgs",
+        "AtpReleaseDiffArgs",
+        "AtpArchiveArgs",
+        "AtpArchiveStoreArgs",
+        "AtpArchiveRetrieveArgs",
+        "AtpArchiveListArgs",
+        "AtpArchiveVerifyArgs",
+        "AtpArchiveCompactArgs",
+        "AtpArchiveExportArgs"
+      ],
+      "value_enums": ["AtpProfile", "ConflictStrategy"],
+      "subcommand_enums": [
+        {
+          "rust_type": "AtpCommand",
+          "variants": [
+            "Send=send",
+            "Get=get",
+            "Sync=sync",
+            "Mirror=mirror",
+            "Share=share",
+            "Watch=watch",
+            "Serve=serve",
+            "Inbox=inbox",
+            "Resume=resume",
+            "Cancel=cancel",
+            "Status=status",
+            "Bench=bench",
+            "Doctor=doctor",
+            "Verify=verify",
+            "Replay=replay",
+            "Proof=proof",
+            "Config=config",
+            "Ci=ci",
+            "Dataset=dataset",
+            "Fuzz=fuzz",
+            "Release=release",
+            "Archive=archive"
+          ]
+        },
+        {
+          "rust_type": "AtpCiAction",
+          "variants": ["Push=push", "Pull=pull", "Clean=clean", "List=list", "Status=status"]
+        },
+        {
+          "rust_type": "AtpDatasetAction",
+          "variants": ["Seed=seed", "Get=get", "List=list", "Status=status", "Pin=pin", "Unpin=unpin"]
+        },
+        {
+          "rust_type": "AtpFuzzAction",
+          "variants": ["Sync=sync", "Pull=pull", "Push=push", "Merge=merge", "Minimize=minimize", "Stats=stats"]
+        },
+        {
+          "rust_type": "AtpReleaseAction",
+          "variants": ["Publish=publish", "Install=install", "List=list", "Info=info", "Verify=verify", "Diff=diff"]
+        },
+        {
+          "rust_type": "AtpArchiveAction",
+          "variants": ["Store=store", "Retrieve=retrieve", "List=list", "Verify=verify", "Compact=compact", "Export=export"]
+        }
+      ],
+      "command_variant_count": 51,
+      "binary_consumers": [],
+      "library_consumers": ["src/cli/atp_config.rs", "src/cli/atp_workflows.rs"],
+      "annotation_counts": {
+        "derive_parser": 0,
+        "derive_subcommand": 6,
+        "derive_args": 47,
+        "derive_value_enum": 2,
+        "arg_attributes": 164,
+        "command_attributes": 5,
+        "value_attributes": 0,
+        "clap_env_attributes": 0
+      }
+    }
+  ],
+  "value_domains": [
+    {
+      "rust_type": "LabDifferentialProfile",
+      "values": ["smoke", "phase1-core", "calibration"]
+    },
+    {
+      "rust_type": "DoctorReportExportFormat",
+      "values": ["markdown", "json"]
+    },
+    {
+      "rust_type": "DoctorPackageProfile",
+      "values": ["local", "ci"]
+    },
+    {
+      "rust_type": "ExportFormat",
+      "values": ["json", "ndjson"]
+    },
+    {
+      "rust_type": "Transport",
+      "values": ["auto", "tcp", "rq", "quic"]
+    },
+    {
+      "rust_type": "PathPreference",
+      "values": ["auto", "direct", "tailscale"]
+    },
+    {
+      "rust_type": "RemoteShell",
+      "values": ["auto", "posix", "powershell"]
+    },
+    {
+      "rust_type": "BondDialPreference",
+      "values": ["auto", "tailscale", "ssh", "ip"]
+    },
+    {
+      "rust_type": "ArchitectureArg",
+      "values": ["scalar", "x86-avx2", "aarch64-neon"]
+    },
+    {
+      "rust_type": "AtpProfile",
+      "values": [
+        "bulk-file",
+        "sync-tree",
+        "media",
+        "sparse-image",
+        "artifact",
+        "stream",
+        "clean-lan",
+        "lossy-wifi",
+        "relay-only",
+        "auto"
+      ]
+    },
+    {
+      "rust_type": "ConflictStrategy",
+      "values": ["prompt", "local", "remote", "both", "latest", "fail"]
+    }
+  ],
+  "cross_file_contracts": [
+    {
+      "contract_id": "CLI-WIDTH-01",
+      "state": "SOURCE_OBSERVED",
+      "contract": "clap enables derive only; wrap_help is absent, so rendered help is not allowed to gain terminal-width-sensitive wrapping during replacement",
+      "anchors": ["Cargo.toml:432", "docs/adr/dep_plan_adr_005_cli_contract.md:46"]
+    },
+    {
+      "contract_id": "CLI-ENV-01",
+      "state": "SOURCE_OBSERVED",
+      "contract": "the clap env feature and all #[arg(env = ...)] bindings are absent; environment behavior is hand-written outside parser population",
+      "anchors": ["Cargo.toml:432"]
+    },
+    {
+      "contract_id": "CLI-OUTPUT-01",
+      "state": "SOURCE_OBSERVED",
+      "contract": "asupersync explicit format and color flags override auto detection; auto format consults CI then ASUPERSYNC_OUTPUT_FORMAT, and auto color consults NO_COLOR then CLICOLOR_FORCE then terminal state",
+      "anchors": ["src/bin/asupersync.rs:3597", "src/cli/output.rs:40", "src/cli/output.rs:101"]
+    },
+    {
+      "contract_id": "CLI-CONFIG-01",
+      "state": "SOURCE_OBSERVED_GAP",
+      "contract": "asupersync root verbosity, quiet, debug, and config values are parsed and copied into CommonArgs but main dispatch consumes only format and color; none of those four root values reaches run",
+      "anchors": ["src/bin/asupersync.rs:141", "src/bin/asupersync.rs:146", "src/bin/asupersync.rs:3597", "src/bin/asupersync.rs:3638"]
+    },
+    {
+      "contract_id": "CLI-CONFIG-02",
+      "state": "SOURCE_OBSERVED",
+      "contract": "atpd --config selects the TOML path and optional or true start flags override loaded values; missing or unreadable configuration falls back to defaults with a warning",
+      "anchors": ["src/bin/atpd.rs:100", "src/bin/atpd.rs:1276", "src/bin/atpd.rs:1314"]
+    },
+    {
+      "contract_id": "CLI-CONFIG-03",
+      "state": "SOURCE_OBSERVED_GAP",
+      "contract": "the documented ATP precedence manager belongs to the detached shared tree and is not wired to the standalone atp binary parser",
+      "anchors": ["src/cli/atp_command_tree.rs:146", "src/cli/atp_config.rs:326", "src/bin/atp.rs:151"]
+    },
+    {
+      "contract_id": "CLI-ENV-ATP-01",
+      "state": "SOURCE_OBSERVED",
+      "contract": "standalone atp reads ATP_RQ_AUTH_KEY_HEX, SSL_CERT_FILE, SSL_CERT_DIR, and HOME outside clap; these remain parser-independent behavior",
+      "anchors": ["src/bin/atp.rs:86", "src/bin/atp.rs:1027", "src/bin/atp.rs:7098"]
+    },
+    {
+      "contract_id": "CLI-ENV-ATPD-01",
+      "state": "SOURCE_OBSERVED",
+      "contract": "atpd reads PROGRAMDATA for Windows default paths and HOSTNAME then COMPUTERNAME for diagnostics outside clap",
+      "anchors": ["src/bin/atpd.rs:43", "src/bin/atpd.rs:1953"]
+    },
+    {
+      "contract_id": "CLI-ENV-TUNER-01",
+      "state": "SOURCE_OBSERVED",
+      "contract": "offline_tuner initializes env_logger through Env::default after parsing and selects only the fallback filter from the verbose flag",
+      "anchors": ["src/bin/offline_tuner.rs:263"]
+    },
+    {
+      "contract_id": "CLI-EXIT-01",
+      "state": "SOURCE_OBSERVED",
+      "contract": "asupersync alone consumes the ten-code semantic registry; atp maps all command errors to FAILURE, atpd returns Result, and offline_tuner exits 1 on errors",
+      "anchors": ["src/bin/asupersync.rs:3624", "src/bin/atp.rs:11891", "src/bin/atpd.rs:1235", "src/bin/offline_tuner.rs:259", "src/cli/exit.rs:12"]
+    },
+    {
+      "contract_id": "CLI-REACHABILITY-01",
+      "state": "SOURCE_OBSERVED_GAP",
+      "contract": "src/cli/atp_command_tree.rs exports 51 command variants but has no Parser root and no binary consumer; it must not be presented as user-reachable",
+      "anchors": ["src/cli/atp_command_tree.rs:17", "src/cli/mod.rs:80", "src/cli/atp_workflows.rs:16"]
+    }
+  ],
+  "golden_capture_contract": {
+    "status": "MISSING_EXECUTION_RECEIPTS",
+    "captured_case_count": 0,
+    "captured_cases": [],
+    "allow_source_inference_as_bytes": false,
+    "required_record_fields": [
+      "case_id",
+      "binary",
+      "argv_os",
+      "feature_set",
+      "target",
+      "terminal_context",
+      "environment_allowlist",
+      "stdout_hex",
+      "stderr_hex",
+      "exit_code",
+      "source_revision"
+    ],
+    "required_case_classes": [
+      "root-long-help",
+      "root-short-help",
+      "root-version",
+      "every-reachable-subcommand-help",
+      "minimal-valid-leaf",
+      "unknown-root-subcommand",
+      "unknown-nested-subcommand",
+      "unknown-option",
+      "missing-required-argument",
+      "option-missing-value",
+      "invalid-value-enum",
+      "invalid-numeric-value",
+      "runtime-validation-error",
+      "non-utf8-argv"
+    ],
+    "terminal_contexts": [
+      "stdout-tty-stderr-tty-no-color-env",
+      "stdout-pipe-stderr-pipe-no-color-env",
+      "no-color-present",
+      "clicolor-force-present",
+      "columns-unset",
+      "columns-40",
+      "columns-120"
+    ],
+    "binary_matrix": [
+      {
+        "binary": "asupersync",
+        "required_features": ["cli"],
+        "command_variant_count": 83,
+        "platform_cells": ["linux", "macos", "windows"],
+        "state": "MISSING"
+      },
+      {
+        "binary": "atp",
+        "required_features": ["atp-cli"],
+        "command_variant_count": 9,
+        "platform_cells": ["linux", "macos", "windows"],
+        "state": "MISSING"
+      },
+      {
+        "binary": "atpd",
+        "required_features": ["atpd-daemon"],
+        "additional_feature_cells": ["atpd-daemon,tls"],
+        "command_variant_count": 11,
+        "platform_cells": ["linux", "macos", "windows"],
+        "state": "MISSING"
+      },
+      {
+        "binary": "offline_tuner",
+        "required_features": ["cli", "simd-intrinsics"],
+        "command_variant_count": 5,
+        "platform_cells": ["linux-x86_64", "linux-aarch64", "macos", "windows"],
+        "state": "MISSING"
+      }
+    ],
+    "capture_owner": "asupersync-5z2scg.7.1",
+    "installed_binary_exit_owner": "asupersync-5z2scg.7.11"
+  },
+  "verification": {
+    "contract_path": "tests/cli_clap_surface_inventory_contract.rs",
+    "contract_execution_state": "NOT_RUN_STATIC_ONLY",
+    "static_checks": [
+      "jq parse",
+      "source sha256",
+      "source line counts",
+      "declaration marker counts",
+      "git diff --check"
+    ]
+  },
+  "no_claims": [
+    "No byte-level help, usage, version, stdout, stderr, or exit-code golden was captured.",
+    "No binary or parser was executed.",
+    "No compiler, test, formatter, benchmark, or remote proof lane was run.",
+    "The argument surface is source-pinned and type-indexed, not normalized field by field.",
+    "The detached ATP command tree is not user-reachable evidence.",
+    "This artifact does not authorize clap replacement or removal.",
+    "This artifact does not prove compilation, runtime correctness, platform parity, release readiness, performance, or broad workspace health."
+  ]
+}
