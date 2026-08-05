@@ -342,8 +342,10 @@ franken_kernel/false/
 # cooldowns, swarm pane bookkeeping, and other ephemeral coordination
 # bytes that change on every tick of every agent. Previously tracked,
 # but the per-second churn produces no signal in git history.
-.ntm/rate_limits.json
-.ntm/gemini_swarm_state.json
+# Keep committed summaries under .ntm/summaries/; ignore everything else.
+.ntm/*
+!.ntm/summaries/
+!.ntm/summaries/**
 
 # Beads bad-import backups
 **/.beads/*.bad_*
@@ -553,3 +555,13 @@ opencode.json
 # ci-summaries/no_mock_policy_report.json) leaves the directory behind, and it
 # was not ignored, so a `git add .` would commit generated CI output.
 /ci-summaries/
+
+# === multi-repo ephemeral patterns 2026-08-05 ===
+# Cloudflare Wrangler local state
+.wrangler/
+# One-shot beads HTML/Markdown dumps at root (never the JSONL source of truth)
+/beads_report_*.md
+# Accidental nested insta snapshot tree (real goldens live under tests/snapshots/)
+/tests/tests/
+# RCH virtual FS workload workspaces
+.rch-vfs-*/
