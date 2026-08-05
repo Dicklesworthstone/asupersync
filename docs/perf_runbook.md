@@ -17,15 +17,16 @@ on estimates another binary produced:
 | `injector_throughput` | `sched/injector/` | LCRQ-style injector upgrade (bt4y5f.5) |
 | `task_state_hot_reads` | `sched/task_state/` | historical non-equivalent task-state microbench rows (bt4y5f.4) |
 | `channel_contended` | `sched/channel_contended/` | flat-combining MPSC (bt4y5f.5) |
-| `io_token_dedup` | *comparator-only (ungated)* | seen-token ring upgrade (bt4y5f.9) |
+| `io_token_dedup` | *comparator-only (ungated)* | I/O-driver dedup plus worker seen-token table (bt4y5f.9, 9y4yup) |
 
 `io_token_dedup` is deliberately not gated: its value is the RELATIVE
-hashset-vs-smallvec strategy comparison (both strategies measure back-to-back
-under identical load, which is robust), while its ABSOLUTE cell costs are
-cache-resident microbenches that drifted +15..111% between same-host runs
-under co-tenant fleet compile load — a 5% hard gate there would be a flake
-generator. Gate rows are only those that survived both the recording run and
-a loaded same-host re-run.
+strategy comparison (the I/O driver's hashset vs smallvec rows and the worker's
+generation-aware direct table vs historical ring and full-clear rows all run
+back-to-back under identical load), while its ABSOLUTE cell costs are
+cache-resident microbenches that drifted +15..111% between same-host runs under
+co-tenant fleet compile load — a 5% hard gate there would be a flake generator.
+Gate rows are only those that survived both the recording run and a loaded
+same-host re-run.
 
 Every workload is fixed-size and seed-free. Contended rows use barrier-synced
 persistent threads so per-iteration totals are identical; interleavings vary,

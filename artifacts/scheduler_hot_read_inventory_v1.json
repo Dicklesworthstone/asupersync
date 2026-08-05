@@ -182,8 +182,8 @@
     },
     {
       "path": "docs/perf_runbook.md",
-      "sha256": "d643c03c19cfc3e088fcdb5c088b8abc54fcc1d7b0d1a3f088b0e9ae6633f909",
-      "line_count": 172,
+      "sha256": "3c3b6218ae14ea45d743b3ca742af43cd34b56580cfda40e744b053cf12503de",
+      "line_count": 173,
       "role": "baseline ownership, host-family identity, and historical-row migration policy"
     }
   ],

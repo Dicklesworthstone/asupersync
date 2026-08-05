@@ -14,8 +14,6 @@ use crate::tracing_compat::trace;
 use crate::types::{TaskId, Time};
 use crate::util::DetRng;
 use std::cell::Cell;
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, VecDeque};
 use std::convert::TryFrom;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -25,88 +23,104 @@ use std::time::Duration;
 /// Identifier for a scheduler worker.
 pub type WorkerId = usize;
 
-/// Cap on the per-worker `seen_io_tokens` generation ring (br-asupersync-414j0b).
+/// Cap on the per-worker `seen_io_tokens` generation table (br-asupersync-414j0b).
 ///
-/// The ring evicts incrementally instead of clearing all history at the cap.
-/// That preserves the memory ceiling while avoiding a burst of re-admitted
-/// tokens exactly when a busy worker crosses the boundary.
+/// The direct table replaces one colliding slot at a time instead of clearing
+/// all history at the cap. That preserves the memory ceiling while avoiding a
+/// burst of re-admitted tokens exactly when a busy worker crosses the boundary.
+/// Its maximum payload is 65,536 `u64` token slots plus a 1,024-word
+/// initialization bitmap (520 KiB per worker).
 ///
 /// Pre-fix the set grew monotonically with cumulative distinct I/O
 /// tokens (~24 B × 100k tokens/day → 2.4 MiB/day per worker leaked
 /// silently). Post-fix the worst-case footprint is bounded.
 pub const MAX_SEEN_IO_TOKENS: usize = 65_536;
 
+const SEEN_IO_TOKEN_SLOT_MASK: u64 = 65_535;
+const SEEN_IO_TOKEN_WORD_BITS: usize = 64;
+
 #[derive(Debug, Default)]
 #[doc(hidden)] // pub ONLY for the io_token_dedup comparator bench
 // (br-asupersync-sched-hot-path-perf-bt4y5f.9); not a supported API.
 pub struct SeenIoTokens {
-    latest_generation: HashMap<u64, u64>,
-    generation_order: VecDeque<(u64, u64)>,
-    next_generation: u64,
+    // Packed tokens include the upstream slab generation. The low 16 index
+    // bits select a bounded direct slot; comparing the complete token makes a
+    // recycled slab slot a first sight without a table-wide reset.
+    slots: Vec<u64>,
+    // Token zero is valid, so initialization lives in a compact side bitmap.
+    initialized: Vec<u64>,
+    occupied: usize,
 }
 
 impl SeenIoTokens {
     #[doc(hidden)]
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
+        let slot_capacity = capacity.clamp(1, MAX_SEEN_IO_TOKENS).next_power_of_two();
         Self {
-            latest_generation: HashMap::with_capacity(capacity),
-            generation_order: VecDeque::with_capacity(capacity),
-            next_generation: 0,
+            slots: vec![0; slot_capacity],
+            initialized: vec![0; slot_capacity.div_ceil(SEEN_IO_TOKEN_WORD_BITS)],
+            occupied: 0,
         }
     }
 
     #[doc(hidden)]
+    #[inline]
     pub fn observe(&mut self, token: u64) -> bool {
-        let generation = self.allocate_generation();
-        let is_first_observation = match self.latest_generation.entry(token) {
-            Entry::Occupied(mut entry) => {
-                *entry.get_mut() = generation;
-                false
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(generation);
-                true
-            }
-        };
+        let slot = Self::slot_for(token);
+        self.ensure_slot(slot);
+        let initialized = self.is_initialized(slot);
 
-        self.generation_order.push_back((token, generation));
-        self.trim_to_capacity();
+        if initialized && self.slots[slot] == token {
+            return false;
+        }
 
-        is_first_observation
+        if !initialized {
+            let word = slot / SEEN_IO_TOKEN_WORD_BITS;
+            let mask = 1_u64 << (slot % SEEN_IO_TOKEN_WORD_BITS);
+            self.initialized[word] |= mask;
+            self.occupied += 1;
+        }
+        self.slots[slot] = token;
+        true
     }
 
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.latest_generation.len()
+        self.occupied
     }
 
     #[cfg(test)]
     fn contains(&self, token: u64) -> bool {
-        self.latest_generation.contains_key(&token)
+        let slot = Self::slot_for(token);
+        slot < self.slots.len() && self.is_initialized(slot) && self.slots[slot] == token
     }
 
     #[cfg(test)]
-    fn raw_order_len(&self) -> usize {
-        self.generation_order.len()
+    fn storage_slots(&self) -> usize {
+        self.slots.len()
     }
 
-    fn allocate_generation(&mut self) -> u64 {
-        self.next_generation = self.next_generation.wrapping_add(1);
-        if self.next_generation == 0 {
-            self.next_generation = 1;
-        }
-        self.next_generation
+    fn slot_for(token: u64) -> usize {
+        usize::try_from(token & SEEN_IO_TOKEN_SLOT_MASK)
+            .expect("the masked I/O token slot always fits usize")
     }
 
-    fn trim_to_capacity(&mut self) {
-        while self.generation_order.len() > MAX_SEEN_IO_TOKENS {
-            if let Some((token, generation)) = self.generation_order.pop_front() {
-                if self.latest_generation.get(&token) == Some(&generation) {
-                    self.latest_generation.remove(&token);
-                }
-            }
+    fn ensure_slot(&mut self, slot: usize) {
+        if slot < self.slots.len() {
+            return;
         }
+
+        let new_len = (slot + 1).next_power_of_two().min(MAX_SEEN_IO_TOKENS);
+        self.slots.resize(new_len, 0);
+        self.initialized
+            .resize(new_len.div_ceil(SEEN_IO_TOKEN_WORD_BITS), 0);
+    }
+
+    fn is_initialized(&self, slot: usize) -> bool {
+        let word = slot / SEEN_IO_TOKEN_WORD_BITS;
+        let mask = 1_u64 << (slot % SEEN_IO_TOKEN_WORD_BITS);
+        self.initialized[word] & mask != 0
     }
 }
 
@@ -134,12 +148,14 @@ pub struct Worker {
     pub trace: TraceBufferHandle,
     /// Timer driver for timestamps (optional).
     pub timer_driver: Option<TimerDriverHandle>,
-    /// Tokens seen for I/O trace emission (generation ring for O(1)-style dedup).
+    /// Tokens seen for I/O trace emission (generation-aware direct table).
     ///
     /// br-asupersync-414j0b first bounded the set by clearing the whole map
     /// at cap. br-asupersync-sched-hot-path-perf-bt4y5f.9 replaces that
-    /// compromise with incremental eviction so a single new token does not
-    /// re-admit every recently-seen token.
+    /// compromise with incremental eviction. br-asupersync-9y4yup keys the
+    /// table by the packed reactor token's slot bits: the packed generation
+    /// makes slot reuse a one-entry lazy invalidation, while a cap collision
+    /// replaces only its direct-mapped entry instead of re-admitting the table.
     seen_io_tokens: SeenIoTokens,
     /// Cached metrics provider — avoids Arc clone per task execution.
     metrics: Arc<dyn MetricsProvider>,
@@ -2860,7 +2876,7 @@ mod tests {
         );
     }
 
-    // ─── br-asupersync-414j0b regression tests ───────────────────────
+    // ─── br-asupersync-414j0b / br-asupersync-9y4yup regressions ─────
 
     #[test]
     fn seen_io_tokens_respects_max_cap() {
@@ -2885,7 +2901,7 @@ mod tests {
         assert!(seen.contains(new_token));
         assert!(!seen.contains(0));
         assert!(seen.contains(1));
-        assert_eq!(seen.raw_order_len(), MAX_SEEN_IO_TOKENS);
+        assert_eq!(seen.storage_slots(), MAX_SEEN_IO_TOKENS);
     }
 
     #[test]
@@ -2899,8 +2915,8 @@ mod tests {
         let existing = 42u64;
         assert!(!seen.observe(existing));
         assert!(seen.contains(existing));
-        assert!(seen.len() >= MAX_SEEN_IO_TOKENS - 1);
-        assert_eq!(seen.raw_order_len(), MAX_SEEN_IO_TOKENS);
+        assert_eq!(seen.len(), MAX_SEEN_IO_TOKENS);
+        assert_eq!(seen.storage_slots(), MAX_SEEN_IO_TOKENS);
     }
 
     #[test]
@@ -2917,6 +2933,38 @@ mod tests {
         // been re-admitted as "new" immediately after the boundary crossing.
         assert!(seen.contains(1));
         assert!(!seen.observe(1));
+    }
+
+    #[test]
+    fn seen_io_tokens_generation_bump_lazily_invalidates_one_slot() {
+        let mut seen = SeenIoTokens::with_capacity(32);
+        let index = 7_u64;
+        let generation_bumped = if cfg!(target_pointer_width = "64") {
+            (1_u64 << 32) | index
+        } else {
+            (1_u64 << 16) | index
+        };
+
+        assert!(seen.observe(index));
+        assert!(!seen.observe(index));
+        assert!(seen.observe(generation_bumped));
+        assert!(!seen.contains(index));
+        assert!(seen.contains(generation_bumped));
+        assert_eq!(seen.len(), 1);
+    }
+
+    #[test]
+    fn seen_io_tokens_direct_table_has_bounded_payload() {
+        let mut seen = SeenIoTokens::with_capacity(32);
+        for token in 0..MAX_SEEN_IO_TOKENS as u64 {
+            assert!(seen.observe(token));
+        }
+
+        let payload_words = seen.slots.len() + seen.initialized.len();
+        let payload_bytes = payload_words * std::mem::size_of::<u64>();
+        assert_eq!(seen.storage_slots(), MAX_SEEN_IO_TOKENS);
+        assert_eq!(seen.initialized.len(), MAX_SEEN_IO_TOKENS / 64);
+        assert_eq!(payload_bytes, 520 * 1024);
     }
 
     #[test]

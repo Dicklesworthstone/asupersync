@@ -11,17 +11,18 @@
 //!   (io_driver.rs:392) — allocation-free below 64 tokens but O(n·m).
 //!
 //! This bench pins both strategies over the same deterministic event batches
-//! so the lever's replacement (bounded LRU / generation ring) has a recorded
-//! comparator. Batches: {16, 64, 256, 1024} events × duplicate share
-//! {0%, 25%, 75%}. Duplicate tokens repeat within a small window, matching
-//! how multiple readiness events for one fd cluster inside a single turn.
-//! Token values are synthesized deterministically — no randomness, identical
-//! input every iteration.
+//! and separately compares the worker's bounded generation-aware direct table
+//! with the retired generation ring and full-clear set. Batches:
+//! {16, 64, 256, 1024} events × duplicate share {0%, 25%, 75%}. Duplicate
+//! tokens repeat within a small window, matching how multiple readiness events
+//! for one fd cluster inside a single turn. Token values are synthesized
+//! deterministically — no randomness, identical input every iteration.
 
 #![allow(missing_docs)]
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group};
-use std::collections::HashSet;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hint::black_box;
 
 use asupersync::runtime::reactor::Token;
@@ -118,9 +119,8 @@ fn bench_token_dedup(c: &mut Criterion) {
 
 /// The retired full-clear-at-cap strategy (br-asupersync-414j0b, commit
 /// 3d6bb2104): bounded `HashSet` that clears ALL history when the cap is
-/// reached. Kept ONLY as the comparator showing the boundary-crossing spike
-/// and re-admission burst that the shipped generation ring
-/// (br-asupersync-sched-hot-path-perf-bt4y5f.9, commit b976af66a) eliminates.
+/// reached. Kept as a historical CPU comparator; unlike the bounded direct
+/// table, it also re-admits the complete retained set at a cap crossing.
 struct FullClearReplica {
     seen: HashSet<u64>,
 }
@@ -140,23 +140,93 @@ impl FullClearReplica {
     }
 }
 
+/// The generation-ring strategy shipped in b976af66a and retired by
+/// br-asupersync-9y4yup. Keeping the replica preserves the measured 128 ns/op
+/// comparison row while the live [`SeenIoTokens`] implementation moves to a
+/// generation-aware direct table.
+struct GenerationRingReplica {
+    latest_generation: HashMap<u64, u64>,
+    generation_order: VecDeque<(u64, u64)>,
+    next_generation: u64,
+}
+
+impl GenerationRingReplica {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            latest_generation: HashMap::with_capacity(capacity),
+            generation_order: VecDeque::with_capacity(capacity),
+            next_generation: 0,
+        }
+    }
+
+    fn observe(&mut self, token: u64) -> bool {
+        self.next_generation = self.next_generation.wrapping_add(1).max(1);
+        let generation = self.next_generation;
+        let is_first_observation = match self.latest_generation.entry(token) {
+            Entry::Occupied(mut entry) => {
+                *entry.get_mut() = generation;
+                false
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(generation);
+                true
+            }
+        };
+
+        self.generation_order.push_back((token, generation));
+        while self.generation_order.len() > MAX_SEEN_IO_TOKENS {
+            if let Some((old_token, old_generation)) = self.generation_order.pop_front() {
+                if self.latest_generation.get(&old_token) == Some(&old_generation) {
+                    self.latest_generation.remove(&old_token);
+                }
+            }
+        }
+
+        is_first_observation
+    }
+}
+
 /// Cap-boundary comparator for the per-worker seen-token structures
 /// (br-asupersync-sched-hot-path-perf-bt4y5f.9 AC2): fill the structure to
 /// exactly the cap in setup, then measure a 256-observe window of fresh
-/// tokens that crosses the boundary. The generation ring pays a constant
-/// incremental eviction per observe (window p50 ≈ steady-state p50); the
-/// full-clear replica pays the clear inside the window and then re-admits
-/// history. Deterministic token sequences; setup excluded from measurement.
+/// tokens that crosses the boundary. The rows retain both historical
+/// strategies and add the generation-aware direct table from
+/// br-asupersync-9y4yup. Deterministic token sequences; setup excluded from
+/// measurement.
 fn bench_worker_seen_tokens_cap_boundary(c: &mut Criterion) {
     const WINDOW: usize = 256;
     let mut group = c.benchmark_group("sched/io_token_dedup");
     group.throughput(Throughput::Elements(WINDOW as u64));
     group.sample_size(10);
 
-    group.bench_function("worker_ring_cap_boundary_window", |b| {
+    group.bench_function("worker_generation_table_cap_boundary_window", |b| {
         b.iter_batched(
             || {
                 let mut seen = SeenIoTokens::with_capacity(MAX_SEEN_IO_TOKENS);
+                for token in 0..MAX_SEEN_IO_TOKENS as u64 {
+                    seen.observe(token);
+                }
+                seen
+            },
+            |mut seen| {
+                let base = MAX_SEEN_IO_TOKENS as u64;
+                let mut first_sights = 0usize;
+                for i in 0..WINDOW as u64 {
+                    if seen.observe(base + i) {
+                        first_sights += 1;
+                    }
+                }
+                assert_eq!(first_sights, WINDOW);
+                black_box(seen)
+            },
+            criterion::BatchSize::PerIteration,
+        );
+    });
+
+    group.bench_function("worker_ring_cap_boundary_window", |b| {
+        b.iter_batched(
+            || {
+                let mut seen = GenerationRingReplica::with_capacity(MAX_SEEN_IO_TOKENS);
                 for token in 0..MAX_SEEN_IO_TOKENS as u64 {
                     seen.observe(token);
                 }
@@ -202,10 +272,30 @@ fn bench_worker_seen_tokens_cap_boundary(c: &mut Criterion) {
     });
 
     // Steady-state floors far from the boundary, same window shape.
-    group.bench_function("worker_ring_steady_state_window", |b| {
+    group.bench_function("worker_generation_table_steady_state_window", |b| {
         b.iter_batched(
             || {
                 let mut seen = SeenIoTokens::with_capacity(MAX_SEEN_IO_TOKENS);
+                for token in 0..(MAX_SEEN_IO_TOKENS / 2) as u64 {
+                    seen.observe(token);
+                }
+                seen
+            },
+            |mut seen| {
+                let base = MAX_SEEN_IO_TOKENS as u64;
+                for i in 0..WINDOW as u64 {
+                    black_box(seen.observe(base + i));
+                }
+                black_box(seen)
+            },
+            criterion::BatchSize::PerIteration,
+        );
+    });
+
+    group.bench_function("worker_ring_steady_state_window", |b| {
+        b.iter_batched(
+            || {
+                let mut seen = GenerationRingReplica::with_capacity(MAX_SEEN_IO_TOKENS);
                 for token in 0..(MAX_SEEN_IO_TOKENS / 2) as u64 {
                     seen.observe(token);
                 }
@@ -255,11 +345,11 @@ fn main() {
     benches();
     Criterion::default().configure_from_args().final_summary();
     // COMPARATOR-ONLY: this binary is deliberately NOT Phase-6 gated. Its
-    // value is the RELATIVE hashset-vs-smallvec strategy data for the
-    // seen-token lever (bt4y5f.9), which is robust because both strategies
-    // measure back-to-back under identical load. The ABSOLUTE cell costs are
-    // cache-resident microbenches that drifted +15..111% between same-host
-    // runs under co-tenant fleet compile load (2026-07-27, ovh-a) — a 5%
-    // hard gate on them would be a flake generator, not a regression net.
+    // value is the RELATIVE strategy data for the I/O-driver and worker
+    // seen-token levers, whose alternatives measure back-to-back under
+    // identical load. The ABSOLUTE cell costs are cache-resident microbenches
+    // that drifted +15..111% between same-host runs under co-tenant fleet
+    // compile load (2026-07-27, ovh-a) — a 5% hard gate on them would be a
+    // flake generator, not a regression net.
     // See docs/perf_runbook.md and artifacts/baseline.json note_sched.
 }
