@@ -7,6 +7,7 @@
 - Bead: `asupersync-dep-p3-api-adrs-h3jspm.4`
 - Capabilities: `CAP-CONFIG-TOML-JSON`, `CAP-SCENARIO-YAML-JSON`
 - Decision: `ADDITIVE_COEXISTENCE` / `KEEP_UNTIL_PARITY` / `KEEP_INCUMBENT`
+- Config A3 disposition: evidence-backed `KEEP_INCUMBENT` at `98aee7f58d463a3950a3412c061d0875ea64b003`
 - Machine row: `artifacts/dependency_api_adr_registry_v1.json`
 - Supersedes: `COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md` §7 item 3.4
 
@@ -94,6 +95,31 @@ JSON is **additive**. `toml` and `serde_yaml` remain `KEEP_UNTIL_PARITY`.
 - Citing `src/fs_config_metamorphic_tests.rs` as evidence for the real config
   types — it tests a local mock behind a legacy harness feature (CFG-GAP-06).
 
+## Config A3 preservation disposition
+
+`asupersync-5z2scg.4.3` selects this ADR's incumbent KEEP branch. The complete
+A1 inventory names five live TOML surfaces, sixteen accepted grammar
+constructs, twelve error distinctions, and twenty-seven corpus cases. Claim-time
+review found no owned parser or writer spanning that contract and no terminal
+replacement evidence. Replacing `toml` would therefore narrow an accepted
+capability or substitute an unproven implementation.
+
+The machine receipt is
+`artifacts/config_toml_capability_inventory_v1.json#a3_keep_receipt`. It records
+all replacement rows as `NOT_PRESENT`, retains A3 gaps `CFG-GAP-02`,
+`CFG-GAP-06`, `CFG-GAP-10`, and `CFG-GAP-12`, forbids dependency exit, and
+leaves `asupersync-5z2scg.4.5` as the sole terminal cutover owner. This decision
+does not block additive typed-model, diagnostic, I/O, or documentation work in
+A2 and A4; it prevents those changes from being misrepresented as parser
+replacement evidence.
+
+Four A1 source pins drifted before this disposition. Static diff review
+classified them as manifest/package growth, runtime scheduling/test growth,
+dependency-budget generation growth, and unrelated consumer-fixture growth.
+The `from_toml` entry points and the generic manifest parse/write surface were
+retained. Refreshed hashes are stored in the A1 artifact, while the A3 receipt
+keeps the exact claim revision and the per-path classification.
+
 ## Known gaps
 
 Recorded as truthful baseline. Each names an owning bead and may only improve.
@@ -127,7 +153,12 @@ the wrong files and miss the entire runtime and CLI TOML surface.
 
 ## Evidence
 
-Evidence state is `BASELINE_PLANNED`: the corpus is specified, not executed.
+Evidence state is mixed and deliberately scoped. The A1 inventory contract has
+a historical executed receipt. The A3 preservation disposition is
+`STATIC_DECISION_AUTHORED_NOT_EXECUTED`: it is based on source-pin
+reconciliation and explicit absence of replacement evidence, not a new parser
+run. A2, A4, A5, and the Scenario cross-format work remain planned unless their
+own artifacts say otherwise.
 
 - Baseline: `asupersync-5z2scg.4.1` (config), `asupersync-5z2scg.5.1` (YAML subset)
 - Unit: `asupersync-5z2scg.4.3`
@@ -160,9 +191,10 @@ RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBU
 
 ## No-claim boundary
 
-This ADR is a frozen decision and public-surface inventory only. It does not
-prove that the planned evidence has run, that JSON is in fact lossless with
-respect to the full accepted TOML and YAML corpora, that config write-back
+This ADR is a frozen decision and public-surface inventory, plus the static A3
+incumbent-preservation disposition. It does not prove that the current A3
+contract extension or other planned evidence has run, that JSON is lossless
+with respect to the full accepted TOML and YAML corpora, that config write-back
 preserves comments, that any owned parser could reach parity, that performance
 is unchanged, or that either parser dependency may be removed. The
 Scenario-specific canonical encoder is not a shared config encoder or a CLI

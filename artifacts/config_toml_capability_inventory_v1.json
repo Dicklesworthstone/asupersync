@@ -43,8 +43,8 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
-      "line_count": 991
+      "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+      "line_count": 1038
     },
     {
       "path": "src/runtime/env_config.rs",
@@ -53,8 +53,8 @@
     },
     {
       "path": "src/runtime/builder.rs",
-      "sha256": "8ad1b6dc373c385e22a24159153c0fa092d74cdb678f6efc9e3d3001a1475be0",
-      "line_count": 7407
+      "sha256": "69e52f8b761944edf5fa038ed3b122ecf9a58da05f5ad15f20d1f8e3e1f8adb1",
+      "line_count": 8393
     },
     {
       "path": "src/runtime/env_config_metamorphic_tests.rs",
@@ -88,8 +88,8 @@
     },
     {
       "path": "src/bin/dependency_marginal_ledger.rs",
-      "sha256": "98653e7247ea43ef2a67b78ac0955f22addcdd6abcbffb05d31090b96ee7fddc",
-      "line_count": 2358
+      "sha256": "5d87b82df1edac2037a6410c7bae0ec20d0e8bb5574f62ef44b58591c5bfc79a",
+      "line_count": 2782
     },
     {
       "path": "src/config.rs",
@@ -108,8 +108,8 @@
     },
     {
       "path": "docs/adr/dep_plan_adr_004_config_scenario_formats.md",
-      "sha256": "310709cc8c3d7aab1dbf92ea2d3fde41c6deffee1fe0b9725b598875a6d3780c",
-      "line_count": 170
+      "sha256": "088184c1e9624a475bb9f4714fcfd387d3dad6431f77308ce2d9ad1193172dab",
+      "line_count": 202
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml",
@@ -118,8 +118,8 @@
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
-      "sha256": "9016a1e0ed3bfeb1f2eb1c3e287323d64488a16077300a7c817269b30b719da6",
-      "line_count": 354
+      "sha256": "b8f78479ddcd426448b224ef6d627b20787e1d6d25c8a74b786bade7bff8778b",
+      "line_count": 859
     }
   ],
   "feature_profiles": [
@@ -1195,14 +1195,14 @@
       "owner_bead": "asupersync-5z2scg.4.3",
       "owned_capability": "Incumbent KEEP decision or exact accepted TOML parser/writer parity with bounded differential, property, fuzz, and diagnostics evidence.",
       "inventory_state": "FROZEN",
-      "evidence_state": "PLANNED",
+      "evidence_state": "SOURCE_BASELINED",
       "required_evidence": [
         "complete A1 corpus",
-        "independent differential oracle",
-        "bounded-resource cases",
-        "write/read semantic parity"
+        "claim-time source-pin reconciliation",
+        "explicit replacement-evidence disposition",
+        "terminal no-cutover boundary"
       ],
-      "no_claim": "An owned parser may not ship or replace toml unless every observed accepted case is SAME-or-BETTER."
+      "no_claim": "The evidence-backed KEEP decision preserves the incumbent; it does not prove a replacement, execute new parser evidence, or authorize toml removal."
     },
     {
       "owner_bead": "asupersync-5z2scg.4.4",
@@ -1231,6 +1231,140 @@
       "no_claim": "Only this terminal child may authorize removal, and only when all rows are SAME-or-BETTER; otherwise KEEP."
     }
   ],
+  "a3_keep_receipt": {
+    "bead_id": "asupersync-5z2scg.4.3",
+    "capability_id": "CAP-CONFIG-TOML-JSON",
+    "decision_date_utc": "2026-08-05",
+    "claim_revision": "98aee7f58d463a3950a3412c061d0875ea64b003",
+    "decision": "KEEP_INCUMBENT",
+    "decision_state": "EVIDENCE_BACKED_KEEP",
+    "replacement_selected": false,
+    "owned_parser_present": false,
+    "owned_writer_present": false,
+    "dependency_exit_allowed": false,
+    "terminal_cutover_allowed": false,
+    "terminal_cutover_owner": "asupersync-5z2scg.4.5",
+    "all_currently_accepted_documents_preserved": true,
+    "preservation_scope": {
+      "surface_ids": [
+        "CFG-TOML-RUNTIME",
+        "CFG-TOML-ATP-COMMAND",
+        "CFG-TOML-ATP-INSTALL",
+        "CFG-TOML-ATPD",
+        "CFG-TOML-DEPENDENCY-LEDGER"
+      ],
+      "grammar_construct_ids": [
+        "CFG-GRAMMAR-BASIC-STRING",
+        "CFG-GRAMMAR-LITERAL-STRING",
+        "CFG-GRAMMAR-MULTILINE-STRING",
+        "CFG-GRAMMAR-INTEGER",
+        "CFG-GRAMMAR-FLOAT",
+        "CFG-GRAMMAR-BOOLEAN",
+        "CFG-GRAMMAR-OFFSET-DATETIME",
+        "CFG-GRAMMAR-LOCAL-DATETIME-DATE-TIME",
+        "CFG-GRAMMAR-ARRAY",
+        "CFG-GRAMMAR-TABLE",
+        "CFG-GRAMMAR-INLINE-TABLE",
+        "CFG-GRAMMAR-DOTTED-KEY",
+        "CFG-GRAMMAR-QUOTED-KEY",
+        "CFG-GRAMMAR-COMMENT",
+        "CFG-GRAMMAR-DUPLICATE-OR-CONFLICT",
+        "CFG-GRAMMAR-ARRAY-OF-TABLES"
+      ],
+      "error_contract_ids": [
+        "CFG-ERROR-RUNTIME-READ",
+        "CFG-ERROR-RUNTIME-PARSE",
+        "CFG-ERROR-RUNTIME-SEMANTIC",
+        "CFG-ERROR-ATP-FILE",
+        "CFG-ERROR-ATP-PARSE",
+        "CFG-ERROR-ATP-SERIALIZE",
+        "CFG-ERROR-ATP-SCOPE",
+        "CFG-ERROR-ATP-PATH",
+        "CFG-ERROR-ATPD-READ",
+        "CFG-ERROR-ATPD-PARSE",
+        "CFG-ERROR-ATPD-START-FALLBACK",
+        "CFG-ERROR-DEPENDENCY-LEDGER"
+      ],
+      "corpus_case_count": 27
+    },
+    "claim_source_reconciliation": {
+      "source_pin_count": 16,
+      "drifted_source_pin_count": 4,
+      "conclusion": "NO_ACCEPTED_TOML_PARSER_OR_WRITER_CONTRACT_CHANGE_DETECTED",
+      "rows": [
+        {
+          "path": "Cargo.toml",
+          "classification": "MANIFEST_AND_PACKAGE_GROWTH",
+          "toml_contract_effect": "NONE_DETECTED"
+        },
+        {
+          "path": "src/runtime/builder.rs",
+          "classification": "RUNTIME_SCHEDULING_AND_TEST_GROWTH",
+          "toml_contract_effect": "FROM_TOML_ENTRY_POINTS_UNCHANGED"
+        },
+        {
+          "path": "src/bin/dependency_marginal_ledger.rs",
+          "classification": "DEPENDENCY_BUDGET_GENERATION_GROWTH",
+          "toml_contract_effect": "EXISTING_GENERIC_PARSE_AND_WRITE_SURFACE_RETAINED"
+        },
+        {
+          "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
+          "classification": "UNRELATED_CONSUMER_FIXTURE_GROWTH",
+          "toml_contract_effect": "NONE_DETECTED"
+        }
+      ]
+    },
+    "blocking_gap_ids": [
+      "CFG-GAP-02",
+      "CFG-GAP-06",
+      "CFG-GAP-10",
+      "CFG-GAP-12"
+    ],
+    "replacement_evidence_rows": [
+      {
+        "evidence_id": "CFG-A3-REPLACE-PARSER",
+        "state": "NOT_PRESENT",
+        "required_result": "Complete accepted grammar and typed-surface parity"
+      },
+      {
+        "evidence_id": "CFG-A3-REPLACE-WRITER",
+        "state": "NOT_PRESENT",
+        "required_result": "Deterministic write/read semantic parity"
+      },
+      {
+        "evidence_id": "CFG-A3-REPLACE-BOUNDS",
+        "state": "NOT_PRESENT",
+        "required_result": "Explicit input, nesting, collection, and work bounds"
+      },
+      {
+        "evidence_id": "CFG-A3-REPLACE-INDEPENDENT",
+        "state": "NOT_PRESENT",
+        "required_result": "Independent and differential accepted-corpus agreement"
+      },
+      {
+        "evidence_id": "CFG-A3-REPLACE-GENERATIVE",
+        "state": "NOT_PRESENT",
+        "required_result": "Property and generated-input evidence over the accepted contract"
+      },
+      {
+        "evidence_id": "CFG-A3-REPLACE-DIAGNOSTICS",
+        "state": "NOT_PRESENT",
+        "required_result": "Actionable line and column diagnostics at least as precise as incumbent behavior"
+      },
+      {
+        "evidence_id": "CFG-A3-REPLACE-CONSUMERS",
+        "state": "NOT_PRESENT",
+        "required_result": "Every inventoried downstream consumer journey is SAME-or-BETTER"
+      }
+    ],
+    "revisit_conditions": [
+      "An owned parser and writer cover every preserved surface, grammar construct, error distinction, and corpus case.",
+      "Every replacement evidence row records a terminal SAME-or-BETTER result at a fresh claim revision.",
+      "A5 records the real user journeys and remains the only child authorized to decide terminal cutover."
+    ],
+    "verification_state": "STATIC_DECISION_AUTHORED_NOT_EXECUTED",
+    "no_claim_boundary": "This A3 receipt records the acceptance-criteria KEEP branch from source and artifact review. It does not add or execute a replacement parser or writer, change runtime behavior, prove current contract execution, prove broad workspace health, or authorize dependency removal."
+  },
   "known_gaps": [
     {
       "gap_id": "CFG-GAP-01",
@@ -1349,5 +1483,5 @@
       "evidence_state": "PLANNED"
     }
   ],
-  "no_claim_boundary": "This A1 packet proves a source-pinned, zero-UNKNOWN inventory and executable parser/typed-model corpus only. It does not add JSON, change precedence, fix diagnostics or I/O, prove real binary journeys, prove arbitrary TOML, prove broad workspace health or performance, or authorize removal of toml, serde, any feature, field, error, path, input, output, or user journey."
+  "no_claim_boundary": "This packet preserves the A1 source-pinned, zero-UNKNOWN inventory and records the A3 evidence-backed KEEP branch. It does not add or execute a replacement parser or writer, add JSON, change precedence, fix diagnostics or I/O, prove current contract execution, prove real binary journeys, prove arbitrary TOML, prove broad workspace health or performance, or authorize removal of toml, serde, any feature, field, error, path, input, output, or user journey."
 }

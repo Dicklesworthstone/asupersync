@@ -202,12 +202,50 @@ owns replacing that inert feature check with a real external-user journey.
 | --- | --- | --- |
 | A1 | inventory, fields, grammar, corpus, precedence, I/O, errors, consumers, gaps | executed contract |
 | A2 | one versioned typed model and additive canonical JSON | planned |
-| A3 | incumbent KEEP or complete bounded owned TOML parser/writer parity | planned |
+| A3 | incumbent KEEP or complete bounded owned TOML parser/writer parity | evidence-backed `KEEP_INCUMBENT` receipt |
 | A4 | diagnostics, precedence, secure/atomic I/O, redaction, migration, docs | planned |
 | A5 | real binary journeys and terminal KEEP-or-cutover decision | planned |
 
 Only A5 is a terminal cutover node. Any missing, planned, blocked, regressed,
 or non-SAME row forces KEEP.
+
+## A3 incumbent decision
+
+At claim revision `98aee7f58d463a3950a3412c061d0875ea64b003`, A3 chose the
+acceptance contract's evidence-backed `KEEP_INCUMBENT` branch. No owned TOML
+parser or writer exists in the inventoried production surfaces, and none of the
+seven required replacement-evidence rows is present. The incumbent therefore
+continues to preserve all five live surfaces, all sixteen observed grammar
+constructs, all twelve error distinctions, and all twenty-seven corpus cases.
+The machine decision state is `EVIDENCE_BACKED_KEEP`.
+
+This is a positive preservation decision, not a deferred replacement claim:
+
+- `replacement_selected`, `owned_parser_present`, and `owned_writer_present`
+  are all `false`;
+- dependency exit and terminal cutover are both forbidden;
+- A5 (`asupersync-5z2scg.4.5`) remains the sole terminal cutover owner;
+- A3 gaps `CFG-GAP-02`, `CFG-GAP-06`, `CFG-GAP-10`, and `CFG-GAP-12`
+  remain explicitly open rather than being reclassified as green.
+
+### Claim-time source reconciliation
+
+Four of the sixteen A1 source pins had changed by the A3 claim revision. Each
+diff was read and classified before refreshing its hash:
+
+| Path | Drift classification | Accepted TOML contract effect |
+| --- | --- | --- |
+| `Cargo.toml` | manifest and package growth | none detected |
+| `src/runtime/builder.rs` | runtime scheduling and test growth | `from_toml` entry points unchanged |
+| `src/bin/dependency_marginal_ledger.rs` | dependency-budget generation growth | existing generic parse/write surface retained |
+| `tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs` | unrelated consumer-fixture growth | none detected |
+
+The receipt fails closed on seven absent replacement rows: parser parity,
+writer parity, explicit resource bounds, independent comparison, generated
+input coverage, diagnostic precision, and all downstream consumer journeys.
+A replacement may be reconsidered only at a fresh claim revision after every
+row is terminal SAME-or-BETTER; A5 must still record the real user journeys and
+the terminal decision.
 
 ## Known gaps
 
@@ -258,8 +296,11 @@ and ATP config unit-test groups. The real `config_formats`,
 `config_toml_json_roundtrip`, `config_precedence`, and `atpd_config_user`
 journeys remain A5 obligations.
 
-The focused clean-overlay inventory lane completed on remote worker `ovh-a` at
-2026-07-24T21:46:01Z: 7 passed, 0 failed.
+The historical A1-only focused inventory lane completed on remote worker
+`ovh-a` at 2026-07-24T21:46:01Z: 7 passed, 0 failed. That receipt predates the
+A3 contract extension and is not presented as execution evidence for the new
+KEEP receipt. The A3 extension was authored and reviewed statically; its
+machine state is `STATIC_DECISION_AUTHORED_NOT_EXECUTED`.
 
 The existing ATP config unit group completed on remote worker `hz2` at
 2026-07-24T22:04:14Z: 3 passed and 1 failed. The failure is the preserved
@@ -267,10 +308,12 @@ The existing ATP config unit group completed on remote worker `hz2` at
 
 ## No-claim boundary
 
-This A1 packet proves a source-pinned, zero-`UNKNOWN` inventory and executable
-parser/typed-model corpus only. It does not add JSON, change precedence, repair
-diagnostics or I/O, prove real binary journeys, prove arbitrary TOML, prove
-broad workspace health or performance, or authorize removing `toml`, `serde`,
-any feature, field, error, path, input, output, or user journey.
+This packet preserves the A1 source-pinned, zero-`UNKNOWN` inventory and records
+the A3 evidence-backed KEEP branch. It does not add or execute a replacement
+parser or writer, add JSON, change precedence, repair diagnostics or I/O, prove
+the current contract execution, prove real binary journeys, prove arbitrary
+TOML, prove broad workspace health or performance, or authorize removing
+`toml`, `serde`, any feature, field, error, path, input, output, or user
+journey.
 
 <!-- END CONFIG TOML CAPABILITY INVENTORY -->

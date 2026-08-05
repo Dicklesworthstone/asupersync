@@ -1,13 +1,14 @@
 //! Fail-closed TOML/config capability inventory contract.
 //!
-//! Bead: asupersync-5z2scg.4.1
+//! Beads: asupersync-5z2scg.4.1, asupersync-5z2scg.4.3
 //! Scenario: config-toml-capability-inventory-contract
 //! Fixture: artifacts/config_toml_capability_inventory_v1.json
 //!
 //! This proves source-pinned surface, field, grammar, precedence, I/O, error,
-//! corpus, downstream, child-owner, and gap inventories. It does not prove
-//! arbitrary TOML, real binary journeys, JSON parity, or permission to remove
-//! the incumbent `toml` dependency.
+//! corpus, downstream, child-owner, and gap inventories, plus the fail-closed
+//! A3 incumbent-preservation receipt. It does not prove arbitrary TOML, real
+//! binary journeys, JSON parity, current execution of this contract, or
+//! permission to remove the incumbent `toml` dependency.
 
 #![allow(missing_docs)]
 
@@ -22,6 +23,8 @@ const ADR_PATH: &str = "docs/adr/dep_plan_adr_004_config_scenario_formats.md";
 const CAPABILITY_REGISTRY_PATH: &str = "artifacts/dependency_capability_registry_v1.json";
 const API_SURFACE_MAP_PATH: &str = "artifacts/api_surface_map_v1.json";
 const BEAD_ID: &str = "asupersync-5z2scg.4.1";
+const A3_BEAD_ID: &str = "asupersync-5z2scg.4.3";
+const A5_BEAD_ID: &str = "asupersync-5z2scg.4.5";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const CAPABILITY_ID: &str = "CAP-CONFIG-TOML-JSON";
 const ADR_ID: &str = "DEP-ADR-004";
@@ -319,6 +322,152 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             ));
         }
     }
+    let a3_child = find_row(children, "owner_bead", A3_BEAD_ID);
+    if text(a3_child, "evidence_state") != "SOURCE_BASELINED" {
+        return Err("CFG A3 child must record the source-baselined KEEP decision".to_owned());
+    }
+
+    let a3 = inventory
+        .get("a3_keep_receipt")
+        .ok_or_else(|| "a3_keep_receipt must be present".to_owned())?;
+    if !a3.is_object() {
+        return Err("a3_keep_receipt must be an object".to_owned());
+    }
+    for (key, expected) in [
+        ("bead_id", A3_BEAD_ID),
+        ("capability_id", CAPABILITY_ID),
+        ("decision", "KEEP_INCUMBENT"),
+        ("decision_state", "EVIDENCE_BACKED_KEEP"),
+        ("terminal_cutover_owner", A5_BEAD_ID),
+        (
+            "verification_state",
+            "STATIC_DECISION_AUTHORED_NOT_EXECUTED",
+        ),
+    ] {
+        if a3.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("a3_keep_receipt.{key} must be {expected}"));
+        }
+    }
+    for key in [
+        "replacement_selected",
+        "owned_parser_present",
+        "owned_writer_present",
+        "dependency_exit_allowed",
+        "terminal_cutover_allowed",
+    ] {
+        if a3.get(key).and_then(Value::as_bool) != Some(false) {
+            return Err(format!("a3_keep_receipt.{key} must remain false"));
+        }
+    }
+    if a3
+        .get("all_currently_accepted_documents_preserved")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Err("A3 KEEP must preserve every currently accepted document".to_owned());
+    }
+
+    let preservation_scope = a3
+        .get("preservation_scope")
+        .ok_or_else(|| "A3 preservation_scope must be present".to_owned())?;
+    if !preservation_scope.is_object() {
+        return Err("A3 preservation_scope must be an object".to_owned());
+    }
+    if string_set(preservation_scope, "surface_ids") != expected_surfaces {
+        return Err("A3 KEEP must preserve every inventoried TOML surface".to_owned());
+    }
+    if string_set(preservation_scope, "grammar_construct_ids")
+        != row_ids(grammar, "construct_id")
+    {
+        return Err("A3 KEEP must preserve every observed grammar construct".to_owned());
+    }
+    if string_set(preservation_scope, "error_contract_ids") != row_ids(errors, "error_id") {
+        return Err("A3 KEEP must preserve every error distinction".to_owned());
+    }
+    if preservation_scope
+        .get("corpus_case_count")
+        .and_then(Value::as_u64)
+        != Some(corpus.len() as u64)
+    {
+        return Err("A3 KEEP must preserve the complete corpus".to_owned());
+    }
+
+    let source_reconciliation = a3
+        .get("claim_source_reconciliation")
+        .ok_or_else(|| "A3 claim source reconciliation must be present".to_owned())?;
+    if source_reconciliation
+        .get("source_pin_count")
+        .and_then(Value::as_u64)
+        != Some(array(inventory, "source_pins").len() as u64)
+        || source_reconciliation
+            .get("drifted_source_pin_count")
+            .and_then(Value::as_u64)
+            != Some(4)
+        || source_reconciliation
+            .get("conclusion")
+            .and_then(Value::as_str)
+            != Some("NO_ACCEPTED_TOML_PARSER_OR_WRITER_CONTRACT_CHANGE_DETECTED")
+    {
+        return Err("A3 source reconciliation counts or conclusion drifted".to_owned());
+    }
+    let reconciliation_rows = array(source_reconciliation, "rows");
+    let expected_drifted_paths: BTreeSet<String> = [
+        "Cargo.toml",
+        "src/runtime/builder.rs",
+        "src/bin/dependency_marginal_ledger.rs",
+        "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if reconciliation_rows.len() != expected_drifted_paths.len()
+        || row_ids(reconciliation_rows, "path") != expected_drifted_paths
+        || reconciliation_rows
+            .iter()
+            .any(|row| text(row, "toml_contract_effect").trim().is_empty())
+    {
+        return Err("A3 must classify each claim-time source-pin drift exactly once".to_owned());
+    }
+
+    let expected_a3_gaps: BTreeSet<String> = [
+        "CFG-GAP-02",
+        "CFG-GAP-06",
+        "CFG-GAP-10",
+        "CFG-GAP-12",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if string_set(a3, "blocking_gap_ids") != expected_a3_gaps {
+        return Err("A3 KEEP must retain its exact four blocking gaps".to_owned());
+    }
+
+    let expected_replacement_rows: BTreeSet<String> = [
+        "CFG-A3-REPLACE-PARSER",
+        "CFG-A3-REPLACE-WRITER",
+        "CFG-A3-REPLACE-BOUNDS",
+        "CFG-A3-REPLACE-INDEPENDENT",
+        "CFG-A3-REPLACE-GENERATIVE",
+        "CFG-A3-REPLACE-DIAGNOSTICS",
+        "CFG-A3-REPLACE-CONSUMERS",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    let replacement_rows = array(a3, "replacement_evidence_rows");
+    if replacement_rows.len() != expected_replacement_rows.len()
+        || row_ids(replacement_rows, "evidence_id") != expected_replacement_rows
+        || replacement_rows
+            .iter()
+            .any(|row| text(row, "state") != "NOT_PRESENT")
+    {
+        return Err("A3 replacement evidence must remain explicitly absent under KEEP".to_owned());
+    }
+    if array(a3, "revisit_conditions").len() != 3
+        || text(a3, "no_claim_boundary").trim().is_empty()
+    {
+        return Err("A3 KEEP must retain revisit conditions and a no-claim boundary".to_owned());
+    }
 
     let expected_gaps: BTreeSet<String> = [1_u8, 2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
         .into_iter()
@@ -334,6 +483,12 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
                 "{} must be routed and fail closed",
                 text(row, "gap_id")
             ));
+        }
+    }
+    for gap_id in expected_a3_gaps {
+        let gap = find_row(gaps, "gap_id", &gap_id);
+        if text(gap, "owner_bead") != A3_BEAD_ID {
+            return Err(format!("{gap_id} must remain owned by CFG A3"));
         }
     }
 
@@ -677,7 +832,9 @@ fn precedence_io_errors_consumers_and_docs_remain_explicit() {
         "`CFG-NON-TOML-RAPTORQ`",
         "`CFG-GAP-16`",
         "zero `UNKNOWN`",
-        "KEEP",
+        "A3 incumbent decision",
+        "EVIDENCE_BACKED_KEEP",
+        "STATIC_DECISION_AUTHORED_NOT_EXECUTED",
     ] {
         assert!(doc.contains(marker), "documentation must retain {marker}");
     }
@@ -712,4 +869,29 @@ fn fail_closed_mutations_are_rejected() {
         .expect("gaps array")
         .pop();
     assert!(validate_inventory(&missing_gap).is_err());
+
+    let mut replace_decision = inventory.clone();
+    replace_decision["a3_keep_receipt"]["decision"] = Value::String("REPLACE".to_owned());
+    assert!(validate_inventory(&replace_decision).is_err());
+
+    let mut a3_dependency_exit = inventory.clone();
+    a3_dependency_exit["a3_keep_receipt"]["dependency_exit_allowed"] = Value::Bool(true);
+    assert!(validate_inventory(&a3_dependency_exit).is_err());
+
+    let mut missing_replacement_row = inventory.clone();
+    missing_replacement_row["a3_keep_receipt"]["replacement_evidence_rows"]
+        .as_array_mut()
+        .expect("replacement evidence rows")
+        .pop();
+    assert!(validate_inventory(&missing_replacement_row).is_err());
+
+    let mut false_green = inventory.clone();
+    false_green["a3_keep_receipt"]["replacement_evidence_rows"][0]["state"] =
+        Value::String("SAME".to_owned());
+    assert!(validate_inventory(&false_green).is_err());
+
+    let mut wrong_cutover_owner = inventory.clone();
+    wrong_cutover_owner["a3_keep_receipt"]["terminal_cutover_owner"] =
+        Value::String(A3_BEAD_ID.to_owned());
+    assert!(validate_inventory(&wrong_cutover_owner).is_err());
 }
