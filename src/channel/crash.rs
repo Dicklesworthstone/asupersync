@@ -13,8 +13,11 @@
 //!
 //! # Restart Modes
 //!
-//! - **Cold**: Reset send counter and stats (fresh state)
-//! - **Warm**: Preserve stats, just re-enable sends (checkpoint resume)
+//! - **Cold**: Reset the actor-wide send counter and per-incarnation send stats
+//! - **Warm**: Preserve send state and stats (checkpoint resume)
+//!
+//! Crash and restart counts remain cumulative in both modes so a cold restart
+//! cannot erase lifecycle history or bypass the configured restart budget.
 //!
 //! # Supervision Integration
 //!
@@ -124,9 +127,9 @@ impl CrashConfig {
 /// How state is handled on restart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestartMode {
-    /// Cold restart: reset send counter (fresh state, no memory of previous run).
+    /// Cold restart: reset the actor-wide send count and send statistics.
     Cold,
-    /// Warm restart: preserve send counter (simulates checkpoint-based recovery).
+    /// Warm restart: preserve send state (simulates checkpoint-based recovery).
     Warm,
 }
 
@@ -135,17 +138,21 @@ pub enum RestartMode {
 // ---------------------------------------------------------------------------
 
 /// Statistics for crash fault injection.
+///
+/// Send counters describe the current incarnation and reset after a successful
+/// cold restart. Crash and restart counters describe the controller lifetime
+/// and remain cumulative across both cold and warm restarts.
 #[derive(Debug)]
 pub struct CrashStats {
-    /// Total send attempts (including rejected).
+    /// Send attempts in the current incarnation (including rejected).
     pub sends_attempted: AtomicU64,
-    /// Successful sends that passed through.
+    /// Successful sends in the current incarnation.
     pub sends_succeeded: AtomicU64,
-    /// Sends rejected because the actor was crashed.
+    /// Sends rejected in the current incarnation because the actor was crashed.
     pub sends_rejected: AtomicU64,
-    /// Number of crash events triggered.
+    /// Number of crash events over the controller lifetime.
     pub crashes: AtomicU64,
-    /// Number of successful restart events.
+    /// Number of successful restart events over the controller lifetime.
     pub restarts: AtomicU64,
 }
 
@@ -164,27 +171,36 @@ impl CrashStats {
     #[must_use]
     pub fn snapshot(&self) -> CrashStatsSnapshot {
         CrashStatsSnapshot {
-            sends_attempted: self.sends_attempted.load(Ordering::Relaxed),
+            sends_attempted: self.sends_attempted.load(Ordering::Acquire),
             sends_succeeded: self.sends_succeeded.load(Ordering::Relaxed),
             sends_rejected: self.sends_rejected.load(Ordering::Relaxed),
             crashes: self.crashes.load(Ordering::Relaxed),
             restarts: self.restarts.load(Ordering::Relaxed),
         }
     }
+
+    fn reset_send_counters(&self) {
+        self.sends_succeeded.store(0, Ordering::Relaxed);
+        self.sends_rejected.store(0, Ordering::Relaxed);
+        // Publish the reset last. An acquiring snapshot that observes this
+        // store (or a later attempt RMW in its release sequence) also observes
+        // both outcome-counter resets above.
+        self.sends_attempted.store(0, Ordering::Release);
+    }
 }
 
 /// Immutable snapshot of crash statistics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CrashStatsSnapshot {
-    /// Total send attempts (including rejected).
+    /// Send attempts in the current incarnation (including rejected).
     pub sends_attempted: u64,
-    /// Successful sends that passed through.
+    /// Successful sends in the current incarnation.
     pub sends_succeeded: u64,
-    /// Sends rejected because the actor was crashed.
+    /// Sends rejected in the current incarnation because the actor was crashed.
     pub sends_rejected: u64,
-    /// Number of crash events triggered.
+    /// Number of crash events over the controller lifetime.
     pub crashes: u64,
-    /// Number of successful restart events.
+    /// Number of successful restart events over the controller lifetime.
     pub restarts: u64,
 }
 
@@ -213,6 +229,13 @@ impl std::fmt::Display for CrashStatsSnapshot {
 pub struct CrashController {
     state: Mutex<CrashState>,
     stats: CrashStats,
+    /// Serializes actor-wide send admission commits with restart transitions.
+    send_commit: Mutex<()>,
+    /// Successful sends in the current actor incarnation.
+    send_count: AtomicU64,
+    /// Changes after every successful restart so pre-restart sends cannot
+    /// commit into the next incarnation.
+    incarnation: AtomicU64,
     evidence_sink: Arc<dyn EvidenceSink>,
     /// Deterministic evidence event sequence for replayable crash logs.
     evidence_seq: AtomicU64,
@@ -257,6 +280,9 @@ impl CrashController {
                 max_restarts: config.max_restarts,
             }),
             stats: CrashStats::new(),
+            send_commit: Mutex::new(()),
+            send_count: AtomicU64::new(0),
+            incarnation: AtomicU64::new(0),
             evidence_sink,
             evidence_seq: AtomicU64::new(0),
             crashed: AtomicBool::new(false),
@@ -268,23 +294,38 @@ impl CrashController {
     /// Trigger a crash. Returns `true` if the actor was running and is now crashed.
     pub fn crash(&self) -> bool {
         let crash_count = {
-            let mut state = self.state.lock();
-            if state.crashed || state.exhausted {
-                return false;
-            }
-            state.crashed = true;
-            self.crashed.store(true, Ordering::Release);
-            state.crash_count += 1;
-            self.stats.crashes.fetch_add(1, Ordering::Relaxed);
-            state.crash_count
+            let _send_guard = self.send_commit.lock();
+            self.transition_to_crashed()
         };
+        let Some(crash_count) = crash_count else {
+            return false;
+        };
+        self.emit_crash_transition(crash_count);
+        true
+    }
+
+    /// Mark the current incarnation crashed while `send_commit` is held.
+    /// Evidence emission is deliberately separate so callbacks never run under
+    /// either controller mutex.
+    fn transition_to_crashed(&self) -> Option<u32> {
+        let mut state = self.state.lock();
+        if state.crashed || state.exhausted {
+            return None;
+        }
+        state.crashed = true;
+        self.crashed.store(true, Ordering::Release);
+        state.crash_count += 1;
+        self.stats.crashes.fetch_add(1, Ordering::Relaxed);
+        Some(state.crash_count)
+    }
+
+    fn emit_crash_transition(&self, crash_count: u32) {
         emit_crash_evidence(
             &self.evidence_sink,
             self.next_evidence_ts(),
             "crash",
             crash_count,
         );
-        true
     }
 
     /// Attempt to restart the actor. Returns `true` if restart succeeded.
@@ -293,6 +334,11 @@ impl CrashController {
     /// - The actor is not crashed (already running)
     /// - The restart limit is exhausted
     pub fn restart(&self) -> bool {
+        // A successful restart and the corresponding send-state transition are
+        // one operation. Send futures may wait for channel capacity without
+        // this gate, but they must re-enter it before committing and validate
+        // the incarnation captured before they waited.
+        let send_guard = self.send_commit.lock();
         let (action, count, restarted) = {
             let mut state = self.state.lock();
             if !state.crashed || state.exhausted {
@@ -306,6 +352,11 @@ impl CrashController {
                     self.exhausted.store(true, Ordering::Release);
                     ("restart_exhausted", state.restart_count, false)
                 } else {
+                    if self.restart_mode == RestartMode::Cold {
+                        self.send_count.store(0, Ordering::Relaxed);
+                        self.stats.reset_send_counters();
+                    }
+                    self.incarnation.fetch_add(1, Ordering::AcqRel);
                     state.crashed = false;
                     self.crashed.store(false, Ordering::Release);
                     state.restart_count += 1;
@@ -313,6 +364,11 @@ impl CrashController {
                     ("restart", state.restart_count, true)
                 }
             } else {
+                if self.restart_mode == RestartMode::Cold {
+                    self.send_count.store(0, Ordering::Relaxed);
+                    self.stats.reset_send_counters();
+                }
+                self.incarnation.fetch_add(1, Ordering::AcqRel);
                 state.crashed = false;
                 self.crashed.store(false, Ordering::Release);
                 state.restart_count += 1;
@@ -320,6 +376,7 @@ impl CrashController {
                 ("restart", state.restart_count, true)
             }
         };
+        drop(send_guard);
         emit_crash_evidence(&self.evidence_sink, self.next_evidence_ts(), action, count);
         restarted
     }
@@ -372,9 +429,6 @@ pub struct CrashSender<T> {
     controller: Arc<CrashController>,
     config: CrashConfig,
     rng: Mutex<ChaosRng>,
-    /// Serializes the non-awaiting exact-N commit decision and accounting.
-    send_commit: Mutex<()>,
-    send_count: AtomicU64,
     evidence_sink: Arc<dyn EvidenceSink>,
 }
 
@@ -402,8 +456,6 @@ impl<T> CrashSender<T> {
             controller,
             config,
             rng: Mutex::new(rng),
-            send_commit: Mutex::new(()),
-            send_count: AtomicU64::new(0),
             evidence_sink,
         }
     }
@@ -414,38 +466,45 @@ impl<T> CrashSender<T> {
     /// - The controller is in crashed state
     /// - A probabilistic or deterministic crash is triggered on this send
     pub async fn send(&self, cx: &Cx, value: T) -> Result<(), SendError<T>> {
-        self.controller
-            .stats
-            .sends_attempted
-            .fetch_add(1, Ordering::Relaxed);
-
-        // Fast-path checks preserve immediate rejection without queueing on
-        // capacity or the exact-N admission gate.
-        if self.controller.is_crashed() {
+        // Account and decide against one controller incarnation. Restart takes
+        // the same short gate, so a successful cold reset cannot race these
+        // per-incarnation counters. No channel-capacity wait occurs under it.
+        let incarnation = {
+            let send_guard = self.controller.send_commit.lock();
+            let incarnation = self.controller.incarnation.load(Ordering::Acquire);
             self.controller
                 .stats
-                .sends_rejected
+                .sends_attempted
                 .fetch_add(1, Ordering::Relaxed);
-            emit_crash_evidence(
-                &self.evidence_sink,
-                self.controller.next_evidence_ts(),
-                "send_rejected_crashed",
-                0,
-            );
-            return Err(SendError::Disconnected(value));
-        }
 
-        // Check deterministic crash trigger.
-        if let Some(limit) = self.config.crash_after_sends {
-            let count = self.send_count.load(Ordering::Relaxed);
-            if count >= limit {
-                let actually_crashed = self.controller.crash();
+            if self.controller.is_crashed() {
                 self.controller
                     .stats
                     .sends_rejected
                     .fetch_add(1, Ordering::Relaxed);
+                drop(send_guard);
+                emit_crash_evidence(
+                    &self.evidence_sink,
+                    self.controller.next_evidence_ts(),
+                    "send_rejected_crashed",
+                    0,
+                );
+                return Err(SendError::Disconnected(value));
+            }
 
-                let action = if actually_crashed {
+            if let Some(limit) = self.config.crash_after_sends
+                && self.controller.send_count.load(Ordering::Relaxed) >= limit
+            {
+                let crash_count = self.controller.transition_to_crashed();
+                self.controller
+                    .stats
+                    .sends_rejected
+                    .fetch_add(1, Ordering::Relaxed);
+                drop(send_guard);
+                if let Some(count) = crash_count {
+                    self.controller.emit_crash_transition(count);
+                }
+                let action = if crash_count.is_some() {
                     "crash_after_sends"
                 } else {
                     "send_rejected_crashed"
@@ -458,35 +517,39 @@ impl<T> CrashSender<T> {
                 );
                 return Err(SendError::Disconnected(value));
             }
-        }
 
-        // Check probabilistic crash trigger.
-        if self.config.crash_probability > 0.0 {
-            let should_crash = {
-                let mut rng = self.rng.lock();
-                rng.should_inject(self.config.crash_probability)
-            };
-            if should_crash {
-                let actually_crashed = self.controller.crash();
-                self.controller
-                    .stats
-                    .sends_rejected
-                    .fetch_add(1, Ordering::Relaxed);
-
-                let action = if actually_crashed {
-                    "crash_probabilistic"
-                } else {
-                    "send_rejected_crashed"
+            if self.config.crash_probability > 0.0 {
+                let should_crash = {
+                    let mut rng = self.rng.lock();
+                    rng.should_inject(self.config.crash_probability)
                 };
-                emit_crash_evidence(
-                    &self.evidence_sink,
-                    self.controller.next_evidence_ts(),
-                    action,
-                    0,
-                );
-                return Err(SendError::Disconnected(value));
+                if should_crash {
+                    let crash_count = self.controller.transition_to_crashed();
+                    self.controller
+                        .stats
+                        .sends_rejected
+                        .fetch_add(1, Ordering::Relaxed);
+                    drop(send_guard);
+                    if let Some(count) = crash_count {
+                        self.controller.emit_crash_transition(count);
+                    }
+                    let action = if crash_count.is_some() {
+                        "crash_probabilistic"
+                    } else {
+                        "send_rejected_crashed"
+                    };
+                    emit_crash_evidence(
+                        &self.evidence_sink,
+                        self.controller.next_evidence_ts(),
+                        action,
+                        0,
+                    );
+                    return Err(SendError::Disconnected(value));
+                }
             }
-        }
+
+            incarnation
+        };
 
         // Reserve capacity before entering exact-N admission. A capacity wake
         // may synchronously reenter this sender, so no admission permit may be
@@ -498,29 +561,43 @@ impl<T> CrashSender<T> {
             Err(SendError::Full(())) => return Err(SendError::Full(value)),
         };
 
-        // The exact-N contract is defined in successful sends, so admission
-        // cannot be reserved with a pre-await counter increment. A short,
-        // non-poisoning commit mutex covers only the authoritative state
-        // recheck, non-awaiting inner commit, and counter update. Capacity
-        // waiting remains cancel-safe, and no callback runs under this mutex.
-        // Fault-disabled and probabilistic-only senders retain their concurrent
-        // fast path.
-        let send_guard = if self.config.crash_after_sends.is_some() {
-            Some(self.send_commit.lock())
-        } else {
-            None
-        };
+        // Successful-send state belongs to the shared controller, not one
+        // wrapper. The gate covers only the authoritative state recheck,
+        // non-awaiting commit, and accounting; callbacks run after release.
+        let send_guard = self.controller.send_commit.lock();
+
+        // A send that waited across any restart belongs to the prior
+        // incarnation and must not commit into the new one. Cold restart has
+        // already discarded its attempt count; Warm preserves that count, so
+        // only the Warm case records the terminal rejection here.
+        if self.controller.incarnation.load(Ordering::Acquire) != incarnation {
+            if self.controller.restart_mode == RestartMode::Warm {
+                self.controller
+                    .stats
+                    .sends_rejected
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            drop(send_guard);
+            drop(permit);
+            emit_crash_evidence(
+                &self.evidence_sink,
+                self.controller.next_evidence_ts(),
+                "send_rejected_restart",
+                0,
+            );
+            return Err(SendError::Disconnected(value));
+        }
 
         // A concurrent admitted send or manual crash may have changed the
         // authoritative state while this attempt waited for the gate. Release
         // the gate before evidence callbacks, which may reenter this sender.
         if self.controller.is_crashed() {
-            drop(send_guard);
-            drop(permit);
             self.controller
                 .stats
                 .sends_rejected
                 .fetch_add(1, Ordering::Relaxed);
+            drop(send_guard);
+            drop(permit);
             emit_crash_evidence(
                 &self.evidence_sink,
                 self.controller.next_evidence_ts(),
@@ -530,16 +607,19 @@ impl<T> CrashSender<T> {
             return Err(SendError::Disconnected(value));
         }
         if let Some(limit) = self.config.crash_after_sends
-            && self.send_count.load(Ordering::Relaxed) >= limit
+            && self.controller.send_count.load(Ordering::Relaxed) >= limit
         {
-            drop(send_guard);
-            drop(permit);
-            let actually_crashed = self.controller.crash();
+            let crash_count = self.controller.transition_to_crashed();
             self.controller
                 .stats
                 .sends_rejected
                 .fetch_add(1, Ordering::Relaxed);
-            let action = if actually_crashed {
+            drop(send_guard);
+            drop(permit);
+            if let Some(count) = crash_count {
+                self.controller.emit_crash_transition(count);
+            }
+            let action = if crash_count.is_some() {
                 "crash_after_sends"
             } else {
                 "send_rejected_crashed"
@@ -558,7 +638,9 @@ impl<T> CrashSender<T> {
         // receiver wake cannot under-count an already-visible message.
         let (result, receiver_wake) = permit.try_send_deferred_wake(value);
         if result.is_ok() {
-            self.send_count.fetch_add(1, Ordering::Relaxed);
+            self.controller
+                .send_count
+                .fetch_add(1, Ordering::Relaxed);
             self.controller
                 .stats
                 .sends_succeeded
@@ -585,19 +667,13 @@ impl<T> CrashSender<T> {
         &self.controller
     }
 
-    /// Returns the number of successful sends from this sender.
+    /// Returns actor-wide successful sends in the current incarnation.
+    ///
+    /// Every sender sharing this controller observes the same count. A
+    /// successful cold restart resets it; a warm restart preserves it.
     #[must_use]
     pub fn send_count(&self) -> u64 {
-        self.send_count.load(Ordering::Relaxed)
-    }
-
-    /// Reset the send counter during a quiescent cold restart.
-    ///
-    /// No send futures may be in flight. Controller restart and counter reset
-    /// remain separate operations; atomic cold-restart orchestration is outside
-    /// this sender's exact-N admission contract.
-    pub fn reset_send_count(&self) {
-        self.send_count.store(0, Ordering::Relaxed);
+        self.controller.send_count.load(Ordering::Relaxed)
     }
 }
 
@@ -731,7 +807,10 @@ mod tests {
             self.lock_free_observations
                 .lock()
                 .expect("probe observations mutex should not poison")
-                .push(controller.state.try_lock().is_some());
+                .push(
+                    controller.state.try_lock().is_some()
+                        && controller.send_commit.try_lock().is_some(),
+                );
         }
 
         fn next_evidence_ts(&self) -> u64 {
@@ -1095,8 +1174,8 @@ mod tests {
         block_on(tx.send(&cx, 1)).unwrap();
         let _ = block_on(tx.send(&cx, 2)); // Triggers crash.
 
-        ctrl.restart();
-        let _ = block_on(tx.send(&cx, 3)); // Rejected (still at count=2 without reset).
+        assert!(ctrl.restart());
+        block_on(tx.send(&cx, 3)).expect("cold restart resets the send limit");
 
         let entries = collector.entries();
         let actions: Vec<String> = entries.iter().map(|e| e.action.clone()).collect();
@@ -1125,7 +1204,7 @@ mod tests {
     }
 
     #[test]
-    fn crash_controller_emits_evidence_after_releasing_state_lock() {
+    fn crash_controller_emits_evidence_after_releasing_controller_locks() {
         let normal_probe = Arc::new(ControllerLockProbeSink::default());
         let normal_sink: Arc<dyn EvidenceSink> = normal_probe.clone();
         let normal_ctrl = Arc::new(CrashController::new(&CrashConfig::new(42), normal_sink));
@@ -1149,6 +1228,52 @@ mod tests {
     // --- Cold vs warm restart ---
 
     #[test]
+    fn send_waiting_across_cold_restart_cannot_enter_new_incarnation() {
+        let config = CrashConfig::new(42)
+            .with_crash_after_sends(2)
+            .with_restart_mode(RestartMode::Cold);
+        let (tx, mut rx, ctrl, _) = crash_channel::<u32>(
+            1,
+            config,
+            Arc::new(CollectorSink::new()) as Arc<dyn EvidenceSink>,
+        );
+        let cx = test_cx();
+        tx.inner()
+            .try_send(99)
+            .expect("sentinel must fill the inner channel");
+
+        let mut stale_send = Box::pin(tx.send(&cx, 1));
+        let waker = std::task::Waker::noop().clone();
+        let mut task_cx = Context::from_waker(&waker);
+        assert!(stale_send.as_mut().poll(&mut task_cx).is_pending());
+
+        assert!(ctrl.crash());
+        assert!(ctrl.restart());
+        assert_eq!(tx.send_count(), 0);
+
+        assert_eq!(rx.try_recv(), Ok(99));
+        assert!(matches!(
+            stale_send.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(SendError::Disconnected(1)))
+        ));
+        assert!(rx.try_recv().is_err(), "stale send must not cross restart");
+        assert_eq!(
+            ctrl.stats().snapshot(),
+            CrashStatsSnapshot {
+                sends_attempted: 0,
+                sends_succeeded: 0,
+                sends_rejected: 0,
+                crashes: 1,
+                restarts: 1,
+            }
+        );
+
+        block_on(tx.send(&cx, 2)).expect("fresh-incarnation send must succeed");
+        assert_eq!(tx.send_count(), 1);
+        assert_eq!(rx.try_recv(), Ok(2));
+    }
+
+    #[test]
     fn cold_restart_resets_send_count() {
         let config = CrashConfig::new(42)
             .with_crash_after_sends(3)
@@ -1163,9 +1288,19 @@ mod tests {
         assert!(block_on(tx.send(&cx, 3)).is_err());
         assert!(ctrl.is_crashed());
 
-        // Cold restart: reset count.
-        ctrl.restart();
-        tx.reset_send_count();
+        // Cold restart completes the count and send-stat reset itself.
+        assert!(ctrl.restart());
+        assert_eq!(tx.send_count(), 0);
+        assert_eq!(
+            ctrl.stats().snapshot(),
+            CrashStatsSnapshot {
+                sends_attempted: 0,
+                sends_succeeded: 0,
+                sends_rejected: 0,
+                crashes: 1,
+                restarts: 1,
+            }
+        );
 
         // Should be able to send 3 more before next crash.
         for i in 10..13 {
@@ -1173,6 +1308,17 @@ mod tests {
         }
         assert!(block_on(tx.send(&cx, 13)).is_err());
         assert!(ctrl.is_crashed());
+        assert_eq!(tx.send_count(), 3);
+        assert_eq!(
+            ctrl.stats().snapshot(),
+            CrashStatsSnapshot {
+                sends_attempted: 4,
+                sends_succeeded: 3,
+                sends_rejected: 1,
+                crashes: 2,
+                restarts: 1,
+            }
+        );
     }
 
     #[test]
@@ -1188,10 +1334,19 @@ mod tests {
             block_on(tx.send(&cx, i)).unwrap();
         }
         assert!(block_on(tx.send(&cx, 3)).is_err());
+        let before_restart = ctrl.stats().snapshot();
 
         // Warm restart: count preserved → immediate crash on next send.
-        ctrl.restart();
+        assert!(ctrl.restart());
+        assert_eq!(tx.send_count(), 3);
+        let after_restart = ctrl.stats().snapshot();
+        assert_eq!(after_restart.sends_attempted, before_restart.sends_attempted);
+        assert_eq!(after_restart.sends_succeeded, before_restart.sends_succeeded);
+        assert_eq!(after_restart.sends_rejected, before_restart.sends_rejected);
+        assert_eq!(after_restart.crashes, before_restart.crashes);
+        assert_eq!(after_restart.restarts, before_restart.restarts + 1);
         assert!(block_on(tx.send(&cx, 4)).is_err());
+        assert_eq!(tx.send_count(), 3);
     }
 
     // =========================================================================

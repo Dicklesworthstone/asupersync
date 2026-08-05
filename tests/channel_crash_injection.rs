@@ -9,8 +9,8 @@
 //! 1. **Crash blocks delivery**: Messages sent after a crash return
 //!    `SendError::Disconnected`.
 //! 2. **Restart re-enables delivery**: After restart, messages flow normally.
-//! 3. **Cold restart resets state**: Send counter resets on cold restart.
-//! 4. **Warm restart preserves state**: Send counter preserved on warm restart.
+//! 3. **Cold restart resets state**: Send count and send stats reset atomically.
+//! 4. **Warm restart preserves state**: Send count and send stats are preserved.
 //! 5. **Restart exhaustion**: After max restarts, controller is permanently
 //!    exhausted and refuses further restarts.
 //! 6. **Deterministic crash after N sends**: Crash triggers at exact send count.
@@ -164,9 +164,15 @@ fn cold_restart_resets_send_counter() {
     assert!(block_on(tx.send(&cx, 3)).is_err());
     assert!(ctrl.is_crashed());
 
-    // Cold restart: reset counter.
-    ctrl.restart();
-    tx.reset_send_count();
+    // Cold restart completes its own counter reset.
+    assert!(ctrl.restart());
+    assert_eq!(tx.send_count(), 0);
+    let restarted = ctrl.stats().snapshot();
+    assert_eq!(restarted.sends_attempted, 0);
+    assert_eq!(restarted.sends_succeeded, 0);
+    assert_eq!(restarted.sends_rejected, 0);
+    assert_eq!(restarted.crashes, 1);
+    assert_eq!(restarted.restarts, 1);
 
     // Should be able to send 3 more before crash.
     for i in 100..103 {
@@ -201,7 +207,8 @@ fn warm_restart_keeps_send_counter() {
     assert!(block_on(tx.send(&cx, 3)).is_err());
 
     // Warm restart: counter preserved at 3, so immediate crash on next send.
-    ctrl.restart();
+    assert!(ctrl.restart());
+    assert_eq!(tx.send_count(), 3);
     assert!(block_on(tx.send(&cx, 4)).is_err());
     assert!(ctrl.is_crashed());
 }
@@ -418,8 +425,7 @@ fn stats_accurate_across_crash_restart_cycles() {
     let _ = block_on(tx.send(&cx, 2)); // Crash.
     let _ = block_on(tx.send(&cx, 3)); // Rejected.
 
-    ctrl.restart();
-    tx.reset_send_count();
+    assert!(ctrl.restart());
 
     // Cycle 2: 2 success, 1 crash.
     block_on(tx.send(&cx, 4)).unwrap();
@@ -427,15 +433,15 @@ fn stats_accurate_across_crash_restart_cycles() {
     let _ = block_on(tx.send(&cx, 6)); // Crash.
 
     let snap = ctrl.stats().snapshot();
-    assert_eq!(snap.sends_attempted, 7);
-    assert_eq!(snap.sends_succeeded, 4);
-    assert_eq!(snap.sends_rejected, 3);
+    assert_eq!(snap.sends_attempted, 3);
+    assert_eq!(snap.sends_succeeded, 2);
+    assert_eq!(snap.sends_rejected, 1);
     assert_eq!(snap.crashes, 2);
     assert_eq!(snap.restarts, 1);
 }
 
 #[test]
-fn send_count_tracks_per_sender() {
+fn send_count_tracks_shared_actor_incarnation() {
     let config = CrashConfig::new(42).with_crash_after_sends(5);
     let (tx, _rx, _ctrl, _) = make_crash_channel(config);
     let cx = test_cx();
@@ -489,8 +495,7 @@ fn crash_during_send_sequence_no_obligation_leak() {
     }
 
     // Restart and send more.
-    ctrl.restart();
-    tx.reset_send_count();
+    assert!(ctrl.restart());
     block_on(tx.send(&cx, 100)).unwrap();
 
     // Verify: 5 pre-crash + 1 post-restart = 6 messages received.
@@ -522,7 +527,7 @@ fn crash_with_no_faults_enabled_is_manual_only() {
 #[test]
 fn controller_shared_across_multiple_senders() {
     let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
-    let config = CrashConfig::new(42);
+    let config = CrashConfig::new(42).with_crash_after_sends(2);
 
     let (tx1, mut rx) = mpsc::channel::<u32>(16);
     let tx2 = tx1.clone();
@@ -537,16 +542,21 @@ fn controller_shared_across_multiple_senders() {
 
     block_on(sender1.send(&cx, 1)).unwrap();
     block_on(sender2.send(&cx, 2)).unwrap();
+    assert_eq!(sender1.send_count(), 2);
+    assert_eq!(sender2.send_count(), 2);
 
-    // Crash affects both senders.
-    ctrl.crash();
+    // The shared actor-wide limit affects both senders.
     assert!(block_on(sender1.send(&cx, 3)).is_err());
     assert!(block_on(sender2.send(&cx, 4)).is_err());
 
-    // Restart re-enables both.
-    ctrl.restart();
+    // Cold restart resets the shared incarnation and re-enables both.
+    assert!(ctrl.restart());
+    assert_eq!(sender1.send_count(), 0);
+    assert_eq!(sender2.send_count(), 0);
     block_on(sender1.send(&cx, 5)).unwrap();
     block_on(sender2.send(&cx, 6)).unwrap();
+    assert_eq!(sender1.send_count(), 2);
+    assert_eq!(sender2.send_count(), 2);
 
     let mut received = Vec::new();
     while let Ok(v) = rx.try_recv() {
