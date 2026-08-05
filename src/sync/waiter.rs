@@ -135,8 +135,11 @@ impl<T> Default for WaiterChain<T> {
 impl<T> WaiterChain<T> {
     pub(crate) fn new() -> Self {
         Self {
-            slots: Slab::with_capacity(4),
-            positions: HashMap::with_capacity_and_hasher(4, BuildHasherDefault::default()),
+            // Keep uncontended synchronization primitives allocation-free. The
+            // slab and stable-id index grow together only when the first waiter
+            // is actually queued, then retain that capacity for reuse.
+            slots: Slab::new(),
+            positions: PositionMap::default(),
             head: None,
             tail: None,
             next_id: Some(0),

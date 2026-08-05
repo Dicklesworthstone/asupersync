@@ -12,6 +12,7 @@
 //! measured test thread.
 //!
 //! Hot paths audited:
+//! - Mutex/RwLock cold construction, uncontended acquisition, and lazy waiter spill
 //! - PriorityScheduler schedule/pop (cancel, timed, ready lanes)
 //! - LocalQueue push/pop
 //! - GlobalQueue push/pop
@@ -97,7 +98,7 @@ use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::record::task::TaskRecord;
 use asupersync::runtime::scheduler::{GlobalInjector, GlobalQueue, LocalQueue, PriorityScheduler};
 use asupersync::runtime::{RegionHeap, RuntimeState, global_alloc_count};
-use asupersync::sync::{ContendedMutex, RwLock};
+use asupersync::sync::{ContendedMutex, Mutex as AsupersyncMutex, RwLock};
 use asupersync::types::{Budget, RegionId, TaskId, Time};
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -127,6 +128,93 @@ fn setup_runtime_state(max_task_id: u32) -> Arc<ContendedMutex<RuntimeState>> {
         assert_eq!(idx.index(), i);
     }
     Arc::new(ContendedMutex::new("runtime_state", state))
+}
+
+/// Empty waiter queues must stay allocation-free until contention actually
+/// queues a task. This covers construction plus the first uncontended guard for
+/// both synchronization primitives backed by `WaiterChain`.
+#[test]
+fn mutex_and_rwlock_uncontended_paths_zero_alloc() {
+    let _guard = ALLOC_TEST_GUARD.lock();
+    init_test("mutex_and_rwlock_uncontended_paths_zero_alloc");
+
+    let before_mutex = AllocSnapshot::take();
+    let mutex = AsupersyncMutex::new(());
+    drop(mutex.try_lock().expect("new mutex acquires immediately"));
+    let after_mutex = AllocSnapshot::take();
+    let mutex_allocs = after_mutex.allocs_since(&before_mutex);
+    let mutex_bytes = after_mutex.bytes_since(&before_mutex);
+
+    let before_rwlock = AllocSnapshot::take();
+    let rwlock = RwLock::new(());
+    drop(rwlock.try_read().expect("new rwlock admits a reader"));
+    drop(rwlock.try_write().expect("new rwlock admits a writer"));
+    let after_rwlock = AllocSnapshot::take();
+    let rwlock_allocs = after_rwlock.allocs_since(&before_rwlock);
+    let rwlock_bytes = after_rwlock.bytes_since(&before_rwlock);
+
+    assert_eq!(mutex_allocs, 0, "cold mutex path must not allocate");
+    assert_eq!(mutex_bytes, 0, "cold mutex path must allocate no bytes");
+    assert_eq!(rwlock_allocs, 0, "cold rwlock path must not allocate");
+    assert_eq!(rwlock_bytes, 0, "cold rwlock path must allocate no bytes");
+    test_complete!(
+        "mutex_and_rwlock_uncontended_paths_zero_alloc",
+        mutex_allocs = mutex_allocs,
+        mutex_bytes = mutex_bytes,
+        rwlock_allocs = rwlock_allocs,
+        rwlock_bytes = rwlock_bytes
+    );
+}
+
+/// The first queued waiter pays for the lazy slab and stable-id index. Removing
+/// that waiter retains both capacities, so the next contention reuses them.
+#[test]
+fn mutex_waiter_storage_allocates_once_then_reuses_capacity() {
+    let _guard = ALLOC_TEST_GUARD.lock();
+    init_test("mutex_waiter_storage_allocates_once_then_reuses_capacity");
+
+    let mutex = AsupersyncMutex::new(());
+    let held = mutex.try_lock().expect("initial mutex guard acquires");
+    let cx = Cx::<cap::None>::detached_cancel_context();
+    let mut task_cx = Context::from_waker(std::task::Waker::noop());
+
+    let mut first_waiter = Box::pin(mutex.lock(&cx));
+    let before_first = AllocSnapshot::take();
+    assert!(matches!(
+        first_waiter.as_mut().poll(&mut task_cx),
+        Poll::Pending
+    ));
+    let after_first = AllocSnapshot::take();
+    let first_allocs = after_first.allocs_since(&before_first);
+    let first_bytes = after_first.bytes_since(&before_first);
+    drop(first_waiter);
+
+    let mut reused_waiter = Box::pin(mutex.lock(&cx));
+    let before_reuse = AllocSnapshot::take();
+    assert!(matches!(
+        reused_waiter.as_mut().poll(&mut task_cx),
+        Poll::Pending
+    ));
+    let after_reuse = AllocSnapshot::take();
+    let reuse_allocs = after_reuse.allocs_since(&before_reuse);
+    let reuse_bytes = after_reuse.bytes_since(&before_reuse);
+    drop(reused_waiter);
+    drop(held);
+
+    assert_eq!(
+        first_allocs, 2,
+        "first contention allocates the slab and stable-id index"
+    );
+    assert!(first_bytes > 0, "first contention must allocate storage");
+    assert_eq!(reuse_allocs, 0, "retained waiter capacity must be reused");
+    assert_eq!(reuse_bytes, 0, "capacity reuse must allocate no bytes");
+    test_complete!(
+        "mutex_waiter_storage_allocates_once_then_reuses_capacity",
+        first_allocs = first_allocs,
+        first_bytes = first_bytes,
+        reuse_allocs = reuse_allocs,
+        reuse_bytes = reuse_bytes
+    );
 }
 
 /// Releasing an active writer to a shallow batch of readers must use the
