@@ -263,6 +263,63 @@ packet does not authorize macro publication, feature rewiring, source,
 manifest, lockfile, or tracker edits, release readiness, or broad
 workspace-health claims.
 
+## Slab consumer static audit
+
+`CAP-TOKEN-SLAB-STATIC-AUDIT-V1` records the bounded static audit for
+`asupersync-d24mms.8`. It is `STATIC_SOURCE_PINNED_NOT_EXECUTED`: fourteen
+source pins revalidate the four external production consumers at revision
+`341ac3656a98e8b07749207d2996914b23042fcf`. No owned collection, source
+migration, manifest or lockfile edit, compiler, formatter, test, benchmark,
+Cargo lane, RCH lane, E2E scenario, or ledger regeneration ran. Its execution
+state is `NO_REPLACEMENT_OR_CONSUMER_MATRIX_EXECUTED`.
+
+The tracker baseline remains exact and is not a scope cap:
+
+- `service/rate_limit.rs` stores exhausted registrations behind slot-plus-id
+  handles. Refund and refill can detach the whole slab before wake callbacks,
+  and final waker destruction stays outside the bucket mutex.
+- `sync/semaphore.rs` stores a doubly linked FIFO behind slot-plus-id handles.
+  Middle/head removal, cancellation, close, panic, and drop must retain link,
+  capacity, and exactly-once retirement semantics.
+- `sync/waiter.rs` deliberately separates monotonic `WaiterId` identity from
+  reusable slab indices. Vacancy, insertion, removal, direct indexing, and
+  deferred waker handling all participate in its contract.
+- `time/wheel.rs` stores a generation per slab index. Cancel and expiry must
+  reject stale generations, remove activity exactly once, and purge or clear
+  the remaining timer storage when empty.
+
+The catalogued evidence does not bind to those consumers.
+`EVD-TOKEN-SLAB` points only to `memory_tier_slab_pool_contract.rs`; that
+fixture has zero external `slab::Slab` tokens and five `util::Arena` tokens.
+It verifies memory-tier capacity planning for the separate arena abstraction.
+The baseline's `EXECUTABLE_COMPLETE` classification may describe that fixture,
+but it is not an external-slab candidate/differential receipt. The declared
+`token_slab_churn` and `token_slab_cancel_cleanup` scenarios are absent from
+both retained dependency-sovereignty and aggregate runners.
+
+The four source files declare 40 rate-limit, 73 semaphore, eight waiter, and
+48 timer-wheel tests. These are valuable incumbent behavior surfaces,
+including stale-id, generation-mismatch, cancellation, FIFO, close, panic,
+clear, purge, overflow, and reuse cases. They were not executed here and do
+not compare an owned candidate.
+
+The stale marginal ledger contains 52 `normal:slab` rows across thirteen
+feature profiles and four targets. Twenty-five rows show no package-ID
+reduction because slab remains transitively reachable; twenty-seven remove
+one `slab@0.4.12` package. All rows classify the edge `SAFE-OWN` with no native
+code, build script, or proc macro. That uneven, older graph opportunity does
+not evaluate present consumer behavior, implementation risk, maintenance, or
+performance.
+
+Only the four-file call-site inventory is `STATIC_COMPLETE`; evidence binding,
+owned-API differential behavior, stale-key safety, cancellation/panic/shutdown
+quiescence, property/conformance coverage, real-consumer replay, platform and
+profile compilation, performance/resource ratchets, and fresh serialized
+ledger cutover are `MISSING`. The disposition is `KEEP_INCUMBENT` and
+`slab_exit_allowed=false`. This packet does not authorize slab removal, owned
+collection publication, source, manifest, lockfile, or tracker edits, release
+readiness, performance claims, or broad workspace-health claims.
+
 ## High-risk boundaries
 
 - SQLite uses the incumbent real-file/WAL corpus, but FrankenSQLite is

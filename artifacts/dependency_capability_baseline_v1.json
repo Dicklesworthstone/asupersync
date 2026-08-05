@@ -2424,6 +2424,430 @@
       "This audit does not authorize visibility removal, owned macro publication, feature rewiring, source behavior changes, tracker closure, release readiness, or broad workspace-health claims."
     ]
   },
+  "slab_static_audit": {
+    "audit_id": "CAP-TOKEN-SLAB-STATIC-AUDIT-V1",
+    "bead_id": "asupersync-d24mms.8",
+    "capability_id": "CAP-TOKEN-SLAB",
+    "observed_at_revision": "341ac3656a98e8b07749207d2996914b23042fcf",
+    "audit_state": "STATIC_SOURCE_PINNED_NOT_EXECUTED",
+    "execution_state": "NO_REPLACEMENT_OR_CONSUMER_MATRIX_EXECUTED",
+    "decision": {
+      "dependency": "slab",
+      "candidate": "minimal owned safe free-list slab",
+      "disposition": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "manifest_or_lockfile_edit_allowed": false,
+      "source_behavior_change_allowed": false,
+      "tracker_closure_allowed": false,
+      "reason": "The four external consumers are statically complete, but the catalogued EVD-TOKEN-SLAB fixture exercises the separate util::Arena abstraction and supplies no replacement parity for rate-limit, semaphore, waiter, or timer behavior. No owned candidate, differential corpus, consumer E2E matrix, performance receipt, or fresh ledger exists."
+    },
+    "dependency_contract": {
+      "manifest_kind": "unconditional normal dependency",
+      "manifest_requirement": "0.4",
+      "direct_locked_version": "0.4.12",
+      "root_direct_edge": "normal:slab",
+      "default_profile_reachable": true,
+      "external_production_file_count": 4,
+      "public_type_exposure_count": 0,
+      "security_requirements": [
+        "strictly safe implementation",
+        "stale key cannot access a newly reused security-sensitive record"
+      ],
+      "lifecycle_requirements": [
+        "cancelled registrations release slots exactly once",
+        "teardown leaves no occupied slots"
+      ]
+    },
+    "source_pins": [
+      {
+        "path": "Cargo.toml",
+        "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+        "line_count": 1038,
+        "role": "unconditional direct slab dependency declaration and default feature boundary"
+      },
+      {
+        "path": "Cargo.lock",
+        "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+        "line_count": 4666,
+        "role": "root direct edge and slab 0.4.12 package identity"
+      },
+      {
+        "path": "src/service/rate_limit.rs",
+        "sha256": "2fe0a3e9167bdd3c2259ff799876eae1e8305fd18c77d5513233adffc3e81e12",
+        "line_count": 2366,
+        "role": "generation-checked rate-limit waiter registry and detached wake batches"
+      },
+      {
+        "path": "src/sync/semaphore.rs",
+        "sha256": "244c8dc608d4d75d3272bd588e90889d6582f3dabf92f4dc2261f2ea68ce496c",
+        "line_count": 5375,
+        "role": "generation-checked FIFO semaphore waiter registry and cancellation unlinking"
+      },
+      {
+        "path": "src/sync/waiter.rs",
+        "sha256": "77d776a525d101d76e3bbbb243204610893b7ea9b7970965fe24bbde92d7525d",
+        "line_count": 585,
+        "role": "stable WaiterId to reusable slab-index map and doubly linked FIFO"
+      },
+      {
+        "path": "src/time/wheel.rs",
+        "sha256": "e42b82efb8c856f7efcaabfed89d2d6fefc80596a7e1ded1575ac5afe84549ff",
+        "line_count": 3193,
+        "role": "timer activity generation map, cancellation, expiry, and purge lifecycle"
+      },
+      {
+        "path": "src/service/mod.rs",
+        "sha256": "12a7452e8d39539c277a63f0b31f10b9a9f386b0405de6e92534aad5f656e595",
+        "line_count": 68,
+        "role": "unconditional public rate_limit module wiring"
+      },
+      {
+        "path": "src/sync/mod.rs",
+        "sha256": "443f6d91172b2fc2fb128735b2e3fa1738488cc221b84bb718a78a16799b8852",
+        "line_count": 146,
+        "role": "public semaphore and private shared waiter module wiring"
+      },
+      {
+        "path": "src/time/mod.rs",
+        "sha256": "8134c6c39eaaa7a6851823afd029bf689a4df6a037fd0dc5278eeb4092b02c66",
+        "line_count": 79,
+        "role": "private wheel module wiring behind the public time surface"
+      },
+      {
+        "path": "artifacts/dependency_capability_registry_v1.json",
+        "sha256": "e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2",
+        "line_count": 6917,
+        "role": "CAP-TOKEN-SLAB source ownership, scenario, safety, and lifecycle authority"
+      },
+      {
+        "path": "artifacts/dependency_marginal_ledger_v1.json",
+        "sha256": "9382d8357e59b49b01775f3efad2db95f2186c63bc432b5616ba20f3b9a218a9",
+        "line_count": 188045,
+        "role": "stale 52-row slab profile and target graph opportunity"
+      },
+      {
+        "path": "tests/memory_tier_slab_pool_contract.rs",
+        "sha256": "393b8571565ee1f87f7480680bcd4c130786397a1f5367a4371c5a10cf1e2907",
+        "line_count": 1452,
+        "role": "catalogued EVD-TOKEN-SLAB fixture that exercises util::Arena rather than external slab consumers"
+      },
+      {
+        "path": "scripts/run_dependency_sovereignty_e2e.sh",
+        "sha256": "388af46854549b837e7de602fbb84f99d26dcf2fef6b7e4f8575f1f6478d33a0",
+        "line_count": 1276,
+        "role": "dependency-sovereignty runner with neither declared token-slab scenario"
+      },
+      {
+        "path": "scripts/run_all_e2e.sh",
+        "sha256": "183b9cccec81d18909feddad4022c084f5fcac27823191b6ea64a2adba8a6aad",
+        "line_count": 1259,
+        "role": "aggregate E2E runner with no token-slab consumer matrix"
+      }
+    ],
+    "call_site_inventory": {
+      "state": "STATIC_COMPLETE_FOUR_PRODUCTION_FILES",
+      "exact_source_token": "slab::",
+      "production_file_count": 4,
+      "dependency_import_count": 3,
+      "qualified_type_or_constructor_count": 2,
+      "public_type_exposure_count": 0,
+      "consumer_roles": [
+        {
+          "path": "src/service/rate_limit.rs",
+          "role": "RateLimitWaiter registry",
+          "key_contract": "slot plus monotonic generation id",
+          "initialization": "Slab::new",
+          "operation_counts": {
+            "new": 6,
+            "get": 1,
+            "get_mut": 1,
+            "try_remove": 1,
+            "reserve": 1,
+            "insert": 1,
+            "mem_take": 3,
+            "consuming_iteration": 1
+          },
+          "critical_semantics": [
+            "a stale handle is rejected by stored id comparison",
+            "refund or refill detaches the whole waiter slab before wake callbacks",
+            "waker destruction remains outside the shared bucket mutex",
+            "reserved capacity and insertion happen beneath the mutex"
+          ]
+        },
+        {
+          "path": "src/sync/semaphore.rs",
+          "role": "SemaphoreState FIFO waiter registry",
+          "key_contract": "slot plus monotonic waiter id with explicit linked-list endpoints",
+          "initialization": "Slab::with_capacity(4)",
+          "operation_counts": {
+            "with_capacity": 1,
+            "get": 3,
+            "get_mut": 1,
+            "insert": 1,
+            "index_mutation": 3,
+            "remove": 1,
+            "len": 1,
+            "reserve": 2,
+            "mem_take": 1
+          },
+          "critical_semantics": [
+            "FIFO prev and next links remain exact across middle and head removal",
+            "stale handles are rejected by stored id comparison",
+            "cancel, drop, close, and wake-panic paths detach and retire registrations exactly once",
+            "queue length and capacity accounting remain observable through diagnostics"
+          ]
+        },
+        {
+          "path": "src/sync/waiter.rs",
+          "role": "WaiterChain reusable slot store",
+          "key_contract": "monotonic WaiterId maps separately to a reusable slab index",
+          "initialization": "Slab::with_capacity(4)",
+          "operation_counts": {
+            "with_capacity": 1,
+            "len": 1,
+            "vacant_key": 2,
+            "insert": 2,
+            "remove": 2,
+            "get_mut": 2,
+            "get": 1,
+            "index_access": 11
+          },
+          "critical_semantics": [
+            "insert returns exactly the preceding vacant key",
+            "stable waiter identity never aliases a reused slot",
+            "front and back insertion preserve doubly linked FIFO order",
+            "deferred waker cloning and retirement remain outside caller locks"
+          ]
+        },
+        {
+          "path": "src/time/wheel.rs",
+          "role": "TimerActivityMap generation store",
+          "key_contract": "TimerHandle id is slab index plus stored generation",
+          "initialization": "slab::Slab::with_capacity(64)",
+          "operation_counts": {
+            "with_capacity": 1,
+            "len": 1,
+            "is_empty": 4,
+            "clear": 1,
+            "insert": 1,
+            "get": 2,
+            "remove": 2
+          },
+          "critical_semantics": [
+            "generation mismatch cannot cancel a live reused slot",
+            "expiry removes the activity row exactly once before returning the waker",
+            "empty activity purges ready, overflow, and wheel storage",
+            "clear resets all activity and occupied bitmaps"
+          ]
+        }
+      ]
+    },
+    "existing_evidence_assessment": {
+      "baseline_claimed_state": "EXECUTABLE_COMPLETE",
+      "baseline_evidence_id": "EVD-TOKEN-SLAB",
+      "baseline_feature_profile": "default",
+      "baseline_fixture_path": "tests/memory_tier_slab_pool_contract.rs",
+      "binding_state": "MISBOUND_ADJACENT_EVIDENCE_NOT_REPLACEMENT_PARITY",
+      "fixture_external_slab_token_count": 0,
+      "fixture_util_arena_token_count": 5,
+      "fixture_declared_test_count": 12,
+      "fixture_covered_surface": "memory-tier RuntimeCapacityHints and util::Arena record presizing",
+      "missing_consumer_surfaces": [
+        "RateLimitWaiter registry",
+        "SemaphoreState waiter registry",
+        "WaiterChain stable identity and free-slot reuse",
+        "TimerActivityMap generation and purge lifecycle"
+      ],
+      "source_declared_test_counts": {
+        "rate_limit": 40,
+        "semaphore": 73,
+        "waiter": 8,
+        "timer_wheel": 48
+      },
+      "existing_source_test_state": "INCUMBENT_BEHAVIOR_SURFACES_NOT_CANDIDATE_DIFFERENTIAL_RECEIPTS",
+      "declared_scenario_ids": [
+        "token_slab_churn",
+        "token_slab_cancel_cleanup"
+      ],
+      "dependency_sovereignty_runner_state": "SCENARIOS_NOT_IMPLEMENTED",
+      "aggregate_runner_state": "SCENARIOS_NOT_IMPLEMENTED",
+      "replacement_execution_receipt_present": false
+    },
+    "marginal_ledger_assessment": {
+      "artifact_path": "artifacts/dependency_marginal_ledger_v1.json",
+      "ledger_source_commit": "ddea6250aee80357756fa1f39456823df88f7af1",
+      "source_commit_matches_observed_revision": false,
+      "fresh_for_cutover": false,
+      "slab_measurement_row_count": 52,
+      "feature_profile_count": 13,
+      "target_triple_count": 4,
+      "feature_profiles": [
+        "cli",
+        "compression",
+        "default",
+        "fuzz-quarantine",
+        "io-uring",
+        "kafka",
+        "loom-tests",
+        "metrics",
+        "minimal",
+        "sqlite",
+        "tls",
+        "trace-compression",
+        "workspace-dev-build-audit"
+      ],
+      "target_triples": [
+        "aarch64-apple-darwin",
+        "wasm32-unknown-unknown",
+        "x86_64-pc-windows-msvc",
+        "x86_64-unknown-linux-gnu"
+      ],
+      "marginal_package_version_count_distribution": [
+        {
+          "marginal_package_version_count": 0,
+          "row_count": 25
+        },
+        {
+          "marginal_package_version_count": 1,
+          "row_count": 27
+        }
+      ],
+      "marginal_package_version": "slab@0.4.12",
+      "unsafe_exposure_class": "SAFE-OWN",
+      "marginal_native_code_state": "none",
+      "build_script_count": 0,
+      "proc_macro_count": 0,
+      "favorable_cutover_verdict": false,
+      "interpretation": "Twenty-five cells retain slab transitively and gain no package-ID reduction; twenty-seven remove one package. The older ledger does not evaluate candidate maintenance, implementation risk, consumer semantics, or current profile exactness."
+    },
+    "required_evidence_matrix": {
+      "status": "MISSING_NOT_RUN",
+      "captured_case_count": 0,
+      "captured_cases": [],
+      "consumer_cells": [
+        "rate-limit registration, refill, refund, replacement, hostile wake, drop, and clone",
+        "semaphore FIFO enqueue, middle/head removal, cancel, close, panic, and shutdown",
+        "waiter front/back insertion, reuse, stale id, exhaustion, deferred clone, and drain",
+        "timer register, cancel, generation mismatch, expiry, clear, purge, coalescing, and overflow"
+      ],
+      "collection_cells": [
+        "happy and empty",
+        "boundary and maximum capacity",
+        "growth and retained capacity",
+        "vacancy and deterministic free-slot reuse",
+        "invalid and stale key",
+        "indexing and mutation",
+        "consuming and borrowed iteration",
+        "panic and allocation failure"
+      ],
+      "profile_cells": [
+        "default",
+        "minimal",
+        "loom-tests",
+        "runtime and lock metrics",
+        "workspace all-targets",
+        "feature combinations reaching each consumer"
+      ],
+      "target_cells": [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+        "wasm32-unknown-unknown"
+      ],
+      "required_metrics": [
+        "p50 latency",
+        "p95 latency",
+        "p999 latency",
+        "CPU time",
+        "allocation count and bytes",
+        "peak and retained RSS",
+        "capacity and free-slot retention",
+        "stale alias, duplicate, leak, and double-release count"
+      ],
+      "required_record_fields": [
+        "case_id",
+        "source_revision",
+        "exact_command",
+        "incumbent_and_candidate_identity",
+        "feature_set",
+        "target_and_host_identity",
+        "toolchain_identity",
+        "workload_seed_and_schedule",
+        "raw_samples_and_summary",
+        "allocation_and_capacity_observations",
+        "stdout_and_stderr",
+        "exit_code",
+        "structured_events_ndjson",
+        "redaction_and_replay_result"
+      ],
+      "missing_or_unsupported_policy": "A missing, skipped, stale, misbound, non-replayable, statistically inconclusive, or regressed cell is not SAME-or-BETTER evidence and keeps slab."
+    },
+    "cutover_gate": {
+      "required_state": "SAME_OR_BETTER",
+      "rows": [
+        {
+          "row_id": "SLAB-CALLSITE-INVENTORY",
+          "state": "STATIC_COMPLETE",
+          "requirement": "exactly four external production consumers and their observed operations remain source-pinned"
+        },
+        {
+          "row_id": "SLAB-EVIDENCE-BINDING",
+          "state": "MISSING",
+          "requirement": "replacement evidence directly exercises all four external slab consumers rather than util::Arena"
+        },
+        {
+          "row_id": "SLAB-OWNED-API-DIFFERENTIAL",
+          "state": "MISSING",
+          "requirement": "owned safe API matches every observed construction, vacancy, access, removal, iteration, clear, reserve, and reuse behavior"
+        },
+        {
+          "row_id": "SLAB-STALE-KEY-GENERATION-SAFETY",
+          "state": "MISSING",
+          "requirement": "candidate reuse cannot alias stale rate-limit, semaphore, waiter, or timer identities"
+        },
+        {
+          "row_id": "SLAB-CANCEL-PANIC-SHUTDOWN-QUIESCENCE",
+          "state": "MISSING",
+          "requirement": "contention, cancellation, panic, close, drop, wake, and shutdown release every slot exactly once without leaks"
+        },
+        {
+          "row_id": "SLAB-PROPERTY-CONFORMANCE-CORPUS",
+          "state": "MISSING",
+          "requirement": "independent invariant, property, mutation, and differential cases cover boundary, growth, vacancy, indexing, and stale keys"
+        },
+        {
+          "row_id": "SLAB-REAL-CONSUMER-E2E-REPLAY",
+          "state": "MISSING",
+          "requirement": "real rate-limit, semaphore, waiter, and timer journeys retain structured logs, provenance, cleanup, redaction, and replay"
+        },
+        {
+          "row_id": "SLAB-PLATFORM-PROFILE-MATRIX",
+          "state": "MISSING",
+          "requirement": "all declared target and feature cells compile and execute under the remote-only proof policy"
+        },
+        {
+          "row_id": "SLAB-PERFORMANCE-RESOURCE-RATCHET",
+          "state": "MISSING",
+          "requirement": "latency, CPU, allocation, RSS, capacity retention, and churn are SAME or BETTER on representative hosts"
+        },
+        {
+          "row_id": "SLAB-FRESH-LEDGER-SERIALIZED-CUTOVER",
+          "state": "MISSING",
+          "requirement": "a current favorable trust and package-ID ledger plus checked manifest and lock scans land only after parity"
+        }
+      ],
+      "on_any_missing_or_regressed_row": "KEEP_INCUMBENT",
+      "slab_exit_allowed": false,
+      "tracker_closure_allowed": false
+    },
+    "no_claims": [
+      "No slab replacement, owned collection, source migration, manifest edit, lockfile edit, compiler, formatter, unit test, property test, E2E test, benchmark, Cargo lane, RCH lane, or ledger regeneration was executed.",
+      "A complete four-file source inventory and incumbent source tests do not prove candidate behavior, stale-key safety, cancellation, performance, or resource parity.",
+      "EVD-TOKEN-SLAB is misbound adjacent util::Arena evidence and is not an external slab replacement receipt.",
+      "The stale 52-row marginal ledger quantifies uneven package-ID opportunity but does not authorize cutover.",
+      "This audit does not authorize slab removal, owned collection publication, source, manifest, lockfile, or tracker edits, release readiness, performance claims, or broad workspace-health claims."
+    ]
+  },
   "no_claim_boundaries": [
     "This artifact is a baseline inventory, not proof that any replacement is SAME-or-BETTER.",
     "No row authorizes dependency removal, public API narrowing, format deletion, feature removal, service deprecation, unsafe expansion, or cutover.",

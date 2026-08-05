@@ -34,6 +34,10 @@ const WHOAMI_CALL: &str = concat!("whoami", "::distro()");
 const VISIBILITY_BEAD_ID: &str = "asupersync-d24mms.7";
 const VISIBILITY_AUDIT_ID: &str = "CAP-VISIBILITY-MACRO-STATIC-AUDIT-V1";
 const VISIBILITY_MAKE_TOKEN: &str = concat!("visibility", "::make(pub)");
+const SLAB_BEAD_ID: &str = "asupersync-d24mms.8";
+const SLAB_AUDIT_ID: &str = "CAP-TOKEN-SLAB-STATIC-AUDIT-V1";
+const SLAB_PATH_TOKEN: &str = concat!("sl", "ab::");
+const SLAB_BASELINE_FIXTURE: &str = "tests/memory_tier_slab_pool_contract.rs";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -126,6 +130,13 @@ fn count_trimmed_lines(source: &str, marker: &str) -> u64 {
             .count(),
     )
     .expect("source line count fits u64")
+}
+
+fn production_before_test_module(source: &str) -> &str {
+    source
+        .split_once("\n#[cfg(test)]\nmod tests")
+        .map(|(production, _)| production)
+        .expect("source must have a top-level cfg(test) module boundary")
 }
 
 fn rust_source_paths_with_token(token: &str) -> BTreeSet<String> {
@@ -935,6 +946,10 @@ fn runner_and_docs_expose_replay_logging_and_no_claim_boundaries() {
         VISIBILITY_BEAD_ID,
         "NO_MACRO_REPLACEMENT_OR_COMPILE_MATRIX_EXECUTED",
         "visibility_exit_allowed=false",
+        SLAB_AUDIT_ID,
+        SLAB_BEAD_ID,
+        "NO_REPLACEMENT_OR_CONSUMER_MATRIX_EXECUTED",
+        "slab_exit_allowed=false",
         GENERATED_BEGIN,
         GENERATED_END,
     ] {
@@ -2238,6 +2253,502 @@ fn visibility_macro_static_audit_is_source_pinned_and_fail_closed() {
         "not a visibility replacement receipt",
         "does not authorize cutover",
         "does not authorize visibility removal",
+    ] {
+        assert!(no_claims.contains(required), "missing no-claim: {required}");
+    }
+}
+
+#[test]
+fn slab_static_audit_is_source_pinned_and_rejects_misbound_evidence() {
+    let value = artifact();
+    let audit = object(&value, "slab_static_audit");
+    assert_eq!(string(audit, "audit_id"), SLAB_AUDIT_ID);
+    assert_eq!(string(audit, "bead_id"), SLAB_BEAD_ID);
+    assert_eq!(string(audit, "capability_id"), "CAP-TOKEN-SLAB");
+    assert_eq!(
+        string(audit, "audit_state"),
+        "STATIC_SOURCE_PINNED_NOT_EXECUTED"
+    );
+    assert_eq!(
+        string(audit, "execution_state"),
+        "NO_REPLACEMENT_OR_CONSUMER_MATRIX_EXECUTED"
+    );
+    assert_eq!(
+        string(audit, "observed_at_revision"),
+        "341ac3656a98e8b07749207d2996914b23042fcf"
+    );
+
+    let decision = object(audit, "decision");
+    assert_eq!(string(decision, "dependency"), "slab");
+    assert_eq!(
+        string(decision, "candidate"),
+        "minimal owned safe free-list slab"
+    );
+    assert_eq!(string(decision, "disposition"), "KEEP_INCUMBENT");
+    assert!(!boolean(decision, "dependency_exit_allowed"));
+    assert!(!boolean(decision, "manifest_or_lockfile_edit_allowed"));
+    assert!(!boolean(decision, "source_behavior_change_allowed"));
+    assert!(!boolean(decision, "tracker_closure_allowed"));
+
+    let dependency = object(audit, "dependency_contract");
+    assert_eq!(
+        string(dependency, "manifest_kind"),
+        "unconditional normal dependency"
+    );
+    assert_eq!(string(dependency, "manifest_requirement"), "0.4");
+    assert_eq!(string(dependency, "direct_locked_version"), "0.4.12");
+    assert_eq!(string(dependency, "root_direct_edge"), "normal:slab");
+    assert!(boolean(dependency, "default_profile_reachable"));
+    assert_eq!(unsigned(dependency, "external_production_file_count"), 4);
+    assert_eq!(unsigned(dependency, "public_type_exposure_count"), 0);
+    assert_eq!(array(dependency, "security_requirements").len(), 2);
+    assert_eq!(array(dependency, "lifecycle_requirements").len(), 2);
+
+    let pins = array(audit, "source_pins");
+    assert_eq!(pins.len(), 14);
+    let pinned_paths = pins
+        .iter()
+        .map(|pin| string(pin, "path"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        pinned_paths,
+        BTreeSet::from([
+            "Cargo.lock",
+            "Cargo.toml",
+            "artifacts/dependency_capability_registry_v1.json",
+            "artifacts/dependency_marginal_ledger_v1.json",
+            "scripts/run_all_e2e.sh",
+            "scripts/run_dependency_sovereignty_e2e.sh",
+            "src/service/mod.rs",
+            "src/service/rate_limit.rs",
+            "src/sync/mod.rs",
+            "src/sync/semaphore.rs",
+            "src/sync/waiter.rs",
+            "src/time/mod.rs",
+            "src/time/wheel.rs",
+            SLAB_BASELINE_FIXTURE,
+        ])
+    );
+    for pin in pins {
+        let path = string(pin, "path");
+        let source = read_repo_file(path);
+        assert_eq!(
+            sha256_hex(&read_repo_bytes(path)),
+            string(pin, "sha256"),
+            "source pin drift for {path}"
+        );
+        assert_eq!(
+            u64::try_from(source.lines().count()).expect("line count fits u64"),
+            unsigned(pin, "line_count"),
+            "line-count drift for {path}"
+        );
+        assert!(!string(pin, "role").trim().is_empty());
+    }
+
+    assert_eq!(
+        rust_source_paths_with_token(SLAB_PATH_TOKEN),
+        BTreeSet::from([
+            "src/service/rate_limit.rs".to_owned(),
+            "src/sync/semaphore.rs".to_owned(),
+            "src/sync/waiter.rs".to_owned(),
+            "src/time/wheel.rs".to_owned(),
+        ])
+    );
+    let inventory = object(audit, "call_site_inventory");
+    assert_eq!(
+        string(inventory, "state"),
+        "STATIC_COMPLETE_FOUR_PRODUCTION_FILES"
+    );
+    assert_eq!(string(inventory, "exact_source_token"), SLAB_PATH_TOKEN);
+    assert_eq!(unsigned(inventory, "production_file_count"), 4);
+    assert_eq!(unsigned(inventory, "dependency_import_count"), 3);
+    assert_eq!(unsigned(inventory, "qualified_type_or_constructor_count"), 2);
+    assert_eq!(unsigned(inventory, "public_type_exposure_count"), 0);
+
+    let roles = array(inventory, "consumer_roles");
+    assert_eq!(roles.len(), 4);
+    let by_path = roles
+        .iter()
+        .map(|row| (string(row, "path"), row))
+        .collect::<BTreeMap<_, _>>();
+
+    let rate = by_path
+        .get("src/service/rate_limit.rs")
+        .copied()
+        .expect("rate-limit consumer row");
+    assert_eq!(string(rate, "role"), "RateLimitWaiter registry");
+    let rate_operations = object(rate, "operation_counts");
+    for (operation, expected) in [
+        ("new", 6),
+        ("get", 1),
+        ("get_mut", 1),
+        ("try_remove", 1),
+        ("reserve", 1),
+        ("insert", 1),
+        ("mem_take", 3),
+        ("consuming_iteration", 1),
+    ] {
+        assert_eq!(unsigned(rate_operations, operation), expected);
+    }
+    let rate_source = read_repo_file("src/service/rate_limit.rs");
+    let rate_production = production_before_test_module(&rate_source);
+    assert_eq!(count_occurrences(rate_production, "Slab::new()"), 6);
+    assert_eq!(count_occurrences(rate_production, "state.waiters.get("), 1);
+    assert_eq!(count_occurrences(rate_production, ".get_mut(handle.slot)"), 1);
+    assert_eq!(count_occurrences(rate_production, "try_remove(handle.slot)"), 1);
+    assert_eq!(count_occurrences(rate_production, "state.waiters.reserve("), 1);
+    assert_eq!(count_occurrences(rate_production, "state.waiters.insert("), 1);
+    assert_eq!(
+        count_occurrences(rate_production, "std::mem::take(&mut state.waiters)"),
+        3
+    );
+    assert_eq!(
+        count_occurrences(rate_production, "for (_, waiter) in waiters"),
+        1
+    );
+    assert!(rate_production.contains("(waiter.id == handle.id).then_some(waiter)"));
+
+    let semaphore = by_path
+        .get("src/sync/semaphore.rs")
+        .copied()
+        .expect("semaphore consumer row");
+    assert_eq!(string(semaphore, "role"), "SemaphoreState FIFO waiter registry");
+    let semaphore_operations = object(semaphore, "operation_counts");
+    for (operation, expected) in [
+        ("with_capacity", 1),
+        ("get", 3),
+        ("get_mut", 1),
+        ("insert", 1),
+        ("index_mutation", 3),
+        ("remove", 1),
+        ("len", 1),
+        ("reserve", 2),
+        ("mem_take", 1),
+    ] {
+        assert_eq!(unsigned(semaphore_operations, operation), expected);
+    }
+    let semaphore_source = read_repo_file("src/sync/semaphore.rs");
+    let semaphore_production = production_before_test_module(&semaphore_source);
+    assert_eq!(
+        count_occurrences(semaphore_production, "Slab::with_capacity(4)"),
+        1
+    );
+    assert_eq!(
+        count_occurrences(semaphore_production, "state.waiters.get("),
+        3
+    );
+    assert_eq!(
+        count_occurrences(semaphore_production, "state.waiters.get_mut("),
+        1
+    );
+    assert_eq!(
+        count_occurrences(semaphore_production, "state.waiters.insert("),
+        1
+    );
+    assert_eq!(
+        count_occurrences(semaphore_production, "state.waiters["),
+        3
+    );
+    assert_eq!(
+        count_occurrences(semaphore_production, "state.waiters.remove("),
+        1
+    );
+    assert_eq!(
+        count_occurrences(semaphore_production, "state.waiters.len()"),
+        1
+    );
+    assert_eq!(
+        count_occurrences(semaphore_production, "state.waiters.reserve("),
+        2
+    );
+    assert_eq!(
+        count_occurrences(semaphore_production, "std::mem::take(&mut state.waiters)"),
+        1
+    );
+    assert!(semaphore_production.contains("(waiter.id == handle.id).then_some(waiter)"));
+
+    let waiter = by_path
+        .get("src/sync/waiter.rs")
+        .copied()
+        .expect("waiter consumer row");
+    assert_eq!(string(waiter, "role"), "WaiterChain reusable slot store");
+    let waiter_operations = object(waiter, "operation_counts");
+    for (operation, expected) in [
+        ("with_capacity", 1),
+        ("len", 1),
+        ("vacant_key", 2),
+        ("insert", 2),
+        ("remove", 2),
+        ("get_mut", 2),
+        ("get", 1),
+        ("index_access", 11),
+    ] {
+        assert_eq!(unsigned(waiter_operations, operation), expected);
+    }
+    let waiter_source = read_repo_file("src/sync/waiter.rs");
+    let waiter_production = production_before_test_module(&waiter_source);
+    for (token, expected) in [
+        ("Slab::with_capacity(4)", 1),
+        ("self.slots.len()", 1),
+        ("self.slots.vacant_key()", 2),
+        ("self.slots.insert(", 2),
+        ("self.slots.remove(", 2),
+        ("self.slots.get_mut(", 2),
+        ("self.slots.get(", 1),
+        ("self.slots[", 11),
+    ] {
+        assert_eq!(count_occurrences(waiter_production, token), expected);
+    }
+    assert_eq!(count_occurrences(waiter_production, "debug_assert_eq!(inserted, index)"), 2);
+    assert!(waiter_production.contains("WaiterChain exhausted its stable waiter ID space"));
+
+    let wheel = by_path
+        .get("src/time/wheel.rs")
+        .copied()
+        .expect("timer-wheel consumer row");
+    assert_eq!(string(wheel, "role"), "TimerActivityMap generation store");
+    let wheel_operations = object(wheel, "operation_counts");
+    for (operation, expected) in [
+        ("with_capacity", 1),
+        ("len", 1),
+        ("is_empty", 4),
+        ("clear", 1),
+        ("insert", 1),
+        ("get", 2),
+        ("remove", 2),
+    ] {
+        assert_eq!(unsigned(wheel_operations, operation), expected);
+    }
+    let wheel_source = read_repo_file("src/time/wheel.rs");
+    let wheel_production = production_before_test_module(&wheel_source);
+    for (token, expected) in [
+        ("slab::Slab::with_capacity(64)", 1),
+        ("self.active.len()", 1),
+        ("self.active.is_empty()", 4),
+        ("self.active.clear()", 1),
+        ("self.active.insert(", 1),
+        ("self.active.remove(", 2),
+    ] {
+        assert_eq!(count_occurrences(wheel_production, token), expected);
+    }
+    assert!(wheel_production.contains(".active\n            .get(id_usize)"));
+    assert!(wheel_production.contains("self.active\n            .get(entry.id as usize)"));
+    assert!(wheel_production.contains("|&g| g == handle.generation"));
+    assert!(wheel_production.contains("*generation == entry.generation"));
+
+    let manifest = read_repo_file("Cargo.toml");
+    assert!(manifest.contains("slab = \"0.4\""));
+    let lock = read_repo_file("Cargo.lock");
+    assert!(lock.contains("name = \"slab\"\nversion = \"0.4.12\""));
+    assert!(read_repo_file("src/service/mod.rs").contains("pub mod rate_limit;"));
+    let sync_module = read_repo_file("src/sync/mod.rs");
+    assert!(sync_module.contains("pub mod semaphore;"));
+    assert!(sync_module.contains("mod waiter;"));
+    assert!(read_repo_file("src/time/mod.rs").contains("mod wheel;"));
+
+    let registry = registry_rows();
+    let capability = registry
+        .get("CAP-TOKEN-SLAB")
+        .expect("token-slab capability");
+    assert_eq!(
+        string_set(capability, "source_owners"),
+        BTreeSet::from([
+            "src/service/rate_limit.rs".to_owned(),
+            "src/sync/semaphore.rs".to_owned(),
+            "src/sync/waiter.rs".to_owned(),
+            "src/time/wheel.rs".to_owned(),
+        ])
+    );
+    assert_eq!(
+        string_set(capability, "features"),
+        BTreeSet::from(["default".to_owned()])
+    );
+    assert_eq!(
+        string_set(capability, "replacement_bead_ids"),
+        BTreeSet::from([SLAB_BEAD_ID.to_owned()])
+    );
+    assert_eq!(
+        string_set(capability, "scenario_ids"),
+        BTreeSet::from([
+            "token_slab_cancel_cleanup".to_owned(),
+            "token_slab_churn".to_owned(),
+        ])
+    );
+    assert_eq!(
+        string(capability, "cutover_state"),
+        "BLOCKED_PENDING_EVIDENCE"
+    );
+
+    let baseline_index = capability_index(&value, "CAP-TOKEN-SLAB");
+    let baseline = &value["capability_baselines"][baseline_index];
+    assert_eq!(string(baseline, "baseline_state"), "EXECUTABLE_COMPLETE");
+    assert_eq!(
+        string_set(baseline, "evidence_ids"),
+        BTreeSet::from(["EVD-TOKEN-SLAB".to_owned()])
+    );
+    assert!(!boolean(baseline, "cutover_eligible"));
+
+    let assessment = object(audit, "existing_evidence_assessment");
+    assert_eq!(
+        string(assessment, "binding_state"),
+        "MISBOUND_ADJACENT_EVIDENCE_NOT_REPLACEMENT_PARITY"
+    );
+    assert_eq!(
+        string(assessment, "baseline_fixture_path"),
+        SLAB_BASELINE_FIXTURE
+    );
+    assert_eq!(unsigned(assessment, "fixture_external_slab_token_count"), 0);
+    assert_eq!(unsigned(assessment, "fixture_util_arena_token_count"), 5);
+    assert_eq!(unsigned(assessment, "fixture_declared_test_count"), 12);
+    assert!(!boolean(
+        assessment,
+        "replacement_execution_receipt_present"
+    ));
+
+    let catalog = evidence_rows(&value);
+    let catalogued = catalog
+        .get("EVD-TOKEN-SLAB")
+        .expect("catalogued token-slab evidence");
+    assert_eq!(
+        string_set(catalogued, "fixture_paths"),
+        BTreeSet::from([SLAB_BASELINE_FIXTURE.to_owned()])
+    );
+    let fixture = read_repo_file(SLAB_BASELINE_FIXTURE);
+    assert_eq!(count_occurrences(&fixture, SLAB_PATH_TOKEN), 0);
+    let arena_token_count = count_occurrences(&fixture, "use asupersync::util::Arena;")
+        + count_occurrences(&fixture, "Arena::with_capacity")
+        + count_occurrences(&fixture, "Arena::<");
+    assert_eq!(arena_token_count, 5);
+    assert_eq!(count_trimmed_lines(&fixture, "#[test]"), 12);
+    for absent in ["RateLimit", "SemaphoreState", "WaiterChain", "TimerWheel"] {
+        assert!(!fixture.contains(absent), "misbound fixture contains {absent}");
+    }
+
+    let declared_counts = object(assessment, "source_declared_test_counts");
+    assert_eq!(
+        count_trimmed_lines(&rate_source, "#[test]"),
+        unsigned(declared_counts, "rate_limit")
+    );
+    assert_eq!(
+        count_trimmed_lines(&semaphore_source, "#[test]"),
+        unsigned(declared_counts, "semaphore")
+    );
+    assert_eq!(
+        count_trimmed_lines(&waiter_source, "#[test]"),
+        unsigned(declared_counts, "waiter")
+    );
+    assert_eq!(
+        count_trimmed_lines(&wheel_source, "#[test]"),
+        unsigned(declared_counts, "timer_wheel")
+    );
+    assert!(waiter_source.contains("popped_waiter_id_cannot_remove_reused_slab_slot"));
+    assert!(wheel_source.contains("wheel_cancel_rejects_generation_mismatch_without_removing"));
+    assert!(semaphore_source.contains("metamorphic_fifo_order_under_cancellation"));
+    assert!(rate_source.contains("panicking_waiter_does_not_suppress_other_refund_wakes"));
+
+    let dependency_runner = read_repo_file("scripts/run_dependency_sovereignty_e2e.sh");
+    let aggregate_runner = read_repo_file("scripts/run_all_e2e.sh");
+    for absent in ["token_slab_churn", "token_slab_cancel_cleanup"] {
+        assert!(!dependency_runner.contains(absent));
+        assert!(!aggregate_runner.contains(absent));
+    }
+
+    let marginal = object(audit, "marginal_ledger_assessment");
+    assert_eq!(unsigned(marginal, "slab_measurement_row_count"), 52);
+    assert_eq!(unsigned(marginal, "feature_profile_count"), 13);
+    assert_eq!(unsigned(marginal, "target_triple_count"), 4);
+    assert!(!boolean(marginal, "source_commit_matches_observed_revision"));
+    assert!(!boolean(marginal, "fresh_for_cutover"));
+    assert!(!boolean(marginal, "favorable_cutover_verdict"));
+    let ledger = parse_json(MARGINAL_LEDGER_PATH);
+    assert_eq!(
+        string(&ledger, "source_commit"),
+        string(marginal, "ledger_source_commit")
+    );
+    let rows = array(&ledger, "marginal_measurements")
+        .iter()
+        .filter(|row| row.get("dependency_name").and_then(Value::as_str) == Some("slab"))
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 52);
+    assert_eq!(
+        rows.iter()
+            .map(|row| string(row, "feature_profile").to_owned())
+            .collect::<BTreeSet<_>>(),
+        string_set(marginal, "feature_profiles")
+    );
+    assert_eq!(
+        rows.iter()
+            .map(|row| string(row, "target_triple").to_owned())
+            .collect::<BTreeSet<_>>(),
+        string_set(marginal, "target_triples")
+    );
+    let mut package_count_distribution = BTreeMap::new();
+    for row in rows {
+        assert_eq!(string(row, "direct_root_edge"), "normal:slab");
+        assert_eq!(string(row, "unsafe_exposure_class"), "SAFE-OWN");
+        assert!(array(row, "build_scripts").is_empty());
+        assert!(array(row, "proc_macros").is_empty());
+        assert_eq!(string(object(row, "marginal_native_code"), "status"), "none");
+        let package_count = unsigned(row, "marginal_package_version_count");
+        *package_count_distribution.entry(package_count).or_insert(0usize) += 1;
+        if package_count == 0 {
+            assert!(array(row, "marginal_package_versions").is_empty());
+        } else {
+            assert_eq!(package_count, 1);
+            assert_eq!(array(row, "marginal_package_versions").len(), 1);
+        }
+    }
+    assert_eq!(
+        package_count_distribution,
+        BTreeMap::from([(0, 25usize), (1, 27usize)])
+    );
+
+    let matrix = object(audit, "required_evidence_matrix");
+    assert_eq!(string(matrix, "status"), "MISSING_NOT_RUN");
+    assert_eq!(unsigned(matrix, "captured_case_count"), 0);
+    assert!(array(matrix, "captured_cases").is_empty());
+    assert_eq!(array(matrix, "consumer_cells").len(), 4);
+    assert_eq!(array(matrix, "collection_cells").len(), 8);
+    assert_eq!(array(matrix, "profile_cells").len(), 6);
+    assert_eq!(array(matrix, "target_cells").len(), 4);
+    assert_eq!(array(matrix, "required_metrics").len(), 8);
+
+    let gate = object(audit, "cutover_gate");
+    assert_eq!(string(gate, "required_state"), "SAME_OR_BETTER");
+    let gate_rows = array(gate, "rows");
+    assert_eq!(gate_rows.len(), 10);
+    assert_eq!(
+        gate_rows
+            .iter()
+            .filter(|row| row.get("state").and_then(Value::as_str) == Some("STATIC_COMPLETE"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        gate_rows
+            .iter()
+            .filter(|row| row.get("state").and_then(Value::as_str) == Some("MISSING"))
+            .count(),
+        9
+    );
+    assert_eq!(
+        string(gate, "on_any_missing_or_regressed_row"),
+        "KEEP_INCUMBENT"
+    );
+    assert!(!boolean(gate, "slab_exit_allowed"));
+    assert!(!boolean(gate, "tracker_closure_allowed"));
+
+    let no_claims = array(audit, "no_claims")
+        .iter()
+        .map(|claim| claim.as_str().expect("no-claim text"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    for required in [
+        "No slab replacement",
+        "do not prove candidate behavior",
+        "misbound adjacent util::Arena evidence",
+        "does not authorize cutover",
+        "does not authorize slab removal",
     ] {
         assert!(no_claims.contains(required), "missing no-claim: {required}");
     }
