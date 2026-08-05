@@ -35,6 +35,10 @@ pub enum BrowserStorageError {
     /// Backend is temporarily unavailable in current execution context.
     BackendUnavailable(StorageBackend),
     /// Host-backed backend returned an operation error.
+    ///
+    /// This reports the adapter-visible terminal result. A host implementation
+    /// may have partially applied an effect before returning the error, so the
+    /// error does not prove that the host state is unchanged.
     HostBackend {
         /// Backend that produced the error.
         backend: StorageBackend,
@@ -94,16 +98,16 @@ pub struct StorageEvent {
 /// Deterministic outcome classification for storage telemetry events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageEventOutcome {
-    /// Request passed policy checks and was applied.
+    /// Request completed successfully.
     Allowed,
-    /// Request was denied by policy.
+    /// Request returned an error, including policy and host errors.
     Denied,
 }
 
 /// Stable reason code attached to storage telemetry events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageEventReasonCode {
-    /// Request passed policy checks and was applied.
+    /// Request completed successfully.
     Allowed,
     /// Namespace was empty/invalid.
     InvalidNamespace,
@@ -164,7 +168,10 @@ pub type StorageHostFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String
 /// Async host-backed browser storage implementation contract.
 ///
 /// This is required for browser-native backends such as IndexedDB whose host
-/// APIs are inherently asynchronous.
+/// APIs are inherently asynchronous. The adapter records a terminal event only
+/// after one of these futures resolves. Dropping an unpolled or pending future
+/// records no terminal outcome because the generic host contract cannot know
+/// whether an effect was absent, committed, or indeterminate.
 pub trait AsyncStorageHostBackend: std::fmt::Debug + Send + Sync {
     /// Writes a value for the given namespace/key.
     fn set<'a>(
@@ -359,7 +366,7 @@ impl BrowserStorageAdapter {
         let namespace = namespace.into();
         let key = key.into();
         let request = StorageRequest::set(backend, namespace.clone(), key.clone(), value.len());
-        self.authorize_and_record(&request)?;
+        self.authorize_request(&request)?;
         if self.async_host_backend(backend).is_some() {
             return self.sync_backend_requires_async(&request);
         }
@@ -379,7 +386,7 @@ impl BrowserStorageAdapter {
 
         self.used_bytes = projected_bytes;
         self.entries.insert(storage_key, value);
-        Ok(())
+        Ok(self.complete_allowed(&request, ()))
     }
 
     /// Reads a value by `(backend, namespace, key)`.
@@ -392,7 +399,7 @@ impl BrowserStorageAdapter {
         let namespace = namespace.into();
         let key = key.into();
         let request = StorageRequest::get(backend, namespace.clone(), key.clone());
-        self.authorize_and_record(&request)?;
+        self.authorize_request(&request)?;
         if self.async_host_backend(backend).is_some() {
             return self.sync_backend_requires_async(&request);
         }
@@ -408,10 +415,11 @@ impl BrowserStorageAdapter {
                 Err(message) => return self.host_backend_error(&request, message),
             };
             self.sync_host_read_cache(&request, &storage_key, value.as_deref())?;
-            return Ok(value);
+            return Ok(self.complete_allowed(&request, value));
         }
 
-        Ok(self.entries.get(&storage_key).cloned())
+        let value = self.entries.get(&storage_key).cloned();
+        Ok(self.complete_allowed(&request, value))
     }
 
     /// Deletes a single key.
@@ -424,7 +432,7 @@ impl BrowserStorageAdapter {
         let namespace = namespace.into();
         let key = key.into();
         let request = StorageRequest::delete(backend, namespace.clone(), key.clone());
-        self.authorize_and_record(&request)?;
+        self.authorize_request(&request)?;
         if self.async_host_backend(backend).is_some() {
             return self.sync_backend_requires_async(&request);
         }
@@ -441,18 +449,19 @@ impl BrowserStorageAdapter {
                 Err(message) => return self.host_backend_error(&request, message),
             };
             self.remove_cached_entry(&storage_key);
-            return Ok(deleted);
+            return Ok(self.complete_allowed(&request, deleted));
         }
 
         let removed = self.entries.remove(&storage_key);
-        if let Some(old) = removed {
+        let deleted = if let Some(old) = removed {
             self.used_bytes =
                 self.used_bytes
                     .saturating_sub(entry_size(&namespace, &key, old.len()));
-            Ok(true)
+            true
         } else {
-            Ok(false)
-        }
+            false
+        };
+        Ok(self.complete_allowed(&request, deleted))
     }
 
     /// Lists keys in deterministic sorted order for a namespace.
@@ -463,14 +472,15 @@ impl BrowserStorageAdapter {
     ) -> Result<Vec<String>, BrowserStorageError> {
         let namespace = namespace.into();
         let request = StorageRequest::list_keys(backend, namespace.clone());
-        self.authorize_and_record(&request)?;
+        self.authorize_request(&request)?;
         if self.async_host_backend(backend).is_some() {
             return self.sync_backend_requires_async(&request);
         }
 
         if let Some(host_backend) = self.host_backend(backend) {
             if self.cap.consistency_policy() == StorageConsistencyPolicy::ImmediateReadAfterWrite {
-                return self.host_backend_list_keys(&request, &*host_backend, &namespace);
+                let keys = self.host_backend_list_keys(&request, &*host_backend, &namespace)?;
+                return Ok(self.complete_allowed(&request, keys));
             }
 
             let namespace_key = StorageNamespaceKey {
@@ -485,11 +495,12 @@ impl BrowserStorageAdapter {
 
             let next = self.host_backend_list_keys(&request, &*host_backend, &namespace)?;
             self.list_snapshot.insert(namespace_key, next);
-            return Ok(visible);
+            return Ok(self.complete_allowed(&request, visible));
         }
 
         if self.cap.consistency_policy() == StorageConsistencyPolicy::ImmediateReadAfterWrite {
-            return Ok(self.collect_namespace_keys(backend, &namespace));
+            let keys = self.collect_namespace_keys(backend, &namespace);
+            return Ok(self.complete_allowed(&request, keys));
         }
 
         let namespace_key = StorageNamespaceKey {
@@ -505,7 +516,7 @@ impl BrowserStorageAdapter {
         // Deterministic eventual-consistency seam: this call may return a
         // stale list, but advances the snapshot so the next list converges.
         self.recompute_list_snapshot(backend, &namespace);
-        Ok(visible)
+        Ok(self.complete_allowed(&request, visible))
     }
 
     /// Clears all keys in a namespace and returns number of removed entries.
@@ -516,7 +527,7 @@ impl BrowserStorageAdapter {
     ) -> Result<usize, BrowserStorageError> {
         let namespace = namespace.into();
         let request = StorageRequest::clear_namespace(backend, namespace.clone());
-        self.authorize_and_record(&request)?;
+        self.authorize_request(&request)?;
         if self.async_host_backend(backend).is_some() {
             return self.sync_backend_requires_async(&request);
         }
@@ -527,7 +538,7 @@ impl BrowserStorageAdapter {
                 Err(message) => return self.host_backend_error(&request, message),
             };
             self.remove_cached_namespace(backend, &namespace);
-            return Ok(removed_count);
+            return Ok(self.complete_allowed(&request, removed_count));
         }
 
         let keys_to_remove: Vec<StorageKey> = self
@@ -548,7 +559,7 @@ impl BrowserStorageAdapter {
             }
         }
 
-        Ok(removed_count)
+        Ok(self.complete_allowed(&request, removed_count))
     }
 
     /// Stores a value under `(backend, namespace, key)` using async host backends when needed.
@@ -563,11 +574,11 @@ impl BrowserStorageAdapter {
         let namespace = namespace.into();
         let key = key.into();
         let request = StorageRequest::set(backend, namespace.clone(), key.clone(), value.len());
-        self.authorize_and_record(&request)?;
 
         let Some(host_backend) = self.async_host_backend(backend) else {
             return self.set(backend, namespace, key, value);
         };
+        self.authorize_request(&request)?;
 
         let storage_key = StorageKey {
             backend,
@@ -580,7 +591,7 @@ impl BrowserStorageAdapter {
         }
         self.used_bytes = projected_bytes;
         self.entries.insert(storage_key, value);
-        Ok(())
+        Ok(self.complete_allowed(&request, ()))
     }
 
     /// Reads a value by `(backend, namespace, key)` using async host backends when needed.
@@ -594,11 +605,11 @@ impl BrowserStorageAdapter {
         let namespace = namespace.into();
         let key = key.into();
         let request = StorageRequest::get(backend, namespace.clone(), key.clone());
-        self.authorize_and_record(&request)?;
 
         let Some(host_backend) = self.async_host_backend(backend) else {
             return self.get(backend, namespace, key);
         };
+        self.authorize_request(&request)?;
 
         let storage_key = StorageKey {
             backend,
@@ -613,7 +624,7 @@ impl BrowserStorageAdapter {
             Err(message) => return self.host_backend_error(&request, message),
         };
         self.sync_host_read_cache(&request, &storage_key, value.as_deref())?;
-        Ok(value)
+        Ok(self.complete_allowed(&request, value))
     }
 
     /// Deletes a single key using async host backends when needed.
@@ -627,11 +638,11 @@ impl BrowserStorageAdapter {
         let namespace = namespace.into();
         let key = key.into();
         let request = StorageRequest::delete(backend, namespace.clone(), key.clone());
-        self.authorize_and_record(&request)?;
 
         let Some(host_backend) = self.async_host_backend(backend) else {
             return self.delete(backend, namespace, key);
         };
+        self.authorize_request(&request)?;
 
         let storage_key = StorageKey {
             backend,
@@ -643,7 +654,7 @@ impl BrowserStorageAdapter {
             Err(message) => return self.host_backend_error(&request, message),
         };
         self.remove_cached_entry(&storage_key);
-        Ok(deleted)
+        Ok(self.complete_allowed(&request, deleted))
     }
 
     /// Lists keys in deterministic sorted order for a namespace using async host backends when needed.
@@ -655,16 +666,17 @@ impl BrowserStorageAdapter {
     ) -> Result<Vec<String>, BrowserStorageError> {
         let namespace = namespace.into();
         let request = StorageRequest::list_keys(backend, namespace.clone());
-        self.authorize_and_record(&request)?;
 
         let Some(host_backend) = self.async_host_backend(backend) else {
             return self.list_keys(backend, namespace);
         };
+        self.authorize_request(&request)?;
 
         if self.cap.consistency_policy() == StorageConsistencyPolicy::ImmediateReadAfterWrite {
-            return self
+            let keys = self
                 .async_host_backend_list_keys(&request, &*host_backend, &namespace)
-                .await;
+                .await?;
+            return Ok(self.complete_allowed(&request, keys));
         }
 
         let namespace_key = StorageNamespaceKey {
@@ -681,7 +693,7 @@ impl BrowserStorageAdapter {
             .async_host_backend_list_keys(&request, &*host_backend, &namespace)
             .await?;
         self.list_snapshot.insert(namespace_key, next);
-        Ok(visible)
+        Ok(self.complete_allowed(&request, visible))
     }
 
     /// Clears all keys in a namespace using async host backends when needed.
@@ -693,38 +705,39 @@ impl BrowserStorageAdapter {
     ) -> Result<usize, BrowserStorageError> {
         let namespace = namespace.into();
         let request = StorageRequest::clear_namespace(backend, namespace.clone());
-        self.authorize_and_record(&request)?;
 
         let Some(host_backend) = self.async_host_backend(backend) else {
             return self.clear_namespace(backend, namespace);
         };
+        self.authorize_request(&request)?;
 
         let removed_count = match host_backend.clear_namespace(&namespace).await {
             Ok(removed_count) => removed_count,
             Err(message) => return self.host_backend_error(&request, message),
         };
         self.remove_cached_namespace(backend, &namespace);
-        Ok(removed_count)
+        Ok(self.complete_allowed(&request, removed_count))
     }
 
-    fn authorize_and_record(
-        &mut self,
-        request: &StorageRequest,
-    ) -> Result<(), BrowserStorageError> {
+    fn authorize_request(&mut self, request: &StorageRequest) -> Result<(), BrowserStorageError> {
         match self.cap.authorize(request) {
             Ok(()) => {
                 if !self.backend_available(request.backend) {
                     return self.backend_unavailable(request);
                 }
-                self.record_event(
-                    request,
-                    StorageEventOutcome::Allowed,
-                    StorageEventReasonCode::Allowed,
-                );
                 Ok(())
             }
             Err(error) => self.policy_error(request, error),
         }
+    }
+
+    fn complete_allowed<T>(&mut self, request: &StorageRequest, value: T) -> T {
+        self.record_event(
+            request,
+            StorageEventOutcome::Allowed,
+            StorageEventReasonCode::Allowed,
+        );
+        value
     }
 
     fn policy_error<T>(
@@ -1628,6 +1641,7 @@ mod tests {
         StorageRedactionPolicy,
     };
     use std::sync::Mutex;
+    use std::task::{Context, Poll};
 
     #[derive(Debug, Default)]
     struct MockHostBackend {
@@ -1782,6 +1796,44 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct PendingAsyncHostBackend;
+
+    impl AsyncStorageHostBackend for PendingAsyncHostBackend {
+        fn set<'a>(
+            &'a self,
+            _namespace: &'a str,
+            _key: &'a str,
+            _value: &'a [u8],
+        ) -> StorageHostFuture<'a, ()> {
+            Box::pin(std::future::pending())
+        }
+
+        fn get<'a>(
+            &'a self,
+            _namespace: &'a str,
+            _key: &'a str,
+        ) -> StorageHostFuture<'a, Option<Vec<u8>>> {
+            Box::pin(std::future::pending())
+        }
+
+        fn delete<'a>(
+            &'a self,
+            _namespace: &'a str,
+            _key: &'a str,
+        ) -> StorageHostFuture<'a, bool> {
+            Box::pin(std::future::pending())
+        }
+
+        fn list_keys<'a>(&'a self, _namespace: &'a str) -> StorageHostFuture<'a, Vec<String>> {
+            Box::pin(std::future::pending())
+        }
+
+        fn clear_namespace<'a>(&'a self, _namespace: &'a str) -> StorageHostFuture<'a, usize> {
+            Box::pin(std::future::pending())
+        }
+    }
+
     fn storage_cap_with_defaults() -> BrowserStorageIoCap {
         BrowserStorageIoCap::new(
             StorageAuthority::deny_all()
@@ -1848,6 +1900,121 @@ mod tests {
                 key: key.to_owned(),
             })
             .map(Vec::as_slice)
+    }
+
+    fn assert_one_terminal_event_since(
+        adapter: &BrowserStorageAdapter,
+        before: usize,
+        outcome: StorageEventOutcome,
+        reason_code: StorageEventReasonCode,
+    ) {
+        assert_eq!(adapter.events().len(), before + 1);
+        let event = &adapter.events()[before];
+        assert_eq!(event.outcome, outcome);
+        assert_eq!(event.reason_code, reason_code);
+    }
+
+    #[test]
+    fn sync_operations_emit_one_terminal_success_event_each() {
+        let mut adapter = BrowserStorageAdapter::new(storage_cap_with_defaults());
+        const BACKEND: StorageBackend = StorageBackend::LocalStorage;
+        const NAMESPACE: &str = "prefs:v1";
+
+        adapter
+            .set(BACKEND, NAMESPACE, "theme", b"dark".to_vec())
+            .expect("set succeeds");
+        adapter
+            .get(BACKEND, NAMESPACE, "theme")
+            .expect("get succeeds");
+        adapter
+            .list_keys(BACKEND, NAMESPACE)
+            .expect("list succeeds");
+        adapter
+            .delete(BACKEND, NAMESPACE, "theme")
+            .expect("delete succeeds");
+        adapter
+            .clear_namespace(BACKEND, NAMESPACE)
+            .expect("clear succeeds");
+
+        assert_eq!(adapter.events().len(), 5);
+        assert!(adapter.events().iter().all(|event| {
+            event.outcome == StorageEventOutcome::Allowed
+                && event.reason_code == StorageEventReasonCode::Allowed
+        }));
+    }
+
+    #[test]
+    fn async_fallback_emits_one_terminal_event_per_result() {
+        futures_lite::future::block_on(async {
+            let mut adapter = BrowserStorageAdapter::new(storage_cap_with_defaults());
+            let before = adapter.events().len();
+            adapter
+                .set_async(
+                    StorageBackend::LocalStorage,
+                    "prefs:v1",
+                    "theme",
+                    b"dark".to_vec(),
+                )
+                .await
+                .expect("sync fallback succeeds");
+            assert_one_terminal_event_since(
+                &adapter,
+                before,
+                StorageEventOutcome::Allowed,
+                StorageEventReasonCode::Allowed,
+            );
+
+            let before = adapter.events().len();
+            let result = adapter
+                .set_async(
+                    StorageBackend::LocalStorage,
+                    "prefs:v1",
+                    "oversized",
+                    vec![0; 129],
+                )
+                .await;
+            assert!(matches!(
+                result,
+                Err(BrowserStorageError::Policy(
+                    StoragePolicyError::ValueTooLarge { .. }
+                ))
+            ));
+            assert_one_terminal_event_since(
+                &adapter,
+                before,
+                StorageEventOutcome::Denied,
+                StorageEventReasonCode::ValueTooLarge,
+            );
+        });
+    }
+
+    #[test]
+    fn dropped_async_operations_emit_no_terminal_event() {
+        let mut never_polled = BrowserStorageAdapter::new(storage_cap_with_defaults());
+        let future = never_polled.set_async(
+            StorageBackend::LocalStorage,
+            "prefs:v1",
+            "theme",
+            b"dark".to_vec(),
+        );
+        drop(future);
+        assert!(never_polled.events().is_empty());
+
+        let mut pending = BrowserStorageAdapter::new(storage_cap_with_defaults());
+        pending.register_async_host_backend(
+            StorageBackend::IndexedDb,
+            Arc::new(PendingAsyncHostBackend),
+        );
+        let mut future = Box::pin(pending.set_async(
+            StorageBackend::IndexedDb,
+            "cache:user:1",
+            "profile",
+            b"v1".to_vec(),
+        ));
+        let mut task_cx = Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(future.as_mut().poll(&mut task_cx), Poll::Pending));
+        drop(future);
+        assert!(pending.events().is_empty());
     }
 
     #[test]
@@ -2527,6 +2694,7 @@ mod tests {
         let event = adapter.events().last().expect("event should exist");
         assert_eq!(event.outcome, StorageEventOutcome::Denied);
         assert_eq!(event.reason_code, StorageEventReasonCode::HostBackendError);
+        assert_eq!(adapter.events().len(), 1, "host failure is one terminal event");
     }
 
     #[test]
@@ -2552,6 +2720,16 @@ mod tests {
             }) if message.contains("requires async browser storage adapter methods")
         ));
         assert_eq!(adapter.entry_count(), 0);
+        assert_eq!(
+            adapter.events().len(),
+            1,
+            "sync/async mismatch is one terminal event"
+        );
+        assert_eq!(adapter.events()[0].outcome, StorageEventOutcome::Denied);
+        assert_eq!(
+            adapter.events()[0].reason_code,
+            StorageEventReasonCode::HostBackendError
+        );
     }
 
     #[test]
@@ -2605,6 +2783,18 @@ mod tests {
                     .expect("async get should succeed"),
                 None
             );
+            assert_eq!(
+                adapter
+                    .clear_namespace_async(StorageBackend::IndexedDb, "cache:user:11")
+                    .await
+                    .expect("async clear should succeed"),
+                0
+            );
+            assert_eq!(adapter.events().len(), 6);
+            assert!(adapter.events().iter().all(|event| {
+                event.outcome == StorageEventOutcome::Allowed
+                    && event.reason_code == StorageEventReasonCode::Allowed
+            }));
         });
     }
 
