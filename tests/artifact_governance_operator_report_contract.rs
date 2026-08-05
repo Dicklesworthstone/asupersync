@@ -19,7 +19,7 @@ const REQUIRED_ACTIONS: &[&str] = &[
     "missing_tests",
     "operator_context",
     "owner_missing",
-    "reference_cycle",
+    "reference_topology",
     "stale_superseded",
 ];
 
@@ -330,29 +330,50 @@ fn buckets_are_ledger_scanner_and_backfill_aligned() {
             allowed_boundaries.extend(string_set(seed, "no_claim_boundaries"));
         }
 
-        if action_id == "reference_cycle" {
+        if action_id == "reference_topology" {
             let scanner = scanner();
             let audit = object(&scanner, "artifact_reference_integrity");
             let audit_value = Value::Object(audit.clone());
             assert_eq!(
                 string(&audit_value, "finding_state"),
-                "BLOCKED_REFERENCE_CYCLE"
+                "PASS_NO_CONTENT_ADDRESSED_CYCLE_WITH_PATH_ALIAS_WARNING"
             );
             assert_eq!(
-                string_set(&item, "cycle_members"),
-                string_set(&audit_value, "component_members")
+                string(&item, "finding_state"),
+                string(&audit_value, "finding_state")
             );
             assert_eq!(
-                u64_field(&item, "cycle_edge_count"),
-                u64_field(&audit_value, "component_edge_count")
+                string_set(&item, "path_alias_members"),
+                string_set(&audit_value, "path_collapsed_component_members")
             );
-            let remediation = object(&audit_value, "remediation");
+            assert_eq!(
+                u64_field(&item, "path_alias_edge_count"),
+                u64_field(&audit_value, "path_collapsed_component_edge_count")
+            );
+            assert_eq!(
+                u64_field(&item, "content_addressed_node_count"),
+                u64_field(&audit_value, "content_addressed_node_count")
+            );
+            assert_eq!(
+                u64_field(&item, "content_addressed_edge_count"),
+                u64_field(&audit_value, "content_addressed_edge_count")
+            );
+            assert_eq!(u64_field(&item, "content_addressed_cycle_count"), 0);
+            let resolution = object(&audit_value, "resolution");
+            let resolution_value = Value::Object(resolution.clone());
             assert_eq!(
                 u64_field(&item, "minimum_full_file_edges_to_replace"),
-                u64_field(
-                    &Value::Object(remediation.clone()),
-                    "minimum_full_file_edges_to_replace"
-                )
+                u64_field(&resolution_value, "minimum_full_file_edges_to_replace")
+            );
+            let historical = object(&audit_value, "historical_target_receipt");
+            let historical_value = Value::Object(historical.clone());
+            assert_eq!(
+                string(&item, "historical_target_commit"),
+                string(&historical_value, "commit")
+            );
+            assert_eq!(
+                string(&item, "historical_target_blob_oid"),
+                string(&historical_value, "blob_oid")
             );
             assert_eq!(optional_string(&item, "selected_owner"), None);
         }
@@ -389,7 +410,7 @@ fn operator_summary_counts_and_golden_text_are_stable() {
         ("missing_tests", "missing_tests_item_count", 1),
         ("operator_context", "operator_context_item_count", 1),
         ("owner_missing", "owner_missing_item_count", 1),
-        ("reference_cycle", "reference_cycle_item_count", 1),
+        ("reference_topology", "reference_topology_item_count", 1),
         ("stale_superseded", "stale_or_superseded_item_count", 1),
     ];
 
@@ -408,7 +429,7 @@ fn operator_summary_counts_and_golden_text_are_stable() {
 
     assert_eq!(
         string(&Value::Object(summary.clone()), "golden_summary"),
-        "citeable=2 blocked=3 ambiguous=1 owner_missing=1 reference_cycle=1 stale_superseded=1 excluded=1 missing_tests=1 operator_context=1"
+        "citeable=2 blocked=3 ambiguous=1 owner_missing=1 reference_topology=1 stale_superseded=1 excluded=1 missing_tests=1 operator_context=1"
     );
     assert_eq!(
         string(&Value::Object(summary.clone()), "first_blocker"),

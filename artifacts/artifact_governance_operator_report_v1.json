@@ -48,9 +48,9 @@
       "meaning": "Scanner orphan rows have references but no sufficient governance ledger row.",
       "next_action_rule": "Add a ledger row or explicit non-citeable exclusion before citation."
     },
-    "reference_cycle": {
-      "meaning": "Mutable artifacts pin one another's full-file hashes in a directed cycle, so blind sequential repinning cannot guarantee a current fixed point.",
-      "next_action_rule": "Replace at least one full-file edge in each named cycle with immutable commit/blob provenance or a canonical semantic projection before repinning."
+    "reference_topology": {
+      "meaning": "Path-collapsed references can look cyclic even when their content-addressed targets form an acyclic historical/current topology.",
+      "next_action_rule": "Resolve every historical target to immutable provenance, preserve it without repinning, and treat only a content-addressed directed cycle as blocking."
     },
     "stale_superseded": {
       "meaning": "Historical rows have a successor and must not be cited as current evidence.",
@@ -275,11 +275,11 @@
       ]
     },
     {
-      "action_id": "reference_cycle",
-      "summary": "Break cyclic full-file hash dependencies before repinning.",
+      "action_id": "reference_topology",
+      "summary": "Distinguish path aliases from content-addressed cycles before changing provenance.",
       "items": [
         {
-          "item_id": "dependency-capability-baseline-reference-cycle",
+          "item_id": "dependency-capability-baseline-versioned-reference-topology",
           "artifact_path": "artifacts/dependency_capability_baseline_v1.json",
           "ledger_row": null,
           "scanner_category": null,
@@ -291,19 +291,26 @@
             "asupersync-d24mms.10.6"
           ],
           "selected_owner": null,
-          "cycle_members": [
+          "finding_state": "PASS_NO_CONTENT_ADDRESSED_CYCLE_WITH_PATH_ALIAS_WARNING",
+          "path_alias_members": [
             "artifacts/base64_capability_inventory_v1.json",
             "artifacts/dependency_capability_baseline_v1.json",
             "artifacts/dependency_phase1_aggregate_signoff_v1.json",
             "artifacts/hex_capability_inventory_v1.json"
           ],
-          "cycle_edge_count": 6,
-          "minimum_full_file_edges_to_replace": 3,
-          "next_action": "Coordinate the four artifact owners, then replace at least one full-file edge in each reciprocal cycle with immutable commit/blob provenance or a canonical semantic projection before any hash refresh.",
+          "path_alias_edge_count": 6,
+          "content_addressed_node_count": 5,
+          "content_addressed_edge_count": 6,
+          "content_addressed_cycle_count": 0,
+          "historical_target_commit": "7390d33f4ac297cd28138c8e1ece38f60b278660",
+          "historical_target_blob_oid": "4e56ad4bc05dbd1614583f8cdf8586a0d1f88cc7",
+          "minimum_full_file_edges_to_replace": 0,
+          "next_action": "Preserve the three historical baseline back-references as immutable commit/blob provenance; do not refresh them, and recompute content-addressed topology before escalating any future path-only cycle warning.",
           "no_claim_boundaries": [
-            "does_not_make_cyclic_pins_current",
+            "does_not_make_historical_pins_current",
             "does_not_authorize_blind_hash_refresh",
-            "does_not_replace_immutable_provenance"
+            "does_not_prove_git_history_is_available_in_every_checkout",
+            "does_not_prove_executable_contract_pass"
           ]
         }
       ]
@@ -344,9 +351,9 @@
     "excluded_item_count": 1,
     "missing_tests_item_count": 1,
     "operator_context_item_count": 1,
-    "reference_cycle_item_count": 1,
+    "reference_topology_item_count": 1,
     "first_blocker": "validation-frontier-inventory",
-    "golden_summary": "citeable=2 blocked=3 ambiguous=1 owner_missing=1 reference_cycle=1 stale_superseded=1 excluded=1 missing_tests=1 operator_context=1"
+    "golden_summary": "citeable=2 blocked=3 ambiguous=1 owner_missing=1 reference_topology=1 stale_superseded=1 excluded=1 missing_tests=1 operator_context=1"
   },
   "no_claim_boundaries": [
     "does_not_prove_full_corpus_coverage",
@@ -354,8 +361,9 @@
     "does_not_prove_fresh_rch_pass",
     "does_not_close_artifact_beads",
     "does_not_prove_release_readiness",
-    "does_not_make_cyclic_pins_current",
+    "does_not_make_historical_pins_current",
     "does_not_authorize_blind_hash_refresh",
-    "does_not_replace_immutable_provenance"
+    "does_not_prove_git_history_is_available_in_every_checkout",
+    "does_not_prove_executable_contract_pass"
   ]
 }

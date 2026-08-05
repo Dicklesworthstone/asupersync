@@ -10,14 +10,14 @@ const REPORT_PATH: &str = "docs/proof/artifact_governance_scanner.md";
 const LEDGER_PATH: &str = "artifacts/artifact_governance_ledger_v1.json";
 const BEAD_ID: &str = "asupersync-artifact-governance-awdiwy.2";
 
-const REFERENCE_CYCLE_MEMBERS: &[&str] = &[
+const PATH_ALIAS_MEMBERS: &[&str] = &[
     "artifacts/base64_capability_inventory_v1.json",
     "artifacts/dependency_capability_baseline_v1.json",
     "artifacts/dependency_phase1_aggregate_signoff_v1.json",
     "artifacts/hex_capability_inventory_v1.json",
 ];
 
-const REFERENCE_CYCLE_EDGES: &[(&str, &str)] = &[
+const PATH_ALIAS_EDGES: &[(&str, &str)] = &[
     (
         "artifacts/base64_capability_inventory_v1.json",
         "artifacts/dependency_capability_baseline_v1.json",
@@ -43,6 +43,12 @@ const REFERENCE_CYCLE_EDGES: &[(&str, &str)] = &[
         "artifacts/dependency_capability_baseline_v1.json",
     ),
 ];
+
+const HISTORICAL_BASELINE_SHA256: &str =
+    "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8";
+const HISTORICAL_BASELINE_COMMIT: &str =
+    "7390d33f4ac297cd28138c8e1ece38f60b278660";
+const HISTORICAL_BASELINE_BLOB_OID: &str = "4e56ad4bc05dbd1614583f8cdf8586a0d1f88cc7";
 
 const REQUIRED_CATEGORIES: &[&str] = &[
     "exact_ownership",
@@ -262,15 +268,31 @@ fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
     let audit = object(scan, "artifact_reference_integrity")?;
     let audit_value = Value::Object(audit.clone());
     if string(&audit_value, "audit_id")?
-        != "artifact-full-file-hash-cycle-witness-2026-08-05"
+        != "artifact-full-file-hash-versioned-topology-2026-08-05"
     {
         return Err("unexpected reference-integrity audit_id".to_owned());
     }
     if bool_field(&audit_value, "full_artifact_corpus_claim")? {
         return Err("reference audit must not claim full artifact corpus coverage".to_owned());
     }
-    if string(&audit_value, "finding_state")? != "BLOCKED_REFERENCE_CYCLE" {
-        return Err("reference audit must remain blocked until the cycles are broken".to_owned());
+    if string(&audit_value, "finding_state")?
+        != "PASS_NO_CONTENT_ADDRESSED_CYCLE_WITH_PATH_ALIAS_WARNING"
+    {
+        return Err("reference audit must distinguish path aliases from content cycles".to_owned());
+    }
+
+    let graph_model = object(&audit_value, "graph_model")?;
+    let graph_model_value = Value::Object(graph_model.clone());
+    for (field, required) in [
+        ("path_collapsed_node_identity", "path"),
+        ("content_addressed_node_identity", "SHA-256"),
+        ("edge_origin_identity", "source artifact SHA-256"),
+        ("historical_target_rule", "immutable commit and blob receipt"),
+        ("active_cycle_rule", "content-addressed nodes"),
+    ] {
+        if !string(&graph_model_value, field)?.contains(required) {
+            return Err(format!("reference graph model {field} must mention {required}"));
+        }
     }
 
     let receipt = object(&audit_value, "discovery_receipt")?;
@@ -281,19 +303,20 @@ fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
         || u64_field(&receipt_value, "tracked_json_document_count")? != 354
         || u64_field(&receipt_value, "parse_failure_count")? != 0
         || u64_field(&receipt_value, "unique_full_file_hash_edge_count")? != 199
-        || u64_field(&receipt_value, "unique_reference_node_count")? != 105
-        || u64_field(&receipt_value, "cyclic_component_count")? != 1
+        || u64_field(&receipt_value, "unique_reference_path_count")? != 105
+        || u64_field(&receipt_value, "path_collapsed_cyclic_component_count")? != 1
+        || u64_field(&receipt_value, "content_addressed_cyclic_component_count")? != 0
     {
         return Err("reference-integrity discovery receipt drifted".to_owned());
     }
 
-    let members = string_set(&audit_value, "component_members")?;
-    let expected_members = REFERENCE_CYCLE_MEMBERS
+    let members = string_set(&audit_value, "path_collapsed_component_members")?;
+    let expected_members = PATH_ALIAS_MEMBERS
         .iter()
         .map(|member| (*member).to_owned())
         .collect::<BTreeSet<_>>();
     if members != expected_members {
-        return Err("reference cycle member set drifted".to_owned());
+        return Err("path-collapsed reference member set drifted".to_owned());
     }
 
     let mut discovered = BTreeMap::new();
@@ -301,17 +324,20 @@ fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
         let source_json = repo_json(source)?;
         collect_member_pin_rows(source, &source_json, &members, &mut discovered)?;
     }
-    let expected_edges = REFERENCE_CYCLE_EDGES
+    let expected_edges = PATH_ALIAS_EDGES
         .iter()
         .map(|(source, target)| ((*source).to_owned(), (*target).to_owned()))
         .collect::<BTreeSet<_>>();
     let discovered_edges = discovered.keys().cloned().collect::<BTreeSet<_>>();
     if discovered_edges != expected_edges {
-        return Err("reference cycle edge set drifted".to_owned());
+        return Err("versioned reference edge set drifted".to_owned());
     }
 
     let mut declared_edges = BTreeSet::new();
-    let mut cycle_edges: BTreeMap<String, BTreeSet<(String, String)>> = BTreeMap::new();
+    let mut path_alias_edges: BTreeMap<String, BTreeSet<(String, String)>> = BTreeMap::new();
+    let mut content_edges = BTreeSet::new();
+    let mut historical_edge_count = 0_u64;
+    let mut current_edge_count = 0_u64;
     for edge in array(&audit_value, "edges")? {
         let source = string(edge, "source_artifact")?.to_owned();
         let target = string(edge, "target_artifact")?.to_owned();
@@ -328,6 +354,10 @@ fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
             return Err(format!("{source} -> {target}: stored pin drifted"));
         }
 
+        let (live_source_sha256, _) = live_file_pin(&source)?;
+        if string(edge, "source_artifact_sha256")? != live_source_sha256.as_str() {
+            return Err(format!("{source} -> {target}: live source identity drifted"));
+        }
         let (live_sha256, live_line_count) = live_file_pin(&target)?;
         if string(edge, "live_target_sha256")? != live_sha256.as_str()
             || u64_field(edge, "live_target_line_count")? != live_line_count
@@ -343,65 +373,115 @@ fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
             return Err(format!("{source} -> {target}: pin state drifted"));
         }
 
-        cycle_edges
-            .entry(string(edge, "cycle_id")?.to_owned())
+        let expected_classification = if expected_state == "current" {
+            current_edge_count += 1;
+            "current_forward_reference"
+        } else {
+            historical_edge_count += 1;
+            "historical_back_reference"
+        };
+        if string(edge, "edge_classification")? != expected_classification {
+            return Err(format!("{source} -> {target}: edge classification drifted"));
+        }
+
+        let source_node = format!("{source}@{live_source_sha256}");
+        let target_node = format!("{target}@{stored_sha256}");
+        if string(edge, "source_node")? != source_node.as_str()
+            || string(edge, "target_node")? != target_node.as_str()
+        {
+            return Err(format!("{source} -> {target}: content identity drifted"));
+        }
+        content_edges.insert((source_node, target_node));
+        path_alias_edges
+            .entry(string(edge, "path_alias_id")?.to_owned())
             .or_default()
             .insert(key);
     }
     if declared_edges != expected_edges
-        || u64_field(&audit_value, "component_edge_count")? != declared_edges.len() as u64
+        || u64_field(&audit_value, "path_collapsed_component_edge_count")?
+            != declared_edges.len() as u64
     {
-        return Err("reference cycle edge set drifted".to_owned());
+        return Err("versioned reference edge set drifted".to_owned());
     }
-    if u64_field(&audit_value, "simple_two_edge_cycle_count")? != 3
-        || cycle_edges.len() != 3
+    if u64_field(&audit_value, "path_collapsed_simple_two_edge_cycle_count")? != 3
+        || path_alias_edges.len() != 3
     {
-        return Err("two-edge cycle count drifted".to_owned());
+        return Err("path-collapsed alias count drifted".to_owned());
     }
-    for (cycle_id, pairs) in cycle_edges {
+    for (alias_id, pairs) in path_alias_edges {
         if pairs.len() != 2
             || !pairs
                 .iter()
                 .all(|(source, target)| pairs.contains(&(target.clone(), source.clone())))
         {
-            return Err(format!("{cycle_id}: expected one reciprocal two-edge cycle"));
+            return Err(format!("{alias_id}: expected one reciprocal path alias"));
         }
     }
     for member in &members {
         if reachable_members(member, &declared_edges) != members {
-            return Err(format!("{member}: component is not strongly connected"));
+            return Err(format!("{member}: path-collapsed component is not strongly connected"));
         }
     }
 
-    let remediation = object(&audit_value, "remediation")?;
-    let remediation_value = Value::Object(remediation.clone());
-    if string(&remediation_value, "required_state")?
-        != "BREAK_EACH_TWO_EDGE_CYCLE_BEFORE_REPIN"
-        || u64_field(&remediation_value, "minimum_full_file_edges_to_replace")? != 3
+    let content_nodes = content_edges
+        .iter()
+        .flat_map(|(source, target)| [source.clone(), target.clone()])
+        .collect::<BTreeSet<_>>();
+    if u64_field(&audit_value, "content_addressed_node_count")? != content_nodes.len() as u64
+        || u64_field(&audit_value, "content_addressed_edge_count")?
+            != content_edges.len() as u64
+        || historical_edge_count != 3
+        || current_edge_count != 3
     {
-        return Err("reference-cycle remediation requirement drifted".to_owned());
+        return Err("content-addressed topology count drifted".to_owned());
     }
-    let replacement_kinds = string_set(&remediation_value, "accepted_replacement_kinds")?;
+    if content_edges
+        .iter()
+        .any(|(source, target)| reachable_members(target, &content_edges).contains(source))
+    {
+        return Err("content-addressed reference graph must remain acyclic".to_owned());
+    }
+
+    let historical = object(&audit_value, "historical_target_receipt")?;
+    let historical_value = Value::Object(historical.clone());
+    if string(&historical_value, "target_artifact")?
+        != "artifacts/dependency_capability_baseline_v1.json"
+        || string(&historical_value, "target_sha256")? != HISTORICAL_BASELINE_SHA256
+        || u64_field(&historical_value, "target_line_count")? != 1357
+        || string(&historical_value, "commit")? != HISTORICAL_BASELINE_COMMIT
+        || string(&historical_value, "blob_oid")? != HISTORICAL_BASELINE_BLOB_OID
+        || string(&historical_value, "verification_state")? != "STATIC_GIT_OBJECT_RESOLVED"
+    {
+        return Err("historical baseline object receipt drifted".to_owned());
+    }
+
+    let resolution = object(&audit_value, "resolution")?;
+    let resolution_value = Value::Object(resolution.clone());
+    if string(&resolution_value, "resolution_state")?
+        != "HISTORICAL_BACK_REFERENCES_RESOLVED_TO_IMMUTABLE_GIT_OBJECT"
+        || u64_field(&resolution_value, "minimum_full_file_edges_to_replace")? != 0
+        || string(&resolution_value, "resolved_by")?
+            != "immutable_commit_or_blob_provenance"
+    {
+        return Err("versioned-reference resolution drifted".to_owned());
+    }
+    let rule = string(&resolution_value, "operator_rule")?;
     for required in [
-        "immutable_commit_or_blob_provenance",
-        "canonical_semantic_projection",
+        "historical back-references",
+        "do not refresh",
+        "content-addressed",
     ] {
-        if !replacement_kinds.contains(required) {
-            return Err(format!("missing reference-cycle replacement kind {required}"));
-        }
-    }
-    let rule = string(&remediation_value, "operator_rule")?;
-    for required in ["each named two-edge cycle", "historical hash", "provenance"] {
         if !rule.contains(required) {
-            return Err(format!("reference-cycle operator rule must mention {required}"));
+            return Err(format!("versioned-reference operator rule must mention {required}"));
         }
     }
     let boundaries = string_set(&audit_value, "no_claim_boundaries")?;
     for required in [
         "does_not_prove_full_corpus_coverage",
-        "does_not_make_cyclic_pins_current",
+        "does_not_make_historical_pins_current",
         "does_not_authorize_blind_hash_refresh",
-        "does_not_replace_immutable_provenance",
+        "does_not_prove_git_history_is_available_in_every_checkout",
+        "does_not_prove_executable_contract_pass",
     ] {
         if !boundaries.contains(required) {
             return Err(format!("missing reference-integrity boundary {required}"));
@@ -705,8 +785,9 @@ fn scanner_report_is_concise_and_matches_artifact_boundaries() {
         "ambiguous",
         "stale",
         "excluded",
-        "BLOCKED_REFERENCE_CYCLE",
-        "canonical semantic projection",
+        "PASS_NO_CONTENT_ADDRESSED_CYCLE_WITH_PATH_ALIAS_WARNING",
+        "content-addressed graph",
+        "immutable provenance",
         "does not authorize blind hash refresh",
     ] {
         assert!(
@@ -788,7 +869,7 @@ fn self_supersession_fixture_is_rejected() {
 }
 
 #[test]
-fn missing_reference_cycle_edge_fixture_is_rejected() {
+fn missing_versioned_reference_edge_fixture_is_rejected() {
     let mut scan = scanner();
     scan["artifact_reference_integrity"]["edges"]
         .as_array_mut()
@@ -797,7 +878,7 @@ fn missing_reference_cycle_edge_fixture_is_rejected() {
 
     let error = validate_scanner(&scan).expect_err("missing reference edge should fail");
     assert!(
-        error.contains("reference cycle edge set"),
+        error.contains("versioned reference edge set"),
         "unexpected error: {error}"
     );
 }

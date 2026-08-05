@@ -25,17 +25,17 @@ The scanner is intentionally bounded: it validates a representative corpus and d
 | `stale` | `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json` | Superseded by `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json`; retain for lineage only. |
 | `excluded` | `${TMPDIR:-/tmp}/rch_target_*` | Ephemeral RCH target/cache output; exclusion does not authorize deletion. |
 
-## Full-File Hash Cycle Witness
+## Versioned Full-File Reference Topology
 
-The scanner also carries a static, read-only `BLOCKED_REFERENCE_CYCLE` witness captured at commit `15391290dce5d259bf491e676d35f3d46564935a`. This audit is orthogonal to the representative ownership rows above. Its discovery scope was the 354 Git-tracked JSON documents under `artifacts/`, recursively recognizing objects that pair a repository-relative `path` with a full-file `sha256`; it is not a full-artifact-corpus claim.
+The scanner also carries a static, read-only `PASS_NO_CONTENT_ADDRESSED_CYCLE_WITH_PATH_ALIAS_WARNING` receipt captured from commit `15391290dce5d259bf491e676d35f3d46564935a`. This audit is orthogonal to the representative ownership rows above. Its discovery scope was the 354 Git-tracked JSON documents under `artifacts/`, recursively recognizing objects that pair a repository-relative `path` with a full-file `sha256`; it is not a full-artifact-corpus claim.
 
-The only cyclic component found in that captured scope has four members and six directed edges:
+Collapsing every version of an artifact to its path produces one strongly connected component with four paths and six directed edges:
 
 - `artifacts/dependency_capability_baseline_v1.json` pins the Base64 inventory, Hex inventory, and Phase-1 signoff at their current captured bytes.
-- Each of those three artifacts pins an older full-file hash of the dependency capability baseline.
-- The result is three reciprocal two-edge cycles sharing the baseline. Refreshing any stale reverse pin changes its source artifact and invalidates the baseline's corresponding inbound pin.
+- Each of those three artifacts records SHA-256 `88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8`, the 1,357-line historical dependency baseline at commit `7390d33f4ac297cd28138c8e1ece38f60b278660` and blob `4e56ad4bc05dbd1614583f8cdf8586a0d1f88cc7`.
+- The live baseline has different content identity `ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4`. The three reverse edges therefore terminate at the historical baseline node, not at the live baseline node that emits the forward edges.
 
-Blind sequential hash refresh therefore has no guaranteed terminating order. Before repinning, an owner must break at least one full-file edge in each of the three named cycles by using immutable commit/blob provenance or a canonical semantic projection. Historical hashes must remain labeled as historical provenance.
+The content-addressed graph has five nodes, six edges, and no directed cycle. No full-file edge replacement is required. Operators must preserve the three historical back-references as immutable provenance and must not refresh or relabel them as current. A future path-only strongly connected component is a warning to recompute the versioned topology, not sufficient evidence of a blocking content cycle.
 
 ## Boundaries
 
@@ -43,4 +43,4 @@ Blind sequential hash refresh therefore has no guaranteed terminating order. Bef
 - Orphan does not mean unused, ownerless, or safe to delete.
 - Excluded means outside this durable artifact scanner, not safe to remove.
 - Stale means cite the successor for current evidence and retain the stale path for lineage.
-- The cycle witness does not make cyclic pins current and does not authorize blind hash refresh.
+- The versioned receipt does not make historical pins current, authorize blind hash refresh, prove that Git history is available in every checkout, or prove that the executable Rust contract passed.
