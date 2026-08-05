@@ -390,7 +390,11 @@ impl<T> RwLock<T> {
 
     #[inline]
     fn drain_reader_waiters(state: &mut State) -> SmallVec<[Waker; 4]> {
-        SmallVec::from_vec(state.reader_waiters.drain())
+        let mut wakers = SmallVec::new();
+        while let Some((_, waker, _)) = state.reader_waiters.pop_front() {
+            wakers.push(waker);
+        }
+        wakers
     }
 
     /// Wakes a released batch of waiters -- an optional writer baton followed by

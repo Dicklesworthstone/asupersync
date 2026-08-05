@@ -24,6 +24,8 @@ mod common;
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use std::future::Future;
+use std::task::{Context, Poll};
 
 // =============================================================================
 // Counting Allocator
@@ -90,11 +92,12 @@ fn u64_to_f64(value: u64) -> f64 {
     f64::from(u32::try_from(clamped).expect("clamped to u32 max"))
 }
 
+use asupersync::cx::{Cx, cap};
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::record::task::TaskRecord;
 use asupersync::runtime::scheduler::{GlobalInjector, GlobalQueue, LocalQueue, PriorityScheduler};
 use asupersync::runtime::{RegionHeap, RuntimeState, global_alloc_count};
-use asupersync::sync::ContendedMutex;
+use asupersync::sync::{ContendedMutex, RwLock};
 use asupersync::types::{Budget, RegionId, TaskId, Time};
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -124,6 +127,44 @@ fn setup_runtime_state(max_task_id: u32) -> Arc<ContendedMutex<RuntimeState>> {
         assert_eq!(idx.index(), i);
     }
     Arc::new(ContendedMutex::new("runtime_state", state))
+}
+
+/// Releasing an active writer to a shallow batch of readers must use the
+/// `SmallVec` inline storage directly. The wait queues and futures are prepared
+/// before the snapshot so the measured delta isolates release and fanout.
+#[test]
+fn rwlock_shallow_reader_release_zero_alloc() {
+    let _guard = ALLOC_TEST_GUARD.lock();
+    init_test("rwlock_shallow_reader_release_zero_alloc");
+
+    let lock = RwLock::with_name("runtime_state", ());
+    let writer = lock.try_write().expect("initial writer acquires");
+    let cx = Cx::<cap::None>::detached_cancel_context();
+    let mut task_cx = Context::from_waker(std::task::Waker::noop());
+    let mut readers = [
+        Box::pin(lock.read(&cx)),
+        Box::pin(lock.read(&cx)),
+        Box::pin(lock.read(&cx)),
+        Box::pin(lock.read(&cx)),
+    ];
+
+    for reader in &mut readers {
+        assert!(matches!(reader.as_mut().poll(&mut task_cx), Poll::Pending));
+    }
+
+    let before = AllocSnapshot::take();
+    drop(writer);
+    let after = AllocSnapshot::take();
+    let allocs = after.allocs_since(&before);
+    let bytes = after.bytes_since(&before);
+
+    assert_eq!(allocs, 0, "shallow reader release must stay inline");
+    assert_eq!(bytes, 0, "shallow reader release must allocate no bytes");
+    test_complete!(
+        "rwlock_shallow_reader_release_zero_alloc",
+        allocs = allocs,
+        bytes = bytes
+    );
 }
 
 // =============================================================================
