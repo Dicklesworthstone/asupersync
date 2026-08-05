@@ -320,6 +320,61 @@ ledger cutover are `MISSING`. The disposition is `KEEP_INCUMBENT` and
 collection publication, source, manifest, lockfile, or tracker edits, release
 readiness, performance claims, or broad workspace-health claims.
 
+## Phase-2 terminal readiness frontier
+
+`CAP-PHASE2-TERMINAL-READINESS-STATIC-AUDIT-V1` records the bounded static
+frontier for `asupersync-d24mms.13` at revision
+`33f94643ced8f5415ad3c1f0a30cd42ddcb738c9`. The result is
+`BLOCKED_12_OF_13_PREREQUISITES_NOT_TERMINAL`: only the scoped Phase-1
+foundation is terminal-ready. No child or aggregate executable evidence was
+replayed for this audit.
+
+This frontier distinguishes useful landed work from terminal proof. A baseline
+capability row marked `EXECUTABLE_COMPLETE` means that the incumbent case
+taxonomy is classified; it does not mean the corresponding replacement leaf or
+campaign has passed its terminal contract. Likewise, a Git landing proves that
+content exists on `main`, not that its focused or aggregate scenario is current
+and replayable.
+
+The exact prerequisite partition is:
+
+| Prerequisite | Static state | Landed scope | Missing terminal scope |
+|---|---|---|---|
+| `asupersync-dep-p1-foundations-upksjk.4` | `FOUNDATION_SCOPED_PASS` | content-pinned Phase-1 foundation receipt | none for its scoped prerequisite role |
+| `asupersync-d24mms.1` | `STATIC_KEEP_GATE_LANDED_BLOCKED` | hash-map inventory and KEEP gate | candidate execution, replay, platform, performance, and fresh ledger |
+| `asupersync-d24mms.2` | `STATIC_KEEP_GATE_LANDED_BLOCKED` | host metadata inventory and KEEP gate | host contexts, profile/platform matrix, schema output, redaction, and replay |
+| `asupersync-d24mms.3` | `STATIC_KEEP_GATE_LANDED_BLOCKED` | offline-tuner logging inventory and KEEP gate | command/filter/stream/exit/artifact parity |
+| `asupersync-d24mms.4` | `CHECKPOINT_LANDED_BLOCKED` | owned deterministic UTC formatter checkpoint | sparse graph, ledger, and broader DEP-ADR-011 evidence |
+| `asupersync-d24mms.5` | `NO_DEDICATED_RECEIPT` | incumbent temporary-artifact baseline only | Cargo-built profile classification and fixture-preserving optionalization decision |
+| `asupersync-d24mms.6.10` | `CAMPAIGN_PARTIAL_BLOCKED` | futures-lite A1 inventory | A2-A9 work and A10 terminal receipt |
+| `asupersync-d24mms.7` | `STATIC_KEEP_GATE_LANDED_BLOCKED` | twelve-attribute visibility inventory and KEEP gate | owned macro and privacy-off/sparse-feature compile matrices |
+| `asupersync-d24mms.8` | `STATIC_KEEP_GATE_LANDED_BLOCKED` | four-consumer slab inventory, evidence-binding defect, and KEEP gate | candidate differential, lifecycle, consumer replay, and performance evidence |
+| `asupersync-d24mms.9.5` | `CAMPAIGN_PARTIAL_BLOCKED` | hex A1 inventory and A2 kernel checkpoint | migrations, independent parity, journeys, and A5 terminal receipt |
+| `asupersync-d24mms.10.6` | `CAMPAIGN_PARTIAL_BLOCKED` | Base64 A1 inventory | owned engines, migrations, corpus, service matrix, and A6 terminal receipt |
+| `asupersync-d24mms.11` | `CHECKPOINT_LANDED_BLOCKED` | bounded scanner plus declared artifact/reassembly route | admitted focused execution and retained replay artifacts |
+| `asupersync-d24mms.12.5` | `CAMPAIGN_PARTIAL_BLOCKED` | dormant-E2E A1 inventory | restored journeys and A5 aggregate evidence |
+
+The machine packet pins the exact 13 blocker edges and the 16 capability IDs
+already mapped to the Phase-2 terminal in the capability registry. The current
+`.beads/issues.jsonl` snapshot is used only for read-only topology. Its status
+labels are stale for several landed commits, so Git ancestry and content-pinned
+artifacts are the progress authority; the tracker is not completion authority
+and was not written.
+
+The state counts are one `FOUNDATION_SCOPED_PASS`, five
+`STATIC_KEEP_GATE_LANDED_BLOCKED`, two `CHECKPOINT_LANDED_BLOCKED`, four
+`CAMPAIGN_PARTIAL_BLOCKED`, and one `NO_DEDICATED_RECEIPT`. Therefore
+`phase2_terminal_signoff_allowed=false`, `dependency_exit_allowed=false`, and
+`tracker_closure_allowed=false`. The required next state is
+`ALL_13_PREREQUISITES_TERMINAL_AND_REPLAYED_WITH_ZERO_UNKNOWN`; any missing,
+stale, unreplayed, or regressed row keeps the incumbents and blocks Phase-2
+signoff.
+
+No Cargo, RCH, compiler, formatter, unit, property, model, E2E, benchmark,
+service, platform, fuzz, ledger-regeneration, runtime, or aggregate replay lane
+was executed for this frontier. It authorizes no source, manifest, lockfile,
+tracker, dependency, release, performance, broad-health, or deletion action.
+
 ## High-risk boundaries
 
 - SQLite uses the incumbent real-file/WAL corpus, but FrankenSQLite is

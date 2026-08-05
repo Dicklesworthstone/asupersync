@@ -2848,6 +2848,356 @@
       "This audit does not authorize slab removal, owned collection publication, source, manifest, lockfile, or tracker edits, release readiness, performance claims, or broad workspace-health claims."
     ]
   },
+  "phase2_terminal_readiness_static_audit": {
+    "audit_id": "CAP-PHASE2-TERMINAL-READINESS-STATIC-AUDIT-V1",
+    "bead_id": "asupersync-d24mms.13",
+    "observed_at_revision": "33f94643ced8f5415ad3c1f0a30cd42ddcb738c9",
+    "captured_at_utc": "2026-08-05T06:00:29Z",
+    "audit_state": "STATIC_GIT_ARTIFACT_AND_TRACKER_TOPOLOGY_PINNED_NOT_EXECUTED",
+    "execution_state": "NO_CHILD_OR_AGGREGATE_EXECUTION_REPLAYED",
+    "registry_binding": {
+      "state": "EXACT_PRESENT",
+      "registry_path": "artifacts/dependency_capability_registry_v1.json",
+      "capability_ids": [
+        "CAP-HASH-MAPS",
+        "CAP-HOST-BENCH-METADATA",
+        "CAP-HOST-INTROSPECTION",
+        "CAP-DIAGNOSTICS",
+        "CAP-CLI-OFFLINE-TUNER",
+        "CAP-TIME-UTC-RFC3339",
+        "CAP-TEMP-ARTIFACTS",
+        "CAP-FUTURES-STREAMS",
+        "CAP-VISIBILITY-MACRO",
+        "CAP-TOKEN-SLAB",
+        "CAP-HEX-CODEC",
+        "CAP-BASE64-CODEC",
+        "CAP-AUTH-CREDENTIALS",
+        "CAP-ATP-VERSION-SCANNER",
+        "CAP-REAL-SERVICE-E2E",
+        "CAP-VERIFICATION-PROFILES"
+      ]
+    },
+    "tracker_snapshot": {
+      "path": ".beads/issues.jsonl",
+      "sha256": "54331bf1da49d041ab0b92e89cf81037a3808de1e7d13ef4810dafc1315256bf",
+      "line_count": 12444,
+      "role": "read-only prerequisite topology snapshot",
+      "completion_authority": false,
+      "write_allowed": false,
+      "interpretation": "Tracker labels are stale for several landed commits. The blocker edge set is useful topology, while Git ancestry and content-pinned artifacts are the progress authority."
+    },
+    "source_pins": [
+      {
+        "path": "artifacts/dependency_capability_registry_v1.json",
+        "sha256": "e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2",
+        "line_count": 6917,
+        "role": "exact Phase-2 terminal capability binding"
+      },
+      {
+        "path": "artifacts/dependency_phase1_aggregate_signoff_v1.json",
+        "sha256": "f99bb9e88291d122b1f075c43480436ed1a94c0389174a472c9684d9b2ebf3c4",
+        "line_count": 327,
+        "role": "scoped Phase-1 foundation prerequisite receipt"
+      },
+      {
+        "path": "artifacts/cli_clap_surface_inventory_v1.json",
+        "sha256": "6e75eaffa3b3a8e64feb38631d7f4d1e65a9126b9338780303e639168687bb55",
+        "line_count": 7443,
+        "role": "offline-tuner env_logger static KEEP gate"
+      },
+      {
+        "path": "artifacts/time_utc_rfc3339_foundation_v1.json",
+        "sha256": "b141bca2ef0238eab6541d903ad02d61dc9c7801acdf7609606fd75a5e1cc599",
+        "line_count": 91,
+        "role": "owned UTC formatter checkpoint with explicit close blocker"
+      },
+      {
+        "path": "artifacts/futures_lite_capability_inventory_v1.json",
+        "sha256": "cea3d2d4c0874b0ee002f98d7730ce5ef67e82c24a0f7412bb96ee49552514fe",
+        "line_count": 894,
+        "role": "futures-lite A1 inventory, not A10 terminal evidence"
+      },
+      {
+        "path": "artifacts/hex_capability_inventory_v1.json",
+        "sha256": "abfa1d24ea067fbab58b862f8d5ba0e624589ad313d765f9e88e5e7ebb94d760",
+        "line_count": 960,
+        "role": "hex A1 inventory preceding the still-missing A5 terminal"
+      },
+      {
+        "path": "artifacts/base64_capability_inventory_v1.json",
+        "sha256": "28171082ff529b93cbe951b9de84db9423b8922fde531c82aa21051b933c83eb",
+        "line_count": 417,
+        "role": "Base64 A1 inventory preceding the still-missing A6 terminal"
+      },
+      {
+        "path": "src/net/atp/chunk/artifact.rs",
+        "sha256": "21b5131f5c5c2502b96bd61363a3bc21072062a0b9473bd602ab478a6b77cea9",
+        "line_count": 1597,
+        "role": "bounded ATP version-scanner implementation checkpoint"
+      },
+      {
+        "path": "scripts/run_dependency_sovereignty_e2e.sh",
+        "sha256": "388af46854549b837e7de602fbb84f99d26dcf2fef6b7e4f8575f1f6478d33a0",
+        "line_count": 1276,
+        "role": "declared UTC and ATP version scenario routes without replay in this audit"
+      },
+      {
+        "path": "artifacts/dormant_e2e_inventory_v1.json",
+        "sha256": "9a28fef1a5e304d371b2c4e0b0538085ad304ce0bdc54828e7709c029a42edbd",
+        "line_count": 552,
+        "role": "dormant-E2E A1 inventory preceding the still-missing A5 terminal"
+      },
+      {
+        "path": ".beads/issues.jsonl",
+        "sha256": "54331bf1da49d041ab0b92e89cf81037a3808de1e7d13ef4810dafc1315256bf",
+        "line_count": 12444,
+        "role": "read-only Phase-2 blocker topology snapshot, not completion authority"
+      }
+    ],
+    "readiness_summary": {
+      "required_prerequisite_count": 13,
+      "terminal_ready_count": 1,
+      "blocked_count": 12,
+      "state_counts": [
+        {
+          "state": "FOUNDATION_SCOPED_PASS",
+          "count": 1
+        },
+        {
+          "state": "STATIC_KEEP_GATE_LANDED_BLOCKED",
+          "count": 5
+        },
+        {
+          "state": "CHECKPOINT_LANDED_BLOCKED",
+          "count": 2
+        },
+        {
+          "state": "CAMPAIGN_PARTIAL_BLOCKED",
+          "count": 4
+        },
+        {
+          "state": "NO_DEDICATED_RECEIPT",
+          "count": 1
+        }
+      ]
+    },
+    "prerequisite_rows": [
+      {
+        "prerequisite_id": "asupersync-dep-p1-foundations-upksjk.4",
+        "readiness_state": "FOUNDATION_SCOPED_PASS",
+        "terminal_ready": true,
+        "evidence_refs": [
+          "artifacts/dependency_phase1_aggregate_signoff_v1.json"
+        ],
+        "landing_commits": [
+          "2ddb3c79f33119f5e13001ca9c2547c2117b8627"
+        ],
+        "landed_scope": "PASS_SCOPED_FOUNDATIONS_ONLY releases downstream evidence work but grants no dependency-exit authority.",
+        "missing_terminal_evidence": []
+      },
+      {
+        "prerequisite_id": "asupersync-d24mms.1",
+        "readiness_state": "STATIC_KEEP_GATE_LANDED_BLOCKED",
+        "terminal_ready": false,
+        "evidence_refs": [
+          "embedded:hash_map_static_audit"
+        ],
+        "landing_commits": [
+          "42a66e7f4e6733c28c59405c052c68f7a32ea0d7"
+        ],
+        "landed_scope": "Two-file hash-map inventory and fail-closed KEEP decision.",
+        "missing_terminal_evidence": [
+          "candidate execution, deterministic replay, platform matrix, performance and fresh ledger"
+        ]
+      },
+      {
+        "prerequisite_id": "asupersync-d24mms.2",
+        "readiness_state": "STATIC_KEEP_GATE_LANDED_BLOCKED",
+        "terminal_ready": false,
+        "evidence_refs": [
+          "embedded:host_benchmark_metadata_static_audit"
+        ],
+        "landing_commits": [
+          "4d5748b3de2c15985af55e3dfe3c35626d6be543"
+        ],
+        "landed_scope": "Two-call-site host metadata inventory and fail-closed KEEP decision.",
+        "missing_terminal_evidence": [
+          "host contexts, profile and platform matrix, schema output, redaction and replay"
+        ]
+      },
+      {
+        "prerequisite_id": "asupersync-d24mms.3",
+        "readiness_state": "STATIC_KEEP_GATE_LANDED_BLOCKED",
+        "terminal_ready": false,
+        "evidence_refs": [
+          "artifacts/cli_clap_surface_inventory_v1.json#env_logger_static_audit"
+        ],
+        "landing_commits": [
+          "efab658ab3966f68f005b02ba0c5710467523d51"
+        ],
+        "landed_scope": "Offline-tuner logging surface inventory and fail-closed KEEP decision.",
+        "missing_terminal_evidence": [
+          "black-box command, filter, stream, exit, artifact and redaction parity"
+        ]
+      },
+      {
+        "prerequisite_id": "asupersync-d24mms.4",
+        "readiness_state": "CHECKPOINT_LANDED_BLOCKED",
+        "terminal_ready": false,
+        "evidence_refs": [
+          "artifacts/time_utc_rfc3339_foundation_v1.json"
+        ],
+        "landing_commits": [
+          "03ae793105ce744c10b878d78d4d0723d23aa81f"
+        ],
+        "landed_scope": "Owned deterministic Unix-nanoseconds formatter checkpoint while the time edge remains retained.",
+        "missing_terminal_evidence": [
+          "sparse graph and ledger proof plus the broader DEP-ADR-011 surfaces"
+        ]
+      },
+      {
+        "prerequisite_id": "asupersync-d24mms.5",
+        "readiness_state": "NO_DEDICATED_RECEIPT",
+        "terminal_ready": false,
+        "evidence_refs": [
+          "baseline-capability:CAP-TEMP-ARTIFACTS"
+        ],
+        "landing_commits": [],
+        "landed_scope": "The incumbent baseline classifies temporary-artifact capability only; no leaf-specific profile audit is landed.",
+        "missing_terminal_evidence": [
+          "Cargo-built profile classification, fixture capability preservation and optionalization decision"
+        ]
+      },
+      {
+        "prerequisite_id": "asupersync-d24mms.6.10",
+        "readiness_state": "CAMPAIGN_PARTIAL_BLOCKED",
+        "terminal_ready": false,
+        "evidence_refs": [
+          "artifacts/futures_lite_capability_inventory_v1.json"
+        ],
+        "landing_commits": [
+          "66e7b73f10fad35292485ea2b3ff1d3a2bb9fff4"
+        ],
+        "landed_scope": "Futures-lite A1 capability inventory only.",
+        "missing_terminal_evidence": [
+          "A2 through A9 implementation and migration evidence plus the A10 terminal receipt"
+        ]
+      },
+      {
+        "prerequisite_id": "asupersync-d24mms.7",
+        "readiness_state": "STATIC_KEEP_GATE_LANDED_BLOCKED",
+        "terminal_ready": false,
+        "evidence_refs": [
+          "embedded:visibility_macro_static_audit"
+        ],
+        "landing_commits": [
+          "1472b388e365460c2dc067b57f084291e6d8d407",
+          "f89fa209b9a1612deab458734030ffcacd908037",
+          "341ac3656a98e8b07749207d2996914b23042fcf"
+        ],
+        "landed_scope": "Twelve-attribute visibility inventory and fail-closed KEEP decision.",
+        "missing_terminal_evidence": [
+          "owned macro, UI corpus, privacy-off and sparse-feature compile matrices"
+        ]
+      },
+      {
+        "prerequisite_id": "asupersync-d24mms.8",
+        "readiness_state": "STATIC_KEEP_GATE_LANDED_BLOCKED",
+        "terminal_ready": false,
+        "evidence_refs": [
+          "embedded:slab_static_audit"
+        ],
+        "landing_commits": [
+          "33f94643ced8f5415ad3c1f0a30cd42ddcb738c9"
+        ],
+        "landed_scope": "Four-consumer slab inventory, misbound-evidence finding and fail-closed KEEP decision.",
+        "missing_terminal_evidence": [
+          "owned differential candidate, stale-key and lifecycle proof, real consumer replay and performance"
+        ]
+      },
+      {
+        "prerequisite_id": "asupersync-d24mms.9.5",
+        "readiness_state": "CAMPAIGN_PARTIAL_BLOCKED",
+        "terminal_ready": false,
+        "evidence_refs": [
+          "artifacts/hex_capability_inventory_v1.json",
+          "source:src/codec/hex.rs"
+        ],
+        "landing_commits": [
+          "90b367053a81ddb436aca6641fc6307fc2b2f1b3",
+          "982d1ae6f76c57c7f7f73aff915aa4c33bfb3e8b"
+        ],
+        "landed_scope": "Hex A1 inventory and A2 scalar kernel checkpoint.",
+        "missing_terminal_evidence": [
+          "call-site migration, independent parity campaigns, user journeys and A5 cutover or KEEP receipt"
+        ]
+      },
+      {
+        "prerequisite_id": "asupersync-d24mms.10.6",
+        "readiness_state": "CAMPAIGN_PARTIAL_BLOCKED",
+        "terminal_ready": false,
+        "evidence_refs": [
+          "artifacts/base64_capability_inventory_v1.json"
+        ],
+        "landing_commits": [
+          "da9b1b40fcc1bf19ba92f445ed338bb51b638ee0"
+        ],
+        "landed_scope": "Base64 A1 capability inventory only.",
+        "missing_terminal_evidence": [
+          "owned engines, all migration groups, independent corpus, real-service matrix and A6 terminal receipt"
+        ]
+      },
+      {
+        "prerequisite_id": "asupersync-d24mms.11",
+        "readiness_state": "CHECKPOINT_LANDED_BLOCKED",
+        "terminal_ready": false,
+        "evidence_refs": [
+          "src/net/atp/chunk/artifact.rs",
+          "scripts/run_dependency_sovereignty_e2e.sh"
+        ],
+        "landing_commits": [
+          "f8c96d5e9641928d5d37ed990aaa16805b95620a",
+          "8793ef7097f23622b2bdea1cd9a60afbb11517f1"
+        ],
+        "landed_scope": "Bounded scanner implementation and real artifact/reassembly route are present.",
+        "missing_terminal_evidence": [
+          "admitted focused execution and retained real artifact/reassembly replay artifacts"
+        ]
+      },
+      {
+        "prerequisite_id": "asupersync-d24mms.12.5",
+        "readiness_state": "CAMPAIGN_PARTIAL_BLOCKED",
+        "terminal_ready": false,
+        "evidence_refs": [
+          "artifacts/dormant_e2e_inventory_v1.json"
+        ],
+        "landing_commits": [
+          "51543c21a171e2708d3892776c8979fdf2d9fd01"
+        ],
+        "landed_scope": "Dormant-E2E A1 inventory only.",
+        "missing_terminal_evidence": [
+          "restored filesystem, general and distributed journeys plus canonical A5 aggregate evidence"
+        ]
+      }
+    ],
+    "readiness_decision": {
+      "status": "BLOCKED_12_OF_13_PREREQUISITES_NOT_TERMINAL",
+      "phase2_terminal_signoff_allowed": false,
+      "dependency_exit_allowed": false,
+      "manifest_or_lockfile_edit_allowed": false,
+      "tracker_closure_allowed": false,
+      "required_next_state": "ALL_13_PREREQUISITES_TERMINAL_AND_REPLAYED_WITH_ZERO_UNKNOWN",
+      "on_missing_stale_unreplayed_or_regressed_row": "BLOCK_PHASE2_SIGNOFF_AND_KEEP_INCUMBENTS",
+      "reason": "Only the scoped Phase-1 foundation is terminal-ready. Static KEEP gates and landed checkpoints are useful progress, but each explicitly lacks terminal executable evidence or closure authority."
+    },
+    "no_claims": [
+      "No Cargo, RCH, compiler, formatter, unit, property, model, E2E, benchmark, service, platform, fuzz, ledger-regeneration, runtime, or aggregate replay lane was executed for this audit.",
+      "Git landing and content-pinned artifact presence do not prove that any child terminal remains executable, current, replayable, or SAME-or-BETTER.",
+      "Stale tracker labels are topology context only; they are not used as proof that landed work is complete or that open work is absent.",
+      "The five static KEEP gates do not authorize their tracker closure, dependency exit, implementation, source migration, manifest edit, or lockfile edit.",
+      "This audit does not authorize Phase-2 signoff, dependency exit, public/API/format/protocol/feature/platform/diagnostic/security/user-journey narrowing, release readiness, performance claims, broad workspace health, or deletion of any file."
+    ]
+  },
   "no_claim_boundaries": [
     "This artifact is a baseline inventory, not proof that any replacement is SAME-or-BETTER.",
     "No row authorizes dependency removal, public API narrowing, format deletion, feature removal, service deprecation, unsafe expansion, or cutover.",

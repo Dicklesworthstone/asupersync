@@ -38,6 +38,16 @@ const SLAB_BEAD_ID: &str = "asupersync-d24mms.8";
 const SLAB_AUDIT_ID: &str = "CAP-TOKEN-SLAB-STATIC-AUDIT-V1";
 const SLAB_PATH_TOKEN: &str = concat!("sl", "ab::");
 const SLAB_BASELINE_FIXTURE: &str = "tests/memory_tier_slab_pool_contract.rs";
+const PHASE2_SIGNOFF_BEAD_ID: &str = "asupersync-d24mms.13";
+const PHASE2_READINESS_AUDIT_ID: &str = "CAP-PHASE2-TERMINAL-READINESS-STATIC-AUDIT-V1";
+const PHASE1_SIGNOFF_PATH: &str = "artifacts/dependency_phase1_aggregate_signoff_v1.json";
+const CLI_INVENTORY_PATH: &str = "artifacts/cli_clap_surface_inventory_v1.json";
+const UTC_FOUNDATION_PATH: &str = "artifacts/time_utc_rfc3339_foundation_v1.json";
+const FUTURES_INVENTORY_PATH: &str = "artifacts/futures_lite_capability_inventory_v1.json";
+const HEX_INVENTORY_PATH: &str = "artifacts/hex_capability_inventory_v1.json";
+const BASE64_INVENTORY_PATH: &str = "artifacts/base64_capability_inventory_v1.json";
+const DORMANT_E2E_INVENTORY_PATH: &str = "artifacts/dormant_e2e_inventory_v1.json";
+const ATP_ARTIFACT_SOURCE: &str = "src/net/atp/chunk/artifact.rs";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -195,6 +205,18 @@ fn tracker_ids() -> BTreeSet<String> {
             let issue: Value = serde_json::from_str(line)
                 .unwrap_or_else(|error| panic!("{TRACKER_PATH} contains invalid JSONL: {error}"));
             string(&issue, "id").to_owned()
+        })
+        .collect()
+}
+
+fn tracker_issues() -> BTreeMap<String, Value> {
+    read_repo_file(TRACKER_PATH)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let issue: Value = serde_json::from_str(line)
+                .unwrap_or_else(|error| panic!("{TRACKER_PATH} contains invalid JSONL: {error}"));
+            (string(&issue, "id").to_owned(), issue)
         })
         .collect()
 }
@@ -950,6 +972,11 @@ fn runner_and_docs_expose_replay_logging_and_no_claim_boundaries() {
         SLAB_BEAD_ID,
         "NO_REPLACEMENT_OR_CONSUMER_MATRIX_EXECUTED",
         "slab_exit_allowed=false",
+        PHASE2_READINESS_AUDIT_ID,
+        PHASE2_SIGNOFF_BEAD_ID,
+        "BLOCKED_12_OF_13_PREREQUISITES_NOT_TERMINAL",
+        "phase2_terminal_signoff_allowed=false",
+        "ALL_13_PREREQUISITES_TERMINAL_AND_REPLAYED_WITH_ZERO_UNKNOWN",
         GENERATED_BEGIN,
         GENERATED_END,
     ] {
@@ -2749,6 +2776,368 @@ fn slab_static_audit_is_source_pinned_and_rejects_misbound_evidence() {
         "misbound adjacent util::Arena evidence",
         "does not authorize cutover",
         "does not authorize slab removal",
+    ] {
+        assert!(no_claims.contains(required), "missing no-claim: {required}");
+    }
+}
+
+#[test]
+fn phase2_terminal_readiness_frontier_is_exact_and_fail_closed() {
+    let value = artifact();
+    let audit = object(&value, "phase2_terminal_readiness_static_audit");
+    assert_eq!(string(audit, "audit_id"), PHASE2_READINESS_AUDIT_ID);
+    assert_eq!(string(audit, "bead_id"), PHASE2_SIGNOFF_BEAD_ID);
+    assert_eq!(
+        string(audit, "observed_at_revision"),
+        "33f94643ced8f5415ad3c1f0a30cd42ddcb738c9"
+    );
+    assert_eq!(
+        string(audit, "audit_state"),
+        "STATIC_GIT_ARTIFACT_AND_TRACKER_TOPOLOGY_PINNED_NOT_EXECUTED"
+    );
+    assert_eq!(
+        string(audit, "execution_state"),
+        "NO_CHILD_OR_AGGREGATE_EXECUTION_REPLAYED"
+    );
+
+    let expected_capabilities = BTreeSet::from([
+        "CAP-ATP-VERSION-SCANNER".to_owned(),
+        "CAP-AUTH-CREDENTIALS".to_owned(),
+        "CAP-BASE64-CODEC".to_owned(),
+        "CAP-CLI-OFFLINE-TUNER".to_owned(),
+        "CAP-DIAGNOSTICS".to_owned(),
+        "CAP-FUTURES-STREAMS".to_owned(),
+        "CAP-HASH-MAPS".to_owned(),
+        "CAP-HEX-CODEC".to_owned(),
+        "CAP-HOST-BENCH-METADATA".to_owned(),
+        "CAP-HOST-INTROSPECTION".to_owned(),
+        "CAP-REAL-SERVICE-E2E".to_owned(),
+        "CAP-TEMP-ARTIFACTS".to_owned(),
+        "CAP-TIME-UTC-RFC3339".to_owned(),
+        "CAP-TOKEN-SLAB".to_owned(),
+        "CAP-VERIFICATION-PROFILES".to_owned(),
+        "CAP-VISIBILITY-MACRO".to_owned(),
+    ]);
+    let binding = object(audit, "registry_binding");
+    assert_eq!(string(binding, "state"), "EXACT_PRESENT");
+    assert_eq!(string(binding, "registry_path"), REGISTRY_PATH);
+    assert_eq!(string_set(binding, "capability_ids"), expected_capabilities);
+
+    let registry = registry();
+    let registry_rule = array(&registry, "bead_mapping_rules")
+        .iter()
+        .find(|rule| rule.get("bead_id").and_then(Value::as_str) == Some(PHASE2_SIGNOFF_BEAD_ID))
+        .expect("Phase-2 signoff must have an exact registry rule");
+    assert_eq!(string(registry_rule, "scope"), "exact");
+    assert_eq!(
+        string_set(registry_rule, "capability_ids"),
+        string_set(binding, "capability_ids")
+    );
+
+    let tracker_snapshot = object(audit, "tracker_snapshot");
+    assert_eq!(string(tracker_snapshot, "path"), TRACKER_PATH);
+    assert_eq!(
+        string(tracker_snapshot, "sha256"),
+        sha256_hex(&read_repo_bytes(TRACKER_PATH))
+    );
+    assert_eq!(
+        unsigned(tracker_snapshot, "line_count"),
+        u64::try_from(read_repo_file(TRACKER_PATH).lines().count()).expect("line count fits u64")
+    );
+    assert!(!boolean(tracker_snapshot, "completion_authority"));
+    assert!(!boolean(tracker_snapshot, "write_allowed"));
+    assert!(string(tracker_snapshot, "role").contains("read-only"));
+
+    let expected_pins = BTreeMap::from([
+        (
+            REGISTRY_PATH,
+            (
+                "e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2",
+                6917_u64,
+            ),
+        ),
+        (
+            PHASE1_SIGNOFF_PATH,
+            (
+                "f99bb9e88291d122b1f075c43480436ed1a94c0389174a472c9684d9b2ebf3c4",
+                327_u64,
+            ),
+        ),
+        (
+            CLI_INVENTORY_PATH,
+            (
+                "6e75eaffa3b3a8e64feb38631d7f4d1e65a9126b9338780303e639168687bb55",
+                7443_u64,
+            ),
+        ),
+        (
+            UTC_FOUNDATION_PATH,
+            (
+                "b141bca2ef0238eab6541d903ad02d61dc9c7801acdf7609606fd75a5e1cc599",
+                91_u64,
+            ),
+        ),
+        (
+            FUTURES_INVENTORY_PATH,
+            (
+                "cea3d2d4c0874b0ee002f98d7730ce5ef67e82c24a0f7412bb96ee49552514fe",
+                894_u64,
+            ),
+        ),
+        (
+            HEX_INVENTORY_PATH,
+            (
+                "abfa1d24ea067fbab58b862f8d5ba0e624589ad313d765f9e88e5e7ebb94d760",
+                960_u64,
+            ),
+        ),
+        (
+            BASE64_INVENTORY_PATH,
+            (
+                "28171082ff529b93cbe951b9de84db9423b8922fde531c82aa21051b933c83eb",
+                417_u64,
+            ),
+        ),
+        (
+            ATP_ARTIFACT_SOURCE,
+            (
+                "21b5131f5c5c2502b96bd61363a3bc21072062a0b9473bd602ab478a6b77cea9",
+                1597_u64,
+            ),
+        ),
+        (
+            RUNNER_PATH,
+            (
+                "388af46854549b837e7de602fbb84f99d26dcf2fef6b7e4f8575f1f6478d33a0",
+                1276_u64,
+            ),
+        ),
+        (
+            DORMANT_E2E_INVENTORY_PATH,
+            (
+                "9a28fef1a5e304d371b2c4e0b0538085ad304ce0bdc54828e7709c029a42edbd",
+                552_u64,
+            ),
+        ),
+        (
+            TRACKER_PATH,
+            (
+                "54331bf1da49d041ab0b92e89cf81037a3808de1e7d13ef4810dafc1315256bf",
+                12444_u64,
+            ),
+        ),
+    ]);
+    let source_pins = array(audit, "source_pins");
+    assert_eq!(source_pins.len(), expected_pins.len());
+    let actual_pin_paths = source_pins
+        .iter()
+        .map(|pin| string(pin, "path").to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        actual_pin_paths,
+        expected_pins.keys().map(|path| (*path).to_owned()).collect()
+    );
+    for pin in source_pins {
+        let path = string(pin, "path");
+        let (expected_sha, expected_lines) = expected_pins
+            .get(path)
+            .unwrap_or_else(|| panic!("unexpected Phase-2 source pin {path}"));
+        let bytes = read_repo_bytes(path);
+        assert_eq!(string(pin, "sha256"), *expected_sha, "stored SHA for {path}");
+        assert_eq!(sha256_hex(&bytes), *expected_sha, "live SHA for {path}");
+        assert_eq!(
+            unsigned(pin, "line_count"),
+            *expected_lines,
+            "stored line count for {path}"
+        );
+        assert_eq!(
+            u64::try_from(read_repo_file(path).lines().count()).expect("line count fits u64"),
+            *expected_lines,
+            "live line count for {path}"
+        );
+        assert!(!string(pin, "role").is_empty());
+    }
+
+    let expected_prerequisites = BTreeSet::from([
+        "asupersync-dep-p1-foundations-upksjk.4".to_owned(),
+        "asupersync-d24mms.1".to_owned(),
+        "asupersync-d24mms.10.6".to_owned(),
+        "asupersync-d24mms.11".to_owned(),
+        "asupersync-d24mms.12.5".to_owned(),
+        "asupersync-d24mms.2".to_owned(),
+        "asupersync-d24mms.3".to_owned(),
+        "asupersync-d24mms.4".to_owned(),
+        "asupersync-d24mms.5".to_owned(),
+        "asupersync-d24mms.6.10".to_owned(),
+        "asupersync-d24mms.7".to_owned(),
+        "asupersync-d24mms.8".to_owned(),
+        "asupersync-d24mms.9.5".to_owned(),
+    ]);
+    let issues = tracker_issues();
+    let signoff_issue = issues
+        .get(PHASE2_SIGNOFF_BEAD_ID)
+        .expect("tracker snapshot must contain Phase-2 signoff");
+    let tracker_prerequisites = array(signoff_issue, "dependencies")
+        .iter()
+        .filter(|dependency| dependency.get("type").and_then(Value::as_str) == Some("blocks"))
+        .map(|dependency| string(dependency, "depends_on_id").to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(tracker_prerequisites, expected_prerequisites);
+
+    let prerequisite_rows = array(audit, "prerequisite_rows");
+    assert_eq!(prerequisite_rows.len(), 13);
+    let row_ids = prerequisite_rows
+        .iter()
+        .map(|row| string(row, "prerequisite_id").to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(row_ids, expected_prerequisites);
+
+    let mut state_counts = BTreeMap::<String, u64>::new();
+    let mut terminal_ready = BTreeSet::new();
+    let mut landing_commits = BTreeSet::new();
+    for row in prerequisite_rows {
+        *state_counts
+            .entry(string(row, "readiness_state").to_owned())
+            .or_default() += 1;
+        assert!(!array(row, "evidence_refs").is_empty());
+        assert!(!string(row, "landed_scope").is_empty());
+        if boolean(row, "terminal_ready") {
+            terminal_ready.insert(string(row, "prerequisite_id").to_owned());
+            assert!(array(row, "missing_terminal_evidence").is_empty());
+        } else {
+            assert!(!array(row, "missing_terminal_evidence").is_empty());
+        }
+        for commit in array(row, "landing_commits") {
+            let commit = commit.as_str().expect("landing commit must be text");
+            assert_eq!(commit.len(), 40);
+            assert!(commit.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            assert!(landing_commits.insert(commit.to_owned()), "duplicate landing commit");
+        }
+    }
+    assert_eq!(
+        state_counts,
+        BTreeMap::from([
+            ("CAMPAIGN_PARTIAL_BLOCKED".to_owned(), 4),
+            ("CHECKPOINT_LANDED_BLOCKED".to_owned(), 2),
+            ("FOUNDATION_SCOPED_PASS".to_owned(), 1),
+            ("NO_DEDICATED_RECEIPT".to_owned(), 1),
+            ("STATIC_KEEP_GATE_LANDED_BLOCKED".to_owned(), 5),
+        ])
+    );
+    assert_eq!(
+        terminal_ready,
+        BTreeSet::from(["asupersync-dep-p1-foundations-upksjk.4".to_owned()])
+    );
+    assert_eq!(
+        landing_commits,
+        BTreeSet::from([
+            "03ae793105ce744c10b878d78d4d0723d23aa81f".to_owned(),
+            "1472b388e365460c2dc067b57f084291e6d8d407".to_owned(),
+            "2ddb3c79f33119f5e13001ca9c2547c2117b8627".to_owned(),
+            "33f94643ced8f5415ad3c1f0a30cd42ddcb738c9".to_owned(),
+            "341ac3656a98e8b07749207d2996914b23042fcf".to_owned(),
+            "42a66e7f4e6733c28c59405c052c68f7a32ea0d7".to_owned(),
+            "4d5748b3de2c15985af55e3dfe3c35626d6be543".to_owned(),
+            "51543c21a171e2708d3892776c8979fdf2d9fd01".to_owned(),
+            "66e7b73f10fad35292485ea2b3ff1d3a2bb9fff4".to_owned(),
+            "8793ef7097f23622b2bdea1cd9a60afbb11517f1".to_owned(),
+            "90b367053a81ddb436aca6641fc6307fc2b2f1b3".to_owned(),
+            "982d1ae6f76c57c7f7f73aff915aa4c33bfb3e8b".to_owned(),
+            "da9b1b40fcc1bf19ba92f445ed338bb51b638ee0".to_owned(),
+            "efab658ab3966f68f005b02ba0c5710467523d51".to_owned(),
+            "f89fa209b9a1612deab458734030ffcacd908037".to_owned(),
+            "f8c96d5e9641928d5d37ed990aaa16805b95620a".to_owned(),
+        ])
+    );
+
+    let summary = object(audit, "readiness_summary");
+    assert_eq!(unsigned(summary, "required_prerequisite_count"), 13);
+    assert_eq!(unsigned(summary, "terminal_ready_count"), 1);
+    assert_eq!(unsigned(summary, "blocked_count"), 12);
+    let declared_state_counts = array(summary, "state_counts")
+        .iter()
+        .map(|row| (string(row, "state").to_owned(), unsigned(row, "count")))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(declared_state_counts, state_counts);
+
+    for (key, bead_id) in [
+        ("hash_map_static_audit", HASH_MAP_BEAD_ID),
+        ("host_benchmark_metadata_static_audit", HOST_METADATA_BEAD_ID),
+        ("visibility_macro_static_audit", VISIBILITY_BEAD_ID),
+        ("slab_static_audit", SLAB_BEAD_ID),
+    ] {
+        let leaf = object(&value, key);
+        assert_eq!(string(leaf, "bead_id"), bead_id);
+        assert!(!boolean(object(leaf, "cutover_gate"), "tracker_closure_allowed"));
+    }
+
+    let cli = parse_json(CLI_INVENTORY_PATH);
+    let env_logger = object(&cli, "env_logger_static_audit");
+    assert_eq!(string(env_logger, "bead_id"), "asupersync-d24mms.3");
+    assert!(!boolean(
+        object(env_logger, "cutover_gate"),
+        "tracker_closure_allowed"
+    ));
+    let phase1 = parse_json(PHASE1_SIGNOFF_PATH);
+    assert_eq!(
+        string(object(&phase1, "verdict"), "outcome"),
+        "PASS_SCOPED_FOUNDATIONS_ONLY"
+    );
+    let utc = parse_json(UTC_FOUNDATION_PATH);
+    assert!(!boolean(object(&utc, "decision"), "close_bead_allowed"));
+    assert_eq!(
+        string(&parse_json(FUTURES_INVENTORY_PATH), "bead_id"),
+        "asupersync-d24mms.6.1"
+    );
+    assert_eq!(
+        string(&parse_json(HEX_INVENTORY_PATH), "bead_id"),
+        "asupersync-d24mms.9.1"
+    );
+    assert_eq!(
+        string(&parse_json(BASE64_INVENTORY_PATH), "bead_id"),
+        "asupersync-d24mms.10.1"
+    );
+    assert_eq!(
+        string(&parse_json(DORMANT_E2E_INVENTORY_PATH), "bead_id"),
+        "asupersync-d24mms.12.1"
+    );
+    let scanner = read_repo_file(ATP_ARTIFACT_SOURCE);
+    assert!(scanner.contains("const MAX_VERSION_TOKEN_BYTES: usize = 64;"));
+    assert!(!scanner.contains("mod regex"));
+    let runner = read_repo_file(RUNNER_PATH);
+    assert!(runner.contains("atp_version_artifacts"));
+    assert!(runner.contains("dep-sovereignty-asupersync_d24mms_11_d22341de8339"));
+
+    let decision = object(audit, "readiness_decision");
+    assert_eq!(
+        string(decision, "status"),
+        "BLOCKED_12_OF_13_PREREQUISITES_NOT_TERMINAL"
+    );
+    assert!(!boolean(decision, "phase2_terminal_signoff_allowed"));
+    assert!(!boolean(decision, "dependency_exit_allowed"));
+    assert!(!boolean(decision, "manifest_or_lockfile_edit_allowed"));
+    assert!(!boolean(decision, "tracker_closure_allowed"));
+    assert_eq!(
+        string(decision, "required_next_state"),
+        "ALL_13_PREREQUISITES_TERMINAL_AND_REPLAYED_WITH_ZERO_UNKNOWN"
+    );
+    assert_eq!(
+        string(decision, "on_missing_stale_unreplayed_or_regressed_row"),
+        "BLOCK_PHASE2_SIGNOFF_AND_KEEP_INCUMBENTS"
+    );
+
+    let no_claims = array(audit, "no_claims")
+        .iter()
+        .map(|claim| claim.as_str().expect("no-claim text"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    for required in [
+        "No Cargo, RCH",
+        "do not prove that any child terminal",
+        "topology context only",
+        "do not authorize their tracker closure",
+        "does not authorize Phase-2 signoff",
+        "deletion of any file",
     ] {
         assert!(no_claims.contains(required), "missing no-claim: {required}");
     }
