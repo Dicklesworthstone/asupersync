@@ -69,6 +69,7 @@ pub struct LockMetricsSnapshot {
 mod inner {
     use super::LockMetricsSnapshot;
     use crate::sync::lock_ordering::{self, LockModule, LockRank};
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{LockResult, Mutex, MutexGuard, PoisonError};
     use std::time::Instant;
@@ -91,15 +92,24 @@ mod inner {
         // ── Cache line 2: updated on drop(Guard) ──
         hold_ns: AtomicU64,
         max_hold_ns: AtomicU64,
-        wait_samples: Mutex<Vec<u64>>,
-        hold_samples: Mutex<Vec<u64>>,
+        wait_samples: Mutex<VecDeque<u64>>,
+        hold_samples: Mutex<VecDeque<u64>>,
     }
 
-    const MAX_SAMPLES: usize = 10000; // Prevent unbounded growth
+    const MAX_SAMPLES: usize = 10_000;
 
     impl Metrics {
         fn update_max(current: &AtomicU64, value: u64) {
             current.fetch_max(value, Ordering::Relaxed);
+        }
+
+        /// Retain the exact most-recent sample suffix with O(1) FIFO eviction.
+        fn record_sample(samples: &mut VecDeque<u64>, sample: u64) {
+            if samples.len() == MAX_SAMPLES {
+                let evicted = samples.pop_front();
+                debug_assert!(evicted.is_some());
+            }
+            samples.push_back(sample);
         }
 
         fn record_acquire(&self, wait_ns: u64, contended: bool) {
@@ -121,12 +131,7 @@ mod inner {
                 self.contentions.fetch_add(1, Ordering::Relaxed);
             }
 
-            // Bound sample collection to prevent memory leak.
-            if samples.len() >= MAX_SAMPLES {
-                // Remove oldest samples to maintain bound (FIFO eviction).
-                samples.drain(0..MAX_SAMPLES / 4);
-            }
-            samples.push(wait_ns);
+            Self::record_sample(&mut samples, wait_ns);
         }
 
         fn record_hold(&self, hold_ns: u64) {
@@ -139,12 +144,7 @@ mod inner {
             self.hold_ns.fetch_add(hold_ns, Ordering::Relaxed);
             Self::update_max(&self.max_hold_ns, hold_ns);
 
-            // Bound sample collection to prevent memory leak.
-            if samples.len() >= MAX_SAMPLES {
-                // Remove oldest samples to maintain bound (FIFO eviction).
-                samples.drain(0..MAX_SAMPLES / 4);
-            }
-            samples.push(hold_ns);
+            Self::record_sample(&mut samples, hold_ns);
         }
 
         /// Computes an exact percentile from an already-sorted (ascending),
@@ -169,14 +169,14 @@ mod inner {
             // record_*/reset use, so the counters and the samples are read as a
             // single coherent tuple. Both percentiles are derived from that one
             // frozen population and the max is read inside the same critical
-            // section, guaranteeing p95 <= p999 <= max (uqm6ex). The clone is
-            // taken under the lock but sorted after releasing it to keep the
-            // critical section short.
+            // section, guaranteeing p95 <= p999 <= max (uqm6ex). The frozen
+            // copy is taken under the lock but sorted after releasing it to
+            // keep the critical section short.
             let acquisitions;
             let contentions;
             let wait_ns;
             let max_wait_ns;
-            let mut wait_frozen;
+            let mut wait_frozen: Vec<u64>;
             {
                 let samples = self
                     .wait_samples
@@ -186,7 +186,7 @@ mod inner {
                 contentions = self.contentions.load(Ordering::Relaxed);
                 wait_ns = self.wait_ns.load(Ordering::Relaxed);
                 max_wait_ns = self.max_wait_ns.load(Ordering::Relaxed);
-                wait_frozen = samples.clone();
+                wait_frozen = samples.iter().copied().collect();
             }
             let wait_percentile_sample_count = u64::try_from(wait_frozen.len()).unwrap_or(u64::MAX);
             wait_frozen.sort_unstable();
@@ -195,7 +195,7 @@ mod inner {
 
             let hold_ns;
             let max_hold_ns;
-            let mut hold_frozen;
+            let mut hold_frozen: Vec<u64>;
             {
                 let samples = self
                     .hold_samples
@@ -203,7 +203,7 @@ mod inner {
                     .unwrap_or_else(PoisonError::into_inner);
                 hold_ns = self.hold_ns.load(Ordering::Relaxed);
                 max_hold_ns = self.max_hold_ns.load(Ordering::Relaxed);
-                hold_frozen = samples.clone();
+                hold_frozen = samples.iter().copied().collect();
             }
             let hold_percentile_sample_count = u64::try_from(hold_frozen.len()).unwrap_or(u64::MAX);
             hold_frozen.sort_unstable();
@@ -259,7 +259,7 @@ mod inner {
 
     #[cfg(test)]
     mod tests {
-        use super::Metrics;
+        use super::{MAX_SAMPLES, Metrics};
 
         #[test]
         fn percentile_horizon_reports_retained_suffix_and_all_history_counters() {
@@ -282,23 +282,99 @@ mod inner {
             assert_eq!(full.p95_hold_ns, 1_000);
             assert_eq!(full.p999_hold_ns, 1_000);
 
-            metrics.record_acquire(1, false);
-            metrics.record_hold(1);
+            for _ in 0..2_500 {
+                metrics.record_acquire(1, false);
+                metrics.record_hold(1);
+            }
 
             let evicted = metrics.snapshot("percentile_horizon");
-            assert_eq!(evicted.wait_percentile_sample_count, 7_501);
-            assert_eq!(evicted.hold_percentile_sample_count, 7_501);
+            assert_eq!(evicted.wait_percentile_sample_count, 10_000);
+            assert_eq!(evicted.hold_percentile_sample_count, 10_000);
             assert_eq!(evicted.p95_wait_ns, 1);
             assert_eq!(evicted.p999_wait_ns, 1);
             assert_eq!(evicted.p95_hold_ns, 1);
             assert_eq!(evicted.p999_hold_ns, 1);
 
-            assert_eq!(evicted.acquisitions, 10_001);
+            assert_eq!(evicted.acquisitions, 12_500);
             assert_eq!(evicted.contentions, 2_500);
-            assert_eq!(evicted.wait_ns, 2_507_501);
+            assert_eq!(evicted.wait_ns, 2_510_000);
             assert_eq!(evicted.max_wait_ns, 1_000);
-            assert_eq!(evicted.hold_ns, 2_507_501);
+            assert_eq!(evicted.hold_ns, 2_510_000);
             assert_eq!(evicted.max_hold_ns, 1_000);
+        }
+
+        #[test]
+        fn sample_rings_replace_fifo_one_at_a_time_across_wraps() {
+            let metrics = Metrics::default();
+            let max_samples = u64::try_from(MAX_SAMPLES).expect("sample bound fits u64");
+
+            for sample in 0..max_samples {
+                metrics.record_acquire(sample, false);
+                metrics.record_hold(sample);
+            }
+
+            let wait_capacity = metrics
+                .wait_samples
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .capacity();
+            let hold_capacity = metrics
+                .hold_samples
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .capacity();
+
+            metrics.record_acquire(max_samples, false);
+            metrics.record_hold(max_samples);
+            {
+                let samples = metrics
+                    .wait_samples
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                assert_eq!(samples.len(), MAX_SAMPLES);
+                assert_eq!(samples.capacity(), wait_capacity);
+                assert_eq!(samples.front().copied(), Some(1));
+                assert_eq!(samples.back().copied(), Some(max_samples));
+            }
+            {
+                let samples = metrics
+                    .hold_samples
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                assert_eq!(samples.len(), MAX_SAMPLES);
+                assert_eq!(samples.capacity(), hold_capacity);
+                assert_eq!(samples.front().copied(), Some(1));
+                assert_eq!(samples.back().copied(), Some(max_samples));
+            }
+
+            let total_samples = max_samples * 3 + 17;
+            for sample in (max_samples + 1)..total_samples {
+                metrics.record_acquire(sample, false);
+                metrics.record_hold(sample);
+            }
+
+            let expected_front = total_samples - max_samples;
+            let expected_back = total_samples - 1;
+            {
+                let samples = metrics
+                    .wait_samples
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                assert_eq!(samples.len(), MAX_SAMPLES);
+                assert_eq!(samples.capacity(), wait_capacity);
+                assert_eq!(samples.front().copied(), Some(expected_front));
+                assert_eq!(samples.back().copied(), Some(expected_back));
+            }
+            {
+                let samples = metrics
+                    .hold_samples
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                assert_eq!(samples.len(), MAX_SAMPLES);
+                assert_eq!(samples.capacity(), hold_capacity);
+                assert_eq!(samples.front().copied(), Some(expected_front));
+                assert_eq!(samples.back().copied(), Some(expected_back));
+            }
         }
     }
 
