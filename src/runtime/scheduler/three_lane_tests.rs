@@ -2018,6 +2018,47 @@ fn test_inject_cancel_promotes_ready_task() {
 }
 
 #[test]
+fn test_inject_ready_promotes_not_due_timed_task_without_duplicate() {
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    let region = state
+        .lock()
+        .expect("lock")
+        .create_root_region(Budget::INFINITE);
+
+    let task_id = {
+        let mut guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (task_id, _handle) = guard
+            .create_task(region, Budget::INFINITE, async {})
+            .expect("create task");
+        task_id
+    };
+
+    let scheduler = ThreeLaneScheduler::new(1, &state);
+    scheduler.inject_timed(task_id, Time::from_secs(100));
+    assert!(scheduler.global.has_timed_work());
+    assert!(!scheduler.global.has_ready_work());
+
+    scheduler.inject_ready(task_id, 50);
+    scheduler.inject_ready(task_id, 50);
+
+    let promoted = scheduler
+        .global
+        .pop_ready()
+        .expect("ready wake should promote the timed task");
+    assert_eq!(promoted.task, task_id);
+    assert!(
+        scheduler.global.pop_ready().is_none(),
+        "repeated ready wake must remain deduplicated"
+    );
+    assert!(
+        scheduler.global.pop_timed().is_none(),
+        "ready promotion must remove the stale timed entry"
+    );
+}
+
+#[test]
 fn test_inject_cancel_promotes_timed_task_without_duplicate() {
     let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
     let region = state

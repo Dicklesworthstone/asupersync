@@ -86,7 +86,7 @@
     },
     {
       "path": "src/runtime/scheduler/three_lane.rs",
-      "sha256": "3f04b9034fc4375278109752093b1d9865e9bfcce57e6e94535708488a97598b",
+      "sha256": "ba804763dd1fd8ca2f495bc01933563f51fd7b403de60a03e52e68a667cc7065",
       "line_count": 8190,
       "role": "production scheduler table selection, poll cycle, publication, ordinary wakers, and reason-bearing cancel wakers"
     },

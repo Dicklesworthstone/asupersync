@@ -2722,7 +2722,7 @@ impl ThreeLaneScheduler {
     /// Injects a task into the ready lane for cross-thread wakeup.
     ///
     /// Uses `wake_state.notify()` for centralized deduplication.
-    /// If the task is already scheduled, this is a no-op.
+    /// Timed tasks are promoted to ready; other scheduled tasks remain deduplicated.
     /// If the task record doesn't exist (e.g., in tests), allows injection.
     ///
     /// # Panics
@@ -2741,8 +2741,8 @@ impl ThreeLaneScheduler {
                     if is_local {
                         // Local tasks cannot be globally injected
                         (false, true, 0)
-                    } else if record.wake_state.notify() {
-                        // Task state allows scheduling, inject while holding lock
+                    } else if record.wake_state.notify() || self.global.remove_timed(task) {
+                        // Newly notified, or promoted from timed after a real wake.
                         let ready_count_before = self.global.ready_count();
                         self.global.inject_ready(task, priority);
                         (true, false, ready_count_before)
