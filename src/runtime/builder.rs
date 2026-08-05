@@ -3449,8 +3449,13 @@ impl Runtime {
 
     /// Create a request-scoped [`Cx`](crate::cx::Cx) backed by this runtime's
     /// drivers, tracing, and logical clock configuration.
+    ///
+    /// This is the ambient-free production entry point for an external
+    /// consumer that must begin an operation with explicit runtime authority.
+    /// The caller supplies the operation budget; the resulting context is
+    /// bound to this runtime rather than manufacturing test-only authority.
     #[must_use]
-    pub(crate) fn request_cx_with_budget(&self, budget: Budget) -> crate::cx::Cx {
+    pub fn request_cx_with_budget(&self, budget: Budget) -> crate::cx::Cx {
         build_request_cx_from_inner(&self.inner, budget)
     }
 
