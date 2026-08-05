@@ -90,6 +90,54 @@ runtime and lab helpers, blocking-pool tests, benchmarks, examples, and the
 Tokio compatibility member. A replacement must explicitly test all of those
 contexts. “Works in a normal unit test” is not parity.
 
+### FUT A3 static kernel progress
+
+At base revision `02b380ee063e7e643105b1a7997360a7021bf32e`, bead
+`asupersync-d24mms.6.3` added an alongside-incumbent owned kernel at the
+crate-private `crate::util::future` module. This is `STATIC_SOURCE_PROGRESS`; its
+executable state is `NOT_RUN_STATIC_ONLY`, and the bead remains open.
+
+The kernel pins its future on the calling stack and uses one `Arc`-owned
+thread-notification state per invocation. The waker records a release-ordered
+notification before unparking the caller. The waiter consumes notifications
+with acquire-release ordering on both sides of each poll, so a wake between the
+pending result and the actual park remains represented by either the atomic bit
+or the thread's park token. A boolean notification coalesces repeated wakes.
+Spurious park returns do not cause an unnotified repoll: the waiter checks the
+notification bit and parks again. Separate state per invocation preserves
+ordinary recursion without a thread-local borrow or a shared poisoned mutex.
+
+The kernel policy is deliberately conservative:
+
+- `crate::util::future::block_on` preserves the parity-shaped direct-output
+  shape for admitted internal contexts, while
+  `crate::util::future::try_block_on` exposes a typed refusal;
+- borrowed, non-`Send`, non-`Unpin`, and non-`'static` futures remain admissible;
+- ordinary host threads and Asupersync blocking-pool threads are admitted;
+- any installed `Runtime::current_handle()` is rejected before the future is
+  polled, covering both scheduler workers and a nested call from the thread
+  driving `Runtime::block_on`;
+- `wasm32` is rejected because host-thread parking is unavailable;
+- the kernel creates no executor, task, region, obligation, or ambient `Cx`;
+- cancellation remains explicit future behavior: progress requires the
+  cancellation source to wake the future after changing its state.
+
+Inline cases have been authored for ready-without-park, borrowed non-`Send`
+recursion, wake coalescing, deterministic spurious returns, stable waker
+identity, wake-after-pending, explicit cancellation wake, panic propagation,
+refusal before polling in an installed runtime context, and execution on the
+real blocking-pool implementation. None of those cases has been executed in
+this static-only increment.
+
+This is not parity and is not a migration authorization. In particular, the
+kernel cannot distinguish an Asupersync scheduler worker from the external
+thread driving a runtime, cannot identify arbitrary foreign executors, has no
+loom/lab receipt, and carries no idle-CPU or latency measurement. The three
+production blocking sites and every test call remain on the incumbent. The
+dependency, manifests, capability registry, source-pinned A1 artifact, and
+cutover state remain unchanged at `KEEP_UNTIL_PARITY` /
+`BLOCKED_PENDING_EVIDENCE`.
+
 ## Consumed helper semantics
 
 The live API set is:

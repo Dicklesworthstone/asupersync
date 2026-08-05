@@ -27,3 +27,9 @@ pub use resource::{
     PoolConfig, PoolExhausted, ResourceLimits, ResourceTracker, SymbolBuffer, SymbolPool,
 };
 pub use stack_trace::{StackTrace, capture_stack_trace};
+
+// Alongside-incumbent FUT A3 kernel. It remains crate-private until the
+// dependency-parity campaign has executable context and performance evidence.
+#[allow(dead_code)]
+#[path = "../future.rs"]
+pub(crate) mod future;
