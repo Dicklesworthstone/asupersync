@@ -48,6 +48,51 @@ The sole current root advisory exception is `RUSTSEC-2025-0134` for
 2026-09-01, and has no automatic renewal. The planned remediation is migration
 to `rustls-pki-types::pem::PemObject`.
 
+## Downstream bounds, lockfiles, and vendoring
+
+The repository's `Cargo.lock` records the graph used by Asupersync's own
+workspace gates. It does not constrain the versions selected when another
+package depends on Asupersync. A downstream application should commit and
+enforce its own lockfile; a downstream library should review the graph resolved
+by its own integration and release fixtures. Neither consumer inherits a green
+advisory, license, source, or duplicate-version result from this repository.
+
+The current lower-bound contract is deliberately narrow:
+
+| Consumer profile | Declared bound | Current evidence state |
+| --- | --- | --- |
+| Default features | The exact nightly in `rust-toolchain.toml`; default features include `nightly-outcome-try` | Pinned contributor/release toolchain, not a numeric stable MSRV |
+| Stable subset | A toolchain supporting Edition 2024, with default features disabled and `proc-macros` enabled | Audited stable profile, but no numeric minimum is declared because `[package].rust-version` is absent |
+| Dependency versions | The semver requirements in the consumer's resolved Asupersync manifest | Current-version coverage only; the workspace lock is not a verified minimum-version set |
+
+The synthesized fixture at
+`tests/fixtures/downstream-consumer-proof/Cargo.toml` exercises selected public
+API and feature profiles through a path dependency. Its proof-status row is
+`rerun-required`, and even a fresh pass would establish compatibility with the
+current manifest resolution only. It has no committed independent lockfile and
+does not exercise Cargo's direct-minimal or transitive-minimal resolution.
+Therefore this project does **not** currently claim a numeric stable MSRV or a
+verified minimum dependency set.
+
+Establishing either claim requires a separate, synthesized consumer with an
+independent lockfile, an explicitly pinned toolchain, exact feature and target
+profiles, and a minimum-version resolution receipt. Any lower bound that fails
+that lane must be raised in the manifest before the bound is published. The
+existing [dependency budget contract](./dependency_budget_contract.md) and
+[feature/platform/consumer matrix](./dependency_feature_platform_consumer_matrix.md)
+define current graph ceilings and profile coverage; they are not downstream
+resolution guarantees.
+
+`cargo vendor` is an optional consumer control, not a universal reproducibility
+or trust guarantee. A consumer that vendors should first resolve and commit its
+own lockfile, commit the generated source configuration and vendor tree, and
+review changes to all three together. Vendoring copies the selected sources; it
+does not by itself freeze resolution, authenticate publishers, find advisories,
+approve licenses, validate build scripts, or cover unreviewed `[patch]` and
+source-replacement configuration. Consumers remain responsible for running
+their own advisory, license, source, and target/profile checks against the graph
+they actually ship.
+
 ## Direct-main and CI runs
 
 Run the live gate from the repository root:

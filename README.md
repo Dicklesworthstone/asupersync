@@ -600,6 +600,23 @@ unit tests through RCH with the shared stable-lane target directory. Stable
 consumers must use `--no-default-features --features proc-macros` until the
 nightly `Outcome` `Try` surface is migrated or disabled by default.
 
+### Downstream dependency resolution
+
+Asupersync's repository `Cargo.lock` governs this workspace; it does not pin a
+downstream consumer's resolution. Default-feature consumers should use the
+exact nightly in `rust-toolchain.toml`. The stable subset currently has no
+numeric MSRV claim because `Cargo.toml` does not declare `rust-version`, and the
+existing synthesized-consumer proof covers current public API profiles rather
+than minimum dependency versions.
+
+Applications should commit and enforce their own lockfile. Vendoring is an
+optional source-availability control that must be maintained together with that
+lockfile and the generated source configuration; it does not replace advisory,
+license, publisher/source, build-script, or feature/target review. See the
+[dependency supply-chain policy](./docs/dependency_supply_chain_policy.md#downstream-bounds-lockfiles-and-vendoring)
+for the exact evidence boundary and the links to the dependency budget and
+consumer-profile contracts.
+
 ---
 
 ## Core Types Reference
