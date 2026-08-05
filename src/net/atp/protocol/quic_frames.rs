@@ -944,24 +944,27 @@ impl VarIntBufExt for VarInt {
     }
 
     fn decode_from_buf<B: Buf>(buf: &mut B) -> Result<Option<VarInt>, QuicFrameError> {
-        let mut temp = BytesMut::new();
-        // VarInt is at most 8 bytes. Bound the copy by the *current contiguous
-        // chunk* length, not `remaining()` (the total across all chunks): for a
-        // non-contiguous `Buf` (e.g. a `Chain`), `remaining()` can exceed
-        // `chunk().len()`, so `&chunk[..remaining().min(8)]` would slice out of
-        // bounds and panic. For contiguous buffers this is identical behavior.
-        let chunk = buf.chunk();
-        let take = chunk.len().min(8);
-        temp.put_slice(&chunk[..take]);
+        let Some(&first_byte) = buf.chunk().first() else {
+            return Ok(None);
+        };
+        let encoded_len = match first_byte >> 6 {
+            0b00 => 1,
+            0b01 => 2,
+            0b10 => 4,
+            0b11 => 8,
+            _ => unreachable!(),
+        };
+        if buf.remaining() < encoded_len {
+            return Ok(None);
+        }
 
-        let original_len = temp.len();
+        // `copy_to_bytes` traverses every chunk in a fragmented `Buf`. Copy
+        // exactly the width declared by the first byte so a complete VarInt
+        // can straddle chunk boundaries without consuming the following frame.
+        let encoded = buf.copy_to_bytes(encoded_len);
+        let mut temp = BytesMut::from(encoded.as_ref());
         match VarInt::decode(&mut temp) {
-            Outcome::Ok(Some(varint)) => {
-                let consumed = original_len - temp.len();
-                buf.advance(consumed);
-                Ok(Some(varint))
-            }
-            Outcome::Ok(None) => Ok(None), // Need more data
+            Outcome::Ok(Some(varint)) => Ok(Some(varint)),
             _ => Err(QuicFrameError::InvalidFormat(
                 "Invalid varint encoding".to_string(),
             )),
@@ -972,6 +975,64 @@ impl VarIntBufExt for VarInt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_varint_decode_spans_every_noncontiguous_boundary() {
+        for value in [64, 16_384, 1_073_741_824] {
+            let expected = VarInt::new(value).unwrap();
+            let mut encoded = BytesMut::new();
+            expected.encode(&mut encoded).unwrap();
+
+            for split in 1..encoded.len() {
+                let mut fragmented = (&encoded[..split]).chain(&encoded[split..]);
+                let decoded = VarInt::decode_from_buf(&mut fragmented).unwrap();
+
+                assert_eq!(decoded, Some(expected), "value={value}, split={split}");
+                assert_eq!(
+                    fragmented.remaining(),
+                    0,
+                    "value={value}, split={split}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_varint_decode_leaves_fragmented_incomplete_input_unconsumed() {
+        let expected = VarInt::new(16_384).unwrap();
+        let mut encoded = BytesMut::new();
+        expected.encode(&mut encoded).unwrap();
+        let truncated = &encoded[..encoded.len() - 1];
+        let mut fragmented = (&truncated[..1]).chain(&truncated[1..]);
+        let remaining = fragmented.remaining();
+
+        assert_eq!(VarInt::decode_from_buf(&mut fragmented).unwrap(), None);
+        assert_eq!(fragmented.remaining(), remaining);
+    }
+
+    #[test]
+    fn test_frame_decode_accepts_varint_split_across_chunks() {
+        let frame = QuicFrame::MaxData {
+            maximum_data: VarInt::new(16_384).unwrap(),
+        };
+        let mut encoded = BytesMut::new();
+        frame.encode(&mut encoded).unwrap();
+        let first_frame_len = encoded.len();
+        QuicFrame::Ping.encode(&mut encoded).unwrap();
+
+        for split in 2..first_frame_len {
+            let mut fragmented = (&encoded[..split]).chain(&encoded[split..]);
+            let decoded = QuicFrame::decode(&mut fragmented).unwrap().unwrap();
+
+            assert_eq!(decoded, frame, "split={split}");
+            assert_eq!(
+                QuicFrame::decode(&mut fragmented).unwrap().unwrap(),
+                QuicFrame::Ping,
+                "split={split}"
+            );
+            assert_eq!(fragmented.remaining(), 0, "split={split}");
+        }
+    }
 
     #[test]
     fn test_ping_frame() {
