@@ -15,7 +15,7 @@ on estimates another binary produced:
 | `methodology_baselines` | `methodology/` | Phase 6 core-op baselines |
 | `spawn_throughput` | *(not yet tracked)* | spawn/join admission (bt4y5f.3) |
 | `injector_throughput` | `sched/injector/` | LCRQ-style injector upgrade (bt4y5f.5) |
-| `task_state_hot_reads` | `sched/task_state/` | seqlock/BRAVO hot reads (bt4y5f.4) |
+| `task_state_hot_reads` | `sched/task_state/` | historical non-equivalent task-state microbench rows (bt4y5f.4) |
 | `channel_contended` | `sched/channel_contended/` | flat-combining MPSC (bt4y5f.5) |
 | `io_token_dedup` | *comparator-only (ungated)* | seen-token ring upgrade (bt4y5f.9) |
 
@@ -30,6 +30,14 @@ a loaded same-host re-run.
 Every workload is fixed-size and seed-free. Contended rows use barrier-synced
 persistent threads so per-iteration totals are identical; interleavings vary,
 which is the phenomenon under measurement.
+
+The `sched/task_state/` family predates the final scheduler ownership shape.
+Keep its six host-family rows unchanged as historical observations of that
+binary; do not use them as production hot-read baselines. HOTREAD-1's live
+ownership inventory and the required `sched/hotread/v2/` replacement operation
+IDs are frozen in `docs/scheduler_hot_read_inventory.md` and
+`artifacts/scheduler_hot_read_inventory_v1.json`. A new semantic path always
+gets a new operation ID rather than rewriting an incumbent row.
 
 ## Running one bench (measurement only)
 
