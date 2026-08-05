@@ -248,6 +248,43 @@ environment cells, the three width cells, admitted feature combinations, and
 the platform cells listed in the artifact. A missing or unsupported cell stays
 explicitly missing; it is not green and is not silently skipped.
 
+## Offline Tuner `env_logger` static audit
+
+The dependent Phase-2 leaf `asupersync-d24mms.3` now has a bounded static
+receipt, `CLI-OFFLINE-TUNER-ENV-LOGGER-AUDIT-V1`, inside the same artifact.
+Its state is `STATIC_SOURCE_PINNED_NOT_EXECUTED`; the required black-box state
+is `NO_BLACK_BOX_BASELINE_CAPTURED`. The receipt advances source and evidence
+planning without treating source inspection as observable logging behavior.
+
+The pinned binary parses first, initializes `env_logger` from
+`Env::default()`, selects only the fallback filter from `--verbose`, creates
+the output directory, and then dispatches exactly one of `optimize`,
+`candidates`, `emit-profile`, `validate`, or `scheduler-recommend`. Static
+counts record two logger builder sites, two environment lookups, 39 stdout
+print sites, two stderr print sites, two explicit exit-1 sites, five file-write
+sites, two file-read sites, and two wall-clock artifact fields. The binary and
+its directly invoked tuner module contain zero direct `log` or `tracing` call
+tokens. That zero is deliberately not promoted to a behavior claim: a built
+command may reach dependency logging that source-local scanning cannot see.
+
+The nominal future baseline has 30 cells: five commands multiplied by default
+versus `--verbose` and by `RUST_LOG` unset, `off`, or `trace`. It must also
+cover successful execution, argument or validation failures, input/output
+failures, the invoked optimization benchmark path, and either a safe panic
+capture or an owner-approved receipt that no safe user-reachable panic cell
+exists. Every case must retain exact stdout and stderr bytes, exit code,
+environment allowlist, feature/host/source identity, generated artifact paths
+and hashes, structured harness NDJSON, a redaction result, and a deterministic
+replay command. Missing, skipped, unsupported, unredacted, or non-replayable
+cells are not parity evidence.
+
+All seven cutover rows are therefore `MISSING`: all-command baseline, filter
+parity, stream/exit parity, artifact/replay parity, redaction parity, focused
+replacement unit evidence, and serialized dependency-ledger cutover. The
+result is `KEEP_INCUMBENT` with `dependency_exit_allowed=false`. No manifest,
+lockfile, dependency, logger, source behavior, or tracker state changed, and
+this partial receipt does not claim completion of `asupersync-d24mms.3`.
+
 ## Static contract
 
 `tests/cli_clap_surface_inventory_contract.rs` is authored to verify source

@@ -7223,6 +7223,199 @@
     "capture_owner": "asupersync-5z2scg.7.1",
     "installed_binary_exit_owner": "asupersync-5z2scg.7.11"
   },
+  "env_logger_static_audit": {
+    "audit_id": "CLI-OFFLINE-TUNER-ENV-LOGGER-AUDIT-V1",
+    "bead_id": "asupersync-d24mms.3",
+    "capability_ids": [
+      "CAP-CLI-OFFLINE-TUNER",
+      "CAP-DIAGNOSTICS"
+    ],
+    "observed_at_revision": "dedf45df21c723bf8b0f567df2d2164a2133e59a",
+    "audit_state": "STATIC_SOURCE_PINNED_NOT_EXECUTED",
+    "execution_state": "NO_BLACK_BOX_BASELINE_CAPTURED",
+    "decision": {
+      "dependency": "env_logger",
+      "disposition": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "manifest_or_lockfile_edit_allowed": false,
+      "source_behavior_change_allowed": false,
+      "reason": "Static source inspection cannot prove whether env_logger emits records from the admitted binary dependency graph. The required all-command black-box baseline is absent, so capability preservation requires retaining the incumbent."
+    },
+    "source_pins": [
+      {
+        "path": "Cargo.toml",
+        "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+        "line_count": 1038,
+        "role": "cli feature, optional env_logger edge, and offline_tuner binary admission"
+      },
+      {
+        "path": "Cargo.lock",
+        "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+        "line_count": 4666,
+        "role": "locked env_logger package and dependency closure inventory"
+      },
+      {
+        "path": "src/bin/offline_tuner.rs",
+        "sha256": "f7a240cac88da235924221ed88a93bd4059ee831c4ec530a58f1fa926e47e203",
+        "line_count": 652,
+        "role": "parser, logger initialization, command dispatch, streams, exits, and artifacts"
+      },
+      {
+        "path": "src/raptorq/offline_tuner.rs",
+        "sha256": "31d01dee026c4610a4f3993e2e4081a08fbb7bb19a180a12c781bd125b1da1be",
+        "line_count": 1366,
+        "role": "direct library implementation invoked by optimize, candidates, and emit-profile"
+      },
+      {
+        "path": "scripts/run_offline_tuning.sh",
+        "sha256": "5092520cbad3aa6289baf4d5e9ce5f135f189fc504c82f00aca2d7382f130836",
+        "line_count": 247,
+        "role": "existing optimize workflow wrapper and verbose forwarding"
+      },
+      {
+        "path": "scripts/run_scheduler_recommend_smoke.sh",
+        "sha256": "bf206faecfd41013a69811bda0173298b4a8da88bd5abc5775f2563ee4e5bce4",
+        "line_count": 745,
+        "role": "existing scheduler-recommend smoke wrapper and execution receipt shape"
+      }
+    ],
+    "observed_source_contract": {
+      "binary": "offline_tuner",
+      "required_features": [
+        "cli",
+        "simd-intrinsics"
+      ],
+      "commands": [
+        "optimize",
+        "candidates",
+        "emit-profile",
+        "validate",
+        "scheduler-recommend"
+      ],
+      "initialization_order": [
+        "parse argv with Cli::parse",
+        "initialize env_logger from Env::default with the verbose-selected fallback filter",
+        "create the output directory",
+        "dispatch exactly one parsed command",
+        "print a top-level error to stderr and exit 1 on a returned error"
+      ],
+      "manifest_boundary": {
+        "cli_enables_env_logger": true,
+        "env_logger_optional_dependency": true,
+        "locked_env_logger_version": "0.11.11",
+        "tracing_integration_also_enabled_by_cli": true,
+        "static_graph_equivalence_proved": false
+      },
+      "logging_and_output_counts": {
+        "env_logger_builder_initializers": 2,
+        "env_default_lookups": 2,
+        "direct_log_or_tracing_tokens_in_binary_and_tuner_module": 0,
+        "stdout_print_macro_sites_in_binary": 39,
+        "stderr_print_macro_sites_in_binary": 2,
+        "explicit_exit_one_sites_in_binary": 2,
+        "filesystem_write_sites_in_binary": 5,
+        "filesystem_read_sites_in_binary": 2,
+        "wall_clock_artifact_sites_in_binary": 2
+      },
+      "source_only_interpretation": "The owned binary and directly invoked tuner module contain no direct log or tracing call sites. This does not prove that dependencies reached by a built command emit no log records, that RUST_LOG is behaviorless, or that replacing env_logger with tracing preserves streams, filters, formatting, redaction, and exits."
+    },
+    "required_black_box_baseline": {
+      "status": "MISSING_NOT_RUN",
+      "captured_case_count": 0,
+      "captured_cases": [],
+      "nominal_filter_matrix_cell_count": 30,
+      "matrix_derivation": "5 commands x 2 verbosity cells x 3 RUST_LOG cells",
+      "commands": [
+        "optimize",
+        "candidates",
+        "emit-profile",
+        "validate",
+        "scheduler-recommend"
+      ],
+      "verbosity_cells": [
+        "default",
+        "--verbose"
+      ],
+      "rust_log_cells": [
+        "RUST_LOG unset",
+        "RUST_LOG=off",
+        "RUST_LOG=trace"
+      ],
+      "required_outcome_classes": [
+        "successful command",
+        "argument or validation error",
+        "input or output filesystem error",
+        "invoked optimize benchmark path",
+        "panic capture or owner-approved proof that no safe user-reachable panic cell exists"
+      ],
+      "required_record_fields": [
+        "case_id",
+        "source_revision",
+        "exact_command",
+        "feature_set",
+        "target_and_host_identity",
+        "environment_allowlist",
+        "stdout_hex",
+        "stderr_hex",
+        "exit_code",
+        "generated_artifact_paths_and_sha256",
+        "structured_harness_events_ndjson",
+        "redaction_scan_result",
+        "deterministic_replay_command"
+      ],
+      "missing_or_unsupported_policy": "A missing, skipped, unsupported, unredacted, or non-replayable cell is not parity evidence and keeps env_logger."
+    },
+    "cutover_gate": {
+      "required_state": "SAME_OR_BETTER",
+      "rows": [
+        {
+          "row_id": "ENVLOG-BASELINE-ALL-COMMANDS",
+          "state": "MISSING",
+          "requirement": "all five commands have admitted nominal, error, and relevant invoked-path receipts"
+        },
+        {
+          "row_id": "ENVLOG-FILTER-PARITY",
+          "state": "MISSING",
+          "requirement": "default, verbose, and RUST_LOG filters preserve or improve observable diagnostics"
+        },
+        {
+          "row_id": "ENVLOG-STREAM-EXIT-PARITY",
+          "state": "MISSING",
+          "requirement": "stdout, stderr, panic reporting, and process exits remain SAME or BETTER"
+        },
+        {
+          "row_id": "ENVLOG-ARTIFACT-REPLAY-PARITY",
+          "state": "MISSING",
+          "requirement": "generated artifacts, harness NDJSON, provenance, and replay commands remain deterministic and complete"
+        },
+        {
+          "row_id": "ENVLOG-REDACTION-PARITY",
+          "state": "MISSING",
+          "requirement": "diagnostic and artifact outputs pass the declared secret-redaction scan"
+        },
+        {
+          "row_id": "ENVLOG-REPLACEMENT-UNIT-EVIDENCE",
+          "state": "MISSING",
+          "requirement": "verbosity and filter selection have focused unit evidence"
+        },
+        {
+          "row_id": "ENVLOG-DEPENDENCY-LEDGER-CUTOVER",
+          "state": "MISSING",
+          "requirement": "manifest, lockfile, dependency ledger, and checked negative scans are serialized after parity"
+        }
+      ],
+      "on_any_missing_or_regressed_row": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "tracker_closure_allowed": false
+    },
+    "no_claims": [
+      "No offline_tuner command, benchmark path, parser, logger, replacement subscriber, or error path was executed.",
+      "Zero direct log or tracing tokens in two pinned owned source files is not proof that the built dependency graph emits no records.",
+      "The 30-cell nominal matrix is a future evidence obligation, not an execution receipt.",
+      "No stdout, stderr, exit, panic, filtering, redaction, artifact, replay, performance, or dependency-graph parity is claimed.",
+      "This receipt does not authorize env_logger removal, manifest or lockfile edits, source behavior changes, tracker closure, release readiness, or broad workspace health claims."
+    ]
+  },
   "verification": {
     "contract_path": "tests/cli_clap_surface_inventory_contract.rs",
     "contract_execution_state": "NOT_RUN_STATIC_ONLY",

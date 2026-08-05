@@ -10,6 +10,7 @@ const DOC_PATH: &str = "docs/cli_clap_surface_inventory.md";
 const ADR_PATH: &str = "docs/adr/dep_plan_adr_005_cli_contract.md";
 const ARTIFACT_ID: &str = "cli-clap-surface-inventory-v1";
 const BEAD_ID: &str = "asupersync-5z2scg.7.1";
+const ENV_LOGGER_BEAD_ID: &str = "asupersync-d24mms.3";
 const DOC_BEGIN: &str = "<!-- BEGIN CLI CLAP SURFACE INVENTORY -->";
 const DOC_END: &str = "<!-- END CLI CLAP SURFACE INVENTORY -->";
 
@@ -133,6 +134,20 @@ fn count_clap_env_attributes(source: &str) -> u64 {
         }
     }
     count
+}
+
+fn count_trimmed_prefix(source: &str, prefix: &str) -> u64 {
+    u64::try_from(
+        source
+            .lines()
+            .filter(|line| line.trim_start().starts_with(prefix))
+            .count(),
+    )
+    .expect("source marker count fits u64")
+}
+
+fn count_occurrences(source: &str, token: &str) -> u64 {
+    u64::try_from(source.matches(token).count()).expect("source token count fits u64")
 }
 
 fn source_declares_type(source: &str, type_name: &str) -> bool {
@@ -625,6 +640,221 @@ fn feature_environment_config_and_exit_boundaries_fail_closed() {
 }
 
 #[test]
+fn offline_tuner_env_logger_audit_is_source_pinned_and_fail_closed() {
+    let artifact = repo_json(ARTIFACT_PATH);
+    let audit = Value::Object(object(&artifact, "env_logger_static_audit").clone());
+    assert_eq!(
+        text(&audit, "audit_id"),
+        "CLI-OFFLINE-TUNER-ENV-LOGGER-AUDIT-V1"
+    );
+    assert_eq!(text(&audit, "bead_id"), ENV_LOGGER_BEAD_ID);
+    assert_eq!(
+        string_set(&audit, "capability_ids"),
+        expected_set(&["CAP-CLI-OFFLINE-TUNER", "CAP-DIAGNOSTICS"])
+    );
+    assert_eq!(
+        text(&audit, "audit_state"),
+        "STATIC_SOURCE_PINNED_NOT_EXECUTED"
+    );
+    assert_eq!(
+        text(&audit, "execution_state"),
+        "NO_BLACK_BOX_BASELINE_CAPTURED"
+    );
+
+    let decision = Value::Object(object(&audit, "decision").clone());
+    assert_eq!(text(&decision, "dependency"), "env_logger");
+    assert_eq!(text(&decision, "disposition"), "KEEP_INCUMBENT");
+    for key in [
+        "dependency_exit_allowed",
+        "manifest_or_lockfile_edit_allowed",
+        "source_behavior_change_allowed",
+    ] {
+        assert!(!boolean(&decision, key), "{key} must remain false");
+    }
+    assert!(text(&decision, "reason").contains("black-box baseline is absent"));
+
+    let pins = array(&audit, "source_pins");
+    assert_eq!(pins.len(), 6);
+    let mut pinned_paths = BTreeSet::new();
+    for pin in pins {
+        let path = text(pin, "path");
+        assert!(pinned_paths.insert(path.to_owned()), "duplicate audit pin {path}");
+        let bytes = read_repo_bytes(path);
+        assert_eq!(sha256_hex(&bytes), text(pin, "sha256"), "audit hash drift: {path}");
+        let source = std::str::from_utf8(&bytes).expect("audit source must be UTF-8");
+        assert_eq!(
+            u64::try_from(source.lines().count()).expect("line count fits u64"),
+            unsigned(pin, "line_count"),
+            "audit line-count drift: {path}"
+        );
+        assert!(!text(pin, "role").is_empty());
+    }
+    assert_eq!(
+        pinned_paths,
+        expected_set(&[
+            "Cargo.toml",
+            "Cargo.lock",
+            "src/bin/offline_tuner.rs",
+            "src/raptorq/offline_tuner.rs",
+            "scripts/run_offline_tuning.sh",
+            "scripts/run_scheduler_recommend_smoke.sh",
+        ])
+    );
+
+    let observed = Value::Object(object(&audit, "observed_source_contract").clone());
+    assert_eq!(text(&observed, "binary"), "offline_tuner");
+    assert_eq!(
+        string_set(&observed, "required_features"),
+        expected_set(&["cli", "simd-intrinsics"])
+    );
+    let expected_commands = expected_set(&[
+        "optimize",
+        "candidates",
+        "emit-profile",
+        "validate",
+        "scheduler-recommend",
+    ]);
+    assert_eq!(string_set(&observed, "commands"), expected_commands);
+    assert_eq!(array(&observed, "initialization_order").len(), 5);
+
+    let manifest_boundary =
+        Value::Object(object(&observed, "manifest_boundary").clone());
+    for key in [
+        "cli_enables_env_logger",
+        "env_logger_optional_dependency",
+        "tracing_integration_also_enabled_by_cli",
+    ] {
+        assert!(boolean(&manifest_boundary, key), "{key} must remain true");
+    }
+    assert!(!boolean(&manifest_boundary, "static_graph_equivalence_proved"));
+    assert_eq!(
+        text(&manifest_boundary, "locked_env_logger_version"),
+        "0.11.11"
+    );
+
+    let binary = read_repo_file("src/bin/offline_tuner.rs");
+    let tuner_module = read_repo_file("src/raptorq/offline_tuner.rs");
+    let counts = Value::Object(object(&observed, "logging_and_output_counts").clone());
+    assert_eq!(
+        unsigned(&counts, "env_logger_builder_initializers"),
+        count_occurrences(&binary, "env_logger::Builder::from_env")
+    );
+    assert_eq!(
+        unsigned(&counts, "env_default_lookups"),
+        count_occurrences(&binary, "env_logger::Env::default")
+    );
+    assert_eq!(
+        unsigned(&counts, "stdout_print_macro_sites_in_binary"),
+        count_trimmed_prefix(&binary, "println!")
+    );
+    assert_eq!(
+        unsigned(&counts, "stderr_print_macro_sites_in_binary"),
+        count_trimmed_prefix(&binary, "eprintln!")
+    );
+    assert_eq!(
+        unsigned(&counts, "explicit_exit_one_sites_in_binary"),
+        count_occurrences(&binary, "process::exit(1)")
+    );
+    assert_eq!(
+        unsigned(&counts, "filesystem_write_sites_in_binary"),
+        count_occurrences(&binary, "fs::write")
+    );
+    assert_eq!(
+        unsigned(&counts, "filesystem_read_sites_in_binary"),
+        count_occurrences(&binary, "fs::read_to_string")
+    );
+    assert_eq!(
+        unsigned(&counts, "wall_clock_artifact_sites_in_binary"),
+        count_occurrences(&binary, "SystemTime::now")
+    );
+    let direct_logging_tokens = [
+        "log::",
+        "tracing::",
+        "trace!",
+        "debug!",
+        "info!",
+        "warn!",
+        "error!",
+    ]
+    .iter()
+    .map(|token| count_occurrences(&binary, token) + count_occurrences(&tuner_module, token))
+    .sum::<u64>();
+    assert_eq!(
+        unsigned(
+            &counts,
+            "direct_log_or_tracing_tokens_in_binary_and_tuner_module"
+        ),
+        direct_logging_tokens
+    );
+    assert_eq!(direct_logging_tokens, 0);
+    assert!(
+        text(&observed, "source_only_interpretation")
+            .contains("does not prove that dependencies")
+    );
+
+    let manifest = read_repo_file("Cargo.toml");
+    assert!(manifest.contains("\"dep:env_logger\""));
+    assert!(manifest.contains("env_logger = { version = \"0.11\", optional = true }"));
+    assert!(manifest.contains("required-features = [\"cli\", \"simd-intrinsics\"]"));
+    let lock = read_repo_file("Cargo.lock");
+    assert!(lock.contains("name = \"env_logger\"\nversion = \"0.11.11\""));
+
+    let baseline = Value::Object(object(&audit, "required_black_box_baseline").clone());
+    assert_eq!(text(&baseline, "status"), "MISSING_NOT_RUN");
+    assert_eq!(unsigned(&baseline, "captured_case_count"), 0);
+    assert!(array(&baseline, "captured_cases").is_empty());
+    assert_eq!(unsigned(&baseline, "nominal_filter_matrix_cell_count"), 30);
+    assert_eq!(string_set(&baseline, "commands"), expected_commands);
+    assert_eq!(array(&baseline, "verbosity_cells").len(), 2);
+    assert_eq!(array(&baseline, "rust_log_cells").len(), 3);
+    assert_eq!(array(&baseline, "required_outcome_classes").len(), 5);
+    assert_eq!(array(&baseline, "required_record_fields").len(), 13);
+    assert!(
+        text(&baseline, "missing_or_unsupported_policy")
+            .contains("keeps env_logger")
+    );
+
+    let cutover = Value::Object(object(&audit, "cutover_gate").clone());
+    assert_eq!(text(&cutover, "required_state"), "SAME_OR_BETTER");
+    assert_eq!(
+        array(&cutover, "rows")
+            .iter()
+            .map(|row| text(row, "row_id").to_owned())
+            .collect::<BTreeSet<_>>(),
+        expected_set(&[
+            "ENVLOG-BASELINE-ALL-COMMANDS",
+            "ENVLOG-FILTER-PARITY",
+            "ENVLOG-STREAM-EXIT-PARITY",
+            "ENVLOG-ARTIFACT-REPLAY-PARITY",
+            "ENVLOG-REDACTION-PARITY",
+            "ENVLOG-REPLACEMENT-UNIT-EVIDENCE",
+            "ENVLOG-DEPENDENCY-LEDGER-CUTOVER",
+        ])
+    );
+    for row in array(&cutover, "rows") {
+        assert_eq!(text(row, "state"), "MISSING");
+        assert!(!text(row, "requirement").is_empty());
+    }
+    assert_eq!(
+        text(&cutover, "on_any_missing_or_regressed_row"),
+        "KEEP_INCUMBENT"
+    );
+    assert!(!boolean(&cutover, "dependency_exit_allowed"));
+    assert!(!boolean(&cutover, "tracker_closure_allowed"));
+
+    let no_claims = strings(&audit, "no_claims").join("\n");
+    for marker in [
+        "No offline_tuner command",
+        "not proof that the built dependency graph emits no records",
+        "future evidence obligation",
+        "No stdout, stderr, exit, panic",
+        "does not authorize env_logger removal",
+    ] {
+        assert!(no_claims.contains(marker), "missing env_logger no-claim marker {marker}");
+    }
+}
+
+#[test]
 fn byte_golden_matrix_is_required_but_not_fabricated() {
     let artifact = repo_json(ARTIFACT_PATH);
     let capture = Value::Object(object(&artifact, "golden_capture_contract").clone());
@@ -695,6 +925,11 @@ fn documentation_and_adr_keep_the_static_completion_boundary_visible() {
         "LIBRARY_EXPORTED_NO_BINARY_PARSER_ROOT",
         "MISSING_EXECUTION_RECEIPTS",
         "KEEP_UNTIL_PARITY",
+        ENV_LOGGER_BEAD_ID,
+        "CLI-OFFLINE-TUNER-ENV-LOGGER-AUDIT-V1",
+        "NO_BLACK_BOX_BASELINE_CAPTURED",
+        "KEEP_INCUMBENT",
+        "dependency_exit_allowed=false",
     ] {
         assert!(docs.contains(marker), "documentation missing {marker}");
     }
