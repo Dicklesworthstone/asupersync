@@ -32,15 +32,15 @@ jobs:
       status: ${{ steps.compare.outcome }}
       summary: ${{ steps.compare.outputs.summary }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -162,7 +162,7 @@ jobs:
 
       - name: Upload benchmark results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: methodology-benchmark-results
           path: target/criterion/
@@ -178,7 +178,7 @@ jobs:
       status: ${{ steps.check.outputs.status }}
       summary: ${{ steps.check.outputs.summary }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
@@ -255,15 +255,15 @@ jobs:
       status: ${{ steps.verify.outcome }}
       summary: ${{ steps.verify.outputs.summary }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -345,7 +345,7 @@ jobs:
       status: ${{ steps.check.outputs.status }}
       summary: ${{ steps.check.outputs.summary }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
@@ -452,7 +452,7 @@ jobs:
       pull-requests: write
     steps:
       - name: Post summary comment
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           script: |
             const baselineStatus = '${{ needs.baseline-gate.result }}';

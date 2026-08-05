@@ -54,7 +54,7 @@ jobs:
       proof-mode: ${{ steps.determine-mode.outputs.mode }}
     steps:
     - name: Checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
     - name: Determine proof mode
       id: determine-mode
@@ -107,7 +107,7 @@ jobs:
         persist-credentials: false
 
     - name: Setup pinned Rust toolchain
-      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
       with:
         toolchain: nightly-2026-07-05
         targets: x86_64-unknown-linux-gnu
@@ -288,10 +288,10 @@ jobs:
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
     - name: Setup Rust toolchain
-      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
       with:
         toolchain: nightly
         components: rustfmt, clippy
@@ -309,7 +309,7 @@ jobs:
           --artifacts-dir "artifacts/smoke"
 
     - name: Upload smoke artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
       if: always()
       with:
         name: smoke-${{ matrix.lane.id }}-${{ matrix.platform }}
@@ -333,10 +333,10 @@ jobs:
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
     - name: Setup Rust toolchain
-      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
       with:
         toolchain: nightly
         components: rustfmt, clippy
@@ -366,7 +366,7 @@ jobs:
           --artifacts-dir "artifacts/full"
 
     - name: Upload full artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
       if: always()
       with:
         name: full-${{ matrix.lane.id }}-${{ matrix.platform }}
@@ -391,10 +391,10 @@ jobs:
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
     - name: Setup Rust toolchain
-      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
       with:
         toolchain: nightly
         components: rustfmt, clippy
@@ -425,7 +425,7 @@ jobs:
           --output "proof/${{ matrix.lane.id }}-proof.json"
 
     - name: Upload release artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
       if: always()
       with:
         name: release-${{ matrix.lane.id }}-${{ matrix.platform }}
@@ -445,10 +445,10 @@ jobs:
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
     - name: Download all artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
       with:
         path: all-artifacts/
 
@@ -461,7 +461,7 @@ jobs:
           --summary proof-summary.md
 
     - name: Upload proof summary
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
       with:
         name: proof-summary-${{ needs.setup.outputs.proof-mode }}
         path: |
@@ -471,7 +471,7 @@ jobs:
 
     - name: Post proof summary to PR
       if: github.event_name == 'pull_request'
-      uses: actions/github-script@v7
+      uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
       with:
         script: |
           const fs = require('fs');

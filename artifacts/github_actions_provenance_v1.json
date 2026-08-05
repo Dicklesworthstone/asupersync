@@ -1,0 +1,209 @@
+{
+  "schema_version": 1,
+  "artifact_id": "github-actions-provenance-v1",
+  "bead_id": "asupersync-mnotoo.3.1",
+  "policy_as_of_date_utc": "2026-08-05",
+  "artifact_kind": "policy_and_inventory_not_execution_receipt",
+  "decision": "ENFORCE_REVIEWED_FULL_SHA_REFERENCES",
+  "inventory": {
+    "workflow_paths": [
+      ".github/workflows/atp-proof-lanes.yml",
+      ".github/workflows/benchmarks.yml",
+      ".github/workflows/ci.yml",
+      ".github/workflows/conformance.yml",
+      ".github/workflows/fuzz.yml",
+      ".github/workflows/methodology-gates.yml",
+      ".github/workflows/nightly-differential-stress.yml",
+      ".github/workflows/pages.yml",
+      ".github/workflows/perf-pr-check.yml",
+      ".github/workflows/property-tests.yml",
+      ".github/workflows/publish.yml",
+      ".github/workflows/tokio_parity_dashboard_drift.yml"
+    ],
+    "workflow_file_count": 12,
+    "action_reference_count": 182,
+    "distinct_action_repository_count": 13,
+    "reference_classes": {
+      "remote_actions": 182,
+      "local_actions": 0,
+      "reusable_workflows": 0,
+      "container_actions": 0,
+      "job_containers": 0
+    },
+    "exception_count": 0
+  },
+  "pins": [
+    {
+      "action": "actions/attest-build-provenance",
+      "source_ref": "v2.4.0",
+      "sha": "e8998f949152b193b063cb0ec769d69d929409be",
+      "version_comment": "v2.4.0",
+      "occurrences": 1,
+      "source_ref_url": "https://github.com/actions/attest-build-provenance/releases/tag/v2.4.0",
+      "provenance_url": "https://github.com/actions/attest-build-provenance/commit/e8998f949152b193b063cb0ec769d69d929409be"
+    },
+    {
+      "action": "actions/attest-build-provenance",
+      "source_ref": "v4.1.1 peeled commit",
+      "sha": "0f67c3f4856b2e3261c31976d6725780e5e4c373",
+      "version_comment": "v4.1.1",
+      "occurrences": 1,
+      "source_ref_url": "https://github.com/actions/attest-build-provenance/releases/tag/v4.1.1",
+      "provenance_url": "https://github.com/actions/attest-build-provenance/commit/0f67c3f4856b2e3261c31976d6725780e5e4c373"
+    },
+    {
+      "action": "actions/cache",
+      "source_ref": "v4.3.0",
+      "sha": "0057852bfaa89a56745cba8c7296529d2fc39830",
+      "version_comment": "v4.3.0",
+      "occurrences": 27,
+      "source_ref_url": "https://github.com/actions/cache/releases/tag/v4.3.0",
+      "provenance_url": "https://github.com/actions/cache/commit/0057852bfaa89a56745cba8c7296529d2fc39830"
+    },
+    {
+      "action": "actions/checkout",
+      "source_ref": "v4.2.2",
+      "sha": "11bd71901bbe5b1630ceea73d27597364c9af683",
+      "version_comment": "v4.2.2",
+      "occurrences": 1,
+      "source_ref_url": "https://github.com/actions/checkout/releases/tag/v4.2.2",
+      "provenance_url": "https://github.com/actions/checkout/commit/11bd71901bbe5b1630ceea73d27597364c9af683"
+    },
+    {
+      "action": "actions/checkout",
+      "source_ref": "v4.4.0",
+      "sha": "11d5960a326750d5838078e36cf38b85af677262",
+      "version_comment": "v4.4.0",
+      "occurrences": 47,
+      "source_ref_url": "https://github.com/actions/checkout/releases/tag/v4.4.0",
+      "provenance_url": "https://github.com/actions/checkout/commit/11d5960a326750d5838078e36cf38b85af677262"
+    },
+    {
+      "action": "actions/configure-pages",
+      "source_ref": "v5.0.0",
+      "sha": "983d7736d9b0ae728b81ab479565c72886d7745b",
+      "version_comment": "v5.0.0",
+      "occurrences": 1,
+      "source_ref_url": "https://github.com/actions/configure-pages/releases/tag/v5.0.0",
+      "provenance_url": "https://github.com/actions/configure-pages/commit/983d7736d9b0ae728b81ab479565c72886d7745b"
+    },
+    {
+      "action": "actions/deploy-pages",
+      "source_ref": "v4.0.5",
+      "sha": "d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e",
+      "version_comment": "v4.0.5",
+      "occurrences": 1,
+      "source_ref_url": "https://github.com/actions/deploy-pages/releases/tag/v4.0.5",
+      "provenance_url": "https://github.com/actions/deploy-pages/commit/d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e"
+    },
+    {
+      "action": "actions/download-artifact",
+      "source_ref": "v4.3.0",
+      "sha": "d3f86a106a0bac45b974a628896c90dbdf5c8093",
+      "version_comment": "v4.3.0",
+      "occurrences": 5,
+      "source_ref_url": "https://github.com/actions/download-artifact/releases/tag/v4.3.0",
+      "provenance_url": "https://github.com/actions/download-artifact/commit/d3f86a106a0bac45b974a628896c90dbdf5c8093"
+    },
+    {
+      "action": "actions/github-script",
+      "source_ref": "v7.1.0",
+      "sha": "f28e40c7f34bde8b3046d885e986cb6290c5673b",
+      "version_comment": "v7.1.0",
+      "occurrences": 3,
+      "source_ref_url": "https://github.com/actions/github-script/releases/tag/v7.1.0",
+      "provenance_url": "https://github.com/actions/github-script/commit/f28e40c7f34bde8b3046d885e986cb6290c5673b"
+    },
+    {
+      "action": "actions/setup-node",
+      "source_ref": "v4.4.0",
+      "sha": "49933ea5288caeca8642d1e84afbd3f7d6820020",
+      "version_comment": "v4.4.0",
+      "occurrences": 1,
+      "source_ref_url": "https://github.com/actions/setup-node/releases/tag/v4.4.0",
+      "provenance_url": "https://github.com/actions/setup-node/commit/49933ea5288caeca8642d1e84afbd3f7d6820020"
+    },
+    {
+      "action": "actions/upload-artifact",
+      "source_ref": "v4.6.2",
+      "sha": "ea165f8d65b6e75b540449e92b4886f43607fa02",
+      "version_comment": "v4.6.2",
+      "occurrences": 51,
+      "source_ref_url": "https://github.com/actions/upload-artifact/releases/tag/v4.6.2",
+      "provenance_url": "https://github.com/actions/upload-artifact/commit/ea165f8d65b6e75b540449e92b4886f43607fa02"
+    },
+    {
+      "action": "actions/upload-pages-artifact",
+      "source_ref": "v3.0.1",
+      "sha": "56afc609e74202658d3ffba0e8f6dda462b719fa",
+      "version_comment": "v3.0.1",
+      "occurrences": 1,
+      "source_ref_url": "https://github.com/actions/upload-pages-artifact/releases/tag/v3.0.1",
+      "provenance_url": "https://github.com/actions/upload-pages-artifact/commit/56afc609e74202658d3ffba0e8f6dda462b719fa"
+    },
+    {
+      "action": "codecov/codecov-action",
+      "source_ref": "v4.6.0 peeled commit",
+      "sha": "b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238",
+      "version_comment": "v4.6.0",
+      "occurrences": 1,
+      "source_ref_url": "https://github.com/codecov/codecov-action/releases/tag/v4.6.0",
+      "provenance_url": "https://github.com/codecov/codecov-action/commit/b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238"
+    },
+    {
+      "action": "dtolnay/rust-toolchain",
+      "source_ref": "master snapshot 2026-07-16",
+      "sha": "2c7215f132e9ebf062739d9130488b56d53c060c",
+      "version_comment": "master snapshot 2026-07-16",
+      "occurrences": 39,
+      "source_ref_url": "https://github.com/dtolnay/rust-toolchain/tree/2c7215f132e9ebf062739d9130488b56d53c060c",
+      "provenance_url": "https://github.com/dtolnay/rust-toolchain/commit/2c7215f132e9ebf062739d9130488b56d53c060c"
+    },
+    {
+      "action": "taiki-e/install-action",
+      "source_ref": "v2.85.8",
+      "sha": "cb33e69fad06166ca28a42b2575e4dadabf62ee8",
+      "version_comment": "v2.85.8",
+      "occurrences": 2,
+      "source_ref_url": "https://github.com/taiki-e/install-action/releases/tag/v2.85.8",
+      "provenance_url": "https://github.com/taiki-e/install-action/commit/cb33e69fad06166ca28a42b2575e4dadabf62ee8"
+    }
+  ],
+  "exceptions": [],
+  "review_receipt": {
+    "reviewer": "FoggyPrairie",
+    "reviewed_date_utc": "2026-08-05",
+    "resolution_method": "Official upstream Git refs were resolved read-only; annotated tags use their peeled commit; existing exact repository pins were retained where already present.",
+    "behavior_preservation": "Existing major-version lines were retained. Branch-selected Rust and tool installer behavior is explicit in workflow inputs after pinning.",
+    "scope": "Reference resolution, readable provenance, occurrence reconciliation, and branch-input preservation. This receipt does not assert upstream trustworthiness."
+  },
+  "update_contract": {
+    "automated_tag_drift": "forbidden",
+    "required_review_steps": [
+      "Inventory every uses reference in every checked workflow file.",
+      "Resolve the proposed human-readable tag in the upstream repository and peel annotated tags to the commit object that GitHub Actions executes.",
+      "Review upstream release notes, the old-to-new action source diff, action.yml inputs, runtime changes, maintainer changes, and requested permissions.",
+      "Record the immutable commit URL, source tag or branch snapshot, readable comment, and exact occurrence count in this artifact.",
+      "For branch-selected actions, preserve behavior through explicit action inputs before replacing the branch alias with a commit SHA.",
+      "Edit workflows and this inventory in the same commit, then run the deterministic contract before citing the policy as green.",
+      "Do not let an automated updater merge a tag-only or SHA-only change without the same owner review."
+    ],
+    "exception_policy": "A non-full-SHA reference requires an owner, narrow reason, exact reference, and expiry date. Expired, missing, or unlisted exceptions fail closed. There are no current exceptions."
+  },
+  "validation": {
+    "contract_path": "tests/github_actions_provenance_contract.rs",
+    "focused_command": "cargo test -p asupersync --test github_actions_provenance_contract -- --nocapture",
+    "execution_status": "NOT_EXECUTED_IN_THIS_STATIC_ONLY_SLICE",
+    "static_observations": [
+      "All 182 uses references contain a lowercase 40-hex revision.",
+      "All 182 uses references contain a nonempty human-readable trailing comment.",
+      "The 15 inventory rows sum to 182 occurrences across 13 action repositories and 12 workflow files."
+    ]
+  },
+  "no_claim_boundaries": [
+    "A full commit SHA prevents tag movement from changing the selected action source; it does not make that source trustworthy or correct.",
+    "Release notes, source review, and provenance URLs do not prove maintainer identity, repository integrity, or absence of undisclosed defects.",
+    "This inventory does not prove least-privilege workflow permissions, runner isolation, secret safety, workflow execution success, or artifact integrity.",
+    "Static contract evidence does not prove release readiness, broad workspace health, runtime correctness, performance, or live CI availability."
+  ]
+}

@@ -68,7 +68,7 @@ jobs:
       rollback_reason: ${{ steps.flags.outputs.rollback_reason }}
       allow_missing_changelog: ${{ steps.flags.outputs.allow_missing_changelog }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
       - name: Determine and validate tag
@@ -132,11 +132,11 @@ jobs:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
       RUST_CRATE_PROVENANCE_DIR: artifacts/release_provenance/rust-crates
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
@@ -478,7 +478,7 @@ jobs:
 
       - name: Upload Rust crate release provenance
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: rust-crate-release-provenance
           path: artifacts/release_provenance/rust-crates/
@@ -507,7 +507,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
@@ -544,7 +544,7 @@ jobs:
           )
           PY
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: wasm32-unknown-unknown
@@ -669,7 +669,7 @@ jobs:
           PY
 
       - name: Upload WASM release bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wasm-release-bundle
           path: |
@@ -682,7 +682,7 @@ jobs:
             artifacts/security_release_gate_events.ndjson
 
       - name: Attest WASM release bundle provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: artifacts/wasm/release/*
 
@@ -801,11 +801,11 @@ jobs:
     timeout-minutes: 20
     if: ${{ needs.plan.outputs.publish_npm == 'true' && !contains(needs.plan.outputs.version, '-') && (needs.plan.outputs.publish_wasm != 'true' || needs.wasm_release.result == 'success') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           registry-url: 'https://registry.npmjs.org'
@@ -1086,7 +1086,7 @@ jobs:
 
       - name: Upload npm publish/rollback artifacts
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: npm-release-controls
           path: artifacts/npm/

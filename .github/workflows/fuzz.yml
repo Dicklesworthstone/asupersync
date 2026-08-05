@@ -98,11 +98,12 @@ jobs:
     name: Fuzz target compile gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
         with:
+          toolchain: nightly
           components: llvm-tools-preview
 
       - name: Resolve cargo executor
@@ -236,11 +237,12 @@ jobs:
             duration: 600
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
         with:
+          toolchain: nightly
           components: llvm-tools-preview
 
       - name: Resolve cargo executor
@@ -279,7 +281,7 @@ jobs:
           echo "RCH_EXECUTOR_MODE=$mode" >> "$GITHUB_ENV"
 
       - name: Cache corpus
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.sha }}
@@ -338,14 +340,14 @@ jobs:
 
       - name: Upload crashes
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: crashes-${{ matrix.target }}
           path: fuzz/artifacts/${{ matrix.target }}/
           retention-days: 30
 
       - name: Upload corpus
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: corpus-${{ matrix.target }}
           path: fuzz/corpus/${{ matrix.target }}/

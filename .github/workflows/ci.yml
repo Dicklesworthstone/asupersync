@@ -26,10 +26,10 @@ jobs:
     name: Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
@@ -56,7 +56,7 @@ jobs:
             --output ci-summaries/no_mock_policy_report.json
 
       - name: Upload no-mock policy report (D5 input)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: no-mock-policy-report
           path: ci-summaries/no_mock_policy_report.json
@@ -76,7 +76,7 @@ jobs:
             --workflow .github/workflows/ci.yml
 
       - name: Upload CI matrix policy report (D5 input)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ci-matrix-policy-report
           path: |
@@ -94,7 +94,7 @@ jobs:
             --policy .github/wasm_dependency_policy.json
 
       - name: Upload WASM dependency audit report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wasm-dependency-audit-report
           path: |
@@ -112,7 +112,7 @@ jobs:
             --policy .github/wasm_abi_policy.json
 
       - name: Upload WASM ABI contract report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wasm-abi-contract-report
           path: |
@@ -130,7 +130,7 @@ jobs:
             --policy .github/wasm_optimization_policy.json
 
       - name: Upload WASM optimization pipeline summary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wasm-optimization-pipeline-summary
           path: artifacts/wasm_optimization_pipeline_summary.json
@@ -146,7 +146,7 @@ jobs:
             --policy .github/wasm_benchmark_corpus.json
 
       - name: Upload WASM benchmark corpus summary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wasm-benchmark-corpus-summary
           path: artifacts/wasm_benchmark_corpus_summary.json
@@ -251,7 +251,7 @@ jobs:
 
       - name: Upload perf regression report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wasm-perf-regression-report
           path: |
@@ -273,7 +273,7 @@ jobs:
 
       - name: Upload security release gate report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: security-release-gate-report
           path: |
@@ -307,7 +307,7 @@ jobs:
 
       - name: Upload RaptorQ performance gate report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: raptorq-performance-gate-report
           path: |
@@ -327,7 +327,7 @@ jobs:
 
       - name: Upload Browser Edition onboarding smoke artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wasm-browser-onboarding-smoke
           path: |
@@ -342,7 +342,7 @@ jobs:
 
       - name: Upload WASM QA smoke bundles
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wasm-qa-smoke-bundles
           path: target/e2e-results/wasm_qa_evidence_smoke/*/*/
@@ -350,7 +350,7 @@ jobs:
 
       - name: Upload WASM QA smoke suite summaries
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wasm-qa-smoke-suite-summaries
           path: target/e2e-results/wasm_qa_evidence_smoke/*/summary.json
@@ -438,7 +438,7 @@ jobs:
 
       - name: Upload WASM browser vNext surface certification artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wasm-browser-vnext-surface-certification
           path: |
@@ -475,7 +475,7 @@ jobs:
 
       - name: Upload WASM bundler compatibility certification artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wasm-bundler-compatibility-certification
           path: |
@@ -517,7 +517,7 @@ jobs:
 
       - name: Upload WASM rollback playbook certification artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wasm-release-rollback-playbook-certification
           path: |
@@ -561,7 +561,7 @@ jobs:
 
       - name: Upload WASM GA readiness review board certification artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wasm-ga-readiness-review-board-certification
           path: |
@@ -606,7 +606,7 @@ jobs:
 
       - name: Upload WASM launch rollout/support stabilization certification artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wasm-launch-rollout-support-stabilization-certification
           path: |
@@ -627,10 +627,10 @@ jobs:
     name: Lint and compile
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
@@ -658,15 +658,15 @@ jobs:
     name: Dependency supply-chain audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache Cargo scanner builds and advisory database
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/bin/cargo-audit
@@ -692,7 +692,7 @@ jobs:
 
       - name: Upload dependency supply-chain receipts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dependency-supply-chain-receipts
           path: artifacts/dependency-supply-chain
@@ -702,15 +702,15 @@ jobs:
     name: Differential Fast Gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -776,7 +776,7 @@ jobs:
 
       - name: Upload differential fast gate artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: lab-live-differential-fast-artifacts
           path: artifacts/lab-differential-fast/
@@ -787,15 +787,15 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -1144,7 +1144,7 @@ jobs:
 
       - name: Upload Lean smoke artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ steps.lean_smoke_contract.outputs.artifact_name }}
           path: ${{ steps.lean_smoke_contract.outputs.artifact_dir }}/
@@ -1155,15 +1155,15 @@ jobs:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -1631,7 +1631,7 @@ jobs:
 
       - name: Upload Lean full artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ steps.lean_full_contract.outputs.artifact_name }}
           path: ${{ steps.lean_full_contract.outputs.artifact_dir }}/
@@ -1645,15 +1645,15 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -1720,7 +1720,7 @@ jobs:
 
       - name: Upload lib-unit flake artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: lib-unit-flake-artifacts-${{ runner.os }}
           path: ci-summaries/lib-unit/
@@ -1759,15 +1759,15 @@ jobs:
     name: Coverage (llvm-cov)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -1779,7 +1779,7 @@ jobs:
         run: rustup component add llvm-tools-preview
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
         with:
           tool: cargo-llvm-cov
 
@@ -1819,14 +1819,14 @@ jobs:
             --output coverage/coverage_ratchet_report.json
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: llvm-cov-report
           path: coverage/
           retention-days: 30
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4.6.0
         with:
           files: coverage/lcov.info
           fail_ci_if_error: false
@@ -1837,15 +1837,15 @@ jobs:
     env:
       RCH_BIN: ${{ github.workspace }}/scripts/rch_ci_fallback.sh
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -1878,7 +1878,7 @@ jobs:
           "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_conformance_report" cargo test -- --format json 2>&1 | tee ../conformance-reports/results.json || true
 
       - name: Upload conformance report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: conformance-report
           path: conformance-reports/
@@ -1888,15 +1888,15 @@ jobs:
     name: Property Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -1921,15 +1921,15 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -1948,7 +1948,7 @@ jobs:
           "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_benchmarks" cargo bench --all-features -- --noplot
 
       - name: Upload benchmark results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: benchmark-results
           path: target/criterion/
@@ -1958,15 +1958,15 @@ jobs:
     name: RaptorQ Regression Gates (G2)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -1987,7 +1987,7 @@ jobs:
 
       - name: Upload G2 regression gate report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: regression-gate-report
           path: artifacts/ci_regression_gate_report.ndjson
@@ -1997,15 +1997,15 @@ jobs:
     name: Phase 6 E2E Suites
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -2299,7 +2299,7 @@ jobs:
 
       - name: Upload Phase 6 E2E artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: phase6-e2e-artifacts
           path: phase6-artifacts/
@@ -2310,28 +2310,28 @@ jobs:
     needs: [check, coverage, phase6-e2e]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Download no-mock policy report (D5 input)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: no-mock-policy-report
           path: ci-summary-inputs/no-mock
 
       - name: Download CI matrix policy report (D5 input)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ci-matrix-policy-report
           path: ci-summary-inputs/ci-matrix
 
       - name: Download coverage report (D5 input)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: llvm-cov-report
           path: ci-summary-inputs/coverage
 
       - name: Download Phase 6 E2E artifacts (D5 input)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: phase6-e2e-artifacts
           path: ci-summary-inputs/phase6
@@ -2350,7 +2350,7 @@ jobs:
             --fail-on-nonpass
 
       - name: Upload CI summary reports (D5)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ci-summary-report
           path: ci-summary/
@@ -2360,15 +2360,15 @@ jobs:
     name: Formal Proof Verification
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -2533,7 +2533,7 @@ jobs:
 
       - name: Upload proof artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: proof-artifacts
           path: proof-artifacts/
@@ -2543,10 +2543,10 @@ jobs:
     name: Documentation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
@@ -2566,15 +2566,15 @@ jobs:
     name: QUIC/H3 Unit Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -2636,15 +2636,15 @@ jobs:
           - quic_h3_e2e_cancel
           - quic_h3_e2e_violations
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -2664,7 +2664,7 @@ jobs:
 
       - name: Persist forensic artifacts on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: quic-h3-forensic-${{ matrix.test_crate }}
           path: |
@@ -2676,7 +2676,7 @@ jobs:
     name: QUIC/H3 No-Mock Gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Verify no mock/fake/stub in QUIC/H3 modules
         run: |
@@ -2692,16 +2692,18 @@ jobs:
     runs-on: ubuntu-latest
     needs: [quic-h3-unit, quic-h3-e2e]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot 2026-07-16
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+        with:
+          tool: cargo-llvm-cov
 
       - name: Run QUIC/H3 coverage
         run: |
@@ -2735,7 +2737,7 @@ jobs:
 
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: quic-h3-coverage-report
           path: ci-summaries/
