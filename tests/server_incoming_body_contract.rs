@@ -5,8 +5,9 @@
 //!
 //! This contract checks source fingerprints, current buffered boundaries,
 //! single-consumer ownership, checked budgets, terminal states, protocol-specific
-//! unread-body cleanup, unchanged extractor defaults, and explicit no-claim
-//! boundaries. It does not prove live handler integration or runtime behavior.
+//! unread-body cleanup, unchanged extractor defaults, the bounded BODY-2 static
+//! H1 scaffold receipt, and explicit no-claim boundaries. It does not prove live
+//! handler integration or runtime behavior.
 
 #![allow(missing_docs)]
 
@@ -19,6 +20,8 @@ use std::path::PathBuf;
 const ARTIFACT_PATH: &str = "artifacts/server_incoming_body_contract_v1.json";
 const DOC_PATH: &str = "docs/server_incoming_body_contract.md";
 const BEAD_ID: &str = "asupersync-server-stack-hardening-eeexl1.6.1";
+const BODY_2_BEAD_ID: &str = "asupersync-server-stack-hardening-eeexl1.6.2";
+const BODY_2_BASE_REVISION: &str = "1620c55e5a3d139e7fb39b1c5e545055e3841541";
 const PROGRAM_ID: &str = "asupersync-server-stack-hardening-eeexl1";
 const BASELINE_REVISION: &str = "e9fa01f67318b3aa7764511e51d35291438a3e40";
 const DOC_BEGIN: &str = "<!-- BEGIN SERVER INCOMING BODY CONTRACT -->";
@@ -222,6 +225,7 @@ fn validate_identity_and_authority(inventory: &Value) -> Result<(), String> {
         "operator_code_policy",
         "telemetry_contract",
         "compatibility_migration",
+        "body_2_h1_scaffold_progress",
         "source_pins",
         "evidence_status",
         "direct_follow_on_children",
@@ -359,8 +363,17 @@ fn validate_defaults_and_inventory(inventory: &Value) -> Result<(), String> {
             }
         }
     }
-    if !text(find_row(surfaces, "surface_id", "H1-STREAM-SCAFFOLD")?, "gap")?
-        .contains("return out of band")
+    let h1_scaffold = find_row(surfaces, "surface_id", "H1-STREAM-SCAFFOLD")?;
+    let h1_semantics = text(h1_scaffold, "current_semantics")?;
+    let h1_gap = text(h1_scaffold, "gap")?;
+    if !h1_semantics.contains("producer terminal reason")
+        || !h1_semantics.contains("before mutation")
+        || !h1_semantics.contains("premature disconnect")
+        || !h1_semantics.contains("decrementing a fixed-length SizeHint")
+        || !h1_gap.contains("HttpError")
+        || !h1_gap.contains("queue-byte permits")
+        || !h1_gap.contains("consumer-drop signal")
+        || !h1_gap.contains("live handler dispatch")
         || !text(find_row(surfaces, "surface_id", "H1-LIVE-DISPATCH")?, "gap")?
             .contains("saturating addition")
         || !text(find_row(surfaces, "surface_id", "H2-LIVE-DISPATCH")?, "current_semantics")?
@@ -1165,6 +1178,156 @@ fn validate_cleanup_errors_and_evidence(inventory: &Value) -> Result<(), String>
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
+fn validate_body_2_static_progress(inventory: &Value) -> Result<(), String> {
+    let progress_value = inventory
+        .get("body_2_h1_scaffold_progress")
+        .ok_or_else(|| "body_2_h1_scaffold_progress must be present".to_owned())?;
+    let progress = progress_value
+        .as_object()
+        .ok_or_else(|| "body_2_h1_scaffold_progress must be an object".to_owned())?;
+    let expected_keys = string_set(&[
+        "bead_id",
+        "captured_date_utc",
+        "base_revision",
+        "progress_state",
+        "execution_state",
+        "modified_paths",
+        "implemented_semantics",
+        "authored_inline_tests",
+        "remaining_gaps",
+        "no_claim_boundary",
+    ]);
+    let actual_keys: BTreeSet<String> = progress.keys().cloned().collect();
+    if actual_keys != expected_keys {
+        return Err("BODY-2 static progress keys drifted".to_owned());
+    }
+    for (key, expected) in [
+        ("bead_id", BODY_2_BEAD_ID),
+        ("captured_date_utc", "2026-08-05"),
+        ("base_revision", BODY_2_BASE_REVISION),
+        ("progress_state", "STATIC_SOURCE_PROGRESS"),
+        ("execution_state", "NOT_RUN_STATIC_ONLY"),
+    ] {
+        if map_text(progress, key)? != expected {
+            return Err(format!("body_2_h1_scaffold_progress.{key} must be {expected}"));
+        }
+    }
+
+    if value_string_set(progress_value, "modified_paths")?
+        != string_set(&[
+            "src/http/h1/stream.rs",
+            "artifacts/server_incoming_body_contract_v1.json",
+            "docs/server_incoming_body_contract.md",
+            "tests/server_incoming_body_contract.rs",
+        ])
+    {
+        return Err("BODY-2 modified path inventory drifted".to_owned());
+    }
+
+    let semantics = object(progress_value, "implemented_semantics")?;
+    let expected_semantic_keys = string_set(&[
+        "premature_disconnect_is_error",
+        "explicit_completion_is_eof",
+        "incoming_total_accounting_checked_before_mutation",
+        "incoming_trailer_accounting_checked_before_mutation",
+        "incoming_buffer_accounting_checked_before_extension",
+        "fixed_length_size_hint_decreases_on_delivery",
+        "producer_error_reason_mirroring",
+        "live_h1_dispatch_streaming",
+        "queue_byte_budget_enforced",
+        "consumer_drop_signal_present",
+        "drain_or_close_policy_present",
+        "incoming_body_error_type_present",
+        "already_terminal_repoll_error_present",
+    ]);
+    let actual_semantic_keys: BTreeSet<String> = semantics.keys().cloned().collect();
+    if actual_semantic_keys != expected_semantic_keys {
+        return Err("BODY-2 implemented semantics keys drifted".to_owned());
+    }
+    for key in [
+        "premature_disconnect_is_error",
+        "explicit_completion_is_eof",
+        "incoming_total_accounting_checked_before_mutation",
+        "incoming_trailer_accounting_checked_before_mutation",
+        "incoming_buffer_accounting_checked_before_extension",
+        "fixed_length_size_hint_decreases_on_delivery",
+    ] {
+        if !map_bool(semantics, key)? {
+            return Err(format!("body_2 implemented_semantics.{key} must be true"));
+        }
+    }
+    for key in [
+        "live_h1_dispatch_streaming",
+        "queue_byte_budget_enforced",
+        "consumer_drop_signal_present",
+        "drain_or_close_policy_present",
+        "incoming_body_error_type_present",
+        "already_terminal_repoll_error_present",
+    ] {
+        if map_bool(semantics, key)? {
+            return Err(format!("body_2 implemented_semantics.{key} must remain false"));
+        }
+    }
+    if map_text(semantics, "producer_error_reason_mirroring")?
+        != "WRITER_GENERATED_HTTP_ERROR_SUBSET_AFTER_QUEUED_FRAMES"
+    {
+        return Err("BODY-2 producer error-reason scope drifted".to_owned());
+    }
+
+    if value_string_set(progress_value, "authored_inline_tests")?
+        != string_set(&[
+            "incoming_body_content_length_hint_tracks_delivered_bytes",
+            "incoming_body_unfinished_producer_drop_is_not_eof",
+            "incoming_body_completed_chunked_without_trailers_ends_cleanly",
+            "incoming_body_chunked_finish_incomplete_errors",
+            "incoming_body_limit_refuses_whole_crossing_frame_and_surfaces_error",
+        ])
+    {
+        return Err("BODY-2 authored inline-test inventory drifted".to_owned());
+    }
+
+    let gaps = array(progress_value, "remaining_gaps")?;
+    if gaps.len() != 4 {
+        return Err("BODY-2 remaining-gap inventory must contain four entries".to_owned());
+    }
+    let joined_gaps = gaps
+        .iter()
+        .map(|gap| {
+            gap.as_str()
+                .ok_or_else(|| "BODY-2 remaining gaps must be text".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\n");
+    for required in [
+        "buffer the complete request",
+        "queued-byte permit budget",
+        "consumer-drop notification",
+        "IncomingBodyError",
+        "already-terminal error",
+        "drain-or-close",
+        "terminal telemetry",
+    ] {
+        if !joined_gaps.contains(required) {
+            return Err(format!("BODY-2 remaining gaps must mention {required}"));
+        }
+    }
+
+    let no_claim = map_text(progress, "no_claim_boundary")?;
+    for required in [
+        "static source receipt",
+        "does not prove compilation",
+        "live streaming dispatch",
+        "connection reuse",
+        "completion of BODY-2",
+    ] {
+        if !no_claim.contains(required) {
+            return Err(format!("BODY-2 no-claim boundary must mention {required}"));
+        }
+    }
+    Ok(())
+}
+
 fn validate_source_pins(inventory: &Value) -> Result<(), String> {
     let pins = array(inventory, "source_pins")?;
     let expected_paths = string_set(&[
@@ -1244,6 +1407,7 @@ fn validate_docs_and_boundaries(inventory: &Value) -> Result<(), String> {
     }
     for required in [
         "## Current architecture",
+        "## BODY-2 static H1 scaffold progress",
         "## Public ownership contract",
         "## Terminal-state contract",
         "## Frame, queue, and total budgets",
@@ -1263,6 +1427,8 @@ fn validate_docs_and_boundaries(inventory: &Value) -> Result<(), String> {
         "form: 2 MiB",
         "nine mapping identifiers",
         "Null is distinct from zero",
+        BODY_2_BASE_REVISION,
+        "Those cases have not been compiled or run",
         "The bead must remain open",
     ] {
         if !doc.contains(required) {
@@ -1301,6 +1467,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     validate_state_and_budgets(inventory)?;
     validate_semantics_and_telemetry(inventory)?;
     validate_cleanup_errors_and_evidence(inventory)?;
+    validate_body_2_static_progress(inventory)?;
     validate_source_pins(inventory)?;
     validate_docs_and_boundaries(inventory)
 }
@@ -1336,6 +1503,16 @@ fn server_incoming_body_contract_fails_closed_on_material_drift() {
     let mut false_integration = base.clone();
     false_integration["authority"]["handler_streaming_present"] = Value::Bool(true);
     mutations.push(("false integration claim", false_integration));
+
+    let mut false_body_2_integration = base.clone();
+    false_body_2_integration["body_2_h1_scaffold_progress"]["implemented_semantics"]
+        ["live_h1_dispatch_streaming"] = Value::Bool(true);
+    mutations.push(("false BODY-2 integration claim", false_body_2_integration));
+
+    let mut false_body_2_execution = base.clone();
+    false_body_2_execution["body_2_h1_scaffold_progress"]["execution_state"] =
+        Value::String("EXECUTED".to_owned());
+    mutations.push(("false BODY-2 execution claim", false_body_2_execution));
 
     let mut disconnect_eof = base.clone();
     disconnect_eof["state_machine"]["disconnect_is_eof"] = Value::Bool(true);

@@ -6,14 +6,17 @@ Bead: `asupersync-server-stack-hardening-eeexl1.6.1`
 
 Canonical artifact: `artifacts/server_incoming_body_contract_v1.json`
 
-Status: static foundation authored; executable validation and production integration are unrun.
-The bead remains open.
+Status: static foundation authored; partial BODY-2 H1 scaffold source progress is
+recorded below; executable validation and live integration are unrun. The BODY-2
+bead remains open.
 
 ## Purpose and authority
 
 This packet freezes the current request-body pipeline and defines the ownership,
 budget, terminal-state, and connection-reuse contract that later H1, H2, and web
-integration work must implement. It makes no production source change.
+integration work must implement. The foundation itself authorizes no production
+source change; the separately owned BODY-2 follow-on records partial source work
+below without widening that authority.
 
 The authority boundary is intentionally narrow:
 
@@ -36,7 +39,7 @@ The reusable abstractions and the live server path are currently separate.
 | Generic body | `Body`, `Frame`, `SizeHint` | Poll-based data/trailer frames | Not owned by live request dispatch |
 | Stream adapter | `StreamBody<S>` | Converts a frame stream into `Body` | Not the incoming request type |
 | Size adapter | `Limited<B>` | Decrements a data-byte allowance | Not wrapped around one shared incoming body |
-| H1 scaffold | `IncomingBody` plus `IncomingBodyWriter` | Bounded frame-count channel, fixed/chunked parsing; the writer enqueues only successful frames | Parse/limit failures return out of band, then writer drop can appear as clean EOF; disconnect and byte-accounting gaps remain |
+| H1 scaffold | `IncomingBody` plus `IncomingBodyWriter` | Bounded frame-count channel and fixed/chunked parsing; explicit producer completion is distinguished from premature disconnect, incoming arithmetic is checked before mutation, and a fixed-length size hint decreases on delivery | Errors still use `HttpError`; no queue-byte permits, consumer-drop signal, already-terminal repoll error, protocol cleanup/reuse, obligation/telemetry integration, or live dispatch |
 | H1 live path | `Http1Codec` to `h1::types::Request` | Applies the body cap, then completes a `Vec<u8>` body before dispatch | No concurrent handoff; prospective body and trailer accounting uses saturating addition |
 | H2 live path | pending headers plus `Vec<u8>` per stream | Uses saturating prospective addition against a configured per-stream cap (16 MiB by default), resets an over-cap stream with `ENHANCE_YOUR_CALM`, and otherwise dispatches after `END_STREAM` | No incremental handler consumption, surfaced trailers, or connection-wide aggregate body budget |
 | Web request | `web::extract::Request` | Owns cloneable `Bytes` | Conflicts with sole-consumer ownership |
@@ -50,6 +53,32 @@ The reusable abstractions and the live server path are currently separate.
 The source-fingerprinted matrix in the artifact is authoritative. In particular,
 the mere presence of `IncomingBody`, `StreamBody`, or `Limited` is not evidence that
 live handlers receive body frames incrementally.
+
+## BODY-2 static H1 scaffold progress
+
+The follow-on bead `asupersync-server-stack-hardening-eeexl1.6.2` has one bounded
+source-only increment based on revision
+`1620c55e5a3d139e7fb39b1c5e545055e3841541`. `IncomingBodyWriter` now stores a
+compact producer terminal reason before releasing its final sender. The consumer
+therefore treats explicit framing completion as EOF and a producer that disappears
+while framing remains open as `HttpError::BodyChannelClosed`. Writer-generated
+framing, limit, header, and cancellation failures retain their matching reason for
+the consumer after any already-queued frames are delivered.
+
+Incoming buffer, accepted body-byte, and trailer-byte totals are checked against
+overflow and their configured limit before the corresponding mutation. Fixed
+`Content-Length` size hints decrease only as frames are delivered and reach exact
+zero at completion or terminal failure. Inline cases were authored for declining
+size hints, premature producer drop, completed trailer-free chunked input, queued
+data followed by a framing failure, and whole-frame refusal at the body limit.
+Those cases have not been compiled or run.
+
+This remains partial scaffold progress. The public error is still `HttpError`,
+unclassified producer failures collapse to `BodyChannelClosed`, and a poll after a
+terminal result returns ordinary end-of-stream rather than `AlreadyTerminal`.
+There is no independent queue-byte permit budget, consumer-drop notification,
+request-budget cancellation bridge, bounded drain-or-close/reuse policy,
+obligation or terminal telemetry integration, or live H1 handler dispatch.
 
 ## Public ownership contract
 
@@ -241,10 +270,11 @@ or both. Pre-body mappings never imply that a body obligation existed:
 - `BODY-CONSUMER-DROPPED` invokes protocol cleanup but also lacks a distinct landed
   variant.
 
-`HttpError::BodyChannelClosed` is currently ambiguous: producer-side code uses it
-for missing sender and full/disconnected sends, while receiver-side producer
-disconnect still becomes EOF. BODY-1 requires separate typed source-disconnect and
-consumer-drop outcomes before live integration.
+`HttpError::BodyChannelClosed` remains ambiguous: producer-side code uses it for
+missing sender and full/disconnected sends, and the partial BODY-2 scaffold also
+uses it for premature or unclassified producer termination. The receiver no longer
+turns that termination into EOF, but the contracted typed source-disconnect and
+consumer-drop outcomes are still required before live integration.
 
 These IDs are artifact-level contract identifiers. `ASUP-E501` is an already-live
 request-deadline code; this foundation allocates no new ASUP code. Before later
@@ -304,8 +334,8 @@ before any live H2 integration claim is made.
 ## Evidence status and no-claim boundary
 
 The artifact parses, its source hashes and anchors were checked statically, and a
-Rust contract accompanies this document. No executable project command was run for
-this packet.
+Rust contract accompanies this document. The BODY-2 inline cases listed above were
+authored but not run. No executable project command was run for this packet.
 
 Therefore this packet does not claim:
 
@@ -317,8 +347,9 @@ Therefore this packet does not claim:
 - response streaming or incremental multipart parsing;
 - broad server-stack or workspace health;
 - an allocated ASUP error code; or
-- completion of the bead.
+- completion of the foundation or BODY-2 bead.
 
-The bead must remain open until executable validation is admitted and recorded.
+The bead must remain open until the remaining ownership, queue-budget, cleanup,
+live-dispatch, and executable-validation work is admitted and recorded.
 
 <!-- END SERVER INCOMING BODY CONTRACT -->

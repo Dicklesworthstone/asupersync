@@ -13,6 +13,8 @@
 //! - [`BodyKind`]: Body length determination (fixed vs chunked)
 
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::task::{Context, Poll};
 
 use crate::bytes::{Buf, Bytes, BytesCursor, BytesMut};
@@ -28,6 +30,78 @@ const DEFAULT_MAX_BODY_SIZE: u64 = 16 * 1024 * 1024;
 const DEFAULT_MAX_TRAILERS_SIZE: usize = 16 * 1024;
 const DEFAULT_MAX_BUFFERED_BYTES: usize = 256 * 1024;
 const DEFAULT_BODY_CHANNEL_CAPACITY: usize = 8;
+
+/// Producer-side terminal state shared with the sole body consumer.
+///
+/// The channel disconnect signal alone cannot distinguish an explicitly
+/// completed body from a producer that disappeared while framing was still
+/// open. Store the terminal reason before dropping the final sender so the
+/// receiver never turns an unfinished body into a clean EOF.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum IncomingProducerTerminal {
+    Open = 0,
+    Finished = 1,
+    BadContentLength = 2,
+    BadChunkedEncoding = 3,
+    BodyTooLarge = 4,
+    HeadersTooLarge = 5,
+    BadHeader = 6,
+    InvalidHeaderName = 7,
+    InvalidHeaderValue = 8,
+    BodyCancelled = 9,
+    BodyChannelClosed = 10,
+}
+
+impl IncomingProducerTerminal {
+    #[inline]
+    fn load(state: &AtomicU8) -> Self {
+        match state.load(Ordering::Acquire) {
+            0 => Self::Open,
+            1 => Self::Finished,
+            2 => Self::BadContentLength,
+            3 => Self::BadChunkedEncoding,
+            4 => Self::BodyTooLarge,
+            5 => Self::HeadersTooLarge,
+            6 => Self::BadHeader,
+            7 => Self::InvalidHeaderName,
+            8 => Self::InvalidHeaderValue,
+            9 => Self::BodyCancelled,
+            _ => Self::BodyChannelClosed,
+        }
+    }
+
+    #[inline]
+    fn from_error(error: &HttpError) -> Self {
+        match error {
+            HttpError::BadContentLength => Self::BadContentLength,
+            HttpError::BadChunkedEncoding => Self::BadChunkedEncoding,
+            HttpError::BodyTooLarge | HttpError::BodyTooLargeDetailed { .. } => Self::BodyTooLarge,
+            HttpError::HeadersTooLarge => Self::HeadersTooLarge,
+            HttpError::BadHeader => Self::BadHeader,
+            HttpError::InvalidHeaderName => Self::InvalidHeaderName,
+            HttpError::InvalidHeaderValue => Self::InvalidHeaderValue,
+            HttpError::BodyCancelled => Self::BodyCancelled,
+            _ => Self::BodyChannelClosed,
+        }
+    }
+
+    #[inline]
+    fn error(self) -> Option<HttpError> {
+        match self {
+            Self::Open | Self::BodyChannelClosed => Some(HttpError::BodyChannelClosed),
+            Self::Finished => None,
+            Self::BadContentLength => Some(HttpError::BadContentLength),
+            Self::BadChunkedEncoding => Some(HttpError::BadChunkedEncoding),
+            Self::BodyTooLarge => Some(HttpError::BodyTooLarge),
+            Self::HeadersTooLarge => Some(HttpError::HeadersTooLarge),
+            Self::BadHeader => Some(HttpError::BadHeader),
+            Self::InvalidHeaderName => Some(HttpError::InvalidHeaderName),
+            Self::InvalidHeaderValue => Some(HttpError::InvalidHeaderValue),
+            Self::BodyCancelled => Some(HttpError::BodyCancelled),
+        }
+    }
+}
 
 /// The kind of body based on headers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +165,7 @@ enum ChunkedReadState {
 #[derive(Debug)]
 pub struct IncomingBody {
     receiver: mpsc::Receiver<Result<Frame<BytesCursor>, HttpError>>,
+    producer_terminal: Arc<AtomicU8>,
     cx: Cx,
     done: bool,
     received: u64,
@@ -114,15 +189,21 @@ impl IncomingBody {
     ) -> (IncomingBodyWriter, Self) {
         let (tx, rx) = mpsc::channel(capacity);
         let done = kind.is_empty();
+        let producer_terminal = Arc::new(AtomicU8::new(if done {
+            IncomingProducerTerminal::Finished as u8
+        } else {
+            IncomingProducerTerminal::Open as u8
+        }));
         let body = Self {
             receiver: rx,
+            producer_terminal: Arc::clone(&producer_terminal),
             cx: cx.clone(),
             done,
             received: 0,
             size_hint: kind.size_hint(),
             kind,
         };
-        let writer = IncomingBodyWriter::new(tx, kind);
+        let writer = IncomingBodyWriter::new(tx, kind, producer_terminal);
         (writer, body)
     }
 
@@ -148,28 +229,56 @@ impl Body for IncomingBody {
         let cx = self.cx.clone();
         match self.receiver.poll_recv(&cx, poll_cx) {
             Poll::Ready(Ok(frame)) => {
-                if let Ok(ref f) = frame {
-                    if f.is_trailers() {
-                        // Trailers mark the end of a chunked body
+                let frame = match frame {
+                    Ok(frame) => frame,
+                    Err(error) => {
                         self.done = true;
-                    } else if let Some(data) = f.data_ref() {
-                        self.received += data.remaining() as u64;
-                        if let BodyKind::ContentLength(expected) = self.kind {
-                            if self.received >= expected {
-                                self.done = true;
-                            }
-                        }
+                        self.size_hint = SizeHint::with_exact(0);
+                        return Poll::Ready(Some(Err(error)));
                     }
+                };
+                if frame.is_trailers() {
+                    // Trailers mark the end of a chunked body.
+                    self.done = true;
+                    self.size_hint = SizeHint::with_exact(0);
+                } else if let Some(data) = frame.data_ref() {
+                    let Ok(data_len) = u64::try_from(data.remaining()) else {
+                        self.done = true;
+                        self.size_hint = SizeHint::with_exact(0);
+                        return Poll::Ready(Some(Err(HttpError::BodyTooLarge)));
+                    };
+                    let Some(received) = self.received.checked_add(data_len) else {
+                        self.done = true;
+                        self.size_hint = SizeHint::with_exact(0);
+                        return Poll::Ready(Some(Err(HttpError::BodyTooLarge)));
+                    };
+                    if let BodyKind::ContentLength(expected) = self.kind {
+                        if received > expected {
+                            self.done = true;
+                            self.size_hint = SizeHint::with_exact(0);
+                            return Poll::Ready(Some(Err(HttpError::BadContentLength)));
+                        }
+                        if received == expected {
+                            self.done = true;
+                        }
+                        self.size_hint = SizeHint::with_exact(expected - received);
+                    }
+                    self.received = received;
                 }
-                Poll::Ready(Some(frame))
+                Poll::Ready(Some(Ok(frame)))
             }
             Poll::Ready(Err(RecvError::Cancelled)) => {
                 self.done = true;
+                self.size_hint = SizeHint::with_exact(0);
                 Poll::Ready(Some(Err(HttpError::BodyCancelled)))
             }
             Poll::Ready(Err(RecvError::Disconnected)) => {
                 self.done = true;
-                Poll::Ready(None)
+                self.size_hint = SizeHint::with_exact(0);
+                match IncomingProducerTerminal::load(&self.producer_terminal).error() {
+                    Some(error) => Poll::Ready(Some(Err(error))),
+                    None => Poll::Ready(None),
+                }
             }
             Poll::Ready(Err(RecvError::Empty)) | Poll::Pending => Poll::Pending,
         }
@@ -188,6 +297,7 @@ impl Body for IncomingBody {
 #[derive(Debug)]
 pub struct IncomingBodyWriter {
     sender: Option<mpsc::Sender<Result<Frame<BytesCursor>, HttpError>>>,
+    producer_terminal: Arc<AtomicU8>,
     buffer: BytesMut,
     kind: BodyKind,
     remaining: u64,
@@ -203,7 +313,11 @@ pub struct IncomingBodyWriter {
 }
 
 impl IncomingBodyWriter {
-    fn new(sender: mpsc::Sender<Result<Frame<BytesCursor>, HttpError>>, kind: BodyKind) -> Self {
+    fn new(
+        sender: mpsc::Sender<Result<Frame<BytesCursor>, HttpError>>,
+        kind: BodyKind,
+        producer_terminal: Arc<AtomicU8>,
+    ) -> Self {
         let done = kind.is_empty();
         let remaining = match kind {
             BodyKind::ContentLength(n) => n,
@@ -215,6 +329,7 @@ impl IncomingBodyWriter {
         };
         let mut writer = Self {
             sender: Some(sender),
+            producer_terminal,
             buffer: BytesMut::with_capacity(8192),
             kind,
             remaining,
@@ -273,35 +388,66 @@ impl IncomingBodyWriter {
 
     /// Pushes raw bytes into the body stream.
     pub async fn push_bytes(&mut self, cx: &Cx, data: &[u8]) -> Result<(), HttpError> {
+        let terminal = IncomingProducerTerminal::load(&self.producer_terminal);
+        if terminal != IncomingProducerTerminal::Open {
+            return match terminal.error() {
+                Some(error) => Err(error),
+                None => Ok(()),
+            };
+        }
         if self.done {
             return Ok(());
         }
 
         if !data.is_empty() {
-            self.buffer.extend_from_slice(data);
-            if self.buffer.len() > self.max_buffered_bytes {
-                return Err(HttpError::BodyTooLarge);
+            let Some(buffered_bytes) = self.buffer.len().checked_add(data.len()) else {
+                let error = HttpError::BodyTooLarge;
+                self.fail_sender(&error);
+                return Err(error);
+            };
+            if buffered_bytes > self.max_buffered_bytes {
+                let error = HttpError::BodyTooLarge;
+                self.fail_sender(&error);
+                return Err(error);
             }
+            self.buffer.extend_from_slice(data);
         }
 
-        self.drain_frames(cx).await
+        match self.drain_frames(cx).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.fail_sender(&error);
+                Err(error)
+            }
+        }
     }
 
     /// Signals EOF with no additional bytes.
     pub fn finish(&mut self, _cx: &Cx) -> Result<(), HttpError> {
+        let terminal = IncomingProducerTerminal::load(&self.producer_terminal);
+        if terminal != IncomingProducerTerminal::Open {
+            return match terminal.error() {
+                Some(error) => Err(error),
+                None => Ok(()),
+            };
+        }
         if self.done {
             return Ok(());
         }
 
         if matches!(self.kind, BodyKind::ContentLength(_)) && self.remaining != 0 {
-            return Err(HttpError::BadContentLength);
+            let error = HttpError::BadContentLength;
+            self.fail_sender(&error);
+            return Err(error);
         }
         if matches!(self.kind, BodyKind::Chunked) {
-            return Err(HttpError::BadChunkedEncoding);
+            let error = HttpError::BadChunkedEncoding;
+            self.fail_sender(&error);
+            return Err(error);
         }
 
         self.done = true;
-        self.close_sender();
+        self.finish_sender();
         Ok(())
     }
 
@@ -309,20 +455,50 @@ impl IncomingBodyWriter {
         while let Some(frame) = self.try_decode_frame()? {
             self.send_frame(cx, frame).await?;
             if self.done {
-                self.close_sender();
+                self.finish_sender();
                 break;
             }
         }
 
         if self.done {
-            self.close_sender();
+            self.finish_sender();
         }
 
         Ok(())
     }
 
-    fn close_sender(&mut self) {
+    fn finish_sender(&mut self) {
+        let _ = self.producer_terminal.compare_exchange(
+            IncomingProducerTerminal::Open as u8,
+            IncomingProducerTerminal::Finished as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
         self.sender.take();
+    }
+
+    fn fail_sender(&mut self, error: &HttpError) {
+        let terminal = IncomingProducerTerminal::from_error(error);
+        let _ = self.producer_terminal.compare_exchange(
+            IncomingProducerTerminal::Open as u8,
+            terminal as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        self.done = true;
+        self.sender.take();
+    }
+
+    fn checked_total_bytes(&self, additional: usize) -> Result<u64, HttpError> {
+        let additional = u64::try_from(additional).map_err(|_| HttpError::BodyTooLarge)?;
+        let total = self
+            .total_bytes
+            .checked_add(additional)
+            .ok_or(HttpError::BodyTooLarge)?;
+        if total > self.max_body_size {
+            return Err(HttpError::BodyTooLarge);
+        }
+        Ok(total)
     }
 
     async fn send_frame(&self, cx: &Cx, frame: Frame<BytesCursor>) -> Result<(), HttpError> {
@@ -371,14 +547,16 @@ impl IncomingBodyWriter {
 
         let remaining = usize::try_from(self.remaining).unwrap_or(usize::MAX);
         let to_yield = self.buffer.len().min(remaining).min(self.max_chunk_size);
+        let next_total = self.checked_total_bytes(to_yield)?;
+        let yielded = u64::try_from(to_yield).map_err(|_| HttpError::BodyTooLarge)?;
+        let next_remaining = self
+            .remaining
+            .checked_sub(yielded)
+            .ok_or(HttpError::BadContentLength)?;
 
         let chunk = self.buffer.split_to(to_yield);
-        self.remaining = self.remaining.saturating_sub(to_yield as u64);
-        self.total_bytes = self.total_bytes.saturating_add(to_yield as u64);
-
-        if self.total_bytes > self.max_body_size {
-            return Err(HttpError::BodyTooLarge);
-        }
+        self.remaining = next_remaining;
+        self.total_bytes = next_total;
 
         if self.remaining == 0 {
             self.done = true;
@@ -424,19 +602,21 @@ impl IncomingBodyWriter {
                     }
 
                     let to_yield = self.buffer.len().min(remaining).min(self.max_chunk_size);
+                    let next_total = self.checked_total_bytes(to_yield)?;
+                    let next_remaining = remaining
+                        .checked_sub(to_yield)
+                        .ok_or(HttpError::BadChunkedEncoding)?;
 
                     let chunk = self.buffer.split_to(to_yield);
-                    let remaining = remaining.saturating_sub(to_yield);
-                    self.chunked_state = if remaining == 0 {
+                    self.chunked_state = if next_remaining == 0 {
                         ChunkedReadState::DataCrlf
                     } else {
-                        ChunkedReadState::Data { remaining }
+                        ChunkedReadState::Data {
+                            remaining: next_remaining,
+                        }
                     };
 
-                    self.total_bytes = self.total_bytes.saturating_add(to_yield as u64);
-                    if self.total_bytes > self.max_body_size {
-                        return Err(HttpError::BodyTooLarge);
-                    }
+                    self.total_bytes = next_total;
 
                     return Ok(Some(Frame::Data(BytesCursor::new(chunk.freeze()))));
                 }
@@ -456,16 +636,18 @@ impl IncomingBodyWriter {
                     let line_end = self.buffer.as_ref().windows(2).position(|w| w == b"\r\n");
                     let Some(line_end) = line_end else {
                         // No complete trailer line yet: bound buffered trailer data.
-                        if self.trailers_bytes + self.buffer.len() > self.max_trailers_size {
+                        let buffered_trailer_bytes = self
+                            .trailers_bytes
+                            .checked_add(self.buffer.len())
+                            .ok_or(HttpError::HeadersTooLarge)?;
+                        if buffered_trailer_bytes > self.max_trailers_size {
                             return Err(HttpError::HeadersTooLarge);
                         }
                         return Ok(None);
                     };
 
-                    let line = self.buffer.split_to(line_end);
-                    let _ = self.buffer.split_to(2);
-
-                    if line.is_empty() {
+                    if line_end == 0 {
+                        let _ = self.buffer.split_to(2);
                         self.done = true;
                         self.chunked_state = ChunkedReadState::Done;
                         if !self.trailers.is_empty() {
@@ -474,10 +656,18 @@ impl IncomingBodyWriter {
                         return Ok(None);
                     }
 
-                    self.trailers_bytes = self.trailers_bytes.saturating_add(line.len() + 2);
-                    if self.trailers_bytes > self.max_trailers_size {
+                    let line_bytes = line_end.checked_add(2).ok_or(HttpError::HeadersTooLarge)?;
+                    let next_trailers_bytes = self
+                        .trailers_bytes
+                        .checked_add(line_bytes)
+                        .ok_or(HttpError::HeadersTooLarge)?;
+                    if next_trailers_bytes > self.max_trailers_size {
                         return Err(HttpError::HeadersTooLarge);
                     }
+
+                    let line = self.buffer.split_to(line_end);
+                    let _ = self.buffer.split_to(2);
+                    self.trailers_bytes = next_trailers_bytes;
 
                     let line_str =
                         std::str::from_utf8(line.as_ref()).map_err(|_| HttpError::BadHeader)?;
@@ -505,6 +695,19 @@ impl IncomingBodyWriter {
 
                 ChunkedReadState::Done => return Ok(None),
             }
+        }
+    }
+}
+
+impl Drop for IncomingBodyWriter {
+    fn drop(&mut self) {
+        if self.sender.is_some() {
+            let _ = self.producer_terminal.compare_exchange(
+                IncomingProducerTerminal::Open as u8,
+                IncomingProducerTerminal::BodyChannelClosed as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
         }
     }
 }
@@ -1162,6 +1365,59 @@ mod tests {
     }
 
     #[test]
+    fn incoming_body_content_length_hint_tracks_delivered_bytes() {
+        let cx: Cx = Cx::for_testing();
+        let (writer, mut body) = IncomingBody::channel(&cx, BodyKind::ContentLength(5));
+        let mut writer = writer.max_chunk_size(2);
+
+        block_on(writer.push_bytes(&cx, b"hello")).expect("push bytes");
+
+        let first = poll_body(&mut body)
+            .expect("first data frame")
+            .expect("first frame should be valid");
+        assert_eq!(first.into_data().expect("first data").chunk(), b"he");
+        assert_eq!(body.size_hint().exact(), Some(3));
+
+        let second = poll_body(&mut body)
+            .expect("second data frame")
+            .expect("second frame should be valid");
+        assert_eq!(second.into_data().expect("second data").chunk(), b"ll");
+        assert_eq!(body.size_hint().exact(), Some(1));
+
+        let third = poll_body(&mut body)
+            .expect("third data frame")
+            .expect("third frame should be valid");
+        assert_eq!(third.into_data().expect("third data").chunk(), b"o");
+        assert_eq!(body.size_hint().exact(), Some(0));
+        assert!(body.is_end_stream());
+    }
+
+    #[test]
+    fn incoming_body_unfinished_producer_drop_is_not_eof() {
+        let cx: Cx = Cx::for_testing();
+        let (writer, mut body) = IncomingBody::channel(&cx, BodyKind::ContentLength(5));
+
+        drop(writer);
+
+        let result = poll_body(&mut body).expect("unfinished producer must yield an error");
+        assert!(matches!(result, Err(HttpError::BodyChannelClosed)));
+        assert_eq!(body.size_hint().exact(), Some(0));
+        assert!(body.is_end_stream());
+    }
+
+    #[test]
+    fn incoming_body_completed_chunked_without_trailers_ends_cleanly() {
+        let cx: Cx = Cx::for_testing();
+        let (mut writer, mut body) = IncomingBody::channel(&cx, BodyKind::Chunked);
+
+        block_on(writer.push_bytes(&cx, b"0\r\n\r\n")).expect("finish chunked body");
+
+        assert!(poll_body(&mut body).is_none());
+        assert_eq!(body.size_hint().exact(), Some(0));
+        assert!(body.is_end_stream());
+    }
+
+    #[test]
     fn incoming_body_chunked_with_trailers() {
         let cx: Cx = Cx::for_testing();
         let (mut writer, mut body) = IncomingBody::channel(&cx, BodyKind::Chunked);
@@ -1224,11 +1480,39 @@ mod tests {
     #[test]
     fn incoming_body_chunked_finish_incomplete_errors() {
         let cx: Cx = Cx::for_testing();
-        let (mut writer, _body) = IncomingBody::channel(&cx, BodyKind::Chunked);
+        let (mut writer, mut body) = IncomingBody::channel(&cx, BodyKind::Chunked);
 
         block_on(writer.push_bytes(&cx, b"5\r\nhello\r\n")).expect("push bytes");
         let err = writer.finish(&cx).expect_err("finish should error");
         assert!(matches!(err, HttpError::BadChunkedEncoding));
+
+        let frame = poll_body(&mut body)
+            .expect("queued data frame")
+            .expect("queued data remains valid");
+        assert_eq!(frame.into_data().expect("data frame").chunk(), b"hello");
+        let terminal = poll_body(&mut body).expect("framing error after queued data");
+        assert!(matches!(terminal, Err(HttpError::BadChunkedEncoding)));
+        assert!(body.is_end_stream());
+    }
+
+    #[test]
+    fn incoming_body_limit_refuses_whole_crossing_frame_and_surfaces_error() {
+        let cx: Cx = Cx::for_testing();
+        let (writer, mut body) = IncomingBody::channel(&cx, BodyKind::ContentLength(4));
+        let mut writer = writer.max_chunk_size(2).max_body_size(3);
+
+        let error = block_on(writer.push_bytes(&cx, b"data"))
+            .expect_err("second two-byte frame crosses the three-byte limit");
+        assert!(matches!(error, HttpError::BodyTooLarge));
+
+        let frame = poll_body(&mut body)
+            .expect("first frame remains queued")
+            .expect("first frame is within the limit");
+        assert_eq!(frame.into_data().expect("data frame").chunk(), b"da");
+        let terminal = poll_body(&mut body).expect("limit error follows accepted frame");
+        assert!(matches!(terminal, Err(HttpError::BodyTooLarge)));
+        assert_eq!(body.size_hint().exact(), Some(0));
+        assert!(body.is_end_stream());
     }
 
     #[test]

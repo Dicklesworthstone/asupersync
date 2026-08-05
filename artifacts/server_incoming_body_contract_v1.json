@@ -61,9 +61,9 @@
     {
       "surface_id": "H1-STREAM-SCAFFOLD",
       "state": "PRESENT_WITH_GAPS",
-      "current_semantics": "IncomingBody and IncomingBodyWriter use a bounded frame-count channel and implement fixed-length or chunked parsing; the writer enqueues only successful frames.",
+      "current_semantics": "IncomingBody and IncomingBodyWriter use a bounded frame-count channel and fixed-length or chunked parsing. The writer records an explicit producer terminal reason before closing, checks incoming buffer, data, and trailer arithmetic before mutation, and the receiver distinguishes explicit completion from premature disconnect while decrementing a fixed-length SizeHint.",
       "anchors": ["src/http/h1/stream.rs::IncomingBody", "src/http/h1/stream.rs::IncomingBodyWriter", "src/http/h1/stream.rs::StreamingRequest"],
-      "gap": "Parsing and limit failures return out of band from push_bytes or finish rather than entering the frame channel; dropping the writer afterward makes the receiver interpret producer disconnect as clean EOF. The size hint does not decrease, receiver byte accounting uses unchecked addition, writer accounting saturates, and the scaffold is not wired into live handler dispatch."
+      "gap": "Writer errors still use HttpError and return out of band to the producer while a compact terminal reason reaches the consumer after queued frames; unclassified failures collapse to BodyChannelClosed. The scaffold has no typed IncomingBodyError, already-terminal repoll error, queue-byte permits, consumer-drop signal, cleanup or reuse policy, obligation or telemetry integration, or live handler dispatch."
     },
     {
       "surface_id": "H1-LIVE-DISPATCH",
@@ -475,21 +475,63 @@
     "h2_incoming_follow_up": "REQUIRES_EXPLICIT_OWNER_BEFORE_LIVE_INTEGRATION",
     "migration_order": ["H1 producer integration", "assign and complete H2 producer integration", "web request and handler ownership", "buffered extractor adapters", "telemetry and stable diagnostics"]
   },
+  "body_2_h1_scaffold_progress": {
+    "bead_id": "asupersync-server-stack-hardening-eeexl1.6.2",
+    "captured_date_utc": "2026-08-05",
+    "base_revision": "1620c55e5a3d139e7fb39b1c5e545055e3841541",
+    "progress_state": "STATIC_SOURCE_PROGRESS",
+    "execution_state": "NOT_RUN_STATIC_ONLY",
+    "modified_paths": [
+      "src/http/h1/stream.rs",
+      "artifacts/server_incoming_body_contract_v1.json",
+      "docs/server_incoming_body_contract.md",
+      "tests/server_incoming_body_contract.rs"
+    ],
+    "implemented_semantics": {
+      "premature_disconnect_is_error": true,
+      "explicit_completion_is_eof": true,
+      "incoming_total_accounting_checked_before_mutation": true,
+      "incoming_trailer_accounting_checked_before_mutation": true,
+      "incoming_buffer_accounting_checked_before_extension": true,
+      "fixed_length_size_hint_decreases_on_delivery": true,
+      "producer_error_reason_mirroring": "WRITER_GENERATED_HTTP_ERROR_SUBSET_AFTER_QUEUED_FRAMES",
+      "live_h1_dispatch_streaming": false,
+      "queue_byte_budget_enforced": false,
+      "consumer_drop_signal_present": false,
+      "drain_or_close_policy_present": false,
+      "incoming_body_error_type_present": false,
+      "already_terminal_repoll_error_present": false
+    },
+    "authored_inline_tests": [
+      "incoming_body_content_length_hint_tracks_delivered_bytes",
+      "incoming_body_unfinished_producer_drop_is_not_eof",
+      "incoming_body_completed_chunked_without_trailers_ends_cleanly",
+      "incoming_body_chunked_finish_incomplete_errors",
+      "incoming_body_limit_refuses_whole_crossing_frame_and_surfaces_error"
+    ],
+    "remaining_gaps": [
+      "The live H1 codec and server still buffer the complete request before handler dispatch.",
+      "The frame-count channel has no independent queued-byte permit budget or consumer-drop notification.",
+      "The scaffold still exposes HttpError rather than the contracted IncomingBodyError and does not return an already-terminal error on repoll.",
+      "Protocol-owned cancellation, bounded drain-or-close, connection reuse, obligation, and terminal telemetry remain unimplemented."
+    ],
+    "no_claim_boundary": "This static source receipt records partial H1 scaffold progress only; it does not prove compilation, executable behavior, live streaming dispatch, protocol correctness, connection reuse, performance, or completion of BODY-2."
+  },
   "source_pins": [
     {"path": "src/http/mod.rs", "sha256": "2a0ca68136d8d4946db692601f25fdb727fb153e8a78529defbc0eb8d913e5ed", "line_count": 85, "anchors": ["pub mod body;", "pub use body::{Body, Empty, Frame, Full, HeaderMap, HeaderName, HeaderValue, SizeHint};"]},
     {"path": "src/http/body.rs", "sha256": "69e63ff5856457bedd8ea9eaf0a45d5ca120c2ffe8f1db65207e747278ba9753", "line_count": 1918, "anchors": ["pub trait Body {", "pub struct StreamBody<S>", "pub struct Limited<B>"]},
-    {"path": "src/channel/mpsc.rs", "sha256": "ea58ac0b1d78738a4625f366be28e7fa91fadd0ef662446e761ded0b30bb338d", "line_count": 6283, "anchors": ["pub fn channel<T>(capacity: usize)", "pub struct SendPermit<'a, T>", "pub struct Receiver<T>"]},
+    {"path": "src/channel/mpsc.rs", "sha256": "ccdff2ffab0f719180a01fca2230bcda74159f0ae9141b1acbc87f5a95b82f5e", "line_count": 6357, "anchors": ["pub fn channel<T>(capacity: usize)", "pub struct SendPermit<'a, T>", "pub struct Receiver<T>"]},
     {"path": "src/stream/stream.rs", "sha256": "46012af8a37bc1bd5d8aa6e8c39e896c2ad7bcddc3e68b5b94881ef18f0e826b", "line_count": 254, "anchors": ["pub trait Stream", "fn poll_next"]},
     {"path": "src/codec/framed.rs", "sha256": "adccbee55b4c1e0268de065a5376cdd8e71cc02a74601013cb6e32a6d829571f", "line_count": 1216, "anchors": ["pub struct Framed<T, U>", "pub fn read_buffer", "impl<T, U> Stream for Framed"]},
     {"path": "src/codec/framed_read.rs", "sha256": "477bf58ca5ee956c841937e59cacda49927a31f2a99f75560223f6f43142d42d", "line_count": 1165, "anchors": ["pub const DEFAULT_MAX_BUFFER_LEN", "pub struct FramedRead<R, D>"]},
     {"path": "src/http/h1/mod.rs", "sha256": "567b4921e41e9dbb485eb4b6c75a62a2b3ab249d0ef7a34564c59b1fae76b792", "line_count": 50, "anchors": ["pub mod stream;", "pub use stream::{"]},
-    {"path": "src/http/h1/stream.rs", "sha256": "b10a901731cf6ab2e9f2d255f57c694b07261186a448b09fa042ad6f9cff18c8", "line_count": 1585, "anchors": ["pub struct IncomingBody {", "pub struct IncomingBodyWriter {", "self.received += data.remaining() as u64;", "Poll::Ready(Err(RecvError::Disconnected)) =>", "async fn send_frame", "Ok::<crate::http::body::Frame<BytesCursor>, HttpError>(frame)", "self.total_bytes = self.total_bytes.saturating_add"]},
+    {"path": "src/http/h1/stream.rs", "sha256": "2c0ac47a1c638de5ad9fbdfaa638a4f839b74b3fabd2c0477ac72458051f9e4a", "line_count": 1869, "anchors": ["enum IncomingProducerTerminal {", "producer_terminal: Arc<AtomicU8>", "Poll::Ready(Err(RecvError::Disconnected)) =>", "self.received.checked_add(data_len)", "fn checked_total_bytes", ".checked_add(self.buffer.len())", "impl Drop for IncomingBodyWriter", "fn incoming_body_unfinished_producer_drop_is_not_eof"]},
     {"path": "src/http/h1/codec.rs", "sha256": "9d6612d647fab75b7348d96eb0999ff8e2f159e8b707a309532efd19ccfed2c1", "line_count": 2827, "anchors": ["pub enum HttpError {", "pub struct Http1Codec", "max_body_size: usize", "self.body.len().saturating_add(size)", "self.trailers_bytes = self.trailers_bytes.saturating_add"]},
     {"path": "src/http/h1/types.rs", "sha256": "c996611abc2ef2d91e914d19e9110230ea90370de98c4a9bcda7bb0edf238692", "line_count": 2102, "anchors": ["pub struct Request {", "pub body: Vec<u8>"]},
     {"path": "src/http/h1/server.rs", "sha256": "d9cbd8c351f2112f11d06e28f2c3c6cb898f40bc997a2728c71d06708017521d", "line_count": 2455, "anchors": ["pub async fn serve_with_peer_addr", "self.read_next(&mut framed, &state).await", "ServerRequestRegion"]},
     {"path": "src/http/h2/connection.rs", "sha256": "af5fd2a7e79deaa1d0bfd4f844ddefa2554e26593fab94170b95df1badbadeb7", "line_count": 6639, "anchors": ["pub enum ReceivedFrame", "pub fn process_frame"]},
     {"path": "src/http/h2/stream.rs", "sha256": "f33ee521ca6ae7b271fff6aa7d2072320464e7e7ce54245ab742229a6e3ff2bd", "line_count": 3376, "anchors": ["pub struct Stream {", "pub fn recv_data", "pub fn queue_data"]},
-    {"path": "src/http/h2/listener.rs", "sha256": "c0b755e4ed754a9f49221bf9d0bb0af2f99e0075fbee7831efa01fb0b9577c15", "line_count": 3737, "anchors": ["const DEFAULT_H2_MAX_BODY_SIZE: usize = 16 * 1024 * 1024;", "let mut pending_requests: HashMap<u32, (Vec<Header>, Vec<u8>)>", "body.len().saturating_add(data.len())", "conn.reset_stream(stream_id, ErrorCode::EnhanceYourCalm);", "fn dispatch_h2_request"]},
+    {"path": "src/http/h2/listener.rs", "sha256": "107a83791760f0b632d9da502026f09ba012a407bb3e47a1513126108ef6d2ea", "line_count": 3804, "anchors": ["const DEFAULT_H2_MAX_BODY_SIZE: usize = 16 * 1024 * 1024;", "let mut pending_requests: HashMap<u32, (Vec<Header>, Vec<u8>)>", "body.len().saturating_add(data.len())", "conn.reset_stream(stream_id, ErrorCode::EnhanceYourCalm);", "fn dispatch_h2_request"]},
     {"path": "src/web/mod.rs", "sha256": "f45c786c88eb80fff899b1781f58f610fd6b98f04384123455b42b8a6382a3ed", "line_count": 88, "anchors": ["pub mod extract;", "pub mod response;", "pub use extract::{", "pub use response::{"]},
     {"path": "src/web/extract.rs", "sha256": "211cecabb4955f2b72aa92058c61e1f3c0f3c5bac4bbec5e805e201667d6171d", "line_count": 2719, "anchors": ["pub struct Request {", "pub body: Bytes", "const DEFAULT_MAX_JSON_BODY_SIZE", "const DEFAULT_MAX_RAW_BODY_SIZE"]},
     {"path": "src/web/handler.rs", "sha256": "ab54ba77e130e510f79b4dd68f207fe40e1a88ed04ab72c0fd918b5fafb23116", "line_count": 1574, "anchors": ["pub trait Handler", "req: Request"]},
@@ -530,6 +572,7 @@
     "This artifact does not claim a configured or landed H2 connection-level aggregate body budget.",
     "This artifact does not claim response streaming or incremental multipart parsing.",
     "This artifact does not allocate an ASUP error code or authorize production source changes.",
+    "The BODY-2 static source receipt does not claim compilation, executable behavior, live H1 handler streaming, cleanup or connection reuse, or completion of BODY-2.",
     "This artifact does not authorize tracker closure while executable validation is unrun."
   ]
 }
