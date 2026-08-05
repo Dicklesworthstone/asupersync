@@ -12,6 +12,7 @@
 #![allow(missing_docs)]
 
 use asupersync::net::atp::sdk::{AtpReader, AtpWriter, TransferProgress};
+use asupersync::stream::Stream as OwnedStream;
 use futures_lite as incumbent;
 use incumbent::{FutureExt, Stream};
 use serde_json::Value;
@@ -213,6 +214,28 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     .collect();
     if row_ids(surfaces, "surface_id") != expected_surfaces {
         return Err("production surface inventory must contain the exact six sites".to_owned());
+    }
+    let atp_surface = find_row(surfaces, "surface_id", "FUT-PROD-ATP-STREAM");
+    let owned_surface = object(atp_surface, "owned_parallel_surface");
+    if owned_surface.get("api").and_then(Value::as_str) != Some("asupersync::stream::Stream")
+        || owned_surface
+            .get("behavioral_impl_count")
+            .and_then(Value::as_u64)
+            != Some(2)
+        || owned_surface
+            .get("shared_poll_kernel")
+            .and_then(Value::as_str)
+            != Some("poll_progress")
+        || owned_surface
+            .get("implementation_state")
+            .and_then(Value::as_str)
+            != Some("SOURCE_AUTHORED_NOT_EXECUTED")
+        || owned_surface
+            .get("cutover_authorized")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return Err("owned ATP Stream progress must remain source-only and fail closed".to_owned());
     }
     let token_total: u64 = surfaces
         .iter()
@@ -646,7 +669,27 @@ fn production_public_and_comment_only_sites_match_source() {
     assert!(stream.contains(&format!("use {TOKEN}::Stream;")));
     assert_eq!(stream.matches("impl Stream for AtpWriter").count(), 1);
     assert_eq!(stream.matches("impl Stream for AtpReader").count(), 1);
-    assert!(stream.matches("cx.waker().wake_by_ref();").count() >= 2);
+    assert_eq!(
+        stream
+            .matches("impl crate::stream::Stream for AtpWriter")
+            .count(),
+        1
+    );
+    assert_eq!(
+        stream
+            .matches("impl crate::stream::Stream for AtpReader")
+            .count(),
+        1
+    );
+    assert_eq!(stream.matches("fn poll_progress(").count(), 1);
+    let progress_kernel = stream
+        .split_once("fn poll_progress(")
+        .expect("owned progress kernel")
+        .1
+        .split_once("// Keep the incumbent public trait implementations")
+        .expect("owned progress kernel terminator")
+        .0;
+    assert_eq!(progress_kernel.matches("cx.waker().wake_by_ref();").count(), 1);
     assert!(stream.contains("obligation.resolve(Resolution::Abort)"));
 
     let middleware = read_repo_file("src/web/middleware.rs");
@@ -943,14 +986,22 @@ fn incumbent_helper_probes_freeze_poll_wake_drop_and_lifetime_semantics() {
 }
 
 #[test]
-fn public_foreign_stream_impls_compile_but_downstream_evidence_remains_planned() {
+fn public_stream_impls_compile_but_downstream_evidence_remains_planned() {
     fn assert_progress_stream<S>()
     where
         S: Stream<Item = TransferProgress>,
     {
     }
+    fn assert_owned_progress_stream<S>()
+    where
+        S: OwnedStream<Item = TransferProgress>,
+    {
+    }
+
     assert_progress_stream::<AtpWriter>();
     assert_progress_stream::<AtpReader>();
+    assert_owned_progress_stream::<AtpWriter>();
+    assert_owned_progress_stream::<AtpReader>();
 
     let inventory = artifact();
     let journeys = array(&inventory, "downstream_and_e2e");

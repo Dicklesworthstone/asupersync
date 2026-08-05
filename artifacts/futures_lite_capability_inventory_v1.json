@@ -307,6 +307,13 @@
       "token_occurrences": 1,
       "behavioral_impl_count": 2,
       "api": "futures_lite::Stream",
+      "owned_parallel_surface": {
+        "api": "asupersync::stream::Stream",
+        "behavioral_impl_count": 2,
+        "shared_poll_kernel": "poll_progress",
+        "implementation_state": "SOURCE_AUTHORED_NOT_EXECUTED",
+        "cutover_authorized": false
+      },
       "public_symbols": [
         "asupersync::net::atp::sdk::AtpWriter",
         "asupersync::net::atp::sdk::AtpReader"
@@ -760,7 +767,7 @@
     },
     {
       "gap_id": "FUT-GAP-07",
-      "summary": "ATP SDK types are the only foreign Stream implementations and have no adapter to the owned trait.",
+      "summary": "ATP SDK types retain the foreign Stream implementations and now have source-authored owned Stream implementations, but compile, downstream ergonomics and behavioral parity evidence remain unexecuted.",
       "owner_bead": "asupersync-d24mms.6.2",
       "state": "BLOCKED_GAP"
     },
@@ -813,8 +820,8 @@
     },
     {
       "path": "src/net/atp/sdk/stream.rs",
-      "sha256": "43f2b985e39451e925632f59cf41da6a3a1b80c87b9c88bda107846d06341e02",
-      "line_count": 685
+      "sha256": "b58fdea526809eeb0db13afb7d083d672845c7efe7e0747ca9b26cb08937953b",
+      "line_count": 714
     },
     {
       "path": "src/web/middleware.rs",
@@ -889,6 +896,7 @@
     "The incumbent future::race and future::or drop losers; this inventory does not treat drop as project-level loser drain or quiescence.",
     "The existing downstream fixture does not prove the public ATP ecosystem Stream journey.",
     "Marginal package counts do not prove behavioral replacement parity.",
+    "The source-authored owned ATP Stream implementations have not been compiled or behaviorally exercised and do not authorize cutover.",
     "No local Cargo fallback is approved when a remote-required proof lane is blocked."
   ]
 }

@@ -477,19 +477,27 @@ impl AsyncRead for AtpReader {
     }
 }
 
-// Implement Stream for progress updates
+fn poll_progress(
+    progress_rx: &mut mpsc::Receiver<TransferProgress>,
+    cx: &mut Context<'_>,
+) -> Poll<Option<TransferProgress>> {
+    match progress_rx.try_recv() {
+        Ok(progress) => Poll::Ready(Some(progress)),
+        Err(mpsc::RecvError::Empty) => {
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+        Err(mpsc::RecvError::Disconnected | mpsc::RecvError::Cancelled) => Poll::Ready(None),
+    }
+}
+
+// Keep the incumbent public trait implementations until downstream evidence
+// authorizes cutover.
 impl Stream for AtpWriter {
     type Item = TransferProgress;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.progress_rx.try_recv() {
-            Ok(p) => Poll::Ready(Some(p)),
-            Err(mpsc::RecvError::Empty) => {
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-            Err(mpsc::RecvError::Disconnected | mpsc::RecvError::Cancelled) => Poll::Ready(None),
-        }
+        poll_progress(&mut self.progress_rx, cx)
     }
 }
 
@@ -497,14 +505,23 @@ impl Stream for AtpReader {
     type Item = TransferProgress;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.progress_rx.try_recv() {
-            Ok(p) => Poll::Ready(Some(p)),
-            Err(mpsc::RecvError::Empty) => {
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-            Err(mpsc::RecvError::Disconnected | mpsc::RecvError::Cancelled) => Poll::Ready(None),
-        }
+        poll_progress(&mut self.progress_rx, cx)
+    }
+}
+
+impl crate::stream::Stream for AtpWriter {
+    type Item = TransferProgress;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        poll_progress(&mut self.progress_rx, cx)
+    }
+}
+
+impl crate::stream::Stream for AtpReader {
+    type Item = TransferProgress;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        poll_progress(&mut self.progress_rx, cx)
     }
 }
 
@@ -517,6 +534,18 @@ mod tests {
     };
     use crate::net::atp::sdk::{AtpSdk, SessionConfig, SessionOptions};
     use futures_lite::future::block_on;
+
+    #[test]
+    fn sdk_progress_types_implement_owned_stream() {
+        fn assert_owned_progress_stream<S>()
+        where
+            S: crate::stream::Stream<Item = TransferProgress>,
+        {
+        }
+
+        assert_owned_progress_stream::<AtpWriter>();
+        assert_owned_progress_stream::<AtpReader>();
+    }
 
     fn granted_direct_options(config: &SessionConfig, peer: PeerId, label: &str) -> SessionOptions {
         SessionOptions::direct(peer).with_grants(vec![CapabilityGrant::new(

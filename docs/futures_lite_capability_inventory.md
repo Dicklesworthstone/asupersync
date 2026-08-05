@@ -68,6 +68,35 @@ The existing standalone downstream fixture proves only
 does not mention the ATP SDK types, and cannot catch a break to the foreign
 impls.
 
+### FUT A2 static owned-Stream progress
+
+At base revision `9f3684b48af00f93a6717af8575bbb4c984d5873`, bead
+`asupersync-d24mms.6.2` adds alongside-incumbent owned Stream implementations
+for `AtpWriter` and `AtpReader`. This is `STATIC_SOURCE_PROGRESS`; its
+executable state is `NOT_RUN_STATIC_ONLY`, and the bead remains open.
+
+The incumbent and owned trait implementations all delegate to one private
+`poll_progress` kernel. That kernel preserves the frozen behavior: one queued
+`TransferProgress` becomes `Ready(Some(_))`, an empty queue self-wakes and
+returns `Pending`, and a disconnected or cancelled queue becomes `Ready(None)`.
+The types' existing Drop implementations still best-effort signal cancellation
+and abort an outstanding graded obligation. The incumbent public trait remains
+implemented; no downstream break or dependency cutover is authorized.
+
+Inline and public-contract compile assertions have been authored for both ATP
+types under `asupersync::stream::Stream<Item = TransferProgress>`. They have not
+been compiled or executed in this static-only increment. The standalone
+downstream fixture is also unchanged, so it still does not prove ATP extension
+method ergonomics, Pending/wake/item/EOF behavior, cancellation, Drop cleanup,
+or region quiescence.
+
+The reviewed ATP source-pin row is refreshed with this increment. The focused
+A1 contract was already non-green at the base revision because seven unrelated
+pins had drifted: `Cargo.toml`, `Cargo.lock`, `src/sync/notify.rs`, the
+capability registry, the marginal ledger, the API surface map, and the
+standalone downstream fixture. Those rows are not blindly repinned here, and
+no focused-contract or broad-health claim is made.
+
 ## `block_on` context
 
 The incumbent pins the future on the calling stack, polls it, and parks the
