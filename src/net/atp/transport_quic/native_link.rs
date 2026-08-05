@@ -549,6 +549,16 @@ macro_rules! quic_rqtrace {
     };
 }
 
+/// Opt-in cached-staging cursor audit shared with the RQ transport. When
+/// `ATP_RQ_STAGING_CURSOR_AUDIT` is set, a QUIC write that would otherwise
+/// trust the tracked cursor verifies the file's actual cursor first and
+/// self-heals any mismatch. Off by default because the check adds one seek
+/// query per sequential cached write.
+fn quic_staging_cursor_audit_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("ATP_RQ_STAGING_CURSOR_AUDIT").is_some())
+}
+
 fn trace_quic_flush_coalescing(
     cx: &Cx,
     packets: usize,
@@ -2119,14 +2129,15 @@ impl NativeDataPlanePacer {
     /// token-bucket `controller`: that bucket gates the DATAGRAM
     /// (`before_send`) path, and resetting it every ACK window would
     /// interfere with FEC repair sends sharing this pacer; the source-stream
-    /// path (`before_send_bytes`) reads only `pacing_rate_bps`.
+    /// path (`before_send_bytes`) reads only `pacing_rate_bps`. An already
+    /// armed deadline is retained so frequent delivery-rate updates cannot
+    /// create unpaced send-now gaps.
     fn set_pacing_rate_bytes_per_s(&mut self, rate_bytes_per_s: u64) {
         let rate = rate_bytes_per_s.max(1);
         if rate == self.pacing_rate_bps {
             return;
         }
         self.pacing_rate_bps = rate;
-        self.byte_pacer_next_send_at = None;
     }
 
     async fn before_send(
@@ -7996,6 +8007,22 @@ impl QuicStagedEntryReceive {
         offset: u64,
         data: &[u8],
     ) -> Result<(), QuicTransportError> {
+        self.write_range_with_cursor_audit(
+            entry,
+            offset,
+            data,
+            quic_staging_cursor_audit_enabled(),
+        )
+        .await
+    }
+
+    async fn write_range_with_cursor_audit(
+        &mut self,
+        entry: &super::ManifestEntry,
+        offset: u64,
+        data: &[u8],
+        audit_cursor: bool,
+    ) -> Result<(), QuicTransportError> {
         if offset > entry.size || (offset == entry.size && !data.is_empty()) {
             return Err(QuicTransportError::Integrity(format!(
                 "staged write starts outside entry {}: offset {offset}, size {}",
@@ -8041,6 +8068,7 @@ impl QuicStagedEntryReceive {
                 })?;
             let unflushed_bytes = self.staging_unflushed_bytes.saturating_add(data.len());
             let should_flush = unflushed_bytes >= QUIC_STAGE_BUFFER_BYTES;
+            let expected_cursor = self.staging_cursor;
             {
                 let file = self.staging_file.as_mut().ok_or_else(|| {
                     QuicTransportError::Integrity(format!(
@@ -8048,8 +8076,20 @@ impl QuicStagedEntryReceive {
                         entry.index
                     ))
                 })?;
-                if self.staging_cursor != Some(offset) {
+                if expected_cursor != Some(offset) {
                     file.seek(std::io::SeekFrom::Start(offset)).await?;
+                } else if audit_cursor {
+                    let actual = file.stream_position().await?;
+                    if actual != offset {
+                        quic_rqtrace!(
+                            "receiver: entry {} STAGING_CURSOR_DESYNC expected={} actual={} len={}",
+                            entry.index,
+                            offset,
+                            actual,
+                            data.len()
+                        );
+                        file.seek(std::io::SeekFrom::Start(offset)).await?;
+                    }
                 }
                 file.write_all(data).await?;
                 if should_flush {
@@ -12270,14 +12310,14 @@ mod tests {
             "armed deadline must sit within one pacing interval ahead (schedule unchanged): ahead={ahead:?} interval={interval:?}"
         );
 
-        // A rate change resets the deadline to `None` (send-now, re-pace),
-        // exactly as before: the flush loop's wait breaks and re-arms on the
-        // next `note_bytes_paced`. This is the same behavior that makes an
-        // ACK-driven mid-wait rate update safe.
+        // ACK-driven rate updates must retain the pending deadline. Clearing
+        // it would turn every update into an unpaced send-now gap and permit a
+        // repeating micro-burst at the delivery-sampling cadence.
         pacer.set_pacing_rate_bytes_per_s(pacing.pacing_rate_bps * 2);
-        assert!(
-            pacer.byte_pacer_deadline().is_none(),
-            "a delivery-clocked rate change clears the deadline (send-now, re-pace)"
+        assert_eq!(
+            pacer.byte_pacer_deadline(),
+            Some(deadline),
+            "a delivery-clocked rate change must preserve the armed deadline"
         );
     }
 
@@ -13000,8 +13040,19 @@ mod tests {
         assert_eq!(staged.staging_cursor, Some(4));
         assert_eq!(staged.staging_unflushed_bytes, 4);
 
-        futures_lite::future::block_on(staged.write_block(&entry, 1, &[5, 6, 7, 8], &config))
-            .expect("write second cached block");
+        futures_lite::future::block_on(async {
+            staged
+                .staging_file
+                .as_mut()
+                .expect("cached staging file")
+                .seek(std::io::SeekFrom::Start(0))
+                .await
+                .expect("desynchronize cached staging cursor");
+            staged
+                .write_range_with_cursor_audit(&entry, 4, &[5, 6, 7, 8], true)
+                .await
+                .expect("audit and write second cached block");
+        });
         assert!(staged.staging_file.is_some());
         assert_eq!(staged.staging_cursor, Some(8));
         assert_eq!(staged.staging_unflushed_bytes, 8);
