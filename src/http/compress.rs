@@ -25,6 +25,41 @@ use std::io;
 /// unusually expansion-prone payloads.
 pub const DEFAULT_MAX_COMPRESSED_SIZE: usize = 16 * 1024 * 1024;
 
+/// Default maximum decompressed body size accepted by HTTP gzip helpers.
+///
+/// Gzip decompression is always bounded. Callers that need a different cap
+/// must provide an explicit [`DecompressionLimit`] when constructing the
+/// decoder.
+pub const DEFAULT_MAX_DECOMPRESSED_SIZE: usize = 16 * 1024 * 1024;
+
+/// Maximum number of decompressed bytes a gzip decoder may emit.
+///
+/// The dedicated type keeps the resource bound explicit at construction and
+/// prevents accidentally selecting an unbounded mode. A zero-byte limit is
+/// valid and accepts only streams that produce no output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DecompressionLimit(usize);
+
+impl DecompressionLimit {
+    /// Create an explicit decompressed-output limit in bytes.
+    #[must_use]
+    pub const fn new(max_bytes: usize) -> Self {
+        Self(max_bytes)
+    }
+
+    /// Return the decompressed-output limit in bytes.
+    #[must_use]
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+impl Default for DecompressionLimit {
+    fn default() -> Self {
+        Self(DEFAULT_MAX_DECOMPRESSED_SIZE)
+    }
+}
+
 /// Supported content encodings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContentEncoding {
@@ -539,7 +574,7 @@ impl Compressor for GzipCompressor {
 /// Gzip decompressor using the flate2 (miniz_oxide) backend.
 #[cfg(feature = "compression")]
 pub struct GzipDecompressor {
-    max_size: Option<usize>,
+    limit: DecompressionLimit,
     total: usize,
     decoder: flate2::write::GzDecoder<LimitedWriter>,
     /// br-asupersync-8vcp64: once any error path runs, no further calls
@@ -554,13 +589,14 @@ pub struct GzipDecompressor {
 
 #[cfg(feature = "compression")]
 impl GzipDecompressor {
-    /// Create a new gzip decompressor with an optional size limit.
+    /// Create a new gzip decompressor with a mandatory output limit.
     #[must_use]
-    pub fn new(max_size: Option<usize>) -> Self {
+    pub fn new(limit: DecompressionLimit) -> Self {
+        let max_size = limit.get();
         Self {
-            max_size,
+            limit,
             total: 0,
-            decoder: flate2::write::GzDecoder::new(LimitedWriter::new(max_size)),
+            decoder: flate2::write::GzDecoder::new(LimitedWriter::new(Some(max_size))),
             poisoned: false,
         }
     }
@@ -576,8 +612,8 @@ impl Decompressor for GzipDecompressor {
         }
         use io::Write;
 
-        let remaining = self.max_size.map(|m| m.saturating_sub(self.total));
-        self.decoder.get_mut().max_size = remaining;
+        let max_size = self.limit.get();
+        self.decoder.get_mut().max_size = Some(max_size.saturating_sub(self.total));
 
         // Run the decompression as a fallible inner expression; on any error,
         // mark poisoned and clear stale partial bytes from the inner buffer.
@@ -585,7 +621,7 @@ impl Decompressor for GzipDecompressor {
             self.decoder.write_all(input)?;
             self.decoder.flush()?;
             let mut buf = std::mem::take(&mut self.decoder.get_mut().inner);
-            update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
+            update_decompressed_total(&mut self.total, buf.len(), Some(max_size))?;
             output.append(&mut buf);
             Ok(())
         })();
@@ -603,13 +639,16 @@ impl Decompressor for GzipDecompressor {
                 "GzipDecompressor poisoned by prior error (br-asupersync-8vcp64)",
             ));
         }
-        let mut finishing_decoder = flate2::write::GzDecoder::new(LimitedWriter::new(None));
+        let max_size = self.limit.get();
+        let remaining = max_size.saturating_sub(self.total);
+        let mut finishing_decoder =
+            flate2::write::GzDecoder::new(LimitedWriter::new(Some(remaining)));
         std::mem::swap(&mut self.decoder, &mut finishing_decoder);
-        finishing_decoder.get_mut().max_size = self.max_size.map(|m| m.saturating_sub(self.total));
+        finishing_decoder.get_mut().max_size = Some(remaining);
 
         let result: io::Result<()> = (|| {
             let mut buf = finishing_decoder.finish()?.inner;
-            update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
+            update_decompressed_total(&mut self.total, buf.len(), Some(max_size))?;
             output.append(&mut buf);
             Ok(())
         })();
@@ -1147,8 +1186,8 @@ mod tests {
     }
 
     #[cfg(feature = "compression")]
-    fn run_gzip_boundary_case(input: &[u8], max_size: Option<usize>) -> GzipBoundaryOutcome {
-        let mut decompressor = GzipDecompressor::new(max_size);
+    fn run_gzip_boundary_case(input: &[u8], limit: DecompressionLimit) -> GzipBoundaryOutcome {
+        let mut decompressor = GzipDecompressor::new(limit);
         let mut output = Vec::new();
 
         match decompressor.decompress(input, &mut output) {
@@ -1178,6 +1217,15 @@ mod tests {
     // ====================================================================
     // ContentEncoding tests
     // ====================================================================
+
+    #[test]
+    fn decompression_limit_default_matches_public_bound() {
+        assert_eq!(
+            DecompressionLimit::default().get(),
+            DEFAULT_MAX_DECOMPRESSED_SIZE
+        );
+        assert_eq!(DecompressionLimit::new(4096).get(), 4096);
+    }
 
     #[test]
     fn encoding_from_token() {
@@ -1725,7 +1773,7 @@ mod tests {
         compressor.finish(&mut compressed).unwrap();
 
         // Cap of 4 is well below the decompressed length (~45 bytes).
-        let mut decompressor = GzipDecompressor::new(Some(4));
+        let mut decompressor = GzipDecompressor::new(DecompressionLimit::new(4));
         let mut output = Vec::new();
         // First call must error out (cap exceeded).
         let first = decompressor.decompress(&compressed, &mut output);
@@ -1814,7 +1862,7 @@ mod tests {
         compressor.compress(input, &mut compressed).unwrap();
         compressor.finish(&mut compressed).unwrap();
 
-        let mut decompressor = GzipDecompressor::new(None);
+        let mut decompressor = GzipDecompressor::new(DecompressionLimit::default());
         let mut decompressed = Vec::new();
 
         for chunk in compressed.chunks(5) {
@@ -1838,7 +1886,7 @@ mod tests {
         assert!(!compressed.is_empty());
 
         // Decompress and verify roundtrip.
-        let mut dec = GzipDecompressor::new(None);
+        let mut dec = GzipDecompressor::new(DecompressionLimit::default());
         let mut decompressed = Vec::new();
         dec.decompress(&compressed, &mut decompressed).unwrap();
         dec.finish(&mut decompressed).unwrap();
@@ -1853,7 +1901,7 @@ mod tests {
         comp.compress(b"", &mut compressed).unwrap();
         comp.finish(&mut compressed).unwrap();
 
-        let mut dec = GzipDecompressor::new(None);
+        let mut dec = GzipDecompressor::new(DecompressionLimit::default());
         let mut decompressed = Vec::new();
         dec.decompress(&compressed, &mut decompressed).unwrap();
         assert!(decompressed.is_empty());
@@ -1875,7 +1923,7 @@ mod tests {
         comp.compress(input, &mut compressed).unwrap();
         comp.finish(&mut compressed).unwrap();
 
-        let mut dec = GzipDecompressor::new(Some(10));
+        let mut dec = GzipDecompressor::new(DecompressionLimit::new(10));
         let mut decompressed = Vec::new();
         let result = dec.decompress(&compressed, &mut decompressed);
         assert!(result.is_err());
@@ -1890,9 +1938,9 @@ mod tests {
         comp.finish(&mut compressed).unwrap();
 
         let mut dec = GzipDecompressor {
-            max_size: None,
+            limit: DecompressionLimit::new(usize::MAX),
             total: usize::MAX,
-            decoder: flate2::write::GzDecoder::new(LimitedWriter::new(None)),
+            decoder: flate2::write::GzDecoder::new(LimitedWriter::new(Some(usize::MAX))),
             poisoned: false,
         };
         let mut decompressed = Vec::new();
@@ -1950,7 +1998,8 @@ mod tests {
 
         let success_plain = b"hello gzip world";
         let success_compressed = gzip_member_bytes(success_plain);
-        let success = run_gzip_boundary_case(&success_compressed, None);
+        let success =
+            run_gzip_boundary_case(&success_compressed, DecompressionLimit::default());
         assert_eq!(success.output, success_plain);
         assert_eq!(success.error_kind, "ok");
         log_case(
@@ -1966,7 +2015,7 @@ mod tests {
         );
 
         let empty_compressed = gzip_member_bytes(b"");
-        let empty = run_gzip_boundary_case(&empty_compressed, None);
+        let empty = run_gzip_boundary_case(&empty_compressed, DecompressionLimit::default());
         assert!(empty.output.is_empty());
         assert_eq!(empty.error_kind, "ok");
         log_case(
@@ -1983,7 +2032,8 @@ mod tests {
 
         let mut malformed_header = success_compressed.clone();
         malformed_header[2] = 0xff;
-        let malformed_header_outcome = run_gzip_boundary_case(&malformed_header, None);
+        let malformed_header_outcome =
+            run_gzip_boundary_case(&malformed_header, DecompressionLimit::default());
         assert_ne!(malformed_header_outcome.error_kind, "ok");
         log_case(
             "malformed_header_invalid_method",
@@ -2000,7 +2050,8 @@ mod tests {
         let mut malformed_trailer = success_compressed.clone();
         let malformed_trailer_len = malformed_trailer.len();
         malformed_trailer[malformed_trailer_len - 8..].fill(0xff);
-        let malformed_trailer_outcome = run_gzip_boundary_case(&malformed_trailer, None);
+        let malformed_trailer_outcome =
+            run_gzip_boundary_case(&malformed_trailer, DecompressionLimit::default());
         assert_ne!(malformed_trailer_outcome.error_kind, "ok");
         log_case(
             "malformed_trailer_bytes",
@@ -2017,7 +2068,7 @@ mod tests {
         let mut crc_mismatch = success_compressed.clone();
         let crc_index = crc_mismatch.len() - 8;
         crc_mismatch[crc_index] ^= 0x01;
-        let crc_outcome = run_gzip_boundary_case(&crc_mismatch, None);
+        let crc_outcome = run_gzip_boundary_case(&crc_mismatch, DecompressionLimit::default());
         assert_ne!(crc_outcome.error_kind, "ok");
         log_case(
             "crc_mismatch",
@@ -2034,7 +2085,8 @@ mod tests {
         let mut isize_mismatch = success_compressed.clone();
         let isize_index = isize_mismatch.len() - 4;
         isize_mismatch[isize_index] ^= 0x01;
-        let isize_outcome = run_gzip_boundary_case(&isize_mismatch, None);
+        let isize_outcome =
+            run_gzip_boundary_case(&isize_mismatch, DecompressionLimit::default());
         assert_ne!(isize_outcome.error_kind, "ok");
         log_case(
             "isize_mismatch",
@@ -2049,7 +2101,8 @@ mod tests {
         );
 
         let truncated_stream = success_compressed[..success_compressed.len() - 3].to_vec();
-        let truncated_outcome = run_gzip_boundary_case(&truncated_stream, None);
+        let truncated_outcome =
+            run_gzip_boundary_case(&truncated_stream, DecompressionLimit::default());
         assert_ne!(truncated_outcome.error_kind, "ok");
         log_case(
             "truncated_stream",
@@ -2067,7 +2120,8 @@ mod tests {
         let second_member = b"member-two";
         let mut multi_member = gzip_member_bytes(first_member);
         multi_member.extend(gzip_member_bytes(second_member));
-        let multi_member_outcome = run_gzip_boundary_case(&multi_member, None);
+        let multi_member_outcome =
+            run_gzip_boundary_case(&multi_member, DecompressionLimit::default());
         assert_ne!(multi_member_outcome.error_kind, "ok");
         assert!(
             multi_member_outcome.output.is_empty(),
@@ -2091,7 +2145,8 @@ mod tests {
         let high_ratio_plain = vec![b'A'; 16 * 1024];
         let high_ratio_compressed = gzip_member_bytes(&high_ratio_plain);
         let high_ratio_value = high_ratio_plain.len() as f64 / high_ratio_compressed.len() as f64;
-        let high_ratio_outcome = run_gzip_boundary_case(&high_ratio_compressed, Some(1024));
+        let high_ratio_outcome =
+            run_gzip_boundary_case(&high_ratio_compressed, DecompressionLimit::new(1024));
         assert!(
             high_ratio_value > 20.0,
             "expected a bomb-like expansion ratio"
@@ -2119,7 +2174,8 @@ mod tests {
         }
         let low_ratio_compressed = gzip_member_bytes(&low_ratio_plain);
         let low_ratio_value = low_ratio_plain.len() as f64 / low_ratio_compressed.len() as f64;
-        let low_ratio_outcome = run_gzip_boundary_case(&low_ratio_compressed, Some(1024));
+        let low_ratio_outcome =
+            run_gzip_boundary_case(&low_ratio_compressed, DecompressionLimit::new(1024));
         assert!(
             low_ratio_value < 4.0,
             "expected a non-bomb compression ratio"
@@ -2145,8 +2201,9 @@ mod tests {
                 vec![0x00, 0xff, 0x10, 0x80, 0x7f, 0x01, 0xfe, 0x55],
             ),
         ] {
-            let arbitrary_result =
-                std::panic::catch_unwind(|| run_gzip_boundary_case(&corpus, Some(1024)));
+            let arbitrary_result = std::panic::catch_unwind(|| {
+                run_gzip_boundary_case(&corpus, DecompressionLimit::new(1024))
+            });
             assert!(
                 arbitrary_result.is_ok(),
                 "gzip arbitrary-bytes corpus must not panic: {label}"

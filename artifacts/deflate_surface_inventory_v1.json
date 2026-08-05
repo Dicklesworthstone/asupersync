@@ -155,6 +155,8 @@
         "raw DEFLATE RFC 1951"
       ],
       "apis": [
+        "DEFAULT_MAX_DECOMPRESSED_SIZE",
+        "DecompressionLimit",
         "GzipCompressor",
         "GzipDecompressor",
         "DeflateCompressor",
@@ -163,7 +165,7 @@
         "make_compressor_with_output_limit"
       ],
       "streaming": "State persists across repeated chunk calls. Encoder finish finalizes once; decoder calls flush per input chunk and finish finalizes the stream.",
-      "limits": "Compressed output accepts Option<usize>; middleware defaults to 16 MiB. Decompressed output accepts Option<usize>. Limits are enforced before LimitedWriter grows.",
+      "limits": "Compressed output accepts Option<usize>; middleware defaults to 16 MiB. Gzip decompression requires a DecompressionLimit, whose default is 16 MiB; raw-deflate decompression still accepts Option<usize>. Limits are enforced before LimitedWriter grows.",
       "public_dependency_leak": "GzipCompressor::with_level, GzipCompressor::with_level_and_output_limit, DeflateCompressor::with_level, and DeflateCompressor::with_level_and_output_limit accept flate2::Compression.",
       "downstream_consumers": [
         "src/web/compress.rs",
@@ -643,13 +645,13 @@
     },
     {
       "path": "src/http/compress.rs",
-      "sha256": "0a090ed3e1c3f629199101e0b7115a2b39ea9690d96a4b7819c3712b0f946c98",
-      "line_count": 2546
+      "sha256": "bc26cef9cd41fe0ba826240d2581603387e0e98e8efd62ceab2905912d471720",
+      "line_count": 2606
     },
     {
       "path": "src/web/compress.rs",
-      "sha256": "99cae5a969688460911c54076d3bb815fac3de0b714fe8fe7807678eb2c97eb9",
-      "line_count": 897
+      "sha256": "82a2b78fb5c723ff8a3b056628f440c779e6c2c47244c8c64105f33a10ae1322",
+      "line_count": 898
     },
     {
       "path": "src/web/middleware.rs",

@@ -31,8 +31,8 @@ use libfuzzer_sys::fuzz_target;
 /// - Embedded null bytes and control characters
 /// - Very long compression streams testing memory usage
 use asupersync::http::compress::{
-    BrotliDecompressor, ContentEncoding, Decompressor, DeflateDecompressor, GzipDecompressor,
-    IdentityDecompressor, negotiate_encoding,
+    BrotliDecompressor, ContentEncoding, DEFAULT_MAX_DECOMPRESSED_SIZE, DecompressionLimit,
+    Decompressor, DeflateDecompressor, GzipDecompressor, IdentityDecompressor, negotiate_encoding,
 };
 use std::io;
 
@@ -173,7 +173,9 @@ fn test_gzip_decompression(data: &[u8]) {
     ];
 
     for &max_size in &size_limits {
-        let mut decompressor = GzipDecompressor::new(max_size);
+        let gzip_limit =
+            DecompressionLimit::new(max_size.unwrap_or(DEFAULT_MAX_DECOMPRESSED_SIZE));
+        let mut decompressor = GzipDecompressor::new(gzip_limit);
         let mut output = Vec::new();
 
         // Test single-shot decompression
@@ -214,7 +216,7 @@ fn test_gzip_decompression(data: &[u8]) {
                 continue;
             }
 
-            let mut stream_decompressor = GzipDecompressor::new(max_size);
+            let mut stream_decompressor = GzipDecompressor::new(gzip_limit);
             let mut stream_output = Vec::new();
 
             for chunk in data.chunks(chunk_size) {
@@ -592,7 +594,8 @@ fuzz_target!(|data: &[u8]| {
             // Verify that compressed formats properly reject or handle it
 
             let mut gzip_output = Vec::new();
-            let mut gzip_decompressor = GzipDecompressor::new(Some(MAX_DECOMPRESSED_SIZE));
+            let mut gzip_decompressor =
+                GzipDecompressor::new(DecompressionLimit::new(MAX_DECOMPRESSED_SIZE));
             let gzip_result = gzip_decompressor.decompress(data, &mut gzip_output);
 
             let mut deflate_output = Vec::new();
@@ -682,7 +685,7 @@ fuzz_target!(|data: &[u8]| {
     if !data.is_empty() && data.len() < 100 {
         // For small inputs, test rapid create/destroy cycles to check for memory leaks
         for _ in 0..10 {
-            let mut gzip = GzipDecompressor::new(Some(1024));
+            let mut gzip = GzipDecompressor::new(DecompressionLimit::new(1024));
             let mut deflate = DeflateDecompressor::new(Some(1024));
             let mut brotli = BrotliDecompressor::new(Some(1024));
             let mut identity = IdentityDecompressor::new(Some(1024));

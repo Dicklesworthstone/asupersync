@@ -763,6 +763,7 @@ mod tests {
     #[test]
     fn gzip_roundtrip_body_integrity() {
         use crate::http::compress::Decompressor;
+        use crate::http::compress::DecompressionLimit;
         use crate::http::compress::GzipDecompressor;
 
         let policy = CompressionPolicy::default().with_min_body_size(0);
@@ -771,7 +772,7 @@ mod tests {
         let resp = mw.call(req);
 
         // Decompress and verify body integrity.
-        let mut dec = GzipDecompressor::new(None);
+        let mut dec = GzipDecompressor::new(DecompressionLimit::default());
         let mut decompressed = Vec::new();
         dec.decompress(&resp.body, &mut decompressed).unwrap();
         let expected = "Hello, World! ".repeat(100);

@@ -64,8 +64,9 @@ HTTP encoder state persists across input chunks. Gzip and raw-deflate
 compression do not force a synchronization flush after every chunk; `finish`
 finalizes the stream and is idempotent. The HTTP decoders write and flush each
 input chunk, preserve state, finalize on `finish`, enforce caller-selected
-output limits, and reject use after an error. gRPC, ATP, persistence, manifest,
-and OTLP call sites are one-shot.
+output limits, and reject use after an error. Gzip construction requires a
+typed `DecompressionLimit`, whose default is 16 MiB, so it has no unbounded
+mode. gRPC, ATP, persistence, manifest, and OTLP call sites are one-shot.
 
 ## Live owners
 
