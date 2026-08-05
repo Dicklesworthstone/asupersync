@@ -43,11 +43,12 @@ registry without mutating those shared authorities:
    preceding line. The corrected literal-or-alias union is therefore 190
    unique lines.
 7. Thirty-eight declared in-file consumer anchors across six categories link
-   to 40 unique direct source anchors. Nine exact cross-file JSON rows across
-   three categories extend that lineage to 51 unique direct source anchors.
-   Together with eight imported-alias anchors, the artifact freezes 46
-   in-file derived anchors and 245 classified direct-plus-derived anchors.
-   This is a source-linked static count, not runtime coverage.
+   to 40 unique direct source anchors. Sixteen exact cross-file JSON rows
+   across three categories link to 25 direct source anchors and extend the
+   combined lineage to 57 unique direct source anchors. Together with eight
+   imported-alias anchors, the artifact freezes 46 in-file derived anchors
+   and 252 classified direct-plus-derived anchors. This is a source-linked
+   static count, not runtime coverage.
 
 The direct `time` edge remains present under `cli`, and Chrono remains present
 under `cli`, `benchmark-adapters`, dev targets, the conformance member, and
@@ -137,18 +138,19 @@ field association and rendering, and standalone fixture serialization,
 template association, and result retention. Every row names its direct source
 anchor and stops at the declared first semantic boundary.
 
-The cross-file tranche freezes 9 exact cross-file JSON rows: six direct
-Chrono-typed main conformance-member report binaries, the separate
-excluded-conformance PING report binary, and two standalone reporting-tool
-outputs. Each row links the executable's first explicit JSON serialization
-boundary to the report field and constructor that establish its timestamp
-lineage. The boundary does not extend through delegated Markdown or summary
-renderers, later distinct file or standard-output sink anchors, dynamic
-dispatch, or ambiguous provenance. The remaining static gap is narrower but
-real: cross-file consumers beyond these nine JSON boundaries, external
-consumers absent from this snapshot, and later container or arbitrary-byte
-propagation are not enumerated. A1's zero-unclassified-use acceptance remains
-unmet and the bead stays open.
+The cross-file tranche freezes 16 exact cross-file JSON rows: all thirteen
+explicit main conformance-member report binaries whose reports carry either a
+direct Chrono-typed timestamp or a String populated by a direct Chrono UTC
+render, the separate excluded-conformance PING report binary, and two
+standalone reporting-tool outputs. Each row links the executable's first
+explicit JSON serialization boundary to the direct timestamp source that
+establishes its lineage. The boundary does not extend through delegated
+Markdown or summary renderers, later distinct file or standard-output sink
+anchors, dynamic dispatch, or ambiguous provenance. The remaining static gap
+is narrower but real: cross-file consumers beyond these sixteen JSON
+boundaries, external consumers absent from this snapshot, and later container
+or arbitrary-byte propagation are not enumerated. A1's
+zero-unclassified-use acceptance remains unmet and the bead stays open.
 
 Most `src/real_*` files in the census are dormant source rather than declared
 modules. The Chrono-bearing H3 server/websocket suite is feature-wired. In the
@@ -369,7 +371,7 @@ not proof of real Redis or RDB temporal behavior.
 The exact text of all 159 literal source lines, their operation projection,
 path routing, line-specific overrides, direct alias binding/reference
 discovery, eight imported-alias anchors, 38 declared source-linked in-file
-downstream anchors, and nine declared cross-file JSON serialization anchors
+downstream anchors, and sixteen declared cross-file JSON serialization anchors
 are frozen in the artifact. The in-file boundary admits the first semantic
 compare, arithmetic, format, serialization, persistence, retention, return,
 extraction, or embedding consumer in a Chrono-bearing path. The cross-file
@@ -413,7 +415,7 @@ The artifact routes, without mutating shared authority files:
 Every reconciliation row has an explicit owner and
 `ROUTED_NOT_MUTATED_BY_A1` state. There are no unclassified literal Chrono
 paths or undiscovered direct Chrono import bindings in the pinned census, but
-derived-consumer coverage beyond the 38 declared in-file rows and nine
+derived-consumer coverage beyond the 38 declared in-file rows and sixteen
 declared cross-file JSON rows remains partial.
 
 ## Validation and no-claim boundary

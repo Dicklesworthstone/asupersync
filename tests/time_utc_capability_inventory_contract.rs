@@ -24,7 +24,7 @@ const CAPABILITY_ID: &str = "CAP-TIME-UTC-RFC3339";
 const ADR_ID: &str = "DEP-ADR-011";
 const BASELINE_REVISION: &str = "1afde84d564bd8ea876459624116f90028b80835";
 const ARTIFACT_SHA256: &str =
-    "fda440c17077791b40af9c9f753de94f3dae7db8d82ccfd6e46400fa91233fa5";
+    "c3a1c30e86c09e42faa749fdb26b3678d170bf44cae363c11ea71d0f74a24e62";
 const DOC_BEGIN: &str = "<!-- BEGIN TIME UTC CAPABILITY INVENTORY -->";
 const DOC_END: &str = "<!-- END TIME UTC CAPABILITY INVENTORY -->";
 const CHRONO_TOKEN: &str = concat!("chrono", "::");
@@ -46,7 +46,7 @@ const ALIAS_CLASSIFICATION_PROJECTION_SHA256: &str =
 const ADDITIONAL_DERIVED_PROJECTION_SHA256: &str =
     "b20b65d03be1995802d929275531ac96a8a66ec06c1c64f0bf887ee27803f674";
 const CROSS_FILE_CONSUMER_PROJECTION_SHA256: &str =
-    "bb5d25453462b46bbc9bc2432fd0009e46e6016153f870b31d2ea499f1a8a140";
+    "121d0363f660c8c605eae024d4e46ac385283550cb1e5ae1d261c201fd90493c";
 const SEMANTIC_CONSUMER_BOUNDARY: &str = concat!(
     "Include nonliteral consumers through the first semantic compare, arithmetic, format, ",
     "serialize, persist, retain, return, extract, or embed boundary in a Chrono-bearing ",
@@ -546,7 +546,7 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
         derived_gap,
         "representative_unclassified_consumers",
         &[
-            "cross-file consumers beyond the nine declared JSON serialization boundaries",
+            "cross-file consumers beyond the sixteen declared JSON serialization boundaries",
             "external consumers not present in the repository snapshot",
             "second-order container and byte propagation beyond the first semantic boundary",
         ],
@@ -2906,8 +2906,8 @@ fn time_utc_inventory_is_exact_and_source_pinned() {
         "one same-line overlap",
         "derived-consumer remainder",
         "38 exact rows",
-        "9 exact cross-file JSON rows",
-        "245 classified",
+        "16 exact cross-file JSON rows",
+        "252 classified",
         "literal-source",
         "bounded lexical scan of production source finds zero external",
         "This is not compiler-resolved name analysis.",
@@ -3063,7 +3063,7 @@ fn time_utc_inventory_rejects_cutover_and_completeness_drift() {
 
     let mut cross_file_lineage_total = inventory.clone();
     cross_file_lineage_total["per_use_classification"]
-        ["declared_consumer_unique_direct_source_anchor_count"] = Value::from(50_u64);
+        ["declared_consumer_unique_direct_source_anchor_count"] = Value::from(56_u64);
     assert!(validate_inventory(&cross_file_lineage_total).is_err());
 
     let mut alias_route = inventory.clone();
