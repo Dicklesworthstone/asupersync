@@ -608,6 +608,8 @@ struct ProductionGrpcH2Outcome {
     connection_window_increment: Option<u32>,
     http_status: Option<String>,
     grpc_status: Option<String>,
+    grpc_message: Option<String>,
+    grpc_status_details: Option<String>,
     framed_body: Vec<u8>,
 }
 
@@ -640,6 +642,14 @@ fn production_grpc_h2_client(addr: SocketAddr) -> ProductionGrpcH2Outcome {
         ],
         &mut header_block,
     );
+    let mut trailer_block = BytesMut::new();
+    hpack.encode(
+        &[
+            Header::new("x-client-tail", "tail-value"),
+            Header::new("x-client-token-bin", "AQI"),
+        ],
+        &mut trailer_block,
+    );
 
     let mut outbound = BytesMut::new();
     stream.write_all(CLIENT_PREFACE).expect("write preface");
@@ -649,9 +659,12 @@ fn production_grpc_h2_client(addr: SocketAddr) -> ProductionGrpcH2Outcome {
     Frame::Headers(HeadersFrame::new(1, header_block.freeze(), false, true))
         .encode(&mut outbound)
         .expect("encode gRPC headers");
-    Frame::Data(DataFrame::new(1, request_body.freeze(), true))
+    Frame::Data(DataFrame::new(1, request_body.freeze(), false))
         .encode(&mut outbound)
         .expect("encode gRPC data");
+    Frame::Headers(HeadersFrame::new(1, trailer_block.freeze(), true, true))
+        .encode(&mut outbound)
+        .expect("encode gRPC request trailers");
     stream.write_all(&outbound).expect("write gRPC request");
     stream.flush().expect("flush gRPC request");
 
@@ -696,6 +709,10 @@ fn production_grpc_h2_client(addr: SocketAddr) -> ProductionGrpcH2Outcome {
                             outcome.http_status = Some(header.value);
                         } else if header.name == "grpc-status" {
                             outcome.grpc_status = Some(header.value);
+                        } else if header.name == "grpc-message" {
+                            outcome.grpc_message = Some(header.value);
+                        } else if header.name == "grpc-status-details-bin" {
+                            outcome.grpc_status_details = Some(header.value);
                         }
                     }
                     if headers.end_stream && outcome.grpc_status.is_some() {
@@ -717,8 +734,10 @@ fn production_grpc_h2_client(addr: SocketAddr) -> ProductionGrpcH2Outcome {
 
 /// br-asupersync-v4ob51: the public gRPC transport adapter must exercise the
 /// real H2 listener, advertise both configured flow-control windows and the
-/// stream-admission cap, decode/dispatch one framed request, then encode the
+/// stream-admission cap, preserve a request trailer block separately from
+/// initial metadata, decode/dispatch one framed request, then encode the
 /// response and terminal grpc-status trailer on the same TCP stream.
+/// Request-trailer coverage was added for br-asupersync-2rnlb0.
 #[test]
 fn production_grpc_adapter_wires_config_and_unary_codec_over_real_h2() {
     let runtime = RuntimeBuilder::new()
@@ -744,8 +763,17 @@ fn production_grpc_adapter_wires_config_and_unary_codec_over_real_h2() {
                 HostPolicy::allow_list(vec!["localhost".to_owned()]),
                 |transport| async move {
                     assert_eq!(transport.path(), "/test.Echo/Unary");
-                    let (_, request) = transport.into_parts();
+                    assert!(matches!(
+                        transport.trailing_metadata().get("x-client-tail"),
+                        Some(MetadataValue::Ascii(value)) if value == "tail-value"
+                    ));
+                    assert!(matches!(
+                        transport.trailing_metadata().get("x-client-token-bin"),
+                        Some(MetadataValue::Binary(value)) if value.as_ref() == b"\x01\x02"
+                    ));
+                    let (_, request, trailers) = transport.into_parts();
                     assert_eq!(request.get_ref().as_ref(), b"ping");
+                    assert_eq!(trailers.iter().count(), 2);
                     Ok(Response::new(Bytes::from_static(b"pong")))
                 },
             )
@@ -772,6 +800,8 @@ fn production_grpc_adapter_wires_config_and_unary_codec_over_real_h2() {
         );
         assert_eq!(outcome.http_status.as_deref(), Some("200"));
         assert_eq!(outcome.grpc_status.as_deref(), Some("0"));
+        assert_eq!(outcome.grpc_message, None);
+        assert_eq!(outcome.grpc_status_details, None);
 
         let mut framed_body = BytesMut::from(outcome.framed_body.as_slice());
         let decoded = GrpcCodec::with_max_size(64)
@@ -780,6 +810,72 @@ fn production_grpc_adapter_wires_config_and_unary_codec_over_real_h2() {
             .expect("one response frame");
         assert_eq!(decoded.data.as_ref(), b"pong");
         assert!(framed_body.is_empty());
+
+        assert!(manager.begin_drain(Duration::from_secs(5)));
+        let _ = run_handle.await.expect("listener run join");
+    });
+}
+
+/// br-asupersync-2rnlb0: an error returned by the production adapter must keep
+/// its code, percent-encoded UTF-8 message, and binary details in the terminal
+/// H2 trailer block.
+#[test]
+fn production_grpc_adapter_preserves_error_status_over_real_h2() {
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let server = Arc::new(
+            Server::builder()
+                .max_recv_message_size(64)
+                .max_send_message_size(64)
+                .stream_idle_timeout(Some(Duration::from_secs(2)))
+                .build(),
+        );
+        let listener = server
+            .bind_http2(
+                "127.0.0.1:0",
+                HostPolicy::allow_list(vec!["localhost".to_owned()]),
+                |transport| async move {
+                    assert_eq!(transport.path(), "/test.Echo/Unary");
+                    assert_eq!(
+                        transport.trailing_metadata().iter().count(),
+                        2,
+                        "validated request trailers reach the erroring handler"
+                    );
+                    Err::<Response<Bytes>, _>(Status::with_details(
+                        Code::ResourceExhausted,
+                        "quota %\n café",
+                        Bytes::from_static(b"detail"),
+                    ))
+                },
+            )
+            .await
+            .expect("bind production gRPC H2 listener");
+
+        let addr = listener.local_addr().expect("listener local addr");
+        let manager = listener.connection_manager().clone();
+        let run_runtime = handle.clone();
+        let run_handle = handle
+            .clone()
+            .try_spawn(async move { listener.run(&run_runtime).await })
+            .expect("spawn production gRPC H2 listener");
+
+        let outcome = std::thread::spawn(move || production_grpc_h2_client(addr))
+            .join()
+            .expect("raw gRPC H2 client thread");
+
+        assert_eq!(outcome.http_status.as_deref(), Some("200"));
+        assert_eq!(outcome.grpc_status.as_deref(), Some("8"));
+        assert_eq!(
+            outcome.grpc_message.as_deref(),
+            Some("quota %25%0A caf%C3%A9")
+        );
+        assert_eq!(outcome.grpc_status_details.as_deref(), Some("ZGV0YWls"));
+        assert!(outcome.framed_body.is_empty());
 
         assert!(manager.begin_drain(Duration::from_secs(5)));
         let _ = run_handle.await.expect("listener run join");

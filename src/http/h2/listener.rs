@@ -306,6 +306,15 @@ pub(crate) fn request_from_h2_headers(
     body: Vec<u8>,
     peer_addr: Option<SocketAddr>,
 ) -> Result<Request, H2Error> {
+    request_from_h2_parts(headers, body, Vec::new(), peer_addr)
+}
+
+fn request_from_h2_parts(
+    headers: Vec<Header>,
+    body: Vec<u8>,
+    trailers: Vec<Header>,
+    peer_addr: Option<SocketAddr>,
+) -> Result<Request, H2Error> {
     let mut method = None;
     let mut path = None;
     let mut authority = None;
@@ -345,13 +354,24 @@ pub(crate) fn request_from_h2_headers(
     }
     request_headers.extend(regular);
 
+    let mut request_trailers = Vec::with_capacity(trailers.len());
+    for trailer in trailers {
+        if trailer.name.starts_with(':') {
+            return Err(H2Error::protocol(format!(
+                "unexpected request trailer pseudo-header {}",
+                trailer.name
+            )));
+        }
+        request_trailers.push((trailer.name, trailer.value));
+    }
+
     Ok(Request {
         method,
         uri,
         version: Version::Http2,
         headers: request_headers,
         body,
-        trailers: Vec::new(),
+        trailers: request_trailers,
         peer_addr,
     })
 }
@@ -1131,6 +1151,7 @@ fn dispatch_h2_request<F, Fut, R>(
     stream_id: u32,
     headers: Vec<Header>,
     body: Vec<u8>,
+    trailers: Vec<Header>,
     peer_addr: Option<SocketAddr>,
     handler: &Arc<F>,
     resp_tx: &mpsc::Sender<FunnelItem>,
@@ -1147,7 +1168,7 @@ fn dispatch_h2_request<F, Fut, R>(
     Fut: Future<Output = R> + Send + 'static,
     R: IntoHttp2Response + Send + 'static,
 {
-    let request = match request_from_h2_headers(headers, body, peer_addr) {
+    let request = match request_from_h2_parts(headers, body, trailers, peer_addr) {
         Ok(request) => request,
         Err(_) => {
             conn.reset_stream(stream_id, ErrorCode::ProtocolError);
@@ -1583,13 +1604,14 @@ where
                         // assembling a body is request trailers (RFC 9113
                         // §8.1; the connection enforces trailers carry
                         // END_STREAM). The buffered request is now complete;
-                        // dispatch it. Trailer fields are not surfaced through
-                        // the h1 Request type.
+                        // dispatch it with the trailer block kept separate on
+                        // the shared Request type for protocol adapters.
                         dispatch_h2_request(
                             &mut conn,
                             stream_id,
                             req_headers,
                             req_body,
+                            headers,
                             peer_addr,
                             &handler,
                             &resp_tx,
@@ -1608,6 +1630,7 @@ where
                             &mut conn,
                             stream_id,
                             headers,
+                            Vec::new(),
                             Vec::new(),
                             peer_addr,
                             &handler,
@@ -1661,6 +1684,7 @@ where
                                     stream_id,
                                     headers,
                                     body,
+                                    Vec::new(),
                                     peer_addr,
                                     &handler,
                                     &resp_tx,
@@ -2802,6 +2826,7 @@ mod tests {
                 stream_id,
                 headers,
                 Vec::new(),
+                Vec::new(),
                 None,
                 &handler,
                 &resp_tx,
@@ -2899,6 +2924,7 @@ mod tests {
                 1,
                 request_block(&[]),
                 Vec::new(),
+                Vec::new(),
                 None,
                 &handler,
                 &resp_tx,
@@ -2971,6 +2997,7 @@ mod tests {
                 1,
                 request_block(&[]),
                 Vec::new(),
+                Vec::new(),
                 None,
                 &handler,
                 &resp_tx,
@@ -3026,6 +3053,7 @@ mod tests {
                 &mut conn,
                 1,
                 request_block(&[]),
+                Vec::new(),
                 Vec::new(),
                 None,
                 &handler,
@@ -3107,6 +3135,45 @@ mod tests {
                 ("x-trace".to_owned(), "abc".to_owned()),
             ]
         );
+    }
+
+    #[test]
+    fn request_mapping_preserves_trailer_block_separately() {
+        let request = request_from_h2_parts(
+            request_block(&[("x-trace", "abc")]),
+            b"body".to_vec(),
+            vec![
+                Header::new("x-client-tail", "tail-value"),
+                Header::new("x-client-token-bin", "AQI"),
+            ],
+            None,
+        )
+        .expect("valid request and trailer blocks");
+
+        assert_eq!(
+            request.trailers,
+            vec![
+                ("x-client-tail".to_owned(), "tail-value".to_owned()),
+                ("x-client-token-bin".to_owned(), "AQI".to_owned()),
+            ]
+        );
+        assert!(
+            request
+                .headers
+                .iter()
+                .all(|(name, _)| !name.eq_ignore_ascii_case("x-client-tail"))
+        );
+    }
+
+    #[test]
+    fn request_mapping_rejects_trailer_pseudo_header() {
+        let result = request_from_h2_parts(
+            request_block(&[]),
+            Vec::new(),
+            vec![Header::new(":status", "200")],
+            None,
+        );
+        assert!(result.is_err());
     }
 
     #[test]

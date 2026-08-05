@@ -509,6 +509,86 @@ impl From<std::io::Error> for GrpcError {
     }
 }
 
+/// Percent-encode a `grpc-message` value for the HTTP/2 trailer wire format.
+///
+/// The gRPC wire grammar permits visible ASCII other than `%`; every other
+/// UTF-8 byte is emitted as an uppercase percent escape. Internal spaces stay
+/// literal, while leading and trailing spaces are escaped so intermediaries
+/// cannot trim message content.
+pub(crate) fn percent_encode_grpc_message(message: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let bytes = message.as_bytes();
+    let mut encoded = String::with_capacity(bytes.len());
+
+    for (index, &byte) in bytes.iter().enumerate() {
+        let internal_space = byte == b' ' && index > 0 && index + 1 < bytes.len();
+        let may_remain_literal = internal_space || matches!(byte, 0x21..=0x24 | 0x26..=0x7E);
+        if may_remain_literal {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0F)]));
+        }
+    }
+
+    encoded
+}
+
+fn decode_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Decode one percent-encoded `grpc-message` trailer value.
+pub(crate) fn percent_decode_grpc_message(value: &str) -> Result<String, GrpcError> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'%' {
+            let (Some(&high), Some(&low)) = (bytes.get(index + 1), bytes.get(index + 2)) else {
+                return Err(GrpcError::protocol(
+                    "incomplete percent escape in grpc-message trailer value",
+                ));
+            };
+            let Some(high) = decode_hex_nibble(high) else {
+                return Err(GrpcError::protocol(
+                    "invalid percent escape in grpc-message trailer value",
+                ));
+            };
+            let Some(low) = decode_hex_nibble(low) else {
+                return Err(GrpcError::protocol(
+                    "invalid percent escape in grpc-message trailer value",
+                ));
+            };
+            decoded.push((high << 4) | low);
+            index += 3;
+            continue;
+        }
+
+        if matches!(byte, 0x20..=0x24 | 0x26..=0x7E) {
+            decoded.push(byte);
+            index += 1;
+            continue;
+        }
+
+        return Err(GrpcError::protocol(format!(
+            "invalid non-printable grpc-message in trailer block (length {})",
+            value.len()
+        )));
+    }
+
+    String::from_utf8(decoded)
+        .map_err(|_| GrpcError::protocol("grpc-message percent escapes decode to invalid UTF-8"))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(

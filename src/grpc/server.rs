@@ -454,11 +454,10 @@ pub struct ServerConfig {
     /// by `grpc-go`'s `MaxHeaderListSize` and the per-RFC-9113 §6.5.2
     /// `SETTINGS_MAX_HEADER_LIST_SIZE` advisory cap.
     ///
-    /// [`Server::dispatch_unary`] applies this to the already-decoded request
-    /// metadata block and returns `Status::resource_exhausted` when it is too
-    /// large. Adapters may call [`enforce_metadata_size_limit`] for other
-    /// decoded blocks, but the built-in path does not currently demonstrate a
-    /// trailer-frame callsite or one combined header-plus-trailer aggregate.
+    /// [`Server::dispatch_unary`] applies this to already-decoded request
+    /// metadata and returns `Status::resource_exhausted` when it is too large.
+    /// The native HTTP/2 adapter applies the same limit to the combined decoded
+    /// initial-header and request-trailer metadata retained for a call.
     ///
     /// This is a post-decode dispatch/retention limit. It does not bound HPACK
     /// decoder allocation; an H2 transport must enforce its wire/header-list
@@ -718,6 +717,101 @@ pub fn enforce_metadata_size_limit(
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn grpc_request_trailer_key_is_reserved(key: &str) -> bool {
+    // gRPC owns every grpc-* field. The remainder mirrors the RFC 9110
+    // trailer restrictions enforced by the HTTP/1 codec so routing, framing,
+    // authentication, and payload semantics cannot be introduced late.
+    metadata_key_uses_grpc_prefix(key)
+        || [
+            "age",
+            "authorization",
+            "cache-control",
+            "connection",
+            "content-encoding",
+            "content-length",
+            "content-range",
+            "content-type",
+            "cookie",
+            "date",
+            "expect",
+            "expires",
+            "host",
+            "keep-alive",
+            "max-forwards",
+            "pragma",
+            "proxy-authenticate",
+            "proxy-authorization",
+            "proxy-connection",
+            "range",
+            "retry-after",
+            "set-cookie",
+            "te",
+            "trailer",
+            "transfer-encoding",
+            "upgrade",
+            "vary",
+            "warning",
+            "www-authenticate",
+        ]
+        .iter()
+        .any(|reserved| key.eq_ignore_ascii_case(reserved))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn insert_http2_metadata_entry(
+    metadata: &mut Metadata,
+    key: &str,
+    value: &str,
+) -> Result<(), Status> {
+    let binary = key
+        .get(key.len().saturating_sub(4)..)
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case("-bin"));
+    let inserted = if binary {
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(value)
+            .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(value))
+            .map_err(|_| {
+                Status::invalid_argument(format!(
+                    "binary metadata value for '{key}' is not valid base64"
+                ))
+            })?;
+        metadata.insert_bin(key, Bytes::from(decoded))
+    } else {
+        metadata.insert(key, value)
+    };
+    if inserted {
+        Ok(())
+    } else {
+        Err(Status::invalid_argument(format!(
+            "invalid gRPC metadata entry '{key}'"
+        )))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn enforce_http2_metadata_blocks(
+    headers: &Metadata,
+    trailers: &Metadata,
+    limit: usize,
+) -> Result<(), Status> {
+    // br-asupersync-2rnlb0: both retained blocks share one request budget.
+    validate_inbound_metadata(headers)?;
+    validate_inbound_metadata(trailers)?;
+    if limit == 0 {
+        return Ok(());
+    }
+
+    let actual = metadata_byte_size(headers).saturating_add(metadata_byte_size(trailers));
+    if actual > limit {
+        return Err(Status::resource_exhausted(format!(
+            "combined request headers and trailers exceed max_metadata_size: \
+             {actual} bytes > {limit} bytes"
+        )));
+    }
+    Ok(())
+}
+
 impl RequestBodyMeter {
     /// Construct a meter from a [`ServerConfig`].
     #[must_use]
@@ -834,12 +928,12 @@ impl ServerBuilder {
         self
     }
 
-    /// Set the maximum aggregate size of the decoded request metadata block
-    /// checked by [`Server::dispatch_unary`]. Defaults to 8 KiB
-    /// ([`DEFAULT_MAX_METADATA_SIZE`]). Adapters can call
-    /// [`enforce_metadata_size_limit`] for additional decoded blocks; this
-    /// setter does not create a combined header-plus-trailer wire limit. A
-    /// value of `0` disables the dispatch check. (br-asupersync-i2bae8.)
+    /// Set the maximum aggregate size of decoded request metadata checked by
+    /// [`Server::dispatch_unary`]. Defaults to 8 KiB
+    /// ([`DEFAULT_MAX_METADATA_SIZE`]). The native HTTP/2 adapter applies this
+    /// cap to initial and trailing metadata combined. This remains a
+    /// post-decode retention limit, not an HPACK allocation bound. A value of
+    /// `0` disables the check. (br-asupersync-i2bae8.)
     #[must_use]
     pub fn max_metadata_size(mut self, size: usize) -> Self {
         self.config.max_metadata_size = size;
@@ -1077,12 +1171,15 @@ pub struct Server {
 ///
 /// The transport adapter has already validated the HTTP method/media type,
 /// decoded exactly one gRPC message through [`Server::framed_codec`], applied
-/// inbound metadata validation, and run the server interceptor/deadline path.
+/// inbound header and trailer metadata validation, and run the server
+/// interceptor/deadline path. Request trailers stay separate from initial
+/// metadata so callers can preserve their wire-level ordering and semantics.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 pub struct GrpcTransportRequest {
     path: String,
     request: Request<Bytes>,
+    trailing_metadata: Metadata,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1099,10 +1196,16 @@ impl GrpcTransportRequest {
         &self.request
     }
 
-    /// Consume this envelope into `(path, request)`.
+    /// Borrow the validated request trailer metadata.
     #[must_use]
-    pub fn into_parts(self) -> (String, Request<Bytes>) {
-        (self.path, self.request)
+    pub fn trailing_metadata(&self) -> &Metadata {
+        &self.trailing_metadata
+    }
+
+    /// Consume this envelope into `(path, request, trailing_metadata)`.
+    #[must_use]
+    pub fn into_parts(self) -> (String, Request<Bytes>, Metadata) {
+        (self.path, self.request, self.trailing_metadata)
     }
 }
 
@@ -1251,13 +1354,17 @@ impl Server {
         F: Fn(GrpcTransportRequest) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Response<Bytes>, Status>> + Send + 'static,
     {
-        let (path, request) = match self.decode_http2_unary_request(request) {
+        let (path, request, trailing_metadata) = match self.decode_http2_unary_request(request) {
             Ok(decoded) => decoded,
             Err(status) => return Self::http2_status_response(&status),
         };
         let result = self
             .dispatch_unary(request, move |request| {
-                handler(GrpcTransportRequest { path, request })
+                handler(GrpcTransportRequest {
+                    path,
+                    request,
+                    trailing_metadata,
+                })
             })
             .await;
         match result {
@@ -1273,7 +1380,7 @@ impl Server {
     fn decode_http2_unary_request(
         &self,
         request: HttpRequest,
-    ) -> Result<(String, Request<Bytes>), Status> {
+    ) -> Result<(String, Request<Bytes>, Metadata), Status> {
         if request.method != crate::http::h1::types::Method::Post {
             return Err(Status::invalid_argument(
                 "gRPC over HTTP/2 requires the POST method",
@@ -1291,25 +1398,31 @@ impl Server {
         let mut metadata = Metadata::new();
         metadata.reserve(request.headers.len());
         for (key, value) in &request.headers {
-            let inserted = if key.ends_with("-bin") {
-                let decoded = base64::engine::general_purpose::STANDARD
-                    .decode(value)
-                    .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(value))
-                    .map_err(|_| {
-                        Status::invalid_argument(format!(
-                            "binary metadata value for '{key}' is not valid base64"
-                        ))
-                    })?;
-                metadata.insert_bin(key, Bytes::from(decoded))
-            } else {
-                metadata.insert(key, value)
-            };
-            if !inserted {
+            insert_http2_metadata_entry(&mut metadata, key, value)?;
+        }
+
+        let mut trailing_metadata = Metadata::new();
+        trailing_metadata.reserve(request.trailers.len());
+        let mut trailer_keys = std::collections::BTreeSet::new();
+        for (key, value) in &request.trailers {
+            let normalized_key = key.to_ascii_lowercase();
+            if grpc_request_trailer_key_is_reserved(key) {
                 return Err(Status::invalid_argument(format!(
-                    "invalid gRPC metadata entry '{key}'"
+                    "gRPC request trailer uses reserved transport key '{key}'"
                 )));
             }
+            if !trailer_keys.insert(normalized_key) || metadata.get(key).is_some() {
+                return Err(Status::invalid_argument(format!(
+                    "duplicate gRPC request trailer metadata key '{key}'"
+                )));
+            }
+            insert_http2_metadata_entry(&mut trailing_metadata, key, value)?;
         }
+        enforce_http2_metadata_blocks(
+            &metadata,
+            &trailing_metadata,
+            self.config.max_metadata_size,
+        )?;
 
         let grpc_encoding = request.header_value("grpc-encoding");
         let encoding = match grpc_encoding {
@@ -1357,7 +1470,11 @@ impl Server {
             }
         }
 
-        Ok((request.uri, Request::with_metadata(message, metadata)))
+        Ok((
+            request.uri,
+            Request::with_metadata(message, metadata),
+            trailing_metadata,
+        ))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1416,15 +1533,21 @@ impl Server {
     fn http2_status_response(status: &Status) -> HttpResponse {
         let mut response = HttpResponse::new(200, "OK", Vec::new())
             .with_header("content-type", "application/grpc");
-        response
-            .trailers
-            .push(("grpc-status".to_owned(), status.code().as_i32().to_string()));
+        if !status.message().is_empty() {
+            response.trailers.push((
+                "grpc-message".to_owned(),
+                super::status::percent_encode_grpc_message(status.message()),
+            ));
+        }
         if let Some(details) = status.details() {
             response.trailers.push((
                 "grpc-status-details-bin".to_owned(),
                 base64::engine::general_purpose::STANDARD_NO_PAD.encode(details),
             ));
         }
+        response
+            .trailers
+            .push(("grpc-status".to_owned(), status.code().as_i32().to_string()));
         response
     }
 
@@ -2572,6 +2695,14 @@ mod tests {
             .map(|(_, value)| value.as_str())
     }
 
+    fn grpc_message_trailer(response: &HttpResponse) -> Option<&str> {
+        response
+            .trailers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("grpc-message"))
+            .map(|(_, value)| value.as_str())
+    }
+
     #[test]
     fn http2_unary_adapter_decodes_dispatches_and_encodes_through_server_policy() {
         let server = Arc::new(
@@ -2580,13 +2711,28 @@ mod tests {
                 .max_send_message_size(64)
                 .build(),
         );
-        let request = unary_http2_request(&server, "/test.Echo/Unary", Bytes::from_static(b"ping"));
+        let mut request =
+            unary_http2_request(&server, "/test.Echo/Unary", Bytes::from_static(b"ping"));
+        request.trailers = vec![
+            ("x-client-tail".to_owned(), "tail-value".to_owned()),
+            ("x-client-token-bin".to_owned(), "AQI".to_owned()),
+        ];
 
         let response = futures_lite::future::block_on(server.dispatch_http2_unary(
             request,
             Arc::new(|transport: GrpcTransportRequest| async move {
                 assert_eq!(transport.path(), "/test.Echo/Unary");
                 assert_eq!(transport.request().get_ref().as_ref(), b"ping");
+                assert!(matches!(
+                    transport.trailing_metadata().get("x-client-tail"),
+                    Some(super::super::streaming::MetadataValue::Ascii(value))
+                        if value == "tail-value"
+                ));
+                assert!(matches!(
+                    transport.trailing_metadata().get("x-client-token-bin"),
+                    Some(super::super::streaming::MetadataValue::Binary(value))
+                        if value.as_ref() == b"\x01\x02"
+                ));
                 Ok(Response::new(Bytes::from_static(b"pong")))
             }),
         ));
@@ -2601,6 +2747,79 @@ mod tests {
             .expect("one response message");
         assert_eq!(decoded.as_ref(), b"pong");
         assert!(body.is_empty());
+    }
+
+    #[test]
+    fn http2_status_response_preserves_percent_encoded_message_and_details() {
+        let status = Status::with_details(
+            super::super::status::Code::ResourceExhausted,
+            "quota %\n café",
+            Bytes::from_static(b"detail"),
+        );
+
+        let response = Server::http2_status_response(&status);
+
+        assert_eq!(grpc_message_trailer(&response), Some("quota %25%0A caf%C3%A9"));
+        assert_eq!(
+            response
+                .trailers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("grpc-status-details-bin"))
+                .map(|(_, value)| value.as_str()),
+            Some("ZGV0YWls")
+        );
+        assert_eq!(grpc_status_trailer(&response), Some("8"));
+        assert_eq!(
+            response.trailers.last().map(|(key, _)| key.as_str()),
+            Some("grpc-status")
+        );
+    }
+
+    #[test]
+    fn http2_request_trailers_fail_closed() {
+        let server = Server::builder().max_metadata_size(100).build();
+
+        let mut duplicate =
+            unary_http2_request(&server, "/test.Echo/Unary", Bytes::from_static(b"ping"));
+        duplicate.trailers = vec![
+            ("x-tail".to_owned(), "one".to_owned()),
+            ("x-tail".to_owned(), "two".to_owned()),
+        ];
+        let status = server
+            .decode_http2_unary_request(duplicate)
+            .expect_err("duplicate trailer key must fail closed");
+        assert_eq!(status.code(), super::super::status::Code::InvalidArgument);
+        assert!(status.message().contains("duplicate"));
+
+        let mut reserved =
+            unary_http2_request(&server, "/test.Echo/Unary", Bytes::from_static(b"ping"));
+        reserved.trailers = vec![("grpc-status".to_owned(), "0".to_owned())];
+        let status = server
+            .decode_http2_unary_request(reserved)
+            .expect_err("reserved trailer key must fail closed");
+        assert_eq!(status.code(), super::super::status::Code::InvalidArgument);
+        assert!(status.message().contains("reserved transport key"));
+
+        let mut malformed =
+            unary_http2_request(&server, "/test.Echo/Unary", Bytes::from_static(b"ping"));
+        malformed.trailers = vec![("x-token-bin".to_owned(), "%".to_owned())];
+        let status = server
+            .decode_http2_unary_request(malformed)
+            .expect_err("malformed binary trailer must fail closed");
+        assert_eq!(status.code(), super::super::status::Code::InvalidArgument);
+        assert!(status.message().contains("not valid base64"));
+
+        let mut oversized =
+            unary_http2_request(&server, "/test.Echo/Unary", Bytes::from_static(b"ping"));
+        oversized.trailers = vec![("x-tail".to_owned(), "x".repeat(100))];
+        let status = server
+            .decode_http2_unary_request(oversized)
+            .expect_err("combined metadata beyond the cap must fail closed");
+        assert_eq!(
+            status.code(),
+            super::super::status::Code::ResourceExhausted
+        );
+        assert!(status.message().contains("combined request headers and trailers"));
     }
 
     #[test]
