@@ -1039,8 +1039,15 @@ async fn pump_writes(
     conn: &mut Connection,
     framed: &mut Framed<TcpStream, FrameCodec>,
 ) -> io::Result<()> {
-    while let Some(frame) = conn.next_frame() {
-        framed.send(frame).map_err(io::Error::other)?;
+    loop {
+        // Respect the codec's soft buffer boundary before removing another
+        // frame from Connection. This keeps a blocked transport from turning
+        // the connection's pending frame queue into an unbounded BytesMut.
+        std::future::poll_fn(|cx| framed.poll_ready(cx)).await?;
+        let Some(frame) = conn.next_frame() else {
+            break;
+        };
+        framed.start_send(frame).map_err(io::Error::other)?;
     }
     std::future::poll_fn(|cx| framed.poll_flush(cx)).await
 }

@@ -9,6 +9,8 @@ use std::task::{Context, Poll};
 
 /// Default write buffer capacity.
 const DEFAULT_CAPACITY: usize = 8192;
+/// Default soft boundary for readiness-driven write backpressure.
+const DEFAULT_BACKPRESSURE_BOUNDARY: usize = DEFAULT_CAPACITY;
 /// Cooperative cap on repeated write passes inside one `poll_flush`.
 ///
 /// Without this bound, a writer that always accepts tiny chunks can monopolize
@@ -18,31 +20,41 @@ const MAX_WRITE_PASSES_PER_POLL: usize = 32;
 /// Async framed writer that applies an `Encoder` to an `AsyncWrite` sink.
 ///
 /// Items are encoded into an internal buffer, then flushed to the underlying
-/// writer. Call `poll_flush` to ensure all buffered data reaches the writer.
+/// writer. Repeated producers should call [`FramedWrite::poll_ready`] before
+/// each [`FramedWrite::start_send`]. Readiness flushes once the configured soft
+/// boundary is reached, so at most one encoded frame can take the buffer over
+/// that boundary. Call `poll_flush` to ensure all buffered data reaches the
+/// writer.
 ///
 /// # Cancel Safety
 ///
-/// `send` (encode) is synchronous and always completes. `poll_flush` is
-/// cancel-safe: partial writes are tracked and resumed on the next call.
+/// `start_send` completes synchronously with either success or an encoder
+/// error. `poll_ready` and `poll_flush` are cancel-safe: partial writes are
+/// tracked and resumed on the next call.
 pub struct FramedWrite<W, E> {
     inner: W,
     encoder: E,
     buffer: BytesMut,
+    backpressure_boundary: usize,
 }
 
 impl<W, E> FramedWrite<W, E> {
     /// Creates a new `FramedWrite` with default buffer capacity.
     #[inline]
     pub fn new(inner: W, encoder: E) -> Self {
-        Self::with_capacity(inner, encoder, DEFAULT_CAPACITY)
+        Self::with_capacity(inner, encoder, DEFAULT_BACKPRESSURE_BOUNDARY)
     }
 
     /// Creates a new `FramedWrite` with the specified buffer capacity.
+    ///
+    /// The initial backpressure boundary matches `capacity` and can be changed
+    /// independently with [`FramedWrite::set_backpressure_boundary`].
     pub fn with_capacity(inner: W, encoder: E, capacity: usize) -> Self {
         Self {
             inner,
             encoder,
             buffer: BytesMut::with_capacity(capacity),
+            backpressure_boundary: capacity,
         }
     }
 
@@ -77,6 +89,34 @@ impl<W, E> FramedWrite<W, E> {
         &self.buffer
     }
 
+    /// Sets the soft write-buffer boundary used by [`FramedWrite::poll_ready`].
+    ///
+    /// The boundary is checked before encoding the next frame. One frame may
+    /// therefore take the buffer over the configured value; readiness will not
+    /// be reported again until that buffered frame has drained. A boundary of
+    /// zero flushes before every frame.
+    #[inline]
+    pub fn set_backpressure_boundary(&mut self, boundary: usize) {
+        self.backpressure_boundary = boundary;
+    }
+
+    /// Configures the soft write-buffer boundary used by
+    /// [`FramedWrite::poll_ready`].
+    #[inline]
+    #[must_use]
+    pub fn with_backpressure_boundary(mut self, boundary: usize) -> Self {
+        self.set_backpressure_boundary(boundary);
+        self
+    }
+
+    /// Returns the soft write-buffer boundary used by
+    /// [`FramedWrite::poll_ready`].
+    #[inline]
+    #[must_use]
+    pub fn backpressure_boundary(&self) -> usize {
+        self.backpressure_boundary
+    }
+
     /// Consumes `self` and returns the inner writer.
     #[inline]
     pub fn into_inner(self) -> W {
@@ -90,11 +130,23 @@ impl<W, E> FramedWrite<W, E> {
 }
 
 impl<W, E> FramedWrite<W, E> {
-    /// Encode an item into the write buffer.
+    /// Encodes an item into the write buffer without polling readiness.
     ///
-    /// The encoded data is buffered internally. Call `poll_flush` to write
-    /// it to the underlying writer.
+    /// This convenience method is appropriate when the caller immediately
+    /// flushes one frame. Repeated producers should use the bounded
+    /// [`FramedWrite::poll_ready`] / [`FramedWrite::start_send`] protocol.
     pub fn send<I>(&mut self, item: I) -> Result<(), <E as Encoder<I>>::Error>
+    where
+        E: Encoder<I>,
+    {
+        self.start_send(item)
+    }
+
+    /// Encodes one item after [`FramedWrite::poll_ready`] reports readiness.
+    ///
+    /// The boundary is soft: this one encoded frame may exceed it. The caller
+    /// must poll readiness again before encoding another frame.
+    pub fn start_send<I>(&mut self, item: I) -> Result<(), <E as Encoder<I>>::Error>
     where
         E: Encoder<I>,
     {
@@ -106,6 +158,20 @@ impl<W, E> FramedWrite<W, E>
 where
     W: AsyncWrite + Unpin,
 {
+    /// Polls whether another frame may be encoded without bypassing the
+    /// configured backpressure boundary.
+    ///
+    /// Once the current buffer reaches the boundary this flushes it before
+    /// returning readiness. A pending writer therefore prevents further
+    /// readiness-driven buffer growth.
+    pub fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.buffer.len() < self.backpressure_boundary {
+            Poll::Ready(Ok(()))
+        } else {
+            self.poll_flush(cx)
+        }
+    }
+
     /// Flush all buffered data to the underlying writer.
     ///
     /// Returns `Poll::Ready(Ok(()))` when the buffer is empty and the
@@ -153,6 +219,7 @@ impl<W: std::fmt::Debug, E: std::fmt::Debug> std::fmt::Debug for FramedWrite<W, 
             .field("inner", &self.inner)
             .field("encoder", &self.encoder)
             .field("buffer_len", &self.buffer.len())
+            .field("backpressure_boundary", &self.backpressure_boundary)
             .finish()
     }
 }
@@ -299,10 +366,20 @@ mod tests {
         let mut framed = FramedWrite::new(output, LinesCodec::new());
 
         assert!(framed.write_buffer().is_empty());
+        assert_eq!(
+            framed.backpressure_boundary(),
+            DEFAULT_BACKPRESSURE_BOUNDARY
+        );
         let _encoder = framed.encoder();
         let _encoder_mut = framed.encoder_mut();
         let _writer = framed.get_ref();
         let _writer_mut = framed.get_mut();
+    }
+
+    #[test]
+    fn framed_write_capacity_sets_initial_backpressure_boundary() {
+        let framed = FramedWrite::with_capacity(Vec::<u8>::new(), LinesCodec::new(), 256);
+        assert_eq!(framed.backpressure_boundary(), 256);
     }
 
     #[test]
@@ -311,6 +388,99 @@ mod tests {
         let framed = FramedWrite::new(output, LinesCodec::new());
 
         let (_writer, _encoder, _buf) = framed.into_parts();
+    }
+
+    #[derive(Debug)]
+    struct GatedWriter {
+        writable: Arc<AtomicBool>,
+        inner: Vec<u8>,
+    }
+
+    impl GatedWriter {
+        fn new(writable: Arc<AtomicBool>) -> Self {
+            Self {
+                writable,
+                inner: Vec::new(),
+            }
+        }
+    }
+
+    impl AsyncWrite for GatedWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            if !this.writable.load(Ordering::SeqCst) {
+                return Poll::Pending;
+            }
+            this.inner.extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn framed_write_readiness_bounds_pending_buffer_and_recovers() {
+        let writable = Arc::new(AtomicBool::new(false));
+        let mut framed = FramedWrite::new(
+            GatedWriter::new(Arc::clone(&writable)),
+            LinesCodec::new(),
+        )
+        .with_backpressure_boundary(8);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(framed.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        framed.start_send("abc".to_string()).unwrap();
+        assert!(matches!(framed.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        framed.start_send("def".to_string()).unwrap();
+        assert_eq!(framed.write_buffer().len(), 8);
+
+        assert!(matches!(framed.poll_ready(&mut cx), Poll::Pending));
+        assert_eq!(
+            framed.write_buffer().len(),
+            8,
+            "pending readiness must not grow the buffered prefix"
+        );
+        assert!(matches!(framed.poll_ready(&mut cx), Poll::Pending));
+        assert_eq!(framed.write_buffer().len(), 8);
+
+        writable.store(true, Ordering::SeqCst);
+        assert!(matches!(framed.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert!(framed.write_buffer().is_empty());
+        assert_eq!(&framed.get_ref().inner, b"abc\ndef\n");
+    }
+
+    #[test]
+    fn framed_write_boundary_is_soft_for_one_oversized_frame() {
+        let writable = Arc::new(AtomicBool::new(false));
+        let mut framed = FramedWrite::new(
+            GatedWriter::new(Arc::clone(&writable)),
+            LinesCodec::new(),
+        )
+        .with_backpressure_boundary(4);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(framed.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        framed.start_send("oversized".to_string()).unwrap();
+        let oversized_len = framed.write_buffer().len();
+        assert!(oversized_len > framed.backpressure_boundary());
+        assert!(matches!(framed.poll_ready(&mut cx), Poll::Pending));
+        assert_eq!(framed.write_buffer().len(), oversized_len);
+
+        writable.store(true, Ordering::SeqCst);
+        assert!(matches!(framed.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert!(framed.write_buffer().is_empty());
     }
 
     /// Writer that accepts only a few bytes at a time.
