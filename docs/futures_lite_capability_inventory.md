@@ -133,6 +133,28 @@ Neither case has been compiled or run. They do not claim a stable compiler
 diagnostic, runtime cancellation behavior, ATP progress behavior, ecosystem
 trait parity, or permission to remove the incumbent dependency.
 
+The same downstream fixture now also maps its custom stream into
+`Result<u32, &'static str>` items and names
+`StreamExt::try_collect::<u32, &'static str, Vec<u32>>`. This is compile-shape
+coverage only; it has not exercised error short-circuiting or completion.
+
+#### A2 acceptance status
+
+| Requirement | Source status | Missing terminal evidence |
+|---|---|---|
+| Owned API | Authored, not executed | Focused compile |
+| Downstream ergonomics | Authored, not executed | Fixture execution |
+| Compile-fail rustdoc | Authored, not executed | Rustdoc execution |
+| Pin/drop/bounds | Authored, not executed | Behavior execution |
+| Error adapter | Authored, not executed | Behavior execution |
+| ATP runtime E2E | Runtime scenario missing | ATP runtime E2E |
+| User trial | Missing | SAME-or-BETTER receipt |
+| Cutover | Blocked | Every receipt above |
+
+This matrix is fail-closed. It is not a terminal receipt, does not authorize
+closing A2, and does not convert source-authored assertions into executed
+evidence.
+
 The reviewed ATP source-pin row is refreshed in the first increment. At that
 base revision, seven unrelated pins had already drifted. The follow-on
 increments refresh the reviewed downstream-fixture row, leaving six unrelated

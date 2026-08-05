@@ -81,6 +81,60 @@
     "behavior_change": false,
     "cutover_authorized": false
   },
+  "a2_acceptance_status": {
+    "owner_bead": "asupersync-d24mms.6.2",
+    "overall_status": "PARTIAL_SOURCE_ONLY",
+    "requirements": [
+      {
+        "requirement_id": "FUT-A2-OWNED-API",
+        "source_status": "AUTHORED_NOT_EXECUTED",
+        "terminal_status": "MISSING_FOCUSED_COMPILE"
+      },
+      {
+        "requirement_id": "FUT-A2-DOWNSTREAM-ERGONOMICS",
+        "source_status": "AUTHORED_NOT_EXECUTED",
+        "terminal_status": "MISSING_FIXTURE_EXECUTION"
+      },
+      {
+        "requirement_id": "FUT-A2-COMPILE-FAIL-RUSTDOC",
+        "source_status": "AUTHORED_NOT_EXECUTED",
+        "terminal_status": "MISSING_RUSTDOC_EXECUTION"
+      },
+      {
+        "requirement_id": "FUT-A2-PIN-DROP-BOUNDS",
+        "source_status": "AUTHORED_NOT_EXECUTED",
+        "terminal_status": "MISSING_BEHAVIOR_EXECUTION"
+      },
+      {
+        "requirement_id": "FUT-A2-ERROR-ADAPTER",
+        "source_status": "AUTHORED_NOT_EXECUTED",
+        "terminal_status": "MISSING_BEHAVIOR_EXECUTION"
+      },
+      {
+        "requirement_id": "FUT-A2-ATP-RUNTIME-E2E",
+        "source_status": "MISSING_RUNTIME_SCENARIO",
+        "terminal_status": "MISSING"
+      },
+      {
+        "requirement_id": "FUT-A2-USER-TRIAL",
+        "source_status": "MISSING",
+        "terminal_status": "MISSING_SAME_OR_BETTER_RECEIPT"
+      },
+      {
+        "requirement_id": "FUT-A2-CUTOVER",
+        "source_status": "BLOCKED",
+        "terminal_status": "BLOCKED_PENDING_ALL_RECEIPTS"
+      }
+    ],
+    "required_terminal_receipts": [
+      "focused compile",
+      "compile-fail rustdoc",
+      "downstream fixture",
+      "ATP runtime E2E",
+      "SAME-or-BETTER user trial"
+    ],
+    "closure_allowed": false
+  },
   "dependency_resolution": {
     "root_manifest": {
       "path": "Cargo.toml",
@@ -738,7 +792,12 @@
         ],
         "implementation_state": "SOURCE_AUTHORED_NOT_EXECUTED"
       },
-      "gap": "The fixture still has no futures-lite edge and now source-authors owned ATP plus pinned local Stream contracts, but those assertions are unexecuted and do not cover ATP progress behavior or the foreign Stream journey."
+      "fallible_terminal_compile_contract": {
+        "item": "Result<u32, &'static str>",
+        "adapter": "StreamExt::try_collect::<u32, &'static str, Vec<u32>>",
+        "implementation_state": "SOURCE_AUTHORED_NOT_EXECUTED"
+      },
+      "gap": "The fixture still has no futures-lite edge and now source-authors owned ATP, pinned local, and fallible terminal Stream contracts, but those assertions are unexecuted and do not cover ATP progress behavior or the foreign Stream journey."
     },
     {
       "journey_id": "FUT-JOURNEY-ECOSYSTEM-STREAM",
@@ -930,8 +989,8 @@
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
-      "sha256": "7668b9e6e490b6116b7336d44abaf32b460d03576d4791aba05ec83ad6dde74a",
-      "line_count": 927
+      "sha256": "a28cd08953d5eb112db6ba43d69ebeb262f74f15f4c36f51753df0cfb8c598ea",
+      "line_count": 940
     }
   ],
   "rollback_triggers": [
@@ -952,6 +1011,7 @@
     "The downstream fixture's source-authored owned ATP compile assertions are unexecuted and do not prove the public ATP ecosystem Stream journey.",
     "The owned Stream semantics documentation freezes a source contract only; it does not prove that every implementation obeys its wake, pinning, size-hint, cancellation, or drop obligations.",
     "The pinned-local downstream case and direct-next compile-fail rustdoc are source-authored but unexecuted and do not prove compiler-diagnostic stability or runtime behavior.",
+    "The A2 acceptance matrix is a fail-closed status inventory, not a terminal receipt; closure remains forbidden while any required receipt is missing.",
     "Marginal package counts do not prove behavioral replacement parity.",
     "The source-authored owned ATP Stream implementations have not been compiled or behaviorally exercised and do not authorize cutover.",
     "No local Cargo fallback is approved when a remote-required proof lane is blocked."

@@ -720,6 +720,19 @@ mod tests {
     }
 
     #[test]
+    fn downstream_fallible_stream_terminal_adapter_compile_contract() {
+        let _collect = DownstreamStream::new([1, 2, 3])
+            .map(|value| {
+                if value == 2 {
+                    Err("downstream error")
+                } else {
+                    Ok(value)
+                }
+            })
+            .try_collect::<u32, &'static str, Vec<u32>>();
+    }
+
+    #[test]
     fn atp_sdk_progress_types_expose_the_owned_stream_contract() {
         fn assert_owned_progress_stream<S>()
         where

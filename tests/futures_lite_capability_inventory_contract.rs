@@ -237,6 +237,95 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         return Err("direct next compile-fail contract must remain source-only".into());
     }
 
+    let a2_status = inventory
+        .get("a2_acceptance_status")
+        .expect("A2 acceptance status");
+    if text(a2_status, "owner_bead") != "asupersync-d24mms.6.2"
+        || text(a2_status, "overall_status") != "PARTIAL_SOURCE_ONLY"
+        || a2_status.get("closure_allowed") != Some(&Value::Bool(false))
+    {
+        return Err("A2 acceptance status must remain partial and fail closed".to_owned());
+    }
+    let a2_requirements = array(a2_status, "requirements");
+    let expected_a2_requirements: BTreeSet<String> = [
+        "FUT-A2-OWNED-API",
+        "FUT-A2-DOWNSTREAM-ERGONOMICS",
+        "FUT-A2-COMPILE-FAIL-RUSTDOC",
+        "FUT-A2-PIN-DROP-BOUNDS",
+        "FUT-A2-ERROR-ADAPTER",
+        "FUT-A2-ATP-RUNTIME-E2E",
+        "FUT-A2-USER-TRIAL",
+        "FUT-A2-CUTOVER",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if row_ids(a2_requirements, "requirement_id") != expected_a2_requirements {
+        return Err("A2 acceptance matrix must contain the exact requirement set".to_owned());
+    }
+    for (requirement_id, source_status, terminal_status) in [
+        (
+            "FUT-A2-OWNED-API",
+            "AUTHORED_NOT_EXECUTED",
+            "MISSING_FOCUSED_COMPILE",
+        ),
+        (
+            "FUT-A2-DOWNSTREAM-ERGONOMICS",
+            "AUTHORED_NOT_EXECUTED",
+            "MISSING_FIXTURE_EXECUTION",
+        ),
+        (
+            "FUT-A2-COMPILE-FAIL-RUSTDOC",
+            "AUTHORED_NOT_EXECUTED",
+            "MISSING_RUSTDOC_EXECUTION",
+        ),
+        (
+            "FUT-A2-PIN-DROP-BOUNDS",
+            "AUTHORED_NOT_EXECUTED",
+            "MISSING_BEHAVIOR_EXECUTION",
+        ),
+        (
+            "FUT-A2-ERROR-ADAPTER",
+            "AUTHORED_NOT_EXECUTED",
+            "MISSING_BEHAVIOR_EXECUTION",
+        ),
+        (
+            "FUT-A2-ATP-RUNTIME-E2E",
+            "MISSING_RUNTIME_SCENARIO",
+            "MISSING",
+        ),
+        (
+            "FUT-A2-USER-TRIAL",
+            "MISSING",
+            "MISSING_SAME_OR_BETTER_RECEIPT",
+        ),
+        (
+            "FUT-A2-CUTOVER",
+            "BLOCKED",
+            "BLOCKED_PENDING_ALL_RECEIPTS",
+        ),
+    ] {
+        let requirement = find_row(a2_requirements, "requirement_id", requirement_id);
+        if text(requirement, "source_status") != source_status
+            || text(requirement, "terminal_status") != terminal_status
+        {
+            return Err(format!("A2 requirement status drift: {requirement_id}"));
+        }
+    }
+    let expected_a2_receipts: BTreeSet<String> = [
+        "focused compile",
+        "compile-fail rustdoc",
+        "downstream fixture",
+        "ATP runtime E2E",
+        "SAME-or-BETTER user trial",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if string_set(a2_status, "required_terminal_receipts") != expected_a2_receipts {
+        return Err("A2 terminal receipt set must remain complete".to_owned());
+    }
+
     let expected_profiles: BTreeSet<String> = [
         "FUT-PROFILE-ROOT-NORMAL",
         "FUT-PROFILE-ROOT-UNIT",
@@ -448,6 +537,17 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     {
         return Err("pinned local downstream contract must remain source-only".to_owned());
     }
+    let fallible = object(owned_journey, "fallible_terminal_compile_contract");
+    if fallible.get("item").and_then(Value::as_str) != Some("Result<u32, &'static str>")
+        || fallible.get("adapter").and_then(Value::as_str)
+            != Some("StreamExt::try_collect::<u32, &'static str, Vec<u32>>")
+        || fallible
+            .get("implementation_state")
+            .and_then(Value::as_str)
+            != Some("SOURCE_AUTHORED_NOT_EXECUTED")
+    {
+        return Err("fallible downstream contract must remain source-only".to_owned());
+    }
 
     if journeys.len() != 4
         || array(inventory, "rollback_triggers").len() < 8
@@ -627,6 +727,9 @@ fn identity_authority_zero_unknown_and_docs_are_fail_closed() {
         "pinned-downstream base revision",
         "DownstreamPinnedLocalStream<'_>",
         "Neither case has been compiled or run",
+        "StreamExt::try_collect::<u32, &'static str, Vec<u32>>",
+        "A2 acceptance status",
+        "does not authorize closing A2",
         "source-authored and unexecuted",
         "No-claim boundary",
     ] {
@@ -875,6 +978,9 @@ fn production_public_and_comment_only_sites_match_source() {
     assert!(downstream.contains("Stream::size_hint(&stream)"));
     assert!(downstream.contains("let _pending_next = stream.next();"));
     assert!(downstream.contains("poll_stream_once(Pin::new(&mut stream))"));
+    assert!(downstream.contains("downstream_fallible_stream_terminal_adapter_compile_contract"));
+    assert!(downstream.contains("Err(\"downstream error\")"));
+    assert!(downstream.contains("try_collect::<u32, &'static str, Vec<u32>>()"));
 }
 
 #[test]
