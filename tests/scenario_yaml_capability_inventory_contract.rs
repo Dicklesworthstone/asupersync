@@ -2233,6 +2233,126 @@ fn validate_a4_gap12_source_progress(inventory: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_post_a3_1_provenance_refresh(inventory: &Value) -> Result<(), String> {
+    let refresh = inventory
+        .get("post_a3_1_provenance_refresh")
+        .ok_or_else(|| "post_a3_1_provenance_refresh is required".to_owned())?;
+    for (key, expected) in [
+        ("captured_date_utc", "2026-08-05"),
+        (
+            "base_commit",
+            "6b5d0638aabc84dfafa078936e3892ed77bfa196",
+        ),
+        ("refresh_state", "STATIC_SOURCE_PIN_MAINTENANCE"),
+        ("required_disposition", "KEEP_INCUMBENT"),
+        ("execution_state", "NOT_RUN_STATIC_ONLY"),
+    ] {
+        if refresh.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("post-A3.1 refresh {key} must be {expected}"));
+        }
+    }
+    if refresh.get("source_pin_path_count").and_then(Value::as_u64) != Some(32)
+        || refresh.get("stale_path_count").and_then(Value::as_u64) != Some(3)
+        || refresh
+            .get("supporting_path_update_count")
+            .and_then(Value::as_u64)
+            != Some(1)
+        || refresh.get("refreshed_path_count").and_then(Value::as_u64) != Some(4)
+    {
+        return Err("post-A3.1 refresh counts drifted".to_owned());
+    }
+    for key in [
+        "source_pin_path_set_changed",
+        "historical_a3_1_revision_changed",
+        "historical_a3_2_receipt_changed",
+        "a3_1_decision_changed",
+        "dependency_exit_allowed",
+    ] {
+        if refresh.get(key).and_then(Value::as_bool) != Some(false) {
+            return Err(format!("post-A3.1 refresh {key} must remain false"));
+        }
+    }
+
+    let rows = array(refresh, "refreshed_paths");
+    let expected_paths: BTreeSet<String> = [
+        ".github/workflows/methodology-gates.yml",
+        "artifacts/dependency_capability_baseline_v1.json",
+        "docs/adr/dep_plan_adr_004_config_scenario_formats.md",
+        "tests/scenario_yaml_capability_inventory_contract.rs",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if rows.len() != 4 || row_ids(rows, "path") != expected_paths {
+        return Err("post-A3.1 refresh must retain the exact four paths".to_owned());
+    }
+    if rows.iter().any(|row| {
+        row.get("scenario_acceptance_semantics_changed")
+            .and_then(Value::as_bool)
+            != Some(false)
+    }) {
+        return Err("post-A3.1 refresh must not claim Scenario semantic drift".to_owned());
+    }
+
+    let adr = find_row(
+        rows,
+        "path",
+        "docs/adr/dep_plan_adr_004_config_scenario_formats.md",
+    );
+    if text(adr, "classification") != "CONFIG_A3_KEEP_RECEIPT_ADDITION"
+        || adr.get("added_line_count").and_then(Value::as_u64) != Some(36)
+        || adr.get("deleted_line_count").and_then(Value::as_u64) != Some(4)
+        || !text(adr, "observed_change").contains("net increase of 32 lines")
+    {
+        return Err("post-A3.1 ADR drift classification changed".to_owned());
+    }
+
+    let workflow = find_row(rows, "path", ".github/workflows/methodology-gates.yml");
+    if text(workflow, "classification") != "IMMUTABLE_ACTION_SOURCE_PINNING_ONLY"
+        || workflow
+            .get("changed_action_reference_count")
+            .and_then(Value::as_u64)
+            != Some(10)
+        || text(workflow, "non_action_content_sha256_before_and_after")
+            != "c5521a02a110251fcdcc8d2828aa39f6a31f4eac88bc8135afd781a9c8b45aed"
+    {
+        return Err("post-A3.1 workflow drift classification changed".to_owned());
+    }
+
+    let baseline = find_row(
+        rows,
+        "path",
+        "artifacts/dependency_capability_baseline_v1.json",
+    );
+    let expected_capabilities: BTreeSet<String> = [CAPABILITY_ID, "CAP-LAB-DETERMINISM"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    if text(baseline, "classification") != "APPEND_ONLY_INDEPENDENT_STATIC_AUDITS"
+        || baseline.get("added_line_count").and_then(Value::as_u64) != Some(1853)
+        || baseline.get("deleted_line_count").and_then(Value::as_u64) != Some(0)
+        || string_set(baseline, "unchanged_capability_rows") != expected_capabilities
+    {
+        return Err("post-A3.1 baseline drift classification changed".to_owned());
+    }
+    let contract = find_row(
+        rows,
+        "path",
+        "tests/scenario_yaml_capability_inventory_contract.rs",
+    );
+    if text(contract, "classification") != "MAINTENANCE_RECEIPT_VALIDATOR_ADDITION"
+        || !text(contract, "validation_scope").contains("fail closed")
+    {
+        return Err("post-A3.1 contract update classification changed".to_owned());
+    }
+    if !text(refresh, "no_claim_boundary").contains("does not rerun")
+        || !text(refresh, "no_claim_boundary").contains("dependency exit")
+    {
+        return Err("post-A3.1 refresh no-claim boundary is incomplete".to_owned());
+    }
+    Ok(())
+}
+
 fn validate_inventory(inventory: &Value) -> Result<(), String> {
     if inventory.get("schema_version").and_then(Value::as_u64) != Some(1) {
         return Err("schema_version must be 1".to_owned());
@@ -2449,6 +2569,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     if text(inventory, "no_claim_boundary").trim().is_empty() {
         return Err("top-level no-claim boundary is required".to_owned());
     }
+    validate_post_a3_1_provenance_refresh(inventory)?;
     validate_a3_acceptance_satisfiability(inventory)?;
     validate_a3_keep_incumbent_receipt(inventory)?;
     validate_a4_source_progress(inventory)?;
@@ -3087,6 +3208,7 @@ fn documentation_workflows_and_no_claim_boundary_are_complete() {
         "OWNER_POLICY_REQUIRED",
         "dependency_exit_allowed=false",
         "A3.1 did not rerun",
+        "static provenance pass refreshed three stale pins",
         "SOURCE_ALIGNED_STATIC",
         "SCN-GAP-13 remains blocked",
         "13 files",

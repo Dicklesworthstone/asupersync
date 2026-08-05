@@ -121,8 +121,8 @@
     },
     {
       "path": "docs/adr/dep_plan_adr_004_config_scenario_formats.md",
-      "sha256": "310709cc8c3d7aab1dbf92ea2d3fde41c6deffee1fe0b9725b598875a6d3780c",
-      "line_count": 170
+      "sha256": "088184c1e9624a475bb9f4714fcfd387d3dad6431f77308ce2d9ad1193172dab",
+      "line_count": 202
     },
     {
       "path": "TESTING_FOR_AGENTS.md",
@@ -146,8 +146,8 @@
     },
     {
       "path": "tests/scenario_yaml_capability_inventory_contract.rs",
-      "sha256": "8d0ed5f0fc2ee156a509906db7f16363ec32d976bd2e5dd1b6a110e91fe6c9c0",
-      "line_count": 3336
+      "sha256": "b0c8f60998e4c6d8e9fa89af55b2fd3c9a3de3349bb32262782ebb98efdc512a",
+      "line_count": 3458
     },
     {
       "path": "tests/phase6_methodology_gate_contract.rs",
@@ -181,7 +181,7 @@
     },
     {
       "path": ".github/workflows/methodology-gates.yml",
-      "sha256": "14d7c31f81566eafc21358547ff5f579c8879ef941355c576898f9af5d27bea6",
+      "sha256": "d4962698ac929b3ca66560cb3cd52873e0fc1e3d44e16dd0d00e50faf3e7e549",
       "line_count": 553
     },
     {
@@ -211,8 +211,8 @@
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8",
-      "line_count": 1357
+      "sha256": "ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4",
+      "line_count": 3210
     },
     {
       "path": "artifacts/api_surface_map_v1.json",
@@ -1678,6 +1678,57 @@
       "dependency_exit_allowed": false
     },
     "no_claim_boundary": "This A3.1 section is a static, source-pinned acceptance-satisfiability audit. It implements no owned YAML parser or production Scenario YAML writer, proves no complete parity, performance, resource, security, broad-health, or release claim, and authorizes no input narrowing, dependency or file removal, tracker closure, or cutover. KEEP_INCUMBENT and dependency_exit_allowed=false remain mandatory; only A5 may authorize terminal cutover after owner-approved bounds and complete SAME-or-BETTER evidence."
+  },
+  "post_a3_1_provenance_refresh": {
+    "captured_date_utc": "2026-08-05",
+    "base_commit": "6b5d0638aabc84dfafa078936e3892ed77bfa196",
+    "refresh_state": "STATIC_SOURCE_PIN_MAINTENANCE",
+    "source_pin_path_count": 32,
+    "source_pin_path_set_changed": false,
+    "stale_path_count": 3,
+    "supporting_path_update_count": 1,
+    "refreshed_path_count": 4,
+    "refreshed_paths": [
+      {
+        "path": "docs/adr/dep_plan_adr_004_config_scenario_formats.md",
+        "classification": "CONFIG_A3_KEEP_RECEIPT_ADDITION",
+        "added_line_count": 36,
+        "deleted_line_count": 4,
+        "observed_change": "The independent TOML/config incumbent-preservation receipt adds a config-only section and revises its related evidence and no-claim wording, for a net increase of 32 lines",
+        "scenario_acceptance_semantics_changed": false
+      },
+      {
+        "path": ".github/workflows/methodology-gates.yml",
+        "classification": "IMMUTABLE_ACTION_SOURCE_PINNING_ONLY",
+        "changed_action_reference_count": 10,
+        "non_action_content_sha256_before_and_after": "c5521a02a110251fcdcc8d2828aa39f6a31f4eac88bc8135afd781a9c8b45aed",
+        "scenario_acceptance_semantics_changed": false
+      },
+      {
+        "path": "artifacts/dependency_capability_baseline_v1.json",
+        "classification": "APPEND_ONLY_INDEPENDENT_STATIC_AUDITS",
+        "added_line_count": 1853,
+        "deleted_line_count": 0,
+        "unchanged_capability_rows": [
+          "CAP-LAB-DETERMINISM",
+          "CAP-SCENARIO-YAML-JSON"
+        ],
+        "scenario_acceptance_semantics_changed": false
+      },
+      {
+        "path": "tests/scenario_yaml_capability_inventory_contract.rs",
+        "classification": "MAINTENANCE_RECEIPT_VALIDATOR_ADDITION",
+        "validation_scope": "fail closed on receipt identity, exact path set, classifications, counts, disposition and no-claim boundary",
+        "scenario_acceptance_semantics_changed": false
+      }
+    ],
+    "historical_a3_1_revision_changed": false,
+    "historical_a3_2_receipt_changed": false,
+    "a3_1_decision_changed": false,
+    "required_disposition": "KEEP_INCUMBENT",
+    "dependency_exit_allowed": false,
+    "execution_state": "NOT_RUN_STATIC_ONLY",
+    "no_claim_boundary": "This maintenance receipt proves only current source-pin reconciliation and the recorded non-semantic classifications. It does not rerun the historical A1, A2, A3.1, or A3.2 executable evidence, authorize input narrowing or dependency exit, or make a broad-health or performance claim."
   },
   "a3_keep_incumbent_receipt": {
     "receipt_id": "SCN-A3-KEEP-INCUMBENT-V1",

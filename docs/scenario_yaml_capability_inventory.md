@@ -243,6 +243,18 @@ authorities. The source-pin inventory now contains 32 unique tracked current
 paths. Untracked local lockfiles are outside this pin inventory. All 13 Scenario
 corpus files still match their A1 hashes, line counts, and byte counts.
 
+A 2026-08-05 static provenance pass refreshed three stale pins against
+`6b5d0638aabc84dfafa078936e3892ed77bfa196`. The shared ADR gained only the
+independent config A3 KEEP receipt and its related evidence/no-claim wording;
+the methodology workflow changed only ten action source references, with all
+non-action content byte-identical; and the capability baseline gained 1,853
+append-only audit lines while both mapped capability rows stayed byte-identical.
+The pass also updates the contract's own pin after adding a fail-closed check
+for this maintenance receipt, for four refreshed rows in the unchanged 32-path
+set. Scenario acceptance semantics, historical A3.1/A3.2 revisions, and the
+`KEEP_INCUMBENT` result did not change. This pass did not rerun executable
+evidence.
+
 ### Current dependency edges
 
 | Edge | Profile | Current declaration | Consequence |
