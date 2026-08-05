@@ -1659,6 +1659,53 @@ impl SqliteConnection {
         .await
     }
 
+    /// Schedule best-effort physical rollback for a dropped managed
+    /// transaction.
+    ///
+    /// `SqliteTransaction::drop` cannot block the dropping thread, but merely
+    /// publishing `NeedsRollback` leaves SQLite's real transaction (and any
+    /// write lock it owns) open until another connection operation happens to
+    /// arrive. Queue cleanup on the connection's blocking pool instead. The
+    /// worker validates the transaction generation while holding `inner`, so
+    /// a delayed cleanup from an older handle cannot roll back a newer
+    /// transaction.
+    ///
+    /// Rollback remains best-effort here: a closed pool or SQLite rollback
+    /// failure leaves `NeedsRollback` intact for `drain_orphaned_transaction`
+    /// to retry on the next connection operation.
+    fn schedule_dropped_transaction_rollback(&self, expected_generation: u64) {
+        let inner = Arc::clone(&self.inner);
+        let transaction_state = Arc::clone(&self.transaction_state);
+        let transaction_generation = Arc::clone(&self.transaction_generation);
+
+        let _cleanup = self.pool.spawn(move || {
+            let guard = inner.lock();
+            let Some(conn) = guard.conn.as_ref() else {
+                // Closing rusqlite::Connection physically rolls back any open
+                // transaction. A handle dropped after close may have
+                // republished NeedsRollback, so retire that stale generation
+                // while the closed connection state is stable under `inner`.
+                if transaction_generation.load(Ordering::Acquire) == expected_generation {
+                    let _ = advance_transaction_generation(transaction_generation.as_ref());
+                    *transaction_state.lock() = TransactionState::Autocommit;
+                }
+                return;
+            };
+
+            // Every generation-changing worker also owns `inner`, so this
+            // check stays stable through the rollback attempt below.
+            if transaction_generation.load(Ordering::Acquire) != expected_generation {
+                return;
+            }
+
+            let _ = rollback_orphaned_transaction_generation_guarded(
+                conn,
+                transaction_state.as_ref(),
+                transaction_generation.as_ref(),
+            );
+        });
+    }
+
     /// Opens a SQLite database at the given path.
     ///
     /// # Cancellation
@@ -2863,6 +2910,8 @@ impl Drop for SqliteTransaction<'_> {
         }
         if !self.finished {
             self.poison_for_rollback();
+            self.conn
+                .schedule_dropped_transaction_rollback(self.generation);
         }
     }
 }
@@ -4926,6 +4975,137 @@ mod tests {
             };
             assert_eq!(rows[0].get_idx(0).unwrap().as_integer(), Some(0));
         });
+    }
+
+    #[test]
+    fn dropped_transaction_rolls_back_before_followup_connection_operation() {
+        let cx = create_test_cx();
+        let pool = BlockingPool::new(1, 1);
+        let raw = rusqlite::Connection::open_in_memory().expect("open test connection");
+        configure_connection_defaults(&raw, false).expect("configure test connection");
+        let interrupt = Arc::new(raw.get_interrupt_handle());
+        let conn = SqliteConnection {
+            inner: Arc::new(Mutex::new(SqliteConnectionInner::new(raw))),
+            pool: pool.handle(),
+            transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
+            transaction_generation: Arc::new(AtomicU64::new(0)),
+            interrupt,
+            statement_timeout_override: None,
+        };
+
+        block_on(async {
+            match conn
+                .execute_batch(&cx, "CREATE TABLE t (value INTEGER NOT NULL);")
+                .await
+            {
+                Outcome::Ok(()) => {}
+                other => panic!("create table failed: {other:?}"),
+            }
+
+            let transaction = match conn.begin_immediate(&cx).await {
+                Outcome::Ok(transaction) => transaction,
+                other => panic!("begin immediate failed: {other:?}"),
+            };
+            match transaction
+                .execute(&cx, "INSERT INTO t (value) VALUES (1)", &[])
+                .await
+            {
+                Outcome::Ok(1) => {}
+                other => panic!("insert in transaction failed: {other:?}"),
+            }
+            drop(transaction);
+        });
+
+        // A one-worker pool preserves submission order, so this empty job is
+        // a deterministic fence behind the cleanup queued by Drop. No
+        // SqliteConnection operation is allowed to trigger fallback cleanup.
+        conn.pool.spawn(|| {}).wait();
+
+        let guard = conn.inner.lock();
+        let raw = guard.get().expect("connection remains open");
+        assert!(
+            raw.is_autocommit(),
+            "drop-triggered cleanup must end the physical transaction"
+        );
+        let retained_rows: i64 = raw
+            .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
+            .expect("read direct post-drop row count");
+        assert_eq!(retained_rows, 0, "uncommitted row must be rolled back");
+        drop(guard);
+        assert_eq!(
+            *conn.transaction_state.lock(),
+            TransactionState::Autocommit,
+            "drop-triggered cleanup must restore the transaction mirror"
+        );
+    }
+
+    #[test]
+    fn delayed_drop_cleanup_does_not_rollback_newer_transaction_generation() {
+        let cx = create_test_cx();
+        let pool = BlockingPool::new(1, 1);
+        let raw = rusqlite::Connection::open_in_memory().expect("open test connection");
+        configure_connection_defaults(&raw, false).expect("configure test connection");
+        raw.execute_batch("CREATE TABLE t (value INTEGER NOT NULL)")
+            .expect("create test table");
+        let interrupt = Arc::new(raw.get_interrupt_handle());
+        let conn = SqliteConnection {
+            inner: Arc::new(Mutex::new(SqliteConnectionInner::new(raw))),
+            pool: pool.handle(),
+            transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
+            transaction_generation: Arc::new(AtomicU64::new(0)),
+            interrupt,
+            statement_timeout_override: None,
+        };
+
+        let transaction = match block_on(conn.begin_immediate(&cx)) {
+            Outcome::Ok(transaction) => transaction,
+            other => panic!("begin immediate failed: {other:?}"),
+        };
+        match block_on(transaction.execute(
+            &cx,
+            "INSERT INTO t (value) VALUES (1)",
+            &[],
+        )) {
+            Outcome::Ok(1) => {}
+            other => panic!("insert in transaction failed: {other:?}"),
+        }
+
+        // Hold the physical connection so Drop can publish and enqueue its
+        // cleanup, but that cleanup cannot inspect the old generation yet.
+        let inner = Arc::clone(&conn.inner);
+        let guard = inner.lock();
+        let old_generation = transaction.generation;
+        drop(transaction);
+
+        // Model a newer owner winning the connection before the delayed
+        // cleanup. The stale job must observe the generation mismatch and
+        // leave this replacement transaction untouched.
+        let raw = guard.get().expect("connection remains open");
+        raw.execute_batch("ROLLBACK; BEGIN IMMEDIATE; INSERT INTO t (value) VALUES (2)")
+            .expect("install replacement transaction");
+        let replacement_generation =
+            advance_transaction_generation(conn.transaction_generation.as_ref())
+                .expect("advance replacement generation");
+        assert_ne!(replacement_generation, old_generation);
+        *conn.transaction_state.lock() = TransactionState::InTransaction;
+        drop(guard);
+
+        conn.pool.spawn(|| {}).wait();
+
+        let guard = conn.inner.lock();
+        let raw = guard.get().expect("connection remains open");
+        assert!(
+            !raw.is_autocommit(),
+            "stale drop cleanup must not finish the replacement transaction"
+        );
+        let visible_rows: i64 = raw
+            .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
+            .expect("read replacement transaction row count");
+        assert_eq!(visible_rows, 1);
+        raw.execute_batch("ROLLBACK")
+            .expect("clean up replacement transaction");
+        drop(guard);
+        *conn.transaction_state.lock() = TransactionState::Autocommit;
     }
 
     #[test]
