@@ -93,7 +93,8 @@ pub struct SpectralThresholds {
     pub history_window: usize,
     /// Miscoverage for one-step split-conformal lower prediction bound.
     pub conformal_alpha: f64,
-    /// E-process lambda for anytime-valid deterioration evidence.
+    /// Fixed betting lambda for anytime-valid directional deterioration
+    /// evidence under the null that decreases are no more likely than increases.
     pub eprocess_lambda: f64,
 }
 
@@ -935,7 +936,8 @@ pub struct BifurcationWarning {
     pub return_rate: Option<f64>,
     /// Split-conformal lower bound for the next Fiedler value.
     pub conformal_lower_bound_next: Option<f64>,
-    /// Anytime-valid e-process against non-deteriorating null.
+    /// Anytime-valid directional e-process against the null that a decrease is
+    /// conditionally no more likely than an increase.
     pub deterioration_e_value: f64,
     /// Composite early warning severity level combining all indicators.
     pub severity: EarlyWarningSeverity,
@@ -1794,10 +1796,15 @@ fn split_conformal_lower_next(values: &[f64], alpha: f64) -> Option<f64> {
     Some(values[values.len() - 1] - q)
 }
 
-/// Anytime-valid e-process for monotone deterioration evidence.
+/// Anytime-valid e-process for directional deterioration evidence.
 ///
-/// We map per-step decreases into `[0, 1]` and apply a Hoeffding-style
-/// nonnegative supermartingale factor with fixed lambda.
+/// Each finite step maps to a scale-free score: `1` for a decrease, `0` for an
+/// increase, and `0.5` for a tie. Under the conditional null that a decrease is
+/// no more likely than an increase, the score's conditional mean is at most
+/// `0.5`. Hoeffding's lemma therefore makes
+/// `exp(lambda * (score - 0.5) - lambda^2 / 8)` a nonnegative
+/// supermartingale factor for a fixed lambda. Using direction rather than raw
+/// Fiedler-unit magnitude keeps the detector live across graph scales.
 #[must_use]
 fn deterioration_eprocess(values: &[f64], lambda: f64) -> f64 {
     if values.len() < 2 {
@@ -1806,8 +1813,20 @@ fn deterioration_eprocess(values: &[f64], lambda: f64) -> f64 {
     let lambda = lambda.clamp(1e-3, 1.0);
     let mut log_e = 0.0_f64;
     for window in values.windows(2) {
-        let step_drop = (window[0] - window[1]).clamp(0.0, 1.0);
-        log_e += lambda * (step_drop - 0.5) - (lambda * lambda / 8.0);
+        let [previous, current] = window else {
+            continue;
+        };
+        if !previous.is_finite() || !current.is_finite() {
+            continue;
+        }
+        let direction_score = if previous > current {
+            1.0
+        } else if previous < current {
+            0.0
+        } else {
+            0.5
+        };
+        log_e += lambda * (direction_score - 0.5) - (lambda * lambda / 8.0);
     }
     log_e.clamp(-60.0, 60.0).exp()
 }
@@ -3188,6 +3207,36 @@ mod tests {
     #[test]
     fn skewness_constant() {
         assert!(sample_skewness(&[5.0, 5.0, 5.0, 5.0]).is_none());
+    }
+
+    // -- Directional deterioration e-process --------------------------------
+
+    #[test]
+    fn deterioration_eprocess_is_scale_free_and_live() {
+        let coarse = (0..32_i32)
+            .map(|step| f64::from(31 - step) * (2.0 / 31.0))
+            .collect::<Vec<_>>();
+        let fine = coarse
+            .iter()
+            .map(|value| value * 1e-9)
+            .collect::<Vec<_>>();
+
+        let coarse_e = deterioration_eprocess(&coarse, 0.5);
+        let fine_e = deterioration_eprocess(&fine, 0.5);
+        assert_eq!(coarse_e, fine_e, "direction evidence must ignore units");
+        assert!(
+            coarse_e > 100.0,
+            "a full monotone history window must activate strong evidence, got {coarse_e}"
+        );
+    }
+
+    #[test]
+    fn deterioration_eprocess_does_not_reward_stable_or_improving_history() {
+        let stable = vec![1.0; 32];
+        let improving = (0..32).map(f64::from).collect::<Vec<_>>();
+
+        assert!(deterioration_eprocess(&stable, 0.5) <= 1.0);
+        assert!(deterioration_eprocess(&improving, 0.5) <= 1.0);
     }
 
     // -- Return rate ----------------------------------------------------------
