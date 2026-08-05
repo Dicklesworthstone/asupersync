@@ -78,6 +78,48 @@ profile vocabulary, and the rendered row order must equal `display_order`.
 The key-dependency table is intentionally a curated projection, not a
 replacement for the complete 105-edge allowset.
 
+### Reviewed projection seed
+
+The following seed preserves the current reviewed purpose meaning and order
+while separating activation details from purpose text and pinning the exact
+direct-edge joins needed by the future machine object. It is design input only:
+until the object, renderer, and contract land, this table is not a second
+metadata authority and does not make the AGENTS table generated.
+
+For readability, **all consumer profiles** below means the exact current
+profile vocabulary: `cli`, `compression`, `default`, `fuzz-quarantine`,
+`io-uring`, `kafka`, `loom-tests`, `metrics`, `minimal`, `sqlite`, `tls`, and
+`trace-compression`. That phrase is documentation shorthand, not an admissible
+JSON feature value; the future object must store the expanded values. Dev rows
+instead use an explicit `development_scope`, which is mutually exclusive with
+`feature_profiles`. The closed tier enum for this projection is
+`core-runtime`, `optional-production`, `development-test`, and
+`development-benchmark`.
+
+| Order | Stable row ID | Exact dependency and edge join | Activation or development scope | Purpose | Tier |
+| ---: | --- | --- | --- | --- | --- |
+| 10 | `key-thiserror` | `thiserror` -> `normal:thiserror` | all consumer profiles | Ergonomic error type derivation | `core-runtime` |
+| 20 | `key-crossbeam-queue` | `crossbeam-queue` -> `normal:crossbeam-queue` | all consumer profiles | Lock-free concurrent queues | `core-runtime` |
+| 30 | `key-parking-lot` | `parking_lot` -> `normal:parking_lot` | all consumer profiles | Fast synchronization primitives | `core-runtime` |
+| 40 | `key-polling` | `polling` -> `target-normal:cfg(not(target_arch = "wasm32")):polling` | all consumer profiles; `cfg(not(target_arch = "wasm32"))` | Portable epoll/kqueue/IOCP polling | `core-runtime` |
+| 50 | `key-slab` | `slab` -> `normal:slab` | all consumer profiles | Pre-allocated storage for fixed-size records | `core-runtime` |
+| 60 | `key-smallvec` | `smallvec` -> `normal:smallvec` | all consumer profiles | Stack-allocated small vectors | `core-runtime` |
+| 70 | `key-pin-project` | `pin-project` -> `normal:pin-project` | all consumer profiles | Safe pin projections | `core-runtime` |
+| 80 | `key-serde-json` | `serde` -> `normal:serde`; `serde_json` -> `normal:serde_json` | all consumer profiles | Serialization | `core-runtime` |
+| 90 | `key-socket2` | `socket2` -> `target-normal:cfg(not(target_arch = "wasm32")):socket2` | all consumer profiles; `cfg(not(target_arch = "wasm32"))` | Low-level socket configuration | `core-runtime` |
+| 100 | `key-rustls` | `rustls` -> `normal:rustls` | `tls`; optional | TLS support | `optional-production` |
+| 110 | `key-rusqlite` | `rusqlite` -> `normal:rusqlite` | `sqlite`; optional | SQLite async wrapper | `optional-production` |
+| 120 | `key-proptest` | `proptest` -> `dev:proptest` | `development_scope = "test"` | Property-based testing | `development-test` |
+| 130 | `key-criterion` | `criterion` -> `target-dev:cfg(not(windows)):criterion` | `development_scope = "benchmark"`; `cfg(not(windows))` | Benchmarking | `development-benchmark` |
+| 140 | `key-rayon` | `rayon` -> `dev:rayon` | `development_scope = "benchmark"` | Data parallelism for CPU-bound work | `development-benchmark` |
+
+The future contract must validate each edge string above against
+`allowed_direct_dependencies`, expand each consumer-profile set against the
+graph-ceiling vocabulary, and verify the two target conditions verbatim. The
+rendered Feature/Profile cells may use concise display text, but that text must
+come from checked projection metadata rather than being reconstructed from
+Cargo edge kinds.
+
 The future renderer must use unique begin/end marker lines, fail on missing,
 duplicate, nested, or reversed markers, and replace only the bytes between
 those markers. Check mode must render in memory and reject drift without
