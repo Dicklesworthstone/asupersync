@@ -1345,6 +1345,293 @@
       "no_claim_boundary": "CAP A2 catalogs incumbent and local fixtures; it does not falsely claim the future aggregate runner, pinned services, platform fleet, or cutover evidence already exists."
     }
   ],
+  "host_benchmark_metadata_static_audit": {
+    "audit_id": "CAP-HOST-BENCH-METADATA-STATIC-AUDIT-V1",
+    "bead_id": "asupersync-d24mms.2",
+    "capability_ids": [
+      "CAP-HOST-BENCH-METADATA",
+      "CAP-HOST-INTROSPECTION"
+    ],
+    "observed_at_revision": "efab658ab3966f68f005b02ba0c5710467523d51",
+    "audit_state": "STATIC_SOURCE_PINNED_NOT_EXECUTED",
+    "execution_state": "NO_PLATFORM_OR_PROFILE_MATRIX_EXECUTED",
+    "decision": {
+      "dependencies": [
+        "num_cpus",
+        "whoami"
+      ],
+      "disposition": "KEEP_INCUMBENT",
+      "dependency_exit_allowed": false,
+      "manifest_or_lockfile_edit_allowed": false,
+      "source_behavior_change_allowed": false,
+      "reason": "The two dependency call sites are statically complete, but the required CPU-count, OS-string, fallback, platform, profile, schema, and operator-output parity receipts are absent. Static source shape cannot authorize either dependency exit."
+    },
+    "source_pins": [
+      {
+        "path": "Cargo.toml",
+        "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+        "line_count": 1038,
+        "role": "default and benchmark-adapters feature boundary plus optional dependency declarations"
+      },
+      {
+        "path": "Cargo.lock",
+        "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+        "line_count": 4666,
+        "role": "locked num_cpus, whoami, and sysinfo package identities"
+      },
+      {
+        "path": "src/atp/mod.rs",
+        "sha256": "098e4acd9abc7df0a9b6e3ba484b07e4eade44235166b98c43bad9a4cb3b327a",
+        "line_count": 172,
+        "role": "benchmark module feature gate"
+      },
+      {
+        "path": "src/atp/benchmark/mod.rs",
+        "sha256": "f74f4e75e888fd5110631b753d98f29b9d53e4dad3b05582213cd3ea43670951",
+        "line_count": 234,
+        "role": "public metadata schema, two dependency call sites, fallbacks, and focused unit assertions"
+      },
+      {
+        "path": "src/atp/benchmark/adapters.rs",
+        "sha256": "e3c62fcd9d4da96ac550143f816cfdd21d01fbbaa81fef4585cd795be4f0161c",
+        "line_count": 1091,
+        "role": "four production benchmark result collection sites"
+      },
+      {
+        "path": "src/atp/benchmark/profiles.rs",
+        "sha256": "c58666954514a9b16a1744b4e0b911b7da69ccd705fe8c4e54fcc1a40b7d7e5b",
+        "line_count": 613,
+        "role": "one production ATP profile result collection site"
+      },
+      {
+        "path": "src/atp/benchmark/reports.rs",
+        "sha256": "a8068beb727a5fd3e90cdb5b2ab08bb78b723bdd672c9067342596e6cc7d5183",
+        "line_count": 1014,
+        "role": "serialized BenchmarkEnvironment consumer and three unit-only collection sites"
+      },
+      {
+        "path": "tests/atp_benchmark_integration.rs",
+        "sha256": "884ac058b426eb89dffd3ae02c749d2bb9affbf2d17f1dfdb74baebc3e7f8420",
+        "line_count": 415,
+        "role": "benchmark-adapters integration surface lacking host metadata assertions"
+      },
+      {
+        "path": "artifacts/dependency_capability_registry_v1.json",
+        "sha256": "e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2",
+        "line_count": 6917,
+        "role": "CAP-HOST-BENCH-METADATA and CAP-HOST-INTROSPECTION authority"
+      },
+      {
+        "path": "scripts/run_all_e2e.sh",
+        "sha256": "183b9cccec81d18909feddad4022c084f5fcac27823191b6ea64a2adba8a6aad",
+        "line_count": 1259,
+        "role": "aggregate dependency-sovereignty suite routing"
+      },
+      {
+        "path": "scripts/run_dependency_sovereignty_e2e.sh",
+        "sha256": "388af46854549b837e7de602fbb84f99d26dcf2fef6b7e4f8575f1f6478d33a0",
+        "line_count": 1276,
+        "role": "scenario catalog and retained evidence schema"
+      }
+    ],
+    "call_site_inventory": {
+      "state": "STATIC_COMPLETE_TWO_OF_TWO",
+      "search_contract": "exact Rust calls matching num_cpus::get( or whoami::distro( across tracked .rs sources",
+      "total_dependency_call_sites": 2,
+      "rows": [
+        {
+          "dependency": "num_cpus",
+          "locked_version": "1.17.0",
+          "path": "src/atp/benchmark/mod.rs",
+          "anchor": "src/atp/benchmark/mod.rs:84",
+          "expression": "num_cpus::get()",
+          "output_field": "cpu_info",
+          "current_contract": "format a nonempty '<count>x <ARCH>' string",
+          "candidate": "std::thread::available_parallelism",
+          "candidate_state": "UNPROVEN_PLATFORM_AND_FALLBACK_PARITY"
+        },
+        {
+          "dependency": "whoami",
+          "locked_version": "2.1.2",
+          "path": "src/atp/benchmark/mod.rs",
+          "anchor": "src/atp/benchmark/mod.rs:83",
+          "expression": "whoami::distro()",
+          "output_field": "os_info",
+          "current_contract": "use the detected distribution string and degrade errors to the literal 'unknown'",
+          "candidate": "existing accepted host-information source",
+          "candidate_state": "UNSELECTED_AND_UNPROVEN_PLATFORM_PARITY"
+        }
+      ]
+    },
+    "feature_and_schema_contract": {
+      "module_gate": "cfg(feature = benchmark-adapters)",
+      "default_features": [
+        "proc-macros",
+        "nightly-outcome-try"
+      ],
+      "default_profile_reaches_benchmark_module": false,
+      "benchmark_adapters_dependency_edges": [
+        "dep:num_cpus",
+        "dep:whoami"
+      ],
+      "benchmark_environment_fields": [
+        "os_info",
+        "cpu_info",
+        "memory_info",
+        "network_info",
+        "timestamp",
+        "env_vars"
+      ],
+      "production_collection_call_count": 5,
+      "unit_only_collection_call_count": 4,
+      "production_collection_sites": [
+        {
+          "path": "src/atp/benchmark/adapters.rs",
+          "count": 4,
+          "role": "baseline adapter BenchmarkResult construction"
+        },
+        {
+          "path": "src/atp/benchmark/profiles.rs",
+          "count": 1,
+          "role": "ATP profile BenchmarkResult construction"
+        }
+      ],
+      "unit_only_collection_sites": [
+        {
+          "path": "src/atp/benchmark/mod.rs",
+          "count": 1,
+          "role": "nonempty OS and CPU smoke assertions"
+        },
+        {
+          "path": "src/atp/benchmark/reports.rs",
+          "count": 3,
+          "role": "report unit fixture construction"
+        }
+      ],
+      "integration_test_path": "tests/atp_benchmark_integration.rs",
+      "integration_host_metadata_assertion_count": 0,
+      "current_unit_assertions": [
+        "os_info is nonempty",
+        "cpu_info is nonempty",
+        "timestamp is not in the future"
+      ]
+    },
+    "existing_evidence_assessment": {
+      "evidence_id": "EVD-HOST-TOPOLOGY",
+      "feature_profile": "default",
+      "fixture_paths": [
+        "tests/large_host_topology_corpus_contract.rs",
+        "tests/host_profile_planner_contract.rs"
+      ],
+      "coverage_state": "ADJACENT_NOT_BENCHMARK_CALLSITE_PARITY",
+      "reason": "The topology corpus covers bounded synthetic host metadata but does not execute BenchmarkEnvironment under benchmark-adapters or compare num_cpus/whoami replacement outputs.",
+      "declared_scenario_id": "host_benchmark_metadata",
+      "dependency_sovereignty_runner_state": "SCENARIO_NOT_IMPLEMENTED",
+      "execution_receipt_present": false
+    },
+    "required_evidence_matrix": {
+      "status": "MISSING_NOT_RUN",
+      "captured_case_count": 0,
+      "captured_cases": [],
+      "platform_cells": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "profile_cells": [
+        "default-negative-no-benchmark-module",
+        "benchmark-adapters",
+        "benchmark-adapters,criterion-benches"
+      ],
+      "host_contexts": [
+        "ordinary host",
+        "affinity-restricted process",
+        "container or cgroup quota",
+        "metadata unavailable or error path"
+      ],
+      "required_semantics": [
+        "nonzero logical CPU count or an owner-approved explicit fallback",
+        "stable '<count>x <ARCH>' cpu_info shape",
+        "populated OS distribution string with the literal 'unknown' error fallback",
+        "unchanged BenchmarkEnvironment serde field names and units",
+        "no host identity expansion or new ambient authority",
+        "collection remains outside measured benchmark intervals"
+      ],
+      "required_record_fields": [
+        "case_id",
+        "source_revision",
+        "exact_command",
+        "feature_set",
+        "target_and_host_identity",
+        "toolchain_identity",
+        "host_context",
+        "serialized_benchmark_environment",
+        "expected_and_observed_semantics",
+        "stdout_and_stderr",
+        "exit_code",
+        "structured_events_ndjson",
+        "redaction_scan_result",
+        "deterministic_replay_command"
+      ],
+      "missing_or_unsupported_policy": "A missing, skipped, unsupported, unredacted, or non-replayable platform/profile/context cell is not parity evidence and keeps the affected incumbent dependency."
+    },
+    "cutover_gate": {
+      "required_state": "SAME_OR_BETTER",
+      "rows": [
+        {
+          "row_id": "HOSTMETA-CALLSITE-INVENTORY",
+          "state": "STATIC_COMPLETE",
+          "requirement": "exactly one num_cpus and one whoami call site remain source-pinned"
+        },
+        {
+          "row_id": "HOSTMETA-CPU-SEMANTIC-PARITY",
+          "state": "MISSING",
+          "requirement": "available parallelism preserves nonzero count, restrictions, fallbacks, and cpu_info shape"
+        },
+        {
+          "row_id": "HOSTMETA-OS-SEMANTIC-PARITY",
+          "state": "MISSING",
+          "requirement": "the selected host source preserves populated OS strings and the explicit unknown fallback"
+        },
+        {
+          "row_id": "HOSTMETA-PLATFORM-PROFILE-MATRIX",
+          "state": "MISSING",
+          "requirement": "all declared platform, feature, and host-context cells compile and execute"
+        },
+        {
+          "row_id": "HOSTMETA-ERROR-FALLBACK-PARITY",
+          "state": "MISSING",
+          "requirement": "unit and boundary evidence covers unavailable and error behavior without blank or fabricated fields"
+        },
+        {
+          "row_id": "HOSTMETA-SCHEMA-OPERATOR-UX-PARITY",
+          "state": "MISSING",
+          "requirement": "serialized fields, units, diagnostics, and benchmark interpretation remain SAME or BETTER"
+        },
+        {
+          "row_id": "HOSTMETA-E2E-REPLAY-REDACTION",
+          "state": "MISSING",
+          "requirement": "the canonical scenario retains structured logs, provenance, redaction, cleanup, and replay"
+        },
+        {
+          "row_id": "HOSTMETA-MARGINAL-LEDGER-CUTOVER",
+          "state": "MISSING",
+          "requirement": "manifest, lockfile, ledger, and checked negative scans are serialized after favorable parity"
+        }
+      ],
+      "on_any_missing_or_regressed_row": "KEEP_INCUMBENT",
+      "num_cpus_exit_allowed": false,
+      "whoami_exit_allowed": false,
+      "tracker_closure_allowed": false
+    },
+    "no_claims": [
+      "No benchmark adapter, host probe, unit test, integration test, compiler, formatter, Cargo lane, RCH lane, or aggregate E2E scenario was executed.",
+      "Two statically complete dependency call sites do not prove std::thread::available_parallelism or another host source has cross-platform semantic parity.",
+      "EVD-HOST-TOPOLOGY is adjacent default-profile evidence, not a benchmark-adapters replacement receipt.",
+      "The required platform/profile/context matrix is a future evidence obligation, not an execution receipt.",
+      "This audit does not authorize num_cpus or whoami removal, manifest or lockfile edits, source behavior changes, tracker closure, performance claims, release readiness, or broad workspace health claims."
+    ]
+  },
   "no_claim_boundaries": [
     "This artifact is a baseline inventory, not proof that any replacement is SAME-or-BETTER.",
     "No row authorizes dependency removal, public API narrowing, format deletion, feature removal, service deprecation, unsafe expansion, or cutover.",

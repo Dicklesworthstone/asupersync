@@ -130,6 +130,43 @@ The later VER A2 aggregate owns
 failure, aggregate service lifecycle, and cross-scenario log packaging. CAP A2
 does not overclaim that future work.
 
+## Host benchmark metadata static audit
+
+`CAP-HOST-BENCH-METADATA-STATIC-AUDIT-V1` records the bounded static audit for
+`asupersync-d24mms.2`. It is `STATIC_SOURCE_PINNED_NOT_EXECUTED`: eleven source
+pins establish a complete two-of-two inventory at the observed revision, but
+no compiler, test, benchmark, host probe, platform matrix, profile matrix, or
+E2E scenario was run. Its execution state is therefore
+`NO_PLATFORM_OR_PROFILE_MATRIX_EXECUTED`.
+
+Both dependency call sites are in `BenchmarkEnvironment::collect()` behind the
+`benchmark-adapters` feature:
+
+- `whoami::distro()` populates `os_info`, degrading detection errors to the
+  literal `unknown`;
+- `num_cpus::get()` contributes the count in the nonempty
+  `<count>x <ARCH>` `cpu_info` string.
+
+The collected schema has six fields and reaches five production result
+construction sites plus four unit-only sites. The existing
+`tests/atp_benchmark_integration.rs` surface asserts none of `os_info`,
+`cpu_info`, or `BenchmarkEnvironment`. `EVD-HOST-TOPOLOGY` is useful adjacent
+default-profile evidence, but it does not execute these call sites or compare
+candidate outputs. The declared `host_benchmark_metadata` dependency-
+sovereignty scenario is not implemented in the retained runner.
+
+Cutover requires SAME-or-BETTER evidence across Linux, macOS, and Windows;
+default-negative, `benchmark-adapters`, and benchmark-plus-Criterion profiles;
+ordinary, affinity-restricted, quota-constrained, and metadata-error host
+contexts; exact schema/operator output; fallback behavior; redaction; replay;
+and a favorable marginal-ledger result. Only the source inventory gate is
+`STATIC_COMPLETE`; the other seven gates are `MISSING`.
+
+The disposition is `KEEP_INCUMBENT` for both dependencies and
+`dependency_exit_allowed=false`. This packet does not authorize manifest,
+lockfile, or behavior edits, tracker closure, performance claims, release
+readiness, or broad workspace-health claims.
+
 ## High-risk boundaries
 
 - SQLite uses the incumbent real-file/WAL corpus, but FrankenSQLite is

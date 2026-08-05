@@ -7,6 +7,7 @@
 #![allow(missing_docs)]
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -22,6 +23,10 @@ const CONSUMER_SOURCE: &str = "tests/fixtures/dependency-capability-baseline-con
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
 const GENERATED_BEGIN: &str = "<!-- BEGIN GENERATED BASELINE SUMMARY -->";
 const GENERATED_END: &str = "<!-- END GENERATED BASELINE SUMMARY -->";
+const HOST_METADATA_BEAD_ID: &str = "asupersync-d24mms.2";
+const HOST_METADATA_AUDIT_ID: &str = "CAP-HOST-BENCH-METADATA-STATIC-AUDIT-V1";
+const NUM_CPUS_CALL: &str = concat!("num_cpus", "::get()");
+const WHOAMI_CALL: &str = concat!("whoami", "::distro()");
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -29,6 +34,11 @@ fn repo_root() -> PathBuf {
 
 fn read_repo_file(path: &str) -> String {
     std::fs::read_to_string(repo_root().join(path))
+        .unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
+}
+
+fn read_repo_bytes(path: &str) -> Vec<u8> {
+    std::fs::read(repo_root().join(path))
         .unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
 }
 
@@ -52,11 +62,33 @@ fn array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
         .unwrap_or_else(|| panic!("{key} must be an array"))
 }
 
+fn object<'a>(value: &'a Value, key: &str) -> &'a Value {
+    let nested = value
+        .get(key)
+        .unwrap_or_else(|| panic!("{key} must be present"));
+    assert!(nested.is_object(), "{key} must be an object");
+    nested
+}
+
 fn string<'a>(value: &'a Value, key: &str) -> &'a str {
     value
         .get(key)
         .and_then(Value::as_str)
         .unwrap_or_else(|| panic!("{key} must be a string"))
+}
+
+fn boolean(value: &Value, key: &str) -> bool {
+    value
+        .get(key)
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| panic!("{key} must be a bool"))
+}
+
+fn unsigned(value: &Value, key: &str) -> u64 {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| panic!("{key} must be an unsigned integer"))
 }
 
 fn string_set(value: &Value, key: &str) -> BTreeSet<String> {
@@ -69,6 +101,14 @@ fn string_set(value: &Value, key: &str) -> BTreeSet<String> {
                 .to_owned()
         })
         .collect()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn count_occurrences(source: &str, token: &str) -> u64 {
+    u64::try_from(source.matches(token).count()).expect("source token count fits u64")
 }
 
 fn path_exists(path: &str) -> bool {
@@ -825,6 +865,12 @@ fn runner_and_docs_expose_replay_logging_and_no_claim_boundaries() {
         "No feature loss",
         "consumer-default",
         "consumer-full",
+        HOST_METADATA_AUDIT_ID,
+        HOST_METADATA_BEAD_ID,
+        "STATIC_SOURCE_PINNED_NOT_EXECUTED",
+        "NO_PLATFORM_OR_PROFILE_MATRIX_EXECUTED",
+        "KEEP_INCUMBENT",
+        "dependency_exit_allowed=false",
         GENERATED_BEGIN,
         GENERATED_END,
     ] {
@@ -832,6 +878,252 @@ fn runner_and_docs_expose_replay_logging_and_no_claim_boundaries() {
             docs.contains(required),
             "documentation missing required contract token {required}"
         );
+    }
+}
+
+#[test]
+fn host_benchmark_metadata_static_audit_is_source_pinned_and_fail_closed() {
+    let value = artifact();
+    let audit = object(&value, "host_benchmark_metadata_static_audit");
+    assert_eq!(string(audit, "audit_id"), HOST_METADATA_AUDIT_ID);
+    assert_eq!(string(audit, "bead_id"), HOST_METADATA_BEAD_ID);
+    assert_eq!(
+        string_set(audit, "capability_ids"),
+        BTreeSet::from([
+            "CAP-HOST-BENCH-METADATA".to_owned(),
+            "CAP-HOST-INTROSPECTION".to_owned(),
+        ])
+    );
+    assert_eq!(
+        string(audit, "audit_state"),
+        "STATIC_SOURCE_PINNED_NOT_EXECUTED"
+    );
+    assert_eq!(
+        string(audit, "execution_state"),
+        "NO_PLATFORM_OR_PROFILE_MATRIX_EXECUTED"
+    );
+    assert_eq!(string(audit, "observed_at_revision").len(), 40);
+
+    let decision = object(audit, "decision");
+    assert_eq!(
+        string_set(decision, "dependencies"),
+        BTreeSet::from(["num_cpus".to_owned(), "whoami".to_owned()])
+    );
+    assert_eq!(string(decision, "disposition"), "KEEP_INCUMBENT");
+    assert!(!boolean(decision, "dependency_exit_allowed"));
+    assert!(!boolean(decision, "manifest_or_lockfile_edit_allowed"));
+    assert!(!boolean(decision, "source_behavior_change_allowed"));
+
+    let pins = array(audit, "source_pins");
+    assert_eq!(pins.len(), 11);
+    let pinned_paths = pins
+        .iter()
+        .map(|pin| string(pin, "path"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        pinned_paths,
+        BTreeSet::from([
+            "Cargo.lock",
+            "Cargo.toml",
+            "artifacts/dependency_capability_registry_v1.json",
+            "scripts/run_all_e2e.sh",
+            "scripts/run_dependency_sovereignty_e2e.sh",
+            "src/atp/benchmark/adapters.rs",
+            "src/atp/benchmark/mod.rs",
+            "src/atp/benchmark/profiles.rs",
+            "src/atp/benchmark/reports.rs",
+            "src/atp/mod.rs",
+            "tests/atp_benchmark_integration.rs",
+        ])
+    );
+    for pin in pins {
+        let path = string(pin, "path");
+        let source = read_repo_file(path);
+        assert_eq!(
+            sha256_hex(&read_repo_bytes(path)),
+            string(pin, "sha256"),
+            "source pin drift for {path}"
+        );
+        assert_eq!(
+            u64::try_from(source.lines().count()).expect("line count fits u64"),
+            unsigned(pin, "line_count"),
+            "line-count drift for {path}"
+        );
+        assert!(!string(pin, "role").trim().is_empty());
+    }
+
+    let inventory = object(audit, "call_site_inventory");
+    assert_eq!(string(inventory, "state"), "STATIC_COMPLETE_TWO_OF_TWO");
+    assert_eq!(unsigned(inventory, "total_dependency_call_sites"), 2);
+    let rows = array(inventory, "rows");
+    assert_eq!(rows.len(), 2);
+    let by_dependency = rows
+        .iter()
+        .map(|row| (string(row, "dependency"), row))
+        .collect::<BTreeMap<_, _>>();
+    let num_cpus = by_dependency
+        .get("num_cpus")
+        .copied()
+        .expect("num_cpus row");
+    assert_eq!(string(num_cpus, "locked_version"), "1.17.0");
+    assert_eq!(string(num_cpus, "path"), "src/atp/benchmark/mod.rs");
+    assert_eq!(string(num_cpus, "expression"), NUM_CPUS_CALL);
+    assert_eq!(string(num_cpus, "output_field"), "cpu_info");
+    assert_eq!(
+        string(num_cpus, "candidate"),
+        "std::thread::available_parallelism"
+    );
+    let whoami = by_dependency
+        .get("whoami")
+        .copied()
+        .expect("whoami row");
+    assert_eq!(string(whoami, "locked_version"), "2.1.2");
+    assert_eq!(string(whoami, "path"), "src/atp/benchmark/mod.rs");
+    assert_eq!(string(whoami, "expression"), WHOAMI_CALL);
+    assert_eq!(string(whoami, "output_field"), "os_info");
+
+    let benchmark = read_repo_file("src/atp/benchmark/mod.rs");
+    assert_eq!(count_occurrences(&benchmark, NUM_CPUS_CALL), 1);
+    assert_eq!(count_occurrences(&benchmark, WHOAMI_CALL), 1);
+    assert!(benchmark.contains("unwrap_or_else(|_| \"unknown\".to_string())"));
+    assert!(benchmark.contains("format!(\"{}x {}\""));
+    let lock = read_repo_file("Cargo.lock");
+    assert!(lock.contains("name = \"num_cpus\"\nversion = \"1.17.0\""));
+    assert!(lock.contains("name = \"whoami\"\nversion = \"2.1.2\""));
+
+    let feature = object(audit, "feature_and_schema_contract");
+    assert_eq!(
+        string(feature, "module_gate"),
+        "cfg(feature = benchmark-adapters)"
+    );
+    assert_eq!(
+        string_set(feature, "default_features"),
+        BTreeSet::from([
+            "nightly-outcome-try".to_owned(),
+            "proc-macros".to_owned(),
+        ])
+    );
+    assert!(!boolean(feature, "default_profile_reaches_benchmark_module"));
+    assert_eq!(
+        string_set(feature, "benchmark_adapters_dependency_edges"),
+        BTreeSet::from(["dep:num_cpus".to_owned(), "dep:whoami".to_owned()])
+    );
+    assert_eq!(
+        string_set(feature, "benchmark_environment_fields"),
+        BTreeSet::from([
+            "cpu_info".to_owned(),
+            "env_vars".to_owned(),
+            "memory_info".to_owned(),
+            "network_info".to_owned(),
+            "os_info".to_owned(),
+            "timestamp".to_owned(),
+        ])
+    );
+    let manifest = read_repo_file("Cargo.toml");
+    assert!(manifest.contains("default = [\"proc-macros\", \"nightly-outcome-try\"]"));
+    assert!(manifest.contains("\"dep:num_cpus\""));
+    assert!(manifest.contains("\"dep:whoami\""));
+    let atp_module = read_repo_file("src/atp/mod.rs");
+    assert!(
+        atp_module.contains("#[cfg(feature = \"benchmark-adapters\")]\npub mod benchmark;")
+    );
+
+    let adapters = read_repo_file("src/atp/benchmark/adapters.rs");
+    let profiles = read_repo_file("src/atp/benchmark/profiles.rs");
+    let reports = read_repo_file("src/atp/benchmark/reports.rs");
+    assert_eq!(
+        count_occurrences(&adapters, "BenchmarkEnvironment::collect()?"),
+        4
+    );
+    assert_eq!(
+        count_occurrences(&profiles, "BenchmarkEnvironment::collect()?"),
+        1
+    );
+    assert_eq!(
+        count_occurrences(&benchmark, "BenchmarkEnvironment::collect().unwrap()"),
+        1
+    );
+    assert_eq!(
+        count_occurrences(&reports, "BenchmarkEnvironment::collect().unwrap()"),
+        3
+    );
+    assert_eq!(unsigned(feature, "production_collection_call_count"), 5);
+    assert_eq!(unsigned(feature, "unit_only_collection_call_count"), 4);
+    assert_eq!(
+        unsigned(feature, "integration_host_metadata_assertion_count"),
+        0
+    );
+    let integration = read_repo_file("tests/atp_benchmark_integration.rs");
+    for absent in ["BenchmarkEnvironment", "os_info", "cpu_info"] {
+        assert!(
+            !integration.contains(absent),
+            "integration surface unexpectedly contains {absent}"
+        );
+    }
+
+    let evidence = object(audit, "existing_evidence_assessment");
+    assert_eq!(string(evidence, "evidence_id"), "EVD-HOST-TOPOLOGY");
+    assert_eq!(
+        string(evidence, "coverage_state"),
+        "ADJACENT_NOT_BENCHMARK_CALLSITE_PARITY"
+    );
+    assert_eq!(
+        string(evidence, "dependency_sovereignty_runner_state"),
+        "SCENARIO_NOT_IMPLEMENTED"
+    );
+    assert!(!boolean(evidence, "execution_receipt_present"));
+    let dependency_runner = read_repo_file("scripts/run_dependency_sovereignty_e2e.sh");
+    assert!(!dependency_runner.contains("host_benchmark_metadata"));
+
+    let matrix = object(audit, "required_evidence_matrix");
+    assert_eq!(string(matrix, "status"), "MISSING_NOT_RUN");
+    assert_eq!(unsigned(matrix, "captured_case_count"), 0);
+    assert!(array(matrix, "captured_cases").is_empty());
+    assert_eq!(array(matrix, "platform_cells").len(), 3);
+    assert_eq!(array(matrix, "profile_cells").len(), 3);
+    assert_eq!(array(matrix, "host_contexts").len(), 4);
+    assert_eq!(array(matrix, "required_semantics").len(), 6);
+    assert_eq!(array(matrix, "required_record_fields").len(), 14);
+
+    let gate = object(audit, "cutover_gate");
+    assert_eq!(string(gate, "required_state"), "SAME_OR_BETTER");
+    let gate_rows = array(gate, "rows");
+    assert_eq!(gate_rows.len(), 8);
+    assert_eq!(
+        gate_rows
+            .iter()
+            .filter(|row| string(row, "state") == "STATIC_COMPLETE")
+            .count(),
+        1
+    );
+    assert_eq!(
+        gate_rows
+            .iter()
+            .filter(|row| string(row, "state") == "MISSING")
+            .count(),
+        7
+    );
+    assert_eq!(
+        string(gate, "on_any_missing_or_regressed_row"),
+        "KEEP_INCUMBENT"
+    );
+    assert!(!boolean(gate, "num_cpus_exit_allowed"));
+    assert!(!boolean(gate, "whoami_exit_allowed"));
+    assert!(!boolean(gate, "tracker_closure_allowed"));
+
+    let no_claims = array(audit, "no_claims")
+        .iter()
+        .map(|claim| claim.as_str().expect("no-claim text"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    for required in [
+        "No benchmark adapter",
+        "do not prove",
+        "not a benchmark-adapters replacement receipt",
+        "future evidence obligation",
+        "does not authorize num_cpus or whoami removal",
+    ] {
+        assert!(no_claims.contains(required), "missing no-claim: {required}");
     }
 }
 
