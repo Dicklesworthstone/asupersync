@@ -123,10 +123,61 @@ Cargo edge kinds.
 The future renderer must use unique begin/end marker lines, fail on missing,
 duplicate, nested, or reversed markers, and replace only the bytes between
 those markers. Check mode must render in memory and reject drift without
-writing; update mode must use the same renderer and preserve every byte outside
-the marked region. Until the metadata object, renderer, markers, and focused
-contract land together, the table remains manually maintained and this lane
-makes no generated-document or drift-prevention claim.
+writing; the reviewed update path must use the same rendered bytes and preserve
+every byte outside the marked region. Until the metadata object, renderer,
+markers, and focused contract land together, the table remains manually
+maintained and this lane makes no generated-document or drift-prevention claim.
+
+### Pinned renderer interface and remote boundary
+
+The future implementation must use these exact, trimmed marker lines:
+
+```text
+<!-- BEGIN GENERATED AGENTS KEY DEPENDENCIES -->
+<!-- END GENERATED AGENTS KEY DEPENDENCIES -->
+```
+
+The `### Key Dependencies` heading stays outside the generated region. The
+begin marker must be the next nonblank line after that heading, the end marker
+must precede the next heading, and only the four-column Markdown table belongs
+between them. The markers must not be added to `AGENTS.md` until the metadata
+object, renderer, and focused contract land in the same reviewed change.
+
+The Cargo-built tool must extend the existing argument style with one input
+selector, `--agents-key-dependencies-from-budget PATH`, and exactly one of two
+mutually exclusive modes:
+
+- `--render-agents-key-dependencies` validates the budget artifact and writes
+  only the canonical bytes that belong between the markers to stdout;
+- `--check-agents-key-dependencies` renders in memory, compares the marked
+  region in `AGENTS.md`, exits nonzero on any marker or content drift, and
+  performs no writes.
+
+These modes may accept the existing `--repo-root` selector. They must reject
+ledger-generation options such as `--work-dir`, `--output`, `--source-commit`,
+`--budget-from-ledger`, `--jobs`, `--offline`, `--profiles`, and `--targets`
+rather than silently combining two output contracts. Render stdout contains
+the table only; diagnostics belong on stderr so a caller never mistakes a
+status line for documentation.
+
+Cargo execution remains remote-only. A process running on an RCH worker must
+not be assumed to mutate the local checkout, and the render command must never
+be redirected directly onto `AGENTS.md`: the local shell can truncate the file
+before the remote exit status is known. The reviewed update workflow is:
+
+1. reserve `AGENTS.md`, the budget artifact, generator, contract, and this
+   runbook;
+2. render the canonical table from the exact clean-overlay source snapshot;
+3. review the captured stdout and use `apply_patch` to replace only the bytes
+   between the two marker lines;
+4. rerun read-only check mode and the focused contract against that exact
+   snapshot; and
+5. verify the staged path set and outside-marker bytes before committing.
+
+An automatic local update mode may be added only after its RCH-to-local
+round-trip and failure atomicity are separately demonstrated. Until then,
+render plus reviewed marker-scoped `apply_patch` is the only documented update
+path and makes no automatic-update claim.
 
 ## Ratchet behavior
 
