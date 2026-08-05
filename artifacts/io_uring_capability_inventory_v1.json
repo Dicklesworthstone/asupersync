@@ -2,8 +2,8 @@
   "artifact_id": "io-uring-capability-inventory-v1",
   "schema_version": 1,
   "bead_id": "asupersync-sched-hot-path-perf-bt4y5f.7.1",
-  "captured_date_utc": "2026-08-04",
-  "base_commit": "3630c5e5f88148816bed034b5afa856749316d68",
+  "captured_date_utc": "2026-08-05",
+  "base_commit": "1efe207a647d8d790dbc553d7c275c1ba620dba6",
   "disposition": "STATIC_INVENTORY_COMPLETE_PRODUCTION_UNCHANGED",
   "validation_state": {
     "source_hashes_checked": true,
@@ -69,8 +69,8 @@
     },
     {
       "path": "src/runtime/builder.rs",
-      "sha256": "69e52f8b761944edf5fa038ed3b122ecf9a58da05f5ad15f20d1f8e3e1f8adb1",
-      "line_count": 8393,
+      "sha256": "ced1fd3901169475f1e390324aa11458f97f52288e8d54bd6f9e91cc0ca3570c",
+      "line_count": 8398,
       "role": "platform-reactor policy, dependency injection and whole-reactor force-off"
     },
     {
