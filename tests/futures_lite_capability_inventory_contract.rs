@@ -224,6 +224,18 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     {
         return Err("owned Stream semantics contract must remain complete and fail closed".into());
     }
+    let direct_next = object(owned_contract_value, "next_direct_compile_fail");
+    if direct_next.get("source").and_then(Value::as_str) != Some("src/stream/mod.rs")
+        || direct_next.get("rejected_shape").and_then(Value::as_str)
+            != Some("AddressSensitive: !Unpin; direct StreamExt::next call")
+        || direct_next.get("required_bound").and_then(Value::as_str) != Some("Self: Unpin")
+        || direct_next
+            .get("implementation_state")
+            .and_then(Value::as_str)
+            != Some("SOURCE_AUTHORED_NOT_EXECUTED")
+    {
+        return Err("direct next compile-fail contract must remain source-only".into());
+    }
 
     let expected_profiles: BTreeSet<String> = [
         "FUT-PROFILE-ROOT-NORMAL",
@@ -407,6 +419,35 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     {
         return Err("owned ATP downstream progress must remain source-only".to_owned());
     }
+    let pinned_local = owned_journey
+        .get("pinned_local_downstream_contract")
+        .expect("pinned local downstream contract");
+    let expected_pinned_properties: BTreeSet<String> = [
+        "borrowed_non_static",
+        "rc_local_not_send_or_sync",
+        "phantom_pinned_not_unpin",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    let expected_pinned_observations: BTreeSet<String> = [
+        "forwarded size_hint",
+        "dropped unpolled Next preserves the item",
+        "one item then EOF",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if text(pinned_local, "type") != "DownstreamPinnedLocalStream<'_>"
+        || string_set(pinned_local, "properties") != expected_pinned_properties
+        || text(pinned_local, "forwarding_adapter")
+            != "Pin<Box<S>> through impl Stream for Pin<P>"
+        || text(pinned_local, "extension_method") != "StreamExt::next on Pin<Box<S>>"
+        || string_set(pinned_local, "observations") != expected_pinned_observations
+        || text(pinned_local, "implementation_state") != "SOURCE_AUTHORED_NOT_EXECUTED"
+    {
+        return Err("pinned local downstream contract must remain source-only".to_owned());
+    }
 
     if journeys.len() != 4
         || array(inventory, "rollback_triggers").len() < 8
@@ -583,6 +624,9 @@ fn identity_authority_zero_unknown_and_docs_are_fail_closed() {
         "Dropping a race loser is not",
         "documentation-contract base revision",
         "former blanket claim that every stream poll is losslessly",
+        "pinned-downstream base revision",
+        "DownstreamPinnedLocalStream<'_>",
+        "Neither case has been compiled or run",
         "source-authored and unexecuted",
         "No-claim boundary",
     ] {
@@ -824,6 +868,13 @@ fn production_public_and_comment_only_sites_match_source() {
     assert!(downstream.contains("assert_owned_progress_stream::<AtpReader>();"));
     assert!(downstream.contains("next_owned_progress::<AtpWriter>"));
     assert!(downstream.contains("next_owned_progress::<AtpReader>"));
+    assert!(downstream.contains("struct DownstreamPinnedLocalStream<'a>"));
+    assert!(downstream.contains("_local_only: Rc<()>"));
+    assert!(downstream.contains("_pin: PhantomPinned"));
+    assert!(downstream.contains("item: &'a Cell<Option<u32>>"));
+    assert!(downstream.contains("Stream::size_hint(&stream)"));
+    assert!(downstream.contains("let _pending_next = stream.next();"));
+    assert!(downstream.contains("poll_stream_once(Pin::new(&mut stream))"));
 }
 
 #[test]
@@ -852,6 +903,9 @@ fn owned_stream_semantics_are_explicit_and_fail_closed() {
         "Cancellation and drop behavior is adapter-specific",
         "Dropping the returned future before it resolves releases the mutable",
         "Address-sensitive (`!Unpin`) streams",
+        "```compile_fail",
+        "struct AddressSensitive",
+        "let _next = stream.next(); // `AddressSensitive` does not implement `Unpin`.",
     ] {
         assert!(
             extension.contains(required),

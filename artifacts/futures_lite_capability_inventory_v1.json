@@ -71,6 +71,12 @@
       "forwarding_adapters"
     ],
     "next_future_cancellation": "dropping Next releases its mutable borrow but does not roll back state changes made by the underlying poll_next call",
+    "next_direct_compile_fail": {
+      "source": "src/stream/mod.rs",
+      "rejected_shape": "AddressSensitive: !Unpin; direct StreamExt::next call",
+      "required_bound": "Self: Unpin",
+      "implementation_state": "SOURCE_AUTHORED_NOT_EXECUTED"
+    },
     "documentation_state": "SOURCE_AUTHORED_NOT_EXECUTED",
     "behavior_change": false,
     "cutover_authorized": false
@@ -716,7 +722,23 @@
         "extension_method": "StreamExt::next",
         "implementation_state": "SOURCE_AUTHORED_NOT_EXECUTED"
       },
-      "gap": "The fixture still has no futures-lite edge and now source-authors owned ATP Stream and next-method compile assertions, but those assertions are unexecuted and do not cover progress behavior or the foreign Stream journey."
+      "pinned_local_downstream_contract": {
+        "type": "DownstreamPinnedLocalStream<'_>",
+        "properties": [
+          "borrowed_non_static",
+          "rc_local_not_send_or_sync",
+          "phantom_pinned_not_unpin"
+        ],
+        "forwarding_adapter": "Pin<Box<S>> through impl Stream for Pin<P>",
+        "extension_method": "StreamExt::next on Pin<Box<S>>",
+        "observations": [
+          "forwarded size_hint",
+          "dropped unpolled Next preserves the item",
+          "one item then EOF"
+        ],
+        "implementation_state": "SOURCE_AUTHORED_NOT_EXECUTED"
+      },
+      "gap": "The fixture still has no futures-lite edge and now source-authors owned ATP plus pinned local Stream contracts, but those assertions are unexecuted and do not cover ATP progress behavior or the foreign Stream journey."
     },
     {
       "journey_id": "FUT-JOURNEY-ECOSYSTEM-STREAM",
@@ -908,8 +930,8 @@
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
-      "sha256": "541cbcddab7df36717f441cec05794123b401753512cff346efba8b16aee15ae",
-      "line_count": 881
+      "sha256": "7668b9e6e490b6116b7336d44abaf32b460d03576d4791aba05ec83ad6dde74a",
+      "line_count": 927
     }
   ],
   "rollback_triggers": [
@@ -929,6 +951,7 @@
     "The incumbent future::race and future::or drop losers; this inventory does not treat drop as project-level loser drain or quiescence.",
     "The downstream fixture's source-authored owned ATP compile assertions are unexecuted and do not prove the public ATP ecosystem Stream journey.",
     "The owned Stream semantics documentation freezes a source contract only; it does not prove that every implementation obeys its wake, pinning, size-hint, cancellation, or drop obligations.",
+    "The pinned-local downstream case and direct-next compile-fail rustdoc are source-authored but unexecuted and do not prove compiler-diagnostic stability or runtime behavior.",
     "Marginal package counts do not prove behavioral replacement parity.",
     "The source-authored owned ATP Stream implementations have not been compiled or behaviorally exercised and do not authorize cutover.",
     "No local Cargo fallback is approved when a remote-required proof lane is blocked."

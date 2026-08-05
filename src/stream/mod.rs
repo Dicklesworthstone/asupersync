@@ -231,6 +231,29 @@ pub trait StreamExt: Stream {
     /// depends on the underlying stream's documented cancellation contract.
     /// Address-sensitive (`!Unpin`) streams must be pinned and polled through
     /// [`Stream::poll_next`] instead of this convenience method.
+    ///
+    /// ```compile_fail
+    /// use asupersync::stream::{Stream, StreamExt};
+    /// use std::marker::PhantomPinned;
+    /// use std::pin::Pin;
+    /// use std::task::{Context, Poll};
+    ///
+    /// struct AddressSensitive {
+    ///     _pin: PhantomPinned,
+    /// }
+    ///
+    /// impl Stream for AddressSensitive {
+    ///     type Item = ();
+    ///
+    ///     fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<()>> {
+    ///         let _ = self;
+    ///         Poll::Ready(None)
+    ///     }
+    /// }
+    ///
+    /// let mut stream = AddressSensitive { _pin: PhantomPinned };
+    /// let _next = stream.next(); // `AddressSensitive` does not implement `Unpin`.
+    /// ```
     fn next(&mut self) -> Next<'_, Self>
     where
         Self: Unpin,

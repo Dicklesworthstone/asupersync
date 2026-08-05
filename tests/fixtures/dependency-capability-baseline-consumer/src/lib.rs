@@ -19,9 +19,12 @@ mod tests {
     use serde::de::{DeserializeOwned, SeqAccess, Visitor};
     use serde::ser::Error as _;
     use serde::{Deserialize, Serialize};
+    use std::cell::Cell;
     use std::collections::{BTreeMap, HashMap, VecDeque};
     use std::fmt;
+    use std::marker::PhantomPinned;
     use std::pin::Pin;
+    use std::rc::Rc;
     use std::task::{Context, Poll};
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -411,6 +414,36 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct DownstreamPinnedLocalStream<'a> {
+        item: &'a Cell<Option<u32>>,
+        _local_only: Rc<()>,
+        _pin: PhantomPinned,
+    }
+
+    impl<'a> DownstreamPinnedLocalStream<'a> {
+        fn new(item: &'a Cell<Option<u32>>) -> Self {
+            Self {
+                item,
+                _local_only: Rc::new(()),
+                _pin: PhantomPinned,
+            }
+        }
+    }
+
+    impl Stream for DownstreamPinnedLocalStream<'_> {
+        type Item = u32;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Ready(self.as_ref().get_ref().item.take())
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            let remaining = usize::from(self.item.get().is_some());
+            (remaining, Some(remaining))
+        }
+    }
+
     fn poll_stream_once<S>(stream: Pin<&mut S>) -> Poll<Option<S::Item>>
     where
         S: Stream,
@@ -671,6 +704,19 @@ mod tests {
         assert_eq!(poll_stream_once(stream.as_mut()), Poll::Ready(Some(6)));
         assert_eq!(poll_stream_once(stream.as_mut()), Poll::Ready(None));
         assert_eq!(poll_stream_once(stream.as_mut()), Poll::Ready(None));
+    }
+
+    #[test]
+    fn downstream_pinned_local_borrowed_stream_uses_forwarding_adapter() {
+        let item = Cell::new(Some(9));
+        let mut stream = Box::pin(DownstreamPinnedLocalStream::new(&item));
+
+        assert_eq!(Stream::size_hint(&stream), (1, Some(1)));
+        {
+            let _pending_next = stream.next();
+        }
+        assert_eq!(poll_stream_once(Pin::new(&mut stream)), Poll::Ready(Some(9)));
+        assert_eq!(poll_stream_once(Pin::new(&mut stream)), Poll::Ready(None));
     }
 
     #[test]

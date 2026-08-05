@@ -119,9 +119,23 @@ compiled as rustdoc or executed, and it does not prove that every existing
 implementation satisfies the documented wake, pinning, size-hint, cancellation,
 or drop obligations.
 
+At pinned-downstream base revision
+`64a80ef684d277238a5b2e19ccef684ebcf7984b`, the standalone consumer adds
+`DownstreamPinnedLocalStream<'_>`. It borrows its item cell, carries `Rc` local
+state, and includes `PhantomPinned`, so the same custom stream simultaneously
+exercises a non-`'static`, non-`Send`/`Sync`, and `!Unpin` shape. The fixture
+holds it behind `Pin<Box<_>>`, names `StreamExt::next` on that forwarding
+adapter, drops the unpolled `Next`, and then source-authors size-hint, item, and
+EOF observations. The `StreamExt::next` rustdoc also adds the inverse
+compile-fail case for calling `next` directly on an address-sensitive value.
+
+Neither case has been compiled or run. They do not claim a stable compiler
+diagnostic, runtime cancellation behavior, ATP progress behavior, ecosystem
+trait parity, or permission to remove the incumbent dependency.
+
 The reviewed ATP source-pin row is refreshed in the first increment. At that
 base revision, seven unrelated pins had already drifted. The follow-on
-increment refreshes the reviewed downstream-fixture row, leaving six unrelated
+increments refresh the reviewed downstream-fixture row, leaving six unrelated
 stale pins: `Cargo.toml`, `Cargo.lock`, `src/sync/notify.rs`, the capability
 registry, the marginal ledger, and the API surface map. Those six rows are not
 blindly repinned here, and no focused-contract or broad-health claim is made.
