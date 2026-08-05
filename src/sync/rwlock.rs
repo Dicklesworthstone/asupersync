@@ -620,13 +620,9 @@ impl<T> RwLock<T> {
                 None
             } else {
                 // We were granted the lock but never took the guard.
+                // Lock-order acquisition is recorded only when the future
+                // observes this grant on its next poll, so nothing is released here.
                 state.readers = state.readers.saturating_sub(1);
-
-                // Record lock release for ordering tracking - this read lock was
-                // granted (record_acquire was called) but cancelled before guard creation
-                if let Some(rank) = self.rank {
-                    lock_ordering::record_release(self.name, rank);
-                }
 
                 if state.readers == 0 && state.writer_waiters > 0 {
                     let waker = Self::pop_writer_waiter(&mut state);
@@ -684,14 +680,10 @@ impl<T> RwLock<T> {
                     }
                 } else {
                     // We were granted the lock but never took the guard.
+                    // Lock-order acquisition is recorded only when the future
+                    // observes this grant on its next poll, so nothing is released here.
                     state.writer_waiters = state.writer_waiters.saturating_sub(1);
                     state.writer_active = false;
-
-                    // Record lock release for ordering tracking - this write lock was
-                    // granted (record_acquire was called) but cancelled before guard creation
-                    if let Some(rank) = self.rank {
-                        lock_ordering::record_release(self.name, rank);
-                    }
 
                     if poisoned {
                         let wakers = Self::queued_waiter_wakers(&mut state);
@@ -5207,34 +5199,51 @@ mod metamorphic_tests {
         crate::test_complete!("audit_rwlock_no_read_to_write_upgrade");
     }
 
-    /// Regression test for asupersync-aqva2c: ensure abandon_read_waiter and
-    /// abandon_write_waiter properly call lock_ordering::record_release when
-    /// cleaning up granted-but-unclaimed locks.
+    /// Regression test for asupersync-0tv9bv item 3: abandoning a pre-granted
+    /// waiter before its next poll must not release a lock-order acquisition
+    /// that never happened. A separate lock with the same diagnostic identity
+    /// makes an unmatched release observable.
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[test]
-    fn abandon_waiter_calls_lock_ordering_record_release() {
-        init_test("abandon_waiter_calls_lock_ordering_record_release");
+    fn abandoning_pregranted_waiter_preserves_existing_lock_order_record() {
+        fn tracked_regions_locks() -> usize {
+            crate::sync::lock_ordering::current_held_locks()
+                .get(&LockRank::Regions)
+                .map_or(0, |locks| {
+                    locks
+                        .iter()
+                        .filter(|lock| lock.name == "regions_table")
+                        .count()
+                })
+        }
+
+        init_test("abandoning_pregranted_waiter_preserves_existing_lock_order_record");
+        crate::sync::lock_ordering::clear_held_locks();
         let cx = test_cx();
 
-        // Test abandon_read_waiter with granted lock
+        // A queued reader is pre-granted when the blocking writer releases,
+        // but the reader future has not yet polled to record its acquisition.
         {
-            let lock = RwLock::with_name("test_abandon_read", 42_u32);
+            let sentinel = RwLock::with_name("regions_table", 0_u32);
+            let lock = RwLock::with_name("regions_table", 42_u32);
+            let sentinel_guard = block_on(sentinel.read(&cx)).expect("sentinel read");
+            let blocking_writer = block_on(lock.write(&cx)).expect("blocking write");
+            assert_eq!(tracked_regions_locks(), 2);
 
-            // Block with writer so reader will queue
-            let _writer = block_on(lock.write(&cx)).expect("write");
-
-            // Start read future but don't complete it
             let mut read_fut = lock.read(&cx);
             let pending = poll_once(&mut read_fut).is_none();
             crate::assert_with_log!(pending, "reader queued", true, pending);
 
-            // Release writer to grant reader but don't poll reader
-            drop(_writer);
+            drop(blocking_writer);
+            assert_eq!(tracked_regions_locks(), 1);
 
-            // Drop read future - this should call abandon_read_waiter
-            // and properly call lock_ordering::record_release
             drop(read_fut);
+            assert_eq!(
+                tracked_regions_locks(),
+                1,
+                "abandoning an unpolled read grant must preserve the sentinel record"
+            );
 
-            // Verify lock is in clean state (the fix prevents lock ordering leaks)
             let state = lock.debug_state();
             crate::assert_with_log!(
                 state.readers == 0 && !state.writer_active,
@@ -5242,28 +5251,34 @@ mod metamorphic_tests {
                 true,
                 state.readers == 0 && !state.writer_active
             );
+
+            drop(sentinel_guard);
+            assert_eq!(tracked_regions_locks(), 0);
         }
 
-        // Test abandon_write_waiter with granted lock
+        // The same invariant applies to a queued writer pre-granted by the
+        // final blocking reader.
         {
-            let lock = RwLock::with_name("test_abandon_write", 42_u32);
+            let sentinel = RwLock::with_name("regions_table", 0_u32);
+            let lock = RwLock::with_name("regions_table", 42_u32);
+            let sentinel_guard = block_on(sentinel.read(&cx)).expect("sentinel read");
+            let blocking_reader = block_on(lock.read(&cx)).expect("blocking read");
+            assert_eq!(tracked_regions_locks(), 2);
 
-            // Block with reader so writer will queue
-            let _reader = block_on(lock.read(&cx)).expect("read");
-
-            // Start write future but don't complete it
             let mut write_fut = lock.write(&cx);
             let pending = poll_once(&mut write_fut).is_none();
             crate::assert_with_log!(pending, "writer queued", true, pending);
 
-            // Release reader to grant writer but don't poll writer
-            drop(_reader);
+            drop(blocking_reader);
+            assert_eq!(tracked_regions_locks(), 1);
 
-            // Drop write future - this should call abandon_write_waiter
-            // and properly call lock_ordering::record_release
             drop(write_fut);
+            assert_eq!(
+                tracked_regions_locks(),
+                1,
+                "abandoning an unpolled write grant must preserve the sentinel record"
+            );
 
-            // Verify lock is in clean state (the fix prevents lock ordering leaks)
             let state = lock.debug_state();
             crate::assert_with_log!(
                 !state.writer_active && state.writer_waiters == 0,
@@ -5271,9 +5286,15 @@ mod metamorphic_tests {
                 true,
                 !state.writer_active && state.writer_waiters == 0
             );
+
+            drop(sentinel_guard);
+            assert_eq!(tracked_regions_locks(), 0);
         }
 
-        crate::test_complete!("abandon_waiter_calls_lock_ordering_record_release");
+        crate::sync::lock_ordering::clear_held_locks();
+        crate::test_complete!(
+            "abandoning_pregranted_waiter_preserves_existing_lock_order_record"
+        );
     }
 
     #[cfg(debug_assertions)]
