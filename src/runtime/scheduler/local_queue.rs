@@ -520,9 +520,13 @@ impl Stealer {
                     // br-asupersync-5oll2p: keep the presence index in
                     // sync — the task moves from src to dest, so remove
                     // from src.presence and insert into dest.presence.
+                    let inserted = dest.presence.insert(task_id);
+                    debug_assert!(
+                        inserted,
+                        "steal_batch destination already contained transferred task {task_id:?}"
+                    );
                     src.presence.remove(&task_id);
                     dest.queue.push(task_id);
-                    dest.presence.insert(task_id);
                     stolen += 1;
                 }
             }
@@ -1197,6 +1201,20 @@ mod tests {
         assert_eq!(src.pop(), Some(task(2)));
         assert_eq!(src.pop(), Some(task(1)));
         assert_eq!(src.pop(), None);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "steal_batch destination already contained transferred task")]
+    fn steal_batch_surfaces_duplicate_destination_presence() {
+        let state = LocalQueue::test_state(1);
+        let src = LocalQueue::new(Arc::clone(&state));
+        let dest = LocalQueue::new(Arc::clone(&state));
+
+        src.push(task(1));
+        assert!(dest.inner.lock().presence.insert(task(1)));
+
+        let _ = src.stealer().steal_batch(&dest);
     }
 
     #[test]
