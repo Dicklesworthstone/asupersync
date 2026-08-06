@@ -275,8 +275,13 @@ cutover state remain unchanged at `KEEP_UNTIL_PARITY` /
 
 At base revision `050fd0f08e4cf127e348bbf545c1e46cc392f6b5`, bead
 `asupersync-d24mms.6.4` adds the allocation-free helper subset beside the
-incumbent in `crate::util::future`. This is `STATIC_SOURCE_PROGRESS`; its
-executable state is `NOT_RUN_STATIC_ONLY`, and the bead remains open.
+incumbent in `crate::util::future`. Revisions
+`da8d632b5ef51ea4074589aed0664cb8f5e33d41` and
+`9f3684b48af00f93a6717af8575bbb4c984d5873` contain the two source increments.
+This is `PARTIAL_STATIC_SOURCE_PROGRESS`; its executable state is
+`NOT_RUN_STATIC_ONLY`, and the bead remains open. The current receipt pins the
+whole source and independently hashes the helper-only projection before the A3
+blocking kernel.
 
 The subset deliberately uses the standard library where it already provides
 the required semantics:
@@ -313,6 +318,36 @@ first/second/later yield sequence, a pending future that never wakes, zip poll
 order and completed-child suppression, retained-output and unfinished-child
 drop, and left-biased `or` selection, fallthrough, and loser drop. None of those
 cases has been executed in these static-only increments.
+
+The machine receipt names the exact seven authored functions. They remain
+source cases, not unit-test evidence. There is no standalone property or
+differential corpus, LabRuntime/DPOR scheduling receipt, deterministic trace
+receipt, or expiry-independent replacement for the incumbent oracle.
+
+`race` remains an explicit policy boundary. The incumbent chooses its first
+child with an ambient random generator on every wrapper poll and drops the
+other generic future after a winner is returned. A raw `Future` exposes only
+poll and drop: it has no generic cancellation acknowledgement, obligation
+ledger, or drain-to-quiescence protocol. Implementing the same drop-only shape
+would preserve the incumbent's local behavior but would not satisfy the
+project's stronger structured loser-drain contract. Ambient per-poll randomness
+would also violate deterministic trace replay. The recorded decision is
+`KEEP_INCUMBENT_UNTIL_STRUCTURED_RACE_POLICY`; a drop-only owned race is not
+authorized.
+
+The stale empty/large-collection requirement came from treating `join_all` as
+live. It is not a reason to invent that API: A1 proved the only occurrence is a
+comment and the pinned dependency exports no such helper. The actual `zip`,
+`or`, and `race` surfaces are two-future, O(1)-state combinators.
+
+Three `BLOCKED_GAP` rows preserve what remains:
+
+- `FUT-A4-GAP-16`: no focused execution or standalone property,
+  differential, lab, or DPOR evidence for the seven source-authored cases;
+- `FUT-A4-GAP-17`: generic-future drop cannot establish structured race-loser
+  cancellation, obligation resolution, drain, and quiescence;
+- `FUT-A4-GAP-18`: no deterministic race fairness/trace policy or
+  expiry-independent race corpus.
 
 These increments do not implement randomized `race` and do not invent a
 comment-only `join_all` target. They also do not migrate an incumbent call site,
@@ -493,5 +528,9 @@ static contract. It does not prove that its authored cases ran, that all
 wake/park interleavings are covered, that runtime or foreign-executor contexts
 are safe, that cancellation reaches quiescence, or that idle CPU and latency
 match the incumbent.
+The FUT A4 receipt likewise does not turn seven source-authored cases into
+executed proof, implement `race`, treat comment-only `join_all` as live, prove
+deterministic fairness, or equate dropping a generic future with structured
+loser drain and quiescence.
 
 <!-- END FUTURES LITE CAPABILITY INVENTORY -->

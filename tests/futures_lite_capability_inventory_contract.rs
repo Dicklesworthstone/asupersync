@@ -1,6 +1,6 @@
 //! Fail-closed inventory contract for the incumbent futures-lite capability.
 //!
-//! Beads: asupersync-d24mms.6.1, asupersync-d24mms.6.3
+//! Beads: asupersync-d24mms.6.1, asupersync-d24mms.6.3, asupersync-d24mms.6.4
 //! Capability: CAP-FUTURES-STREAMS
 //! Fixture: the inventory artifact declared by `ARTIFACT_PATH` below.
 //!
@@ -36,6 +36,7 @@ const CAPABILITY_REGISTRY_PATH: &str = "artifacts/dependency_capability_registry
 const MARGINAL_LEDGER_PATH: &str = "artifacts/dependency_marginal_ledger_v1.json";
 const BEAD_ID: &str = "asupersync-d24mms.6.1";
 const A3_BEAD_ID: &str = "asupersync-d24mms.6.3";
+const A4_BEAD_ID: &str = "asupersync-d24mms.6.4";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const CAPABILITY_ID: &str = "CAP-FUTURES-STREAMS";
 const BASELINE_REVISION: &str = "ed1c0c3ae4ba68947cd2c0212f1aab2242f60724";
@@ -232,6 +233,126 @@ fn validate_a3_receipt(inventory: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_a4_receipt(inventory: &Value) -> Result<(), String> {
+    let receipt = inventory
+        .get("a4_helper_receipt")
+        .expect("A4 helper receipt");
+    if text(receipt, "owner_bead") != A4_BEAD_ID
+        || text(receipt, "first_base_revision")
+            != "050fd0f08e4cf127e348bbf545c1e46cc392f6b5"
+        || string_set(receipt, "implementation_revisions")
+            != [
+                "da8d632b5ef51ea4074589aed0664cb8f5e33d41",
+                "9f3684b48af00f93a6717af8575bbb4c984d5873",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        || text(receipt, "source_status") != "PARTIAL_STATIC_SOURCE_PROGRESS"
+        || text(receipt, "execution_status") != "NOT_RUN_STATIC_ONLY"
+        || text(receipt, "module") != "crate::util::future"
+        || receipt.get("incumbent_call_sites_migrated").and_then(Value::as_u64) != Some(0)
+        || receipt.get("cutover_authorized") != Some(&Value::Bool(false))
+        || receipt.get("closure_allowed") != Some(&Value::Bool(false))
+    {
+        return Err("A4 receipt must remain partial, static-only, and fail closed".to_owned());
+    }
+
+    let source_pin = object(receipt, "current_source_pin");
+    if source_pin.get("path").and_then(Value::as_str) != Some("src/future.rs")
+        || source_pin.get("sha256").and_then(Value::as_str)
+            != Some("fd0a1defa1efef7d42a918fc8a390ce3e851e4dfe00d3b412579455e25d88e41")
+        || source_pin.get("line_count").and_then(Value::as_u64) != Some(858)
+    {
+        return Err("A4 current source pin drift".to_owned());
+    }
+    let source_bytes = read_repo_bytes("src/future.rs");
+    if hex_bytes(&Sha256::digest(&source_bytes))
+        != "fd0a1defa1efef7d42a918fc8a390ce3e851e4dfe00d3b412579455e25d88e41"
+        || read_repo_file("src/future.rs").lines().count() != 858
+    {
+        return Err("A4 current source no longer matches its receipt".to_owned());
+    }
+
+    let projection = object(receipt, "helper_projection");
+    let source = read_repo_file(text(projection, "path"));
+    let start_marker = text(projection, "start_marker");
+    let end_marker = text(projection, "end_marker");
+    let start = source
+        .find(start_marker)
+        .ok_or_else(|| "A4 helper start marker is missing".to_owned())?;
+    let relative_end = source[start..]
+        .find(end_marker)
+        .ok_or_else(|| "A4 helper end marker is missing".to_owned())?;
+    let helper_source = &source.as_bytes()[start..start + relative_end];
+    if hex_bytes(&Sha256::digest(helper_source)) != text(projection, "sha256") {
+        return Err("A4 helper projection hash drift".to_owned());
+    }
+
+    let helpers = array(receipt, "live_helper_matrix");
+    let expected_helpers: BTreeMap<&str, &str> = BTreeMap::from([
+        ("FUT-API-POLL-FN", "SOURCE_AUTHORED_NOT_EXECUTED"),
+        ("FUT-API-POLL-ONCE", "SOURCE_AUTHORED_NOT_EXECUTED"),
+        ("FUT-API-YIELD-NOW", "SOURCE_AUTHORED_NOT_EXECUTED"),
+        ("FUT-API-PENDING", "SOURCE_AUTHORED_NOT_EXECUTED"),
+        ("FUT-API-ZIP", "SOURCE_AUTHORED_NOT_EXECUTED"),
+        ("FUT-API-OR", "SOURCE_AUTHORED_NOT_EXECUTED"),
+        ("FUT-API-RACE", "MISSING_BLOCKED_POLICY"),
+        (
+            "FUT-API-JOIN-ALL-MENTION",
+            "COMMENT_ONLY_NOT_A_LIVE_HELPER",
+        ),
+    ]);
+    if helpers.len() != expected_helpers.len() {
+        return Err("A4 helper matrix must contain the exact corrected live set".to_owned());
+    }
+    for (api_id, expected_status) in expected_helpers {
+        let row = find_row(helpers, "api_id", api_id);
+        if text(row, "source_status") != expected_status
+            || text(row, "poll_policy").is_empty()
+            || text(row, "allocation_policy").is_empty()
+        {
+            return Err(format!("A4 helper matrix drift: {api_id}"));
+        }
+    }
+
+    let expected_tests: BTreeSet<String> = [
+        "poll_fn_forwards_context_and_calls_once_per_wrapper_poll",
+        "poll_once_observes_ready_and_pending_without_waiting",
+        "yield_now_wakes_once_then_remains_ready",
+        "pending_never_completes_or_schedules_a_wake",
+        "zip_polls_left_then_right_and_stops_polling_completed_children",
+        "dropping_pending_zip_drops_retained_output_and_unfinished_child",
+        "or_is_left_biased_and_drops_the_loser_with_the_wrapper",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if string_set(receipt, "authored_inline_tests") != expected_tests {
+        return Err("A4 receipt must list the exact seven authored source cases".to_owned());
+    }
+    for test_name in expected_tests {
+        if !source.contains(&format!("fn {test_name}()")) {
+            return Err(format!("A4 authored source case is missing: {test_name}"));
+        }
+    }
+    if source.contains("pub(crate) fn race") || source.contains("join_all") {
+        return Err("A4 source must not invent the blocked race or comment-only helper".to_owned());
+    }
+
+    let race = object(receipt, "race_policy_boundary");
+    if race.get("decision").and_then(Value::as_str)
+        != Some("KEEP_INCUMBENT_UNTIL_STRUCTURED_RACE_POLICY")
+        || race.get("drop_only_owned_race_allowed").and_then(Value::as_bool) != Some(false)
+        || !text(receipt, "completion_boundary").contains("post-Ready repoll")
+        || array(receipt, "missing_terminal_evidence").len() != 7
+    {
+        return Err("A4 race, completion, or terminal-evidence boundary drift".to_owned());
+    }
+
+    Ok(())
+}
+
 fn validate_current_snapshot(inventory: &Value) -> Result<(), String> {
     let snapshot = inventory
         .get("post_baseline_current_snapshot")
@@ -420,6 +541,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     }
     validate_state_fields(inventory, "$")?;
     validate_a3_receipt(inventory)?;
+    validate_a4_receipt(inventory)?;
     validate_current_snapshot(inventory)?;
 
     let owned_contract_value = inventory
@@ -716,12 +838,15 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         "FUT-A3-GAP-13",
         "FUT-A3-GAP-14",
         "FUT-A3-GAP-15",
+        "FUT-A4-GAP-16",
+        "FUT-A4-GAP-17",
+        "FUT-A4-GAP-18",
     ]
     .into_iter()
     .map(str::to_owned)
     .collect();
     if row_ids(gaps, "gap_id") != expected_gaps {
-        return Err("all ADR, A1, and A3-discovered gaps must remain routed".to_owned());
+        return Err("all ADR, A1, A3, and A4-discovered gaps must remain routed".to_owned());
     }
 
     let journeys = array(inventory, "downstream_and_e2e");
@@ -973,6 +1098,12 @@ fn identity_authority_zero_unknown_and_docs_are_fail_closed() {
         "FUT-A3-GAP-13",
         "FUT-A3-GAP-14",
         "FUT-A3-GAP-15",
+        "FUT A4 static helper progress",
+        "PARTIAL_STATIC_SOURCE_PROGRESS",
+        "KEEP_INCUMBENT_UNTIL_STRUCTURED_RACE_POLICY",
+        "FUT-A4-GAP-16",
+        "FUT-A4-GAP-17",
+        "FUT-A4-GAP-18",
         "No-claim boundary",
     ] {
         assert!(doc.contains(required), "missing docs marker: {required}");
@@ -1621,6 +1752,16 @@ fn malformed_inventory_mutations_fail_closed() {
     let mut a3_cutover = canonical.clone();
     a3_cutover["a3_block_on_receipt"]["cutover_authorized"] = Value::Bool(true);
     assert!(validate_inventory(&a3_cutover).is_err());
+
+    let mut a4_promoted = canonical.clone();
+    a4_promoted["a4_helper_receipt"]["execution_status"] =
+        Value::String("EXECUTED_CONTRACT".to_owned());
+    assert!(validate_inventory(&a4_promoted).is_err());
+
+    let mut drop_only_race = canonical.clone();
+    drop_only_race["a4_helper_receipt"]["race_policy_boundary"]
+        ["drop_only_owned_race_allowed"] = Value::Bool(true);
+    assert!(validate_inventory(&drop_only_race).is_err());
 
     let mut baseline_rewritten = canonical;
     baseline_rewritten["post_baseline_current_snapshot"]["historical_baseline_preserved"] =

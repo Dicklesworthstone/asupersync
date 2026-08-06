@@ -238,6 +238,118 @@
     "cutover_authorized": false,
     "closure_allowed": false
   },
+  "a4_helper_receipt": {
+    "owner_bead": "asupersync-d24mms.6.4",
+    "first_base_revision": "050fd0f08e4cf127e348bbf545c1e46cc392f6b5",
+    "implementation_revisions": [
+      "da8d632b5ef51ea4074589aed0664cb8f5e33d41",
+      "9f3684b48af00f93a6717af8575bbb4c984d5873"
+    ],
+    "source_status": "PARTIAL_STATIC_SOURCE_PROGRESS",
+    "execution_status": "NOT_RUN_STATIC_ONLY",
+    "module": "crate::util::future",
+    "visibility": "crate-private alongside-incumbent",
+    "current_source_pin": {
+      "path": "src/future.rs",
+      "sha256": "fd0a1defa1efef7d42a918fc8a390ce3e851e4dfe00d3b412579455e25d88e41",
+      "line_count": 858
+    },
+    "helper_projection": {
+      "path": "src/future.rs",
+      "start_marker": "/// Builds a future that delegates every poll to an `FnMut` closure.",
+      "end_marker": "/// Reason the owned blocking kernel refused to poll a future.",
+      "sha256": "91219a9fb6dd5e3674c68edc2cd6c1b15ea8a450cf998c5d501f4f9dc25d8c4d"
+    },
+    "live_helper_matrix": [
+      {
+        "api_id": "FUT-API-POLL-FN",
+        "implementation": "std::future::poll_fn re-export",
+        "source_status": "SOURCE_AUTHORED_NOT_EXECUTED",
+        "poll_policy": "one closure call per wrapper poll with the caller Context",
+        "allocation_policy": "no owned heap allocation"
+      },
+      {
+        "api_id": "FUT-API-POLL-ONCE",
+        "implementation": "owned async wrapper around one pinned inner poll",
+        "source_status": "SOURCE_AUTHORED_NOT_EXECUTED",
+        "poll_policy": "one inner poll; Ready maps to Some and Pending maps to None",
+        "allocation_policy": "stack-owned state with no explicit heap allocation"
+      },
+      {
+        "api_id": "FUT-API-YIELD-NOW",
+        "implementation": "owned YieldNow future",
+        "source_status": "SOURCE_AUTHORED_NOT_EXECUTED",
+        "poll_policy": "first poll self-wakes and yields; later polls remain Ready",
+        "allocation_policy": "one boolean inline"
+      },
+      {
+        "api_id": "FUT-API-PENDING",
+        "implementation": "std::future::pending re-export",
+        "source_status": "SOURCE_AUTHORED_NOT_EXECUTED",
+        "poll_policy": "always Pending without scheduling a wake",
+        "allocation_policy": "no owned heap allocation"
+      },
+      {
+        "api_id": "FUT-API-ZIP",
+        "implementation": "owned two-future Zip",
+        "source_status": "SOURCE_AUTHORED_NOT_EXECUTED",
+        "poll_policy": "left then right; completed children are dropped and never repolled",
+        "allocation_policy": "two children and two optional outputs inline; O(1) in pair size"
+      },
+      {
+        "api_id": "FUT-API-OR",
+        "implementation": "owned left-biased two-future Or",
+        "source_status": "SOURCE_AUTHORED_NOT_EXECUTED",
+        "poll_policy": "left first; right only after left returns Pending",
+        "allocation_policy": "two children inline; O(1) in pair size"
+      },
+      {
+        "api_id": "FUT-API-RACE",
+        "implementation": "missing",
+        "source_status": "MISSING_BLOCKED_POLICY",
+        "poll_policy": "incumbent randomizes first poll order on every wrapper poll",
+        "allocation_policy": "unresolved with deterministic fairness policy"
+      },
+      {
+        "api_id": "FUT-API-JOIN-ALL-MENTION",
+        "implementation": "not applicable",
+        "source_status": "COMMENT_ONLY_NOT_A_LIVE_HELPER",
+        "poll_policy": "not applicable",
+        "allocation_policy": "empty and large collection requirements are not applicable to this comment-only surface"
+      }
+    ],
+    "authored_inline_tests": [
+      "poll_fn_forwards_context_and_calls_once_per_wrapper_poll",
+      "poll_once_observes_ready_and_pending_without_waiting",
+      "yield_now_wakes_once_then_remains_ready",
+      "pending_never_completes_or_schedules_a_wake",
+      "zip_polls_left_then_right_and_stops_polling_completed_children",
+      "dropping_pending_zip_drops_retained_output_and_unfinished_child",
+      "or_is_left_biased_and_drops_the_loser_with_the_wrapper"
+    ],
+    "race_policy_boundary": {
+      "incumbent_first_poll_policy": "a newly seeded fastrand Rng advances and chooses the first child on every wrapper poll",
+      "incumbent_loser_policy": "the losing future is dropped when the completed race wrapper is dropped",
+      "project_required_loser_policy": "structured cancellation plus obligation-aware drain and quiescence",
+      "generic_future_limitation": "Future exposes poll and drop but no generic cancellation acknowledgement, obligation ledger, or drain-to-quiescence protocol",
+      "determinism_conflict": "ambient thread-local randomness cannot establish deterministic trace replay",
+      "decision": "KEEP_INCUMBENT_UNTIL_STRUCTURED_RACE_POLICY",
+      "drop_only_owned_race_allowed": false
+    },
+    "completion_boundary": "Future does not generally promise a post-Ready repoll contract; only the authored YieldNow explicitly remains Ready on later polls.",
+    "incumbent_call_sites_migrated": 0,
+    "missing_terminal_evidence": [
+      "focused compile and execution of the seven authored source cases",
+      "standalone property and differential corpus for every source-authored helper",
+      "LabRuntime or DPOR scheduling, cancellation, and trace evidence",
+      "expiry-independent tests that do not require the incumbent oracle",
+      "structured race cancellation, loser drain, and quiescence design",
+      "deterministic race fairness and trace policy",
+      "migration of any production or test call site"
+    ],
+    "cutover_authorized": false,
+    "closure_allowed": false
+  },
   "post_baseline_current_snapshot": {
     "captured_date_utc": "2026-08-06",
     "historical_baseline_preserved": true,
@@ -1168,6 +1280,24 @@
       "summary": "The owned blocking kernel has no incumbent comparison for idle CPU or completion latency.",
       "owner_bead": "asupersync-d24mms.6.3",
       "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-A4-GAP-16",
+      "summary": "The seven source-authored helper cases have no focused execution receipt and no standalone property, differential, LabRuntime, or DPOR evidence.",
+      "owner_bead": "asupersync-d24mms.6.4",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-A4-GAP-17",
+      "summary": "A raw generic Future exposes no cancellation acknowledgement, obligation ledger, or drain protocol, so a drop-only owned race cannot satisfy the project's structured loser-drain and quiescence requirement.",
+      "owner_bead": "asupersync-d24mms.6.4",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-A4-GAP-18",
+      "summary": "No deterministic fairness and trace policy replaces the incumbent race's ambient per-poll random ordering, and no expiry-independent race corpus exists.",
+      "owner_bead": "asupersync-d24mms.6.4",
+      "state": "BLOCKED_GAP"
     }
   ],
   "source_pins": [
@@ -1267,6 +1397,7 @@
     "The pinned-local downstream case and direct-next compile-fail rustdoc are source-authored but unexecuted and do not prove compiler-diagnostic stability or runtime behavior.",
     "The A2 acceptance matrix is a fail-closed status inventory, not a terminal receipt; closure remains forbidden while any required receipt is missing.",
     "The A3 blocking-kernel receipt is static-only: authored inline cases, source hashes, and wake-order review do not prove execution, interleaving completeness, runtime-context safety, cancellation quiescence, idle CPU, latency parity, or cutover readiness.",
+    "The A4 helper receipt is partial and static-only: it does not implement race, treat comment-only join_all as live, convert generic Future drop into structured loser drain, prove deterministic fairness, or promote authored source cases to executed evidence.",
     "Marginal package counts do not prove behavioral replacement parity.",
     "The source-authored owned ATP Stream implementations have not been compiled or behaviorally exercised and do not authorize cutover.",
     "No local Cargo fallback is approved when a remote-required proof lane is blocked."
