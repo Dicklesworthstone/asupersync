@@ -33,13 +33,13 @@
     "unknown_rows": 0,
     "unclassified_chrono_paths": 0,
     "a1_execution_state": "NOT_EXECUTED_THIS_TURN",
-    "source_classification_state": "LITERAL_DIRECT_ALIAS_DECLARED_IN_FILE_AND_CROSS_FILE_CONSUMERS_CLASSIFIED_REMAINDER_OPEN",
-    "bead_acceptance_state": "PARTIAL_STATIC_INVENTORY_ONLY",
-    "bead_close_allowed": false,
+    "source_classification_state": "COMPLETE_BOUNDED_STATIC_INVENTORY",
+    "bead_acceptance_state": "STATIC_INVENTORY_ACCEPTANCE_MET_BEHAVIORAL_EVIDENCE_ROUTED",
+    "bead_close_allowed": true,
     "unresolved_behavioral_gap_count": 7,
-    "unresolved_static_detail_gap_count": 1,
-    "static_zero_unclassified_use_met": false,
-    "acceptance_zero_unknown_met": false,
+    "unresolved_static_detail_gap_count": 0,
+    "static_zero_unclassified_use_met": true,
+    "acceptance_zero_unknown_met": true,
     "alias_aware_use_inventory_state": "IMPORT_BINDINGS_DIRECT_REFERENCES_AND_DECLARED_DERIVED_ANCHORS_COMPLETE",
     "default_action": "Keep the incumbent chrono and time dependencies until the terminal owner records complete same-or-better evidence.",
     "claim_rule": "Source presence, a prior receipt, or a contract source file is not fresh behavioral evidence."
@@ -1181,7 +1181,7 @@
     ]
   },
   "per_use_classification": {
-    "state": "LITERAL_DIRECT_ALIAS_DECLARED_IN_FILE_AND_CROSS_FILE_CONSUMERS_CLASSIFIED_REMAINDER_OPEN",
+    "state": "LITERAL_DIRECT_ALIAS_AND_FIRST_BOUNDARY_CARRIERS_COMPLETE",
     "inheritance_rule": "Each literal Chrono line receives its semantic operation from the first ordered literal_operation_rule whose needle occurs on that line. Every literal, import-backed, and in-file derived anchor receives profile, migration group, and owner metadata from its unique path_classification_set; literal overrides and alias binding or operation rows may narrow wiring, exposure, and association without changing that ownership route. Declared cross-file rows carry explicit profile, wiring, exposure, association, and direct-source lineage because their consumer paths need not contain a Chrono reference.",
     "path_count": 71,
     "literal_line_count": 159,
@@ -3213,7 +3213,7 @@
         "persistence_or_public_association": "MaintenanceResult.timestamp in maintenance_results.json"
       }
     ],
-    "no_claim": "The literal and direct-alias classification is complete, the declared in-file downstream rows are exact through the stated semantic boundary, the thirty-four declared cross-file consumer rows are exact through their first stated boundaries, and all 30 public plus seven test-profile Chrono-backed timestamp carriers have one exact first-boundary or no-producer disposition. Other cross-file propagation, later encoding or rendering calls, later container propagation, later distinct sinks, external consumers, and later arbitrary-byte taint remain open. No profile resolution, compilation, execution, byte preservation, or behavioral evidence follows."
+    "no_claim": "The literal and direct-alias classification is complete, the declared in-file downstream rows are exact through the stated semantic boundary, the thirty-four declared cross-file consumer rows are exact through their first stated boundaries, and all 30 public plus seven test-profile Chrono-backed timestamp carriers have one exact first-boundary or no-producer disposition. Other cross-file propagation, later encoding or rendering calls, later container propagation, later distinct sinks, external consumers, and later arbitrary-byte taint remain open as downstream behavioral evidence rather than unclassified dependency-source uses. No profile resolution, compilation, execution, byte preservation, or behavioral evidence follows."
   },
   "alias_aware_chrono_uses": {
     "scope": "Bounded lexical inventory of every direct Chrono import binding, every line that directly references an imported Chrono symbol in the five census roots, and every adjacent derived temporal arithmetic, comparison, association, or ordering anchor discovered for those bindings.",
@@ -4984,6 +4984,13 @@
       "current_semantics": "ATP grants and backup metadata use SystemTime, offline tuning uses logical Time or Debug SystemTime text, Kafka records use Option<i64> epoch milliseconds, and Redis TTL behavior uses Duration. These are distinct temporal schemas, not Chrono or external-time migration substitutes.",
       "scope_policy": "CROSS_REFERENCED_NOT_CLAIMED_AS_COMPLETE_REPOSITORY_TEMPORAL_INVENTORY",
       "later_owner": "asupersync-5z2scg.6.1"
+    },
+    {
+      "contract_id": "TIME-SEM-POST-FIRST-BOUNDARY-PROPAGATION",
+      "surface": "timestamp-bearing values after their first classified semantic consumer boundary",
+      "current_semantics": "A1 classifies every repository Chrono or external-time source use plus the first declared compare, arithmetic, format, serialization, persistence, retention, return, extraction, embedding, constructor, or cross-file JSON boundary. Later container, encoded-byte, external-consumer, or downstream execution propagation is behavioral evidence rather than another dependency-source use.",
+      "scope_policy": "STATIC_SOURCE_ACCEPTANCE_COMPLETE_DOWNSTREAM_BEHAVIOR_ROUTED",
+      "later_owner": "asupersync-5z2scg.6.7"
     }
   ],
   "migration_groups": [
@@ -5177,38 +5184,7 @@
       "fresh execution in A1"
     ]
   },
-  "static_inventory_gaps": [
-    {
-      "gap_id": "TIME-STATIC-GAP-DERIVED-CONSUMER-CLASSIFICATION",
-      "summary": "All 159 literal Chrono lines, all 32 direct imported-symbol lines, eight imported-alias anchors, the declared in-file downstream consumers through the first semantic boundary, and thirty-four declared cross-file consumer boundaries have deterministic source-linked classifications. All 30 public and seven test-profile Chrono-backed timestamp carriers have exactly one disposition through their declared first current in-repository boundaries or one of two exact no-producer states. Other cross-file propagation, external consumers, and second-order container or byte propagation remain outside this bounded static tranche.",
-      "newly_classified_consumer_categories": [
-        "CLI cutoff comparisons and optional-expiry moves",
-        "PostgreSQL midnight construction and Kafka recency arithmetic",
-        "JetStream timestamp insertion into a wire payload",
-        "real-E2E serialization, retention, return, and embedding boundaries",
-        "conformance report rendering and output",
-        "root CLI generic JSON value serialization boundary",
-        "benchmark adapter and profile result-environment embeddings",
-        "benchmark suite report-constructor boundary",
-        "main-conformance RaptorQ maintenance private-carrier constructors",
-        "main-conformance RaptorQ public pipeline constructors and history update",
-        "main-conformance RaptorQ report rendering and serialization",
-        "complete 30-field public carrier first-boundary disposition matrix",
-        "complete seven-field test-profile carrier first-boundary disposition matrix",
-        "standalone golden and reporting persistence paths",
-        "conformance executable JSON serialization boundaries",
-        "excluded-conformance executable JSON serialization boundary",
-        "standalone reporting executable JSON serialization boundaries"
-      ],
-      "representative_unclassified_consumers": [
-        "cross-file consumers beyond the thirty-four declared first semantic boundaries",
-        "external consumers not present in the repository snapshot",
-        "second-order container and byte propagation beyond the first semantic boundary"
-      ],
-      "effect": "A1 zero-unclassified-use acceptance remains unmet and the bead must stay open.",
-      "owner_bead": "asupersync-5z2scg.6.1"
-    }
-  ],
+  "static_inventory_gaps": [],
   "resolved_static_details": [
     {
       "detail_id": "TIME-STATIC-RESOLVED-ALIAS-BINDINGS",
@@ -5224,8 +5200,14 @@
     },
     {
       "detail_id": "TIME-STATIC-RESOLVED-DECLARED-DERIVED-CONSUMERS",
-      "summary": "Thirty-nine declared in-file consumer anchors across six categories and thirty-four declared cross-file consumers across nine categories are linked to 72 unique direct source anchors, source-matched, category-routed, and frozen through their stated boundaries. The wider remainder stays explicit in static_inventory_gaps.",
+      "summary": "Forty-seven declared in-file consumer anchors across seven categories and thirty-four declared cross-file consumers across nine categories are linked to 76 unique direct source anchors, source-matched, category-routed, and frozen through their stated boundaries.",
       "state": "RESOLVED_BY_STATIC_DECLARED_DERIVED_CLASSIFICATION",
+      "owner_bead": "asupersync-5z2scg.6.1"
+    },
+    {
+      "detail_id": "TIME-STATIC-RESOLVED-FIRST-BOUNDARY-CARRIER-LINEAGE",
+      "summary": "All 30 public and seven test-profile Chrono-backed timestamp carriers have exactly one source-linked first-boundary or no-producer disposition. Post-first-boundary container or byte propagation and consumers outside the repository snapshot are explicitly scoped as downstream behavioral evidence, not unclassified dependency-source uses.",
+      "state": "RESOLVED_BY_COMPLETE_BOUNDED_FIRST_BOUNDARY_CLASSIFICATION",
       "owner_bead": "asupersync-5z2scg.6.1"
     }
   ],
@@ -5235,6 +5217,13 @@
       "summary": "SystemTime, logical Time, epoch-millisecond integers, and Duration/TTL schemas are cross-referenced but are not substitutes for the Chrono or external-time dependency migration inventory.",
       "effect": "The artifact must not be read as a repository-wide inventory of every temporal value.",
       "semantic_contract_id": "TIME-SEM-NONDEPENDENCY-TEMPORAL-SCHEMAS",
+      "owner_bead": "asupersync-5z2scg.6.1"
+    },
+    {
+      "boundary_id": "TIME-SCOPE-POST-FIRST-BOUNDARY-PROPAGATION",
+      "summary": "Container, encoded-byte, external-consumer, and downstream execution propagation after the first classified semantic boundary is outside the bounded dependency-source inventory.",
+      "effect": "These surfaces remain explicit behavioral obligations of A4, A5, and A7; they do not count as unknown or unclassified Chrono or external-time source uses in A1.",
+      "semantic_contract_id": "TIME-SEM-POST-FIRST-BOUNDARY-PROPAGATION",
       "owner_bead": "asupersync-5z2scg.6.1"
     }
   ],
@@ -6023,6 +6012,72 @@
     "required_disposition": "KEEP_OPEN",
     "no_claim_boundary": "This extension proves a one-row-per-field static first-boundary disposition for all seven test-profile DateTime carriers and records eight previously missing source-matched consumer rows. It does not execute a test or standalone tool, prove serialized or persisted bytes, prove readback, enumerate external consumers or later second-order propagation, close the wider static remainder, close A1, or authorize dependency exit."
   },
+  "post_a1_static_inventory_signoff": {
+    "signoff_id": "TIME-A1-STATIC-INVENTORY-SIGNOFF-2026-08-06",
+    "captured_date_utc": "2026-08-06",
+    "signoff_state": "STATIC_INVENTORY_ACCEPTANCE_MET_BEHAVIORAL_EVIDENCE_ROUTED",
+    "source_snapshot_pin_count": 74,
+    "dependency_profile_count": 16,
+    "literal_chrono_line_count": 159,
+    "direct_alias_line_count": 32,
+    "literal_or_alias_unique_line_count": 190,
+    "alias_derived_anchor_count": 8,
+    "additional_derived_anchor_count": 47,
+    "cross_file_consumer_anchor_count": 34,
+    "declared_consumer_unique_direct_source_anchor_count": 76,
+    "classified_anchor_count": 279,
+    "public_carrier_field_count": 30,
+    "test_profile_carrier_field_count": 7,
+    "semantic_contract_count": 15,
+    "persisted_and_output_surface_count": 16,
+    "migration_group_count": 8,
+    "unknown_row_count": 0,
+    "unclassified_chrono_path_count": 0,
+    "unresolved_static_gap_count": 0,
+    "routed_behavioral_gap_count": 7,
+    "resolved_static_detail_ids": [
+      "TIME-STATIC-RESOLVED-ALIAS-BINDINGS",
+      "TIME-STATIC-RESOLVED-DECLARED-DERIVED-CONSUMERS",
+      "TIME-STATIC-RESOLVED-DIRECT-PER-USE-CLASSIFICATION",
+      "TIME-STATIC-RESOLVED-FIRST-BOUNDARY-CARRIER-LINEAGE"
+    ],
+    "scope_boundary_ids": [
+      "TIME-SCOPE-NONDEPENDENCY-TEMPORAL-SCHEMAS",
+      "TIME-SCOPE-POST-FIRST-BOUNDARY-PROPAGATION"
+    ],
+    "routed_behavioral_gap_ids": [
+      "TIME-GAP-A1-BENCHMARK-ARTIFACT",
+      "TIME-GAP-A1-CUTOVER",
+      "TIME-GAP-A1-DATABASE-MESSAGING",
+      "TIME-GAP-A1-DOWNSTREAM",
+      "TIME-GAP-A1-PARSE-FORMAT",
+      "TIME-GAP-A1-PERSISTED-BYTES",
+      "TIME-GAP-A1-RANGE-CORPUS"
+    ],
+    "scope_interpretation": {
+      "repository_dependency_source_uses_complete": true,
+      "first_semantic_consumer_boundaries_complete": true,
+      "public_and_test_profile_carrier_dispositions_complete": true,
+      "external_consumers_are_repository_source_uses": false,
+      "post_first_boundary_propagation_is_an_unclassified_dependency_use": false,
+      "behavioral_evidence_is_complete": false,
+      "dependency_exit_allowed": false
+    },
+    "static_acceptance_met": true,
+    "bead_close_allowed": true,
+    "dependency_exit_allowed": false,
+    "execution_state": "NOT_RUN_STATIC_ONLY",
+    "required_disposition": "CLOSE_A1_KEEP_DEPENDENCIES_AND_BEHAVIORAL_GAPS",
+    "preservation": {
+      "production_source_changed": false,
+      "historical_a1_revision_changed": false,
+      "behavioral_gap_count_changed": false,
+      "behavioral_evidence_state_changed": false,
+      "time_acceptance_semantics_changed": false,
+      "dependency_cutover_allowed": false
+    },
+    "no_claim_boundary": "This signoff establishes only completion of A1's bounded static source inventory: profiles, direct dependency uses, first semantic consumers, public and test-profile carriers, semantic contracts, persisted/output surface states, and migration ownership all have exact fully classified dispositions. Closing A1 does not execute or satisfy A2-A8 behavioral work, prove runtime correctness, serialized or persisted bytes, readback, interoperability, cross-platform support, performance, broad workspace health, release readiness, or dependency exit."
+  },
   "validation": {
     "contract_path": "tests/time_utc_capability_inventory_contract.rs",
     "doc_path": "docs/time_utc_capability_inventory.md",
@@ -6041,6 +6096,7 @@
       "main-conformance RaptorQ history serialization source matching",
       "complete public carrier field-to-consumer disposition reconciliation",
       "complete test-profile carrier field-to-consumer disposition reconciliation",
+      "terminal static-inventory acceptance and downstream-owner routing reconciliation",
       "derived and cross-file anchor source matching with direct-source lineage validation",
       "source file hashing",
       "manual cross-review"
@@ -6053,6 +6109,6 @@
     "This inventory does not establish PostgreSQL, Redis, conformance, external-service, sparse-feature, cross-platform, or downstream behavior.",
     "This inventory does not establish resource bounds, malformed-input safety, performance, broad workspace health, or release readiness.",
     "Prior foundation receipts are not fresh A1 execution evidence and remain limited to their recorded scope.",
-    "No dependency removal, cutover, tracker closure, or permission to delete files follows from this artifact."
+    "No dependency removal, cutover, downstream-bead closure, or permission to delete files follows from this artifact; A1 tracker closure records bounded static-inventory completion only."
   ]
 }

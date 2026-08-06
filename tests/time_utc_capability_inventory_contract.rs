@@ -24,7 +24,7 @@ const CAPABILITY_ID: &str = "CAP-TIME-UTC-RFC3339";
 const ADR_ID: &str = "DEP-ADR-011";
 const BASELINE_REVISION: &str = "1afde84d564bd8ea876459624116f90028b80835";
 const ARTIFACT_SHA256: &str =
-    "332b68183102841ccba880b54bfe9dc15701ae39a71b923f2b37b6dc66989a57";
+    "d4178c6acca03d8f7df7b0e9585a52d2449c9a065138a75a0f384cb7c082dc55";
 const DOC_BEGIN: &str = "<!-- BEGIN TIME UTC CAPABILITY INVENTORY -->";
 const DOC_END: &str = "<!-- END TIME UTC CAPABILITY INVENTORY -->";
 const CHRONO_TOKEN: &str = concat!("chrono", "::");
@@ -253,12 +253,10 @@ fn validate_identity(inventory: &Value) -> Result<(), String> {
         || policy.get("a1_execution_state").and_then(Value::as_str)
             != Some("NOT_EXECUTED_THIS_TURN")
         || policy.get("source_classification_state").and_then(Value::as_str)
-            != Some(
-                "LITERAL_DIRECT_ALIAS_DECLARED_IN_FILE_AND_CROSS_FILE_CONSUMERS_CLASSIFIED_REMAINDER_OPEN",
-            )
+            != Some("COMPLETE_BOUNDED_STATIC_INVENTORY")
         || policy.get("bead_acceptance_state").and_then(Value::as_str)
-            != Some("PARTIAL_STATIC_INVENTORY_ONLY")
-        || policy.get("bead_close_allowed").and_then(Value::as_bool) != Some(false)
+            != Some("STATIC_INVENTORY_ACCEPTANCE_MET_BEHAVIORAL_EVIDENCE_ROUTED")
+        || policy.get("bead_close_allowed").and_then(Value::as_bool) != Some(true)
         || policy
             .get("unresolved_behavioral_gap_count")
             .and_then(Value::as_u64)
@@ -266,10 +264,10 @@ fn validate_identity(inventory: &Value) -> Result<(), String> {
         || policy
             .get("unresolved_static_detail_gap_count")
             .and_then(Value::as_u64)
-            != Some(1)
+            != Some(0)
         || policy.get("static_zero_unclassified_use_met").and_then(Value::as_bool)
-            != Some(false)
-        || policy.get("acceptance_zero_unknown_met").and_then(Value::as_bool) != Some(false)
+            != Some(true)
+        || policy.get("acceptance_zero_unknown_met").and_then(Value::as_bool) != Some(true)
         || policy.get("alias_aware_use_inventory_state").and_then(Value::as_str)
             != Some("IMPORT_BINDINGS_DIRECT_REFERENCES_AND_DECLARED_DERIVED_ANCHORS_COMPLETE")
         || contains_unclassified_value(inventory)
@@ -444,6 +442,7 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
             "TIME-SEM-OWNED-EMITTERS",
             "TIME-SEM-LOGICAL-SEPARATION",
             "TIME-SEM-NONDEPENDENCY-TEMPORAL-SCHEMAS",
+            "TIME-SEM-POST-FIRST-BOUNDARY-PROPAGATION",
         ],
         "semantic contracts",
     )?;
@@ -498,12 +497,9 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
         ],
         "known gaps",
     )?;
-    require_exact_ids(
-        array(inventory, "static_inventory_gaps"),
-        "gap_id",
-        &["TIME-STATIC-GAP-DERIVED-CONSUMER-CLASSIFICATION"],
-        "static inventory gaps",
-    )?;
+    if !array(inventory, "static_inventory_gaps").is_empty() {
+        return Err("bounded static inventory gaps must be empty at A1 signoff".to_owned());
+    }
     require_exact_ids(
         array(inventory, "resolved_static_details"),
         "detail_id",
@@ -511,70 +507,49 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
             "TIME-STATIC-RESOLVED-ALIAS-BINDINGS",
             "TIME-STATIC-RESOLVED-DECLARED-DERIVED-CONSUMERS",
             "TIME-STATIC-RESOLVED-DIRECT-PER-USE-CLASSIFICATION",
+            "TIME-STATIC-RESOLVED-FIRST-BOUNDARY-CARRIER-LINEAGE",
         ],
         "resolved static details",
     )?;
     require_exact_ids(
         array(inventory, "scope_boundaries"),
         "boundary_id",
-        &["TIME-SCOPE-NONDEPENDENCY-TEMPORAL-SCHEMAS"],
+        &[
+            "TIME-SCOPE-NONDEPENDENCY-TEMPORAL-SCHEMAS",
+            "TIME-SCOPE-POST-FIRST-BOUNDARY-PROPAGATION",
+        ],
         "scope boundaries",
     )?;
     let resolved_alias = &array(inventory, "resolved_static_details")[0];
     let resolved_per_use = &array(inventory, "resolved_static_details")[1];
     let resolved_derived = &array(inventory, "resolved_static_details")[2];
-    let derived_gap = &array(inventory, "static_inventory_gaps")[0];
+    let resolved_first_boundary = &array(inventory, "resolved_static_details")[3];
     let nondependency_boundary = &array(inventory, "scope_boundaries")[0];
+    let propagation_boundary = &array(inventory, "scope_boundaries")[1];
     if text(resolved_alias, "state") != "RESOLVED_BY_STATIC_ALIAS_INVENTORY"
         || text(resolved_per_use, "state")
             != "RESOLVED_BY_STATIC_DIRECT_PER_USE_CLASSIFICATION"
         || text(resolved_derived, "state")
             != "RESOLVED_BY_STATIC_DECLARED_DERIVED_CLASSIFICATION"
-        || array(derived_gap, "newly_classified_consumer_categories").len() != 17
-        || string_set(derived_gap, "newly_classified_consumer_categories").len() != 17
-        || array(derived_gap, "representative_unclassified_consumers").len() != 3
-        || string_set(derived_gap, "representative_unclassified_consumers").len() != 3
-        || !text(derived_gap, "summary")
+        || !text(resolved_derived, "summary")
+            .contains("Forty-seven declared in-file consumer anchors")
+        || !text(resolved_derived, "summary").contains("76 unique direct source anchors")
+        || text(resolved_first_boundary, "state")
+            != "RESOLVED_BY_COMPLETE_BOUNDED_FIRST_BOUNDARY_CLASSIFICATION"
+        || !text(resolved_first_boundary, "summary")
             .contains("All 30 public and seven test-profile Chrono-backed timestamp carriers")
-        || text(derived_gap, "effect").is_empty()
-        || text(derived_gap, "owner_bead") != BEAD_ID
+        || array(inventory, "resolved_static_details")
+            .iter()
+            .any(|row| text(row, "owner_bead") != BEAD_ID)
         || text(nondependency_boundary, "semantic_contract_id")
             != "TIME-SEM-NONDEPENDENCY-TEMPORAL-SCHEMAS"
+        || text(propagation_boundary, "semantic_contract_id")
+            != "TIME-SEM-POST-FIRST-BOUNDARY-PROPAGATION"
+        || !text(propagation_boundary, "effect").contains("A4, A5, and A7")
+        || text(propagation_boundary, "owner_bead") != BEAD_ID
     {
         return Err("resolved detail or scope-boundary routing drifted".to_owned());
     }
-    require_exact_strings(
-        derived_gap,
-        "newly_classified_consumer_categories",
-        &[
-            "CLI cutoff comparisons and optional-expiry moves",
-            "JetStream timestamp insertion into a wire payload",
-            "PostgreSQL midnight construction and Kafka recency arithmetic",
-            "benchmark adapter and profile result-environment embeddings",
-            "benchmark suite report-constructor boundary",
-            "conformance report rendering and output",
-            "conformance executable JSON serialization boundaries",
-            "complete 30-field public carrier first-boundary disposition matrix",
-            "complete seven-field test-profile carrier first-boundary disposition matrix",
-            "excluded-conformance executable JSON serialization boundary",
-            "main-conformance RaptorQ maintenance private-carrier constructors",
-            "main-conformance RaptorQ public pipeline constructors and history update",
-            "main-conformance RaptorQ report rendering and serialization",
-            "real-E2E serialization, retention, return, and embedding boundaries",
-            "root CLI generic JSON value serialization boundary",
-            "standalone golden and reporting persistence paths",
-            "standalone reporting executable JSON serialization boundaries",
-        ],
-    )?;
-    require_exact_strings(
-        derived_gap,
-        "representative_unclassified_consumers",
-        &[
-            "cross-file consumers beyond the thirty-four declared first semantic boundaries",
-            "external consumers not present in the repository snapshot",
-            "second-order container and byte propagation beyond the first semantic boundary",
-        ],
-    )?;
     Ok(())
 }
 
@@ -1193,8 +1168,7 @@ fn alias_classification_projection(alias: &Value) -> String {
 fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
     let per_use = &inventory["per_use_classification"];
     let alias = &inventory["alias_aware_chrono_uses"];
-    if text(per_use, "state")
-        != "LITERAL_DIRECT_ALIAS_DECLARED_IN_FILE_AND_CROSS_FILE_CONSUMERS_CLASSIFIED_REMAINDER_OPEN"
+    if text(per_use, "state") != "LITERAL_DIRECT_ALIAS_AND_FIRST_BOUNDARY_CARRIERS_COMPLETE"
         || number(per_use, "path_count") != 71
         || number(per_use, "literal_line_count") != 159
         || number(per_use, "direct_alias_line_count") != 32
@@ -4038,6 +4012,309 @@ fn validate_post_a1_test_profile_carrier_lineage_extension(
     Ok(())
 }
 
+fn validate_post_a1_static_inventory_signoff(inventory: &Value) -> Result<(), String> {
+    let signoff = inventory
+        .get("post_a1_static_inventory_signoff")
+        .ok_or_else(|| "post_a1_static_inventory_signoff is required".to_owned())?;
+    for (key, expected) in [
+        (
+            "signoff_id",
+            "TIME-A1-STATIC-INVENTORY-SIGNOFF-2026-08-06",
+        ),
+        ("captured_date_utc", "2026-08-06"),
+        (
+            "signoff_state",
+            "STATIC_INVENTORY_ACCEPTANCE_MET_BEHAVIORAL_EVIDENCE_ROUTED",
+        ),
+        ("execution_state", "NOT_RUN_STATIC_ONLY"),
+        (
+            "required_disposition",
+            "CLOSE_A1_KEEP_DEPENDENCIES_AND_BEHAVIORAL_GAPS",
+        ),
+    ] {
+        if signoff.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("post-A1 static inventory signoff {key} must be {expected}"));
+        }
+    }
+
+    for (key, expected) in [
+        ("source_snapshot_pin_count", 74_u64),
+        ("dependency_profile_count", 16),
+        ("literal_chrono_line_count", 159),
+        ("direct_alias_line_count", 32),
+        ("literal_or_alias_unique_line_count", 190),
+        ("alias_derived_anchor_count", 8),
+        ("additional_derived_anchor_count", 47),
+        ("cross_file_consumer_anchor_count", 34),
+        ("declared_consumer_unique_direct_source_anchor_count", 76),
+        ("classified_anchor_count", 279),
+        ("public_carrier_field_count", 30),
+        ("test_profile_carrier_field_count", 7),
+        ("semantic_contract_count", 15),
+        ("persisted_and_output_surface_count", 16),
+        ("migration_group_count", 8),
+        ("unknown_row_count", 0),
+        ("unclassified_chrono_path_count", 0),
+        ("unresolved_static_gap_count", 0),
+        ("routed_behavioral_gap_count", 7),
+    ] {
+        if signoff.get(key).and_then(Value::as_u64) != Some(expected) {
+            return Err(format!("post-A1 static inventory signoff {key} drifted"));
+        }
+    }
+
+    let per_use = &inventory["per_use_classification"];
+    let alias = &inventory["alias_aware_chrono_uses"];
+    let public_carrier_count = array(inventory, "public_datetime_fields").len()
+        + array(inventory, "public_chrono_generated_string_fields").len();
+    if number(signoff, "source_snapshot_pin_count")
+        != array(&inventory["source_snapshot"], "files").len() as u64
+        || number(signoff, "dependency_profile_count")
+            != array(inventory, "dependency_profiles").len() as u64
+        || number(signoff, "literal_chrono_line_count")
+            != number(&inventory["chrono_census"], "matching_line_count")
+        || number(signoff, "direct_alias_line_count")
+            != number(alias, "direct_reference_line_count")
+        || number(signoff, "literal_or_alias_unique_line_count")
+            != number(per_use, "literal_or_alias_unique_line_count")
+        || number(signoff, "alias_derived_anchor_count")
+            != number(alias, "derived_operation_anchor_line_count")
+        || number(signoff, "additional_derived_anchor_count")
+            != array(per_use, "additional_derived_operation_rows").len() as u64
+        || number(signoff, "cross_file_consumer_anchor_count")
+            != array(per_use, "cross_file_consumer_rows").len() as u64
+        || number(signoff, "declared_consumer_unique_direct_source_anchor_count")
+            != number(per_use, "declared_consumer_unique_direct_source_anchor_count")
+        || number(signoff, "classified_anchor_count")
+            != number(per_use, "classified_anchor_count")
+        || number(signoff, "public_carrier_field_count") != public_carrier_count as u64
+        || number(signoff, "test_profile_carrier_field_count")
+            != array(inventory, "test_profile_datetime_fields").len() as u64
+        || number(signoff, "semantic_contract_count")
+            != array(inventory, "semantic_contracts").len() as u64
+        || number(signoff, "persisted_and_output_surface_count")
+            != array(inventory, "persisted_and_output_surfaces").len() as u64
+        || number(signoff, "migration_group_count")
+            != array(inventory, "migration_groups").len() as u64
+        || number(signoff, "unresolved_static_gap_count")
+            != array(inventory, "static_inventory_gaps").len() as u64
+        || number(signoff, "routed_behavioral_gap_count")
+            != array(inventory, "known_gaps").len() as u64
+    {
+        return Err("post-A1 static inventory signoff aggregate drifted".to_owned());
+    }
+
+    require_exact_strings(
+        signoff,
+        "resolved_static_detail_ids",
+        &[
+            "TIME-STATIC-RESOLVED-ALIAS-BINDINGS",
+            "TIME-STATIC-RESOLVED-DECLARED-DERIVED-CONSUMERS",
+            "TIME-STATIC-RESOLVED-DIRECT-PER-USE-CLASSIFICATION",
+            "TIME-STATIC-RESOLVED-FIRST-BOUNDARY-CARRIER-LINEAGE",
+        ],
+    )?;
+    require_exact_strings(
+        signoff,
+        "scope_boundary_ids",
+        &[
+            "TIME-SCOPE-NONDEPENDENCY-TEMPORAL-SCHEMAS",
+            "TIME-SCOPE-POST-FIRST-BOUNDARY-PROPAGATION",
+        ],
+    )?;
+    require_exact_strings(
+        signoff,
+        "routed_behavioral_gap_ids",
+        &[
+            "TIME-GAP-A1-BENCHMARK-ARTIFACT",
+            "TIME-GAP-A1-CUTOVER",
+            "TIME-GAP-A1-DATABASE-MESSAGING",
+            "TIME-GAP-A1-DOWNSTREAM",
+            "TIME-GAP-A1-PARSE-FORMAT",
+            "TIME-GAP-A1-PERSISTED-BYTES",
+            "TIME-GAP-A1-RANGE-CORPUS",
+        ],
+    )?;
+    if string_set(signoff, "resolved_static_detail_ids")
+        != row_ids(array(inventory, "resolved_static_details"), "detail_id")
+        || string_set(signoff, "scope_boundary_ids")
+            != row_ids(array(inventory, "scope_boundaries"), "boundary_id")
+        || string_set(signoff, "routed_behavioral_gap_ids")
+            != row_ids(array(inventory, "known_gaps"), "gap_id")
+    {
+        return Err("post-A1 static inventory signoff routed ID set drifted".to_owned());
+    }
+
+    let expected_gap_owners = [
+        ("TIME-GAP-A1-RANGE-CORPUS", "asupersync-5z2scg.6.2"),
+        ("TIME-GAP-A1-PARSE-FORMAT", "asupersync-5z2scg.6.3"),
+        ("TIME-GAP-A1-PERSISTED-BYTES", "asupersync-5z2scg.6.4"),
+        (
+            "TIME-GAP-A1-BENCHMARK-ARTIFACT",
+            "asupersync-5z2scg.6.5",
+        ),
+        (
+            "TIME-GAP-A1-DATABASE-MESSAGING",
+            "asupersync-5z2scg.6.6",
+        ),
+        ("TIME-GAP-A1-DOWNSTREAM", "asupersync-5z2scg.6.7"),
+        ("TIME-GAP-A1-CUTOVER", "asupersync-5z2scg.6.8"),
+    ];
+    let known_gap_owners: BTreeMap<_, _> = array(inventory, "known_gaps")
+        .iter()
+        .map(|row| (text(row, "gap_id"), text(row, "owner_bead")))
+        .collect();
+    if expected_gap_owners
+        .iter()
+        .any(|(gap_id, owner)| known_gap_owners.get(gap_id).copied() != Some(*owner))
+    {
+        return Err("post-A1 behavioral gap ownership drifted".to_owned());
+    }
+
+    let scope = object(signoff, "scope_interpretation");
+    if scope
+        .get("repository_dependency_source_uses_complete")
+        .and_then(Value::as_bool)
+        != Some(true)
+        || scope
+            .get("first_semantic_consumer_boundaries_complete")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || scope
+            .get("public_and_test_profile_carrier_dispositions_complete")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || scope
+            .get("external_consumers_are_repository_source_uses")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || scope
+            .get("post_first_boundary_propagation_is_an_unclassified_dependency_use")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || scope
+            .get("behavioral_evidence_is_complete")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || scope.get("dependency_exit_allowed").and_then(Value::as_bool) != Some(false)
+        || signoff.get("static_acceptance_met").and_then(Value::as_bool) != Some(true)
+        || signoff.get("bead_close_allowed").and_then(Value::as_bool) != Some(true)
+        || signoff.get("dependency_exit_allowed").and_then(Value::as_bool) != Some(false)
+    {
+        return Err("post-A1 static inventory signoff scope interpretation drifted".to_owned());
+    }
+
+    let preservation = object(signoff, "preservation");
+    let expected_preservation_keys: BTreeSet<String> = [
+        "production_source_changed",
+        "historical_a1_revision_changed",
+        "behavioral_gap_count_changed",
+        "behavioral_evidence_state_changed",
+        "time_acceptance_semantics_changed",
+        "dependency_cutover_allowed",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if preservation.keys().cloned().collect::<BTreeSet<_>>() != expected_preservation_keys
+        || preservation.values().any(|value| value.as_bool() != Some(false))
+    {
+        return Err("post-A1 static inventory signoff preservation drifted".to_owned());
+    }
+
+    let propagation_semantic = array(inventory, "semantic_contracts")
+        .iter()
+        .find(|row| {
+            row.get("contract_id").and_then(Value::as_str)
+                == Some("TIME-SEM-POST-FIRST-BOUNDARY-PROPAGATION")
+        })
+        .ok_or_else(|| "post-first-boundary semantic contract is required".to_owned())?;
+    if text(propagation_semantic, "scope_policy")
+        != "STATIC_SOURCE_ACCEPTANCE_COMPLETE_DOWNSTREAM_BEHAVIOR_ROUTED"
+        || text(propagation_semantic, "later_owner") != "asupersync-5z2scg.6.7"
+    {
+        return Err("post-first-boundary semantic contract drifted".to_owned());
+    }
+
+    let semantic_by_id: BTreeMap<_, _> = array(inventory, "semantic_contracts")
+        .iter()
+        .map(|row| (text(row, "contract_id"), row))
+        .collect();
+    if semantic_by_id
+        .values()
+        .any(|row| text(row, "current_semantics").is_empty())
+    {
+        return Err("semantic contract current-state inventory drifted".to_owned());
+    }
+    let required_dimension_fields: [(&str, &[&str]); 9] = [
+        (
+            "TIME-SEM-PUBLIC-TYPE",
+            &[
+                "range_policy",
+                "precision_policy",
+                "offset_policy",
+                "parse_policy",
+                "format_policy",
+                "error_policy",
+            ],
+        ),
+        (
+            "TIME-SEM-OPTION-ABSENCE",
+            &["output_policy", "roundtrip_state", "evidence_state"],
+        ),
+        ("TIME-SEM-CLI-CLOCK", &["deterministic_clock_policy"]),
+        ("TIME-SEM-DURATION-CONVERSION", &["overflow_policy"]),
+        (
+            "TIME-SEM-STORE-IO",
+            &["compatibility_policy", "atomicity_policy"],
+        ),
+        ("TIME-SEM-POSTGRES-ORACLE", &["oracle_scope"]),
+        (
+            "TIME-SEM-CONFORMANCE-STRING-TIMESTAMPS",
+            &["migration_policy", "evidence_state"],
+        ),
+        (
+            "TIME-SEM-OWNED-RELEASE-PROOF-PARSER",
+            &[
+                "accepted_syntax",
+                "calendar_validation",
+                "error_policy",
+                "precision_policy",
+                "leap_second_policy",
+                "evidence_state",
+            ],
+        ),
+        (
+            "TIME-SEM-POST-FIRST-BOUNDARY-PROPAGATION",
+            &["scope_policy", "later_owner"],
+        ),
+    ];
+    for (contract_id, fields) in required_dimension_fields {
+        let Some(row) = semantic_by_id.get(contract_id).copied() else {
+            return Err(format!("acceptance dimension contract missing {contract_id}"));
+        };
+        if fields.iter().any(|field| text(row, field).is_empty()) {
+            return Err(format!(
+                "acceptance dimension contract fields drifted for {contract_id}"
+            ));
+        }
+    }
+
+    let no_claim = text(signoff, "no_claim_boundary");
+    for required in [
+        "bounded static source inventory",
+        "Closing A1",
+        "does not execute or satisfy A2-A8 behavioral work",
+        "serialized or persisted bytes",
+        "dependency exit",
+    ] {
+        if !no_claim.contains(required) {
+            return Err(format!("post-A1 static signoff no-claim missing {required}"));
+        }
+    }
+    Ok(())
+}
+
 fn count_matching_lines(source: &str, token: &str) -> usize {
     source.lines().filter(|line| line.contains(token)).count()
 }
@@ -4473,7 +4750,7 @@ fn validate_foundation_boundary(inventory: &Value) -> Result<(), String> {
             "This inventory does not establish PostgreSQL, Redis, conformance, external-service, sparse-feature, cross-platform, or downstream behavior.",
             "This inventory does not establish resource bounds, malformed-input safety, performance, broad workspace health, or release readiness.",
             "Prior foundation receipts are not fresh A1 execution evidence and remain limited to their recorded scope.",
-            "No dependency removal, cutover, tracker closure, or permission to delete files follows from this artifact.",
+            "No dependency removal, cutover, downstream-bead closure, or permission to delete files follows from this artifact; A1 tracker closure records bounded static-inventory completion only.",
         ],
     )?;
     if array(inventory, "registry_reconciliation").iter().any(|row| {
@@ -4508,6 +4785,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     validate_post_a1_conformance_raptorq_lineage_extension(inventory)?;
     validate_post_a1_public_carrier_lineage_extension(inventory)?;
     validate_post_a1_test_profile_carrier_lineage_extension(inventory)?;
+    validate_post_a1_static_inventory_signoff(inventory)?;
     Ok(())
 }
 
@@ -4531,7 +4809,6 @@ fn time_utc_inventory_is_exact_and_source_pinned() {
         "190 unique",
         "Thirteen ordered literal-operation rules",
         "one same-line overlap",
-        "derived-consumer remainder",
         "47 exact rows",
         "34 exact cross-file consumer rows",
         "279 classified",
@@ -4565,12 +4842,15 @@ fn time_utc_inventory_is_exact_and_source_pinned() {
         "bounded lexical scan of production source finds zero external",
         "This is not compiler-resolved name analysis.",
         "17 public Chrono-backed timestamp fields",
-        "partial static inventory only",
-        "bead_close_allowed=false",
-        "the bead must not be closed",
+        "TIME-A1-STATIC-INVENTORY-SIGNOFF-2026-08-06",
+        "zero unresolved static gaps",
+        "bead_close_allowed=true",
+        "post-first-boundary scope policy",
+        "seven remaining behavioral gaps",
+        "A1 only",
         "1,853 append-only audit lines",
         "source-pin maintenance only",
-        "No compiler, formatter, test, benchmark, service, remote job, or runtime lane",
+        "No compiler, formatter, test, contract, benchmark, service, remote job, or",
     ] {
         assert!(docs.contains(marker), "documentation marker drifted: {marker}");
     }
@@ -4588,6 +4868,16 @@ fn time_utc_inventory_rejects_cutover_and_completeness_drift() {
     maintenance_cutover["post_a1_provenance_refresh"]["dependency_exit_allowed"] =
         Value::Bool(true);
     assert!(validate_inventory(&maintenance_cutover).is_err());
+
+    let mut signoff_cutover = inventory.clone();
+    signoff_cutover["post_a1_static_inventory_signoff"]["dependency_exit_allowed"] =
+        Value::Bool(true);
+    assert!(validate_inventory(&signoff_cutover).is_err());
+
+    let mut signoff_count = inventory.clone();
+    signoff_count["post_a1_static_inventory_signoff"]["classified_anchor_count"] =
+        Value::from(278_u64);
+    assert!(validate_inventory(&signoff_count).is_err());
 
     let mut unclassified = inventory.clone();
     unclassified["policy"]["unclassified_chrono_paths"] = Value::from(1_u64);
@@ -4800,10 +5090,8 @@ fn time_utc_inventory_rejects_cutover_and_completeness_drift() {
     assert!(validate_inventory(&alias_route).is_err());
 
     let mut static_gap = inventory.clone();
-    static_gap["static_inventory_gaps"]
-        .as_array_mut()
-        .expect("static inventory gaps must be an array")
-        .clear();
+    static_gap["static_inventory_gaps"] =
+        Value::Array(vec![Value::String("unexpected static gap".to_owned())]);
     assert!(validate_inventory(&static_gap).is_err());
 
     let mut alias_total = inventory.clone();

@@ -12,9 +12,13 @@ The governing `DEP-ADR-011` decision remains additive coexistence:
 `PRESERVE_AND_REPLACE_IF_PARITY`, `BLOCKED_PENDING_EVIDENCE`, and
 `dependency_exit_allowed=false`. This inventory changes none of those states.
 It classifies source and routes evidence work; it is not a cutover packet.
-The A1 bead's full A1 acceptance remains unmet: the result is a
-partial static inventory with seven behavioral evidence gaps and one bounded
-derived-consumer remainder, and the bead must not be closed from this artifact.
+The terminal `TIME-A1-STATIC-INVENTORY-SIGNOFF-2026-08-06` reconciliation meets
+A1's bounded static-inventory acceptance: every repository dependency-source
+use, first semantic consumer boundary, and public or test-profile carrier has
+an exact non-`UNKNOWN` disposition, with zero unresolved static gaps. Seven
+behavioral evidence gaps remain routed to A2-A8. `bead_close_allowed=true`
+authorizes closing A1 only; it does not authorize dependency exit, cutover, or
+closure of any downstream bead.
 
 ## Pinned static result
 
@@ -174,13 +178,14 @@ Each row links the first declared cross-file embedding, constructor, return,
 or JSON serialization boundary to the direct timestamp source that establishes
 its lineage. The boundary does not extend through later encoding or rendering
 calls, later container propagation, later distinct file or standard-output
-sink anchors, dynamic dispatch, or ambiguous provenance. The remaining static
-gap is narrower but real. All 30 public and seven test-profile Chrono-backed
-timestamp fields now have exactly one first-boundary or no-producer
-disposition, but cross-file consumers beyond these thirty-four first semantic
+sink anchors, dynamic dispatch, or ambiguous provenance. All 30 public and
+seven test-profile Chrono-backed timestamp fields have exactly one
+first-boundary or no-producer disposition. Cross-file propagation after those
 boundaries, external consumers absent from this snapshot, and later container
-or arbitrary-byte propagation are not fully dispositioned. A1's
-zero-unclassified-use acceptance remains unmet and the bead stays open.
+or arbitrary-byte behavior are explicit downstream evidence obligations of
+A4, A5, and A7; they are not additional dependency-source uses or unresolved
+static A1 rows. A1's zero-unclassified-use acceptance is therefore met without
+claiming that any downstream behavior has been executed or proved.
 
 A 2026-08-05 static provenance pass refreshed one stale authority pin against
 `2f9314377d9418c5819bd6baf656e0f4f19b5200`. The shared capability baseline
@@ -195,7 +200,7 @@ root CLI changed by `+127/-28` lines solely in replay artifact and diagnostic
 work, while PostgreSQL changed by `+87/-27` lines solely in a read-cancellation
 seam and its test. Neither diff changes a TIME acceptance semantic. Neither
 receipt completes the derived-consumer inventory, reruns A1 evidence, or
-changes `bead_close_allowed=false`.
+changes the then-current `bead_close_allowed=false` state.
 
 The subsequent `TIME-A1-BENCHMARK-LINEAGE-2026-08-06` extension adds the three
 current consumer files, yielding 72 current source pins. It binds five
@@ -230,9 +235,22 @@ association at line 605, and both standalone coverage-matrix JSON
 serialization paths at lines 254 and 464. Together with four prior in-file
 rows and two prior executable-output rows, all seven test-profile fields now
 reference 12 exact derived consumer IDs and two exact cross-file consumer IDs.
-This remains static first-boundary lineage only: external consumers,
-second-order propagation, emitted or persisted bytes, readback, behavior, and
-A1 completion remain open.
+At that extension point this remained static first-boundary lineage only:
+external consumers, second-order propagation, emitted or persisted bytes,
+readback, behavior, and A1 completion remained open.
+
+The terminal `TIME-A1-STATIC-INVENTORY-SIGNOFF-2026-08-06` reconciliation
+composes all preceding source-linked tranches. It freezes 74 source pins, 16
+dependency profiles, 190 unique literal-or-alias direct lines, 55 in-file
+derived anchors, 34 cross-file anchors, 76 unique declared direct-source
+anchors, and 279 classified anchors. It also freezes 30 public and seven
+test-profile carrier dispositions, 15 semantic contracts, 16 persisted/output
+surface states, and eight migration groups. The signoff has zero `UNKNOWN`
+rows, zero unclassified Chrono paths, and zero unresolved static gaps. Its
+post-first-boundary scope policy routes the seven remaining behavioral gaps to
+A2-A8 and keeps `dependency_exit_allowed=false`; it does not convert static
+lineage into runtime, byte-level, readback, interoperability, or performance
+evidence.
 
 That full line-sensitive pass also repaired a missed consequence of the
 previously classified PostgreSQL read-cancellation insertion: two literal
@@ -461,7 +479,7 @@ not proof of real Redis or RDB temporal behavior.
 
 The exact text of all 159 literal source lines, their operation projection,
 path routing, line-specific overrides, direct alias binding/reference
-discovery, eight imported-alias anchors, 39 declared source-linked in-file
+discovery, eight imported-alias anchors, 47 declared source-linked in-file
 downstream anchors, and thirty-four declared cross-file consumer anchors are
 frozen in the artifact.
 The in-file boundary admits the first
@@ -470,8 +488,9 @@ return, extraction, or embedding consumer in a Chrono-bearing path. The
 cross-file boundary admits the first explicit embedding, constructor, return,
 or statically generic JSON-value serialization in a different source file with
 direct timestamp lineage. Other cross-file propagation, external consumers,
-later renderers, and later container or arbitrary-byte taint remain the
-declared static gap.
+later renderers, and later container or arbitrary-byte behavior remain routed
+downstream obligations beyond the first static semantic boundary, not
+unclassified dependency-source uses.
 Later owners must prove each admitted profile separately rather than borrowing
 a green result from another crate or feature set.
 
@@ -509,9 +528,11 @@ Every reconciliation row has an explicit owner and
 `ROUTED_NOT_MUTATED_BY_A1` state. There are no unclassified literal Chrono
 paths or undiscovered direct Chrono import bindings in the pinned census, but
 all 30 public plus seven test-profile carrier rows now have an exact
-first-boundary or no-producer disposition. Derived-consumer coverage beyond
-the 47 declared in-file rows and thirty-four declared cross-file consumer rows
-remains partial.
+first-boundary or no-producer disposition. The
+`TIME-SCOPE-POST-FIRST-BOUNDARY-PROPAGATION` boundary assigns later container,
+encoded-byte, external-consumer, and downstream execution behavior to A4, A5,
+and A7. Those obligations remain unproved, but they are outside the bounded
+dependency-source inventory rather than unresolved static A1 rows.
 
 ## Validation and no-claim boundary
 
@@ -520,16 +541,18 @@ manifest and authority inspection, SHA-256 source pins, path/count and
 literal-operation, literal-source, in-file derived-row, and cross-file consumer
 projections; direct timestamp lineage checks; the complete 30-field public
 carrier disposition matrix; the complete seven-field test-profile carrier
-matrix; and independent static cross-review. It did not execute the companion
-contract. This remains a
-partial static inventory only; full A1 acceptance is unmet,
-`bead_close_allowed=false`, and the bead must not be closed from this packet.
+matrix; terminal downstream-owner routing reconciliation; and independent
+static cross-review. It did not execute the companion contract. The resulting
+bounded static inventory meets A1 acceptance with zero unresolved static gaps,
+and `bead_close_allowed=true` permits closing A1 while retaining every A2-A8
+behavioral obligation and the incumbent dependencies.
 
-No compiler, formatter, test, benchmark, service, remote job, or runtime lane
-was run. This inventory therefore does not prove runtime formatting or parsing,
-calendar correctness, serde bytes, historical readback, database or messaging
-behavior, deterministic clocks, malformed-input bounds, downstream builds,
-cross-platform support, performance, broad workspace health, release
-readiness, dependency removal, tracker closure, or permission to delete files.
+No compiler, formatter, test, contract, benchmark, service, remote job, or
+runtime lane was run. This inventory therefore does not prove runtime
+formatting or parsing, calendar correctness, serde bytes, historical readback,
+database or messaging behavior, deterministic clocks, malformed-input bounds,
+downstream builds, cross-platform support, performance, broad workspace
+health, release readiness, dependency removal, downstream tracker closure, or
+permission to delete files.
 
 <!-- END TIME UTC CAPABILITY INVENTORY -->
