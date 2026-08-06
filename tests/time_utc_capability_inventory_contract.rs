@@ -24,7 +24,7 @@ const CAPABILITY_ID: &str = "CAP-TIME-UTC-RFC3339";
 const ADR_ID: &str = "DEP-ADR-011";
 const BASELINE_REVISION: &str = "1afde84d564bd8ea876459624116f90028b80835";
 const ARTIFACT_SHA256: &str =
-    "06e7a706e276e7c86d7a6909ebbf41ea7c0877626fd3567273c6d8caa0e2c6fd";
+    "e8064091bc705ff2cadced49335e838d104464aa3c3468e4cc48a66edbe80639";
 const DOC_BEGIN: &str = "<!-- BEGIN TIME UTC CAPABILITY INVENTORY -->";
 const DOC_END: &str = "<!-- END TIME UTC CAPABILITY INVENTORY -->";
 const CHRONO_TOKEN: &str = concat!("chrono", "::");
@@ -47,6 +47,8 @@ const ADDITIONAL_DERIVED_PROJECTION_SHA256: &str =
     "f41dab083731bc95f246db17e7a5b1e3d50ac60cf1d2af96696c556b0dd512f2";
 const CROSS_FILE_CONSUMER_PROJECTION_SHA256: &str =
     "d7b4020e22cb33af7d359836b80e0d66f20574d2b9fb29566ecae0691831ff99";
+const PUBLIC_CARRIER_LINEAGE_PROJECTION_SHA256: &str =
+    "c14a1beb11f2c57890a9907a2c29092183974a56f2c2b521f0b37ae40c077eb7";
 const ROOT_CLI_REFRESH_REVISIONS: &[&str] = &[
     "fbbd4d065ae4768b84e4161a00d10e5acba04b39",
     "75778fbf0846be2d3bc965a2809a705aeb1dfe25",
@@ -524,10 +526,13 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
             != "RESOLVED_BY_STATIC_DIRECT_PER_USE_CLASSIFICATION"
         || text(resolved_derived, "state")
             != "RESOLVED_BY_STATIC_DECLARED_DERIVED_CLASSIFICATION"
-        || array(derived_gap, "newly_classified_consumer_categories").len() != 15
-        || string_set(derived_gap, "newly_classified_consumer_categories").len() != 15
+        || array(derived_gap, "newly_classified_consumer_categories").len() != 16
+        || string_set(derived_gap, "newly_classified_consumer_categories").len() != 16
         || array(derived_gap, "representative_unclassified_consumers").len() != 3
         || string_set(derived_gap, "representative_unclassified_consumers").len() != 3
+        || !text(derived_gap, "summary")
+            .contains("All 30 public Chrono-backed timestamp carriers")
+        || !text(derived_gap, "summary").contains("Test-profile carrier disposition")
         || text(derived_gap, "effect").is_empty()
         || text(derived_gap, "owner_bead") != BEAD_ID
         || text(nondependency_boundary, "semantic_contract_id")
@@ -546,6 +551,7 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
             "benchmark suite report-constructor boundary",
             "conformance report rendering and output",
             "conformance executable JSON serialization boundaries",
+            "complete 30-field public carrier first-boundary disposition matrix",
             "excluded-conformance executable JSON serialization boundary",
             "main-conformance RaptorQ maintenance private-carrier constructors",
             "main-conformance RaptorQ public pipeline constructors and history update",
@@ -1062,6 +1068,23 @@ fn cross_file_consumer_projection(rows: &[Value]) -> String {
                 text(row, "cfg_or_wiring"),
                 text(row, "exposure"),
                 text(row, "persistence_or_public_association"),
+            )
+        })
+        .collect();
+    rows.sort();
+    rows.concat()
+}
+
+fn public_carrier_lineage_projection(rows: &[Value]) -> String {
+    let mut rows: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            format!(
+                "{}\t{}\t{}\t{}\n",
+                text(row, "field_id"),
+                text(row, "inventory_section"),
+                text(row, "state"),
+                sorted_strings(row, "consumer_ids"),
             )
         })
         .collect();
@@ -3492,6 +3515,288 @@ fn validate_post_a1_conformance_raptorq_lineage_extension(
     Ok(())
 }
 
+fn validate_post_a1_public_carrier_lineage_extension(inventory: &Value) -> Result<(), String> {
+    let extension = inventory
+        .get("post_a1_public_carrier_lineage_extension")
+        .ok_or_else(|| "post_a1_public_carrier_lineage_extension is required".to_owned())?;
+    for (key, expected) in [
+        (
+            "extension_id",
+            "TIME-A1-PUBLIC-CARRIER-LINEAGE-2026-08-06",
+        ),
+        ("captured_date_utc", "2026-08-06"),
+        (
+            "extension_state",
+            "STATIC_COMPLETE_PUBLIC_CARRIER_FIRST_BOUNDARY_DISPOSITION",
+        ),
+        ("execution_state", "NOT_RUN_STATIC_ONLY"),
+        ("required_disposition", "KEEP_OPEN"),
+    ] {
+        if extension.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!(
+                "post-A1 public carrier lineage extension {key} must be {expected}"
+            ));
+        }
+    }
+    for (key, expected) in [
+        ("source_pin_path_count", 74_u64),
+        ("public_datetime_field_count", 18),
+        ("public_chrono_generated_string_field_count", 12),
+        ("all_public_chrono_backed_timestamp_field_count", 30),
+        ("declared_first_boundary_field_count", 28),
+        ("no_in_tree_producer_field_count", 2),
+        ("unclassified_public_carrier_field_count", 0),
+        ("public_cross_file_consumer_id_count", 32),
+        ("public_derived_consumer_id_count", 2),
+        ("declared_public_consumer_id_count", 34),
+    ] {
+        if extension.get(key).and_then(Value::as_u64) != Some(expected) {
+            return Err(format!(
+                "post-A1 public carrier lineage extension {key} must be {expected}"
+            ));
+        }
+    }
+
+    let datetime_ids = row_ids(array(inventory, "public_datetime_fields"), "field_id");
+    let string_ids = row_ids(
+        array(inventory, "public_chrono_generated_string_fields"),
+        "field_id",
+    );
+    let public_field_ids: BTreeSet<String> = datetime_ids.union(&string_ids).cloned().collect();
+    if datetime_ids.len() != 18
+        || string_ids.len() != 12
+        || public_field_ids.len() != 30
+        || !datetime_ids.is_disjoint(&string_ids)
+    {
+        return Err("public timestamp carrier inventory totals drifted".to_owned());
+    }
+
+    let mut expected: BTreeMap<String, (String, BTreeSet<String>)> = BTreeMap::new();
+    for (extension_key, disposition_key) in [
+        (
+            "post_a1_benchmark_lineage_extension",
+            "root_public_carrier_dispositions",
+        ),
+        (
+            "post_a1_conformance_raptorq_lineage_extension",
+            "carrier_dispositions",
+        ),
+    ] {
+        let source_extension = inventory
+            .get(extension_key)
+            .ok_or_else(|| format!("{extension_key} is required"))?;
+        for disposition in array(source_extension, disposition_key) {
+            let state = text(disposition, "state").to_owned();
+            let consumers = string_set(disposition, "consumer_ids");
+            for field_id in array(disposition, "field_ids") {
+                let field_id = field_id
+                    .as_str()
+                    .ok_or_else(|| format!("{disposition_key} field IDs must be strings"))?;
+                if expected
+                    .insert(field_id.to_owned(), (state.clone(), consumers.clone()))
+                    .is_some()
+                {
+                    return Err(format!("duplicate public carrier disposition for {field_id}"));
+                }
+            }
+        }
+    }
+    for (field_id, state, consumer_id) in [
+        (
+            "TIME-PUB-CONFORMANCE-H1-EXPECT-STRING",
+            "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+            "TIME-CROSS-FILE-CONFORMANCE-H1-EXPECT-JSON-0093",
+        ),
+        (
+            "TIME-PUB-CONFORMANCE-H1-REQUEST-STRING",
+            "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+            "TIME-CROSS-FILE-CONFORMANCE-H1-REQUEST-JSON-0093",
+        ),
+        (
+            "TIME-PUB-CONFORMANCE-H1-RESPONSE-STRING",
+            "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+            "TIME-CROSS-FILE-CONFORMANCE-H1-RESPONSE-JSON-0093",
+        ),
+        (
+            "TIME-PUB-CONFORMANCE-H2-CONNECT-STRING",
+            "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+            "TIME-CROSS-FILE-CONFORMANCE-H2-CONNECT-JSON-0097",
+        ),
+        (
+            "TIME-PUB-CONFORMANCE-H2-CONTINUATION-STRING",
+            "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+            "TIME-CROSS-FILE-CONFORMANCE-H2-CONTINUATION-JSON-0097",
+        ),
+        (
+            "TIME-PUB-CONFORMANCE-H2-DATA-END",
+            "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+            "TIME-CROSS-FILE-CONFORMANCE-DATA-END-JSON-0098",
+        ),
+        (
+            "TIME-PUB-CONFORMANCE-H2-ENABLE-PUSH-STRING",
+            "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+            "TIME-CROSS-FILE-CONFORMANCE-H2-ENABLE-PUSH-JSON-0094",
+        ),
+        (
+            "TIME-PUB-CONFORMANCE-H2-GOAWAY",
+            "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+            "TIME-CROSS-FILE-CONFORMANCE-GOAWAY-JSON-0093",
+        ),
+        (
+            "TIME-PUB-CONFORMANCE-H2-PING",
+            "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+            "TIME-CROSS-FILE-CONFORMANCE-PING-JSON-0100",
+        ),
+        (
+            "TIME-PUB-CONFORMANCE-H2-PRIORITY",
+            "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+            "TIME-CROSS-FILE-CONFORMANCE-PRIORITY-JSON-0093",
+        ),
+        (
+            "TIME-PUB-CONFORMANCE-H2-SETTINGS",
+            "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+            "TIME-CROSS-FILE-CONFORMANCE-SETTINGS-JSON-0094",
+        ),
+        (
+            "TIME-PUB-CONFORMANCE-HPACK",
+            "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+            "TIME-CROSS-FILE-CONFORMANCE-HPACK-JSON-0094",
+        ),
+        (
+            "TIME-PUB-CONFORMANCE-HPACK-ENCODER-STRING",
+            "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+            "TIME-CROSS-FILE-CONFORMANCE-HPACK-ENCODER-JSON-0097",
+        ),
+        (
+            "TIME-PUB-EXCLUDED-CONFORMANCE-PING-REPORT-TIMESTAMP",
+            "DECLARED_EXCLUDED_WORKSPACE_PRETTY_JSON_BOUNDARY",
+            "TIME-CROSS-FILE-EXCLUDED-PING-JSON-0051",
+        ),
+    ] {
+        let consumers: BTreeSet<String> = [consumer_id.to_owned()].into_iter().collect();
+        if expected
+            .insert(field_id.to_owned(), (state.to_owned(), consumers))
+            .is_some()
+        {
+            return Err(format!("duplicate public carrier disposition for {field_id}"));
+        }
+    }
+    if expected.len() != 30 || expected.keys().cloned().collect::<BTreeSet<_>>() != public_field_ids
+    {
+        return Err("public carrier expected disposition coverage drifted".to_owned());
+    }
+
+    let lineage_rows = array(extension, "field_lineage_rows");
+    let expected_field_ids: Vec<_> = public_field_ids.iter().map(String::as_str).collect();
+    require_exact_ids(
+        lineage_rows,
+        "field_id",
+        &expected_field_ids,
+        "post-A1 public carrier lineage rows",
+    )?;
+    let cross_file_ids = row_ids(
+        array(
+            &inventory["per_use_classification"],
+            "cross_file_consumer_rows",
+        ),
+        "use_id",
+    );
+    let derived_ids = row_ids(
+        array(
+            &inventory["per_use_classification"],
+            "additional_derived_operation_rows",
+        ),
+        "use_id",
+    );
+    let known_consumer_ids: BTreeSet<String> =
+        cross_file_ids.union(&derived_ids).cloned().collect();
+    let mut referenced_consumer_ids = BTreeSet::new();
+    let mut declared_boundary_fields = 0_u64;
+    let mut no_producer_fields = 0_u64;
+    for row in lineage_rows {
+        let field_id = text(row, "field_id");
+        let (expected_state, expected_consumers) = expected
+            .get(field_id)
+            .ok_or_else(|| format!("unexpected public carrier lineage row {field_id}"))?;
+        let expected_section = if datetime_ids.contains(field_id) {
+            "public_datetime_fields"
+        } else {
+            "public_chrono_generated_string_fields"
+        };
+        let consumers = string_set(row, "consumer_ids");
+        if text(row, "inventory_section") != expected_section
+            || text(row, "state") != expected_state.as_str()
+            || &consumers != expected_consumers
+            || !consumers.is_subset(&known_consumer_ids)
+        {
+            return Err(format!("public carrier lineage drifted for {field_id}"));
+        }
+        if consumers.is_empty() {
+            no_producer_fields += 1;
+        } else {
+            declared_boundary_fields += 1;
+        }
+        referenced_consumer_ids.extend(consumers);
+    }
+    let referenced_cross_file_count = referenced_consumer_ids
+        .intersection(&cross_file_ids)
+        .count();
+    let referenced_derived_count = referenced_consumer_ids.intersection(&derived_ids).count();
+    if declared_boundary_fields != 28
+        || no_producer_fields != 2
+        || referenced_cross_file_count != 32
+        || referenced_derived_count != 2
+        || referenced_consumer_ids.len() != 34
+    {
+        return Err("public carrier lineage aggregate counts drifted".to_owned());
+    }
+    if text(extension, "public_carrier_lineage_projection_sha256")
+        != PUBLIC_CARRIER_LINEAGE_PROJECTION_SHA256
+        || sha256_hex(public_carrier_lineage_projection(lineage_rows).as_bytes())
+            != PUBLIC_CARRIER_LINEAGE_PROJECTION_SHA256
+    {
+        return Err("public carrier lineage projection drifted".to_owned());
+    }
+
+    let preservation = object(extension, "preservation");
+    let expected_preservation_keys: BTreeSet<String> = [
+        "production_source_changed",
+        "historical_a1_revision_changed",
+        "behavioral_gap_count_changed",
+        "time_acceptance_semantics_changed",
+        "test_profile_carrier_remainder_closed",
+        "second_order_propagation_closed",
+        "static_remainder_closed",
+        "bead_close_allowed",
+        "dependency_exit_allowed",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if preservation.keys().cloned().collect::<BTreeSet<_>>() != expected_preservation_keys
+        || preservation.values().any(|value| value.as_bool() != Some(false))
+    {
+        return Err("post-A1 public carrier preservation boundary drifted".to_owned());
+    }
+    let no_claim = text(extension, "no_claim_boundary");
+    for required in [
+        "all 30 public Chrono-backed timestamp carriers",
+        "does not execute any producer or consumer",
+        "prove serialized or persisted bytes",
+        "seven test-profile fields",
+        "second-order propagation",
+        "close A1",
+        "authorize dependency exit",
+    ] {
+        if !no_claim.contains(required) {
+            return Err(format!(
+                "post-A1 public carrier no-claim boundary missing {required}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn count_matching_lines(source: &str, token: &str) -> usize {
     source.lines().filter(|line| line.contains(token)).count()
 }
@@ -3960,6 +4265,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     validate_post_a1_cli_output_extension(inventory)?;
     validate_post_a1_benchmark_lineage_extension(inventory)?;
     validate_post_a1_conformance_raptorq_lineage_extension(inventory)?;
+    validate_post_a1_public_carrier_lineage_extension(inventory)?;
     Ok(())
 }
 
@@ -3999,6 +4305,12 @@ fn time_utc_inventory_is_exact_and_source_pinned() {
         "conformance/raptorq_rfc6330/reporting/src/regression_detection.rs:77",
         "conformance/raptorq_rfc6330/reporting/src/compliance_report.rs:298",
         "uniform `+60` lines",
+        "TIME-A1-PUBLIC-CARRIER-LINEAGE-2026-08-06",
+        "18 public",
+        "12 public Chrono-generated string fields",
+        "Twenty-eight",
+        "32 exact cross-file consumer IDs",
+        "no unclassified public carrier",
         "+127/-28",
         "+87/-27",
         "literal-source",
@@ -4186,6 +4498,18 @@ fn time_utc_inventory_rejects_cutover_and_completeness_drift() {
         ["line_sensitive_pin_reconciliation"]["current_direct_source_id"] =
         Value::String("src/database/postgres.rs:18086".to_owned());
     assert!(validate_inventory(&stale_postgres_lineage).is_err());
+
+    let mut public_carrier_overclaim = inventory.clone();
+    public_carrier_overclaim["post_a1_public_carrier_lineage_extension"]["preservation"]
+        ["test_profile_carrier_remainder_closed"] = Value::Bool(true);
+    assert!(validate_inventory(&public_carrier_overclaim).is_err());
+
+    let mut missing_public_carrier = inventory.clone();
+    missing_public_carrier["post_a1_public_carrier_lineage_extension"]["field_lineage_rows"]
+        .as_array_mut()
+        .expect("public carrier lineage rows must be mutable")
+        .pop();
+    assert!(validate_inventory(&missing_public_carrier).is_err());
 
     let mut alias_route = inventory.clone();
     for binding in alias_route["alias_aware_chrono_uses"]["bindings"]

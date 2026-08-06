@@ -174,9 +174,11 @@ or JSON serialization boundary to the direct timestamp source that establishes
 its lineage. The boundary does not extend through later encoding or rendering
 calls, later container propagation, later distinct file or standard-output
 sink anchors, dynamic dispatch, or ambiguous provenance. The remaining static
-gap is narrower but real: cross-file consumers beyond these thirty-four first
+gap is narrower but real. All 30 public Chrono-backed timestamp fields now
+have exactly one first-boundary or no-producer disposition, but the seven
+test-profile fields, cross-file consumers beyond these thirty-four first
 semantic boundaries, external consumers absent from this snapshot, and later
-container or arbitrary-byte propagation are not enumerated. A1's
+container or arbitrary-byte propagation are not fully dispositioned. A1's
 zero-unclassified-use acceptance remains unmet and the bead stays open.
 
 A 2026-08-05 static provenance pass refreshed one stale authority pin against
@@ -210,6 +212,17 @@ HTML field read at
 `conformance/raptorq_rfc6330/reporting/src/compliance_report.rs:298`. It does
 not execute any conformance tool or establish emitted bytes, persistence
 readback, unit-fixture propagation, or downstream behavior.
+
+The `TIME-A1-PUBLIC-CARRIER-LINEAGE-2026-08-06` extension composes those
+source-linked tranches into one fail-closed row for each of the 18 public
+DateTime fields and 12 public Chrono-generated string fields. Twenty-eight
+fields reach an already-declared first in-repository boundary; the two root
+CLI fields with no in-tree producer remain explicit empty-consumer rows. The
+matrix references 32 exact cross-file consumer IDs and two exact in-file
+derived consumer IDs, with no unclassified public carrier. This closes only
+the public-carrier first-boundary classification: test-profile carriers,
+external consumers, second-order propagation, emitted or persisted bytes,
+readback, behavior, and A1 completion remain open.
 
 That full line-sensitive pass also repaired a missed consequence of the
 previously classified PostgreSQL read-cancellation insertion: two literal
@@ -485,16 +498,19 @@ The artifact routes, without mutating shared authority files:
 Every reconciliation row has an explicit owner and
 `ROUTED_NOT_MUTATED_BY_A1` state. There are no unclassified literal Chrono
 paths or undiscovered direct Chrono import bindings in the pinned census, but
-derived-consumer coverage beyond the 39 declared in-file rows and thirty-four
-declared cross-file consumer rows remains partial.
+all 30 public carrier rows now have an exact first-boundary or no-producer
+disposition. Test-profile carrier coverage and derived-consumer coverage
+beyond the 39 declared in-file rows and thirty-four declared cross-file
+consumer rows remain partial.
 
 ## Validation and no-claim boundary
 
 A1 used workspace-filesystem source search, direct-import reconciliation,
 manifest and authority inspection, SHA-256 source pins, path/count and
 literal-operation, literal-source, in-file derived-row, and cross-file consumer
-projections; direct timestamp lineage checks; and independent static
-cross-review. It did not execute the companion contract. This remains a
+projections; direct timestamp lineage checks; the complete 30-field public
+carrier disposition matrix; and independent static cross-review. It did not
+execute the companion contract. This remains a
 partial static inventory only; full A1 acceptance is unmet,
 `bead_close_allowed=false`, and the bead must not be closed from this packet.
 

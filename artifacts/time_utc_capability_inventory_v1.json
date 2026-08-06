@@ -3090,7 +3090,7 @@
         "persistence_or_public_association": "MaintenanceResult.timestamp in maintenance_results.json"
       }
     ],
-    "no_claim": "The literal and direct-alias classification is complete, the declared in-file downstream rows are exact through the stated semantic boundary, and the thirty-four declared cross-file consumer rows are exact through their first stated boundaries. Other cross-file propagation, later encoding or rendering calls, later container propagation, later distinct sinks, external consumers, and later arbitrary-byte taint remain open. No profile resolution, compilation, execution, byte preservation, or behavioral evidence follows."
+    "no_claim": "The literal and direct-alias classification is complete, the declared in-file downstream rows are exact through the stated semantic boundary, the thirty-four declared cross-file consumer rows are exact through their first stated boundaries, and all 30 public Chrono-backed timestamp carriers have one exact first-boundary or no-producer disposition. Other cross-file propagation, later encoding or rendering calls, later container propagation, later distinct sinks, external consumers, test-profile carrier disposition, and later arbitrary-byte taint remain open. No profile resolution, compilation, execution, byte preservation, or behavioral evidence follows."
   },
   "alias_aware_chrono_uses": {
     "scope": "Bounded lexical inventory of every direct Chrono import binding, every line that directly references an imported Chrono symbol in the five census roots, and every adjacent derived temporal arithmetic, comparison, association, or ordering anchor discovered for those bindings.",
@@ -5057,7 +5057,7 @@
   "static_inventory_gaps": [
     {
       "gap_id": "TIME-STATIC-GAP-DERIVED-CONSUMER-CLASSIFICATION",
-      "summary": "All 159 literal Chrono lines, all 32 direct imported-symbol lines, eight imported-alias anchors, the declared in-file downstream consumers through the first semantic boundary, and thirty-four declared cross-file consumer boundaries have deterministic source-linked classifications. The root public DateTime carrier set and the main-conformance RaptorQ public reporting or private maintenance carrier slice are dispositioned through their declared first current in-repository boundaries or exact no-consumer states. Other cross-file propagation, external consumers, and second-order container or byte propagation remain outside this bounded static tranche.",
+      "summary": "All 159 literal Chrono lines, all 32 direct imported-symbol lines, eight imported-alias anchors, the declared in-file downstream consumers through the first semantic boundary, and thirty-four declared cross-file consumer boundaries have deterministic source-linked classifications. All 30 public Chrono-backed timestamp carriers have exactly one disposition through their declared first current in-repository boundaries or one of two exact no-producer states. Test-profile carrier disposition, other cross-file propagation, external consumers, and second-order container or byte propagation remain outside this bounded static tranche.",
       "newly_classified_consumer_categories": [
         "CLI cutoff comparisons and optional-expiry moves",
         "PostgreSQL midnight construction and Kafka recency arithmetic",
@@ -5070,6 +5070,7 @@
         "main-conformance RaptorQ maintenance private-carrier constructors",
         "main-conformance RaptorQ public pipeline constructors and history update",
         "main-conformance RaptorQ report rendering and serialization",
+        "complete 30-field public carrier first-boundary disposition matrix",
         "standalone golden and reporting persistence paths",
         "conformance executable JSON serialization boundaries",
         "excluded-conformance executable JSON serialization boundary",
@@ -5509,6 +5510,291 @@
     "required_disposition": "KEEP_OPEN",
     "no_claim_boundary": "This extension freezes declared source lineage for four main-conformance RaptorQ timestamp-string fields through public pipeline construction and update, three report output branches, history serialization, or private maintenance construction with an explicit no-timestamp-sink state. It does not execute conformance tools, prove emitted or persisted bytes, prove readback, enumerate unit-fixture or second-order propagation, close the wider derived-consumer remainder, close A1, or authorize dependency exit."
   },
+  "post_a1_public_carrier_lineage_extension": {
+    "extension_id": "TIME-A1-PUBLIC-CARRIER-LINEAGE-2026-08-06",
+    "captured_date_utc": "2026-08-06",
+    "extension_state": "STATIC_COMPLETE_PUBLIC_CARRIER_FIRST_BOUNDARY_DISPOSITION",
+    "source_pin_path_count": 74,
+    "public_datetime_field_count": 18,
+    "public_chrono_generated_string_field_count": 12,
+    "all_public_chrono_backed_timestamp_field_count": 30,
+    "declared_first_boundary_field_count": 28,
+    "no_in_tree_producer_field_count": 2,
+    "unclassified_public_carrier_field_count": 0,
+    "public_cross_file_consumer_id_count": 32,
+    "public_derived_consumer_id_count": 2,
+    "declared_public_consumer_id_count": 34,
+    "public_carrier_lineage_projection_sha256": "c14a1beb11f2c57890a9907a2c29092183974a56f2c2b521f0b37ae40c077eb7",
+    "field_lineage_rows": [
+      {
+        "field_id": "TIME-PUB-BENCH-ENVIRONMENT-TIMESTAMP",
+        "inventory_section": "public_datetime_fields",
+        "state": "DECLARED_FIRST_CROSS_FILE_EMBEDDINGS",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-BENCHMARK-ATP-RESULT-0204",
+          "TIME-CROSS-FILE-BENCHMARK-CURL-RESULT-0961",
+          "TIME-CROSS-FILE-BENCHMARK-RCLONE-RESULT-0692",
+          "TIME-CROSS-FILE-BENCHMARK-RSYNC-RESULT-0511",
+          "TIME-CROSS-FILE-BENCHMARK-SCP-RESULT-0279"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-BENCH-REPORT-TIMESTAMP",
+        "inventory_section": "public_datetime_fields",
+        "state": "DECLARED_FIRST_CROSS_FILE_CONSTRUCTOR",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-BENCHMARK-REPORT-CONSTRUCTOR-0099"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-CLI-ARCHIVE-ARCHIVED",
+        "inventory_section": "public_datetime_fields",
+        "state": "DECLARED_FIRST_CROSS_FILE_JSON_BOUNDARY",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-ROOT-CLI-OUTPUTTABLE-JSON-0156"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-CLI-ARCHIVE-EXPIRES",
+        "inventory_section": "public_datetime_fields",
+        "state": "DECLARED_FIRST_CROSS_FILE_JSON_BOUNDARY",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-ROOT-CLI-OUTPUTTABLE-JSON-0156"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-CLI-ARCHIVE-VERIFIED",
+        "inventory_section": "public_datetime_fields",
+        "state": "DECLARED_FIRST_CROSS_FILE_JSON_BOUNDARY",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-ROOT-CLI-OUTPUTTABLE-JSON-0156"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-CLI-BENCH-SYSTEM-TIMESTAMP",
+        "inventory_section": "public_datetime_fields",
+        "state": "NO_IN_TREE_PRODUCER_IN_PINNED_SNAPSHOT",
+        "consumer_ids": []
+      },
+      {
+        "field_id": "TIME-PUB-CLI-CI-EXPIRES",
+        "inventory_section": "public_datetime_fields",
+        "state": "DECLARED_FIRST_CROSS_FILE_JSON_BOUNDARY",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-ROOT-CLI-OUTPUTTABLE-JSON-0156"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-CLI-CI-TIMESTAMP",
+        "inventory_section": "public_datetime_fields",
+        "state": "DECLARED_FIRST_CROSS_FILE_JSON_BOUNDARY",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-ROOT-CLI-OUTPUTTABLE-JSON-0156"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-CLI-DATASET-UPDATED",
+        "inventory_section": "public_datetime_fields",
+        "state": "DECLARED_FIRST_CROSS_FILE_JSON_BOUNDARY",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-ROOT-CLI-OUTPUTTABLE-JSON-0156"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-CLI-INTEGRITY-LAST-CHECK",
+        "inventory_section": "public_datetime_fields",
+        "state": "DECLARED_FIRST_CROSS_FILE_JSON_BOUNDARY",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-ROOT-CLI-OUTPUTTABLE-JSON-0156"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-CLI-RELEASE-PUBLISHED",
+        "inventory_section": "public_datetime_fields",
+        "state": "DECLARED_FIRST_CROSS_FILE_JSON_BOUNDARY",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-ROOT-CLI-OUTPUTTABLE-JSON-0156"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-CLI-STATUS-TIMESTAMP",
+        "inventory_section": "public_datetime_fields",
+        "state": "NO_IN_TREE_PRODUCER_IN_PINNED_SNAPSHOT",
+        "consumer_ids": []
+      },
+      {
+        "field_id": "TIME-PUB-CONFORMANCE-H1-EXPECT-STRING",
+        "inventory_section": "public_chrono_generated_string_fields",
+        "state": "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-CONFORMANCE-H1-EXPECT-JSON-0093"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-CONFORMANCE-H1-REQUEST-STRING",
+        "inventory_section": "public_chrono_generated_string_fields",
+        "state": "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-CONFORMANCE-H1-REQUEST-JSON-0093"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-CONFORMANCE-H1-RESPONSE-STRING",
+        "inventory_section": "public_chrono_generated_string_fields",
+        "state": "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-CONFORMANCE-H1-RESPONSE-JSON-0093"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-CONFORMANCE-H2-CONNECT-STRING",
+        "inventory_section": "public_chrono_generated_string_fields",
+        "state": "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-CONFORMANCE-H2-CONNECT-JSON-0097"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-CONFORMANCE-H2-CONTINUATION-STRING",
+        "inventory_section": "public_chrono_generated_string_fields",
+        "state": "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-CONFORMANCE-H2-CONTINUATION-JSON-0097"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-CONFORMANCE-H2-DATA-END",
+        "inventory_section": "public_datetime_fields",
+        "state": "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-CONFORMANCE-DATA-END-JSON-0098"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-CONFORMANCE-H2-ENABLE-PUSH-STRING",
+        "inventory_section": "public_chrono_generated_string_fields",
+        "state": "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-CONFORMANCE-H2-ENABLE-PUSH-JSON-0094"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-CONFORMANCE-H2-GOAWAY",
+        "inventory_section": "public_datetime_fields",
+        "state": "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-CONFORMANCE-GOAWAY-JSON-0093"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-CONFORMANCE-H2-PING",
+        "inventory_section": "public_datetime_fields",
+        "state": "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-CONFORMANCE-PING-JSON-0100"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-CONFORMANCE-H2-PRIORITY",
+        "inventory_section": "public_datetime_fields",
+        "state": "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-CONFORMANCE-PRIORITY-JSON-0093"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-CONFORMANCE-H2-SETTINGS",
+        "inventory_section": "public_datetime_fields",
+        "state": "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-CONFORMANCE-SETTINGS-JSON-0094"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-CONFORMANCE-HPACK",
+        "inventory_section": "public_datetime_fields",
+        "state": "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-CONFORMANCE-HPACK-JSON-0094"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-CONFORMANCE-HPACK-ENCODER-STRING",
+        "inventory_section": "public_chrono_generated_string_fields",
+        "state": "DECLARED_EXECUTABLE_PRETTY_JSON_BOUNDARY",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-CONFORMANCE-HPACK-ENCODER-JSON-0097"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-CONFORMANCE-RAPTORQ-COVERAGE-GENERATED",
+        "inventory_section": "public_chrono_generated_string_fields",
+        "state": "PUBLIC_PIPELINE_REPORT_AND_HISTORY_BOUNDARIES_DECLARED",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-CI-MATRIX-0111",
+          "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-HISTORY-UPDATE-0100",
+          "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-REGRESSION-MATRIX-0092",
+          "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-REPORT-MATRIX-0080",
+          "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-REPORT-HTML-0298",
+          "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-REPORT-JSON-0277",
+          "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-REPORT-MARKDOWN-0095",
+          "TIME-DERIVED-CONFORMANCE-RAPTORQ-HISTORY-FIELD-0039",
+          "TIME-DERIVED-CONFORMANCE-RAPTORQ-HISTORY-SERIALIZE-0077"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-CONFORMANCE-RAPTORQ-HISTORY-UPDATED",
+        "inventory_section": "public_chrono_generated_string_fields",
+        "state": "PUBLIC_PIPELINE_CONSTRUCTION_UPDATE_AND_PERSISTENCE_DECLARED",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-HISTORY-CONSTRUCTOR-0039",
+          "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-HISTORY-UPDATE-0100",
+          "TIME-DERIVED-CONFORMANCE-RAPTORQ-HISTORY-SERIALIZE-0077"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-CONFORMANCE-RAPTORQ-RECORD-TIMESTAMP",
+        "inventory_section": "public_chrono_generated_string_fields",
+        "state": "DERIVED_FROM_COVERAGE_MATRIX_AND_PERSISTED_WITH_HISTORY",
+        "consumer_ids": [
+          "TIME-DERIVED-CONFORMANCE-RAPTORQ-HISTORY-FIELD-0039",
+          "TIME-DERIVED-CONFORMANCE-RAPTORQ-HISTORY-SERIALIZE-0077"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-CONFORMANCE-RAPTORQ-REFERENCE-UPDATED",
+        "inventory_section": "public_chrono_generated_string_fields",
+        "state": "PRIVATE_EXECUTABLE_CONSTRUCTORS_WITH_NO_TIMESTAMP_SINK_AND_NO_IN_TREE_UPDATE_CALLER",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-MAINT-CONFIGURED-0164",
+          "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-MAINT-DIFFERENTIAL-0218",
+          "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-MAINT-GOLDEN-0199"
+        ]
+      },
+      {
+        "field_id": "TIME-PUB-EXCLUDED-CONFORMANCE-PING-REPORT-TIMESTAMP",
+        "inventory_section": "public_chrono_generated_string_fields",
+        "state": "DECLARED_EXCLUDED_WORKSPACE_PRETTY_JSON_BOUNDARY",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-EXCLUDED-PING-JSON-0051"
+        ]
+      }
+    ],
+    "preservation": {
+      "production_source_changed": false,
+      "historical_a1_revision_changed": false,
+      "behavioral_gap_count_changed": false,
+      "time_acceptance_semantics_changed": false,
+      "test_profile_carrier_remainder_closed": false,
+      "second_order_propagation_closed": false,
+      "static_remainder_closed": false,
+      "bead_close_allowed": false,
+      "dependency_exit_allowed": false
+    },
+    "execution_state": "NOT_RUN_STATIC_ONLY",
+    "required_disposition": "KEEP_OPEN",
+    "no_claim_boundary": "This extension proves a one-row-per-field static disposition for all 30 public Chrono-backed timestamp carriers through an already-declared first in-repository consumer boundary or one of the two exact no-in-tree-producer states. It does not execute any producer or consumer, prove serialized or persisted bytes, prove readback, disposition the seven test-profile fields, enumerate external consumers or second-order propagation, close the wider static remainder, close A1, or authorize dependency exit."
+  },
   "validation": {
     "contract_path": "tests/time_utc_capability_inventory_contract.rs",
     "doc_path": "docs/time_utc_capability_inventory.md",
@@ -5525,6 +5811,7 @@
       "main-conformance RaptorQ pipeline and report source matching",
       "main-conformance RaptorQ maintenance private-carrier source matching",
       "main-conformance RaptorQ history serialization source matching",
+      "complete public carrier field-to-consumer disposition reconciliation",
       "derived and cross-file anchor source matching with direct-source lineage validation",
       "source file hashing",
       "manual cross-review"
