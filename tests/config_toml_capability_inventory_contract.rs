@@ -128,10 +128,7 @@ fn validate_post_a3_provenance_refresh(inventory: &Value) -> Result<(), String> 
         .ok_or_else(|| "post_a3_provenance_refresh must be present".to_owned())?;
     for (key, expected) in [
         ("captured_date_utc", "2026-08-05"),
-        (
-            "base_commit",
-            "424134f7338f610e36d5047d3d334128ae4275e4",
-        ),
+        ("base_commit", "424134f7338f610e36d5047d3d334128ae4275e4"),
         ("refresh_state", "STATIC_SOURCE_PIN_MAINTENANCE"),
         ("required_disposition", "KEEP_INCUMBENT"),
         ("execution_state", "NOT_RUN_STATIC_ONLY"),
@@ -164,10 +161,8 @@ fn validate_post_a3_provenance_refresh(inventory: &Value) -> Result<(), String> 
     }
     let builder = &rows[0];
     if text(builder, "path") != "src/runtime/builder.rs"
-        || text(builder, "source_commit")
-            != "24eb7ec6c62e9ba037d70fed4a69c4e733785926"
-        || text(builder, "classification")
-            != "PUBLIC_REQUEST_CX_VISIBILITY_AND_DOCUMENTATION_ONLY"
+        || text(builder, "source_commit") != "24eb7ec6c62e9ba037d70fed4a69c4e733785926"
+        || text(builder, "classification") != "PUBLIC_REQUEST_CX_VISIBILITY_AND_DOCUMENTATION_ONLY"
         || text(builder, "previous_sha256")
             != "69e52f8b761944edf5fa038ed3b122ecf9a58da05f5ad15f20d1f8e3e1f8adb1"
         || builder.get("previous_line_count").and_then(Value::as_u64) != Some(8393)
@@ -463,9 +458,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     if string_set(preservation_scope, "surface_ids") != expected_surfaces {
         return Err("A3 KEEP must preserve every inventoried TOML surface".to_owned());
     }
-    if string_set(preservation_scope, "grammar_construct_ids")
-        != row_ids(grammar, "construct_id")
-    {
+    if string_set(preservation_scope, "grammar_construct_ids") != row_ids(grammar, "construct_id") {
         return Err("A3 KEEP must preserve every observed grammar construct".to_owned());
     }
     if string_set(preservation_scope, "error_contract_ids") != row_ids(errors, "error_id") {
@@ -516,15 +509,11 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         return Err("A3 must classify each claim-time source-pin drift exactly once".to_owned());
     }
 
-    let expected_a3_gaps: BTreeSet<String> = [
-        "CFG-GAP-02",
-        "CFG-GAP-06",
-        "CFG-GAP-10",
-        "CFG-GAP-12",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect();
+    let expected_a3_gaps: BTreeSet<String> =
+        ["CFG-GAP-02", "CFG-GAP-06", "CFG-GAP-10", "CFG-GAP-12"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
     if string_set(a3, "blocking_gap_ids") != expected_a3_gaps {
         return Err("A3 KEEP must retain its exact four blocking gaps".to_owned());
     }
@@ -550,8 +539,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     {
         return Err("A3 replacement evidence must remain explicitly absent under KEEP".to_owned());
     }
-    if array(a3, "revisit_conditions").len() != 3
-        || text(a3, "no_claim_boundary").trim().is_empty()
+    if array(a3, "revisit_conditions").len() != 3 || text(a3, "no_claim_boundary").trim().is_empty()
     {
         return Err("A3 KEEP must retain revisit conditions and a no-claim boundary".to_owned());
     }
@@ -986,7 +974,7 @@ fn fail_closed_mutations_are_rejected() {
     assert!(validate_inventory(&wrong_cutover_owner).is_err());
 
     let mut changed_toml_contract = inventory;
-    changed_toml_contract["post_a3_provenance_refresh"]["refreshed_paths"][0]
-        ["accepted_toml_contract_changed"] = Value::Bool(true);
+    changed_toml_contract["post_a3_provenance_refresh"]["refreshed_paths"][0]["accepted_toml_contract_changed"] =
+        Value::Bool(true);
     assert!(validate_inventory(&changed_toml_contract).is_err());
 }

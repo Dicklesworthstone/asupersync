@@ -12497,7 +12497,10 @@ mod tests {
 
         let result = run(read_exact_from(&cx, &mut reader, &mut buf));
 
-        assert_eq!(reader.polls, 1, "the read poll must run before cancellation");
+        assert_eq!(
+            reader.polls, 1,
+            "the read poll must run before cancellation"
+        );
         assert!(
             reader.was_live_before_cancel,
             "the reader must inject cancellation after the guard passes"

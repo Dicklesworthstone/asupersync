@@ -638,9 +638,7 @@ impl<T> CrashSender<T> {
         // receiver wake cannot under-count an already-visible message.
         let (result, receiver_wake) = permit.try_send_deferred_wake(value);
         if result.is_ok() {
-            self.controller
-                .send_count
-                .fetch_add(1, Ordering::Relaxed);
+            self.controller.send_count.fetch_add(1, Ordering::Relaxed);
             self.controller
                 .stats
                 .sends_succeeded
@@ -1340,8 +1338,14 @@ mod tests {
         assert!(ctrl.restart());
         assert_eq!(tx.send_count(), 3);
         let after_restart = ctrl.stats().snapshot();
-        assert_eq!(after_restart.sends_attempted, before_restart.sends_attempted);
-        assert_eq!(after_restart.sends_succeeded, before_restart.sends_succeeded);
+        assert_eq!(
+            after_restart.sends_attempted,
+            before_restart.sends_attempted
+        );
+        assert_eq!(
+            after_restart.sends_succeeded,
+            before_restart.sends_succeeded
+        );
         assert_eq!(after_restart.sends_rejected, before_restart.sends_rejected);
         assert_eq!(after_restart.crashes, before_restart.crashes);
         assert_eq!(after_restart.restarts, before_restart.restarts + 1);

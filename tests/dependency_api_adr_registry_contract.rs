@@ -485,7 +485,9 @@ fn dep_adr_004_claim_time_truth_is_current() {
     assert!(typed_corpus.contains("ten Scenario files under `examples/scenarios/`"));
     assert!(typed_corpus.contains("three under `frankenlab/examples/scenarios/`"));
     assert!(typed_corpus.contains("adjacent parameter reference"));
-    assert!(!typed_corpus.contains("across `examples/scenarios/`, `frankenlab/examples/scenarios/`, and `tools/demos/`"));
+    assert!(!typed_corpus.contains(
+        "across `examples/scenarios/`, `frankenlab/examples/scenarios/`, and `tools/demos/`"
+    ));
 
     let primary_json = alternatives
         .iter()
@@ -545,12 +547,17 @@ fn dep_adr_004_claim_time_truth_is_current() {
         "parameter reference, not the Scenario",
         "shared/config-agnostic canonical-JSON encoder",
     ] {
-        assert!(adr_doc.contains(marker), "DEP-ADR-004 doc is missing {marker}");
+        assert!(
+            adr_doc.contains(marker),
+            "DEP-ADR-004 doc is missing {marker}"
+        );
     }
 
     let cutover = adr.get("cutover").expect("DEP-ADR-004 cutover");
     assert_eq!(
-        cutover.get("dependency_exit_allowed").and_then(Value::as_bool),
+        cutover
+            .get("dependency_exit_allowed")
+            .and_then(Value::as_bool),
         Some(false)
     );
     for row in array(cutover, "per_capability") {

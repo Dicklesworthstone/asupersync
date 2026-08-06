@@ -1312,7 +1312,10 @@ mod tests {
         assert!(!right.remove(task(1), &mut arena));
         assert_eq!(left.len(), 3);
         assert_eq!(right.len(), 3);
-        assert_eq!(pop_all_ring(&mut left, &mut arena), vec![task(0), task(1), task(2)]);
+        assert_eq!(
+            pop_all_ring(&mut left, &mut arena),
+            vec![task(0), task(1), task(2)]
+        );
         assert_eq!(
             pop_all_ring(&mut right, &mut arena),
             vec![task(3), task(4), task(5)]

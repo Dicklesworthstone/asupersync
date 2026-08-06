@@ -211,14 +211,11 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     );
     if text(owned_contract_value, "owner_bead") != "asupersync-d24mms.6.2"
         || text(owned_contract_value, "trait") != "asupersync::stream::Stream"
-        || text(owned_contract_value, "extension_trait")
-            != "asupersync::stream::StreamExt"
+        || text(owned_contract_value, "extension_trait") != "asupersync::stream::StreamExt"
         || string_set(owned_contract_value, "source_paths") != expected_owned_sources
         || string_set(owned_contract_value, "dimensions") != expected_owned_dimensions
-        || text(owned_contract_value, "next_future_cancellation")
-            != expected_next_cancellation
-        || text(owned_contract_value, "documentation_state")
-            != "SOURCE_AUTHORED_NOT_EXECUTED"
+        || text(owned_contract_value, "next_future_cancellation") != expected_next_cancellation
+        || text(owned_contract_value, "documentation_state") != "SOURCE_AUTHORED_NOT_EXECUTED"
         || owned_contract_value.get("behavior_change") != Some(&Value::Bool(false))
         || owned_contract_value.get("cutover_authorized") != Some(&Value::Bool(false))
     {
@@ -299,11 +296,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             "MISSING",
             "MISSING_SAME_OR_BETTER_RECEIPT",
         ),
-        (
-            "FUT-A2-CUTOVER",
-            "BLOCKED",
-            "BLOCKED_PENDING_ALL_RECEIPTS",
-        ),
+        ("FUT-A2-CUTOVER", "BLOCKED", "BLOCKED_PENDING_ALL_RECEIPTS"),
     ] {
         let requirement = find_row(a2_requirements, "requirement_id", requirement_id);
         if text(requirement, "source_status") != source_status
@@ -499,8 +492,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     if string_set(owned_atp, "types") != expected_owned_types
         || owned_atp.get("trait").and_then(Value::as_str)
             != Some("asupersync::stream::Stream<Item = TransferProgress>")
-        || owned_atp.get("extension_method").and_then(Value::as_str)
-            != Some("StreamExt::next")
+        || owned_atp.get("extension_method").and_then(Value::as_str) != Some("StreamExt::next")
         || owned_atp
             .get("implementation_state")
             .and_then(Value::as_str)
@@ -529,8 +521,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     .collect();
     if text(pinned_local, "type") != "DownstreamPinnedLocalStream<'_>"
         || string_set(pinned_local, "properties") != expected_pinned_properties
-        || text(pinned_local, "forwarding_adapter")
-            != "Pin<Box<S>> through impl Stream for Pin<P>"
+        || text(pinned_local, "forwarding_adapter") != "Pin<Box<S>> through impl Stream for Pin<P>"
         || text(pinned_local, "extension_method") != "StreamExt::next on Pin<Box<S>>"
         || string_set(pinned_local, "observations") != expected_pinned_observations
         || text(pinned_local, "implementation_state") != "SOURCE_AUTHORED_NOT_EXECUTED"
@@ -541,9 +532,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     if fallible.get("item").and_then(Value::as_str) != Some("Result<u32, &'static str>")
         || fallible.get("adapter").and_then(Value::as_str)
             != Some("StreamExt::try_collect::<u32, &'static str, Vec<u32>>")
-        || fallible
-            .get("implementation_state")
-            .and_then(Value::as_str)
+        || fallible.get("implementation_state").and_then(Value::as_str)
             != Some("SOURCE_AUTHORED_NOT_EXECUTED")
     {
         return Err("fallible downstream contract must remain source-only".to_owned());
@@ -905,7 +894,10 @@ fn production_public_and_comment_only_sites_match_source() {
         .split_once("// Keep the incumbent public trait implementations")
         .expect("owned progress kernel terminator")
         .0;
-    assert_eq!(progress_kernel.matches("cx.waker().wake_by_ref();").count(), 1);
+    assert_eq!(
+        progress_kernel.matches("cx.waker().wake_by_ref();").count(),
+        1
+    );
     assert!(stream.contains("obligation.resolve(Resolution::Abort)"));
 
     let middleware = read_repo_file("src/web/middleware.rs");
@@ -998,7 +990,10 @@ fn owned_stream_semantics_are_explicit_and_fail_closed() {
         "impl<S: Stream + Unpin + ?Sized> Stream for Box<S>",
         "impl<S: Stream + Unpin + ?Sized> Stream for &mut S",
     ] {
-        assert!(stream.contains(required), "missing Stream marker: {required}");
+        assert!(
+            stream.contains(required),
+            "missing Stream marker: {required}"
+        );
     }
     assert!(!stream.contains("The Stream trait is inherently cancel-safe"));
     assert!(!stream.contains("This method is cancel-safe"));
@@ -1282,10 +1277,7 @@ fn public_stream_impls_compile_but_downstream_evidence_remains_planned() {
     let inventory = artifact();
     let journeys = array(&inventory, "downstream_and_e2e");
     let owned_journey = find_row(journeys, "journey_id", "FUT-JOURNEY-OWNED-STREAM");
-    assert_eq!(
-        text(owned_journey, "state"),
-        "EXISTING_TEST"
-    );
+    assert_eq!(text(owned_journey, "state"), "EXISTING_TEST");
     assert_eq!(
         owned_journey
             .get("owned_atp_progress_compile_contract")

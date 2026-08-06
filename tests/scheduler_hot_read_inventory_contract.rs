@@ -124,11 +124,7 @@ fn check_anchor_objects(value: &Value) -> usize {
                 );
                 checked += 1;
             }
-            checked
-                + fields
-                    .values()
-                    .map(check_anchor_objects)
-                    .sum::<usize>()
+            checked + fields.values().map(check_anchor_objects).sum::<usize>()
         }
         _ => 0,
     }
@@ -152,7 +148,11 @@ fn source_pins_and_exact_anchors_match_the_captured_tree() {
         let path = text(pin, "path");
         assert!(paths.insert(path.to_owned()), "duplicate source pin {path}");
         let bytes = read_repo_bytes(path);
-        assert_eq!(sha256_hex(&bytes), text(pin, "sha256"), "hash drift: {path}");
+        assert_eq!(
+            sha256_hex(&bytes),
+            text(pin, "sha256"),
+            "hash drift: {path}"
+        );
         let source = String::from_utf8(bytes).expect("pinned source must be UTF-8");
         assert_eq!(
             source.lines().count() as u64,
@@ -315,7 +315,11 @@ fn incumbent_rows_remain_exact_and_are_not_reinterpreted() {
         let actual = live_rows
             .get(&key)
             .unwrap_or_else(|| panic!("missing incumbent row {key:?}"));
-        assert_eq!(actual.get("p50_ns"), expected.get("p50_ns"), "p50 drift: {key:?}");
+        assert_eq!(
+            actual.get("p50_ns"),
+            expected.get("p50_ns"),
+            "p50 drift: {key:?}"
+        );
         assert_eq!(text(actual, "git_sha"), text(expected, "git_sha"));
     }
 
@@ -373,7 +377,10 @@ fn replacement_matrix_identity_and_migration_are_fail_closed() {
         "sched/hotread/v2/checkpoint/cancel_requested",
         "sched/hotread/v2/recycle_generation/1024",
     ] {
-        assert!(operations.contains(required), "missing operation {required}");
+        assert!(
+            operations.contains(required),
+            "missing operation {required}"
+        );
     }
 
     let profiles = row_id_set(&artifact, "profile_corpus", "profile_id");
@@ -425,7 +432,10 @@ fn replacement_matrix_identity_and_migration_are_fail_closed() {
         "spread_pct",
         "outcome_checksum",
     ] {
-        assert!(identity.contains(required), "missing identity field {required}");
+        assert!(
+            identity.contains(required),
+            "missing identity field {required}"
+        );
     }
 
     let migration = array(&artifact, "migration_rules")
@@ -442,7 +452,10 @@ fn replacement_matrix_identity_and_migration_are_fail_closed() {
         "standalone atomic-load result cannot authorize",
         "peer-owned baseline",
     ] {
-        assert!(migration.contains(required), "migration rules missing {required}");
+        assert!(
+            migration.contains(required),
+            "migration rules missing {required}"
+        );
     }
 
     let decisions = object(&artifact, "ecosystem_scan")
@@ -509,7 +522,10 @@ fn static_validation_and_documentation_keep_the_no_claim_boundary() {
         "baseline rewrite",
         "default flip",
     ] {
-        assert!(no_claims.contains(claim), "missing no-claim boundary {claim}");
+        assert!(
+            no_claims.contains(claim),
+            "missing no-claim boundary {claim}"
+        );
     }
 
     let doc = read_repo_file(DOC_PATH);
@@ -534,11 +550,17 @@ fn static_validation_and_documentation_keep_the_no_claim_boundary() {
         &Value::Object(object(&artifact, "replacement_comparator_spec").clone()),
         "operation_ids",
     ) {
-        assert!(doc.contains(&operation), "inventory doc missing {operation}");
+        assert!(
+            doc.contains(&operation),
+            "inventory doc missing {operation}"
+        );
     }
     for profile in array(&artifact, "profile_corpus") {
         let profile_id = text(profile, "profile_id");
-        assert!(doc.contains(profile_id), "inventory doc missing {profile_id}");
+        assert!(
+            doc.contains(profile_id),
+            "inventory doc missing {profile_id}"
+        );
     }
 
     let runbook = read_repo_file(PERF_RUNBOOK_PATH);

@@ -1936,10 +1936,7 @@ where
         let mut read_buf = ReadBuf::new(&mut buf[pos..]);
         std::future::poll_fn(|task_cx| {
             if Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
-                return Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    "cancelled",
-                )));
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
             Pin::new(&mut *stream).poll_read(task_cx, &mut read_buf)
         })
@@ -6287,7 +6284,10 @@ mod tests {
 
         let result = run(read_exact_from(&mut reader, &mut buf));
 
-        assert_eq!(reader.polls, 1, "the read poll must run before cancellation");
+        assert_eq!(
+            reader.polls, 1,
+            "the read poll must run before cancellation"
+        );
         assert!(
             reader.was_live_before_cancel,
             "the reader must inject cancellation after the guard passes"

@@ -135,10 +135,7 @@ fn find_row<'a>(rows: &'a [Value], key: &str, expected: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("missing {key}={expected}"))
 }
 
-fn map_string_set(
-    value: &serde_json::Map<String, Value>,
-    key: &str,
-) -> BTreeSet<String> {
+fn map_string_set(value: &serde_json::Map<String, Value>, key: &str) -> BTreeSet<String> {
     map_array(value, key)
         .iter()
         .map(|entry| {
@@ -273,7 +270,10 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         || map_usize(graph, "inactive_wasm_cells_per_dependency") != 13
         || map_usize(graph, "recorded_active_rows") != 78
         || map_usize(graph, "combined_marginal_package_version_observations") != 87
-        || graph.get("rustix_eviction_supported").and_then(Value::as_bool) != Some(false)
+        || graph
+            .get("rustix_eviction_supported")
+            .and_then(Value::as_bool)
+            != Some(false)
         || map_text(graph, "measured_graph_benefit") != "MINIMAL"
     {
         return Err("marginal graph summary drifted".to_owned());
@@ -396,14 +396,20 @@ fn direct_dependency_use_path_sets_are_exact() {
 
     let polling = map_object(census, "polling");
     let expected_polling = map_string_set(polling, "production_paths");
-    assert_eq!(expected_polling.len(), map_usize(polling, "direct_file_count"));
+    assert_eq!(
+        expected_polling.len(),
+        map_usize(polling, "direct_file_count")
+    );
     assert_eq!(direct_use_paths("polling::"), expected_polling);
 
     let socket2 = map_object(census, "socket2");
     let production = map_string_set(socket2, "production_paths");
     let test_only = map_string_set(socket2, "test_only_paths");
     assert!(production.is_disjoint(&test_only));
-    assert_eq!(production.len(), map_usize(socket2, "production_file_count"));
+    assert_eq!(
+        production.len(),
+        map_usize(socket2, "production_file_count")
+    );
     assert_eq!(test_only.len(), map_usize(socket2, "test_only_file_count"));
     let expected_socket2: BTreeSet<_> = production.union(&test_only).cloned().collect();
     assert_eq!(
@@ -457,9 +463,7 @@ fn plan_registry_baseline_cutover_and_taxonomy_retain_incumbents() {
     assert_eq!(text(capability, "disposition"), "KEEP_UNTIL_PARITY");
     assert_eq!(text(capability, "evidence_state"), "BASELINE_PLANNED");
     assert_eq!(text(capability, "cutover_state"), "KEEP_INCUMBENT");
-    assert!(
-        text(capability, "no_claim_boundary").contains("terminal KEEP/defer")
-    );
+    assert!(text(capability, "no_claim_boundary").contains("terminal KEEP/defer"));
 
     let baseline = parse_repo_json(BASELINE_PATH);
     let baseline_row = find_row(
@@ -469,7 +473,9 @@ fn plan_registry_baseline_cutover_and_taxonomy_retain_incumbents() {
     );
     assert_eq!(text(baseline_row, "baseline_state"), "BLOCKED_PLATFORM");
     assert_eq!(
-        baseline_row.get("cutover_eligible").and_then(Value::as_bool),
+        baseline_row
+            .get("cutover_eligible")
+            .and_then(Value::as_bool),
         Some(false)
     );
     assert_eq!(array(baseline_row, "parity_modes").len(), 7);
@@ -482,13 +488,19 @@ fn plan_registry_baseline_cutover_and_taxonomy_retain_incumbents() {
     );
     assert_eq!(text(binding, "registry_cutover_state"), "KEEP_INCUMBENT");
     assert_eq!(
-        binding.get("dependency_exit_allowed").and_then(Value::as_bool),
+        binding
+            .get("dependency_exit_allowed")
+            .and_then(Value::as_bool),
         Some(false)
     );
 
     let taxonomy = parse_repo_json(TAXONOMY_PATH);
     for candidate in ["polling-reactor", "socket-platform"] {
-        let row = find_row(array(&taxonomy, "classifications"), "candidate_id", candidate);
+        let row = find_row(
+            array(&taxonomy, "classifications"),
+            "candidate_id",
+            candidate,
+        );
         assert_eq!(text(row, "class_id"), "BOUNDARY-UNSAFE");
         assert_eq!(text(row, "program_verdict"), "KEEP_UNLESS_GATED");
         let gates = array(row, "program_gates");
@@ -582,7 +594,10 @@ fn canonical_marginal_rows_match_terminal_graph_summary() {
                 .collect()
         );
         for row in rows.iter().copied() {
-            assert_eq!(row_nested_text(row, "marginal_native_code", "status"), "none");
+            assert_eq!(
+                row_nested_text(row, "marginal_native_code", "status"),
+                "none"
+            );
             assert!(array(row, "build_scripts").is_empty());
             assert!(array(row, "proc_macros").is_empty());
             assert_eq!(text(row, "unsafe_exposure_class"), "BOUNDARY-UNSAFE");
@@ -741,7 +756,9 @@ fn source_anchors_preserve_nontrivial_platform_scope() {
 #[test]
 fn docs_expose_terminal_keep_reopen_gate_and_no_claims() {
     let document = read_repo_file(DOC_PATH);
-    let begin = document.find(DOC_BEGIN).expect("missing document begin marker");
+    let begin = document
+        .find(DOC_BEGIN)
+        .expect("missing document begin marker");
     let end = document.find(DOC_END).expect("missing document end marker");
     assert!(begin < end);
 
@@ -755,6 +772,9 @@ fn docs_expose_terminal_keep_reopen_gate_and_no_claims() {
         "did not compile or execute the focused contract",
         "replacement implementation, dependency removal",
     ] {
-        assert!(document.contains(token), "documentation token missing: {token}");
+        assert!(
+            document.contains(token),
+            "documentation token missing: {token}"
+        );
     }
 }

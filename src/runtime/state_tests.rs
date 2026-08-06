@@ -6973,10 +6973,7 @@ fn leak_response_panic_drains_deferred_region_advancements_before_unwind() {
         "deferred advancement queue must be drained before unwind escapes"
     );
     assert!(
-        state
-            .regions
-            .get(deferred_region.arena_index())
-            .is_none(),
+        state.regions.get(deferred_region.arena_index()).is_none(),
         "the finalizing region must close before the leak panic escapes"
     );
     assert_eq!(

@@ -5096,11 +5096,7 @@ mod tests {
             Outcome::Ok(transaction) => transaction,
             other => panic!("begin immediate failed: {other:?}"),
         };
-        match block_on(transaction.execute(
-            &cx,
-            "INSERT INTO t (value) VALUES (1)",
-            &[],
-        )) {
+        match block_on(transaction.execute(&cx, "INSERT INTO t (value) VALUES (1)", &[])) {
             Outcome::Ok(1) => {}
             other => panic!("insert in transaction failed: {other:?}"),
         }

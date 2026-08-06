@@ -1232,9 +1232,7 @@ impl StrandedBlockingTasks {
 /// worker remains, queued work stays available to it. If this was the last
 /// claim, every queue is detached and its handles are completed as cancelled
 /// after the mutex is released.
-fn rollback_failed_worker_spawn_locked(
-    inner: &BlockingPoolInner,
-) -> Option<StrandedBlockingTasks> {
+fn rollback_failed_worker_spawn_locked(inner: &BlockingPoolInner) -> Option<StrandedBlockingTasks> {
     let claimed_workers = inner.active_threads.fetch_sub(1, Ordering::AcqRel);
     debug_assert!(claimed_workers > 0, "failed spawn must own a worker claim");
     if claimed_workers != 1 {
@@ -1254,8 +1252,8 @@ fn rollback_failed_worker_spawn_locked(
             .iter()
             .zip(&affinity.cohort_pending_counts)
         {
-            recorded_cohort_pending = recorded_cohort_pending
-                .saturating_add(pending.swap(0, Ordering::AcqRel));
+            recorded_cohort_pending =
+                recorded_cohort_pending.saturating_add(pending.swap(0, Ordering::AcqRel));
             while let Some(task) = queue.pop() {
                 drained_cohort_tasks = drained_cohort_tasks.saturating_add(1);
                 tasks.push(task);
@@ -1686,11 +1684,7 @@ mod tests {
     fn tracked_test_blocking_task(
         preferred_cohort: Option<usize>,
         executions: Arc<AtomicUsize>,
-    ) -> (
-        BlockingTask,
-        Arc<AtomicBool>,
-        Arc<BlockingTaskCompletion>,
-    ) {
+    ) -> (BlockingTask, Arc<AtomicBool>, Arc<BlockingTaskCompletion>) {
         let cancelled = Arc::new(AtomicBool::new(false));
         let completion = Arc::new(BlockingTaskCompletion::new(wall_clock_now));
         let task = BlockingTask {
@@ -2670,10 +2664,7 @@ mod tests {
 
     #[test]
     fn failed_additional_worker_spawn_preserves_work_for_live_worker() {
-        let inner = test_blocking_inner_with_affinity(
-            BlockingPoolAffinityProfile::Disabled,
-            None,
-        );
+        let inner = test_blocking_inner_with_affinity(BlockingPoolAffinityProfile::Disabled, None);
         let executions = Arc::new(AtomicUsize::new(0));
         let (task, cancelled, completion) =
             tracked_test_blocking_task(None, Arc::clone(&executions));
@@ -2685,7 +2676,10 @@ mod tests {
             rollback_failed_worker_spawn_locked(&inner)
         };
 
-        assert!(stranded.is_none(), "one live worker can service queued work");
+        assert!(
+            stranded.is_none(),
+            "one live worker can service queued work"
+        );
         assert_eq!(inner.active_threads.load(Ordering::Acquire), 1);
         assert_eq!(inner.pending_count.load(Ordering::Acquire), 1);
         assert!(!cancelled.load(Ordering::Acquire));

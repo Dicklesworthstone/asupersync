@@ -1817,11 +1817,7 @@ mod tests {
             Box::pin(std::future::pending())
         }
 
-        fn delete<'a>(
-            &'a self,
-            _namespace: &'a str,
-            _key: &'a str,
-        ) -> StorageHostFuture<'a, bool> {
+        fn delete<'a>(&'a self, _namespace: &'a str, _key: &'a str) -> StorageHostFuture<'a, bool> {
             Box::pin(std::future::pending())
         }
 
@@ -2694,7 +2690,11 @@ mod tests {
         let event = adapter.events().last().expect("event should exist");
         assert_eq!(event.outcome, StorageEventOutcome::Denied);
         assert_eq!(event.reason_code, StorageEventReasonCode::HostBackendError);
-        assert_eq!(adapter.events().len(), 1, "host failure is one terminal event");
+        assert_eq!(
+            adapter.events().len(),
+            1,
+            "host failure is one terminal event"
+        );
     }
 
     #[test]

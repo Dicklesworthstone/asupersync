@@ -3216,10 +3216,7 @@ mod tests {
         let coarse = (0..32_i32)
             .map(|step| f64::from(31 - step) * (2.0 / 31.0))
             .collect::<Vec<_>>();
-        let fine = coarse
-            .iter()
-            .map(|value| value * 1e-9)
-            .collect::<Vec<_>>();
+        let fine = coarse.iter().map(|value| value * 1e-9).collect::<Vec<_>>();
 
         let coarse_e = deterioration_eprocess(&coarse, 0.5);
         let fine_e = deterioration_eprocess(&fine, 0.5);

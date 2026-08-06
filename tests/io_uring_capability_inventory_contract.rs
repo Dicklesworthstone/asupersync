@@ -292,8 +292,14 @@ fn source_accuracy_ledger_and_existing_evidence_gaps_are_explicit() {
         assert!(!text(gap, "pinned_reality").is_empty());
         let source = read_repo_file(text(gap, "path"));
         for anchor in array(gap, "source_anchors") {
-            let anchor = anchor.as_str().expect("source accuracy anchor must be text");
-            assert!(source.contains(anchor), "{} missing {anchor}", text(gap, "gap_id"));
+            let anchor = anchor
+                .as_str()
+                .expect("source accuracy anchor must be text");
+            assert!(
+                source.contains(anchor),
+                "{} missing {anchor}",
+                text(gap, "gap_id")
+            );
         }
         assert!(text(gap, "owner_bead").starts_with("asupersync-"));
     }
@@ -338,7 +344,11 @@ fn source_accuracy_ledger_and_existing_evidence_gaps_are_explicit() {
             .iter()
             .map(|locator| locator_signature(locator, "recorded_line"))
             .collect();
-        assert_eq!(recorded_signatures.len(), recorded_locators.len(), "{site_id}");
+        assert_eq!(
+            recorded_signatures.len(),
+            recorded_locators.len(),
+            "{site_id}"
+        );
         assert_eq!(
             reconciled_signatures.len(),
             current_locators.len(),
@@ -438,7 +448,10 @@ fn capability_levels_and_runtime_probes_are_independent() {
     ]);
     let capabilities = array(&inventory, "capability_matrix");
     assert_eq!(capabilities.len(), 6);
-    assert_eq!(row_ids(capabilities, "capability_id"), expected_capabilities);
+    assert_eq!(
+        row_ids(capabilities, "capability_id"),
+        expected_capabilities
+    );
 
     let fixed = find_row(capabilities, "capability_id", "URING-CAP-FIXED-BUFFERS");
     assert_eq!(
@@ -503,15 +516,13 @@ fn capability_levels_and_runtime_probes_are_independent() {
                 "URING-FB-RESOURCE",
                 "URING-FB-RING-CREATE",
             ]),
-            "URING-CAP-MAPPED-BUFFER-RING" | "URING-CAP-MULTISHOT-RECV" => {
-                expected_set(&[
-                    "URING-FB-DEPENDENCY",
-                    "URING-FB-OP-UNSUPPORTED",
-                    "URING-FB-PROBE-ERROR",
-                    "URING-FB-RESOURCE",
-                    "URING-FB-RING-CREATE",
-                ])
-            }
+            "URING-CAP-MAPPED-BUFFER-RING" | "URING-CAP-MULTISHOT-RECV" => expected_set(&[
+                "URING-FB-DEPENDENCY",
+                "URING-FB-OP-UNSUPPORTED",
+                "URING-FB-PROBE-ERROR",
+                "URING-FB-RESOURCE",
+                "URING-FB-RING-CREATE",
+            ]),
             "URING-CAP-SQPOLL" => expected_set(&[
                 "URING-FB-PERMISSION",
                 "URING-FB-PROBE-ERROR",
@@ -535,13 +546,22 @@ fn force_off_fallback_and_observability_contracts_fail_closed() {
     let inventory = artifact();
     let force_off = object(&inventory, "force_off_contract");
     let force_off_value = Value::Object(force_off.clone());
-    assert!(!boolean(&force_off_value, "ambient_environment_read_allowed"));
+    assert!(!boolean(
+        &force_off_value,
+        "ambient_environment_read_allowed"
+    ));
     assert!(boolean(&force_off_value, "global_disable_precedes_probe"));
-    assert!(boolean(&force_off_value, "per_capability_mask_precedes_probe"));
+    assert!(boolean(
+        &force_off_value,
+        "per_capability_mask_precedes_probe"
+    ));
     assert!(text(&force_off_value, "production_source").contains("RuntimeBuilder"));
     let forced = object(&force_off_value, "forced_off_result");
     assert_eq!(forced.get("requested").and_then(Value::as_bool), Some(true));
-    assert_eq!(text(&Value::Object(forced.clone()), "supported"), "NOT_PROBED");
+    assert_eq!(
+        text(&Value::Object(forced.clone()), "supported"),
+        "NOT_PROBED"
+    );
     assert_eq!(forced.get("active").and_then(Value::as_bool), Some(false));
     assert_eq!(
         text(&Value::Object(forced.clone()), "fallback_reason"),
@@ -622,72 +642,27 @@ fn force_off_fallback_and_observability_contracts_fail_closed() {
     assert_eq!(row_ids(valid_states, "fallback_reason"), expected_reasons);
     let expected_state_rows: [(&str, &[bool], &[&str], bool); 14] = [
         ("URING-FB-NONE", &[true], &["SUPPORTED"], true),
-        (
-            "URING-FB-NOT-REQUESTED",
-            &[false],
-            &["NOT_PROBED"],
-            false,
-        ),
-        (
-            "URING-FB-FEATURE-DISABLED",
-            &[true],
-            &["NOT_PROBED"],
-            false,
-        ),
+        ("URING-FB-NOT-REQUESTED", &[false], &["NOT_PROBED"], false),
+        ("URING-FB-FEATURE-DISABLED", &[true], &["NOT_PROBED"], false),
         (
             "URING-FB-TARGET-UNSUPPORTED",
             &[true],
             &["UNSUPPORTED"],
             false,
         ),
-        (
-            "URING-FB-FORCED-OFF",
-            &[true],
-            &["NOT_PROBED"],
-            false,
-        ),
-        (
-            "URING-FB-RING-CREATE",
-            &[true],
-            &["NOT_PROBED"],
-            false,
-        ),
+        ("URING-FB-FORCED-OFF", &[true], &["NOT_PROBED"], false),
+        ("URING-FB-RING-CREATE", &[true], &["NOT_PROBED"], false),
         (
             "URING-FB-REACTOR-UNAVAILABLE",
             &[true],
             &["NOT_PROBED"],
             false,
         ),
-        (
-            "URING-FB-OP-UNSUPPORTED",
-            &[true],
-            &["UNSUPPORTED"],
-            false,
-        ),
-        (
-            "URING-FB-PERMISSION",
-            &[true],
-            &["NOT_PROBED"],
-            false,
-        ),
-        (
-            "URING-FB-RESOURCE",
-            &[true],
-            &["NOT_PROBED"],
-            false,
-        ),
-        (
-            "URING-FB-PROBE-ERROR",
-            &[true],
-            &["NOT_PROBED"],
-            false,
-        ),
-        (
-            "URING-FB-DEPENDENCY",
-            &[true],
-            &["NOT_PROBED"],
-            false,
-        ),
+        ("URING-FB-OP-UNSUPPORTED", &[true], &["UNSUPPORTED"], false),
+        ("URING-FB-PERMISSION", &[true], &["NOT_PROBED"], false),
+        ("URING-FB-RESOURCE", &[true], &["NOT_PROBED"], false),
+        ("URING-FB-PROBE-ERROR", &[true], &["NOT_PROBED"], false),
+        ("URING-FB-DEPENDENCY", &[true], &["NOT_PROBED"], false),
         ("URING-FB-NO-WIN", &[true], &["SUPPORTED"], false),
         (
             "URING-FB-UNKNOWN",
@@ -772,7 +747,10 @@ fn force_off_fallback_and_observability_contracts_fail_closed() {
             "supported",
         ])
     );
-    assert_eq!(array(&observability_value, "required_snapshot_fields").len(), 6);
+    assert_eq!(
+        array(&observability_value, "required_snapshot_fields").len(),
+        6
+    );
     assert!(boolean(&observability_value, "bounded_cardinality"));
     assert!(!boolean(
         &observability_value,
@@ -905,7 +883,10 @@ fn evidence_ownership_and_no_win_policy_are_exact() {
     let noise = object(&no_win_value, "noise_rule");
     assert!(text(&Value::Object(noise.clone()), "statistic").contains("median absolute"));
     assert_eq!(noise.get("maximum_pct").and_then(Value::as_f64), Some(5.0));
-    assert_eq!(text(&Value::Object(noise.clone()), "exceeded_action"), "NO_WIN");
+    assert_eq!(
+        text(&Value::Object(noise.clone()), "exceeded_action"),
+        "NO_WIN"
+    );
 
     let resources = object(&no_win_value, "resource_envelope");
     for key in [
@@ -914,7 +895,12 @@ fn evidence_ownership_and_no_win_policy_are_exact() {
     ] {
         assert_eq!(resources.get(key).and_then(Value::as_f64), Some(5.0));
     }
-    assert_eq!(resources.get("additional_threads_max_default").and_then(Value::as_u64), Some(0));
+    assert_eq!(
+        resources
+            .get("additional_threads_max_default")
+            .and_then(Value::as_u64),
+        Some(0)
+    );
     assert_eq!(
         resources
             .get("additional_threads_max_sqpoll_opt_in")
@@ -1044,10 +1030,22 @@ fn docs_and_no_claim_boundary_remain_honest() {
     }
 
     let validation = object(&inventory, "validation_state");
-    assert!(boolean(&Value::Object(validation.clone()), "source_hashes_checked"));
-    assert!(boolean(&Value::Object(validation.clone()), "json_shape_checked"));
-    assert!(boolean(&Value::Object(validation.clone()), "rust_contract_authored"));
-    assert!(!boolean(&Value::Object(validation.clone()), "rust_contract_executed"));
+    assert!(boolean(
+        &Value::Object(validation.clone()),
+        "source_hashes_checked"
+    ));
+    assert!(boolean(
+        &Value::Object(validation.clone()),
+        "json_shape_checked"
+    ));
+    assert!(boolean(
+        &Value::Object(validation.clone()),
+        "rust_contract_authored"
+    ));
+    assert!(!boolean(
+        &Value::Object(validation.clone()),
+        "rust_contract_executed"
+    ));
     assert!(!boolean(
         &Value::Object(validation.clone()),
         "live_kernel_probes_executed"
@@ -1072,6 +1070,9 @@ fn docs_and_no_claim_boundary_remain_honest() {
         "does not prove broad workspace health",
         "does not authorize dependency",
     ] {
-        assert!(joined.contains(boundary), "missing no-claim boundary: {boundary}");
+        assert!(
+            joined.contains(boundary),
+            "missing no-claim boundary: {boundary}"
+        );
     }
 }

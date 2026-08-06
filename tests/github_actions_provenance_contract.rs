@@ -90,11 +90,7 @@ fn validate_reference(reference_and_comment: &str) -> Result<(String, String, St
         return Err("uses revision must be a lowercase 40-hex commit SHA".to_owned());
     }
 
-    Ok((
-        action.to_owned(),
-        revision.to_owned(),
-        comment.to_owned(),
-    ))
+    Ok((action.to_owned(), revision.to_owned(), comment.to_owned()))
 }
 
 #[test]
@@ -207,10 +203,7 @@ fn update_and_no_claim_policies_are_explicit() {
         text(&policy["review_receipt"], "scope")
             .contains("does not assert upstream trustworthiness")
     );
-    assert_eq!(
-        text(&policy["review_receipt"], "reviewer"),
-        "FoggyPrairie"
-    );
+    assert_eq!(text(&policy["review_receipt"], "reviewer"), "FoggyPrairie");
     assert!(
         array(&policy["update_contract"], "required_review_steps").len() >= 7,
         "update contract must retain the complete review sequence"
@@ -233,13 +226,10 @@ fn mutable_short_and_uncommented_references_fail_closed() {
     assert!(validate_reference("actions/checkout@v4 # v4").is_err());
     assert!(validate_reference("actions/checkout@11bd719 # v4.2.2").is_err());
     assert!(
-        validate_reference("actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683")
-            .is_err()
+        validate_reference("actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683").is_err()
     );
     assert!(
-        validate_reference(
-            "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2"
-        )
-        .is_ok()
+        validate_reference("actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2")
+            .is_ok()
     );
 }

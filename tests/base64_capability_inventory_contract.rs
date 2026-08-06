@@ -262,8 +262,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
 
     let source_scope = object(inventory, "source_pin_scope");
     if source_scope.get("path_count").and_then(Value::as_u64) != Some(70)
-        || source_scope.get("paths_sha256").and_then(Value::as_str)
-            != Some(SOURCE_PIN_PATHS_SHA256)
+        || source_scope.get("paths_sha256").and_then(Value::as_str) != Some(SOURCE_PIN_PATHS_SHA256)
         || array(inventory, "source_pins").len() != 70
     {
         return Err("source-pin scope drifted".to_owned());
@@ -273,12 +272,10 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     if resolution["root"]["manifest_requirement"].as_str() != Some("0.23")
         || resolution["root"]["resolved_version"].as_str() != Some("0.23.0")
         || resolution["root"]["default_features"].as_bool() != Some(false)
-        || resolution["root_transitive_retained"]["resolved_version"].as_str()
-            != Some("0.22.1")
+        || resolution["root_transitive_retained"]["resolved_version"].as_str() != Some("0.22.1")
         || resolution["root_transitive_retained"]["direct_0_23_edge_removal_effect"].as_str()
             != Some("DOES_NOT_REMOVE_ALL_BASE64_PACKAGES_FROM_ROOT_LOCKED_GRAPH")
-        || resolution["excluded_fuzz_workspace"]["resolved_version"].as_str()
-            != Some("0.22.1")
+        || resolution["excluded_fuzz_workspace"]["resolved_version"].as_str() != Some("0.22.1")
         || resolution["standalone_raptorq_workspace"]["resolved_version_state"].as_str()
             != Some("NOT_LOCKED_IN_REPOSITORY")
         || resolution["synthesized_consumer_profile_count"].as_u64() != Some(12)
@@ -290,7 +287,11 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     require_exact_strings(
         &inventory["dependency_resolution"]["root_transitive_retained"],
         "consumers",
-        &["opentelemetry-proto@0.32.0", "sqlx-core@0.9.0", "tonic@0.14.6"],
+        &[
+            "opentelemetry-proto@0.32.0",
+            "sqlx-core@0.9.0",
+            "tonic@0.14.6",
+        ],
     )?;
     require_exact_strings(
         &inventory["dependency_resolution"],
@@ -334,12 +335,18 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         "engines",
     )?;
     for engine in array(inventory, "engines") {
-        if engine.get("rejects_nonzero_trailing_bits").and_then(Value::as_bool) != Some(true)
+        if engine
+            .get("rejects_nonzero_trailing_bits")
+            .and_then(Value::as_bool)
+            != Some(true)
             || engine.get("rejects_whitespace").and_then(Value::as_bool) != Some(true)
             || engine.get("empty_input").and_then(Value::as_str) != Some("ACCEPT_AS_EMPTY")
             || text(engine, "current_acceptance_rule").is_empty()
         {
-            return Err(format!("engine {} semantics drifted", text(engine, "engine_id")));
+            return Err(format!(
+                "engine {} semantics drifted",
+                text(engine, "engine_id")
+            ));
         }
     }
 
@@ -433,7 +440,11 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         }
     }
     if call_sites.len() != 36
-        || call_sites.iter().map(|row| number(row, "literal_tokens")).sum::<u64>() != 166
+        || call_sites
+            .iter()
+            .map(|row| number(row, "literal_tokens"))
+            .sum::<u64>()
+            != 166
         || sum_nested(call_sites, "production", "encode") != 23
         || sum_nested(call_sites, "production", "decode") != 20
         || sum_nested(call_sites, "nonproduction", "encode") != 52
@@ -444,7 +455,10 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
 
     let occurrence = object(inventory, "occurrence_census");
     if occurrence.get("path_count").and_then(Value::as_u64) != Some(36)
-        || occurrence.get("literal_token_count").and_then(Value::as_u64) != Some(166)
+        || occurrence
+            .get("literal_token_count")
+            .and_then(Value::as_u64)
+            != Some(166)
         || occurrence.get("local_mock_paths").and_then(Value::as_u64) != Some(2)
         || occurrence.get("comment_only_paths").and_then(Value::as_u64) != Some(1)
     {
@@ -491,9 +505,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         ("B64-A5-REMAINING", "asupersync-d24mms.10.5"),
     ]);
     for row in array(inventory, "migration_reservation_groups") {
-        if expected_group_owners.get(text(row, "group_id")).copied()
-            != Some(text(row, "owner"))
-        {
+        if expected_group_owners.get(text(row, "group_id")).copied() != Some(text(row, "owner")) {
             return Err("migration group owner drifted".to_owned());
         }
     }
@@ -697,13 +709,22 @@ fn source_pins_cover_every_claimed_path_and_match_bytes() {
         projection.push('\n');
     }
     assert_eq!(sha256_hex(projection.as_bytes()), SOURCE_PIN_PATHS_SHA256);
-    assert_eq!(text(&inventory["source_pin_scope"], "paths_sha256"), SOURCE_PIN_PATHS_SHA256);
+    assert_eq!(
+        text(&inventory["source_pin_scope"], "paths_sha256"),
+        SOURCE_PIN_PATHS_SHA256
+    );
 
     for row in array(&inventory, "call_sites") {
-        assert!(pinned_paths.contains(text(row, "path")), "call-site path is not pinned");
+        assert!(
+            pinned_paths.contains(text(row, "path")),
+            "call-site path is not pinned"
+        );
     }
     for row in array(&inventory, "manual_collision_surfaces") {
-        assert!(pinned_paths.contains(text(row, "path")), "collision path is not pinned");
+        assert!(
+            pinned_paths.contains(text(row, "path")),
+            "collision path is not pinned"
+        );
     }
 }
 
@@ -716,11 +737,17 @@ fn literal_path_token_census_and_reservation_digests_are_exact() {
     for group in array(&inventory, "migration_reservation_groups") {
         let group_id = text(group, "group_id");
         let mut projection = BTreeMap::new();
-        for row in call_sites.iter().filter(|row| text(row, "group") == group_id) {
+        for row in call_sites
+            .iter()
+            .filter(|row| text(row, "group") == group_id)
+        {
             projection.insert(text(row, "path").to_owned(), number(row, "literal_tokens"));
         }
         assert_eq!(projection.len() as u64, number(group, "path_count"));
-        assert_eq!(projection.values().sum::<u64>(), number(group, "literal_token_count"));
+        assert_eq!(
+            projection.values().sum::<u64>(),
+            number(group, "literal_token_count")
+        );
         let mut bytes = String::new();
         for (path, count) in projection {
             bytes.push_str(&path);
@@ -728,7 +755,10 @@ fn literal_path_token_census_and_reservation_digests_are_exact() {
             bytes.push_str(&count.to_string());
             bytes.push('\n');
         }
-        assert_eq!(sha256_hex(bytes.as_bytes()), text(group, "projection_sha256"));
+        assert_eq!(
+            sha256_hex(bytes.as_bytes()),
+            text(group, "projection_sha256")
+        );
     }
 }
 
@@ -739,19 +769,34 @@ fn dependency_governance_sources_remain_blocking_and_version_skew_is_explicit() 
         .iter()
         .find(|row| row.get("capability_id").and_then(Value::as_str) == Some(CAPABILITY_ID))
         .expect("registry must contain the Base64 capability");
-    assert_eq!(text(registry_row, "disposition"), "PRESERVE_AND_REPLACE_IF_PARITY");
+    assert_eq!(
+        text(registry_row, "disposition"),
+        "PRESERVE_AND_REPLACE_IF_PARITY"
+    );
     assert_eq!(text(registry_row, "evidence_state"), "BASELINE_PLANNED");
-    assert_eq!(text(registry_row, "cutover_state"), "BLOCKED_PENDING_EVIDENCE");
-    assert_eq!(registry_row["baseline"]["owner_bead"].as_str(), Some(BEAD_ID));
+    assert_eq!(
+        text(registry_row, "cutover_state"),
+        "BLOCKED_PENDING_EVIDENCE"
+    );
+    assert_eq!(
+        registry_row["baseline"]["owner_bead"].as_str(),
+        Some(BEAD_ID)
+    );
 
     let baseline = parse_repo_json(BASELINE_PATH);
     let baseline_row = array(&baseline, "capability_baselines")
         .iter()
         .find(|row| row.get("capability_id").and_then(Value::as_str) == Some(CAPABILITY_ID))
         .expect("baseline must contain the Base64 capability");
-    assert_eq!(text(baseline_row, "baseline_state"), "EXECUTABLE_PARTIAL_BLOCKING");
+    assert_eq!(
+        text(baseline_row, "baseline_state"),
+        "EXECUTABLE_PARTIAL_BLOCKING"
+    );
     assert_eq!(baseline_row["cutover_eligible"].as_bool(), Some(false));
-    assert_eq!(baseline_row["downstream_profiles"], serde_json::json!(["consumer-default"]));
+    assert_eq!(
+        baseline_row["downstream_profiles"],
+        serde_json::json!(["consumer-default"])
+    );
 
     let matrix = parse_repo_json(MATRIX_PATH);
     let rows: Vec<_> = array(&matrix, "matrix")
@@ -868,7 +913,10 @@ fn dependency_governance_sources_remain_blocking_and_version_skew_is_explicit() 
         "name = \"sqlx-core\"\nversion = \"0.9.0\"",
         "name = \"tonic\"\nversion = \"0.14.6\"",
     ] {
-        assert!(root_lock.contains(needle), "root lock boundary missing: {needle}");
+        assert!(
+            root_lock.contains(needle),
+            "root lock boundary missing: {needle}"
+        );
     }
     assert_eq!(root_lock.matches(" \"base64 0.22.1\",").count(), 3);
     assert!(read_repo_file(FUZZ_MANIFEST_PATH).contains("base64 = \"0.22\""));
@@ -892,11 +940,16 @@ fn docs_ignore_and_no_claim_markers_remain_discoverable() {
         "does not prove compilation",
         "Only A6",
     ] {
-        assert!(docs.contains(needle), "documentation marker missing: {needle}");
+        assert!(
+            docs.contains(needle),
+            "documentation marker missing: {needle}"
+        );
     }
-    assert!(read_repo_file(IGNORE_PATH)
-        .lines()
-        .any(|line| line == "!artifacts/base64_capability_inventory_v1.json"));
+    assert!(
+        read_repo_file(IGNORE_PATH)
+            .lines()
+            .any(|line| line == "!artifacts/base64_capability_inventory_v1.json")
+    );
 }
 
 #[test]

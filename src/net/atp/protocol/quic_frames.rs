@@ -988,11 +988,7 @@ mod tests {
                 let decoded = VarInt::decode_from_buf(&mut fragmented).unwrap();
 
                 assert_eq!(decoded, Some(expected), "value={value}, split={split}");
-                assert_eq!(
-                    fragmented.remaining(),
-                    0,
-                    "value={value}, split={split}"
-                );
+                assert_eq!(fragmented.remaining(), 0, "value={value}, split={split}");
             }
         }
     }

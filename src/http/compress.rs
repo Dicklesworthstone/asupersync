@@ -1220,7 +1220,10 @@ mod tests {
 
     #[test]
     fn decompression_limit_default_matches_public_bound() {
-        assert_eq!(DecompressionLimit::default().get(), DEFAULT_MAX_DECOMPRESSED_SIZE);
+        assert_eq!(
+            DecompressionLimit::default().get(),
+            DEFAULT_MAX_DECOMPRESSED_SIZE
+        );
         assert_eq!(DecompressionLimit::new(4096).get(), 4096);
     }
 
@@ -1995,8 +1998,7 @@ mod tests {
 
         let success_plain = b"hello gzip world";
         let success_compressed = gzip_member_bytes(success_plain);
-        let success =
-            run_gzip_boundary_case(&success_compressed, DecompressionLimit::default());
+        let success = run_gzip_boundary_case(&success_compressed, DecompressionLimit::default());
         assert_eq!(success.output, success_plain);
         assert_eq!(success.error_kind, "ok");
         log_case(
@@ -2082,8 +2084,7 @@ mod tests {
         let mut isize_mismatch = success_compressed.clone();
         let isize_index = isize_mismatch.len() - 4;
         isize_mismatch[isize_index] ^= 0x01;
-        let isize_outcome =
-            run_gzip_boundary_case(&isize_mismatch, DecompressionLimit::default());
+        let isize_outcome = run_gzip_boundary_case(&isize_mismatch, DecompressionLimit::default());
         assert_ne!(isize_outcome.error_kind, "ok");
         log_case(
             "isize_mismatch",

@@ -8007,13 +8007,8 @@ impl QuicStagedEntryReceive {
         offset: u64,
         data: &[u8],
     ) -> Result<(), QuicTransportError> {
-        self.write_range_with_cursor_audit(
-            entry,
-            offset,
-            data,
-            quic_staging_cursor_audit_enabled(),
-        )
-        .await
+        self.write_range_with_cursor_audit(entry, offset, data, quic_staging_cursor_audit_enabled())
+            .await
     }
 
     async fn write_range_with_cursor_audit(

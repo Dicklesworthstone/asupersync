@@ -23,8 +23,7 @@ const BEAD_ID: &str = "asupersync-5z2scg.6.1";
 const CAPABILITY_ID: &str = "CAP-TIME-UTC-RFC3339";
 const ADR_ID: &str = "DEP-ADR-011";
 const BASELINE_REVISION: &str = "1afde84d564bd8ea876459624116f90028b80835";
-const ARTIFACT_SHA256: &str =
-    "e8064091bc705ff2cadced49335e838d104464aa3c3468e4cc48a66edbe80639";
+const ARTIFACT_SHA256: &str = "e8064091bc705ff2cadced49335e838d104464aa3c3468e4cc48a66edbe80639";
 const DOC_BEGIN: &str = "<!-- BEGIN TIME UTC CAPABILITY INVENTORY -->";
 const DOC_END: &str = "<!-- END TIME UTC CAPABILITY INVENTORY -->";
 const CHRONO_TOKEN: &str = concat!("chrono", "::");
@@ -54,8 +53,7 @@ const ROOT_CLI_REFRESH_REVISIONS: &[&str] = &[
     "75778fbf0846be2d3bc965a2809a705aeb1dfe25",
     "ab1bdba3f6a303da9d51216cb2b8794395daed95",
 ];
-const POSTGRES_REFRESH_REVISIONS: &[&str] =
-    &["2e89fda041c6a5bb8b0c2907b3fe76a068180280"];
+const POSTGRES_REFRESH_REVISIONS: &[&str] = &["2e89fda041c6a5bb8b0c2907b3fe76a068180280"];
 const SEMANTIC_CONSUMER_BOUNDARY: &str = concat!(
     "Include nonliteral consumers through the first semantic compare, arithmetic, format, ",
     "serialize, persist, retain, return, extract, or embed boundary in a Chrono-bearing ",
@@ -248,7 +246,9 @@ fn validate_identity(inventory: &Value) -> Result<(), String> {
             != Some(0)
         || policy.get("a1_execution_state").and_then(Value::as_str)
             != Some("NOT_EXECUTED_THIS_TURN")
-        || policy.get("source_classification_state").and_then(Value::as_str)
+        || policy
+            .get("source_classification_state")
+            .and_then(Value::as_str)
             != Some(
                 "LITERAL_DIRECT_ALIAS_DECLARED_IN_FILE_AND_CROSS_FILE_CONSUMERS_CLASSIFIED_REMAINDER_OPEN",
             )
@@ -263,10 +263,17 @@ fn validate_identity(inventory: &Value) -> Result<(), String> {
             .get("unresolved_static_detail_gap_count")
             .and_then(Value::as_u64)
             != Some(1)
-        || policy.get("static_zero_unclassified_use_met").and_then(Value::as_bool)
+        || policy
+            .get("static_zero_unclassified_use_met")
+            .and_then(Value::as_bool)
             != Some(false)
-        || policy.get("acceptance_zero_unknown_met").and_then(Value::as_bool) != Some(false)
-        || policy.get("alias_aware_use_inventory_state").and_then(Value::as_str)
+        || policy
+            .get("acceptance_zero_unknown_met")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || policy
+            .get("alias_aware_use_inventory_state")
+            .and_then(Value::as_str)
             != Some("IMPORT_BINDINGS_DIRECT_REFERENCES_AND_DECLARED_DERIVED_ANCHORS_COMPLETE")
         || contains_unclassified_value(inventory)
     {
@@ -305,14 +312,24 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
         .collect();
     let fuzz_root = profiles["TIME-PROFILE-EXCLUDED-FUZZ-WORKSPACE"];
     if fuzz_root.get("direct_chrono_edge").and_then(Value::as_bool) != Some(false)
-        || fuzz_root.get("transitive_chrono_edge").and_then(Value::as_bool) != Some(true)
+        || fuzz_root
+            .get("transitive_chrono_edge")
+            .and_then(Value::as_bool)
+            != Some(true)
         || fuzz_root.get("direct_time_edge").and_then(Value::as_bool) != Some(false)
-        || fuzz_root.get("transitive_time_edge").and_then(Value::as_bool) != Some(true)
+        || fuzz_root
+            .get("transitive_time_edge")
+            .and_then(Value::as_bool)
+            != Some(true)
         || text(fuzz_root, "manifest") != "fuzz/Cargo.toml"
     {
         return Err("excluded fuzz workspace dependency profile drifted".to_owned());
     }
-    require_exact_strings(fuzz_root, "root_dependency_features", &["benchmark-adapters", "tls"])?;
+    require_exact_strings(
+        fuzz_root,
+        "root_dependency_features",
+        &["benchmark-adapters", "tls"],
+    )?;
     let offline = profiles["TIME-PROFILE-OFFLINE-TUNER"];
     require_exact_strings(offline, "cargo_features", &["cli", "simd-intrinsics"])?;
     require_exact_strings(offline, "target_kinds", &["offline_tuner binary"])?;
@@ -522,16 +539,13 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
     let derived_gap = &array(inventory, "static_inventory_gaps")[0];
     let nondependency_boundary = &array(inventory, "scope_boundaries")[0];
     if text(resolved_alias, "state") != "RESOLVED_BY_STATIC_ALIAS_INVENTORY"
-        || text(resolved_per_use, "state")
-            != "RESOLVED_BY_STATIC_DIRECT_PER_USE_CLASSIFICATION"
-        || text(resolved_derived, "state")
-            != "RESOLVED_BY_STATIC_DECLARED_DERIVED_CLASSIFICATION"
+        || text(resolved_per_use, "state") != "RESOLVED_BY_STATIC_DIRECT_PER_USE_CLASSIFICATION"
+        || text(resolved_derived, "state") != "RESOLVED_BY_STATIC_DECLARED_DERIVED_CLASSIFICATION"
         || array(derived_gap, "newly_classified_consumer_categories").len() != 16
         || string_set(derived_gap, "newly_classified_consumer_categories").len() != 16
         || array(derived_gap, "representative_unclassified_consumers").len() != 3
         || string_set(derived_gap, "representative_unclassified_consumers").len() != 3
-        || !text(derived_gap, "summary")
-            .contains("All 30 public Chrono-backed timestamp carriers")
+        || !text(derived_gap, "summary").contains("All 30 public Chrono-backed timestamp carriers")
         || !text(derived_gap, "summary").contains("Test-profile carrier disposition")
         || text(derived_gap, "effect").is_empty()
         || text(derived_gap, "owner_bead") != BEAD_ID
@@ -577,10 +591,7 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
 fn validate_locked_packages(inventory: &Value) -> Result<(), String> {
     let rows = array(inventory, "locked_packages");
     require_exact_ids(rows, "package", &["chrono", "time"], "locked packages")?;
-    let by_name: BTreeMap<_, _> = rows
-        .iter()
-        .map(|row| (text(row, "package"), row))
-        .collect();
+    let by_name: BTreeMap<_, _> = rows.iter().map(|row| (text(row, "package"), row)).collect();
     let chrono = by_name["chrono"];
     if text(chrono, "version") != "0.4.45"
         || text(chrono, "checksum")
@@ -603,11 +614,7 @@ fn validate_locked_packages(inventory: &Value) -> Result<(), String> {
     require_exact_strings(
         time,
         "direct_locked_dependers",
-        &[
-            "asn1-rs 0.7.2",
-            "asupersync 0.3.10",
-            "x509-parser 0.18.1",
-        ],
+        &["asn1-rs 0.7.2", "asupersync 0.3.10", "x509-parser 0.18.1"],
     )?;
     Ok(())
 }
@@ -635,15 +642,12 @@ fn validate_public_and_persisted_counts(inventory: &Value) -> Result<(), String>
         .count();
     let rendered_serialize_only = rendered
         .iter()
-        .filter(|row| {
-            row.get("serde_direction").and_then(Value::as_str) == Some("SERIALIZE_ONLY")
-        })
+        .filter(|row| row.get("serde_direction").and_then(Value::as_str) == Some("SERIALIZE_ONLY"))
         .count();
     let rendered_roundtrip = rendered
         .iter()
         .filter(|row| {
-            row.get("serde_direction").and_then(Value::as_str)
-                == Some("SERIALIZE_AND_DESERIALIZE")
+            row.get("serde_direction").and_then(Value::as_str) == Some("SERIALIZE_AND_DESERIALIZE")
         })
         .count();
     let test_publicly_reachable = test_profile
@@ -657,8 +661,7 @@ fn validate_public_and_persisted_counts(inventory: &Value) -> Result<(), String>
     let test_pub_private_module = test_profile
         .iter()
         .filter(|row| {
-            row.get("visibility").and_then(Value::as_str)
-                == Some("PUB_ITEM_IN_PRIVATE_TEST_MODULE")
+            row.get("visibility").and_then(Value::as_str) == Some("PUB_ITEM_IN_PRIVATE_TEST_MODULE")
         })
         .count();
     let test_private = test_profile
@@ -677,10 +680,8 @@ fn validate_public_and_persisted_counts(inventory: &Value) -> Result<(), String>
         .map(|row| (text(row, "field_id"), row))
         .collect();
     let optional_datetime = format!("Option<{}DateTime<{}Utc>>", CHRONO_TOKEN, CHRONO_TOKEN);
-    if text(typed_fields["TIME-PUB-CONFORMANCE-H2-SETTINGS"], "struct")
-        != "ComplianceReport"
-        || text(typed_fields["TIME-PUB-CONFORMANCE-HPACK"], "struct")
-            != "ComplianceReport"
+    if text(typed_fields["TIME-PUB-CONFORMANCE-H2-SETTINGS"], "struct") != "ComplianceReport"
+        || text(typed_fields["TIME-PUB-CONFORMANCE-HPACK"], "struct") != "ComplianceReport"
         || text(
             test_fields["TIME-TEST-ROOT-HPACK-FIXTURE-GENERATED"],
             "visibility",
@@ -717,9 +718,18 @@ fn validate_public_and_persisted_counts(inventory: &Value) -> Result<(), String>
 
     let totals = object(inventory, "public_field_totals");
     if totals.get("root_asupersync_fields").and_then(Value::as_u64) != Some(12)
-        || totals.get("root_asupersync_structs").and_then(Value::as_u64) != Some(9)
-        || totals.get("root_asupersync_modules").and_then(Value::as_u64) != Some(3)
-        || totals.get("conformance_member_fields").and_then(Value::as_u64) != Some(6)
+        || totals
+            .get("root_asupersync_structs")
+            .and_then(Value::as_u64)
+            != Some(9)
+        || totals
+            .get("root_asupersync_modules")
+            .and_then(Value::as_u64)
+            != Some(3)
+        || totals
+            .get("conformance_member_fields")
+            .and_then(Value::as_u64)
+            != Some(6)
         || totals
             .get("conformance_member_chrono_generated_string_fields")
             .and_then(Value::as_u64)
@@ -736,7 +746,10 @@ fn validate_public_and_persisted_counts(inventory: &Value) -> Result<(), String>
             .get("all_public_chrono_backed_timestamp_fields")
             .and_then(Value::as_u64)
             != Some(30)
-        || totals.get("test_profile_datetime_fields").and_then(Value::as_u64) != Some(7)
+        || totals
+            .get("test_profile_datetime_fields")
+            .and_then(Value::as_u64)
+            != Some(7)
         || totals
             .get("test_profile_publicly_reachable_fields")
             .and_then(Value::as_u64)
@@ -749,8 +762,14 @@ fn validate_public_and_persisted_counts(inventory: &Value) -> Result<(), String>
             .get("test_profile_private_serialized_fields")
             .and_then(Value::as_u64)
             != Some(1)
-        || totals.get("all_inventory_field_rows").and_then(Value::as_u64) != Some(37)
-        || totals.get("syntactically_pub_field_rows").and_then(Value::as_u64) != Some(36)
+        || totals
+            .get("all_inventory_field_rows")
+            .and_then(Value::as_u64)
+            != Some(37)
+        || totals
+            .get("syntactically_pub_field_rows")
+            .and_then(Value::as_u64)
+            != Some(36)
         || totals
             .get("externally_reachable_public_field_rows")
             .and_then(Value::as_u64)
@@ -868,7 +887,8 @@ fn collect_rs_files(root: &Path, output: &mut Vec<PathBuf>) {
                 continue;
             }
             collect_rs_files(&path, output);
-        } else if file_type.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+        } else if file_type.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("rs")
+        {
             output.push(path);
         }
     }
@@ -1183,12 +1203,10 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
         || number(per_use, "literal_use_override_count") != 36
         || text(per_use, "literal_operation_projection_sha256")
             != LITERAL_OPERATION_PROJECTION_SHA256
-        || text(per_use, "literal_source_projection_sha256")
-            != LITERAL_SOURCE_PROJECTION_SHA256
+        || text(per_use, "literal_source_projection_sha256") != LITERAL_SOURCE_PROJECTION_SHA256
         || text(per_use, "path_classification_projection_sha256")
             != PATH_CLASSIFICATION_PROJECTION_SHA256
-        || text(per_use, "literal_override_projection_sha256")
-            != LITERAL_OVERRIDE_PROJECTION_SHA256
+        || text(per_use, "literal_override_projection_sha256") != LITERAL_OVERRIDE_PROJECTION_SHA256
         || text(per_use, "additional_derived_projection_sha256")
             != ADDITIONAL_DERIVED_PROJECTION_SHA256
         || text(per_use, "cross_file_consumer_projection_sha256")
@@ -1301,12 +1319,17 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
             return Err(format!("{} path set drifted", text(set, "set_id")));
         }
         for path in paths {
-            let Some((actual_group, _, _)) = group_by_path.get(&path)
-            else {
-                return Err(format!("{} references non-census path {path}", text(set, "set_id")));
+            let Some((actual_group, _, _)) = group_by_path.get(&path) else {
+                return Err(format!(
+                    "{} references non-census path {path}",
+                    text(set, "set_id")
+                ));
             };
             if actual_group.as_str() != group_id {
-                return Err(format!("{} group route drifted for {path}", text(set, "set_id")));
+                return Err(format!(
+                    "{} group route drifted for {path}",
+                    text(set, "set_id")
+                ));
             }
             let metadata = (
                 actual_group.clone(),
@@ -1419,7 +1442,10 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
             || text(rule, "operation") != operation
             || number(rule, "matching_line_count") != matching_line_count
         {
-            return Err(format!("{} rule metadata drifted", text(rule, "operation_id")));
+            return Err(format!(
+                "{} rule metadata drifted",
+                text(rule, "operation_id")
+            ));
         }
     }
 
@@ -1438,7 +1464,9 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
     let mut projection = String::new();
     for (path, line, source) in &literal_rows {
         if !classified_paths.contains_key(path) {
-            return Err(format!("literal use lacks a path classification at {path}:{line}"));
+            return Err(format!(
+                "literal use lacks a path classification at {path}:{line}"
+            ));
         }
         let Some(rule) = rules
             .iter()
@@ -1451,7 +1479,10 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
         projection.push_str(&format!("{path}\t{line}\t{operation_id}\n"));
     }
     for rule in rules {
-        if rule_counts.get(text(rule, "operation_id")).copied().unwrap_or(0)
+        if rule_counts
+            .get(text(rule, "operation_id"))
+            .copied()
+            .unwrap_or(0)
             != number(rule, "matching_line_count")
         {
             return Err(format!("{} rule count drifted", text(rule, "operation_id")));
@@ -1549,7 +1580,10 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
             || text(row, "exposure").is_empty()
             || text(row, "persistence_or_public_association").is_empty()
         {
-            return Err(format!("{} additional derived row drifted", text(row, "use_id")));
+            return Err(format!(
+                "{} additional derived row drifted",
+                text(row, "use_id")
+            ));
         }
         actual_categories.insert(category.to_owned());
         declared_consumer_direct_source_ids.extend(derivation_source_set);
@@ -1566,8 +1600,7 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
     {
         return Err("cross-file consumer identity, total, or projection drifted".to_owned());
     }
-    let declared_cross_file_categories =
-        string_set(per_use, "cross_file_consumer_category_ids");
+    let declared_cross_file_categories = string_set(per_use, "cross_file_consumer_category_ids");
     let conformance_manifest = read_repo_file("conformance/Cargo.toml");
     let conformance_root_lib = read_repo_file("conformance/src/lib.rs");
     let raptorq_reporting_module =
@@ -1727,7 +1760,10 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
             || text(row, "exposure").is_empty()
             || text(row, "persistence_or_public_association").is_empty()
         {
-            return Err(format!("{} cross-file consumer row drifted", text(row, "use_id")));
+            return Err(format!(
+                "{} cross-file consumer row drifted",
+                text(row, "use_id")
+            ));
         }
         actual_cross_file_categories.insert(category.to_owned());
         cross_file_direct_source_ids.extend(derivation_source_set.iter().cloned());
@@ -1738,8 +1774,10 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
     }
     if number(per_use, "cross_file_direct_source_anchor_count")
         != cross_file_direct_source_ids.len() as u64
-        || number(per_use, "declared_consumer_unique_direct_source_anchor_count")
-            != declared_consumer_direct_source_ids.len() as u64
+        || number(
+            per_use,
+            "declared_consumer_unique_direct_source_anchor_count",
+        ) != declared_consumer_direct_source_ids.len() as u64
     {
         return Err("declared consumer direct-source totals drifted".to_owned());
     }
@@ -1764,8 +1802,7 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
         || number(alias, "new_line_count_beyond_literal_census") != 31
         || number(alias, "literal_or_alias_unique_line_count") != 190
         || number(alias, "derived_operation_anchor_line_count") != 8
-        || text(alias, "classification_projection_sha256")
-            != ALIAS_CLASSIFICATION_PROJECTION_SHA256
+        || text(alias, "classification_projection_sha256") != ALIAS_CLASSIFICATION_PROJECTION_SHA256
     {
         return Err("alias-aware inventory totals drifted".to_owned());
     }
@@ -1831,9 +1868,7 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
             vec!["DateTime", "Utc"],
         ),
     ];
-    for (binding_id, path, import_line, import_source, imported_symbols) in
-        expected_binding_facts
-    {
+    for (binding_id, path, import_line, import_source, imported_symbols) in expected_binding_facts {
         let binding = binding_by_id[binding_id];
         if text(binding, "path") != path
             || number(binding, "import_line") != import_line
@@ -1857,7 +1892,10 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
             text(set, "owner_bead").to_owned(),
         );
         for source_path in string_set(set, "paths") {
-            if path_routes.insert(source_path.clone(), route.clone()).is_some() {
+            if path_routes
+                .insert(source_path.clone(), route.clone())
+                .is_some()
+            {
                 return Err(format!("duplicate per-use route for {source_path}"));
             }
         }
@@ -1872,7 +1910,10 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
         let path = text(binding, "path");
         binding_paths.insert(path.to_owned());
         let Some((route_profile, route_migration, route_owner)) = path_routes.get(path) else {
-            return Err(format!("{} lacks a per-use path route", text(binding, "binding_id")));
+            return Err(format!(
+                "{} lacks a per-use path route",
+                text(binding, "binding_id")
+            ));
         };
         if text(binding, "profile_id") != route_profile.as_str()
             || text(binding, "migration_group_id") != route_migration.as_str()
@@ -1899,10 +1940,7 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
             || excluded_lines.len() != array(binding, "excluded_nonchrono_shadow_lines").len()
             || !overlap_lines.is_subset(&direct_lines)
         {
-            return Err(format!(
-                "{} line sets drifted",
-                text(binding, "binding_id")
-            ));
+            return Err(format!("{} line sets drifted", text(binding, "binding_id")));
         }
         for line in direct_lines {
             direct_pairs.insert((path.to_owned(), line));
@@ -1943,8 +1981,7 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
             )
         })
         .chain(std::iter::once((
-            "tests/conformance/raptorq_rfc6330/reporting/src/regression_detection.rs"
-                .to_owned(),
+            "tests/conformance/raptorq_rfc6330/reporting/src/regression_detection.rs".to_owned(),
             314,
         )))
         .collect();
@@ -1952,8 +1989,7 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
         return Err("derived temporal operation anchors drifted".to_owned());
     }
     let expected_excluded_pairs = BTreeSet::from([(
-        "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs"
-            .to_owned(),
+        "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs".to_owned(),
         751_u64,
     )]);
     if excluded_pairs != expected_excluded_pairs {
@@ -1976,8 +2012,7 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
     }
 
     let operation_rows = array(alias, "operation_rows");
-    if operation_rows.len() != 32
-        || row_ids(operation_rows, "use_id").len() != operation_rows.len()
+    if operation_rows.len() != 32 || row_ids(operation_rows, "use_id").len() != operation_rows.len()
     {
         return Err("direct alias operation row identity drifted".to_owned());
     }
@@ -1986,7 +2021,10 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
     for row in operation_rows {
         let binding_id = text(row, "binding_id");
         let Some(binding) = binding_by_id.get(binding_id).copied() else {
-            return Err(format!("{} references an unknown binding", text(row, "use_id")));
+            return Err(format!(
+                "{} references an unknown binding",
+                text(row, "use_id")
+            ));
         };
         let pair = (text(row, "path").to_owned(), number(row, "line"));
         if !operation_pairs.insert(pair.clone()) || !direct_pairs.contains(&pair) {
@@ -2009,7 +2047,10 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
             || used_symbols.len() != array(row, "imported_symbols_used").len()
             || !used_symbols.is_subset(&imported_symbols)
         {
-            return Err(format!("{} imported-symbol set drifted", text(row, "use_id")));
+            return Err(format!(
+                "{} imported-symbol set drifted",
+                text(row, "use_id")
+            ));
         }
         operation_occurrences += used_symbols.len();
         if row
@@ -2017,13 +2058,14 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
             .and_then(Value::as_bool)
             != Some(overlap_pairs.contains(&pair))
         {
-            return Err(format!("{} overlap classification drifted", text(row, "use_id")));
+            return Err(format!(
+                "{} overlap classification drifted",
+                text(row, "use_id")
+            ));
         }
     }
     if operation_pairs != direct_pairs || operation_occurrences != 45 {
-        return Err(
-            "direct alias references lack one-to-one operation and symbol rows".to_owned(),
-        );
+        return Err("direct alias references lack one-to-one operation and symbol rows".to_owned());
     }
 
     let derived_rows = array(alias, "derived_operation_rows");
@@ -2034,7 +2076,10 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
     for row in derived_rows {
         let binding_id = text(row, "binding_id");
         let Some(binding) = binding_by_id.get(binding_id).copied() else {
-            return Err(format!("{} references an unknown binding", text(row, "use_id")));
+            return Err(format!(
+                "{} references an unknown binding",
+                text(row, "use_id")
+            ));
         };
         let pair = (text(row, "path").to_owned(), number(row, "line"));
         if !classified_derived_pairs.insert(pair.clone()) || !derived_pairs.contains(&pair) {
@@ -2050,7 +2095,10 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
             || text(row, "exposure").is_empty()
             || text(row, "persistence_or_public_association").is_empty()
         {
-            return Err(format!("{} derived classification drifted", text(row, "use_id")));
+            return Err(format!(
+                "{} derived classification drifted",
+                text(row, "use_id")
+            ));
         }
     }
     if classified_derived_pairs != derived_pairs {
@@ -2137,9 +2185,7 @@ fn after_optional_visibility(value: &str) -> &str {
 
 fn starts_direct_crate_path(value: &str, crate_name: &str) -> bool {
     let value = value.trim_start();
-    let value = value
-        .strip_prefix("::")
-        .map_or(value, str::trim_start);
+    let value = value.strip_prefix("::").map_or(value, str::trim_start);
     let value = value.strip_prefix("r#").unwrap_or(value);
     let Some(remainder) = value.strip_prefix(crate_name) else {
         return false;
@@ -2186,16 +2232,13 @@ fn direct_crate_use_tree(value: &str, crate_name: &str) -> bool {
 
 fn find_last_keyword(value: &str, keyword: &str) -> Option<usize> {
     let bytes = value.as_bytes();
-    value
-        .match_indices(keyword)
-        .rev()
-        .find_map(|(index, _)| {
-            let end = index + keyword.len();
-            let left_boundary = index == 0 || !is_identifier_byte(bytes[index - 1]);
-            let right_boundary = end == bytes.len() || !is_identifier_byte(bytes[end]);
-            let raw_identifier = index >= 2 && bytes.get(index - 2..index) == Some(b"r#");
-            (left_boundary && right_boundary && !raw_identifier).then_some(index)
-        })
+    value.match_indices(keyword).rev().find_map(|(index, _)| {
+        let end = index + keyword.len();
+        let left_boundary = index == 0 || !is_identifier_byte(bytes[index - 1]);
+        let right_boundary = end == bytes.len() || !is_identifier_byte(bytes[end]);
+        let raw_identifier = index >= 2 && bytes.get(index - 2..index) == Some(b"r#");
+        (left_boundary && right_boundary && !raw_identifier).then_some(index)
+    })
 }
 
 fn statement_line(statement: &str, start_line: u64, keyword_index: usize) -> u64 {
@@ -2206,11 +2249,7 @@ fn statement_line(statement: &str, start_line: u64, keyword_index: usize) -> u64
             .count() as u64
 }
 
-fn direct_chrono_binding_line(
-    statement: &str,
-    start_line: u64,
-    chrono_name: &str,
-) -> Option<u64> {
+fn direct_chrono_binding_line(statement: &str, start_line: u64, chrono_name: &str) -> Option<u64> {
     if let Some(use_index) = find_last_keyword(statement, "use")
         && direct_crate_use_tree(&statement[use_index + "use".len()..], chrono_name)
     {
@@ -2262,7 +2301,10 @@ fn char_literal_consumed(bytes: &[u8], start: usize) -> Option<usize> {
     let closing = if bytes.get(content) == Some(&b'\\') {
         match (bytes.get(content + 1), bytes.get(content + 2)) {
             (Some(b'u'), Some(b'{')) => {
-                let end = bytes.get(content + 3..)?.iter().position(|byte| *byte == b'}')?;
+                let end = bytes
+                    .get(content + 3..)?
+                    .iter()
+                    .position(|byte| *byte == b'}')?;
                 content + 4 + end
             }
             (Some(b'x'), _) => content + 4,
@@ -2270,7 +2312,10 @@ fn char_literal_consumed(bytes: &[u8], start: usize) -> Option<usize> {
             _ => return None,
         }
     } else {
-        let character = std::str::from_utf8(bytes.get(content..)?).ok()?.chars().next()?;
+        let character = std::str::from_utf8(bytes.get(content..)?)
+            .ok()?
+            .chars()
+            .next()?;
         content + character.len_utf8()
     };
     (bytes.get(closing) == Some(&b'\'')).then_some(closing + 1 - start)
@@ -2431,9 +2476,7 @@ fn validate_alias_sources(inventory: &Value) -> Result<(), String> {
         let import_line = number(binding, "import_line");
         let import_index = usize::try_from(import_line - 1)
             .map_err(|_| format!("{path} import line overflowed usize"))?;
-        if lines.get(import_index).map(|line| line.trim())
-            != Some(text(binding, "import_source"))
-        {
+        if lines.get(import_index).map(|line| line.trim()) != Some(text(binding, "import_source")) {
             return Err(format!("{path} import source drifted"));
         }
         let imported_symbols = string_set(binding, "imported_symbols");
@@ -2502,7 +2545,10 @@ fn validate_alias_sources(inventory: &Value) -> Result<(), String> {
                     .and_then(Value::as_bool)
                     != Some(line.contains(CHRONO_TOKEN))
             {
-                return Err(format!("{} source classification drifted", text(row, "use_id")));
+                return Err(format!(
+                    "{} source classification drifted",
+                    text(row, "use_id")
+                ));
             }
         }
         for row in array(alias, "derived_operation_rows")
@@ -2556,10 +2602,7 @@ fn validate_post_a1_provenance_refresh(inventory: &Value) -> Result<(), String> 
         .ok_or_else(|| "post_a1_provenance_refresh is required".to_owned())?;
     for (key, expected) in [
         ("captured_date_utc", "2026-08-05"),
-        (
-            "base_commit",
-            "2f9314377d9418c5819bd6baf656e0f4f19b5200",
-        ),
+        ("base_commit", "2f9314377d9418c5819bd6baf656e0f4f19b5200"),
         ("refresh_state", "STATIC_SOURCE_PIN_MAINTENANCE"),
         ("required_disposition", "KEEP_OPEN"),
         ("execution_state", "NOT_RUN_STATIC_ONLY"),
@@ -2592,8 +2635,7 @@ fn validate_post_a1_provenance_refresh(inventory: &Value) -> Result<(), String> 
     let baseline = &rows[0];
     if text(baseline, "path") != "artifacts/dependency_capability_baseline_v1.json"
         || text(baseline, "classification") != "APPEND_ONLY_INDEPENDENT_STATIC_AUDITS"
-        || text(baseline, "previous_sha256")
-            != "88575b016105828ce8a3687ef6be2509e0412dee949cda8"
+        || text(baseline, "previous_sha256") != "88575b016105828ce8a3687ef6be2509e0412dee949cda8"
         || baseline.get("previous_line_count").and_then(Value::as_u64) != Some(1357)
         || text(baseline, "current_sha256")
             != "ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4"
@@ -2661,7 +2703,10 @@ fn validate_post_a1_cli_output_extension(inventory: &Value) -> Result<(), String
             return Err(format!("post-A1 CLI extension {key} must be {expected}"));
         }
     }
-    if extension.get("source_pin_path_count").and_then(Value::as_u64) != Some(69)
+    if extension
+        .get("source_pin_path_count")
+        .and_then(Value::as_u64)
+        != Some(69)
         || extension
             .get("direct_timestamp_field_count")
             .and_then(Value::as_u64)
@@ -2846,7 +2891,9 @@ fn validate_post_a1_cli_output_extension(inventory: &Value) -> Result<(), String
         "pub integrity_check_status: AtpIntegrityStatus",
     ] {
         if !command_tree.contains(association) {
-            return Err(format!("root CLI timestamp association drifted: {association}"));
+            return Err(format!(
+                "root CLI timestamp association drifted: {association}"
+            ));
         }
     }
     let workflows = read_repo_file("src/cli/atp_workflows.rs");
@@ -2877,7 +2924,9 @@ fn validate_post_a1_cli_output_extension(inventory: &Value) -> Result<(), String
     .map(str::to_owned)
     .collect();
     if preservation.keys().cloned().collect::<BTreeSet<_>>() != expected_preservation_keys
-        || preservation.values().any(|value| value.as_bool() != Some(false))
+        || preservation
+            .values()
+            .any(|value| value.as_bool() != Some(false))
     {
         return Err("post-A1 CLI preservation boundary drifted".to_owned());
     }
@@ -2995,8 +3044,10 @@ fn validate_post_a1_benchmark_lineage_extension(inventory: &Value) -> Result<(),
         "cross_file_consumer_rows",
     );
     let cross_file_ids = row_ids(cross_file_rows, "use_id");
-    let expected_consumer_set: BTreeSet<String> =
-        expected_consumers.iter().map(|id| (*id).to_owned()).collect();
+    let expected_consumer_set: BTreeSet<String> = expected_consumers
+        .iter()
+        .map(|id| (*id).to_owned())
+        .collect();
     if !expected_consumer_set.is_subset(&cross_file_ids) {
         return Err("post-A1 benchmark lineage consumer rows are missing".to_owned());
     }
@@ -3046,7 +3097,9 @@ fn validate_post_a1_benchmark_lineage_extension(inventory: &Value) -> Result<(),
             || number(row, "line") != line
             || text(row, "source_anchor") != anchor
         {
-            return Err(format!("post-A1 benchmark consumer row drifted for {use_id}"));
+            return Err(format!(
+                "post-A1 benchmark consumer row drifted for {use_id}"
+            ));
         }
     }
 
@@ -3112,7 +3165,9 @@ fn validate_post_a1_benchmark_lineage_extension(inventory: &Value) -> Result<(),
             _ => return Err(format!("unexpected root public carrier {disposition_id}")),
         };
         if text(disposition, "state") != state {
-            return Err(format!("root public carrier state drifted for {disposition_id}"));
+            return Err(format!(
+                "root public carrier state drifted for {disposition_id}"
+            ));
         }
         require_exact_strings(disposition, "field_ids", field_ids)?;
         require_exact_strings(disposition, "consumer_ids", consumer_ids)?;
@@ -3140,7 +3195,9 @@ fn validate_post_a1_benchmark_lineage_extension(inventory: &Value) -> Result<(),
     .map(str::to_owned)
     .collect();
     if preservation.keys().cloned().collect::<BTreeSet<_>>() != expected_preservation_keys
-        || preservation.values().any(|value| value.as_bool() != Some(false))
+        || preservation
+            .values()
+            .any(|value| value.as_bool() != Some(false))
     {
         return Err("post-A1 benchmark lineage preservation boundary drifted".to_owned());
     }
@@ -3161,14 +3218,10 @@ fn validate_post_a1_benchmark_lineage_extension(inventory: &Value) -> Result<(),
     Ok(())
 }
 
-fn validate_post_a1_conformance_raptorq_lineage_extension(
-    inventory: &Value,
-) -> Result<(), String> {
+fn validate_post_a1_conformance_raptorq_lineage_extension(inventory: &Value) -> Result<(), String> {
     let extension = inventory
         .get("post_a1_conformance_raptorq_lineage_extension")
-        .ok_or_else(|| {
-            "post_a1_conformance_raptorq_lineage_extension is required".to_owned()
-        })?;
+        .ok_or_else(|| "post_a1_conformance_raptorq_lineage_extension is required".to_owned())?;
     for (key, expected) in [
         (
             "extension_id",
@@ -3238,7 +3291,9 @@ fn validate_post_a1_conformance_raptorq_lineage_extension(
             .find(|pin| text(pin, "path") == path)
             .ok_or_else(|| format!("post-A1 conformance RaptorQ pin missing for {path}"))?;
         if text(added, "sha256") != sha256 || number(added, "line_count") != lines {
-            return Err(format!("post-A1 conformance RaptorQ pin drifted for {path}"));
+            return Err(format!(
+                "post-A1 conformance RaptorQ pin drifted for {path}"
+            ));
         }
         if source_pins.get(path).copied() != Some(added) {
             return Err(format!(
@@ -3255,10 +3310,8 @@ fn validate_post_a1_conformance_raptorq_lineage_extension(
         || number(reconciliation, "uniform_line_delta") != 60
         || number(reconciliation, "refreshed_explicit_anchor_count") != 3
         || number(reconciliation, "refreshed_direct_source_reference_count") != 1
-        || text(reconciliation, "previous_direct_source_id")
-            != "src/database/postgres.rs:18086"
-        || text(reconciliation, "current_direct_source_id")
-            != "src/database/postgres.rs:18146"
+        || text(reconciliation, "previous_direct_source_id") != "src/database/postgres.rs:18086"
+        || text(reconciliation, "current_direct_source_id") != "src/database/postgres.rs:18146"
         || text(reconciliation, "classification")
             != "LINE_ONLY_SHIFT_FROM_PREVIOUSLY_CLASSIFIED_READ_CANCELLATION_SEAM"
         || reconciliation
@@ -3308,9 +3361,7 @@ fn validate_post_a1_conformance_raptorq_lineage_extension(
         if previous_projections.get(key).and_then(Value::as_str) != Some(previous)
             || current_projections.get(key).and_then(Value::as_str) != Some(current)
         {
-            return Err(format!(
-                "post-A1 line-sensitive projection {key} drifted"
-            ));
+            return Err(format!("post-A1 line-sensitive projection {key} drifted"));
         }
     }
 
@@ -3378,14 +3429,12 @@ fn validate_post_a1_conformance_raptorq_lineage_extension(
         ],
         "post-A1 conformance RaptorQ carrier dispositions",
     )?;
-    let public_field_ids: BTreeSet<String> = array(
-        inventory,
-        "public_chrono_generated_string_fields",
-    )
-    .iter()
-    .filter(|row| text(row, "module").starts_with("raptorq_rfc6330_reporting::"))
-    .map(|row| text(row, "field_id").to_owned())
-    .collect();
+    let public_field_ids: BTreeSet<String> =
+        array(inventory, "public_chrono_generated_string_fields")
+            .iter()
+            .filter(|row| text(row, "module").starts_with("raptorq_rfc6330_reporting::"))
+            .map(|row| text(row, "field_id").to_owned())
+            .collect();
     let all_consumer_ids: BTreeSet<String> = derived_ids.union(&cross_file_ids).cloned().collect();
     let mut disposition_field_ids = BTreeSet::new();
     for disposition in dispositions {
@@ -3432,7 +3481,11 @@ fn validate_post_a1_conformance_raptorq_lineage_extension(
                     "TIME-DERIVED-CONFORMANCE-RAPTORQ-HISTORY-SERIALIZE-0077",
                 ],
             ),
-            _ => return Err(format!("unexpected conformance RaptorQ carrier {disposition_id}")),
+            _ => {
+                return Err(format!(
+                    "unexpected conformance RaptorQ carrier {disposition_id}"
+                ));
+            }
         };
         if text(disposition, "state") != state {
             return Err(format!(
@@ -3493,7 +3546,9 @@ fn validate_post_a1_conformance_raptorq_lineage_extension(
     .map(str::to_owned)
     .collect();
     if preservation.keys().cloned().collect::<BTreeSet<_>>() != expected_preservation_keys
-        || preservation.values().any(|value| value.as_bool() != Some(false))
+        || preservation
+            .values()
+            .any(|value| value.as_bool() != Some(false))
     {
         return Err("post-A1 conformance RaptorQ preservation boundary drifted".to_owned());
     }
@@ -3520,10 +3575,7 @@ fn validate_post_a1_public_carrier_lineage_extension(inventory: &Value) -> Resul
         .get("post_a1_public_carrier_lineage_extension")
         .ok_or_else(|| "post_a1_public_carrier_lineage_extension is required".to_owned())?;
     for (key, expected) in [
-        (
-            "extension_id",
-            "TIME-A1-PUBLIC-CARRIER-LINEAGE-2026-08-06",
-        ),
+        ("extension_id", "TIME-A1-PUBLIC-CARRIER-LINEAGE-2026-08-06"),
         ("captured_date_utc", "2026-08-06"),
         (
             "extension_state",
@@ -3596,7 +3648,9 @@ fn validate_post_a1_public_carrier_lineage_extension(inventory: &Value) -> Resul
                     .insert(field_id.to_owned(), (state.clone(), consumers.clone()))
                     .is_some()
                 {
-                    return Err(format!("duplicate public carrier disposition for {field_id}"));
+                    return Err(format!(
+                        "duplicate public carrier disposition for {field_id}"
+                    ));
                 }
             }
         }
@@ -3678,7 +3732,9 @@ fn validate_post_a1_public_carrier_lineage_extension(inventory: &Value) -> Resul
             .insert(field_id.to_owned(), (state.to_owned(), consumers))
             .is_some()
         {
-            return Err(format!("duplicate public carrier disposition for {field_id}"));
+            return Err(format!(
+                "duplicate public carrier disposition for {field_id}"
+            ));
         }
     }
     if expected.len() != 30 || expected.keys().cloned().collect::<BTreeSet<_>>() != public_field_ids
@@ -3774,7 +3830,9 @@ fn validate_post_a1_public_carrier_lineage_extension(inventory: &Value) -> Resul
     .map(str::to_owned)
     .collect();
     if preservation.keys().cloned().collect::<BTreeSet<_>>() != expected_preservation_keys
-        || preservation.values().any(|value| value.as_bool() != Some(false))
+        || preservation
+            .values()
+            .any(|value| value.as_bool() != Some(false))
     {
         return Err("post-A1 public carrier preservation boundary drifted".to_owned());
     }
@@ -3942,8 +4000,9 @@ fn validate_source_markers(inventory: &Value) -> Result<(), String> {
         || !root_conformance_mod.contains("pub mod hpack_rfc7541;")
         || !hpack_mod.contains("mod differential_tests;")
         || !hpack_mod.contains("mod fixtures;")
-        || !jetstream_target
-            .contains("#[path = \"integration/jetstream_real_server.rs\"]\nmod jetstream_real_server;")
+        || !jetstream_target.contains(
+            "#[path = \"integration/jetstream_real_server.rs\"]\nmod jetstream_real_server;",
+        )
     {
         return Err("root integration wiring classification drifted".to_owned());
     }
@@ -3985,7 +4044,9 @@ fn validate_source_markers(inventory: &Value) -> Result<(), String> {
             || !source.contains("pub timestamp: String")
             || !source.contains(&rendered_call)
         {
-            return Err(format!("public rendered timestamp surface drifted in {path}"));
+            return Err(format!(
+                "public rendered timestamp surface drifted in {path}"
+            ));
         }
     }
 
@@ -4057,7 +4118,9 @@ fn validate_source_markers(inventory: &Value) -> Result<(), String> {
     if !conformance_rfc.contains("pub timestamp: std::time::SystemTime")
         || !conformance_rfc.contains("pub generated_at: std::time::SystemTime")
         || !conformance_rfc.contains("pub struct ConformanceLogEntry")
-        || !conformance_rfc.contains(".unwrap_or_default()\n                .as_secs()\n                .to_string()")
+        || !conformance_rfc.contains(
+            ".unwrap_or_default()\n                .as_secs()\n                .to_string()",
+        )
     {
         return Err("non-chrono conformance temporal surface drifted".to_owned());
     }
@@ -4091,7 +4154,8 @@ fn validate_source_markers(inventory: &Value) -> Result<(), String> {
     let offline_binary = read_repo_file("src/bin/offline_tuner.rs");
     if !offline_library.contains("pub benchmark_timestamp: String")
         || !offline_library.contains("benchmark_timestamp: format!(\"t_ns={}")
-        || !offline_binary.contains("\"generated_at\": format!(\"{:?}\", std::time::SystemTime::now())")
+        || !offline_binary
+            .contains("\"generated_at\": format!(\"{:?}\", std::time::SystemTime::now())")
     {
         return Err("offline tuner temporal metadata drifted".to_owned());
     }
@@ -4113,7 +4177,9 @@ fn validate_source_markers(inventory: &Value) -> Result<(), String> {
             return Err(format!("{path} test module lost its cfg guard"));
         };
         if prefix[cfg_guard..].lines().count() > 8 {
-            return Err(format!("{path} test module cfg guard moved away from the module"));
+            return Err(format!(
+                "{path} test module cfg guard moved away from the module"
+            ));
         }
         if prefix.contains(CHRONO_TOKEN) {
             return Err(format!("{path} gained a production chrono reference"));
@@ -4176,8 +4242,14 @@ fn validate_source_markers(inventory: &Value) -> Result<(), String> {
         ));
     }
     let external = object(inventory, "external_time_crate_census");
-    if external.get("production_source_path_count").and_then(Value::as_u64) != Some(0)
-        || external.get("production_call_count").and_then(Value::as_u64) != Some(0)
+    if external
+        .get("production_source_path_count")
+        .and_then(Value::as_u64)
+        != Some(0)
+        || external
+            .get("production_call_count")
+            .and_then(Value::as_u64)
+            != Some(0)
         || external.get("classification").and_then(Value::as_str)
             != Some("DIRECT_EDGE_RETAINED_WITHOUT_PRODUCTION_CALL")
     {
@@ -4191,8 +4263,7 @@ fn validate_foundation_boundary(inventory: &Value) -> Result<(), String> {
     if foundation.get("bead_id").and_then(Value::as_str) != Some("asupersync-d24mms.4")
         || foundation.get("artifact").and_then(Value::as_str)
             != Some("artifacts/time_utc_rfc3339_foundation_v1.json")
-        || foundation.get("evidence_reuse").and_then(Value::as_str)
-            != Some("PRIOR_SCOPED_ONLY")
+        || foundation.get("evidence_reuse").and_then(Value::as_str) != Some("PRIOR_SCOPED_ONLY")
     {
         return Err("prior foundation boundary drifted".to_owned());
     }
@@ -4235,11 +4306,14 @@ fn validate_foundation_boundary(inventory: &Value) -> Result<(), String> {
             "No dependency removal, cutover, tracker closure, or permission to delete files follows from this artifact.",
         ],
     )?;
-    if array(inventory, "registry_reconciliation").iter().any(|row| {
-        row.get("state").and_then(Value::as_str) != Some("ROUTED_NOT_MUTATED_BY_A1")
-            || text(row, "finding").is_empty()
-            || text(row, "current_fact").is_empty()
-    }) {
+    if array(inventory, "registry_reconciliation")
+        .iter()
+        .any(|row| {
+            row.get("state").and_then(Value::as_str) != Some("ROUTED_NOT_MUTATED_BY_A1")
+                || text(row, "finding").is_empty()
+                || text(row, "current_fact").is_empty()
+        })
+    {
         return Err("registry reconciliation routing drifted".to_owned());
     }
     if array(inventory, "migration_groups").iter().any(|row| {
@@ -4324,7 +4398,10 @@ fn time_utc_inventory_is_exact_and_source_pinned() {
         "source-pin maintenance only",
         "No compiler, formatter, test, benchmark, service, remote job, or runtime lane",
     ] {
-        assert!(docs.contains(marker), "documentation marker drifted: {marker}");
+        assert!(
+            docs.contains(marker),
+            "documentation marker drifted: {marker}"
+        );
     }
 }
 
@@ -4386,8 +4463,7 @@ fn time_utc_inventory_rejects_cutover_and_completeness_drift() {
     assert!(validate_inventory(&alias_semantic).is_err());
 
     let mut alias_duplicate_symbol = inventory.clone();
-    alias_duplicate_symbol["alias_aware_chrono_uses"]["operation_rows"][0]
-        ["imported_symbols_used"]
+    alias_duplicate_symbol["alias_aware_chrono_uses"]["operation_rows"][0]["imported_symbols_used"]
         .as_array_mut()
         .expect("imported symbols must be an array")
         .push(Value::String("Utc".to_owned()));
@@ -4398,8 +4474,7 @@ fn time_utc_inventory_rejects_cutover_and_completeness_drift() {
         .as_array_mut()
         .expect("literal overrides must be an array")
         .pop();
-    literal_override["per_use_classification"]["literal_use_override_count"] =
-        Value::from(35_u64);
+    literal_override["per_use_classification"]["literal_use_override_count"] = Value::from(35_u64);
     assert!(validate_inventory(&literal_override).is_err());
 
     let mut rule_definition = inventory.clone();
@@ -4413,14 +4488,15 @@ fn time_utc_inventory_rejects_cutover_and_completeness_drift() {
     assert!(validate_inventory(&path_route).is_err());
 
     let mut derived_semantic = inventory.clone();
-    derived_semantic["per_use_classification"]["additional_derived_operation_rows"][0]
-        ["operation"] = Value::String("nonempty derived semantic drift".to_owned());
+    derived_semantic["per_use_classification"]["additional_derived_operation_rows"][0]["operation"] =
+        Value::String("nonempty derived semantic drift".to_owned());
     assert!(validate_inventory(&derived_semantic).is_err());
 
     let mut duplicate_derivation_source = inventory.clone();
-    let duplicate_source = duplicate_derivation_source["per_use_classification"]
-        ["additional_derived_operation_rows"][0]["derivation_sources"][0]
-        .clone();
+    let duplicate_source =
+        duplicate_derivation_source["per_use_classification"]["additional_derived_operation_rows"]
+            [0]["derivation_sources"][0]
+            .clone();
     duplicate_derivation_source["per_use_classification"]
         ["additional_derived_operation_rows"][0]["derivation_sources"]
         .as_array_mut()
@@ -4429,13 +4505,13 @@ fn time_utc_inventory_rejects_cutover_and_completeness_drift() {
     assert!(validate_inventory(&duplicate_derivation_source).is_err());
 
     let mut orphan_derivation_source = inventory.clone();
-    orphan_derivation_source["per_use_classification"]["additional_derived_operation_rows"][0]
-        ["derivation_sources"][0] = Value::String("src/cli/atp_workflows.rs:1".to_owned());
+    orphan_derivation_source["per_use_classification"]["additional_derived_operation_rows"][0]["derivation_sources"]
+        [0] = Value::String("src/cli/atp_workflows.rs:1".to_owned());
     assert!(validate_inventory(&orphan_derivation_source).is_err());
 
     let mut derived_category = inventory.clone();
-    derived_category["per_use_classification"]["additional_derived_operation_rows"][0]
-        ["consumer_category_id"] = Value::String("TIME-CONSUMER-UNDECLARED".to_owned());
+    derived_category["per_use_classification"]["additional_derived_operation_rows"][0]["consumer_category_id"] =
+        Value::String("TIME-CONSUMER-UNDECLARED".to_owned());
     assert!(validate_inventory(&derived_category).is_err());
 
     let mut cross_file_missing = inventory.clone();
@@ -4446,8 +4522,8 @@ fn time_utc_inventory_rejects_cutover_and_completeness_drift() {
     assert!(validate_inventory(&cross_file_missing).is_err());
 
     let mut cross_file_semantic = inventory.clone();
-    cross_file_semantic["per_use_classification"]["cross_file_consumer_rows"][0]
-        ["operation"] = Value::String("nonempty cross-file semantic drift".to_owned());
+    cross_file_semantic["per_use_classification"]["cross_file_consumer_rows"][0]["operation"] =
+        Value::String("nonempty cross-file semantic drift".to_owned());
     assert!(validate_inventory(&cross_file_semantic).is_err());
 
     let mut cross_file_duplicate_source = inventory.clone();
@@ -4462,46 +4538,43 @@ fn time_utc_inventory_rejects_cutover_and_completeness_drift() {
     assert!(validate_inventory(&cross_file_duplicate_source).is_err());
 
     let mut cross_file_orphan_source = inventory.clone();
-    cross_file_orphan_source["per_use_classification"]["cross_file_consumer_rows"][0]
-        ["derivation_sources"][0] =
-        Value::String("conformance/src/h2_data_end_stream_conformance.rs:1".to_owned());
+    cross_file_orphan_source["per_use_classification"]["cross_file_consumer_rows"][0]["derivation_sources"]
+        [0] = Value::String("conformance/src/h2_data_end_stream_conformance.rs:1".to_owned());
     assert!(validate_inventory(&cross_file_orphan_source).is_err());
 
     let mut cross_file_category = inventory.clone();
-    cross_file_category["per_use_classification"]["cross_file_consumer_rows"][0]
-        ["consumer_category_id"] =
+    cross_file_category["per_use_classification"]["cross_file_consumer_rows"][0]["consumer_category_id"] =
         Value::String("TIME-CROSS-FILE-UNDECLARED".to_owned());
     assert!(validate_inventory(&cross_file_category).is_err());
 
     let mut cross_file_lineage_total = inventory.clone();
-    cross_file_lineage_total["per_use_classification"]
-        ["declared_consumer_unique_direct_source_anchor_count"] = Value::from(64_u64);
+    cross_file_lineage_total["per_use_classification"]["declared_consumer_unique_direct_source_anchor_count"] =
+        Value::from(64_u64);
     assert!(validate_inventory(&cross_file_lineage_total).is_err());
 
     let mut cli_extension_overclaim = inventory.clone();
-    cli_extension_overclaim["post_a1_cli_output_extension"]["preservation"]
-        ["static_remainder_closed"] = Value::Bool(true);
+    cli_extension_overclaim["post_a1_cli_output_extension"]["preservation"]["static_remainder_closed"] =
+        Value::Bool(true);
     assert!(validate_inventory(&cli_extension_overclaim).is_err());
 
     let mut benchmark_extension_overclaim = inventory.clone();
-    benchmark_extension_overclaim["post_a1_benchmark_lineage_extension"]["preservation"]
-        ["static_remainder_closed"] = Value::Bool(true);
+    benchmark_extension_overclaim["post_a1_benchmark_lineage_extension"]["preservation"]["static_remainder_closed"] =
+        Value::Bool(true);
     assert!(validate_inventory(&benchmark_extension_overclaim).is_err());
 
     let mut raptorq_extension_overclaim = inventory.clone();
-    raptorq_extension_overclaim["post_a1_conformance_raptorq_lineage_extension"]
-        ["preservation"]["static_remainder_closed"] = Value::Bool(true);
+    raptorq_extension_overclaim["post_a1_conformance_raptorq_lineage_extension"]["preservation"]
+        ["static_remainder_closed"] = Value::Bool(true);
     assert!(validate_inventory(&raptorq_extension_overclaim).is_err());
 
     let mut stale_postgres_lineage = inventory.clone();
-    stale_postgres_lineage["post_a1_conformance_raptorq_lineage_extension"]
-        ["line_sensitive_pin_reconciliation"]["current_direct_source_id"] =
-        Value::String("src/database/postgres.rs:18086".to_owned());
+    stale_postgres_lineage["post_a1_conformance_raptorq_lineage_extension"]["line_sensitive_pin_reconciliation"]
+        ["current_direct_source_id"] = Value::String("src/database/postgres.rs:18086".to_owned());
     assert!(validate_inventory(&stale_postgres_lineage).is_err());
 
     let mut public_carrier_overclaim = inventory.clone();
-    public_carrier_overclaim["post_a1_public_carrier_lineage_extension"]["preservation"]
-        ["test_profile_carrier_remainder_closed"] = Value::Bool(true);
+    public_carrier_overclaim["post_a1_public_carrier_lineage_extension"]["preservation"]["test_profile_carrier_remainder_closed"] =
+        Value::Bool(true);
     assert!(validate_inventory(&public_carrier_overclaim).is_err());
 
     let mut missing_public_carrier = inventory.clone();
@@ -4518,8 +4591,7 @@ fn time_utc_inventory_rejects_cutover_and_completeness_drift() {
     {
         if binding["binding_id"] == "TIME-ALIAS-STANDALONE-MAINTENANCE" {
             binding["profile_id"] = Value::String("TIME-PROFILE-ROOT-DEV".to_owned());
-            binding["migration_group_id"] =
-                Value::String("TIME-MIG-DOWNSTREAM-CORPUS".to_owned());
+            binding["migration_group_id"] = Value::String("TIME-MIG-DOWNSTREAM-CORPUS".to_owned());
             binding["owner_bead"] = Value::String("asupersync-5z2scg.6.6".to_owned());
         }
     }
@@ -4530,8 +4602,7 @@ fn time_utc_inventory_rejects_cutover_and_completeness_drift() {
         {
             if row["binding_id"] == "TIME-ALIAS-STANDALONE-MAINTENANCE" {
                 row["profile_id"] = Value::String("TIME-PROFILE-ROOT-DEV".to_owned());
-                row["migration_group_id"] =
-                    Value::String("TIME-MIG-DOWNSTREAM-CORPUS".to_owned());
+                row["migration_group_id"] = Value::String("TIME-MIG-DOWNSTREAM-CORPUS".to_owned());
                 row["owner_bead"] = Value::String("asupersync-5z2scg.6.6".to_owned());
             }
         }
@@ -4546,8 +4617,7 @@ fn time_utc_inventory_rejects_cutover_and_completeness_drift() {
     assert!(validate_inventory(&static_gap).is_err());
 
     let mut alias_total = inventory.clone();
-    alias_total["alias_aware_chrono_uses"]["direct_reference_line_count"] =
-        Value::from(31_u64);
+    alias_total["alias_aware_chrono_uses"]["direct_reference_line_count"] = Value::from(31_u64);
     assert!(validate_inventory(&alias_total).is_err());
 
     let mut path = inventory;
@@ -4601,5 +4671,8 @@ fn time_utc_prior_foundation_stays_prior_and_scoped() {
             .iter()
             .any(|value| value == "fresh execution in A1")
     );
-    assert_eq!(inventory["validation"]["contract_execution"], "NOT_EXECUTED_THIS_TURN");
+    assert_eq!(
+        inventory["validation"]["contract_execution"],
+        "NOT_EXECUTED_THIS_TURN"
+    );
 }

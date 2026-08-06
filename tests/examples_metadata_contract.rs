@@ -216,7 +216,10 @@ fn metadata_declares_schema_scope_and_owner() {
     assert_eq!(string(registry, "owner_bead"), SCENARIO_REGISTRY_BEAD_ID);
     assert_eq!(
         nonempty_string_set(registry, "roots"),
-        SCENARIO_ROOTS.iter().map(|root| (*root).to_string()).collect()
+        SCENARIO_ROOTS
+            .iter()
+            .map(|root| (*root).to_string())
+            .collect()
     );
     assert_eq!(string(registry, "source_state"), "SOURCE_ALIGNED_STATIC");
     assert_eq!(
@@ -447,13 +450,10 @@ fn commands_kinds_and_feature_flags_are_shape_checked() {
             }
             "scenario-yaml" => {
                 assert!(
-                    SCENARIO_ROOTS
-                        .iter()
-                        .any(|root| {
-                            file.strip_prefix(*root)
-                                .is_some_and(|suffix| suffix.starts_with('/'))
-                        })
-                        && has_extension(file, "yaml"),
+                    SCENARIO_ROOTS.iter().any(|root| {
+                        file.strip_prefix(*root)
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                    }) && has_extension(file, "yaml"),
                     "scenario-yaml entry must point below a declared scenario root: {file}"
                 );
                 assert!(

@@ -270,8 +270,7 @@ fn validate_identity_and_authority(inventory: &Value) -> Result<(), String> {
         }
     }
     if map_text(authority, "executable_validation_status")? != "UNRUN_STATIC_ONLY"
-        || map_text(authority, "required_disposition")?
-            != "KEEP_OPEN_PENDING_EXECUTABLE_VALIDATION"
+        || map_text(authority, "required_disposition")? != "KEEP_OPEN_PENDING_EXECUTABLE_VALIDATION"
     {
         return Err("static validation disposition drifted".to_owned());
     }
@@ -346,7 +345,10 @@ fn validate_defaults_and_inventory(inventory: &Value) -> Result<(), String> {
             || text(row, "gap")?.is_empty()
             || array(row, "anchors")?.is_empty()
         {
-            return Err(format!("surface {} is incomplete", text(row, "surface_id")?));
+            return Err(format!(
+                "surface {} is incomplete",
+                text(row, "surface_id")?
+            ));
         }
         if text(row, "state")? != expected_state {
             return Err(format!("{surface_id} state drifted"));
@@ -359,7 +361,9 @@ fn validate_defaults_and_inventory(inventory: &Value) -> Result<(), String> {
                 .split_once("::")
                 .ok_or_else(|| format!("{surface_id} anchor must name a pinned path"))?;
             if !pin_paths.contains(path) {
-                return Err(format!("{surface_id} anchor path is not source-pinned: {path}"));
+                return Err(format!(
+                    "{surface_id} anchor path is not source-pinned: {path}"
+                ));
             }
         }
     }
@@ -376,10 +380,16 @@ fn validate_defaults_and_inventory(inventory: &Value) -> Result<(), String> {
         || !h1_gap.contains("live handler dispatch")
         || !text(find_row(surfaces, "surface_id", "H1-LIVE-DISPATCH")?, "gap")?
             .contains("saturating addition")
-        || !text(find_row(surfaces, "surface_id", "H2-LIVE-DISPATCH")?, "current_semantics")?
-            .contains("RST_STREAM(ENHANCE_YOUR_CALM)")
-        || !text(find_row(surfaces, "surface_id", "H2-LIVE-DISPATCH")?, "current_semantics")?
-            .contains("saturating prospective addition")
+        || !text(
+            find_row(surfaces, "surface_id", "H2-LIVE-DISPATCH")?,
+            "current_semantics",
+        )?
+        .contains("RST_STREAM(ENHANCE_YOUR_CALM)")
+        || !text(
+            find_row(surfaces, "surface_id", "H2-LIVE-DISPATCH")?,
+            "current_semantics",
+        )?
+        .contains("saturating prospective addition")
     {
         return Err("current H1/H2 accounting inventory drifted".to_owned());
     }
@@ -419,7 +429,9 @@ fn validate_state_and_budgets(inventory: &Value) -> Result<(), String> {
     let incoming_error = contract
         .get("incoming_error_contract")
         .and_then(Value::as_object)
-        .ok_or_else(|| "incoming_body_contract.incoming_error_contract must be an object".to_owned())?;
+        .ok_or_else(|| {
+            "incoming_body_contract.incoming_error_contract must be an object".to_owned()
+        })?;
     let error_variants = incoming_error
         .get("required_variants")
         .and_then(Value::as_array)
@@ -449,8 +461,10 @@ fn validate_state_and_budgets(inventory: &Value) -> Result<(), String> {
         ("ACCOUNTING_OVERFLOW", &["counter", "lhs", "rhs"][..]),
         ("ALREADY_TERMINAL", &["prior_terminal_state"][..]),
     ] {
-        if value_string_set(find_row(error_variants, "variant_id", variant_id)?, "payload_fields")?
-            != string_set(fields)
+        if value_string_set(
+            find_row(error_variants, "variant_id", variant_id)?,
+            "payload_fields",
+        )? != string_set(fields)
         {
             return Err(format!("{variant_id} payload contract drifted"));
         }
@@ -467,7 +481,9 @@ fn validate_state_and_budgets(inventory: &Value) -> Result<(), String> {
         "telemetry_owner",
     ] {
         if map_text(ownership, key)?.is_empty() {
-            return Err(format!("incoming_body_contract.ownership.{key} must be nonempty"));
+            return Err(format!(
+                "incoming_body_contract.ownership.{key} must be nonempty"
+            ));
         }
     }
     if !map_text(ownership, "consumer")?.contains("exactly one")
@@ -535,7 +551,9 @@ fn validate_state_and_budgets(inventory: &Value) -> Result<(), String> {
         ("default_protocol_total_bytes", 16_777_216),
     ] {
         if map_u64(budgets, key)? != expected {
-            return Err(format!("frame_and_budget_contract.{key} must be {expected}"));
+            return Err(format!(
+                "frame_and_budget_contract.{key} must be {expected}"
+            ));
         }
     }
     let derived_queue = map_u64(budgets, "max_frame_bytes")?
@@ -552,13 +570,17 @@ fn validate_state_and_budgets(inventory: &Value) -> Result<(), String> {
         || !map_text(budgets, "limit_binding_rule")?.contains("before body handoff")
         || !map_text(budgets, "limit_binding_rule")?.contains("monotonically tighten")
         || !map_text(budgets, "limit_binding_rule")?.contains("never relaxes")
-        || !map_text(budgets, "limit_binding_rule")?.contains("bytes already received, delivered, or queued")
+        || !map_text(budgets, "limit_binding_rule")?
+            .contains("bytes already received, delivered, or queued")
         || !map_text(budgets, "trailer_accounting_rule")?.contains("queue byte cap")
         || !map_text(budgets, "trailer_accounting_rule")?.contains("trailer cap")
         || !map_text(budgets, "queue_release_rule")?.contains("transfers exactly once on dequeue")
-        || !map_text(budgets, "queue_release_rule")?.contains("releases all residual permits exactly once")
-        || !map_text(budgets, "h2_connection_aggregate_rule")?.contains("connection-level in-flight byte and frame caps")
-        || !map_text(budgets, "h2_connection_aggregate_rule")?.contains("reserve aggregate and stream capacity atomically")
+        || !map_text(budgets, "queue_release_rule")?
+            .contains("releases all residual permits exactly once")
+        || !map_text(budgets, "h2_connection_aggregate_rule")?
+            .contains("connection-level in-flight byte and frame caps")
+        || !map_text(budgets, "h2_connection_aggregate_rule")?
+            .contains("reserve aggregate and stream capacity atomically")
     {
         return Err("effective limit or trailer accounting contract drifted".to_owned());
     }
@@ -590,8 +612,7 @@ fn validate_semantics_and_telemetry(inventory: &Value) -> Result<(), String> {
     {
         return Err("terminal state set drifted".to_owned());
     }
-    if map_string_set(state_machine, "cleanup_handoff_states")?
-        != string_set(&["CONSUMER_DROPPED"])
+    if map_string_set(state_machine, "cleanup_handoff_states")? != string_set(&["CONSUMER_DROPPED"])
     {
         return Err("cleanup handoff state set drifted".to_owned());
     }
@@ -617,8 +638,7 @@ fn validate_semantics_and_telemetry(inventory: &Value) -> Result<(), String> {
         || !map_text(size_hint, "chunked")?.contains("remaining effective total limit")
         || map_text(size_hint, "eof")? != "Exact zero."
         || !map_text(size_hint, "terminal_error")?.contains("fail-closed repoll")
-        || !map_string_set(size_hint, "forbidden")?
-            .contains("using a hint as admission authority")
+        || !map_string_set(size_hint, "forbidden")?.contains("using a hint as admission authority")
     {
         return Err("size-hint contract drifted".to_owned());
     }
@@ -626,8 +646,10 @@ fn validate_semantics_and_telemetry(inventory: &Value) -> Result<(), String> {
     let cancellation = object(inventory, "cancellation_and_abort_contract")?;
     if !map_text(cancellation, "request_budget_scope")?.contains("handler consumption")
         || map_text(cancellation, "request_budget_scope")?.contains("cleanup")
-        || !map_text(cancellation, "post_cancel_cleanup_scope")?.contains("separate strictly bounded cleanup grace")
-        || !map_text(cancellation, "post_cancel_cleanup_scope")?.contains("does not reuse the cancelled request Cx")
+        || !map_text(cancellation, "post_cancel_cleanup_scope")?
+            .contains("separate strictly bounded cleanup grace")
+        || !map_text(cancellation, "post_cancel_cleanup_scope")?
+            .contains("does not reuse the cancelled request Cx")
         || !map_text(cancellation, "client_abort_rule")?.contains("never EOF")
         || !map_text(cancellation, "source_disconnect_rule")?.contains("is ERROR")
         || !map_text(cancellation, "consumer_drop_rule")?.contains("drain-or-close")
@@ -669,15 +691,18 @@ fn validate_semantics_and_telemetry(inventory: &Value) -> Result<(), String> {
         ("Shutdown", "BODY-CANCELLED"),
         ("LinkedExit", "BODY-CANCELLED"),
     ] {
-        if text(find_row(cancel_rows, "cancel_kind", cancel_kind)?, "mapping_id")? != mapping_id {
+        if text(
+            find_row(cancel_rows, "cancel_kind", cancel_kind)?,
+            "mapping_id",
+        )? != mapping_id
+        {
             return Err(format!("{cancel_kind} mapping drifted"));
         }
     }
     if !map_text(cancellation, "cancel_kind_preservation_rule")?.contains("exact CancelKind")
         || !map_text(cancellation, "status_499_scope")?.contains("not an HTTP response status")
         || !map_text(cancellation, "status_499_scope")?.contains("not universal")
-        || !map_text(cancellation, "transport_loss_mapping")?
-            .contains("BODY-CLIENT-ABORTED")
+        || !map_text(cancellation, "transport_loss_mapping")?.contains("BODY-CLIENT-ABORTED")
     {
         return Err("cancellation classification policy drifted".to_owned());
     }
@@ -732,7 +757,11 @@ fn validate_semantics_and_telemetry(inventory: &Value) -> Result<(), String> {
             "cancel_kind",
         ])
         || map_string_set(telemetry, "forbidden_fields")?
-            != string_set(&["body content", "raw authorization headers", "raw cookie headers"])
+            != string_set(&[
+                "body content",
+                "raw authorization headers",
+                "raw cookie headers",
+            ])
     {
         return Err("incoming-body telemetry field set drifted".to_owned());
     }
@@ -771,8 +800,10 @@ fn validate_semantics_and_telemetry(inventory: &Value) -> Result<(), String> {
         .and_then(Value::as_object)
         .ok_or_else(|| "telemetry counter_semantics must be an object".to_owned())?;
     if !map_text(counters, "data_rule")?.contains("equals bytes_delivered plus discarded_bytes")
-        || !map_text(counters, "trailer_rule")?.contains("equals trailer_bytes_delivered plus trailer_bytes_discarded")
-        || !map_text(counters, "frame_rule")?.contains("equals frames_delivered plus frames_discarded")
+        || !map_text(counters, "trailer_rule")?
+            .contains("equals trailer_bytes_delivered plus trailer_bytes_discarded")
+        || !map_text(counters, "frame_rule")?
+            .contains("equals frames_delivered plus frames_discarded")
         || !map_text(counters, "cleanup_subset_rule")?.contains("subsets")
         || !map_text(counters, "unknown_unread_rule")?.contains("unread_bytes is null")
     {
@@ -900,8 +931,7 @@ fn validate_cleanup_errors_and_evidence(inventory: &Value) -> Result<(), String>
         {
             return Err(format!("{protocol} cleanup budgets drifted"));
         }
-        if !map_text(row, "reuse_when")?.contains("EOF")
-            || map_text(row, "close_when")?.is_empty()
+        if !map_text(row, "reuse_when")?.contains("EOF") || map_text(row, "close_when")?.is_empty()
         {
             return Err(format!("{protocol} reuse decision is incomplete"));
         }
@@ -955,7 +985,9 @@ fn validate_cleanup_errors_and_evidence(inventory: &Value) -> Result<(), String>
                 return Err("request deadline must retain ASUP-E501".to_owned());
             }
         } else if !operator_code.is_null() {
-            return Err(format!("{mapping_id} must not allocate a new operator code"));
+            return Err(format!(
+                "{mapping_id} must not allocate a new operator code"
+            ));
         }
         if text(row, "protocol_action")?.is_empty() {
             return Err(format!("{mapping_id}.protocol_action must be nonempty"));
@@ -1029,7 +1061,9 @@ fn validate_cleanup_errors_and_evidence(inventory: &Value) -> Result<(), String>
         "BODY-CONSUMER-DROPPED",
     ] {
         if telemetry_status(mapping_id)?.is_some() {
-            return Err(format!("{mapping_id} must not claim cancellation telemetry status"));
+            return Err(format!(
+                "{mapping_id} must not claim cancellation telemetry status"
+            ));
         }
     }
     if telemetry_status("BODY-CANCELLED")? != Some(499) {
@@ -1062,22 +1096,25 @@ fn validate_cleanup_errors_and_evidence(inventory: &Value) -> Result<(), String>
             ])
         || variants("BODY-CANCELLED")?
             != string_set(&["HttpError::BodyCancelled", "ServerHopOutcome::Cancelled"])
-        || variants("BODY-REQUEST-DEADLINE")?
-            != string_set(&["ServerHopOutcome::DeadlineExceeded"])
+        || variants("BODY-REQUEST-DEADLINE")? != string_set(&["ServerHopOutcome::DeadlineExceeded"])
         || !variants("BODY-RESOURCE-EXHAUSTED")?.is_empty()
         || !variants("BODY-SOURCE-DISCONNECTED")?.is_empty()
-        || variants("BODY-CLIENT-ABORTED")?
-            != string_set(&["ServerHopOutcome::ConnectionLost"])
+        || variants("BODY-CLIENT-ABORTED")? != string_set(&["ServerHopOutcome::ConnectionLost"])
         || !variants("BODY-ACCOUNTING-OVERFLOW")?.is_empty()
         || !variants("BODY-CONSUMER-DROPPED")?.is_empty()
     {
         return Err("current body error variant mapping drifted".to_owned());
     }
     for mapping_id in ["BODY-SOURCE-DISCONNECTED", "BODY-CONSUMER-DROPPED"] {
-        if !text(find_row(errors, "mapping_id", mapping_id)?, "current_ambiguity")?
-            .contains("HttpError::BodyChannelClosed")
+        if !text(
+            find_row(errors, "mapping_id", mapping_id)?,
+            "current_ambiguity",
+        )?
+        .contains("HttpError::BodyChannelClosed")
         {
-            return Err(format!("{mapping_id} must retain channel-closure ambiguity"));
+            return Err(format!(
+                "{mapping_id} must retain channel-closure ambiguity"
+            ));
         }
     }
     let action = |mapping_id: &str| {
@@ -1124,12 +1161,12 @@ fn validate_cleanup_errors_and_evidence(inventory: &Value) -> Result<(), String>
         || !map_text(compatibility, "buffered_extractors")?.contains("Limited")
         || !map_text(compatibility, "buffered_extractors")?.contains("checked accounting")
         || migration_order.iter().copied().ne([
-                "H1 producer integration",
-                "assign and complete H2 producer integration",
-                "web request and handler ownership",
-                "buffered extractor adapters",
-                "telemetry and stable diagnostics",
-            ])
+            "H1 producer integration",
+            "assign and complete H2 producer integration",
+            "web request and handler ownership",
+            "buffered extractor adapters",
+            "telemetry and stable diagnostics",
+        ])
     {
         return Err("direct-cutover compatibility contract drifted".to_owned());
     }
@@ -1210,7 +1247,9 @@ fn validate_body_2_static_progress(inventory: &Value) -> Result<(), String> {
         ("execution_state", "NOT_RUN_STATIC_ONLY"),
     ] {
         if map_text(progress, key)? != expected {
-            return Err(format!("body_2_h1_scaffold_progress.{key} must be {expected}"));
+            return Err(format!(
+                "body_2_h1_scaffold_progress.{key} must be {expected}"
+            ));
         }
     }
 
@@ -1266,7 +1305,9 @@ fn validate_body_2_static_progress(inventory: &Value) -> Result<(), String> {
         "already_terminal_repoll_error_present",
     ] {
         if map_bool(semantics, key)? {
-            return Err(format!("body_2 implemented_semantics.{key} must remain false"));
+            return Err(format!(
+                "body_2 implemented_semantics.{key} must remain false"
+            ));
         }
     }
     if map_text(semantics, "producer_error_reason_mirroring")?
@@ -1492,8 +1533,7 @@ fn server_incoming_body_contract_fails_closed_on_material_drift() {
     mutations.push(("zero queue", zero_queue));
 
     let mut overflowing_queue = base.clone();
-    overflowing_queue["frame_and_budget_contract"]["queue_capacity_frames"] =
-        Value::from(u64::MAX);
+    overflowing_queue["frame_and_budget_contract"]["queue_capacity_frames"] = Value::from(u64::MAX);
     mutations.push(("overflowing queue", overflowing_queue));
 
     let mut lowered_json = base.clone();
@@ -1505,8 +1545,8 @@ fn server_incoming_body_contract_fails_closed_on_material_drift() {
     mutations.push(("false integration claim", false_integration));
 
     let mut false_body_2_integration = base.clone();
-    false_body_2_integration["body_2_h1_scaffold_progress"]["implemented_semantics"]
-        ["live_h1_dispatch_streaming"] = Value::Bool(true);
+    false_body_2_integration["body_2_h1_scaffold_progress"]["implemented_semantics"]["live_h1_dispatch_streaming"] =
+        Value::Bool(true);
     mutations.push(("false BODY-2 integration claim", false_body_2_integration));
 
     let mut false_body_2_execution = base.clone();

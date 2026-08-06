@@ -134,11 +134,7 @@ fn check_anchor_objects(value: &Value) -> usize {
                 );
                 checked += 1;
             }
-            checked
-                + fields
-                    .values()
-                    .map(check_anchor_objects)
-                    .sum::<usize>()
+            checked + fields.values().map(check_anchor_objects).sum::<usize>()
         }
         _ => 0,
     }
@@ -263,7 +259,10 @@ fn post_capture_provenance_refresh_is_exact_and_non_semantic() {
             .find(|pin| text(pin, "path") == text(row, "path"))
             .expect("refreshed source pin");
         assert_eq!(text(pin, "sha256"), text(row, "current_sha256"));
-        assert_eq!(unsigned(pin, "line_count"), unsigned(row, "current_line_count"));
+        assert_eq!(
+            unsigned(pin, "line_count"),
+            unsigned(row, "current_line_count")
+        );
     }
 
     assert!(
@@ -272,8 +271,7 @@ fn post_capture_provenance_refresh_is_exact_and_non_semantic() {
     );
     let authority = Value::Object(object(&artifact, "authority").clone());
     assert!(
-        text(&authority, "source_revision_authority")
-            .contains("post_capture_provenance_refresh")
+        text(&authority, "source_revision_authority").contains("post_capture_provenance_refresh")
     );
 }
 
@@ -366,18 +364,14 @@ fn producer_amortization_does_not_rewrite_consumer_fairness() {
 
     let producer = object(&batch_value, "producer_now");
     let producer_value = Value::Object(producer.clone());
-    assert!(
-        text(&producer_value, "publication").contains("one scheduler notification")
-    );
+    assert!(text(&producer_value, "publication").contains("one scheduler notification"));
     assert!(text(&producer_value, "trace").contains("before"));
 
     let consumer = object(&batch_value, "consumer_now");
     let consumer_value = Value::Object(consumer.clone());
     assert!(text(&consumer_value, "global_send_lane").contains("one request"));
     assert!(text(&consumer_value, "owner_local_lane").contains("sixteen"));
-    assert!(
-        text(&consumer_value, "fairness_boundary").contains("does not authorize")
-    );
+    assert!(text(&consumer_value, "fairness_boundary").contains("does not authorize"));
 
     let future_contract = array(&batch_value, "required_future_contract");
     assert_eq!(future_contract.len(), 10);
@@ -407,7 +401,10 @@ fn existing_baselines_are_machine_checked_as_non_equivalent() {
         12
     );
     assert_eq!(
-        unsigned(&reconciliation_value, "methodology_task_spawn_operation_count"),
+        unsigned(
+            &reconciliation_value,
+            "methodology_task_spawn_operation_count"
+        ),
         6
     );
     assert_eq!(
@@ -533,13 +530,9 @@ fn required_measurement_matrix_fails_closed_until_complete() {
     let cells = array(&measurements_value, "operation_cells");
     let public_cx_loop = cells
         .iter()
-        .find(|cell| {
-            text(cell, "operation_id") == "sched/join_batch/v1/public_cx_spawn_loop/1000"
-        })
+        .find(|cell| text(cell, "operation_id") == "sched/join_batch/v1/public_cx_spawn_loop/1000")
         .expect("public Cx loop cell must exist");
-    assert!(
-        text(public_cx_loop, "measurement_scope").contains("request_cx_with_budget")
-    );
+    assert!(text(public_cx_loop, "measurement_scope").contains("request_cx_with_budget"));
     assert_eq!(
         cells
             .iter()
@@ -579,7 +572,10 @@ fn required_measurement_matrix_fails_closed_until_complete() {
         "allocator",
         "timer_source",
     ] {
-        assert!(required_fields.contains(field), "missing required field {field}");
+        assert!(
+            required_fields.contains(field),
+            "missing required field {field}"
+        );
     }
     assert_eq!(array(&measurements_value, "timing_rules").len(), 6);
 }
@@ -595,9 +591,7 @@ fn candidate_thresholds_and_no_claim_boundary_are_explicit() {
     assert!(!boolean(&authority_value, "implementation_authorized"));
     assert!(!boolean(&authority_value, "performance_claim_made"));
     assert!(text(&authority_value, "completion_candidate_selected").contains("legacy"));
-    assert!(
-        text(&authority_value, "structured_task_handle_role").contains("comparator")
-    );
+    assert!(text(&authority_value, "structured_task_handle_role").contains("comparator"));
 
     let policy = object(&artifact, "candidate_and_decision_policy");
     let policy_value = Value::Object(policy.clone());
@@ -605,9 +599,7 @@ fn candidate_thresholds_and_no_claim_boundary_are_explicit() {
     let join_candidate_value = Value::Object(join_candidate.clone());
     assert!(text(&join_candidate_value, "target").contains("legacy"));
     assert!(text(&join_candidate_value, "first_candidate").contains("oneshot"));
-    assert!(
-        text(&join_candidate_value, "explicit_non_claim").contains("mutex-backed")
-    );
+    assert!(text(&join_candidate_value, "explicit_non_claim").contains("mutex-backed"));
 
     let batch_candidate = object(&policy_value, "batch_candidate");
     let batch_candidate_value = Value::Object(batch_candidate.clone());
@@ -615,9 +607,7 @@ fn candidate_thresholds_and_no_claim_boundary_are_explicit() {
         text(&batch_candidate_value, "first_candidate")
             .contains("one final scheduler notification")
     );
-    assert!(
-        text(&batch_candidate_value, "explicit_non_claim").contains("not one queue operation")
-    );
+    assert!(text(&batch_candidate_value, "explicit_non_claim").contains("not one queue operation"));
 
     let ship = array(&policy_value, "ship_thresholds")
         .iter()

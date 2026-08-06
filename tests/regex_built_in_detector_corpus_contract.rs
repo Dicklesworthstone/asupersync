@@ -246,7 +246,10 @@ fn materialize_input(row: &Value) -> String {
                 .expect("recipe suffix");
             format!("{prefix}{}{suffix}", repeated.repeat(count))
         }
-        _ => panic!("{} must define exactly one input form", text(row, "case_id")),
+        _ => panic!(
+            "{} must define exactly one input form",
+            text(row, "case_id")
+        ),
     }
 }
 
@@ -352,8 +355,7 @@ fn validate_post_capture_provenance_refresh(corpus: &Value) -> Result<(), String
     }
 
     let classification = &refresh["change_classification"];
-    if text(classification, "classification")
-        != "APPEND_ONLY_INDEPENDENT_PHASE2_STATIC_AUDITS"
+    if text(classification, "classification") != "APPEND_ONLY_INDEPENDENT_PHASE2_STATIC_AUDITS"
         || number(classification, "inserted_lines") != 1_853
         || number(classification, "deleted_lines") != 0
     {
@@ -392,9 +394,7 @@ fn validate_post_capture_provenance_refresh(corpus: &Value) -> Result<(), String
 
     let row_hashes = object(classification, "unchanged_capability_rows");
     if row_hashes.len() != 2
-        || row_hashes
-            .get(CAPABILITY_ID)
-            .and_then(Value::as_str)
+        || row_hashes.get(CAPABILITY_ID).and_then(Value::as_str)
             != Some(REGEX_CAPABILITY_ROW_SHA256)
         || row_hashes
             .get("CAP-LAB-DETERMINISM")
@@ -420,7 +420,9 @@ fn validate_post_capture_provenance_refresh(corpus: &Value) -> Result<(), String
     .collect();
     let actual_preservation_keys: BTreeSet<String> = preservation.keys().cloned().collect();
     if actual_preservation_keys != expected_preservation_keys
-        || preservation.values().any(|value| value.as_bool() != Some(false))
+        || preservation
+            .values()
+            .any(|value| value.as_bool() != Some(false))
     {
         return Err("provenance refresh preservation boundary drifted".to_owned());
     }
@@ -558,9 +560,7 @@ fn validate_inventory(corpus: &Value) -> Result<(), String> {
     let detector_vectors = array(corpus, "detector_vectors");
     let pipeline_vectors = array(corpus, "pipeline_vectors");
     let negative_fixtures = array(corpus, "dispatch_negative_fixtures");
-    if detector_vectors.len() != 62
-        || pipeline_vectors.len() != 19
-        || negative_fixtures.len() != 8
+    if detector_vectors.len() != 62 || pipeline_vectors.len() != 19 || negative_fixtures.len() != 8
     {
         return Err("corpus vector counts drifted".to_owned());
     }
@@ -628,7 +628,10 @@ fn validate_inventory(corpus: &Value) -> Result<(), String> {
                 .as_str()
                 .ok_or_else(|| format!("{} capability must be text", text(row, "case_id")))?;
             if !capability_ids.contains(capability) {
-                return Err(format!("{} has unknown capability {capability}", text(row, "case_id")));
+                return Err(format!(
+                    "{} has unknown capability {capability}",
+                    text(row, "case_id")
+                ));
             }
         }
     }
@@ -675,13 +678,22 @@ fn validate_inventory(corpus: &Value) -> Result<(), String> {
     }
 
     let coverage = object(corpus, "coverage_matrix");
-    if coverage.get("detector_vector_count").and_then(Value::as_u64) != Some(62)
-        || coverage.get("pipeline_vector_count").and_then(Value::as_u64) != Some(19)
+    if coverage
+        .get("detector_vector_count")
+        .and_then(Value::as_u64)
+        != Some(62)
+        || coverage
+            .get("pipeline_vector_count")
+            .and_then(Value::as_u64)
+            != Some(19)
         || coverage
             .get("dispatch_negative_fixture_count")
             .and_then(Value::as_u64)
             != Some(8)
-        || coverage.get("synthetic_values_only").and_then(Value::as_bool) != Some(true)
+        || coverage
+            .get("synthetic_values_only")
+            .and_then(Value::as_bool)
+            != Some(true)
         || coverage.get("unknown_rows").and_then(Value::as_u64) != Some(0)
     {
         return Err("coverage summary drifted".to_owned());
@@ -715,8 +727,7 @@ fn validate_inventory(corpus: &Value) -> Result<(), String> {
             .get("unrecognized_identity_action")
             .and_then(Value::as_str)
             != Some("FALL_THROUGH_TO_INCUMBENT_WITHOUT_PARTIAL_RESULT")
-        || string_set(&corpus["dispatch_allowset"], "identity_fields")
-            != expected_identity_fields
+        || string_set(&corpus["dispatch_allowset"], "identity_fields") != expected_identity_fields
         || row_ids(negative_fixtures, "mutation_field") != expected_identity_fields
     {
         return Err("dispatch allowset identity or fallback policy drifted".to_owned());
@@ -769,7 +780,11 @@ fn source_pins_and_authority_rows_are_current() {
         let path = text(pin, "path");
         assert!(paths.insert(path.to_owned()), "duplicate source pin {path}");
         let bytes = read_repo_bytes(path);
-        assert_eq!(sha256_hex(&bytes), text(pin, "sha256"), "{path} hash drifted");
+        assert_eq!(
+            sha256_hex(&bytes),
+            text(pin, "sha256"),
+            "{path} hash drifted"
+        );
         let source = String::from_utf8(bytes).expect("pinned source must be UTF-8");
         assert_eq!(
             source.lines().count(),
@@ -782,7 +797,10 @@ fn source_pins_and_authority_rows_are_current() {
         path_projection.push_str(path);
         path_projection.push('\n');
     }
-    assert_eq!(sha256_hex(path_projection.as_bytes()), SOURCE_PIN_PATHS_SHA256);
+    assert_eq!(
+        sha256_hex(path_projection.as_bytes()),
+        SOURCE_PIN_PATHS_SHA256
+    );
 
     let registry = parse_repo_json(REGISTRY_PATH);
     let registry_rows = array(&registry, "capabilities");
@@ -793,7 +811,10 @@ fn source_pins_and_authority_rows_are_current() {
     let baseline = parse_repo_json(BASELINE_PATH);
     let baseline_rows = array(&baseline, "capability_baselines");
     let baseline_row = find_row(baseline_rows, "capability_id", CAPABILITY_ID);
-    assert_eq!(text(baseline_row, "baseline_state"), "EXECUTABLE_PARTIAL_BLOCKING");
+    assert_eq!(
+        text(baseline_row, "baseline_state"),
+        "EXECUTABLE_PARTIAL_BLOCKING"
+    );
     assert_eq!(baseline_row["cutover_eligible"].as_bool(), Some(false));
     for (capability_id, expected_sha256) in [
         (CAPABILITY_ID, REGEX_CAPABILITY_ROW_SHA256),
@@ -831,17 +852,17 @@ fn source_pins_and_authority_rows_are_current() {
             })
             .expect("crosswalk target must exist");
         let r2_input = materialize_input(r2_row);
-        let r2_output =
-            if let Some(detector_id) = r2_row.get("detector_id").and_then(Value::as_str) {
-                let detector = find_row(detectors, "detector_id", detector_id);
-                if flag(r2_row, "expected_detector_accepts") {
-                    text(detector, "output_token").to_owned()
-                } else {
-                    r2_input.clone()
-                }
+        let r2_output = if let Some(detector_id) = r2_row.get("detector_id").and_then(Value::as_str)
+        {
+            let detector = find_row(detectors, "detector_id", detector_id);
+            if flag(r2_row, "expected_detector_accepts") {
+                text(detector, "output_token").to_owned()
             } else {
-                text(r2_row, "expected_output").to_owned()
-            };
+                r2_input.clone()
+            }
+        } else {
+            text(r2_row, "expected_output").to_owned()
+        };
 
         if text(link, "relationship") == "EXACT_INPUT_AND_OUTCOME" {
             assert_eq!(r2_input, text(r1_row, "value"));
@@ -887,12 +908,16 @@ fn live_pattern_identity_order_tokens_and_custom_priority_are_pinned() {
     }
 
     let positions = [
-        source.find("let email_re =").expect("email detector source"),
+        source
+            .find("let email_re =")
+            .expect("email detector source"),
         source.find("let ssn_re =").expect("SSN detector source"),
         source
             .find("let card_candidate_re =")
             .expect("card detector source"),
-        source.find("let phone_re =").expect("phone detector source"),
+        source
+            .find("let phone_re =")
+            .expect("phone detector source"),
     ];
     assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
     assert!(source.contains(".find_iter(value)"));
@@ -922,8 +947,8 @@ fn independent_detector_vectors_match_incumbent_spans_and_luhn() {
         let actual: Vec<(usize, usize, Option<bool>)> = regex
             .find_iter(&input)
             .map(|matched| {
-                let luhn = (detector_id == "RGX-BUILTIN-CARD")
-                    .then(|| independent_luhn(matched.as_str()));
+                let luhn =
+                    (detector_id == "RGX-BUILTIN-CARD").then(|| independent_luhn(matched.as_str()));
                 (matched.start(), matched.end(), luhn)
             })
             .collect();
@@ -938,7 +963,10 @@ fn independent_detector_vectors_match_incumbent_spans_and_luhn() {
                 if detector_id == "RGX-BUILTIN-CARD" {
                     assert!(luhn.is_some(), "card span must declare Luhn validity");
                 } else {
-                    assert!(luhn.is_none(), "non-card span must not declare Luhn validity");
+                    assert!(
+                        luhn.is_none(),
+                        "non-card span must not declare Luhn validity"
+                    );
                 }
                 (start, end, luhn)
             })
@@ -976,7 +1004,9 @@ fn independent_detector_vectors_match_incumbent_spans_and_luhn() {
 fn detector_accepts(detector: &Value, input: &str) -> bool {
     let regex = Regex::new(text(detector, "pattern")).expect("frozen pattern must compile");
     if text(detector, "detector_id") == "RGX-BUILTIN-CARD" {
-        regex.find_iter(input).any(|matched| independent_luhn(matched.as_str()))
+        regex
+            .find_iter(input)
+            .any(|matched| independent_luhn(matched.as_str()))
     } else {
         regex.is_match(input)
     }
@@ -1029,10 +1059,16 @@ fn public_pipeline_preserves_order_whole_value_tokens_and_custom_origin() {
             .iter()
             .map(|entry| entry.as_str().expect("visited detector text").to_owned())
             .collect();
-        assert_eq!(visited, expected_visited, "{} visit order", text(row, "case_id"));
+        assert_eq!(
+            visited,
+            expected_visited,
+            "{} visit order",
+            text(row, "case_id")
+        );
         assert_eq!(
             selected.as_deref(),
-            row.get("expected_selected_detector").and_then(Value::as_str),
+            row.get("expected_selected_detector")
+                .and_then(Value::as_str),
             "{} selected detector",
             text(row, "case_id")
         );
@@ -1179,7 +1215,7 @@ fn structural_mutations_fail_closed() {
     assert!(validate_inventory(&overclaim).is_err());
 
     let mut semantic_refresh = artifact();
-    semantic_refresh["post_capture_provenance_refresh"]["preservation"]
-        ["detector_vectors_changed"] = Value::Bool(true);
+    semantic_refresh["post_capture_provenance_refresh"]["preservation"]["detector_vectors_changed"] =
+        Value::Bool(true);
     assert!(validate_inventory(&semantic_refresh).is_err());
 }

@@ -151,8 +151,7 @@ fn count_occurrences(source: &str, token: &str) -> u64 {
 }
 
 fn source_declares_type(source: &str, type_name: &str) -> bool {
-    source.contains(&format!("struct {type_name}"))
-        || source.contains(&format!("enum {type_name}"))
+    source.contains(&format!("struct {type_name}")) || source.contains(&format!("enum {type_name}"))
 }
 
 fn source_declares_variant(source: &str, variant: &str) -> bool {
@@ -192,7 +191,11 @@ fn source_pins_and_six_file_boundary_match_main() {
         assert!(pinned_paths.insert(path.to_owned()), "duplicate pin {path}");
         assert!(!text(pin, "role").is_empty());
         let bytes = read_repo_bytes(path);
-        assert_eq!(sha256_hex(&bytes), text(pin, "sha256"), "hash drift: {path}");
+        assert_eq!(
+            sha256_hex(&bytes),
+            text(pin, "sha256"),
+            "hash drift: {path}"
+        );
         let source = std::str::from_utf8(&bytes).expect("pinned source must be UTF-8");
         assert_eq!(
             u64::try_from(source.lines().count()).expect("line count fits u64"),
@@ -234,21 +237,17 @@ fn declaration_indexes_and_annotation_counts_are_exact() {
         ("src/cli/atp_command_tree.rs", 0, 6, 47, 2, 164, 5, 0),
     ];
 
-    for (
-        path,
-        parsers,
-        subcommands,
-        args,
-        values,
-        arg_attrs,
-        command_attrs,
-        value_attrs,
-    ) in expected
+    for (path, parsers, subcommands, args, values, arg_attrs, command_attrs, value_attrs) in
+        expected
     {
         let row = find_primary(&artifact, path);
         let counts = Value::Object(object(row, "annotation_counts").clone());
         let source = read_repo_file(path);
-        assert_eq!(count_derive(&source, "Parser"), parsers, "Parser drift: {path}");
+        assert_eq!(
+            count_derive(&source, "Parser"),
+            parsers,
+            "Parser drift: {path}"
+        );
         assert_eq!(
             count_derive(&source, "Subcommand"),
             subcommands,
@@ -260,7 +259,11 @@ fn declaration_indexes_and_annotation_counts_are_exact() {
             values,
             "ValueEnum drift: {path}"
         );
-        assert_eq!(count_attribute_starts(&source, "arg"), arg_attrs, "arg drift: {path}");
+        assert_eq!(
+            count_attribute_starts(&source, "arg"),
+            arg_attrs,
+            "arg drift: {path}"
+        );
         assert_eq!(
             count_attribute_starts(&source, "command"),
             command_attrs,
@@ -271,7 +274,11 @@ fn declaration_indexes_and_annotation_counts_are_exact() {
             value_attrs,
             "value drift: {path}"
         );
-        assert_eq!(count_clap_env_attributes(&source), 0, "clap env binding: {path}");
+        assert_eq!(
+            count_clap_env_attributes(&source),
+            0,
+            "clap env binding: {path}"
+        );
         assert_eq!(unsigned(&counts, "derive_parser"), parsers);
         assert_eq!(unsigned(&counts, "derive_subcommand"), subcommands);
         assert_eq!(unsigned(&counts, "derive_args"), args);
@@ -281,7 +288,11 @@ fn declaration_indexes_and_annotation_counts_are_exact() {
         assert_eq!(unsigned(&counts, "value_attributes"), value_attrs);
         assert_eq!(unsigned(&counts, "clap_env_attributes"), 0);
 
-        for key in ["parser_derived_types", "argument_group_types", "value_enums"] {
+        for key in [
+            "parser_derived_types",
+            "argument_group_types",
+            "value_enums",
+        ] {
             for type_name in strings(row, key) {
                 assert!(
                     source_declares_type(&source, &type_name),
@@ -290,7 +301,10 @@ fn declaration_indexes_and_annotation_counts_are_exact() {
             }
         }
         if let Some(root) = row.get("root_parser").and_then(Value::as_str) {
-            assert!(source_declares_type(&source, root), "missing root parser {root}");
+            assert!(
+                source_declares_type(&source, root),
+                "missing root parser {root}"
+            );
         }
     }
 }
@@ -307,10 +321,17 @@ fn every_indexed_command_variant_is_present_and_reachability_is_explicit() {
         let mut row_variants = 0_u64;
         for command_enum in array(row, "subcommand_enums") {
             let rust_type = text(command_enum, "rust_type");
-            assert!(source.contains(&format!("enum {rust_type}")), "missing enum {rust_type}");
+            assert!(
+                source.contains(&format!("enum {rust_type}")),
+                "missing enum {rust_type}"
+            );
             let variants = strings(command_enum, "variants");
             let unique = variants.iter().collect::<BTreeSet<_>>();
-            assert_eq!(unique.len(), variants.len(), "duplicate variants in {path}:{rust_type}");
+            assert_eq!(
+                unique.len(),
+                variants.len(),
+                "duplicate variants in {path}:{rust_type}"
+            );
             for mapping in &variants {
                 let (rust_variant, clap_name) = mapping
                     .split_once('=')
@@ -323,7 +344,11 @@ fn every_indexed_command_variant_is_present_and_reachability_is_explicit() {
             }
             row_variants += u64::try_from(variants.len()).expect("variant count fits u64");
         }
-        assert_eq!(row_variants, unsigned(row, "command_variant_count"), "{path}");
+        assert_eq!(
+            row_variants,
+            unsigned(row, "command_variant_count"),
+            "{path}"
+        );
         total_variants += row_variants;
         if row.get("binary").is_some_and(Value::is_string) {
             binary_variants += row_variants;
@@ -377,7 +402,10 @@ fn complete_field_normalization_cohort_is_exact_and_source_anchored() {
         ])
     );
     assert!(array(&normalization, "remaining_primary_sources").is_empty());
-    assert_eq!(unsigned(&normalization, "annotated_arg_attribute_count"), 490);
+    assert_eq!(
+        unsigned(&normalization, "annotated_arg_attribute_count"),
+        490
+    );
     assert_eq!(unsigned(&normalization, "implicit_positional_count"), 37);
     assert_eq!(unsigned(&normalization, "normalized_field_count"), 527);
     assert!(text(&normalization, "spelling_policy").contains("not byte-capture evidence"));
@@ -425,8 +453,7 @@ fn complete_field_normalization_cohort_is_exact_and_source_anchored() {
     assert_eq!(
         rows.iter()
             .filter(|row| {
-                row.get("source_path").and_then(Value::as_str)
-                    == Some("src/bin/asupersync.rs")
+                row.get("source_path").and_then(Value::as_str) == Some("src/bin/asupersync.rs")
                     && row.get("source_attribute").and_then(Value::as_str)
                         != Some("NONE_IMPLICIT_POSITIONAL")
             })
@@ -436,8 +463,7 @@ fn complete_field_normalization_cohort_is_exact_and_source_anchored() {
     assert_eq!(
         rows.iter()
             .filter(|row| {
-                row.get("source_path").and_then(Value::as_str)
-                    == Some("src/bin/asupersync.rs")
+                row.get("source_path").and_then(Value::as_str) == Some("src/bin/asupersync.rs")
                     && row.get("source_attribute").and_then(Value::as_str)
                         == Some("NONE_IMPLICIT_POSITIONAL")
             })
@@ -488,7 +514,10 @@ fn complete_field_normalization_cohort_is_exact_and_source_anchored() {
     let mut parsed_unused = BTreeSet::new();
     for row in rows {
         let field_id = text(row, "field_id");
-        assert!(field_ids.insert(field_id.to_owned()), "duplicate field id {field_id}");
+        assert!(
+            field_ids.insert(field_id.to_owned()),
+            "duplicate field id {field_id}"
+        );
         let path = text(row, "source_path");
         let source = read_repo_file(path);
         for key in [
@@ -623,16 +652,35 @@ fn feature_environment_config_and_exit_boundaries_fail_closed() {
     assert!(asupersync.contains("let format = effective_output_format"));
     assert!(asupersync.contains("let run_result = run(cli.command, &mut output)"));
     let output = read_repo_file("src/cli/output.rs");
-    for marker in ["CI", "ASUPERSYNC_OUTPUT_FORMAT", "NO_COLOR", "CLICOLOR_FORCE"] {
-        assert!(output.contains(marker), "missing output environment marker {marker}");
+    for marker in [
+        "CI",
+        "ASUPERSYNC_OUTPUT_FORMAT",
+        "NO_COLOR",
+        "CLICOLOR_FORCE",
+    ] {
+        assert!(
+            output.contains(marker),
+            "missing output environment marker {marker}"
+        );
     }
     let atp = read_repo_file("src/bin/atp.rs");
-    for marker in ["ATP_RQ_AUTH_KEY_HEX", "SSL_CERT_FILE", "SSL_CERT_DIR", "HOME"] {
-        assert!(atp.contains(marker), "missing ATP environment marker {marker}");
+    for marker in [
+        "ATP_RQ_AUTH_KEY_HEX",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "HOME",
+    ] {
+        assert!(
+            atp.contains(marker),
+            "missing ATP environment marker {marker}"
+        );
     }
     let atpd = read_repo_file("src/bin/atpd.rs");
     for marker in ["PROGRAMDATA", "HOSTNAME", "COMPUTERNAME"] {
-        assert!(atpd.contains(marker), "missing ATPD environment marker {marker}");
+        assert!(
+            atpd.contains(marker),
+            "missing ATPD environment marker {marker}"
+        );
     }
     let tuner = read_repo_file("src/bin/offline_tuner.rs");
     assert!(tuner.contains("env_logger::Builder::from_env"));
@@ -678,9 +726,16 @@ fn offline_tuner_env_logger_audit_is_source_pinned_and_fail_closed() {
     let mut pinned_paths = BTreeSet::new();
     for pin in pins {
         let path = text(pin, "path");
-        assert!(pinned_paths.insert(path.to_owned()), "duplicate audit pin {path}");
+        assert!(
+            pinned_paths.insert(path.to_owned()),
+            "duplicate audit pin {path}"
+        );
         let bytes = read_repo_bytes(path);
-        assert_eq!(sha256_hex(&bytes), text(pin, "sha256"), "audit hash drift: {path}");
+        assert_eq!(
+            sha256_hex(&bytes),
+            text(pin, "sha256"),
+            "audit hash drift: {path}"
+        );
         let source = std::str::from_utf8(&bytes).expect("audit source must be UTF-8");
         assert_eq!(
             u64::try_from(source.lines().count()).expect("line count fits u64"),
@@ -701,9 +756,7 @@ fn offline_tuner_env_logger_audit_is_source_pinned_and_fail_closed() {
         ])
     );
 
-    let correction = Value::Object(
-        object(&audit, "source_pin_measurement_correction").clone(),
-    );
+    let correction = Value::Object(object(&audit, "source_pin_measurement_correction").clone());
     assert_eq!(text(&correction, "captured_date_utc"), "2026-08-05");
     assert_eq!(
         text(&correction, "base_commit"),
@@ -716,9 +769,7 @@ fn offline_tuner_env_logger_audit_is_source_pinned_and_fail_closed() {
     );
     assert_eq!(unsigned(&correction, "previous_line_count"), 247);
     assert_eq!(unsigned(&correction, "corrected_line_count"), 248);
-    assert!(
-        text(&correction, "line_count_semantics").contains("Rust str::lines()")
-    );
+    assert!(text(&correction, "line_count_semantics").contains("Rust str::lines()"));
     assert!(!boolean(&correction, "source_ends_with_lf"));
     assert!(!boolean(&correction, "source_bytes_changed"));
     assert!(!boolean(&correction, "decision_changed"));
@@ -729,8 +780,8 @@ fn offline_tuner_env_logger_audit_is_source_pinned_and_fail_closed() {
 
     let corrected_source = read_repo_bytes("scripts/run_offline_tuning.sh");
     assert!(!corrected_source.ends_with(b"\n"));
-    let corrected_source = std::str::from_utf8(&corrected_source)
-        .expect("corrected source pin must remain UTF-8");
+    let corrected_source =
+        std::str::from_utf8(&corrected_source).expect("corrected source pin must remain UTF-8");
     assert_eq!(corrected_source.lines().count(), 248);
 
     let observed = Value::Object(object(&audit, "observed_source_contract").clone());
@@ -749,8 +800,7 @@ fn offline_tuner_env_logger_audit_is_source_pinned_and_fail_closed() {
     assert_eq!(string_set(&observed, "commands"), expected_commands);
     assert_eq!(array(&observed, "initialization_order").len(), 5);
 
-    let manifest_boundary =
-        Value::Object(object(&observed, "manifest_boundary").clone());
+    let manifest_boundary = Value::Object(object(&observed, "manifest_boundary").clone());
     for key in [
         "cli_enables_env_logger",
         "env_logger_optional_dependency",
@@ -758,7 +808,10 @@ fn offline_tuner_env_logger_audit_is_source_pinned_and_fail_closed() {
     ] {
         assert!(boolean(&manifest_boundary, key), "{key} must remain true");
     }
-    assert!(!boolean(&manifest_boundary, "static_graph_equivalence_proved"));
+    assert!(!boolean(
+        &manifest_boundary,
+        "static_graph_equivalence_proved"
+    ));
     assert_eq!(
         text(&manifest_boundary, "locked_env_logger_version"),
         "0.11.11"
@@ -820,8 +873,7 @@ fn offline_tuner_env_logger_audit_is_source_pinned_and_fail_closed() {
     );
     assert_eq!(direct_logging_tokens, 0);
     assert!(
-        text(&observed, "source_only_interpretation")
-            .contains("does not prove that dependencies")
+        text(&observed, "source_only_interpretation").contains("does not prove that dependencies")
     );
 
     let manifest = read_repo_file("Cargo.toml");
@@ -841,10 +893,7 @@ fn offline_tuner_env_logger_audit_is_source_pinned_and_fail_closed() {
     assert_eq!(array(&baseline, "rust_log_cells").len(), 3);
     assert_eq!(array(&baseline, "required_outcome_classes").len(), 5);
     assert_eq!(array(&baseline, "required_record_fields").len(), 13);
-    assert!(
-        text(&baseline, "missing_or_unsupported_policy")
-            .contains("keeps env_logger")
-    );
+    assert!(text(&baseline, "missing_or_unsupported_policy").contains("keeps env_logger"));
 
     let cutover = Value::Object(object(&audit, "cutover_gate").clone());
     assert_eq!(text(&cutover, "required_state"), "SAME_OR_BETTER");
@@ -882,7 +931,10 @@ fn offline_tuner_env_logger_audit_is_source_pinned_and_fail_closed() {
         "No stdout, stderr, exit, panic",
         "does not authorize env_logger removal",
     ] {
-        assert!(no_claims.contains(marker), "missing env_logger no-claim marker {marker}");
+        assert!(
+            no_claims.contains(marker),
+            "missing env_logger no-claim marker {marker}"
+        );
     }
 }
 
@@ -929,7 +981,10 @@ fn byte_golden_matrix_is_required_but_not_fabricated() {
         "does not authorize clap replacement",
         "does not prove compilation",
     ] {
-        assert!(no_claims.contains(marker), "missing no-claim marker {marker}");
+        assert!(
+            no_claims.contains(marker),
+            "missing no-claim marker {marker}"
+        );
     }
 }
 

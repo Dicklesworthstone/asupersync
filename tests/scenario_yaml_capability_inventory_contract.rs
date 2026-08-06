@@ -288,10 +288,7 @@ fn validate_a3_acceptance_satisfiability(inventory: &Value) -> Result<(), String
             .get("refreshed_stale_path_count")
             .and_then(Value::as_u64)
             != Some(6)
-        || pin_refresh
-            .get("added_path_count")
-            .and_then(Value::as_u64)
-            != Some(15)
+        || pin_refresh.get("added_path_count").and_then(Value::as_u64) != Some(15)
         || pin_refresh
             .get("sorted_path_projection_sha256")
             .and_then(Value::as_str)
@@ -302,8 +299,11 @@ fn validate_a3_acceptance_satisfiability(inventory: &Value) -> Result<(), String
         )
         .len()
             != 6
-        || array(audit.get("source_pin_refresh").expect("source pin refresh"), "added_paths")
-            .len()
+        || array(
+            audit.get("source_pin_refresh").expect("source pin refresh"),
+            "added_paths",
+        )
+        .len()
             != 15
     {
         return Err("A3.1 source-pin refresh counts or projection drifted".to_owned());
@@ -468,7 +468,9 @@ fn validate_a3_acceptance_satisfiability(inventory: &Value) -> Result<(), String
         .and_then(Value::as_bool)
         != Some(true)
         || !text(
-            audit.get("consumer_matrix_scope").expect("consumer matrix scope"),
+            audit
+                .get("consumer_matrix_scope")
+                .expect("consumer matrix scope"),
             "raw_reference_policy",
         )
         .contains("excluded from the direct parser/reference matrix")
@@ -570,7 +572,9 @@ fn validate_a3_acceptance_satisfiability(inventory: &Value) -> Result<(), String
             }
         }
         if row.get("dependency_edge_id").and_then(Value::as_str) != dependency_edge {
-            return Err(format!("A3.1 consumer {consumer_id} dependency edge drifted"));
+            return Err(format!(
+                "A3.1 consumer {consumer_id} dependency edge drifted"
+            ));
         }
     }
     let doc_reference = find_row(
@@ -698,11 +702,7 @@ fn validate_a3_acceptance_satisfiability(inventory: &Value) -> Result<(), String
             return Err(format!("A3.1 writer {writer_id} source join drifted"));
         }
     }
-    let production_writer = find_row(
-        writers,
-        "writer_id",
-        "SCN-A3-WRITER-PRODUCTION-SCENARIO",
-    );
+    let production_writer = find_row(writers, "writer_id", "SCN-A3-WRITER-PRODUCTION-SCENARIO");
     if text(production_writer, "operation") != "ABSENT"
         || production_writer
             .get("retains_serde_yaml_edge")
@@ -722,7 +722,10 @@ fn validate_a3_acceptance_satisfiability(inventory: &Value) -> Result<(), String
         "parser_internal_boundaries",
         "typed_deserialization_behavior_boundaries",
     ] {
-        for id in string_set(audit.get("grammar_partition").expect("grammar partition"), key) {
+        for id in string_set(
+            audit.get("grammar_partition").expect("grammar partition"),
+            key,
+        ) {
             if !partition_ids.insert(id.clone()) {
                 return Err(format!("grammar partition duplicates {id}"));
             }
@@ -794,8 +797,10 @@ fn validate_a3_acceptance_satisfiability(inventory: &Value) -> Result<(), String
                 .collect(),
         ),
     ] {
-        if string_set(audit.get("grammar_partition").expect("grammar partition"), key)
-            != expected_ids
+        if string_set(
+            audit.get("grammar_partition").expect("grammar partition"),
+            key,
+        ) != expected_ids
         {
             return Err(format!("A3.1 grammar bucket {key} drifted"));
         }
@@ -844,13 +849,14 @@ fn validate_a3_acceptance_satisfiability(inventory: &Value) -> Result<(), String
             .and_then(Value::as_bool)
             != Some(false)
         || string_set(
-            audit.get("unknown_field_contract").expect("unknown field contract"),
+            audit
+                .get("unknown_field_contract")
+                .expect("unknown field contract"),
             "preserved_extension_maps",
-        )
-            != ["faults[].args", "metadata", "participants[].properties"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect()
+        ) != ["faults[].args", "metadata", "participants[].properties"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
     {
         return Err("A3.1 unknown-field policy drifted or was tightened".to_owned());
     }
@@ -1001,7 +1007,9 @@ fn validate_a3_acceptance_satisfiability(inventory: &Value) -> Result<(), String
                 .and_then(Value::as_str)
                 .is_none_or(str::is_empty)
         {
-            return Err(format!("{limit_id} must retain its finite-bound contradiction"));
+            return Err(format!(
+                "{limit_id} must retain its finite-bound contradiction"
+            ));
         }
     }
     for limit_id in ["SCN-A3-LIMIT-NESTING", "SCN-A3-LIMIT-ALIAS-REPETITION"] {
@@ -1012,7 +1020,9 @@ fn validate_a3_acceptance_satisfiability(inventory: &Value) -> Result<(), String
                 .and_then(Value::as_str)
                 .is_none_or(str::is_empty)
         {
-            return Err(format!("{limit_id} must distinguish parser-internal policy"));
+            return Err(format!(
+                "{limit_id} must distinguish parser-internal policy"
+            ));
         }
     }
     for limit_id in [
@@ -1025,7 +1035,9 @@ fn validate_a3_acceptance_satisfiability(inventory: &Value) -> Result<(), String
             .and_then(Value::as_str)
             .is_none_or(str::is_empty)
         {
-            return Err(format!("{limit_id} must retain its non-parse control boundary"));
+            return Err(format!(
+                "{limit_id} must retain its non-parse control boundary"
+            ));
         }
     }
 
@@ -1155,10 +1167,7 @@ fn validate_a3_keep_incumbent_receipt(inventory: &Value) -> Result<(), String> {
         ("recorded_date_utc", "2026-08-04"),
         ("receipt_state", "RECORDED"),
         ("evidence_state", "SOURCE_BASELINED"),
-        (
-            "evidence_kind",
-            "STATIC_SOURCE_PINNED_GOVERNANCE_RECEIPT",
-        ),
+        ("evidence_kind", "STATIC_SOURCE_PINNED_GOVERNANCE_RECEIPT"),
         ("execution_state", "NOT_RUN_BY_A3_2_STATIC_LANE"),
     ] {
         if receipt.get(key).and_then(Value::as_str) != Some(expected) {
@@ -1201,10 +1210,7 @@ fn validate_a3_keep_incumbent_receipt(inventory: &Value) -> Result<(), String> {
             "a3_acceptance_satisfiability_audit.satisfiability_decision",
         ),
         ("artifact_path", ARTIFACT_PATH),
-        (
-            "artifact_sha256_at_landed_commit",
-            A3_AUDIT_ARTIFACT_SHA256,
-        ),
+        ("artifact_sha256_at_landed_commit", A3_AUDIT_ARTIFACT_SHA256),
         ("documentation_path", DOC_PATH),
         (
             "documentation_sha256_at_landed_commit",
@@ -1214,10 +1220,7 @@ fn validate_a3_keep_incumbent_receipt(inventory: &Value) -> Result<(), String> {
             "contract_path",
             "tests/scenario_yaml_capability_inventory_contract.rs",
         ),
-        (
-            "contract_sha256_at_landed_commit",
-            A3_AUDIT_CONTRACT_SHA256,
-        ),
+        ("contract_sha256_at_landed_commit", A3_AUDIT_CONTRACT_SHA256),
     ] {
         if source.get(key).and_then(Value::as_str) != Some(expected) {
             return Err(format!("A3.2 source join {key} must be {expected}"));
@@ -1318,8 +1321,11 @@ fn validate_a3_keep_incumbent_receipt(inventory: &Value) -> Result<(), String> {
             .get("mapped_unresolved_row_count")
             .and_then(Value::as_u64)
             != Some(7)
-        || !array(receipt.get("decision").expect("receipt decision"), "removed_paths")
-            .is_empty()
+        || !array(
+            receipt.get("decision").expect("receipt decision"),
+            "removed_paths",
+        )
+        .is_empty()
         || !array(
             receipt.get("decision").expect("receipt decision"),
             "removed_dependency_edges",
@@ -1443,10 +1449,7 @@ fn validate_a3_keep_incumbent_receipt(inventory: &Value) -> Result<(), String> {
                 .collect()
         || string_set(bounds_gate, "source_limit_ids") != finite_limit_ids
         || string_set(bounds_gate, "source_gap_ids")
-            != ["SCN-GAP-10"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect()
+            != ["SCN-GAP-10"].into_iter().map(str::to_owned).collect()
     {
         return Err("A3.2 bounds gate must derive all seven finite limits".to_owned());
     }
@@ -1476,16 +1479,9 @@ fn validate_a3_keep_incumbent_receipt(inventory: &Value) -> Result<(), String> {
     {
         return Err("A3.2 acceptance/parser gate source join drifted".to_owned());
     }
-    let diagnostic_gate = find_row(
-        gates,
-        "gate_id",
-        "SCN-A3-KEEP-GATE-DIAGNOSTIC-PARITY",
-    );
+    let diagnostic_gate = find_row(gates, "gate_id", "SCN-A3-KEEP-GATE-DIAGNOSTIC-PARITY");
     if string_set(diagnostic_gate, "source_gap_ids")
-        != ["SCN-GAP-15"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
+        != ["SCN-GAP-15"].into_iter().map(str::to_owned).collect()
         || string_set(diagnostic_gate, "source_unresolved_row_ids")
             != ["SCN-A3-UNRESOLVED-DIAGNOSTIC-PARITY"]
                 .into_iter()
@@ -1519,10 +1515,7 @@ fn validate_a3_keep_incumbent_receipt(inventory: &Value) -> Result<(), String> {
         || !array(consumer_gate, "source_limit_ids").is_empty()
         || !array(consumer_gate, "source_gap_ids").is_empty()
         || string_set(writer_gate, "source_sections")
-            != ["writer_matrix"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect()
+            != ["writer_matrix"].into_iter().map(str::to_owned).collect()
         || string_set(consumer_gate, "source_sections")
             != ["consumer_matrix", "dependency_edges"]
                 .into_iter()
@@ -1544,8 +1537,10 @@ fn validate_a3_keep_incumbent_receipt(inventory: &Value) -> Result<(), String> {
         return Err("A3.2 gate-to-gap projection drifted".to_owned());
     }
     for gap_id in mapped_gap_ids {
-        if text(find_row(array(inventory, "known_gaps"), "gap_id", &gap_id), "evidence_state")
-            != "BLOCKED_GAP"
+        if text(
+            find_row(array(inventory, "known_gaps"), "gap_id", &gap_id),
+            "evidence_state",
+        ) != "BLOCKED_GAP"
         {
             return Err(format!("A3.2 mapped gap {gap_id} must remain blocked"));
         }
@@ -1553,29 +1548,26 @@ fn validate_a3_keep_incumbent_receipt(inventory: &Value) -> Result<(), String> {
 
     let fail_closed = object(receipt, "fail_closed_rule");
     let blocking_states = string_set(
-        receipt
-            .get("fail_closed_rule")
-            .expect("fail-closed rule"),
+        receipt.get("fail_closed_rule").expect("fail-closed rule"),
         "blocking_states",
     );
     if blocking_states
         != [
-        "ABSENT",
-        "BLOCKED",
-        "BLOCKED_GAP",
-        "MISSING",
-        "NOT_AUTHORIZED",
-        "NOT_PROVEN",
-        "NOT_RUN",
-        "PLANNED",
-        "REGRESSED",
-        "UNKNOWN",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect()
-        || fail_closed.get("on_any_blocker").and_then(Value::as_str)
-            != Some("KEEP_INCUMBENT")
+            "ABSENT",
+            "BLOCKED",
+            "BLOCKED_GAP",
+            "MISSING",
+            "NOT_AUTHORIZED",
+            "NOT_PROVEN",
+            "NOT_RUN",
+            "PLANNED",
+            "REGRESSED",
+            "UNKNOWN",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+        || fail_closed.get("on_any_blocker").and_then(Value::as_str) != Some("KEEP_INCUMBENT")
         || fail_closed
             .get("replacement_disposition")
             .and_then(Value::as_str)
@@ -1638,17 +1630,19 @@ fn validate_a3_keep_incumbent_receipt(inventory: &Value) -> Result<(), String> {
             .into_iter()
             .map(str::to_owned)
             .collect()
-        || string_set(handoff.get("a4").expect("A4 handoff"), "required_properties")
-            != [
-                "NON_DESTRUCTIVE",
-                "PRESERVE_CURRENT_YAML_INPUTS_FILES_AND_ACCEPTED_LANGUAGE",
-                "PRESERVE_SCHEMA_VERSION_DEFAULTS_SEEDS_ORACLES_AND_REPLAY_FINGERPRINTS",
-                "REVERSIBLE",
-                "SEMANTIC",
-            ]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
+        || string_set(
+            handoff.get("a4").expect("A4 handoff"),
+            "required_properties",
+        ) != [
+            "NON_DESTRUCTIVE",
+            "PRESERVE_CURRENT_YAML_INPUTS_FILES_AND_ACCEPTED_LANGUAGE",
+            "PRESERVE_SCHEMA_VERSION_DEFAULTS_SEEDS_ORACLES_AND_REPLAY_FINGERPRINTS",
+            "REVERSIBLE",
+            "SEMANTIC",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
         || string_set(handoff.get("a4").expect("A4 handoff"), "routed_gap_ids")
             != [
                 "SCN-GAP-01",
@@ -1692,7 +1686,10 @@ fn validate_a3_keep_incumbent_receipt(inventory: &Value) -> Result<(), String> {
     for (key, expected) in [
         ("bead_id", "asupersync-5z2scg.5.5"),
         ("role", "SOLE_TERMINAL_KEEP_DEFER_OR_CUTOVER_AUTHORITY"),
-        ("on_any_unsatisfied_or_regressed_prerequisite", "KEEP_OR_DEFER"),
+        (
+            "on_any_unsatisfied_or_regressed_prerequisite",
+            "KEEP_OR_DEFER",
+        ),
     ] {
         if a5.get(key).and_then(Value::as_str) != Some(expected) {
             return Err(format!("A3.2 A5 {key} must be {expected}"));
@@ -1815,23 +1812,17 @@ fn validate_a4_source_progress(inventory: &Value) -> Result<(), String> {
             return Err(format!("A4 registry {key} must be {expected}"));
         }
     }
-    let expected_roots: BTreeSet<String> = [
-        "examples/scenarios",
-        "frankenlab/examples/scenarios",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect();
+    let expected_roots: BTreeSet<String> = ["examples/scenarios", "frankenlab/examples/scenarios"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
     if string_set(registry_value, "scenario_roots") != expected_roots
         || registry.get("root_scenario_count").and_then(Value::as_u64) != Some(10)
         || registry
             .get("frankenlab_scenario_count")
             .and_then(Value::as_u64)
             != Some(3)
-        || registry
-            .get("total_scenario_count")
-            .and_then(Value::as_u64)
-            != Some(13)
+        || registry.get("total_scenario_count").and_then(Value::as_u64) != Some(13)
     {
         return Err("A4 registry roots or counts drifted".to_owned());
     }
@@ -1843,9 +1834,7 @@ fn validate_a4_source_progress(inventory: &Value) -> Result<(), String> {
     .into_iter()
     .map(str::to_owned)
     .collect();
-    if string_set(registry_value, "registered_frankenlab_paths")
-        != expected_frankenlab_paths
-    {
+    if string_set(registry_value, "registered_frankenlab_paths") != expected_frankenlab_paths {
         return Err("A4 registry must name the exact three FrankenLab scenarios".to_owned());
     }
 
@@ -1859,7 +1848,9 @@ fn validate_a4_source_progress(inventory: &Value) -> Result<(), String> {
         ("execution_state", "NOT_RUN_BY_STATIC_LANE"),
     ] {
         if metadata_registry.get(key).and_then(Value::as_str) != Some(expected) {
-            return Err(format!("example metadata registry {key} must be {expected}"));
+            return Err(format!(
+                "example metadata registry {key} must be {expected}"
+            ));
         }
     }
     if string_set(metadata_registry, "roots") != expected_roots
@@ -1886,7 +1877,9 @@ fn validate_a4_source_progress(inventory: &Value) -> Result<(), String> {
         if text(row, "kind") != "scenario-yaml"
             || !text(row, "description").contains("does not establish runner effects")
         {
-            return Err(format!("{path} metadata must remain truthful and scenario-typed"));
+            return Err(format!(
+                "{path} metadata must remain truthful and scenario-typed"
+            ));
         }
         let loc = object(row, "loc");
         let current_line_count = read_repo_file(path).lines().count() as u64;
@@ -1961,7 +1954,9 @@ fn validate_a4_source_progress(inventory: &Value) -> Result<(), String> {
     if text(gap, "evidence_state") != "BLOCKED_GAP"
         || !text(gap, "finding").contains("not executed")
     {
-        return Err("SCN-GAP-13 must remain fail-closed until execution evidence exists".to_owned());
+        return Err(
+            "SCN-GAP-13 must remain fail-closed until execution evidence exists".to_owned(),
+        );
     }
     let a4_child = find_row(
         array(inventory, "child_capability_rows"),
@@ -2013,10 +2008,7 @@ fn validate_a4_gap12_source_progress(inventory: &Value) -> Result<(), String> {
             .get("dynamic_contract_executed")
             .and_then(Value::as_bool)
             != Some(false)
-        || progress
-            .get("typed_scenario_count")
-            .and_then(Value::as_u64)
-            != Some(13)
+        || progress.get("typed_scenario_count").and_then(Value::as_u64) != Some(13)
         || string_set(progress, "typed_scenario_roots")
             != ["examples/scenarios", "frankenlab/examples/scenarios"]
                 .into_iter()
@@ -2051,9 +2043,7 @@ fn validate_a4_gap12_source_progress(inventory: &Value) -> Result<(), String> {
         "adjacent_id",
         "SCN-ADJACENT-TIME-TRAVEL-DEMO",
     );
-    if text(adjacent_inventory, "classification")
-        != "NOT_SCENARIO_SCHEMA_NO_AUTOMATIC_WIRING"
-    {
+    if text(adjacent_inventory, "classification") != "NOT_SCENARIO_SCHEMA_NO_AUTOMATIC_WIRING" {
         return Err("A4 GAP-12 adjacent classification drifted from inventory".to_owned());
     }
     for (key, expected) in [
@@ -2154,9 +2144,7 @@ fn validate_a4_gap12_source_progress(inventory: &Value) -> Result<(), String> {
         "owner_bead",
         A4_BEAD_ID,
     );
-    if !string_set(a4_child, "additional_progress_pointers")
-        .contains("a4_gap12_source_progress")
-    {
+    if !string_set(a4_child, "additional_progress_pointers").contains("a4_gap12_source_progress") {
         return Err("A4 child must retain the GAP-12 progress pointer".to_owned());
     }
 
@@ -2276,10 +2264,14 @@ fn validate_a4_gap15_source_progress(inventory: &Value) -> Result<(), String> {
             .map(str::to_owned)
             .collect()
         || string_set(progress, "adapter_functions")
-            != ["lab_replay", "runner_error_message", "scenario_runner_error"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect()
+            != [
+                "lab_replay",
+                "runner_error_message",
+                "scenario_runner_error",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
         || string_set(progress, "authored_tests")
             != [
                 "runner_error_message_replay_divergence_preserves_stable_code",
@@ -2305,18 +2297,14 @@ fn validate_a4_gap15_source_progress(inventory: &Value) -> Result<(), String> {
     let root_replay = source_item(&root_cli, "fn lab_replay(");
     let franken_cli = read_repo_file("frankenlab/src/main.rs");
     let franken_adapter = source_item(&franken_cli, "fn runner_error_message(");
-    if !root_cli.contains(
-        "\"[ASUP-E401] Deterministic replay divergence detected\"",
-    ) || !root_adapter.contains("REPLAY_DIVERGENCE_TITLE")
+    if !root_cli.contains("\"[ASUP-E401] Deterministic replay divergence detected\"")
+        || !root_adapter.contains("REPLAY_DIVERGENCE_TITLE")
         || !root_replay.contains("REPLAY_DIVERGENCE_TITLE")
         || !franken_cli.contains("const REPLAY_DIVERGENCE_PREFIX: &str = \"[ASUP-E401]\";")
         || !franken_adapter.contains("REPLAY_DIVERGENCE_PREFIX")
-        || !root_cli.contains(
-            "fn scenario_runner_error_replay_divergence_preserves_stable_code()",
-        )
-        || !franken_cli.contains(
-            "fn runner_error_message_replay_divergence_preserves_stable_code()",
-        )
+        || !root_cli.contains("fn scenario_runner_error_replay_divergence_preserves_stable_code()")
+        || !franken_cli
+            .contains("fn runner_error_message_replay_divergence_preserves_stable_code()")
     {
         return Err("A4 GAP-15 adapter token or authored source test drifted".to_owned());
     }
@@ -2363,9 +2351,7 @@ fn validate_a4_gap15_source_progress(inventory: &Value) -> Result<(), String> {
         "owner_bead",
         A4_BEAD_ID,
     );
-    if !string_set(a4_child, "additional_progress_pointers")
-        .contains("a4_gap15_source_progress")
-    {
+    if !string_set(a4_child, "additional_progress_pointers").contains("a4_gap15_source_progress") {
         return Err("A4 child must retain the GAP-15 progress pointer".to_owned());
     }
 
@@ -2512,9 +2498,7 @@ fn validate_a4_gap16_source_progress(inventory: &Value) -> Result<(), String> {
         "owner_bead",
         A4_BEAD_ID,
     );
-    if !string_set(a4_child, "additional_progress_pointers")
-        .contains("a4_gap16_source_progress")
-    {
+    if !string_set(a4_child, "additional_progress_pointers").contains("a4_gap16_source_progress") {
         return Err("A4 child must retain the GAP-16 progress pointer".to_owned());
     }
 
@@ -2546,10 +2530,7 @@ fn validate_post_a3_1_provenance_refresh(inventory: &Value) -> Result<(), String
         .ok_or_else(|| "post_a3_1_provenance_refresh is required".to_owned())?;
     for (key, expected) in [
         ("captured_date_utc", "2026-08-05"),
-        (
-            "base_commit",
-            "6b5d0638aabc84dfafa078936e3892ed77bfa196",
-        ),
+        ("base_commit", "6b5d0638aabc84dfafa078936e3892ed77bfa196"),
         ("refresh_state", "STATIC_SOURCE_PIN_MAINTENANCE"),
         ("required_disposition", "KEEP_INCUMBENT"),
         ("execution_state", "NOT_RUN_STATIC_ONLY"),
@@ -2962,8 +2943,7 @@ fn authority_profiles_and_live_loader_routes_are_truthful() {
     let api_map = parse_repo_json(API_SURFACE_MAP_PATH);
     let api_map_text = api_map.to_string();
     assert!(
-        api_map_text.contains("lab_scenario_yaml")
-            && api_map_text.contains("lab::ScenarioRunner"),
+        api_map_text.contains("lab_scenario_yaml") && api_map_text.contains("lab::ScenarioRunner"),
         "API surface map must retain the YAML scenario journey"
     );
 
@@ -2993,8 +2973,7 @@ fn authority_profiles_and_live_loader_routes_are_truthful() {
 #[test]
 fn a3_current_consumers_writers_bounds_and_keep_decision_are_source_bound() {
     let inventory = artifact();
-    validate_a3_acceptance_satisfiability(&inventory)
-        .unwrap_or_else(|error| panic!("{error}"));
+    validate_a3_acceptance_satisfiability(&inventory).unwrap_or_else(|error| panic!("{error}"));
 
     let root_cli = read_repo_file("src/bin/asupersync.rs");
     let root_loader = source_item(&root_cli, "fn load_scenario(path: &Path)");
@@ -3375,7 +3354,11 @@ fn exact_checked_in_typed_corpus_parses_and_validates() {
         .as_mapping()
         .expect("adjacent demo must remain a mapping")
         .keys()
-        .map(|key| key.as_str().expect("adjacent root keys must be strings").to_owned())
+        .map(|key| {
+            key.as_str()
+                .expect("adjacent root keys must be strings")
+                .to_owned()
+        })
         .collect();
     assert_eq!(
         adjacent_keys,
@@ -3478,12 +3461,12 @@ fn execution_consumption_diagnostics_and_gap_routing_stay_truthful() {
     assert!(runner.contains("[ASUP-E401]"));
     assert!(root_cli.contains("[ASUP-E401]"));
     assert!(franken_cli.contains("[ASUP-E401]"));
-    assert!(root_cli.contains(
-        "fn scenario_runner_error_replay_divergence_preserves_stable_code()"
-    ));
-    assert!(franken_cli.contains(
-        "fn runner_error_message_replay_divergence_preserves_stable_code()"
-    ));
+    assert!(
+        root_cli.contains("fn scenario_runner_error_replay_divergence_preserves_stable_code()")
+    );
+    assert!(
+        franken_cli.contains("fn runner_error_message_replay_divergence_preserves_stable_code()")
+    );
 
     let gaps = array(&inventory, "known_gaps");
     for gap_id in [
@@ -3605,35 +3588,34 @@ fn fail_closed_mutations_reject_cutover_unknown_missing_surface_bound_and_policy
     assert!(validate_inventory(&missing_consumer).is_err());
 
     let mut false_application_bound = inventory.clone();
-    let limits = false_application_bound["a3_acceptance_satisfiability_audit"]
-        ["application_limit_matrix"]
-        .as_array_mut()
-        .expect("application limit matrix");
+    let limits =
+        false_application_bound["a3_acceptance_satisfiability_audit"]["application_limit_matrix"]
+            .as_array_mut()
+            .expect("application limit matrix");
     let bytes = limits
         .iter_mut()
         .find(|row| {
-            row.get("limit_id").and_then(Value::as_str)
-                == Some("SCN-A3-LIMIT-DOCUMENT-BYTES")
+            row.get("limit_id").and_then(Value::as_str) == Some("SCN-A3-LIMIT-DOCUMENT-BYTES")
         })
         .expect("document byte limit row");
     bytes["current_application_policy"] = Value::String("FINITE".to_owned());
     assert!(validate_inventory(&false_application_bound).is_err());
 
     let mut tightened_unknowns = inventory.clone();
-    tightened_unknowns["a3_acceptance_satisfiability_audit"]["unknown_field_contract"]
-        ["root_typed_struct"] = Value::String("REJECT".to_owned());
+    tightened_unknowns["a3_acceptance_satisfiability_audit"]["unknown_field_contract"]["root_typed_struct"] =
+        Value::String("REJECT".to_owned());
     assert!(validate_inventory(&tightened_unknowns).is_err());
 
     let mut invented_owner_policy = inventory.clone();
-    invented_owner_policy["a3_acceptance_satisfiability_audit"]["satisfiability_decision"]
-        ["owner_policy_approved"] = Value::Bool(true);
+    invented_owner_policy["a3_acceptance_satisfiability_audit"]["satisfiability_decision"]["owner_policy_approved"] =
+        Value::Bool(true);
     assert!(validate_inventory(&invented_owner_policy).is_err());
 
     let mut false_satisfiability = inventory.clone();
-    false_satisfiability["a3_acceptance_satisfiability_audit"]["satisfiability_decision"]
-        ["satisfiability"] = Value::String("SATISFIABLE".to_owned());
-    false_satisfiability["a3_acceptance_satisfiability_audit"]["satisfiability_decision"]
-        ["dependency_exit_allowed"] = Value::Bool(true);
+    false_satisfiability["a3_acceptance_satisfiability_audit"]["satisfiability_decision"]["satisfiability"] =
+        Value::String("SATISFIABLE".to_owned());
+    false_satisfiability["a3_acceptance_satisfiability_audit"]["satisfiability_decision"]["dependency_exit_allowed"] =
+        Value::Bool(true);
     assert!(validate_inventory(&false_satisfiability).is_err());
 
     let mut replacement = inventory.clone();
@@ -3642,13 +3624,13 @@ fn fail_closed_mutations_reject_cutover_unknown_missing_surface_bound_and_policy
     assert!(validate_inventory(&replacement).is_err());
 
     let mut replacement_authorized = inventory.clone();
-    replacement_authorized["a3_keep_incumbent_receipt"]["decision"]
-        ["replacement_authorized"] = Value::Bool(true);
+    replacement_authorized["a3_keep_incumbent_receipt"]["decision"]["replacement_authorized"] =
+        Value::Bool(true);
     assert!(validate_inventory(&replacement_authorized).is_err());
 
     let mut cutover_authorized = inventory.clone();
-    cutover_authorized["a3_keep_incumbent_receipt"]["decision"]
-        ["terminal_cutover_authorized"] = Value::Bool(true);
+    cutover_authorized["a3_keep_incumbent_receipt"]["decision"]["terminal_cutover_authorized"] =
+        Value::Bool(true);
     assert!(validate_inventory(&cutover_authorized).is_err());
 
     let mut receipt_exit = inventory.clone();
@@ -3657,8 +3639,8 @@ fn fail_closed_mutations_reject_cutover_unknown_missing_surface_bound_and_policy
     assert!(validate_inventory(&receipt_exit).is_err());
 
     let mut falsely_satisfied = inventory.clone();
-    falsely_satisfied["a3_keep_incumbent_receipt"]["decision"]
-        ["all_required_gates_satisfied"] = Value::Bool(true);
+    falsely_satisfied["a3_keep_incumbent_receipt"]["decision"]["all_required_gates_satisfied"] =
+        Value::Bool(true);
     assert!(validate_inventory(&falsely_satisfied).is_err());
 
     let mut missing_receipt_gate = inventory.clone();
@@ -3687,13 +3669,13 @@ fn fail_closed_mutations_reject_cutover_unknown_missing_surface_bound_and_policy
     assert!(validate_inventory(&missing_receipt_bound).is_err());
 
     let mut a4_terminal = inventory.clone();
-    a4_terminal["a3_keep_incumbent_receipt"]["authority_handoff"]["a4"]
-        ["may_issue_terminal_decision"] = Value::Bool(true);
+    a4_terminal["a3_keep_incumbent_receipt"]["authority_handoff"]["a4"]["may_issue_terminal_decision"] =
+        Value::Bool(true);
     assert!(validate_inventory(&a4_terminal).is_err());
 
     let mut a5_authority_drift = inventory.clone();
-    a5_authority_drift["a3_keep_incumbent_receipt"]["authority_handoff"]["a5"]
-        ["bead_id"] = Value::String("asupersync-5z2scg.5.4".to_owned());
+    a5_authority_drift["a3_keep_incumbent_receipt"]["authority_handoff"]["a5"]["bead_id"] =
+        Value::String("asupersync-5z2scg.5.4".to_owned());
     assert!(validate_inventory(&a5_authority_drift).is_err());
 
     let mut source_join_drift = inventory.clone();
@@ -3705,7 +3687,9 @@ fn fail_closed_mutations_reject_cutover_unknown_missing_surface_bound_and_policy
     removed_path["a3_keep_incumbent_receipt"]["decision"]["removed_paths"]
         .as_array_mut()
         .expect("removed paths")
-        .push(Value::String("examples/scenarios/smoke_happy_path.yaml".to_owned()));
+        .push(Value::String(
+            "examples/scenarios/smoke_happy_path.yaml".to_owned(),
+        ));
     assert!(validate_inventory(&removed_path).is_err());
 
     let mut forbidden_verdict = inventory.clone();
@@ -3714,19 +3698,16 @@ fn fail_closed_mutations_reject_cutover_unknown_missing_surface_bound_and_policy
     assert!(validate_inventory(&forbidden_verdict).is_err());
 
     let mut invented_a4_execution = inventory.clone();
-    invented_a4_execution["a4_source_progress"]["dynamic_contract_executed"] =
-        Value::Bool(true);
+    invented_a4_execution["a4_source_progress"]["dynamic_contract_executed"] = Value::Bool(true);
     assert!(validate_inventory(&invented_a4_execution).is_err());
 
     let mut a4_removal = inventory.clone();
-    a4_removal["a4_source_progress"]["preservation"]["yaml_file_removed"] =
-        Value::Bool(true);
+    a4_removal["a4_source_progress"]["preservation"]["yaml_file_removed"] = Value::Bool(true);
     assert!(validate_inventory(&a4_removal).is_err());
 
     let mut missing_a4_registration = inventory.clone();
     assert!(
-        missing_a4_registration["a4_source_progress"]["registry"]
-            ["registered_frankenlab_paths"]
+        missing_a4_registration["a4_source_progress"]["registry"]["registered_frankenlab_paths"]
             .as_array_mut()
             .expect("registered FrankenLab paths")
             .pop()
@@ -3752,8 +3733,8 @@ fn fail_closed_mutations_reject_cutover_unknown_missing_surface_bound_and_policy
     assert!(validate_inventory(&tools_as_typed_root).is_err());
 
     let mut gap12_dependency_removal = inventory.clone();
-    gap12_dependency_removal["a4_gap12_source_progress"]["preservation"]
-        ["dependency_removed"] = Value::Bool(true);
+    gap12_dependency_removal["a4_gap12_source_progress"]["preservation"]["dependency_removed"] =
+        Value::Bool(true);
     assert!(validate_inventory(&gap12_dependency_removal).is_err());
 
     let mut invented_gap16_execution = inventory.clone();
@@ -3771,8 +3752,7 @@ fn fail_closed_mutations_reject_cutover_unknown_missing_surface_bound_and_policy
         .position(|row| row.get("owner_bead").and_then(Value::as_str) == Some(A4_BEAD_ID))
         .expect("A4 child row");
     let mut missing_gap12_pointer = inventory.clone();
-    missing_gap12_pointer["child_capability_rows"][a4_child_index]
-        ["additional_progress_pointers"]
+    missing_gap12_pointer["child_capability_rows"][a4_child_index]["additional_progress_pointers"]
         .as_array_mut()
         .expect("additional A4 progress pointers")
         .clear();

@@ -8935,8 +8935,7 @@ struct WasmDependencyForbiddenHit {
     transitive_chain: Vec<String>,
 }
 
-const REPLAY_DIVERGENCE_TITLE: &str =
-    "[ASUP-E401] Deterministic replay divergence detected";
+const REPLAY_DIVERGENCE_TITLE: &str = "[ASUP-E401] Deterministic replay divergence detected";
 
 fn load_scenario(path: &Path) -> Result<asupersync::lab::scenario::Scenario, CliError> {
     let yaml = fs::read_to_string(path).map_err(|err| io_error(path, &err))?;
@@ -9114,11 +9113,9 @@ fn lab_replay(args: &LabReplayArgs, output: &mut Output) -> Result<(), CliError>
                 .map_or(report.event_hash, |d| d.second_event_hash),
             replay_hint
         );
-        return Err(
-            CliError::new("replay_divergence", REPLAY_DIVERGENCE_TITLE)
-                .detail(detail)
-                .exit_code(ExitCode::DETERMINISM_FAILURE),
-        );
+        return Err(CliError::new("replay_divergence", REPLAY_DIVERGENCE_TITLE)
+            .detail(detail)
+            .exit_code(ExitCode::DETERMINISM_FAILURE));
     }
 
     Ok(())
@@ -11705,13 +11702,10 @@ fn write_replay_artifact(path: &Path, report: &LabReplayOutput) -> Result<(), Cl
     })?;
 
     let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(|err| {
-        CliError::new(
-            "artifact_output_error",
-            "Failed to stage replay artifact",
-        )
-        .detail(err.to_string())
-        .context("path", path.display().to_string())
-        .exit_code(ExitCode::RUNTIME_ERROR)
+        CliError::new("artifact_output_error", "Failed to stage replay artifact")
+            .detail(err.to_string())
+            .context("path", path.display().to_string())
+            .exit_code(ExitCode::RUNTIME_ERROR)
     })?;
     staged.write_all(&payload).map_err(|err| {
         CliError::new(
@@ -13435,9 +13429,7 @@ mod tests {
 
     #[test]
     fn scenario_runner_error_replay_divergence_preserves_stable_code() {
-        use asupersync::lab::scenario_runner::{
-            ScenarioRunnerError, TraceCertificateSnapshot,
-        };
+        use asupersync::lab::scenario_runner::{ScenarioRunnerError, TraceCertificateSnapshot};
 
         let err = scenario_runner_error(ScenarioRunnerError::ReplayDivergence {
             seed: 17,

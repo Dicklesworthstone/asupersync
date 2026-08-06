@@ -3214,8 +3214,7 @@ mod tests {
             _ => panic!("first reserve poll should acquire capacity"),
         };
         assert_eq!(
-            tx.telemetry_snapshot(13)
-                .reserved_uncommitted_obligations,
+            tx.telemetry_snapshot(13).reserved_uncommitted_obligations,
             1
         );
 
@@ -3236,8 +3235,7 @@ mod tests {
             "unexpected repoll panic: {message}"
         );
         assert_eq!(
-            tx.telemetry_snapshot(13)
-                .reserved_uncommitted_obligations,
+            tx.telemetry_snapshot(13).reserved_uncommitted_obligations,
             1,
             "rejected repoll must not reserve another slot"
         );
@@ -3245,15 +3243,13 @@ mod tests {
             .expect("rejected repoll must leave the second slot available")
             .abort();
         assert_eq!(
-            tx.telemetry_snapshot(13)
-                .reserved_uncommitted_obligations,
+            tx.telemetry_snapshot(13).reserved_uncommitted_obligations,
             1
         );
 
         permit.abort();
         assert_eq!(
-            tx.telemetry_snapshot(13)
-                .reserved_uncommitted_obligations,
+            tx.telemetry_snapshot(13).reserved_uncommitted_obligations,
             0
         );
         tx.try_reserve()

@@ -1124,11 +1124,8 @@ mod tests {
     #[test]
     fn framed_readiness_bounds_pending_buffer_and_recovers() {
         let writable = Arc::new(AtomicBool::new(false));
-        let mut framed = Framed::new(
-            GatedWriter::new(Arc::clone(&writable)),
-            LinesCodec::new(),
-        )
-        .with_backpressure_boundary(8);
+        let mut framed = Framed::new(GatedWriter::new(Arc::clone(&writable)), LinesCodec::new())
+            .with_backpressure_boundary(8);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
@@ -1156,11 +1153,8 @@ mod tests {
     #[test]
     fn framed_boundary_is_soft_for_one_oversized_frame() {
         let writable = Arc::new(AtomicBool::new(false));
-        let mut framed = Framed::new(
-            GatedWriter::new(Arc::clone(&writable)),
-            LinesCodec::new(),
-        )
-        .with_backpressure_boundary(4);
+        let mut framed = Framed::new(GatedWriter::new(Arc::clone(&writable)), LinesCodec::new())
+            .with_backpressure_boundary(4);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 

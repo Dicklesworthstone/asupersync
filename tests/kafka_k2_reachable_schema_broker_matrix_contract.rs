@@ -17,10 +17,8 @@ use std::path::{Path, PathBuf};
 
 const ARTIFACT_PATH: &str = "artifacts/kafka_k2_reachable_schema_broker_matrix_v1.json";
 const DOC_PATH: &str = "docs/kafka_k2_reachable_schema_broker_matrix.md";
-const ARTIFACT_SHA256: &str =
-    "b74accafa98c7dff7c47e3fc6f53cba3202bd7ce7a01b3db0327f11e0139cb54";
-const DOC_SHA256: &str =
-    "949f40c1c68009357dc38ea108509d8a51b63e43e7fc7a39feaa2c52cb42785f";
+const ARTIFACT_SHA256: &str = "b74accafa98c7dff7c47e3fc6f53cba3202bd7ce7a01b3db0327f11e0139cb54";
+const DOC_SHA256: &str = "949f40c1c68009357dc38ea108509d8a51b63e43e7fc7a39feaa2c52cb42785f";
 
 const DOC_BEGIN: &str = "<!-- BEGIN KAFKA K2.1 REACHABLE SCHEMA BROKER MATRIX -->";
 const DOC_END: &str = "<!-- END KAFKA K2.1 REACHABLE SCHEMA BROKER MATRIX -->";
@@ -118,29 +116,13 @@ const EXPECTED_APIS: &[(u64, &str, bool, u64, &str, &str, Option<u64>)] = &[
     (17, "SaslHandshake", true, 1, "0-1", "0-1", None),
     (18, "ApiVersions", true, 3, "0-4", "0-3", Some(3)),
     (22, "InitProducerId", true, 4, "0-6", "0-4", Some(2)),
-    (
-        23,
-        "OffsetForLeaderEpoch",
-        true,
-        2,
-        "2-4",
-        "2",
-        Some(4),
-    ),
+    (23, "OffsetForLeaderEpoch", true, 2, "2-4", "2", Some(4)),
     (24, "AddPartitionsToTxn", true, 0, "0-5", "0", Some(3)),
     (25, "AddOffsetsToTxn", true, 0, "0-4", "0", Some(3)),
     (26, "EndTxn", true, 1, "0-5", "0-1", Some(3)),
     (28, "TxnOffsetCommit", true, 3, "0-5", "0-3", Some(3)),
     (36, "SaslAuthenticate", true, 1, "0-2", "0-1", Some(2)),
-    (
-        71,
-        "GetTelemetrySubscriptions",
-        false,
-        0,
-        "0",
-        "0",
-        Some(0),
-    ),
+    (71, "GetTelemetrySubscriptions", false, 0, "0", "0", Some(0)),
     (72, "PushTelemetry", false, 0, "0", "0", Some(0)),
 ];
 
@@ -1101,17 +1083,13 @@ fn expected_effective_default(
         )),
         "KAFKA-K2-1-FIELD-CURRENT-010-REQUEST-000-KEY"
         | "KAFKA-K2-1-FIELD-CURRENT-010-RESPONSE-002-ERROR-MESSAGE"
-        | "KAFKA-K2-1-FIELD-CURRENT-010-RESPONSE-004-HOST" => Some((
-            "IMPLICIT_GENERATED_TYPE_DEFAULT",
-            Some("\"\""),
-            "0-6",
-        )),
+        | "KAFKA-K2-1-FIELD-CURRENT-010-RESPONSE-004-HOST" => {
+            Some(("IMPLICIT_GENERATED_TYPE_DEFAULT", Some("\"\""), "0-6"))
+        }
         "KAFKA-K2-1-FIELD-CURRENT-010-REQUEST-002-COORDINATOR-KEYS"
-        | "KAFKA-K2-1-FIELD-CURRENT-010-RESPONSE-006-COORDINATORS" => Some((
-            "IMPLICIT_GENERATED_TYPE_DEFAULT",
-            Some("[]"),
-            "0-6",
-        )),
+        | "KAFKA-K2-1-FIELD-CURRENT-010-RESPONSE-006-COORDINATORS" => {
+            Some(("IMPLICIT_GENERATED_TYPE_DEFAULT", Some("[]"), "0-6"))
+        }
         "KAFKA-K2-1-FIELD-CURRENT-010-RESPONSE-000-THROTTLE-TIME-MS"
         | "KAFKA-K2-1-FIELD-CURRENT-010-RESPONSE-001-ERROR-CODE"
         | "KAFKA-K2-1-FIELD-CURRENT-010-RESPONSE-003-NODE-ID"
@@ -1120,21 +1098,17 @@ fn expected_effective_default(
         }
         "KAFKA-K2-1-FIELD-CURRENT-010-RESPONSE-006-COORDINATORS-000-KEY"
         | "KAFKA-K2-1-FIELD-CURRENT-010-RESPONSE-006-COORDINATORS-002-HOST"
-        | "KAFKA-K2-1-FIELD-CURRENT-010-RESPONSE-006-COORDINATORS-005-ERROR-MESSAGE" => Some((
-            "IMPLICIT_GENERATED_TYPE_DEFAULT",
-            Some("\"\""),
-            "4-6",
-        )),
+        | "KAFKA-K2-1-FIELD-CURRENT-010-RESPONSE-006-COORDINATORS-005-ERROR-MESSAGE" => {
+            Some(("IMPLICIT_GENERATED_TYPE_DEFAULT", Some("\"\""), "4-6"))
+        }
         "KAFKA-K2-1-FIELD-CURRENT-010-RESPONSE-006-COORDINATORS-001-NODE-ID"
         | "KAFKA-K2-1-FIELD-CURRENT-010-RESPONSE-006-COORDINATORS-003-PORT"
         | "KAFKA-K2-1-FIELD-CURRENT-010-RESPONSE-006-COORDINATORS-004-ERROR-CODE" => {
             Some(("IMPLICIT_GENERATED_TYPE_DEFAULT", Some("0"), "4-6"))
         }
-        "KAFKA-K2-1-FIELD-CURRENT-017-REQUEST-000-MECHANISM" => Some((
-            "IMPLICIT_GENERATED_TYPE_DEFAULT",
-            Some("\"\""),
-            "0-1",
-        )),
+        "KAFKA-K2-1-FIELD-CURRENT-017-REQUEST-000-MECHANISM" => {
+            Some(("IMPLICIT_GENERATED_TYPE_DEFAULT", Some("\"\""), "0-1"))
+        }
         "KAFKA-K2-1-FIELD-CURRENT-017-RESPONSE-000-ERROR-CODE" => {
             Some(("IMPLICIT_GENERATED_TYPE_DEFAULT", Some("0"), "0-1"))
         }
@@ -1148,22 +1122,18 @@ fn expected_effective_default(
         "KAFKA-K2-1-FIELD-CURRENT-036-RESPONSE-000-ERROR-CODE" => {
             Some(("IMPLICIT_GENERATED_TYPE_DEFAULT", Some("0"), "0-2"))
         }
-        "KAFKA-K2-1-FIELD-CURRENT-036-RESPONSE-001-ERROR-MESSAGE" => Some((
-            "IMPLICIT_GENERATED_TYPE_DEFAULT",
-            Some("\"\""),
-            "0-2",
-        )),
+        "KAFKA-K2-1-FIELD-CURRENT-036-RESPONSE-001-ERROR-MESSAGE" => {
+            Some(("IMPLICIT_GENERATED_TYPE_DEFAULT", Some("\"\""), "0-2"))
+        }
         "KAFKA-K2-1-FIELD-CURRENT-036-RESPONSE-003-SESSION-LIFETIME-MS" => Some((
             "EXPLICIT_SCHEMA_LITERAL_GENERATED_DEFAULT",
             Some("0"),
             "0-2",
         )),
         "KAFKA-K2-1-FIELD-CURRENT-018-REQUEST-000-CLIENT-SOFTWARE-NAME"
-        | "KAFKA-K2-1-FIELD-CURRENT-018-REQUEST-001-CLIENT-SOFTWARE-VERSION" => Some((
-            "IMPLICIT_GENERATED_TYPE_DEFAULT",
-            Some("\"\""),
-            "0-4",
-        )),
+        | "KAFKA-K2-1-FIELD-CURRENT-018-REQUEST-001-CLIENT-SOFTWARE-VERSION" => {
+            Some(("IMPLICIT_GENERATED_TYPE_DEFAULT", Some("\"\""), "0-4"))
+        }
         "KAFKA-K2-1-FIELD-CURRENT-018-RESPONSE-000-ERROR-CODE"
         | "KAFKA-K2-1-FIELD-CURRENT-018-RESPONSE-001-API-KEYS-000-API-KEY"
         | "KAFKA-K2-1-FIELD-CURRENT-018-RESPONSE-001-API-KEYS-001-MIN-VERSION"
@@ -1196,11 +1166,9 @@ fn expected_effective_default(
             Some("false"),
             "0-4",
         )),
-        "KAFKA-K2-1-FIELD-CURRENT-022-REQUEST-000-TRANSACTIONAL-ID" => Some((
-            "IMPLICIT_GENERATED_TYPE_DEFAULT",
-            Some("\"\""),
-            "0-6",
-        )),
+        "KAFKA-K2-1-FIELD-CURRENT-022-REQUEST-000-TRANSACTIONAL-ID" => {
+            Some(("IMPLICIT_GENERATED_TYPE_DEFAULT", Some("\"\""), "0-6"))
+        }
         "KAFKA-K2-1-FIELD-CURRENT-022-REQUEST-001-TRANSACTION-TIMEOUT-MS"
         | "KAFKA-K2-1-FIELD-CURRENT-022-RESPONSE-000-THROTTLE-TIME-MS"
         | "KAFKA-K2-1-FIELD-CURRENT-022-RESPONSE-001-ERROR-CODE"
@@ -1222,38 +1190,28 @@ fn expected_effective_default(
             Some("false"),
             "0-6",
         )),
-        "KAFKA-K2-1-FIELD-HISTORICAL-022-REQUEST-000-TRANSACTIONAL-ID" => Some((
-            "IMPLICIT_NULLABLE_STRUCT_DEFAULT",
-            Some("null"),
-            "0",
-        )),
-        "KAFKA-K2-1-FIELD-HISTORICAL-022-RESPONSE-000-THROTTLE-TIME-MS" => Some((
-            "EXPLICIT_SCHEMA_LITERAL_STRUCT_DEFAULT",
-            Some("0"),
-            "0",
-        )),
+        "KAFKA-K2-1-FIELD-HISTORICAL-022-REQUEST-000-TRANSACTIONAL-ID" => {
+            Some(("IMPLICIT_NULLABLE_STRUCT_DEFAULT", Some("null"), "0"))
+        }
+        "KAFKA-K2-1-FIELD-HISTORICAL-022-RESPONSE-000-THROTTLE-TIME-MS" => {
+            Some(("EXPLICIT_SCHEMA_LITERAL_STRUCT_DEFAULT", Some("0"), "0"))
+        }
         "KAFKA-K2-1-FIELD-HISTORICAL-022-REQUEST-001-TRANSACTION-TIMEOUT-MS"
         | "KAFKA-K2-1-FIELD-HISTORICAL-022-RESPONSE-001-ERROR-CODE"
         | "KAFKA-K2-1-FIELD-HISTORICAL-022-RESPONSE-002-PRODUCER-ID"
         | "KAFKA-K2-1-FIELD-HISTORICAL-022-RESPONSE-003-PRODUCER-EPOCH" => {
             Some(("REQUIRED_NO_DEFAULT", None, "none"))
         }
-        "KAFKA-K2-1-FIELD-HISTORICAL-036-RESPONSE-001-ERROR-MESSAGE" => Some((
-            "IMPLICIT_NULLABLE_STRUCT_DEFAULT",
-            Some("null"),
-            "0",
-        )),
-        "KAFKA-K2-1-FIELD-HISTORICAL-010-RESPONSE-V1-002-ERROR-MESSAGE" => Some((
-            "IMPLICIT_NULLABLE_STRUCT_DEFAULT",
-            Some("null"),
-            "1",
-        )),
+        "KAFKA-K2-1-FIELD-HISTORICAL-036-RESPONSE-001-ERROR-MESSAGE" => {
+            Some(("IMPLICIT_NULLABLE_STRUCT_DEFAULT", Some("null"), "0"))
+        }
+        "KAFKA-K2-1-FIELD-HISTORICAL-010-RESPONSE-V1-002-ERROR-MESSAGE" => {
+            Some(("IMPLICIT_NULLABLE_STRUCT_DEFAULT", Some("null"), "1"))
+        }
         "KAFKA-K2-1-FIELD-HISTORICAL-010-RESPONSE-V1-000-THROTTLE-TIME-MS"
-        | "KAFKA-K2-1-FIELD-HISTORICAL-018-RESPONSE-002-THROTTLE-TIME-MS" => Some((
-            "EXPLICIT_SCHEMA_LITERAL_STRUCT_DEFAULT",
-            Some("0"),
-            "1",
-        )),
+        | "KAFKA-K2-1-FIELD-HISTORICAL-018-RESPONSE-002-THROTTLE-TIME-MS" => {
+            Some(("EXPLICIT_SCHEMA_LITERAL_STRUCT_DEFAULT", Some("0"), "1"))
+        }
         "KAFKA-K2-1-FIELD-HISTORICAL-010-REQUEST-V0-000-GROUP-ID"
         | "KAFKA-K2-1-FIELD-HISTORICAL-010-REQUEST-V1-000-COORDINATOR-KEY"
         | "KAFKA-K2-1-FIELD-HISTORICAL-010-REQUEST-V1-001-COORDINATOR-TYPE"
@@ -1547,15 +1505,11 @@ const EXPECTED_HISTORICAL_CONTRACTS: &[ExpectedHistoricalContract] = &[
         range_rows: 4,
         source_files: 22,
         source_bytes: 95_596,
-        projection_sha256:
-            "808a785e9aaaf3794baf77b4cf6a079436064fdb0480c63c00a469a8cac308c3",
-        semantic_role_projection_sha256:
-            "b287fc3b07d99a92fc2fecf508da081971a2e24943a766bc1ca485d60b54f130",
-        nested_payload_state:
-            "LEGACY_MESSAGE_AND_COMPRESSION_SOURCES_PINNED_INTEROPERABILITY_NOT_PROVED",
+        projection_sha256: "808a785e9aaaf3794baf77b4cf6a079436064fdb0480c63c00a469a8cac308c3",
+        semantic_role_projection_sha256: "b287fc3b07d99a92fc2fecf508da081971a2e24943a766bc1ca485d60b54f130",
+        nested_payload_state: "LEGACY_MESSAGE_AND_COMPRESSION_SOURCES_PINNED_INTEROPERABILITY_NOT_PROVED",
         full_frontier_state: "NOT_EVALUATED_PROFILE_SCOPE_ONLY",
-        blocking_observation:
-            "Only keys 0-3 at v0 are covered; full current-facade support is not evaluated.",
+        blocking_observation: "Only keys 0-3 at v0 are covered; full current-facade support is not evaluated.",
         source_path_prefix: "core/src/main/scala/kafka/",
     },
     ExpectedHistoricalContract {
@@ -1569,15 +1523,11 @@ const EXPECTED_HISTORICAL_CONTRACTS: &[ExpectedHistoricalContract] = &[
         range_rows: 9,
         source_files: 10,
         source_bytes: 210_904,
-        projection_sha256:
-            "bdd0b4c71280124cda67095fedfada10647d9b310c7ea9ba92e3c6eade0be414",
-        semantic_role_projection_sha256:
-            "8f5f6a0924973f4cf90cd775e124329d6eb5963a679f77ae277e1194b03a9a46",
-        nested_payload_state:
-            "API10_SCALAR_STRUCT_API18_NAMED_ARRAY_STRUCT_AND_API22_FLAT_BODY_FIELDS_PROJECTED_MAGIC_V2_RECORD_PAYLOAD_SOURCES_EXCLUDED_OWNED_BY_K4_1",
+        projection_sha256: "bdd0b4c71280124cda67095fedfada10647d9b310c7ea9ba92e3c6eade0be414",
+        semantic_role_projection_sha256: "8f5f6a0924973f4cf90cd775e124329d6eb5963a679f77ae277e1194b03a9a46",
+        nested_payload_state: "API10_SCALAR_STRUCT_API18_NAMED_ARRAY_STRUCT_AND_API22_FLAT_BODY_FIELDS_PROJECTED_MAGIC_V2_RECORD_PAYLOAD_SOURCES_EXCLUDED_OWNED_BY_K4_1",
         full_frontier_state: "KNOWN_EMPTY_INTERSECTION_API_23_BROKER_V0_INCUMBENT_V2",
-        blocking_observation:
-            "Only API 10 and API 18 v0-1 plus API 22 v0 body fields are projected for this profile and no range or broker behavior is accepted; API 23 OffsetForLeaderEpoch is broker v0 while the incumbent minimum is v2, so the full-frontier intersection remains empty.",
+        blocking_observation: "Only API 10 and API 18 v0-1 plus API 22 v0 body fields are projected for this profile and no range or broker behavior is accepted; API 23 OffsetForLeaderEpoch is broker v0 while the incumbent minimum is v2, so the full-frontier intersection remains empty.",
         source_path_prefix: "clients/src/main/java/org/apache/kafka/common/",
     },
     ExpectedHistoricalContract {
@@ -1591,14 +1541,11 @@ const EXPECTED_HISTORICAL_CONTRACTS: &[ExpectedHistoricalContract] = &[
         range_rows: 2,
         source_files: 14,
         source_bytes: 118_304,
-        projection_sha256:
-            "2cb5fa14d4be90ac72126ad3ff2f480cbb3cb8c71d786d392ae8ddf6687b4790",
-        semantic_role_projection_sha256:
-            "a6d6df3c0b7c74a8633acb807a1d9bb4bc303537ec9884887afba6847d3d87b4",
+        projection_sha256: "2cb5fa14d4be90ac72126ad3ff2f480cbb3cb8c71d786d392ae8ddf6687b4790",
+        semantic_role_projection_sha256: "a6d6df3c0b7c74a8633acb807a1d9bb4bc303537ec9884887afba6847d3d87b4",
         nested_payload_state: "AUTH_BODY_FIELDS_PROJECTED_OPAQUE_MECHANISM_PAYLOAD_NOT_PROJECTED",
         full_frontier_state: "NOT_EVALUATED_PROFILE_SCOPE_ONLY",
-        blocking_observation:
-            "Only candidate body fields and source-established outcome membership for keys 17 and 36 are projected; full current-facade support is not evaluated.",
+        blocking_observation: "Only candidate body fields and source-established outcome membership for keys 17 and 36 are projected; full current-facade support is not evaluated.",
         source_path_prefix: "clients/src/main/java/org/apache/kafka/common/",
     },
 ];
@@ -1945,9 +1892,7 @@ fn expect_number(value: &Value, key: &str, expected: u64) -> Result<(), String> 
     if actual == expected {
         Ok(())
     } else {
-        Err(format!(
-            "{key} mismatch: expected {expected}, got {actual}"
-        ))
+        Err(format!("{key} mismatch: expected {expected}, got {actual}"))
     }
 }
 
@@ -1956,9 +1901,7 @@ fn expect_boolean(value: &Value, key: &str, expected: bool) -> Result<(), String
     if actual == expected {
         Ok(())
     } else {
-        Err(format!(
-            "{key} mismatch: expected {expected}, got {actual}"
-        ))
+        Err(format!("{key} mismatch: expected {expected}, got {actual}"))
     }
 }
 
@@ -2150,8 +2093,8 @@ fn validate_authority_inputs(artifact: &Value, root: &Path) -> Result<(), String
 
     for row in inputs {
         let path = text(row, "path")?;
-        let bytes = fs::read(root.join(path))
-            .map_err(|error| format!("failed to read {path}: {error}"))?;
+        let bytes =
+            fs::read(root.join(path)).map_err(|error| format!("failed to read {path}: {error}"))?;
         let byte_count = u64::try_from(bytes.len())
             .map_err(|error| format!("byte count overflow for {path}: {error}"))?;
         let record_count = u64::try_from(String::from_utf8_lossy(&bytes).lines().count())
@@ -2167,7 +2110,10 @@ fn validate_authority_inputs(artifact: &Value, root: &Path) -> Result<(), String
 fn validate_external_authorities(artifact: &Value) -> Result<(), String> {
     let rows = array(artifact, "external_authorities")?;
     if rows.len() != 5 {
-        return Err(format!("expected five external authorities, got {}", rows.len()));
+        return Err(format!(
+            "expected five external authorities, got {}",
+            rows.len()
+        ));
     }
 
     for (authority_id, tag, tag_object, commit) in EXTERNAL_SOURCE_ROWS {
@@ -2252,9 +2198,7 @@ fn validate_reachable_rows(artifact: &Value) -> Result<(), String> {
     }
     let allowed_journeys = JOURNEY_CLASSES.iter().copied().collect::<BTreeSet<_>>();
 
-    for (api_key, name, k1_seed, client_max, valid, intersection, flex_first) in
-        EXPECTED_APIS
-    {
+    for (api_key, name, k1_seed, client_max, valid, intersection, flex_first) in EXPECTED_APIS {
         let row = rows
             .iter()
             .find(|row| row.get("api_key").and_then(Value::as_u64) == Some(*api_key))
@@ -2267,7 +2211,10 @@ fn validate_reachable_rows(artifact: &Value) -> Result<(), String> {
         expect_text(row, "apache_4_3_1_valid_versions", valid)?;
         expect_text(row, "candidate_current_intersection", intersection)?;
         let (expected_reachability, expected_probe) = match *api_key {
-            17 | 36 => ("CURRENT_EXPLICIT_BLOCKED_NATIVE_CAPABILITY", "BLOCKED_EXTERNAL"),
+            17 | 36 => (
+                "CURRENT_EXPLICIT_BLOCKED_NATIVE_CAPABILITY",
+                "BLOCKED_EXTERNAL",
+            ),
             25 | 28 => ("REQUIRED_ADDITIVE_ABSENT", "BLOCKED_NOT_SHIPPED"),
             71 | 72 => ("CURRENT_IMPLICIT_DEFAULT_TELEMETRY", "NOT_RUN"),
             _ => ("CURRENT_EXPLICIT", "NOT_RUN"),
@@ -2283,7 +2230,9 @@ fn validate_reachable_rows(artifact: &Value) -> Result<(), String> {
                 .as_str()
                 .ok_or_else(|| format!("API key {api_key} journey class must be text"))?;
             if !allowed_journeys.contains(journey) {
-                return Err(format!("API key {api_key} has unknown journey class {journey:?}"));
+                return Err(format!(
+                    "API key {api_key} has unknown journey class {journey:?}"
+                ));
             }
         }
         if row.get("accepted_version_range") != Some(&Value::Null) {
@@ -2298,23 +2247,28 @@ fn validate_reachable_rows(artifact: &Value) -> Result<(), String> {
 
         let reaches_flexible = flex_first.is_some_and(|first| first <= *client_max);
         let expected_request_headers: &[u64] = if reaches_flexible { &[1, 2] } else { &[1] };
-        let expected_response_headers: &[u64] =
-            if *api_key == 18 || !reaches_flexible { &[0] } else { &[0, 1] };
+        let expected_response_headers: &[u64] = if *api_key == 18 || !reaches_flexible {
+            &[0]
+        } else {
+            &[0, 1]
+        };
         if numeric_array(row, "candidate_request_header_versions")?.as_slice()
             != expected_request_headers
         {
-            return Err(format!("API key {api_key} request header selection changed"));
+            return Err(format!(
+                "API key {api_key} request header selection changed"
+            ));
         }
         if numeric_array(row, "candidate_response_header_versions")?.as_slice()
             != expected_response_headers
         {
-            return Err(format!("API key {api_key} response header selection changed"));
+            return Err(format!(
+                "API key {api_key} response header selection changed"
+            ));
         }
         let expected_projection_state = match *api_key {
             10 => "FIND_COORDINATOR_BODY_CURRENT_AND_DEFAULT_FLOOR_PROJECTED_NOT_ACCEPTED",
-            17 | 36 => {
-                "AUTH_BODY_PARTIAL_CURRENT_AND_HISTORICAL_PROFILE_PROJECTED_NOT_ACCEPTED"
-            }
+            17 | 36 => "AUTH_BODY_PARTIAL_CURRENT_AND_HISTORICAL_PROFILE_PROJECTED_NOT_ACCEPTED",
             18 => "API_VERSIONS_BODY_CURRENT_AND_DEFAULT_FLOOR_PROJECTED_NOT_ACCEPTED",
             22 => "INIT_PRODUCER_ID_BODY_CURRENT_AND_DEFAULT_FLOOR_PROJECTED_NOT_ACCEPTED",
             _ => "SOURCE_SELECTED_FIELDS_NOT_PROJECTED",
@@ -2324,7 +2278,12 @@ fn validate_reachable_rows(artifact: &Value) -> Result<(), String> {
 
     let telemetry = rows
         .iter()
-        .filter(|row| matches!(row.get("api_key").and_then(Value::as_u64), Some(71) | Some(72)))
+        .filter(|row| {
+            matches!(
+                row.get("api_key").and_then(Value::as_u64),
+                Some(71) | Some(72)
+            )
+        })
         .collect::<Vec<_>>();
     if telemetry.len() != 2 {
         return Err("telemetry reachability rows are incomplete".to_owned());
@@ -2435,7 +2394,10 @@ fn validate_schema_sources(artifact: &Value) -> Result<(), String> {
         .iter()
         .map(|row| number(row, "api_key"))
         .collect::<Result<BTreeSet<_>, _>>()?;
-    let expected = EXPECTED_APIS.iter().map(|row| row.0).collect::<BTreeSet<_>>();
+    let expected = EXPECTED_APIS
+        .iter()
+        .map(|row| row.0)
+        .collect::<BTreeSet<_>>();
     if keys != expected {
         return Err("schema pair keys do not match the reachability frontier".to_owned());
     }
@@ -2490,12 +2452,7 @@ fn validate_schema_sources(artifact: &Value) -> Result<(), String> {
         .map(|(path, object_id, byte_count)| format!("{path}\t{object_id}\t{byte_count}\n"))
         .collect::<String>();
     let projection_sha256 = sha256_bytes(projection.as_bytes());
-    if projection_sha256
-        != text(
-            identity,
-            "sorted_path_object_id_size_projection_sha256",
-        )?
-    {
+    if projection_sha256 != text(identity, "sorted_path_object_id_size_projection_sha256")? {
         return Err("schema source identity projection digest changed".to_owned());
     }
     Ok(())
@@ -2561,11 +2518,7 @@ fn validate_historical_schema_sources(artifact: &Value) -> Result<(), String> {
         }
         expect_number(contract, "api_range_row_count", expected.range_rows)?;
         expect_number(contract, "source_file_count", expected.source_files)?;
-        expect_number(
-            contract,
-            "total_payload_byte_count",
-            expected.source_bytes,
-        )?;
+        expect_number(contract, "total_payload_byte_count", expected.source_bytes)?;
         expect_text(
             contract,
             "sorted_projection_encoding",
@@ -2621,16 +2574,8 @@ fn validate_historical_schema_sources(artifact: &Value) -> Result<(), String> {
                 )?;
                 expect_number(blocker, "api_key", expected_blocker.api_key)?;
                 expect_text(blocker, "api_name", expected_blocker.api_name)?;
-                expect_number(
-                    blocker,
-                    "broker_declared_min",
-                    expected_blocker.broker_min,
-                )?;
-                expect_number(
-                    blocker,
-                    "broker_declared_max",
-                    expected_blocker.broker_max,
-                )?;
+                expect_number(blocker, "broker_declared_min", expected_blocker.broker_min)?;
+                expect_number(blocker, "broker_declared_max", expected_blocker.broker_max)?;
                 expect_number(blocker, "incumbent_min", expected_blocker.incumbent_min)?;
                 expect_number(blocker, "incumbent_max", expected_blocker.incumbent_max)?;
                 if blocker.get("intersection") != Some(&Value::Null)
@@ -2639,9 +2584,7 @@ fn validate_historical_schema_sources(artifact: &Value) -> Result<(), String> {
                     return Err("empty full-frontier blocker gained a range".to_owned());
                 }
                 expect_text(blocker, "state", expected_blocker.state)?;
-                if number(blocker, "broker_declared_max")?
-                    >= number(blocker, "incumbent_min")?
-                {
+                if number(blocker, "broker_declared_max")? >= number(blocker, "incumbent_min")? {
                     return Err(
                         "full-frontier blocker does not encode an empty intersection".to_owned(),
                     );
@@ -2649,8 +2592,7 @@ fn validate_historical_schema_sources(artifact: &Value) -> Result<(), String> {
                 let reachable = reachable_api_rows
                     .iter()
                     .find(|row| {
-                        row.get("api_key").and_then(Value::as_u64)
-                            == Some(expected_blocker.api_key)
+                        row.get("api_key").and_then(Value::as_u64) == Some(expected_blocker.api_key)
                     })
                     .ok_or_else(|| {
                         format!(
@@ -2906,8 +2848,7 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
         expect_text(row, "semantic_role", expected.5)?;
         if !matches!(
             authority,
-            "KAFKA-K2-1-AUTH-APACHE-CURRENT"
-                | "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR"
+            "KAFKA-K2-1-AUTH-APACHE-CURRENT" | "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR"
         ) {
             return Err(format!(
                 "field/error projection source {source_id} escaped the two-profile slice"
@@ -2921,7 +2862,9 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
         if !support_ids.insert(source_id.to_owned())
             || !support_keys.insert((authority.to_owned(), path.to_owned()))
         {
-            return Err("field/error projection support source identities must be unique".to_owned());
+            return Err(
+                "field/error projection support source identities must be unique".to_owned(),
+            );
         }
         support_bytes += byte_count;
         support_projection.push((
@@ -2939,9 +2882,7 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
     let support_projection = support_projection
         .into_iter()
         .map(|(authority, path, object_id, byte_count, semantic_role)| {
-            format!(
-                "{authority}\t{path}\t{object_id}\t{byte_count}\t{semantic_role}\n"
-            )
+            format!("{authority}\t{path}\t{object_id}\t{byte_count}\t{semantic_role}\n")
         })
         .collect::<String>();
     let support_projection_sha256 = sha256_bytes(support_projection.as_bytes());
@@ -2985,10 +2926,8 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
     let mut field_api_keys = BTreeSet::new();
     let mut field_api_profiles = BTreeSet::new();
     let mut field_api_versions = BTreeSet::new();
-    let mut field_orders = BTreeMap::<
-        (String, u64, String, Option<String>, Option<u64>),
-        BTreeSet<u64>,
-    >::new();
+    let mut field_orders =
+        BTreeMap::<(String, u64, String, Option<String>, Option<u64>), BTreeSet<u64>>::new();
     let mut field_version_cells = 0_usize;
     let mut explicit_schema_defaults = 0_usize;
     let mut implicit_generated_defaults = 0_usize;
@@ -3072,7 +3011,11 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
             "EXPLICIT_SCHEMA_LITERAL_STRUCT_DEFAULT" => explicit_struct_defaults += 1,
             "IMPLICIT_NULLABLE_STRUCT_DEFAULT" => implicit_nullable_struct_defaults += 1,
             "REQUIRED_NO_DEFAULT" => required_no_defaults += 1,
-            state => return Err(format!("field row {row_id} has unknown default state {state}")),
+            state => {
+                return Err(format!(
+                    "field row {row_id} has unknown default state {state}"
+                ));
+            }
         }
         if let Some(expected) = legacy_expected {
             expect_text(row, "ignorable_versions", expected.ignorable_versions)?;
@@ -3092,13 +3035,13 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
         let authority = text(row, "source_authority_id")?;
         let expected_authority = match profile {
             "KAFKA-K2-1-BROKER-CURRENT" => "KAFKA-K2-1-AUTH-APACHE-CURRENT",
-            "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR" => {
-                "KAFKA-K2-1-AUTH-APACHE-DEFAULT-FLOOR"
+            "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR" => "KAFKA-K2-1-AUTH-APACHE-DEFAULT-FLOOR",
+            "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR" => "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR",
+            _ => {
+                return Err(format!(
+                    "field row {row_id} escaped the three-profile slice"
+                ));
             }
-            "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR" => {
-                "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR"
-            }
-            _ => return Err(format!("field row {row_id} escaped the three-profile slice")),
         };
         if authority != expected_authority {
             return Err(format!("field row {row_id} crossed source authorities"));
@@ -3134,8 +3077,7 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
             if !coherent_default_versions
                 || !matches!(
                     effective_state,
-                    "IMPLICIT_GENERATED_TYPE_DEFAULT"
-                        | "EXPLICIT_SCHEMA_LITERAL_GENERATED_DEFAULT"
+                    "IMPLICIT_GENERATED_TYPE_DEFAULT" | "EXPLICIT_SCHEMA_LITERAL_GENERATED_DEFAULT"
                 )
             {
                 return Err(format!(
@@ -3161,12 +3103,8 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
             expect_text(row, "effective_default_literal", "null")?;
         } else if canonical_field.ends_with(".ERROR_MESSAGE") {
             let expected_nullable_default_versions = match (profile, api_key) {
-                ("KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR", 10) => {
-                    BTreeSet::from([1])
-                }
-                ("KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR", 36) => {
-                    BTreeSet::from([0])
-                }
+                ("KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR", 10) => BTreeSet::from([1]),
+                ("KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR", 36) => BTreeSet::from([0]),
                 _ => {
                     return Err(format!(
                         "historical nullable error message row {row_id} escaped its profile"
@@ -3230,7 +3168,9 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
             .copied()
             .collect::<BTreeSet<_>>();
         if projected_and_excluded != source_versions {
-            return Err(format!("field row {row_id} does not partition its source versions"));
+            return Err(format!(
+                "field row {row_id} does not partition its source versions"
+            ));
         }
         let expected_exclusion_state = if excluded_versions.is_empty() {
             "NONE"
@@ -3292,8 +3232,7 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
         };
         let field_order = number(row, "field_order")?;
         let order_version_slice =
-            if profile == "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR" && api_key == 10
-            {
+            if profile == "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR" && api_key == 10 {
                 if projected_versions.len() != 1 {
                     return Err(format!(
                         "historical API 10 field row {row_id} is not version-sliced"
@@ -3329,8 +3268,7 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
                 ));
             }
         }
-        let current_flexible_api_36 =
-            profile == "KAFKA-K2-1-BROKER-CURRENT" && api_key == 36;
+        let current_flexible_api_36 = profile == "KAFKA-K2-1-BROKER-CURRENT" && api_key == 36;
         let expected_compact_versions = if current_flexible_api_36
             && (canonical_field.ends_with(".AUTH_BYTES")
                 || canonical_field.ends_with(".ERROR_MESSAGE"))
@@ -3338,9 +3276,7 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
             "2"
         } else if profile == "KAFKA-K2-1-BROKER-CURRENT" && api_key == 10 {
             match canonical_field {
-                "API10.REQUEST.KEY"
-                | "API10.RESPONSE.ERROR_MESSAGE"
-                | "API10.RESPONSE.HOST" => "3",
+                "API10.REQUEST.KEY" | "API10.RESPONSE.ERROR_MESSAGE" | "API10.RESPONSE.HOST" => "3",
                 "API10.REQUEST.COORDINATOR_KEYS"
                 | "API10.RESPONSE.COORDINATORS"
                 | "API10.RESPONSE.COORDINATORS[].KEY"
@@ -3369,11 +3305,7 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
         } else {
             "none"
         };
-        expect_text(
-            row,
-            "projected_compact_versions",
-            expected_compact_versions,
-        )?;
+        expect_text(row, "projected_compact_versions", expected_compact_versions)?;
         let expected_tag: Option<u64> = match canonical_field {
             "API18.RESPONSE.SUPPORTED_FEATURES" => Some(0),
             "API18.RESPONSE.FINALIZED_FEATURES_EPOCH" => Some(1),
@@ -3384,7 +3316,11 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
         expect_text(
             row,
             "projected_tagged_versions",
-            if expected_tag.is_some() { "3-4" } else { "none" },
+            if expected_tag.is_some() {
+                "3-4"
+            } else {
+                "none"
+            },
         )?;
         expect_text(
             row,
@@ -3427,29 +3363,23 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
                 explicit_schema_defaults += 1;
                 let expected_literal = match (profile, api_key, canonical_field) {
                     ("KAFKA-K2-1-BROKER-CURRENT", 10, "API10.REQUEST.KEY_TYPE") => "0",
-                    (
-                        "KAFKA-K2-1-BROKER-CURRENT",
-                        36,
-                        "API36.RESPONSE.SESSION_LIFETIME_MS",
-                    ) => "0",
+                    ("KAFKA-K2-1-BROKER-CURRENT", 36, "API36.RESPONSE.SESSION_LIFETIME_MS") => "0",
                     (
                         "KAFKA-K2-1-BROKER-CURRENT",
                         18,
                         "API18.RESPONSE.FINALIZED_FEATURES_EPOCH",
                     ) => "-1",
-                    (
-                        "KAFKA-K2-1-BROKER-CURRENT",
-                        18,
-                        "API18.RESPONSE.ZK_MIGRATION_READY",
-                    ) => "false",
+                    ("KAFKA-K2-1-BROKER-CURRENT", 18, "API18.RESPONSE.ZK_MIGRATION_READY") => {
+                        "false"
+                    }
                     (
                         "KAFKA-K2-1-BROKER-CURRENT",
                         22,
                         "API22.REQUEST.PRODUCER_ID"
-                            | "API22.REQUEST.PRODUCER_EPOCH"
-                            | "API22.RESPONSE.PRODUCER_ID"
-                            | "API22.RESPONSE.ONGOING_TXN_PRODUCER_ID"
-                            | "API22.RESPONSE.ONGOING_TXN_PRODUCER_EPOCH",
+                        | "API22.REQUEST.PRODUCER_EPOCH"
+                        | "API22.RESPONSE.PRODUCER_ID"
+                        | "API22.RESPONSE.ONGOING_TXN_PRODUCER_ID"
+                        | "API22.RESPONSE.ONGOING_TXN_PRODUCER_EPOCH",
                     ) => "-1",
                     (
                         "KAFKA-K2-1-BROKER-CURRENT",
@@ -3496,7 +3426,9 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
                 "unprojected API 10, API 18 or API 22 error field row {row_id} acquired an error set"
             ));
         } else if row.get("error_set_id") != Some(&Value::Null) {
-            return Err(format!("non-error field row {row_id} acquired an error set"));
+            return Err(format!(
+                "non-error field row {row_id} acquired an error set"
+            ));
         }
         if canonical_field.ends_with(".AUTH_BYTES") {
             expect_text(row, "sensitivity", "SECRET_BEARING_OPAQUE_AUTH_MATERIAL")?;
@@ -3517,9 +3449,7 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
         }
         if canonical_field.ends_with(".ERROR_MESSAGE") {
             let expected_nullable = match (profile, api_key, canonical_field) {
-                ("KAFKA-K2-1-BROKER-CURRENT", 10, "API10.RESPONSE.ERROR_MESSAGE") => {
-                    "1-3"
-                }
+                ("KAFKA-K2-1-BROKER-CURRENT", 10, "API10.RESPONSE.ERROR_MESSAGE") => "1-3",
                 (
                     "KAFKA-K2-1-BROKER-CURRENT",
                     10,
@@ -3607,10 +3537,7 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
     let mut tag_buffer_rows = 0_usize;
     let mut tag_buffer_version_cells = 0_usize;
     let mut max_depth = 0_usize;
-    let mut owner_tag_buffers = BTreeMap::<
-        (String, u64, String, Option<String>),
-        String,
-    >::new();
+    let mut owner_tag_buffers = BTreeMap::<(String, u64, String, Option<String>), String>::new();
     let mut tag_ids_by_scope =
         BTreeMap::<(String, u64, String, Option<String>), BTreeSet<u64>>::new();
 
@@ -3622,41 +3549,23 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
         let direction = text(row, "direction")?;
         let canonical_field = text(row, "canonical_field_id")?;
         let canonical_prefix = format!("API{api_key}.{direction}.");
-        if !canonical_field.starts_with(&canonical_prefix)
-            || canonical_field.contains(".HEADER.")
-        {
+        if !canonical_field.starts_with(&canonical_prefix) || canonical_field.contains(".HEADER.") {
             return Err(format!(
                 "field row {row_id} escaped its API body canonical path"
             ));
         }
 
         let message_versions = match (profile, api_key) {
-            ("KAFKA-K2-1-BROKER-CURRENT", 10) => {
-                BTreeSet::from([0, 1, 2, 3, 4, 5, 6])
-            }
+            ("KAFKA-K2-1-BROKER-CURRENT", 10) => BTreeSet::from([0, 1, 2, 3, 4, 5, 6]),
             ("KAFKA-K2-1-BROKER-CURRENT", 17) => BTreeSet::from([0, 1]),
-            ("KAFKA-K2-1-BROKER-CURRENT", 18) => {
-                BTreeSet::from([0, 1, 2, 3, 4])
-            }
-            ("KAFKA-K2-1-BROKER-CURRENT", 22) => {
-                BTreeSet::from([0, 1, 2, 3, 4, 5, 6])
-            }
+            ("KAFKA-K2-1-BROKER-CURRENT", 18) => BTreeSet::from([0, 1, 2, 3, 4]),
+            ("KAFKA-K2-1-BROKER-CURRENT", 22) => BTreeSet::from([0, 1, 2, 3, 4, 5, 6]),
             ("KAFKA-K2-1-BROKER-CURRENT", 36) => BTreeSet::from([0, 1, 2]),
-            ("KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR", 18) => {
-                BTreeSet::from([0, 1])
-            }
-            ("KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR", 10) => {
-                BTreeSet::from([0, 1])
-            }
-            ("KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR", 22) => {
-                BTreeSet::from([0])
-            }
-            ("KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR", 17) => {
-                BTreeSet::from([0, 1])
-            }
-            ("KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR", 36) => {
-                BTreeSet::from([0])
-            }
+            ("KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR", 18) => BTreeSet::from([0, 1]),
+            ("KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR", 10) => BTreeSet::from([0, 1]),
+            ("KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR", 22) => BTreeSet::from([0]),
+            ("KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR", 17) => BTreeSet::from([0, 1]),
+            ("KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR", 36) => BTreeSet::from([0]),
             _ => return Err(format!("field row {row_id} has no message domain")),
         };
         let declared_versions = version_set(text(row, "source_declared_versions")?)?;
@@ -3697,9 +3606,7 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
                     format!("{parent_canonical}.")
                 }
                 _ => {
-                    return Err(format!(
-                        "field row {row_id} has a non-struct named parent"
-                    ));
+                    return Err(format!("field row {row_id} has a non-struct named parent"));
                 }
             };
             if !canonical_field.starts_with(&expected_child_prefix) {
@@ -3713,8 +3620,7 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
                 .copied()
                 .collect();
             let projected_versions = version_set(text(row, "projected_versions")?)?;
-            let parent_projected_versions =
-                version_set(text(parent, "projected_versions")?)?;
+            let parent_projected_versions = version_set(text(parent, "projected_versions")?)?;
             if !projected_versions.is_subset(&parent_projected_versions) {
                 return Err(format!(
                     "field row {row_id} projected outside its parent versions"
@@ -3744,29 +3650,26 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
         }
 
         let expected_nested_type = match (profile, canonical_field) {
-            ("KAFKA-K2-1-BROKER-CURRENT", "API10.RESPONSE.COORDINATORS") => {
-                Some("Coordinator")
-            }
-            ("KAFKA-K2-1-BROKER-CURRENT", "API18.RESPONSE.API_KEYS") => {
-                Some("ApiVersion")
-            }
+            ("KAFKA-K2-1-BROKER-CURRENT", "API10.RESPONSE.COORDINATORS") => Some("Coordinator"),
+            ("KAFKA-K2-1-BROKER-CURRENT", "API18.RESPONSE.API_KEYS") => Some("ApiVersion"),
             ("KAFKA-K2-1-BROKER-CURRENT", "API18.RESPONSE.SUPPORTED_FEATURES") => {
                 Some("SupportedFeatureKey")
             }
             ("KAFKA-K2-1-BROKER-CURRENT", "API18.RESPONSE.FINALIZED_FEATURES") => {
                 Some("FinalizedFeatureKey")
             }
-            (
-                "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR",
-                "API18.RESPONSE.API_KEYS",
-            ) => Some("API_VERSIONS_V0"),
-            (
-                "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR",
-                "API10.RESPONSE.COORDINATOR",
-            ) => Some("FIND_COORDINATOR_BROKER_V0"),
+            ("KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR", "API18.RESPONSE.API_KEYS") => {
+                Some("API_VERSIONS_V0")
+            }
+            ("KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR", "API10.RESPONSE.COORDINATOR") => {
+                Some("FIND_COORDINATOR_BROKER_V0")
+            }
             _ => None,
         };
-        match (nullable_text(row, "nested_type_name")?, expected_nested_type) {
+        match (
+            nullable_text(row, "nested_type_name")?,
+            expected_nested_type,
+        ) {
             (Some(actual), Some(expected)) if actual == expected => {
                 named_struct_parents += 1;
             }
@@ -3786,9 +3689,7 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
         }
         if expected_map_key {
             map_key_rows += 1;
-            if parent_row_id.is_none()
-                || text(row, "projected_tagged_versions")? != "none"
-            {
+            if parent_row_id.is_none() || text(row, "projected_tagged_versions")? != "none" {
                 return Err(format!("field row {row_id} has an invalid map key"));
             }
         }
@@ -3817,8 +3718,7 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
             direction.to_owned(),
             parent_row_id.map(str::to_owned),
         );
-        let tag_buffer_text =
-            text(row, "owning_struct_tag_buffer_projected_versions")?;
+        let tag_buffer_text = text(row, "owning_struct_tag_buffer_projected_versions")?;
         if let Some(previous) = owner_tag_buffers.get(&scope) {
             if previous != tag_buffer_text {
                 return Err(format!(
@@ -3880,11 +3780,7 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
         "RESPONSE".to_owned(),
         None,
     );
-    if tag_ids_by_scope
-        != BTreeMap::from([(
-            expected_tag_scope,
-            BTreeSet::from([0, 1, 2, 3]),
-        )])
+    if tag_ids_by_scope != BTreeMap::from([(expected_tag_scope, BTreeSet::from([0, 1, 2, 3]))])
         || top_level_rows != 64
         || nested_rows != 24
         || named_struct_parents != 7
@@ -3902,14 +3798,8 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
     if field_profiles
         != BTreeMap::from([
             ("KAFKA-K2-1-BROKER-CURRENT".to_owned(), 54),
-            (
-                "KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR".to_owned(),
-                27,
-            ),
-            (
-                "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR".to_owned(),
-                7,
-            ),
+            ("KAFKA-K2-1-BROKER-DEFAULT-IDEMPOTENCE-FLOOR".to_owned(), 27),
+            ("KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR".to_owned(), 7),
         ])
         || field_api_keys != BTreeSet::from([10, 17, 18, 22, 36])
         || field_api_profiles.len() != 10
@@ -3966,12 +3856,7 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
             33,
             "UNSUPPORTED_SASL_MECHANISM",
         ),
-        (
-            "KAFKA-K2-1-BROKER-CURRENT",
-            17,
-            34,
-            "ILLEGAL_SASL_STATE",
-        ),
+        ("KAFKA-K2-1-BROKER-CURRENT", 17, 34, "ILLEGAL_SASL_STATE"),
         ("KAFKA-K2-1-BROKER-CURRENT", 36, 0, "NONE"),
         (
             "KAFKA-K2-1-BROKER-CURRENT",
@@ -3979,12 +3864,7 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
             58,
             "SASL_AUTHENTICATION_FAILED",
         ),
-        (
-            "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
-            17,
-            0,
-            "NONE",
-        ),
+        ("KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR", 17, 0, "NONE"),
         (
             "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
             17,
@@ -3997,12 +3877,7 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
             34,
             "ILLEGAL_SASL_STATE",
         ),
-        (
-            "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
-            36,
-            0,
-            "NONE",
-        ),
+        ("KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR", 36, 0, "NONE"),
         (
             "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR",
             36,
@@ -4060,18 +3935,12 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
             None => return Err(format!("error row {row_id} invented a comment code")),
         }
         expect_text(row, "outcome_class", expected.outcome_class)?;
-        expect_text(
-            row,
-            "code_consistency_state",
-            expected.consistency_state,
-        )?;
+        expect_text(row, "code_consistency_state", expected.consistency_state)?;
         let profile = text(row, "profile_id")?;
         let authority = text(row, "source_authority_id")?;
         let expected_authority = match profile {
             "KAFKA-K2-1-BROKER-CURRENT" => "KAFKA-K2-1-AUTH-APACHE-CURRENT",
-            "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR" => {
-                "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR"
-            }
+            "KAFKA-K2-1-BROKER-WRAPPED-SASL-FLOOR" => "KAFKA-K2-1-AUTH-APACHE-WRAPPED-SASL-FLOOR",
             _ => return Err(format!("error row {row_id} escaped the two-profile slice")),
         };
         if authority != expected_authority {
@@ -4133,12 +4002,11 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
             .difference(&candidate_versions)
             .copied()
             .collect::<BTreeSet<_>>();
-        let allowed_outside_candidate =
-            if profile == "KAFKA-K2-1-BROKER-CURRENT" && api_key == 36 {
-                BTreeSet::from([2])
-            } else {
-                BTreeSet::new()
-            };
+        let allowed_outside_candidate = if profile == "KAFKA-K2-1-BROKER-CURRENT" && api_key == 36 {
+            BTreeSet::from([2])
+        } else {
+            BTreeSet::new()
+        };
         if !projected_outside_candidate.is_subset(&allowed_outside_candidate) {
             return Err(format!(
                 "error row {row_id} projected an unauthorized outside-candidate version"
@@ -4154,7 +4022,9 @@ fn validate_partial_body_projection(artifact: &Value) -> Result<(), String> {
         }
 
         if boolean(row, "wire_enum_closed")? {
-            return Err(format!("error row {row_id} closed an open INT16 wire field"));
+            return Err(format!(
+                "error row {row_id} closed an open INT16 wire field"
+            ));
         }
         expect_text(row, "enum_membership_state", "CONFIRMED_CANONICAL_ENUM")?;
         expect_text(row, "retry_policy_state", "UNPROJECTED_BLOCKING")?;
@@ -4270,9 +4140,14 @@ fn validate_blocked_evidence(artifact: &Value) -> Result<(), String> {
     let header = artifact
         .get("header_contract")
         .ok_or_else(|| "header_contract must exist".to_owned())?;
-    if numeric_array(header, "reachable_request_header_versions_in_22_row_frontier")? != [1, 2]
-        || numeric_array(header, "reachable_response_header_versions_in_22_row_frontier")?
-            != [0, 1]
+    if numeric_array(
+        header,
+        "reachable_request_header_versions_in_22_row_frontier",
+    )? != [1, 2]
+        || numeric_array(
+            header,
+            "reachable_response_header_versions_in_22_row_frontier",
+        )? != [0, 1]
     {
         return Err("header frontier changed".to_owned());
     }
@@ -4311,7 +4186,10 @@ fn validate_blocked_evidence(artifact: &Value) -> Result<(), String> {
 
     let brokers = array(artifact, "broker_profile_rows")?;
     if brokers.len() != 4 {
-        return Err(format!("expected four blocked broker profiles, got {}", brokers.len()));
+        return Err(format!(
+            "expected four blocked broker profiles, got {}",
+            brokers.len()
+        ));
     }
     let versions = brokers
         .iter()
@@ -4336,17 +4214,16 @@ fn validate_blocked_evidence(artifact: &Value) -> Result<(), String> {
     let probe = artifact
         .get("existing_probe_disposition")
         .ok_or_else(|| "existing_probe_disposition must exist".to_owned())?;
-    expect_text(
-        probe,
-        "path",
-        "scripts/kafka_broker_parity_proof_runner.sh",
-    )?;
+    expect_text(probe, "path", "scripts/kafka_broker_parity_proof_runner.sh")?;
     expect_text(probe, "classification", "PROOF_ONLY_NONTERMINAL")?;
     expect_boolean(probe, "executed_for_k2_1", false)?;
 
     let gaps = array(artifact, "completion_gaps")?;
     if gaps.len() != 7 {
-        return Err(format!("expected seven completion gaps, got {}", gaps.len()));
+        return Err(format!(
+            "expected seven completion gaps, got {}",
+            gaps.len()
+        ));
     }
     let gap_ids = gaps
         .iter()
@@ -4501,10 +4378,7 @@ fn validate_document(root: &Path) -> Result<(), String> {
 }
 
 fn validate_checked_in_hashes(root: &Path) -> Result<(), String> {
-    for (path, expected) in [
-        (ARTIFACT_PATH, ARTIFACT_SHA256),
-        (DOC_PATH, DOC_SHA256),
-    ] {
+    for (path, expected) in [(ARTIFACT_PATH, ARTIFACT_SHA256), (DOC_PATH, DOC_SHA256)] {
         let bytes =
             fs::read(root.join(path)).map_err(|error| format!("failed to read {path}: {error}"))?;
         let actual = sha256_bytes(&bytes);
@@ -4568,7 +4442,10 @@ fn kafka_k2_packet_rejects_completion_inflation() -> Result<(), String> {
         .and_then(|rows| rows.first_mut())
         .and_then(Value::as_object_mut)
         .ok_or_else(|| "reachable API mutation target missing".to_owned())?;
-    first_api.insert("accepted_version_range".to_owned(), Value::String("3-10".to_owned()));
+    first_api.insert(
+        "accepted_version_range".to_owned(),
+        Value::String("3-10".to_owned()),
+    );
     expect_invalid(&invented_range, &root, "invented accepted range")?;
 
     let mut admitted_broker = artifact.clone();
@@ -4897,9 +4774,7 @@ fn kafka_k2_packet_rejects_completion_inflation() -> Result<(), String> {
         .and_then(|rows| {
             rows.iter_mut().find(|row| {
                 row.get("row_id").and_then(Value::as_str)
-                    == Some(
-                        "KAFKA-K2-1-FIELD-CURRENT-036-RESPONSE-003-SESSION-LIFETIME-MS",
-                    )
+                    == Some("KAFKA-K2-1-FIELD-CURRENT-036-RESPONSE-003-SESSION-LIFETIME-MS")
             })
         })
         .and_then(Value::as_object_mut)
@@ -4921,9 +4796,7 @@ fn kafka_k2_packet_rejects_completion_inflation() -> Result<(), String> {
         .and_then(|rows| {
             rows.iter_mut().find(|row| {
                 row.get("row_id").and_then(Value::as_str)
-                    == Some(
-                        "KAFKA-K2-1-ERROR-CURRENT-036-058-SASL-AUTHENTICATION-FAILED",
-                    )
+                    == Some("KAFKA-K2-1-ERROR-CURRENT-036-058-SASL-AUTHENTICATION-FAILED")
             })
         })
         .and_then(Value::as_object_mut)

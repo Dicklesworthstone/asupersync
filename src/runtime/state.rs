@@ -4693,13 +4693,7 @@ impl RuntimeState {
                     details = %error,
                     "obligation leaks detected (fail-fast)"
                 );
-                self.finish_obligation_leak_batch(
-                    regions,
-                    tasks,
-                    obligations,
-                    effects,
-                    &leak_ids,
-                );
+                self.finish_obligation_leak_batch(regions, tasks, obligations, effects, &leak_ids);
                 std::panic::panic_any(msg);
             }
             ObligationLeakResponse::Log => {

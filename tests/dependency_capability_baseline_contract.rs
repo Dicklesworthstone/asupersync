@@ -133,13 +133,8 @@ fn count_occurrences(source: &str, token: &str) -> u64 {
 }
 
 fn count_trimmed_lines(source: &str, marker: &str) -> u64 {
-    u64::try_from(
-        source
-            .lines()
-            .filter(|line| line.trim() == marker)
-            .count(),
-    )
-    .expect("source line count fits u64")
+    u64::try_from(source.lines().filter(|line| line.trim() == marker).count())
+        .expect("source line count fits u64")
 }
 
 fn production_before_test_module(source: &str) -> &str {
@@ -1118,9 +1113,7 @@ fn hash_map_static_audit_is_source_pinned_and_fail_closed() {
     assert_eq!(unsigned(local_operations, "default_initialization"), 1);
     assert_eq!(unsigned(local_operations, "collection_iteration"), 0);
     let local_source = read_repo_file("src/runtime/scheduler/local_queue.rs");
-    assert!(
-        local_source.contains(&format!("use {HASHBROWN_PATH_TOKEN}HashSet;"))
-    );
+    assert!(local_source.contains(&format!("use {HASHBROWN_PATH_TOKEN}HashSet;")));
     assert_eq!(count_occurrences(&local_source, "presence.insert"), 4);
     assert_eq!(count_occurrences(&local_source, "presence.remove"), 3);
     assert_eq!(count_occurrences(&local_source, "presence.reserve"), 1);
@@ -1157,20 +1150,24 @@ fn hash_map_static_audit_is_source_pinned_and_fail_closed() {
     }
     let epoll_source = read_repo_file("src/runtime/reactor/epoll.rs");
     assert!(epoll_source.contains(&format!("use {HASHBROWN_PATH_TOKEN}HashMap;")));
-    assert!(
-        epoll_source.contains(&format!("use {HASHBROWN_PATH_TOKEN}hash_map::Entry;"))
-    );
+    assert!(epoll_source.contains(&format!("use {HASHBROWN_PATH_TOKEN}hash_map::Entry;")));
     let epoll_production = epoll_source
         .split_once("\n#[cfg(test)]")
         .map(|(production, _)| production)
         .expect("epoll source must separate production and tests");
-    assert_eq!(count_occurrences(epoll_production, "HashMap::with_capacity"), 2);
+    assert_eq!(
+        count_occurrences(epoll_production, "HashMap::with_capacity"),
+        2
+    );
     assert_eq!(count_occurrences(epoll_production, ".contains_key"), 2);
     assert_eq!(count_occurrences(epoll_production, ".tokens.insert"), 1);
     assert_eq!(count_occurrences(epoll_production, ".fds.insert"), 1);
     assert_eq!(count_occurrences(epoll_production, "tokens.entry"), 1);
     assert_eq!(count_occurrences(epoll_production, "state.tokens.get"), 2);
-    assert_eq!(count_occurrences(epoll_production, "state.tokens.remove"), 2);
+    assert_eq!(
+        count_occurrences(epoll_production, "state.tokens.remove"),
+        2
+    );
     assert_eq!(count_occurrences(epoll_production, "fds.remove"), 3);
     assert_eq!(count_occurrences(epoll_production, "entry.remove()"), 1);
     assert_eq!(count_occurrences(epoll_production, "entry.into_mut()"), 1);
@@ -1273,10 +1270,7 @@ fn hash_map_static_audit_is_source_pinned_and_fail_closed() {
         "source_commit_matches_observed_revision"
     ));
     assert!(!boolean(ledger_assessment, "fresh_for_cutover"));
-    assert!(!boolean(
-        ledger_assessment,
-        "favorable_cutover_verdict"
-    ));
+    assert!(!boolean(ledger_assessment, "favorable_cutover_verdict"));
     let hashbrown_rows = array(&ledger, "marginal_measurements")
         .iter()
         .filter(|row| {
@@ -1484,10 +1478,7 @@ fn host_benchmark_metadata_static_audit_is_source_pinned_and_fail_closed() {
         string(num_cpus, "candidate"),
         "std::thread::available_parallelism"
     );
-    let whoami = by_dependency
-        .get("whoami")
-        .copied()
-        .expect("whoami row");
+    let whoami = by_dependency.get("whoami").copied().expect("whoami row");
     assert_eq!(string(whoami, "locked_version"), "2.1.2");
     assert_eq!(string(whoami, "path"), "src/atp/benchmark/mod.rs");
     assert_eq!(string(whoami, "expression"), WHOAMI_CALL);
@@ -1509,12 +1500,12 @@ fn host_benchmark_metadata_static_audit_is_source_pinned_and_fail_closed() {
     );
     assert_eq!(
         string_set(feature, "default_features"),
-        BTreeSet::from([
-            "nightly-outcome-try".to_owned(),
-            "proc-macros".to_owned(),
-        ])
+        BTreeSet::from(["nightly-outcome-try".to_owned(), "proc-macros".to_owned(),])
     );
-    assert!(!boolean(feature, "default_profile_reaches_benchmark_module"));
+    assert!(!boolean(
+        feature,
+        "default_profile_reaches_benchmark_module"
+    ));
     assert_eq!(
         string_set(feature, "benchmark_adapters_dependency_edges"),
         BTreeSet::from(["dep:num_cpus".to_owned(), "dep:whoami".to_owned()])
@@ -1535,9 +1526,7 @@ fn host_benchmark_metadata_static_audit_is_source_pinned_and_fail_closed() {
     assert!(manifest.contains("\"dep:num_cpus\""));
     assert!(manifest.contains("\"dep:whoami\""));
     let atp_module = read_repo_file("src/atp/mod.rs");
-    assert!(
-        atp_module.contains("#[cfg(feature = \"benchmark-adapters\")]\npub mod benchmark;")
-    );
+    assert!(atp_module.contains("#[cfg(feature = \"benchmark-adapters\")]\npub mod benchmark;"));
 
     let adapters = read_repo_file("src/atp/benchmark/adapters.rs");
     let profiles = read_repo_file("src/atp/benchmark/profiles.rs");
@@ -2007,7 +1996,10 @@ fn visibility_macro_static_audit_is_source_pinned_and_fail_closed() {
         string(inventory, "state"),
         "STATIC_COMPLETE_TWELVE_OCCURRENCES_FOUR_FILES"
     );
-    assert_eq!(string(inventory, "exact_source_token"), VISIBILITY_MAKE_TOKEN);
+    assert_eq!(
+        string(inventory, "exact_source_token"),
+        VISIBILITY_MAKE_TOKEN
+    );
     assert_eq!(unsigned(inventory, "occurrence_count"), 12);
     assert_eq!(unsigned(inventory, "production_file_count"), 4);
     assert_eq!(unsigned(inventory, "pub_crate_item_count"), 11);
@@ -2045,7 +2037,10 @@ fn visibility_macro_static_audit_is_source_pinned_and_fail_closed() {
     }
 
     let id_source = read_repo_file("src/types/id.rs");
-    assert_eq!(count_occurrences(&id_source, "pub(crate) const fn from_arena"), 2);
+    assert_eq!(
+        count_occurrences(&id_source, "pub(crate) const fn from_arena"),
+        2
+    );
     let cx_source = read_repo_file("src/cx/cx.rs");
     assert!(cx_source.contains("pub struct CurrentCxGuard"));
     assert!(cx_source.contains("pub(crate) fn new_with_drivers("));
@@ -2060,10 +2055,7 @@ fn visibility_macro_static_audit_is_source_pinned_and_fail_closed() {
     let features = object(audit, "feature_path_inventory");
     assert_eq!(
         string_set(features, "default_features"),
-        BTreeSet::from([
-            "nightly-outcome-try".to_owned(),
-            "proc-macros".to_owned(),
-        ])
+        BTreeSet::from(["nightly-outcome-try".to_owned(), "proc-macros".to_owned(),])
     );
     assert_eq!(
         string_set(features, "proc_macros_feature_edges"),
@@ -2127,13 +2119,12 @@ fn visibility_macro_static_audit_is_source_pinned_and_fail_closed() {
     ));
     assert!(macro_manifest.contains("trybuild = \"1.0\""));
     assert!(!read_repo_file("asupersync-macros/src/lib.rs").contains(VISIBILITY_MAKE_TOKEN));
-    let visibility_fixture_count = std::fs::read_dir(
-        repo_root().join("asupersync-macros/tests/compile_fail"),
-    )
-    .expect("compile-fail fixture directory")
-    .filter_map(Result::ok)
-    .filter(|entry| entry.file_name().to_string_lossy().contains("visibility"))
-    .count();
+    let visibility_fixture_count =
+        std::fs::read_dir(repo_root().join("asupersync-macros/tests/compile_fail"))
+            .expect("compile-fail fixture directory")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains("visibility"))
+            .count();
     assert_eq!(visibility_fixture_count, 0);
 
     let registry = registry_rows();
@@ -2142,10 +2133,7 @@ fn visibility_macro_static_audit_is_source_pinned_and_fail_closed() {
         .expect("visibility capability");
     assert_eq!(
         string_set(capability, "dependency_owners"),
-        BTreeSet::from([
-            "asupersync-macros".to_owned(),
-            "visibility".to_owned(),
-        ])
+        BTreeSet::from(["asupersync-macros".to_owned(), "visibility".to_owned(),])
     );
     assert_eq!(
         string_set(capability, "features"),
@@ -2197,11 +2185,17 @@ fn visibility_macro_static_audit_is_source_pinned_and_fail_closed() {
         string(downstream, "state"),
         "PARTIAL_STATIC_TOKEN_SEARCH_NOT_SEMANTICALLY_CLASSIFIED"
     );
-    assert!(!boolean(downstream, "complete_downstream_inventory_present"));
+    assert!(!boolean(
+        downstream,
+        "complete_downstream_inventory_present"
+    ));
 
     let marginal = object(audit, "marginal_ledger_assessment");
     assert_eq!(unsigned(marginal, "visibility_measurement_row_count"), 4);
-    assert!(!boolean(marginal, "source_commit_matches_observed_revision"));
+    assert!(!boolean(
+        marginal,
+        "source_commit_matches_observed_revision"
+    ));
     assert!(!boolean(marginal, "fresh_for_cutover"));
     assert!(!boolean(marginal, "favorable_cutover_verdict"));
     let ledger = parse_json(MARGINAL_LEDGER_PATH);
@@ -2232,7 +2226,10 @@ fn visibility_macro_static_audit_is_source_pinned_and_fail_closed() {
         assert_eq!(string(row, "unsafe_exposure_class"), "SAFE-OWN");
         assert!(array(row, "build_scripts").is_empty());
         assert_eq!(array(row, "proc_macros").len(), 1);
-        assert_eq!(string(object(row, "marginal_native_code"), "status"), "none");
+        assert_eq!(
+            string(object(row, "marginal_native_code"), "status"),
+            "none"
+        );
     }
 
     let matrix = object(audit, "required_evidence_matrix");
@@ -2389,7 +2386,10 @@ fn slab_static_audit_is_source_pinned_and_rejects_misbound_evidence() {
     assert_eq!(string(inventory, "exact_source_token"), SLAB_PATH_TOKEN);
     assert_eq!(unsigned(inventory, "production_file_count"), 4);
     assert_eq!(unsigned(inventory, "dependency_import_count"), 3);
-    assert_eq!(unsigned(inventory, "qualified_type_or_constructor_count"), 2);
+    assert_eq!(
+        unsigned(inventory, "qualified_type_or_constructor_count"),
+        2
+    );
     assert_eq!(unsigned(inventory, "public_type_exposure_count"), 0);
 
     let roles = array(inventory, "consumer_roles");
@@ -2421,10 +2421,22 @@ fn slab_static_audit_is_source_pinned_and_rejects_misbound_evidence() {
     let rate_production = production_before_test_module(&rate_source);
     assert_eq!(count_occurrences(rate_production, "Slab::new()"), 6);
     assert_eq!(count_occurrences(rate_production, "state.waiters.get("), 1);
-    assert_eq!(count_occurrences(rate_production, ".get_mut(handle.slot)"), 1);
-    assert_eq!(count_occurrences(rate_production, "try_remove(handle.slot)"), 1);
-    assert_eq!(count_occurrences(rate_production, "state.waiters.reserve("), 1);
-    assert_eq!(count_occurrences(rate_production, "state.waiters.insert("), 1);
+    assert_eq!(
+        count_occurrences(rate_production, ".get_mut(handle.slot)"),
+        1
+    );
+    assert_eq!(
+        count_occurrences(rate_production, "try_remove(handle.slot)"),
+        1
+    );
+    assert_eq!(
+        count_occurrences(rate_production, "state.waiters.reserve("),
+        1
+    );
+    assert_eq!(
+        count_occurrences(rate_production, "state.waiters.insert("),
+        1
+    );
     assert_eq!(
         count_occurrences(rate_production, "std::mem::take(&mut state.waiters)"),
         3
@@ -2439,7 +2451,10 @@ fn slab_static_audit_is_source_pinned_and_rejects_misbound_evidence() {
         .get("src/sync/semaphore.rs")
         .copied()
         .expect("semaphore consumer row");
-    assert_eq!(string(semaphore, "role"), "SemaphoreState FIFO waiter registry");
+    assert_eq!(
+        string(semaphore, "role"),
+        "SemaphoreState FIFO waiter registry"
+    );
     let semaphore_operations = object(semaphore, "operation_counts");
     for (operation, expected) in [
         ("with_capacity", 1),
@@ -2472,10 +2487,7 @@ fn slab_static_audit_is_source_pinned_and_rejects_misbound_evidence() {
         count_occurrences(semaphore_production, "state.waiters.insert("),
         1
     );
-    assert_eq!(
-        count_occurrences(semaphore_production, "state.waiters["),
-        3
-    );
+    assert_eq!(count_occurrences(semaphore_production, "state.waiters["), 3);
     assert_eq!(
         count_occurrences(semaphore_production, "state.waiters.remove("),
         1
@@ -2526,7 +2538,10 @@ fn slab_static_audit_is_source_pinned_and_rejects_misbound_evidence() {
     ] {
         assert_eq!(count_occurrences(waiter_production, token), expected);
     }
-    assert_eq!(count_occurrences(waiter_production, "debug_assert_eq!(inserted, index)"), 2);
+    assert_eq!(
+        count_occurrences(waiter_production, "debug_assert_eq!(inserted, index)"),
+        2
+    );
     assert!(waiter_production.contains("WaiterChain exhausted its stable waiter ID space"));
 
     let wheel = by_path
@@ -2648,7 +2663,10 @@ fn slab_static_audit_is_source_pinned_and_rejects_misbound_evidence() {
     assert_eq!(arena_token_count, 5);
     assert_eq!(count_trimmed_lines(&fixture, "#[test]"), 12);
     for absent in ["RateLimit", "SemaphoreState", "WaiterChain", "TimerWheel"] {
-        assert!(!fixture.contains(absent), "misbound fixture contains {absent}");
+        assert!(
+            !fixture.contains(absent),
+            "misbound fixture contains {absent}"
+        );
     }
 
     let declared_counts = object(assessment, "source_declared_test_counts");
@@ -2684,7 +2702,10 @@ fn slab_static_audit_is_source_pinned_and_rejects_misbound_evidence() {
     assert_eq!(unsigned(marginal, "slab_measurement_row_count"), 52);
     assert_eq!(unsigned(marginal, "feature_profile_count"), 13);
     assert_eq!(unsigned(marginal, "target_triple_count"), 4);
-    assert!(!boolean(marginal, "source_commit_matches_observed_revision"));
+    assert!(!boolean(
+        marginal,
+        "source_commit_matches_observed_revision"
+    ));
     assert!(!boolean(marginal, "fresh_for_cutover"));
     assert!(!boolean(marginal, "favorable_cutover_verdict"));
     let ledger = parse_json(MARGINAL_LEDGER_PATH);
@@ -2715,9 +2736,14 @@ fn slab_static_audit_is_source_pinned_and_rejects_misbound_evidence() {
         assert_eq!(string(row, "unsafe_exposure_class"), "SAFE-OWN");
         assert!(array(row, "build_scripts").is_empty());
         assert!(array(row, "proc_macros").is_empty());
-        assert_eq!(string(object(row, "marginal_native_code"), "status"), "none");
+        assert_eq!(
+            string(object(row, "marginal_native_code"), "status"),
+            "none"
+        );
         let package_count = unsigned(row, "marginal_package_version_count");
-        *package_count_distribution.entry(package_count).or_insert(0usize) += 1;
+        *package_count_distribution
+            .entry(package_count)
+            .or_insert(0usize) += 1;
         if package_count == 0 {
             assert!(array(row, "marginal_package_versions").is_empty());
         } else {
@@ -2935,7 +2961,10 @@ fn phase2_terminal_readiness_frontier_is_exact_and_fail_closed() {
         .collect::<BTreeSet<_>>();
     assert_eq!(
         actual_pin_paths,
-        expected_pins.keys().map(|path| (*path).to_owned()).collect()
+        expected_pins
+            .keys()
+            .map(|path| (*path).to_owned())
+            .collect()
     );
     for pin in source_pins {
         let path = string(pin, "path");
@@ -2943,7 +2972,11 @@ fn phase2_terminal_readiness_frontier_is_exact_and_fail_closed() {
             .get(path)
             .unwrap_or_else(|| panic!("unexpected Phase-2 source pin {path}"));
         let bytes = read_repo_bytes(path);
-        assert_eq!(string(pin, "sha256"), *expected_sha, "stored SHA for {path}");
+        assert_eq!(
+            string(pin, "sha256"),
+            *expected_sha,
+            "stored SHA for {path}"
+        );
         assert_eq!(sha256_hex(&bytes), *expected_sha, "live SHA for {path}");
         assert_eq!(
             unsigned(pin, "line_count"),
@@ -3011,7 +3044,10 @@ fn phase2_terminal_readiness_frontier_is_exact_and_fail_closed() {
             let commit = commit.as_str().expect("landing commit must be text");
             assert_eq!(commit.len(), 40);
             assert!(commit.bytes().all(|byte| byte.is_ascii_hexdigit()));
-            assert!(landing_commits.insert(commit.to_owned()), "duplicate landing commit");
+            assert!(
+                landing_commits.insert(commit.to_owned()),
+                "duplicate landing commit"
+            );
         }
     }
     assert_eq!(
@@ -3062,13 +3098,19 @@ fn phase2_terminal_readiness_frontier_is_exact_and_fail_closed() {
 
     for (key, bead_id) in [
         ("hash_map_static_audit", HASH_MAP_BEAD_ID),
-        ("host_benchmark_metadata_static_audit", HOST_METADATA_BEAD_ID),
+        (
+            "host_benchmark_metadata_static_audit",
+            HOST_METADATA_BEAD_ID,
+        ),
         ("visibility_macro_static_audit", VISIBILITY_BEAD_ID),
         ("slab_static_audit", SLAB_BEAD_ID),
     ] {
         let leaf = object(&value, key);
         assert_eq!(string(leaf, "bead_id"), bead_id);
-        assert!(!boolean(object(leaf, "cutover_gate"), "tracker_closure_allowed"));
+        assert!(!boolean(
+            object(leaf, "cutover_gate"),
+            "tracker_closure_allowed"
+        ));
     }
 
     let cli = parse_json(CLI_INVENTORY_PATH);

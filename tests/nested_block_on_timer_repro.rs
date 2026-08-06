@@ -30,7 +30,10 @@ const WATCHDOG: Duration = Duration::from_secs(20);
 async fn await_inner_timeout() -> Duration {
     let start = Instant::now();
     let res = timeout(wall_now(), INNER_TIMEOUT, std::future::pending::<()>()).await;
-    assert!(res.is_err(), "pending future cannot complete: must be Elapsed");
+    assert!(
+        res.is_err(),
+        "pending future cannot complete: must be Elapsed"
+    );
     start.elapsed()
 }
 
@@ -103,9 +106,7 @@ fn reentrant_block_on_same_runtime_fires_timeout() {
         let rt_b = RuntimeBuilder::current_thread()
             .build()
             .expect("build rt_b");
-        rt_a.block_on(async {
-            rt_b.block_on(async { rt_b.block_on(await_inner_timeout()) })
-        })
+        rt_a.block_on(async { rt_b.block_on(async { rt_b.block_on(await_inner_timeout()) }) })
     });
 }
 
@@ -137,8 +138,6 @@ fn reentrant_block_on_with_reactor_fires_timeout() {
             .with_reactor(reactor)
             .build()
             .expect("build rt_b");
-        rt_a.block_on(async {
-            rt_b.block_on(async { rt_b.block_on(await_inner_timeout()) })
-        })
+        rt_a.block_on(async { rt_b.block_on(async { rt_b.block_on(await_inner_timeout()) }) })
     });
 }

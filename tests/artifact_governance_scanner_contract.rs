@@ -46,8 +46,7 @@ const PATH_ALIAS_EDGES: &[(&str, &str)] = &[
 
 const HISTORICAL_BASELINE_SHA256: &str =
     "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8";
-const HISTORICAL_BASELINE_COMMIT: &str =
-    "7390d33f4ac297cd28138c8e1ece38f60b278660";
+const HISTORICAL_BASELINE_COMMIT: &str = "7390d33f4ac297cd28138c8e1ece38f60b278660";
 const HISTORICAL_BASELINE_BLOB_OID: &str = "4e56ad4bc05dbd1614583f8cdf8586a0d1f88cc7";
 
 const REQUIRED_CATEGORIES: &[&str] = &[
@@ -194,8 +193,7 @@ fn assert_repo_file_exists(path: &str) -> Result<(), String> {
 }
 
 fn live_file_pin(path: &str) -> Result<(String, u64), String> {
-    let bytes = std::fs::read(repo_path(path))
-        .map_err(|error| format!("read {path}: {error}"))?;
+    let bytes = std::fs::read(repo_path(path)).map_err(|error| format!("read {path}: {error}"))?;
     let text = std::str::from_utf8(&bytes).map_err(|error| format!("utf8 {path}: {error}"))?;
     Ok((
         format!("{:x}", Sha256::digest(&bytes)),
@@ -248,10 +246,7 @@ fn collect_member_pin_rows(
     Ok(())
 }
 
-fn reachable_members(
-    start: &str,
-    edges: &BTreeSet<(String, String)>,
-) -> BTreeSet<String> {
+fn reachable_members(start: &str, edges: &BTreeSet<(String, String)>) -> BTreeSet<String> {
     let mut reachable = BTreeSet::from([start.to_owned()]);
     let mut frontier = vec![start.to_owned()];
     while let Some(source) = frontier.pop() {
@@ -267,8 +262,7 @@ fn reachable_members(
 fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
     let audit = object(scan, "artifact_reference_integrity")?;
     let audit_value = Value::Object(audit.clone());
-    if string(&audit_value, "audit_id")?
-        != "artifact-full-file-hash-versioned-topology-2026-08-05"
+    if string(&audit_value, "audit_id")? != "artifact-full-file-hash-versioned-topology-2026-08-05"
     {
         return Err("unexpected reference-integrity audit_id".to_owned());
     }
@@ -287,18 +281,22 @@ fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
         ("path_collapsed_node_identity", "path"),
         ("content_addressed_node_identity", "SHA-256"),
         ("edge_origin_identity", "source artifact SHA-256"),
-        ("historical_target_rule", "immutable commit and blob receipt"),
+        (
+            "historical_target_rule",
+            "immutable commit and blob receipt",
+        ),
         ("active_cycle_rule", "content-addressed nodes"),
     ] {
         if !string(&graph_model_value, field)?.contains(required) {
-            return Err(format!("reference graph model {field} must mention {required}"));
+            return Err(format!(
+                "reference graph model {field} must mention {required}"
+            ));
         }
     }
 
     let receipt = object(&audit_value, "discovery_receipt")?;
     let receipt_value = Value::Object(receipt.clone());
-    if string(&receipt_value, "capture_commit")?
-        != "15391290dce5d259bf491e676d35f3d46564935a"
+    if string(&receipt_value, "capture_commit")? != "15391290dce5d259bf491e676d35f3d46564935a"
         || string(&receipt_value, "execution_state")? != "STATIC_READ_ONLY"
         || u64_field(&receipt_value, "tracked_json_document_count")? != 354
         || u64_field(&receipt_value, "parse_failure_count")? != 0
@@ -343,7 +341,9 @@ fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
         let target = string(edge, "target_artifact")?.to_owned();
         let key = (source.clone(), target.clone());
         if !declared_edges.insert(key.clone()) {
-            return Err(format!("duplicate declared reference edge {source} -> {target}"));
+            return Err(format!(
+                "duplicate declared reference edge {source} -> {target}"
+            ));
         }
         let (stored_sha256, stored_line_count) = discovered
             .get(&key)
@@ -356,7 +356,9 @@ fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
 
         let (live_source_sha256, _) = live_file_pin(&source)?;
         if string(edge, "source_artifact_sha256")? != live_source_sha256.as_str() {
-            return Err(format!("{source} -> {target}: live source identity drifted"));
+            return Err(format!(
+                "{source} -> {target}: live source identity drifted"
+            ));
         }
         let (live_sha256, live_line_count) = live_file_pin(&target)?;
         if string(edge, "live_target_sha256")? != live_sha256.as_str()
@@ -419,7 +421,9 @@ fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
     }
     for member in &members {
         if reachable_members(member, &declared_edges) != members {
-            return Err(format!("{member}: path-collapsed component is not strongly connected"));
+            return Err(format!(
+                "{member}: path-collapsed component is not strongly connected"
+            ));
         }
     }
 
@@ -428,8 +432,7 @@ fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
         .flat_map(|(source, target)| [source.clone(), target.clone()])
         .collect::<BTreeSet<_>>();
     if u64_field(&audit_value, "content_addressed_node_count")? != content_nodes.len() as u64
-        || u64_field(&audit_value, "content_addressed_edge_count")?
-            != content_edges.len() as u64
+        || u64_field(&audit_value, "content_addressed_edge_count")? != content_edges.len() as u64
         || historical_edge_count != 3
         || current_edge_count != 3
     {
@@ -460,8 +463,7 @@ fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
     if string(&resolution_value, "resolution_state")?
         != "HISTORICAL_BACK_REFERENCES_RESOLVED_TO_IMMUTABLE_GIT_OBJECT"
         || u64_field(&resolution_value, "minimum_full_file_edges_to_replace")? != 0
-        || string(&resolution_value, "resolved_by")?
-            != "immutable_commit_or_blob_provenance"
+        || string(&resolution_value, "resolved_by")? != "immutable_commit_or_blob_provenance"
     {
         return Err("versioned-reference resolution drifted".to_owned());
     }
@@ -472,7 +474,9 @@ fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
         "content-addressed",
     ] {
         if !rule.contains(required) {
-            return Err(format!("versioned-reference operator rule must mention {required}"));
+            return Err(format!(
+                "versioned-reference operator rule must mention {required}"
+            ));
         }
     }
     let boundaries = string_set(&audit_value, "no_claim_boundaries")?;

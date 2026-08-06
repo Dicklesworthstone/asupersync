@@ -2759,7 +2759,10 @@ mod tests {
 
         let response = Server::http2_status_response(&status);
 
-        assert_eq!(grpc_message_trailer(&response), Some("quota %25%0A caf%C3%A9"));
+        assert_eq!(
+            grpc_message_trailer(&response),
+            Some("quota %25%0A caf%C3%A9")
+        );
         assert_eq!(
             response
                 .trailers
@@ -2815,11 +2818,12 @@ mod tests {
         let status = server
             .decode_http2_unary_request(oversized)
             .expect_err("combined metadata beyond the cap must fail closed");
-        assert_eq!(
-            status.code(),
-            super::super::status::Code::ResourceExhausted
+        assert_eq!(status.code(), super::super::status::Code::ResourceExhausted);
+        assert!(
+            status
+                .message()
+                .contains("combined request headers and trailers")
         );
-        assert!(status.message().contains("combined request headers and trailers"));
     }
 
     #[test]

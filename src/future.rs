@@ -153,10 +153,7 @@ where
     }
 }
 
-fn take_zip_outputs<T1, T2>(
-    output1: &mut Option<T1>,
-    output2: &mut Option<T2>,
-) -> Poll<(T1, T2)> {
+fn take_zip_outputs<T1, T2>(output1: &mut Option<T1>, output2: &mut Option<T2>) -> Poll<(T1, T2)> {
     match (output1.take(), output2.take()) {
         (Some(output1), Some(output2)) => Poll::Ready((output1, output2)),
         (remaining1, remaining2) => {

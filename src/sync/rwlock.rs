@@ -5292,9 +5292,7 @@ mod metamorphic_tests {
         }
 
         crate::sync::lock_ordering::clear_held_locks();
-        crate::test_complete!(
-            "abandoning_pregranted_waiter_preserves_existing_lock_order_record"
-        );
+        crate::test_complete!("abandoning_pregranted_waiter_preserves_existing_lock_order_record");
     }
 
     #[cfg(debug_assertions)]
