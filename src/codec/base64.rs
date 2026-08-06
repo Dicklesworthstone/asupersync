@@ -198,11 +198,7 @@ impl Base64Engine {
         }
     }
 
-    fn decode_plan(
-        self,
-        input: &[u8],
-        max_binary_len: usize,
-    ) -> Result<DecodePlan, Base64Error> {
+    fn decode_plan(self, input: &[u8], max_binary_len: usize) -> Result<DecodePlan, Base64Error> {
         let text_limit = max_text_len(max_binary_len)?;
         if input.len() > text_limit {
             return Err(Base64Error::TextLengthExceeded {
@@ -347,7 +343,10 @@ impl fmt::Display for Base64Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Self::InvalidByte { index, byte } => {
-                write!(formatter, "Invalid Base64 byte 0x{byte:02x} at position {index}")
+                write!(
+                    formatter,
+                    "Invalid Base64 byte 0x{byte:02x} at position {index}"
+                )
             }
             Self::InvalidLength { len } => {
                 write!(formatter, "Invalid Base64 input length {len}")
@@ -355,16 +354,15 @@ impl fmt::Display for Base64Error {
             Self::InvalidPadding { index } => {
                 write!(formatter, "Invalid Base64 padding at position {index}")
             }
-            Self::InvalidLastSymbol {
-                index,
-                byte,
-                value,
-            } => write!(
+            Self::InvalidLastSymbol { index, byte, value } => write!(
                 formatter,
                 "Invalid Base64 last symbol 0x{byte:02x} (value {value}) at position {index}"
             ),
             Self::BinaryLengthExceeded { len, limit } => {
-                write!(formatter, "Base64 binary length {len} exceeds limit {limit}")
+                write!(
+                    formatter,
+                    "Base64 binary length {len} exceeds limit {limit}"
+                )
             }
             Self::TextLengthExceeded { len, limit } => {
                 write!(formatter, "Base64 text length {len} exceeds limit {limit}")
@@ -413,8 +411,20 @@ fn encoded_len_with_max(
         .ok_or(Base64Error::OutputLengthOverflow { input_len })?;
     let tail_len = match input_len % 3 {
         0 => 0,
-        1 => if padded { 4 } else { 2 },
-        2 => if padded { 4 } else { 3 },
+        1 => {
+            if padded {
+                4
+            } else {
+                2
+            }
+        }
+        2 => {
+            if padded {
+                4
+            } else {
+                3
+            }
+        }
         _ => return Err(Base64Error::OutputLengthOverflow { input_len }),
     };
     let output_len = full_len
@@ -446,20 +456,19 @@ fn encode_validated(input: &[u8], alphabet: &[u8; 64], padded: bool, output: &mu
     let mut chunks = input.chunks_exact(3);
     for chunk in &mut chunks {
         output.push(char::from(alphabet[usize::from(chunk[0] >> 2)]));
-        output.push(char::from(alphabet[usize::from(
-            ((chunk[0] & 0x03) << 4) | (chunk[1] >> 4),
-        )]));
-        output.push(char::from(alphabet[usize::from(
-            ((chunk[1] & 0x0f) << 2) | (chunk[2] >> 6),
-        )]));
+        output.push(char::from(
+            alphabet[usize::from(((chunk[0] & 0x03) << 4) | (chunk[1] >> 4))],
+        ));
+        output.push(char::from(
+            alphabet[usize::from(((chunk[1] & 0x0f) << 2) | (chunk[2] >> 6))],
+        ));
         output.push(char::from(alphabet[usize::from(chunk[2] & 0x3f)]));
     }
 
     let tail = chunks.remainder();
     if let Some((&first, rest)) = tail.split_first() {
         output.push(char::from(alphabet[usize::from(first >> 2)]));
-        let second_value =
-            ((first & 0x03) << 4) | (rest.first().copied().unwrap_or(0) >> 4);
+        let second_value = ((first & 0x03) << 4) | (rest.first().copied().unwrap_or(0) >> 4);
         output.push(char::from(alphabet[usize::from(second_value)]));
         if let Some(&second) = rest.first() {
             output.push(char::from(alphabet[usize::from((second & 0x0f) << 2)]));
@@ -472,20 +481,13 @@ fn encode_validated(input: &[u8], alphabet: &[u8; 64], padded: bool, output: &mu
     }
 }
 
-fn encode_validated_to_slice(
-    input: &[u8],
-    alphabet: &[u8; 64],
-    padded: bool,
-    output: &mut [u8],
-) {
+fn encode_validated_to_slice(input: &[u8], alphabet: &[u8; 64], padded: bool, output: &mut [u8]) {
     let mut write_index = 0;
     let mut chunks = input.chunks_exact(3);
     for chunk in &mut chunks {
         output[write_index] = alphabet[usize::from(chunk[0] >> 2)];
-        output[write_index + 1] =
-            alphabet[usize::from(((chunk[0] & 0x03) << 4) | (chunk[1] >> 4))];
-        output[write_index + 2] =
-            alphabet[usize::from(((chunk[1] & 0x0f) << 2) | (chunk[2] >> 6))];
+        output[write_index + 1] = alphabet[usize::from(((chunk[0] & 0x03) << 4) | (chunk[1] >> 4))];
+        output[write_index + 2] = alphabet[usize::from(((chunk[1] & 0x0f) << 2) | (chunk[2] >> 6))];
         output[write_index + 3] = alphabet[usize::from(chunk[2] & 0x3f)];
         write_index += 4;
     }
@@ -503,8 +505,7 @@ fn encode_validated_to_slice(
         }
         [first, second] => {
             output[write_index] = alphabet[usize::from(first >> 2)];
-            output[write_index + 1] =
-                alphabet[usize::from(((first & 0x03) << 4) | (second >> 4))];
+            output[write_index + 1] = alphabet[usize::from(((first & 0x03) << 4) | (second >> 4))];
             output[write_index + 2] = alphabet[usize::from((second & 0x0f) << 2)];
             if padded {
                 output[write_index + 3] = b'=';
@@ -513,12 +514,7 @@ fn encode_validated_to_slice(
     }
 }
 
-fn decode_validated(
-    input: &[u8],
-    plan: DecodePlan,
-    values: &[u8; 256],
-    output: &mut Vec<u8>,
-) {
+fn decode_validated(input: &[u8], plan: DecodePlan, values: &[u8; 256], output: &mut Vec<u8>) {
     let data = &input[..plan.data_len];
     let mut chunks = data.chunks_exact(4);
     for chunk in &mut chunks {
@@ -599,8 +595,7 @@ mod tests {
     use proptest::prelude::*;
     use proptest::test_runner::RngSeed;
 
-    const ENGINES: [Base64Engine; 4] =
-        [STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD];
+    const ENGINES: [Base64Engine; 4] = [STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD];
 
     // bead_id: asupersync-d24mms.10.2
     // capability_ids: CAP-BASE64-CODEC, CAP-AUTH-CREDENTIALS
@@ -653,7 +648,9 @@ mod tests {
                 "Base64 text length 13 exceeds limit 12".to_owned(),
             ),
             (
-                Base64Error::OutputLengthOverflow { input_len: usize::MAX },
+                Base64Error::OutputLengthOverflow {
+                    input_len: usize::MAX,
+                },
                 format!(
                     "Base64 output length overflow for input length {}",
                     usize::MAX
@@ -740,10 +737,7 @@ mod tests {
                 assert_eq!(encoded_slice, encoded.as_bytes());
 
                 let mut decoded_slice = vec![0xa5; len];
-                assert_eq!(
-                    engine.decode_to_slice(&encoded, &mut decoded_slice),
-                    Ok(())
-                );
+                assert_eq!(engine.decode_to_slice(&encoded, &mut decoded_slice), Ok(()));
                 assert_eq!(decoded_slice, binary);
             }
         }
@@ -996,7 +990,10 @@ mod tests {
         assert_eq!(STANDARD_NO_PAD.encoded_len(2), Ok(3));
         assert_eq!(STANDARD.encoded_len(3), Ok(4));
         assert_eq!(STANDARD_NO_PAD.encoded_len(3), Ok(4));
-        assert_eq!(STANDARD.encoded_len(MAX_BASE64_BINARY_LEN), Ok(MAX_BASE64_TEXT_LEN));
+        assert_eq!(
+            STANDARD.encoded_len(MAX_BASE64_BINARY_LEN),
+            Ok(MAX_BASE64_TEXT_LEN)
+        );
         for engine in ENGINES {
             assert_eq!(
                 engine.encoded_len(MAX_BASE64_BINARY_LEN + 1),
@@ -1056,10 +1053,7 @@ mod tests {
             assert_eq!(engine.decode(&encoded), Ok(binary.clone()));
 
             let mut destination = vec![0xa5; binary.len()];
-            assert_eq!(
-                engine.decode_to_slice(&encoded, &mut destination),
-                Ok(())
-            );
+            assert_eq!(engine.decode_to_slice(&encoded, &mut destination), Ok(()));
             assert_eq!(destination, binary);
         }
     }
