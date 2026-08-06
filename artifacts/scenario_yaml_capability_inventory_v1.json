@@ -91,8 +91,8 @@
     },
     {
       "path": "src/bin/asupersync.rs",
-      "sha256": "7971454a7b45c39d5f647b6079b5e4feddac14130561816d053aa2553feddf4a",
-      "line_count": 16772
+      "sha256": "a6d81b8821419c87631017deb3b42e03703818a80d744f686c42f32fe364a943",
+      "line_count": 16803
     },
     {
       "path": "frankenlab/Cargo.toml",
@@ -101,8 +101,8 @@
     },
     {
       "path": "frankenlab/src/main.rs",
-      "sha256": "d0b22ad25b8744cc5cfc75d2c0d3c0bbbc911068fc5b1d3394771dda18883dc1",
-      "line_count": 1771
+      "sha256": "8eecdcc11ee198a7a828e4a59651a4779c801ce19f227593376ccf7eb02f2acf",
+      "line_count": 1796
     },
     {
       "path": "tests/frankenlab_integration.rs",
@@ -146,8 +146,8 @@
     },
     {
       "path": "tests/scenario_yaml_capability_inventory_contract.rs",
-      "sha256": "62d36ad273e91bb880ab66e819ce169c4fa061cfb71bac9dfabb7e9541a994b7",
-      "line_count": 3630
+      "sha256": "c4adfcafd3b0219c7ec6a00b26e8337cd9a66dc60691942b38afb2b449b18a7a",
+      "line_count": 3805
     },
     {
       "path": "tests/phase6_methodology_gate_contract.rs",
