@@ -2,8 +2,8 @@
   "artifact_id": "scheduler-hot-read-inventory-v1",
   "schema_version": 1,
   "bead_id": "asupersync-sched-hot-path-perf-bt4y5f.4.1",
-  "captured_date_utc": "2026-08-05",
-  "base_commit": "38856122aa1dcc98a48148b74e96ffb491258682",
+  "captured_date_utc": "2026-08-06",
+  "base_commit": "5d8f4959fa6cf027ddfcc2afd3d8b3ff601587b8",
   "disposition": "STATIC_INVENTORY_COMPLETE_PRODUCTION_UNCHANGED",
   "validation_state": {
     "source_hashes_checked": true,
@@ -92,14 +92,14 @@
     },
     {
       "path": "src/runtime/scheduler/worker.rs",
-      "sha256": "00fb1852f09dbdaf075d7e2da6c26d2367481d95e4704f6b5f49a1208983929e",
-      "line_count": 2950,
+      "sha256": "84306384a4b214e54c0fa11cdf998a316b82344a9675868a6f1b4ef9106d71c8",
+      "line_count": 2998,
       "role": "exported legacy worker wake and rich-state paths"
     },
     {
       "path": "src/runtime/state.rs",
-      "sha256": "fc217b1b34219ef2747613e0cf7fe8fa67a166231a5f72e955a7a05a64d5d80e",
-      "line_count": 10160,
+      "sha256": "a9ed4e41e2f08548e9f421914181c4a7311cc518d0d3ae3a1fc21d3167bd40b2",
+      "line_count": 10177,
       "role": "embedded task owner, cancellation propagation, completion, finalizer publication, and snapshots"
     },
     {
@@ -308,12 +308,12 @@
         {"path": "src/record/task.rs", "line": 1319, "fragment": "pub fn cancel_reason"},
         {"path": "src/runtime/scheduler/three_lane.rs", "line": 7552, "fragment": "record.state.is_terminal()"},
         {"path": "src/runtime/scheduler/three_lane.rs", "line": 7885, "fragment": "fn complete_polled_record"},
-        {"path": "src/runtime/scheduler/worker.rs", "line": 375, "fragment": "record.state.is_terminal()"},
-        {"path": "src/runtime/scheduler/worker.rs", "line": 591, "fragment": "record.state.is_terminal()"},
-        {"path": "src/runtime/scheduler/worker.rs", "line": 754, "fragment": "record.state.is_terminal()"},
-        {"path": "src/runtime/state.rs", "line": 6415, "fragment": "match &task.state"},
-        {"path": "src/runtime/state.rs", "line": 6489, "fragment": "match &task.state"},
-        {"path": "src/runtime/state.rs", "line": 8882, "fragment": "from_state(&record.state)"},
+        {"path": "src/runtime/scheduler/worker.rs", "line": 391, "fragment": "record.state.is_terminal()"},
+        {"path": "src/runtime/scheduler/worker.rs", "line": 607, "fragment": "record.state.is_terminal()"},
+        {"path": "src/runtime/scheduler/worker.rs", "line": 770, "fragment": "record.state.is_terminal()"},
+        {"path": "src/runtime/state.rs", "line": 6432, "fragment": "match &task.state"},
+        {"path": "src/runtime/state.rs", "line": 6506, "fragment": "match &task.state"},
+        {"path": "src/runtime/state.rs", "line": 8899, "fragment": "from_state(&record.state)"},
         {"path": "src/observability/task_inspector.rs", "line": 533, "fragment": "from(&task.state)"},
         {"path": "src/observability/diagnostics.rs", "line": 454, "fragment": "match &task.state"}
       ]
@@ -407,12 +407,12 @@
       "semantic_payload": "legacy rich lifecycle and ordinary wake publication without fast_cancel routing",
       "disposition": "TREE_DORMANT_PUBLIC_SURFACE_NOT_A_CURRENT_BUILDER_COMPARATOR",
       "anchors": [
-        {"path": "src/runtime/scheduler/worker.rs", "line": 397, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/worker.rs", "line": 462, "fragment": "record.wake_state.begin_poll()"},
-        {"path": "src/runtime/scheduler/worker.rs", "line": 647, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/worker.rs", "line": 722, "fragment": "wake_state.finish_poll()"},
-        {"path": "src/runtime/scheduler/worker.rs", "line": 770, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/worker.rs", "line": 900, "fragment": "self.wake_state.notify()"}
+        {"path": "src/runtime/scheduler/worker.rs", "line": 413, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/worker.rs", "line": 478, "fragment": "record.wake_state.begin_poll()"},
+        {"path": "src/runtime/scheduler/worker.rs", "line": 663, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/worker.rs", "line": 738, "fragment": "wake_state.finish_poll()"},
+        {"path": "src/runtime/scheduler/worker.rs", "line": 786, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/worker.rs", "line": 916, "fragment": "self.wake_state.notify()"}
       ]
     }
   ],
@@ -534,7 +534,7 @@
       "anchors": [
         {"path": "src/runtime/scheduler/three_lane.rs", "line": 5758, "fragment": "record.wake_state.notify()"},
         {"path": "src/runtime/scheduler/three_lane.rs", "line": 5763, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/state.rs", "line": 7217, "fragment": "record.wake_state.notify()"}
+        {"path": "src/runtime/state.rs", "line": 7234, "fragment": "record.wake_state.notify()"}
       ]
     },
     {
