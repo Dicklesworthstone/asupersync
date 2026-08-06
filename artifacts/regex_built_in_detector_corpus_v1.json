@@ -95,11 +95,62 @@
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8",
-      "line_count": 1357,
+      "sha256": "ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4",
+      "line_count": 3210,
       "role": "executable-partial blocking baseline authority"
     }
   ],
+  "post_capture_provenance_refresh": {
+    "refresh_id": "RGX-R2-SOURCE-PIN-REFRESH-2026-08-06",
+    "recorded_date_utc": "2026-08-06",
+    "refresh_state": "STATIC_SOURCE_PIN_MAINTENANCE",
+    "execution_state": "NOT_RUN_BY_R2_1_STATIC_LANE",
+    "path": "artifacts/dependency_capability_baseline_v1.json",
+    "previous_pin": {
+      "authority_revision": "7390d33f4ac297cd28138c8e1ece38f60b278660",
+      "sha256": "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8",
+      "line_count": 1357
+    },
+    "current_pin": {
+      "last_change_revision": "612a82a546634ba1de2d06fe6e429bf85516a475",
+      "sha256": "ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4",
+      "line_count": 3210
+    },
+    "change_classification": {
+      "classification": "APPEND_ONLY_INDEPENDENT_PHASE2_STATIC_AUDITS",
+      "inserted_lines": 1853,
+      "deleted_lines": 0,
+      "added_top_level_objects": [
+        "hash_map_static_audit",
+        "host_benchmark_metadata_static_audit",
+        "phase2_terminal_readiness_static_audit",
+        "slab_static_audit",
+        "visibility_macro_static_audit"
+      ],
+      "change_revisions": [
+        "4d5748b3de2c15985af55e3dfe3c35626d6be543",
+        "42a66e7f4e6733c28c59405c052c68f7a32ea0d7",
+        "1472b388e365460c2dc067b57f084291e6d8d407",
+        "33f94643ced8f5415ad3c1f0a30cd42ddcb738c9",
+        "612a82a546634ba1de2d06fe6e429bf85516a475"
+      ],
+      "unchanged_capability_rows": {
+        "CAP-REGEX-PRIVACY": "5053806ac9a546ea240a6efc0190969da549f31ed03cf17e4b7b40f45adedc5b",
+        "CAP-LAB-DETERMINISM": "335025c213cd9a79c1d95dbe4b8fae77787478e6cff42bf141a265f597fd348b"
+      }
+    },
+    "preservation": {
+      "detector_vectors_changed": false,
+      "pipeline_vectors_changed": false,
+      "dispatch_negative_fixtures_changed": false,
+      "dispatch_allowset_changed": false,
+      "corpus_policy_changed": false,
+      "authority_decision_changed": false,
+      "production_source_changed": false,
+      "dependency_exit_allowed": false
+    },
+    "no_claim_boundary": "This refresh classifies one shared baseline pin drift and records the current content hash. The five added top-level objects belong to independent Phase-2 static audits, while the CAP-REGEX-PRIVACY and CAP-LAB-DETERMINISM rows remain byte-equivalent after canonicalization. It does not execute the R2.1 contract, change any corpus vector or dispatch rule, implement a scanner, prove performance or protection, authorize dependency exit or cutover, close the tracker, or establish broad workspace health."
+  },
   "r1_case_crosswalk": [
     {"r1_case_id": "RGX-PII-001", "r2_case_id": "RGX-R2-PIPE-004", "relationship": "SEMANTIC_EQUIVALENT_OUTCOME_CLASS"},
     {"r1_case_id": "RGX-PII-002", "r2_case_id": "RGX-R2-EMAIL-004", "relationship": "EXACT_INPUT_AND_OUTCOME"},

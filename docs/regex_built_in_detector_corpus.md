@@ -132,6 +132,25 @@ incumbent engine without publishing a partial scanner result.
 Eight negative fixtures mutate each identity dimension and require that exact
 fallback. R2.1 specifies this allowset but does not implement it.
 
+## Post-capture source-pin refresh
+
+`RGX-R2-SOURCE-PIN-REFRESH-2026-08-06` records a provenance-only refresh of
+`artifacts/dependency_capability_baseline_v1.json`. Since the R2.1 corpus was
+captured, that shared baseline gained 1,853 lines and lost none. The additions
+are five independent Phase-2 static-audit objects: hash-map, host benchmark
+metadata, terminal readiness, slab, and visibility macro.
+
+The canonical `CAP-REGEX-PRIVACY` and `CAP-LAB-DETERMINISM` rows are unchanged.
+Therefore the baseline authority revision remains
+`7390d33f4ac297cd28138c8e1ece38f60b278660`, while the source pin tracks the
+current complete file content. The refresh changes none of the 62 detector
+vectors, 19 pipeline vectors, eight negative dispatch fixtures, dispatch
+allowset, policy, authority decision, or production source.
+
+This is `STATIC_SOURCE_PIN_MAINTENANCE`, not execution evidence. Its execution
+state remains `NOT_RUN_BY_R2_1_STATIC_LANE`; it does not complete R2.1 or
+authorize dependency exit or cutover.
+
 ## Downstream handoff
 
 - R2.2 consumes the email and SSN spans.

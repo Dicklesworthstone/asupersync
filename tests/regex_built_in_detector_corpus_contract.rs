@@ -34,10 +34,20 @@ const SOURCE_REVISION: &str = "3b222630d3814ea0bd254709d10e14953f90441e";
 const AUTHORITY_REVISION: &str = "5f208e04f24d8addaa051c9bf7465f7b398848fe";
 const BASELINE_AUTHORITY_REVISION: &str = "7390d33f4ac297cd28138c8e1ece38f60b278660";
 const R1_EVIDENCE_REVISION: &str = "8b399fa722e47e55950164655dd18276d9fc85fc";
+const PROVENANCE_REFRESH_ID: &str = "RGX-R2-SOURCE-PIN-REFRESH-2026-08-06";
+const BASELINE_CURRENT_REVISION: &str = "612a82a546634ba1de2d06fe6e429bf85516a475";
+const BASELINE_PREVIOUS_SHA256: &str =
+    "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8";
+const BASELINE_CURRENT_SHA256: &str =
+    "ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4";
+const REGEX_CAPABILITY_ROW_SHA256: &str =
+    "5053806ac9a546ea240a6efc0190969da549f31ed03cf17e4b7b40f45adedc5b";
+const LAB_CAPABILITY_ROW_SHA256: &str =
+    "335025c213cd9a79c1d95dbe4b8fae77787478e6cff42bf141a265f597fd348b";
 const SOURCE_PIN_PATHS_SHA256: &str =
     "b5ba6ff6a6eb152e0c3bb263205e8a7d9f9a58fbbb27ec13fd276eb909d9552a";
 const CLAIMS_PROJECTION_SHA256: &str =
-    "375b90392cb2e9e310d61dcbd961816810a115920939ecfb17e7ac28fb77a3d5";
+    "96ce72ed035986f8e302710c245e28c8076d0c4d946be8bc1110292f7833fc1f";
 const DOC_BEGIN: &str = "<!-- BEGIN REGEX BUILT-IN DETECTOR CORPUS -->";
 const DOC_END: &str = "<!-- END REGEX BUILT-IN DETECTOR CORPUS -->";
 
@@ -302,6 +312,133 @@ impl DispatchKey {
     }
 }
 
+fn validate_post_capture_provenance_refresh(corpus: &Value) -> Result<(), String> {
+    let refresh = &corpus["post_capture_provenance_refresh"];
+    for (key, expected) in [
+        ("refresh_id", PROVENANCE_REFRESH_ID),
+        ("recorded_date_utc", "2026-08-06"),
+        ("refresh_state", "STATIC_SOURCE_PIN_MAINTENANCE"),
+        ("execution_state", "NOT_RUN_BY_R2_1_STATIC_LANE"),
+        ("path", BASELINE_PATH),
+    ] {
+        if refresh.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("provenance refresh {key} must be {expected}"));
+        }
+    }
+
+    let previous = &refresh["previous_pin"];
+    if text(previous, "authority_revision") != BASELINE_AUTHORITY_REVISION
+        || text(previous, "sha256") != BASELINE_PREVIOUS_SHA256
+        || number(previous, "line_count") != 1_357
+    {
+        return Err("previous baseline pin receipt drifted".to_owned());
+    }
+
+    let current = &refresh["current_pin"];
+    if text(current, "last_change_revision") != BASELINE_CURRENT_REVISION
+        || text(current, "sha256") != BASELINE_CURRENT_SHA256
+        || number(current, "line_count") != 3_210
+    {
+        return Err("current baseline pin receipt drifted".to_owned());
+    }
+    let baseline_pin = array(corpus, "source_pins")
+        .iter()
+        .find(|pin| pin.get("path").and_then(Value::as_str) == Some(BASELINE_PATH))
+        .ok_or_else(|| "current baseline source pin is missing".to_owned())?;
+    if text(baseline_pin, "sha256") != text(current, "sha256")
+        || number(baseline_pin, "line_count") != number(current, "line_count")
+    {
+        return Err("refresh receipt and current baseline source pin disagree".to_owned());
+    }
+
+    let classification = &refresh["change_classification"];
+    if text(classification, "classification")
+        != "APPEND_ONLY_INDEPENDENT_PHASE2_STATIC_AUDITS"
+        || number(classification, "inserted_lines") != 1_853
+        || number(classification, "deleted_lines") != 0
+    {
+        return Err("baseline drift classification changed".to_owned());
+    }
+    let expected_objects: BTreeSet<String> = [
+        "hash_map_static_audit",
+        "host_benchmark_metadata_static_audit",
+        "phase2_terminal_readiness_static_audit",
+        "slab_static_audit",
+        "visibility_macro_static_audit",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if array(classification, "added_top_level_objects").len() != expected_objects.len()
+        || string_set(classification, "added_top_level_objects") != expected_objects
+    {
+        return Err("added baseline object set drifted".to_owned());
+    }
+    let expected_revisions: BTreeSet<String> = [
+        "4d5748b3de2c15985af55e3dfe3c35626d6be543",
+        "42a66e7f4e6733c28c59405c052c68f7a32ea0d7",
+        "1472b388e365460c2dc067b57f084291e6d8d407",
+        "33f94643ced8f5415ad3c1f0a30cd42ddcb738c9",
+        BASELINE_CURRENT_REVISION,
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if array(classification, "change_revisions").len() != expected_revisions.len()
+        || string_set(classification, "change_revisions") != expected_revisions
+    {
+        return Err("baseline change revision set drifted".to_owned());
+    }
+
+    let row_hashes = object(classification, "unchanged_capability_rows");
+    if row_hashes.len() != 2
+        || row_hashes
+            .get(CAPABILITY_ID)
+            .and_then(Value::as_str)
+            != Some(REGEX_CAPABILITY_ROW_SHA256)
+        || row_hashes
+            .get("CAP-LAB-DETERMINISM")
+            .and_then(Value::as_str)
+            != Some(LAB_CAPABILITY_ROW_SHA256)
+    {
+        return Err("unchanged capability-row receipt drifted".to_owned());
+    }
+
+    let preservation = object(refresh, "preservation");
+    let expected_preservation_keys: BTreeSet<String> = [
+        "detector_vectors_changed",
+        "pipeline_vectors_changed",
+        "dispatch_negative_fixtures_changed",
+        "dispatch_allowset_changed",
+        "corpus_policy_changed",
+        "authority_decision_changed",
+        "production_source_changed",
+        "dependency_exit_allowed",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    let actual_preservation_keys: BTreeSet<String> = preservation.keys().cloned().collect();
+    if actual_preservation_keys != expected_preservation_keys
+        || preservation.values().any(|value| value.as_bool() != Some(false))
+    {
+        return Err("provenance refresh preservation boundary drifted".to_owned());
+    }
+
+    let no_claim = text(refresh, "no_claim_boundary");
+    for required in [
+        "does not execute the R2.1 contract",
+        "change any corpus vector or dispatch rule",
+        "authorize dependency exit or cutover",
+        "close the tracker",
+    ] {
+        if !no_claim.contains(required) {
+            return Err(format!("refresh no-claim boundary missing {required}"));
+        }
+    }
+    Ok(())
+}
+
 fn validate_inventory(corpus: &Value) -> Result<(), String> {
     for (key, expected) in [
         ("artifact_id", ARTIFACT_ID),
@@ -324,6 +461,7 @@ fn validate_inventory(corpus: &Value) -> Result<(), String> {
     if contains_unknown(corpus) {
         return Err("corpus must contain no UNKNOWN text".to_owned());
     }
+    validate_post_capture_provenance_refresh(corpus)?;
 
     let pin_scope = &corpus["source_pin_scope"];
     if number(pin_scope, "path_count") != 8
@@ -657,6 +795,17 @@ fn source_pins_and_authority_rows_are_current() {
     let baseline_row = find_row(baseline_rows, "capability_id", CAPABILITY_ID);
     assert_eq!(text(baseline_row, "baseline_state"), "EXECUTABLE_PARTIAL_BLOCKING");
     assert_eq!(baseline_row["cutover_eligible"].as_bool(), Some(false));
+    for (capability_id, expected_sha256) in [
+        (CAPABILITY_ID, REGEX_CAPABILITY_ROW_SHA256),
+        ("CAP-LAB-DETERMINISM", LAB_CAPABILITY_ROW_SHA256),
+    ] {
+        let row = find_row(baseline_rows, "capability_id", capability_id);
+        assert_eq!(
+            canonical_sha256(row),
+            expected_sha256,
+            "{capability_id} canonical baseline row drifted",
+        );
+    }
 
     let r1 = parse_repo_json(R1_ARTIFACT_PATH);
     assert_eq!(text(&r1, "capability_id"), CAPABILITY_ID);
@@ -980,6 +1129,9 @@ fn docs_ignore_rule_and_static_no_claims_are_discoverable() {
         "KEEP_UNTIL_PARITY",
         "UTF-8 byte ranges",
         "pattern text alone is insufficient",
+        PROVENANCE_REFRESH_ID,
+        "STATIC_SOURCE_PIN_MAINTENANCE",
+        "1,853 lines and lost none",
         "NOT_RUN_BY_R2_1_STATIC_LANE",
         "implements no scanner",
         "No local Cargo fallback is approved",
@@ -1025,4 +1177,9 @@ fn structural_mutations_fail_closed() {
     let mut overclaim = original;
     overclaim["dispatch_allowset"]["state"] = Value::String("IMPLEMENTED".to_owned());
     assert!(validate_inventory(&overclaim).is_err());
+
+    let mut semantic_refresh = artifact();
+    semantic_refresh["post_capture_provenance_refresh"]["preservation"]
+        ["detector_vectors_changed"] = Value::Bool(true);
+    assert!(validate_inventory(&semantic_refresh).is_err());
 }
