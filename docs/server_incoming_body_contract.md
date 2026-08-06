@@ -353,6 +353,12 @@ changed. The artifact now carries the refreshed exact fingerprints. This was a
 static source and history review only, not behavioral proof; the Rust contract
 was not compiled or executed.
 
+Commit `513aa04f5b0ea045672e170c7c85eb1903510328` later reformatted the
+`CatchPanicMiddleware` future arm without changing any request-body anchor or
+behavior. The `src/web/middleware.rs` fingerprint and line count were refreshed
+after inspecting that one formatting-only diff; all three BODY-1 anchors remain
+present and the buffered/live matrix is unchanged.
+
 Therefore this packet does not claim:
 
 - that handlers receive a streaming request body;
