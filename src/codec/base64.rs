@@ -230,9 +230,11 @@ impl Base64Engine {
             0 | 1 => 0,
             2 => 1,
             3 => 2,
-            _ => return Err(Base64Error::OutputLengthOverflow {
-                input_len: input.len(),
-            }),
+            _ => {
+                return Err(Base64Error::OutputLengthOverflow {
+                    input_len: input.len(),
+                });
+            }
         };
         let output_len = (data_len / 4)
             .checked_mul(3)
@@ -301,9 +303,7 @@ impl Base64Engine {
 
         if self.padded {
             if !(suffix_padding + suffix_symbols).is_multiple_of(4) {
-                return Err(Base64Error::InvalidPadding {
-                    index: input.len(),
-                });
+                return Err(Base64Error::InvalidPadding { index: input.len() });
             }
         } else if suffix_padding != 0 {
             return Err(Base64Error::InvalidPadding {
@@ -885,10 +885,7 @@ mod tests {
             for (input, index) in [("A=A==", 1), ("Zg===", 2), ("AAAA=", 4), ("AAAA==", 4)] {
                 assert_eq!(
                     engine.decode(input),
-                    Err(Base64Error::InvalidByte {
-                        index,
-                        byte: b'=',
-                    })
+                    Err(Base64Error::InvalidByte { index, byte: b'=' })
                 );
             }
         }
@@ -907,10 +904,7 @@ mod tests {
             for (input, index) in [("=AAA", 0), ("A=AA", 1), ("AA=A", 2), ("A===", 1)] {
                 assert_eq!(
                     engine.decode(input),
-                    Err(Base64Error::InvalidByte {
-                        index,
-                        byte: b'=',
-                    })
+                    Err(Base64Error::InvalidByte { index, byte: b'=' })
                 );
             }
             for input in ["SGVsbG9", "SGVsbA=", "SGVsbA"] {
@@ -1306,10 +1300,7 @@ mod tests {
                         prop_assert_eq!(engine.decode(&encoded), Ok(binary.clone()));
 
                         let mut destination = vec![prefill; binary.len()];
-                        prop_assert_eq!(
-                            engine.decode_to_slice(&encoded, &mut destination),
-                            Ok(())
-                        );
+                        prop_assert_eq!(engine.decode_to_slice(&encoded, &mut destination), Ok(()));
                         prop_assert_eq!(&destination, &binary);
 
                         if !encoded.is_empty() {
