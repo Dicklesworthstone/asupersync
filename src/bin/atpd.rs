@@ -214,7 +214,7 @@ enum IdentityAction {
 }
 
 /// ATP Daemon configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AtpdConfig {
     /// Daemon identity configuration
     pub identity: IdentityConfig,
@@ -230,7 +230,7 @@ pub struct AtpdConfig {
     pub diagnostics: DiagnosticsConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdentityConfig {
     /// Peer ID (derived from private key)
     pub peer_id: String,
@@ -242,7 +242,7 @@ pub struct IdentityConfig {
     pub team_memberships: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkConfig {
     /// Bind address for ATP service
     pub bind_addr: SocketAddr,
@@ -259,7 +259,22 @@ pub struct NetworkConfig {
     pub discovery: DiscoveryConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+const ATPD_REDACTED_RQ_AUTH_KEY: &str = "[REDACTED]";
+
+fn serialize_redacted_rq_auth_key<S>(
+    value: &Option<String>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match value {
+        Some(_) => serializer.serialize_some(ATPD_REDACTED_RQ_AUTH_KEY),
+        None => serializer.serialize_none(),
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct QuicDaemonConfig {
     /// PEM certificate chain presented by the QUIC listener.
     pub server_cert_path: Option<PathBuf>,
@@ -267,12 +282,34 @@ pub struct QuicDaemonConfig {
     pub server_key_path: Option<PathBuf>,
     /// Legacy RQ per-symbol auth key. Direct QUIC/TLS transfer symbols are
     /// authenticated by QUIC 1-RTT AEAD and ignore this value.
+    #[serde(serialize_with = "serialize_redacted_rq_auth_key")]
     pub rq_auth_key_hex: Option<String>,
     /// Legacy loopback/lab-only RQ unauthenticated symbol mode.
     pub allow_unauthenticated_lab: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl std::fmt::Debug for QuicDaemonConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("QuicDaemonConfig")
+            .field("server_cert_path", &self.server_cert_path)
+            .field("server_key_path", &self.server_key_path)
+            .field(
+                "rq_auth_key_hex",
+                &self
+                    .rq_auth_key_hex
+                    .as_ref()
+                    .map(|_| ATPD_REDACTED_RQ_AUTH_KEY),
+            )
+            .field(
+                "allow_unauthenticated_lab",
+                &self.allow_unauthenticated_lab,
+            )
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscoveryConfig {
     /// Enable local network discovery
     pub enable_local: bool,
@@ -284,7 +321,7 @@ pub struct DiscoveryConfig {
     pub bootstrap_peers: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageConfig {
     /// Data directory
     pub data_dir: PathBuf,
@@ -298,7 +335,7 @@ pub struct StorageConfig {
     pub journal: JournalConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JournalConfig {
     /// Enable persistent journal
     pub enable: bool,
@@ -310,7 +347,7 @@ pub struct JournalConfig {
     pub rotation_policy: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferConfig {
     /// Maximum concurrent transfers
     pub max_concurrent: u32,
@@ -324,7 +361,7 @@ pub struct TransferConfig {
     pub bandwidth_limit_bps: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceConfig {
     /// Enable auto-start on system boot
     pub auto_start: bool,
@@ -336,7 +373,7 @@ pub struct ServiceConfig {
     pub shutdown_timeout_secs: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RestartPolicy {
     Never,
     Always,
@@ -344,7 +381,7 @@ pub enum RestartPolicy {
     UnlessStopped,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthCheckConfig {
     /// Enable health checks
     pub enable: bool,
@@ -356,7 +393,7 @@ pub struct HealthCheckConfig {
     pub failure_threshold: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiagnosticsConfig {
     /// Enable metrics collection
     pub enable_metrics: bool,
@@ -368,7 +405,7 @@ pub struct DiagnosticsConfig {
     pub logging: LoggingConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoggingConfig {
     /// Log level
     pub level: String,
@@ -380,7 +417,7 @@ pub struct LoggingConfig {
     pub rotation: Option<LogRotationConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogRotationConfig {
     /// Maximum log file size in bytes
     pub max_size: u64,
@@ -526,11 +563,109 @@ impl Default for AtpdConfig {
     }
 }
 
+impl AtpdConfig {
+    /// Parse the daemon's single typed config model from versioned JSON.
+    ///
+    /// Every path is an exact lexical UTF-8 string. Parsing does not resolve,
+    /// normalize, or access paths. Raw `rq_auth_key_hex` input is accepted,
+    /// while the redaction sentinel emitted by canonical output is rejected so
+    /// a diagnostic projection cannot be mistaken for a usable credential.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed or ill-typed JSON, an unsupported schema
+    /// version, a non-UTF-8 path, or a redacted credential sentinel.
+    pub fn from_json(json: &str) -> Result<Self> {
+        let document = asupersync::config::VersionedConfigDocument::<Self>::from_json(json)
+            .map_err(|error| cli_error(format!("failed to parse JSON config: {error}")))?;
+        let config = document.into_config();
+        config.validate_canonical_paths()?;
+        config.validate_loadable_secrets()?;
+        Ok(config)
+    }
+
+    /// Render the daemon config as compact, versioned, redacted canonical JSON.
+    ///
+    /// Object keys are recursively lexicographic and paths remain exact UTF-8
+    /// strings. `rq_auth_key_hex` is replaced at the Serde boundary, so direct
+    /// serialization of the typed config cannot expose that credential.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a path is not valid UTF-8 or serialization fails.
+    pub fn to_redacted_canonical_json(&self) -> Result<String> {
+        self.validate_canonical_paths()?;
+        asupersync::config::VersionedConfigDocument::new(self)
+            .to_canonical_json()
+            .map_err(|error| cli_error(format!("failed to encode JSON config: {error}")))
+    }
+
+    fn validate_loadable_secrets(&self) -> Result<()> {
+        if self.network.quic.rq_auth_key_hex.as_deref() == Some(ATPD_REDACTED_RQ_AUTH_KEY) {
+            Err(cli_error(
+                "network.quic.rq_auth_key_hex is redacted and cannot be loaded as a credential",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn validate_canonical_paths(&self) -> Result<()> {
+        for (field, path) in [
+            (
+                "identity.private_key_path",
+                Some(self.identity.private_key_path.as_path()),
+            ),
+            (
+                "network.quic.server_cert_path",
+                self.network.quic.server_cert_path.as_deref(),
+            ),
+            (
+                "network.quic.server_key_path",
+                self.network.quic.server_key_path.as_deref(),
+            ),
+            ("storage.data_dir", Some(self.storage.data_dir.as_path())),
+            ("storage.cache_dir", Some(self.storage.cache_dir.as_path())),
+            (
+                "storage.journal.journal_path",
+                Some(self.storage.journal.journal_path.as_path()),
+            ),
+            (
+                "diagnostics.logging.file_path",
+                self.diagnostics.logging.file_path.as_deref(),
+            ),
+        ] {
+            if let Some(path) = path {
+                require_utf8_atpd_config_path(field, path)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn require_utf8_atpd_config_path(field: &str, path: &Path) -> Result<()> {
+    if path.to_str().is_some() {
+        Ok(())
+    } else {
+        Err(cli_error(format!(
+            "{field} must be valid UTF-8 for canonical JSON"
+        )))
+    }
+}
+
 /// Load daemon configuration from file or return default config
 fn load_daemon_config(config_path: &PathBuf) -> Result<AtpdConfig> {
     if config_path.exists() {
         let content = std::fs::read_to_string(config_path)
             .map_err(|e| cli_error(format!("Failed to read config file: {e}")))?;
+
+        if config_path
+            .extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+        {
+            return AtpdConfig::from_json(&content);
+        }
 
         let config: AtpdConfig = toml::from_str(&content)
             .map_err(|e| cli_error(format!("Failed to parse config file: {e}")))?;
@@ -2153,6 +2288,202 @@ mod tests {
             rq_allow_unauthenticated_lab: false,
             diagnostics_bind: None,
         }
+    }
+
+    fn canonical_config_fixture() -> AtpdConfig {
+        AtpdConfig {
+            identity: IdentityConfig {
+                peer_id: "peer-test".to_owned(),
+                private_key_path: PathBuf::from("/srv/atpd/identity.key"),
+                device_name: "node".to_owned(),
+                team_memberships: vec!["alpha".to_owned(), "beta".to_owned()],
+            },
+            network: NetworkConfig {
+                bind_addr: loopback(8472),
+                enable_quic: true,
+                quic: QuicDaemonConfig {
+                    server_cert_path: Some(PathBuf::from("/srv/atpd/server.pem")),
+                    server_key_path: Some(PathBuf::from("/srv/atpd/server.key")),
+                    rq_auth_key_hex: None,
+                    allow_unauthenticated_lab: false,
+                },
+                enable_relay: true,
+                enable_mailbox: false,
+                discovery: DiscoveryConfig {
+                    enable_local: true,
+                    enable_relay_discovery: true,
+                    relay_servers: vec!["relay.example:443".to_owned()],
+                    bootstrap_peers: vec!["peer-a".to_owned()],
+                },
+            },
+            storage: StorageConfig {
+                data_dir: PathBuf::from("/srv/atpd/data"),
+                cache_dir: PathBuf::from("/srv/atpd/cache"),
+                max_cache_size: 1024,
+                cache_retention_secs: 60,
+                journal: JournalConfig {
+                    enable: true,
+                    journal_path: PathBuf::from("/srv/atpd/journal"),
+                    max_journal_size: 512,
+                    rotation_policy: "daily".to_owned(),
+                },
+            },
+            transfers: TransferConfig {
+                max_concurrent: 2,
+                default_timeout_secs: 30,
+                max_transfer_size: 4096,
+                enable_bandwidth_limit: true,
+                bandwidth_limit_bps: Some(2048),
+            },
+            service: ServiceConfig {
+                auto_start: true,
+                restart_policy: RestartPolicy::OnFailure,
+                health_check: HealthCheckConfig {
+                    enable: true,
+                    interval_secs: 5,
+                    timeout_secs: 2,
+                    failure_threshold: 3,
+                },
+                shutdown_timeout_secs: 10,
+            },
+            diagnostics: DiagnosticsConfig {
+                enable_metrics: true,
+                metrics_bind: Some(loopback(8473)),
+                enable_debug: false,
+                logging: LoggingConfig {
+                    level: "info".to_owned(),
+                    format: "json".to_owned(),
+                    file_path: Some(PathBuf::from("/var/log/atpd.log")),
+                    rotation: Some(LogRotationConfig {
+                        max_size: 100,
+                        keep_files: 2,
+                        frequency: "daily".to_owned(),
+                    }),
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn atpd_toml_and_json_share_one_model_and_exact_golden() {
+        let config = canonical_config_fixture();
+        let toml = toml::to_string_pretty(&config).expect("atpd TOML fixture");
+        let from_toml: AtpdConfig = toml::from_str(&toml).expect("atpd TOML round trip");
+        let canonical = from_toml
+            .to_redacted_canonical_json()
+            .expect("canonical atpd JSON");
+
+        assert_eq!(
+            canonical,
+            r#"{"config":{"diagnostics":{"enable_debug":false,"enable_metrics":true,"logging":{"file_path":"/var/log/atpd.log","format":"json","level":"info","rotation":{"frequency":"daily","keep_files":2,"max_size":100}},"metrics_bind":"127.0.0.1:8473"},"identity":{"device_name":"node","peer_id":"peer-test","private_key_path":"/srv/atpd/identity.key","team_memberships":["alpha","beta"]},"network":{"bind_addr":"127.0.0.1:8472","discovery":{"bootstrap_peers":["peer-a"],"enable_local":true,"enable_relay_discovery":true,"relay_servers":["relay.example:443"]},"enable_mailbox":false,"enable_quic":true,"enable_relay":true,"quic":{"allow_unauthenticated_lab":false,"rq_auth_key_hex":null,"server_cert_path":"/srv/atpd/server.pem","server_key_path":"/srv/atpd/server.key"}},"service":{"auto_start":true,"health_check":{"enable":true,"failure_threshold":3,"interval_secs":5,"timeout_secs":2},"restart_policy":"OnFailure","shutdown_timeout_secs":10},"storage":{"cache_dir":"/srv/atpd/cache","cache_retention_secs":60,"data_dir":"/srv/atpd/data","journal":{"enable":true,"journal_path":"/srv/atpd/journal","max_journal_size":512,"rotation_policy":"daily"},"max_cache_size":1024},"transfers":{"bandwidth_limit_bps":2048,"default_timeout_secs":30,"enable_bandwidth_limit":true,"max_concurrent":2,"max_transfer_size":4096}},"schema_version":1}"#
+        );
+        assert_eq!(AtpdConfig::from_json(&canonical).unwrap(), config);
+    }
+
+    #[test]
+    fn atpd_json_schema_unknown_and_required_field_rules_are_additive() {
+        let canonical = canonical_config_fixture()
+            .to_redacted_canonical_json()
+            .expect("canonical atpd JSON");
+        let without_version = canonical.replacen(",\"schema_version\":1}", "}", 1);
+        assert_eq!(
+            AtpdConfig::from_json(&without_version).expect("missing outer schema migrates to v1"),
+            canonical_config_fixture()
+        );
+
+        let with_unknown = canonical.replacen(
+            "\"diagnostics\":",
+            "\"future_atpd_field\":true,\"diagnostics\":",
+            1,
+        );
+        assert_eq!(
+            AtpdConfig::from_json(&with_unknown).expect("unknown fields remain tolerated"),
+            canonical_config_fixture()
+        );
+        assert!(AtpdConfig::from_json(r#"{"config":{}}"#).is_err());
+        let unsupported = canonical.replacen(
+            ",\"schema_version\":1}",
+            ",\"schema_version\":2}",
+            1,
+        );
+        assert!(
+            AtpdConfig::from_json(&unsupported)
+            .unwrap_err()
+            .to_string()
+            .contains("schema version 2")
+        );
+    }
+
+    #[test]
+    fn atpd_secret_is_redacted_from_debug_serde_and_canonical_output() {
+        const RAW_KEY: &str =
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+        let mut config = canonical_config_fixture();
+        config.network.quic.rq_auth_key_hex = Some(RAW_KEY.to_owned());
+
+        let debug = format!("{config:?}");
+        assert!(!debug.contains(RAW_KEY));
+        assert!(debug.contains(ATPD_REDACTED_RQ_AUTH_KEY));
+
+        let direct_json = serde_json::to_string(&config).expect("direct JSON serialization");
+        assert!(!direct_json.contains(RAW_KEY));
+        assert!(direct_json.contains(ATPD_REDACTED_RQ_AUTH_KEY));
+
+        let canonical = config
+            .to_redacted_canonical_json()
+            .expect("redacted canonical JSON");
+        assert!(!canonical.contains(RAW_KEY));
+        assert!(canonical.contains(ATPD_REDACTED_RQ_AUTH_KEY));
+        assert!(
+            AtpdConfig::from_json(&canonical)
+                .unwrap_err()
+                .to_string()
+                .contains("redacted")
+        );
+
+        let raw_json = canonical_config_fixture()
+            .to_redacted_canonical_json()
+            .unwrap()
+            .replacen(
+                "\"rq_auth_key_hex\":null",
+                &format!("\"rq_auth_key_hex\":\"{RAW_KEY}\""),
+                1,
+            );
+        let loaded = AtpdConfig::from_json(&raw_json).expect("raw secret JSON input");
+        assert_eq!(loaded.network.quic.rq_auth_key_hex.as_deref(), Some(RAW_KEY));
+    }
+
+    #[test]
+    fn atpd_loader_selects_json_additively_and_retains_toml() {
+        let directory = tempfile::tempdir().expect("temporary config directory");
+        let config = canonical_config_fixture();
+
+        let json_path = directory.path().join("atpd.json");
+        std::fs::write(
+            &json_path,
+            config.to_redacted_canonical_json().unwrap(),
+        )
+        .expect("write JSON fixture");
+        assert_eq!(load_daemon_config(&json_path).unwrap(), config);
+
+        let toml_path = directory.path().join("atpd.toml");
+        std::fs::write(&toml_path, toml::to_string_pretty(&config).unwrap())
+            .expect("write TOML fixture");
+        assert_eq!(load_daemon_config(&toml_path).unwrap(), config);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atpd_canonical_paths_require_utf8_without_normalizing() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let mut config = canonical_config_fixture();
+        config.storage.data_dir = PathBuf::from(OsString::from_vec(vec![0xff]));
+        let error = config
+            .to_redacted_canonical_json()
+            .expect_err("non-UTF-8 path cannot be represented losslessly in JSON");
+        assert!(error.to_string().contains("storage.data_dir must be valid UTF-8"));
     }
 
     #[test]
