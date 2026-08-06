@@ -47,7 +47,7 @@
   "source_snapshot": {
     "git_head": "1afde84d564bd8ea876459624116f90028b80835",
     "dirty_scope": "A1 paths were absent before this inventory. The literal-source census walks every Rust file under its five workspace roots, including untracked files; unmatched peer paths did not affect the frozen projection.",
-    "pin_scope": "Authority, manifests, public and persisted production owners, the generic CLI JSON output boundary, owned formatter/parser boundaries, database or messaging oracle owners, every direct Chrono alias-import source, test-profile fields, and excluded-conformance sources.",
+    "pin_scope": "Authority, manifests, public and persisted production owners, the generic CLI JSON output boundary, benchmark adapter/profile embeddings and public suite boundary, owned formatter/parser boundaries, database or messaging oracle owners, every direct Chrono alias-import source, test-profile fields, and excluded-conformance sources.",
     "files": [
       {
         "path": "Cargo.toml",
@@ -275,14 +275,29 @@
         "line_count": 907
       },
       {
+        "path": "src/atp/benchmark/adapters.rs",
+        "sha256": "e3c62fcd9d4da96ac550143f816cfdd21d01fbbaa81fef4585cd795be4f0161c",
+        "line_count": 1091
+      },
+      {
         "path": "src/atp/benchmark/mod.rs",
         "sha256": "f74f4e75e888fd5110631b753d98f29b9d53e4dad3b05582213cd3ea43670951",
         "line_count": 234
       },
       {
+        "path": "src/atp/benchmark/profiles.rs",
+        "sha256": "c58666954514a9b16a1744b4e0b911b7da69ccd705fe8c4e54fcc1a40b7d7e5b",
+        "line_count": 613
+      },
+      {
         "path": "src/atp/benchmark/reports.rs",
         "sha256": "a8068beb727a5fd3e90cdb5b2ab08bb78b723bdd672c9067342596e6cc7d5183",
         "line_count": 1014
+      },
+      {
+        "path": "src/atp/benchmark/suite.rs",
+        "sha256": "4c53f1453815ab28acd88ceff677cc837200044bf65a5739f464d1120b7f11a9",
+        "line_count": 341
       },
       {
         "path": "src/database/mod.rs",
@@ -1164,20 +1179,20 @@
     "literal_alias_overlap_line_count": 1,
     "literal_or_alias_unique_line_count": 190,
     "derived_operation_anchor_count": 46,
-    "classified_anchor_count": 253,
+    "classified_anchor_count": 259,
     "literal_use_override_count": 36,
     "additional_derived_operation_anchor_count": 38,
-    "cross_file_consumer_anchor_count": 17,
-    "cross_file_direct_source_anchor_count": 33,
-    "declared_consumer_unique_direct_source_anchor_count": 65,
+    "cross_file_consumer_anchor_count": 23,
+    "cross_file_direct_source_anchor_count": 37,
+    "declared_consumer_unique_direct_source_anchor_count": 69,
     "literal_operation_projection_sha256": "a533497be94a3a8c649a061117053acff88821c102e9cedbe16cb4da0b66990b",
     "literal_source_projection_sha256": "5c4020cfe41d10dbfcab19c64f3677ee78941c65441c12da93dc7e3cd6946f2d",
     "path_classification_projection_sha256": "5f60bb8b7deb36b1aac2123747fd1be426f1888fc759f46afe3baae103dc3b63",
     "literal_override_projection_sha256": "81f3549c7644361eabee937044ba098315b3aeffbd079d9c644eb1d60ccc3f84",
     "additional_derived_projection_sha256": "b20b65d03be1995802d929275531ac96a8a66ec06c1c64f0bf887ee27803f674",
-    "cross_file_consumer_projection_sha256": "1d2fc96d68cab5db949433a6e8b30232c876b1d7ec70eab472fc4b9571c24209",
+    "cross_file_consumer_projection_sha256": "cb308728a8fdc7ebda1d750165463b098325024f4d05f496148b40bb714396e1",
     "semantic_consumer_boundary": "Include nonliteral consumers through the first semantic compare, arithmetic, format, serialize, persist, retain, return, extract, or embed boundary in a Chrono-bearing source path; exclude cross-file propagation, external consumers, and later container or arbitrary-byte taint.",
-    "cross_file_consumer_boundary": "Include the first explicit or statically generic JSON value serialization boundary in a different source file when a timestamp-bearing report or public workflow wrapper flows from a direct Chrono producer to a declared in-repository consumer; exclude later encoding or rendering calls, distinct file or standard-output sink anchors, dynamic dispatch, external consumers, and ambiguous provenance.",
+    "cross_file_consumer_boundary": "Include the first explicit embedding, constructor, return, or statically generic JSON value serialization boundary in a different source file when a timestamp-bearing public carrier flows from a direct Chrono producer to a declared in-repository consumer; exclude later encoding or rendering calls, later container propagation, distinct file or standard-output sink anchors, dynamic dispatch, external consumers, and ambiguous provenance.",
     "derived_consumer_category_ids": [
       "TIME-CONSUMER-CLI-CUTOFF-EXPIRY",
       "TIME-CONSUMER-CONFORMANCE-OUTPUT",
@@ -1187,6 +1202,8 @@
       "TIME-CONSUMER-STANDALONE-PERSISTENCE"
     ],
     "cross_file_consumer_category_ids": [
+      "TIME-CROSS-FILE-BENCHMARK-PUBLIC-CONSTRUCTOR",
+      "TIME-CROSS-FILE-BENCHMARK-RESULT",
       "TIME-CROSS-FILE-CONFORMANCE-JSON",
       "TIME-CROSS-FILE-EXCLUDED-CONFORMANCE-JSON",
       "TIME-CROSS-FILE-ROOT-CLI-JSON",
@@ -2533,6 +2550,102 @@
         "persistence_or_public_association": "first cross-file JSON value boundary before compact, pretty, or stream encoding"
       },
       {
+        "use_id": "TIME-CROSS-FILE-BENCHMARK-SCP-RESULT-0279",
+        "derivation_sources": [
+          "src/atp/benchmark/mod.rs:68",
+          "src/atp/benchmark/mod.rs:87"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-BENCHMARK-RESULT",
+        "profile_id": "TIME-PROFILE-BENCHMARK-ADAPTERS",
+        "path": "src/atp/benchmark/adapters.rs",
+        "line": 279,
+        "source_anchor": "environment: crate::atp::benchmark::BenchmarkEnvironment::collect()?,",
+        "operation": "collect and embed a timestamp-bearing BenchmarkEnvironment into the SCP BenchmarkResult",
+        "cfg_or_wiring": "FEATURE_BENCHMARK_ADAPTERS",
+        "exposure": "PUBLIC_FEATURE_GATED_SERDE_REPORT",
+        "persistence_or_public_association": "BenchmarkResult.environment public serde field carried into BenchmarkReport.baseline_results"
+      },
+      {
+        "use_id": "TIME-CROSS-FILE-BENCHMARK-RSYNC-RESULT-0511",
+        "derivation_sources": [
+          "src/atp/benchmark/mod.rs:68",
+          "src/atp/benchmark/mod.rs:87"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-BENCHMARK-RESULT",
+        "profile_id": "TIME-PROFILE-BENCHMARK-ADAPTERS",
+        "path": "src/atp/benchmark/adapters.rs",
+        "line": 511,
+        "source_anchor": "environment: crate::atp::benchmark::BenchmarkEnvironment::collect()?,",
+        "operation": "collect and embed a timestamp-bearing BenchmarkEnvironment into the rsync BenchmarkResult",
+        "cfg_or_wiring": "FEATURE_BENCHMARK_ADAPTERS",
+        "exposure": "PUBLIC_FEATURE_GATED_SERDE_REPORT",
+        "persistence_or_public_association": "BenchmarkResult.environment public serde field carried into BenchmarkReport.baseline_results"
+      },
+      {
+        "use_id": "TIME-CROSS-FILE-BENCHMARK-RCLONE-RESULT-0692",
+        "derivation_sources": [
+          "src/atp/benchmark/mod.rs:68",
+          "src/atp/benchmark/mod.rs:87"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-BENCHMARK-RESULT",
+        "profile_id": "TIME-PROFILE-BENCHMARK-ADAPTERS",
+        "path": "src/atp/benchmark/adapters.rs",
+        "line": 692,
+        "source_anchor": "environment: crate::atp::benchmark::BenchmarkEnvironment::collect()?,",
+        "operation": "collect and embed a timestamp-bearing BenchmarkEnvironment into the rclone BenchmarkResult",
+        "cfg_or_wiring": "FEATURE_BENCHMARK_ADAPTERS",
+        "exposure": "PUBLIC_FEATURE_GATED_SERDE_REPORT",
+        "persistence_or_public_association": "BenchmarkResult.environment public serde field carried into BenchmarkReport.baseline_results"
+      },
+      {
+        "use_id": "TIME-CROSS-FILE-BENCHMARK-CURL-RESULT-0961",
+        "derivation_sources": [
+          "src/atp/benchmark/mod.rs:68",
+          "src/atp/benchmark/mod.rs:87"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-BENCHMARK-RESULT",
+        "profile_id": "TIME-PROFILE-BENCHMARK-ADAPTERS",
+        "path": "src/atp/benchmark/adapters.rs",
+        "line": 961,
+        "source_anchor": "environment: crate::atp::benchmark::BenchmarkEnvironment::collect()?,",
+        "operation": "collect and embed a timestamp-bearing BenchmarkEnvironment into the curl BenchmarkResult",
+        "cfg_or_wiring": "FEATURE_BENCHMARK_ADAPTERS",
+        "exposure": "PUBLIC_FEATURE_GATED_SERDE_REPORT",
+        "persistence_or_public_association": "BenchmarkResult.environment public serde field carried into BenchmarkReport.baseline_results"
+      },
+      {
+        "use_id": "TIME-CROSS-FILE-BENCHMARK-ATP-RESULT-0204",
+        "derivation_sources": [
+          "src/atp/benchmark/mod.rs:68",
+          "src/atp/benchmark/mod.rs:87"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-BENCHMARK-RESULT",
+        "profile_id": "TIME-PROFILE-BENCHMARK-ADAPTERS",
+        "path": "src/atp/benchmark/profiles.rs",
+        "line": 204,
+        "source_anchor": "environment: crate::atp::benchmark::BenchmarkEnvironment::collect()?,",
+        "operation": "collect and embed a timestamp-bearing BenchmarkEnvironment into the ATP profile BenchmarkResult",
+        "cfg_or_wiring": "FEATURE_BENCHMARK_ADAPTERS",
+        "exposure": "PUBLIC_FEATURE_GATED_SERDE_REPORT",
+        "persistence_or_public_association": "BenchmarkResult.environment public serde field carried into BenchmarkReport.atp_results"
+      },
+      {
+        "use_id": "TIME-CROSS-FILE-BENCHMARK-REPORT-CONSTRUCTOR-0099",
+        "derivation_sources": [
+          "src/atp/benchmark/reports.rs:252",
+          "src/atp/benchmark/reports.rs:274"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-BENCHMARK-PUBLIC-CONSTRUCTOR",
+        "profile_id": "TIME-PROFILE-BENCHMARK-ADAPTERS",
+        "path": "src/atp/benchmark/suite.rs",
+        "line": 99,
+        "source_anchor": "let report = BenchmarkReport::new(",
+        "operation": "construct the timestamp-bearing BenchmarkReport at the benchmark-suite aggregation boundary",
+        "cfg_or_wiring": "FEATURE_BENCHMARK_ADAPTERS",
+        "exposure": "PUBLIC_FEATURE_GATED_SERDE_REPORT",
+        "persistence_or_public_association": "BenchmarkSuite::run_benchmark public Result carries the report with baseline_results and atp_results"
+      },
+      {
         "use_id": "TIME-CROSS-FILE-CONFORMANCE-DATA-END-JSON-0098",
         "derivation_sources": [
           "conformance/src/h2_data_end_stream_conformance.rs:142",
@@ -2782,7 +2895,7 @@
         "persistence_or_public_association": "MaintenanceResult.timestamp in maintenance_results.json"
       }
     ],
-    "no_claim": "The literal and direct-alias classification is complete, the declared in-file downstream rows are exact through the stated semantic boundary, and the seventeen declared cross-file JSON rows are exact through their first serialization boundary. Other cross-file propagation, later encoding or rendering calls, later distinct sinks, external consumers, and later container or arbitrary-byte taint remain open. No profile resolution, compilation, execution, byte preservation, or behavioral evidence follows."
+    "no_claim": "The literal and direct-alias classification is complete, the declared in-file downstream rows are exact through the stated semantic boundary, and the twenty-three declared cross-file consumer rows are exact through their first stated boundaries. Other cross-file propagation, later encoding or rendering calls, later container propagation, later distinct sinks, external consumers, and later arbitrary-byte taint remain open. No profile resolution, compilation, execution, byte preservation, or behavioral evidence follows."
   },
   "alias_aware_chrono_uses": {
     "scope": "Bounded lexical inventory of every direct Chrono import binding, every line that directly references an imported Chrono symbol in the five census roots, and every adjacent derived temporal arithmetic, comparison, association, or ordering anchor discovered for those bindings.",
@@ -4749,7 +4862,7 @@
   "static_inventory_gaps": [
     {
       "gap_id": "TIME-STATIC-GAP-DERIVED-CONSUMER-CLASSIFICATION",
-      "summary": "All 159 literal Chrono lines, all 32 direct imported-symbol lines, eight imported-alias anchors, the declared in-file downstream consumers through the first semantic boundary, and seventeen declared cross-file JSON serialization boundaries have deterministic source-linked classifications. Other cross-file propagation, external consumers, and second-order container or byte propagation remain outside this bounded static tranche.",
+      "summary": "All 159 literal Chrono lines, all 32 direct imported-symbol lines, eight imported-alias anchors, the declared in-file downstream consumers through the first semantic boundary, and twenty-three declared cross-file consumer boundaries have deterministic source-linked classifications. The root public DateTime carrier set is dispositioned through its first current in-repository boundary or an exact no-in-tree-producer state. Other cross-file propagation, external consumers, and second-order container or byte propagation remain outside this bounded static tranche.",
       "newly_classified_consumer_categories": [
         "CLI cutoff comparisons and optional-expiry moves",
         "PostgreSQL midnight construction and Kafka recency arithmetic",
@@ -4757,13 +4870,15 @@
         "real-E2E serialization, retention, return, and embedding boundaries",
         "conformance report rendering and output",
         "root CLI generic JSON value serialization boundary",
+        "benchmark adapter and profile result-environment embeddings",
+        "benchmark suite report-constructor boundary",
         "standalone golden and reporting persistence paths",
         "conformance executable JSON serialization boundaries",
         "excluded-conformance executable JSON serialization boundary",
         "standalone reporting executable JSON serialization boundaries"
       ],
       "representative_unclassified_consumers": [
-        "cross-file consumers beyond the seventeen declared JSON serialization boundaries",
+        "cross-file consumers beyond the twenty-three declared first semantic boundaries",
         "external consumers not present in the repository snapshot",
         "second-order container and byte propagation beyond the first semantic boundary"
       ],
@@ -4786,7 +4901,7 @@
     },
     {
       "detail_id": "TIME-STATIC-RESOLVED-DECLARED-DERIVED-CONSUMERS",
-      "summary": "Thirty-eight declared in-file consumer anchors across six categories and seventeen declared cross-file JSON consumers across four categories are linked to 65 unique direct source anchors, source-matched, category-routed, and frozen through their stated boundaries. The wider remainder stays explicit in static_inventory_gaps.",
+      "summary": "Thirty-eight declared in-file consumer anchors across six categories and twenty-three declared cross-file consumers across six categories are linked to 69 unique direct source anchors, source-matched, category-routed, and frozen through their stated boundaries. The wider remainder stays explicit in static_inventory_gaps.",
       "state": "RESOLVED_BY_STATIC_DECLARED_DERIVED_CLASSIFICATION",
       "owner_bead": "asupersync-5z2scg.6.1"
     }
@@ -4945,6 +5060,109 @@
     "required_disposition": "KEEP_OPEN",
     "no_claim_boundary": "This extension freezes one statically generic cross-file JSON value boundary and exact lineage from eight existing timestamp fields. The two refreshed existing pins contain independent replay-diagnostic and PostgreSQL read-cancellation changes with no TIME acceptance-semantic change in their exact Git diffs. It does not execute the CLI, prove emitted bytes or round trips, cover later encoding or sinks, complete the derived-consumer inventory, close A1, or authorize dependency exit."
   },
+  "post_a1_benchmark_lineage_extension": {
+    "extension_id": "TIME-A1-BENCHMARK-LINEAGE-2026-08-06",
+    "captured_date_utc": "2026-08-06",
+    "extension_state": "STATIC_ROOT_PUBLIC_CARRIER_LINEAGE_EXTENSION",
+    "source_pin_path_count": 72,
+    "added_source_pins": [
+      {
+        "path": "src/atp/benchmark/adapters.rs",
+        "sha256": "e3c62fcd9d4da96ac550143f816cfdd21d01fbbaa81fef4585cd795be4f0161c",
+        "line_count": 1091
+      },
+      {
+        "path": "src/atp/benchmark/profiles.rs",
+        "sha256": "c58666954514a9b16a1744b4e0b911b7da69ccd705fe8c4e54fcc1a40b7d7e5b",
+        "line_count": 613
+      },
+      {
+        "path": "src/atp/benchmark/suite.rs",
+        "sha256": "4c53f1453815ab28acd88ceff677cc837200044bf65a5739f464d1120b7f11a9",
+        "line_count": 341
+      }
+    ],
+    "cross_file_consumer_ids": [
+      "TIME-CROSS-FILE-BENCHMARK-ATP-RESULT-0204",
+      "TIME-CROSS-FILE-BENCHMARK-CURL-RESULT-0961",
+      "TIME-CROSS-FILE-BENCHMARK-RCLONE-RESULT-0692",
+      "TIME-CROSS-FILE-BENCHMARK-REPORT-CONSTRUCTOR-0099",
+      "TIME-CROSS-FILE-BENCHMARK-RSYNC-RESULT-0511",
+      "TIME-CROSS-FILE-BENCHMARK-SCP-RESULT-0279"
+    ],
+    "root_public_datetime_field_count": 12,
+    "declared_first_boundary_field_count": 10,
+    "no_in_tree_producer_field_count": 2,
+    "unclassified_root_public_datetime_field_count": 0,
+    "root_public_carrier_dispositions": [
+      {
+        "disposition_id": "TIME-CARRIER-DISPOSITION-CLI-GENERIC-JSON",
+        "field_ids": [
+          "TIME-PUB-CLI-ARCHIVE-ARCHIVED",
+          "TIME-PUB-CLI-ARCHIVE-EXPIRES",
+          "TIME-PUB-CLI-ARCHIVE-VERIFIED",
+          "TIME-PUB-CLI-CI-EXPIRES",
+          "TIME-PUB-CLI-CI-TIMESTAMP",
+          "TIME-PUB-CLI-DATASET-UPDATED",
+          "TIME-PUB-CLI-INTEGRITY-LAST-CHECK",
+          "TIME-PUB-CLI-RELEASE-PUBLISHED"
+        ],
+        "state": "DECLARED_FIRST_CROSS_FILE_JSON_BOUNDARY",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-ROOT-CLI-OUTPUTTABLE-JSON-0156"
+        ]
+      },
+      {
+        "disposition_id": "TIME-CARRIER-DISPOSITION-CLI-NO-PRODUCER",
+        "field_ids": [
+          "TIME-PUB-CLI-BENCH-SYSTEM-TIMESTAMP",
+          "TIME-PUB-CLI-STATUS-TIMESTAMP"
+        ],
+        "state": "NO_IN_TREE_PRODUCER_IN_PINNED_SNAPSHOT",
+        "consumer_ids": []
+      },
+      {
+        "disposition_id": "TIME-CARRIER-DISPOSITION-BENCHMARK-ENVIRONMENT",
+        "field_ids": [
+          "TIME-PUB-BENCH-ENVIRONMENT-TIMESTAMP"
+        ],
+        "state": "DECLARED_FIRST_CROSS_FILE_EMBEDDINGS",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-BENCHMARK-ATP-RESULT-0204",
+          "TIME-CROSS-FILE-BENCHMARK-CURL-RESULT-0961",
+          "TIME-CROSS-FILE-BENCHMARK-RCLONE-RESULT-0692",
+          "TIME-CROSS-FILE-BENCHMARK-RSYNC-RESULT-0511",
+          "TIME-CROSS-FILE-BENCHMARK-SCP-RESULT-0279"
+        ]
+      },
+      {
+        "disposition_id": "TIME-CARRIER-DISPOSITION-BENCHMARK-REPORT",
+        "field_ids": [
+          "TIME-PUB-BENCH-REPORT-TIMESTAMP"
+        ],
+        "state": "DECLARED_FIRST_CROSS_FILE_CONSTRUCTOR",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-BENCHMARK-REPORT-CONSTRUCTOR-0099"
+        ]
+      }
+    ],
+    "cross_file_consumer_anchor_count": 23,
+    "cross_file_direct_source_anchor_count": 37,
+    "declared_consumer_unique_direct_source_anchor_count": 69,
+    "classified_anchor_count": 259,
+    "preservation": {
+      "production_source_changed": false,
+      "historical_a1_revision_changed": false,
+      "behavioral_gap_count_changed": false,
+      "time_acceptance_semantics_changed": false,
+      "static_remainder_closed": false,
+      "bead_close_allowed": false,
+      "dependency_exit_allowed": false
+    },
+    "execution_state": "NOT_RUN_STATIC_ONLY",
+    "required_disposition": "KEEP_OPEN",
+    "no_claim_boundary": "This extension freezes the first current in-repository cross-file embedding or constructor boundary for the two benchmark DateTime carriers and dispositions all twelve root public DateTime fields as a declared first boundary or exact no-in-tree-producer state. It does not execute the benchmark feature, prove serialized bytes, enumerate second-order propagation, close the wider derived-consumer remainder, close A1, or authorize dependency exit."
+  },
   "validation": {
     "contract_path": "tests/time_utc_capability_inventory_contract.rs",
     "doc_path": "docs/time_utc_capability_inventory.md",
@@ -4956,6 +5174,8 @@
       "path, matching-line, literal-operation, literal-source and classification projection hashing",
       "literal override, declared derived-row, cross-file consumer, and lineage projection hashing",
       "root CLI generic JSON value boundary source matching",
+      "benchmark adapter and profile environment-embedding source matching",
+      "benchmark suite report-constructor source matching",
       "derived and cross-file anchor source matching with direct-source lineage validation",
       "source file hashing",
       "manual cross-review"

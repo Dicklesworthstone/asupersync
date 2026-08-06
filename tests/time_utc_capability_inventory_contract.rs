@@ -24,7 +24,7 @@ const CAPABILITY_ID: &str = "CAP-TIME-UTC-RFC3339";
 const ADR_ID: &str = "DEP-ADR-011";
 const BASELINE_REVISION: &str = "1afde84d564bd8ea876459624116f90028b80835";
 const ARTIFACT_SHA256: &str =
-    "e566e52feb6e1ae4424d5254ba043faf39f2dffa41f54d7147d340944ce026a9";
+    "ea935065531310b542385e812ae546221ef936657fdb1f45e0f81ced7986ac3c";
 const DOC_BEGIN: &str = "<!-- BEGIN TIME UTC CAPABILITY INVENTORY -->";
 const DOC_END: &str = "<!-- END TIME UTC CAPABILITY INVENTORY -->";
 const CHRONO_TOKEN: &str = concat!("chrono", "::");
@@ -46,7 +46,7 @@ const ALIAS_CLASSIFICATION_PROJECTION_SHA256: &str =
 const ADDITIONAL_DERIVED_PROJECTION_SHA256: &str =
     "b20b65d03be1995802d929275531ac96a8a66ec06c1c64f0bf887ee27803f674";
 const CROSS_FILE_CONSUMER_PROJECTION_SHA256: &str =
-    "1d2fc96d68cab5db949433a6e8b30232c876b1d7ec70eab472fc4b9571c24209";
+    "cb308728a8fdc7ebda1d750165463b098325024f4d05f496148b40bb714396e1";
 const ROOT_CLI_REFRESH_REVISIONS: &[&str] = &[
     "fbbd4d065ae4768b84e4161a00d10e5acba04b39",
     "75778fbf0846be2d3bc965a2809a705aeb1dfe25",
@@ -61,11 +61,12 @@ const SEMANTIC_CONSUMER_BOUNDARY: &str = concat!(
     "or arbitrary-byte taint.",
 );
 const CROSS_FILE_CONSUMER_BOUNDARY: &str = concat!(
-    "Include the first explicit or statically generic JSON value serialization boundary in ",
-    "a different source file when a timestamp-bearing report or public workflow wrapper ",
-    "flows from a direct Chrono producer to a declared in-repository consumer; exclude ",
-    "later encoding or rendering calls, distinct file or standard-output sink anchors, ",
-    "dynamic dispatch, external consumers, and ambiguous provenance.",
+    "Include the first explicit embedding, constructor, return, or statically generic JSON ",
+    "value serialization boundary in a different source file when a timestamp-bearing public ",
+    "carrier flows from a direct Chrono producer to a declared in-repository consumer; exclude ",
+    "later encoding or rendering calls, later container propagation, distinct file or ",
+    "standard-output sink anchors, dynamic dispatch, external consumers, and ambiguous ",
+    "provenance.",
 );
 
 fn repo_root() -> PathBuf {
@@ -523,8 +524,8 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
             != "RESOLVED_BY_STATIC_DIRECT_PER_USE_CLASSIFICATION"
         || text(resolved_derived, "state")
             != "RESOLVED_BY_STATIC_DECLARED_DERIVED_CLASSIFICATION"
-        || array(derived_gap, "newly_classified_consumer_categories").len() != 10
-        || string_set(derived_gap, "newly_classified_consumer_categories").len() != 10
+        || array(derived_gap, "newly_classified_consumer_categories").len() != 12
+        || string_set(derived_gap, "newly_classified_consumer_categories").len() != 12
         || array(derived_gap, "representative_unclassified_consumers").len() != 3
         || string_set(derived_gap, "representative_unclassified_consumers").len() != 3
         || text(derived_gap, "effect").is_empty()
@@ -541,6 +542,8 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
             "CLI cutoff comparisons and optional-expiry moves",
             "JetStream timestamp insertion into a wire payload",
             "PostgreSQL midnight construction and Kafka recency arithmetic",
+            "benchmark adapter and profile result-environment embeddings",
+            "benchmark suite report-constructor boundary",
             "conformance report rendering and output",
             "conformance executable JSON serialization boundaries",
             "excluded-conformance executable JSON serialization boundary",
@@ -554,7 +557,7 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
         derived_gap,
         "representative_unclassified_consumers",
         &[
-            "cross-file consumers beyond the seventeen declared JSON serialization boundaries",
+            "cross-file consumers beyond the twenty-three declared first semantic boundaries",
             "external consumers not present in the repository snapshot",
             "second-order container and byte propagation beyond the first semantic boundary",
         ],
@@ -1187,6 +1190,8 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
         per_use,
         "cross_file_consumer_category_ids",
         &[
+            "TIME-CROSS-FILE-BENCHMARK-PUBLIC-CONSTRUCTOR",
+            "TIME-CROSS-FILE-BENCHMARK-RESULT",
             "TIME-CROSS-FILE-CONFORMANCE-JSON",
             "TIME-CROSS-FILE-EXCLUDED-CONFORMANCE-JSON",
             "TIME-CROSS-FILE-ROOT-CLI-JSON",
@@ -1539,6 +1544,8 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
     let standalone_reporting_manifest =
         read_repo_file("tests/conformance/raptorq_rfc6330/reporting/Cargo.toml");
     let root_lib = read_repo_file("src/lib.rs");
+    let atp_module = read_repo_file("src/atp/mod.rs");
+    let benchmark_module = read_repo_file("src/atp/benchmark/mod.rs");
     let cli_module = read_repo_file("src/cli/mod.rs");
     let mut actual_cross_file_categories = BTreeSet::new();
     let mut cross_file_pairs = BTreeSet::new();
@@ -1552,6 +1559,37 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
         let category = text(row, "consumer_category_id");
         let same_file_prefix = format!("{path}:");
         let route_is_valid = match category {
+            "TIME-CROSS-FILE-BENCHMARK-PUBLIC-CONSTRUCTOR" => {
+                text(row, "profile_id") == "TIME-PROFILE-BENCHMARK-ADAPTERS"
+                    && path == "src/atp/benchmark/suite.rs"
+                    && text(row, "cfg_or_wiring") == "FEATURE_BENCHMARK_ADAPTERS"
+                    && text(row, "exposure") == "PUBLIC_FEATURE_GATED_SERDE_REPORT"
+                    && atp_module.contains(
+                        "#[cfg(feature = \"benchmark-adapters\")]\npub mod benchmark;",
+                    )
+                    && benchmark_module.contains("pub mod suite;")
+                    && benchmark_module.contains("pub use suite::BenchmarkSuite;")
+                    && benchmark_module.contains(
+                        "pub use reports::{BenchmarkMetrics, BenchmarkReport, BenchmarkResult, ComparisonReport};",
+                    )
+            }
+            "TIME-CROSS-FILE-BENCHMARK-RESULT" => {
+                text(row, "profile_id") == "TIME-PROFILE-BENCHMARK-ADAPTERS"
+                    && matches!(
+                        path,
+                        "src/atp/benchmark/adapters.rs" | "src/atp/benchmark/profiles.rs"
+                    )
+                    && text(row, "cfg_or_wiring") == "FEATURE_BENCHMARK_ADAPTERS"
+                    && text(row, "exposure") == "PUBLIC_FEATURE_GATED_SERDE_REPORT"
+                    && atp_module.contains(
+                        "#[cfg(feature = \"benchmark-adapters\")]\npub mod benchmark;",
+                    )
+                    && benchmark_module.contains("pub mod adapters;")
+                    && benchmark_module.contains("pub mod profiles;")
+                    && benchmark_module.contains(
+                        "pub use reports::{BenchmarkMetrics, BenchmarkReport, BenchmarkResult, ComparisonReport};",
+                    )
+            }
             "TIME-CROSS-FILE-CONFORMANCE-JSON" => {
                 text(row, "profile_id") == "TIME-PROFILE-CONFORMANCE-MEMBER"
                     && path.starts_with("conformance/src/bin/")
@@ -2417,7 +2455,7 @@ fn validate_alias_sources(inventory: &Value) -> Result<(), String> {
 
 fn validate_source_pins(inventory: &Value) -> Result<(), String> {
     let pins = array(&inventory["source_snapshot"], "files");
-    if pins.len() != 69 {
+    if pins.len() != 72 {
         return Err("source pin count drifted".to_owned());
     }
     let mut paths = BTreeSet::new();
@@ -2781,6 +2819,270 @@ fn validate_post_a1_cli_output_extension(inventory: &Value) -> Result<(), String
     ] {
         if !no_claim.contains(required) {
             return Err(format!("post-A1 CLI no-claim boundary missing {required}"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_post_a1_benchmark_lineage_extension(inventory: &Value) -> Result<(), String> {
+    let extension = inventory
+        .get("post_a1_benchmark_lineage_extension")
+        .ok_or_else(|| "post_a1_benchmark_lineage_extension is required".to_owned())?;
+    for (key, expected) in [
+        ("extension_id", "TIME-A1-BENCHMARK-LINEAGE-2026-08-06"),
+        ("captured_date_utc", "2026-08-06"),
+        (
+            "extension_state",
+            "STATIC_ROOT_PUBLIC_CARRIER_LINEAGE_EXTENSION",
+        ),
+        ("execution_state", "NOT_RUN_STATIC_ONLY"),
+        ("required_disposition", "KEEP_OPEN"),
+    ] {
+        if extension.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!(
+                "post-A1 benchmark lineage extension {key} must be {expected}"
+            ));
+        }
+    }
+    for (key, expected) in [
+        ("source_pin_path_count", 72_u64),
+        ("root_public_datetime_field_count", 12),
+        ("declared_first_boundary_field_count", 10),
+        ("no_in_tree_producer_field_count", 2),
+        ("unclassified_root_public_datetime_field_count", 0),
+        ("cross_file_consumer_anchor_count", 23),
+        ("cross_file_direct_source_anchor_count", 37),
+        ("declared_consumer_unique_direct_source_anchor_count", 69),
+        ("classified_anchor_count", 259),
+    ] {
+        if extension.get(key).and_then(Value::as_u64) != Some(expected) {
+            return Err(format!(
+                "post-A1 benchmark lineage extension {key} must be {expected}"
+            ));
+        }
+    }
+
+    let added_pins = array(extension, "added_source_pins");
+    require_exact_ids(
+        added_pins,
+        "path",
+        &[
+            "src/atp/benchmark/adapters.rs",
+            "src/atp/benchmark/profiles.rs",
+            "src/atp/benchmark/suite.rs",
+        ],
+        "post-A1 benchmark lineage source pins",
+    )?;
+    let source_pins: BTreeMap<_, _> = array(&inventory["source_snapshot"], "files")
+        .iter()
+        .map(|pin| (text(pin, "path"), pin))
+        .collect();
+    for (path, sha256, lines) in [
+        (
+            "src/atp/benchmark/adapters.rs",
+            "e3c62fcd9d4da96ac550143f816cfdd21d01fbbaa81fef4585cd795be4f0161c",
+            1_091,
+        ),
+        (
+            "src/atp/benchmark/profiles.rs",
+            "c58666954514a9b16a1744b4e0b911b7da69ccd705fe8c4e54fcc1a40b7d7e5b",
+            613,
+        ),
+        (
+            "src/atp/benchmark/suite.rs",
+            "4c53f1453815ab28acd88ceff677cc837200044bf65a5739f464d1120b7f11a9",
+            341,
+        ),
+    ] {
+        let added = added_pins
+            .iter()
+            .find(|pin| text(pin, "path") == path)
+            .ok_or_else(|| format!("post-A1 benchmark lineage pin is missing for {path}"))?;
+        if text(added, "sha256") != sha256 || number(added, "line_count") != lines {
+            return Err(format!("post-A1 benchmark lineage pin drifted for {path}"));
+        }
+        if source_pins.get(path).copied() != Some(added) {
+            return Err(format!(
+                "post-A1 benchmark lineage and source snapshot pins disagree for {path}"
+            ));
+        }
+    }
+
+    let expected_consumers = [
+        "TIME-CROSS-FILE-BENCHMARK-ATP-RESULT-0204",
+        "TIME-CROSS-FILE-BENCHMARK-CURL-RESULT-0961",
+        "TIME-CROSS-FILE-BENCHMARK-RCLONE-RESULT-0692",
+        "TIME-CROSS-FILE-BENCHMARK-REPORT-CONSTRUCTOR-0099",
+        "TIME-CROSS-FILE-BENCHMARK-RSYNC-RESULT-0511",
+        "TIME-CROSS-FILE-BENCHMARK-SCP-RESULT-0279",
+    ];
+    require_exact_strings(extension, "cross_file_consumer_ids", &expected_consumers)?;
+    let cross_file_rows = array(
+        &inventory["per_use_classification"],
+        "cross_file_consumer_rows",
+    );
+    let cross_file_ids = row_ids(cross_file_rows, "use_id");
+    let expected_consumer_set: BTreeSet<String> =
+        expected_consumers.iter().map(|id| (*id).to_owned()).collect();
+    if !expected_consumer_set.is_subset(&cross_file_ids) {
+        return Err("post-A1 benchmark lineage consumer rows are missing".to_owned());
+    }
+    for (use_id, path, line, anchor) in [
+        (
+            "TIME-CROSS-FILE-BENCHMARK-SCP-RESULT-0279",
+            "src/atp/benchmark/adapters.rs",
+            279_u64,
+            "environment: crate::atp::benchmark::BenchmarkEnvironment::collect()?,",
+        ),
+        (
+            "TIME-CROSS-FILE-BENCHMARK-RSYNC-RESULT-0511",
+            "src/atp/benchmark/adapters.rs",
+            511,
+            "environment: crate::atp::benchmark::BenchmarkEnvironment::collect()?,",
+        ),
+        (
+            "TIME-CROSS-FILE-BENCHMARK-RCLONE-RESULT-0692",
+            "src/atp/benchmark/adapters.rs",
+            692,
+            "environment: crate::atp::benchmark::BenchmarkEnvironment::collect()?,",
+        ),
+        (
+            "TIME-CROSS-FILE-BENCHMARK-CURL-RESULT-0961",
+            "src/atp/benchmark/adapters.rs",
+            961,
+            "environment: crate::atp::benchmark::BenchmarkEnvironment::collect()?,",
+        ),
+        (
+            "TIME-CROSS-FILE-BENCHMARK-ATP-RESULT-0204",
+            "src/atp/benchmark/profiles.rs",
+            204,
+            "environment: crate::atp::benchmark::BenchmarkEnvironment::collect()?,",
+        ),
+        (
+            "TIME-CROSS-FILE-BENCHMARK-REPORT-CONSTRUCTOR-0099",
+            "src/atp/benchmark/suite.rs",
+            99,
+            "let report = BenchmarkReport::new(",
+        ),
+    ] {
+        let row = cross_file_rows
+            .iter()
+            .find(|row| text(row, "use_id") == use_id)
+            .ok_or_else(|| format!("post-A1 benchmark consumer row is missing for {use_id}"))?;
+        if text(row, "path") != path
+            || number(row, "line") != line
+            || text(row, "source_anchor") != anchor
+        {
+            return Err(format!("post-A1 benchmark consumer row drifted for {use_id}"));
+        }
+    }
+
+    let dispositions = array(extension, "root_public_carrier_dispositions");
+    require_exact_ids(
+        dispositions,
+        "disposition_id",
+        &[
+            "TIME-CARRIER-DISPOSITION-BENCHMARK-ENVIRONMENT",
+            "TIME-CARRIER-DISPOSITION-BENCHMARK-REPORT",
+            "TIME-CARRIER-DISPOSITION-CLI-GENERIC-JSON",
+            "TIME-CARRIER-DISPOSITION-CLI-NO-PRODUCER",
+        ],
+        "post-A1 root public carrier dispositions",
+    )?;
+    let root_public_field_ids: BTreeSet<String> = array(inventory, "public_datetime_fields")
+        .iter()
+        .filter(|row| text(row, "crate") == "asupersync")
+        .map(|row| text(row, "field_id").to_owned())
+        .collect();
+    let mut disposition_field_ids = BTreeSet::new();
+    for disposition in dispositions {
+        let disposition_id = text(disposition, "disposition_id");
+        let (state, field_ids, consumer_ids): (&str, &[&str], &[&str]) = match disposition_id {
+            "TIME-CARRIER-DISPOSITION-CLI-GENERIC-JSON" => (
+                "DECLARED_FIRST_CROSS_FILE_JSON_BOUNDARY",
+                &[
+                    "TIME-PUB-CLI-ARCHIVE-ARCHIVED",
+                    "TIME-PUB-CLI-ARCHIVE-EXPIRES",
+                    "TIME-PUB-CLI-ARCHIVE-VERIFIED",
+                    "TIME-PUB-CLI-CI-EXPIRES",
+                    "TIME-PUB-CLI-CI-TIMESTAMP",
+                    "TIME-PUB-CLI-DATASET-UPDATED",
+                    "TIME-PUB-CLI-INTEGRITY-LAST-CHECK",
+                    "TIME-PUB-CLI-RELEASE-PUBLISHED",
+                ],
+                &["TIME-CROSS-FILE-ROOT-CLI-OUTPUTTABLE-JSON-0156"],
+            ),
+            "TIME-CARRIER-DISPOSITION-CLI-NO-PRODUCER" => (
+                "NO_IN_TREE_PRODUCER_IN_PINNED_SNAPSHOT",
+                &[
+                    "TIME-PUB-CLI-BENCH-SYSTEM-TIMESTAMP",
+                    "TIME-PUB-CLI-STATUS-TIMESTAMP",
+                ],
+                &[],
+            ),
+            "TIME-CARRIER-DISPOSITION-BENCHMARK-ENVIRONMENT" => (
+                "DECLARED_FIRST_CROSS_FILE_EMBEDDINGS",
+                &["TIME-PUB-BENCH-ENVIRONMENT-TIMESTAMP"],
+                &[
+                    "TIME-CROSS-FILE-BENCHMARK-ATP-RESULT-0204",
+                    "TIME-CROSS-FILE-BENCHMARK-CURL-RESULT-0961",
+                    "TIME-CROSS-FILE-BENCHMARK-RCLONE-RESULT-0692",
+                    "TIME-CROSS-FILE-BENCHMARK-RSYNC-RESULT-0511",
+                    "TIME-CROSS-FILE-BENCHMARK-SCP-RESULT-0279",
+                ],
+            ),
+            "TIME-CARRIER-DISPOSITION-BENCHMARK-REPORT" => (
+                "DECLARED_FIRST_CROSS_FILE_CONSTRUCTOR",
+                &["TIME-PUB-BENCH-REPORT-TIMESTAMP"],
+                &["TIME-CROSS-FILE-BENCHMARK-REPORT-CONSTRUCTOR-0099"],
+            ),
+            _ => return Err(format!("unexpected root public carrier {disposition_id}")),
+        };
+        if text(disposition, "state") != state {
+            return Err(format!("root public carrier state drifted for {disposition_id}"));
+        }
+        require_exact_strings(disposition, "field_ids", field_ids)?;
+        require_exact_strings(disposition, "consumer_ids", consumer_ids)?;
+        for field_id in field_ids {
+            if !disposition_field_ids.insert((*field_id).to_owned()) {
+                return Err(format!("duplicate root public carrier field {field_id}"));
+            }
+        }
+    }
+    if disposition_field_ids != root_public_field_ids || root_public_field_ids.len() != 12 {
+        return Err("root public DateTime carrier coverage drifted".to_owned());
+    }
+
+    let preservation = object(extension, "preservation");
+    let expected_preservation_keys: BTreeSet<String> = [
+        "production_source_changed",
+        "historical_a1_revision_changed",
+        "behavioral_gap_count_changed",
+        "time_acceptance_semantics_changed",
+        "static_remainder_closed",
+        "bead_close_allowed",
+        "dependency_exit_allowed",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if preservation.keys().cloned().collect::<BTreeSet<_>>() != expected_preservation_keys
+        || preservation.values().any(|value| value.as_bool() != Some(false))
+    {
+        return Err("post-A1 benchmark lineage preservation boundary drifted".to_owned());
+    }
+    let no_claim = text(extension, "no_claim_boundary");
+    for required in [
+        "does not execute the benchmark feature",
+        "prove serialized bytes",
+        "second-order propagation",
+        "close A1",
+        "authorize dependency exit",
+    ] {
+        if !no_claim.contains(required) {
+            return Err(format!(
+                "post-A1 benchmark lineage no-claim boundary missing {required}"
+            ));
         }
     }
     Ok(())
@@ -3252,6 +3554,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     validate_foundation_boundary(inventory)?;
     validate_post_a1_provenance_refresh(inventory)?;
     validate_post_a1_cli_output_extension(inventory)?;
+    validate_post_a1_benchmark_lineage_extension(inventory)?;
     Ok(())
 }
 
@@ -3277,11 +3580,15 @@ fn time_utc_inventory_is_exact_and_source_pinned() {
         "one same-line overlap",
         "derived-consumer remainder",
         "38 exact rows",
-        "17 exact cross-file JSON rows",
-        "253 classified",
+        "23 exact cross-file consumer rows",
+        "259 classified",
         "TIME-A1-ROOT-CLI-JSON-2026-08-06",
         "src/cli/output.rs:156",
         "69th current source pin",
+        "TIME-A1-BENCHMARK-LINEAGE-2026-08-06",
+        "src/atp/benchmark/suite.rs:99",
+        "72 current source pins",
+        "all 12 root public DateTime fields",
         "+127/-28",
         "+87/-27",
         "literal-source",
@@ -3453,6 +3760,11 @@ fn time_utc_inventory_rejects_cutover_and_completeness_drift() {
     cli_extension_overclaim["post_a1_cli_output_extension"]["preservation"]
         ["static_remainder_closed"] = Value::Bool(true);
     assert!(validate_inventory(&cli_extension_overclaim).is_err());
+
+    let mut benchmark_extension_overclaim = inventory.clone();
+    benchmark_extension_overclaim["post_a1_benchmark_lineage_extension"]["preservation"]
+        ["static_remainder_closed"] = Value::Bool(true);
+    assert!(validate_inventory(&benchmark_extension_overclaim).is_err());
 
     let mut alias_route = inventory.clone();
     for binding in alias_route["alias_aware_chrono_uses"]["bindings"]
