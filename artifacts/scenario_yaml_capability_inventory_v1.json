@@ -1039,8 +1039,8 @@
     {
       "diagnostic_id": "SCN-DIAG-REPLAY-DIVERGENCE",
       "surface": "ScenarioRunner and both CLIs",
-      "behavior": "runner Display owns ASUP-E401 but both CLI adapters reconstruct text without the stable token",
-      "evidence_state": "SOURCE_BASELINED"
+      "behavior": "runner Display and both CLI adapters lead replay-divergence diagnostics with ASUP-E401; focused adapter tests are authored but were not executed in the static A4 lane",
+      "evidence_state": "SOURCE_PROGRESS_STATIC"
     },
     {
       "diagnostic_id": "SCN-DIAG-DUPLICATE",
@@ -2090,6 +2090,48 @@
     },
     "no_claim_boundary": "This source-only A4 receipt aligns the ADR, registry, adjacent-file comments, author guidance, and static contract sources with current path wiring. The focused contracts were not executed, so SCN-GAP-01, SCN-GAP-12, and SCN-GAP-13 remain fail-closed. It does not add an include or demo reader, make tools/demos/time_travel.yaml a typed Scenario, prove parsing, validation, execution, replay, conversion, fingerprints, benchmark behavior, checksums, cross-platform determinism, redaction, security, broad health, release readiness, tracker closure, dependency or file removal, cutover, or terminal authority. KEEP_INCUMBENT and dependency_exit_allowed=false remain mandatory."
   },
+  "a4_gap15_source_progress": {
+    "progress_id": "SCN-A4-GAP-15-REPLAY-CODE-SOURCE-V1",
+    "bead_id": "asupersync-5z2scg.5.4",
+    "recorded_date_utc": "2026-08-06",
+    "scope": "STABLE_REPLAY_DIVERGENCE_DIAGNOSTICS",
+    "gap_id": "SCN-GAP-15",
+    "source_state": "SOURCE_IMPLEMENTED_STATIC",
+    "execution_state": "NOT_RUN_BY_STATIC_LANE",
+    "source_change_authored": true,
+    "dynamic_contract_executed": false,
+    "diagnostic_code": "ASUP-E401",
+    "production_paths": [
+      "src/bin/asupersync.rs",
+      "frankenlab/src/main.rs"
+    ],
+    "adapter_functions": [
+      "scenario_runner_error",
+      "lab_replay",
+      "runner_error_message"
+    ],
+    "authored_tests": [
+      "scenario_runner_error_replay_divergence_preserves_stable_code",
+      "runner_error_message_replay_divergence_preserves_stable_code"
+    ],
+    "remaining_gap": "YAML_SEMANTIC_SOURCE_SPANS_NOT_IMPLEMENTED",
+    "gap_state": "BLOCKED_GAP",
+    "blockers": [
+      "FOCUSED_CONTRACT_NOT_EXECUTED",
+      "YAML_SEMANTIC_SOURCE_SPANS_NOT_IMPLEMENTED"
+    ],
+    "preservation": {
+      "accepted_yaml_narrowed": false,
+      "dependency_removed": false,
+      "yaml_capability_removed": false,
+      "yaml_file_removed": false,
+      "error_type_changed": false,
+      "exit_code_changed": false,
+      "replay_comparison_changed": false,
+      "terminal_decision_issued": false
+    },
+    "no_claim_boundary": "The GAP-15 CLI adapter source changes and focused tests are authored but were not compiled or executed in this static lane. Both adapters now retain the registered ASUP-E401 token in their reconstructed replay-divergence messages, but semantic validation still has field paths rather than YAML source spans, so SCN-GAP-15 remains blocked. This row proves no runtime output, parser behavior, conversion, semantic or fingerprint equivalence, performance, security, broad health, release readiness, tracker closure, cutover, or terminal authority."
+  },
   "a4_gap16_source_progress": {
     "progress_id": "SCN-A4-GAP-16-ATOMIC-REPLAY-SOURCE-V1",
     "bead_id": "asupersync-5z2scg.5.4",
@@ -2171,6 +2213,7 @@
       "responsibility": "repair diagnostics, migration ergonomics, examples, include truth, atomic replay output, and operator documentation",
       "required_evidence": [
         "stable located errors",
+        "stable ASUP-E401 replay-divergence diagnostics in both CLI adapters",
         "migration guidance",
         "example and metadata alignment",
         "atomic no-clobber replay artifact persistence"
@@ -2179,6 +2222,7 @@
       "progress_pointer": "a4_source_progress",
       "additional_progress_pointers": [
         "a4_gap12_source_progress",
+        "a4_gap15_source_progress",
         "a4_gap16_source_progress"
       ],
       "no_claim": "Static source and documentation cannot substitute for executable runtime behavior or terminal proof."
@@ -2285,9 +2329,10 @@
     },
     {
       "gap_id": "SCN-GAP-15",
-      "finding": "semantic errors have field paths but no YAML source spans, and CLI replay adapters drop the runner's ASUP-E401 token",
+      "finding": "both CLI adapter token repairs and focused source tests are authored but unexecuted; semantic errors still have field paths rather than YAML source spans",
       "owner_bead": "asupersync-5z2scg.5.4",
-      "evidence_state": "BLOCKED_GAP"
+      "evidence_state": "BLOCKED_GAP",
+      "progress_pointer": "a4_gap15_source_progress"
     },
     {
       "gap_id": "SCN-GAP-16",
@@ -2300,8 +2345,8 @@
   "validation_commands": [
     {
       "lane": "scenario-yaml-capability-inventory-contract",
-      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/bin/asupersync.rs --overlay-path src/lab/scenario.rs --overlay-path tools/demos/time_travel.yaml --overlay-path docs/adoption/getting_started.md --overlay-path examples/README.md --overlay-path docs/adr/dep_plan_adr_004_config_scenario_formats.md --overlay-path artifacts/dependency_api_adr_registry_v1.json --overlay-path docs/dependency_api_adr_registry.md --overlay-path tests/dependency_api_adr_registry_contract.rs --overlay-path artifacts/config_toml_capability_inventory_v1.json --overlay-path artifacts/scenario_yaml_capability_inventory_v1.json --overlay-path docs/scenario_yaml_capability_inventory.md --overlay-path tests/scenario_yaml_capability_inventory_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_scenario_yaml_capability_inventory\" cargo test -p asupersync --test scenario_yaml_capability_inventory_contract -- --nocapture",
-      "claim": "source pins, typed schema, observed grammar, exact corpus, loaders, workflows, diagnostics, routed gaps, durable KEEP receipt gate derivation, A4/A5 authority handoff, static example-registry alignment, GAP-12 claim truth, GAP-16 atomic no-clobber replay source, author guidance markers, docs markers, and negative mutations"
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/bin/asupersync.rs --overlay-path frankenlab/src/main.rs --overlay-path src/lab/scenario.rs --overlay-path tools/demos/time_travel.yaml --overlay-path docs/adoption/getting_started.md --overlay-path examples/README.md --overlay-path docs/adr/dep_plan_adr_004_config_scenario_formats.md --overlay-path docs/error_codes/ASUP-E401.md --overlay-path artifacts/dependency_api_adr_registry_v1.json --overlay-path docs/dependency_api_adr_registry.md --overlay-path tests/dependency_api_adr_registry_contract.rs --overlay-path artifacts/config_toml_capability_inventory_v1.json --overlay-path artifacts/scenario_yaml_capability_inventory_v1.json --overlay-path docs/scenario_yaml_capability_inventory.md --overlay-path tests/scenario_yaml_capability_inventory_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_scenario_yaml_capability_inventory\" cargo test -p asupersync --test scenario_yaml_capability_inventory_contract -- --nocapture",
+      "claim": "source pins, typed schema, observed grammar, exact corpus, loaders, workflows, diagnostics, routed gaps, durable KEEP receipt gate derivation, A4/A5 authority handoff, static example-registry alignment, GAP-12 claim truth, GAP-15 stable replay diagnostics, GAP-16 atomic no-clobber replay source, author guidance markers, docs markers, and negative mutations"
     },
     {
       "lane": "existing-root-scenario-integration",
@@ -2314,5 +2359,5 @@
       "claim": "existing frankenlab example author journey only"
     }
   ],
-  "no_claim_boundary": "This A1/A2/A3.1/A3.2 packet combines the earlier executable inventory and canonical-JSON evidence with a current static acceptance-satisfiability audit and fail-closed KEEP_INCUMBENT governance receipt. The A4 additions record source-level example-registry, GAP-12 claim-truth, author-guidance alignment, and an authored GAP-16 replay-persistence change; no Rust contract was executed for them, and SCN-GAP-01, SCN-GAP-12, SCN-GAP-13, and SCN-GAP-16 remain blocked. A3.1, A3.2, and these A4 static slices did not rerun executable lanes or implement an owned YAML parser or production Scenario YAML writer. The GAP-16 source was not compiled or executed and therefore does not establish cross-platform filesystem behavior or crash durability after destination publication. The packet proves no complete parity, runtime behavior outside the authored replay-persistence source, performance, resource, security, broad-health, release, or terminal decision, and authorizes no input narrowing, dependency or file removal, tracker closure, or cutover. It grants no permission to remove serde_yaml, serde, any accepted field, error, document, or workflow. It also does not implement include merging, network or cancellation simulation, participant workloads, full fault effects, resource-policy bounds, or stable located semantic diagnostics. KEEP_INCUMBENT and dependency_exit_allowed=false remain mandatory. Only A5 may issue a terminal KEEP, DEFER, or CUTOVER decision; CUTOVER and dependency exit remain unauthorized until every declared prerequisite is satisfied."
+  "no_claim_boundary": "This A1/A2/A3.1/A3.2 packet combines the earlier executable inventory and canonical-JSON evidence with a current static acceptance-satisfiability audit and fail-closed KEEP_INCUMBENT governance receipt. The A4 additions record source-level example-registry, GAP-12 claim-truth, author-guidance alignment, authored GAP-15 replay-code diagnostics, and an authored GAP-16 replay-persistence change; no Rust contract was executed for them, and SCN-GAP-01, SCN-GAP-12, SCN-GAP-13, SCN-GAP-15, and SCN-GAP-16 remain blocked. A3.1, A3.2, and these A4 static slices did not rerun executable lanes or implement an owned YAML parser or production Scenario YAML writer. The GAP-15 source was not compiled or executed and semantic validation still lacks YAML source spans. The GAP-16 source was not compiled or executed and therefore does not establish cross-platform filesystem behavior or crash durability after destination publication. The packet proves no complete parity, runtime behavior outside the authored replay-persistence source, performance, resource, security, broad-health, release, or terminal decision, and authorizes no input narrowing, dependency or file removal, tracker closure, or cutover. It grants no permission to remove serde_yaml, serde, any accepted field, error, document, or workflow. It also does not implement include merging, network or cancellation simulation, participant workloads, full fault effects, resource-policy bounds, or stable located semantic diagnostics. KEEP_INCUMBENT and dependency_exit_allowed=false remain mandatory. Only A5 may issue a terminal KEEP, DEFER, or CUTOVER decision; CUTOVER and dependency exit remain unauthorized until every declared prerequisite is satisfied."
 }

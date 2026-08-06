@@ -219,8 +219,10 @@ plain strings.
 
 `Scenario::validate` returns all semantic problems with field-like paths, but
 those paths are not YAML source spans. `ScenarioRunnerError` includes
-`[ASUP-E401]` in replay-divergence `Display`; both CLI adapters reconstruct
-their own replay text and lose that stable token.
+`[ASUP-E401]` in replay-divergence `Display`. A4 has now authored the same
+leading token in both CLI adapters and focused source tests for those adapter
+messages; neither the tests nor the inventory contract were executed in this
+static lane.
 
 Both loaders publish a fully deserialized temporary value or an error, so a
 parse failure cannot expose a partial `Scenario`. They nevertheless read the
@@ -321,8 +323,10 @@ path context, parser text and available parser location plus a generic hint.
 Frankenlab still returns plain strings with equivalent path/parser context.
 Semantic validation reports field-like paths without YAML source spans.
 Unknown-oracle rejection remains separate. The runner owns `[ASUP-E401]` for
-replay divergence, while both CLI adapters still reconstruct text without that
-token. A3.1 freezes these facts; it does not prove a replacement diagnostic.
+replay divergence. At the A3.1 capture revision, both CLI adapters reconstructed
+text without that token. A3.1 freezes that historical fact; the later A4 source
+progress below records the unexecuted adapter repair rather than rewriting the
+A3.1 receipt.
 
 ### Application-limit matrix
 
@@ -466,6 +470,29 @@ benchmark behavior, checksums, cross-platform determinism, redaction, security,
 broad health, release readiness, tracker closure, dependency or file removal,
 cutover, or terminal authority.
 
+### A4 source progress: stable replay-divergence code
+
+A4 additionally records `SCN-A4-GAP-15-REPLAY-CODE-SOURCE-V1`. The root CLI's
+structured `replay_divergence` title now starts with the registered
+`[ASUP-E401]` token for both its `ScenarioRunnerError` adapter and its direct
+same-seed comparison path. Frankenlab's `runner_error_message` now starts its
+reconstructed replay-divergence message with the same token. The error type,
+exit class, comparison behavior, and replay report schema are unchanged.
+
+The authored tests
+`scenario_runner_error_replay_divergence_preserves_stable_code` and
+`runner_error_message_replay_divergence_preserves_stable_code` pin the two
+adapter boundaries. This inventory contract also fails closed if either CLI
+drops the token, if either test disappears, or if the future clean-overlay lane
+omits either production source.
+
+No Rust test, compiler, formatter, or remote lane was run for this static
+slice. Semantic validation still reports field-like paths rather than YAML
+source spans. Therefore `SCN-GAP-15 remains blocked`: the stable-code half is
+authored, while execution evidence and located semantic diagnostics remain
+outstanding. This is not conversion, parser, replay-equivalence, runtime,
+security, performance, broad-health, release, cutover, or terminal evidence.
+
 ### A4 source progress: atomic replay artifact persistence
 
 A4 additionally records `SCN-A4-GAP-16-ATOMIC-REPLAY-SOURCE-V1`. The root
@@ -500,7 +527,7 @@ closure, cutover, or terminal authority.
 | A1 | loaders, schema, grammar, corpus, workflows, diagnostics, consumption, gaps | executed contract |
 | A2 | one versioned typed model and additive canonical JSON | executed contract |
 | A3 | incumbent KEEP or complete bounded owned parser/writer parity | A3.1 static audit and A3.2 durable receipt recorded; tracker state is separate |
-| A4 | located diagnostics, migration, examples, include truth, atomic output, docs | static source progress for exact example registry, GAP-12/author claim truth, and GAP-16 no-clobber replay persistence; behavioral evidence remains unrun |
+| A4 | located diagnostics, migration, examples, include truth, atomic output, docs | static source progress for exact example registry, GAP-12/author claim truth, GAP-15 stable replay code, and GAP-16 no-clobber replay persistence; behavioral evidence remains unrun |
 | A5 | real validate/run/explore/replay journeys and terminal KEEP, DEFER, or CUTOVER decision | planned |
 
 Only A5 is terminal. Any missing, planned, blocked, regressed, or not-at-required
@@ -526,7 +553,7 @@ The artifact routes sixteen fail-closed gaps:
 | `SCN-GAP-12` | source truth now separates the adjacent demo YAML from the typed corpus, but focused contracts remain unexecuted | A4 |
 | `SCN-GAP-13` | all 13 typed fixtures are source-registered, but the focused Rust contracts were not executed in this static lane | A4 |
 | `SCN-GAP-14` | no full-corpus typed YAML/JSON equivalence proof | A3 |
-| `SCN-GAP-15` | semantic spans and stable CLI replay code are incomplete | A4 |
+| `SCN-GAP-15` | stable CLI replay-code repairs and tests are authored but unexecuted; semantic YAML source spans remain absent | A4 |
 | `SCN-GAP-16` | staged, synced, no-clobber replay persistence is authored, but its focused Rust tests and inventory contract remain unexecuted | A4 |
 
 There are zero `UNKNOWN` loader, schema, grammar, corpus, workflow,
@@ -535,17 +562,20 @@ diagnostic, resource, consumer, child, or gap rows.
 ## Validation
 
 Run the focused source-pin, typed-schema, parser-behavior, corpus, routing,
-durable-receipt gate derivation, A4/A5 authority, GAP-16 replay-persistence
-source, documentation, and negative-mutation contract:
+durable-receipt gate derivation, A4/A5 authority, GAP-15 replay diagnostics,
+GAP-16 replay-persistence source, documentation, and negative-mutation
+contract:
 
 ```bash
 RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay \
   --overlay-path src/bin/asupersync.rs \
+  --overlay-path frankenlab/src/main.rs \
   --overlay-path src/lab/scenario.rs \
   --overlay-path tools/demos/time_travel.yaml \
   --overlay-path docs/adoption/getting_started.md \
   --overlay-path examples/README.md \
   --overlay-path docs/adr/dep_plan_adr_004_config_scenario_formats.md \
+  --overlay-path docs/error_codes/ASUP-E401.md \
   --overlay-path artifacts/dependency_api_adr_registry_v1.json \
   --overlay-path docs/dependency_api_adr_registry.md \
   --overlay-path tests/dependency_api_adr_registry_contract.rs \
@@ -569,20 +599,22 @@ checked scenarios and workflows; they do not close the routed execution gaps.
 This A1/A2/A3.1/A3.2 packet combines the earlier executable
 inventory/canonical-JSON evidence with a current static
 acceptance-satisfiability audit and fail-closed KEEP receipt. The A4 additions
-are source-level example-registry, GAP-12/author claim-truth alignment, and an
-authored GAP-16 replay-persistence change. No Rust contract was executed for
-them, and `SCN-GAP-01`, `SCN-GAP-12`, `SCN-GAP-13`, and `SCN-GAP-16` remain
-blocked. A3.1, A3.2, and these A4 static slices did not rerun executable lanes
-or implement an owned YAML parser or production Scenario YAML writer. The
-GAP-16 source was not compiled or executed and therefore does not establish
-cross-platform filesystem behavior or crash durability after destination
-publication. The packet proves no complete parity, runtime behavior outside
-the authored replay-persistence source, performance, resource, security,
-broad-health, release, or terminal decision, and authorizes no input narrowing,
-dependency or file removal, tracker closure, or cutover. It also does not
-implement include merging, network or cancellation simulation, participant
-workloads, full fault effects, resource-policy bounds, or stable located
-semantic diagnostics.
+are source-level example-registry, GAP-12/author claim-truth alignment, an
+authored GAP-15 replay-code repair, and an authored GAP-16 replay-persistence
+change. No Rust contract was executed for them, and `SCN-GAP-01`,
+`SCN-GAP-12`, `SCN-GAP-13`, `SCN-GAP-15`, and `SCN-GAP-16` remain blocked.
+A3.1, A3.2, and these A4 static slices did not rerun executable lanes or
+implement an owned YAML parser or production Scenario YAML writer. The GAP-15
+source was not compiled or executed, and semantic validation still lacks YAML
+source spans. The GAP-16 source was not compiled or executed and therefore does
+not establish cross-platform filesystem behavior or crash durability after
+destination publication. The packet proves no complete parity, runtime
+behavior outside the authored replay-persistence source, performance,
+resource, security, broad-health, release, or terminal decision, and authorizes
+no input narrowing, dependency or file removal, tracker closure, or cutover.
+It also does not implement include merging, network or cancellation simulation,
+participant workloads, full fault effects, resource-policy bounds, or stable
+located semantic diagnostics.
 `KEEP_INCUMBENT` and `dependency_exit_allowed=false` remain mandatory. Only A5
 may issue a terminal KEEP, DEFER, or CUTOVER decision; CUTOVER and dependency
 exit remain unauthorized until every declared prerequisite is satisfied.
