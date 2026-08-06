@@ -90,12 +90,17 @@
 //!
 //! See [`env_config`](super::env_config) for the full list of supported variables.
 //!
-//! ## With TOML Config File (requires `config-file` feature)
+//! ## With TOML or Versioned JSON Config (requires `config-file` feature)
 //!
 //! ```ignore
 //! let runtime = RuntimeBuilder::from_toml("config/runtime.toml")?
 //!     .with_env_overrides()?   // env vars override file values
 //!     .worker_threads(4)       // programmatic override (highest priority)
+//!     .build()?;
+//!
+//! let runtime = RuntimeBuilder::from_json("config/runtime.json")?
+//!     .with_env_overrides()?
+//!     .worker_threads(4)
 //!     .build()?;
 //! ```
 //!
@@ -105,7 +110,7 @@
 //!
 //! 1. **Programmatic** — `builder.worker_threads(4)` (highest)
 //! 2. **Environment** — `ASUPERSYNC_WORKER_THREADS=8`
-//! 3. **Config file** — `worker_threads = 16` in TOML
+//! 3. **Config file** — the shared typed layer loaded from TOML or JSON
 //! 4. **Defaults** — `RuntimeConfig::default()` (lowest)
 //!
 //! # Configuration Reference
@@ -2737,6 +2742,19 @@ impl RuntimeBuilder {
         Ok(self)
     }
 
+    #[cfg(feature = "config-file")]
+    #[allow(clippy::result_large_err)]
+    fn from_runtime_config_layer(
+        layer: &crate::runtime::env_config::RuntimeConfigLayer,
+    ) -> Result<Self, Error> {
+        let mut builder = Self::new();
+        crate::runtime::env_config::apply_runtime_config_layer(&mut builder.config, layer)
+            .map_err(|e| {
+                Error::new(crate::error::ErrorKind::ConfigError).with_message(e.to_string())
+            })?;
+        Ok(builder)
+    }
+
     /// Load configuration from a TOML file.
     ///
     /// Values from the file are applied as a base; environment variables
@@ -2760,19 +2778,7 @@ impl RuntimeBuilder {
         .map_err(|e| {
             Error::new(crate::error::ErrorKind::ConfigError).with_message(e.to_string())
         })?;
-        let mut config = RuntimeConfig::default();
-        crate::runtime::env_config::apply_toml_config(&mut config, &toml_config).map_err(|e| {
-            Error::new(crate::error::ErrorKind::ConfigError).with_message(e.to_string())
-        })?;
-        Ok(Self {
-            config,
-            reactor: None,
-            io_driver: None,
-            platform_reactor: true,
-            timer_driver: None,
-            entropy_source: None,
-            host_services: default_runtime_host_services(),
-        })
+        Self::from_runtime_config_layer(&toml_config)
     }
 
     /// Load configuration from a TOML string.
@@ -2798,19 +2804,51 @@ impl RuntimeBuilder {
         let toml_config = crate::runtime::env_config::parse_toml_str(toml).map_err(|e| {
             Error::new(crate::error::ErrorKind::ConfigError).with_message(e.to_string())
         })?;
-        let mut config = RuntimeConfig::default();
-        crate::runtime::env_config::apply_toml_config(&mut config, &toml_config).map_err(|e| {
+        Self::from_runtime_config_layer(&toml_config)
+    }
+
+    /// Load configuration from a versioned JSON file.
+    ///
+    /// JSON is additive: it deserializes into the same typed layer and uses
+    /// the same application path as TOML. Environment variables and later
+    /// programmatic settings therefore retain identical precedence.
+    ///
+    /// Requires the `config-file` feature.
+    ///
+    /// ```ignore
+    /// let runtime = RuntimeBuilder::from_json("config/runtime.json")?
+    ///     .with_env_overrides()?
+    ///     .worker_threads(4)
+    ///     .build()?;
+    /// ```
+    #[cfg(feature = "config-file")]
+    #[allow(clippy::result_large_err)]
+    pub fn from_json(path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
+        let json_config = crate::runtime::env_config::parse_json_file(
+            path.as_ref(),
+            &crate::runtime::env_config::SystemEnvReader::new(),
+        )
+        .map_err(|e| {
             Error::new(crate::error::ErrorKind::ConfigError).with_message(e.to_string())
         })?;
-        Ok(Self {
-            config,
-            reactor: None,
-            io_driver: None,
-            platform_reactor: true,
-            timer_driver: None,
-            entropy_source: None,
-            host_services: default_runtime_host_services(),
-        })
+        Self::from_runtime_config_layer(&json_config)
+    }
+
+    /// Load configuration from a versioned JSON string.
+    ///
+    /// The document shape is
+    /// `{ "schema_version": 1, "config": { "scheduler": { ... } } }`.
+    /// Missing `schema_version` migrates to version 1. Unsupported explicit
+    /// versions fail closed. TOML and JSON share defaults and validation.
+    ///
+    /// Requires the `config-file` feature.
+    #[cfg(feature = "config-file")]
+    #[allow(clippy::result_large_err)]
+    pub fn from_json_str(json: &str) -> Result<Self, Error> {
+        let json_config = crate::runtime::env_config::parse_json_str(json).map_err(|e| {
+            Error::new(crate::error::ErrorKind::ConfigError).with_message(e.to_string())
+        })?;
+        Self::from_runtime_config_layer(&json_config)
     }
 
     /// Build a runtime from this configuration.
@@ -7435,6 +7473,59 @@ worker_threads = 8
     fn from_toml_str_invalid_returns_error() {
         let result = RuntimeBuilder::from_toml_str("not valid {{{{");
         assert!(result.is_err());
+    }
+
+    #[cfg(feature = "config-file")]
+    #[test]
+    fn from_json_str_builds_runtime_through_the_shared_typed_layer() {
+        let json = r#"{
+            "schema_version": 1,
+            "config": {
+                "scheduler": {
+                    "worker_threads": 2,
+                    "poll_budget": 32
+                }
+            }
+        }"#;
+        let runtime = RuntimeBuilder::from_json_str(json)
+            .expect("from_json_str")
+            .build()
+            .expect("runtime build");
+        assert_eq!(runtime.config().worker_threads, 2);
+        assert_eq!(runtime.config().poll_budget, 32);
+    }
+
+    #[cfg(feature = "config-file")]
+    #[test]
+    fn from_json_str_rejects_unsupported_schema_version() {
+        let result = RuntimeBuilder::from_json_str(
+            r#"{"schema_version":2,"config":{"scheduler":{"worker_threads":2}}}"#,
+        );
+        let error = match result {
+            Ok(_) => panic!("unsupported JSON schema must fail closed"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("schema version 2"));
+    }
+
+    #[cfg(feature = "config-file")]
+    #[test]
+    fn precedence_programmatic_over_env_over_json() {
+        use crate::runtime::env_config::*;
+        with_envs(&[(ENV_WORKER_THREADS, "8")], || {
+            let json = r#"{
+                "schema_version": 1,
+                "config": {"scheduler": {"worker_threads": 16}}
+            }"#;
+            let runtime = RuntimeBuilder::from_json_str(json)
+                .expect("from_json_str")
+                .with_env_overrides()
+                .expect("env overrides")
+                .worker_threads(2)
+                .build()
+                .expect("runtime build");
+            assert_eq!(runtime.config().worker_threads, 2);
+        });
     }
 
     #[cfg(feature = "config-file")]

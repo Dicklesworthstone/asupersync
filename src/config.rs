@@ -1,6 +1,7 @@
-//! Configuration, tuning, and runtime profiles for the RaptorQ-integrated runtime.
+//! Configuration documents, tuning, and runtime profiles.
 //!
 //! This module provides:
+//! - A versioned envelope and canonical JSON encoder for typed configuration
 //! - Hierarchical configuration types
 //! - Runtime profiles with sensible defaults
 //! - Validation for guardrail invariants
@@ -24,6 +25,179 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// Current schema version for canonical JSON configuration documents.
+pub const CONFIG_DOCUMENT_SCHEMA_VERSION: u32 = 1;
+
+fn default_config_document_schema_version() -> u32 {
+    CONFIG_DOCUMENT_SCHEMA_VERSION
+}
+
+/// Versioned canonical-JSON envelope for a typed configuration model.
+///
+/// `T` remains the only configuration payload. Existing authoring formats
+/// deserialize directly into `T`, while JSON uses this envelope to carry an
+/// explicit schema version. This prevents TOML and JSON from acquiring
+/// separate, drifting field models.
+///
+/// Missing `schema_version` migrates additively to version 1. Unsupported
+/// explicit versions fail closed in [`Self::from_json`] and
+/// [`Self::to_canonical_json`]. Unknown fields retain serde's default
+/// ignore-on-input behavior so an additive JSON path does not tighten the
+/// incumbent TOML contract.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct VersionedConfigDocument<T> {
+    /// Schema version for the envelope, independent of application versions.
+    #[serde(default = "default_config_document_schema_version")]
+    pub schema_version: u32,
+    /// The single typed configuration payload shared by every format layer.
+    pub config: T,
+}
+
+impl<T> VersionedConfigDocument<T> {
+    /// Wrap a typed configuration using the current schema version.
+    #[must_use]
+    pub const fn new(config: T) -> Self {
+        Self {
+            schema_version: CONFIG_DOCUMENT_SCHEMA_VERSION,
+            config,
+        }
+    }
+
+    /// Consume the envelope and return its typed configuration payload.
+    #[must_use]
+    pub fn into_config(self) -> T {
+        self.config
+    }
+
+    fn validate_schema_version(&self) -> Result<(), ConfigDocumentError> {
+        if self.schema_version == CONFIG_DOCUMENT_SCHEMA_VERSION {
+            Ok(())
+        } else {
+            Err(ConfigDocumentError::UnsupportedSchemaVersion {
+                observed: self.schema_version,
+                supported: CONFIG_DOCUMENT_SCHEMA_VERSION,
+            })
+        }
+    }
+}
+
+impl<T> VersionedConfigDocument<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    /// Parse a versioned JSON document into its single typed model.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigDocumentError::Json`] for malformed or ill-typed JSON,
+    /// or [`ConfigDocumentError::UnsupportedSchemaVersion`] for an explicit
+    /// version other than the current one.
+    pub fn from_json(json: &str) -> Result<Self, ConfigDocumentError> {
+        let document = serde_json::from_str(json).map_err(ConfigDocumentError::Json)?;
+        document.validate_schema_version()?;
+        Ok(document)
+    }
+}
+
+impl<T> VersionedConfigDocument<T>
+where
+    T: serde::Serialize,
+{
+    /// Serialize the versioned document as compact canonical JSON.
+    ///
+    /// Object keys are recursively ordered lexicographically, arrays retain
+    /// typed order, and finite numbers use `serde_json`'s stable shortest
+    /// representation. Path and secret representation remain responsibilities
+    /// of the typed payload: secret-bearing models must provide a redacted
+    /// projection instead of serializing raw credentials.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the document has an unsupported schema version or
+    /// if its typed payload cannot be represented as JSON.
+    pub fn to_canonical_json(&self) -> Result<String, ConfigDocumentError> {
+        self.validate_schema_version()?;
+        to_canonical_json(self).map_err(ConfigDocumentError::Json)
+    }
+}
+
+/// Serialize any serde value as compact recursively key-ordered JSON.
+///
+/// This is the shared encoding primitive for versioned configuration models.
+/// It does not perform semantic validation or secret redaction; callers must
+/// apply those model-specific policies before encoding.
+///
+/// # Errors
+///
+/// Returns an error if `value` cannot be represented by `serde_json`.
+pub fn to_canonical_json<T>(value: &T) -> Result<String, serde_json::Error>
+where
+    T: serde::Serialize + ?Sized,
+{
+    let value = serde_json::to_value(value)?;
+    serde_json::to_string(&canonicalize_json_value(value))
+}
+
+fn canonicalize_json_value(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values
+                .into_iter()
+                .map(canonicalize_json_value)
+                .collect(),
+        ),
+        serde_json::Value::Object(values) => {
+            let mut entries: Vec<_> = values.into_iter().collect();
+            entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+
+            let mut canonical = serde_json::Map::new();
+            for (key, value) in entries {
+                canonical.insert(key, canonicalize_json_value(value));
+            }
+            serde_json::Value::Object(canonical)
+        }
+        scalar => scalar,
+    }
+}
+
+/// Error returned by versioned canonical JSON configuration operations.
+#[derive(Debug)]
+pub enum ConfigDocumentError {
+    /// The JSON syntax or typed representation is invalid.
+    Json(serde_json::Error),
+    /// The envelope names a schema version this build does not support.
+    UnsupportedSchemaVersion {
+        /// Version observed in the document.
+        observed: u32,
+        /// Version supported by this build.
+        supported: u32,
+    },
+}
+
+impl std::fmt::Display for ConfigDocumentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Json(error) => write!(f, "JSON config error: {error}"),
+            Self::UnsupportedSchemaVersion {
+                observed,
+                supported,
+            } => write!(
+                f,
+                "unsupported config schema version {observed}; expected {supported}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ConfigDocumentError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Json(error) => Some(error),
+            Self::UnsupportedSchemaVersion { .. } => None,
+        }
+    }
+}
 
 /// Top-level configuration for the RaptorQ runtime.
 #[derive(Debug, Clone, Default)]
@@ -1177,6 +1351,79 @@ fn parse_transport_coding_policy(
 #[allow(unsafe_code)]
 mod tests {
     use super::*;
+
+    #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct SampleDocumentConfig {
+        zeta: u32,
+        alpha: String,
+        freeform: serde_json::Value,
+    }
+
+    #[test]
+    fn versioned_config_document_has_recursive_canonical_golden() {
+        let mut freeform = serde_json::Map::new();
+        freeform.insert("z".to_owned(), serde_json::json!(2));
+        freeform.insert("a".to_owned(), serde_json::json!([{"y": 1, "b": 2}]));
+        let document = VersionedConfigDocument::new(SampleDocumentConfig {
+            zeta: 9,
+            alpha: "first".to_owned(),
+            freeform: serde_json::Value::Object(freeform),
+        });
+
+        assert_eq!(
+            document.to_canonical_json().expect("canonical JSON"),
+            r#"{"config":{"alpha":"first","freeform":{"a":[{"b":2,"y":1}],"z":2},"zeta":9},"schema_version":1}"#
+        );
+    }
+
+    #[test]
+    fn versioned_config_document_migrates_missing_v1_and_ignores_unknown_fields() {
+        let document = VersionedConfigDocument::<SampleDocumentConfig>::from_json(
+            r#"{
+                "future_envelope_field": "ignored",
+                "config": {
+                    "zeta": 9,
+                    "alpha": "first",
+                    "freeform": {},
+                    "future_config_field": true
+                }
+            }"#,
+        )
+        .expect("missing schema version must migrate to v1");
+
+        assert_eq!(document.schema_version, CONFIG_DOCUMENT_SCHEMA_VERSION);
+        assert_eq!(document.config.zeta, 9);
+        assert!(!document.to_canonical_json().unwrap().contains("future_"));
+    }
+
+    #[test]
+    fn versioned_config_document_rejects_unsupported_schema_on_read_and_write() {
+        let read_error = VersionedConfigDocument::<SampleDocumentConfig>::from_json(
+            r#"{"schema_version":2,"config":{"zeta":9,"alpha":"first","freeform":{}}}"#,
+        )
+        .expect_err("unsupported input schema must fail closed");
+        assert!(matches!(
+            read_error,
+            ConfigDocumentError::UnsupportedSchemaVersion {
+                observed: 2,
+                supported: 1
+            }
+        ));
+
+        let mut document = VersionedConfigDocument::new(SampleDocumentConfig {
+            zeta: 9,
+            alpha: "first".to_owned(),
+            freeform: serde_json::json!({}),
+        });
+        document.schema_version = 2;
+        assert!(matches!(
+            document.to_canonical_json(),
+            Err(ConfigDocumentError::UnsupportedSchemaVersion {
+                observed: 2,
+                supported: 1
+            })
+        ));
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     mod native_server_config_tests {
