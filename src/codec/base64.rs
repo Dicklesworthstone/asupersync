@@ -16,6 +16,10 @@
 //! offset, canonical trailing bits, then destination length. Encoding reports
 //! representational overflow before the binary policy cap, and destination
 //! mismatch only after the complete size plan succeeds.
+//!
+//! This is a general-purpose safe scalar kernel, not a side-channel-hardened
+//! primitive. It makes no constant-time claim; security-bearing callers must
+//! retain their protocol-specific validation, redaction, and failure mapping.
 
 #![forbid(unsafe_code)]
 
