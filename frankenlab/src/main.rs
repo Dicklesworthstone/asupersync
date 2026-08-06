@@ -202,6 +202,8 @@ struct LdfiArgs {
 // Scenario loading
 // ---------------------------------------------------------------------------
 
+const REPLAY_DIVERGENCE_PREFIX: &str = "[ASUP-E401]";
+
 fn parse_scenario(path: &Path, yaml: &str) -> Result<asupersync::lab::scenario::Scenario, String> {
     serde_yaml::from_str(yaml).map_err(|e| {
         format!(
@@ -241,7 +243,7 @@ fn runner_error_message(err: ScenarioRunnerError) -> String {
             second,
         } => {
             format!(
-                "Replay divergence at seed {seed}: \
+                "{REPLAY_DIVERGENCE_PREFIX} Replay divergence at seed {seed}: \
                 run1(event_hash={}, steps={}) != run2(event_hash={}, steps={})",
                 first.event_hash, first.steps, second.event_hash, second.steps,
             )
@@ -1296,6 +1298,29 @@ mod tests {
         IncidentSourceKind,
     };
     use std::collections::BTreeMap;
+
+    #[test]
+    fn runner_error_message_replay_divergence_preserves_stable_code() {
+        use asupersync::lab::scenario_runner::TraceCertificateSnapshot;
+
+        let message = runner_error_message(ScenarioRunnerError::ReplayDivergence {
+            seed: 17,
+            first: TraceCertificateSnapshot {
+                event_hash: 10,
+                schedule_hash: 20,
+                steps: 30,
+                trace_fingerprint: 40,
+            },
+            second: TraceCertificateSnapshot {
+                event_hash: 11,
+                schedule_hash: 21,
+                steps: 31,
+                trace_fingerprint: 41,
+            },
+        });
+
+        assert!(message.starts_with("[ASUP-E401] Replay divergence at seed 17:"));
+    }
 
     #[test]
     fn ldfi_cli_core_finds_single_shared_fault() {

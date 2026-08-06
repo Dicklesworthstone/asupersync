@@ -8935,6 +8935,9 @@ struct WasmDependencyForbiddenHit {
     transitive_chain: Vec<String>,
 }
 
+const REPLAY_DIVERGENCE_TITLE: &str =
+    "[ASUP-E401] Deterministic replay divergence detected";
+
 fn load_scenario(path: &Path) -> Result<asupersync::lab::scenario::Scenario, CliError> {
     let yaml = fs::read_to_string(path).map_err(|err| io_error(path, &err))?;
     serde_yaml::from_str(&yaml).map_err(|err| {
@@ -8978,7 +8981,7 @@ fn scenario_runner_error(err: asupersync::lab::scenario_runner::ScenarioRunnerEr
             second,
         } => CliError::new(
             "replay_divergence",
-            "Deterministic replay divergence detected",
+            REPLAY_DIVERGENCE_TITLE,
         )
         .detail(format!(
             "Seed {seed}: run1(event_hash={}, steps={}) != run2(event_hash={}, steps={})",
@@ -9116,7 +9119,7 @@ fn lab_replay(args: &LabReplayArgs, output: &mut Output) -> Result<(), CliError>
         );
         return Err(CliError::new(
             "replay_divergence",
-            "Deterministic replay divergence detected",
+            REPLAY_DIVERGENCE_TITLE,
         )
         .detail(detail)
         .exit_code(ExitCode::DETERMINISM_FAILURE));
@@ -13432,6 +13435,34 @@ mod tests {
 
         assert_eq!(err.error_type, "unknown_oracle");
         assert_eq!(err.exit_code, ExitCode::USER_ERROR);
+    }
+
+    #[test]
+    fn scenario_runner_error_replay_divergence_preserves_stable_code() {
+        use asupersync::lab::scenario_runner::{
+            ScenarioRunnerError, TraceCertificateSnapshot,
+        };
+
+        let err = scenario_runner_error(ScenarioRunnerError::ReplayDivergence {
+            seed: 17,
+            first: TraceCertificateSnapshot {
+                event_hash: 10,
+                schedule_hash: 20,
+                steps: 30,
+                trace_fingerprint: 40,
+            },
+            second: TraceCertificateSnapshot {
+                event_hash: 11,
+                schedule_hash: 21,
+                steps: 31,
+                trace_fingerprint: 41,
+            },
+        });
+
+        assert_eq!(err.error_type, "replay_divergence");
+        assert_eq!(err.title, REPLAY_DIVERGENCE_TITLE);
+        assert!(err.title.starts_with("[ASUP-E401]"));
+        assert_eq!(err.exit_code, ExitCode::DETERMINISM_FAILURE);
     }
 
     #[test]
