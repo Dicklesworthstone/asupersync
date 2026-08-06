@@ -186,8 +186,8 @@ RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay \
   --test regex_built_in_detector_corpus_contract -- --nocapture
 ```
 
-R2.1's recorded execution state is `NOT_RUN_BY_R2_1_STATIC_LANE`. No local
-Cargo fallback is approved.
+R2.1's recorded execution state is `NOT_RUN_BY_R2_1_STATIC_LANE`.
+No local Cargo fallback is approved.
 
 ## No-claim boundary
 
