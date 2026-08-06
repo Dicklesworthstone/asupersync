@@ -1867,9 +1867,7 @@ impl<H: Handler> Handler for CatchPanicMiddleware<H> {
             // (br-asupersync-server-stack-hardening-eeexl1.3).
             let outcome =
                 match std::panic::catch_unwind(AssertUnwindSafe(|| self.inner.call(&cx, req))) {
-                    Ok(future) => {
-                        crate::util::future::catch_unwind(AssertUnwindSafe(future)).await
-                    }
+                    Ok(future) => crate::util::future::catch_unwind(AssertUnwindSafe(future)).await,
                     Err(payload) => Err(payload),
                 };
 

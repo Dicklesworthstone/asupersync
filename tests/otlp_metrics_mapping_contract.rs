@@ -138,10 +138,7 @@ fn map_string_set(value: &Map<String, Value>, key: &str) -> BTreeSet<String> {
 }
 
 fn row_ids(rows: &[Value], key: &str) -> BTreeSet<String> {
-    let result: BTreeSet<String> = rows
-        .iter()
-        .map(|row| text(row, key).to_owned())
-        .collect();
+    let result: BTreeSet<String> = rows.iter().map(|row| text(row, key).to_owned()).collect();
     assert_eq!(result.len(), rows.len(), "{key} entries must be unique");
     result
 }
@@ -175,10 +172,7 @@ fn validate_authority(value: &Value) -> Result<(), String> {
     if actual_keys != expected_keys {
         return Err("authority keys must match the closed schema".to_owned());
     }
-    for key in [
-        "static_contract_only",
-        "external_meter_bridge_retained",
-    ] {
+    for key in ["static_contract_only", "external_meter_bridge_retained"] {
         if authority.get(key).and_then(Value::as_bool) != Some(true) {
             return Err(format!("authority.{key} must be true"));
         }
@@ -200,17 +194,19 @@ fn validate_authority(value: &Value) -> Result<(), String> {
     {
         return Err("executable validation must remain UNRUN_STATIC_ONLY".to_owned());
     }
-    if authority.get("lab_runtime_status").and_then(Value::as_str)
-        != Some("UNRUN_REQUIRED")
-    {
+    if authority.get("lab_runtime_status").and_then(Value::as_str) != Some("UNRUN_REQUIRED") {
         return Err("LabRuntime status must remain UNRUN_REQUIRED".to_owned());
     }
-    if authority.get("real_collector_status").and_then(Value::as_str)
+    if authority
+        .get("real_collector_status")
+        .and_then(Value::as_str)
         != Some("UNRUN_REQUIRED")
     {
         return Err("real collector status must remain UNRUN_REQUIRED".to_owned());
     }
-    if authority.get("required_disposition").and_then(Value::as_str)
+    if authority
+        .get("required_disposition")
+        .and_then(Value::as_str)
         != Some("KEEP_OPEN_PENDING_IMPLEMENTATION_AND_EXECUTABLE_EVIDENCE")
     {
         return Err("required disposition must keep the bead open".to_owned());
@@ -314,40 +310,158 @@ fn retained_instrument_census_and_mapping_are_exact() {
     let inventory = artifact();
     let rows = array(&inventory, "retained_instruments");
     let expected = [
-        ("asupersync.tasks.active", "OBSERVABLE_GAUGE_U64", "Currently running tasks", "1"),
-        ("asupersync.regions.active", "OBSERVABLE_GAUGE_U64", "Currently active regions", "1"),
-        ("asupersync.obligations.active", "OBSERVABLE_GAUGE_U64", "Currently active obligations", "1"),
-        ("asupersync.tasks.spawned", "COUNTER_U64", "Total tasks spawned", "1"),
-        ("asupersync.tasks.completed", "COUNTER_U64", "Total tasks completed", "1"),
-        ("asupersync.regions.created", "COUNTER_U64", "Total regions created", "1"),
-        ("asupersync.regions.closed", "COUNTER_U64", "Total regions closed", "1"),
-        ("asupersync.cancellations", "COUNTER_U64", "Cancellation requests", "1"),
-        ("asupersync.deadlines.set", "COUNTER_U64", "Deadlines configured", "1"),
-        ("asupersync.deadlines.exceeded", "COUNTER_U64", "Deadline exceeded events", "1"),
-        ("asupersync.deadline.warnings_total", "COUNTER_U64", "Deadline warning events", "1"),
-        ("asupersync.deadline.violations_total", "COUNTER_U64", "Deadline violation events", "1"),
-        ("asupersync.task.stuck_detected_total", "COUNTER_U64", "Tasks detected as stuck (no progress)", "1"),
-        ("asupersync.obligations.created", "COUNTER_U64", "Obligations created", "1"),
-        ("asupersync.obligations.discharged", "COUNTER_U64", "Obligations discharged", "1"),
-        ("asupersync.obligations.leaked", "COUNTER_U64", "Obligations leaked", "1"),
-        ("asupersync.tasks.duration", "HISTOGRAM_F64", "Task execution duration in seconds", "s"),
-        ("asupersync.regions.lifetime", "HISTOGRAM_F64", "Region lifetime in seconds", "s"),
-        ("asupersync.cancellation.drain_duration", "HISTOGRAM_F64", "Cancellation drain duration in seconds", "s"),
-        ("asupersync.deadline.remaining_seconds", "HISTOGRAM_F64", "Time remaining at completion in seconds", "s"),
-        ("asupersync.checkpoint.interval_seconds", "HISTOGRAM_F64", "Time between checkpoints in seconds", "s"),
-        ("asupersync.scheduler.poll_time", "HISTOGRAM_F64", "Scheduler poll duration in seconds", "s"),
-        ("asupersync.scheduler.tasks_polled", "HISTOGRAM_F64", "Tasks polled per scheduler tick", "1"),
+        (
+            "asupersync.tasks.active",
+            "OBSERVABLE_GAUGE_U64",
+            "Currently running tasks",
+            "1",
+        ),
+        (
+            "asupersync.regions.active",
+            "OBSERVABLE_GAUGE_U64",
+            "Currently active regions",
+            "1",
+        ),
+        (
+            "asupersync.obligations.active",
+            "OBSERVABLE_GAUGE_U64",
+            "Currently active obligations",
+            "1",
+        ),
+        (
+            "asupersync.tasks.spawned",
+            "COUNTER_U64",
+            "Total tasks spawned",
+            "1",
+        ),
+        (
+            "asupersync.tasks.completed",
+            "COUNTER_U64",
+            "Total tasks completed",
+            "1",
+        ),
+        (
+            "asupersync.regions.created",
+            "COUNTER_U64",
+            "Total regions created",
+            "1",
+        ),
+        (
+            "asupersync.regions.closed",
+            "COUNTER_U64",
+            "Total regions closed",
+            "1",
+        ),
+        (
+            "asupersync.cancellations",
+            "COUNTER_U64",
+            "Cancellation requests",
+            "1",
+        ),
+        (
+            "asupersync.deadlines.set",
+            "COUNTER_U64",
+            "Deadlines configured",
+            "1",
+        ),
+        (
+            "asupersync.deadlines.exceeded",
+            "COUNTER_U64",
+            "Deadline exceeded events",
+            "1",
+        ),
+        (
+            "asupersync.deadline.warnings_total",
+            "COUNTER_U64",
+            "Deadline warning events",
+            "1",
+        ),
+        (
+            "asupersync.deadline.violations_total",
+            "COUNTER_U64",
+            "Deadline violation events",
+            "1",
+        ),
+        (
+            "asupersync.task.stuck_detected_total",
+            "COUNTER_U64",
+            "Tasks detected as stuck (no progress)",
+            "1",
+        ),
+        (
+            "asupersync.obligations.created",
+            "COUNTER_U64",
+            "Obligations created",
+            "1",
+        ),
+        (
+            "asupersync.obligations.discharged",
+            "COUNTER_U64",
+            "Obligations discharged",
+            "1",
+        ),
+        (
+            "asupersync.obligations.leaked",
+            "COUNTER_U64",
+            "Obligations leaked",
+            "1",
+        ),
+        (
+            "asupersync.tasks.duration",
+            "HISTOGRAM_F64",
+            "Task execution duration in seconds",
+            "s",
+        ),
+        (
+            "asupersync.regions.lifetime",
+            "HISTOGRAM_F64",
+            "Region lifetime in seconds",
+            "s",
+        ),
+        (
+            "asupersync.cancellation.drain_duration",
+            "HISTOGRAM_F64",
+            "Cancellation drain duration in seconds",
+            "s",
+        ),
+        (
+            "asupersync.deadline.remaining_seconds",
+            "HISTOGRAM_F64",
+            "Time remaining at completion in seconds",
+            "s",
+        ),
+        (
+            "asupersync.checkpoint.interval_seconds",
+            "HISTOGRAM_F64",
+            "Time between checkpoints in seconds",
+            "s",
+        ),
+        (
+            "asupersync.scheduler.poll_time",
+            "HISTOGRAM_F64",
+            "Scheduler poll duration in seconds",
+            "s",
+        ),
+        (
+            "asupersync.scheduler.tasks_polled",
+            "HISTOGRAM_F64",
+            "Tasks polled per scheduler tick",
+            "1",
+        ),
     ];
     assert_eq!(rows.len(), expected.len());
 
-    let by_name: BTreeMap<&str, &Value> = rows
-        .iter()
-        .map(|row| (text(row, "name"), row))
-        .collect();
+    let by_name: BTreeMap<&str, &Value> = rows.iter().map(|row| (text(row, "name"), row)).collect();
     assert_eq!(by_name.len(), rows.len(), "instrument names must be unique");
     let expected_callbacks: BTreeMap<&str, &str> = [
-        ("asupersync.tasks.active", "task_spawned plus task_completed"),
-        ("asupersync.regions.active", "region_created plus region_closed"),
+        (
+            "asupersync.tasks.active",
+            "task_spawned plus task_completed",
+        ),
+        (
+            "asupersync.regions.active",
+            "region_created plus region_closed",
+        ),
         (
             "asupersync.obligations.active",
             "obligation_created plus obligation_discharged or obligation_leaked",
@@ -361,16 +475,16 @@ fn retained_instrument_census_and_mapping_are_exact() {
         ("asupersync.deadlines.exceeded", "deadline_exceeded"),
         ("asupersync.deadline.warnings_total", "deadline_warning"),
         ("asupersync.deadline.violations_total", "deadline_violation"),
-        ("asupersync.task.stuck_detected_total", "task_stuck_detected"),
+        (
+            "asupersync.task.stuck_detected_total",
+            "task_stuck_detected",
+        ),
         ("asupersync.obligations.created", "obligation_created"),
         ("asupersync.obligations.discharged", "obligation_discharged"),
         ("asupersync.obligations.leaked", "obligation_leaked"),
         ("asupersync.tasks.duration", "task_completed"),
         ("asupersync.regions.lifetime", "region_closed"),
-        (
-            "asupersync.cancellation.drain_duration",
-            "drain_completed",
-        ),
+        ("asupersync.cancellation.drain_duration", "drain_completed"),
         (
             "asupersync.deadline.remaining_seconds",
             "deadline_remaining",
@@ -485,11 +599,9 @@ fn retained_instrument_census_and_mapping_are_exact() {
                 "LAST_VALUE_AT_COLLECTION",
                 "NOT_APPLICABLE",
             ),
-            "COUNTER_U64" if actual.is_empty() => (
-                "Sum(NumberDataPoint::Int)",
-                "MONOTONIC_SUM",
-                "CUMULATIVE",
-            ),
+            "COUNTER_U64" if actual.is_empty() => {
+                ("Sum(NumberDataPoint::Int)", "MONOTONIC_SUM", "CUMULATIVE")
+            }
             "COUNTER_U64" => (
                 "Sum(NumberDataPoint::Int)",
                 "MONOTONIC_SUM_PER_ATTRIBUTE_SET",
@@ -535,7 +647,10 @@ fn retained_instrument_census_and_mapping_are_exact() {
         "unmapped_provider_callbacks row",
     );
     assert_eq!(text(&hooks[0], "callback"), "MetricsProvider::record_panic");
-    assert_eq!(text(&hooks[0], "current_otel_metrics_behavior"), "INHERITED_NO_OP");
+    assert_eq!(
+        text(&hooks[0], "current_otel_metrics_behavior"),
+        "INHERITED_NO_OP"
+    );
     assert_eq!(
         text(&hooks[0], "required_disposition"),
         "ADD_A_VERSIONED_COUNTER_MAPPING_OR_EXPLICITLY_KEEP_UNSUPPORTED_BEFORE_CUTOVER"
@@ -593,7 +708,9 @@ fn retained_instrument_census_and_mapping_are_exact() {
         expected_dynamic_kinds
     );
     for row in dynamic_rows {
-        let map = row.as_object().expect("dynamic mapping row must be an object");
+        let map = row
+            .as_object()
+            .expect("dynamic mapping row must be an object");
         assert_map_keys(
             map,
             &[
@@ -649,7 +766,9 @@ fn retained_instrument_census_and_mapping_are_exact() {
         expected_discarded_callbacks
     );
     for row in discarded_rows {
-        let map = row.as_object().expect("discarded input row must be an object");
+        let map = row
+            .as_object()
+            .expect("discarded input row must be an object");
         assert_map_keys(map, &["callback", "discarded"], "discarded input row");
         let callback = text(row, "callback");
         assert_eq!(
@@ -677,7 +796,9 @@ fn retained_instrument_census_and_mapping_are_exact() {
 
     let runtime = additional_by_id["RUNTIME-METRICS-FEATURE"];
     assert_map_keys(
-        runtime.as_object().expect("runtime surface must be an object"),
+        runtime
+            .as_object()
+            .expect("runtime surface must be an object"),
         &[
             "surface_id",
             "path",
@@ -703,13 +824,24 @@ fn retained_instrument_census_and_mapping_are_exact() {
             "worker_unparks",
         ])
     );
-    assert_eq!(value_string_set(runtime, "gauges"), string_set(&["active_timers"]));
+    assert_eq!(
+        value_string_set(runtime, "gauges"),
+        string_set(&["active_timers"])
+    );
     assert_eq!(text(runtime, "owned_mapping_state"), "UNMAPPED_GAP");
 
     let dynamic = additional_by_id["DYNAMIC-METRICS-REGISTRY-PRODUCERS"];
     assert_map_keys(
-        dynamic.as_object().expect("dynamic surface must be an object"),
-        &["surface_id", "paths", "state", "examples", "owned_mapping_state"],
+        dynamic
+            .as_object()
+            .expect("dynamic surface must be an object"),
+        &[
+            "surface_id",
+            "paths",
+            "state",
+            "examples",
+            "owned_mapping_state",
+        ],
         "dynamic registry retained surface",
     );
     assert_eq!(
@@ -726,8 +858,16 @@ fn retained_instrument_census_and_mapping_are_exact() {
 
     let direct = additional_by_id["DIRECT-METRIC-INSTRUMENT-PRODUCERS"];
     assert_map_keys(
-        direct.as_object().expect("direct surface must be an object"),
-        &["surface_id", "paths", "state", "examples", "owned_mapping_state"],
+        direct
+            .as_object()
+            .expect("direct surface must be an object"),
+        &[
+            "surface_id",
+            "paths",
+            "state",
+            "examples",
+            "owned_mapping_state",
+        ],
         "direct instrument retained surface",
     );
     assert_eq!(
@@ -923,10 +1063,22 @@ fn policy_limits_golden_matrix_and_gaps_are_explicit() {
     assert!(map_text(producer_limits, "resolution_rule").contains("covered by goldens"));
 
     let queue = object(&inventory, "snapshot_queue_and_batch_contract");
-    assert_eq!(map_text(queue, "queue_overload"), "DROP_OLDEST_THEN_RETAIN_FIFO");
-    assert_eq!(map_text(queue, "snapshot_entry_limit"), "EXPLICIT_UNBOUNDED");
-    assert_eq!(map_text(queue, "snapshot_label_limit"), "EXPLICIT_UNBOUNDED");
-    assert_eq!(map_text(queue, "snapshot_batch_byte_limit"), "EXPLICIT_UNBOUNDED");
+    assert_eq!(
+        map_text(queue, "queue_overload"),
+        "DROP_OLDEST_THEN_RETAIN_FIFO"
+    );
+    assert_eq!(
+        map_text(queue, "snapshot_entry_limit"),
+        "EXPLICIT_UNBOUNDED"
+    );
+    assert_eq!(
+        map_text(queue, "snapshot_label_limit"),
+        "EXPLICIT_UNBOUNDED"
+    );
+    assert_eq!(
+        map_text(queue, "snapshot_batch_byte_limit"),
+        "EXPLICIT_UNBOUNDED"
+    );
     assert!(map_text(queue, "queue_capacity_zero").contains("EFFECTIVE_DEPTH_ONE"));
 
     let message = object(&inventory, "owned_message_mapping");
@@ -1020,7 +1172,11 @@ fn policy_limits_golden_matrix_and_gaps_are_explicit() {
         ("metric_description_bytes", 4_096),
         ("metric_unit_bytes", 256),
     ] {
-        assert_eq!(map_u64(limits, key), expected, "owned limit mismatch for {key}");
+        assert_eq!(
+            map_u64(limits, key),
+            expected,
+            "owned limit mismatch for {key}"
+        );
     }
     assert_eq!(
         map_text(limits, "limit_failure"),
@@ -1031,8 +1187,7 @@ fn policy_limits_golden_matrix_and_gaps_are_explicit() {
             .contains("defaults, not immutable schema caps")
     );
     assert!(
-        map_text(limits, "producer_note")
-            .contains("do not make an unbounded producer bounded")
+        map_text(limits, "producer_note").contains("do not make an unbounded producer bounded")
     );
 
     let expected_goldens = string_set(&[
@@ -1061,7 +1216,12 @@ fn policy_limits_golden_matrix_and_gaps_are_explicit() {
     for row in golden_rows {
         assert_map_keys(
             row.as_object().expect("golden row must be an object"),
-            &["case_id", "requirement", "current_evidence", "acceptance_state"],
+            &[
+                "case_id",
+                "requirement",
+                "current_evidence",
+                "acceptance_state",
+            ],
             "required_golden_matrix row",
         );
         assert!(!text(row, "requirement").is_empty());
@@ -1143,7 +1303,10 @@ fn source_pins_and_documentation_match_the_claim_revision() {
             "source_pins row",
         );
         let path = text(pin, "path");
-        assert!(paths.insert(path.to_owned()), "duplicate source pin for {path}");
+        assert!(
+            paths.insert(path.to_owned()),
+            "duplicate source pin for {path}"
+        );
         let bytes = read_repo_bytes(path);
         assert_eq!(
             sha256_hex(&bytes),
@@ -1165,7 +1328,10 @@ fn source_pins_and_documentation_match_the_claim_revision() {
             let anchor = anchor
                 .as_str()
                 .unwrap_or_else(|| panic!("source anchor must be text for {path}"));
-            assert!(source.contains(anchor), "missing source anchor {anchor:?} in {path}");
+            assert!(
+                source.contains(anchor),
+                "missing source anchor {anchor:?} in {path}"
+            );
         }
     }
     assert_eq!(paths, expected_paths);
@@ -1192,7 +1358,10 @@ fn source_pins_and_documentation_match_the_claim_revision() {
         "The bead stays open",
         "This packet does not implement an owned production adapter",
     ] {
-        assert!(docs.contains(required), "documentation missing {required:?}");
+        assert!(
+            docs.contains(required),
+            "documentation missing {required:?}"
+        );
     }
 }
 
@@ -1219,7 +1388,10 @@ fn evidence_and_no_claims_cannot_be_promoted_by_the_static_packet() {
         ],
         "evidence_status",
     );
-    assert_eq!(map_text(evidence, "claim_time_source_inventory"), "COMPLETE_STATIC");
+    assert_eq!(
+        map_text(evidence, "claim_time_source_inventory"),
+        "COMPLETE_STATIC"
+    );
     assert_eq!(
         map_text(evidence, "retained_fixed_instrument_census"),
         "COMPLETE_STATIC_23"
@@ -1244,7 +1416,10 @@ fn evidence_and_no_claims_cannot_be_promoted_by_the_static_packet() {
         map_text(evidence, "prior_a3_integration_receipt"),
         "PARTIAL_EXECUTED_NOT_ACCEPTANCE_COMPLETE"
     );
-    assert_eq!(map_text(evidence, "dedicated_contract_source"), "AUTHORED_UNRUN");
+    assert_eq!(
+        map_text(evidence, "dedicated_contract_source"),
+        "AUTHORED_UNRUN"
+    );
     assert_eq!(map_text(evidence, "feature_compile"), "UNRUN");
     assert_eq!(map_text(evidence, "contract_execution"), "UNRUN");
     assert_eq!(map_text(evidence, "lab_runtime"), "UNRUN");

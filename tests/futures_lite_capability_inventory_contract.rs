@@ -361,8 +361,7 @@ fn validate_a5_receipt(inventory: &Value) -> Result<(), String> {
         .get("a5_panic_boundary_receipt")
         .expect("A5 panic-boundary receipt");
     if text(receipt, "owner_bead") != A5_BEAD_ID
-        || text(receipt, "claimed_base_revision")
-            != "e37de5b6c44c3c0d86c6f05a981249491d3c2343"
+        || text(receipt, "claimed_base_revision") != "e37de5b6c44c3c0d86c6f05a981249491d3c2343"
         || text(receipt, "source_status") != "PARTIAL_STATIC_SOURCE_PROGRESS"
         || text(receipt, "execution_status") != "NOT_RUN_STATIC_ONLY"
         || receipt.get("cutover_authorized") != Some(&Value::Bool(false))
@@ -428,8 +427,7 @@ fn validate_a5_receipt(inventory: &Value) -> Result<(), String> {
     }
 
     let helper = object(receipt, "poll_helper_contract");
-    if helper.get("api").and_then(Value::as_str)
-        != Some("crate::util::future::catch_unwind")
+    if helper.get("api").and_then(Value::as_str) != Some("crate::util::future::catch_unwind")
         || helper.get("drop_panic_contained").and_then(Value::as_bool) != Some(false)
         || !helper
             .get("post_terminal_behavior")
@@ -448,16 +446,8 @@ fn validate_a5_receipt(inventory: &Value) -> Result<(), String> {
     {
         return Err("A5 receipt must cover the exact two production boundaries".to_owned());
     }
-    let middleware_boundary = find_row(
-        boundaries,
-        "surface_id",
-        "FUT-PROD-MIDDLEWARE-CATCH",
-    );
-    let negotiate_boundary = find_row(
-        boundaries,
-        "surface_id",
-        "FUT-PROD-NEGOTIATE-CATCH",
-    );
+    let middleware_boundary = find_row(boundaries, "surface_id", "FUT-PROD-MIDDLEWARE-CATCH");
+    let negotiate_boundary = find_row(boundaries, "surface_id", "FUT-PROD-NEGOTIATE-CATCH");
     if !text(middleware_boundary, "operator_diagnostic").contains("ASUP-E502")
         || text(negotiate_boundary, "operator_diagnostic")
             != "missing stable code and structured log"
@@ -495,12 +485,11 @@ fn validate_a5_receipt(inventory: &Value) -> Result<(), String> {
         ("src/web/negotiate.rs", &negotiate_source),
     ] {
         if source.contains(&format!("use {TOKEN}::FutureExt;"))
-            || source
-                .matches("crate::util::future::catch_unwind")
-                .count()
-                != 1
+            || source.matches("crate::util::future::catch_unwind").count() != 1
         {
-            return Err(format!("A5 production poll-adapter migration drift: {path}"));
+            return Err(format!(
+                "A5 production poll-adapter migration drift: {path}"
+            ));
         }
     }
     if !middleware_source.contains("std::panic::catch_unwind")
@@ -510,11 +499,23 @@ fn validate_a5_receipt(inventory: &Value) -> Result<(), String> {
     }
 
     let delta = object(receipt, "dependency_token_delta");
-    if delta.get("production_poll_adapter_sites_before").and_then(Value::as_u64) != Some(2)
-        || delta.get("production_poll_adapter_sites_after").and_then(Value::as_u64) != Some(0)
-        || delta.get("current_census_token_delta").and_then(Value::as_i64) != Some(-2)
+    if delta
+        .get("production_poll_adapter_sites_before")
+        .and_then(Value::as_u64)
+        != Some(2)
+        || delta
+            .get("production_poll_adapter_sites_after")
+            .and_then(Value::as_u64)
+            != Some(0)
+        || delta
+            .get("current_census_token_delta")
+            .and_then(Value::as_i64)
+            != Some(-2)
         || delta.get("manifest_changed").and_then(Value::as_bool) != Some(false)
-        || delta.get("dependency_removal_authorized").and_then(Value::as_bool) != Some(false)
+        || delta
+            .get("dependency_removal_authorized")
+            .and_then(Value::as_bool)
+            != Some(false)
         || array(receipt, "missing_terminal_evidence").len() != 8
     {
         return Err("A5 dependency delta or terminal-evidence boundary drift".to_owned());
@@ -1501,17 +1502,17 @@ fn production_public_and_comment_only_sites_match_source() {
     let middleware = read_repo_file("src/web/middleware.rs");
     assert!(!middleware.contains(&format!("use {TOKEN}::FutureExt;")));
     assert!(middleware.contains("std::panic::catch_unwind"));
-    assert!(middleware.contains(
-        "crate::util::future::catch_unwind(AssertUnwindSafe(future)).await"
-    ));
+    assert!(
+        middleware.contains("crate::util::future::catch_unwind(AssertUnwindSafe(future)).await")
+    );
     assert!(middleware.contains("[ASUP-E502] web handler panic recovered"));
 
     let negotiate = read_repo_file("src/web/negotiate.rs");
     assert!(!negotiate.contains(&format!("use {TOKEN}::FutureExt;")));
     assert!(negotiate.contains("std::panic::catch_unwind"));
-    assert!(negotiate.contains(
-        "crate::util::future::catch_unwind(AssertUnwindSafe(future)).await"
-    ));
+    assert!(
+        negotiate.contains("crate::util::future::catch_unwind(AssertUnwindSafe(future)).await")
+    );
 
     let router = read_repo_file("src/web/router.rs");
     assert!(router.contains("pub fn handle(&self, req: Request) -> Response"));
@@ -1955,8 +1956,8 @@ fn malformed_inventory_mutations_fail_closed() {
     assert!(validate_inventory(&a5_promoted).is_err());
 
     let mut drop_panic_contained = canonical.clone();
-    drop_panic_contained["a5_panic_boundary_receipt"]["poll_helper_contract"]
-        ["drop_panic_contained"] = Value::Bool(true);
+    drop_panic_contained["a5_panic_boundary_receipt"]["poll_helper_contract"]["drop_panic_contained"] =
+        Value::Bool(true);
     assert!(validate_inventory(&drop_panic_contained).is_err());
 
     let mut baseline_rewritten = canonical;

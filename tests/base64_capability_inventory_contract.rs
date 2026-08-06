@@ -265,13 +265,18 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         return Err("zero-UNKNOWN or A1 execution policy drifted".to_owned());
     }
     let refresh = object(inventory, "static_refresh_receipt");
-    if refresh.get("previous_authority_revision").and_then(Value::as_str)
+    if refresh
+        .get("previous_authority_revision")
+        .and_then(Value::as_str)
         != Some("7bb939ab2d18c1c102671809cf74b922d2ed0437")
-        || refresh.get("current_authority_revision").and_then(Value::as_str)
+        || refresh
+            .get("current_authority_revision")
+            .and_then(Value::as_str)
             != Some(AUTHORITY_REVISION)
-        || refresh.get("review_method").and_then(Value::as_str)
-            != Some("SOURCE_ONLY_NO_EXECUTION")
-        || refresh.get("direct_rust_census_state").and_then(Value::as_str)
+        || refresh.get("review_method").and_then(Value::as_str) != Some("SOURCE_ONLY_NO_EXECUTION")
+        || refresh
+            .get("direct_rust_census_state")
+            .and_then(Value::as_str)
             != Some("UNCHANGED_36_PATHS_166_TOKENS")
         || refresh.get("execution_state").and_then(Value::as_str) != Some("NOT_RUN_BY_A1")
     {
@@ -356,8 +361,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         || resolution["excluded_wasm_scaffold"]["local_snapshot"]["locked_asupersync_version"]
             .as_str()
             != Some("0.3.2")
-        || resolution["excluded_wasm_scaffold"]["local_snapshot"]["locked_base64_version"]
-            .as_str()
+        || resolution["excluded_wasm_scaffold"]["local_snapshot"]["locked_base64_version"].as_str()
             != Some("0.22.1")
         || resolution["excluded_wasm_scaffold"]["scope"].as_str()
             != Some("EXCLUDED_WORKSPACE_NOT_ROOT_PRODUCTION_GRAPH")
@@ -498,7 +502,10 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     )?;
     for role in array(inventory, "security_roles") {
         if text(role, "category").is_empty()
-            || role.get("security_critical").and_then(Value::as_bool).is_none()
+            || role
+                .get("security_critical")
+                .and_then(Value::as_bool)
+                .is_none()
             || text(role, "description").is_empty()
         {
             return Err(format!(
@@ -540,7 +547,9 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         }
     }
     let vector_authority = object(inventory, "semantic_vector_authority");
-    if vector_authority.get("positive_vectors").and_then(Value::as_str)
+    if vector_authority
+        .get("positive_vectors")
+        .and_then(Value::as_str)
         != Some("RFC 4648 section 10")
         || vector_authority
             .get("independence_boundary")
@@ -680,16 +689,15 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         ("conformance", (0, 0)),
         ("asupersync-wasm/src", (0, 0)),
     ]);
-    let actual_root_totals: BTreeMap<_, _> =
-        array(&inventory["occurrence_census"], "root_totals")
-            .iter()
-            .map(|row| {
-                (
-                    text(row, "root"),
-                    (number(row, "paths"), number(row, "literal_tokens")),
-                )
-            })
-            .collect();
+    let actual_root_totals: BTreeMap<_, _> = array(&inventory["occurrence_census"], "root_totals")
+        .iter()
+        .map(|row| {
+            (
+                text(row, "root"),
+                (number(row, "paths"), number(row, "literal_tokens")),
+            )
+        })
+        .collect();
     if actual_root_totals != expected_root_totals {
         return Err("literal census root totals drifted".to_owned());
     }
@@ -783,7 +791,9 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         let mut projection = String::new();
         for path in &expected_paths {
             if !all_reserved_paths.insert(path.clone()) {
-                return Err(format!("reservation path {path} belongs to multiple groups"));
+                return Err(format!(
+                    "reservation path {path} belongs to multiple groups"
+                ));
             }
             projection.push_str(path);
             projection.push('\n');
@@ -905,7 +915,9 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             || !string_set(consumer, "profile_ids").is_subset(&profile_ids)
             || !string_set(consumer, "group_ids").is_subset(&group_ids)
         {
-            return Err(format!("nonpublic consumer relation drifted for {consumer_id}"));
+            return Err(format!(
+                "nonpublic consumer relation drifted for {consumer_id}"
+            ));
         }
     }
     let nonpublic_consumer_ids = row_ids(nonpublic_consumers, "consumer_id");
@@ -918,8 +930,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         .collect();
 
     let operation_progress = object(inventory, "operation_matrix_progress");
-    if operation_progress.get("state").and_then(Value::as_str)
-        != Some("A3_A4_RECORDED_A5_PENDING")
+    if operation_progress.get("state").and_then(Value::as_str) != Some("A3_A4_RECORDED_A5_PENDING")
         || operation_progress
             .get("external_operation_total")
             .and_then(Value::as_u64)
@@ -1055,7 +1066,9 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             return Err(format!("operation {operation_id} is incomplete"));
         }
         if !source_locations.insert((path.to_owned(), source_line)) {
-            return Err(format!("operation {operation_id} source location is duplicated"));
+            return Err(format!(
+                "operation {operation_id} source location is duplicated"
+            ));
         }
         let bucket_index = match (classification, direction) {
             ("PRODUCTION", "ENCODE") => 0,
@@ -1093,7 +1106,9 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         let role_id = text(operation, "role_id");
         let error_id = text(operation, "error_id");
         if !role_ids.contains(role_id) || !error_ids.contains(error_id) {
-            return Err(format!("operation {operation_id} registry relation drifted"));
+            return Err(format!(
+                "operation {operation_id} registry relation drifted"
+            ));
         }
         used_role_ids.insert(role_id.to_owned());
         used_error_ids.insert(error_id.to_owned());
@@ -1115,10 +1130,11 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             || !string_set(consumer, "call_ids").contains(call_id)
             || !string_set(consumer, "profile_ids").contains(text(operation, "profile_id"))
             || !string_set(consumer, "group_ids").contains(text(operation, "group_id"))
-            || string_set(operation, "capability_ids")
-                != string_set(consumer, "capability_ids")
+            || string_set(operation, "capability_ids") != string_set(consumer, "capability_ids")
         {
-            return Err(format!("operation {operation_id} consumer relation drifted"));
+            return Err(format!(
+                "operation {operation_id} consumer relation drifted"
+            ));
         }
         operation_totals.entry(call_id.to_owned()).or_default()[bucket_index] += count;
     }
@@ -1127,12 +1143,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     }
     let expected_recorded_call_ids: BTreeSet<String> = call_sites
         .iter()
-        .filter(|row| {
-            matches!(
-                text(row, "group"),
-                "B64-A3-AUTH" | "B64-A4-WEB-GRPC"
-            )
-        })
+        .filter(|row| matches!(text(row, "group"), "B64-A3-AUTH" | "B64-A4-WEB-GRPC"))
         .map(|row| text(row, "call_id").to_owned())
         .collect();
     if operation_totals.keys().cloned().collect::<BTreeSet<_>>() != expected_recorded_call_ids {
@@ -1140,12 +1151,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     }
     for call in call_sites
         .iter()
-        .filter(|row| {
-            matches!(
-                text(row, "group"),
-                "B64-A3-AUTH" | "B64-A4-WEB-GRPC"
-            )
-        })
+        .filter(|row| matches!(text(row, "group"), "B64-A3-AUTH" | "B64-A4-WEB-GRPC"))
     {
         let actual = operation_totals
             .get(text(call, "call_id"))
@@ -1470,13 +1476,18 @@ fn dependency_governance_sources_remain_blocking_and_version_skew_is_explicit() 
     );
     let auth_registry_row = array(&registry, "capabilities")
         .iter()
-        .find(|row| row.get("capability_id").and_then(Value::as_str) == Some("CAP-AUTH-CREDENTIALS"))
+        .find(|row| {
+            row.get("capability_id").and_then(Value::as_str) == Some("CAP-AUTH-CREDENTIALS")
+        })
         .expect("registry must contain the authentication capability");
     assert_eq!(
         text(auth_registry_row, "disposition"),
         "PRESERVE_AND_REPLACE_IF_PARITY"
     );
-    assert_eq!(text(auth_registry_row, "evidence_state"), "BASELINE_PLANNED");
+    assert_eq!(
+        text(auth_registry_row, "evidence_state"),
+        "BASELINE_PLANNED"
+    );
     assert_eq!(
         text(auth_registry_row, "cutover_state"),
         "BLOCKED_PENDING_EVIDENCE"
@@ -1498,14 +1509,19 @@ fn dependency_governance_sources_remain_blocking_and_version_skew_is_explicit() 
     );
     let auth_baseline_row = array(&baseline, "capability_baselines")
         .iter()
-        .find(|row| row.get("capability_id").and_then(Value::as_str) == Some("CAP-AUTH-CREDENTIALS"))
+        .find(|row| {
+            row.get("capability_id").and_then(Value::as_str) == Some("CAP-AUTH-CREDENTIALS")
+        })
         .expect("baseline must contain the authentication capability");
     assert_eq!(
         text(auth_baseline_row, "baseline_state"),
         "EXECUTABLE_PARTIAL_BLOCKING"
     );
     assert_eq!(auth_baseline_row["cutover_eligible"].as_bool(), Some(false));
-    assert_eq!(auth_baseline_row["downstream_profiles"], serde_json::json!([]));
+    assert_eq!(
+        auth_baseline_row["downstream_profiles"],
+        serde_json::json!([])
+    );
     require_exact_strings(
         auth_baseline_row,
         "evidence_ids",
@@ -1674,9 +1690,11 @@ fn dependency_governance_sources_remain_blocking_and_version_skew_is_explicit() 
     assert!(read_repo_file(FUZZ_MANIFEST_PATH).contains("base64 = \"0.22\""));
     assert!(read_repo_file(RAPTORQ_MANIFEST_PATH).contains("base64 = \"0.22\""));
     let excluded_wasm_manifest = read_repo_file("asupersync-wasm/Cargo.toml");
-    assert!(excluded_wasm_manifest.contains(
-        "asupersync = { version = \"0.3.5\", path = \"..\", default-features = false }"
-    ));
+    assert!(
+        excluded_wasm_manifest.contains(
+            "asupersync = { version = \"0.3.5\", path = \"..\", default-features = false }"
+        )
+    );
     assert!(
         read_repo_file("asupersync-wasm/src/lib.rs")
             .contains("Non-canonical Browser Edition binding scaffold.")

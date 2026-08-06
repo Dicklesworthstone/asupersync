@@ -393,9 +393,7 @@ impl<H: Handler> Handler for ErrorHandlerMiddleware<H> {
 
             let result = if self.config.catch_panics {
                 match std::panic::catch_unwind(AssertUnwindSafe(|| self.inner.call(&cx, req))) {
-                    Ok(future) => {
-                        crate::util::future::catch_unwind(AssertUnwindSafe(future)).await
-                    }
+                    Ok(future) => crate::util::future::catch_unwind(AssertUnwindSafe(future)).await,
                     Err(payload) => Err(payload),
                 }
             } else {
@@ -742,10 +740,8 @@ mod tests {
 
     #[test]
     fn error_handler_catches_construction_panic() {
-        let mw = ErrorHandlerMiddleware::new(
-            ConstructionPanicHandler,
-            ErrorHandlerConfig::default(),
-        );
+        let mw =
+            ErrorHandlerMiddleware::new(ConstructionPanicHandler, ErrorHandlerConfig::default());
         let resp = mw.call(make_request());
         assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
     }

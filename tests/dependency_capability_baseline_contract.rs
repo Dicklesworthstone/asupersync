@@ -29,8 +29,7 @@ const HASHBROWN_PATH_TOKEN: &str = concat!("hash", "brown::");
 const MARGINAL_LEDGER_PATH: &str = "artifacts/dependency_marginal_ledger_v1.json";
 const HOST_METADATA_BEAD_ID: &str = "asupersync-d24mms.2";
 const HOST_METADATA_AUDIT_ID: &str = "CAP-HOST-BENCH-METADATA-STATIC-AUDIT-V1";
-const HOST_METADATA_CHECKPOINT_BASE_REVISION: &str =
-    "706bde7ee34caa356ef675359b2e611dfae3e700";
+const HOST_METADATA_CHECKPOINT_BASE_REVISION: &str = "706bde7ee34caa356ef675359b2e611dfae3e700";
 const HOST_METADATA_INTEGRATION_PATH: &str = "tests/atp_benchmark_integration.rs";
 const HOST_METADATA_INTEGRATION_SHA256: &str =
     "c1854aba192f2c207c34a6c72031909e7b9bb209a6d46cbed0ad12b09e4945ef";
@@ -40,10 +39,8 @@ const HOST_METADATA_INTEGRATION_TEST: &str =
 const NUM_CPUS_CALL: &str = concat!("num_cpus", "::get()");
 const WHOAMI_CALL: &str = concat!("whoami", "::distro()");
 const TEMPFILE_BEAD_ID: &str = "asupersync-d24mms.5";
-const TEMPFILE_CHECKPOINT_ID: &str =
-    "CAP-TEMP-ARTIFACTS-CLAIM-TIME-STATIC-CHECKPOINT-V1";
-const TEMPFILE_CHECKPOINT_BASE_REVISION: &str =
-    "869664efc07f7be8a3e3803d48a786f76151a08d";
+const TEMPFILE_CHECKPOINT_ID: &str = "CAP-TEMP-ARTIFACTS-CLAIM-TIME-STATIC-CHECKPOINT-V1";
+const TEMPFILE_CHECKPOINT_BASE_REVISION: &str = "869664efc07f7be8a3e3803d48a786f76151a08d";
 const VISIBILITY_BEAD_ID: &str = "asupersync-d24mms.7";
 const VISIBILITY_AUDIT_ID: &str = "CAP-VISIBILITY-MACRO-STATIC-AUDIT-V1";
 const VISIBILITY_MAKE_TOKEN: &str = concat!("visibility", "::make(pub)");
@@ -1639,7 +1636,10 @@ fn host_benchmark_metadata_static_audit_is_source_pinned_and_fail_closed() {
         "SOURCE_AUTHORED_NOT_EXECUTED",
         "candidate APIs are compile/smoke anchors",
     ] {
-        assert!(docs.contains(required), "missing host checkpoint doc: {required}");
+        assert!(
+            docs.contains(required),
+            "missing host checkpoint doc: {required}"
+        );
     }
 
     let evidence = object(audit, "existing_evidence_assessment");
@@ -1868,7 +1868,10 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         "tempfile::Builder::new()",
         "_pack_tempdir: Option<tempfile::TempDir>",
     ] {
-        assert!(rq_production.contains(required), "RQ packing lost {required}");
+        assert!(
+            rq_production.contains(required),
+            "RQ packing lost {required}"
+        );
     }
 
     let quic = read_repo_file("src/net/atp/transport_quic/mod.rs");
@@ -1900,18 +1903,13 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
     assert!(benchmark.contains("let work_dir = TempDir::new()"));
 
     let lib = read_repo_file("src/lib.rs");
-    assert!(lib.contains(
-        "#[cfg(any(test, feature = \"test-internals\"))]\npub mod test_logging;"
-    ));
+    assert!(lib.contains("#[cfg(any(test, feature = \"test-internals\"))]\npub mod test_logging;"));
     let test_logging = read_repo_file("src/test_logging.rs");
     let test_logging_production = test_logging
         .split_once("\n#[cfg(test)]\n#[allow(unsafe_code)]\nmod tests")
         .map(|(production, _)| production)
         .expect("test logging must retain its cfg(test) module boundary");
-    assert_eq!(
-        count_occurrences(test_logging_production, "tempfile::"),
-        4
-    );
+    assert_eq!(count_occurrences(test_logging_production, "tempfile::"), 4);
 
     let source_paths = rust_source_paths_with_token("tempfile::");
     assert_eq!(source_paths.len(), 80);
@@ -1922,7 +1920,10 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         "src/net/atp/transport_rq/mod.rs",
         "src/test_logging.rs",
     ] {
-        assert!(source_paths.contains(required), "missing tempfile path {required}");
+        assert!(
+            source_paths.contains(required),
+            "missing tempfile path {required}"
+        );
     }
     let source_token_count = source_paths
         .iter()
@@ -1930,8 +1931,14 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         .sum::<u64>();
     assert_eq!(source_token_count, 277);
     assert_eq!(rust_paths_under_with_token("tests", "tempfile::").len(), 94);
-    assert_eq!(rust_paths_under_with_token("benches", "tempfile::").len(), 2);
-    assert_eq!(rust_paths_under_with_token("examples", "tempfile::").len(), 1);
+    assert_eq!(
+        rust_paths_under_with_token("benches", "tempfile::").len(),
+        2
+    );
+    assert_eq!(
+        rust_paths_under_with_token("examples", "tempfile::").len(),
+        1
+    );
 
     let baseline = artifact();
     let phase2 = object(&baseline, "phase2_terminal_readiness_static_audit");
@@ -1939,7 +1946,10 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         .iter()
         .find(|row| string(row, "prerequisite_id") == TEMPFILE_BEAD_ID)
         .expect("historical Phase-2 snapshot must retain the tempfile row");
-    assert_eq!(string(tempfile_row, "readiness_state"), "NO_DEDICATED_RECEIPT");
+    assert_eq!(
+        string(tempfile_row, "readiness_state"),
+        "NO_DEDICATED_RECEIPT"
+    );
     assert!(!boolean(tempfile_row, "terminal_ready"));
 
     let docs = read_repo_file(DOC_PATH);
@@ -1953,7 +1963,10 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         "default-native ATP RaptorQ and QUIC pack-materialization paths",
         "historical `NO_DEDICATED_RECEIPT` row remains unchanged",
     ] {
-        assert!(docs.contains(required), "missing tempfile checkpoint doc: {required}");
+        assert!(
+            docs.contains(required),
+            "missing tempfile checkpoint doc: {required}"
+        );
     }
 }
 
