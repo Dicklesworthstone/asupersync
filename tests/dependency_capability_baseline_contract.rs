@@ -39,6 +39,11 @@ const HOST_METADATA_INTEGRATION_TEST: &str =
     "benchmark_environment_host_metadata_candidate_contract";
 const NUM_CPUS_CALL: &str = concat!("num_cpus", "::get()");
 const WHOAMI_CALL: &str = concat!("whoami", "::distro()");
+const TEMPFILE_BEAD_ID: &str = "asupersync-d24mms.5";
+const TEMPFILE_CHECKPOINT_ID: &str =
+    "CAP-TEMP-ARTIFACTS-CLAIM-TIME-STATIC-CHECKPOINT-V1";
+const TEMPFILE_CHECKPOINT_BASE_REVISION: &str =
+    "869664efc07f7be8a3e3803d48a786f76151a08d";
 const VISIBILITY_BEAD_ID: &str = "asupersync-d24mms.7";
 const VISIBILITY_AUDIT_ID: &str = "CAP-VISIBILITY-MACRO-STATIC-AUDIT-V1";
 const VISIBILITY_MAKE_TOKEN: &str = concat!("visibility", "::make(pub)");
@@ -145,6 +150,19 @@ fn count_trimmed_lines(source: &str, marker: &str) -> u64 {
         .expect("source line count fits u64")
 }
 
+fn simple_toml_dependency_requirement<'a>(section: &'a str, dependency: &str) -> &'a str {
+    let prefix = format!("{dependency} = ");
+    let declaration = section
+        .lines()
+        .find(|line| line.trim_start().starts_with(&prefix))
+        .unwrap_or_else(|| panic!("missing {dependency} declaration"));
+    assert!(!declaration.contains("optional"));
+    declaration
+        .split_once('=')
+        .map(|(_, requirement)| requirement.trim())
+        .expect("dependency requirement")
+}
+
 fn production_before_test_module(source: &str) -> &str {
     source
         .split_once("\n#[cfg(test)]\nmod tests")
@@ -152,9 +170,9 @@ fn production_before_test_module(source: &str) -> &str {
         .expect("source must have a top-level cfg(test) module boundary")
 }
 
-fn rust_source_paths_with_token(token: &str) -> BTreeSet<String> {
+fn rust_paths_under_with_token(relative_root: &str, token: &str) -> BTreeSet<String> {
     let root = repo_root();
-    let mut pending = vec![root.join("src")];
+    let mut pending = vec![root.join(relative_root)];
     let mut matches = BTreeSet::new();
 
     while let Some(directory) = pending.pop() {
@@ -189,6 +207,10 @@ fn rust_source_paths_with_token(token: &str) -> BTreeSet<String> {
     }
 
     matches
+}
+
+fn rust_source_paths_with_token(token: &str) -> BTreeSet<String> {
+    rust_paths_under_with_token("src", token)
 }
 
 fn path_exists(path: &str) -> bool {
@@ -967,6 +989,10 @@ fn runner_and_docs_expose_replay_logging_and_no_claim_boundaries() {
         "NO_PLATFORM_OR_PROFILE_MATRIX_EXECUTED",
         "KEEP_INCUMBENT",
         "dependency_exit_allowed=false",
+        TEMPFILE_CHECKPOINT_ID,
+        TEMPFILE_BEAD_ID,
+        "SOURCE_AUTHORED_NOT_EXECUTED",
+        "normal_dependency_optionalization_allowed=false",
         VISIBILITY_AUDIT_ID,
         VISIBILITY_BEAD_ID,
         "NO_MACRO_REPLACEMENT_OR_COMPILE_MATRIX_EXECUTED",
@@ -1679,6 +1705,255 @@ fn host_benchmark_metadata_static_audit_is_source_pinned_and_fail_closed() {
         "does not authorize num_cpus or whoami removal",
     ] {
         assert!(no_claims.contains(required), "missing no-claim: {required}");
+    }
+}
+
+#[test]
+fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
+    let expected_pins = BTreeMap::from([
+        (
+            "Cargo.lock",
+            (
+                "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+                4666_u64,
+            ),
+        ),
+        (
+            "Cargo.toml",
+            (
+                "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+                1038_u64,
+            ),
+        ),
+        (
+            "artifacts/dependency_capability_baseline_v1.json",
+            (
+                "ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4",
+                3210_u64,
+            ),
+        ),
+        (
+            "artifacts/dependency_capability_registry_v1.json",
+            (
+                "e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2",
+                6917_u64,
+            ),
+        ),
+        (
+            "artifacts/dependency_marginal_ledger_v1.json",
+            (
+                "9382d8357e59b49b01775f3efad2db95f2186c63bc432b5616ba20f3b9a218a9",
+                188_045_u64,
+            ),
+        ),
+        (
+            "src/atp/benchmark/suite.rs",
+            (
+                "4c53f1453815ab28acd88ceff677cc837200044bf65a5739f464d1120b7f11a9",
+                341_u64,
+            ),
+        ),
+        (
+            "src/atp/mod.rs",
+            (
+                "098e4acd9abc7df0a9b6e3ba484b07e4eade44235166b98c43bad9a4cb3b327a",
+                172_u64,
+            ),
+        ),
+        (
+            "src/bin/asupersync.rs",
+            (
+                "39719e72f1c00122ec4730aab2e2404086292ac46ced4e9290bb206a3b618ec7",
+                16_791_u64,
+            ),
+        ),
+        (
+            "src/lib.rs",
+            (
+                "22ce17632d6a98843ebd6b9f855a430aef3ea6da07a6657e3311ad87b78c1b7f",
+                468_u64,
+            ),
+        ),
+        (
+            "src/net/atp/mod.rs",
+            (
+                "fff6f36cd57f83fc949b9f5a11ad67382367aeb79152a0b6bd62d36b274fb058",
+                67_u64,
+            ),
+        ),
+        (
+            "src/net/atp/transport_quic/mod.rs",
+            (
+                "01282192055de1910eab74c3c78b77493c9f2254848027152a50194c8e1d3796",
+                17_212_u64,
+            ),
+        ),
+        (
+            "src/net/atp/transport_rq/mod.rs",
+            (
+                "2d3f3123d15124a972b9172be3bcd5a9e8010cfde176e723fb2abb215e28ee86",
+                15_242_u64,
+            ),
+        ),
+        (
+            "src/net/mod.rs",
+            (
+                "a0652a2a243499570d274c670dc3c45125584f65909141a36e97fd585e05761e",
+                118_u64,
+            ),
+        ),
+        (
+            "src/test_logging.rs",
+            (
+                "85bb7979d1fa1e63c54b230f55b68c8e0f6deea57e6068365b6f91db04cf8848",
+                5919_u64,
+            ),
+        ),
+    ]);
+    for (path, (expected_sha, expected_lines)) in expected_pins {
+        let source = read_repo_file(path);
+        assert_eq!(
+            sha256_hex(source.as_bytes()),
+            expected_sha,
+            "tempfile checkpoint source drifted: {path}"
+        );
+        assert_eq!(
+            u64::try_from(source.lines().count()).expect("line count fits u64"),
+            expected_lines,
+            "tempfile checkpoint line count drifted: {path}"
+        );
+    }
+
+    let manifest = read_repo_file("Cargo.toml");
+    let normal_dependencies = manifest
+        .split_once("\n[dependencies]\n")
+        .map(|(_, rest)| rest)
+        .and_then(|rest| rest.split_once("\n[target.").map(|(section, _)| section))
+        .expect("root normal dependencies section");
+    let dev_dependencies = manifest
+        .split_once("\n[dev-dependencies]\n")
+        .map(|(_, rest)| rest)
+        .and_then(|rest| rest.split_once("\n[target.").map(|(section, _)| section))
+        .expect("root dev dependencies section");
+    assert_eq!(
+        simple_toml_dependency_requirement(normal_dependencies, "tempfile"),
+        simple_toml_dependency_requirement(dev_dependencies, "tempfile")
+    );
+    assert_eq!(count_occurrences(&manifest, "dep:tempfile"), 0);
+    assert!(manifest.contains(
+        "name = \"asupersync\"\npath = \"src/bin/asupersync.rs\"\nrequired-features = [\"cli\"]"
+    ));
+    let lock = read_repo_file("Cargo.lock");
+    let tempfile_packages = lock
+        .split("\n[[package]]\n")
+        .filter(|package| package.starts_with("name = \"tempfile\"\n"))
+        .collect::<Vec<_>>();
+    assert_eq!(tempfile_packages.len(), 1);
+    assert!(tempfile_packages[0].contains("\nversion = \""));
+    assert!(tempfile_packages[0].contains("\nsource = \"registry+"));
+
+    let net = read_repo_file("src/net/mod.rs");
+    assert!(net.contains("#[cfg(not(target_arch = \"wasm32\"))]\npub mod atp;"));
+    let net_atp = read_repo_file("src/net/atp/mod.rs");
+    assert!(net_atp.contains("pub mod transport_quic;\npub mod transport_rq;"));
+
+    let rq = read_repo_file("src/net/atp/transport_rq/mod.rs");
+    let rq_production = rq
+        .split_once("\n#[cfg(test)]\n#[path = \"transport_rq_tests.rs\"]")
+        .map(|(production, _)| production)
+        .expect("RQ source must retain its external cfg(test) module boundary");
+    assert_eq!(count_occurrences(rq_production, "tempfile::"), 4);
+    for required in [
+        "Option<tempfile::TempDir>",
+        "tempfile::Builder::new()",
+        "_pack_tempdir: Option<tempfile::TempDir>",
+    ] {
+        assert!(rq_production.contains(required), "RQ packing lost {required}");
+    }
+
+    let quic = read_repo_file("src/net/atp/transport_quic/mod.rs");
+    let quic_production = production_before_test_module(&quic);
+    assert_eq!(count_occurrences(quic_production, "tempfile::"), 3);
+    for required in [
+        "pack_tempdir: Option<std::sync::Arc<tempfile::TempDir>>",
+        "let mut pack_tempdir: Option<tempfile::TempDir> = None;",
+        "let dir = tempfile::Builder::new()",
+    ] {
+        assert!(
+            quic_production.contains(required),
+            "QUIC packing lost {required}"
+        );
+    }
+
+    let cli = read_repo_file("src/bin/asupersync.rs");
+    let cli_production = production_before_test_module(&cli);
+    assert_eq!(count_occurrences(cli_production, "tempfile::"), 1);
+    assert!(cli_production.contains("tempfile::NamedTempFile::new_in(parent)"));
+
+    let atp_module = read_repo_file("src/atp/mod.rs");
+    assert!(atp_module.contains("#[cfg(feature = \"benchmark-adapters\")]\npub mod benchmark;"));
+    let benchmark = read_repo_file("src/atp/benchmark/suite.rs");
+    assert_eq!(
+        count_occurrences(production_before_test_module(&benchmark), "tempfile::"),
+        1
+    );
+    assert!(benchmark.contains("let work_dir = TempDir::new()"));
+
+    let lib = read_repo_file("src/lib.rs");
+    assert!(lib.contains(
+        "#[cfg(any(test, feature = \"test-internals\"))]\npub mod test_logging;"
+    ));
+    let test_logging = read_repo_file("src/test_logging.rs");
+    let test_logging_production = test_logging
+        .split_once("\n#[cfg(test)]\n#[allow(unsafe_code)]\nmod tests")
+        .map(|(production, _)| production)
+        .expect("test logging must retain its cfg(test) module boundary");
+    assert_eq!(
+        count_occurrences(test_logging_production, "tempfile::"),
+        4
+    );
+
+    let source_paths = rust_source_paths_with_token("tempfile::");
+    assert_eq!(source_paths.len(), 80);
+    for required in [
+        "src/atp/benchmark/suite.rs",
+        "src/bin/asupersync.rs",
+        "src/net/atp/transport_quic/mod.rs",
+        "src/net/atp/transport_rq/mod.rs",
+        "src/test_logging.rs",
+    ] {
+        assert!(source_paths.contains(required), "missing tempfile path {required}");
+    }
+    let source_token_count = source_paths
+        .iter()
+        .map(|path| count_occurrences(&read_repo_file(path), "tempfile::"))
+        .sum::<u64>();
+    assert_eq!(source_token_count, 277);
+    assert_eq!(rust_paths_under_with_token("tests", "tempfile::").len(), 94);
+    assert_eq!(rust_paths_under_with_token("benches", "tempfile::").len(), 2);
+    assert_eq!(rust_paths_under_with_token("examples", "tempfile::").len(), 1);
+
+    let baseline = artifact();
+    let phase2 = object(&baseline, "phase2_terminal_readiness_static_audit");
+    let tempfile_row = array(phase2, "prerequisite_rows")
+        .iter()
+        .find(|row| string(row, "prerequisite_id") == TEMPFILE_BEAD_ID)
+        .expect("historical Phase-2 snapshot must retain the tempfile row");
+    assert_eq!(string(tempfile_row, "readiness_state"), "NO_DEDICATED_RECEIPT");
+    assert!(!boolean(tempfile_row, "terminal_ready"));
+
+    let docs = read_repo_file(DOC_PATH);
+    for required in [
+        TEMPFILE_CHECKPOINT_ID,
+        TEMPFILE_CHECKPOINT_BASE_REVISION,
+        TEMPFILE_BEAD_ID,
+        "SOURCE_AUTHORED_NOT_EXECUTED",
+        "KEEP_INCUMBENT",
+        "normal_dependency_optionalization_allowed=false",
+        "default-native ATP RaptorQ and QUIC pack-materialization paths",
+        "historical `NO_DEDICATED_RECEIPT` row remains unchanged",
+    ] {
+        assert!(docs.contains(required), "missing tempfile checkpoint doc: {required}");
     }
 }
 
