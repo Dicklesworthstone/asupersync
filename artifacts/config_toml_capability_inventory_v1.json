@@ -1666,7 +1666,7 @@
         "current_line_count": 8398,
         "added_line_count": 6,
         "deleted_line_count": 1,
-        "unchanged_toml_token_projection_sha256": "20ec2bf53ba17d83d4b4ac205574cbc13513119d5ace0c988a76c6fc745676d7",
+        "unchanged_toml_token_projection_sha256": "81a64340f94f30c21bfc2cee958de6e965fad4f81a2251960620ea4cd4e53c36",
         "toml_entry_points_changed": false,
         "accepted_toml_contract_changed": false
       }

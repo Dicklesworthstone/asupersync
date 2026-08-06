@@ -323,9 +323,9 @@ line in `src/runtime/builder.rs`: it documented the production request-context
 entry point and changed `request_cx_with_budget` from `pub(crate)` to `pub`.
 The ordered `from_toml`, `from_toml_str`, and direct `toml::` token projection
 remained byte-identical. The 16-path pin set, historical A1/A3 revisions,
-`KEEP_INCUMBENT` decision, and all blocked gaps are unchanged. This is static
-source-pin maintenance only; it does not add JSON, rerun either receipt, or
-authorize dependency exit.
+`KEEP_INCUMBENT` decision, and all blocked gaps are unchanged.
+This is static source-pin maintenance only; it does not add JSON, rerun either
+receipt, or authorize dependency exit.
 
 The receipt fails closed on seven absent replacement rows: parser parity,
 writer parity, explicit resource bounds, independent comparison, generated
