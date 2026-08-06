@@ -91,8 +91,8 @@
     },
     {
       "path": "src/bin/asupersync.rs",
-      "sha256": "a6d81b8821419c87631017deb3b42e03703818a80d744f686c42f32fe364a943",
-      "line_count": 16803
+      "sha256": "8415296574e31367ea2d542082fa7dffd4ec400923b244ed730ae3db02b30d89",
+      "line_count": 16799
     },
     {
       "path": "frankenlab/Cargo.toml",

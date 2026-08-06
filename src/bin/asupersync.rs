@@ -8979,15 +8979,12 @@ fn scenario_runner_error(err: asupersync::lab::scenario_runner::ScenarioRunnerEr
             seed,
             first,
             second,
-        } => CliError::new(
-            "replay_divergence",
-            REPLAY_DIVERGENCE_TITLE,
-        )
-        .detail(format!(
-            "Seed {seed}: run1(event_hash={}, steps={}) != run2(event_hash={}, steps={})",
-            first.event_hash, first.steps, second.event_hash, second.steps,
-        ))
-        .exit_code(ExitCode::DETERMINISM_FAILURE),
+        } => CliError::new("replay_divergence", REPLAY_DIVERGENCE_TITLE)
+            .detail(format!(
+                "Seed {seed}: run1(event_hash={}, steps={}) != run2(event_hash={}, steps={})",
+                first.event_hash, first.steps, second.event_hash, second.steps,
+            ))
+            .exit_code(ExitCode::DETERMINISM_FAILURE),
     }
 }
 
@@ -9117,12 +9114,11 @@ fn lab_replay(args: &LabReplayArgs, output: &mut Output) -> Result<(), CliError>
                 .map_or(report.event_hash, |d| d.second_event_hash),
             replay_hint
         );
-        return Err(CliError::new(
-            "replay_divergence",
-            REPLAY_DIVERGENCE_TITLE,
-        )
-        .detail(detail)
-        .exit_code(ExitCode::DETERMINISM_FAILURE));
+        return Err(
+            CliError::new("replay_divergence", REPLAY_DIVERGENCE_TITLE)
+                .detail(detail)
+                .exit_code(ExitCode::DETERMINISM_FAILURE),
+        );
     }
 
     Ok(())
