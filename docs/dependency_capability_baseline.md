@@ -195,10 +195,11 @@ Both dependency call sites are in `BenchmarkEnvironment::collect()` behind the
 
 The collected schema has six fields and reaches five production result
 construction sites plus four unit-only sites. The existing
-`tests/atp_benchmark_integration.rs` surface asserts none of `os_info`,
-`cpu_info`, or `BenchmarkEnvironment`. `EVD-HOST-TOPOLOGY` is useful adjacent
-default-profile evidence, but it does not execute these call sites or compare
-candidate outputs. The declared `host_benchmark_metadata` dependency-
+`tests/atp_benchmark_integration.rs` surface asserted none of `os_info`,
+`cpu_info`, or `BenchmarkEnvironment` at the observed audit revision.
+`EVD-HOST-TOPOLOGY` is useful adjacent default-profile evidence, but it does not
+execute these call sites or compare candidate outputs. The declared
+`host_benchmark_metadata` dependency-
 sovereignty scenario is not implemented in the retained runner.
 
 Cutover requires SAME-or-BETTER evidence across Linux, macOS, and Windows;
@@ -212,6 +213,29 @@ The disposition is `KEEP_INCUMBENT` for both dependencies and
 `dependency_exit_allowed=false`. This packet does not authorize manifest,
 lockfile, or behavior edits, tracker closure, performance claims, release
 readiness, or broad workspace-health claims.
+
+### Claim-time host-metadata source checkpoint
+
+At claim base `706bde7ee34caa356ef675359b2e611dfae3e700`,
+`tests/atp_benchmark_integration.rs` adds
+`benchmark_environment_host_metadata_candidate_contract`. Its state is
+`SOURCE_AUTHORED_NOT_EXECUTED`: no compiler, test, benchmark, host probe, Cargo,
+RCH, or platform/profile lane was run.
+
+The contract freezes the incumbent nonempty `os_info`, nonzero
+`<count>x <ARCH>` `cpu_info`, and exact six-field serialized
+`BenchmarkEnvironment` schema. It also names
+`std::thread::available_parallelism()` and
+`sysinfo::System::long_os_version()` with explicit `1` and `unknown` fallback
+shapes. These candidate APIs are compile/smoke anchors only; their values are
+not asserted equal to the incumbent because affinity, container/quota, error,
+Linux, macOS, and Windows parity still requires the declared execution matrix.
+
+The machine artifact retains its historical 415-line integration-source pin at
+the observed audit revision. The fail-closed Rust contract separately pins the
+current 467-line checkpoint so historical evidence is not silently rewritten.
+Neither production dependency call changed, and no manifest, lockfile,
+marginal-ledger, registry, cutover, or closure state was promoted.
 
 ## Visibility macro static audit
 

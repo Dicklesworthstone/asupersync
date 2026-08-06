@@ -29,6 +29,14 @@ const HASHBROWN_PATH_TOKEN: &str = concat!("hash", "brown::");
 const MARGINAL_LEDGER_PATH: &str = "artifacts/dependency_marginal_ledger_v1.json";
 const HOST_METADATA_BEAD_ID: &str = "asupersync-d24mms.2";
 const HOST_METADATA_AUDIT_ID: &str = "CAP-HOST-BENCH-METADATA-STATIC-AUDIT-V1";
+const HOST_METADATA_CHECKPOINT_BASE_REVISION: &str =
+    "706bde7ee34caa356ef675359b2e611dfae3e700";
+const HOST_METADATA_INTEGRATION_PATH: &str = "tests/atp_benchmark_integration.rs";
+const HOST_METADATA_INTEGRATION_SHA256: &str =
+    "c1854aba192f2c207c34a6c72031909e7b9bb209a6d46cbed0ad12b09e4945ef";
+const HOST_METADATA_INTEGRATION_LINES: u64 = 467;
+const HOST_METADATA_INTEGRATION_TEST: &str =
+    "benchmark_environment_host_metadata_candidate_contract";
 const NUM_CPUS_CALL: &str = concat!("num_cpus", "::get()");
 const WHOAMI_CALL: &str = concat!("whoami", "::distro()");
 const VISIBILITY_BEAD_ID: &str = "asupersync-d24mms.7";
@@ -1407,7 +1415,10 @@ fn host_benchmark_metadata_static_audit_is_source_pinned_and_fail_closed() {
         string(audit, "execution_state"),
         "NO_PLATFORM_OR_PROFILE_MATRIX_EXECUTED"
     );
-    assert_eq!(string(audit, "observed_at_revision").len(), 40);
+    assert_eq!(
+        string(audit, "observed_at_revision"),
+        "efab658ab3966f68f005b02ba0c5710467523d51"
+    );
 
     let decision = object(audit, "decision");
     assert_eq!(
@@ -1443,6 +1454,15 @@ fn host_benchmark_metadata_static_audit_is_source_pinned_and_fail_closed() {
     );
     for pin in pins {
         let path = string(pin, "path");
+        if path == HOST_METADATA_INTEGRATION_PATH {
+            assert_eq!(
+                string(pin, "sha256"),
+                "884ac058b426eb89dffd3ae02c749d2bb9affbf2d17f1dfdb74baebc3e7f8420"
+            );
+            assert_eq!(unsigned(pin, "line_count"), 415);
+            assert!(!string(pin, "role").trim().is_empty());
+            continue;
+        }
         let source = read_repo_file(path);
         assert_eq!(
             sha256_hex(&read_repo_bytes(path)),
@@ -1487,6 +1507,8 @@ fn host_benchmark_metadata_static_audit_is_source_pinned_and_fail_closed() {
     let benchmark = read_repo_file("src/atp/benchmark/mod.rs");
     assert_eq!(count_occurrences(&benchmark, NUM_CPUS_CALL), 1);
     assert_eq!(count_occurrences(&benchmark, WHOAMI_CALL), 1);
+    assert!(!benchmark.contains("std::thread::available_parallelism"));
+    assert!(!benchmark.contains("sysinfo::System::long_os_version"));
     assert!(benchmark.contains("unwrap_or_else(|_| \"unknown\".to_string())"));
     assert!(benchmark.contains("format!(\"{}x {}\""));
     let lock = read_repo_file("Cargo.lock");
@@ -1553,12 +1575,45 @@ fn host_benchmark_metadata_static_audit_is_source_pinned_and_fail_closed() {
         unsigned(feature, "integration_host_metadata_assertion_count"),
         0
     );
-    let integration = read_repo_file("tests/atp_benchmark_integration.rs");
-    for absent in ["BenchmarkEnvironment", "os_info", "cpu_info"] {
+    let integration = read_repo_file(HOST_METADATA_INTEGRATION_PATH);
+    assert_eq!(
+        sha256_hex(&read_repo_bytes(HOST_METADATA_INTEGRATION_PATH)),
+        HOST_METADATA_INTEGRATION_SHA256
+    );
+    assert_eq!(
+        u64::try_from(integration.lines().count()).expect("line count fits u64"),
+        HOST_METADATA_INTEGRATION_LINES
+    );
+    assert_eq!(
+        count_occurrences(
+            &integration,
+            &format!("fn {HOST_METADATA_INTEGRATION_TEST}()")
+        ),
+        1
+    );
+    for required in [
+        "BenchmarkEnvironment::collect()?",
+        "std::thread::available_parallelism()",
+        "sysinfo::System::long_os_version()",
+        "unwrap_or(1)",
+        "unwrap_or_else(|| \"unknown\".to_owned())",
+        "cpu_info must retain the '<count>x <ARCH>' shape",
+        "candidate cpu_info must retain the '<count>x <ARCH>' shape",
+        "BenchmarkEnvironment must serialize as an object",
+    ] {
         assert!(
-            !integration.contains(absent),
-            "integration surface unexpectedly contains {absent}"
+            integration.contains(required),
+            "host-metadata checkpoint is missing: {required}"
         );
+    }
+    let docs = read_repo_file(DOC_PATH);
+    for required in [
+        HOST_METADATA_CHECKPOINT_BASE_REVISION,
+        HOST_METADATA_INTEGRATION_TEST,
+        "SOURCE_AUTHORED_NOT_EXECUTED",
+        "candidate APIs are compile/smoke anchors",
+    ] {
+        assert!(docs.contains(required), "missing host checkpoint doc: {required}");
     }
 
     let evidence = object(audit, "existing_evidence_assessment");

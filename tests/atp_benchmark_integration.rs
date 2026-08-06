@@ -5,10 +5,62 @@
 //! Tests the benchmark adapter framework with scp baseline and ATP profile comparison.
 
 use asupersync::atp::benchmark::{
-    AtpProfile, BaselineAdapter, BenchmarkConfig, BenchmarkSuite, CurlAdapter, RsyncAdapter,
-    ScpAdapter, ToolAvailability, suite::BenchmarkSuiteBuilder,
+    AtpProfile, BaselineAdapter, BenchmarkConfig, BenchmarkEnvironment, BenchmarkSuite,
+    CurlAdapter, RsyncAdapter, ScpAdapter, ToolAvailability, suite::BenchmarkSuiteBuilder,
 };
+use std::collections::BTreeSet;
 use std::time::Duration;
+
+type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+#[test]
+fn benchmark_environment_host_metadata_candidate_contract() -> TestResult {
+    let environment = BenchmarkEnvironment::collect()?;
+    assert!(!environment.os_info.trim().is_empty());
+
+    let (incumbent_count, incumbent_arch) = environment
+        .cpu_info
+        .split_once("x ")
+        .expect("cpu_info must retain the '<count>x <ARCH>' shape");
+    assert!(incumbent_count.parse::<usize>()? > 0);
+    assert_eq!(incumbent_arch, std::env::consts::ARCH);
+
+    // These calls are candidate compile/smoke anchors only. Equality with the
+    // incumbent requires the declared platform and constrained-host matrix.
+    let candidate_count_value = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+    let candidate_cpu_info = format!("{candidate_count_value}x {}", std::env::consts::ARCH);
+    let (candidate_count_text, candidate_arch) = candidate_cpu_info
+        .split_once("x ")
+        .expect("candidate cpu_info must retain the '<count>x <ARCH>' shape");
+    assert!(candidate_count_text.parse::<usize>()? > 0);
+    assert_eq!(candidate_arch, std::env::consts::ARCH);
+
+    let candidate_os_info = sysinfo::System::long_os_version()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "unknown".to_owned());
+    assert!(!candidate_os_info.trim().is_empty());
+
+    let serialized = serde_json::to_value(&environment)?;
+    let object = serialized
+        .as_object()
+        .expect("BenchmarkEnvironment must serialize as an object");
+    let field_names = object.keys().map(String::as_str).collect::<BTreeSet<_>>();
+    assert_eq!(
+        field_names,
+        BTreeSet::from([
+            "cpu_info",
+            "env_vars",
+            "memory_info",
+            "network_info",
+            "os_info",
+            "timestamp",
+        ])
+    );
+
+    Ok(())
+}
 
 #[tokio::test]
 async fn test_scp_adapter_availability_check() {
