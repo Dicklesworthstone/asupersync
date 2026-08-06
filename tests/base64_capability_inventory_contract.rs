@@ -1319,7 +1319,9 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             || !collision_errors.is_subset(&error_ids)
             || !collision_consumers.is_subset(&operation_consumer_ids)
         {
-            return Err(format!("collision {collision_id} registry relation drifted"));
+            return Err(format!(
+                "collision {collision_id} registry relation drifted"
+            ));
         }
         for consumer_id in collision_consumers {
             used_consumer_ids.insert(consumer_id.clone());
@@ -1358,9 +1360,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         if string_set(consumer, "role_ids") != expected_roles
             || string_set(consumer, "error_ids") != expected_errors
         {
-            return Err(format!(
-                "consumer {consumer_id} role/error closure drifted"
-            ));
+            return Err(format!("consumer {consumer_id} role/error closure drifted"));
         }
     }
     if used_role_ids != role_ids || used_error_ids != error_ids {
@@ -1383,16 +1383,13 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     if operation_totals.keys().cloned().collect::<BTreeSet<_>>() != expected_recorded_call_ids {
         return Err("recorded operation call coverage drifted".to_owned());
     }
-    for call in call_sites
-        .iter()
-        .filter(|row| {
-            number(&row["production"], "encode")
-                + number(&row["production"], "decode")
-                + number(&row["nonproduction"], "encode")
-                + number(&row["nonproduction"], "decode")
-                > 0
-        })
-    {
+    for call in call_sites.iter().filter(|row| {
+        number(&row["production"], "encode")
+            + number(&row["production"], "decode")
+            + number(&row["nonproduction"], "encode")
+            + number(&row["nonproduction"], "decode")
+            > 0
+    }) {
         let actual = operation_totals
             .get(text(call, "call_id"))
             .expect("covered recorded call must have operation totals");
@@ -2047,8 +2044,7 @@ fn safe_negative_mutations_fail_closed() {
     let mut duplicate_profile_gate_call = original.clone();
     let duplicated_call_ids =
         duplicate_profile_gate_call["profile_gate_contracts"][0]["call_ids"].clone();
-    duplicate_profile_gate_call["profile_gate_contracts"][1]["call_ids"] =
-        duplicated_call_ids;
+    duplicate_profile_gate_call["profile_gate_contracts"][1]["call_ids"] = duplicated_call_ids;
     assert!(validate_inventory(&duplicate_profile_gate_call).is_err());
 
     let mut incomplete_profile_baseline = original.clone();
