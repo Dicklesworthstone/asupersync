@@ -2236,6 +2236,170 @@ fn validate_a4_gap12_source_progress(inventory: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_a4_gap15_source_progress(inventory: &Value) -> Result<(), String> {
+    let progress = inventory
+        .get("a4_gap15_source_progress")
+        .ok_or_else(|| "a4_gap15_source_progress is required".to_owned())?;
+    for (key, expected) in [
+        ("progress_id", A4_GAP15_PROGRESS_ID),
+        ("bead_id", A4_BEAD_ID),
+        ("recorded_date_utc", "2026-08-06"),
+        ("scope", "STABLE_REPLAY_DIVERGENCE_DIAGNOSTICS"),
+        ("gap_id", "SCN-GAP-15"),
+        ("source_state", "SOURCE_IMPLEMENTED_STATIC"),
+        ("execution_state", "NOT_RUN_BY_STATIC_LANE"),
+        ("diagnostic_code", "ASUP-E401"),
+        (
+            "remaining_gap",
+            "YAML_SEMANTIC_SOURCE_SPANS_NOT_IMPLEMENTED",
+        ),
+        ("gap_state", "BLOCKED_GAP"),
+    ] {
+        if progress.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("A4 GAP-15 progress {key} must be {expected}"));
+        }
+    }
+    if progress
+        .get("source_change_authored")
+        .and_then(Value::as_bool)
+        != Some(true)
+        || progress
+            .get("dynamic_contract_executed")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return Err("A4 GAP-15 must distinguish authored source from execution".to_owned());
+    }
+    if string_set(progress, "production_paths")
+        != ["frankenlab/src/main.rs", "src/bin/asupersync.rs"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        || string_set(progress, "adapter_functions")
+            != ["lab_replay", "runner_error_message", "scenario_runner_error"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        || string_set(progress, "authored_tests")
+            != [
+                "runner_error_message_replay_divergence_preserves_stable_code",
+                "scenario_runner_error_replay_divergence_preserves_stable_code",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        || string_set(progress, "blockers")
+            != [
+                "FOCUSED_CONTRACT_NOT_EXECUTED",
+                "YAML_SEMANTIC_SOURCE_SPANS_NOT_IMPLEMENTED",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    {
+        return Err("A4 GAP-15 source, test, or blocker set drifted".to_owned());
+    }
+
+    let root_cli = read_repo_file("src/bin/asupersync.rs");
+    let root_adapter = source_item(&root_cli, "fn scenario_runner_error(");
+    let root_replay = source_item(&root_cli, "fn lab_replay(");
+    let franken_cli = read_repo_file("frankenlab/src/main.rs");
+    let franken_adapter = source_item(&franken_cli, "fn runner_error_message(");
+    if !root_cli.contains(
+        "\"[ASUP-E401] Deterministic replay divergence detected\"",
+    ) || !root_adapter.contains("REPLAY_DIVERGENCE_TITLE")
+        || !root_replay.contains("REPLAY_DIVERGENCE_TITLE")
+        || !franken_cli.contains("const REPLAY_DIVERGENCE_PREFIX: &str = \"[ASUP-E401]\";")
+        || !franken_adapter.contains("REPLAY_DIVERGENCE_PREFIX")
+        || !root_cli.contains(
+            "fn scenario_runner_error_replay_divergence_preserves_stable_code()",
+        )
+        || !franken_cli.contains(
+            "fn runner_error_message_replay_divergence_preserves_stable_code()",
+        )
+    {
+        return Err("A4 GAP-15 adapter token or authored source test drifted".to_owned());
+    }
+
+    let diagnostic = find_row(
+        array(inventory, "diagnostic_contracts"),
+        "diagnostic_id",
+        "SCN-DIAG-REPLAY-DIVERGENCE",
+    );
+    if text(diagnostic, "evidence_state") != "SOURCE_PROGRESS_STATIC"
+        || !text(diagnostic, "behavior").contains("both CLI adapters")
+        || !text(diagnostic, "behavior").contains("ASUP-E401")
+        || !text(diagnostic, "behavior").contains("not executed")
+    {
+        return Err("A4 GAP-15 diagnostic row drifted".to_owned());
+    }
+
+    let preservation = object(progress, "preservation");
+    for key in [
+        "accepted_yaml_narrowed",
+        "dependency_removed",
+        "yaml_capability_removed",
+        "yaml_file_removed",
+        "error_type_changed",
+        "exit_code_changed",
+        "replay_comparison_changed",
+        "terminal_decision_issued",
+    ] {
+        if preservation.get(key).and_then(Value::as_bool) != Some(false) {
+            return Err(format!("A4 GAP-15 preservation.{key} must remain false"));
+        }
+    }
+
+    let gap = find_row(array(inventory, "known_gaps"), "gap_id", "SCN-GAP-15");
+    if text(gap, "evidence_state") != "BLOCKED_GAP"
+        || text(gap, "progress_pointer") != "a4_gap15_source_progress"
+        || !text(gap, "finding").contains("authored but unexecuted")
+        || !text(gap, "finding").contains("source spans")
+    {
+        return Err("SCN-GAP-15 must remain fail-closed and point to A4 progress".to_owned());
+    }
+    let a4_child = find_row(
+        array(inventory, "child_capability_rows"),
+        "owner_bead",
+        A4_BEAD_ID,
+    );
+    if !string_set(a4_child, "additional_progress_pointers")
+        .contains("a4_gap15_source_progress")
+    {
+        return Err("A4 child must retain the GAP-15 progress pointer".to_owned());
+    }
+
+    let validation = find_row(
+        array(inventory, "validation_commands"),
+        "lane",
+        "scenario-yaml-capability-inventory-contract",
+    );
+    for marker in [
+        "--overlay-path src/bin/asupersync.rs",
+        "--overlay-path frankenlab/src/main.rs",
+        "--overlay-path docs/error_codes/ASUP-E401.md",
+    ] {
+        if !text(validation, "command").contains(marker) {
+            return Err(format!("A4 GAP-15 validation command is missing {marker}"));
+        }
+    }
+    if !text(validation, "claim").contains("GAP-15 stable replay diagnostics") {
+        return Err("A4 GAP-15 validation claim drifted".to_owned());
+    }
+
+    let scenario_doc = read_repo_file(DOC_PATH);
+    let error_code_doc = read_repo_file(REPLAY_DIVERGENCE_DOC_PATH);
+    if !scenario_doc.contains("A4 source progress: stable replay-divergence code")
+        || !scenario_doc.contains("SCN-GAP-15 remains blocked")
+        || !error_code_doc.contains("root `asupersync lab replay` structured error title")
+        || !text(progress, "no_claim_boundary").contains("not compiled or executed")
+        || !text(inventory, "no_claim_boundary").contains("SCN-GAP-15")
+    {
+        return Err("A4 GAP-15 docs or no-claim boundary drifted".to_owned());
+    }
+    Ok(())
+}
+
 fn validate_a4_gap16_source_progress(inventory: &Value) -> Result<(), String> {
     let progress = inventory
         .get("a4_gap16_source_progress")
@@ -2717,6 +2881,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     validate_a3_keep_incumbent_receipt(inventory)?;
     validate_a4_source_progress(inventory)?;
     validate_a4_gap12_source_progress(inventory)?;
+    validate_a4_gap15_source_progress(inventory)?;
     validate_a4_gap16_source_progress(inventory)?;
     Ok(())
 }
@@ -3311,8 +3476,14 @@ fn execution_consumption_diagnostics_and_gap_routing_stay_truthful() {
     assert!(!replay_writer.contains("fs::write(path, payload)"));
     assert!(scenario.contains("pub struct ValidationError"));
     assert!(runner.contains("[ASUP-E401]"));
-    assert!(!root_cli.contains("[ASUP-E401]"));
-    assert!(!franken_cli.contains("[ASUP-E401]"));
+    assert!(root_cli.contains("[ASUP-E401]"));
+    assert!(franken_cli.contains("[ASUP-E401]"));
+    assert!(root_cli.contains(
+        "fn scenario_runner_error_replay_divergence_preserves_stable_code()"
+    ));
+    assert!(franken_cli.contains(
+        "fn runner_error_message_replay_divergence_preserves_stable_code()"
+    ));
 
     let gaps = array(&inventory, "known_gaps");
     for gap_id in [
@@ -3348,6 +3519,7 @@ fn documentation_workflows_and_no_claim_boundary_are_complete() {
         A3_RECEIPT_ID,
         A4_BEAD_ID,
         A4_PROGRESS_ID,
+        A4_GAP15_PROGRESS_ID,
         A4_GAP16_PROGRESS_ID,
         A3_AUDIT_LANDED_COMMIT,
         BASELINE_REVISION,
@@ -3362,6 +3534,7 @@ fn documentation_workflows_and_no_claim_boundary_are_complete() {
         "SOURCE_ALIGNED_STATIC",
         "SOURCE_IMPLEMENTED_STATIC",
         "SCN-GAP-13 remains blocked",
+        "SCN-GAP-15 remains blocked",
         "SCN-GAP-16 remains blocked",
         "13 files",
         "validation-only",
