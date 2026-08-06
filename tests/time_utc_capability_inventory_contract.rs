@@ -24,7 +24,7 @@ const CAPABILITY_ID: &str = "CAP-TIME-UTC-RFC3339";
 const ADR_ID: &str = "DEP-ADR-011";
 const BASELINE_REVISION: &str = "1afde84d564bd8ea876459624116f90028b80835";
 const ARTIFACT_SHA256: &str =
-    "e8064091bc705ff2cadced49335e838d104464aa3c3468e4cc48a66edbe80639";
+    "332b68183102841ccba880b54bfe9dc15701ae39a71b923f2b37b6dc66989a57";
 const DOC_BEGIN: &str = "<!-- BEGIN TIME UTC CAPABILITY INVENTORY -->";
 const DOC_END: &str = "<!-- END TIME UTC CAPABILITY INVENTORY -->";
 const CHRONO_TOKEN: &str = concat!("chrono", "::");
@@ -44,11 +44,15 @@ const LITERAL_OVERRIDE_PROJECTION_SHA256: &str =
 const ALIAS_CLASSIFICATION_PROJECTION_SHA256: &str =
     "867c7f39911b829635b5a28413179e8cc2d4156f0cfe2a1218fbb3f4819c5118";
 const ADDITIONAL_DERIVED_PROJECTION_SHA256: &str =
+    "fa3f27e183745af01595417e0a59d6b239d0dc0f06fe914aeb80c5c82e957d18";
+const RAPTORQ_LINEAGE_ADDITIONAL_DERIVED_PROJECTION_SHA256: &str =
     "f41dab083731bc95f246db17e7a5b1e3d50ac60cf1d2af96696c556b0dd512f2";
 const CROSS_FILE_CONSUMER_PROJECTION_SHA256: &str =
     "d7b4020e22cb33af7d359836b80e0d66f20574d2b9fb29566ecae0691831ff99";
 const PUBLIC_CARRIER_LINEAGE_PROJECTION_SHA256: &str =
     "c14a1beb11f2c57890a9907a2c29092183974a56f2c2b521f0b37ae40c077eb7";
+const TEST_PROFILE_CARRIER_LINEAGE_PROJECTION_SHA256: &str =
+    "e4a4a3575ac7b11028672c0fdbe6b342775e0908cfa9df4ad32aa19053ee6e43";
 const ROOT_CLI_REFRESH_REVISIONS: &[&str] = &[
     "fbbd4d065ae4768b84e4161a00d10e5acba04b39",
     "75778fbf0846be2d3bc965a2809a705aeb1dfe25",
@@ -526,13 +530,12 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
             != "RESOLVED_BY_STATIC_DIRECT_PER_USE_CLASSIFICATION"
         || text(resolved_derived, "state")
             != "RESOLVED_BY_STATIC_DECLARED_DERIVED_CLASSIFICATION"
-        || array(derived_gap, "newly_classified_consumer_categories").len() != 16
-        || string_set(derived_gap, "newly_classified_consumer_categories").len() != 16
+        || array(derived_gap, "newly_classified_consumer_categories").len() != 17
+        || string_set(derived_gap, "newly_classified_consumer_categories").len() != 17
         || array(derived_gap, "representative_unclassified_consumers").len() != 3
         || string_set(derived_gap, "representative_unclassified_consumers").len() != 3
         || !text(derived_gap, "summary")
-            .contains("All 30 public Chrono-backed timestamp carriers")
-        || !text(derived_gap, "summary").contains("Test-profile carrier disposition")
+            .contains("All 30 public and seven test-profile Chrono-backed timestamp carriers")
         || text(derived_gap, "effect").is_empty()
         || text(derived_gap, "owner_bead") != BEAD_ID
         || text(nondependency_boundary, "semantic_contract_id")
@@ -552,6 +555,7 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
             "conformance report rendering and output",
             "conformance executable JSON serialization boundaries",
             "complete 30-field public carrier first-boundary disposition matrix",
+            "complete seven-field test-profile carrier first-boundary disposition matrix",
             "excluded-conformance executable JSON serialization boundary",
             "main-conformance RaptorQ maintenance private-carrier constructors",
             "main-conformance RaptorQ public pipeline constructors and history update",
@@ -1092,6 +1096,22 @@ fn public_carrier_lineage_projection(rows: &[Value]) -> String {
     rows.concat()
 }
 
+fn test_profile_carrier_lineage_projection(rows: &[Value]) -> String {
+    let mut rows: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            format!(
+                "{}\t{}\t{}\n",
+                text(row, "field_id"),
+                text(row, "state"),
+                sorted_strings(row, "consumer_ids"),
+            )
+        })
+        .collect();
+    rows.sort();
+    rows.concat()
+}
+
 fn sorted_strings(value: &Value, key: &str) -> String {
     string_set(value, key)
         .into_iter()
@@ -1210,6 +1230,7 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
             "TIME-CONSUMER-JETSTREAM-WIRE-INSERTION",
             "TIME-CONSUMER-REAL-E2E-BOUNDARY",
             "TIME-CONSUMER-STANDALONE-PERSISTENCE",
+            "TIME-CONSUMER-TEST-PROFILE-CARRIER",
         ],
     )?;
     require_exact_strings(
@@ -3302,7 +3323,7 @@ fn validate_post_a1_conformance_raptorq_lineage_extension(
         (
             "additional_derived",
             "b20b65d03be1995802d929275531ac96a8a66ec06c1c64f0bf887ee27803f674",
-            ADDITIONAL_DERIVED_PROJECTION_SHA256,
+            RAPTORQ_LINEAGE_ADDITIONAL_DERIVED_PROJECTION_SHA256,
         ),
     ] {
         if previous_projections.get(key).and_then(Value::as_str) != Some(previous)
@@ -3797,6 +3818,226 @@ fn validate_post_a1_public_carrier_lineage_extension(inventory: &Value) -> Resul
     Ok(())
 }
 
+fn validate_post_a1_test_profile_carrier_lineage_extension(
+    inventory: &Value,
+) -> Result<(), String> {
+    let extension = inventory
+        .get("post_a1_test_profile_carrier_lineage_extension")
+        .ok_or_else(|| "post_a1_test_profile_carrier_lineage_extension is required".to_owned())?;
+    for (key, expected) in [
+        (
+            "extension_id",
+            "TIME-A1-TEST-PROFILE-CARRIER-LINEAGE-2026-08-06",
+        ),
+        ("captured_date_utc", "2026-08-06"),
+        (
+            "extension_state",
+            "STATIC_COMPLETE_TEST_PROFILE_CARRIER_FIRST_BOUNDARY_DISPOSITION",
+        ),
+        ("execution_state", "NOT_RUN_STATIC_ONLY"),
+        ("required_disposition", "KEEP_OPEN"),
+    ] {
+        if extension.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!(
+                "post-A1 test-profile carrier extension {key} must be {expected}"
+            ));
+        }
+    }
+    for (key, expected) in [
+        ("source_pin_path_count", 74_u64),
+        ("test_profile_datetime_field_count", 7),
+        ("test_profile_publicly_reachable_field_count", 5),
+        ("test_profile_pub_in_private_module_field_count", 1),
+        ("test_profile_private_serialized_field_count", 1),
+        ("declared_first_boundary_field_count", 7),
+        ("unclassified_test_profile_carrier_field_count", 0),
+        ("added_derived_consumer_id_count", 8),
+        ("referenced_derived_consumer_id_count", 12),
+        ("referenced_cross_file_consumer_id_count", 2),
+        ("declared_test_profile_consumer_id_count", 14),
+        ("additional_derived_operation_anchor_count", 47),
+        ("derived_operation_anchor_count", 55),
+        ("declared_consumer_unique_direct_source_anchor_count", 76),
+        ("classified_anchor_count", 279),
+    ] {
+        if extension.get(key).and_then(Value::as_u64) != Some(expected) {
+            return Err(format!(
+                "post-A1 test-profile carrier extension {key} must be {expected}"
+            ));
+        }
+    }
+    if extension
+        .get("test_profile_first_boundary_disposition_complete")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Err("test-profile first-boundary completion state drifted".to_owned());
+    }
+
+    let added_ids = [
+        "TIME-DERIVED-STANDALONE-GOLDEN-METADATA-ASSOCIATE-0605",
+        "TIME-DERIVED-STANDALONE-MATRIX-REPORT-JSON-0254",
+        "TIME-DERIVED-STANDALONE-MATRIX-SAVE-JSON-0464",
+        "TIME-DERIVED-TEST-HPACK-METADATA-RETAIN-0101",
+        "TIME-DERIVED-TEST-HPACK-METADATA-RETAIN-0118",
+        "TIME-DERIVED-TEST-HPACK-METADATA-RETAIN-0131",
+        "TIME-DERIVED-TEST-HPACK-METADATA-RETAIN-0148",
+        "TIME-DERIVED-TEST-HPACK-METADATA-RETAIN-0165",
+    ];
+    require_exact_strings(extension, "added_derived_consumer_ids", &added_ids)?;
+
+    let field_ids = row_ids(array(inventory, "test_profile_datetime_fields"), "field_id");
+    let lineage_rows = array(extension, "field_lineage_rows");
+    let expected_field_ids: Vec<_> = field_ids.iter().map(String::as_str).collect();
+    if field_ids.len() != 7 {
+        return Err("test-profile field inventory total drifted".to_owned());
+    }
+    require_exact_ids(
+        lineage_rows,
+        "field_id",
+        &expected_field_ids,
+        "post-A1 test-profile carrier lineage rows",
+    )?;
+
+    let derived_ids = row_ids(
+        array(
+            &inventory["per_use_classification"],
+            "additional_derived_operation_rows",
+        ),
+        "use_id",
+    );
+    let cross_file_ids = row_ids(
+        array(
+            &inventory["per_use_classification"],
+            "cross_file_consumer_rows",
+        ),
+        "use_id",
+    );
+    let known_consumer_ids: BTreeSet<String> =
+        derived_ids.union(&cross_file_ids).cloned().collect();
+    if !added_ids.iter().all(|id| derived_ids.contains(*id)) {
+        return Err("test-profile added derived consumer rows are missing".to_owned());
+    }
+
+    let mut referenced_consumer_ids = BTreeSet::new();
+    for row in lineage_rows {
+        let field_id = text(row, "field_id");
+        let (expected_state, expected_consumers): (&str, &[&str]) = match field_id {
+            "TIME-TEST-GOLDEN-FIXTURE-GENERATED" => (
+                "PRIVATE_SERIALIZED_FIXTURE_BOUNDARY_DECLARED",
+                &["TIME-DERIVED-STANDALONE-GOLDEN-SERIALIZE-0197"],
+            ),
+            "TIME-TEST-GOLDEN-METADATA-UPDATED" => (
+                "PUBLIC_TEST_CARRIER_ASSOCIATION_DECLARED_NO_FIELD_READ_OR_SERIALIZATION",
+                &["TIME-DERIVED-STANDALONE-GOLDEN-METADATA-ASSOCIATE-0605"],
+            ),
+            "TIME-TEST-REPORT-COVERAGE-GENERATED" => (
+                "PUBLIC_STANDALONE_TEMPLATE_AND_JSON_BOUNDARIES_DECLARED",
+                &[
+                    "TIME-DERIVED-STANDALONE-MATRIX-REPORT-JSON-0254",
+                    "TIME-DERIVED-STANDALONE-MATRIX-SAVE-JSON-0464",
+                    "TIME-DERIVED-STANDALONE-TEMPLATE-FIELD-0221",
+                ],
+            ),
+            "TIME-TEST-REPORT-FILE-MODIFIED" => (
+                "PUBLIC_STANDALONE_RETENTION_AND_JSON_BOUNDARIES_DECLARED",
+                &[
+                    "TIME-CROSS-FILE-STANDALONE-MAINT-HEALTH-JSON-0239",
+                    "TIME-DERIVED-STANDALONE-HEALTH-RETAIN-0280",
+                ],
+            ),
+            "TIME-TEST-REPORT-MAINTENANCE-TIMESTAMP" => (
+                "PUBLIC_STANDALONE_JSON_BOUNDARY_DECLARED",
+                &["TIME-CROSS-FILE-STANDALONE-MAINT-RESULT-JSON-0552"],
+            ),
+            "TIME-TEST-REPORT-SNAPSHOT-TIMESTAMP" => (
+                "PUBLIC_STANDALONE_SNAPSHOT_JSON_BOUNDARY_DECLARED",
+                &["TIME-DERIVED-STANDALONE-SNAPSHOT-SERIALIZE-0287"],
+            ),
+            "TIME-TEST-ROOT-HPACK-FIXTURE-GENERATED" => (
+                "PRIVATE_TEST_FIXTURE_CLONE_EMBEDDINGS_DECLARED_NO_FIELD_READ_OR_SERIALIZATION",
+                &[
+                    "TIME-DERIVED-TEST-HPACK-METADATA-RETAIN-0101",
+                    "TIME-DERIVED-TEST-HPACK-METADATA-RETAIN-0118",
+                    "TIME-DERIVED-TEST-HPACK-METADATA-RETAIN-0131",
+                    "TIME-DERIVED-TEST-HPACK-METADATA-RETAIN-0148",
+                    "TIME-DERIVED-TEST-HPACK-METADATA-RETAIN-0165",
+                ],
+            ),
+            _ => return Err(format!("unexpected test-profile carrier row {field_id}")),
+        };
+        if text(row, "state") != expected_state {
+            return Err(format!("test-profile carrier state drifted for {field_id}"));
+        }
+        require_exact_strings(row, "consumer_ids", expected_consumers)?;
+        referenced_consumer_ids.extend(string_set(row, "consumer_ids"));
+    }
+    let referenced_derived_count = referenced_consumer_ids.intersection(&derived_ids).count();
+    let referenced_cross_file_count = referenced_consumer_ids
+        .intersection(&cross_file_ids)
+        .count();
+    if referenced_derived_count != 12
+        || referenced_cross_file_count != 2
+        || referenced_consumer_ids.len() != 14
+        || !referenced_consumer_ids.is_subset(&known_consumer_ids)
+    {
+        return Err("test-profile carrier aggregate consumer counts drifted".to_owned());
+    }
+    if text(extension, "test_profile_carrier_lineage_projection_sha256")
+        != TEST_PROFILE_CARRIER_LINEAGE_PROJECTION_SHA256
+        || sha256_hex(test_profile_carrier_lineage_projection(lineage_rows).as_bytes())
+            != TEST_PROFILE_CARRIER_LINEAGE_PROJECTION_SHA256
+    {
+        return Err("test-profile carrier lineage projection drifted".to_owned());
+    }
+
+    let hpack = read_repo_file("tests/conformance/hpack_rfc7541/fixtures.rs");
+    if count_matching_lines(&hpack, "metadata: metadata.clone(),") != 5
+        || hpack.contains("metadata.generated_at")
+        || !hpack.contains("#[derive(Debug, Clone)]\n#[allow(dead_code)]\npub struct FixtureMetadata")
+    {
+        return Err("HPACK private fixture metadata boundary drifted".to_owned());
+    }
+
+    let preservation = object(extension, "preservation");
+    let expected_preservation_keys: BTreeSet<String> = [
+        "production_source_changed",
+        "historical_a1_revision_changed",
+        "behavioral_gap_count_changed",
+        "time_acceptance_semantics_changed",
+        "external_consumer_remainder_closed",
+        "second_order_propagation_closed",
+        "static_remainder_closed",
+        "bead_close_allowed",
+        "dependency_exit_allowed",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if preservation.keys().cloned().collect::<BTreeSet<_>>() != expected_preservation_keys
+        || preservation.values().any(|value| value.as_bool() != Some(false))
+    {
+        return Err("post-A1 test-profile preservation boundary drifted".to_owned());
+    }
+    let no_claim = text(extension, "no_claim_boundary");
+    for required in [
+        "all seven test-profile DateTime carriers",
+        "does not execute a test or standalone tool",
+        "prove serialized or persisted bytes",
+        "external consumers",
+        "second-order propagation",
+        "close A1",
+        "authorize dependency exit",
+    ] {
+        if !no_claim.contains(required) {
+            return Err(format!(
+                "post-A1 test-profile no-claim boundary missing {required}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn count_matching_lines(source: &str, token: &str) -> usize {
     source.lines().filter(|line| line.contains(token)).count()
 }
@@ -4266,6 +4507,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     validate_post_a1_benchmark_lineage_extension(inventory)?;
     validate_post_a1_conformance_raptorq_lineage_extension(inventory)?;
     validate_post_a1_public_carrier_lineage_extension(inventory)?;
+    validate_post_a1_test_profile_carrier_lineage_extension(inventory)?;
     Ok(())
 }
 
@@ -4290,9 +4532,9 @@ fn time_utc_inventory_is_exact_and_source_pinned() {
         "Thirteen ordered literal-operation rules",
         "one same-line overlap",
         "derived-consumer remainder",
-        "39 exact rows",
+        "47 exact rows",
         "34 exact cross-file consumer rows",
-        "271 classified",
+        "279 classified",
         "TIME-A1-ROOT-CLI-JSON-2026-08-06",
         "src/cli/output.rs:156",
         "69th current source pin",
@@ -4311,6 +4553,12 @@ fn time_utc_inventory_is_exact_and_source_pinned() {
         "Twenty-eight",
         "32 exact cross-file consumer IDs",
         "no unclassified public carrier",
+        "TIME-A1-TEST-PROFILE-CARRIER-LINEAGE-2026-08-06",
+        "five HPACK private-fixture",
+        "line 605",
+        "lines 254 and 464",
+        "12 exact derived consumer IDs",
+        "seven test-profile",
         "+127/-28",
         "+87/-27",
         "literal-source",
@@ -4510,6 +4758,19 @@ fn time_utc_inventory_rejects_cutover_and_completeness_drift() {
         .expect("public carrier lineage rows must be mutable")
         .pop();
     assert!(validate_inventory(&missing_public_carrier).is_err());
+
+    let mut test_profile_overclaim = inventory.clone();
+    test_profile_overclaim["post_a1_test_profile_carrier_lineage_extension"]["preservation"]
+        ["static_remainder_closed"] = Value::Bool(true);
+    assert!(validate_inventory(&test_profile_overclaim).is_err());
+
+    let mut missing_test_profile_carrier = inventory.clone();
+    missing_test_profile_carrier["post_a1_test_profile_carrier_lineage_extension"]
+        ["field_lineage_rows"]
+        .as_array_mut()
+        .expect("test-profile carrier lineage rows must be mutable")
+        .pop();
+    assert!(validate_inventory(&missing_test_profile_carrier).is_err());
 
     let mut alias_route = inventory.clone();
     for binding in alias_route["alias_aware_chrono_uses"]["bindings"]

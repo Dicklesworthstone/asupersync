@@ -42,12 +42,12 @@ registry without mutating those shared authorities:
    reported overlaps have their literal `chrono::Duration` call on the
    preceding line. The corrected literal-or-alias union is therefore 190
    unique lines.
-7. Thirty-nine declared in-file consumer anchors across six categories link
-   to 42 unique direct source anchors. Thirty-four exact cross-file consumer
+7. Forty-seven declared in-file consumer anchors across seven categories link
+   to 46 unique direct source anchors. Thirty-four exact cross-file consumer
    rows across nine categories link to 41 direct source anchors and extend the
-   combined lineage to 72 unique direct source anchors. Together with eight
-   imported-alias anchors, the artifact freezes 47 in-file derived anchors
-   and 271 classified direct-plus-derived anchors. This is a source-linked
+   combined lineage to 76 unique direct source anchors. Together with eight
+   imported-alias anchors, the artifact freezes 55 in-file derived anchors
+   and 279 classified direct-plus-derived anchors. This is a source-linked
    static count, not runtime coverage.
 
 The direct `time` edge remains present under `cli`, and Chrono remains present
@@ -131,13 +131,14 @@ direct bindings, 32 direct alias rows, one same-line overlap, and eight
 imported-alias arithmetic, comparison, association, or ordering anchors are
 also exact.
 
-The declared downstream tranche now freezes 39 exact rows across CLI
+The declared downstream tranche now freezes 47 exact rows across CLI
 cutoff/expiry handling, PostgreSQL and Kafka arithmetic, JetStream wire
 insertion, real-E2E serialization/retention/return/embedding, conformance
 field association and rendering, and standalone fixture serialization,
-template association, result retention, and main-conformance RaptorQ history
-serialization. Every row names its direct source anchor and stops at the
-declared first semantic boundary.
+template association, result retention, main-conformance RaptorQ history
+serialization, HPACK fixture-metadata retention, Golden metadata association,
+and standalone coverage-matrix JSON serialization. Every row names its direct
+source anchor and stops at the declared first semantic boundary.
 
 The cross-file tranche freezes 34 exact cross-file consumer rows. Seventeen
 are JSON boundaries: all thirteen explicit main conformance-member report
@@ -174,11 +175,11 @@ or JSON serialization boundary to the direct timestamp source that establishes
 its lineage. The boundary does not extend through later encoding or rendering
 calls, later container propagation, later distinct file or standard-output
 sink anchors, dynamic dispatch, or ambiguous provenance. The remaining static
-gap is narrower but real. All 30 public Chrono-backed timestamp fields now
-have exactly one first-boundary or no-producer disposition, but the seven
-test-profile fields, cross-file consumers beyond these thirty-four first
-semantic boundaries, external consumers absent from this snapshot, and later
-container or arbitrary-byte propagation are not fully dispositioned. A1's
+gap is narrower but real. All 30 public and seven test-profile Chrono-backed
+timestamp fields now have exactly one first-boundary or no-producer
+disposition, but cross-file consumers beyond these thirty-four first semantic
+boundaries, external consumers absent from this snapshot, and later container
+or arbitrary-byte propagation are not fully dispositioned. A1's
 zero-unclassified-use acceptance remains unmet and the bead stays open.
 
 A 2026-08-05 static provenance pass refreshed one stale authority pin against
@@ -220,9 +221,18 @@ fields reach an already-declared first in-repository boundary; the two root
 CLI fields with no in-tree producer remain explicit empty-consumer rows. The
 matrix references 32 exact cross-file consumer IDs and two exact in-file
 derived consumer IDs, with no unclassified public carrier. This closes only
-the public-carrier first-boundary classification: test-profile carriers,
-external consumers, second-order propagation, emitted or persisted bytes,
-readback, behavior, and A1 completion remain open.
+the public-carrier first-boundary classification at that extension point.
+
+The `TIME-A1-TEST-PROFILE-CARRIER-LINEAGE-2026-08-06` extension adds the
+matching seven-row test-profile matrix. It records five HPACK private-fixture
+metadata clone embeddings, the Golden `MetadataSummary.last_updated`
+association at line 605, and both standalone coverage-matrix JSON
+serialization paths at lines 254 and 464. Together with four prior in-file
+rows and two prior executable-output rows, all seven test-profile fields now
+reference 12 exact derived consumer IDs and two exact cross-file consumer IDs.
+This remains static first-boundary lineage only: external consumers,
+second-order propagation, emitted or persisted bytes, readback, behavior, and
+A1 completion remain open.
 
 That full line-sensitive pass also repaired a missed consequence of the
 previously classified PostgreSQL read-cancellation insertion: two literal
@@ -498,10 +508,10 @@ The artifact routes, without mutating shared authority files:
 Every reconciliation row has an explicit owner and
 `ROUTED_NOT_MUTATED_BY_A1` state. There are no unclassified literal Chrono
 paths or undiscovered direct Chrono import bindings in the pinned census, but
-all 30 public carrier rows now have an exact first-boundary or no-producer
-disposition. Test-profile carrier coverage and derived-consumer coverage
-beyond the 39 declared in-file rows and thirty-four declared cross-file
-consumer rows remain partial.
+all 30 public plus seven test-profile carrier rows now have an exact
+first-boundary or no-producer disposition. Derived-consumer coverage beyond
+the 47 declared in-file rows and thirty-four declared cross-file consumer rows
+remains partial.
 
 ## Validation and no-claim boundary
 
@@ -509,8 +519,9 @@ A1 used workspace-filesystem source search, direct-import reconciliation,
 manifest and authority inspection, SHA-256 source pins, path/count and
 literal-operation, literal-source, in-file derived-row, and cross-file consumer
 projections; direct timestamp lineage checks; the complete 30-field public
-carrier disposition matrix; and independent static cross-review. It did not
-execute the companion contract. This remains a
+carrier disposition matrix; the complete seven-field test-profile carrier
+matrix; and independent static cross-review. It did not execute the companion
+contract. This remains a
 partial static inventory only; full A1 acceptance is unmet,
 `bead_close_allowed=false`, and the bead must not be closed from this packet.
 
