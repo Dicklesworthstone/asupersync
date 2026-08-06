@@ -157,6 +157,34 @@ The exact engine split is:
 | `URL_SAFE` | 0 | 2 |
 | `URL_SAFE_NO_PAD` | 14 | 6 |
 
+### A3 per-operation checkpoint
+
+The machine artifact now records 22 of 123 external call expressions as exact
+one-operation rows for `B64-A3-AUTH`; 101 A4/A5 expressions remain. Each row
+pins its call/path relation, source anchor and line, engine, direction,
+production classification, compilation profile, migration group, stable
+security-role and owned-error IDs, capability IDs, consumer, and acceptance
+rule. Every recorded row has `count = 1`.
+
+| A3 call | Production encode/decode | Nonproduction encode/decode | Recorded operations |
+| --- | ---: | ---: | ---: |
+| PostgreSQL SCRAM (`CALL-009`) | 3 / 2 | 5 / 1 | 11 |
+| NATS authentication (`CALL-017`) | 1 / 2 | 3 / 0 | 6 |
+| signed runtime profile (`CALL-024`) | 1 / 1 | 0 / 0 | 2 |
+| TLS pins (`CALL-025`) | 1 / 2 | 0 / 0 | 3 |
+| **A3 total** | **6 / 7** | **8 / 1** | **22** |
+
+The partial registry contains 12 stable A3 security-role IDs and
+7 stable A3 owned-error IDs. All 22 recorded operations reference registered
+IDs, and every registered A3 role/error is used. Encode-only rows use the explicit
+infallible allocating-output boundary; decode rows name the owned runtime
+profile, NATS, PostgreSQL, TLS, or deterministic-test boundary. No row exposes
+the upstream codec error type.
+
+This is a source-only checkpoint, not a completed A1 matrix. A4/A5 operation
+rows and stable collision/consumer role-error references are still pending;
+the corresponding gaps remain `BLOCKED`.
+
 Two paths named `base64` are local modules, not the dependency:
 
 - `src/observability/otel_conformance_tests.rs` contains a hand-written
@@ -291,11 +319,12 @@ separate from the unchanged 36-path direct Rust dependency census.
 
 The machine artifact routes every observed gap; none is left unowned:
 
-- A1: the current 36 path rows aggregate 123 external expressions. A1 still
-  owns the exact per-operation engine/direction/anchor/error/security-role,
-  nonpublic-consumer matrix, exact manifest/feature/target/cfg profile gates,
-  and stable error/security-role registries, especially for multi-engine paths.
-  This checkpoint is not acceptance-complete.
+- A1: the current 36 path rows aggregate 123 external expressions. The A3
+  checkpoint records 22 exact operation rows with registered roles/errors;
+  the remaining 101 A4/A5 operations, stable collision/consumer role-error
+  references, nonpublic-consumer matrix, and exact manifest/feature/target/cfg
+  profile gates are still owned here. This checkpoint is not
+  acceptance-complete.
 - A2: checked global sizing/allocation policy and the explicit no-constant-time
   boundary.
 - A3: credential/certificate migration and the URL-safe padded decode-only

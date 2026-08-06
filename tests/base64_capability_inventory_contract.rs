@@ -34,8 +34,10 @@ const DOC_END: &str = "<!-- END BASE64 CAPABILITY INVENTORY -->";
 const PATH_TOKEN: &str = concat!("base", "64::");
 const SOURCE_PIN_PATHS_SHA256: &str =
     "996efa7ae8c2105ab6d8a059f8cafef646c323e1791e40895becc43f68157fe4";
+const A3_OPERATION_SEMANTICS_SHA256: &str =
+    "165174a4a8b2eb830fec0b7f3770958c79ba58863020a831ae124d5db503ffc2";
 const CLAIMS_PROJECTION_SHA256: &str =
-    "4a149d69cc66264b397e14ccc6e0a3bbbb329a3ac5ebea8a5aef79cc67e0677d";
+    "f3e9e74f5aff62b4c79f0d15aeab94a49cddf517b0a26e3e4f899b684a8c120d";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -194,6 +196,10 @@ fn claims_projection(inventory: &Value) -> Value {
         "engines": inventory["engines"].clone(),
         "incumbent_api": inventory["incumbent_api"].clone(),
         "decode_error_contract": inventory["decode_error_contract"].clone(),
+        "security_roles": inventory["security_roles"].clone(),
+        "owned_error_mappings": inventory["owned_error_mappings"].clone(),
+        "operation_matrix_progress": inventory["operation_matrix_progress"].clone(),
+        "operation_contracts": inventory["operation_contracts"].clone(),
         "semantic_vector_authority": inventory["semantic_vector_authority"].clone(),
         "semantic_corpus": inventory["semantic_corpus"].clone(),
         "call_compilation_profiles": inventory["call_compilation_profiles"].clone(),
@@ -452,6 +458,61 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         != Some("ABSENT")
     {
         return Err("upstream error exposure boundary drifted".to_owned());
+    }
+    require_exact_ids(
+        array(inventory, "security_roles"),
+        "role_id",
+        &[
+            "B64-ROLE-RUNTIME-PROFILE-SIGNATURE",
+            "B64-ROLE-NATS-NONCE-SIGNATURE",
+            "B64-ROLE-NATS-JWT-SEGMENT",
+            "B64-ROLE-POSTGRES-SCRAM-NONCE",
+            "B64-ROLE-POSTGRES-SCRAM-SALT",
+            "B64-ROLE-POSTGRES-SCRAM-CHANNEL-BINDING",
+            "B64-ROLE-POSTGRES-SCRAM-CLIENT-PROOF",
+            "B64-ROLE-POSTGRES-SCRAM-SERVER-SIGNATURE",
+            "B64-ROLE-POSTGRES-SCRAM-TEST-BOUNDARY",
+            "B64-ROLE-TLS-SPKI-PIN",
+            "B64-ROLE-TLS-CERT-PIN",
+            "B64-ROLE-TLS-PIN-SERIALIZATION",
+        ],
+        "A3 security roles",
+    )?;
+    for role in array(inventory, "security_roles") {
+        if text(role, "category").is_empty()
+            || role.get("security_critical").and_then(Value::as_bool).is_none()
+            || text(role, "description").is_empty()
+        {
+            return Err(format!(
+                "security role {} is incomplete",
+                text(role, "role_id")
+            ));
+        }
+    }
+    require_exact_ids(
+        array(inventory, "owned_error_mappings"),
+        "error_id",
+        &[
+            "B64-ERROR-INFALLIBLE-ENCODE",
+            "B64-ERROR-RUNTIME-PROFILE-REFUSAL",
+            "B64-ERROR-NATS-FALLBACK-SUPPRESSED",
+            "B64-ERROR-NATS-INVALID-AUTH",
+            "B64-ERROR-POSTGRES-AUTHENTICATION",
+            "B64-ERROR-TEST-ASSERTION",
+            "B64-ERROR-TLS-CERTIFICATE",
+        ],
+        "A3 owned error mappings",
+    )?;
+    for error in array(inventory, "owned_error_mappings") {
+        if error.get("upstream_error_exposed").and_then(Value::as_bool) != Some(false)
+            || text(error, "owned_boundary").is_empty()
+            || text(error, "detail").is_empty()
+        {
+            return Err(format!(
+                "owned error mapping {} is incomplete",
+                text(error, "error_id")
+            ));
+        }
     }
     let vector_authority = object(inventory, "semantic_vector_authority");
     if vector_authority.get("positive_vectors").and_then(Value::as_str)
@@ -800,6 +861,245 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         {
             return Err(format!("consumer obligation drifted for {consumer_id}"));
         }
+    }
+
+    let operation_progress = object(inventory, "operation_matrix_progress");
+    if operation_progress.get("state").and_then(Value::as_str)
+        != Some("A3_RECORDED_A4_A5_PENDING")
+        || operation_progress
+            .get("external_operation_total")
+            .and_then(Value::as_u64)
+            != Some(123)
+        || operation_progress
+            .get("recorded_operation_total")
+            .and_then(Value::as_u64)
+            != Some(22)
+        || operation_progress
+            .get("remaining_operation_total")
+            .and_then(Value::as_u64)
+            != Some(101)
+        || text(&inventory["operation_matrix_progress"], "count_semantics").is_empty()
+    {
+        return Err("operation-matrix progress drifted".to_owned());
+    }
+    require_exact_strings(
+        &inventory["operation_matrix_progress"],
+        "recorded_group_ids",
+        &["B64-A3-AUTH"],
+    )?;
+    require_exact_strings(
+        &inventory["operation_matrix_progress"],
+        "remaining_group_ids",
+        &["B64-A4-WEB-GRPC", "B64-A5-REMAINING"],
+    )?;
+
+    let operations = array(inventory, "operation_contracts");
+    require_exact_ids(
+        operations,
+        "operation_id",
+        &[
+            "B64-A3-OP-RUNTIME-PROFILE-SIGNATURE-ENCODE",
+            "B64-A3-OP-RUNTIME-PROFILE-SIGNATURE-DECODE",
+            "B64-A3-OP-NATS-NONCE-SIGNATURE-ENCODE",
+            "B64-A3-OP-NATS-JWT-DECODE-NOPAD",
+            "B64-A3-OP-NATS-JWT-DECODE-PAD-FALLBACK",
+            "B64-A3-OP-NATS-TEST-JWT-HEADER-ENCODE",
+            "B64-A3-OP-NATS-TEST-JWT-PAYLOAD-ENCODE",
+            "B64-A3-OP-NATS-TEST-JWT-SIGNATURE-ENCODE",
+            "B64-A3-OP-PG-SCRAM-CLIENT-NONCE-ENCODE",
+            "B64-A3-OP-PG-SCRAM-SALT-DECODE",
+            "B64-A3-OP-PG-SCRAM-CHANNEL-BINDING-ENCODE",
+            "B64-A3-OP-PG-SCRAM-CLIENT-PROOF-ENCODE",
+            "B64-A3-OP-PG-SCRAM-SERVER-SIGNATURE-DECODE",
+            "B64-A3-OP-PG-TEST-SALT64-ENCODE",
+            "B64-A3-OP-PG-TEST-SALT65-ENCODE",
+            "B64-A3-OP-PG-TEST-RFC-SIGNATURE-DECODE",
+            "B64-A3-OP-PG-TEST-TRUNCATED-SIGNATURE-ENCODE",
+            "B64-A3-OP-PG-TEST-SIGNATURE31-ENCODE",
+            "B64-A3-OP-PG-TEST-SIGNATURE33-ENCODE",
+            "B64-A3-OP-TLS-SPKI-PIN-DECODE",
+            "B64-A3-OP-TLS-CERT-PIN-DECODE",
+            "B64-A3-OP-TLS-PIN-ENCODE",
+        ],
+        "A3 operation contracts",
+    )?;
+    let operation_semantics: BTreeMap<String, Value> = operations
+        .iter()
+        .map(|operation| {
+            let operation_id = text(operation, "operation_id").to_owned();
+            let mut semantics = operation.clone();
+            semantics
+                .as_object_mut()
+                .expect("operation contract must be an object")
+                .remove("operation_id");
+            (operation_id, semantics)
+        })
+        .collect();
+    let operation_semantics = serde_json::to_value(operation_semantics)
+        .expect("operation semantic projection must serialize");
+    if sha256_hex(&canonical_json_bytes(&operation_semantics))
+        != A3_OPERATION_SEMANTICS_SHA256
+    {
+        return Err("A3 keyed operation semantics drifted".to_owned());
+    }
+    let role_ids = row_ids(array(inventory, "security_roles"), "role_id");
+    let error_ids = row_ids(array(inventory, "owned_error_mappings"), "error_id");
+    let mut used_role_ids = BTreeSet::new();
+    let mut used_error_ids = BTreeSet::new();
+    let mut source_locations = BTreeSet::new();
+    let mut operation_totals: BTreeMap<String, [u64; 4]> = BTreeMap::new();
+    for operation in operations {
+        let operation_id = text(operation, "operation_id");
+        let call_id = text(operation, "call_id");
+        let path = text(operation, "path");
+        let direction = text(operation, "direction");
+        let classification = text(operation, "classification");
+        let count = number(operation, "count");
+        let source_line = number(operation, "source_line");
+        if count != 1
+            || source_line == 0
+            || text(operation, "source_anchor").is_empty()
+            || text(operation, "acceptance_rule").is_empty()
+            || text(operation, "group_id") != "B64-A3-AUTH"
+        {
+            return Err(format!("operation {operation_id} is incomplete"));
+        }
+        if !source_locations.insert((path.to_owned(), source_line)) {
+            return Err(format!("operation {operation_id} source location is duplicated"));
+        }
+        let bucket_index = match (classification, direction) {
+            ("PRODUCTION", "ENCODE") => 0,
+            ("PRODUCTION", "DECODE") => 1,
+            ("NONPRODUCTION", "ENCODE") => 2,
+            ("NONPRODUCTION", "DECODE") => 3,
+            _ => return Err(format!("operation {operation_id} classification drifted")),
+        };
+        let source_line_index = usize::try_from(source_line - 1)
+            .map_err(|_| format!("operation {operation_id} source line overflowed"))?;
+        let source = read_repo_file(path);
+        let source_text = source
+            .lines()
+            .nth(source_line_index)
+            .ok_or_else(|| format!("operation {operation_id} source line is absent"))?;
+        let direction_marker = direction.to_ascii_lowercase();
+        if !source_text.contains(direction_marker.as_str()) {
+            return Err(format!("operation {operation_id} source direction drifted"));
+        }
+
+        let call = call_sites
+            .iter()
+            .find(|row| text(row, "call_id") == call_id)
+            .ok_or_else(|| format!("operation {operation_id} call is absent"))?;
+        let engine_id = text(operation, "engine_id");
+        if path != text(call, "path")
+            || text(operation, "profile_id") != text(call, "profile")
+            || text(operation, "group_id") != text(call, "group")
+            || !string_set(call, "engines").contains(engine_id)
+            || !engine_ids.contains(engine_id)
+        {
+            return Err(format!("operation {operation_id} call relation drifted"));
+        }
+
+        let role_id = text(operation, "role_id");
+        let error_id = text(operation, "error_id");
+        if !role_ids.contains(role_id) || !error_ids.contains(error_id) {
+            return Err(format!("operation {operation_id} registry relation drifted"));
+        }
+        used_role_ids.insert(role_id.to_owned());
+        used_error_ids.insert(error_id.to_owned());
+
+        let operation_consumers = string_set(operation, "consumer_ids");
+        if operation_consumers.len() != 1 {
+            return Err(format!("operation {operation_id} must name one consumer"));
+        }
+        let consumer_id = operation_consumers
+            .iter()
+            .next()
+            .expect("one operation consumer must exist");
+        let consumer = consumers
+            .iter()
+            .find(|row| text(row, "consumer_id") == consumer_id)
+            .ok_or_else(|| format!("operation {operation_id} consumer is absent"))?;
+        if !consumer_ids.contains(consumer_id)
+            || !string_set(consumer, "call_ids").contains(call_id)
+            || !string_set(consumer, "profile_ids").contains(text(operation, "profile_id"))
+            || !string_set(consumer, "group_ids").contains(text(operation, "group_id"))
+            || string_set(operation, "capability_ids")
+                != string_set(consumer, "capability_ids")
+        {
+            return Err(format!("operation {operation_id} consumer relation drifted"));
+        }
+        operation_totals.entry(call_id.to_owned()).or_default()[bucket_index] += count;
+    }
+    if used_role_ids != role_ids || used_error_ids != error_ids {
+        return Err("A3 role or error registry contains an orphan".to_owned());
+    }
+    let expected_a3_call_ids: BTreeSet<String> = call_sites
+        .iter()
+        .filter(|row| text(row, "group") == "B64-A3-AUTH")
+        .map(|row| text(row, "call_id").to_owned())
+        .collect();
+    if operation_totals.keys().cloned().collect::<BTreeSet<_>>() != expected_a3_call_ids {
+        return Err("A3 operation call coverage drifted".to_owned());
+    }
+    for call in call_sites
+        .iter()
+        .filter(|row| text(row, "group") == "B64-A3-AUTH")
+    {
+        let actual = operation_totals
+            .get(text(call, "call_id"))
+            .expect("covered A3 call must have operation totals");
+        let expected = [
+            call["production"]["encode"]
+                .as_u64()
+                .expect("production encode must be an unsigned integer"),
+            call["production"]["decode"]
+                .as_u64()
+                .expect("production decode must be an unsigned integer"),
+            call["nonproduction"]["encode"]
+                .as_u64()
+                .expect("nonproduction encode must be an unsigned integer"),
+            call["nonproduction"]["decode"]
+                .as_u64()
+                .expect("nonproduction decode must be an unsigned integer"),
+        ];
+        if *actual != expected {
+            return Err(format!(
+                "A3 operation totals drifted for {}",
+                text(call, "call_id")
+            ));
+        }
+    }
+    let recorded_totals = object(
+        &inventory["operation_matrix_progress"],
+        "recorded_totals",
+    );
+    let aggregate_totals: [u64; 4] = [
+        operation_totals.values().map(|counts| counts[0]).sum(),
+        operation_totals.values().map(|counts| counts[1]).sum(),
+        operation_totals.values().map(|counts| counts[2]).sum(),
+        operation_totals.values().map(|counts| counts[3]).sum(),
+    ];
+    if aggregate_totals != [6, 7, 8, 1]
+        || recorded_totals
+            .get("production_encode")
+            .and_then(Value::as_u64)
+            != Some(aggregate_totals[0])
+        || recorded_totals
+            .get("production_decode")
+            .and_then(Value::as_u64)
+            != Some(aggregate_totals[1])
+        || recorded_totals
+            .get("nonproduction_encode")
+            .and_then(Value::as_u64)
+            != Some(aggregate_totals[2])
+        || recorded_totals
+            .get("nonproduction_decode")
+            .and_then(Value::as_u64)
+            != Some(aggregate_totals[3])
+        || aggregate_totals.iter().sum::<u64>() != 22
+    {
+        return Err("A3 operation aggregate drifted".to_owned());
     }
 
     require_exact_ids(
@@ -1305,6 +1605,10 @@ fn docs_ignore_and_no_claim_markers_remain_discoverable() {
         "B64-A3-AUTH",
         "B64-A4-WEB-GRPC",
         "B64-A5-REMAINING",
+        "22 of 123 external call expressions",
+        "12 stable A3 security-role IDs",
+        "7 stable A3 owned-error IDs",
+        "101 A4/A5 expressions remain",
         "no constant-time claim",
         "does not prove compilation",
         "Only A6",
@@ -1358,6 +1662,21 @@ fn safe_negative_mutations_fail_closed() {
     let mut changed_group = original.clone();
     changed_group["call_sites"][0]["group"] = Value::String("B64-A3-AUTH".to_owned());
     assert!(validate_claims_projection(&changed_group).is_err());
+
+    let mut invalid_operation_engine = original.clone();
+    invalid_operation_engine["operation_contracts"][0]["engine_id"] =
+        Value::String("B64-ENGINE-NOT-REGISTERED".to_owned());
+    assert!(validate_inventory(&invalid_operation_engine).is_err());
+
+    let mut registered_operation_engine_swap = original.clone();
+    registered_operation_engine_swap["operation_contracts"][3]["engine_id"] =
+        Value::String("B64-ENGINE-URL-SAFE-PAD".to_owned());
+    assert!(validate_inventory(&registered_operation_engine_swap).is_err());
+
+    let mut registered_error_reassignment = original.clone();
+    registered_error_reassignment["operation_contracts"][0]["error_id"] =
+        Value::String("B64-ERROR-RUNTIME-PROFILE-REFUSAL".to_owned());
+    assert!(validate_inventory(&registered_error_reassignment).is_err());
 
     let mut exposed_error = original;
     exposed_error["public_surface"][0]["upstream_error_exposed"] = Value::Bool(true);
