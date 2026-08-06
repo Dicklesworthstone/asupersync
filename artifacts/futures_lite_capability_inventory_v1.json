@@ -135,6 +135,242 @@
     ],
     "closure_allowed": false
   },
+  "a3_block_on_receipt": {
+    "owner_bead": "asupersync-d24mms.6.3",
+    "base_revision": "02b380ee063e7e643105b1a7997360a7021bf32e",
+    "implementation_revision": "050fd0f08e4cf127e348bbf545c1e46cc392f6b5",
+    "source_status": "STATIC_SOURCE_PROGRESS",
+    "execution_status": "NOT_RUN_STATIC_ONLY",
+    "module": "crate::util::future",
+    "visibility": "crate-private alongside-incumbent",
+    "current_source_pins": [
+      {
+        "path": "src/future.rs",
+        "sha256": "82f603dfb1403b45b401a4268afd7976c22ce515b55924e3b265b8889af06af0",
+        "line_count": 861
+      },
+      {
+        "path": "src/util/mod.rs",
+        "sha256": "2f833ed4e8c6b11701490669d96bcea63239af4e6868ff379daf3606b569ef4a",
+        "line_count": 35
+      }
+    ],
+    "kernel_projection": {
+      "path": "src/future.rs",
+      "start_marker": "pub(crate) enum BlockOnError",
+      "end_marker": "#[cfg(all(test, not(target_arch = \"wasm32\")))]",
+      "sha256": "12d69325741ba77b6e68ae082909696179dc77f050438c6e852eeeb34a97b0d8"
+    },
+    "semantic_guarantees": [
+      "the future is pinned on the calling stack without Send, Unpin, or static bounds",
+      "one Arc-owned notification and stable waker identity are created per invocation",
+      "the wake flag is stored before unpark and consumed with acquire-release ordering",
+      "repeated wakes coalesce without losing the wake that races with park",
+      "a spurious park return does not cause an unnotified repoll",
+      "recursive ordinary-thread calls use independent state",
+      "future panic propagates without shared kernel poisoning",
+      "the kernel creates no executor, task, region, obligation, or ambient Cx",
+      "cancellation progress requires the future state change to schedule a wake"
+    ],
+    "context_policy": [
+      {
+        "context": "ordinary host thread",
+        "decision": "ADMIT",
+        "evidence": "SOURCE_AUTHORED_NOT_EXECUTED"
+      },
+      {
+        "context": "recursive ordinary-thread invocation",
+        "decision": "ADMIT",
+        "evidence": "SOURCE_AUTHORED_NOT_EXECUTED"
+      },
+      {
+        "context": "Asupersync blocking-pool thread",
+        "decision": "ADMIT",
+        "evidence": "SOURCE_AUTHORED_NOT_EXECUTED"
+      },
+      {
+        "context": "thread with an installed Asupersync runtime handle",
+        "decision": "REFUSE_BEFORE_POLL",
+        "evidence": "SOURCE_AUTHORED_NOT_EXECUTED"
+      },
+      {
+        "context": "Asupersync runtime driver versus scheduler worker",
+        "decision": "UNRESOLVED_CONFLATED_BY_CURRENT_HANDLE_CHECK",
+        "evidence": "BLOCKED_GAP"
+      },
+      {
+        "context": "foreign executor thread",
+        "decision": "UNRESOLVED_NOT_IDENTIFIABLE",
+        "evidence": "BLOCKED_GAP"
+      },
+      {
+        "context": "wasm32 without host-thread parking",
+        "decision": "REFUSE_UNSUPPORTED_PLATFORM",
+        "evidence": "SOURCE_AUTHORED_NOT_EXECUTED"
+      }
+    ],
+    "authored_inline_tests": [
+      "ready_future_completes_without_parking",
+      "borrowed_non_send_future_and_recursive_call_are_admitted",
+      "wakes_during_poll_are_coalesced_without_parking",
+      "spurious_park_return_does_not_trigger_an_unnotified_poll",
+      "repeated_polls_receive_the_same_waker_identity",
+      "wake_after_pending_makes_progress",
+      "explicit_cancellation_wake_makes_progress",
+      "future_panic_propagates_without_poisoning_kernel_state",
+      "installed_runtime_context_is_refused_before_poll",
+      "blocking_pool_thread_is_admitted"
+    ],
+    "incumbent_production_sites": [
+      "src/web/router.rs:662",
+      "src/signal/shutdown.rs:161",
+      "src/signal/shutdown.rs:499"
+    ],
+    "missing_terminal_evidence": [
+      "focused compile and execution of the ten authored source cases",
+      "loom or equivalent state-model coverage of wake and park interleavings",
+      "LabRuntime or DPOR cancellation and quiescence evidence",
+      "runtime driver versus scheduler worker context policy",
+      "foreign executor context policy",
+      "idle CPU and completion-latency comparison against the incumbent",
+      "migration of any production or test call site"
+    ],
+    "cutover_authorized": false,
+    "closure_allowed": false
+  },
+  "post_baseline_current_snapshot": {
+    "captured_date_utc": "2026-08-06",
+    "historical_baseline_preserved": true,
+    "source_status": "STATIC_SOURCE_PROGRESS",
+    "evidence_state": "SOURCE_BASELINED",
+    "execution_status": "NOT_RUN_STATIC_ONLY",
+    "current_occurrence": {
+      "unit": "non-overlapping textual token occurrences in current tracked Rust source, excluding this contract",
+      "ordering": "bytewise path order; digest input is path, tab, decimal count, newline",
+      "file_count": 315,
+      "token_count": 1384,
+      "digest_sha256": "879eb440a38b3bdcebe64b38165865f3869243592101c45169c83beecc6e2f5c",
+      "scope_rows": [
+        {
+          "scope": "src",
+          "file_count": 151,
+          "token_count": 830,
+          "digest_sha256": "874ef3599c28f8007951426f018274f85bb7f18ac1d78ab904a1a6d40b96c7f4"
+        },
+        {
+          "scope": "tests",
+          "file_count": 154,
+          "token_count": 542,
+          "digest_sha256": "73e35c82f2bbdd8f6af9c9f3a2979bad0ad546d174c73e21fd112cbfed40bac5"
+        },
+        {
+          "scope": "benches",
+          "file_count": 4,
+          "token_count": 4,
+          "digest_sha256": "e0486d644e0a2806541a08f48881263d2c6a5eb6afc967a93783e625dc9b86f7"
+        },
+        {
+          "scope": "examples",
+          "file_count": 1,
+          "token_count": 1,
+          "digest_sha256": "ac6854be3e45bc271b3d3434510f18c0aa4d95bd637bc112219b48db906d5ad4"
+        },
+        {
+          "scope": "asupersync-tokio-compat",
+          "file_count": 3,
+          "token_count": 5,
+          "digest_sha256": "4b683da32edc8ec80b28d24e377bb7c715efaff7ca76469848005d5e0d24d7ce"
+        },
+        {
+          "scope": "fuzz",
+          "file_count": 2,
+          "token_count": 2,
+          "digest_sha256": "666119285e1ae804e6b859a2fb54aed4bd29c60fe4b92243d3b3cbab5964264d"
+        }
+      ]
+    },
+    "current_migration_reservation_groups": [
+      {
+        "group_id": "FUT-A6-CORE",
+        "file_count": 42,
+        "token_count": 258,
+        "digest_sha256": "4290063517ed4334390487b158bffa2a14f76f146fbf83a6c5158856e37f474e"
+      },
+      {
+        "group_id": "FUT-A7-IO",
+        "file_count": 32,
+        "token_count": 153,
+        "digest_sha256": "1f4118668eff5e07ae8d4acd46343b842d5d7ec62aec7bc087a02a66c6f17c56"
+      },
+      {
+        "group_id": "FUT-A8-SERVICES",
+        "file_count": 33,
+        "token_count": 197,
+        "digest_sha256": "6bec0c63b36d44665eb57ab71b36d5230a980494533b91392b2af1d6d6e17a34"
+      },
+      {
+        "group_id": "FUT-A9-ATP-DEV",
+        "file_count": 208,
+        "token_count": 776,
+        "digest_sha256": "4746f8c8a8862b82fe0e836d2fcb60cf53430f1cd093f6af8c0751f889166e3f"
+      }
+    ],
+    "source_pin_reconciliations": [
+      {
+        "path": "Cargo.toml",
+        "baseline_sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
+        "current_sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+        "current_line_count": 1038,
+        "classification": "CAPABILITY_PROJECTION_UNCHANGED",
+        "projection": "root futures-lite manifest requirement",
+        "projection_sha256": "81edacba422d047cd609290f9b0a95a8cda255ef326afe8d34afd7dfa7b80def"
+      },
+      {
+        "path": "Cargo.lock",
+        "baseline_sha256": "9fa12e8af1e6b15a3070d88d62b2b81b8ba49c0e9d8592c1d1682f1cd72a4461",
+        "current_sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+        "current_line_count": 4666,
+        "classification": "CAPABILITY_PROJECTION_UNCHANGED",
+        "projection": "resolved futures-lite package block",
+        "projection_sha256": "9260990a318c00b457e53860e1d10774e380ff818c7d7579f2d922473ade1b4b"
+      },
+      {
+        "path": "src/sync/notify.rs",
+        "baseline_sha256": "11d85d8cc9bcd7ec6c21245dba5b58f381b3aa4c54dc3d8d17d01f68b213a3ef",
+        "current_sha256": "3df286c11ba03629b29838e75798454cc3899a6836d0efd381ef0afef9b960d7",
+        "current_line_count": 7060,
+        "classification": "CAPABILITY_PROJECTION_UNCHANGED",
+        "projection": "sorted futures-lite token lines",
+        "projection_sha256": "ff73e9793bd9748d2e82dba7b4d16e27830b5d35491c2759021dcbb81b33b2c7"
+      },
+      {
+        "path": "artifacts/dependency_capability_registry_v1.json",
+        "baseline_sha256": "4d91239e2f2e83069414ca36eafc4aaba283cd3f89576fbb5e75f3374bd41b11",
+        "current_sha256": "e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2",
+        "current_line_count": 6917,
+        "classification": "CAPABILITY_PROJECTION_UNCHANGED",
+        "projection": "canonical CAP-FUTURES-STREAMS row",
+        "projection_sha256": "e4440233403e24db85a0b8719e0670b5af45ff6c0728f956a9f02c8a9dba5c12"
+      },
+      {
+        "path": "artifacts/dependency_marginal_ledger_v1.json",
+        "baseline_sha256": "832e8d68eefe9400a246ea619a250ea91bcf16a57d5fe728a6ce45e25bbdb4a6",
+        "current_sha256": "9382d8357e59b49b01775f3efad2db95f2186c63bc432b5616ba20f3b9a218a9",
+        "current_line_count": 188045,
+        "classification": "CAPABILITY_MEASUREMENTS_UNCHANGED_METADATA_REFRESHED",
+        "projection": "52 cells, 13 profiles, 4 targets, package-count histogram 0x4 3x21 4x13 5x14"
+      },
+      {
+        "path": "artifacts/api_surface_map_v1.json",
+        "baseline_sha256": "a00b61fe82326d766cde69e2392bc493a67d3c62f9d5cd83e3e02f8b5bf5535a",
+        "current_sha256": "7dfbb239422630e1ef9c875e7542c4cee440211233dc7b734611fa8481d54178",
+        "current_line_count": 4824,
+        "classification": "CAPABILITY_PROJECTION_UNCHANGED",
+        "projection": "public API token count remains zero"
+      }
+    ],
+    "no_claim": "This static reconciliation is not executable proof, broad workspace health, replacement parity, migration authorization, performance evidence, or permission to remove the incumbent dependency."
+  },
   "dependency_resolution": {
     "root_manifest": {
       "path": "Cargo.toml",
@@ -914,18 +1150,36 @@
       "summary": "fuzz targets contain two stale futures-lite comments but no direct futures-lite call or manifest edge.",
       "owner_bead": "asupersync-d24mms.6.9",
       "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-A3-GAP-13",
+      "summary": "The safe blocking kernel and ten inline cases are source-authored but have no focused execution, loom or equivalent state-model receipt, or LabRuntime/DPOR cancellation and quiescence evidence.",
+      "owner_bead": "asupersync-d24mms.6.3",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-A3-GAP-14",
+      "summary": "The current runtime-handle check conflates the external runtime driver with scheduler workers and cannot identify arbitrary foreign executor threads.",
+      "owner_bead": "asupersync-d24mms.6.3",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-A3-GAP-15",
+      "summary": "The owned blocking kernel has no incumbent comparison for idle CPU or completion latency.",
+      "owner_bead": "asupersync-d24mms.6.3",
+      "state": "BLOCKED_GAP"
     }
   ],
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
-      "line_count": 991
+      "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+      "line_count": 1038
     },
     {
       "path": "Cargo.lock",
-      "sha256": "9fa12e8af1e6b15a3070d88d62b2b81b8ba49c0e9d8592c1d1682f1cd72a4461",
-      "line_count": 4664
+      "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+      "line_count": 4666
     },
     {
       "path": "asupersync-tokio-compat/Cargo.toml",
@@ -959,8 +1213,8 @@
     },
     {
       "path": "src/sync/notify.rs",
-      "sha256": "11d85d8cc9bcd7ec6c21245dba5b58f381b3aa4c54dc3d8d17d01f68b213a3ef",
-      "line_count": 6872
+      "sha256": "3df286c11ba03629b29838e75798454cc3899a6836d0efd381ef0afef9b960d7",
+      "line_count": 7060
     },
     {
       "path": "docs/adr/dep_plan_adr_008_futures_streams.md",
@@ -969,18 +1223,18 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "4d91239e2f2e83069414ca36eafc4aaba283cd3f89576fbb5e75f3374bd41b11",
-      "line_count": 1887
+      "sha256": "e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2",
+      "line_count": 6917
     },
     {
       "path": "artifacts/dependency_marginal_ledger_v1.json",
-      "sha256": "832e8d68eefe9400a246ea619a250ea91bcf16a57d5fe728a6ce45e25bbdb4a6",
-      "line_count": 187712
+      "sha256": "9382d8357e59b49b01775f3efad2db95f2186c63bc432b5616ba20f3b9a218a9",
+      "line_count": 188045
     },
     {
       "path": "artifacts/api_surface_map_v1.json",
-      "sha256": "a00b61fe82326d766cde69e2392bc493a67d3c62f9d5cd83e3e02f8b5bf5535a",
-      "line_count": 4650
+      "sha256": "7dfbb239422630e1ef9c875e7542c4cee440211233dc7b734611fa8481d54178",
+      "line_count": 4824
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml",
@@ -1012,6 +1266,7 @@
     "The owned Stream semantics documentation freezes a source contract only; it does not prove that every implementation obeys its wake, pinning, size-hint, cancellation, or drop obligations.",
     "The pinned-local downstream case and direct-next compile-fail rustdoc are source-authored but unexecuted and do not prove compiler-diagnostic stability or runtime behavior.",
     "The A2 acceptance matrix is a fail-closed status inventory, not a terminal receipt; closure remains forbidden while any required receipt is missing.",
+    "The A3 blocking-kernel receipt is static-only: authored inline cases, source hashes, and wake-order review do not prove execution, interleaving completeness, runtime-context safety, cancellation quiescence, idle CPU, latency parity, or cutover readiness.",
     "Marginal package counts do not prove behavioral replacement parity.",
     "The source-authored owned ATP Stream implementations have not been compiled or behaviorally exercised and do not authorize cutover.",
     "No local Cargo fallback is approved when a remote-required proof lane is blocked."
