@@ -301,10 +301,7 @@ impl std::fmt::Debug for QuicDaemonConfig {
                     .as_ref()
                     .map(|_| ATPD_REDACTED_RQ_AUTH_KEY),
             )
-            .field(
-                "allow_unauthenticated_lab",
-                &self.allow_unauthenticated_lab,
-            )
+            .field("allow_unauthenticated_lab", &self.allow_unauthenticated_lab)
             .finish()
     }
 }
@@ -2401,23 +2398,18 @@ mod tests {
             canonical_config_fixture()
         );
         assert!(AtpdConfig::from_json(r#"{"config":{}}"#).is_err());
-        let unsupported = canonical.replacen(
-            ",\"schema_version\":1}",
-            ",\"schema_version\":2}",
-            1,
-        );
+        let unsupported = canonical.replacen(",\"schema_version\":1}", ",\"schema_version\":2}", 1);
         assert!(
             AtpdConfig::from_json(&unsupported)
-            .unwrap_err()
-            .to_string()
-            .contains("schema version 2")
+                .unwrap_err()
+                .to_string()
+                .contains("schema version 2")
         );
     }
 
     #[test]
     fn atpd_secret_is_redacted_from_debug_serde_and_canonical_output() {
-        const RAW_KEY: &str =
-            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+        const RAW_KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
         let mut config = canonical_config_fixture();
         config.network.quic.rq_auth_key_hex = Some(RAW_KEY.to_owned());
 
@@ -2450,7 +2442,10 @@ mod tests {
                 1,
             );
         let loaded = AtpdConfig::from_json(&raw_json).expect("raw secret JSON input");
-        assert_eq!(loaded.network.quic.rq_auth_key_hex.as_deref(), Some(RAW_KEY));
+        assert_eq!(
+            loaded.network.quic.rq_auth_key_hex.as_deref(),
+            Some(RAW_KEY)
+        );
     }
 
     #[test]
@@ -2459,11 +2454,8 @@ mod tests {
         let config = canonical_config_fixture();
 
         let json_path = directory.path().join("atpd.json");
-        std::fs::write(
-            &json_path,
-            config.to_redacted_canonical_json().unwrap(),
-        )
-        .expect("write JSON fixture");
+        std::fs::write(&json_path, config.to_redacted_canonical_json().unwrap())
+            .expect("write JSON fixture");
         assert_eq!(load_daemon_config(&json_path).unwrap(), config);
 
         let toml_path = directory.path().join("atpd.toml");
@@ -2483,7 +2475,11 @@ mod tests {
         let error = config
             .to_redacted_canonical_json()
             .expect_err("non-UTF-8 path cannot be represented losslessly in JSON");
-        assert!(error.to_string().contains("storage.data_dir must be valid UTF-8"));
+        assert!(
+            error
+                .to_string()
+                .contains("storage.data_dir must be valid UTF-8")
+        );
     }
 
     #[test]

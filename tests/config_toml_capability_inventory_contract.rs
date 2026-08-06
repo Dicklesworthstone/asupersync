@@ -222,7 +222,9 @@ fn validate_a2_implementation_receipt(inventory: &Value) -> Result<(), String> {
         ("execution_state", "NOT_RUN_STATIC_ONLY"),
     ] {
         if a2.get(key).and_then(Value::as_str) != Some(expected) {
-            return Err(format!("a2_implementation_receipt.{key} must be {expected}"));
+            return Err(format!(
+                "a2_implementation_receipt.{key} must be {expected}"
+            ));
         }
     }
 
@@ -291,17 +293,13 @@ fn validate_a2_implementation_receipt(inventory: &Value) -> Result<(), String> {
             || array(row, "toml_entry_points").is_empty()
             || array(row, "json_entry_points").is_empty()
             || row.get("precedence_changed").and_then(Value::as_bool) != Some(false)
-            || row
-                .get("physical_writer_changed")
-                .and_then(Value::as_bool)
-                != Some(false)
+            || row.get("physical_writer_changed").and_then(Value::as_bool) != Some(false)
         {
             return Err(format!("{family_id} implementation boundary drifted"));
         }
     }
     let ledger = find_row(families, "family_id", "CFG-A2-DEPENDENCY-LEDGER");
-    if text(ledger, "family_state")
-        != "EXPLICIT_GENERIC_MANIFEST_TRANSFORM_NOT_APPLICATION_CONFIG"
+    if text(ledger, "family_state") != "EXPLICIT_GENERIC_MANIFEST_TRANSFORM_NOT_APPLICATION_CONFIG"
         || !array(ledger, "json_entry_points").is_empty()
         || ledger.get("precedence_changed").and_then(Value::as_bool) != Some(false)
         || ledger
@@ -317,8 +315,10 @@ fn validate_a2_implementation_receipt(inventory: &Value) -> Result<(), String> {
         .into_iter()
         .map(str::to_owned)
         .collect();
-    if string_set(a2.get("canonical_contract").expect("canonical contract"), "envelope_fields")
-        != expected_envelope_fields
+    if string_set(
+        a2.get("canonical_contract").expect("canonical contract"),
+        "envelope_fields",
+    ) != expected_envelope_fields
         || canonical
             .get("current_schema_version")
             .and_then(Value::as_u64)
@@ -475,9 +475,7 @@ fn validate_a2_implementation_receipt(inventory: &Value) -> Result<(), String> {
         "path",
         "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
     );
-    if text(unrelated, "classification")
-        != "UNRELATED_DOWNSTREAM_STREAM_AND_ATP_CONTRACT_GROWTH"
-    {
+    if text(unrelated, "classification") != "UNRELATED_DOWNSTREAM_STREAM_AND_ATP_CONTRACT_GROWTH" {
         return Err("A2 must separate unrelated downstream fixture growth".to_owned());
     }
 
@@ -1343,18 +1341,18 @@ fn fail_closed_mutations_are_rejected() {
     assert!(validate_inventory(&missing_a2_family).is_err());
 
     let mut changed_a2_precedence = inventory.clone();
-    changed_a2_precedence["a2_implementation_receipt"]["family_rows"][0]
-        ["precedence_changed"] = Value::Bool(true);
+    changed_a2_precedence["a2_implementation_receipt"]["family_rows"][0]["precedence_changed"] =
+        Value::Bool(true);
     assert!(validate_inventory(&changed_a2_precedence).is_err());
 
     let mut weakened_a2_redaction = inventory.clone();
-    weakened_a2_redaction["a2_implementation_receipt"]["secret_rows"][3]
-        ["secret_contract"] = Value::String("RAW_SECRET_OUTPUT".to_owned());
+    weakened_a2_redaction["a2_implementation_receipt"]["secret_rows"][3]["secret_contract"] =
+        Value::String("RAW_SECRET_OUTPUT".to_owned());
     assert!(validate_inventory(&weakened_a2_redaction).is_err());
 
     let mut stale_a2_pin = inventory.clone();
-    stale_a2_pin["a2_implementation_receipt"]["source_pin_reconciliation"]["rows"][0]
-        ["current_sha256"] = Value::String("0".repeat(64));
+    stale_a2_pin["a2_implementation_receipt"]["source_pin_reconciliation"]["rows"][0]["current_sha256"] =
+        Value::String("0".repeat(64));
     assert!(validate_inventory(&stale_a2_pin).is_err());
 
     let mut changed_toml_contract = inventory;

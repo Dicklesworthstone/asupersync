@@ -509,9 +509,7 @@ pub fn parse_json_file(
 /// typed field is emitted explicitly, object keys are recursively sorted, and
 /// the current schema version is always present.
 #[cfg(feature = "config-file")]
-pub fn runtime_config_to_canonical_json(
-    config: &RuntimeConfigLayer,
-) -> Result<String, BuildError> {
+pub fn runtime_config_to_canonical_json(config: &RuntimeConfigLayer) -> Result<String, BuildError> {
     crate::config::VersionedConfigDocument::new(config)
         .to_canonical_json()
         .map_err(|e| BuildError::custom(format!("failed to encode JSON config: {e}")))
@@ -722,7 +720,10 @@ mod tests {
     fn env_layer_parses_before_applying_any_field() {
         let mut vars = HashMap::new();
         vars.insert(ENV_WORKER_THREADS.to_owned(), "8".to_owned());
-        vars.insert(ENV_ENABLE_ADAPTIVE_CANCEL_STREAK.to_owned(), "invalid".to_owned());
+        vars.insert(
+            ENV_ENABLE_ADAPTIVE_CANCEL_STREAK.to_owned(),
+            "invalid".to_owned(),
+        );
         let reader = TestEnvReader::new(vars);
         let mut config = RuntimeConfig::default();
         let original_worker_threads = config.worker_threads;
@@ -730,7 +731,11 @@ mod tests {
         let error = super::apply_env_overrides(&mut config, &reader)
             .expect_err("invalid late variable must reject the whole layer");
 
-        assert!(error.to_string().contains(ENV_ENABLE_ADAPTIVE_CANCEL_STREAK));
+        assert!(
+            error
+                .to_string()
+                .contains(ENV_ENABLE_ADAPTIVE_CANCEL_STREAK)
+        );
         assert_eq!(config.worker_threads, original_worker_threads);
     }
 
@@ -1095,8 +1100,8 @@ thread_name_prefix = "node"
 max_threads = 8
 "#;
         let from_toml = parse_toml_str(toml).expect("TOML config layer");
-        let canonical = runtime_config_to_canonical_json(&from_toml)
-            .expect("canonical runtime JSON");
+        let canonical =
+            runtime_config_to_canonical_json(&from_toml).expect("canonical runtime JSON");
 
         assert_eq!(
             canonical,
@@ -1130,18 +1135,16 @@ max_threads = 8
         assert_eq!(parsed.scheduler.worker_threads, Some(3));
         assert_eq!(parsed.blocking.max_threads, None);
 
-        let canonical = runtime_config_to_canonical_json(&parsed)
-            .expect("migrated canonical JSON");
+        let canonical = runtime_config_to_canonical_json(&parsed).expect("migrated canonical JSON");
         assert!(canonical.ends_with(r#","schema_version":1}"#));
         assert!(!canonical.contains("future_"));
     }
 
     #[test]
     fn json_rejects_unsupported_schema_and_wrong_field_type() {
-        let unsupported = parse_json_str(
-            r#"{"schema_version":2,"config":{"scheduler":{"worker_threads":4}}}"#,
-        )
-        .expect_err("unsupported schema must fail closed");
+        let unsupported =
+            parse_json_str(r#"{"schema_version":2,"config":{"scheduler":{"worker_threads":4}}}"#)
+                .expect_err("unsupported schema must fail closed");
         assert!(unsupported.to_string().contains("schema version 2"));
 
         let wrong_type = parse_json_str(
@@ -1155,8 +1158,7 @@ max_threads = 8
     fn json_file_uses_the_same_capability_mediated_read_path() {
         let reader = TestEnvReader::new(HashMap::new()).with_file(
             "runtime.json",
-            r#"{"schema_version":1,"config":{"blocking":{"min_threads":2}}}"#
-                .to_owned(),
+            r#"{"schema_version":1,"config":{"blocking":{"min_threads":2}}}"#.to_owned(),
         );
 
         let parsed = parse_json_file(std::path::Path::new("runtime.json"), &reader)

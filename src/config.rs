@@ -141,12 +141,9 @@ where
 
 fn canonicalize_json_value(value: serde_json::Value) -> serde_json::Value {
     match value {
-        serde_json::Value::Array(values) => serde_json::Value::Array(
-            values
-                .into_iter()
-                .map(canonicalize_json_value)
-                .collect(),
-        ),
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(canonicalize_json_value).collect())
+        }
         serde_json::Value::Object(values) => {
             let mut entries: Vec<_> = values.into_iter().collect();
             entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));

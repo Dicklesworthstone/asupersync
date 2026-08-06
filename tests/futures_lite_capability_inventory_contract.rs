@@ -116,10 +116,8 @@ fn validate_a3_receipt(inventory: &Value) -> Result<(), String> {
         .get("a3_block_on_receipt")
         .expect("A3 blocking-kernel receipt");
     if text(receipt, "owner_bead") != A3_BEAD_ID
-        || text(receipt, "base_revision")
-            != "02b380ee063e7e643105b1a7997360a7021bf32e"
-        || text(receipt, "implementation_revision")
-            != "050fd0f08e4cf127e348bbf545c1e46cc392f6b5"
+        || text(receipt, "base_revision") != "02b380ee063e7e643105b1a7997360a7021bf32e"
+        || text(receipt, "implementation_revision") != "050fd0f08e4cf127e348bbf545c1e46cc392f6b5"
         || text(receipt, "source_status") != "STATIC_SOURCE_PROGRESS"
         || text(receipt, "execution_status") != "NOT_RUN_STATIC_ONLY"
         || text(receipt, "module") != "crate::util::future"
@@ -164,7 +162,9 @@ fn validate_a3_receipt(inventory: &Value) -> Result<(), String> {
         if hex_bytes(&Sha256::digest(&bytes)) != *expected_sha
             || read_repo_file(path).lines().count() as u64 != *expected_lines
         {
-            return Err(format!("A3 current source no longer matches receipt: {path}"));
+            return Err(format!(
+                "A3 current source no longer matches receipt: {path}"
+            ));
         }
     }
 
@@ -238,8 +238,7 @@ fn validate_a4_receipt(inventory: &Value) -> Result<(), String> {
         .get("a4_helper_receipt")
         .expect("A4 helper receipt");
     if text(receipt, "owner_bead") != A4_BEAD_ID
-        || text(receipt, "first_base_revision")
-            != "050fd0f08e4cf127e348bbf545c1e46cc392f6b5"
+        || text(receipt, "first_base_revision") != "050fd0f08e4cf127e348bbf545c1e46cc392f6b5"
         || string_set(receipt, "implementation_revisions")
             != [
                 "da8d632b5ef51ea4074589aed0664cb8f5e33d41",
@@ -251,7 +250,10 @@ fn validate_a4_receipt(inventory: &Value) -> Result<(), String> {
         || text(receipt, "source_status") != "PARTIAL_STATIC_SOURCE_PROGRESS"
         || text(receipt, "execution_status") != "NOT_RUN_STATIC_ONLY"
         || text(receipt, "module") != "crate::util::future"
-        || receipt.get("incumbent_call_sites_migrated").and_then(Value::as_u64) != Some(0)
+        || receipt
+            .get("incumbent_call_sites_migrated")
+            .and_then(Value::as_u64)
+            != Some(0)
         || receipt.get("cutover_authorized") != Some(&Value::Bool(false))
         || receipt.get("closure_allowed") != Some(&Value::Bool(false))
     {
@@ -298,10 +300,7 @@ fn validate_a4_receipt(inventory: &Value) -> Result<(), String> {
         ("FUT-API-ZIP", "SOURCE_AUTHORED_NOT_EXECUTED"),
         ("FUT-API-OR", "SOURCE_AUTHORED_NOT_EXECUTED"),
         ("FUT-API-RACE", "MISSING_BLOCKED_POLICY"),
-        (
-            "FUT-API-JOIN-ALL-MENTION",
-            "COMMENT_ONLY_NOT_A_LIVE_HELPER",
-        ),
+        ("FUT-API-JOIN-ALL-MENTION", "COMMENT_ONLY_NOT_A_LIVE_HELPER"),
     ]);
     if helpers.len() != expected_helpers.len() {
         return Err("A4 helper matrix must contain the exact corrected live set".to_owned());
@@ -343,7 +342,10 @@ fn validate_a4_receipt(inventory: &Value) -> Result<(), String> {
     let race = object(receipt, "race_policy_boundary");
     if race.get("decision").and_then(Value::as_str)
         != Some("KEEP_INCUMBENT_UNTIL_STRUCTURED_RACE_POLICY")
-        || race.get("drop_only_owned_race_allowed").and_then(Value::as_bool) != Some(false)
+        || race
+            .get("drop_only_owned_race_allowed")
+            .and_then(Value::as_bool)
+            != Some(false)
         || !text(receipt, "completion_boundary").contains("post-Ready repoll")
         || array(receipt, "missing_terminal_evidence").len() != 7
     {
@@ -1759,8 +1761,8 @@ fn malformed_inventory_mutations_fail_closed() {
     assert!(validate_inventory(&a4_promoted).is_err());
 
     let mut drop_only_race = canonical.clone();
-    drop_only_race["a4_helper_receipt"]["race_policy_boundary"]
-        ["drop_only_owned_race_allowed"] = Value::Bool(true);
+    drop_only_race["a4_helper_receipt"]["race_policy_boundary"]["drop_only_owned_race_allowed"] =
+        Value::Bool(true);
     assert!(validate_inventory(&drop_only_race).is_err());
 
     let mut baseline_rewritten = canonical;

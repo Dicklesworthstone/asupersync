@@ -791,8 +791,7 @@ repair_overhead = 0.25
 daemon_socket = "./run/../atp.sock"
 "#;
         let from_toml: AtpConfig = toml::from_str(toml).expect("ATP TOML layer");
-        let canonical = atp_command_to_canonical_json(&from_toml)
-            .expect("canonical ATP JSON");
+        let canonical = atp_command_to_canonical_json(&from_toml).expect("canonical ATP JSON");
 
         assert_eq!(
             canonical,
@@ -807,8 +806,7 @@ daemon_socket = "./run/../atp.sock"
     #[test]
     fn atp_command_empty_unknown_schema_and_nonfinite_rules_are_explicit() {
         let empty_toml: AtpConfig = toml::from_str("").expect("empty ATP TOML layer");
-        let empty_json = parse_atp_command_json(r#"{"config":{}}"#)
-            .expect("empty ATP JSON layer");
+        let empty_json = parse_atp_command_json(r#"{"config":{}}"#).expect("empty ATP JSON layer");
         assert_eq!(empty_json, empty_toml);
 
         let unknown = parse_atp_command_json(
@@ -817,10 +815,9 @@ daemon_socket = "./run/../atp.sock"
         .expect("unknown JSON fields retain incumbent tolerance");
         assert_eq!(unknown.profile, Some(AtpProfile::Auto));
 
-        let unsupported = parse_atp_command_json(
-            r#"{"schema_version":2,"config":{"profile":"auto"}}"#,
-        )
-        .expect_err("unsupported outer schema must fail closed");
+        let unsupported =
+            parse_atp_command_json(r#"{"schema_version":2,"config":{"profile":"auto"}}"#)
+                .expect_err("unsupported outer schema must fail closed");
         assert!(unsupported.to_string().contains("schema version 2"));
 
         let nonfinite: AtpConfig =
@@ -835,8 +832,7 @@ daemon_socket = "./run/../atp.sock"
     fn atp_install_toml_and_json_share_one_model_and_exact_golden() {
         let install = sample_install_config();
         let toml = toml::to_string_pretty(&install).expect("install TOML");
-        let from_toml: AtpInstallConfig =
-            toml::from_str(&toml).expect("install TOML round trip");
+        let from_toml: AtpInstallConfig = toml::from_str(&toml).expect("install TOML round trip");
         let canonical = from_toml
             .to_canonical_json()
             .expect("canonical install JSON");
@@ -889,7 +885,11 @@ daemon_socket = "./run/../atp.sock"
         let error = install
             .to_canonical_json()
             .expect_err("non-UTF-8 path cannot be represented losslessly in JSON");
-        assert!(error.to_string().contains("identity_path must be valid UTF-8"));
+        assert!(
+            error
+                .to_string()
+                .contains("identity_path must be valid UTF-8")
+        );
     }
 
     #[test]
