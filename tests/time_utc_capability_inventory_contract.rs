@@ -24,7 +24,7 @@ const CAPABILITY_ID: &str = "CAP-TIME-UTC-RFC3339";
 const ADR_ID: &str = "DEP-ADR-011";
 const BASELINE_REVISION: &str = "1afde84d564bd8ea876459624116f90028b80835";
 const ARTIFACT_SHA256: &str =
-    "ea935065531310b542385e812ae546221ef936657fdb1f45e0f81ced7986ac3c";
+    "06e7a706e276e7c86d7a6909ebbf41ea7c0877626fd3567273c6d8caa0e2c6fd";
 const DOC_BEGIN: &str = "<!-- BEGIN TIME UTC CAPABILITY INVENTORY -->";
 const DOC_END: &str = "<!-- END TIME UTC CAPABILITY INVENTORY -->";
 const CHRONO_TOKEN: &str = concat!("chrono", "::");
@@ -34,17 +34,17 @@ const CENSUS_PROJECTION_SHA256: &str =
 const CENSUS_PATHS_SHA256: &str =
     "f16dea3b2143a0502579cdde842a5b00694031ec504eb674750554f6030f9700";
 const LITERAL_OPERATION_PROJECTION_SHA256: &str =
-    "a533497be94a3a8c649a061117053acff88821c102e9cedbe16cb4da0b66990b";
+    "7faffe9031ee795c8fc84549c65f70d564ffd7a433d09ae82fc01d87f14ea4c3";
 const LITERAL_SOURCE_PROJECTION_SHA256: &str =
-    "5c4020cfe41d10dbfcab19c64f3677ee78941c65441c12da93dc7e3cd6946f2d";
+    "fdc95e79f2d3a8d16236e9c48e606e082ad5d9fb55aacd16f518b6738b8ae860";
 const PATH_CLASSIFICATION_PROJECTION_SHA256: &str =
     "5f60bb8b7deb36b1aac2123747fd1be426f1888fc759f46afe3baae103dc3b63";
 const LITERAL_OVERRIDE_PROJECTION_SHA256: &str =
-    "81f3549c7644361eabee937044ba098315b3aeffbd079d9c644eb1d60ccc3f84";
+    "c33fc35568d9de398e4e0ab84e91aeb567703e72e33c8b15cc0a7eaba7358f06";
 const ALIAS_CLASSIFICATION_PROJECTION_SHA256: &str =
     "867c7f39911b829635b5a28413179e8cc2d4156f0cfe2a1218fbb3f4819c5118";
 const ADDITIONAL_DERIVED_PROJECTION_SHA256: &str =
-    "1143d56f92afe1b3e151ff9e8578d1c5883480df3ccd548fd686d51883405d8f";
+    "f41dab083731bc95f246db17e7a5b1e3d50ac60cf1d2af96696c556b0dd512f2";
 const CROSS_FILE_CONSUMER_PROJECTION_SHA256: &str =
     "d7b4020e22cb33af7d359836b80e0d66f20574d2b9fb29566ecae0691831ff99";
 const ROOT_CLI_REFRESH_REVISIONS: &[&str] = &[
@@ -3138,6 +3138,360 @@ fn validate_post_a1_benchmark_lineage_extension(inventory: &Value) -> Result<(),
     Ok(())
 }
 
+fn validate_post_a1_conformance_raptorq_lineage_extension(
+    inventory: &Value,
+) -> Result<(), String> {
+    let extension = inventory
+        .get("post_a1_conformance_raptorq_lineage_extension")
+        .ok_or_else(|| {
+            "post_a1_conformance_raptorq_lineage_extension is required".to_owned()
+        })?;
+    for (key, expected) in [
+        (
+            "extension_id",
+            "TIME-A1-CONFORMANCE-RAPTORQ-LINEAGE-2026-08-06",
+        ),
+        ("captured_date_utc", "2026-08-06"),
+        (
+            "extension_state",
+            "STATIC_DECLARED_CONFORMANCE_RAPTORQ_CARRIER_LINEAGE_EXTENSION",
+        ),
+        ("execution_state", "NOT_RUN_STATIC_ONLY"),
+        ("required_disposition", "KEEP_OPEN"),
+    ] {
+        if extension.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!(
+                "post-A1 conformance RaptorQ extension {key} must be {expected}"
+            ));
+        }
+    }
+    for (key, expected) in [
+        ("source_pin_path_count", 74_u64),
+        ("main_conformance_raptorq_public_string_field_count", 4),
+        ("direct_producer_anchor_count", 5),
+        ("derived_carrier_field_count", 1),
+        ("additional_derived_operation_anchor_count", 39),
+        ("derived_operation_anchor_count", 47),
+        ("cross_file_consumer_anchor_count", 34),
+        ("cross_file_direct_source_anchor_count", 41),
+        ("declared_consumer_unique_direct_source_anchor_count", 72),
+        ("classified_anchor_count", 271),
+    ] {
+        if extension.get(key).and_then(Value::as_u64) != Some(expected) {
+            return Err(format!(
+                "post-A1 conformance RaptorQ extension {key} must be {expected}"
+            ));
+        }
+    }
+
+    let added_pins = array(extension, "added_source_pins");
+    require_exact_ids(
+        added_pins,
+        "path",
+        &[
+            "conformance/raptorq_rfc6330/reporting/bin/maintain_fixtures.rs",
+            "conformance/raptorq_rfc6330/reporting/src/compliance_report.rs",
+        ],
+        "post-A1 conformance RaptorQ source pins",
+    )?;
+    let source_pins: BTreeMap<_, _> = array(&inventory["source_snapshot"], "files")
+        .iter()
+        .map(|pin| (text(pin, "path"), pin))
+        .collect();
+    for (path, sha256, lines) in [
+        (
+            "conformance/raptorq_rfc6330/reporting/bin/maintain_fixtures.rs",
+            "137cecd6089b99b0ca6d733c5c14951466e814632fd031533456b5cf8c5b5c78",
+            524_u64,
+        ),
+        (
+            "conformance/raptorq_rfc6330/reporting/src/compliance_report.rs",
+            "5f1b2c5427243361f20d5343c0f78743132bdc8322c1e0947eff1965a5750db2",
+            501,
+        ),
+    ] {
+        let added = added_pins
+            .iter()
+            .find(|pin| text(pin, "path") == path)
+            .ok_or_else(|| format!("post-A1 conformance RaptorQ pin missing for {path}"))?;
+        if text(added, "sha256") != sha256 || number(added, "line_count") != lines {
+            return Err(format!("post-A1 conformance RaptorQ pin drifted for {path}"));
+        }
+        if source_pins.get(path).copied() != Some(added) {
+            return Err(format!(
+                "post-A1 conformance RaptorQ and source snapshot pins disagree for {path}"
+            ));
+        }
+    }
+
+    let reconciliation = object(extension, "line_sensitive_pin_reconciliation");
+    if text(reconciliation, "path") != "src/database/postgres.rs"
+        || text(reconciliation, "current_sha256")
+            != "ddc35a5809d998391a0e6ffe6f995fc9f4e9919a39e5ad7d71dd4b644c049a75"
+        || number(reconciliation, "current_line_count") != 19_776
+        || number(reconciliation, "uniform_line_delta") != 60
+        || number(reconciliation, "refreshed_explicit_anchor_count") != 3
+        || number(reconciliation, "refreshed_direct_source_reference_count") != 1
+        || text(reconciliation, "previous_direct_source_id")
+            != "src/database/postgres.rs:18086"
+        || text(reconciliation, "current_direct_source_id")
+            != "src/database/postgres.rs:18146"
+        || text(reconciliation, "classification")
+            != "LINE_ONLY_SHIFT_FROM_PREVIOUSLY_CLASSIFIED_READ_CANCELLATION_SEAM"
+        || reconciliation
+            .get("additional_derived_projection_change_includes_new_history_row")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || reconciliation
+            .get("time_acceptance_semantics_changed")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return Err("post-A1 line-sensitive PostgreSQL reconciliation drifted".to_owned());
+    }
+    require_exact_strings(
+        reconciliation,
+        "refreshed_anchor_ids",
+        &[
+            "TIME-DERIVED-POSTGRES-MIDNIGHT-CONSTRUCTION-18148",
+            "TIME-LITERAL-OVERRIDE-POSTGRES-18139",
+            "TIME-LITERAL-OVERRIDE-POSTGRES-18150",
+        ],
+    )?;
+    let previous_projections = object(reconciliation, "previous_projection_sha256");
+    let current_projections = object(reconciliation, "current_projection_sha256");
+    for (key, previous, current) in [
+        (
+            "literal_operation",
+            "a533497be94a3a8c649a061117053acff88821c102e9cedbe16cb4da0b66990b",
+            LITERAL_OPERATION_PROJECTION_SHA256,
+        ),
+        (
+            "literal_source",
+            "5c4020cfe41d10dbfcab19c64f3677ee78941c65441c12da93dc7e3cd6946f2d",
+            LITERAL_SOURCE_PROJECTION_SHA256,
+        ),
+        (
+            "literal_override",
+            "81f3549c7644361eabee937044ba098315b3aeffbd079d9c644eb1d60ccc3f84",
+            LITERAL_OVERRIDE_PROJECTION_SHA256,
+        ),
+        (
+            "additional_derived",
+            "b20b65d03be1995802d929275531ac96a8a66ec06c1c64f0bf887ee27803f674",
+            ADDITIONAL_DERIVED_PROJECTION_SHA256,
+        ),
+    ] {
+        if previous_projections.get(key).and_then(Value::as_str) != Some(previous)
+            || current_projections.get(key).and_then(Value::as_str) != Some(current)
+        {
+            return Err(format!(
+                "post-A1 line-sensitive projection {key} drifted"
+            ));
+        }
+    }
+
+    require_exact_strings(
+        extension,
+        "direct_producer_ids",
+        &[
+            "conformance/raptorq_rfc6330/reporting/src/coverage_matrix.rs:229",
+            "conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs:44",
+            "conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs:80",
+            "conformance/raptorq_rfc6330/reporting/src/regression_detection.rs:64",
+            "conformance/raptorq_rfc6330/reporting/src/regression_detection.rs:84",
+        ],
+    )?;
+    let expected_derived = [
+        "TIME-DERIVED-CONFORMANCE-RAPTORQ-HISTORY-FIELD-0039",
+        "TIME-DERIVED-CONFORMANCE-RAPTORQ-HISTORY-SERIALIZE-0077",
+    ];
+    require_exact_strings(extension, "derived_consumer_ids", &expected_derived)?;
+    let expected_cross_file = [
+        "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-MAINT-CONFIGURED-0164",
+        "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-MAINT-DIFFERENTIAL-0218",
+        "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-MAINT-GOLDEN-0199",
+        "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-CI-MATRIX-0111",
+        "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-HISTORY-CONSTRUCTOR-0039",
+        "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-HISTORY-UPDATE-0100",
+        "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-REGRESSION-MATRIX-0092",
+        "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-REPORT-MATRIX-0080",
+        "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-REPORT-HTML-0298",
+        "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-REPORT-JSON-0277",
+        "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-REPORT-MARKDOWN-0095",
+    ];
+    require_exact_strings(extension, "cross_file_consumer_ids", &expected_cross_file)?;
+    let derived_ids = row_ids(
+        array(
+            &inventory["per_use_classification"],
+            "additional_derived_operation_rows",
+        ),
+        "use_id",
+    );
+    let cross_file_ids = row_ids(
+        array(
+            &inventory["per_use_classification"],
+            "cross_file_consumer_rows",
+        ),
+        "use_id",
+    );
+    if !expected_derived.iter().all(|id| derived_ids.contains(*id))
+        || !expected_cross_file
+            .iter()
+            .all(|id| cross_file_ids.contains(*id))
+    {
+        return Err("post-A1 conformance RaptorQ consumer rows are missing".to_owned());
+    }
+
+    let dispositions = array(extension, "carrier_dispositions");
+    require_exact_ids(
+        dispositions,
+        "disposition_id",
+        &[
+            "TIME-CARRIER-DISPOSITION-RAPTORQ-CONFORMANCE-HISTORY",
+            "TIME-CARRIER-DISPOSITION-RAPTORQ-CONFORMANCE-RECORD",
+            "TIME-CARRIER-DISPOSITION-RAPTORQ-COVERAGE-MATRIX",
+            "TIME-CARRIER-DISPOSITION-RAPTORQ-REFERENCE-VERSION",
+        ],
+        "post-A1 conformance RaptorQ carrier dispositions",
+    )?;
+    let public_field_ids: BTreeSet<String> = array(
+        inventory,
+        "public_chrono_generated_string_fields",
+    )
+    .iter()
+    .filter(|row| text(row, "module").starts_with("raptorq_rfc6330_reporting::"))
+    .map(|row| text(row, "field_id").to_owned())
+    .collect();
+    let all_consumer_ids: BTreeSet<String> = derived_ids.union(&cross_file_ids).cloned().collect();
+    let mut disposition_field_ids = BTreeSet::new();
+    for disposition in dispositions {
+        let disposition_id = text(disposition, "disposition_id");
+        let (state, field_ids, consumer_ids): (&str, &[&str], &[&str]) = match disposition_id {
+            "TIME-CARRIER-DISPOSITION-RAPTORQ-REFERENCE-VERSION" => (
+                "PRIVATE_EXECUTABLE_CONSTRUCTORS_WITH_NO_TIMESTAMP_SINK_AND_NO_IN_TREE_UPDATE_CALLER",
+                &["TIME-PUB-CONFORMANCE-RAPTORQ-REFERENCE-UPDATED"],
+                &[
+                    "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-MAINT-CONFIGURED-0164",
+                    "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-MAINT-DIFFERENTIAL-0218",
+                    "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-MAINT-GOLDEN-0199",
+                ],
+            ),
+            "TIME-CARRIER-DISPOSITION-RAPTORQ-COVERAGE-MATRIX" => (
+                "PUBLIC_PIPELINE_REPORT_AND_HISTORY_BOUNDARIES_DECLARED",
+                &["TIME-PUB-CONFORMANCE-RAPTORQ-COVERAGE-GENERATED"],
+                &[
+                    "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-CI-MATRIX-0111",
+                    "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-HISTORY-UPDATE-0100",
+                    "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-REGRESSION-MATRIX-0092",
+                    "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-REPORT-MATRIX-0080",
+                    "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-REPORT-HTML-0298",
+                    "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-REPORT-JSON-0277",
+                    "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-REPORT-MARKDOWN-0095",
+                    "TIME-DERIVED-CONFORMANCE-RAPTORQ-HISTORY-FIELD-0039",
+                    "TIME-DERIVED-CONFORMANCE-RAPTORQ-HISTORY-SERIALIZE-0077",
+                ],
+            ),
+            "TIME-CARRIER-DISPOSITION-RAPTORQ-CONFORMANCE-RECORD" => (
+                "DERIVED_FROM_COVERAGE_MATRIX_AND_PERSISTED_WITH_HISTORY",
+                &["TIME-PUB-CONFORMANCE-RAPTORQ-RECORD-TIMESTAMP"],
+                &[
+                    "TIME-DERIVED-CONFORMANCE-RAPTORQ-HISTORY-FIELD-0039",
+                    "TIME-DERIVED-CONFORMANCE-RAPTORQ-HISTORY-SERIALIZE-0077",
+                ],
+            ),
+            "TIME-CARRIER-DISPOSITION-RAPTORQ-CONFORMANCE-HISTORY" => (
+                "PUBLIC_PIPELINE_CONSTRUCTION_UPDATE_AND_PERSISTENCE_DECLARED",
+                &["TIME-PUB-CONFORMANCE-RAPTORQ-HISTORY-UPDATED"],
+                &[
+                    "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-HISTORY-CONSTRUCTOR-0039",
+                    "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-HISTORY-UPDATE-0100",
+                    "TIME-DERIVED-CONFORMANCE-RAPTORQ-HISTORY-SERIALIZE-0077",
+                ],
+            ),
+            _ => return Err(format!("unexpected conformance RaptorQ carrier {disposition_id}")),
+        };
+        if text(disposition, "state") != state {
+            return Err(format!(
+                "conformance RaptorQ carrier state drifted for {disposition_id}"
+            ));
+        }
+        require_exact_strings(disposition, "field_ids", field_ids)?;
+        require_exact_strings(disposition, "consumer_ids", consumer_ids)?;
+        for field_id in field_ids {
+            if !disposition_field_ids.insert((*field_id).to_owned()) {
+                return Err(format!(
+                    "duplicate conformance RaptorQ carrier field {field_id}"
+                ));
+            }
+        }
+        if !consumer_ids
+            .iter()
+            .all(|consumer_id| all_consumer_ids.contains(*consumer_id))
+        {
+            return Err(format!(
+                "conformance RaptorQ carrier consumer drifted for {disposition_id}"
+            ));
+        }
+    }
+    if disposition_field_ids != public_field_ids || public_field_ids.len() != 4 {
+        return Err("conformance RaptorQ public carrier coverage drifted".to_owned());
+    }
+    let public_strings = array(inventory, "public_chrono_generated_string_fields");
+    let reference_field = public_strings
+        .iter()
+        .find(|row| {
+            row.get("field_id").and_then(Value::as_str)
+                == Some("TIME-PUB-CONFORMANCE-RAPTORQ-REFERENCE-UPDATED")
+        })
+        .ok_or_else(|| "RaptorQ ReferenceVersion field is missing".to_owned())?;
+    if text(reference_field, "in_tree_persistence")
+        != "EXCLUDED_FROM_PRIVATE_FIXTURE_VERSION_METADATA"
+    {
+        return Err("RaptorQ ReferenceVersion persistence boundary drifted".to_owned());
+    }
+    let maintenance_bin =
+        read_repo_file("conformance/raptorq_rfc6330/reporting/bin/maintain_fixtures.rs");
+    if maintenance_bin.contains(".update_from_git(") || maintenance_bin.contains("last_updated") {
+        return Err("RaptorQ private maintenance timestamp sink drifted".to_owned());
+    }
+
+    let preservation = object(extension, "preservation");
+    let expected_preservation_keys: BTreeSet<String> = [
+        "production_source_changed",
+        "historical_a1_revision_changed",
+        "behavioral_gap_count_changed",
+        "time_acceptance_semantics_changed",
+        "static_remainder_closed",
+        "bead_close_allowed",
+        "dependency_exit_allowed",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if preservation.keys().cloned().collect::<BTreeSet<_>>() != expected_preservation_keys
+        || preservation.values().any(|value| value.as_bool() != Some(false))
+    {
+        return Err("post-A1 conformance RaptorQ preservation boundary drifted".to_owned());
+    }
+    let no_claim = text(extension, "no_claim_boundary");
+    for required in [
+        "does not execute conformance tools",
+        "prove emitted or persisted bytes",
+        "prove readback",
+        "second-order propagation",
+        "close A1",
+        "authorize dependency exit",
+    ] {
+        if !no_claim.contains(required) {
+            return Err(format!(
+                "post-A1 conformance RaptorQ no-claim boundary missing {required}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn count_matching_lines(source: &str, token: &str) -> usize {
     source.lines().filter(|line| line.contains(token)).count()
 }
@@ -3605,6 +3959,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     validate_post_a1_provenance_refresh(inventory)?;
     validate_post_a1_cli_output_extension(inventory)?;
     validate_post_a1_benchmark_lineage_extension(inventory)?;
+    validate_post_a1_conformance_raptorq_lineage_extension(inventory)?;
     Ok(())
 }
 
@@ -3629,9 +3984,9 @@ fn time_utc_inventory_is_exact_and_source_pinned() {
         "Thirteen ordered literal-operation rules",
         "one same-line overlap",
         "derived-consumer remainder",
-        "38 exact rows",
-        "23 exact cross-file consumer rows",
-        "259 classified",
+        "39 exact rows",
+        "34 exact cross-file consumer rows",
+        "271 classified",
         "TIME-A1-ROOT-CLI-JSON-2026-08-06",
         "src/cli/output.rs:156",
         "69th current source pin",
@@ -3639,6 +3994,11 @@ fn time_utc_inventory_is_exact_and_source_pinned() {
         "src/atp/benchmark/suite.rs:99",
         "72 current source pins",
         "all 12 root public DateTime fields",
+        "TIME-A1-CONFORMANCE-RAPTORQ-LINEAGE-2026-08-06",
+        "74 current source pins",
+        "conformance/raptorq_rfc6330/reporting/src/regression_detection.rs:77",
+        "conformance/raptorq_rfc6330/reporting/src/compliance_report.rs:298",
+        "uniform `+60` lines",
         "+127/-28",
         "+87/-27",
         "literal-source",
@@ -3815,6 +4175,17 @@ fn time_utc_inventory_rejects_cutover_and_completeness_drift() {
     benchmark_extension_overclaim["post_a1_benchmark_lineage_extension"]["preservation"]
         ["static_remainder_closed"] = Value::Bool(true);
     assert!(validate_inventory(&benchmark_extension_overclaim).is_err());
+
+    let mut raptorq_extension_overclaim = inventory.clone();
+    raptorq_extension_overclaim["post_a1_conformance_raptorq_lineage_extension"]
+        ["preservation"]["static_remainder_closed"] = Value::Bool(true);
+    assert!(validate_inventory(&raptorq_extension_overclaim).is_err());
+
+    let mut stale_postgres_lineage = inventory.clone();
+    stale_postgres_lineage["post_a1_conformance_raptorq_lineage_extension"]
+        ["line_sensitive_pin_reconciliation"]["current_direct_source_id"] =
+        Value::String("src/database/postgres.rs:18086".to_owned());
+    assert!(validate_inventory(&stale_postgres_lineage).is_err());
 
     let mut alias_route = inventory.clone();
     for binding in alias_route["alias_aware_chrono_uses"]["bindings"]

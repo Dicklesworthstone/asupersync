@@ -1195,11 +1195,11 @@
     "cross_file_consumer_anchor_count": 34,
     "cross_file_direct_source_anchor_count": 41,
     "declared_consumer_unique_direct_source_anchor_count": 72,
-    "literal_operation_projection_sha256": "a533497be94a3a8c649a061117053acff88821c102e9cedbe16cb4da0b66990b",
-    "literal_source_projection_sha256": "5c4020cfe41d10dbfcab19c64f3677ee78941c65441c12da93dc7e3cd6946f2d",
+    "literal_operation_projection_sha256": "7faffe9031ee795c8fc84549c65f70d564ffd7a433d09ae82fc01d87f14ea4c3",
+    "literal_source_projection_sha256": "fdc95e79f2d3a8d16236e9c48e606e082ad5d9fb55aacd16f518b6738b8ae860",
     "path_classification_projection_sha256": "5f60bb8b7deb36b1aac2123747fd1be426f1888fc759f46afe3baae103dc3b63",
-    "literal_override_projection_sha256": "81f3549c7644361eabee937044ba098315b3aeffbd079d9c644eb1d60ccc3f84",
-    "additional_derived_projection_sha256": "1143d56f92afe1b3e151ff9e8578d1c5883480df3ccd548fd686d51883405d8f",
+    "literal_override_projection_sha256": "c33fc35568d9de398e4e0ab84e91aeb567703e72e33c8b15cc0a7eaba7358f06",
+    "additional_derived_projection_sha256": "f41dab083731bc95f246db17e7a5b1e3d50ac60cf1d2af96696c556b0dd512f2",
     "cross_file_consumer_projection_sha256": "d7b4020e22cb33af7d359836b80e0d66f20574d2b9fb29566ecae0691831ff99",
     "semantic_consumer_boundary": "Include nonliteral consumers through the first semantic compare, arithmetic, format, serialize, persist, retain, return, extract, or embed boundary in a Chrono-bearing source path; exclude cross-file propagation, external consumers, and later container or arbitrary-byte taint.",
     "cross_file_consumer_boundary": "Include the first explicit embedding, constructor, return, or statically generic JSON value serialization boundary in a different source file when a timestamp-bearing public carrier flows from a direct Chrono producer to a declared in-repository consumer; exclude later encoding or rendering calls, later container propagation, distinct file or standard-output sink anchors, dynamic dispatch, external consumers, and ambiguous provenance.",
@@ -1722,9 +1722,9 @@
         "persistence_or_public_association": "BenchmarkEnvironment collection unit test"
       },
       {
-        "use_id": "TIME-LITERAL-OVERRIDE-POSTGRES-18079",
+        "use_id": "TIME-LITERAL-OVERRIDE-POSTGRES-18139",
         "path": "src/database/postgres.rs",
-        "line": 18079,
+        "line": 18139,
         "source_anchor": "(epoch + chrono::TimeDelta::days(days)).to_string()",
         "operation": "add a PostgreSQL day offset to the calendar epoch and render expected DATE text",
         "cfg_or_wiring": "FEATURE_POSTGRES_AND_CFG_TEST_IN_MODULE",
@@ -1732,9 +1732,9 @@
         "persistence_or_public_association": "independent PostgreSQL DATE decode expectation"
       },
       {
-        "use_id": "TIME-LITERAL-OVERRIDE-POSTGRES-18090",
+        "use_id": "TIME-LITERAL-OVERRIDE-POSTGRES-18150",
         "path": "src/database/postgres.rs",
-        "line": 18090,
+        "line": 18150,
         "source_anchor": "(epoch + chrono::TimeDelta::microseconds(micros)).to_string()",
         "operation": "add a PostgreSQL microsecond offset to the midnight epoch and render expected TIMESTAMP text",
         "cfg_or_wiring": "FEATURE_POSTGRES_AND_CFG_TEST_IN_MODULE",
@@ -2053,13 +2053,13 @@
         "persistence_or_public_association": "AtpArchiveEntry.expires_at"
       },
       {
-        "use_id": "TIME-DERIVED-POSTGRES-MIDNIGHT-CONSTRUCTION-18088",
+        "use_id": "TIME-DERIVED-POSTGRES-MIDNIGHT-CONSTRUCTION-18148",
         "derivation_sources": [
-          "src/database/postgres.rs:18086"
+          "src/database/postgres.rs:18146"
         ],
         "consumer_category_id": "TIME-CONSUMER-DATABASE-MESSAGING-ARITHMETIC",
         "path": "src/database/postgres.rs",
-        "line": 18088,
+        "line": 18148,
         "source_anchor": ".and_hms_opt(0, 0, 0)",
         "operation": "extend the PostgreSQL calendar epoch date to a midnight timestamp",
         "cfg_or_wiring": "FEATURE_POSTGRES_AND_CFG_TEST_IN_MODULE",
@@ -5378,6 +5378,36 @@
         "line_count": 501
       }
     ],
+    "line_sensitive_pin_reconciliation": {
+      "path": "src/database/postgres.rs",
+      "current_sha256": "ddc35a5809d998391a0e6ffe6f995fc9f4e9919a39e5ad7d71dd4b644c049a75",
+      "current_line_count": 19776,
+      "uniform_line_delta": 60,
+      "refreshed_explicit_anchor_count": 3,
+      "refreshed_direct_source_reference_count": 1,
+      "previous_direct_source_id": "src/database/postgres.rs:18086",
+      "current_direct_source_id": "src/database/postgres.rs:18146",
+      "refreshed_anchor_ids": [
+        "TIME-DERIVED-POSTGRES-MIDNIGHT-CONSTRUCTION-18148",
+        "TIME-LITERAL-OVERRIDE-POSTGRES-18139",
+        "TIME-LITERAL-OVERRIDE-POSTGRES-18150"
+      ],
+      "previous_projection_sha256": {
+        "literal_operation": "a533497be94a3a8c649a061117053acff88821c102e9cedbe16cb4da0b66990b",
+        "literal_source": "5c4020cfe41d10dbfcab19c64f3677ee78941c65441c12da93dc7e3cd6946f2d",
+        "literal_override": "81f3549c7644361eabee937044ba098315b3aeffbd079d9c644eb1d60ccc3f84",
+        "additional_derived": "b20b65d03be1995802d929275531ac96a8a66ec06c1c64f0bf887ee27803f674"
+      },
+      "current_projection_sha256": {
+        "literal_operation": "7faffe9031ee795c8fc84549c65f70d564ffd7a433d09ae82fc01d87f14ea4c3",
+        "literal_source": "fdc95e79f2d3a8d16236e9c48e606e082ad5d9fb55aacd16f518b6738b8ae860",
+        "literal_override": "c33fc35568d9de398e4e0ab84e91aeb567703e72e33c8b15cc0a7eaba7358f06",
+        "additional_derived": "f41dab083731bc95f246db17e7a5b1e3d50ac60cf1d2af96696c556b0dd512f2"
+      },
+      "additional_derived_projection_change_includes_new_history_row": true,
+      "classification": "LINE_ONLY_SHIFT_FROM_PREVIOUSLY_CLASSIFIED_READ_CANCELLATION_SEAM",
+      "time_acceptance_semantics_changed": false
+    },
     "direct_producer_ids": [
       "conformance/raptorq_rfc6330/reporting/src/coverage_matrix.rs:229",
       "conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs:44",

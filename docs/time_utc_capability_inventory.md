@@ -42,12 +42,12 @@ registry without mutating those shared authorities:
    reported overlaps have their literal `chrono::Duration` call on the
    preceding line. The corrected literal-or-alias union is therefore 190
    unique lines.
-7. Thirty-eight declared in-file consumer anchors across six categories link
-   to 40 unique direct source anchors. Twenty-three exact cross-file consumer
-   rows across six categories link to 37 direct source anchors and extend the
-   combined lineage to 69 unique direct source anchors. Together with eight
-   imported-alias anchors, the artifact freezes 46 in-file derived anchors
-   and 259 classified direct-plus-derived anchors. This is a source-linked
+7. Thirty-nine declared in-file consumer anchors across six categories link
+   to 42 unique direct source anchors. Thirty-four exact cross-file consumer
+   rows across nine categories link to 41 direct source anchors and extend the
+   combined lineage to 72 unique direct source anchors. Together with eight
+   imported-alias anchors, the artifact freezes 47 in-file derived anchors
+   and 271 classified direct-plus-derived anchors. This is a source-linked
    static count, not runtime coverage.
 
 The direct `time` edge remains present under `cli`, and Chrono remains present
@@ -131,14 +131,15 @@ direct bindings, 32 direct alias rows, one same-line overlap, and eight
 imported-alias arithmetic, comparison, association, or ordering anchors are
 also exact.
 
-The declared downstream tranche now freezes 38 exact rows across CLI
+The declared downstream tranche now freezes 39 exact rows across CLI
 cutoff/expiry handling, PostgreSQL and Kafka arithmetic, JetStream wire
 insertion, real-E2E serialization/retention/return/embedding, conformance
 field association and rendering, and standalone fixture serialization,
-template association, and result retention. Every row names its direct source
-anchor and stops at the declared first semantic boundary.
+template association, result retention, and main-conformance RaptorQ history
+serialization. Every row names its direct source anchor and stops at the
+declared first semantic boundary.
 
-The cross-file tranche freezes 23 exact cross-file consumer rows. Seventeen
+The cross-file tranche freezes 34 exact cross-file consumer rows. Seventeen
 are JSON boundaries: all thirteen explicit main conformance-member report
 binaries whose reports carry either a direct Chrono-typed timestamp or a
 String populated by a direct Chrono UTC render, the separate
@@ -157,12 +158,23 @@ public DateTime fields: eight reach the root CLI JSON boundary, two reach the
 benchmark boundaries, and `AtpStatusOutput.timestamp` plus
 `AtpBenchSystemInfo.timestamp` retain their exact no-in-tree-producer state.
 
+Eleven more rows freeze the main-conformance RaptorQ reporting slice: three
+private `ReferenceVersion` constructors in the declared maintenance
+executable, five public reporting-pipeline construction or history-update
+calls, and the Markdown, JSON, and HTML report branches. The public history
+serializer at
+`conformance/raptorq_rfc6330/reporting/src/regression_detection.rs:77` is the
+39th declared in-file row. The `ReferenceVersion::update_from_git` timestamp
+refresh has no in-tree caller, and the executable's private reference carriers
+have no timestamp sink; the private fixture metadata intentionally excludes
+`last_updated`.
+
 Each row links the first declared cross-file embedding, constructor, return,
 or JSON serialization boundary to the direct timestamp source that establishes
 its lineage. The boundary does not extend through later encoding or rendering
 calls, later container propagation, later distinct file or standard-output
 sink anchors, dynamic dispatch, or ambiguous provenance. The remaining static
-gap is narrower but real: cross-file consumers beyond these twenty-three first
+gap is narrower but real: cross-file consumers beyond these thirty-four first
 semantic boundaries, external consumers absent from this snapshot, and later
 container or arbitrary-byte propagation are not enumerated. A1's
 zero-unclassified-use acceptance remains unmet and the bead stays open.
@@ -189,6 +201,24 @@ environment embeddings and the report-constructor call at
 of all 12 root public DateTime fields. This is source lineage only: it neither
 executes the feature nor proves report bytes, later propagation, runtime
 behavior, or A1 completion.
+
+The `TIME-A1-CONFORMANCE-RAPTORQ-LINEAGE-2026-08-06` extension then pins the
+report generator and maintenance executable, yielding 74 current source pins.
+It binds the four public RaptorQ timestamp-string carriers to 11 declared
+cross-file sites and the exact history serialization boundary, including the
+HTML field read at
+`conformance/raptorq_rfc6330/reporting/src/compliance_report.rs:298`. It does
+not execute any conformance tool or establish emitted bytes, persistence
+readback, unit-fixture propagation, or downstream behavior.
+
+That full line-sensitive pass also repaired a missed consequence of the
+previously classified PostgreSQL read-cancellation insertion: two literal
+overrides, one derived midnight anchor, and its direct-source reference had
+moved by a uniform `+60` lines. The current source pin was already correct;
+the refreshed literal-operation, literal-source, override, and derived-row
+projections now bind the relocated anchors at lines 18139, 18146, 18148, and
+18150. The exact diff classification remains unchanged and records no TIME
+acceptance-semantic change.
 
 Most `src/real_*` files in the census are dormant source rather than declared
 modules. The Chrono-bearing H3 server/websocket suite is feature-wired. In the
@@ -408,9 +438,10 @@ not proof of real Redis or RDB temporal behavior.
 
 The exact text of all 159 literal source lines, their operation projection,
 path routing, line-specific overrides, direct alias binding/reference
-discovery, eight imported-alias anchors, 38 declared source-linked in-file
-downstream anchors, and twenty-three declared cross-file consumer anchors are
-frozen in the artifact. The in-file boundary admits the first
+discovery, eight imported-alias anchors, 39 declared source-linked in-file
+downstream anchors, and thirty-four declared cross-file consumer anchors are
+frozen in the artifact.
+The in-file boundary admits the first
 semantic compare, arithmetic, format, serialization, persistence, retention,
 return, extraction, or embedding consumer in a Chrono-bearing path. The
 cross-file boundary admits the first explicit embedding, constructor, return,
@@ -454,7 +485,7 @@ The artifact routes, without mutating shared authority files:
 Every reconciliation row has an explicit owner and
 `ROUTED_NOT_MUTATED_BY_A1` state. There are no unclassified literal Chrono
 paths or undiscovered direct Chrono import bindings in the pinned census, but
-derived-consumer coverage beyond the 38 declared in-file rows and twenty-three
+derived-consumer coverage beyond the 39 declared in-file rows and thirty-four
 declared cross-file consumer rows remains partial.
 
 ## Validation and no-claim boundary
