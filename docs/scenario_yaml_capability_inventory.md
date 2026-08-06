@@ -225,7 +225,9 @@ their own replay text and lose that stable token.
 Both loaders publish a fully deserialized temporary value or an error, so a
 parse failure cannot expose a partial `Scenario`. They nevertheless read the
 entire file without application-level size or work limits. The root replay
-artifact path uses direct `fs::write`, not atomic temp-write, sync, and rename.
+artifact writer now has an authored same-directory staged-write, staged-file
+sync, and no-clobber publication path; that source has not been compiled or
+executed in this static lane.
 
 ## A3.1 current-surface and acceptance-satisfiability audit
 
@@ -464,6 +466,33 @@ benchmark behavior, checksums, cross-platform determinism, redaction, security,
 broad health, release readiness, tracker closure, dependency or file removal,
 cutover, or terminal authority.
 
+### A4 source progress: atomic replay artifact persistence
+
+A4 additionally records `SCN-A4-GAP-16-ATOMIC-REPLAY-SOURCE-V1`. The root
+`write_replay_artifact` source now serializes the complete JSON report before
+opening output, creates a `tempfile::NamedTempFile` in the destination
+directory, writes the full payload, flushes and synchronizes the staged file,
+and publishes it with `persist_noclobber`. The final commit therefore refuses
+to replace an existing replay artifact. The existing success-path source test
+is retained, and
+`write_replay_artifact_preserves_existing_destination` checks that a failed
+commit leaves earlier evidence byte-for-byte unchanged.
+
+This changes replay-artifact persistence behavior only: an occupied output
+path now fails closed rather than being silently overwritten. It changes no
+report schema, scenario format, accepted YAML input, dependency, capability,
+or scenario runtime semantics. The commit primitive is supplied by
+`tempfile`; on supported platforms it uses a no-replace rename and may fall
+back to link/unlink publication, so this packet makes no stronger
+cross-platform or post-publication crash-durability claim.
+
+The focused Rust tests and this inventory contract were not executed in this
+static lane. Accordingly, `SCN-GAP-16 remains blocked`: the artifact records
+`SOURCE_IMPLEMENTED_STATIC`, not executable proof. This slice does not prove
+compilation, runtime filesystem behavior, conversion, semantic or fingerprint
+equivalence, performance, security, broad health, release readiness, tracker
+closure, cutover, or terminal authority.
+
 ## Child routing
 
 | Child | Frozen responsibility | Current evidence |
@@ -471,7 +500,7 @@ cutover, or terminal authority.
 | A1 | loaders, schema, grammar, corpus, workflows, diagnostics, consumption, gaps | executed contract |
 | A2 | one versioned typed model and additive canonical JSON | executed contract |
 | A3 | incumbent KEEP or complete bounded owned parser/writer parity | A3.1 static audit and A3.2 durable receipt recorded; tracker state is separate |
-| A4 | located diagnostics, migration, examples, include truth, atomic output, docs | static source progress for exact example registry plus GAP-12/author claim truth; behavioral evidence remains unrun |
+| A4 | located diagnostics, migration, examples, include truth, atomic output, docs | static source progress for exact example registry, GAP-12/author claim truth, and GAP-16 no-clobber replay persistence; behavioral evidence remains unrun |
 | A5 | real validate/run/explore/replay journeys and terminal KEEP, DEFER, or CUTOVER decision | planned |
 
 Only A5 is terminal. Any missing, planned, blocked, regressed, or not-at-required
@@ -498,7 +527,7 @@ The artifact routes sixteen fail-closed gaps:
 | `SCN-GAP-13` | all 13 typed fixtures are source-registered, but the focused Rust contracts were not executed in this static lane | A4 |
 | `SCN-GAP-14` | no full-corpus typed YAML/JSON equivalence proof | A3 |
 | `SCN-GAP-15` | semantic spans and stable CLI replay code are incomplete | A4 |
-| `SCN-GAP-16` | replay artifact output is non-atomic | A4 |
+| `SCN-GAP-16` | staged, synced, no-clobber replay persistence is authored, but its focused Rust tests and inventory contract remain unexecuted | A4 |
 
 There are zero `UNKNOWN` loader, schema, grammar, corpus, workflow,
 diagnostic, resource, consumer, child, or gap rows.
@@ -506,11 +535,12 @@ diagnostic, resource, consumer, child, or gap rows.
 ## Validation
 
 Run the focused source-pin, typed-schema, parser-behavior, corpus, routing,
-durable-receipt gate derivation, A4/A5 authority, documentation, and
-negative-mutation contract:
+durable-receipt gate derivation, A4/A5 authority, GAP-16 replay-persistence
+source, documentation, and negative-mutation contract:
 
 ```bash
 RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay \
+  --overlay-path src/bin/asupersync.rs \
   --overlay-path src/lab/scenario.rs \
   --overlay-path tools/demos/time_travel.yaml \
   --overlay-path docs/adoption/getting_started.md \
@@ -539,16 +569,20 @@ checked scenarios and workflows; they do not close the routed execution gaps.
 This A1/A2/A3.1/A3.2 packet combines the earlier executable
 inventory/canonical-JSON evidence with a current static
 acceptance-satisfiability audit and fail-closed KEEP receipt. The A4 additions
-are source-level example-registry and GAP-12/author claim-truth alignment only;
-no Rust contract was executed for them, and `SCN-GAP-01`, `SCN-GAP-12`, and
-`SCN-GAP-13` remain blocked. A3.1, A3.2, and these A4 static slices did not
-rerun executable lanes or implement an owned YAML parser or production
-Scenario YAML writer. The packet proves no complete parity, runtime behavior,
-performance, resource, security, broad-health, release, or terminal decision,
-and authorizes no input narrowing, dependency or file removal, tracker closure,
-or cutover. It also does not implement include merging, network or cancellation
-simulation, participant workloads, full fault effects, atomic artifact output,
-resource-policy bounds, or stable located semantic diagnostics.
+are source-level example-registry, GAP-12/author claim-truth alignment, and an
+authored GAP-16 replay-persistence change. No Rust contract was executed for
+them, and `SCN-GAP-01`, `SCN-GAP-12`, `SCN-GAP-13`, and `SCN-GAP-16` remain
+blocked. A3.1, A3.2, and these A4 static slices did not rerun executable lanes
+or implement an owned YAML parser or production Scenario YAML writer. The
+GAP-16 source was not compiled or executed and therefore does not establish
+cross-platform filesystem behavior or crash durability after destination
+publication. The packet proves no complete parity, runtime behavior outside
+the authored replay-persistence source, performance, resource, security,
+broad-health, release, or terminal decision, and authorizes no input narrowing,
+dependency or file removal, tracker closure, or cutover. It also does not
+implement include merging, network or cancellation simulation, participant
+workloads, full fault effects, resource-policy bounds, or stable located
+semantic diagnostics.
 `KEEP_INCUMBENT` and `dependency_exit_allowed=false` remain mandatory. Only A5
 may issue a terminal KEEP, DEFER, or CUTOVER decision; CUTOVER and dependency
 exit remain unauthorized until every declared prerequisite is satisfied.

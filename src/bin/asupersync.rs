@@ -11679,7 +11679,11 @@ fn build_replay_rerun_commands(args: &LabReplayArgs, seed: u64) -> Vec<String> {
 }
 
 fn write_replay_artifact(path: &Path, report: &LabReplayOutput) -> Result<(), CliError> {
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if parent != Path::new(".") {
         fs::create_dir_all(parent).map_err(|err| {
             CliError::new(
                 "artifact_output_error",
@@ -11701,12 +11705,53 @@ fn write_replay_artifact(path: &Path, report: &LabReplayOutput) -> Result<(), Cl
         .exit_code(ExitCode::RUNTIME_ERROR)
     })?;
 
-    fs::write(path, payload).map_err(|err| {
-        CliError::new("artifact_output_error", "Failed to write replay artifact")
-            .detail(err.to_string())
-            .context("path", path.display().to_string())
-            .exit_code(ExitCode::RUNTIME_ERROR)
-    })
+    let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(|err| {
+        CliError::new(
+            "artifact_output_error",
+            "Failed to stage replay artifact",
+        )
+        .detail(err.to_string())
+        .context("path", path.display().to_string())
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+    staged.write_all(&payload).map_err(|err| {
+        CliError::new(
+            "artifact_output_error",
+            "Failed to write staged replay artifact",
+        )
+        .detail(err.to_string())
+        .context("path", path.display().to_string())
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+    staged.flush().map_err(|err| {
+        CliError::new(
+            "artifact_output_error",
+            "Failed to flush staged replay artifact",
+        )
+        .detail(err.to_string())
+        .context("path", path.display().to_string())
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+    staged.as_file().sync_all().map_err(|err| {
+        CliError::new(
+            "artifact_output_error",
+            "Failed to sync staged replay artifact",
+        )
+        .detail(err.to_string())
+        .context("path", path.display().to_string())
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+    staged.persist_noclobber(path).map_err(|err| {
+        CliError::new(
+            "artifact_output_error",
+            "Failed to commit replay artifact without replacing an existing file",
+        )
+        .detail(err.error.to_string())
+        .context("path", path.display().to_string())
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+
+    Ok(())
 }
 
 // =========================================================================
@@ -13584,11 +13629,8 @@ lab:
         assert!(commands[1].contains("--out-dir 'artifacts/diff reports'"));
     }
 
-    #[test]
-    fn write_replay_artifact_persists_json_report() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let output_path = temp.path().join("replay/report.json");
-        let report = LabReplayOutput {
+    fn replay_artifact_test_report() -> LabReplayOutput {
+        LabReplayOutput {
             scenario: "examples/scenarios/smoke_happy_path.yaml".to_string(),
             scenario_id: "smoke-happy-path".to_string(),
             deterministic: true,
@@ -13616,12 +13658,42 @@ lab:
                 ],
             },
             divergence: None,
-        };
+        }
+    }
+
+    #[test]
+    fn write_replay_artifact_persists_json_report() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output_path = temp.path().join("replay/report.json");
+        let report = replay_artifact_test_report();
 
         write_replay_artifact(&output_path, &report).expect("write replay artifact");
         let saved = fs::read_to_string(&output_path).expect("read replay artifact");
         assert!(saved.contains("\"scenario_id\": \"smoke-happy-path\""));
         assert!(saved.contains("\"rerun_commands\""));
+    }
+
+    #[test]
+    fn write_replay_artifact_preserves_existing_destination() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output_path = temp.path().join("replay/report.json");
+        fs::create_dir_all(output_path.parent().expect("replay parent"))
+            .expect("create replay parent");
+        fs::write(&output_path, b"existing replay evidence")
+            .expect("write existing replay evidence");
+
+        let error = write_replay_artifact(&output_path, &replay_artifact_test_report())
+            .expect_err("existing replay artifact must not be replaced");
+
+        assert_eq!(error.error_type, "artifact_output_error");
+        assert_eq!(
+            error.title,
+            "Failed to commit replay artifact without replacing an existing file"
+        );
+        assert_eq!(
+            fs::read_to_string(&output_path).expect("read preserved replay evidence"),
+            "existing replay evidence"
+        );
     }
 
     #[test]

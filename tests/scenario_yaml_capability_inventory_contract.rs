@@ -9,8 +9,8 @@
 //! This proves source-pinned loader, typed-schema, observed grammar, checked-in
 //! corpus, canonical JSON, workflow, diagnostic, resource, current YAML
 //! consumers/writers, acceptance-satisfiability, the durable KEEP receipt,
-//! A4/A5 authority handoff, source-level example-registry and GAP-12 claim
-//! truth alignment,
+//! A4/A5 authority handoff, source-level example-registry, GAP-12 claim truth,
+//! and GAP-16 atomic replay-persistence alignment,
 //! execution-consumption, child-owner, and gap inventories. It does not prove
 //! arbitrary YAML, parser replacement, runtime semantics for validation-only
 //! fields, CLI conversion UX, or permission to remove the incumbent
@@ -45,6 +45,7 @@ const A3_RECEIPT_ID: &str = "SCN-A3-KEEP-INCUMBENT-V1";
 const A4_BEAD_ID: &str = "asupersync-5z2scg.5.4";
 const A4_PROGRESS_ID: &str = "SCN-A4-GAP-13-REGISTRY-SOURCE-V1";
 const A4_GAP12_PROGRESS_ID: &str = "SCN-A4-GAP-12-CLAIM-TRUTH-V1";
+const A4_GAP16_PROGRESS_ID: &str = "SCN-A4-GAP-16-ATOMIC-REPLAY-SOURCE-V1";
 const EXAMPLES_METADATA_PATH: &str = "examples/metadata.json";
 const EXAMPLES_README_PATH: &str = "examples/README.md";
 const EXAMPLES_METADATA_CONTRACT_PATH: &str = "tests/examples_metadata_contract.rs";
@@ -2233,6 +2234,146 @@ fn validate_a4_gap12_source_progress(inventory: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_a4_gap16_source_progress(inventory: &Value) -> Result<(), String> {
+    let progress = inventory
+        .get("a4_gap16_source_progress")
+        .ok_or_else(|| "a4_gap16_source_progress is required".to_owned())?;
+    for (key, expected) in [
+        ("progress_id", A4_GAP16_PROGRESS_ID),
+        ("bead_id", A4_BEAD_ID),
+        ("recorded_date_utc", "2026-08-06"),
+        ("scope", "ATOMIC_NO_CLOBBER_REPLAY_ARTIFACT_PERSISTENCE"),
+        ("gap_id", "SCN-GAP-16"),
+        ("source_state", "SOURCE_IMPLEMENTED_STATIC"),
+        ("execution_state", "NOT_RUN_BY_STATIC_LANE"),
+        ("gap_state", "BLOCKED_GAP"),
+        ("blocker", "FOCUSED_CONTRACT_NOT_EXECUTED"),
+        ("production_path", "src/bin/asupersync.rs"),
+        ("write_function", "write_replay_artifact"),
+    ] {
+        if progress.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("A4 GAP-16 progress {key} must be {expected}"));
+        }
+    }
+    if progress
+        .get("source_change_authored")
+        .and_then(Value::as_bool)
+        != Some(true)
+        || progress
+            .get("dynamic_contract_executed")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return Err("A4 GAP-16 must distinguish authored source from execution".to_owned());
+    }
+
+    let protocol = object(progress, "commit_protocol");
+    if protocol.get("commit_primitive").and_then(Value::as_str)
+        != Some("tempfile::NamedTempFile::persist_noclobber")
+    {
+        return Err("A4 GAP-16 commit primitive drifted".to_owned());
+    }
+    for key in [
+        "same_directory_staging",
+        "serialize_before_staging",
+        "write_all_before_commit",
+        "flush_before_sync",
+        "staged_file_synced",
+        "no_replace_commit",
+        "existing_destination_preserved",
+    ] {
+        if protocol.get(key).and_then(Value::as_bool) != Some(true) {
+            return Err(format!("A4 GAP-16 commit_protocol.{key} must be true"));
+        }
+    }
+
+    if string_set(progress, "authored_tests")
+        != [
+            "write_replay_artifact_persists_json_report",
+            "write_replay_artifact_preserves_existing_destination",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    {
+        return Err("A4 GAP-16 authored test set drifted".to_owned());
+    }
+
+    let root_cli = read_repo_file("src/bin/asupersync.rs");
+    let writer = source_item(&root_cli, "fn write_replay_artifact(");
+    for marker in [
+        "tempfile::NamedTempFile::new_in(parent)",
+        "staged.write_all(&payload)",
+        "staged.flush()",
+        "staged.as_file().sync_all()",
+        "staged.persist_noclobber(path)",
+    ] {
+        if !writer.contains(marker) {
+            return Err(format!("A4 GAP-16 writer is missing {marker}"));
+        }
+    }
+    if writer.contains("fs::write(path, payload)")
+        || !root_cli.contains("fn write_replay_artifact_preserves_existing_destination()")
+    {
+        return Err("A4 GAP-16 writer or no-clobber source test drifted".to_owned());
+    }
+
+    let preservation = object(progress, "preservation");
+    for key in [
+        "accepted_yaml_narrowed",
+        "dependency_removed",
+        "yaml_capability_removed",
+        "yaml_file_removed",
+        "replay_report_schema_changed",
+        "existing_destination_overwrite_allowed",
+        "terminal_decision_issued",
+    ] {
+        if preservation.get(key).and_then(Value::as_bool) != Some(false) {
+            return Err(format!("A4 GAP-16 preservation.{key} must remain false"));
+        }
+    }
+
+    let gap = find_row(array(inventory, "known_gaps"), "gap_id", "SCN-GAP-16");
+    if text(gap, "evidence_state") != "BLOCKED_GAP"
+        || text(gap, "progress_pointer") != "a4_gap16_source_progress"
+        || !text(gap, "finding").contains("source change is authored")
+        || !text(gap, "finding").contains("not executed")
+    {
+        return Err("SCN-GAP-16 must remain fail-closed and point to A4 progress".to_owned());
+    }
+    let a4_child = find_row(
+        array(inventory, "child_capability_rows"),
+        "owner_bead",
+        A4_BEAD_ID,
+    );
+    if !string_set(a4_child, "additional_progress_pointers")
+        .contains("a4_gap16_source_progress")
+    {
+        return Err("A4 child must retain the GAP-16 progress pointer".to_owned());
+    }
+
+    let validation = find_row(
+        array(inventory, "validation_commands"),
+        "lane",
+        "scenario-yaml-capability-inventory-contract",
+    );
+    if !text(validation, "command").contains("--overlay-path src/bin/asupersync.rs")
+        || !text(validation, "claim").contains("GAP-16 atomic no-clobber replay source")
+    {
+        return Err("A4 GAP-16 validation command must overlay and name the root CLI".to_owned());
+    }
+
+    let scenario_doc = read_repo_file(DOC_PATH);
+    if !scenario_doc.contains("A4 source progress: atomic replay artifact persistence")
+        || !scenario_doc.contains("SCN-GAP-16 remains blocked")
+        || !text(progress, "no_claim_boundary").contains("not executed")
+        || !text(inventory, "no_claim_boundary").contains("SCN-GAP-16")
+    {
+        return Err("A4 GAP-16 docs or no-claim boundary drifted".to_owned());
+    }
+    Ok(())
+}
+
 fn validate_post_a3_1_provenance_refresh(inventory: &Value) -> Result<(), String> {
     let refresh = inventory
         .get("post_a3_1_provenance_refresh")
@@ -2574,6 +2715,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     validate_a3_keep_incumbent_receipt(inventory)?;
     validate_a4_source_progress(inventory)?;
     validate_a4_gap12_source_progress(inventory)?;
+    validate_a4_gap16_source_progress(inventory)?;
     Ok(())
 }
 
@@ -3159,7 +3301,12 @@ fn execution_consumption_diagnostics_and_gap_routing_stay_truthful() {
     assert!(root_cli.contains("\"scenario_parse_error\""));
     assert!(root_cli.contains("Hint: check indentation and field names"));
     assert!(root_cli.contains("fn write_replay_artifact("));
-    assert!(root_cli.contains("fs::write(path, payload)"));
+    let replay_writer = source_item(&root_cli, "fn write_replay_artifact(");
+    assert!(replay_writer.contains("tempfile::NamedTempFile::new_in(parent)"));
+    assert!(replay_writer.contains("staged.write_all(&payload)"));
+    assert!(replay_writer.contains("staged.as_file().sync_all()"));
+    assert!(replay_writer.contains("staged.persist_noclobber(path)"));
+    assert!(!replay_writer.contains("fs::write(path, payload)"));
     assert!(scenario.contains("pub struct ValidationError"));
     assert!(runner.contains("[ASUP-E401]"));
     assert!(!root_cli.contains("[ASUP-E401]"));
@@ -3199,6 +3346,7 @@ fn documentation_workflows_and_no_claim_boundary_are_complete() {
         A3_RECEIPT_ID,
         A4_BEAD_ID,
         A4_PROGRESS_ID,
+        A4_GAP16_PROGRESS_ID,
         A3_AUDIT_LANDED_COMMIT,
         BASELINE_REVISION,
         A3_CAPTURED_REVISION,
@@ -3210,7 +3358,9 @@ fn documentation_workflows_and_no_claim_boundary_are_complete() {
         "A3.1 did not rerun",
         "static provenance pass refreshed three stale pins",
         "SOURCE_ALIGNED_STATIC",
+        "SOURCE_IMPLEMENTED_STATIC",
         "SCN-GAP-13 remains blocked",
+        "SCN-GAP-16 remains blocked",
         "13 files",
         "validation-only",
         "does not schedule an application workload",
@@ -3431,6 +3581,16 @@ fn fail_closed_mutations_reject_cutover_unknown_missing_surface_bound_and_policy
         ["dependency_removed"] = Value::Bool(true);
     assert!(validate_inventory(&gap12_dependency_removal).is_err());
 
+    let mut invented_gap16_execution = inventory.clone();
+    invented_gap16_execution["a4_gap16_source_progress"]["dynamic_contract_executed"] =
+        Value::Bool(true);
+    assert!(validate_inventory(&invented_gap16_execution).is_err());
+
+    let mut gap16_clobber = inventory.clone();
+    gap16_clobber["a4_gap16_source_progress"]["commit_protocol"]["no_replace_commit"] =
+        Value::Bool(false);
+    assert!(validate_inventory(&gap16_clobber).is_err());
+
     let a4_child_index = array(&inventory, "child_capability_rows")
         .iter()
         .position(|row| row.get("owner_bead").and_then(Value::as_str) == Some(A4_BEAD_ID))
@@ -3442,6 +3602,18 @@ fn fail_closed_mutations_reject_cutover_unknown_missing_surface_bound_and_policy
         .expect("additional A4 progress pointers")
         .clear();
     assert!(validate_inventory(&missing_gap12_pointer).is_err());
+
+    let mut missing_gap16_pointer = inventory.clone();
+    let progress_pointers = missing_gap16_pointer["child_capability_rows"][a4_child_index]
+        ["additional_progress_pointers"]
+        .as_array_mut()
+        .expect("additional A4 progress pointers");
+    let gap16_pointer_index = progress_pointers
+        .iter()
+        .position(|pointer| pointer.as_str() == Some("a4_gap16_source_progress"))
+        .expect("GAP-16 progress pointer");
+    progress_pointers.remove(gap16_pointer_index);
+    assert!(validate_inventory(&missing_gap16_pointer).is_err());
 
     let gap13_index = array(&inventory, "known_gaps")
         .iter()

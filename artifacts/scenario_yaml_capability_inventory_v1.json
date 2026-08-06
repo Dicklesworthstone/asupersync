@@ -91,8 +91,8 @@
     },
     {
       "path": "src/bin/asupersync.rs",
-      "sha256": "397f3800f4a40ccb4f25366bb10ce641d12b4947b9e1b230359db69c5af1e283",
-      "line_count": 16700
+      "sha256": "7971454a7b45c39d5f647b6079b5e4feddac14130561816d053aa2553feddf4a",
+      "line_count": 16772
     },
     {
       "path": "frankenlab/Cargo.toml",
@@ -146,8 +146,8 @@
     },
     {
       "path": "tests/scenario_yaml_capability_inventory_contract.rs",
-      "sha256": "b0c8f60998e4c6d8e9fa89af55b2fd3c9a3de3349bb32262782ebb98efdc512a",
-      "line_count": 3458
+      "sha256": "62d36ad273e91bb880ab66e819ce169c4fa061cfb71bac9dfabb7e9541a994b7",
+      "line_count": 3630
     },
     {
       "path": "tests/phase6_methodology_gate_contract.rs",
@@ -2090,6 +2090,45 @@
     },
     "no_claim_boundary": "This source-only A4 receipt aligns the ADR, registry, adjacent-file comments, author guidance, and static contract sources with current path wiring. The focused contracts were not executed, so SCN-GAP-01, SCN-GAP-12, and SCN-GAP-13 remain fail-closed. It does not add an include or demo reader, make tools/demos/time_travel.yaml a typed Scenario, prove parsing, validation, execution, replay, conversion, fingerprints, benchmark behavior, checksums, cross-platform determinism, redaction, security, broad health, release readiness, tracker closure, dependency or file removal, cutover, or terminal authority. KEEP_INCUMBENT and dependency_exit_allowed=false remain mandatory."
   },
+  "a4_gap16_source_progress": {
+    "progress_id": "SCN-A4-GAP-16-ATOMIC-REPLAY-SOURCE-V1",
+    "bead_id": "asupersync-5z2scg.5.4",
+    "recorded_date_utc": "2026-08-06",
+    "scope": "ATOMIC_NO_CLOBBER_REPLAY_ARTIFACT_PERSISTENCE",
+    "gap_id": "SCN-GAP-16",
+    "source_state": "SOURCE_IMPLEMENTED_STATIC",
+    "execution_state": "NOT_RUN_BY_STATIC_LANE",
+    "source_change_authored": true,
+    "dynamic_contract_executed": false,
+    "production_path": "src/bin/asupersync.rs",
+    "write_function": "write_replay_artifact",
+    "commit_protocol": {
+      "same_directory_staging": true,
+      "serialize_before_staging": true,
+      "write_all_before_commit": true,
+      "flush_before_sync": true,
+      "staged_file_synced": true,
+      "no_replace_commit": true,
+      "commit_primitive": "tempfile::NamedTempFile::persist_noclobber",
+      "existing_destination_preserved": true
+    },
+    "authored_tests": [
+      "write_replay_artifact_persists_json_report",
+      "write_replay_artifact_preserves_existing_destination"
+    ],
+    "gap_state": "BLOCKED_GAP",
+    "blocker": "FOCUSED_CONTRACT_NOT_EXECUTED",
+    "preservation": {
+      "accepted_yaml_narrowed": false,
+      "dependency_removed": false,
+      "yaml_capability_removed": false,
+      "yaml_file_removed": false,
+      "replay_report_schema_changed": false,
+      "existing_destination_overwrite_allowed": false,
+      "terminal_decision_issued": false
+    },
+    "no_claim_boundary": "The GAP-16 source change is authored but its Rust tests and inventory contract were not executed in this static lane, so SCN-GAP-16 remains blocked. The row does not prove compilation, cross-platform filesystem behavior, crash durability after destination publication, runtime behavior outside replay persistence, conversion, semantic or fingerprint equivalence, performance, security, broad health, release readiness, tracker closure, cutover, or terminal authority."
+  },
   "child_capability_rows": [
     {
       "owner_bead": "asupersync-5z2scg.5.1",
@@ -2129,18 +2168,20 @@
     },
     {
       "owner_bead": "asupersync-5z2scg.5.4",
-      "responsibility": "repair diagnostics, migration ergonomics, examples, include truth, and operator documentation",
+      "responsibility": "repair diagnostics, migration ergonomics, examples, include truth, atomic replay output, and operator documentation",
       "required_evidence": [
         "stable located errors",
         "migration guidance",
-        "example and metadata alignment"
+        "example and metadata alignment",
+        "atomic no-clobber replay artifact persistence"
       ],
       "evidence_state": "SOURCE_PROGRESS_STATIC",
       "progress_pointer": "a4_source_progress",
       "additional_progress_pointers": [
-        "a4_gap12_source_progress"
+        "a4_gap12_source_progress",
+        "a4_gap16_source_progress"
       ],
-      "no_claim": "Documentation cannot substitute for runtime behavior or terminal proof."
+      "no_claim": "Static source and documentation cannot substitute for executable runtime behavior or terminal proof."
     },
     {
       "owner_bead": "asupersync-5z2scg.5.5",
@@ -2250,16 +2291,17 @@
     },
     {
       "gap_id": "SCN-GAP-16",
-      "finding": "asupersync replay artifacts use direct fs::write without atomic temp-write, sync, and rename",
+      "finding": "the replay writer source change is authored with same-directory staging, staged-file sync, and no-clobber destination publication, but its focused Rust tests and inventory contract were not executed",
       "owner_bead": "asupersync-5z2scg.5.4",
-      "evidence_state": "BLOCKED_GAP"
+      "evidence_state": "BLOCKED_GAP",
+      "progress_pointer": "a4_gap16_source_progress"
     }
   ],
   "validation_commands": [
     {
       "lane": "scenario-yaml-capability-inventory-contract",
-      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/lab/scenario.rs --overlay-path tools/demos/time_travel.yaml --overlay-path docs/adoption/getting_started.md --overlay-path examples/README.md --overlay-path docs/adr/dep_plan_adr_004_config_scenario_formats.md --overlay-path artifacts/dependency_api_adr_registry_v1.json --overlay-path docs/dependency_api_adr_registry.md --overlay-path tests/dependency_api_adr_registry_contract.rs --overlay-path artifacts/config_toml_capability_inventory_v1.json --overlay-path artifacts/scenario_yaml_capability_inventory_v1.json --overlay-path docs/scenario_yaml_capability_inventory.md --overlay-path tests/scenario_yaml_capability_inventory_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_scenario_yaml_capability_inventory\" cargo test -p asupersync --test scenario_yaml_capability_inventory_contract -- --nocapture",
-      "claim": "source pins, typed schema, observed grammar, exact corpus, loaders, workflows, diagnostics, routed gaps, durable KEEP receipt gate derivation, A4/A5 authority handoff, static example-registry alignment, GAP-12 claim truth, author guidance markers, docs markers, and negative mutations"
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/bin/asupersync.rs --overlay-path src/lab/scenario.rs --overlay-path tools/demos/time_travel.yaml --overlay-path docs/adoption/getting_started.md --overlay-path examples/README.md --overlay-path docs/adr/dep_plan_adr_004_config_scenario_formats.md --overlay-path artifacts/dependency_api_adr_registry_v1.json --overlay-path docs/dependency_api_adr_registry.md --overlay-path tests/dependency_api_adr_registry_contract.rs --overlay-path artifacts/config_toml_capability_inventory_v1.json --overlay-path artifacts/scenario_yaml_capability_inventory_v1.json --overlay-path docs/scenario_yaml_capability_inventory.md --overlay-path tests/scenario_yaml_capability_inventory_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_scenario_yaml_capability_inventory\" cargo test -p asupersync --test scenario_yaml_capability_inventory_contract -- --nocapture",
+      "claim": "source pins, typed schema, observed grammar, exact corpus, loaders, workflows, diagnostics, routed gaps, durable KEEP receipt gate derivation, A4/A5 authority handoff, static example-registry alignment, GAP-12 claim truth, GAP-16 atomic no-clobber replay source, author guidance markers, docs markers, and negative mutations"
     },
     {
       "lane": "existing-root-scenario-integration",
@@ -2272,5 +2314,5 @@
       "claim": "existing frankenlab example author journey only"
     }
   ],
-  "no_claim_boundary": "This A1/A2/A3.1/A3.2 packet combines the earlier executable inventory and canonical-JSON evidence with a current static acceptance-satisfiability audit and fail-closed KEEP_INCUMBENT governance receipt. The A4 additions record source-level example-registry, GAP-12 claim-truth, and author-guidance alignment only; no Rust contract was executed for them, and SCN-GAP-01, SCN-GAP-12, and SCN-GAP-13 remain blocked. A3.1, A3.2, and these A4 static slices did not rerun executable lanes or implement an owned YAML parser or production Scenario YAML writer. The packet proves no complete parity, runtime behavior, performance, resource, security, broad-health, release, or terminal decision, and authorizes no input narrowing, dependency or file removal, tracker closure, or cutover. It grants no permission to remove serde_yaml, serde, any accepted field, error, document, or workflow. It also does not implement include merging, network or cancellation simulation, participant workloads, full fault effects, atomic artifact output, resource-policy bounds, or stable located semantic diagnostics. KEEP_INCUMBENT and dependency_exit_allowed=false remain mandatory. Only A5 may issue a terminal KEEP, DEFER, or CUTOVER decision; CUTOVER and dependency exit remain unauthorized until every declared prerequisite is satisfied."
+  "no_claim_boundary": "This A1/A2/A3.1/A3.2 packet combines the earlier executable inventory and canonical-JSON evidence with a current static acceptance-satisfiability audit and fail-closed KEEP_INCUMBENT governance receipt. The A4 additions record source-level example-registry, GAP-12 claim-truth, author-guidance alignment, and an authored GAP-16 replay-persistence change; no Rust contract was executed for them, and SCN-GAP-01, SCN-GAP-12, SCN-GAP-13, and SCN-GAP-16 remain blocked. A3.1, A3.2, and these A4 static slices did not rerun executable lanes or implement an owned YAML parser or production Scenario YAML writer. The GAP-16 source was not compiled or executed and therefore does not establish cross-platform filesystem behavior or crash durability after destination publication. The packet proves no complete parity, runtime behavior outside the authored replay-persistence source, performance, resource, security, broad-health, release, or terminal decision, and authorizes no input narrowing, dependency or file removal, tracker closure, or cutover. It grants no permission to remove serde_yaml, serde, any accepted field, error, document, or workflow. It also does not implement include merging, network or cancellation simulation, participant workloads, full fault effects, resource-policy bounds, or stable located semantic diagnostics. KEEP_INCUMBENT and dependency_exit_allowed=false remain mandatory. Only A5 may issue a terminal KEEP, DEFER, or CUTOVER decision; CUTOVER and dependency exit remain unauthorized until every declared prerequisite is satisfied."
 }
