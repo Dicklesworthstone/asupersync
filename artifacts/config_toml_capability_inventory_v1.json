@@ -49,8 +49,8 @@
     },
     {
       "path": "src/runtime/env_config.rs",
-      "sha256": "84222f9f0f62163c47947ae7805a275c4192ffa712c6fff83c3035acae65ff90",
-      "line_count": 1170
+      "sha256": "1b33cfcba73d2ec67ac3fcea5b9a0d5abb3eec30848996a6a1eca173e2b761dc",
+      "line_count": 1172
     },
     {
       "path": "src/runtime/builder.rs",
@@ -64,7 +64,7 @@
     },
     {
       "path": "src/cli/atp_config.rs",
-      "sha256": "9bb110bceb286d9dfbce19657a09b239c08de71641b5517fb3f699f35bc2ec2f",
+      "sha256": "b6e56aefd2d04371f37958f7070053374cfe2aa2ce1db0ada2eab56161f27a2f",
       "line_count": 1016
     },
     {
@@ -84,8 +84,8 @@
     },
     {
       "path": "src/bin/atpd.rs",
-      "sha256": "aa1ff63fbd19e4252171c66fb6c02aeb8358a3c100ae73b2169db2399ee857c9",
-      "line_count": 2664
+      "sha256": "f2420f0514c347fd0a8dbad6afde64299bc2f810b0f1ebbda77490c9d60185f9",
+      "line_count": 2660
     },
     {
       "path": "src/bin/dependency_marginal_ledger.rs",
@@ -94,8 +94,8 @@
     },
     {
       "path": "src/config.rs",
-      "sha256": "8315e1e2d4b0fe2223356d364c2656f2f6d4b93ca71b705a7b328ee41cb3f05e",
-      "line_count": 2164
+      "sha256": "e35b43aed9c335ee86bf16a9e645a679d03808ae2ed9b7f237c2aa3263d66e6e",
+      "line_count": 2161
     },
     {
       "path": "src/fs_config_metamorphic_tests.rs",
@@ -1409,6 +1409,42 @@
       "refreshed_path_count": 7,
       "a2_owned_path_count": 6,
       "unrelated_path_count": 1,
+      "format_only_maintenance": {
+        "commit": "8d94b8b9e4361863599db9a17f7badd4179b2609",
+        "classification": "FORMAT_ONLY_RUSTFMT_NO_CONFIG_CONTRACT_CHANGE",
+        "refreshed_path_count": 4,
+        "accepted_toml_input_changed": false,
+        "rows": [
+          {
+            "path": "src/config.rs",
+            "previous_sha256": "8315e1e2d4b0fe2223356d364c2656f2f6d4b93ca71b705a7b328ee41cb3f05e",
+            "previous_line_count": 2164,
+            "current_sha256": "e35b43aed9c335ee86bf16a9e645a679d03808ae2ed9b7f237c2aa3263d66e6e",
+            "current_line_count": 2161
+          },
+          {
+            "path": "src/runtime/env_config.rs",
+            "previous_sha256": "84222f9f0f62163c47947ae7805a275c4192ffa712c6fff83c3035acae65ff90",
+            "previous_line_count": 1170,
+            "current_sha256": "1b33cfcba73d2ec67ac3fcea5b9a0d5abb3eec30848996a6a1eca173e2b761dc",
+            "current_line_count": 1172
+          },
+          {
+            "path": "src/cli/atp_config.rs",
+            "previous_sha256": "9bb110bceb286d9dfbce19657a09b239c08de71641b5517fb3f699f35bc2ec2f",
+            "previous_line_count": 1016,
+            "current_sha256": "b6e56aefd2d04371f37958f7070053374cfe2aa2ce1db0ada2eab56161f27a2f",
+            "current_line_count": 1016
+          },
+          {
+            "path": "src/bin/atpd.rs",
+            "previous_sha256": "aa1ff63fbd19e4252171c66fb6c02aeb8358a3c100ae73b2169db2399ee857c9",
+            "previous_line_count": 2664,
+            "current_sha256": "f2420f0514c347fd0a8dbad6afde64299bc2f810b0f1ebbda77490c9d60185f9",
+            "current_line_count": 2660
+          }
+        ]
+      },
       "rows": [
         {
           "path": "src/config.rs",
@@ -1416,8 +1452,8 @@
           "classification": "A2_SHARED_VERSIONED_DOCUMENT_AND_SOURCE_TESTS",
           "previous_sha256": "de72f96a52b9a31bb2934f1d7a19b3836fafc1f1be21afae4afacc66a8fb05c8",
           "previous_line_count": 1917,
-          "current_sha256": "8315e1e2d4b0fe2223356d364c2656f2f6d4b93ca71b705a7b328ee41cb3f05e",
-          "current_line_count": 2164,
+          "current_sha256": "e35b43aed9c335ee86bf16a9e645a679d03808ae2ed9b7f237c2aa3263d66e6e",
+          "current_line_count": 2161,
           "accepted_toml_input_changed": false
         },
         {
@@ -1426,8 +1462,8 @@
           "classification": "A2_RUNTIME_SINGLE_TYPED_LAYER_AND_JSON",
           "previous_sha256": "d4e12314788bd50940e904daf2ccc565b4a24607b47fd46dcb286b22b5b96d9c",
           "previous_line_count": 1009,
-          "current_sha256": "84222f9f0f62163c47947ae7805a275c4192ffa712c6fff83c3035acae65ff90",
-          "current_line_count": 1170,
+          "current_sha256": "1b33cfcba73d2ec67ac3fcea5b9a0d5abb3eec30848996a6a1eca173e2b761dc",
+          "current_line_count": 1172,
           "accepted_toml_input_changed": false
         },
         {
@@ -1446,7 +1482,7 @@
           "classification": "A2_ATP_COMMAND_AND_INSTALL_JSON_MODEL_APIS",
           "previous_sha256": "6251a2f39ef6175d8bc9d195adbe5626950ae14261a91aee7e75ad0ee76dd2c2",
           "previous_line_count": 775,
-          "current_sha256": "9bb110bceb286d9dfbce19657a09b239c08de71641b5517fb3f699f35bc2ec2f",
+          "current_sha256": "b6e56aefd2d04371f37958f7070053374cfe2aa2ce1db0ada2eab56161f27a2f",
           "current_line_count": 1016,
           "accepted_toml_input_changed": false
         },
@@ -1466,8 +1502,8 @@
           "classification": "A2_ATPD_JSON_LOADER_AND_REDACTED_PROJECTION",
           "previous_sha256": "8d969a0669bcd865be9589f5a408cab2b861c1a14ab0a3e5a9e8b1f1fb731cf8",
           "previous_line_count": 2333,
-          "current_sha256": "aa1ff63fbd19e4252171c66fb6c02aeb8358a3c100ae73b2169db2399ee857c9",
-          "current_line_count": 2664,
+          "current_sha256": "f2420f0514c347fd0a8dbad6afde64299bc2f810b0f1ebbda77490c9d60185f9",
+          "current_line_count": 2660,
           "accepted_toml_input_changed": false
         },
         {
