@@ -31,6 +31,7 @@
       "EXECUTED",
       "PARTIAL_EXECUTED",
       "SOURCE_BASELINED",
+      "SOURCE_IMPLEMENTED_NOT_EXECUTED",
       "EXISTING_TEST",
       "PLANNED",
       "BLOCKED_GAP",
@@ -48,13 +49,13 @@
     },
     {
       "path": "src/runtime/env_config.rs",
-      "sha256": "d4e12314788bd50940e904daf2ccc565b4a24607b47fd46dcb286b22b5b96d9c",
-      "line_count": 1009
+      "sha256": "84222f9f0f62163c47947ae7805a275c4192ffa712c6fff83c3035acae65ff90",
+      "line_count": 1170
     },
     {
       "path": "src/runtime/builder.rs",
-      "sha256": "ced1fd3901169475f1e390324aa11458f97f52288e8d54bd6f9e91cc0ca3570c",
-      "line_count": 8398
+      "sha256": "5f8e9cb956e9d93cc70bedd0a3e1415f32d682f5714be26b18d4ece08548a4aa",
+      "line_count": 8489
     },
     {
       "path": "src/runtime/env_config_metamorphic_tests.rs",
@@ -63,12 +64,12 @@
     },
     {
       "path": "src/cli/atp_config.rs",
-      "sha256": "6251a2f39ef6175d8bc9d195adbe5626950ae14261a91aee7e75ad0ee76dd2c2",
-      "line_count": 775
+      "sha256": "9bb110bceb286d9dfbce19657a09b239c08de71641b5517fb3f699f35bc2ec2f",
+      "line_count": 1016
     },
     {
       "path": "src/cli/atp_command_tree.rs",
-      "sha256": "b79d4f01345274f6260d3ce911e48e2c2d2cd7c0c49ff7562f5ecf1a58d2e603",
+      "sha256": "72f9659b1dd2f7ee1e05b30eb285bde1bafd965911c87675d52148fc86c6bb46",
       "line_count": 1706
     },
     {
@@ -83,8 +84,8 @@
     },
     {
       "path": "src/bin/atpd.rs",
-      "sha256": "8d969a0669bcd865be9589f5a408cab2b861c1a14ab0a3e5a9e8b1f1fb731cf8",
-      "line_count": 2333
+      "sha256": "aa1ff63fbd19e4252171c66fb6c02aeb8358a3c100ae73b2169db2399ee857c9",
+      "line_count": 2664
     },
     {
       "path": "src/bin/dependency_marginal_ledger.rs",
@@ -93,8 +94,8 @@
     },
     {
       "path": "src/config.rs",
-      "sha256": "de72f96a52b9a31bb2934f1d7a19b3836fafc1f1be21afae4afacc66a8fb05c8",
-      "line_count": 1917
+      "sha256": "8315e1e2d4b0fe2223356d364c2656f2f6d4b93ca71b705a7b328ee41cb3f05e",
+      "line_count": 2164
     },
     {
       "path": "src/fs_config_metamorphic_tests.rs",
@@ -118,8 +119,8 @@
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
-      "sha256": "b8f78479ddcd426448b224ef6d627b20787e1d6d25c8a74b786bade7bff8778b",
-      "line_count": 859
+      "sha256": "a28cd08953d5eb112db6ba43d69ebeb262f74f15f4c36f51753df0cfb8c598ea",
+      "line_count": 940
     }
   ],
   "feature_profiles": [
@@ -1183,13 +1184,14 @@
       "owner_bead": "asupersync-5z2scg.4.2",
       "owned_capability": "One versioned typed model, additive canonical JSON, schema/default/redaction rules, atomic model I/O, and TOML coexistence.",
       "inventory_state": "FROZEN",
-      "evidence_state": "PLANNED",
+      "evidence_state": "SOURCE_IMPLEMENTED_NOT_EXECUTED",
       "required_evidence": [
-        "golden JSON",
-        "TOML-to-model-to-JSON equivalence",
-        "schema migration and rollback"
+        "source-pinned canonical JSON goldens",
+        "source-pinned TOML-to-model-to-JSON equivalence",
+        "source-pinned schema, path, number, and redaction rules",
+        "focused executable confirmation still required"
       ],
-      "no_claim": "A new JSON representation does not narrow or replace any accepted TOML surface."
+      "no_claim": "The source implementation does not narrow or replace any accepted TOML surface, prove its unexecuted tests, change physical write behavior, or authorize dependency exit."
     },
     {
       "owner_bead": "asupersync-5z2scg.4.3",
@@ -1231,6 +1233,286 @@
       "no_claim": "Only this terminal child may authorize removal, and only when all rows are SAME-or-BETTER; otherwise KEEP."
     }
   ],
+  "a2_implementation_receipt": {
+    "bead_id": "asupersync-5z2scg.4.2",
+    "capability_id": "CAP-CONFIG-TOML-JSON",
+    "captured_date_utc": "2026-08-06",
+    "implementation_state": "SOURCE_IMPLEMENTED_NOT_EXECUTED",
+    "source_commits": [
+      {
+        "commit": "cbe4a452a",
+        "scope": "shared versioned document plus runtime TOML, JSON, environment, and builder model"
+      },
+      {
+        "commit": "0fb5fadc6",
+        "scope": "ATP command and install canonical JSON model APIs"
+      },
+      {
+        "commit": "c05c8cb6d",
+        "scope": "atpd additive JSON loader and redacted canonical projection"
+      }
+    ],
+    "family_rows": [
+      {
+        "family_id": "CFG-A2-RUNTIME",
+        "surface_ids": [
+          "CFG-TOML-RUNTIME"
+        ],
+        "typed_model": "RuntimeConfigLayer",
+        "toml_entry_points": [
+          "runtime::env_config::parse_toml_str",
+          "RuntimeBuilder::from_toml",
+          "RuntimeBuilder::from_toml_str"
+        ],
+        "json_entry_points": [
+          "runtime::env_config::parse_json_str",
+          "runtime::env_config::runtime_config_to_canonical_json",
+          "RuntimeBuilder::from_json",
+          "RuntimeBuilder::from_json_str"
+        ],
+        "other_layers": [
+          "runtime::env_config::parse_env_layer",
+          "later RuntimeBuilder programmatic setters"
+        ],
+        "family_state": "SOURCE_IMPLEMENTED_NOT_EXECUTED",
+        "precedence_changed": false,
+        "physical_writer_changed": false
+      },
+      {
+        "family_id": "CFG-A2-ATP-COMMAND",
+        "surface_ids": [
+          "CFG-TOML-ATP-COMMAND"
+        ],
+        "typed_model": "cli::AtpConfig",
+        "toml_entry_points": [
+          "AtpConfigManager TOML loaders"
+        ],
+        "json_entry_points": [
+          "cli::parse_atp_command_json",
+          "cli::atp_command_to_canonical_json"
+        ],
+        "other_layers": [
+          "daemon policy",
+          "local config",
+          "CLI flags"
+        ],
+        "family_state": "SOURCE_IMPLEMENTED_NOT_EXECUTED",
+        "precedence_changed": false,
+        "physical_writer_changed": false
+      },
+      {
+        "family_id": "CFG-A2-ATP-INSTALL",
+        "surface_ids": [
+          "CFG-TOML-ATP-INSTALL"
+        ],
+        "typed_model": "cli::AtpInstallConfig",
+        "toml_entry_points": [
+          "AtpInstallConfig::read_from_file",
+          "AtpInstallConfig::write_to_file"
+        ],
+        "json_entry_points": [
+          "AtpInstallConfig::from_json",
+          "AtpInstallConfig::to_canonical_json"
+        ],
+        "other_layers": [
+          "first-run persisted state",
+          "upgrade persisted state"
+        ],
+        "family_state": "SOURCE_IMPLEMENTED_NOT_EXECUTED",
+        "precedence_changed": false,
+        "physical_writer_changed": false
+      },
+      {
+        "family_id": "CFG-A2-ATPD",
+        "surface_ids": [
+          "CFG-TOML-ATPD"
+        ],
+        "typed_model": "bin::atpd::AtpdConfig",
+        "toml_entry_points": [
+          "atpd load_daemon_config for every non-json extension"
+        ],
+        "json_entry_points": [
+          "AtpdConfig::from_json",
+          "AtpdConfig::to_redacted_canonical_json",
+          "atpd load_daemon_config for .json extensions"
+        ],
+        "other_layers": [
+          "selected atpd start CLI overrides"
+        ],
+        "family_state": "SOURCE_IMPLEMENTED_NOT_EXECUTED",
+        "precedence_changed": false,
+        "physical_writer_changed": false
+      },
+      {
+        "family_id": "CFG-A2-DEPENDENCY-LEDGER",
+        "surface_ids": [
+          "CFG-TOML-DEPENDENCY-LEDGER"
+        ],
+        "typed_model": "generic toml::Value Cargo manifest transformation",
+        "toml_entry_points": [
+          "dependency_marginal_ledger Cargo manifest parser and shadow writer"
+        ],
+        "json_entry_points": [],
+        "other_layers": [],
+        "family_state": "EXPLICIT_GENERIC_MANIFEST_TRANSFORM_NOT_APPLICATION_CONFIG",
+        "precedence_changed": false,
+        "physical_writer_changed": false
+      }
+    ],
+    "canonical_contract": {
+      "envelope_fields": [
+        "config",
+        "schema_version"
+      ],
+      "current_schema_version": 1,
+      "missing_schema_version": "MIGRATE_TO_V1",
+      "unsupported_explicit_schema": "REJECT_READ_AND_WRITE",
+      "object_key_order": "RECURSIVE_LEXICOGRAPHIC",
+      "array_order": "PRESERVE_TYPED_ORDER",
+      "whitespace": "COMPACT",
+      "finite_number_encoding": "SERDE_JSON_STABLE_SHORTEST",
+      "nonfinite_number_policy": "REJECT_MODEL_CONVERSION",
+      "path_policy": "EXACT_LEXICAL_UTF8_WITHOUT_NORMALIZE_RESOLVE_OR_ACCESS",
+      "unknown_field_policy": "RETAIN_SERDE_IGNORE_ON_INPUT_COMPATIBILITY",
+      "required_field_policy": "RETAIN_EACH_EXISTING_TYPED_MODEL_REQUIREMENTS"
+    },
+    "model_publication_contract": {
+      "parse_then_validate_before_runtime_mutation": true,
+      "failed_runtime_layer_leaves_fresh_builder_unpublished": true,
+      "canonical_conversion_performs_no_file_io": true,
+      "physical_atomic_write_changed": false,
+      "physical_io_and_diagnostics_owner": "asupersync-5z2scg.4.4",
+      "real_user_journey_owner": "asupersync-5z2scg.4.5"
+    },
+    "secret_rows": [
+      {
+        "family_id": "CFG-A2-RUNTIME",
+        "secret_contract": "NO_SECRET_BEARING_FIELD_IN_THE_14_FIELD_LAYER"
+      },
+      {
+        "family_id": "CFG-A2-ATP-COMMAND",
+        "secret_contract": "NO_SECRET_BEARING_FIELD_IN_THE_11_FIELD_LAYER"
+      },
+      {
+        "family_id": "CFG-A2-ATP-INSTALL",
+        "secret_contract": "IDENTITY_PATH_ONLY_NO_IDENTITY_KEY_MATERIAL"
+      },
+      {
+        "family_id": "CFG-A2-ATPD",
+        "secret_contract": "RQ_AUTH_KEY_REDACTED_BY_SERDE_AND_DEBUG_AND_REDACTION_SENTINEL_REJECTED_ON_JSON_LOAD"
+      }
+    ],
+    "source_pin_reconciliation": {
+      "comparison_revision": "424134f7338f610e36d5047d3d334128ae4275e4",
+      "current_source_commit": "c05c8cb6d",
+      "top_level_source_pin_count": 16,
+      "refreshed_path_count": 7,
+      "a2_owned_path_count": 6,
+      "unrelated_path_count": 1,
+      "rows": [
+        {
+          "path": "src/config.rs",
+          "source_commit": "cbe4a452a",
+          "classification": "A2_SHARED_VERSIONED_DOCUMENT_AND_SOURCE_TESTS",
+          "previous_sha256": "de72f96a52b9a31bb2934f1d7a19b3836fafc1f1be21afae4afacc66a8fb05c8",
+          "previous_line_count": 1917,
+          "current_sha256": "8315e1e2d4b0fe2223356d364c2656f2f6d4b93ca71b705a7b328ee41cb3f05e",
+          "current_line_count": 2164,
+          "accepted_toml_input_changed": false
+        },
+        {
+          "path": "src/runtime/env_config.rs",
+          "source_commit": "cbe4a452a",
+          "classification": "A2_RUNTIME_SINGLE_TYPED_LAYER_AND_JSON",
+          "previous_sha256": "d4e12314788bd50940e904daf2ccc565b4a24607b47fd46dcb286b22b5b96d9c",
+          "previous_line_count": 1009,
+          "current_sha256": "84222f9f0f62163c47947ae7805a275c4192ffa712c6fff83c3035acae65ff90",
+          "current_line_count": 1170,
+          "accepted_toml_input_changed": false
+        },
+        {
+          "path": "src/runtime/builder.rs",
+          "source_commit": "cbe4a452a",
+          "classification": "A2_RUNTIME_JSON_ENTRY_POINTS_AND_SHARED_APPLICATION",
+          "previous_sha256": "ced1fd3901169475f1e390324aa11458f97f52288e8d54bd6f9e91cc0ca3570c",
+          "previous_line_count": 8398,
+          "current_sha256": "5f8e9cb956e9d93cc70bedd0a3e1415f32d682f5714be26b18d4ece08548a4aa",
+          "current_line_count": 8489,
+          "accepted_toml_input_changed": false
+        },
+        {
+          "path": "src/cli/atp_config.rs",
+          "source_commit": "0fb5fadc6",
+          "classification": "A2_ATP_COMMAND_AND_INSTALL_JSON_MODEL_APIS",
+          "previous_sha256": "6251a2f39ef6175d8bc9d195adbe5626950ae14261a91aee7e75ad0ee76dd2c2",
+          "previous_line_count": 775,
+          "current_sha256": "9bb110bceb286d9dfbce19657a09b239c08de71641b5517fb3f699f35bc2ec2f",
+          "current_line_count": 1016,
+          "accepted_toml_input_changed": false
+        },
+        {
+          "path": "src/cli/atp_command_tree.rs",
+          "source_commit": "0fb5fadc6",
+          "classification": "A2_TYPED_EQUALITY_FOR_CROSS_FORMAT_RECEIPTS",
+          "previous_sha256": "b79d4f01345274f6260d3ce911e48e2c2d2cd7c0c49ff7562f5ecf1a58d2e603",
+          "previous_line_count": 1706,
+          "current_sha256": "72f9659b1dd2f7ee1e05b30eb285bde1bafd965911c87675d52148fc86c6bb46",
+          "current_line_count": 1706,
+          "accepted_toml_input_changed": false
+        },
+        {
+          "path": "src/bin/atpd.rs",
+          "source_commit": "c05c8cb6d",
+          "classification": "A2_ATPD_JSON_LOADER_AND_REDACTED_PROJECTION",
+          "previous_sha256": "8d969a0669bcd865be9589f5a408cab2b861c1a14ab0a3e5a9e8b1f1fb731cf8",
+          "previous_line_count": 2333,
+          "current_sha256": "aa1ff63fbd19e4252171c66fb6c02aeb8358a3c100ae73b2169db2399ee857c9",
+          "current_line_count": 2664,
+          "accepted_toml_input_changed": false
+        },
+        {
+          "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
+          "source_commit": "bcbeffb85",
+          "classification": "UNRELATED_DOWNSTREAM_STREAM_AND_ATP_CONTRACT_GROWTH",
+          "previous_sha256": "b8f78479ddcd426448b224ef6d627b20787e1d6d25c8a74b786bade7bff8778b",
+          "previous_line_count": 859,
+          "current_sha256": "a28cd08953d5eb112db6ba43d69ebeb262f74f15f4c36f51753df0cfb8c598ea",
+          "current_line_count": 940,
+          "accepted_toml_input_changed": false
+        }
+      ]
+    },
+    "source_test_cases": [
+      "versioned_config_document_has_recursive_canonical_golden",
+      "versioned_config_document_migrates_missing_v1_and_ignores_unknown_fields",
+      "versioned_config_document_rejects_unsupported_schema_on_read_and_write",
+      "toml_and_json_share_one_typed_layer_with_canonical_golden",
+      "empty_toml_and_empty_json_payload_share_defaults",
+      "json_missing_version_migrates_and_unknown_fields_stay_ignored",
+      "json_rejects_unsupported_schema_and_wrong_field_type",
+      "json_file_uses_the_same_capability_mediated_read_path",
+      "from_json_str_builds_runtime_through_the_shared_typed_layer",
+      "from_json_str_rejects_unsupported_schema_version",
+      "precedence_programmatic_over_env_over_json",
+      "atp_command_toml_and_json_share_one_model_and_exact_golden",
+      "atp_command_empty_unknown_schema_and_nonfinite_rules_are_explicit",
+      "atp_install_toml_and_json_share_one_model_and_exact_golden",
+      "atp_install_outer_schema_is_additive_but_payload_requirements_remain",
+      "atp_install_canonical_paths_require_utf8_without_normalizing",
+      "atpd_toml_and_json_share_one_model_and_exact_golden",
+      "atpd_json_schema_unknown_and_required_field_rules_are_additive",
+      "atpd_secret_is_redacted_from_debug_serde_and_canonical_output",
+      "atpd_loader_selects_json_additively_and_retains_toml",
+      "atpd_canonical_paths_require_utf8_without_normalizing"
+    ],
+    "execution_state": "NOT_RUN_STATIC_ONLY",
+    "open_obligations": [
+      "Run focused shared-document, runtime, ATP, atpd, and inventory contract tests.",
+      "A4 retains physical atomic writes, diagnostics, migration UX, and operator examples.",
+      "A5 retains real binary journeys and the terminal KEEP-or-cutover decision."
+    ],
+    "no_claim_boundary": "This receipt pins source implementation and unexecuted source tests only. It does not claim compilation, test success, physical atomic writes, changed precedence, real user journeys, broad workspace health, performance, or permission to remove the incumbent TOML path or dependency."
+  },
   "a3_keep_receipt": {
     "bead_id": "asupersync-5z2scg.4.3",
     "capability_id": "CAP-CONFIG-TOML-JSON",
@@ -1478,7 +1760,7 @@
     },
     {
       "gap_id": "CFG-GAP-16",
-      "finding": "No JSON configuration loader, shared canonical typed model, conversion path, or cross-format equivalence test exists.",
+      "finding": "Versioned JSON model APIs, canonical conversion paths, and cross-format source tests now exist for runtime, ATP command/install, and atpd, but focused executable confirmation has not run; ATP persisted writers remain TOML and physical atomic I/O is still A4-owned.",
       "owner_bead": "asupersync-5z2scg.4.2",
       "evidence_state": "BLOCKED_GAP"
     },
@@ -1515,5 +1797,5 @@
       "evidence_state": "PLANNED"
     }
   ],
-  "no_claim_boundary": "This packet preserves the A1 source-pinned, zero-UNKNOWN inventory and records the A3 evidence-backed KEEP branch. It does not add or execute a replacement parser or writer, add JSON, change precedence, fix diagnostics or I/O, prove current contract execution, prove real binary journeys, prove arbitrary TOML, prove broad workspace health or performance, or authorize removal of toml, serde, any feature, field, error, path, input, output, or user journey."
+  "no_claim_boundary": "This packet preserves the A1 source-pinned, zero-UNKNOWN inventory, records the A2 source implementation without executable confirmation, and retains the A3 evidence-backed KEEP branch. It does not add or execute a replacement TOML parser or writer, change precedence or incumbent TOML acceptance, repair physical write atomicity or diagnostics, prove current contract or source-test execution, prove real binary journeys, prove arbitrary TOML or JSON, prove broad workspace health or performance, or authorize removal of toml, serde, any feature, field, error, path, input, output, or user journey."
 }

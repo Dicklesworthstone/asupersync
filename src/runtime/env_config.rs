@@ -6,7 +6,7 @@
 //!
 //! 1. **Programmatic** — values set via builder methods (`worker_threads(4)`)
 //! 2. **Environment variables** — values from `ASUPERSYNC_*` env vars
-//! 3. **Config file** — values loaded from a TOML file (requires `config-file` feature)
+//! 3. **Config file** — values loaded from TOML or versioned JSON (requires `config-file`)
 //! 4. **Defaults** — built-in defaults from [`RuntimeConfig::default()`]
 //!
 //! # Supported Environment Variables
@@ -88,7 +88,7 @@ pub trait EnvReader {
     fn read_env(&self, name: &str) -> Option<String>;
 
     /// Read a file, returning an error if it fails.
-    /// This is needed for TOML config file reading.
+    /// This is needed for TOML and JSON config file reading.
     fn read_file(
         &self,
         path: &std::path::Path,
@@ -204,60 +204,76 @@ pub const ENV_ENABLE_ADAPTIVE_CANCEL_STREAK: &str = "ASUPERSYNC_ENABLE_ADAPTIVE_
 /// Environment variable name for adaptive cancel-streak epoch length.
 pub const ENV_ADAPTIVE_CANCEL_EPOCH_STEPS: &str = "ASUPERSYNC_ADAPTIVE_CANCEL_EPOCH_STEPS";
 
+/// Parse environment variable overrides into the shared typed config layer.
+///
+/// Only variables that are set become `Some`. Parsing completes before the
+/// caller mutates a [`RuntimeConfig`], so an invalid late variable cannot
+/// leave a partially applied layer.
+pub fn parse_env_layer(env_reader: &dyn EnvReader) -> Result<RuntimeConfigLayer, BuildError> {
+    let mut layer = RuntimeConfigLayer::default();
+    if let Some(val) = env_reader.read_env(ENV_WORKER_THREADS) {
+        layer.scheduler.worker_threads = Some(parse_usize(ENV_WORKER_THREADS, &val)?);
+    }
+    if let Some(val) = env_reader.read_env(ENV_TASK_QUEUE_DEPTH) {
+        layer.scheduler.task_queue_depth = Some(parse_usize(ENV_TASK_QUEUE_DEPTH, &val)?);
+    }
+    if let Some(val) = env_reader.read_env(ENV_THREAD_STACK_SIZE) {
+        layer.scheduler.thread_stack_size = Some(parse_usize(ENV_THREAD_STACK_SIZE, &val)?);
+    }
+    if let Some(val) = env_reader.read_env(ENV_THREAD_NAME_PREFIX) {
+        validate_thread_name_prefix(ENV_THREAD_NAME_PREFIX, &val)?;
+        layer.scheduler.thread_name_prefix = Some(val);
+    }
+    if let Some(val) = env_reader.read_env(ENV_STEAL_BATCH_SIZE) {
+        layer.scheduler.steal_batch_size = Some(parse_usize(ENV_STEAL_BATCH_SIZE, &val)?);
+    }
+    if let Some(val) = env_reader.read_env(ENV_BLOCKING_MIN_THREADS) {
+        layer.blocking.min_threads = Some(parse_usize(ENV_BLOCKING_MIN_THREADS, &val)?);
+    }
+    if let Some(val) = env_reader.read_env(ENV_BLOCKING_MAX_THREADS) {
+        layer.blocking.max_threads = Some(parse_usize(ENV_BLOCKING_MAX_THREADS, &val)?);
+    }
+    if let Some(val) = env_reader.read_env(ENV_ENABLE_PARKING) {
+        layer.scheduler.enable_parking = Some(parse_bool(ENV_ENABLE_PARKING, &val)?);
+    }
+    if let Some(val) = env_reader.read_env(ENV_POLL_BUDGET) {
+        layer.scheduler.poll_budget = Some(parse_u32(ENV_POLL_BUDGET, &val)?);
+    }
+    if let Some(val) = env_reader.read_env(ENV_CANCEL_LANE_MAX_STREAK) {
+        layer.scheduler.cancel_lane_max_streak =
+            Some(parse_usize(ENV_CANCEL_LANE_MAX_STREAK, &val)?);
+    }
+    if let Some(val) = env_reader.read_env(ENV_ENABLE_GOVERNOR) {
+        layer.scheduler.enable_governor = Some(parse_bool(ENV_ENABLE_GOVERNOR, &val)?);
+    }
+    if let Some(val) = env_reader.read_env(ENV_GOVERNOR_INTERVAL) {
+        layer.scheduler.governor_interval = Some(parse_u32(ENV_GOVERNOR_INTERVAL, &val)?);
+    }
+    if let Some(val) = env_reader.read_env(ENV_ENABLE_ADAPTIVE_CANCEL_STREAK) {
+        layer.scheduler.enable_adaptive_cancel_streak =
+            Some(parse_bool(ENV_ENABLE_ADAPTIVE_CANCEL_STREAK, &val)?);
+    }
+    if let Some(val) = env_reader.read_env(ENV_ADAPTIVE_CANCEL_EPOCH_STEPS) {
+        layer.scheduler.adaptive_cancel_streak_epoch_steps =
+            Some(parse_u32(ENV_ADAPTIVE_CANCEL_EPOCH_STEPS, &val)?);
+    }
+
+    Ok(layer)
+}
+
 /// Apply environment variable overrides to a [`RuntimeConfig`].
 ///
-/// Only variables that are set in the environment are applied.
-/// Returns an error if a variable is set but contains an unparseable value.
+/// Environment, TOML, and JSON share [`RuntimeConfigLayer`] and
+/// [`apply_runtime_config_layer`]. Only set environment variables override the
+/// current configuration. Invalid input fails before any field is applied.
 pub fn apply_env_overrides(
     config: &mut RuntimeConfig,
     env_reader: &dyn EnvReader,
 ) -> Result<(), BuildError> {
-    if let Some(val) = env_reader.read_env(ENV_WORKER_THREADS) {
-        config.worker_threads = parse_usize(ENV_WORKER_THREADS, &val)?;
-    }
-    if let Some(val) = env_reader.read_env(ENV_TASK_QUEUE_DEPTH) {
-        config.global_queue_limit = parse_usize(ENV_TASK_QUEUE_DEPTH, &val)?;
-    }
-    if let Some(val) = env_reader.read_env(ENV_THREAD_STACK_SIZE) {
-        config.thread_stack_size = parse_usize(ENV_THREAD_STACK_SIZE, &val)?;
-    }
-    if let Some(val) = env_reader.read_env(ENV_THREAD_NAME_PREFIX) {
-        validate_thread_name_prefix(ENV_THREAD_NAME_PREFIX, &val)?;
-        config.thread_name_prefix = val;
-    }
-    if let Some(val) = env_reader.read_env(ENV_STEAL_BATCH_SIZE) {
-        config.steal_batch_size = parse_usize(ENV_STEAL_BATCH_SIZE, &val)?;
-    }
-    if let Some(val) = env_reader.read_env(ENV_BLOCKING_MIN_THREADS) {
-        config.blocking.min_threads = parse_usize(ENV_BLOCKING_MIN_THREADS, &val)?;
-    }
-    if let Some(val) = env_reader.read_env(ENV_BLOCKING_MAX_THREADS) {
-        config.blocking.max_threads = parse_usize(ENV_BLOCKING_MAX_THREADS, &val)?;
-    }
-    if let Some(val) = env_reader.read_env(ENV_ENABLE_PARKING) {
-        config.enable_parking = parse_bool(ENV_ENABLE_PARKING, &val)?;
-    }
-    if let Some(val) = env_reader.read_env(ENV_POLL_BUDGET) {
-        config.poll_budget = parse_u32(ENV_POLL_BUDGET, &val)?;
-    }
-    if let Some(val) = env_reader.read_env(ENV_CANCEL_LANE_MAX_STREAK) {
-        config.cancel_lane_max_streak = parse_usize(ENV_CANCEL_LANE_MAX_STREAK, &val)?;
-    }
-    if let Some(val) = env_reader.read_env(ENV_ENABLE_GOVERNOR) {
-        config.enable_governor = parse_bool(ENV_ENABLE_GOVERNOR, &val)?;
-    }
-    if let Some(val) = env_reader.read_env(ENV_GOVERNOR_INTERVAL) {
-        config.governor_interval = parse_u32(ENV_GOVERNOR_INTERVAL, &val)?;
-    }
-    if let Some(val) = env_reader.read_env(ENV_ENABLE_ADAPTIVE_CANCEL_STREAK) {
-        config.enable_adaptive_cancel_streak = parse_bool(ENV_ENABLE_ADAPTIVE_CANCEL_STREAK, &val)?;
-    }
-    if let Some(val) = env_reader.read_env(ENV_ADAPTIVE_CANCEL_EPOCH_STEPS) {
-        config.adaptive_cancel_streak_epoch_steps =
-            parse_u32(ENV_ADAPTIVE_CANCEL_EPOCH_STEPS, &val)?;
-    }
+    let layer = parse_env_layer(env_reader)?;
+    apply_runtime_config_layer(config, &layer)?;
 
-    // Blocking pool min/max are applied independently above. Normalize after
+    // Blocking pool min/max remain independently optional. Normalize after
     // overrides so setting either value alone cannot leave min_threads greater
     // than max_threads.
     config.blocking.normalize();
@@ -302,13 +318,15 @@ fn validate_thread_name_prefix(field_name: &'static str, val: &str) -> Result<()
 }
 
 // =========================================================================
-// TOML config file support (feature-gated)
+// Shared typed config layer and feature-gated file parsers
 // =========================================================================
 
-/// TOML-deserializable runtime configuration.
+/// Format-neutral runtime configuration layer.
 ///
 /// This struct mirrors the fields of [`RuntimeConfig`] in a flat,
-/// serialization-friendly layout. Fields are grouped into TOML tables:
+/// serialization-friendly layout. TOML and versioned JSON deserialize into
+/// this same type and feed the same application function. Fields are grouped
+/// into TOML tables and equivalent JSON objects:
 ///
 /// ```toml
 /// [scheduler]
@@ -329,21 +347,19 @@ fn validate_thread_name_prefix(field_name: &'static str, val: &str) -> Result<()
 /// min_threads = 1
 /// max_threads = 512
 /// ```
-#[cfg(feature = "config-file")]
-#[derive(serde::Deserialize, Default, Debug)]
-pub struct RuntimeTomlConfig {
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeConfigLayer {
     /// Scheduler settings.
     #[serde(default)]
-    pub scheduler: SchedulerToml,
+    pub scheduler: SchedulerConfigLayer,
     /// Blocking pool settings.
     #[serde(default)]
-    pub blocking: BlockingToml,
+    pub blocking: BlockingConfigLayer,
 }
 
-/// Scheduler section of the TOML config.
-#[cfg(feature = "config-file")]
-#[derive(serde::Deserialize, Default, Debug)]
-pub struct SchedulerToml {
+/// Scheduler section of the typed runtime config layer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SchedulerConfigLayer {
     /// Number of worker threads.
     pub worker_threads: Option<usize>,
     /// Global task queue depth (0 = unbounded).
@@ -370,83 +386,86 @@ pub struct SchedulerToml {
     pub thread_name_prefix: Option<String>,
 }
 
-/// Blocking pool section of the TOML config.
-#[cfg(feature = "config-file")]
-#[derive(serde::Deserialize, Default, Debug)]
-pub struct BlockingToml {
+/// Blocking pool section of the typed runtime config layer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BlockingConfigLayer {
     /// Minimum number of blocking threads.
     pub min_threads: Option<usize>,
     /// Maximum number of blocking threads.
     pub max_threads: Option<usize>,
 }
 
-/// Apply a parsed TOML config to a [`RuntimeConfig`].
+/// Apply a parsed file-format config layer to a [`RuntimeConfig`].
 ///
-/// Only fields that are `Some` in the TOML struct override the config.
-#[cfg(feature = "config-file")]
-pub fn apply_toml_config(
+/// Only fields that are `Some` in the typed layer override the config. TOML
+/// and JSON callers share this function so format choice cannot change
+/// defaults, validation, or precedence.
+pub fn apply_runtime_config_layer(
     config: &mut RuntimeConfig,
-    toml: &RuntimeTomlConfig,
+    layer: &RuntimeConfigLayer,
 ) -> Result<(), BuildError> {
-    if let Some(v) = toml.scheduler.worker_threads {
+    if let Some(ref prefix) = layer.scheduler.thread_name_prefix {
+        validate_thread_name_prefix("scheduler.thread_name_prefix", prefix)?;
+    }
+
+    if let Some(v) = layer.scheduler.worker_threads {
         config.worker_threads = v;
     }
-    if let Some(v) = toml.scheduler.task_queue_depth {
+    if let Some(v) = layer.scheduler.task_queue_depth {
         config.global_queue_limit = v;
     }
-    if let Some(v) = toml.scheduler.steal_batch_size {
+    if let Some(v) = layer.scheduler.steal_batch_size {
         config.steal_batch_size = v;
     }
-    if let Some(v) = toml.scheduler.poll_budget {
+    if let Some(v) = layer.scheduler.poll_budget {
         config.poll_budget = v;
     }
-    if let Some(v) = toml.scheduler.cancel_lane_max_streak {
+    if let Some(v) = layer.scheduler.cancel_lane_max_streak {
         config.cancel_lane_max_streak = v;
     }
-    if let Some(v) = toml.scheduler.enable_governor {
+    if let Some(v) = layer.scheduler.enable_governor {
         config.enable_governor = v;
     }
-    if let Some(v) = toml.scheduler.governor_interval {
+    if let Some(v) = layer.scheduler.governor_interval {
         config.governor_interval = v;
     }
-    if let Some(v) = toml.scheduler.enable_adaptive_cancel_streak {
+    if let Some(v) = layer.scheduler.enable_adaptive_cancel_streak {
         config.enable_adaptive_cancel_streak = v;
     }
-    if let Some(v) = toml.scheduler.adaptive_cancel_streak_epoch_steps {
+    if let Some(v) = layer.scheduler.adaptive_cancel_streak_epoch_steps {
         config.adaptive_cancel_streak_epoch_steps = v;
     }
-    if let Some(v) = toml.scheduler.enable_parking {
+    if let Some(v) = layer.scheduler.enable_parking {
         config.enable_parking = v;
     }
-    if let Some(v) = toml.scheduler.thread_stack_size {
+    if let Some(v) = layer.scheduler.thread_stack_size {
         config.thread_stack_size = v;
     }
-    if let Some(ref v) = toml.scheduler.thread_name_prefix {
-        validate_thread_name_prefix("scheduler.thread_name_prefix", v)?;
-        config.thread_name_prefix.clone_from(v);
+    if let Some(ref prefix) = layer.scheduler.thread_name_prefix {
+        config.thread_name_prefix.clone_from(prefix);
     }
-    if let Some(v) = toml.blocking.min_threads {
+    if let Some(v) = layer.blocking.min_threads {
         config.blocking.min_threads = v;
     }
-    if let Some(v) = toml.blocking.max_threads {
+    if let Some(v) = layer.blocking.max_threads {
         config.blocking.max_threads = v;
     }
     Ok(())
 }
 
-/// Parse a TOML string into a [`RuntimeTomlConfig`].
+/// Parse a TOML string into the shared [`RuntimeConfigLayer`].
 #[cfg(feature = "config-file")]
-pub fn parse_toml_str(toml_str: &str) -> Result<RuntimeTomlConfig, BuildError> {
+pub fn parse_toml_str(toml_str: &str) -> Result<RuntimeConfigLayer, BuildError> {
     toml::from_str(toml_str)
         .map_err(|e| BuildError::custom(format!("failed to parse TOML config: {e}")))
 }
 
-/// Read and parse a TOML file into a [`RuntimeTomlConfig`].
+/// Read and parse a TOML file into the shared [`RuntimeConfigLayer`].
 #[cfg(feature = "config-file")]
 pub fn parse_toml_file(
     path: &std::path::Path,
     env_reader: &dyn EnvReader,
-) -> Result<RuntimeTomlConfig, BuildError> {
+) -> Result<RuntimeConfigLayer, BuildError> {
     let content = env_reader.read_file(path).map_err(|e| {
         BuildError::custom(format!(
             "failed to read config file {}: {e}",
@@ -454,6 +473,48 @@ pub fn parse_toml_file(
         ))
     })?;
     parse_toml_str(&content)
+}
+
+/// Parse a versioned JSON string into the shared [`RuntimeConfigLayer`].
+///
+/// The JSON envelope is `{ "schema_version": 1, "config": { ... } }`.
+/// Missing `schema_version` migrates to version 1; unsupported explicit
+/// versions fail closed. Unknown fields remain accepted and ignored, matching
+/// the incumbent TOML model.
+#[cfg(feature = "config-file")]
+pub fn parse_json_str(json: &str) -> Result<RuntimeConfigLayer, BuildError> {
+    let document = crate::config::VersionedConfigDocument::<RuntimeConfigLayer>::from_json(json)
+        .map_err(|e| BuildError::custom(format!("failed to parse JSON config: {e}")))?;
+    Ok(document.into_config())
+}
+
+/// Read and parse a versioned JSON file into the shared [`RuntimeConfigLayer`].
+#[cfg(feature = "config-file")]
+pub fn parse_json_file(
+    path: &std::path::Path,
+    env_reader: &dyn EnvReader,
+) -> Result<RuntimeConfigLayer, BuildError> {
+    let content = env_reader.read_file(path).map_err(|e| {
+        BuildError::custom(format!(
+            "failed to read config file {} as JSON: {e}",
+            path.display()
+        ))
+    })?;
+    parse_json_str(&content)
+}
+
+/// Render a runtime config layer as compact, versioned canonical JSON.
+///
+/// The runtime layer contains no credential-bearing fields. Every optional
+/// typed field is emitted explicitly, object keys are recursively sorted, and
+/// the current schema version is always present.
+#[cfg(feature = "config-file")]
+pub fn runtime_config_to_canonical_json(
+    config: &RuntimeConfigLayer,
+) -> Result<String, BuildError> {
+    crate::config::VersionedConfigDocument::new(config)
+        .to_canonical_json()
+        .map_err(|e| BuildError::custom(format!("failed to encode JSON config: {e}")))
 }
 
 // =========================================================================
@@ -655,6 +716,22 @@ mod tests {
             .expect_err("NUL prefix must be rejected");
 
         assert!(err.to_string().contains("NUL"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn env_layer_parses_before_applying_any_field() {
+        let mut vars = HashMap::new();
+        vars.insert(ENV_WORKER_THREADS.to_owned(), "8".to_owned());
+        vars.insert(ENV_ENABLE_ADAPTIVE_CANCEL_STREAK.to_owned(), "invalid".to_owned());
+        let reader = TestEnvReader::new(vars);
+        let mut config = RuntimeConfig::default();
+        let original_worker_threads = config.worker_threads;
+
+        let error = super::apply_env_overrides(&mut config, &reader)
+            .expect_err("invalid late variable must reject the whole layer");
+
+        assert!(error.to_string().contains(ENV_ENABLE_ADAPTIVE_CANCEL_STREAK));
+        assert_eq!(config.worker_threads, original_worker_threads);
     }
 
     #[test]
@@ -941,7 +1018,7 @@ max_threads = 128
 ";
         let parsed = parse_toml_str(toml_str).unwrap();
         let mut config = RuntimeConfig::default();
-        apply_toml_config(&mut config, &parsed).unwrap();
+        apply_runtime_config_layer(&mut config, &parsed).unwrap();
 
         assert_eq!(config.worker_threads, 16);
         assert_eq!(config.poll_budget, 512);
@@ -984,7 +1061,7 @@ poll_budget = 64
 
         let parsed = parse_toml_file(&path, &SystemEnvReader::new()).unwrap();
         let mut config = RuntimeConfig::default();
-        apply_toml_config(&mut config, &parsed).unwrap();
+        apply_runtime_config_layer(&mut config, &parsed).unwrap();
         assert_eq!(config.worker_threads, 2);
         assert_eq!(config.poll_budget, 64);
     }
@@ -994,13 +1071,97 @@ poll_budget = 64
         let parsed = parse_toml_str(
             r#"
 [scheduler]
+worker_threads = 16
 thread_name_prefix = "bad\u0000prefix"
 "#,
         )
         .unwrap();
         let mut config = RuntimeConfig::default();
-        let err = apply_toml_config(&mut config, &parsed).expect_err("NUL prefix must be rejected");
+        let original_worker_threads = config.worker_threads;
+        let err = apply_runtime_config_layer(&mut config, &parsed)
+            .expect_err("NUL prefix must be rejected");
         assert!(err.to_string().contains("NUL"), "unexpected error: {err}");
+        assert_eq!(config.worker_threads, original_worker_threads);
+    }
+
+    #[test]
+    fn toml_and_json_share_one_typed_layer_with_canonical_golden() {
+        let toml = r#"
+[scheduler]
+worker_threads = 4
+thread_name_prefix = "node"
+
+[blocking]
+max_threads = 8
+"#;
+        let from_toml = parse_toml_str(toml).expect("TOML config layer");
+        let canonical = runtime_config_to_canonical_json(&from_toml)
+            .expect("canonical runtime JSON");
+
+        assert_eq!(
+            canonical,
+            r#"{"config":{"blocking":{"max_threads":8,"min_threads":null},"scheduler":{"adaptive_cancel_streak_epoch_steps":null,"cancel_lane_max_streak":null,"enable_adaptive_cancel_streak":null,"enable_governor":null,"enable_parking":null,"governor_interval":null,"poll_budget":null,"steal_batch_size":null,"task_queue_depth":null,"thread_name_prefix":"node","thread_stack_size":null,"worker_threads":4}},"schema_version":1}"#
+        );
+
+        let from_json = parse_json_str(&canonical).expect("canonical JSON config layer");
+        assert_eq!(from_json, from_toml);
+    }
+
+    #[test]
+    fn empty_toml_and_empty_json_payload_share_defaults() {
+        let from_toml = parse_toml_str("").expect("empty TOML layer");
+        let from_json = parse_json_str(r#"{"config":{}}"#).expect("empty JSON payload");
+        assert_eq!(from_json, from_toml);
+    }
+
+    #[test]
+    fn json_missing_version_migrates_and_unknown_fields_stay_ignored() {
+        let json = r#"{
+            "future_envelope_field": true,
+            "config": {
+                "scheduler": {
+                    "worker_threads": 3,
+                    "future_scheduler_field": "ignored"
+                },
+                "future_config_field": 42
+            }
+        }"#;
+        let parsed = parse_json_str(json).expect("additive JSON input");
+        assert_eq!(parsed.scheduler.worker_threads, Some(3));
+        assert_eq!(parsed.blocking.max_threads, None);
+
+        let canonical = runtime_config_to_canonical_json(&parsed)
+            .expect("migrated canonical JSON");
+        assert!(canonical.ends_with(r#","schema_version":1}"#));
+        assert!(!canonical.contains("future_"));
+    }
+
+    #[test]
+    fn json_rejects_unsupported_schema_and_wrong_field_type() {
+        let unsupported = parse_json_str(
+            r#"{"schema_version":2,"config":{"scheduler":{"worker_threads":4}}}"#,
+        )
+        .expect_err("unsupported schema must fail closed");
+        assert!(unsupported.to_string().contains("schema version 2"));
+
+        let wrong_type = parse_json_str(
+            r#"{"schema_version":1,"config":{"scheduler":{"worker_threads":"four"}}}"#,
+        )
+        .expect_err("wrong field type must be rejected");
+        assert!(wrong_type.to_string().contains("JSON"));
+    }
+
+    #[test]
+    fn json_file_uses_the_same_capability_mediated_read_path() {
+        let reader = TestEnvReader::new(HashMap::new()).with_file(
+            "runtime.json",
+            r#"{"schema_version":1,"config":{"blocking":{"min_threads":2}}}"#
+                .to_owned(),
+        );
+
+        let parsed = parse_json_file(std::path::Path::new("runtime.json"), &reader)
+            .expect("JSON file config layer");
+        assert_eq!(parsed.blocking.min_threads, Some(2));
     }
 }
 

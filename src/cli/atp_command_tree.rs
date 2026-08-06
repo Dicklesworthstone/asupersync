@@ -144,7 +144,7 @@ impl AtpProfile {
 }
 
 /// Configuration precedence: CLI flags > local config > daemon policy > defaults.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AtpConfig {
     /// Active transfer profile.
     pub profile: Option<AtpProfile>,
