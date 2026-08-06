@@ -1,6 +1,6 @@
 //! Fail-closed inventory contract for the incumbent futures-lite capability.
 //!
-//! Bead: asupersync-d24mms.6.1
+//! Beads: asupersync-d24mms.6.1, asupersync-d24mms.6.3
 //! Capability: CAP-FUTURES-STREAMS
 //! Fixture: the inventory artifact declared by `ARTIFACT_PATH` below.
 //!
@@ -35,6 +35,7 @@ const ADR_PATH: &str = "docs/adr/dep_plan_adr_008_futures_streams.md";
 const CAPABILITY_REGISTRY_PATH: &str = "artifacts/dependency_capability_registry_v1.json";
 const MARGINAL_LEDGER_PATH: &str = "artifacts/dependency_marginal_ledger_v1.json";
 const BEAD_ID: &str = "asupersync-d24mms.6.1";
+const A3_BEAD_ID: &str = "asupersync-d24mms.6.3";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const CAPABILITY_ID: &str = "CAP-FUTURES-STREAMS";
 const BASELINE_REVISION: &str = "ed1c0c3ae4ba68947cd2c0212f1aab2242f60724";
@@ -109,6 +110,244 @@ fn string_set(value: &Value, key: &str) -> BTreeSet<String> {
         .collect()
 }
 
+fn validate_a3_receipt(inventory: &Value) -> Result<(), String> {
+    let receipt = inventory
+        .get("a3_block_on_receipt")
+        .expect("A3 blocking-kernel receipt");
+    if text(receipt, "owner_bead") != A3_BEAD_ID
+        || text(receipt, "base_revision")
+            != "02b380ee063e7e643105b1a7997360a7021bf32e"
+        || text(receipt, "implementation_revision")
+            != "050fd0f08e4cf127e348bbf545c1e46cc392f6b5"
+        || text(receipt, "source_status") != "STATIC_SOURCE_PROGRESS"
+        || text(receipt, "execution_status") != "NOT_RUN_STATIC_ONLY"
+        || text(receipt, "module") != "crate::util::future"
+        || text(receipt, "visibility") != "crate-private alongside-incumbent"
+        || receipt.get("cutover_authorized") != Some(&Value::Bool(false))
+        || receipt.get("closure_allowed") != Some(&Value::Bool(false))
+    {
+        return Err("A3 receipt must remain static-only and fail closed".to_owned());
+    }
+
+    let expected_source_pins = BTreeMap::from([
+        (
+            "src/future.rs",
+            (
+                "fd0a1defa1efef7d42a918fc8a390ce3e851e4dfe00d3b412579455e25d88e41",
+                858_u64,
+            ),
+        ),
+        (
+            "src/util/mod.rs",
+            (
+                "2f833ed4e8c6b11701490669d96bcea63239af4e6868ff379daf3606b569ef4a",
+                35_u64,
+            ),
+        ),
+    ]);
+    let source_pins = array(receipt, "current_source_pins");
+    if source_pins.len() != expected_source_pins.len() {
+        return Err("A3 receipt must pin the exact two source paths".to_owned());
+    }
+    for pin in source_pins {
+        let path = text(pin, "path");
+        let (expected_sha, expected_lines) = expected_source_pins
+            .get(path)
+            .unwrap_or_else(|| panic!("unexpected A3 source pin: {path}"));
+        if text(pin, "sha256") != *expected_sha
+            || pin.get("line_count").and_then(Value::as_u64) != Some(*expected_lines)
+        {
+            return Err(format!("A3 source pin drift: {path}"));
+        }
+        let bytes = read_repo_bytes(path);
+        if hex_bytes(&Sha256::digest(&bytes)) != *expected_sha
+            || read_repo_file(path).lines().count() as u64 != *expected_lines
+        {
+            return Err(format!("A3 current source no longer matches receipt: {path}"));
+        }
+    }
+
+    let projection = object(receipt, "kernel_projection");
+    let source = read_repo_file(text(projection, "path"));
+    let start_marker = text(projection, "start_marker");
+    let end_marker = text(projection, "end_marker");
+    let start = source
+        .find(start_marker)
+        .ok_or_else(|| "A3 kernel start marker is missing".to_owned())?;
+    let relative_end = source[start..]
+        .find(end_marker)
+        .ok_or_else(|| "A3 kernel end marker is missing".to_owned())?;
+    let kernel = &source.as_bytes()[start..start + relative_end];
+    if hex_bytes(&Sha256::digest(kernel)) != text(projection, "sha256") {
+        return Err("A3 kernel projection hash drift".to_owned());
+    }
+
+    let expected_tests: BTreeSet<String> = [
+        "ready_future_completes_without_parking",
+        "borrowed_non_send_future_and_recursive_call_are_admitted",
+        "wakes_during_poll_are_coalesced_without_parking",
+        "spurious_park_return_does_not_trigger_an_unnotified_poll",
+        "repeated_polls_receive_the_same_waker_identity",
+        "wake_after_pending_makes_progress",
+        "explicit_cancellation_wake_makes_progress",
+        "future_panic_propagates_without_poisoning_kernel_state",
+        "installed_runtime_context_is_refused_before_poll",
+        "blocking_pool_thread_is_admitted",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if string_set(receipt, "authored_inline_tests") != expected_tests {
+        return Err("A3 receipt must list the exact ten authored source cases".to_owned());
+    }
+    let future_source = read_repo_file("src/future.rs");
+    for test_name in expected_tests {
+        if !future_source.contains(&format!("fn {test_name}()")) {
+            return Err(format!("A3 authored source case is missing: {test_name}"));
+        }
+    }
+
+    let contexts = array(receipt, "context_policy");
+    if contexts.len() != 7
+        || !contexts.iter().any(|row| {
+            text(row, "context") == "Asupersync runtime driver versus scheduler worker"
+                && text(row, "decision") == "UNRESOLVED_CONFLATED_BY_CURRENT_HANDLE_CHECK"
+                && text(row, "evidence") == "BLOCKED_GAP"
+        })
+        || !contexts.iter().any(|row| {
+            text(row, "context") == "foreign executor thread"
+                && text(row, "decision") == "UNRESOLVED_NOT_IDENTIFIABLE"
+                && text(row, "evidence") == "BLOCKED_GAP"
+        })
+    {
+        return Err("A3 context policy must preserve both unresolved boundaries".to_owned());
+    }
+    if array(receipt, "semantic_guarantees").len() != 9
+        || array(receipt, "incumbent_production_sites").len() != 3
+        || array(receipt, "missing_terminal_evidence").len() != 7
+    {
+        return Err("A3 semantics, incumbent sites, or evidence gaps are incomplete".to_owned());
+    }
+
+    Ok(())
+}
+
+fn validate_current_snapshot(inventory: &Value) -> Result<(), String> {
+    let snapshot = inventory
+        .get("post_baseline_current_snapshot")
+        .expect("post-baseline current snapshot");
+    if text(snapshot, "captured_date_utc") != "2026-08-06"
+        || snapshot.get("historical_baseline_preserved") != Some(&Value::Bool(true))
+        || text(snapshot, "source_status") != "STATIC_SOURCE_PROGRESS"
+        || text(snapshot, "evidence_state") != "SOURCE_BASELINED"
+        || text(snapshot, "execution_status") != "NOT_RUN_STATIC_ONLY"
+        || !text(snapshot, "no_claim").contains("not executable proof")
+    {
+        return Err("current snapshot must remain static-only and preserve A1".to_owned());
+    }
+
+    let census = inventory
+        .get("occurrence_census")
+        .expect("historical occurrence census");
+    if census.get("baseline_file_count").and_then(Value::as_u64) != Some(310)
+        || census.get("baseline_token_count").and_then(Value::as_u64) != Some(1362)
+        || text(census, "baseline_digest_sha256")
+            != "899a9f62fd77ce8843c00a37902efa5ccc447ead46018a8fe14cdf2d0a241d9c"
+    {
+        return Err("historical A1 occurrence baseline must not be rewritten".to_owned());
+    }
+
+    let current = snapshot
+        .get("current_occurrence")
+        .expect("current occurrence snapshot");
+    if current.get("file_count").and_then(Value::as_u64) != Some(315)
+        || current.get("token_count").and_then(Value::as_u64) != Some(1384)
+        || text(current, "digest_sha256")
+            != "879eb440a38b3bdcebe64b38165865f3869243592101c45169c83beecc6e2f5c"
+        || array(current, "scope_rows").len() != 6
+        || array(snapshot, "current_migration_reservation_groups").len() != 4
+    {
+        return Err("current occurrence snapshot is incomplete".to_owned());
+    }
+
+    let reconciliations = array(snapshot, "source_pin_reconciliations");
+    let expected_paths: BTreeSet<String> = [
+        "Cargo.toml",
+        "Cargo.lock",
+        "src/sync/notify.rs",
+        "artifacts/dependency_capability_registry_v1.json",
+        "artifacts/dependency_marginal_ledger_v1.json",
+        "artifacts/api_surface_map_v1.json",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if row_ids(reconciliations, "path") != expected_paths {
+        return Err("current snapshot must reconcile the exact six drifted pins".to_owned());
+    }
+    let expected_reconciliations = [
+        (
+            "Cargo.toml",
+            "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
+            "CAPABILITY_PROJECTION_UNCHANGED",
+            Some("81edacba422d047cd609290f9b0a95a8cda255ef326afe8d34afd7dfa7b80def"),
+        ),
+        (
+            "Cargo.lock",
+            "9fa12e8af1e6b15a3070d88d62b2b81b8ba49c0e9d8592c1d1682f1cd72a4461",
+            "CAPABILITY_PROJECTION_UNCHANGED",
+            Some("9260990a318c00b457e53860e1d10774e380ff818c7d7579f2d922473ade1b4b"),
+        ),
+        (
+            "src/sync/notify.rs",
+            "11d85d8cc9bcd7ec6c21245dba5b58f381b3aa4c54dc3d8d17d01f68b213a3ef",
+            "CAPABILITY_PROJECTION_UNCHANGED",
+            Some("ff73e9793bd9748d2e82dba7b4d16e27830b5d35491c2759021dcbb81b33b2c7"),
+        ),
+        (
+            "artifacts/dependency_capability_registry_v1.json",
+            "4d91239e2f2e83069414ca36eafc4aaba283cd3f89576fbb5e75f3374bd41b11",
+            "CAPABILITY_PROJECTION_UNCHANGED",
+            Some("e4440233403e24db85a0b8719e0670b5af45ff6c0728f956a9f02c8a9dba5c12"),
+        ),
+        (
+            "artifacts/dependency_marginal_ledger_v1.json",
+            "832e8d68eefe9400a246ea619a250ea91bcf16a57d5fe728a6ce45e25bbdb4a6",
+            "CAPABILITY_MEASUREMENTS_UNCHANGED_METADATA_REFRESHED",
+            None,
+        ),
+        (
+            "artifacts/api_surface_map_v1.json",
+            "a00b61fe82326d766cde69e2392bc493a67d3c62f9d5cd83e3e02f8b5bf5535a",
+            "CAPABILITY_PROJECTION_UNCHANGED",
+            None,
+        ),
+    ];
+    let source_pins = array(inventory, "source_pins");
+    for (path, baseline_sha, classification, projection_sha) in expected_reconciliations {
+        let reconciliation = find_row(reconciliations, "path", path);
+        let pin = find_row(source_pins, "path", path);
+        if text(reconciliation, "baseline_sha256") != baseline_sha
+            || text(reconciliation, "current_sha256") != text(pin, "sha256")
+            || reconciliation
+                .get("current_line_count")
+                .and_then(Value::as_u64)
+                != pin.get("line_count").and_then(Value::as_u64)
+            || text(reconciliation, "classification") != classification
+            || projection_sha.is_some_and(|expected| {
+                reconciliation
+                    .get("projection_sha256")
+                    .and_then(Value::as_str)
+                    != Some(expected)
+            })
+        {
+            return Err(format!("source-pin reconciliation drift: {path}"));
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_state_fields(value: &Value, path: &str) -> Result<(), String> {
     match value {
         Value::Array(values) => {
@@ -180,6 +419,8 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         }
     }
     validate_state_fields(inventory, "$")?;
+    validate_a3_receipt(inventory)?;
+    validate_current_snapshot(inventory)?;
 
     let owned_contract_value = inventory
         .get("owned_stream_semantics_contract")
@@ -472,12 +713,15 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         "FUT-A1-GAP-10",
         "FUT-A1-GAP-11",
         "FUT-A1-GAP-12",
+        "FUT-A3-GAP-13",
+        "FUT-A3-GAP-14",
+        "FUT-A3-GAP-15",
     ]
     .into_iter()
     .map(str::to_owned)
     .collect();
     if row_ids(gaps, "gap_id") != expected_gaps {
-        return Err("all ADR and A1-discovered gaps must remain routed".to_owned());
+        return Err("all ADR, A1, and A3-discovered gaps must remain routed".to_owned());
     }
 
     let journeys = array(inventory, "downstream_and_e2e");
@@ -720,6 +964,15 @@ fn identity_authority_zero_unknown_and_docs_are_fail_closed() {
         "A2 acceptance status",
         "does not authorize closing A2",
         "source-authored and unexecuted",
+        "Post-baseline current snapshot",
+        "315",
+        "1,384",
+        "FUT A3 static kernel progress",
+        "STATIC_SOURCE_PROGRESS",
+        "NOT_RUN_STATIC_ONLY",
+        "FUT-A3-GAP-13",
+        "FUT-A3-GAP-14",
+        "FUT-A3-GAP-15",
         "No-claim boundary",
     ] {
         assert!(doc.contains(required), "missing docs marker: {required}");
@@ -791,28 +1044,40 @@ fn occurrence_census_and_reservation_partition_are_exact() {
     let census = inventory
         .get("occurrence_census")
         .expect("occurrence_census");
+    assert_eq!(
+        census.get("baseline_file_count").and_then(Value::as_u64),
+        Some(310)
+    );
+    assert_eq!(
+        census.get("baseline_token_count").and_then(Value::as_u64),
+        Some(1362)
+    );
+
+    let snapshot = inventory
+        .get("post_baseline_current_snapshot")
+        .expect("post-baseline current snapshot");
+    let current = snapshot
+        .get("current_occurrence")
+        .expect("current occurrence snapshot");
     let all_rows = all_occurrence_rows();
     let all_count: usize = all_rows.iter().map(|row| row.count).sum();
     assert_eq!(
         all_rows.len() as u64,
-        census
-            .get("baseline_file_count")
+        current
+            .get("file_count")
             .and_then(Value::as_u64)
-            .expect("baseline_file_count")
+            .expect("current file_count")
     );
     assert_eq!(
         all_count as u64,
-        census
-            .get("baseline_token_count")
+        current
+            .get("token_count")
             .and_then(Value::as_u64)
-            .expect("baseline_token_count")
+            .expect("current token_count")
     );
-    assert_eq!(
-        rows_digest(&all_rows),
-        text(census, "baseline_digest_sha256")
-    );
+    assert_eq!(rows_digest(&all_rows), text(current, "digest_sha256"));
 
-    for scope_row in array(census, "scope_rows") {
+    for scope_row in array(current, "scope_rows") {
         let scope = text(scope_row, "scope");
         let rows = occurrence_rows_for_scope(scope);
         let count: usize = rows.iter().map(|row| row.count).sum();
@@ -841,7 +1106,28 @@ fn occurrence_census_and_reservation_partition_are_exact() {
 
     assert_eq!(read_repo_file(SELF_PATH).match_indices(TOKEN).count(), 1);
 
-    let groups = array(&inventory, "migration_reservation_groups");
+    let historical_groups = array(&inventory, "migration_reservation_groups");
+    let expected_historical_groups = BTreeMap::from([
+        ("FUT-A6-CORE", (42_u64, 258_u64)),
+        ("FUT-A7-IO", (31_u64, 145_u64)),
+        ("FUT-A8-SERVICES", (33_u64, 196_u64)),
+        ("FUT-A9-ATP-DEV", (204_u64, 763_u64)),
+    ]);
+    for group in historical_groups {
+        let (expected_files, expected_tokens) = expected_historical_groups
+            .get(text(group, "group_id"))
+            .expect("known historical migration group");
+        assert_eq!(
+            group.get("file_count").and_then(Value::as_u64),
+            Some(*expected_files)
+        );
+        assert_eq!(
+            group.get("token_count").and_then(Value::as_u64),
+            Some(*expected_tokens)
+        );
+    }
+
+    let groups = array(snapshot, "current_migration_reservation_groups");
     for group in groups {
         let group_id = text(group, "group_id");
         let rows: Vec<_> = all_rows
@@ -1317,7 +1603,7 @@ fn malformed_inventory_mutations_fail_closed() {
         .retain(|row| row.get("api_id").and_then(Value::as_str) != Some("FUT-API-OR"));
     assert!(validate_inventory(&missing_api).is_err());
 
-    let mut join_promoted = canonical;
+    let mut join_promoted = canonical.clone();
     let row = join_promoted["consumed_api_semantics"]
         .as_array_mut()
         .expect("api array")
@@ -1326,4 +1612,18 @@ fn malformed_inventory_mutations_fail_closed() {
         .expect("join-all row");
     row["classification"] = Value::String("CONSUMED".to_owned());
     assert!(validate_inventory(&join_promoted).is_err());
+
+    let mut a3_promoted = canonical.clone();
+    a3_promoted["a3_block_on_receipt"]["execution_status"] =
+        Value::String("EXECUTED_CONTRACT".to_owned());
+    assert!(validate_inventory(&a3_promoted).is_err());
+
+    let mut a3_cutover = canonical.clone();
+    a3_cutover["a3_block_on_receipt"]["cutover_authorized"] = Value::Bool(true);
+    assert!(validate_inventory(&a3_cutover).is_err());
+
+    let mut baseline_rewritten = canonical;
+    baseline_rewritten["post_baseline_current_snapshot"]["historical_baseline_preserved"] =
+        Value::Bool(false);
+    assert!(validate_inventory(&baseline_rewritten).is_err());
 }

@@ -155,12 +155,34 @@ This matrix is fail-closed. It is not a terminal receipt, does not authorize
 closing A2, and does not convert source-authored assertions into executed
 evidence.
 
-The reviewed ATP source-pin row is refreshed in the first increment. At that
-base revision, seven unrelated pins had already drifted. The follow-on
-increments refresh the reviewed downstream-fixture row, leaving six unrelated
-stale pins: `Cargo.toml`, `Cargo.lock`, `src/sync/notify.rs`, the capability
-registry, the marginal ledger, and the API surface map. Those six rows are not
-blindly repinned here, and no focused-contract or broad-health claim is made.
+### Post-baseline current snapshot
+
+The historical A1 census remains frozen at 310 files and 1,362 textual tokens.
+A separate post-baseline current snapshot, captured on 2026-08-06, records 315
+files and 1,384 tokens. It does not rewrite the historical baseline:
+
+| Scope | Current files | Current tokens |
+|---|---:|---:|
+| `src` | 151 | 830 |
+| `tests` | 154 | 542 |
+| `benches` | 4 | 4 |
+| `examples` | 1 | 1 |
+| `asupersync-tokio-compat` | 3 | 5 |
+| `fuzz` | 2 | 2 |
+
+The current ownership projection is 42 files / 258 tokens for `FUT-A6-CORE`,
+32 / 153 for `FUT-A7-IO`, 33 / 197 for `FUT-A8-SERVICES`, and 208 / 776 for
+`FUT-A9-ATP-DEV`. Owners must use these current projections for reservation
+drift checks while retaining the A1 rows as historical evidence.
+
+Six previously stale source pins are reconciled to current bytes:
+`Cargo.toml`, `Cargo.lock`, `src/sync/notify.rs`, the capability registry, the
+marginal ledger, and the API surface map. Each reconciliation records the old
+and current whole-file hash plus its capability-specific classification. The
+manifest requirement, resolved package block, notify token lines, canonical
+capability row, 52-cell marginal distribution, and zero-token public API result
+are unchanged. This is static source reconciliation only: it is
+`NOT_RUN_STATIC_ONLY`, not focused-contract or broad-health evidence.
 
 ## `block_on` context
 
@@ -190,6 +212,13 @@ At base revision `02b380ee063e7e643105b1a7997360a7021bf32e`, bead
 `asupersync-d24mms.6.3` added an alongside-incumbent owned kernel at the
 crate-private `crate::util::future` module. This is `STATIC_SOURCE_PROGRESS`; its
 executable state is `NOT_RUN_STATIC_ONLY`, and the bead remains open.
+
+The implementation landed in revision
+`050fd0f08e4cf127e348bbf545c1e46cc392f6b5`. The current source receipt pins
+`src/future.rs` and `src/util/mod.rs`; the exact blocking-kernel projection from
+`pub(crate) enum BlockOnError` through the line before the inline test module is
+hashed independently. Later FUT A4 helper work in the same source file is
+therefore outside the A3 kernel projection.
 
 The kernel pins its future on the calling stack and uses one `Arc`-owned
 thread-notification state per invocation. The waker records a release-ordered
@@ -222,6 +251,16 @@ identity, wake-after-pending, explicit cancellation wake, panic propagation,
 refusal before polling in an installed runtime context, and execution on the
 real blocking-pool implementation. None of those cases has been executed in
 this static-only increment.
+
+The artifact names all ten functions rather than summarizing them as a green
+test result. Three explicit `BLOCKED_GAP` rows keep the remaining acceptance
+work visible:
+
+- `FUT-A3-GAP-13`: no focused execution, loom or equivalent state-model
+  receipt, or LabRuntime/DPOR cancellation and quiescence evidence;
+- `FUT-A3-GAP-14`: the installed-handle check conflates the runtime driver and
+  scheduler worker, while arbitrary foreign executors remain unidentified;
+- `FUT-A3-GAP-15`: no incumbent comparison for idle CPU or completion latency.
 
 This is not parity and is not a migration authorization. In particular, the
 kernel cannot distinguish an Asupersync scheduler worker from the external
@@ -449,5 +488,10 @@ approval, or permission to remove futures-lite. Package-count marginals are not
 behavioral evidence. Dropping a race loser is not the project's required loser
 drain. The owned Stream semantics and ATP additions described above are
 source-authored and unexecuted; they do not extend the historical proof state.
+The FUT A3 receipt likewise proves only current source identity and a reviewed
+static contract. It does not prove that its authored cases ran, that all
+wake/park interleavings are covered, that runtime or foreign-executor contexts
+are safe, that cancellation reaches quiescence, or that idle CPU and latency
+match the incumbent.
 
 <!-- END FUTURES LITE CAPABILITY INVENTORY -->
