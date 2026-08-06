@@ -159,8 +159,8 @@ The exact engine split is:
 
 ### A3 per-operation checkpoint
 
-The machine artifact now records 22 of 123 external call expressions as exact
-one-operation rows for `B64-A3-AUTH`; 101 A4/A5 expressions remain. Each row
+The first bounded matrix tranche records 22 of 123 external call expressions as
+exact one-operation rows for `B64-A3-AUTH`. Each row
 pins its call/path relation, source anchor and line, engine, direction,
 production classification, compilation profile, migration group, stable
 security-role and owned-error IDs, capability IDs, consumer, and acceptance
@@ -174,16 +174,50 @@ rule. Every recorded row has `count = 1`.
 | TLS pins (`CALL-025`) | 1 / 2 | 0 / 0 | 3 |
 | **A3 total** | **6 / 7** | **8 / 1** | **22** |
 
-The partial registry contains 12 stable A3 security-role IDs and
+The A3 registry subset contains 12 stable A3 security-role IDs and
 7 stable A3 owned-error IDs. All 22 recorded operations reference registered
 IDs, and every registered A3 role/error is used. Encode-only rows use the explicit
 infallible allocating-output boundary; decode rows name the owned runtime
 profile, NATS, PostgreSQL, TLS, or deterministic-test boundary. No row exposes
 the upstream codec error type.
 
-This is a source-only checkpoint, not a completed A1 matrix. A4/A5 operation
-rows and stable collision/consumer role-error references are still pending;
-the corresponding gaps remain `BLOCKED`.
+That first tranche was a source-only checkpoint, not a completed A1 matrix.
+The A4 checkpoint below advances the matrix; the corresponding A1 gaps remain
+`BLOCKED` until every tranche and relation is complete.
+
+### A4 per-operation checkpoint
+
+The second bounded tranche adds all 33 `B64-A4-WEB-GRPC` expressions. The
+machine artifact therefore records 55 of 123 external call expressions, with
+68 A5 expressions remaining.
+
+| A4 call | Production encode/decode | Nonproduction encode/decode | Recorded operations |
+| --- | ---: | ---: | ---: |
+| native gRPC server metadata (`CALL-012`) | 2 / 2 | 0 / 0 | 4 |
+| gRPC status snapshot (`CALL-013`) | 0 / 0 | 1 / 0 | 1 |
+| gRPC-Web (`CALL-014`) | 2 / 5 | 1 / 1 | 9 |
+| HTTP Basic (`CALL-015`) | 2 / 0 | 0 / 0 | 2 |
+| browser persistence (`CALL-016`) | 5 / 3 | 0 / 0 | 8 |
+| WebSocket handshake (`CALL-018`) | 2 / 1 | 2 / 2 | 7 |
+| debug WebSocket (`CALL-026`) | 1 / 0 | 0 / 0 | 1 |
+| web extractor WebSocket (`CALL-027`) | 0 / 1 | 0 / 0 | 1 |
+| **A4 total** | **14 / 12** | **4 / 3** | **33** |
+
+Across A3 and A4, the registry now contains 29 stable security-role IDs and
+14 stable owned-error IDs. Every one is referenced by the 55 recorded
+operations without an orphan. The private gRPC status snapshot is linked to
+the explicit `B64-CONSUMER-GRPC-STATUS-SNAPSHOT` nonpublic fixture relation;
+it is not silently promoted into a public journey or execution receipt.
+
+The native gRPC metadata rows preserve the existing scope qualification: the
+shared budget applies after decode to handler dispatch and retained metadata;
+it does not bound HPACK or header-list allocation. The debug WebSocket encode
+row likewise records that it hashes the trimmed key without locally decoding
+or enforcing the public 16-byte key requirement.
+
+This remains source-only evidence. The remaining A5 operation rows, exact
+profile gates, and stable role/error references on collision and consumer
+records keep A1 `in_progress`.
 
 Two paths named `base64` are local modules, not the dependency:
 
@@ -319,12 +353,12 @@ separate from the unchanged 36-path direct Rust dependency census.
 
 The machine artifact routes every observed gap; none is left unowned:
 
-- A1: the current 36 path rows aggregate 123 external expressions. The A3
-  checkpoint records 22 exact operation rows with registered roles/errors;
-  the remaining 101 A4/A5 operations, stable collision/consumer role-error
-  references, nonpublic-consumer matrix, and exact manifest/feature/target/cfg
-  profile gates are still owned here. This checkpoint is not
-  acceptance-complete.
+- A1: the current 36 path rows aggregate 123 external expressions. The A3/A4
+  checkpoints record 55 exact operation rows with registered roles/errors and
+  an explicit nonpublic relation for the private gRPC status snapshot. The
+  remaining 68 A5 operations, stable collision/consumer role-error references,
+  and exact manifest/feature/target/cfg profile gates are still owned here.
+  This checkpoint is not acceptance-complete.
 - A2: checked global sizing/allocation policy and the explicit no-constant-time
   boundary.
 - A3: credential/certificate migration and the URL-safe padded decode-only

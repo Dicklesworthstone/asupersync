@@ -34,10 +34,10 @@ const DOC_END: &str = "<!-- END BASE64 CAPABILITY INVENTORY -->";
 const PATH_TOKEN: &str = concat!("base", "64::");
 const SOURCE_PIN_PATHS_SHA256: &str =
     "996efa7ae8c2105ab6d8a059f8cafef646c323e1791e40895becc43f68157fe4";
-const A3_OPERATION_SEMANTICS_SHA256: &str =
-    "165174a4a8b2eb830fec0b7f3770958c79ba58863020a831ae124d5db503ffc2";
+const RECORDED_OPERATION_SEMANTICS_SHA256: &str =
+    "0ca447b568ddc5e5a0965d7c1161a8dc785794704ce5acb44d2a118853690e16";
 const CLAIMS_PROJECTION_SHA256: &str =
-    "f3e9e74f5aff62b4c79f0d15aeab94a49cddf517b0a26e3e4f899b684a8c120d";
+    "eae3fe6edc7fb5774de4fc490d305bb764b68af5c8765943408ee1dd27a7d1e9";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -200,6 +200,7 @@ fn claims_projection(inventory: &Value) -> Value {
         "owned_error_mappings": inventory["owned_error_mappings"].clone(),
         "operation_matrix_progress": inventory["operation_matrix_progress"].clone(),
         "operation_contracts": inventory["operation_contracts"].clone(),
+        "nonpublic_consumer_relations": inventory["nonpublic_consumer_relations"].clone(),
         "semantic_vector_authority": inventory["semantic_vector_authority"].clone(),
         "semantic_corpus": inventory["semantic_corpus"].clone(),
         "call_compilation_profiles": inventory["call_compilation_profiles"].clone(),
@@ -475,8 +476,25 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             "B64-ROLE-TLS-SPKI-PIN",
             "B64-ROLE-TLS-CERT-PIN",
             "B64-ROLE-TLS-PIN-SERIALIZATION",
+            "B64-ROLE-HTTP-ORIGIN-BASIC-CREDENTIALS",
+            "B64-ROLE-HTTP-PROXY-BASIC-CREDENTIALS",
+            "B64-ROLE-BROWSER-LOCALSTORAGE-ADDRESS",
+            "B64-ROLE-BROWSER-LOCALSTORAGE-VALUE",
+            "B64-ROLE-BROWSER-INDEXEDDB-ADDRESS",
+            "B64-ROLE-WEBSOCKET-ACCEPT-DIGEST",
+            "B64-ROLE-WEBSOCKET-CLIENT-KEY",
+            "B64-ROLE-WEBSOCKET-TEST-BOUNDARY",
+            "B64-ROLE-WEBSOCKET-DEBUG-UNVALIDATED-ACCEPT",
+            "B64-ROLE-GRPC-SERVER-INBOUND-BINARY-METADATA",
+            "B64-ROLE-GRPC-SERVER-OUTBOUND-BINARY-METADATA",
+            "B64-ROLE-GRPC-SERVER-STATUS-DETAILS",
+            "B64-ROLE-GRPC-STATUS-SNAPSHOT",
+            "B64-ROLE-GRPC-WEB-TRAILER-BINARY-METADATA",
+            "B64-ROLE-GRPC-WEB-TEXT-WHOLE",
+            "B64-ROLE-GRPC-WEB-TEXT-STREAM",
+            "B64-ROLE-GRPC-WEB-TEST-FIXTURE",
         ],
-        "A3 security roles",
+        "recorded operation security roles",
     )?;
     for role in array(inventory, "security_roles") {
         if text(role, "category").is_empty()
@@ -500,8 +518,15 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             "B64-ERROR-POSTGRES-AUTHENTICATION",
             "B64-ERROR-TEST-ASSERTION",
             "B64-ERROR-TLS-CERTIFICATE",
+            "B64-ERROR-BROWSER-KEY-OMISSION",
+            "B64-ERROR-BROWSER-VALUE-STRING",
+            "B64-ERROR-WEBSOCKET-HANDSHAKE-INVALID-KEY",
+            "B64-ERROR-WEBSOCKET-EXTRACTION-BAD-REQUEST",
+            "B64-ERROR-GRPC-SERVER-FALLBACK-SUPPRESSED",
+            "B64-ERROR-GRPC-SERVER-INVALID-METADATA",
+            "B64-ERROR-GRPC-WEB-PROTOCOL",
         ],
-        "A3 owned error mappings",
+        "recorded operation owned error mappings",
     )?;
     for error in array(inventory, "owned_error_mappings") {
         if error.get("upstream_error_exposed").and_then(Value::as_bool) != Some(false)
@@ -862,10 +887,39 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             return Err(format!("consumer obligation drifted for {consumer_id}"));
         }
     }
+    let nonpublic_consumers = array(inventory, "nonpublic_consumer_relations");
+    require_exact_ids(
+        nonpublic_consumers,
+        "consumer_id",
+        &["B64-CONSUMER-GRPC-STATUS-SNAPSHOT"],
+        "nonpublic consumer relations",
+    )?;
+    for consumer in nonpublic_consumers {
+        let consumer_id = text(consumer, "consumer_id");
+        if text(consumer, "classification") != "NONPUBLIC_TEST_FIXTURE"
+            || text(consumer, "state") != "STATIC_RELATION_ONLY"
+            || text(consumer, "implementation_owner") != "asupersync-d24mms.10.4"
+            || text(consumer, "relation_boundary").is_empty()
+            || !string_set(consumer, "call_ids").is_subset(&call_ids)
+            || !string_set(consumer, "capability_ids").is_subset(&capability_ids)
+            || !string_set(consumer, "profile_ids").is_subset(&profile_ids)
+            || !string_set(consumer, "group_ids").is_subset(&group_ids)
+        {
+            return Err(format!("nonpublic consumer relation drifted for {consumer_id}"));
+        }
+    }
+    let nonpublic_consumer_ids = row_ids(nonpublic_consumers, "consumer_id");
+    if !consumer_ids.is_disjoint(&nonpublic_consumer_ids) {
+        return Err("public and nonpublic consumer IDs overlap".to_owned());
+    }
+    let operation_consumer_ids: BTreeSet<String> = consumer_ids
+        .union(&nonpublic_consumer_ids)
+        .cloned()
+        .collect();
 
     let operation_progress = object(inventory, "operation_matrix_progress");
     if operation_progress.get("state").and_then(Value::as_str)
-        != Some("A3_RECORDED_A4_A5_PENDING")
+        != Some("A3_A4_RECORDED_A5_PENDING")
         || operation_progress
             .get("external_operation_total")
             .and_then(Value::as_u64)
@@ -873,11 +927,11 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         || operation_progress
             .get("recorded_operation_total")
             .and_then(Value::as_u64)
-            != Some(22)
+            != Some(55)
         || operation_progress
             .get("remaining_operation_total")
             .and_then(Value::as_u64)
-            != Some(101)
+            != Some(68)
         || text(&inventory["operation_matrix_progress"], "count_semantics").is_empty()
     {
         return Err("operation-matrix progress drifted".to_owned());
@@ -885,12 +939,12 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     require_exact_strings(
         &inventory["operation_matrix_progress"],
         "recorded_group_ids",
-        &["B64-A3-AUTH"],
+        &["B64-A3-AUTH", "B64-A4-WEB-GRPC"],
     )?;
     require_exact_strings(
         &inventory["operation_matrix_progress"],
         "remaining_group_ids",
-        &["B64-A4-WEB-GRPC", "B64-A5-REMAINING"],
+        &["B64-A5-REMAINING"],
     )?;
 
     let operations = array(inventory, "operation_contracts");
@@ -920,8 +974,41 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             "B64-A3-OP-TLS-SPKI-PIN-DECODE",
             "B64-A3-OP-TLS-CERT-PIN-DECODE",
             "B64-A3-OP-TLS-PIN-ENCODE",
+            "B64-A4-OP-GRPC-SERVER-INBOUND-METADATA-DECODE-PAD",
+            "B64-A4-OP-GRPC-SERVER-INBOUND-METADATA-DECODE-NOPAD-FALLBACK",
+            "B64-A4-OP-GRPC-SERVER-RESPONSE-METADATA-ENCODE",
+            "B64-A4-OP-GRPC-SERVER-STATUS-DETAILS-ENCODE",
+            "B64-A4-OP-GRPC-STATUS-SNAPSHOT-DETAILS-ENCODE",
+            "B64-A4-OP-GRPC-WEB-TRAILER-METADATA-ENCODE",
+            "B64-A4-OP-GRPC-WEB-TRAILER-METADATA-DECODE",
+            "B64-A4-OP-GRPC-WEB-TEXT-WHOLE-ENCODE",
+            "B64-A4-OP-GRPC-WEB-TEXT-WHOLE-DECODE",
+            "B64-A4-OP-GRPC-WEB-TEXT-STREAM-PADDED-FINAL-DECODE",
+            "B64-A4-OP-GRPC-WEB-TEXT-STREAM-COMPLETE-QUADS-DECODE",
+            "B64-A4-OP-GRPC-WEB-TEXT-STREAM-FINAL-TAIL-DECODE",
+            "B64-A4-OP-GRPC-WEB-TEST-SNAPSHOT-METADATA-ENCODE",
+            "B64-A4-OP-GRPC-WEB-TEST-SPEC-METADATA-DECODE",
+            "B64-A4-OP-HTTP-ORIGIN-BASIC-ENCODE",
+            "B64-A4-OP-HTTP-PROXY-BASIC-ENCODE",
+            "B64-A4-OP-BROWSER-LOCALSTORAGE-NAMESPACE-ENCODE",
+            "B64-A4-OP-BROWSER-LOCALSTORAGE-KEY-ENCODE",
+            "B64-A4-OP-BROWSER-LOCALSTORAGE-KEY-DECODE",
+            "B64-A4-OP-BROWSER-LOCALSTORAGE-VALUE-ENCODE",
+            "B64-A4-OP-BROWSER-LOCALSTORAGE-VALUE-DECODE",
+            "B64-A4-OP-BROWSER-INDEXEDDB-NAMESPACE-ENCODE",
+            "B64-A4-OP-BROWSER-INDEXEDDB-KEY-ENCODE",
+            "B64-A4-OP-BROWSER-INDEXEDDB-KEY-DECODE",
+            "B64-A4-OP-WS-ACCEPT-DIGEST-ENCODE",
+            "B64-A4-OP-WS-CLIENT-KEY-ENCODE",
+            "B64-A4-OP-WS-CLIENT-KEY-DECODE",
+            "B64-A4-OP-WS-TEST-GENERATED-KEY-DECODE",
+            "B64-A4-OP-WS-GOLDEN-KEY-DECODE",
+            "B64-A4-OP-WS-GOLDEN-ACCEPT-ENCODE",
+            "B64-A4-OP-WS-GOLDEN-WRONG-GUID-ENCODE",
+            "B64-A4-OP-DEBUG-WS-ACCEPT-DIGEST-ENCODE",
+            "B64-A4-OP-WEB-WS-CLIENT-KEY-DECODE",
         ],
-        "A3 operation contracts",
+        "recorded operation contracts",
     )?;
     let operation_semantics: BTreeMap<String, Value> = operations
         .iter()
@@ -938,9 +1025,9 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     let operation_semantics = serde_json::to_value(operation_semantics)
         .expect("operation semantic projection must serialize");
     if sha256_hex(&canonical_json_bytes(&operation_semantics))
-        != A3_OPERATION_SEMANTICS_SHA256
+        != RECORDED_OPERATION_SEMANTICS_SHA256
     {
-        return Err("A3 keyed operation semantics drifted".to_owned());
+        return Err("recorded keyed operation semantics drifted".to_owned());
     }
     let role_ids = row_ids(array(inventory, "security_roles"), "role_id");
     let error_ids = row_ids(array(inventory, "owned_error_mappings"), "error_id");
@@ -960,7 +1047,10 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             || source_line == 0
             || text(operation, "source_anchor").is_empty()
             || text(operation, "acceptance_rule").is_empty()
-            || text(operation, "group_id") != "B64-A3-AUTH"
+            || !matches!(
+                text(operation, "group_id"),
+                "B64-A3-AUTH" | "B64-A4-WEB-GRPC"
+            )
         {
             return Err(format!("operation {operation_id} is incomplete"));
         }
@@ -1018,9 +1108,10 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             .expect("one operation consumer must exist");
         let consumer = consumers
             .iter()
+            .chain(nonpublic_consumers.iter())
             .find(|row| text(row, "consumer_id") == consumer_id)
             .ok_or_else(|| format!("operation {operation_id} consumer is absent"))?;
-        if !consumer_ids.contains(consumer_id)
+        if !operation_consumer_ids.contains(consumer_id)
             || !string_set(consumer, "call_ids").contains(call_id)
             || !string_set(consumer, "profile_ids").contains(text(operation, "profile_id"))
             || !string_set(consumer, "group_ids").contains(text(operation, "group_id"))
@@ -1032,23 +1123,33 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         operation_totals.entry(call_id.to_owned()).or_default()[bucket_index] += count;
     }
     if used_role_ids != role_ids || used_error_ids != error_ids {
-        return Err("A3 role or error registry contains an orphan".to_owned());
+        return Err("recorded role or error registry contains an orphan".to_owned());
     }
-    let expected_a3_call_ids: BTreeSet<String> = call_sites
+    let expected_recorded_call_ids: BTreeSet<String> = call_sites
         .iter()
-        .filter(|row| text(row, "group") == "B64-A3-AUTH")
+        .filter(|row| {
+            matches!(
+                text(row, "group"),
+                "B64-A3-AUTH" | "B64-A4-WEB-GRPC"
+            )
+        })
         .map(|row| text(row, "call_id").to_owned())
         .collect();
-    if operation_totals.keys().cloned().collect::<BTreeSet<_>>() != expected_a3_call_ids {
-        return Err("A3 operation call coverage drifted".to_owned());
+    if operation_totals.keys().cloned().collect::<BTreeSet<_>>() != expected_recorded_call_ids {
+        return Err("recorded operation call coverage drifted".to_owned());
     }
     for call in call_sites
         .iter()
-        .filter(|row| text(row, "group") == "B64-A3-AUTH")
+        .filter(|row| {
+            matches!(
+                text(row, "group"),
+                "B64-A3-AUTH" | "B64-A4-WEB-GRPC"
+            )
+        })
     {
         let actual = operation_totals
             .get(text(call, "call_id"))
-            .expect("covered A3 call must have operation totals");
+            .expect("covered recorded call must have operation totals");
         let expected = [
             call["production"]["encode"]
                 .as_u64()
@@ -1065,22 +1166,19 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         ];
         if *actual != expected {
             return Err(format!(
-                "A3 operation totals drifted for {}",
+                "recorded operation totals drifted for {}",
                 text(call, "call_id")
             ));
         }
     }
-    let recorded_totals = object(
-        &inventory["operation_matrix_progress"],
-        "recorded_totals",
-    );
+    let recorded_totals = object(&inventory["operation_matrix_progress"], "recorded_totals");
     let aggregate_totals: [u64; 4] = [
         operation_totals.values().map(|counts| counts[0]).sum(),
         operation_totals.values().map(|counts| counts[1]).sum(),
         operation_totals.values().map(|counts| counts[2]).sum(),
         operation_totals.values().map(|counts| counts[3]).sum(),
     ];
-    if aggregate_totals != [6, 7, 8, 1]
+    if aggregate_totals != [20, 19, 12, 4]
         || recorded_totals
             .get("production_encode")
             .and_then(Value::as_u64)
@@ -1097,9 +1195,9 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             .get("nonproduction_decode")
             .and_then(Value::as_u64)
             != Some(aggregate_totals[3])
-        || aggregate_totals.iter().sum::<u64>() != 22
+        || aggregate_totals.iter().sum::<u64>() != 55
     {
-        return Err("A3 operation aggregate drifted".to_owned());
+        return Err("recorded operation aggregate drifted".to_owned());
     }
 
     require_exact_ids(
@@ -1608,7 +1706,11 @@ fn docs_ignore_and_no_claim_markers_remain_discoverable() {
         "22 of 123 external call expressions",
         "12 stable A3 security-role IDs",
         "7 stable A3 owned-error IDs",
-        "101 A4/A5 expressions remain",
+        "55 of 123 external call expressions",
+        "68 A5 expressions remaining",
+        "29 stable security-role IDs",
+        "14 stable owned-error IDs",
+        "B64-CONSUMER-GRPC-STATUS-SNAPSHOT",
         "no constant-time claim",
         "does not prove compilation",
         "Only A6",
