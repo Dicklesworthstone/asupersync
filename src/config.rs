@@ -94,7 +94,7 @@ where
     /// or [`ConfigDocumentError::UnsupportedSchemaVersion`] for an explicit
     /// version other than the current one.
     pub fn from_json(json: &str) -> Result<Self, ConfigDocumentError> {
-        let document = serde_json::from_str(json).map_err(ConfigDocumentError::Json)?;
+        let document: Self = serde_json::from_str(json).map_err(ConfigDocumentError::Json)?;
         document.validate_schema_version()?;
         Ok(document)
     }
