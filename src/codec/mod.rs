@@ -5,6 +5,7 @@
 //! framed transport types (`FramedRead`, `FramedWrite`, `Framed`) that
 //! bridge synchronous codecs with async I/O.
 
+pub mod base64;
 pub mod bytes_codec;
 pub mod decoder;
 pub mod encoder;
