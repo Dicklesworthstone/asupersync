@@ -12,6 +12,9 @@ const DOC_PATH: &str = "docs/scheduler_join_batch_inventory.md";
 const PERF_RUNBOOK_PATH: &str = "docs/perf_runbook.md";
 const BEAD_ID: &str = "asupersync-sched-hot-path-perf-bt4y5f.3.1";
 const ARTIFACT_ID: &str = "scheduler-join-batch-inventory-v1";
+const REFRESH_ID: &str = "SCHED-JOIN-BATCH-PROVENANCE-REFRESH-2026-08-06";
+const ORIGINAL_BASE_COMMIT: &str = "e9a2d6229fd42d982f9bc296129852b7821c0905";
+const REFRESH_BASE_COMMIT: &str = "fbbd4d065ae4768b84e4161a00d10e5acba04b39";
 const BEGIN_MARKER: &str = "<!-- BEGIN SCHEDULER JOIN BATCH INVENTORY -->";
 const END_MARKER: &str = "<!-- END SCHEDULER JOIN BATCH INVENTORY -->";
 
@@ -151,7 +154,7 @@ fn source_pins_and_exact_anchors_match_the_captured_tree() {
         text(&artifact, "disposition"),
         "STATIC_SURFACE_COMPLETE_MEASUREMENT_BLOCKED"
     );
-    assert_eq!(text(&artifact, "base_commit").len(), 40);
+    assert_eq!(text(&artifact, "base_commit"), ORIGINAL_BASE_COMMIT);
 
     let pins = array(&artifact, "source_pins");
     assert_eq!(pins.len(), 15);
@@ -181,6 +184,97 @@ fn source_pins_and_exact_anchors_match_the_captured_tree() {
     assert!(paths.contains("src/runtime/scheduler/three_lane.rs"));
 
     assert_eq!(check_anchor_objects(&artifact), 76);
+}
+
+#[test]
+fn post_capture_provenance_refresh_is_exact_and_non_semantic() {
+    let artifact = repo_json(ARTIFACT_PATH);
+    let refresh = object(&artifact, "post_capture_provenance_refresh");
+    let refresh_value = Value::Object(refresh.clone());
+
+    for (key, expected) in [
+        ("refresh_id", REFRESH_ID),
+        ("captured_date_utc", "2026-08-06"),
+        ("base_commit", REFRESH_BASE_COMMIT),
+        ("original_base_commit", ORIGINAL_BASE_COMMIT),
+        ("refresh_state", "STATIC_SOURCE_PIN_MAINTENANCE"),
+        ("disposition", "STATIC_SURFACE_COMPLETE_MEASUREMENT_BLOCKED"),
+    ] {
+        assert_eq!(text(&refresh_value, key), expected, "refresh {key} drifted");
+    }
+    assert_eq!(unsigned(&refresh_value, "source_pin_path_count"), 15);
+    assert_eq!(unsigned(&refresh_value, "stale_path_count"), 2);
+    assert_eq!(unsigned(&refresh_value, "exact_anchor_count"), 76);
+    assert!(boolean(&refresh_value, "all_exact_anchors_match"));
+    for key in [
+        "source_pin_path_set_changed",
+        "semantic_contract_changed",
+        "measurement_state_changed",
+        "production_source_changed_by_refresh",
+        "benchmark_source_changed_by_refresh",
+        "baseline_registry_changed_by_refresh",
+        "rust_contract_executed",
+    ] {
+        assert!(!boolean(&refresh_value, key), "refresh {key} must be false");
+    }
+
+    assert_eq!(
+        row_id_set(&refresh_value, "refreshed_paths", "path"),
+        expected_set(&[
+            "src/runtime/scheduler/three_lane.rs",
+            "src/runtime/state.rs",
+        ])
+    );
+    let refreshed_paths = array(&refresh_value, "refreshed_paths");
+    let scheduler = refreshed_paths
+        .iter()
+        .find(|row| text(row, "path") == "src/runtime/scheduler/three_lane.rs")
+        .expect("scheduler refresh row");
+    assert_eq!(
+        text(scheduler, "change_commit"),
+        "b213fc7ba7966e3a8522d9d23fc0e57037613e2a"
+    );
+    assert_eq!(unsigned(scheduler, "previous_line_count"), 8190);
+    assert_eq!(unsigned(scheduler, "current_line_count"), 8190);
+    assert_eq!(unsigned(scheduler, "exact_anchor_count"), 4);
+    assert!(boolean(scheduler, "all_exact_anchors_match"));
+    assert!(text(scheduler, "classification").contains("WAKE_INJECTION"));
+    assert!(text(scheduler, "semantic_scope_effect").contains("batch-one"));
+
+    let state = refreshed_paths
+        .iter()
+        .find(|row| text(row, "path") == "src/runtime/state.rs")
+        .expect("runtime state refresh row");
+    assert_eq!(
+        text(state, "change_commit"),
+        "6688f15be0acb724b264dd6ca6051201fe0e7f06"
+    );
+    assert_eq!(unsigned(state, "previous_line_count"), 10160);
+    assert_eq!(unsigned(state, "current_line_count"), 10177);
+    assert_eq!(unsigned(state, "exact_anchor_count"), 3);
+    assert!(boolean(state, "all_exact_anchors_match"));
+    assert!(text(state, "classification").contains("OBLIGATION_LEAK"));
+    assert!(text(state, "semantic_scope_effect").contains("three pinned"));
+
+    for row in refreshed_paths {
+        assert_ne!(text(row, "previous_sha256"), text(row, "current_sha256"));
+        let pin = array(&artifact, "source_pins")
+            .iter()
+            .find(|pin| text(pin, "path") == text(row, "path"))
+            .expect("refreshed source pin");
+        assert_eq!(text(pin, "sha256"), text(row, "current_sha256"));
+        assert_eq!(unsigned(pin, "line_count"), unsigned(row, "current_line_count"));
+    }
+
+    assert!(
+        text(&refresh_value, "no_claim_boundary")
+            .contains("executes no Rust contract or benchmark")
+    );
+    let authority = Value::Object(object(&artifact, "authority").clone());
+    assert!(
+        text(&authority, "source_revision_authority")
+            .contains("post_capture_provenance_refresh")
+    );
 }
 
 #[test]
@@ -578,6 +672,9 @@ fn docs_and_existing_harness_use_the_frozen_vocabulary() {
     assert_eq!(doc.matches(END_MARKER).count(), 1);
     assert!(doc.contains(BEAD_ID));
     assert!(doc.contains(ARTIFACT_PATH));
+    assert!(doc.contains(REFRESH_ID));
+    assert!(doc.contains("Exactly two of the 15 source"));
+    assert!(doc.contains("all 76 exact anchors still matched"));
     assert!(doc.contains("STATIC_SURFACE_COMPLETE_MEASUREMENT_BLOCKED"));
     assert!(doc.contains("zero baseline-registry rows"));
     assert!(doc.contains("mutex-backed"));

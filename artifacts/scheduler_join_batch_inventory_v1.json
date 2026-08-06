@@ -18,9 +18,55 @@
     "remote_jobs_executed": false,
     "reason": "This packet freezes the current JOIN-BATCH surfaces and the exact evidence gap. The required isolated two-host measurements do not exist, so the bead remains open."
   },
+  "post_capture_provenance_refresh": {
+    "refresh_id": "SCHED-JOIN-BATCH-PROVENANCE-REFRESH-2026-08-06",
+    "captured_date_utc": "2026-08-06",
+    "base_commit": "fbbd4d065ae4768b84e4161a00d10e5acba04b39",
+    "original_base_commit": "e9a2d6229fd42d982f9bc296129852b7821c0905",
+    "refresh_state": "STATIC_SOURCE_PIN_MAINTENANCE",
+    "source_pin_path_count": 15,
+    "stale_path_count": 2,
+    "exact_anchor_count": 76,
+    "all_exact_anchors_match": true,
+    "source_pin_path_set_changed": false,
+    "semantic_contract_changed": false,
+    "measurement_state_changed": false,
+    "production_source_changed_by_refresh": false,
+    "benchmark_source_changed_by_refresh": false,
+    "baseline_registry_changed_by_refresh": false,
+    "rust_contract_executed": false,
+    "refreshed_paths": [
+      {
+        "path": "src/runtime/scheduler/three_lane.rs",
+        "change_commit": "b213fc7ba7966e3a8522d9d23fc0e57037613e2a",
+        "previous_sha256": "3f04b9034fc4375278109752093b1d9865e9bfcce57e6e94535708488a97598b",
+        "current_sha256": "ba804763dd1fd8ca2f495bc01933563f51fd7b403de60a03e52e68a667cc7065",
+        "previous_line_count": 8190,
+        "current_line_count": 8190,
+        "exact_anchor_count": 4,
+        "all_exact_anchors_match": true,
+        "classification": "ADJACENT_WAKE_INJECTION_FIX_OUTSIDE_PINNED_SPAWN_ADMISSION_ANCHORS",
+        "semantic_scope_effect": "The timed-task ready-injection fix changes neither the pinned global batch-one nor owner-local batch-sixteen spawn-admission policy."
+      },
+      {
+        "path": "src/runtime/state.rs",
+        "change_commit": "6688f15be0acb724b264dd6ca6051201fe0e7f06",
+        "previous_sha256": "fc217b1b34219ef2747613e0cf7fe8fa67a166231a5f72e955a7a05a64d5d80e",
+        "current_sha256": "a9ed4e41e2f08548e9f421914181c4a7311cc518d0d3ae3a1fc21d3167bd40b2",
+        "previous_line_count": 10160,
+        "current_line_count": 10177,
+        "exact_anchor_count": 3,
+        "all_exact_anchors_match": true,
+        "classification": "OBLIGATION_LEAK_CLEANUP_AFTER_ALL_PINNED_ADMISSION_ANCHORS",
+        "semantic_scope_effect": "The leak-batch cleanup is after the three pinned spawn-admission anchors and changes none of their admission, identity, quota, rollback, or successor-publication contracts."
+      }
+    ],
+    "disposition": "STATIC_SURFACE_COMPLETE_MEASUREMENT_BLOCKED",
+    "no_claim_boundary": "This refresh reconciles two current hashes and one line count after reviewing the exact intervening diffs and all 76 anchors. It executes no Rust contract or benchmark, changes no production or benchmark source, records no measurement, and does not close the bead or authorize implementation."
+  },
   "authority": {
     "inventory_scope": "legacy RuntimeHandle JoinHandle, canonical Cx TaskHandle, Scope and JoinSet collection, spawn gateway publication, mailbox admission, and incumbent benchmark evidence",
-    "source_revision_authority": "source_pins and exact line anchors at base_commit",
+    "source_revision_authority": "the historical base_commit plus current source_pins and exact anchors joined through post_capture_provenance_refresh",
     "production_behavior_changed": false,
     "benchmark_behavior_changed": false,
     "baseline_registry_changed": false,
@@ -83,14 +129,14 @@
     },
     {
       "path": "src/runtime/scheduler/three_lane.rs",
-      "sha256": "3f04b9034fc4375278109752093b1d9865e9bfcce57e6e94535708488a97598b",
+      "sha256": "ba804763dd1fd8ca2f495bc01933563f51fd7b403de60a03e52e68a667cc7065",
       "line_count": 8190,
       "role": "global batch-one and owner-local batch-sixteen consumer policies"
     },
     {
       "path": "src/runtime/state.rs",
-      "sha256": "fc217b1b34219ef2747613e0cf7fe8fa67a166231a5f72e955a7a05a64d5d80e",
-      "line_count": 10160,
+      "sha256": "a9ed4e41e2f08548e9f421914181c4a7311cc518d0d3ae3a1fc21d3167bd40b2",
+      "line_count": 10177,
       "role": "admission result taxonomy, canonical identity, quota rollback, and successor publication"
     },
     {

@@ -17,6 +17,29 @@ packet therefore records
 `STATIC_SURFACE_COMPLETE_MEASUREMENT_BLOCKED`; it does not close the bead or
 authorize a production change.
 
+### Post-capture provenance refresh (2026-08-06)
+
+`SCHED-JOIN-BATCH-PROVENANCE-REFRESH-2026-08-06` joins the historical capture
+at `e9a2d6229fd42d982f9bc296129852b7821c0905` to a static refresh at
+`fbbd4d065ae4768b84e4161a00d10e5acba04b39`. Exactly two of the 15 source
+pins had changed, while all 76 exact anchors still matched:
+
+- `src/runtime/scheduler/three_lane.rs` changed at
+  `b213fc7ba7966e3a8522d9d23fc0e57037613e2a` to promote timed tasks during a
+  real ready injection. Its four JOIN-BATCH anchors still pin the global
+  batch-one and owner-local batch-sixteen spawn-admission policies.
+- `src/runtime/state.rs` changed at
+  `6688f15be0acb724b264dd6ca6051201fe0e7f06` to drain deferred regions before
+  an obligation-leak panic. That cleanup is after all three pinned admission
+  anchors and changes none of their identity, quota, rollback, or successor
+  publication contracts.
+
+The refresh updates those two hashes and the `state.rs` line count. It changes
+no source-pin path, semantic row, production or benchmark source, baseline
+registry row, measurement state, candidate, threshold, or disposition. The
+Rust contract was not executed, and the missing p50, p95, allocation,
+repetition, and admitted two-host observations still keep the bead open.
+
 The two completion families are intentionally separate:
 
 - `RuntimeHandle::spawn` returns the legacy
