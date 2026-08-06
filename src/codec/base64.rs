@@ -11,9 +11,11 @@
 //! validate the complete request before changing the destination. A malformed
 //! credential therefore cannot expose a partially decoded prefix.
 //!
-//! Decode errors have deterministic precedence: encoded-text envelope,
-//! structural length, decoded-binary envelope, first invalid byte or padding
-//! offset, canonical trailing bits, then destination length. Encoding reports
+//! Decode errors have deterministic precedence: encoded-text envelope; an
+//! invalid final non-padding byte in a one-symbol-tail shape; decoded-binary
+//! envelope; the first invalid byte or padding placement in complete groups
+//! and the terminal group; structural one-symbol tail; engine padding mode;
+//! canonical trailing bits; then destination length. Encoding reports
 //! representational overflow before the binary policy cap, and destination
 //! mismatch only after the complete size plan succeeds.
 //!
@@ -212,26 +214,29 @@ impl Base64Engine {
         }
 
         let remainder = input.len() % 4;
-        if (self.padded && remainder != 0) || (!self.padded && remainder == 1) {
-            return Err(Base64Error::InvalidLength { len: input.len() });
+        let values = self.decode_values();
+        if remainder == 1 {
+            let index = input.len() - 1;
+            let byte = input[index];
+            if byte != b'=' && values[usize::from(byte)] == INVALID_VALUE {
+                return Err(Base64Error::InvalidByte { index, byte });
+            }
         }
 
-        let padding_len = if self.padded {
-            match input {
-                [.., b'=', b'='] => 2,
-                [.., b'='] => 1,
-                _ => 0,
-            }
-        } else {
-            0
+        let padding_len = match input {
+            [.., b'=', b'='] => 2,
+            [.., b'='] => 1,
+            _ => 0,
         };
         let data_len = input.len() - padding_len;
         let tail_len = data_len % 4;
         let tail_output_len = match tail_len {
-            0 => 0,
+            0 | 1 => 0,
             2 => 1,
             3 => 2,
-            _ => return Err(Base64Error::InvalidLength { len: input.len() }),
+            _ => return Err(Base64Error::OutputLengthOverflow {
+                input_len: input.len(),
+            }),
         };
         let output_len = (data_len / 4)
             .checked_mul(3)
@@ -241,39 +246,92 @@ impl Base64Engine {
             })?;
         ensure_binary_len(output_len, max_binary_len)?;
 
-        let values = self.decode_values();
-        for (index, &byte) in input[..data_len].iter().enumerate() {
-            if byte == b'=' {
-                return Err(Base64Error::InvalidPadding { index });
-            }
+        let suffix_len = if input.is_empty() {
+            0
+        } else if remainder == 0 {
+            4
+        } else {
+            remainder
+        };
+        let suffix_start = input.len() - suffix_len;
+
+        for (index, &byte) in input[..suffix_start].iter().enumerate() {
             if values[usize::from(byte)] == INVALID_VALUE {
                 return Err(Base64Error::InvalidByte { index, byte });
             }
         }
-        for (offset, &byte) in input[data_len..].iter().enumerate() {
-            if byte != b'=' {
-                return Err(Base64Error::InvalidPadding {
-                    index: data_len + offset,
+
+        let mut suffix_symbols = 0;
+        let mut suffix_padding = 0;
+        let mut first_padding_offset = 0;
+        let mut last_symbol = 0;
+        let mut last_symbol_value = 0;
+        for (offset, &byte) in input[suffix_start..].iter().enumerate() {
+            if byte == b'=' {
+                if offset < 2 {
+                    return Err(Base64Error::InvalidByte {
+                        index: suffix_start + offset,
+                        byte,
+                    });
+                }
+                if suffix_padding == 0 {
+                    first_padding_offset = offset;
+                }
+                suffix_padding += 1;
+                continue;
+            }
+            if suffix_padding != 0 {
+                return Err(Base64Error::InvalidByte {
+                    index: suffix_start + first_padding_offset,
+                    byte: b'=',
                 });
             }
+
+            let value = values[usize::from(byte)];
+            if value == INVALID_VALUE {
+                return Err(Base64Error::InvalidByte {
+                    index: suffix_start + offset,
+                    byte,
+                });
+            }
+            last_symbol = byte;
+            last_symbol_value = value;
+            suffix_symbols += 1;
         }
 
-        if let Some(index) = data_len.checked_sub(1) {
-            let value = values[usize::from(input[index])];
-            let unused_mask = match tail_len {
+        if !input.is_empty() && suffix_symbols < 2 {
+            return Err(Base64Error::InvalidLength { len: input.len() });
+        }
+
+        if self.padded {
+            if !(suffix_padding + suffix_symbols).is_multiple_of(4) {
+                return Err(Base64Error::InvalidPadding {
+                    index: input.len(),
+                });
+            }
+        } else if suffix_padding != 0 {
+            return Err(Base64Error::InvalidPadding {
+                index: suffix_start + first_padding_offset,
+            });
+        }
+
+        if suffix_symbols != 0 {
+            let index = suffix_start + suffix_symbols - 1;
+            let unused_mask = match suffix_symbols {
                 2 => 0b0000_1111,
                 3 => 0b0000_0011,
                 _ => 0,
             };
-            if value & unused_mask != 0 {
+            if last_symbol_value & unused_mask != 0 {
                 return Err(Base64Error::InvalidLastSymbol {
                     index,
-                    byte: input[index],
-                    value,
+                    byte: last_symbol,
+                    value: last_symbol_value,
                 });
             }
         }
 
+        let data_len = suffix_start + suffix_symbols;
         Ok(DecodePlan {
             data_len,
             output_len,
@@ -296,9 +354,10 @@ pub enum Base64Error {
         /// Encoded input length.
         len: usize,
     },
-    /// `=` appeared outside the canonical tail required by the engine.
+    /// Padding is absent, present, or incomplete contrary to the engine mode.
     InvalidPadding {
-        /// Raw byte position of the first invalid padding symbol.
+        /// Raw position of the first forbidden padding symbol, or the encoded
+        /// input length when canonical padding is missing or incomplete.
         index: usize,
     },
     /// The final symbol has non-zero bits outside the decoded payload.
@@ -594,10 +653,17 @@ fn reserve_bytes(requested: usize) -> Result<Vec<u8>, Base64Error> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::pedantic, clippy::nursery)]
+    // Registered verification filters use double underscores to separate the
+    // immutable authority prefix from the relation name.
+    #![allow(non_snake_case)]
 
     use super::*;
     use proptest::prelude::*;
-    use proptest::test_runner::RngSeed;
+    use proptest::test_runner::{FileFailurePersistence, RngSeed, TestRunner};
+
+    const CANONICAL_PROPERTY_FAILURES: &str = "target/test-artifacts/dependency-sovereignty/asupersync_d24mms_10_2_ff120f39f884/asupersync_d24mms_10_2_property/proptest-regressions.txt";
+    const LOCAL_PROPERTY_FAILURES: &str =
+        "target/test-artifacts/agent-lane/base64_a2_local_proptest-regressions.txt";
 
     const ENGINES: [Base64Engine; 4] =
         [STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD];
@@ -605,13 +671,22 @@ mod tests {
     // bead_id: asupersync-d24mms.10.2
     // capability_ids: CAP-BASE64-CODEC, CAP-AUTH-CREDENTIALS
     // scenario_id: base64_a2_safe_scalar_four_engine_core
+    // seed_or_fixture: RFC 4648 sections 3-5 and 10; local seed
+    // 0x4236_3441_325f_5246; canonical seeds 0..64
+    // registered_unit_filter:
+    // ver_a1_asupersync_d24mms_10_2_ff120f39f884__local_invariants
+    // registered_property_filter:
+    // ver_a1_asupersync_d24mms_10_2_ff120f39f884__property_matrix
+    // artifact_path: target/test-artifacts/dependency-sovereignty/
+    // asupersync_d24mms_10_2_ff120f39f884/asupersync_d24mms_10_2_property
+    // expected_outcome: pass
     // proof boundary: these are in-process codec contracts, not downstream
     // protocol, authentication-journey, performance, or dependency-cutover proof.
 
     fn assert_owned_error_traits<T: Copy + Eq + StdError>() {}
 
     #[test]
-    fn owned_error_contract_and_engine_names_are_stable() {
+    fn ver_a1_asupersync_d24mms_10_2_ff120f39f884__local_invariants__owned_error() {
         assert_owned_error_traits::<Base64Error>();
         assert_eq!(STANDARD.name(), "STANDARD");
         assert_eq!(STANDARD_NO_PAD.name(), "STANDARD_NO_PAD");
@@ -677,7 +752,7 @@ mod tests {
     }
 
     #[test]
-    fn rfc_4648_section_10_vectors_cover_all_tail_lengths() {
+    fn ver_a1_asupersync_d24mms_10_2_ff120f39f884__local_invariants() {
         let vectors = [
             (b"".as_slice(), "", ""),
             (b"f".as_slice(), "Zg==", "Zg"),
@@ -701,12 +776,12 @@ mod tests {
     }
 
     #[test]
-    fn alphabets_padding_and_empty_input_are_exact() {
-        let binary = [0xfb, 0xff, 0xbf];
-        assert_eq!(STANDARD.encode(binary), Ok("+/+/".to_owned()));
-        assert_eq!(STANDARD_NO_PAD.encode(binary), Ok("+/+/".to_owned()));
-        assert_eq!(URL_SAFE.encode(binary), Ok("-_-_".to_owned()));
-        assert_eq!(URL_SAFE_NO_PAD.encode(binary), Ok("-_-_".to_owned()));
+    fn ver_a1_asupersync_d24mms_10_2_ff120f39f884__local_invariants__alphabets() {
+        let binary = [0xfb, 0xff, 0xef];
+        assert_eq!(STANDARD.encode(binary), Ok("+//v".to_owned()));
+        assert_eq!(STANDARD_NO_PAD.encode(binary), Ok("+//v".to_owned()));
+        assert_eq!(URL_SAFE.encode(binary), Ok("-__v".to_owned()));
+        assert_eq!(URL_SAFE_NO_PAD.encode(binary), Ok("-__v".to_owned()));
 
         assert_eq!(STANDARD.encode([0xff]), Ok("/w==".to_owned()));
         assert_eq!(STANDARD_NO_PAD.encode([0xff]), Ok("/w".to_owned()));
@@ -724,7 +799,7 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_roundtrip_matrix_covers_every_short_tail() {
+    fn ver_a1_asupersync_d24mms_10_2_ff120f39f884__local_invariants__roundtrip() {
         for len in 0..=257 {
             let binary = (0..len)
                 .map(|index| (index as u8).wrapping_mul(73).wrapping_add(19))
@@ -750,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_alphabet_rejects_mixing_whitespace_and_non_ascii() {
+    fn ver_a1_asupersync_d24mms_10_2_ff120f39f884__local_invariants__strict_alphabet() {
         for (engine, forbidden) in [
             (STANDARD, [b'-', b'_']),
             (STANDARD_NO_PAD, [b'-', b'_']),
@@ -771,11 +846,18 @@ mod tests {
                     Err(Base64Error::InvalidByte { index: 2, byte })
                 );
             }
+            assert_eq!(
+                engine.decode(b"Z g=="),
+                Err(Base64Error::InvalidByte {
+                    index: 1,
+                    byte: b' ',
+                })
+            );
         }
     }
 
     #[test]
-    fn every_invalid_byte_reports_its_exact_raw_offset() {
+    fn ver_a1_asupersync_d24mms_10_2_ff120f39f884__local_invariants__invalid_offsets() {
         for engine in ENGINES {
             let values = engine.decode_values();
             for byte in u8::MIN..=u8::MAX {
@@ -789,7 +871,11 @@ mod tests {
                     let mut input = [b'A'; 4];
                     input[index] = byte;
                     let expected = if byte == b'=' {
-                        Base64Error::InvalidPadding { index }
+                        if !engine.padded && index == 3 {
+                            Base64Error::InvalidPadding { index }
+                        } else {
+                            Base64Error::InvalidByte { index, byte }
+                        }
                     } else {
                         Base64Error::InvalidByte { index, byte }
                     };
@@ -800,20 +886,52 @@ mod tests {
     }
 
     #[test]
-    fn padding_placement_and_length_rules_are_fail_closed() {
-        for engine in [STANDARD, URL_SAFE] {
-            for input in ["Zg", "Zg=", "Zg===", "A"] {
-                assert!(matches!(
+    fn ver_a1_asupersync_d24mms_10_2_ff120f39f884__local_invariants__padding() {
+        for engine in ENGINES {
+            for (input, index) in [("A=A==", 1), ("Zg===", 2), ("AAAA=", 4), ("AAAA==", 4)] {
+                assert_eq!(
                     engine.decode(input),
-                    Err(Base64Error::InvalidLength { .. })
-                ));
+                    Err(Base64Error::InvalidByte {
+                        index,
+                        byte: b'=',
+                    })
+                );
             }
+        }
+
+        for engine in [STANDARD, URL_SAFE] {
+            for input in ["Zg", "Zg="] {
+                assert_eq!(
+                    engine.decode(input),
+                    Err(Base64Error::InvalidPadding { index: input.len() })
+                );
+            }
+            assert_eq!(
+                engine.decode("A"),
+                Err(Base64Error::InvalidLength { len: 1 })
+            );
             for (input, index) in [("=AAA", 0), ("A=AA", 1), ("AA=A", 2), ("A===", 1)] {
                 assert_eq!(
                     engine.decode(input),
-                    Err(Base64Error::InvalidPadding { index })
+                    Err(Base64Error::InvalidByte {
+                        index,
+                        byte: b'=',
+                    })
                 );
             }
+            for input in ["SGVsbG9", "SGVsbA=", "SGVsbA"] {
+                assert_eq!(
+                    engine.decode(input),
+                    Err(Base64Error::InvalidPadding { index: input.len() })
+                );
+            }
+            assert_eq!(
+                engine.decode("SGVsbA===="),
+                Err(Base64Error::InvalidByte {
+                    index: 6,
+                    byte: b'=',
+                })
+            );
         }
 
         for engine in [STANDARD_NO_PAD, URL_SAFE_NO_PAD] {
@@ -847,6 +965,58 @@ mod tests {
                 );
             }
         }
+        for engine in [STANDARD_NO_PAD, URL_SAFE_NO_PAD] {
+            for mask in 0_u8..16 {
+                let mut input = [b'A'; 4];
+                for (index, byte) in input.iter_mut().enumerate() {
+                    if mask & (1 << index) != 0 {
+                        *byte = b'=';
+                    }
+                }
+                assert_eq!(
+                    engine.decode(input).is_ok(),
+                    mask == 0,
+                    "{} padding mask {mask:04b}",
+                    engine.name()
+                );
+            }
+        }
+
+        for symbol_count in 1..=257 {
+            let remainder = symbol_count % 4;
+            let mut input = vec![b'A'; symbol_count];
+            input.resize(symbol_count + (4 - remainder), b'=');
+
+            for engine in ENGINES {
+                let result = engine.decode(&input);
+                if remainder < 2 {
+                    assert_eq!(
+                        result,
+                        Err(Base64Error::InvalidByte {
+                            index: symbol_count,
+                            byte: b'=',
+                        }),
+                        "{} padding at quartet offset {remainder}",
+                        engine.name()
+                    );
+                } else if engine.padded {
+                    assert!(
+                        result.is_ok(),
+                        "{} rejected canonical padding at quartet offset {remainder}",
+                        engine.name()
+                    );
+                } else {
+                    assert_eq!(
+                        result,
+                        Err(Base64Error::InvalidPadding {
+                            index: symbol_count,
+                        }),
+                        "{} accepted forbidden padding at quartet offset {remainder}",
+                        engine.name()
+                    );
+                }
+            }
+        }
 
         for len in 0..=12 {
             let input = vec![b'A'; len];
@@ -860,7 +1030,18 @@ mod tests {
     }
 
     #[test]
-    fn canonical_trailing_bits_are_exhaustive() {
+    fn ver_a1_asupersync_d24mms_10_2_ff120f39f884__local_invariants__trailing_bits() {
+        for engine in [STANDARD, URL_SAFE] {
+            assert_eq!(
+                engine.decode("SGVsbG9="),
+                Err(Base64Error::InvalidLastSymbol {
+                    index: 6,
+                    byte: b'9',
+                    value: 61,
+                })
+            );
+        }
+
         for engine in ENGINES {
             let alphabet = engine.alphabet_bytes();
             for value in 0_u8..64 {
@@ -905,7 +1086,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_decode_and_slice_size_failures_are_atomic() {
+    fn ver_a1_asupersync_d24mms_10_2_ff120f39f884__local_invariants__atomic_decode() {
         for engine in ENGINES {
             let valid = engine.encode([0, 1, 2, 3, 4, 5]).unwrap();
             let mut malformed = valid.into_bytes();
@@ -938,10 +1119,31 @@ mod tests {
     }
 
     #[test]
-    fn decode_error_precedence_is_deterministic_and_atomic() {
+    fn ver_a1_asupersync_d24mms_10_2_ff120f39f884__local_invariants__error_precedence() {
+        assert_eq!(
+            STANDARD.decode_plan(b"!AAA!", MAX_BASE64_BINARY_LEN),
+            Err(Base64Error::InvalidByte {
+                index: 4,
+                byte: b'!',
+            })
+        );
+        assert_eq!(
+            STANDARD.decode_plan(b"!AAAA", MAX_BASE64_BINARY_LEN),
+            Err(Base64Error::InvalidByte {
+                index: 0,
+                byte: b'!',
+            })
+        );
+        assert_eq!(
+            STANDARD.decode_plan(b"!AAAA", 2),
+            Err(Base64Error::BinaryLengthExceeded { len: 3, limit: 2 })
+        );
         assert_eq!(
             STANDARD.decode_plan(b"!", MAX_BASE64_BINARY_LEN),
-            Err(Base64Error::InvalidLength { len: 1 })
+            Err(Base64Error::InvalidByte {
+                index: 0,
+                byte: b'!',
+            })
         );
         assert_eq!(
             STANDARD.decode_plan(b"AAA!", 2),
@@ -972,7 +1174,7 @@ mod tests {
     }
 
     #[test]
-    fn encode_slice_size_failures_are_atomic() {
+    fn ver_a1_asupersync_d24mms_10_2_ff120f39f884__local_invariants__atomic_encode() {
         for engine in ENGINES {
             let expected = engine.encoded_len(5).unwrap();
             for actual in [0, expected - 1, expected + 1] {
@@ -988,7 +1190,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_length_plans_and_small_resource_limits_are_exact() {
+    fn ver_a1_asupersync_d24mms_10_2_ff120f39f884__local_invariants__length_plans() {
         assert_eq!(STANDARD.encoded_len(0), Ok(0));
         assert_eq!(STANDARD.encoded_len(1), Ok(4));
         assert_eq!(STANDARD_NO_PAD.encoded_len(1), Ok(2));
@@ -1028,7 +1230,7 @@ mod tests {
     }
 
     #[test]
-    fn allocation_failures_are_owned_errors() {
+    fn ver_a1_asupersync_d24mms_10_2_ff120f39f884__local_invariants__allocation_errors() {
         assert_eq!(
             reserve_string(usize::MAX),
             Err(Base64Error::AllocationFailed {
@@ -1044,7 +1246,7 @@ mod tests {
     }
 
     #[test]
-    fn one_mibibyte_roundtrip_stays_inside_the_fixed_envelope() {
+    fn ver_a1_asupersync_d24mms_10_2_ff120f39f884__local_invariants__large_roundtrip() {
         const LARGE_LEN: usize = 1024 * 1024;
         let binary = (0..LARGE_LEN)
             .map(|index| (index as u8).wrapping_mul(31).wrapping_add(7))
@@ -1064,16 +1266,103 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ver_a1_asupersync_d24mms_10_2_ff120f39f884__property_matrix() {
+        let strategy = (
+            proptest::collection::vec(any::<u8>(), 0..1024),
+            proptest::collection::vec(any::<u8>(), 0..1024),
+            any::<usize>(),
+            any::<usize>(),
+            any::<u8>(),
+            any::<u8>().prop_filter(
+                "byte is outside both RFC 4648 Base64 alphabets and padding",
+                |byte| {
+                    !matches!(
+                        byte,
+                        b'A'..=b'Z'
+                            | b'a'..=b'z'
+                            | b'0'..=b'9'
+                            | b'+'
+                            | b'/'
+                            | b'-'
+                            | b'_'
+                            | b'='
+                    )
+                },
+            ),
+        );
+
+        for seed in 0_u64..64 {
+            let mut config = ProptestConfig::with_cases(4);
+            config.rng_seed = RngSeed::Fixed(seed);
+            config.source_file = Some(file!());
+            config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(
+                CANONICAL_PROPERTY_FAILURES,
+            )));
+            let mut runner = TestRunner::new(config);
+
+            let result = runner.run(
+                &strategy,
+                |(binary, text, destination_len, raw_position, prefill, invalid)| {
+                    for engine in ENGINES {
+                        let encoded = engine
+                            .encode(&binary)
+                            .map_err(|error| TestCaseError::fail(error.to_string()))?;
+                        prop_assert_eq!(engine.encoded_len(binary.len()), Ok(encoded.len()));
+                        prop_assert_eq!(engine.decode(&encoded), Ok(binary.clone()));
+
+                        let mut destination = vec![prefill; binary.len()];
+                        prop_assert_eq!(
+                            engine.decode_to_slice(&encoded, &mut destination),
+                            Ok(())
+                        );
+                        prop_assert_eq!(&destination, &binary);
+
+                        if !encoded.is_empty() {
+                            let mut malformed = encoded.into_bytes();
+                            let position = raw_position % malformed.len();
+                            malformed[position] = invalid;
+                            let expected = Base64Error::InvalidByte {
+                                index: position,
+                                byte: invalid,
+                            };
+                            prop_assert_eq!(engine.decode(&malformed), Err(expected));
+
+                            let before = vec![prefill; binary.len()];
+                            let mut destination = before.clone();
+                            prop_assert_eq!(
+                                engine.decode_to_slice(&malformed, &mut destination),
+                                Err(expected)
+                            );
+                            prop_assert_eq!(destination, before);
+                        }
+
+                        let before = vec![prefill; destination_len % 1024];
+                        let mut destination = before.clone();
+                        if engine.decode_to_slice(&text, &mut destination).is_err() {
+                            prop_assert_eq!(destination, before);
+                        }
+                    }
+
+                    Ok(())
+                },
+            );
+            assert!(result.is_ok(), "fixed seed {seed} failed: {result:?}");
+        }
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig {
             cases: 128,
-            failure_persistence: None,
+            failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
+                LOCAL_PROPERTY_FAILURES,
+            ))),
             rng_seed: RngSeed::Fixed(0x4236_3441_325f_5246),
             ..ProptestConfig::default()
         })]
 
         #[test]
-        fn arbitrary_bytes_round_trip_without_partial_output(
+        fn ver_a1_asupersync_d24mms_10_2_ff120f39f884__property_matrix__roundtrip_and_atomicity(
             binary in proptest::collection::vec(any::<u8>(), 0..4096),
             prefill in any::<u8>(),
         ) {
@@ -1098,7 +1387,7 @@ mod tests {
         }
 
         #[test]
-        fn arbitrary_text_never_panics_or_mutates_on_error(
+        fn ver_a1_asupersync_d24mms_10_2_ff120f39f884__property_matrix__arbitrary_text_atomicity(
             text in proptest::collection::vec(any::<u8>(), 0..4096),
             destination_len in 0_usize..4096,
             prefill in any::<u8>(),
