@@ -1,6 +1,6 @@
 //! Fail-closed inventory contract for the incumbent futures-lite capability.
 //!
-//! Beads: asupersync-d24mms.6.1, asupersync-d24mms.6.3, asupersync-d24mms.6.4
+//! Beads: A1 asupersync-d24mms.6.1 through A5 asupersync-d24mms.6.5
 //! Capability: CAP-FUTURES-STREAMS
 //! Fixture: the inventory artifact declared by `ARTIFACT_PATH` below.
 //!
@@ -37,6 +37,7 @@ const MARGINAL_LEDGER_PATH: &str = "artifacts/dependency_marginal_ledger_v1.json
 const BEAD_ID: &str = "asupersync-d24mms.6.1";
 const A3_BEAD_ID: &str = "asupersync-d24mms.6.3";
 const A4_BEAD_ID: &str = "asupersync-d24mms.6.4";
+const A5_BEAD_ID: &str = "asupersync-d24mms.6.5";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const CAPABILITY_ID: &str = "CAP-FUTURES-STREAMS";
 const BASELINE_REVISION: &str = "ed1c0c3ae4ba68947cd2c0212f1aab2242f60724";
@@ -134,8 +135,8 @@ fn validate_a3_receipt(inventory: &Value) -> Result<(), String> {
         (
             "src/future.rs",
             (
-                "fd0a1defa1efef7d42a918fc8a390ce3e851e4dfe00d3b412579455e25d88e41",
-                858_u64,
+                "c0a02784a010e9709dfab3b40259bccf8d312e9101834d8c110f2b1f19bd8598",
+                972_u64,
             ),
         ),
         (
@@ -261,15 +262,15 @@ fn validate_a4_receipt(inventory: &Value) -> Result<(), String> {
     let source_pin = object(receipt, "current_source_pin");
     if source_pin.get("path").and_then(Value::as_str) != Some("src/future.rs")
         || source_pin.get("sha256").and_then(Value::as_str)
-            != Some("fd0a1defa1efef7d42a918fc8a390ce3e851e4dfe00d3b412579455e25d88e41")
-        || source_pin.get("line_count").and_then(Value::as_u64) != Some(858)
+            != Some("c0a02784a010e9709dfab3b40259bccf8d312e9101834d8c110f2b1f19bd8598")
+        || source_pin.get("line_count").and_then(Value::as_u64) != Some(972)
     {
         return Err("A4 current source pin drift".to_owned());
     }
     let source_bytes = read_repo_bytes("src/future.rs");
     if hex_bytes(&Sha256::digest(&source_bytes))
-        != "fd0a1defa1efef7d42a918fc8a390ce3e851e4dfe00d3b412579455e25d88e41"
-        || read_repo_file("src/future.rs").lines().count() != 858
+        != "c0a02784a010e9709dfab3b40259bccf8d312e9101834d8c110f2b1f19bd8598"
+        || read_repo_file("src/future.rs").lines().count() != 972
     {
         return Err("A4 current source no longer matches its receipt".to_owned());
     }
@@ -353,6 +354,173 @@ fn validate_a4_receipt(inventory: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_a5_receipt(inventory: &Value) -> Result<(), String> {
+    let receipt = inventory
+        .get("a5_panic_boundary_receipt")
+        .expect("A5 panic-boundary receipt");
+    if text(receipt, "owner_bead") != A5_BEAD_ID
+        || text(receipt, "claimed_base_revision")
+            != "e37de5b6c44c3c0d86c6f05a981249491d3c2343"
+        || text(receipt, "source_status") != "PARTIAL_STATIC_SOURCE_PROGRESS"
+        || text(receipt, "execution_status") != "NOT_RUN_STATIC_ONLY"
+        || receipt.get("cutover_authorized") != Some(&Value::Bool(false))
+        || receipt.get("closure_allowed") != Some(&Value::Bool(false))
+    {
+        return Err("A5 receipt must remain partial, static-only, and fail closed".to_owned());
+    }
+
+    let expected_source_pins = BTreeMap::from([
+        (
+            "src/future.rs",
+            (
+                "c0a02784a010e9709dfab3b40259bccf8d312e9101834d8c110f2b1f19bd8598",
+                972_u64,
+            ),
+        ),
+        (
+            "src/web/middleware.rs",
+            (
+                "d4f6e9bbe0cb18849ce58aa293301c796ac079ad016f261d0db8affd8a0bb10a",
+                6030_u64,
+            ),
+        ),
+        (
+            "src/web/negotiate.rs",
+            (
+                "4a98a71fe252c26e059e2bb4f0b2350a4a6e9b4bd13519f35590627788794c61",
+                903_u64,
+            ),
+        ),
+    ]);
+    let source_pins = array(receipt, "current_source_pins");
+    if source_pins.len() != expected_source_pins.len() {
+        return Err("A5 receipt must pin the exact three source paths".to_owned());
+    }
+    for pin in source_pins {
+        let path = text(pin, "path");
+        let (expected_sha, expected_lines) = expected_source_pins
+            .get(path)
+            .unwrap_or_else(|| panic!("unexpected A5 source pin: {path}"));
+        if text(pin, "sha256") != *expected_sha
+            || pin.get("line_count").and_then(Value::as_u64) != Some(*expected_lines)
+            || hex_bytes(&Sha256::digest(read_repo_bytes(path))) != *expected_sha
+            || read_repo_file(path).lines().count() as u64 != *expected_lines
+        {
+            return Err(format!("A5 source pin drift: {path}"));
+        }
+    }
+
+    let projection = object(receipt, "poll_helper_projection");
+    let future_source = read_repo_file(text(projection, "path"));
+    let start_marker = text(projection, "start_marker");
+    let end_marker = text(projection, "end_marker");
+    let start = future_source
+        .find(start_marker)
+        .ok_or_else(|| "A5 helper start marker is missing".to_owned())?;
+    let relative_end = future_source[start..]
+        .find(end_marker)
+        .ok_or_else(|| "A5 helper end marker is missing".to_owned())?;
+    let helper_source = &future_source.as_bytes()[start..start + relative_end];
+    if hex_bytes(&Sha256::digest(helper_source)) != text(projection, "sha256") {
+        return Err("A5 poll-helper projection hash drift".to_owned());
+    }
+
+    let helper = object(receipt, "poll_helper_contract");
+    if helper.get("api").and_then(Value::as_str)
+        != Some("crate::util::future::catch_unwind")
+        || helper.get("drop_panic_contained").and_then(Value::as_bool) != Some(false)
+        || !helper
+            .get("post_terminal_behavior")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.contains("prevents every later inner poll"))
+    {
+        return Err("A5 owned poll-helper contract drift".to_owned());
+    }
+
+    let boundaries = array(receipt, "production_boundary_matrix");
+    if row_ids(boundaries, "surface_id")
+        != ["FUT-PROD-MIDDLEWARE-CATCH", "FUT-PROD-NEGOTIATE-CATCH"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    {
+        return Err("A5 receipt must cover the exact two production boundaries".to_owned());
+    }
+    let middleware_boundary = find_row(
+        boundaries,
+        "surface_id",
+        "FUT-PROD-MIDDLEWARE-CATCH",
+    );
+    let negotiate_boundary = find_row(
+        boundaries,
+        "surface_id",
+        "FUT-PROD-NEGOTIATE-CATCH",
+    );
+    if !text(middleware_boundary, "operator_diagnostic").contains("ASUP-E502")
+        || text(negotiate_boundary, "operator_diagnostic")
+            != "missing stable code and structured log"
+        || text(middleware_boundary, "source_status") != "SOURCE_AUTHORED_NOT_EXECUTED"
+        || text(negotiate_boundary, "source_status") != "SOURCE_AUTHORED_NOT_EXECUTED"
+    {
+        return Err("A5 production diagnostic boundary drift".to_owned());
+    }
+
+    let expected_tests: BTreeSet<String> = [
+        "catch_unwind_forwards_pending_wake_and_ready",
+        "catch_unwind_preserves_payload_and_refuses_repoll",
+        "dropping_unpolled_catch_unwind_drops_inner",
+        "error_handler_catches_construction_panic",
+        "error_handler_disabled_propagates_construction_panic",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if string_set(receipt, "authored_source_cases") != expected_tests {
+        return Err("A5 receipt must list the exact five authored source cases".to_owned());
+    }
+    let negotiate_source = read_repo_file("src/web/negotiate.rs");
+    for test_name in expected_tests {
+        if !future_source.contains(&format!("fn {test_name}()"))
+            && !negotiate_source.contains(&format!("fn {test_name}()"))
+        {
+            return Err(format!("A5 authored source case is missing: {test_name}"));
+        }
+    }
+
+    let middleware_source = read_repo_file("src/web/middleware.rs");
+    for (path, source) in [
+        ("src/web/middleware.rs", &middleware_source),
+        ("src/web/negotiate.rs", &negotiate_source),
+    ] {
+        if source.contains(&format!("use {TOKEN}::FutureExt;"))
+            || source
+                .matches("crate::util::future::catch_unwind")
+                .count()
+                != 1
+        {
+            return Err(format!("A5 production poll-adapter migration drift: {path}"));
+        }
+    }
+    if !middleware_source.contains("std::panic::catch_unwind")
+        || !negotiate_source.contains("std::panic::catch_unwind")
+    {
+        return Err("both A5 production sites must contain construction panic".to_owned());
+    }
+
+    let delta = object(receipt, "dependency_token_delta");
+    if delta.get("production_poll_adapter_sites_before").and_then(Value::as_u64) != Some(2)
+        || delta.get("production_poll_adapter_sites_after").and_then(Value::as_u64) != Some(0)
+        || delta.get("current_census_token_delta").and_then(Value::as_i64) != Some(-2)
+        || delta.get("manifest_changed").and_then(Value::as_bool) != Some(false)
+        || delta.get("dependency_removal_authorized").and_then(Value::as_bool) != Some(false)
+        || array(receipt, "missing_terminal_evidence").len() != 8
+    {
+        return Err("A5 dependency delta or terminal-evidence boundary drift".to_owned());
+    }
+
+    Ok(())
+}
+
 fn validate_current_snapshot(inventory: &Value) -> Result<(), String> {
     let snapshot = inventory
         .get("post_baseline_current_snapshot")
@@ -382,9 +550,9 @@ fn validate_current_snapshot(inventory: &Value) -> Result<(), String> {
         .get("current_occurrence")
         .expect("current occurrence snapshot");
     if current.get("file_count").and_then(Value::as_u64) != Some(315)
-        || current.get("token_count").and_then(Value::as_u64) != Some(1384)
+        || current.get("token_count").and_then(Value::as_u64) != Some(1382)
         || text(current, "digest_sha256")
-            != "879eb440a38b3bdcebe64b38165865f3869243592101c45169c83beecc6e2f5c"
+            != "86755aabb204be53aca205404e7449a9218bb7353a3adb45fc019cddc581b30a"
         || array(current, "scope_rows").len() != 6
         || array(snapshot, "current_migration_reservation_groups").len() != 4
     {
@@ -542,6 +710,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     validate_state_fields(inventory, "$")?;
     validate_a3_receipt(inventory)?;
     validate_a4_receipt(inventory)?;
+    validate_a5_receipt(inventory)?;
     validate_current_snapshot(inventory)?;
 
     let owned_contract_value = inventory
@@ -841,12 +1010,16 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         "FUT-A4-GAP-16",
         "FUT-A4-GAP-17",
         "FUT-A4-GAP-18",
+        "FUT-A5-GAP-19",
+        "FUT-A5-GAP-20",
+        "FUT-A5-GAP-21",
+        "FUT-A5-GAP-22",
     ]
     .into_iter()
     .map(str::to_owned)
     .collect();
     if row_ids(gaps, "gap_id") != expected_gaps {
-        return Err("all ADR, A1, A3, and A4-discovered gaps must remain routed".to_owned());
+        return Err("all ADR and A1 through A5 gaps must remain routed".to_owned());
     }
 
     let journeys = array(inventory, "downstream_and_e2e");
@@ -1091,7 +1264,7 @@ fn identity_authority_zero_unknown_and_docs_are_fail_closed() {
         "source-authored and unexecuted",
         "Post-baseline current snapshot",
         "315",
-        "1,384",
+        "1,382",
         "FUT A3 static kernel progress",
         "STATIC_SOURCE_PROGRESS",
         "NOT_RUN_STATIC_ONLY",
@@ -1104,6 +1277,12 @@ fn identity_authority_zero_unknown_and_docs_are_fail_closed() {
         "FUT-A4-GAP-16",
         "FUT-A4-GAP-17",
         "FUT-A4-GAP-18",
+        "FUT A5 static panic-boundary progress",
+        "crate::util::future::catch_unwind",
+        "FUT-A5-GAP-19",
+        "FUT-A5-GAP-20",
+        "FUT-A5-GAP-21",
+        "FUT-A5-GAP-22",
         "No-claim boundary",
     ] {
         assert!(doc.contains(required), "missing docs marker: {required}");
@@ -1318,14 +1497,19 @@ fn production_public_and_comment_only_sites_match_source() {
     assert!(stream.contains("obligation.resolve(Resolution::Abort)"));
 
     let middleware = read_repo_file("src/web/middleware.rs");
-    assert!(middleware.contains(&format!("use {TOKEN}::FutureExt;")));
+    assert!(!middleware.contains(&format!("use {TOKEN}::FutureExt;")));
     assert!(middleware.contains("std::panic::catch_unwind"));
-    assert!(middleware.contains("AssertUnwindSafe(future).catch_unwind().await"));
+    assert!(middleware.contains(
+        "crate::util::future::catch_unwind(AssertUnwindSafe(future)).await"
+    ));
     assert!(middleware.contains("[ASUP-E502] web handler panic recovered"));
 
     let negotiate = read_repo_file("src/web/negotiate.rs");
-    assert!(negotiate.contains(&format!("use {TOKEN}::FutureExt;")));
-    assert!(negotiate.contains(".catch_unwind()"));
+    assert!(!negotiate.contains(&format!("use {TOKEN}::FutureExt;")));
+    assert!(negotiate.contains("std::panic::catch_unwind"));
+    assert!(negotiate.contains(
+        "crate::util::future::catch_unwind(AssertUnwindSafe(future)).await"
+    ));
 
     let router = read_repo_file("src/web/router.rs");
     assert!(router.contains("pub fn handle(&self, req: Request) -> Response"));
@@ -1762,6 +1946,16 @@ fn malformed_inventory_mutations_fail_closed() {
     drop_only_race["a4_helper_receipt"]["race_policy_boundary"]
         ["drop_only_owned_race_allowed"] = Value::Bool(true);
     assert!(validate_inventory(&drop_only_race).is_err());
+
+    let mut a5_promoted = canonical.clone();
+    a5_promoted["a5_panic_boundary_receipt"]["execution_status"] =
+        Value::String("EXECUTED_CONTRACT".to_owned());
+    assert!(validate_inventory(&a5_promoted).is_err());
+
+    let mut drop_panic_contained = canonical.clone();
+    drop_panic_contained["a5_panic_boundary_receipt"]["poll_helper_contract"]
+        ["drop_panic_contained"] = Value::Bool(true);
+    assert!(validate_inventory(&drop_panic_contained).is_err());
 
     let mut baseline_rewritten = canonical;
     baseline_rewritten["post_baseline_current_snapshot"]["historical_baseline_preserved"] =

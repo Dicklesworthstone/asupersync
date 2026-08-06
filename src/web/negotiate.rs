@@ -22,8 +22,6 @@ use super::response::{Response, StatusCode};
 use std::cmp::Ordering;
 use std::panic::AssertUnwindSafe;
 
-use futures_lite::FutureExt;
-
 // ─── Media Type ──────────────────────────────────────────────────────────────
 
 /// A parsed media type with quality value.
@@ -394,9 +392,12 @@ impl<H: Handler> Handler for ErrorHandlerMiddleware<H> {
                 .unwrap_or_default();
 
             let result = if self.config.catch_panics {
-                AssertUnwindSafe(self.inner.call(&cx, req))
-                    .catch_unwind()
-                    .await
+                match std::panic::catch_unwind(AssertUnwindSafe(|| self.inner.call(&cx, req))) {
+                    Ok(future) => {
+                        crate::util::future::catch_unwind(AssertUnwindSafe(future)).await
+                    }
+                    Err(payload) => Err(payload),
+                }
             } else {
                 Ok(self.inner.call(&cx, req).await)
             };
@@ -457,6 +458,18 @@ mod tests {
 
     fn panicking_handler() -> &'static str {
         panic!("test panic");
+    }
+
+    struct ConstructionPanicHandler;
+
+    impl Handler for ConstructionPanicHandler {
+        fn call(
+            &self,
+            _cx: &crate::Cx,
+            _req: Request,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+            panic!("construction panic");
+        }
     }
 
     fn not_found_handler() -> StatusCode {
@@ -725,6 +738,29 @@ mod tests {
         );
         let resp = mw.call(make_request());
         assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn error_handler_catches_construction_panic() {
+        let mw = ErrorHandlerMiddleware::new(
+            ConstructionPanicHandler,
+            ErrorHandlerConfig::default(),
+        );
+        let resp = mw.call(make_request());
+        assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn error_handler_disabled_propagates_construction_panic() {
+        let mw = ErrorHandlerMiddleware::new(
+            ConstructionPanicHandler,
+            ErrorHandlerConfig {
+                catch_panics: false,
+                ..ErrorHandlerConfig::default()
+            },
+        );
+        let panic = std::panic::catch_unwind(AssertUnwindSafe(|| mw.call(make_request())));
+        assert!(panic.is_err());
     }
 
     #[test]

@@ -99,7 +99,6 @@ use crate::http::compress::{
 pub use crate::service::Layer;
 use crate::tracing_compat::{debug, error, warn};
 use crate::types::Time;
-use futures_lite::FutureExt;
 
 use super::extract::Request;
 use super::handler::Handler;
@@ -1868,7 +1867,9 @@ impl<H: Handler> Handler for CatchPanicMiddleware<H> {
             // (br-asupersync-server-stack-hardening-eeexl1.3).
             let outcome =
                 match std::panic::catch_unwind(AssertUnwindSafe(|| self.inner.call(&cx, req))) {
-                    Ok(future) => AssertUnwindSafe(future).catch_unwind().await,
+                    Ok(future) => {
+                        crate::util::future::catch_unwind(AssertUnwindSafe(future)).await
+                    }
                     Err(payload) => Err(payload),
                 };
 

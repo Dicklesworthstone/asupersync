@@ -204,6 +204,62 @@ where
     }
 }
 
+/// Catches a panic raised while polling `future`.
+///
+/// The wrapper forwards the caller's Context unchanged and adds no allocation,
+/// executor, or lifetime bound. A normal ready value becomes `Ok`; a poll
+/// panic becomes the original boxed payload in `Err`. After either terminal
+/// result the inner future is never polled again. Dropping the wrapper still
+/// drops the inner future normally; a panic raised by that destructor is not
+/// part of this poll-only boundary.
+pub(crate) fn catch_unwind<F>(future: F) -> CatchUnwind<F>
+where
+    F: Future + std::panic::UnwindSafe,
+{
+    CatchUnwind {
+        inner: future,
+        completed: false,
+    }
+}
+
+/// Future returned by [`catch_unwind`].
+#[pin_project::pin_project]
+#[derive(Debug)]
+#[must_use = "futures do nothing unless polled or awaited"]
+pub(crate) struct CatchUnwind<F> {
+    #[pin]
+    inner: F,
+    completed: bool,
+}
+
+impl<F> Future for CatchUnwind<F>
+where
+    F: Future + std::panic::UnwindSafe,
+{
+    type Output = Result<F::Output, Box<dyn std::any::Any + Send>>;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut this = self.project();
+        if *this.completed {
+            return Poll::Pending;
+        }
+
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            this.inner.as_mut().poll(context)
+        })) {
+            Ok(Poll::Ready(output)) => {
+                *this.completed = true;
+                Poll::Ready(Ok(output))
+            }
+            Ok(Poll::Pending) => Poll::Pending,
+            Err(payload) => {
+                *this.completed = true;
+                Poll::Ready(Err(payload))
+            }
+        }
+    }
+}
+
 /// Reason the owned blocking kernel refused to poll a future.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BlockOnError {
@@ -616,6 +672,64 @@ mod tests {
         assert_eq!(pending_drops.get(), 1);
         assert_eq!(right_polls.get(), 1);
         assert_eq!(right_drops.get(), 1);
+    }
+
+    #[test]
+    fn catch_unwind_forwards_pending_wake_and_ready() {
+        let polls = Rc::new(Cell::new(0_usize));
+        let observed_polls = Rc::clone(&polls);
+        let future = poll_fn(move |context| {
+            let current = polls.get();
+            polls.set(current + 1);
+            if current == 0 {
+                context.waker().wake_by_ref();
+                Poll::Pending
+            } else {
+                Poll::Ready(71_u8)
+            }
+        });
+
+        let observed = block_on(catch_unwind(std::panic::AssertUnwindSafe(future)));
+        assert!(matches!(observed, Ok(71)));
+        assert_eq!(observed_polls.get(), 2);
+    }
+
+    #[test]
+    fn catch_unwind_preserves_payload_and_refuses_repoll() {
+        let polls = Rc::new(Cell::new(0_usize));
+        let observed_polls = Rc::clone(&polls);
+        let future = poll_fn(move |_| -> Poll<u8> {
+            polls.set(polls.get() + 1);
+            std::panic::panic_any(String::from("owned poll panic"));
+        });
+        let mut caught = std::pin::pin!(catch_unwind(std::panic::AssertUnwindSafe(future)));
+        let wake_state = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&wake_state));
+        let mut context = Context::from_waker(&waker);
+
+        let Poll::Ready(Err(payload)) = caught.as_mut().poll(&mut context) else {
+            panic!("poll panic must become a ready error");
+        };
+        assert_eq!(
+            payload.downcast_ref::<String>().map(String::as_str),
+            Some("owned poll panic")
+        );
+        assert!(caught.as_mut().poll(&mut context).is_pending());
+        assert_eq!(observed_polls.get(), 1);
+    }
+
+    #[test]
+    fn dropping_unpolled_catch_unwind_drops_inner() {
+        let polls = Rc::new(Cell::new(0_usize));
+        let drops = Rc::new(Cell::new(0_usize));
+        {
+            let _caught = catch_unwind(std::panic::AssertUnwindSafe(PendingDrop {
+                polls: Rc::clone(&polls),
+                drops: Rc::clone(&drops),
+            }));
+        }
+        assert_eq!(polls.get(), 0);
+        assert_eq!(drops.get(), 1);
     }
 
     #[test]
