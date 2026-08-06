@@ -261,9 +261,9 @@ impl Base64Engine {
             }
         }
 
-        let mut suffix_symbols = 0;
-        let mut suffix_padding = 0;
-        let mut first_padding_offset = 0;
+        let mut suffix_symbols = 0usize;
+        let mut suffix_padding = 0usize;
+        let mut first_padding_offset = 0usize;
         let mut last_symbol = 0;
         let mut last_symbol_value = 0;
         for (offset, &byte) in input[suffix_start..].iter().enumerate() {

@@ -1906,7 +1906,7 @@ fn expect_boolean(value: &Value, key: &str, expected: bool) -> Result<(), String
 }
 
 fn sha256_bytes(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn expect_exact_keys(value: &Value, expected: &[&str], label: &str) -> Result<(), String> {

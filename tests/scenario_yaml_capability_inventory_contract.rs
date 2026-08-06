@@ -3067,7 +3067,9 @@ fn a3_current_consumers_writers_bounds_and_keep_decision_are_source_bound() {
     let audit = inventory
         .get("a3_acceptance_satisfiability_audit")
         .expect("A3.1 audit");
-    let decision = object(audit, "satisfiability_decision");
+    let decision = audit
+        .get("satisfiability_decision")
+        .expect("satisfiability_decision must exist");
     assert_eq!(
         text(decision, "satisfiability"),
         "UNSATISFIABLE_UNDER_CURRENT_ACCEPTANCE"

@@ -193,7 +193,7 @@ fn parse_json(root: &Path, path: &str) -> Result<Value, String> {
 }
 
 fn sha256_bytes(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn sorted_newline_sha256(rows: impl IntoIterator<Item = String>) -> String {
@@ -206,7 +206,7 @@ fn sorted_newline_sha256(rows: impl IntoIterator<Item = String>) -> String {
         hasher.update(row.as_bytes());
         hasher.update(b"\n");
     }
-    format!("{hasher:x}")
+    hex::encode(hasher.finalize())
 }
 
 fn ordered_newline_sha256(rows: impl IntoIterator<Item = String>) -> String {
@@ -215,7 +215,7 @@ fn ordered_newline_sha256(rows: impl IntoIterator<Item = String>) -> String {
         hasher.update(row.as_bytes());
         hasher.update(b"\n");
     }
-    format!("{hasher:x}")
+    hex::encode(hasher.finalize())
 }
 
 fn canonicalize(value: &Value) -> Value {

@@ -238,7 +238,7 @@ fn load_inputs(root: &Path) -> Result<AuthorityInputs, String> {
 }
 
 fn sha256_bytes(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn sorted_newline_sha256(mut rows: Vec<String>) -> String {
@@ -249,7 +249,7 @@ fn sorted_newline_sha256(mut rows: Vec<String>) -> String {
         hasher.update(row.as_bytes());
         hasher.update(b"\n");
     }
-    format!("{hasher:x}")
+    hex::encode(hasher.finalize())
 }
 
 fn canonicalize(value: &Value) -> Value {

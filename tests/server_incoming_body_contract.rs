@@ -231,7 +231,7 @@ fn validate_identity_and_authority(inventory: &Value) -> Result<(), String> {
         "direct_follow_on_children",
         "no_claim_boundaries",
     ]);
-    let actual_keys = inventory
+    let actual_keys: BTreeSet<String> = inventory
         .as_object()
         .ok_or_else(|| "artifact root must be an object".to_owned())?
         .keys()

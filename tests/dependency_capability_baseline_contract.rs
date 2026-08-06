@@ -135,7 +135,7 @@ fn string_set(value: &Value, key: &str) -> BTreeSet<String> {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn count_occurrences(source: &str, token: &str) -> u64 {

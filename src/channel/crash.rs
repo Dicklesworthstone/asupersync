@@ -1230,7 +1230,7 @@ mod tests {
         let config = CrashConfig::new(42)
             .with_crash_after_sends(2)
             .with_restart_mode(RestartMode::Cold);
-        let (tx, mut rx, ctrl, _) = crash_channel::<u32>(
+        let (tx, mut rx, ctrl) = crash_channel::<u32>(
             1,
             config,
             Arc::new(CollectorSink::new()) as Arc<dyn EvidenceSink>,
