@@ -28,14 +28,14 @@ const ARTIFACT_ID: &str = "base64-capability-inventory-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const BEAD_ID: &str = "asupersync-d24mms.10.1";
 const CAPABILITY_ID: &str = "CAP-BASE64-CODEC";
-const AUTHORITY_REVISION: &str = "7bb939ab2d18c1c102671809cf74b922d2ed0437";
+const AUTHORITY_REVISION: &str = "470dab2839742dc36cbb1241ff219e1c8d2f451b";
 const DOC_BEGIN: &str = "<!-- BEGIN BASE64 CAPABILITY INVENTORY -->";
 const DOC_END: &str = "<!-- END BASE64 CAPABILITY INVENTORY -->";
 const PATH_TOKEN: &str = concat!("base", "64::");
 const SOURCE_PIN_PATHS_SHA256: &str =
-    "12dcbba4d979f2ded1f858c31a4a14108b219eced6698896059b181a039e3a55";
+    "996efa7ae8c2105ab6d8a059f8cafef646c323e1791e40895becc43f68157fe4";
 const CLAIMS_PROJECTION_SHA256: &str =
-    "125c6fab5148b957c7d119442ad8a752e84d29883b0efa630b32ba52119d620e";
+    "4a149d69cc66264b397e14ccc6e0a3bbbb329a3ac5ebea8a5aef79cc67e0677d";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -184,14 +184,17 @@ fn canonical_json_bytes(value: &Value) -> Vec<u8> {
 
 fn claims_projection(inventory: &Value) -> Value {
     serde_json::json!({
+        "capability_ids": inventory["capability_ids"].clone(),
         "authority": inventory["authority"].clone(),
         "policy": inventory["policy"].clone(),
+        "static_refresh_receipt": inventory["static_refresh_receipt"].clone(),
         "source_pin_scope": inventory["source_pin_scope"].clone(),
         "source_pins": inventory["source_pins"].clone(),
         "dependency_resolution": inventory["dependency_resolution"].clone(),
         "engines": inventory["engines"].clone(),
         "incumbent_api": inventory["incumbent_api"].clone(),
         "decode_error_contract": inventory["decode_error_contract"].clone(),
+        "semantic_vector_authority": inventory["semantic_vector_authority"].clone(),
         "semantic_corpus": inventory["semantic_corpus"].clone(),
         "call_compilation_profiles": inventory["call_compilation_profiles"].clone(),
         "occurrence_census": inventory["occurrence_census"].clone(),
@@ -233,6 +236,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         || text(inventory, "program_id") != PROGRAM_ID
         || text(inventory, "bead_id") != BEAD_ID
         || text(inventory, "capability_id") != CAPABILITY_ID
+        || text(inventory, "captured_date_utc") != "2026-08-06"
         || text(inventory, "authority_revision") != AUTHORITY_REVISION
     {
         return Err("inventory identity drifted".to_owned());
@@ -240,6 +244,11 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     if contains_unknown_value(inventory) {
         return Err("inventory contains an UNKNOWN value".to_owned());
     }
+    require_exact_strings(
+        inventory,
+        "capability_ids",
+        &["CAP-AUTH-CREDENTIALS", "CAP-BASE64-CODEC"],
+    )?;
 
     let policy = object(inventory, "policy");
     if policy.get("zero_unknown_required").and_then(Value::as_bool) != Some(true)
@@ -248,6 +257,49 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     {
         return Err("zero-UNKNOWN or A1 execution policy drifted".to_owned());
     }
+    let refresh = object(inventory, "static_refresh_receipt");
+    if refresh.get("previous_authority_revision").and_then(Value::as_str)
+        != Some("7bb939ab2d18c1c102671809cf74b922d2ed0437")
+        || refresh.get("current_authority_revision").and_then(Value::as_str)
+            != Some(AUTHORITY_REVISION)
+        || refresh.get("review_method").and_then(Value::as_str)
+            != Some("SOURCE_ONLY_NO_EXECUTION")
+        || refresh.get("direct_rust_census_state").and_then(Value::as_str)
+            != Some("UNCHANGED_36_PATHS_166_TOKENS")
+        || refresh.get("execution_state").and_then(Value::as_str) != Some("NOT_RUN_BY_A1")
+    {
+        return Err("static refresh receipt drifted".to_owned());
+    }
+    require_exact_strings(
+        &inventory["static_refresh_receipt"],
+        "changed_source_pin_paths",
+        &[
+            "artifacts/dependency_capability_baseline_v1.json",
+            "src/database/postgres.rs",
+            "src/grpc/server.rs",
+            "src/grpc/status.rs",
+            "src/grpc/web.rs",
+            "src/io/browser_storage.rs",
+            "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
+        ],
+    )?;
+    require_exact_strings(
+        &inventory["static_refresh_receipt"],
+        "added_source_pin_paths",
+        &[
+            ".gitignore",
+            "asupersync-wasm/Cargo.toml",
+            "asupersync-wasm/src/lib.rs",
+            "fuzz/create_postgres_scram_seeds.py",
+            "fuzz/create_tls_seeds.py",
+            "tests/wasm_service_worker_broker_contract.rs",
+        ],
+    )?;
+    require_exact_strings(
+        &inventory["static_refresh_receipt"],
+        "removed_nonrepository_pin_paths",
+        &["fuzz/Cargo.lock"],
+    )?;
     let authority = object(inventory, "authority");
     if authority.get("current_action").and_then(Value::as_str) != Some("KEEP_INCUMBENT")
         || authority.get("cutover_state").and_then(Value::as_str)
@@ -261,12 +313,17 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     }
 
     let source_scope = object(inventory, "source_pin_scope");
-    if source_scope.get("path_count").and_then(Value::as_u64) != Some(70)
+    if source_scope.get("path_count").and_then(Value::as_u64) != Some(75)
         || source_scope.get("paths_sha256").and_then(Value::as_str) != Some(SOURCE_PIN_PATHS_SHA256)
-        || array(inventory, "source_pins").len() != 70
+        || array(inventory, "source_pins").len() != 75
     {
         return Err("source-pin scope drifted".to_owned());
     }
+    require_exact_strings(
+        &inventory["source_pin_scope"],
+        "excluded_generated_paths",
+        &["asupersync-wasm/Cargo.lock", "fuzz/Cargo.lock"],
+    )?;
 
     let resolution = object(inventory, "dependency_resolution");
     if resolution["root"]["manifest_requirement"].as_str() != Some("0.23")
@@ -275,7 +332,28 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         || resolution["root_transitive_retained"]["resolved_version"].as_str() != Some("0.22.1")
         || resolution["root_transitive_retained"]["direct_0_23_edge_removal_effect"].as_str()
             != Some("DOES_NOT_REMOVE_ALL_BASE64_PACKAGES_FROM_ROOT_LOCKED_GRAPH")
-        || resolution["excluded_fuzz_workspace"]["resolved_version"].as_str() != Some("0.22.1")
+        || resolution["excluded_fuzz_workspace"]["repository_lock_state"].as_str()
+            != Some("ABSENT_IGNORED")
+        || resolution["excluded_fuzz_workspace"]["local_snapshot"]["state"].as_str()
+            != Some("OBSERVED_NOT_REPOSITORY_PINNED")
+        || resolution["excluded_fuzz_workspace"]["local_snapshot"]["resolved_version"].as_str()
+            != Some("0.22.1")
+        || resolution["excluded_wasm_scaffold"]["manifest_path_requirement"].as_str()
+            != Some("asupersync ^0.3.5")
+        || resolution["excluded_wasm_scaffold"]["current_path_package_version"].as_str()
+            != Some("0.3.10")
+        || resolution["excluded_wasm_scaffold"]["repository_lock_state"].as_str()
+            != Some("ABSENT_IGNORED")
+        || resolution["excluded_wasm_scaffold"]["local_snapshot"]["state"].as_str()
+            != Some("STALE_OBSERVED_NOT_REPOSITORY_PINNED")
+        || resolution["excluded_wasm_scaffold"]["local_snapshot"]["locked_asupersync_version"]
+            .as_str()
+            != Some("0.3.2")
+        || resolution["excluded_wasm_scaffold"]["local_snapshot"]["locked_base64_version"]
+            .as_str()
+            != Some("0.22.1")
+        || resolution["excluded_wasm_scaffold"]["scope"].as_str()
+            != Some("EXCLUDED_WORKSPACE_NOT_ROOT_PRODUCTION_GRAPH")
         || resolution["standalone_raptorq_workspace"]["resolved_version_state"].as_str()
             != Some("NOT_LOCKED_IN_REPOSITORY")
         || resolution["synthesized_consumer_profile_count"].as_u64() != Some(12)
@@ -375,6 +453,16 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     {
         return Err("upstream error exposure boundary drifted".to_owned());
     }
+    let vector_authority = object(inventory, "semantic_vector_authority");
+    if vector_authority.get("positive_vectors").and_then(Value::as_str)
+        != Some("RFC 4648 section 10")
+        || vector_authority
+            .get("independence_boundary")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        return Err("semantic vector authority drifted".to_owned());
+    }
 
     require_exact_ids(
         array(inventory, "call_compilation_profiles"),
@@ -392,10 +480,26 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             "B64-PROFILE-UNWIRED-SOURCE",
             "B64-PROFILE-STANDALONE-RAPTORQ",
             "B64-PROFILE-EXCLUDED-FUZZ",
+            "B64-PROFILE-EXCLUDED-WASM-SCAFFOLD",
             "B64-PROFILE-LOCAL-MOCK-OR-COMMENT",
         ],
         "compilation profiles",
     )?;
+    let excluded_wasm_profile = array(inventory, "call_compilation_profiles")
+        .iter()
+        .find(|row| {
+            row.get("profile_id").and_then(Value::as_str)
+                == Some("B64-PROFILE-EXCLUDED-WASM-SCAFFOLD")
+        })
+        .ok_or_else(|| "excluded wasm profile is missing".to_owned())?;
+    if excluded_wasm_profile.get("state").and_then(Value::as_str) != Some("PRESENT")
+        || excluded_wasm_profile
+            .get("profile_kind")
+            .and_then(Value::as_str)
+            != Some("DEPENDENCY_ONLY_NO_DIRECT_CALLS")
+    {
+        return Err("excluded wasm profile boundary drifted".to_owned());
+    }
 
     let call_sites = array(inventory, "call_sites");
     let expected_call_ids: Vec<String> = (1..=36)
@@ -454,6 +558,55 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     }
 
     let occurrence = object(inventory, "occurrence_census");
+    require_exact_strings(
+        &inventory["occurrence_census"],
+        "roots",
+        &[
+            "src",
+            "tests",
+            "fuzz",
+            "examples",
+            "benches",
+            "conformance",
+            "asupersync-wasm/src",
+        ],
+    )?;
+    require_exact_ids(
+        array(&inventory["occurrence_census"], "root_totals"),
+        "root",
+        &[
+            "src",
+            "tests",
+            "fuzz",
+            "examples",
+            "benches",
+            "conformance",
+            "asupersync-wasm/src",
+        ],
+        "literal census roots",
+    )?;
+    let expected_root_totals = BTreeMap::from([
+        ("src", (20, 89)),
+        ("tests", (9, 19)),
+        ("fuzz", (7, 58)),
+        ("examples", (0, 0)),
+        ("benches", (0, 0)),
+        ("conformance", (0, 0)),
+        ("asupersync-wasm/src", (0, 0)),
+    ]);
+    let actual_root_totals: BTreeMap<_, _> =
+        array(&inventory["occurrence_census"], "root_totals")
+            .iter()
+            .map(|row| {
+                (
+                    text(row, "root"),
+                    (number(row, "paths"), number(row, "literal_tokens")),
+                )
+            })
+            .collect();
+    if actual_root_totals != expected_root_totals {
+        return Err("literal census root totals drifted".to_owned());
+    }
     if occurrence.get("path_count").and_then(Value::as_u64) != Some(36)
         || occurrence
             .get("literal_token_count")
@@ -516,12 +669,53 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     {
         return Err("call site has an unregistered migration group".to_owned());
     }
+    let collisions = array(inventory, "manual_collision_surfaces");
+    if collisions
+        .iter()
+        .any(|row| !group_ids.contains(text(row, "group")))
+    {
+        return Err("collision has an unregistered migration group".to_owned());
+    }
+    let mut all_reserved_paths = BTreeSet::new();
+    for group in array(inventory, "migration_reservation_groups") {
+        let group_id = text(group, "group_id");
+        let expected_paths: BTreeSet<String> = call_sites
+            .iter()
+            .filter(|row| text(row, "group") == group_id)
+            .chain(
+                collisions
+                    .iter()
+                    .filter(|row| text(row, "group") == group_id),
+            )
+            .map(|row| text(row, "path").to_owned())
+            .collect();
+        if string_set(group, "reservation_paths") != expected_paths
+            || number(group, "reservation_path_count") != expected_paths.len() as u64
+        {
+            return Err(format!("reservation path union drifted for {group_id}"));
+        }
+        let mut projection = String::new();
+        for path in &expected_paths {
+            if !all_reserved_paths.insert(path.clone()) {
+                return Err(format!("reservation path {path} belongs to multiple groups"));
+            }
+            projection.push_str(path);
+            projection.push('\n');
+        }
+        if sha256_hex(projection.as_bytes()) != text(group, "reservation_paths_sha256") {
+            return Err(format!("reservation path digest drifted for {group_id}"));
+        }
+    }
+    if all_reserved_paths.len() != 44 {
+        return Err("reservation path union count drifted".to_owned());
+    }
 
     require_exact_ids(
         array(inventory, "public_surface"),
         "surface_id",
         &[
             "B64-PUBLIC-GRPC-WEB",
+            "B64-PROTOCOL-GRPC-SERVER-METADATA",
             "B64-PUBLIC-TLS-PIN",
             "B64-PUBLIC-HTTP-BASIC",
             "B64-PUBLIC-WEBSOCKET",
@@ -539,6 +733,74 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     {
         return Err("a public surface exposes the upstream error".to_owned());
     }
+    let consumers = array(&inventory["downstream_and_e2e"], "consumer_obligations");
+    require_exact_ids(
+        consumers,
+        "consumer_id",
+        &[
+            "B64-CONSUMER-GRPC-WEB",
+            "B64-CONSUMER-GRPC-SERVER-METADATA",
+            "B64-CONSUMER-TLS-PIN",
+            "B64-CONSUMER-HTTP-BASIC",
+            "B64-CONSUMER-WEBSOCKET",
+            "B64-CONSUMER-BROWSER-PERSISTENCE",
+            "B64-CONSUMER-RUNTIME-PROFILE",
+            "B64-CONSUMER-NATS-AUTH",
+            "B64-CONSUMER-POSTGRES-SCRAM",
+            "B64-CONSUMER-ATP-CLI",
+        ],
+        "downstream consumers",
+    )?;
+    let call_ids = row_ids(call_sites, "call_id");
+    let collision_ids = row_ids(collisions, "collision_id");
+    let capability_ids = string_set(inventory, "capability_ids");
+    let surface_ids = row_ids(array(inventory, "public_surface"), "surface_id");
+    let consumer_ids = row_ids(consumers, "consumer_id");
+    for surface in array(inventory, "public_surface") {
+        let surface_id = text(surface, "surface_id");
+        let consumer_id = text(surface, "consumer_id");
+        if !consumer_ids.contains(consumer_id)
+            || !profile_ids.contains(text(surface, "profile_id"))
+            || !group_ids.contains(text(surface, "group_id"))
+            || !string_set(surface, "call_ids").is_subset(&call_ids)
+            || !string_set(surface, "collision_ids").is_subset(&collision_ids)
+            || !string_set(surface, "capability_ids").is_subset(&capability_ids)
+        {
+            return Err(format!("public surface relation drifted for {surface_id}"));
+        }
+        let consumer = consumers
+            .iter()
+            .find(|row| text(row, "consumer_id") == consumer_id)
+            .ok_or_else(|| format!("consumer {consumer_id} is missing"))?;
+        if string_set(consumer, "surface_ids") != BTreeSet::from([surface_id.to_owned()])
+            || string_set(consumer, "call_ids") != string_set(surface, "call_ids")
+            || string_set(consumer, "collision_ids") != string_set(surface, "collision_ids")
+            || string_set(consumer, "capability_ids") != string_set(surface, "capability_ids")
+            || string_set(consumer, "profile_ids")
+                != BTreeSet::from([text(surface, "profile_id").to_owned()])
+            || string_set(consumer, "group_ids")
+                != BTreeSet::from([text(surface, "group_id").to_owned()])
+        {
+            return Err(format!("consumer relation drifted for {consumer_id}"));
+        }
+    }
+    for consumer in consumers {
+        let consumer_id = text(consumer, "consumer_id");
+        if text(consumer, "state") != "BLOCKED"
+            || !text(consumer, "implementation_owner").starts_with("asupersync-d24mms.10.")
+            || text(consumer, "evidence_owner") != "asupersync-d24mms.10.6"
+            || text(consumer, "scenario_id").is_empty()
+            || text(consumer, "evidence_boundary").is_empty()
+            || !string_set(consumer, "surface_ids").is_subset(&surface_ids)
+            || !string_set(consumer, "call_ids").is_subset(&call_ids)
+            || !string_set(consumer, "collision_ids").is_subset(&collision_ids)
+            || !string_set(consumer, "capability_ids").is_subset(&capability_ids)
+            || !string_set(consumer, "profile_ids").is_subset(&profile_ids)
+            || !string_set(consumer, "group_ids").is_subset(&group_ids)
+        {
+            return Err(format!("consumer obligation drifted for {consumer_id}"));
+        }
+    }
 
     require_exact_ids(
         array(inventory, "gaps"),
@@ -554,10 +816,14 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             "B64-GAP-BROWSER-HOST",
             "B64-GAP-HOST-COMMAND",
             "B64-GAP-VERSION-SKEW",
+            "B64-GAP-EXCLUDED-WASM-LOCK",
             "B64-GAP-ORPHAN-SOURCES",
             "B64-GAP-LOCAL-MOCKS",
             "B64-GAP-DEBUG-WS-KEY",
             "B64-GAP-URL-SAFE-PAD-ONLY-DECODE",
+            "B64-GAP-CALL-LEVEL-RELATIONS",
+            "B64-GAP-PROFILE-GATE-RELATIONS",
+            "B64-GAP-ERROR-ROLE-REGISTRY",
             "B64-GAP-A1-NOT-EXECUTED",
         ],
         "routed gaps",
@@ -579,6 +845,9 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             "B64-VEC-F",
             "B64-VEC-FO",
             "B64-VEC-FOO",
+            "B64-VEC-FOOB",
+            "B64-VEC-FOOBA",
+            "B64-VEC-FOOBAR",
             "B64-VEC-ALPHABET",
             "B64-ERR-WHITESPACE",
             "B64-ERR-MIXED-STANDARD",
@@ -590,6 +859,12 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         ],
         "semantic corpus",
     )?;
+    if array(inventory, "semantic_corpus")
+        .iter()
+        .any(|row| text(row, "provenance").is_empty())
+    {
+        return Err("semantic corpus provenance drifted".to_owned());
+    }
     require_exact_ids(
         array(inventory, "manual_collision_surfaces"),
         "collision_id",
@@ -601,11 +876,15 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             "B64-COLLISION-TLS-PIN-TEST",
             "B64-COLLISION-OTEL-MOCK",
             "B64-COLLISION-WEBSOCKET-MOCK",
+            "B64-COLLISION-POSTGRES-PYTHON-SEEDS",
+            "B64-COLLISION-TLS-PYTHON-SEEDS",
+            "B64-COLLISION-SERVICE-WORKER-NODE",
+            "B64-COLLISION-ATP-POWERSHELL",
         ],
         "manual collisions",
     )?;
-    if array(inventory, "semantic_corpus").len() != 12
-        || array(inventory, "manual_collision_surfaces").len() != 7
+    if array(inventory, "semantic_corpus").len() != 15
+        || array(inventory, "manual_collision_surfaces").len() != 11
         || array(inventory, "rollback_triggers").len() != 7
         || array(inventory, "no_claim_boundaries").len() != 7
     {
@@ -644,7 +923,15 @@ fn collect_rust_files(directory: &Path, output: &mut Vec<PathBuf>) {
 fn live_literal_census() -> BTreeMap<String, u64> {
     let root = repo_root();
     let mut files = Vec::new();
-    for directory in ["src", "tests", "fuzz", "examples", "benches", "conformance"] {
+    for directory in [
+        "src",
+        "tests",
+        "fuzz",
+        "examples",
+        "benches",
+        "conformance",
+        "asupersync-wasm/src",
+    ] {
         collect_rust_files(&root.join(directory), &mut files);
     }
     let mut census = BTreeMap::new();
@@ -680,7 +967,7 @@ fn identity_policy_engines_profiles_and_routed_gaps_are_exact() {
 fn source_pins_cover_every_claimed_path_and_match_bytes() {
     let inventory = artifact();
     let pins = array(&inventory, "source_pins");
-    assert_eq!(pins.len(), 70);
+    assert_eq!(pins.len(), 75);
 
     let mut pinned_paths = BTreeSet::new();
     for pin in pins {
@@ -764,6 +1051,7 @@ fn literal_path_token_census_and_reservation_digests_are_exact() {
 
 #[test]
 fn dependency_governance_sources_remain_blocking_and_version_skew_is_explicit() {
+    let inventory = artifact();
     let registry = parse_repo_json(REGISTRY_PATH);
     let registry_row = array(&registry, "capabilities")
         .iter()
@@ -782,6 +1070,19 @@ fn dependency_governance_sources_remain_blocking_and_version_skew_is_explicit() 
         registry_row["baseline"]["owner_bead"].as_str(),
         Some(BEAD_ID)
     );
+    let auth_registry_row = array(&registry, "capabilities")
+        .iter()
+        .find(|row| row.get("capability_id").and_then(Value::as_str) == Some("CAP-AUTH-CREDENTIALS"))
+        .expect("registry must contain the authentication capability");
+    assert_eq!(
+        text(auth_registry_row, "disposition"),
+        "PRESERVE_AND_REPLACE_IF_PARITY"
+    );
+    assert_eq!(text(auth_registry_row, "evidence_state"), "BASELINE_PLANNED");
+    assert_eq!(
+        text(auth_registry_row, "cutover_state"),
+        "BLOCKED_PENDING_EVIDENCE"
+    );
 
     let baseline = parse_repo_json(BASELINE_PATH);
     let baseline_row = array(&baseline, "capability_baselines")
@@ -797,6 +1098,59 @@ fn dependency_governance_sources_remain_blocking_and_version_skew_is_explicit() 
         baseline_row["downstream_profiles"],
         serde_json::json!(["consumer-default"])
     );
+    let auth_baseline_row = array(&baseline, "capability_baselines")
+        .iter()
+        .find(|row| row.get("capability_id").and_then(Value::as_str) == Some("CAP-AUTH-CREDENTIALS"))
+        .expect("baseline must contain the authentication capability");
+    assert_eq!(
+        text(auth_baseline_row, "baseline_state"),
+        "EXECUTABLE_PARTIAL_BLOCKING"
+    );
+    assert_eq!(auth_baseline_row["cutover_eligible"].as_bool(), Some(false));
+    assert_eq!(auth_baseline_row["downstream_profiles"], serde_json::json!([]));
+    require_exact_strings(
+        auth_baseline_row,
+        "evidence_ids",
+        &["EVD-AUTH-POLICY", "EVD-NKEY-SIGNED-PROFILE"],
+    )
+    .expect("authentication evidence IDs must remain exact");
+    require_exact_ids(
+        array(&inventory["downstream_and_e2e"], "capability_baselines"),
+        "capability_id",
+        &["CAP-AUTH-CREDENTIALS", "CAP-BASE64-CODEC"],
+        "inventory capability baselines",
+    )
+    .expect("inventory capability baselines must remain exact");
+    let evidence_ids = row_ids(array(&baseline, "evidence_catalog"), "evidence_id");
+    for row in array(&inventory["downstream_and_e2e"], "capability_baselines") {
+        let capability_id = text(row, "capability_id");
+        let authority_row = array(&baseline, "capability_baselines")
+            .iter()
+            .find(|candidate| text(candidate, "capability_id") == capability_id)
+            .expect("inventory capability baseline must have an authority row");
+        assert_eq!(
+            text(row, "baseline_state"),
+            text(authority_row, "baseline_state")
+        );
+        assert_eq!(
+            row["cutover_eligible"].as_bool(),
+            authority_row["cutover_eligible"].as_bool()
+        );
+        assert_eq!(
+            string_set(row, "evidence_ids"),
+            string_set(authority_row, "evidence_ids")
+        );
+        assert_eq!(
+            string_set(row, "downstream_profiles"),
+            string_set(authority_row, "downstream_profiles")
+        );
+    }
+    for consumer in array(&inventory["downstream_and_e2e"], "consumer_obligations") {
+        assert!(
+            string_set(consumer, "current_evidence_ids").is_subset(&evidence_ids),
+            "consumer evidence ID must exist in the baseline catalog"
+        );
+    }
 
     let matrix = parse_repo_json(MATRIX_PATH);
     let rows: Vec<_> = array(&matrix, "matrix")
@@ -921,6 +1275,14 @@ fn dependency_governance_sources_remain_blocking_and_version_skew_is_explicit() 
     assert_eq!(root_lock.matches(" \"base64 0.22.1\",").count(), 3);
     assert!(read_repo_file(FUZZ_MANIFEST_PATH).contains("base64 = \"0.22\""));
     assert!(read_repo_file(RAPTORQ_MANIFEST_PATH).contains("base64 = \"0.22\""));
+    let excluded_wasm_manifest = read_repo_file("asupersync-wasm/Cargo.toml");
+    assert!(excluded_wasm_manifest.contains(
+        "asupersync = { version = \"0.3.5\", path = \"..\", default-features = false }"
+    ));
+    assert!(
+        read_repo_file("asupersync-wasm/src/lib.rs")
+            .contains("Non-canonical Browser Edition binding scaffold.")
+    );
 }
 
 #[test]
@@ -931,6 +1293,13 @@ fn docs_ignore_and_no_claim_markers_remain_discoverable() {
     for needle in [
         "NOT_RUN_BY_A1",
         "36 Rust paths and 166 literal",
+        "75 tracked source hashes",
+        "request trailers",
+        "RFC 4648 section 10",
+        "asupersync-wasm",
+        "Structured downstream obligations",
+        "CAP-AUTH-CREDENTIALS",
+        "44 unique reservation paths",
         "23 | 20 | 43",
         "52 | 28 | 80",
         "B64-A3-AUTH",
@@ -949,6 +1318,11 @@ fn docs_ignore_and_no_claim_markers_remain_discoverable() {
         read_repo_file(IGNORE_PATH)
             .lines()
             .any(|line| line == "!artifacts/base64_capability_inventory_v1.json")
+    );
+    assert!(
+        read_repo_file(IGNORE_PATH)
+            .lines()
+            .any(|line| line == "Cargo.lock")
     );
 }
 
