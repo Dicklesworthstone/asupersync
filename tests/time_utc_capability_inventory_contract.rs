@@ -44,9 +44,9 @@ const LITERAL_OVERRIDE_PROJECTION_SHA256: &str =
 const ALIAS_CLASSIFICATION_PROJECTION_SHA256: &str =
     "867c7f39911b829635b5a28413179e8cc2d4156f0cfe2a1218fbb3f4819c5118";
 const ADDITIONAL_DERIVED_PROJECTION_SHA256: &str =
-    "b20b65d03be1995802d929275531ac96a8a66ec06c1c64f0bf887ee27803f674";
+    "1143d56f92afe1b3e151ff9e8578d1c5883480df3ccd548fd686d51883405d8f";
 const CROSS_FILE_CONSUMER_PROJECTION_SHA256: &str =
-    "cb308728a8fdc7ebda1d750165463b098325024f4d05f496148b40bb714396e1";
+    "d7b4020e22cb33af7d359836b80e0d66f20574d2b9fb29566ecae0691831ff99";
 const ROOT_CLI_REFRESH_REVISIONS: &[&str] = &[
     "fbbd4d065ae4768b84e4161a00d10e5acba04b39",
     "75778fbf0846be2d3bc965a2809a705aeb1dfe25",
@@ -524,8 +524,8 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
             != "RESOLVED_BY_STATIC_DIRECT_PER_USE_CLASSIFICATION"
         || text(resolved_derived, "state")
             != "RESOLVED_BY_STATIC_DECLARED_DERIVED_CLASSIFICATION"
-        || array(derived_gap, "newly_classified_consumer_categories").len() != 12
-        || string_set(derived_gap, "newly_classified_consumer_categories").len() != 12
+        || array(derived_gap, "newly_classified_consumer_categories").len() != 15
+        || string_set(derived_gap, "newly_classified_consumer_categories").len() != 15
         || array(derived_gap, "representative_unclassified_consumers").len() != 3
         || string_set(derived_gap, "representative_unclassified_consumers").len() != 3
         || text(derived_gap, "effect").is_empty()
@@ -547,6 +547,9 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
             "conformance report rendering and output",
             "conformance executable JSON serialization boundaries",
             "excluded-conformance executable JSON serialization boundary",
+            "main-conformance RaptorQ maintenance private-carrier constructors",
+            "main-conformance RaptorQ public pipeline constructors and history update",
+            "main-conformance RaptorQ report rendering and serialization",
             "real-E2E serialization, retention, return, and embedding boundaries",
             "root CLI generic JSON value serialization boundary",
             "standalone golden and reporting persistence paths",
@@ -557,7 +560,7 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
         derived_gap,
         "representative_unclassified_consumers",
         &[
-            "cross-file consumers beyond the twenty-three declared first semantic boundaries",
+            "cross-file consumers beyond the thirty-four declared first semantic boundaries",
             "external consumers not present in the repository snapshot",
             "second-order container and byte propagation beyond the first semantic boundary",
         ],
@@ -1193,6 +1196,9 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
             "TIME-CROSS-FILE-BENCHMARK-PUBLIC-CONSTRUCTOR",
             "TIME-CROSS-FILE-BENCHMARK-RESULT",
             "TIME-CROSS-FILE-CONFORMANCE-JSON",
+            "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-MAINTENANCE",
+            "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-CONSTRUCTOR",
+            "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-REPORT",
             "TIME-CROSS-FILE-EXCLUDED-CONFORMANCE-JSON",
             "TIME-CROSS-FILE-ROOT-CLI-JSON",
             "TIME-CROSS-FILE-STANDALONE-JSON",
@@ -2455,7 +2461,7 @@ fn validate_alias_sources(inventory: &Value) -> Result<(), String> {
 
 fn validate_source_pins(inventory: &Value) -> Result<(), String> {
     let pins = array(&inventory["source_snapshot"], "files");
-    if pins.len() != 72 {
+    if pins.len() != 74 {
         return Err("source pin count drifted".to_owned());
     }
     let mut paths = BTreeSet::new();

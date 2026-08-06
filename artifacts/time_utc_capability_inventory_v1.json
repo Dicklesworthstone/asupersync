@@ -47,7 +47,7 @@
   "source_snapshot": {
     "git_head": "1afde84d564bd8ea876459624116f90028b80835",
     "dirty_scope": "A1 paths were absent before this inventory. The literal-source census walks every Rust file under its five workspace roots, including untracked files; unmatched peer paths did not affect the frozen projection.",
-    "pin_scope": "Authority, manifests, public and persisted production owners, the generic CLI JSON output boundary, benchmark adapter/profile embeddings and public suite boundary, owned formatter/parser boundaries, database or messaging oracle owners, every direct Chrono alias-import source, test-profile fields, and excluded-conformance sources.",
+    "pin_scope": "Authority, manifests, public and persisted production owners, the generic CLI JSON output boundary, benchmark adapter/profile embeddings and public suite boundary, main-conformance RaptorQ reporting and maintenance consumers, owned formatter/parser boundaries, database or messaging oracle owners, every direct Chrono alias-import source, test-profile fields, and excluded-conformance sources.",
     "files": [
       {
         "path": "Cargo.toml",
@@ -143,6 +143,16 @@
         "path": "conformance/src/raptorq_rfc6330.rs",
         "sha256": "7ac7a315493c3f6319a71b0f3cfa27b0dc309a858f2cc8a0a3634be8600e4933",
         "line_count": 957
+      },
+      {
+        "path": "conformance/raptorq_rfc6330/reporting/bin/maintain_fixtures.rs",
+        "sha256": "137cecd6089b99b0ca6d733c5c14951466e814632fd031533456b5cf8c5b5c78",
+        "line_count": 524
+      },
+      {
+        "path": "conformance/raptorq_rfc6330/reporting/src/compliance_report.rs",
+        "sha256": "5f1b2c5427243361f20d5343c0f78743132bdc8322c1e0947eff1965a5750db2",
+        "line_count": 501
       },
       {
         "path": "conformance/raptorq_rfc6330/reporting/src/coverage_matrix.rs",
@@ -1178,19 +1188,19 @@
     "direct_alias_line_count": 32,
     "literal_alias_overlap_line_count": 1,
     "literal_or_alias_unique_line_count": 190,
-    "derived_operation_anchor_count": 46,
-    "classified_anchor_count": 259,
+    "derived_operation_anchor_count": 47,
+    "classified_anchor_count": 271,
     "literal_use_override_count": 36,
-    "additional_derived_operation_anchor_count": 38,
-    "cross_file_consumer_anchor_count": 23,
-    "cross_file_direct_source_anchor_count": 37,
-    "declared_consumer_unique_direct_source_anchor_count": 69,
+    "additional_derived_operation_anchor_count": 39,
+    "cross_file_consumer_anchor_count": 34,
+    "cross_file_direct_source_anchor_count": 41,
+    "declared_consumer_unique_direct_source_anchor_count": 72,
     "literal_operation_projection_sha256": "a533497be94a3a8c649a061117053acff88821c102e9cedbe16cb4da0b66990b",
     "literal_source_projection_sha256": "5c4020cfe41d10dbfcab19c64f3677ee78941c65441c12da93dc7e3cd6946f2d",
     "path_classification_projection_sha256": "5f60bb8b7deb36b1aac2123747fd1be426f1888fc759f46afe3baae103dc3b63",
     "literal_override_projection_sha256": "81f3549c7644361eabee937044ba098315b3aeffbd079d9c644eb1d60ccc3f84",
-    "additional_derived_projection_sha256": "b20b65d03be1995802d929275531ac96a8a66ec06c1c64f0bf887ee27803f674",
-    "cross_file_consumer_projection_sha256": "cb308728a8fdc7ebda1d750165463b098325024f4d05f496148b40bb714396e1",
+    "additional_derived_projection_sha256": "1143d56f92afe1b3e151ff9e8578d1c5883480df3ccd548fd686d51883405d8f",
+    "cross_file_consumer_projection_sha256": "d7b4020e22cb33af7d359836b80e0d66f20574d2b9fb29566ecae0691831ff99",
     "semantic_consumer_boundary": "Include nonliteral consumers through the first semantic compare, arithmetic, format, serialize, persist, retain, return, extract, or embed boundary in a Chrono-bearing source path; exclude cross-file propagation, external consumers, and later container or arbitrary-byte taint.",
     "cross_file_consumer_boundary": "Include the first explicit embedding, constructor, return, or statically generic JSON value serialization boundary in a different source file when a timestamp-bearing public carrier flows from a direct Chrono producer to a declared in-repository consumer; exclude later encoding or rendering calls, later container propagation, distinct file or standard-output sink anchors, dynamic dispatch, external consumers, and ambiguous provenance.",
     "derived_consumer_category_ids": [
@@ -1205,6 +1215,9 @@
       "TIME-CROSS-FILE-BENCHMARK-PUBLIC-CONSTRUCTOR",
       "TIME-CROSS-FILE-BENCHMARK-RESULT",
       "TIME-CROSS-FILE-CONFORMANCE-JSON",
+      "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-MAINTENANCE",
+      "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-CONSTRUCTOR",
+      "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-REPORT",
       "TIME-CROSS-FILE-EXCLUDED-CONFORMANCE-JSON",
       "TIME-CROSS-FILE-ROOT-CLI-JSON",
       "TIME-CROSS-FILE-STANDALONE-JSON"
@@ -2434,6 +2447,22 @@
         "persistence_or_public_association": "ConformanceRecord timestamp field"
       },
       {
+        "use_id": "TIME-DERIVED-CONFORMANCE-RAPTORQ-HISTORY-SERIALIZE-0077",
+        "derivation_sources": [
+          "conformance/raptorq_rfc6330/reporting/src/coverage_matrix.rs:229",
+          "conformance/raptorq_rfc6330/reporting/src/regression_detection.rs:64",
+          "conformance/raptorq_rfc6330/reporting/src/regression_detection.rs:84"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-CONFORMANCE-OUTPUT",
+        "path": "conformance/raptorq_rfc6330/reporting/src/regression_detection.rs",
+        "line": 77,
+        "source_anchor": "let contents = serde_json::to_string_pretty(self)?;",
+        "operation": "serialize the timestamp-bearing ConformanceHistory and its generated-at-derived ConformanceRecord entries before filesystem persistence",
+        "cfg_or_wiring": "PUBLIC_CONFORMANCE_LIBRARY_REEXPORT",
+        "exposure": "PUBLIC_SERDE_SCHEMA_AND_MAINTENANCE_OUTPUT",
+        "persistence_or_public_association": "ConformanceHistory JSON written by save_to_file"
+      },
+      {
         "use_id": "TIME-DERIVED-EXCLUDED-CONFORMANCE-PING-RENDER-0631",
         "derivation_sources": [
           "fuzz/conformance/src/h2_ping_rtt_measurement_conformance.rs:534",
@@ -2644,6 +2673,172 @@
         "cfg_or_wiring": "FEATURE_BENCHMARK_ADAPTERS",
         "exposure": "PUBLIC_FEATURE_GATED_SERDE_REPORT",
         "persistence_or_public_association": "BenchmarkSuite::run_benchmark public Result carries the report with baseline_results and atp_results"
+      },
+      {
+        "use_id": "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-MAINT-CONFIGURED-0164",
+        "derivation_sources": [
+          "conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs:44"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-MAINTENANCE",
+        "profile_id": "TIME-PROFILE-CONFORMANCE-MEMBER",
+        "path": "conformance/raptorq_rfc6330/reporting/bin/maintain_fixtures.rs",
+        "line": 164,
+        "source_anchor": "let mut version = ReferenceVersion::new(reference.name.clone(), fixture_directory);",
+        "operation": "construct a timestamp-bearing configured ReferenceVersion and retain it in the executable's private reference plan",
+        "cfg_or_wiring": "EXPLICIT_CARGO_BIN_WITH_PATH_INCLUDED_MODULE",
+        "exposure": "CONFORMANCE_EXECUTABLE_PRIVATE_CARRIER",
+        "persistence_or_public_association": "ReferencePlan.reference private carrier; last_updated has no executable sink"
+      },
+      {
+        "use_id": "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-MAINT-GOLDEN-0199",
+        "derivation_sources": [
+          "conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs:44"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-MAINTENANCE",
+        "profile_id": "TIME-PROFILE-CONFORMANCE-MEMBER",
+        "path": "conformance/raptorq_rfc6330/reporting/bin/maintain_fixtures.rs",
+        "line": 199,
+        "source_anchor": "let mut golden = ReferenceVersion::new(\"golden\".to_string(), golden_dir);",
+        "operation": "construct the timestamp-bearing golden ReferenceVersion and retain it in the executable's private reference catalog",
+        "cfg_or_wiring": "EXPLICIT_CARGO_BIN_WITH_PATH_INCLUDED_MODULE",
+        "exposure": "CONFORMANCE_EXECUTABLE_PRIVATE_CARRIER",
+        "persistence_or_public_association": "ReferencePlan.reference private carrier; last_updated has no executable sink"
+      },
+      {
+        "use_id": "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-MAINT-DIFFERENTIAL-0218",
+        "derivation_sources": [
+          "conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs:44"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-MAINTENANCE",
+        "profile_id": "TIME-PROFILE-CONFORMANCE-MEMBER",
+        "path": "conformance/raptorq_rfc6330/reporting/bin/maintain_fixtures.rs",
+        "line": 218,
+        "source_anchor": "let mut differential = ReferenceVersion::new(\"differential\".to_string(), differential_dir);",
+        "operation": "construct the timestamp-bearing differential ReferenceVersion and retain it in the executable's private reference catalog",
+        "cfg_or_wiring": "EXPLICIT_CARGO_BIN_WITH_PATH_INCLUDED_MODULE",
+        "exposure": "CONFORMANCE_EXECUTABLE_PRIVATE_CARRIER",
+        "persistence_or_public_association": "ReferencePlan.reference private carrier; last_updated has no executable sink"
+      },
+      {
+        "use_id": "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-HISTORY-CONSTRUCTOR-0039",
+        "derivation_sources": [
+          "conformance/raptorq_rfc6330/reporting/src/regression_detection.rs:64"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-CONSTRUCTOR",
+        "profile_id": "TIME-PROFILE-CONFORMANCE-MEMBER",
+        "path": "conformance/raptorq_rfc6330/reporting/src/mod.rs",
+        "line": 39,
+        "source_anchor": "let history = ConformanceHistory::new();",
+        "operation": "construct a timestamp-bearing ConformanceHistory for the default public reporting pipeline",
+        "cfg_or_wiring": "PUBLIC_CONFORMANCE_LIBRARY_REEXPORT",
+        "exposure": "PUBLIC_CONFORMANCE_REPORTING_PIPELINE",
+        "persistence_or_public_association": "ReportingPipeline regression detector history"
+      },
+      {
+        "use_id": "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-REPORT-MATRIX-0080",
+        "derivation_sources": [
+          "conformance/raptorq_rfc6330/reporting/src/coverage_matrix.rs:229"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-CONSTRUCTOR",
+        "profile_id": "TIME-PROFILE-CONFORMANCE-MEMBER",
+        "path": "conformance/raptorq_rfc6330/reporting/src/mod.rs",
+        "line": 80,
+        "source_anchor": "let matrix = CoverageMatrix::from_test_results(executions, implementation_version);",
+        "operation": "construct the timestamp-bearing CoverageMatrix for the public report-generation path",
+        "cfg_or_wiring": "PUBLIC_CONFORMANCE_LIBRARY_REEXPORT",
+        "exposure": "PUBLIC_CONFORMANCE_REPORTING_PIPELINE",
+        "persistence_or_public_association": "ReportingPipeline::generate_report carrier before format-specific output"
+      },
+      {
+        "use_id": "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-REGRESSION-MATRIX-0092",
+        "derivation_sources": [
+          "conformance/raptorq_rfc6330/reporting/src/coverage_matrix.rs:229"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-CONSTRUCTOR",
+        "profile_id": "TIME-PROFILE-CONFORMANCE-MEMBER",
+        "path": "conformance/raptorq_rfc6330/reporting/src/mod.rs",
+        "line": 92,
+        "source_anchor": "let matrix = CoverageMatrix::from_test_results(executions, implementation_version);",
+        "operation": "construct the timestamp-bearing CoverageMatrix for regression detection and history update",
+        "cfg_or_wiring": "PUBLIC_CONFORMANCE_LIBRARY_REEXPORT",
+        "exposure": "PUBLIC_CONFORMANCE_REPORTING_PIPELINE",
+        "persistence_or_public_association": "ReportingPipeline::check_regression carrier"
+      },
+      {
+        "use_id": "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-HISTORY-UPDATE-0100",
+        "derivation_sources": [
+          "conformance/raptorq_rfc6330/reporting/src/coverage_matrix.rs:229",
+          "conformance/raptorq_rfc6330/reporting/src/regression_detection.rs:84"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-CONSTRUCTOR",
+        "profile_id": "TIME-PROFILE-CONFORMANCE-MEMBER",
+        "path": "conformance/raptorq_rfc6330/reporting/src/mod.rs",
+        "line": 100,
+        "source_anchor": ".update_history(&matrix, commit_sha, branch);",
+        "operation": "copy the matrix timestamp into a ConformanceRecord and refresh the retained ConformanceHistory timestamp",
+        "cfg_or_wiring": "PUBLIC_CONFORMANCE_LIBRARY_REEXPORT",
+        "exposure": "PUBLIC_CONFORMANCE_REPORTING_PIPELINE",
+        "persistence_or_public_association": "ReportingPipeline retained regression history"
+      },
+      {
+        "use_id": "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-CI-MATRIX-0111",
+        "derivation_sources": [
+          "conformance/raptorq_rfc6330/reporting/src/coverage_matrix.rs:229"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-CONSTRUCTOR",
+        "profile_id": "TIME-PROFILE-CONFORMANCE-MEMBER",
+        "path": "conformance/raptorq_rfc6330/reporting/src/mod.rs",
+        "line": 111,
+        "source_anchor": "let matrix = CoverageMatrix::from_test_results(executions, implementation_version);",
+        "operation": "construct the timestamp-bearing CoverageMatrix before the public CI summary intentionally drops generated_at",
+        "cfg_or_wiring": "PUBLIC_CONFORMANCE_LIBRARY_REEXPORT",
+        "exposure": "PUBLIC_CONFORMANCE_REPORTING_PIPELINE",
+        "persistence_or_public_association": "ReportingPipeline::generate_ci_summary excludes the timestamp from its returned JSON value"
+      },
+      {
+        "use_id": "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-REPORT-MARKDOWN-0095",
+        "derivation_sources": [
+          "conformance/raptorq_rfc6330/reporting/src/coverage_matrix.rs:229"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-REPORT",
+        "profile_id": "TIME-PROFILE-CONFORMANCE-MEMBER",
+        "path": "conformance/raptorq_rfc6330/reporting/src/compliance_report.rs",
+        "line": 95,
+        "source_anchor": "report.push_str(&format!(\"**Generated:** {}\\n\", matrix.generated_at));",
+        "operation": "render CoverageMatrix.generated_at into the Markdown conformance report",
+        "cfg_or_wiring": "PUBLIC_CONFORMANCE_LIBRARY_REEXPORT",
+        "exposure": "PUBLIC_CONFORMANCE_REPORT_OUTPUT",
+        "persistence_or_public_association": "ComplianceReportGenerator Markdown return"
+      },
+      {
+        "use_id": "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-REPORT-JSON-0277",
+        "derivation_sources": [
+          "conformance/raptorq_rfc6330/reporting/src/coverage_matrix.rs:229"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-REPORT",
+        "profile_id": "TIME-PROFILE-CONFORMANCE-MEMBER",
+        "path": "conformance/raptorq_rfc6330/reporting/src/compliance_report.rs",
+        "line": 277,
+        "source_anchor": "serde_json::to_string_pretty(matrix).unwrap_or_else(|_| \"{}\".to_string())",
+        "operation": "serialize the timestamp-bearing CoverageMatrix into the JSON conformance report",
+        "cfg_or_wiring": "PUBLIC_CONFORMANCE_LIBRARY_REEXPORT",
+        "exposure": "PUBLIC_CONFORMANCE_REPORT_OUTPUT",
+        "persistence_or_public_association": "ComplianceReportGenerator JSON return"
+      },
+      {
+        "use_id": "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-REPORT-HTML-0298",
+        "derivation_sources": [
+          "conformance/raptorq_rfc6330/reporting/src/coverage_matrix.rs:229"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-REPORT",
+        "profile_id": "TIME-PROFILE-CONFORMANCE-MEMBER",
+        "path": "conformance/raptorq_rfc6330/reporting/src/compliance_report.rs",
+        "line": 298,
+        "source_anchor": "matrix.generated_at",
+        "operation": "render CoverageMatrix.generated_at into the HTML conformance report",
+        "cfg_or_wiring": "PUBLIC_CONFORMANCE_LIBRARY_REEXPORT",
+        "exposure": "PUBLIC_CONFORMANCE_REPORT_OUTPUT",
+        "persistence_or_public_association": "ComplianceReportGenerator HTML return"
       },
       {
         "use_id": "TIME-CROSS-FILE-CONFORMANCE-DATA-END-JSON-0098",
@@ -2895,7 +3090,7 @@
         "persistence_or_public_association": "MaintenanceResult.timestamp in maintenance_results.json"
       }
     ],
-    "no_claim": "The literal and direct-alias classification is complete, the declared in-file downstream rows are exact through the stated semantic boundary, and the twenty-three declared cross-file consumer rows are exact through their first stated boundaries. Other cross-file propagation, later encoding or rendering calls, later container propagation, later distinct sinks, external consumers, and later arbitrary-byte taint remain open. No profile resolution, compilation, execution, byte preservation, or behavioral evidence follows."
+    "no_claim": "The literal and direct-alias classification is complete, the declared in-file downstream rows are exact through the stated semantic boundary, and the thirty-four declared cross-file consumer rows are exact through their first stated boundaries. Other cross-file propagation, later encoding or rendering calls, later container propagation, later distinct sinks, external consumers, and later arbitrary-byte taint remain open. No profile resolution, compilation, execution, byte preservation, or behavioral evidence follows."
   },
   "alias_aware_chrono_uses": {
     "scope": "Bounded lexical inventory of every direct Chrono import binding, every line that directly references an imported Chrono symbol in the five census roots, and every adjacent derived temporal arithmetic, comparison, association, or ordering anchor discovered for those bindings.",
@@ -4862,7 +5057,7 @@
   "static_inventory_gaps": [
     {
       "gap_id": "TIME-STATIC-GAP-DERIVED-CONSUMER-CLASSIFICATION",
-      "summary": "All 159 literal Chrono lines, all 32 direct imported-symbol lines, eight imported-alias anchors, the declared in-file downstream consumers through the first semantic boundary, and twenty-three declared cross-file consumer boundaries have deterministic source-linked classifications. The root public DateTime carrier set is dispositioned through its first current in-repository boundary or an exact no-in-tree-producer state. Other cross-file propagation, external consumers, and second-order container or byte propagation remain outside this bounded static tranche.",
+      "summary": "All 159 literal Chrono lines, all 32 direct imported-symbol lines, eight imported-alias anchors, the declared in-file downstream consumers through the first semantic boundary, and thirty-four declared cross-file consumer boundaries have deterministic source-linked classifications. The root public DateTime carrier set and the main-conformance RaptorQ public reporting or private maintenance carrier slice are dispositioned through their declared first current in-repository boundaries or exact no-consumer states. Other cross-file propagation, external consumers, and second-order container or byte propagation remain outside this bounded static tranche.",
       "newly_classified_consumer_categories": [
         "CLI cutoff comparisons and optional-expiry moves",
         "PostgreSQL midnight construction and Kafka recency arithmetic",
@@ -4872,13 +5067,16 @@
         "root CLI generic JSON value serialization boundary",
         "benchmark adapter and profile result-environment embeddings",
         "benchmark suite report-constructor boundary",
+        "main-conformance RaptorQ maintenance private-carrier constructors",
+        "main-conformance RaptorQ public pipeline constructors and history update",
+        "main-conformance RaptorQ report rendering and serialization",
         "standalone golden and reporting persistence paths",
         "conformance executable JSON serialization boundaries",
         "excluded-conformance executable JSON serialization boundary",
         "standalone reporting executable JSON serialization boundaries"
       ],
       "representative_unclassified_consumers": [
-        "cross-file consumers beyond the twenty-three declared first semantic boundaries",
+        "cross-file consumers beyond the thirty-four declared first semantic boundaries",
         "external consumers not present in the repository snapshot",
         "second-order container and byte propagation beyond the first semantic boundary"
       ],
@@ -4901,7 +5099,7 @@
     },
     {
       "detail_id": "TIME-STATIC-RESOLVED-DECLARED-DERIVED-CONSUMERS",
-      "summary": "Thirty-eight declared in-file consumer anchors across six categories and twenty-three declared cross-file consumers across six categories are linked to 69 unique direct source anchors, source-matched, category-routed, and frozen through their stated boundaries. The wider remainder stays explicit in static_inventory_gaps.",
+      "summary": "Thirty-nine declared in-file consumer anchors across six categories and thirty-four declared cross-file consumers across nine categories are linked to 72 unique direct source anchors, source-matched, category-routed, and frozen through their stated boundaries. The wider remainder stays explicit in static_inventory_gaps.",
       "state": "RESOLVED_BY_STATIC_DECLARED_DERIVED_CLASSIFICATION",
       "owner_bead": "asupersync-5z2scg.6.1"
     }
@@ -5163,6 +5361,124 @@
     "required_disposition": "KEEP_OPEN",
     "no_claim_boundary": "This extension freezes the first current in-repository cross-file embedding or constructor boundary for the two benchmark DateTime carriers and dispositions all twelve root public DateTime fields as a declared first boundary or exact no-in-tree-producer state. It does not execute the benchmark feature, prove serialized bytes, enumerate second-order propagation, close the wider derived-consumer remainder, close A1, or authorize dependency exit."
   },
+  "post_a1_conformance_raptorq_lineage_extension": {
+    "extension_id": "TIME-A1-CONFORMANCE-RAPTORQ-LINEAGE-2026-08-06",
+    "captured_date_utc": "2026-08-06",
+    "extension_state": "STATIC_DECLARED_CONFORMANCE_RAPTORQ_CARRIER_LINEAGE_EXTENSION",
+    "source_pin_path_count": 74,
+    "added_source_pins": [
+      {
+        "path": "conformance/raptorq_rfc6330/reporting/bin/maintain_fixtures.rs",
+        "sha256": "137cecd6089b99b0ca6d733c5c14951466e814632fd031533456b5cf8c5b5c78",
+        "line_count": 524
+      },
+      {
+        "path": "conformance/raptorq_rfc6330/reporting/src/compliance_report.rs",
+        "sha256": "5f1b2c5427243361f20d5343c0f78743132bdc8322c1e0947eff1965a5750db2",
+        "line_count": 501
+      }
+    ],
+    "direct_producer_ids": [
+      "conformance/raptorq_rfc6330/reporting/src/coverage_matrix.rs:229",
+      "conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs:44",
+      "conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs:80",
+      "conformance/raptorq_rfc6330/reporting/src/regression_detection.rs:64",
+      "conformance/raptorq_rfc6330/reporting/src/regression_detection.rs:84"
+    ],
+    "derived_consumer_ids": [
+      "TIME-DERIVED-CONFORMANCE-RAPTORQ-HISTORY-FIELD-0039",
+      "TIME-DERIVED-CONFORMANCE-RAPTORQ-HISTORY-SERIALIZE-0077"
+    ],
+    "cross_file_consumer_ids": [
+      "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-MAINT-CONFIGURED-0164",
+      "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-MAINT-DIFFERENTIAL-0218",
+      "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-MAINT-GOLDEN-0199",
+      "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-CI-MATRIX-0111",
+      "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-HISTORY-CONSTRUCTOR-0039",
+      "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-HISTORY-UPDATE-0100",
+      "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-REGRESSION-MATRIX-0092",
+      "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-REPORT-MATRIX-0080",
+      "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-REPORT-HTML-0298",
+      "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-REPORT-JSON-0277",
+      "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-REPORT-MARKDOWN-0095"
+    ],
+    "main_conformance_raptorq_public_string_field_count": 4,
+    "direct_producer_anchor_count": 5,
+    "derived_carrier_field_count": 1,
+    "carrier_dispositions": [
+      {
+        "disposition_id": "TIME-CARRIER-DISPOSITION-RAPTORQ-REFERENCE-VERSION",
+        "field_ids": [
+          "TIME-PUB-CONFORMANCE-RAPTORQ-REFERENCE-UPDATED"
+        ],
+        "state": "PRIVATE_EXECUTABLE_CONSTRUCTORS_WITH_NO_TIMESTAMP_SINK_AND_NO_IN_TREE_UPDATE_CALLER",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-MAINT-CONFIGURED-0164",
+          "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-MAINT-DIFFERENTIAL-0218",
+          "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-MAINT-GOLDEN-0199"
+        ]
+      },
+      {
+        "disposition_id": "TIME-CARRIER-DISPOSITION-RAPTORQ-COVERAGE-MATRIX",
+        "field_ids": [
+          "TIME-PUB-CONFORMANCE-RAPTORQ-COVERAGE-GENERATED"
+        ],
+        "state": "PUBLIC_PIPELINE_REPORT_AND_HISTORY_BOUNDARIES_DECLARED",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-CI-MATRIX-0111",
+          "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-HISTORY-UPDATE-0100",
+          "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-REGRESSION-MATRIX-0092",
+          "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-REPORT-MATRIX-0080",
+          "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-REPORT-HTML-0298",
+          "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-REPORT-JSON-0277",
+          "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-REPORT-MARKDOWN-0095",
+          "TIME-DERIVED-CONFORMANCE-RAPTORQ-HISTORY-FIELD-0039",
+          "TIME-DERIVED-CONFORMANCE-RAPTORQ-HISTORY-SERIALIZE-0077"
+        ]
+      },
+      {
+        "disposition_id": "TIME-CARRIER-DISPOSITION-RAPTORQ-CONFORMANCE-RECORD",
+        "field_ids": [
+          "TIME-PUB-CONFORMANCE-RAPTORQ-RECORD-TIMESTAMP"
+        ],
+        "state": "DERIVED_FROM_COVERAGE_MATRIX_AND_PERSISTED_WITH_HISTORY",
+        "consumer_ids": [
+          "TIME-DERIVED-CONFORMANCE-RAPTORQ-HISTORY-FIELD-0039",
+          "TIME-DERIVED-CONFORMANCE-RAPTORQ-HISTORY-SERIALIZE-0077"
+        ]
+      },
+      {
+        "disposition_id": "TIME-CARRIER-DISPOSITION-RAPTORQ-CONFORMANCE-HISTORY",
+        "field_ids": [
+          "TIME-PUB-CONFORMANCE-RAPTORQ-HISTORY-UPDATED"
+        ],
+        "state": "PUBLIC_PIPELINE_CONSTRUCTION_UPDATE_AND_PERSISTENCE_DECLARED",
+        "consumer_ids": [
+          "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-HISTORY-CONSTRUCTOR-0039",
+          "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-HISTORY-UPDATE-0100",
+          "TIME-DERIVED-CONFORMANCE-RAPTORQ-HISTORY-SERIALIZE-0077"
+        ]
+      }
+    ],
+    "additional_derived_operation_anchor_count": 39,
+    "derived_operation_anchor_count": 47,
+    "cross_file_consumer_anchor_count": 34,
+    "cross_file_direct_source_anchor_count": 41,
+    "declared_consumer_unique_direct_source_anchor_count": 72,
+    "classified_anchor_count": 271,
+    "preservation": {
+      "production_source_changed": false,
+      "historical_a1_revision_changed": false,
+      "behavioral_gap_count_changed": false,
+      "time_acceptance_semantics_changed": false,
+      "static_remainder_closed": false,
+      "bead_close_allowed": false,
+      "dependency_exit_allowed": false
+    },
+    "execution_state": "NOT_RUN_STATIC_ONLY",
+    "required_disposition": "KEEP_OPEN",
+    "no_claim_boundary": "This extension freezes declared source lineage for four main-conformance RaptorQ timestamp-string fields through public pipeline construction and update, three report output branches, history serialization, or private maintenance construction with an explicit no-timestamp-sink state. It does not execute conformance tools, prove emitted or persisted bytes, prove readback, enumerate unit-fixture or second-order propagation, close the wider derived-consumer remainder, close A1, or authorize dependency exit."
+  },
   "validation": {
     "contract_path": "tests/time_utc_capability_inventory_contract.rs",
     "doc_path": "docs/time_utc_capability_inventory.md",
@@ -5176,6 +5492,9 @@
       "root CLI generic JSON value boundary source matching",
       "benchmark adapter and profile environment-embedding source matching",
       "benchmark suite report-constructor source matching",
+      "main-conformance RaptorQ pipeline and report source matching",
+      "main-conformance RaptorQ maintenance private-carrier source matching",
+      "main-conformance RaptorQ history serialization source matching",
       "derived and cross-file anchor source matching with direct-source lineage validation",
       "source file hashing",
       "manual cross-review"
