@@ -11,7 +11,9 @@ colliding Base64 surfaces for `CAP-BASE64-CODEC` and
 The disposition remains **KEEP_INCUMBENT** and dependency cutover remains
 `BLOCKED_PENDING_EVIDENCE`. A1 is a static inventory: its execution state is
 `NOT_RUN_BY_A1`. It authorizes no implementation, migration, manifest edit,
-dependency removal, release claim, or tracker closure.
+dependency removal, release claim, or downstream implementation/cutover
+closure. A1 itself may close only when this static inventory satisfies its
+exact relation acceptance criteria.
 
 The 2026-08-06 source-only refresh preserves the exact direct Rust census at
 36 paths and 166 literal tokens. It refreshes seven changed source pins, adds
@@ -182,14 +184,14 @@ profile, NATS, PostgreSQL, TLS, or deterministic-test boundary. No row exposes
 the upstream codec error type.
 
 That first tranche was a source-only checkpoint, not a completed A1 matrix.
-The A4 checkpoint below advances the matrix; the corresponding A1 gaps remain
-`BLOCKED` until every tranche and relation is complete.
+The A4 checkpoint below advanced the matrix, and the A5 completion section
+records the final static relation state.
 
 ### A4 per-operation checkpoint
 
-The second bounded tranche adds all 33 `B64-A4-WEB-GRPC` expressions. The
-machine artifact therefore records 55 of 123 external call expressions, with
-68 A5 expressions remaining.
+The second bounded tranche added all 33 `B64-A4-WEB-GRPC` expressions. At that
+checkpoint the machine artifact recorded 55 of 123 external call expressions,
+with 68 A5 expressions remaining.
 
 | A4 call | Production encode/decode | Nonproduction encode/decode | Recorded operations |
 | --- | ---: | ---: | ---: |
@@ -215,9 +217,41 @@ it does not bound HPACK or header-list allocation. The debug WebSocket encode
 row likewise records that it hashes the trimmed key without locally decoding
 or enforcing the public 16-byte key requirement.
 
-This remains source-only evidence. The remaining A5 operation rows, exact
-profile gates, and stable role/error references on collision and consumer
-records keep A1 `in_progress`.
+This remains source-only evidence. A5 completes the static relations below; it
+does not retroactively turn A3 or A4 into executed evidence.
+
+### A5 per-operation and relation completion
+
+The final tranche records all 68 `B64-A5-REMAINING` expressions. Together the
+three reservation groups now account for all 123 external operations at unique
+source locations: production 23 encode / 20 decode and nonproduction 52 encode
+/ 28 decode.
+
+| A5 surface family | Production encode/decode | Nonproduction encode/decode | Recorded operations |
+| --- | ---: | ---: | ---: |
+| excluded fuzz targets (`CALL-001` through `CALL-007`) | 0 / 0 | 24 / 17 | 41 |
+| ATP CLI (`CALL-008`) | 3 / 1 | 1 / 1 | 6 |
+| legacy database fixtures (`CALL-010/011`) | 0 / 0 | 2 / 0 | 2 |
+| H3 and unwired WebSocket sources (`CALL-020/022/023`) | 0 / 0 | 4 / 2 | 6 |
+| unwired H2C settings (`CALL-028`) | 0 / 0 | 0 / 1 | 1 |
+| standalone RaptorQ fixtures (`CALL-029`) | 0 / 0 | 2 / 2 | 4 |
+| root conformance/golden/perf fixtures (`CALL-030/031/033/034/035/036`) | 0 / 0 | 7 / 1 | 8 |
+| **A5 total** | **3 / 1** | **40 / 24** | **68** |
+
+`CALL-019`, `CALL-021`, and `CALL-032` remain explicit zero-operation rows:
+two hand-written local helpers and one comment-only source. They are linked to
+`B64-CONSUMER-EXCLUDED-LOCAL-HELPERS`; no synthetic codec call was invented.
+
+The completed registry contains 43 stable roles and 20 owned error mappings.
+Every operation references one registered role and error, and every manual or
+cross-runtime collision plus all 10 public and 17 explicit nonpublic consumer
+records carry stable role/error references. The 14 profile-gate contracts pin
+manifest/workspace boundary, target, Cargo feature, Rust cfg semantics,
+consumers, groups, and no-claim text. Their call IDs partition all 36 call rows
+exactly once; the excluded wasm scaffold is the sole dependency-only zero-call
+profile. A parallel 14-row profile-baseline relation joins each profile to its
+exact capability and partial evidence-ID set without promoting that baseline
+to execution proof.
 
 Two paths named `base64` are local modules, not the dependency:
 
@@ -261,12 +295,12 @@ below is partial rather than terminal journey proof.
 | --- | --- | --- | --- |
 | gRPC-Web | `CALL-014` | `EVD-CONSUMER-DEFAULT`, `EVD-BASE64-PROTOCOL` | A4 / A6 |
 | native gRPC metadata | `CALL-012` | none | A4 / A6 |
-| TLS pins | `CALL-025` | none | A3 / A6 |
+| TLS pins | `CALL-025`, `COLLISION-TLS-PIN-TEST` | none | A3 / A6 |
 | HTTP Basic | `CALL-015`, `COLLISION-HTTP-REQUEST` | none | A4 / A6 |
 | WebSocket | `CALL-018/026/027` | none | A4 / A6 |
-| browser persistence | `CALL-016`, `COLLISION-BROWSER-TS` | none | A4 / A6 |
+| browser persistence | `CALL-016`, `COLLISION-BROWSER-TS/SERVICE-WORKER-NODE` | none | A4 / A6 |
 | signed runtime profile | `CALL-024` | `EVD-NKEY-SIGNED-PROFILE` | A3 / A6 |
-| NATS authentication | `CALL-017` | `EVD-NKEY-SIGNED-PROFILE` | A3 / A6 |
+| NATS authentication | `CALL-017`, `COLLISION-JETSTREAM-TEST` | `EVD-NKEY-SIGNED-PROFILE` | A3 / A6 |
 | PostgreSQL SCRAM | `CALL-009` | `EVD-AUTH-POLICY` | A3 / A6 |
 | ATP CLI transport | `CALL-008`, `COLLISION-ATP-POWERSHELL` | none | A5 / A6 |
 
@@ -277,7 +311,8 @@ cutover receipt.
 
 ## Compilation profiles
 
-The inventory assigns every call path to one of these explicit profiles:
+The inventory assigns every call path to one of these explicit profiles and
+freezes a machine-readable gate contract for each:
 
 - portable library;
 - native messaging;
@@ -294,6 +329,14 @@ The inventory assigns every call path to one of these explicit profiles:
 - dependency-only excluded non-canonical wasm scaffold compilation gate, with
   no direct call path, an absent ignored lock, and a stale local snapshot;
 - local mock or comment-only text.
+
+The 36 call IDs appear exactly once across the profile contracts. Each contract
+names its manifest or workspace boundary, target and feature admission, Rust
+cfg relationship, consumers, reservation groups, static state, and no-claim
+boundary. The excluded wasm scaffold has an empty call set by design.
+Each profile also has one exact baseline relation: `CAP-BASE64-CODEC` and,
+where credential consumers apply, `CAP-AUTH-CREDENTIALS`, with the existing
+`EXECUTABLE_PARTIAL_BLOCKING` evidence IDs and an explicit scope boundary.
 
 Unwired sources remain inventory obligations. They do not become executed or
 compiled evidence merely because they are source-pinned. One unwired legacy
@@ -353,12 +396,11 @@ separate from the unchanged 36-path direct Rust dependency census.
 
 The machine artifact routes every observed gap; none is left unowned:
 
-- A1: the current 36 path rows aggregate 123 external expressions. The A3/A4
-  checkpoints record 55 exact operation rows with registered roles/errors and
-  an explicit nonpublic relation for the private gRPC status snapshot. The
-  remaining 68 A5 operations, stable collision/consumer role-error references,
-  and exact manifest/feature/target/cfg profile gates are still owned here.
-  This checkpoint is not acceptance-complete.
+- A1: the current 36 call rows aggregate 123 external expressions. All three
+  tranches now have exact operation rows, the three zero-operation rows remain
+  explicit, all collision/consumer role-error references resolve, and the 14
+  manifest/feature/target/cfg profile contracts partition the calls. The A1
+  static relation gaps are resolved; execution remains outside A1.
 - A2: checked global sizing/allocation policy and the explicit no-constant-time
   boundary.
 - A3: credential/certificate migration and the URL-safe padded decode-only
@@ -380,11 +422,12 @@ those rows.
 ## Static contract and no-claim boundary
 
 `tests/base64_capability_inventory_contract.rs` is a fail-closed static
-contract for artifact structure, zero `UNKNOWN` values, 75 tracked source hashes and
-line counts, the literal census, call totals, engine/profile/group ownership,
-governance-source state, documentation markers, and the `.gitignore`
-exception. It deliberately performs no external process, network, timing, or
-environment-dependent work.
+contract for artifact structure, zero `UNKNOWN` values, 75 tracked source hashes
+and line counts, the literal census, all 123 operation semantics, exact
+call totals, engine/profile/group ownership, role/error/consumer/collision
+closure, the 14 profile-gate relations, governance-source state,
+documentation markers, and the `.gitignore` exception. It deliberately
+performs no external process, network, timing, or environment-dependent work.
 
 For this A1 tranche, that contract was written but **not executed**. Static
 JSON parsing, digest recomputation, literal recounting, and Git diff checks are
@@ -393,10 +436,12 @@ not behavioral execution evidence.
 This packet does not prove compilation, runtime correctness, protocol or
 authentication security, certificate or framing security, constant-time
 behavior, bounded memory, denial-of-service resistance, throughput, wasm
-parity, cross-version parity, release readiness, tracker closure, or permission
-to remove the dependency. Browser, Python, Node, shell, and .NET host codecs
-are collision surfaces rather than independent parity receipts. Only A6 may
-attach independently reproduced journey evidence and evaluate cutover
-eligibility.
+parity, cross-version parity, release readiness, downstream tracker closure, or
+permission to remove the dependency. That tracker boundary applies to
+downstream implementation and cutover beads; it does not prevent A1 from
+closing once its static acceptance criteria are met. Browser, Python, Node,
+shell, and .NET host codecs are collision surfaces rather than independent
+parity receipts. Only A6 may attach independently reproduced journey evidence
+and evaluate cutover eligibility.
 
 <!-- END BASE64 CAPABILITY INVENTORY -->

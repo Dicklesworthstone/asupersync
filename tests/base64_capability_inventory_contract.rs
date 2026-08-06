@@ -35,9 +35,9 @@ const PATH_TOKEN: &str = concat!("base", "64::");
 const SOURCE_PIN_PATHS_SHA256: &str =
     "996efa7ae8c2105ab6d8a059f8cafef646c323e1791e40895becc43f68157fe4";
 const RECORDED_OPERATION_SEMANTICS_SHA256: &str =
-    "0ca447b568ddc5e5a0965d7c1161a8dc785794704ce5acb44d2a118853690e16";
+    "bddb32296014409a7237fb9cd68ebc94a4eb538ca47fbaa22a6d4aa2b0217b5d";
 const CLAIMS_PROJECTION_SHA256: &str =
-    "eae3fe6edc7fb5774de4fc490d305bb764b68af5c8765943408ee1dd27a7d1e9";
+    "067fce80f3a0289e540f0e0847aba0c64786a4657fc9d8fd9fabc0952f8e1610";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -204,6 +204,8 @@ fn claims_projection(inventory: &Value) -> Value {
         "semantic_vector_authority": inventory["semantic_vector_authority"].clone(),
         "semantic_corpus": inventory["semantic_corpus"].clone(),
         "call_compilation_profiles": inventory["call_compilation_profiles"].clone(),
+        "profile_gate_contracts": inventory["profile_gate_contracts"].clone(),
+        "profile_baseline_relations": inventory["profile_baseline_relations"].clone(),
         "occurrence_census": inventory["occurrence_census"].clone(),
         "call_sites": inventory["call_sites"].clone(),
         "migration_reservation_groups": inventory["migration_reservation_groups"].clone(),
@@ -497,6 +499,20 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             "B64-ROLE-GRPC-WEB-TEXT-WHOLE",
             "B64-ROLE-GRPC-WEB-TEXT-STREAM",
             "B64-ROLE-GRPC-WEB-TEST-FIXTURE",
+            "B64-ROLE-GRPC-FUZZ-BOUNDARY",
+            "B64-ROLE-NATS-FUZZ-JWT",
+            "B64-ROLE-POSTGRES-SCRAM-FUZZ",
+            "B64-ROLE-POSTGRES-FOUR-ENGINE-ORACLE",
+            "B64-ROLE-TLS-FUZZ-PEM",
+            "B64-ROLE-ATP-DELTA-MANIFEST",
+            "B64-ROLE-ATP-POWERSHELL-TRANSPORT",
+            "B64-ROLE-DATABASE-LEGACY-SCRAM-FIXTURE",
+            "B64-ROLE-H2C-SETTINGS-HEADER",
+            "B64-ROLE-RAPTORQ-PERSISTED-FIXTURE",
+            "B64-ROLE-TLS-PIN-TEST-BOUNDARY",
+            "B64-ROLE-GRPC-CONFORMANCE-FIXTURE",
+            "B64-ROLE-PERF-COMMAND-FIXTURE",
+            "B64-ROLE-EXCLUDED-LOCAL-HELPER",
         ],
         "recorded operation security roles",
     )?;
@@ -532,6 +548,12 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             "B64-ERROR-GRPC-SERVER-FALLBACK-SUPPRESSED",
             "B64-ERROR-GRPC-SERVER-INVALID-METADATA",
             "B64-ERROR-GRPC-WEB-PROTOCOL",
+            "B64-ERROR-FUZZ-DIAGNOSTIC",
+            "B64-ERROR-FUZZ-POSTGRES-STRING",
+            "B64-ERROR-ATP-CLI-STRING",
+            "B64-ERROR-H3-WEBSOCKET-FIXTURE",
+            "B64-ERROR-H2C-CONFORMANCE-STRING",
+            "B64-ERROR-RAPTORQ-FIXTURE",
         ],
         "recorded operation owned error mappings",
     )?;
@@ -901,14 +923,32 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     require_exact_ids(
         nonpublic_consumers,
         "consumer_id",
-        &["B64-CONSUMER-GRPC-STATUS-SNAPSHOT"],
+        &[
+            "B64-CONSUMER-GRPC-STATUS-SNAPSHOT",
+            "B64-CONSUMER-GRPC-FUZZ",
+            "B64-CONSUMER-NATS-FUZZ",
+            "B64-CONSUMER-POSTGRES-SCRAM-FUZZ",
+            "B64-CONSUMER-TLS-X509-FUZZ",
+            "B64-CONSUMER-WEBSOCKET-FUZZ",
+            "B64-CONSUMER-DATABASE-LEGACY-FIXTURES",
+            "B64-CONSUMER-WEBSOCKET-E2E-FIXTURES",
+            "B64-CONSUMER-H2C-CONFORMANCE",
+            "B64-CONSUMER-RAPTORQ-FIXTURES",
+            "B64-CONSUMER-TLS-CONFORMANCE",
+            "B64-CONSUMER-WEBSOCKET-CONFORMANCE",
+            "B64-CONSUMER-GRPC-STATUS-GOLDEN",
+            "B64-CONSUMER-GRPC-TRAILERS-CONFORMANCE",
+            "B64-CONSUMER-GRPC-WEB-AUDIT",
+            "B64-CONSUMER-PERF-COMMAND-FIXTURE",
+            "B64-CONSUMER-EXCLUDED-LOCAL-HELPERS",
+        ],
         "nonpublic consumer relations",
     )?;
     for consumer in nonpublic_consumers {
         let consumer_id = text(consumer, "consumer_id");
-        if text(consumer, "classification") != "NONPUBLIC_TEST_FIXTURE"
+        if !text(consumer, "classification").starts_with("NONPUBLIC_")
             || text(consumer, "state") != "STATIC_RELATION_ONLY"
-            || text(consumer, "implementation_owner") != "asupersync-d24mms.10.4"
+            || !text(consumer, "implementation_owner").starts_with("asupersync-d24mms.10.")
             || text(consumer, "relation_boundary").is_empty()
             || !string_set(consumer, "call_ids").is_subset(&call_ids)
             || !string_set(consumer, "capability_ids").is_subset(&capability_ids)
@@ -929,8 +969,99 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         .cloned()
         .collect();
 
+    let profile_gates = array(inventory, "profile_gate_contracts");
+    if profile_gates.len() != 14 || row_ids(profile_gates, "profile_id") != profile_ids {
+        return Err("profile-gate contract ID closure drifted".to_owned());
+    }
+    let mut gated_call_ids = BTreeSet::new();
+    for gate in profile_gates {
+        let profile_id = text(gate, "profile_id");
+        if text(gate, "manifest_path").is_empty()
+            || text(gate, "workspace_relation").is_empty()
+            || text(gate, "target_gate").is_empty()
+            || text(gate, "feature_gate").is_empty()
+            || text(gate, "rust_cfg_gate").is_empty()
+            || text(gate, "state").is_empty()
+            || text(gate, "no_claim").is_empty()
+            || !string_set(gate, "consumer_ids").is_subset(&operation_consumer_ids)
+            || !string_set(gate, "group_ids").is_subset(&group_ids)
+        {
+            return Err(format!("profile gate {profile_id} is incomplete"));
+        }
+        for call_id in string_set(gate, "call_ids") {
+            if !call_ids.contains(&call_id) || !gated_call_ids.insert(call_id.clone()) {
+                return Err(format!("profile gate {profile_id} call partition drifted"));
+            }
+            let call = call_sites
+                .iter()
+                .find(|row| text(row, "call_id") == call_id.as_str())
+                .expect("gated call must exist");
+            if text(call, "profile") != profile_id {
+                return Err(format!("profile gate {profile_id} call profile drifted"));
+            }
+        }
+    }
+    if gated_call_ids != call_ids {
+        return Err("profile gates do not partition every call exactly once".to_owned());
+    }
+    let wasm_gate = profile_gates
+        .iter()
+        .find(|gate| text(gate, "profile_id") == "B64-PROFILE-EXCLUDED-WASM-SCAFFOLD")
+        .expect("excluded wasm profile gate must exist");
+    if text(wasm_gate, "state") != "DEPENDENCY_ONLY_NO_DIRECT_CALLS"
+        || !array(wasm_gate, "call_ids").is_empty()
+        || !array(wasm_gate, "consumer_ids").is_empty()
+        || !array(wasm_gate, "group_ids").is_empty()
+    {
+        return Err("excluded wasm zero-call profile gate drifted".to_owned());
+    }
+    let profile_baselines = array(inventory, "profile_baseline_relations");
+    if profile_baselines.len() != 14 || row_ids(profile_baselines, "profile_id") != profile_ids {
+        return Err("profile baseline relation ID closure drifted".to_owned());
+    }
+    for baseline in profile_baselines {
+        let profile_id = text(baseline, "profile_id");
+        let baseline_capabilities = string_set(baseline, "capability_ids");
+        let mut expected_capabilities = BTreeSet::new();
+        let gate = profile_gates
+            .iter()
+            .find(|gate| text(gate, "profile_id") == profile_id)
+            .expect("profile baseline gate must exist");
+        for consumer_id in string_set(gate, "consumer_ids") {
+            let consumer = consumers
+                .iter()
+                .chain(nonpublic_consumers.iter())
+                .find(|row| text(row, "consumer_id") == consumer_id)
+                .expect("profile baseline consumer must exist");
+            expected_capabilities.extend(string_set(consumer, "capability_ids"));
+        }
+        if profile_id == "B64-PROFILE-EXCLUDED-WASM-SCAFFOLD" {
+            expected_capabilities.insert("CAP-BASE64-CODEC".to_owned());
+        }
+        let expected_evidence_ids = if expected_capabilities.contains("CAP-AUTH-CREDENTIALS") {
+            BTreeSet::from([
+                "EVD-AUTH-POLICY".to_owned(),
+                "EVD-BASE64-PROTOCOL".to_owned(),
+                "EVD-CONSUMER-DEFAULT".to_owned(),
+                "EVD-NKEY-SIGNED-PROFILE".to_owned(),
+            ])
+        } else {
+            BTreeSet::from([
+                "EVD-BASE64-PROTOCOL".to_owned(),
+                "EVD-CONSUMER-DEFAULT".to_owned(),
+            ])
+        };
+        if baseline_capabilities != expected_capabilities
+            || text(baseline, "baseline_state") != "EXECUTABLE_PARTIAL_BLOCKING"
+            || string_set(baseline, "evidence_ids") != expected_evidence_ids
+            || text(baseline, "relation_boundary").is_empty()
+        {
+            return Err(format!("profile baseline {profile_id} relation drifted"));
+        }
+    }
+
     let operation_progress = object(inventory, "operation_matrix_progress");
-    if operation_progress.get("state").and_then(Value::as_str) != Some("A3_A4_RECORDED_A5_PENDING")
+    if operation_progress.get("state").and_then(Value::as_str) != Some("ALL_GROUPS_RECORDED")
         || operation_progress
             .get("external_operation_total")
             .and_then(Value::as_u64)
@@ -938,11 +1069,11 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         || operation_progress
             .get("recorded_operation_total")
             .and_then(Value::as_u64)
-            != Some(55)
+            != Some(123)
         || operation_progress
             .get("remaining_operation_total")
             .and_then(Value::as_u64)
-            != Some(68)
+            != Some(0)
         || text(&inventory["operation_matrix_progress"], "count_semantics").is_empty()
     {
         return Err("operation-matrix progress drifted".to_owned());
@@ -950,17 +1081,25 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     require_exact_strings(
         &inventory["operation_matrix_progress"],
         "recorded_group_ids",
-        &["B64-A3-AUTH", "B64-A4-WEB-GRPC"],
+        &["B64-A3-AUTH", "B64-A4-WEB-GRPC", "B64-A5-REMAINING"],
     )?;
     require_exact_strings(
         &inventory["operation_matrix_progress"],
         "remaining_group_ids",
-        &["B64-A5-REMAINING"],
+        &[],
     )?;
 
     let operations = array(inventory, "operation_contracts");
+    if operations.len() != 123 || row_ids(operations, "operation_id").len() != 123 {
+        return Err("operation contract count or ID uniqueness drifted".to_owned());
+    }
+    let prior_operations: Vec<Value> = operations
+        .iter()
+        .filter(|operation| text(operation, "group_id") != "B64-A5-REMAINING")
+        .cloned()
+        .collect();
     require_exact_ids(
-        operations,
+        &prior_operations,
         "operation_id",
         &[
             "B64-A3-OP-RUNTIME-PROFILE-SIGNATURE-ENCODE",
@@ -1042,6 +1181,10 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     }
     let role_ids = row_ids(array(inventory, "security_roles"), "role_id");
     let error_ids = row_ids(array(inventory, "owned_error_mappings"), "error_id");
+    let mut used_engine_ids = BTreeSet::new();
+    let mut used_group_ids = BTreeSet::new();
+    let mut used_capability_ids = BTreeSet::new();
+    let mut used_consumer_ids = BTreeSet::new();
     let mut used_role_ids = BTreeSet::new();
     let mut used_error_ids = BTreeSet::new();
     let mut source_locations = BTreeSet::new();
@@ -1060,7 +1203,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             || text(operation, "acceptance_rule").is_empty()
             || !matches!(
                 text(operation, "group_id"),
-                "B64-A3-AUTH" | "B64-A4-WEB-GRPC"
+                "B64-A3-AUTH" | "B64-A4-WEB-GRPC" | "B64-A5-REMAINING"
             )
         {
             return Err(format!("operation {operation_id} is incomplete"));
@@ -1102,6 +1245,9 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         {
             return Err(format!("operation {operation_id} call relation drifted"));
         }
+        used_engine_ids.insert(engine_id.to_owned());
+        used_group_ids.insert(text(operation, "group_id").to_owned());
+        used_capability_ids.extend(string_set(operation, "capability_ids"));
 
         let role_id = text(operation, "role_id");
         let error_id = text(operation, "error_id");
@@ -1121,6 +1267,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             .iter()
             .next()
             .expect("one operation consumer must exist");
+        used_consumer_ids.insert(consumer_id.to_owned());
         let consumer = consumers
             .iter()
             .chain(nonpublic_consumers.iter())
@@ -1138,12 +1285,99 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         }
         operation_totals.entry(call_id.to_owned()).or_default()[bucket_index] += count;
     }
+    if used_engine_ids != engine_ids
+        || used_group_ids != group_ids
+        || used_capability_ids != capability_ids
+    {
+        return Err("engine, group, or capability relation contains an orphan".to_owned());
+    }
+    for relation in consumers.iter().chain(nonpublic_consumers.iter()) {
+        let relation_roles = string_set(relation, "role_ids");
+        let relation_errors = string_set(relation, "error_ids");
+        if relation_roles.is_empty()
+            || relation_errors.is_empty()
+            || !relation_roles.is_subset(&role_ids)
+            || !relation_errors.is_subset(&error_ids)
+        {
+            return Err(format!(
+                "consumer {} role/error registry relation drifted",
+                text(relation, "consumer_id")
+            ));
+        }
+        used_role_ids.extend(relation_roles);
+        used_error_ids.extend(relation_errors);
+    }
+    for collision in collisions {
+        let collision_id = text(collision, "collision_id");
+        let collision_roles = string_set(collision, "role_ids");
+        let collision_errors = string_set(collision, "error_ids");
+        let collision_consumers = string_set(collision, "consumer_ids");
+        if collision_roles.is_empty()
+            || collision_errors.is_empty()
+            || collision_consumers.is_empty()
+            || !collision_roles.is_subset(&role_ids)
+            || !collision_errors.is_subset(&error_ids)
+            || !collision_consumers.is_subset(&operation_consumer_ids)
+        {
+            return Err(format!("collision {collision_id} registry relation drifted"));
+        }
+        for consumer_id in collision_consumers {
+            used_consumer_ids.insert(consumer_id.clone());
+            let consumer = consumers
+                .iter()
+                .chain(nonpublic_consumers.iter())
+                .find(|row| text(row, "consumer_id") == consumer_id)
+                .ok_or_else(|| format!("collision {collision_id} consumer is absent"))?;
+            if !string_set(consumer, "collision_ids").contains(collision_id) {
+                return Err(format!(
+                    "collision {collision_id} is not linked back by {consumer_id}"
+                ));
+            }
+        }
+        used_role_ids.extend(collision_roles);
+        used_error_ids.extend(collision_errors);
+    }
+    for consumer in consumers.iter().chain(nonpublic_consumers.iter()) {
+        let consumer_id = text(consumer, "consumer_id");
+        let mut expected_roles = BTreeSet::new();
+        let mut expected_errors = BTreeSet::new();
+        for operation in operations
+            .iter()
+            .filter(|row| string_set(row, "consumer_ids").contains(consumer_id))
+        {
+            expected_roles.insert(text(operation, "role_id").to_owned());
+            expected_errors.insert(text(operation, "error_id").to_owned());
+        }
+        for collision in collisions
+            .iter()
+            .filter(|row| string_set(row, "consumer_ids").contains(consumer_id))
+        {
+            expected_roles.extend(string_set(collision, "role_ids"));
+            expected_errors.extend(string_set(collision, "error_ids"));
+        }
+        if string_set(consumer, "role_ids") != expected_roles
+            || string_set(consumer, "error_ids") != expected_errors
+        {
+            return Err(format!(
+                "consumer {consumer_id} role/error closure drifted"
+            ));
+        }
+    }
     if used_role_ids != role_ids || used_error_ids != error_ids {
         return Err("recorded role or error registry contains an orphan".to_owned());
     }
+    if used_consumer_ids != operation_consumer_ids {
+        return Err("consumer relation contains an orphan".to_owned());
+    }
     let expected_recorded_call_ids: BTreeSet<String> = call_sites
         .iter()
-        .filter(|row| matches!(text(row, "group"), "B64-A3-AUTH" | "B64-A4-WEB-GRPC"))
+        .filter(|row| {
+            number(&row["production"], "encode")
+                + number(&row["production"], "decode")
+                + number(&row["nonproduction"], "encode")
+                + number(&row["nonproduction"], "decode")
+                > 0
+        })
         .map(|row| text(row, "call_id").to_owned())
         .collect();
     if operation_totals.keys().cloned().collect::<BTreeSet<_>>() != expected_recorded_call_ids {
@@ -1151,7 +1385,13 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     }
     for call in call_sites
         .iter()
-        .filter(|row| matches!(text(row, "group"), "B64-A3-AUTH" | "B64-A4-WEB-GRPC"))
+        .filter(|row| {
+            number(&row["production"], "encode")
+                + number(&row["production"], "decode")
+                + number(&row["nonproduction"], "encode")
+                + number(&row["nonproduction"], "decode")
+                > 0
+        })
     {
         let actual = operation_totals
             .get(text(call, "call_id"))
@@ -1184,7 +1424,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         operation_totals.values().map(|counts| counts[2]).sum(),
         operation_totals.values().map(|counts| counts[3]).sum(),
     ];
-    if aggregate_totals != [20, 19, 12, 4]
+    if aggregate_totals != [23, 20, 52, 28]
         || recorded_totals
             .get("production_encode")
             .and_then(Value::as_u64)
@@ -1201,7 +1441,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             .get("nonproduction_decode")
             .and_then(Value::as_u64)
             != Some(aggregate_totals[3])
-        || aggregate_totals.iter().sum::<u64>() != 55
+        || aggregate_totals.iter().sum::<u64>() != 123
     {
         return Err("recorded operation aggregate drifted".to_owned());
     }
@@ -1233,7 +1473,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         "routed gaps",
     )?;
     for gap in array(inventory, "gaps") {
-        if !matches!(text(gap, "state"), "ROUTED" | "BLOCKED")
+        if !matches!(text(gap, "state"), "ROUTED" | "BLOCKED" | "RESOLVED")
             || !text(gap, "owner").starts_with("asupersync-d24mms.10.")
             || text(gap, "detail").is_empty()
         {
@@ -1729,6 +1969,12 @@ fn docs_ignore_and_no_claim_markers_remain_discoverable() {
         "29 stable security-role IDs",
         "14 stable owned-error IDs",
         "B64-CONSUMER-GRPC-STATUS-SNAPSHOT",
+        "all 123 external operations",
+        "43 stable roles and 20 owned error mappings",
+        "14 profile-gate contracts",
+        "14-row profile-baseline relation",
+        "10 public and 17 explicit nonpublic consumer",
+        "CALL-019`, `CALL-021`, and `CALL-032",
         "no constant-time claim",
         "does not prove compilation",
         "Only A6",
@@ -1797,6 +2043,23 @@ fn safe_negative_mutations_fail_closed() {
     registered_error_reassignment["operation_contracts"][0]["error_id"] =
         Value::String("B64-ERROR-RUNTIME-PROFILE-REFUSAL".to_owned());
     assert!(validate_inventory(&registered_error_reassignment).is_err());
+
+    let mut duplicate_profile_gate_call = original.clone();
+    let duplicated_call_ids =
+        duplicate_profile_gate_call["profile_gate_contracts"][0]["call_ids"].clone();
+    duplicate_profile_gate_call["profile_gate_contracts"][1]["call_ids"] =
+        duplicated_call_ids;
+    assert!(validate_inventory(&duplicate_profile_gate_call).is_err());
+
+    let mut incomplete_profile_baseline = original.clone();
+    incomplete_profile_baseline["profile_baseline_relations"][0]["evidence_ids"] =
+        Value::Array(Vec::new());
+    assert!(validate_inventory(&incomplete_profile_baseline).is_err());
+
+    let mut missing_collision_backlink = original.clone();
+    missing_collision_backlink["downstream_and_e2e"]["consumer_obligations"][2]["collision_ids"] =
+        Value::Array(Vec::new());
+    assert!(validate_inventory(&missing_collision_backlink).is_err());
 
     let mut exposed_error = original;
     exposed_error["public_surface"][0]["upstream_error_exposed"] = Value::Bool(true);
