@@ -159,11 +159,12 @@ evidence.
 
 The historical A1 census remains frozen at 310 files and 1,362 textual tokens.
 A separate post-baseline current snapshot, captured on 2026-08-06, records 315
-files and 1,384 tokens. It does not rewrite the historical baseline:
+files and 1,382 tokens after the A5 production poll-adapter migration. It does
+not rewrite the historical baseline:
 
 | Scope | Current files | Current tokens |
 |---|---:|---:|
-| `src` | 151 | 830 |
+| `src` | 151 | 828 |
 | `tests` | 154 | 542 |
 | `benches` | 4 | 4 |
 | `examples` | 1 | 1 |
@@ -171,7 +172,7 @@ files and 1,384 tokens. It does not rewrite the historical baseline:
 | `fuzz` | 2 | 2 |
 
 The current ownership projection is 42 files / 258 tokens for `FUT-A6-CORE`,
-32 / 153 for `FUT-A7-IO`, 33 / 197 for `FUT-A8-SERVICES`, and 208 / 776 for
+32 / 153 for `FUT-A7-IO`, 33 / 195 for `FUT-A8-SERVICES`, and 208 / 776 for
 `FUT-A9-ATP-DEV`. Owners must use these current projections for reservation
 drift checks while retaining the A1 rows as historical evidence.
 
@@ -355,6 +356,61 @@ change a manifest, authorize cutover, establish differential parity, or provide
 unit, property, lab, DPOR, performance, or loser-drain evidence. The remaining
 race surface and its explicit cancellation/quiescence policy keep FUT A4 open.
 
+### FUT A5 static panic-boundary progress
+
+At claimed base revision `e37de5b6c44c3c0d86c6f05a981249491d3c2343`, bead
+`asupersync-d24mms.6.5` adds an owned crate-private poll-panic wrapper and
+migrates the two production web poll adapters away from the incumbent. This is
+`PARTIAL_STATIC_SOURCE_PROGRESS`; its executable state is
+`NOT_RUN_STATIC_ONLY`, and the bead remains open.
+
+`crate::util::future::catch_unwind` safely pin-projects its inner future,
+forwards the caller Context, and contains exactly one inner poll inside
+`std::panic::catch_unwind`. Normal readiness becomes `Ok`; a poll panic becomes
+the original `Box<dyn Any + Send>` payload in `Err`. A completed flag prevents
+every later inner poll after either terminal result. The wrapper itself stores
+only the future and one boolean. It deliberately remains a poll boundary:
+dropping it drops the retained inner future normally, so a destructor panic is
+not contained by this helper.
+
+The production boundaries are now explicit and two-stage:
+
+- `CatchPanicMiddleware` retains its existing construction-phase standard
+  catch, uses the owned helper for polling, logs the best-effort payload with
+  `[ASUP-E502]` plus method/path/trace correlation, and returns only the fixed
+  generic 500 body to the client;
+- `ErrorHandlerMiddleware` now catches a synchronous panic from
+  `Handler::call` as well as a later poll panic, then formats the generic 500 by
+  content negotiation. Its disabled configuration still propagates the panic.
+
+This removes the two production `FutureExt` poll-adapter imports. It does not
+remove the manifest dependency or migrate test/dev occurrences. The current
+census therefore falls by exactly two textual tokens while the historical A1
+surface rows remain frozen.
+
+Five focused cases are source-authored: pending/wake/ready forwarding, payload
+preservation with no terminal repoll, unpolled-drop behavior, enabled
+construction-panic containment, and disabled construction-panic propagation.
+None has been compiled or executed in this static increment. Existing inline,
+audit, and web E2E surfaces were also not rerun.
+
+Four `BLOCKED_GAP` rows preserve the remaining acceptance work:
+
+- `FUT-A5-GAP-19`: no focused compile, execution, or LabRuntime receipt;
+- `FUT-A5-GAP-20`: destructor/nested-panic payload precedence, resource
+  cleanup, obligation resolution, and quiescence remain unspecified;
+- `FUT-A5-GAP-21`: `ErrorHandlerMiddleware` still discards the payload and has
+  no stable operator diagnostic, while both web boundaries return `Response`
+  rather than an explicit `Outcome` mapping;
+- `FUT-A5-GAP-22`: no post-migration real web E2E proves construction/poll
+  containment, redacted client artifacts, correlated logs, and unwind-lane
+  admission.
+
+This source progress is not a cutover receipt. In particular, it does not
+claim nested destructor-panic containment, stable diagnostics for both sites,
+resource/obligation drain, broad web health, or panic behavior under an abort
+strategy.
+
 ## Consumed helper semantics
 
 The live API set is:
@@ -387,11 +443,12 @@ differential compatibility or explicitly upgrade it to the project's stronger
 race contract with obligation-aware drain evidence. Merely dropping the loser
 cannot be reported as “losers are drained.”
 
-`pending` never completes and never schedules a wake. `catch_unwind` wraps each
-inner poll in `std::panic::catch_unwind`, producing
-`Err(Box<dyn Any + Send>)`; the middleware construction-stage catch remains a
-separate requirement. The `Stream` trait is the futures-core trait re-export
-and adds no `Send`, `Sync`, `Unpin`, or `'static` supertrait.
+`pending` never completes and never schedules a wake. The incumbent
+`catch_unwind` wraps each inner poll in `std::panic::catch_unwind`, producing
+`Err(Box<dyn Any + Send>)`. The owned A5 poll wrapper now supplies that
+production behavior, while each web middleware separately owns its
+construction-stage policy. The `Stream` trait is the futures-core trait
+re-export and adds no `Send`, `Sync`, `Unpin`, or `'static` supertrait.
 
 ### ADR correction: no `join_all`
 
@@ -532,5 +589,10 @@ The FUT A4 receipt likewise does not turn seven source-authored cases into
 executed proof, implement `race`, treat comment-only `join_all` as live, prove
 deterministic fairness, or equate dropping a generic future with structured
 loser drain and quiescence.
+The FUT A5 receipt likewise does not turn the owned poll wrapper or migrated
+source sites into executed proof, contain destructor panics, define nested
+payload precedence, prove cleanup or obligation drain, establish a stable
+diagnostic and `Outcome` mapping at both sites, or prove the real web and
+panic-unwind lanes.
 
 <!-- END FUTURES LITE CAPABILITY INVENTORY -->

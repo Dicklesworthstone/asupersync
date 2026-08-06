@@ -146,8 +146,8 @@
     "current_source_pins": [
       {
         "path": "src/future.rs",
-        "sha256": "fd0a1defa1efef7d42a918fc8a390ce3e851e4dfe00d3b412579455e25d88e41",
-        "line_count": 858
+        "sha256": "c0a02784a010e9709dfab3b40259bccf8d312e9101834d8c110f2b1f19bd8598",
+        "line_count": 972
       },
       {
         "path": "src/util/mod.rs",
@@ -251,13 +251,13 @@
     "visibility": "crate-private alongside-incumbent",
     "current_source_pin": {
       "path": "src/future.rs",
-      "sha256": "fd0a1defa1efef7d42a918fc8a390ce3e851e4dfe00d3b412579455e25d88e41",
-      "line_count": 858
+      "sha256": "c0a02784a010e9709dfab3b40259bccf8d312e9101834d8c110f2b1f19bd8598",
+      "line_count": 972
     },
     "helper_projection": {
       "path": "src/future.rs",
       "start_marker": "/// Builds a future that delegates every poll to an `FnMut` closure.",
-      "end_marker": "/// Reason the owned blocking kernel refused to poll a future.",
+      "end_marker": "/// Catches a panic raised while polling `future`.",
       "sha256": "91219a9fb6dd5e3674c68edc2cd6c1b15ea8a450cf998c5d501f4f9dc25d8c4d"
     },
     "live_helper_matrix": [
@@ -350,6 +350,101 @@
     "cutover_authorized": false,
     "closure_allowed": false
   },
+  "a5_panic_boundary_receipt": {
+    "owner_bead": "asupersync-d24mms.6.5",
+    "claimed_base_revision": "e37de5b6c44c3c0d86c6f05a981249491d3c2343",
+    "source_status": "PARTIAL_STATIC_SOURCE_PROGRESS",
+    "execution_status": "NOT_RUN_STATIC_ONLY",
+    "current_source_pins": [
+      {
+        "path": "src/future.rs",
+        "sha256": "c0a02784a010e9709dfab3b40259bccf8d312e9101834d8c110f2b1f19bd8598",
+        "line_count": 972
+      },
+      {
+        "path": "src/web/middleware.rs",
+        "sha256": "d4f6e9bbe0cb18849ce58aa293301c796ac079ad016f261d0db8affd8a0bb10a",
+        "line_count": 6030
+      },
+      {
+        "path": "src/web/negotiate.rs",
+        "sha256": "4a98a71fe252c26e059e2bb4f0b2350a4a6e9b4bd13519f35590627788794c61",
+        "line_count": 903
+      }
+    ],
+    "poll_helper_projection": {
+      "path": "src/future.rs",
+      "start_marker": "/// Catches a panic raised while polling `future`.",
+      "end_marker": "/// Reason the owned blocking kernel refused to poll a future.",
+      "sha256": "b51e2972bbb635271739c501fe7632f318efacbf8e48e1e896811c0813aa10e0"
+    },
+    "poll_helper_contract": {
+      "api": "crate::util::future::catch_unwind",
+      "input_bound": "Future + UnwindSafe; web call sites use AssertUnwindSafe around existing handler futures",
+      "poll_behavior": "forwards the caller Context and polls the pinned inner future once per wrapper poll inside std::panic::catch_unwind",
+      "completion_behavior": "Ready becomes Ok; a poll panic becomes the original Box<dyn Any + Send> payload in Err",
+      "post_terminal_behavior": "a completed flag prevents every later inner poll and returns Pending",
+      "drop_behavior": "normal wrapper drop drops the retained inner future outside the poll catch boundary",
+      "allocation_behavior": "the wrapper stores only the inner future and one boolean; panic payload allocation belongs to the panic runtime",
+      "drop_panic_contained": false
+    },
+    "production_boundary_matrix": [
+      {
+        "surface_id": "FUT-PROD-MIDDLEWARE-CATCH",
+        "path": "src/web/middleware.rs",
+        "construction_phase": "std::panic::catch_unwind around Handler::call",
+        "poll_phase": "owned crate::util::future::catch_unwind",
+        "payload_policy": "best-effort string extraction for server-side structured log; payload text is never returned to the client",
+        "operator_diagnostic": "[ASUP-E502] web handler panic recovered",
+        "client_response": "500 with [ASUP-E502] Internal Server Error",
+        "outcome_translation": "Response boundary only; no Outcome value is produced",
+        "source_status": "SOURCE_AUTHORED_NOT_EXECUTED"
+      },
+      {
+        "surface_id": "FUT-PROD-NEGOTIATE-CATCH",
+        "path": "src/web/negotiate.rs",
+        "construction_phase": "new std::panic::catch_unwind around Handler::call",
+        "poll_phase": "owned crate::util::future::catch_unwind",
+        "payload_policy": "payload is currently discarded after classification as an internal server error",
+        "operator_diagnostic": "missing stable code and structured log",
+        "client_response": "negotiated 500 with generic text unless development detail exposure is enabled",
+        "outcome_translation": "Response boundary only; no Outcome value is produced",
+        "source_status": "SOURCE_AUTHORED_NOT_EXECUTED"
+      }
+    ],
+    "authored_source_cases": [
+      "catch_unwind_forwards_pending_wake_and_ready",
+      "catch_unwind_preserves_payload_and_refuses_repoll",
+      "dropping_unpolled_catch_unwind_drops_inner",
+      "error_handler_catches_construction_panic",
+      "error_handler_disabled_propagates_construction_panic"
+    ],
+    "existing_evidence_surfaces_not_rerun": [
+      "src/web/middleware.rs inline CatchPanicMiddleware cases",
+      "src/web/negotiate.rs inline poll-panic and negotiated-response cases",
+      "tests/web_middleware_panic_recovery_audit.rs",
+      "tests/e2e_web.rs"
+    ],
+    "dependency_token_delta": {
+      "production_poll_adapter_sites_before": 2,
+      "production_poll_adapter_sites_after": 0,
+      "current_census_token_delta": -2,
+      "manifest_changed": false,
+      "dependency_removal_authorized": false
+    },
+    "missing_terminal_evidence": [
+      "focused compile and execution of the five newly authored source cases",
+      "focused rerun of existing middleware and negotiation panic cases",
+      "LabRuntime panic, cancellation, resource, and obligation-drain evidence",
+      "nested poll-panic plus destructor-panic policy and payload precedence",
+      "stable structured operator diagnostic for ErrorHandlerMiddleware",
+      "explicit Outcome mapping decision for both Response-only web boundaries",
+      "real web E2E with redacted client artifacts and correlated server log",
+      "panic strategy admission proving unwind support for the claimed lane"
+    ],
+    "cutover_authorized": false,
+    "closure_allowed": false
+  },
   "post_baseline_current_snapshot": {
     "captured_date_utc": "2026-08-06",
     "historical_baseline_preserved": true,
@@ -360,14 +455,14 @@
       "unit": "non-overlapping textual token occurrences in current tracked Rust source, excluding this contract",
       "ordering": "bytewise path order; digest input is path, tab, decimal count, newline",
       "file_count": 315,
-      "token_count": 1384,
-      "digest_sha256": "879eb440a38b3bdcebe64b38165865f3869243592101c45169c83beecc6e2f5c",
+      "token_count": 1382,
+      "digest_sha256": "86755aabb204be53aca205404e7449a9218bb7353a3adb45fc019cddc581b30a",
       "scope_rows": [
         {
           "scope": "src",
           "file_count": 151,
-          "token_count": 830,
-          "digest_sha256": "874ef3599c28f8007951426f018274f85bb7f18ac1d78ab904a1a6d40b96c7f4"
+          "token_count": 828,
+          "digest_sha256": "b320a46fb92d414e161b9014779f6268d1049403ac970a0b0ea6a1bba0df99dc"
         },
         {
           "scope": "tests",
@@ -417,8 +512,8 @@
       {
         "group_id": "FUT-A8-SERVICES",
         "file_count": 33,
-        "token_count": 197,
-        "digest_sha256": "6bec0c63b36d44665eb57ab71b36d5230a980494533b91392b2af1d6d6e17a34"
+        "token_count": 195,
+        "digest_sha256": "8f35f46341fab463da6265b8248a75221881074d4f797f95c6a8399e9e98a705"
       },
       {
         "group_id": "FUT-A9-ATP-DEV",
@@ -1298,6 +1393,30 @@
       "summary": "No deterministic fairness and trace policy replaces the incumbent race's ambient per-poll random ordering, and no expiry-independent race corpus exists.",
       "owner_bead": "asupersync-d24mms.6.4",
       "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-A5-GAP-19",
+      "summary": "The owned poll-panic wrapper, two migrated web boundaries, and five newly authored cases have no focused compile or execution receipt and no LabRuntime evidence.",
+      "owner_bead": "asupersync-d24mms.6.5",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-A5-GAP-20",
+      "summary": "A destructor panic after a caught poll panic is outside the owned poll boundary; nested payload precedence, resource cleanup, obligation resolution, and quiescence are unspecified.",
+      "owner_bead": "asupersync-d24mms.6.5",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-A5-GAP-21",
+      "summary": "ErrorHandlerMiddleware still discards the panic payload and has no stable operator diagnostic; both migrated web sites return Response rather than an explicit Outcome mapping.",
+      "owner_bead": "asupersync-d24mms.6.5",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-A5-GAP-22",
+      "summary": "No post-migration real web E2E proves construction and poll panic containment, correlated redacted logs, generic client responses, and panic-unwind lane admission.",
+      "owner_bead": "asupersync-d24mms.6.5",
+      "state": "BLOCKED_GAP"
     }
   ],
   "source_pins": [
@@ -1323,13 +1442,13 @@
     },
     {
       "path": "src/web/middleware.rs",
-      "sha256": "979a0b3b3665bba209f8ad84a929a35e70008d8c37096c577f91780d1ba51fff",
-      "line_count": 6029
+      "sha256": "d4f6e9bbe0cb18849ce58aa293301c796ac079ad016f261d0db8affd8a0bb10a",
+      "line_count": 6030
     },
     {
       "path": "src/web/negotiate.rs",
-      "sha256": "24ba9ffb298491566eabb934c009dbec8c54f79b74246de153210d22cfa04cbd",
-      "line_count": 867
+      "sha256": "4a98a71fe252c26e059e2bb4f0b2350a4a6e9b4bd13519f35590627788794c61",
+      "line_count": 903
     },
     {
       "path": "src/web/router.rs",
@@ -1398,6 +1517,7 @@
     "The A2 acceptance matrix is a fail-closed status inventory, not a terminal receipt; closure remains forbidden while any required receipt is missing.",
     "The A3 blocking-kernel receipt is static-only: authored inline cases, source hashes, and wake-order review do not prove execution, interleaving completeness, runtime-context safety, cancellation quiescence, idle CPU, latency parity, or cutover readiness.",
     "The A4 helper receipt is partial and static-only: it does not implement race, treat comment-only join_all as live, convert generic Future drop into structured loser drain, prove deterministic fairness, or promote authored source cases to executed evidence.",
+    "The A5 panic-boundary receipt is partial and static-only: it does not contain destructor panics, define nested-panic payload precedence, prove resource or obligation drain, add a stable ErrorHandlerMiddleware diagnostic, produce Outcome values, or establish panic-unwind and real-web E2E evidence.",
     "Marginal package counts do not prove behavioral replacement parity.",
     "The source-authored owned ATP Stream implementations have not been compiled or behaviorally exercised and do not authorize cutover.",
     "No local Cargo fallback is approved when a remote-required proof lane is blocked."

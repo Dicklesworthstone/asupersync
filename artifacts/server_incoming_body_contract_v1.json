@@ -75,9 +75,9 @@
     {
       "surface_id": "H2-LIVE-DISPATCH",
       "state": "BUFFERED",
-      "current_semantics": "The listener stores each pending stream as headers plus Vec<u8>, uses saturating prospective addition against a configured per-stream cap whose default is 16 MiB, sends RST_STREAM(ENHANCE_YOUR_CALM) when that cap is exceeded, and otherwise dispatches only after END_STREAM.",
+      "current_semantics": "The listener stores each pending stream as headers plus Vec<u8>, preserves a separate validated trailer block on the shared Request type, uses saturating prospective addition against a configured per-stream cap whose default is 16 MiB, sends RST_STREAM(ENHANCE_YOUR_CALM) when that cap is exceeded, and otherwise dispatches only after END_STREAM.",
       "anchors": ["src/http/h2/listener.rs::pending_requests", "src/http/h2/listener.rs::dispatch_h2_request"],
-      "gap": "The handler cannot consume DATA incrementally, trailer fields are not surfaced through the request type, and the connection has no aggregate incoming-body budget across concurrent streams."
+      "gap": "The handler cannot consume DATA incrementally, and the connection has no aggregate incoming-body budget across concurrent streams."
     },
     {
       "surface_id": "WEB-REQUEST",
@@ -520,9 +520,9 @@
   "source_pins": [
     {"path": "src/http/mod.rs", "sha256": "2a0ca68136d8d4946db692601f25fdb727fb153e8a78529defbc0eb8d913e5ed", "line_count": 85, "anchors": ["pub mod body;", "pub use body::{Body, Empty, Frame, Full, HeaderMap, HeaderName, HeaderValue, SizeHint};"]},
     {"path": "src/http/body.rs", "sha256": "69e63ff5856457bedd8ea9eaf0a45d5ca120c2ffe8f1db65207e747278ba9753", "line_count": 1918, "anchors": ["pub trait Body {", "pub struct StreamBody<S>", "pub struct Limited<B>"]},
-    {"path": "src/channel/mpsc.rs", "sha256": "ccdff2ffab0f719180a01fca2230bcda74159f0ae9141b1acbc87f5a95b82f5e", "line_count": 6357, "anchors": ["pub fn channel<T>(capacity: usize)", "pub struct SendPermit<'a, T>", "pub struct Receiver<T>"]},
-    {"path": "src/stream/stream.rs", "sha256": "46012af8a37bc1bd5d8aa6e8c39e896c2ad7bcddc3e68b5b94881ef18f0e826b", "line_count": 254, "anchors": ["pub trait Stream", "fn poll_next"]},
-    {"path": "src/codec/framed.rs", "sha256": "adccbee55b4c1e0268de065a5376cdd8e71cc02a74601013cb6e32a6d829571f", "line_count": 1216, "anchors": ["pub struct Framed<T, U>", "pub fn read_buffer", "impl<T, U> Stream for Framed"]},
+    {"path": "src/channel/mpsc.rs", "sha256": "4cf8cb372493f93d8ec82b72edf565a23ba17a3c65a7a06e5c534a476c48fef7", "line_count": 6353, "anchors": ["pub fn channel<T>(capacity: usize)", "pub struct SendPermit<'a, T>", "pub struct Receiver<T>"]},
+    {"path": "src/stream/stream.rs", "sha256": "49d3dd8c7cbc3504c476cb08498cf9300b9bfca84f37fc1781ccf497ab8e68db", "line_count": 304, "anchors": ["pub trait Stream", "fn poll_next"]},
+    {"path": "src/codec/framed.rs", "sha256": "5733d84397523e9659ea18e25fa152fa6d4ebe81766da96432f717a8d4f546d7", "line_count": 1372, "anchors": ["pub struct Framed<T, U>", "pub fn read_buffer", "impl<T, U> Stream for Framed"]},
     {"path": "src/codec/framed_read.rs", "sha256": "477bf58ca5ee956c841937e59cacda49927a31f2a99f75560223f6f43142d42d", "line_count": 1165, "anchors": ["pub const DEFAULT_MAX_BUFFER_LEN", "pub struct FramedRead<R, D>"]},
     {"path": "src/http/h1/mod.rs", "sha256": "567b4921e41e9dbb485eb4b6c75a62a2b3ab249d0ef7a34564c59b1fae76b792", "line_count": 50, "anchors": ["pub mod stream;", "pub use stream::{"]},
     {"path": "src/http/h1/stream.rs", "sha256": "2c0ac47a1c638de5ad9fbdfaa638a4f839b74b3fabd2c0477ac72458051f9e4a", "line_count": 1869, "anchors": ["enum IncomingProducerTerminal {", "producer_terminal: Arc<AtomicU8>", "Poll::Ready(Err(RecvError::Disconnected)) =>", "self.received.checked_add(data_len)", "fn checked_total_bytes", ".checked_add(self.buffer.len())", "impl Drop for IncomingBodyWriter", "fn incoming_body_unfinished_producer_drop_is_not_eof"]},
@@ -531,12 +531,12 @@
     {"path": "src/http/h1/server.rs", "sha256": "d9cbd8c351f2112f11d06e28f2c3c6cb898f40bc997a2728c71d06708017521d", "line_count": 2455, "anchors": ["pub async fn serve_with_peer_addr", "self.read_next(&mut framed, &state).await", "ServerRequestRegion"]},
     {"path": "src/http/h2/connection.rs", "sha256": "af5fd2a7e79deaa1d0bfd4f844ddefa2554e26593fab94170b95df1badbadeb7", "line_count": 6639, "anchors": ["pub enum ReceivedFrame", "pub fn process_frame"]},
     {"path": "src/http/h2/stream.rs", "sha256": "f33ee521ca6ae7b271fff6aa7d2072320464e7e7ce54245ab742229a6e3ff2bd", "line_count": 3376, "anchors": ["pub struct Stream {", "pub fn recv_data", "pub fn queue_data"]},
-    {"path": "src/http/h2/listener.rs", "sha256": "107a83791760f0b632d9da502026f09ba012a407bb3e47a1513126108ef6d2ea", "line_count": 3804, "anchors": ["const DEFAULT_H2_MAX_BODY_SIZE: usize = 16 * 1024 * 1024;", "let mut pending_requests: HashMap<u32, (Vec<Header>, Vec<u8>)>", "body.len().saturating_add(data.len())", "conn.reset_stream(stream_id, ErrorCode::EnhanceYourCalm);", "fn dispatch_h2_request"]},
+    {"path": "src/http/h2/listener.rs", "sha256": "52cfded1c1421a9fd13ad7761b01a00b2bcc0a9f23f25b76d58b9031bbe3ddcf", "line_count": 3815, "anchors": ["const DEFAULT_H2_MAX_BODY_SIZE: usize = 16 * 1024 * 1024;", "let mut pending_requests: HashMap<u32, (Vec<Header>, Vec<u8>)>", "body.len().saturating_add(data.len())", "conn.reset_stream(stream_id, ErrorCode::EnhanceYourCalm);", "fn request_from_h2_parts", "trailers: request_trailers", "fn dispatch_h2_request"]},
     {"path": "src/web/mod.rs", "sha256": "f45c786c88eb80fff899b1781f58f610fd6b98f04384123455b42b8a6382a3ed", "line_count": 88, "anchors": ["pub mod extract;", "pub mod response;", "pub use extract::{", "pub use response::{"]},
     {"path": "src/web/extract.rs", "sha256": "211cecabb4955f2b72aa92058c61e1f3c0f3c5bac4bbec5e805e201667d6171d", "line_count": 2719, "anchors": ["pub struct Request {", "pub body: Bytes", "const DEFAULT_MAX_JSON_BODY_SIZE", "const DEFAULT_MAX_RAW_BODY_SIZE"]},
     {"path": "src/web/handler.rs", "sha256": "ab54ba77e130e510f79b4dd68f207fe40e1a88ed04ab72c0fd918b5fafb23116", "line_count": 1574, "anchors": ["pub trait Handler", "req: Request"]},
     {"path": "src/web/router.rs", "sha256": "d31de4ab5694c39d45374577a549ff190a4bbd8539bfc0b646d6751bd32400f2", "line_count": 2475, "anchors": ["handler.call(cx, req).await"]},
-    {"path": "src/web/middleware.rs", "sha256": "979a0b3b3665bba209f8ad84a929a35e70008d8c37096c577f91780d1ba51fff", "line_count": 6029, "anchors": ["pub struct RetryMiddleware", "pub struct RequestBodyLimitMiddleware", "if req.body.len() > self.max_bytes"]},
+    {"path": "src/web/middleware.rs", "sha256": "d4f6e9bbe0cb18849ce58aa293301c796ac079ad016f261d0db8affd8a0bb10a", "line_count": 6030, "anchors": ["pub struct RetryMiddleware", "pub struct RequestBodyLimitMiddleware", "if req.body.len() > self.max_bytes"]},
     {"path": "src/web/multipart.rs", "sha256": "03ffb856485d1ec52878aa811fef324d0dcf63ad9fc5182430a050e648d72058", "line_count": 1753, "anchors": ["const DEFAULT_MAX_MULTIPART_SIZE", "const DEFAULT_MAX_PART_BODY_SIZE", "pub struct MultipartLimits {", "pub struct Multipart {"]},
     {"path": "src/web/response.rs", "sha256": "be4f49cbbbf5f71e85143e02df1f3a15765dfda51598428159daf7c977343222", "line_count": 1530, "anchors": ["pub struct Response {", "impl Response"]},
     {"path": "src/web/request_region.rs", "sha256": "3942340eb27bcea22a575c40241c7aa4f31e52e153b5bc5fa53811cd5cce1da6", "line_count": 2671, "anchors": ["pub enum ServerHopOutcome<R>", "pub struct ServerRequestRegion"]},

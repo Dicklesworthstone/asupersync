@@ -390,6 +390,16 @@ fn validate_defaults_and_inventory(inventory: &Value) -> Result<(), String> {
             "current_semantics",
         )?
         .contains("saturating prospective addition")
+        || !text(
+            find_row(surfaces, "surface_id", "H2-LIVE-DISPATCH")?,
+            "current_semantics",
+        )?
+        .contains("separate validated trailer block")
+        || !text(
+            find_row(surfaces, "surface_id", "H2-LIVE-DISPATCH")?,
+            "gap",
+        )?
+        .contains("aggregate incoming-body budget")
     {
         return Err("current H1/H2 accounting inventory drifted".to_owned());
     }

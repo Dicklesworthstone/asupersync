@@ -195,10 +195,11 @@ Both dependency call sites are in `BenchmarkEnvironment::collect()` behind the
 
 The collected schema has six fields and reaches five production result
 construction sites plus four unit-only sites. The existing
-`tests/atp_benchmark_integration.rs` surface asserts none of `os_info`,
-`cpu_info`, or `BenchmarkEnvironment`. `EVD-HOST-TOPOLOGY` is useful adjacent
-default-profile evidence, but it does not execute these call sites or compare
-candidate outputs. The declared `host_benchmark_metadata` dependency-
+`tests/atp_benchmark_integration.rs` surface asserted none of `os_info`,
+`cpu_info`, or `BenchmarkEnvironment` at the observed audit revision.
+`EVD-HOST-TOPOLOGY` is useful adjacent default-profile evidence, but it does not
+execute these call sites or compare candidate outputs. The declared
+`host_benchmark_metadata` dependency-
 sovereignty scenario is not implemented in the retained runner.
 
 Cutover requires SAME-or-BETTER evidence across Linux, macOS, and Windows;
@@ -212,6 +213,77 @@ The disposition is `KEEP_INCUMBENT` for both dependencies and
 `dependency_exit_allowed=false`. This packet does not authorize manifest,
 lockfile, or behavior edits, tracker closure, performance claims, release
 readiness, or broad workspace-health claims.
+
+### Claim-time host-metadata source checkpoint
+
+At claim base `706bde7ee34caa356ef675359b2e611dfae3e700`,
+`tests/atp_benchmark_integration.rs` adds
+`benchmark_environment_host_metadata_candidate_contract`. Its state is
+`SOURCE_AUTHORED_NOT_EXECUTED`: no compiler, test, benchmark, host probe, Cargo,
+RCH, or platform/profile lane was run.
+
+The contract freezes the incumbent nonempty `os_info`, nonzero
+`<count>x <ARCH>` `cpu_info`, and exact six-field serialized
+`BenchmarkEnvironment` schema. It also names
+`std::thread::available_parallelism()` and
+`sysinfo::System::long_os_version()` with explicit `1` and `unknown` fallback
+shapes. These candidate APIs are compile/smoke anchors only; their values are
+not asserted equal to the incumbent because affinity, container/quota, error,
+Linux, macOS, and Windows parity still requires the declared execution matrix.
+
+The machine artifact retains its historical 415-line integration-source pin at
+the observed audit revision. The fail-closed Rust contract separately pins the
+current 467-line checkpoint so historical evidence is not silently rewritten.
+Neither production dependency call changed, and no manifest, lockfile,
+marginal-ledger, registry, cutover, or closure state was promoted.
+
+## Claim-time tempfile profile checkpoint
+
+`CAP-TEMP-ARTIFACTS-CLAIM-TIME-STATIC-CHECKPOINT-V1` is the bounded
+claim-time checkpoint for `asupersync-d24mms.5` at base revision
+`869664efc07f7be8a3e3803d48a786f76151a08d`. Its state is
+`SOURCE_AUTHORED_NOT_EXECUTED`: no compiler, formatter, test, Cargo, RCH,
+benchmark, service, platform, lifecycle, or E2E lane was run.
+
+The July tracker premise is stale. The normal `tempfile` edge is required by
+default-native ATP RaptorQ and QUIC pack-materialization paths, not only by the
+`benchmark-adapters` and `test-internals` profiles. The source-authored contract
+pins the following current resolution boundaries:
+
+| Resolution profile | Current non-test consumer | Static consequence |
+|---|---|---|
+| default native library | `src/net/atp/transport_rq/mod.rs` owns four qualified `tempfile` references for pack materialization and lifetime retention | the unconditional native ATP module requires the normal edge |
+| default native library | `src/net/atp/transport_quic/mod.rs` owns three pre-test-module qualified references for pack materialization and lifetime retention | the unconditional native ATP module requires the normal edge |
+| `cli` | `src/bin/asupersync.rs` stages replay artifacts with `NamedTempFile::new_in` before its test module | CLI optionalization would require `dep:tempfile` in `cli` |
+| `benchmark-adapters` | `src/atp/benchmark/suite.rs` owns a `TempDir` work directory | benchmark optionalization would require `dep:tempfile` in `benchmark-adapters` |
+| `test-internals` | `src/test_logging.rs` exposes `TempDirFixture` when `test || test-internals` | test-internals optionalization would require `dep:tempfile` in `test-internals` |
+
+The current repository `src/` census contains 80 Rust files and 277 qualified
+`tempfile::` tokens. This is a drift detector, not a Cargo-built profile
+classification: inline tests and dormant harnesses account for many tokens, so
+the checkpoint does not claim zero `UNKNOWN`. The post-checkpoint `tests/`
+lexical census contains 94 Rust files; one is this contract and contains only
+checkpoint literals, which demonstrates why lexical presence is not dependency
+resolution proof. The dev edge remains necessary for broad integration and
+inline tests, the two current benchmark files, and the test-only example
+fixture.
+
+At the claim base, `Cargo.toml` still has separate normal and dev declarations
+spelled `3.25`, while `Cargo.lock` resolves `3.27.0`. Those are pinned observed
+facts, not future version requirements. No feature contains `dep:tempfile`.
+Because the default native library already consumes the crate, wiring only the
+original two proposed features would be incomplete. The decision is therefore
+`KEEP_INCUMBENT` with `normal_dependency_optionalization_allowed=false`.
+
+`Cargo.toml`, `Cargo.lock`, the marginal ledger, the capability registry, and
+the canonical baseline artifact remain byte-for-byte unchanged. In particular,
+the historical `NO_DEDICATED_RECEIPT` row remains unchanged at its own observed
+revision; this newer source-authored checkpoint does not rewrite that snapshot
+or masquerade as an execution receipt. The bead remains open for an exact
+Cargo-built default/sparse/combined profile inventory, lifecycle and cleanup
+evidence, platform coverage, canonical replay/redaction artifacts, and a
+serialized manifest/lock/ledger decision only if every capability remains
+SAME-or-BETTER.
 
 ## Visibility macro static audit
 

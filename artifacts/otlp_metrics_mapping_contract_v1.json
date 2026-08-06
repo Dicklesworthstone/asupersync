@@ -1,0 +1,1037 @@
+{
+  "schema_version": 1,
+  "artifact_id": "otlp-metrics-mapping-contract-v1",
+  "program_id": "asupersync-5z2scg",
+  "bead_id": "asupersync-5z2scg.2.3",
+  "captured_date_utc": "2026-08-06",
+  "claim_revision": "f3ccd58d8d9b740ad07b4f2197d56d70ad049125",
+  "purpose": "Freeze the reviewed OTLP-relevant Asupersync metrics surfaces, record the currently decidable owned-message mapping requirements, and fail closed on unresolved producer limits, histogram boundaries, numeric domains, reset state, and executable evidence.",
+  "authority": {
+    "static_contract_only": true,
+    "production_adapter_present": false,
+    "production_source_changes_authorized": false,
+    "external_meter_bridge_retained": true,
+    "dependency_cutover_authorized": false,
+    "executable_validation_status": "UNRUN_STATIC_ONLY",
+    "lab_runtime_status": "UNRUN_REQUIRED",
+    "real_collector_status": "UNRUN_REQUIRED",
+    "tracker_closure_authorized": false,
+    "required_disposition": "KEEP_OPEN_PENDING_IMPLEMENTATION_AND_EXECUTABLE_EVIDENCE"
+  },
+  "current_architecture": {
+    "production_metrics_path": "OtelMetrics records fixed runtime instruments into a caller-supplied opentelemetry Meter; the embedder SDK owns aggregation, timestamps, temporality selection, collection, and export.",
+    "owned_schema_path": "src/observability/otlp_proto.rs contains crate-private bounded metric and collector message models but no OtelMetrics or MetricsSnapshot production adapter.",
+    "fixture_builder_path": "src/observability/otel.rs::otlp_request_builder::metrics_request_from_snapshot is test-or-fuzz gated, uses generated opentelemetry_proto messages, and is not the owned production encoder.",
+    "registry_path": "src/observability/metrics.rs provides a dependency-free dynamic Metrics registry with counters, gauges, explicit-bound histograms, and bounded-sample summaries.",
+    "test_only_json_path": "src/observability/metrics.rs also contains a cfg(test) JSON exporter harness; it is neither protobuf nor production authority.",
+    "synthetic_golden_path": "tests/otlp_metrics_request_golden.rs mirrors selected OTLP fields in local JSON-only structs and does not exercise the production Meter bridge or owned protobuf model.",
+    "capability_inventory_state": "SHIPPED_VIA_DEPENDENCY",
+    "capability_inventory_temporality_drift": "The frozen inventory says cumulative only, but the production Meter bridge does not configure temporality. That statement applies only to generated-message fixtures today.",
+    "capability_inventory_queue_drift": "The frozen inventory says metrics drop newest, but BoundedExportQueue drops oldest and retains FIFO among surviving snapshots.",
+    "capability_inventory_a3_evidence_drift": "The A3 child row says EXECUTED, but its cited integration receipt does not exercise owned mapping, epoch/reset, queue, cardinality boundaries, LabRuntime, or a real collector. The honest current disposition is PARTIAL_EXECUTED.",
+    "surface_inventory_scope": "PARTIAL_OTLP_RELEVANT_BASELINE_NOT_ALL_METRIC_TYPES_OR_PRODUCERS",
+    "mapping_design_completion": "PARTIAL_STATIC_WITH_BLOCKING_DECISIONS",
+    "owned_production_mapping_state": "ABSENT"
+  },
+  "retained_instrument_row_semantics": "The 23 rows below are the complete fixed OtelMetrics provider census only. Every owned_* field is a minimum future owned-adapter mapping requirement, not a complete producer design or a claim about the current embedder-controlled MeterProvider wire output.",
+  "retained_instruments": [
+    {
+      "name": "asupersync.tasks.active",
+      "kind": "OBSERVABLE_GAUGE_U64",
+      "description": "Currently running tasks",
+      "semantic_unit": "1",
+      "incumbent_descriptor_unit": "",
+      "attributes": [],
+      "sampling_group": "UNSAMPLED",
+      "provider_callback": "task_spawned plus task_completed",
+      "owned_metric_data": "Gauge(NumberDataPoint::Int)",
+      "owned_aggregation": "LAST_VALUE_AT_COLLECTION",
+      "owned_temporality": "NOT_APPLICABLE",
+      "exemplars": "EMPTY"
+    },
+    {
+      "name": "asupersync.regions.active",
+      "kind": "OBSERVABLE_GAUGE_U64",
+      "description": "Currently active regions",
+      "semantic_unit": "1",
+      "incumbent_descriptor_unit": "",
+      "attributes": [],
+      "sampling_group": "UNSAMPLED",
+      "provider_callback": "region_created plus region_closed",
+      "owned_metric_data": "Gauge(NumberDataPoint::Int)",
+      "owned_aggregation": "LAST_VALUE_AT_COLLECTION",
+      "owned_temporality": "NOT_APPLICABLE",
+      "exemplars": "EMPTY"
+    },
+    {
+      "name": "asupersync.obligations.active",
+      "kind": "OBSERVABLE_GAUGE_U64",
+      "description": "Currently active obligations",
+      "semantic_unit": "1",
+      "incumbent_descriptor_unit": "",
+      "attributes": [],
+      "sampling_group": "UNSAMPLED",
+      "provider_callback": "obligation_created plus obligation_discharged or obligation_leaked",
+      "owned_metric_data": "Gauge(NumberDataPoint::Int)",
+      "owned_aggregation": "LAST_VALUE_AT_COLLECTION",
+      "owned_temporality": "NOT_APPLICABLE",
+      "exemplars": "EMPTY"
+    },
+    {
+      "name": "asupersync.tasks.spawned",
+      "kind": "COUNTER_U64",
+      "description": "Total tasks spawned",
+      "semantic_unit": "1",
+      "incumbent_descriptor_unit": "",
+      "attributes": [],
+      "sampling_group": "UNSAMPLED",
+      "provider_callback": "task_spawned",
+      "owned_metric_data": "Sum(NumberDataPoint::Int)",
+      "owned_aggregation": "MONOTONIC_SUM",
+      "owned_temporality": "CUMULATIVE",
+      "exemplars": "EMPTY"
+    },
+    {
+      "name": "asupersync.tasks.completed",
+      "kind": "COUNTER_U64",
+      "description": "Total tasks completed",
+      "semantic_unit": "1",
+      "incumbent_descriptor_unit": "",
+      "attributes": ["outcome"],
+      "sampling_group": "UNSAMPLED",
+      "provider_callback": "task_completed",
+      "owned_metric_data": "Sum(NumberDataPoint::Int)",
+      "owned_aggregation": "MONOTONIC_SUM_PER_ATTRIBUTE_SET",
+      "owned_temporality": "CUMULATIVE",
+      "exemplars": "EMPTY"
+    },
+    {
+      "name": "asupersync.regions.created",
+      "kind": "COUNTER_U64",
+      "description": "Total regions created",
+      "semantic_unit": "1",
+      "incumbent_descriptor_unit": "",
+      "attributes": [],
+      "sampling_group": "UNSAMPLED",
+      "provider_callback": "region_created",
+      "owned_metric_data": "Sum(NumberDataPoint::Int)",
+      "owned_aggregation": "MONOTONIC_SUM",
+      "owned_temporality": "CUMULATIVE",
+      "exemplars": "EMPTY"
+    },
+    {
+      "name": "asupersync.regions.closed",
+      "kind": "COUNTER_U64",
+      "description": "Total regions closed",
+      "semantic_unit": "1",
+      "incumbent_descriptor_unit": "",
+      "attributes": [],
+      "sampling_group": "UNSAMPLED",
+      "provider_callback": "region_closed",
+      "owned_metric_data": "Sum(NumberDataPoint::Int)",
+      "owned_aggregation": "MONOTONIC_SUM",
+      "owned_temporality": "CUMULATIVE",
+      "exemplars": "EMPTY"
+    },
+    {
+      "name": "asupersync.cancellations",
+      "kind": "COUNTER_U64",
+      "description": "Cancellation requests",
+      "semantic_unit": "1",
+      "incumbent_descriptor_unit": "",
+      "attributes": ["kind"],
+      "sampling_group": "UNSAMPLED",
+      "provider_callback": "cancellation_requested",
+      "owned_metric_data": "Sum(NumberDataPoint::Int)",
+      "owned_aggregation": "MONOTONIC_SUM_PER_ATTRIBUTE_SET",
+      "owned_temporality": "CUMULATIVE",
+      "exemplars": "EMPTY"
+    },
+    {
+      "name": "asupersync.deadlines.set",
+      "kind": "COUNTER_U64",
+      "description": "Deadlines configured",
+      "semantic_unit": "1",
+      "incumbent_descriptor_unit": "",
+      "attributes": [],
+      "sampling_group": "UNSAMPLED",
+      "provider_callback": "deadline_set",
+      "owned_metric_data": "Sum(NumberDataPoint::Int)",
+      "owned_aggregation": "MONOTONIC_SUM",
+      "owned_temporality": "CUMULATIVE",
+      "exemplars": "EMPTY"
+    },
+    {
+      "name": "asupersync.deadlines.exceeded",
+      "kind": "COUNTER_U64",
+      "description": "Deadline exceeded events",
+      "semantic_unit": "1",
+      "incumbent_descriptor_unit": "",
+      "attributes": [],
+      "sampling_group": "UNSAMPLED",
+      "provider_callback": "deadline_exceeded",
+      "owned_metric_data": "Sum(NumberDataPoint::Int)",
+      "owned_aggregation": "MONOTONIC_SUM",
+      "owned_temporality": "CUMULATIVE",
+      "exemplars": "EMPTY"
+    },
+    {
+      "name": "asupersync.deadline.warnings_total",
+      "kind": "COUNTER_U64",
+      "description": "Deadline warning events",
+      "semantic_unit": "1",
+      "incumbent_descriptor_unit": "",
+      "attributes": ["reason", "task_type"],
+      "sampling_group": "UNSAMPLED",
+      "provider_callback": "deadline_warning",
+      "owned_metric_data": "Sum(NumberDataPoint::Int)",
+      "owned_aggregation": "MONOTONIC_SUM_PER_ATTRIBUTE_SET",
+      "owned_temporality": "CUMULATIVE",
+      "exemplars": "EMPTY"
+    },
+    {
+      "name": "asupersync.deadline.violations_total",
+      "kind": "COUNTER_U64",
+      "description": "Deadline violation events",
+      "semantic_unit": "1",
+      "incumbent_descriptor_unit": "",
+      "attributes": ["task_type"],
+      "sampling_group": "UNSAMPLED",
+      "provider_callback": "deadline_violation",
+      "owned_metric_data": "Sum(NumberDataPoint::Int)",
+      "owned_aggregation": "MONOTONIC_SUM_PER_ATTRIBUTE_SET",
+      "owned_temporality": "CUMULATIVE",
+      "exemplars": "EMPTY"
+    },
+    {
+      "name": "asupersync.task.stuck_detected_total",
+      "kind": "COUNTER_U64",
+      "description": "Tasks detected as stuck (no progress)",
+      "semantic_unit": "1",
+      "incumbent_descriptor_unit": "",
+      "attributes": ["task_type"],
+      "sampling_group": "UNSAMPLED",
+      "provider_callback": "task_stuck_detected",
+      "owned_metric_data": "Sum(NumberDataPoint::Int)",
+      "owned_aggregation": "MONOTONIC_SUM_PER_ATTRIBUTE_SET",
+      "owned_temporality": "CUMULATIVE",
+      "exemplars": "EMPTY"
+    },
+    {
+      "name": "asupersync.obligations.created",
+      "kind": "COUNTER_U64",
+      "description": "Obligations created",
+      "semantic_unit": "1",
+      "incumbent_descriptor_unit": "",
+      "attributes": [],
+      "sampling_group": "UNSAMPLED",
+      "provider_callback": "obligation_created",
+      "owned_metric_data": "Sum(NumberDataPoint::Int)",
+      "owned_aggregation": "MONOTONIC_SUM",
+      "owned_temporality": "CUMULATIVE",
+      "exemplars": "EMPTY"
+    },
+    {
+      "name": "asupersync.obligations.discharged",
+      "kind": "COUNTER_U64",
+      "description": "Obligations discharged",
+      "semantic_unit": "1",
+      "incumbent_descriptor_unit": "",
+      "attributes": [],
+      "sampling_group": "UNSAMPLED",
+      "provider_callback": "obligation_discharged",
+      "owned_metric_data": "Sum(NumberDataPoint::Int)",
+      "owned_aggregation": "MONOTONIC_SUM",
+      "owned_temporality": "CUMULATIVE",
+      "exemplars": "EMPTY"
+    },
+    {
+      "name": "asupersync.obligations.leaked",
+      "kind": "COUNTER_U64",
+      "description": "Obligations leaked",
+      "semantic_unit": "1",
+      "incumbent_descriptor_unit": "",
+      "attributes": [],
+      "sampling_group": "UNSAMPLED",
+      "provider_callback": "obligation_leaked",
+      "owned_metric_data": "Sum(NumberDataPoint::Int)",
+      "owned_aggregation": "MONOTONIC_SUM",
+      "owned_temporality": "CUMULATIVE",
+      "exemplars": "EMPTY"
+    },
+    {
+      "name": "asupersync.tasks.duration",
+      "kind": "HISTOGRAM_F64",
+      "description": "Task execution duration in seconds",
+      "semantic_unit": "s",
+      "incumbent_descriptor_unit": "",
+      "attributes": ["outcome"],
+      "sampling_group": "SELF",
+      "provider_callback": "task_completed",
+      "owned_metric_data": "Histogram(HistogramDataPoint)",
+      "owned_aggregation": "EXPLICIT_BUCKET_HISTOGRAM_PER_ATTRIBUTE_SET",
+      "owned_temporality": "CUMULATIVE",
+      "exemplars": "EMPTY"
+    },
+    {
+      "name": "asupersync.regions.lifetime",
+      "kind": "HISTOGRAM_F64",
+      "description": "Region lifetime in seconds",
+      "semantic_unit": "s",
+      "incumbent_descriptor_unit": "",
+      "attributes": [],
+      "sampling_group": "SELF",
+      "provider_callback": "region_closed",
+      "owned_metric_data": "Histogram(HistogramDataPoint)",
+      "owned_aggregation": "EXPLICIT_BUCKET_HISTOGRAM",
+      "owned_temporality": "CUMULATIVE",
+      "exemplars": "EMPTY"
+    },
+    {
+      "name": "asupersync.cancellation.drain_duration",
+      "kind": "HISTOGRAM_F64",
+      "description": "Cancellation drain duration in seconds",
+      "semantic_unit": "s",
+      "incumbent_descriptor_unit": "",
+      "attributes": [],
+      "sampling_group": "SELF",
+      "provider_callback": "drain_completed",
+      "owned_metric_data": "Histogram(HistogramDataPoint)",
+      "owned_aggregation": "EXPLICIT_BUCKET_HISTOGRAM",
+      "owned_temporality": "CUMULATIVE",
+      "exemplars": "EMPTY"
+    },
+    {
+      "name": "asupersync.deadline.remaining_seconds",
+      "kind": "HISTOGRAM_F64",
+      "description": "Time remaining at completion in seconds",
+      "semantic_unit": "s",
+      "incumbent_descriptor_unit": "",
+      "attributes": ["task_type"],
+      "sampling_group": "SELF",
+      "provider_callback": "deadline_remaining",
+      "owned_metric_data": "Histogram(HistogramDataPoint)",
+      "owned_aggregation": "EXPLICIT_BUCKET_HISTOGRAM_PER_ATTRIBUTE_SET",
+      "owned_temporality": "CUMULATIVE",
+      "exemplars": "EMPTY"
+    },
+    {
+      "name": "asupersync.checkpoint.interval_seconds",
+      "kind": "HISTOGRAM_F64",
+      "description": "Time between checkpoints in seconds",
+      "semantic_unit": "s",
+      "incumbent_descriptor_unit": "",
+      "attributes": ["task_type"],
+      "sampling_group": "SELF",
+      "provider_callback": "checkpoint_interval",
+      "owned_metric_data": "Histogram(HistogramDataPoint)",
+      "owned_aggregation": "EXPLICIT_BUCKET_HISTOGRAM_PER_ATTRIBUTE_SET",
+      "owned_temporality": "CUMULATIVE",
+      "exemplars": "EMPTY"
+    },
+    {
+      "name": "asupersync.scheduler.poll_time",
+      "kind": "HISTOGRAM_F64",
+      "description": "Scheduler poll duration in seconds",
+      "semantic_unit": "s",
+      "incumbent_descriptor_unit": "",
+      "attributes": [],
+      "sampling_group": "asupersync.scheduler",
+      "provider_callback": "scheduler_tick",
+      "owned_metric_data": "Histogram(HistogramDataPoint)",
+      "owned_aggregation": "EXPLICIT_BUCKET_HISTOGRAM",
+      "owned_temporality": "CUMULATIVE",
+      "exemplars": "EMPTY"
+    },
+    {
+      "name": "asupersync.scheduler.tasks_polled",
+      "kind": "HISTOGRAM_F64",
+      "description": "Tasks polled per scheduler tick",
+      "semantic_unit": "1",
+      "incumbent_descriptor_unit": "",
+      "attributes": [],
+      "sampling_group": "asupersync.scheduler",
+      "provider_callback": "scheduler_tick",
+      "owned_metric_data": "Histogram(HistogramDataPoint)",
+      "owned_aggregation": "EXPLICIT_BUCKET_HISTOGRAM",
+      "owned_temporality": "CUMULATIVE",
+      "exemplars": "EMPTY"
+    }
+  ],
+  "unmapped_provider_callbacks": [
+    {
+      "callback": "MetricsProvider::record_panic",
+      "current_otel_metrics_behavior": "INHERITED_NO_OP",
+      "required_disposition": "ADD_A_VERSIONED_COUNTER_MAPPING_OR_EXPLICITLY_KEEP_UNSUPPORTED_BEFORE_CUTOVER",
+      "closure_blocker": true
+    }
+  ],
+  "discarded_provider_inputs": [
+    {
+      "callback": "task_spawned",
+      "discarded": ["region_id", "task_id"]
+    },
+    {
+      "callback": "task_completed",
+      "discarded": ["task_id"]
+    },
+    {
+      "callback": "region_created",
+      "discarded": ["region_id", "parent_region_id"]
+    },
+    {
+      "callback": "region_closed",
+      "discarded": ["region_id"]
+    },
+    {
+      "callback": "cancellation_requested",
+      "discarded": ["region_id"]
+    },
+    {
+      "callback": "drain_completed",
+      "discarded": ["region_id"]
+    },
+    {
+      "callback": "deadline_set",
+      "discarded": ["region_id", "deadline"]
+    },
+    {
+      "callback": "deadline_exceeded",
+      "discarded": ["region_id"]
+    },
+    {
+      "callback": "deadline_warning",
+      "discarded": ["remaining"]
+    },
+    {
+      "callback": "deadline_violation",
+      "discarded": ["over_by"]
+    },
+    {
+      "callback": "obligation_created or obligation_discharged or obligation_leaked",
+      "discarded": ["region_id"]
+    }
+  ],
+  "additional_retained_surfaces": [
+    {
+      "surface_id": "RUNTIME-METRICS-FEATURE",
+      "path": "src/runtime/metrics.rs",
+      "state": "PUBLIC_FEATURE_GATED_UNMAPPED",
+      "counters": ["sched_yield_calls", "timer_threads_spawned", "timers_cancelled", "timers_fired", "timers_registered", "worker_parks", "worker_spins", "worker_unparks"],
+      "gauges": ["active_timers"],
+      "reset_behavior": "The eight process-global counters can be reset under runtime-metrics; active_timers is derived with saturating arithmetic.",
+      "owned_mapping_state": "UNMAPPED_GAP"
+    },
+    {
+      "surface_id": "DYNAMIC-METRICS-REGISTRY-PRODUCERS",
+      "paths": ["src/observability/pressure_governor.rs", "src/raptorq/pipeline.rs"],
+      "state": "REPRESENTATIVE_IN_TREE_PRODUCERS_NOT_EXHAUSTIVE",
+      "examples": ["pressure_governor_decision_latency_ns", "pressure_overall_scaled", "raptorq.auth_rejected", "raptorq.symbols_sent", "swarm_coordination_latency_seconds"],
+      "owned_mapping_state": "TYPE_LEVEL_MAPPING_ONLY_NAME_CENSUS_INCOMPLETE"
+    },
+    {
+      "surface_id": "DIRECT-METRIC-INSTRUMENT-PRODUCERS",
+      "paths": ["src/agent_swarm/release_proof_aggregator.rs", "src/net/atp/quic/metrics.rs", "src/observability/network_truth.rs"],
+      "state": "PUBLIC_OR_PRODUCTION_IN_TREE_PRODUCERS_NOT_EXHAUSTIVE",
+      "examples": ["asw_proofs_generated_total", "atp_network_rtt_seconds", "atp_quic_packets_sent_<connection_id>"],
+      "owned_mapping_state": "UNMAPPED_GAP"
+    }
+  ],
+  "dynamic_registry_mapping": [
+    {
+      "registry_kind": "Counter",
+      "owned_metric_data": "Sum(NumberDataPoint::Int)",
+      "temporality": "CUMULATIVE",
+      "aggregation": "MONOTONIC_SUM",
+      "available_snapshot_fidelity": "EXACT_U64_VALUE_ONLY",
+      "mapping_state": "BLOCKED_ON_U64_TO_I64_RANGE_POLICY_AND_EPOCH_STATE"
+    },
+    {
+      "registry_kind": "Gauge",
+      "owned_metric_data": "Gauge(NumberDataPoint::Int)",
+      "temporality": "NOT_APPLICABLE",
+      "aggregation": "LAST_VALUE_AT_COLLECTION",
+      "available_snapshot_fidelity": "EXACT_I64_VALUE",
+      "mapping_state": "DESIGN_COMPLETE_IMPLEMENTATION_ABSENT"
+    },
+    {
+      "registry_kind": "Histogram",
+      "owned_metric_data": "Histogram(HistogramDataPoint)",
+      "temporality": "CUMULATIVE",
+      "aggregation": "EXPLICIT_BUCKET_HISTOGRAM",
+      "available_snapshot_fidelity": "HistogramSnapshot retains sorted bounds, per-bucket counts including +Inf, count, and sum; MetricsSnapshot drops bounds and bucket counts.",
+      "mapping_state": "USE_HISTOGRAM_SNAPSHOT_DIRECTLY_OR_EXTEND_SNAPSHOT_WITHOUT_LOSS"
+    },
+    {
+      "registry_kind": "Summary",
+      "owned_metric_data": "Summary(SummaryDataPoint)",
+      "temporality": "NOT_APPLICABLE",
+      "aggregation": "EXACT_COUNT_AND_SUM_PLUS_BOUNDED_ROLLING_QUANTILE_SAMPLE",
+      "available_snapshot_fidelity": "No summary row exists in MetricValue or MetricsSnapshot, and no canonical exported quantile set is selected.",
+      "mapping_state": "BLOCKED_ON_SNAPSHOT_AND_QUANTILE_POLICY"
+    }
+  ],
+  "descriptor_and_unit_policy": {
+    "name_policy": "Preserve every fixed instrument name exactly. Dynamic names must be nonempty and pass the owned metric-name byte limit before allocation.",
+    "description_policy": "Preserve the exact incumbent description strings for the 23 fixed instruments.",
+    "incumbent_unit_fact": "OtelMetrics calls with_description but never with_unit, so the application-level descriptor unit is empty for every fixed instrument.",
+    "owned_cutover_policy": "Emit an empty Metric.unit for parity. A future nonempty unit correction is an intentional observable descriptor version and requires golden plus collector evidence.",
+    "semantic_unit_field": "semantic_unit documents the current value meaning; it is not a claim that the incumbent wire carries that unit.",
+    "metadata_policy": "Emit no metric metadata until a retained metadata producer exists."
+  },
+  "dynamic_stream_identity_contract": {
+    "descriptor_identity_fields": ["description", "kind", "name", "unit"],
+    "stream_identity_fields": ["attributes", "description", "kind", "name", "unit"],
+    "attribute_form": "Canonical ordered key and encoded-value vector after filtering and redaction.",
+    "metric_grouping": "Emit one Metric per descriptor identity and group distinct canonical attribute streams as data points under that Metric.",
+    "duplicate_exact_identity": "HARD_REJECT_BEFORE_MODEL_CONSTRUCTION",
+    "same_name_conflicting_kind_or_descriptor": "HARD_REJECT_BEFORE_MODEL_CONSTRUCTION",
+    "duplicate_point_identity": "HARD_REJECT_BEFORE_MODEL_CONSTRUCTION",
+    "coalescing": "FORBIDDEN_UNTIL_AN_EXPLICIT_ASSOCIATIVE_AGGREGATION_CONTRACT_AND_GOLDENS_EXIST",
+    "current_snapshot_gap": "MetricsSnapshot permits duplicate names, duplicate name-plus-attribute points, arbitrary order, empty names, and no descriptor fields."
+  },
+  "temporality_timestamp_and_reset_contract": {
+    "production_meter_bridge_ownership": "EMBEDDER_OWNED_NOT_ENFORCED_BY_ASUPERSYNC",
+    "required_owned_sum_temporality": "CUMULATIVE_ONLY",
+    "required_owned_histogram_temporality": "CUMULATIVE_ONLY",
+    "delta_policy": "FORBIDDEN_UNTIL_PREVIOUS_VALUE_STATE_RESET_DETECTION_AND_GOLDENS_EXIST",
+    "point_time": "Every emitted point has a nonzero collection observation time. Within one stream and attribute set it must not move backwards.",
+    "gauge_start_time": "ZERO_ABSENT",
+    "cumulative_start_time": "Stable nonzero accumulation-epoch start time for a metric stream and attribute set; it changes only when that aggregation state is recreated or explicitly reset.",
+    "reset_signal": "A cumulative reset rotates start_time_unix_nano and restarts the cumulative value or buckets. It must never be represented as a negative delta.",
+    "current_fixture_gap": "The generated-message fixture derives a new start time from every batch_sequence. It therefore models a new accumulation epoch per batch and does not prove multi-batch cumulative continuity.",
+    "counter_range_policy": "A u64 counter greater than i64::MAX must produce a typed adapter refusal before owned model construction. Wrapping cast_signed and lossy f64 conversion are forbidden.",
+    "observable_gauge_range_policy": "A u64 observable gauge greater than i64::MAX must likewise produce a typed adapter refusal; signed wrapping and lossy conversion are forbidden.",
+    "counter_wrap_policy": "The current AtomicU64 counter uses fetch_add and has no checked overflow or reset API. Owned mapping cannot claim reset correctness across u64 wraparound.",
+    "scheduler_tasks_polled_precision": "The incumbent provider converts usize to f64 and can lose integer precision above 2^52. An owned adapter must either retain an exact integer source or explicitly preserve this incumbent loss boundary.",
+    "histogram_reset_policy": "Bounds are stable within an epoch. A reset rotates the start time and restarts count, sum, and every bucket together.",
+    "summary_reset_policy": "A future summary adapter must rotate start time and restart count, sum, and retained quantile sample together.",
+    "clock_authority": "The production adapter must receive timestamp and epoch authority explicitly; synthetic batch arithmetic and ambient wall-clock reads are not production authority.",
+    "numeric_domain_policy": "The adapter must reject nonfinite histogram observations, bounds, sums, min, max, summary sums, quantiles, and quantile values before model construction. Negative Summary quantile values remain an incompatibility with the current dynamic Summary producer and block that mapping.",
+    "numeric_overflow_policy": "A registry count or sum overflow that produces wraparound or infinity is a typed adapter refusal; it is not truncated, saturated, or serialized."
+  },
+  "attribute_ordering_and_cardinality_contract": {
+    "ordering": "Filter and redact first, then sort attributes by UTF-8 key bytes and encoded value bytes before model construction.",
+    "duplicate_keys": "HARD_REJECT_BEFORE_MODEL_CONSTRUCTION",
+    "empty_keys": "HARD_REJECT_BEFORE_MODEL_CONSTRUCTION",
+    "empty_string_values": "PRESERVE_UNLESS_THE_CALLER_PRIVACY_POLICY_EXPLICITLY_DROPS_THE_FIELD",
+    "fixed_attribute_domains": {
+      "outcome": ["cancelled", "err", "ok", "panicked"],
+      "kind": ["cost_budget", "deadline", "fail_fast", "linked_exit", "parent_cancelled", "poll_quota", "race_lost", "resource_unavailable", "shutdown", "timeout", "user"],
+      "task_type": "One through 64 bytes, begins with ASCII alphabetic, then restricted to A-Z a-z 0-9 underscore dot colon hyphen; otherwise <invalid>.",
+      "reason": "Caller-supplied static reason string. Built-in deadline monitoring currently uses approaching_deadline, no_progress, and approaching_deadline_no_progress, but the public callback does not enforce a finite domain; every value remains subject to owned byte admission."
+    },
+    "otel_metrics_defaults": {
+      "max_cardinality_per_metric": 1000,
+      "max_metric_names": 4096,
+      "overflow_strategy": "Drop",
+      "drop_labels": [],
+      "sampling": null
+    },
+    "tracker_visible_fixed_metric_names": [
+      "asupersync.cancellations",
+      "asupersync.checkpoint.interval_seconds",
+      "asupersync.deadline.remaining_seconds",
+      "asupersync.deadline.violations_total",
+      "asupersync.deadline.warnings_total",
+      "asupersync.task.stuck_detected_total",
+      "asupersync.tasks.completed",
+      "asupersync.tasks.duration"
+    ],
+    "tracker_visibility_note": "Only the eight fixed label-bearing call sites pass through check_cardinality. The other 15 fixed instruments do not consume tracker metric-name slots.",
+    "otel_metrics_zero_semantics": {
+      "max_cardinality_zero": "PRIMARY_ADMISSION_OVERFLOWS_EVERY_FRESH_LABEL_SET",
+      "max_cardinality_zero_drop": "OMIT_AND_COUNT_OVERFLOW",
+      "max_cardinality_zero_aggregate": "AGGREGATE_RETRY_ALSO_OVERFLOWS_UNLESS_ALREADY_ADMITTED_THEN_OMIT",
+      "max_cardinality_zero_warn": "WARN_THEN_RECORD_BEYOND_ZERO_CAP",
+      "max_metrics_zero": "UNLIMITED_METRIC_NAMES"
+    },
+    "overflow_strategies": {
+      "Drop": "Count the overflow and omit the new point.",
+      "Aggregate": "Replace every retained label value with other and retry admission once. Because the retry occurs after the per-metric set is already full, a new all-other set is normally refused; aggregation succeeds only if that exact set was admitted earlier.",
+      "Warn": "Current code warns then records beyond both caps; this is explicitly unbounded and blocks an owned bounded-adapter claim."
+    },
+    "sampling": "See sampling_contract; deterministic LabRuntime replay remains unproved.",
+    "dynamic_registry_defaults": {
+      "per_kind_metric_name_cap": 10000,
+      "zero_means": "UNLIMITED",
+      "overflow_name": "asupersync_metric_cardinality_overflow",
+      "overflow_behavior": "Route fresh names beyond the cap into one shared bucket per kind and count rejections."
+    },
+    "owned_adapter_policy": "The adapter may use a stricter producer cap than the owned schema, but every rejection or aggregation must be counted and observable. Warn cannot bypass a finite cap."
+  },
+  "sampling_contract": {
+    "rate_input": "SamplingConfig::new clamps finite inputs to 0 through 1; NaN remains NaN.",
+    "threshold": "floor(sample_rate times 100) cast to u64; NaN casts to zero.",
+    "granularity": "ONE_PERCENT_WITH_DOWNWARD_QUANTIZATION",
+    "selector": "Configured strings use substring matching against the metric selector name; an empty selector list samples every should_sample call.",
+    "sequence": "One AtomicU64 sequence is shared across every selected metric in one OtelMetrics instance.",
+    "admission_order": "For sampled histograms, sampling occurs before task_type sanitization and cardinality admission. A sampled-out point consumes no tracker slot.",
+    "paired_callback_divergence": "task_completed can increment the unsampled completion counter while the duration histogram is sampled out; both scheduler histograms share one selector decision.",
+    "reweighting": "NONE",
+    "concurrency": "Concurrent callback order can change which observations occupy sampled sequence slots.",
+    "required_owned_nan_policy": "HARD_REJECT_CONFIGURATION_BEFORE_PROVIDER_CONSTRUCTION"
+  },
+  "owned_producer_limit_decisions": {
+    "decision_state": "UNRESOLVED_CLOSURE_BLOCKER",
+    "points_per_metric": "MUST_BE_FINITE_AND_AT_MOST_1000_EXACT_VALUE_UNSELECTED",
+    "metrics_per_scope_batch": "MUST_BE_FINITE_AND_AT_MOST_4096_EXACT_VALUE_UNSELECTED",
+    "batch_bytes": "MUST_BE_FINITE_AND_WITHIN_CALLER_WIRE_ENVELOPE_EXACT_VALUE_UNSELECTED",
+    "queue_depth": "MUST_BE_FINITE_EXACT_VALUE_UNSELECTED",
+    "queue_overload": "MUST_BE_COUNTED_EXACT_POLICY_UNSELECTED",
+    "histogram_bound_vectors": "UNSELECTED_FOR_ALL_SEVEN_FIXED_HISTOGRAMS",
+    "summary_quantiles": "UNSELECTED",
+    "resolution_rule": "No owned adapter or A3 closure may land until exact values and overflow or split behavior are versioned in this artifact and covered by goldens."
+  },
+  "snapshot_queue_and_batch_contract": {
+    "production_meter_bridge_reachability": "NOT_WIRED",
+    "snapshot_entry_limit": "EXPLICIT_UNBOUNDED",
+    "snapshot_label_limit": "EXPLICIT_UNBOUNDED",
+    "snapshot_batch_byte_limit": "EXPLICIT_UNBOUNDED",
+    "queue_capacity": "CALLER_SUPPLIED_NO_DEFAULT",
+    "queue_overload": "DROP_OLDEST_THEN_RETAIN_FIFO",
+    "queue_capacity_zero": "EFFECTIVE_DEPTH_ONE; first enqueue reports shedding but increments no drop counter because no prior item existed",
+    "failed_dequeued_batch": "NOT_REQUEUED_AND_NOT_COUNTED_AS_SHED",
+    "inventory_conflict": "The current capability inventory says DROP_NEWEST; source and tests say DROP_OLDEST.",
+    "owned_adapter_requirement": "A production owned batcher must set finite point, batch, queue, and byte limits and preserve counted outcomes; this utility is not inherited proof."
+  },
+  "owned_message_mapping": {
+    "request": "collector::metrics::ExportMetricsServiceRequest",
+    "nesting": "ResourceMetrics -> ScopeMetrics -> Metric -> one MetricData variant -> data points",
+    "counter": "MetricData::Sum with AggregationTemporality::Cumulative, is_monotonic=true, and NumberDataPoint::Int",
+    "gauge": "MetricData::Gauge with NumberDataPoint::Int and no start time",
+    "histogram": "MetricData::Histogram with AggregationTemporality::Cumulative, count, sum, strictly increasing explicit_bounds, and exactly bounds_len_plus_one bucket_counts",
+    "summary": "MetricData::Summary with count, sum, and strictly increasing unique quantiles only after a canonical quantile policy lands",
+    "exponential_histogram": "UNUSED_BY_RETAINED_SURFACES",
+    "exemplars": "Empty for all retained instruments until an explicit trace-correlated exemplar producer and limit policy land.",
+    "metric_order": "Sort Metric entries by descriptor identity (name, kind, description, unit). Within each Metric, sort data points by their canonical ordered attribute vector.",
+    "partial_output": "No model or wire bytes are returned on a producer mapping refusal."
+  },
+  "owned_schema_limits": {
+    "default_max_message_bytes": 4194304,
+    "default_max_wire_fields": 65536,
+    "default_max_wire_depth": 100,
+    "default_max_wire_work_bytes": 16777216,
+    "hard_protobuf_message_ceiling_bytes": 2147483647,
+    "wire_envelope_configurability": "ProtoMessage encode and decode accept caller-supplied ProtobufWireLimits; the four default_* values are defaults, not immutable schema caps, and remain clamped by the protobuf message ceiling.",
+    "max_total_repeated_items": 65536,
+    "max_total_any_value_nodes": 4096,
+    "max_total_owned_bytes": 4194304,
+    "resource_groups_per_request": 64,
+    "scopes_per_resource_group": 128,
+    "metrics_per_scope": 4096,
+    "data_points_per_metric": 1000,
+    "attributes_per_owner": 128,
+    "metric_metadata_entries": 128,
+    "exemplars_per_data_point": 128,
+    "histogram_bucket_counts": 4096,
+    "histogram_explicit_bounds": 4095,
+    "exponential_histogram_buckets_per_sign": 4096,
+    "summary_quantiles": 1024,
+    "attribute_key_bytes": 1024,
+    "attribute_value_bytes": 4096,
+    "schema_url_bytes": 2048,
+    "scope_name_bytes": 1024,
+    "scope_version_bytes": 1024,
+    "metric_name_bytes": 1024,
+    "metric_description_bytes": 4096,
+    "metric_unit_bytes": 256,
+    "limit_failure": "TYPED_HARD_REJECT_WITHOUT_PARTIAL_FRESH_MODEL",
+    "producer_note": "The hard semantic limits do not make an unbounded producer bounded, and the default wire envelope can be replaced by caller-supplied limits. Producer admission occurs before owned model allocation, must be finite, and may be stricter."
+  },
+  "required_golden_matrix": [
+    {
+      "case_id": "A3-GOLDEN-INSTRUMENT-CENSUS",
+      "requirement": "All 23 fixed names, kinds, descriptions, semantic units, empty incumbent units, label keys, and exemplar policy match this artifact.",
+      "current_evidence": "STATIC_CONTRACT_AUTHORED_UNRUN",
+      "acceptance_state": "PENDING_EXECUTION"
+    },
+    {
+      "case_id": "A3-GOLDEN-CUMULATIVE-EPOCH",
+      "requirement": "Two exports in one epoch retain one start time while point time and cumulative value advance.",
+      "current_evidence": "NO_PRODUCTION_OWNED_ADAPTER",
+      "acceptance_state": "PENDING_IMPLEMENTATION"
+    },
+    {
+      "case_id": "A3-GOLDEN-COUNTER-RESET",
+      "requirement": "A reset rotates start time and restarts the nonnegative cumulative value; no delta or wrapped signed value is emitted.",
+      "current_evidence": "CURRENT_FIXTURE_ROTATES_START_TIME_EVERY_BATCH",
+      "acceptance_state": "PENDING_IMPLEMENTATION"
+    },
+    {
+      "case_id": "A3-GOLDEN-COUNTER-RANGE",
+      "requirement": "i64::MAX maps exactly and i64::MAX plus one is refused before model construction.",
+      "current_evidence": "CURRENT_FIXTURE_USES_WRAPPING_CAST_SIGNED",
+      "acceptance_state": "PENDING_IMPLEMENTATION"
+    },
+    {
+      "case_id": "A3-GOLDEN-HISTOGRAM-SHAPE",
+      "requirement": "Sorted bounds, per-bucket counts, count, sum, empty histogram, maximum bounds, malformed shape, and reset are pinned.",
+      "current_evidence": "OWNED_SCHEMA_VALIDATES_SHAPE_BUT_PRODUCTION_ADAPTER_IS_ABSENT",
+      "acceptance_state": "PENDING_ADAPTER_AND_EXECUTION"
+    },
+    {
+      "case_id": "A3-GOLDEN-TIMESTAMPS",
+      "requirement": "Gauge start time is absent, cumulative start is stable, point times are nonzero and nondecreasing, and backwards time is refused.",
+      "current_evidence": "OWNED_SCHEMA_REQUIRES_NONZERO_POINT_TIME_ONLY",
+      "acceptance_state": "PENDING_ADAPTER_POLICY"
+    },
+    {
+      "case_id": "A3-GOLDEN-ATTRIBUTES",
+      "requirement": "Equivalent input orders emit identical bytes; duplicates and empty keys refuse; fixed label domains and task_type sanitization are pinned.",
+      "current_evidence": "FIXTURE_SORTS_KEY_THEN_VALUE_AND_DROPS_EMPTY_KEY_OR_VALUE",
+      "acceptance_state": "PENDING_OWNED_ADAPTER"
+    },
+    {
+      "case_id": "A3-GOLDEN-CARDINALITY",
+      "requirement": "N and N plus one cases cover Drop, Aggregate, max_cardinality zero, max_metrics zero, metric-name overflow, and counted rejection.",
+      "current_evidence": "CURRENT_PROVIDER_TESTS_EXIST_BUT_OWNED_ADAPTER_POLICY_IS_UNIMPLEMENTED",
+      "acceptance_state": "PENDING_OWNED_ADAPTER"
+    },
+    {
+      "case_id": "A3-GOLDEN-ZERO-CARDINALITY-STRATEGIES",
+      "requirement": "At max_cardinality zero, Drop omits, Aggregate retry remains refused unless already admitted, and Warn records beyond the zero cap; every outcome advances the overflow counter.",
+      "current_evidence": "SOURCE_REVIEWED_STATIC_DEDICATED_GOLDEN_ABSENT",
+      "acceptance_state": "PENDING_EXECUTION"
+    },
+    {
+      "case_id": "A3-GOLDEN-WARN-BOUNDARY",
+      "requirement": "Owned mode refuses configuration that would let Warn bypass a finite cap.",
+      "current_evidence": "CURRENT_WARN_PATH_IS_EXPLICITLY_UNBOUNDED",
+      "acceptance_state": "PENDING_POLICY_CHANGE"
+    },
+    {
+      "case_id": "A3-GOLDEN-SUMMARY-NEGATIVE",
+      "requirement": "Negative finite Summary observations demonstrate the current producer-to-owned-model incompatibility and refuse before model construction.",
+      "current_evidence": "CURRENT_PRODUCER_ACCEPTS_AND_OWNED_QUANTILE_REJECTS",
+      "acceptance_state": "PENDING_POLICY_AND_EXECUTION"
+    },
+    {
+      "case_id": "A3-GOLDEN-NUMERIC-DOMAINS",
+      "requirement": "NaN, positive and negative infinity, count wrap, sum overflow, nonfinite bounds, and min-max inconsistencies follow one typed no-output refusal policy.",
+      "current_evidence": "CURRENT_PRODUCER_AND_OWNED_VALIDATION_POLICIES_DIFFER",
+      "acceptance_state": "PENDING_POLICY_AND_EXECUTION"
+    },
+    {
+      "case_id": "A3-GOLDEN-DYNAMIC-IDENTITY",
+      "requirement": "Empty names, duplicate exact streams, same-name descriptor conflicts, duplicate points, and input-order permutations follow the identity and refusal contract.",
+      "current_evidence": "CURRENT_SNAPSHOT_PERMITS_DUPLICATES_AND_EMPTY_NAMES",
+      "acceptance_state": "PENDING_OWNED_ADAPTER"
+    },
+    {
+      "case_id": "A3-GOLDEN-SAMPLING",
+      "requirement": "Finite rate quantization, NaN refusal in owned mode, substring selection, shared sequence order, pre-cardinality sampling, paired callback divergence, and scheduler pairing are pinned.",
+      "current_evidence": "SOURCE_REVIEWED_STATIC_DEDICATED_GOLDEN_ABSENT",
+      "acceptance_state": "PENDING_POLICY_AND_EXECUTION"
+    },
+    {
+      "case_id": "A3-GOLDEN-RETAINED-SURFACE-CENSUS",
+      "requirement": "An exhaustive repository-wide retained metric surface, producer, feature gate, public name, descriptor, reset, and numeric-domain census replaces the current three-family reviewed baseline.",
+      "current_evidence": "PARTIAL_OTLP_RELEVANT_BASELINE_ONLY",
+      "acceptance_state": "PENDING_EXHAUSTIVE_CENSUS"
+    },
+    {
+      "case_id": "A3-GOLDEN-PRODUCER-ENVELOPE",
+      "requirement": "Exact points-per-metric, metrics-per-scope-batch, batch-byte, queue-depth, overload and split behavior, all seven fixed histogram bound vectors, and the canonical Summary quantiles are pinned at zero, limit, and limit-plus-one boundaries.",
+      "current_evidence": "EXACT_PRODUCER_LIMITS_BOUNDS_AND_QUANTILES_UNSELECTED",
+      "acceptance_state": "PENDING_POLICY_IMPLEMENTATION_AND_EXECUTION"
+    },
+    {
+      "case_id": "A3-GOLDEN-PANIC-DISPOSITION",
+      "requirement": "MetricsProvider::record_panic has either a versioned fixed counter descriptor and owned mapping or an explicit retained unsupported disposition, with callback behavior pinned.",
+      "current_evidence": "CURRENT_OTEL_METRICS_INHERITS_NO_OP",
+      "acceptance_state": "PENDING_POLICY_AND_EXECUTION"
+    },
+    {
+      "case_id": "A3-GOLDEN-LAB-REPLAY",
+      "requirement": "A deterministic LabRuntime schedule produces byte-identical ordered metric batches and the same sampling decisions across replay.",
+      "current_evidence": "UNRUN",
+      "acceptance_state": "PENDING_IMPLEMENTATION_AND_EXECUTION"
+    },
+    {
+      "case_id": "A3-GOLDEN-REAL-COLLECTOR",
+      "requirement": "A no-mock collector receives and decodes counter, gauge, histogram, reset, attributes, and cardinality-boundary cases.",
+      "current_evidence": "UNRUN",
+      "acceptance_state": "PENDING_IMPLEMENTATION_AND_EXECUTION"
+    }
+  ],
+  "known_gaps": [
+    {
+      "gap_id": "A3-GAP-OWNED-ADAPTER",
+      "summary": "No production adapter constructs owned metric messages from OtelMetrics, Metrics, or MetricsSnapshot.",
+      "closure_blocker": true
+    },
+    {
+      "gap_id": "A3-GAP-EPOCH",
+      "summary": "No production accumulation-epoch state owns stable cumulative start timestamps or explicit reset transitions.",
+      "closure_blocker": true
+    },
+    {
+      "gap_id": "A3-GAP-HISTOGRAM-BOUNDS",
+      "summary": "OtelMetrics delegates histogram aggregation and boundaries to the external SDK, while MetricsSnapshot drops registry bucket boundaries and counts. The local registry sorts and deduplicates caller bounds but does not reject nonfinite bounds, and re-registration silently retains the first boundary set.",
+      "closure_blocker": true
+    },
+    {
+      "gap_id": "A3-GAP-U64-RANGE",
+      "summary": "The fixture casts u64 counters to signed i64 and can wrap values above i64::MAX; the three u64 observable gauges have the same finite owned-integer range problem.",
+      "closure_blocker": true
+    },
+    {
+      "gap_id": "A3-GAP-SUMMARY",
+      "summary": "The dynamic Summary has no snapshot row and no canonical exported quantile set.",
+      "closure_blocker": true
+    },
+    {
+      "gap_id": "A3-GAP-SUMMARY-NEGATIVE",
+      "summary": "The dynamic Summary accepts negative finite observations, while the owned Summary quantile model rejects negative quantile values.",
+      "closure_blocker": true
+    },
+    {
+      "gap_id": "A3-GAP-NUMERIC-DOMAINS",
+      "summary": "Registry sums can overflow to infinity and histogram boundaries can be nonfinite, while current owned validation does not uniformly reject every nonfinite numeric field or inconsistent min-max pair.",
+      "closure_blocker": true
+    },
+    {
+      "gap_id": "A3-GAP-PANIC",
+      "summary": "OtelMetrics inherits the no-op record_panic callback and exposes no fixed panic counter.",
+      "closure_blocker": true
+    },
+    {
+      "gap_id": "A3-GAP-DETERMINISTIC-SAMPLING",
+      "summary": "The shared counter sampler depends on concurrent callback order; deterministic LabRuntime replay has not been demonstrated.",
+      "closure_blocker": true
+    },
+    {
+      "gap_id": "A3-GAP-SAMPLING-NAN-ORDER",
+      "summary": "Sampling uses downward one-percent quantization, substring selectors, one cross-metric sequence, and pre-cardinality admission; NaN becomes an effective zero rate instead of a configuration error.",
+      "closure_blocker": true
+    },
+    {
+      "gap_id": "A3-GAP-SCHEDULER-PRECISION",
+      "summary": "scheduler.tasks_polled converts usize to f64 and can lose integer precision above 2^52.",
+      "closure_blocker": true
+    },
+    {
+      "gap_id": "A3-GAP-EMPTY-LABEL-VALUE",
+      "summary": "The generated fixture silently drops empty label values, while the required owned contract preserves them unless privacy policy explicitly removes the field.",
+      "closure_blocker": true
+    },
+    {
+      "gap_id": "A3-GAP-WARN-UNBOUNDED",
+      "summary": "CardinalityOverflow::Warn records beyond the configured caps and cannot support a bounded owned-adapter claim.",
+      "closure_blocker": true
+    },
+    {
+      "gap_id": "A3-GAP-AGGREGATE",
+      "summary": "The Aggregate retry normally occurs after saturation and therefore behaves as Drop unless the all-other series was admitted earlier.",
+      "closure_blocker": true
+    },
+    {
+      "gap_id": "A3-GAP-BATCH-ENVELOPE",
+      "summary": "MetricsSnapshot and the custom exporter path have no finite entry, label, batch-byte, or message envelope; the standalone queue is not wired to the production Meter bridge.",
+      "closure_blocker": true
+    },
+    {
+      "gap_id": "A3-GAP-PRODUCER-LIMIT-DECISIONS",
+      "summary": "Exact producer point, batch, byte, queue, overload, fixed-histogram-bound, and summary-quantile policies remain unselected.",
+      "closure_blocker": true
+    },
+    {
+      "gap_id": "A3-GAP-DYNAMIC-IDENTITY",
+      "summary": "MetricsSnapshot permits empty names, duplicate metric streams, duplicate point identities, arbitrary order, and no descriptor identity; the future hard-refusal contract is not implemented.",
+      "closure_blocker": true
+    },
+    {
+      "gap_id": "A3-GAP-RETAINED-SURFACE-CENSUS",
+      "summary": "The 23-row census covers fixed OtelMetrics instruments only. runtime-metrics, dynamic Metrics producers, direct Counter/Gauge/Histogram producers, and other in-tree metrics remain unmapped and not exhaustively inventoried.",
+      "closure_blocker": true
+    },
+    {
+      "gap_id": "A3-GAP-INVENTORY-DRIFT",
+      "summary": "The frozen inventory overstates production cumulative policy, records the opposite queue shedding direction, and promotes a partial A3 receipt to EXECUTED.",
+      "closure_blocker": true
+    },
+    {
+      "gap_id": "A3-GAP-INTEGRATION-CENSUS",
+      "summary": "The current integration name census expects the 20 synchronous counters and histograms but omits the three observable gauges from its explicit expected-name list.",
+      "closure_blocker": true
+    },
+    {
+      "gap_id": "A3-GAP-EXECUTION",
+      "summary": "The dedicated contract, feature cells, LabRuntime replay, and real collector cases have not been executed in this static tranche.",
+      "closure_blocker": true
+    }
+  ],
+  "source_pins": [
+    {
+      "path": "src/observability/metrics.rs",
+      "sha256": "1a5d3a65f5b7b91cba70666da93aa844df9715ce424a08334b1ed4d19367b9c0",
+      "line_count": 2907,
+      "anchors": ["pub struct Histogram", "pub struct Summary", "pub const DEFAULT_METRIC_CARDINALITY_CAP", "fn record_panic"]
+    },
+    {
+      "path": "src/observability/otel.rs",
+      "sha256": "c6cc312af370ee4485bedeb49aa0d900ed649b813c849179c68f5d03944de311",
+      "line_count": 9427,
+      "anchors": ["pub enum CardinalityOverflow", "pub struct MetricsSnapshot", "pub struct OtelMetrics", "pub fn metrics_request_from_snapshot"]
+    },
+    {
+      "path": "src/observability/otlp_proto.rs",
+      "sha256": "2429b5f46dd985fa7c700e6255f0070b0c0c43eaa627377843ac96ef94048ca4",
+      "line_count": 8556,
+      "anchors": ["MAX_DATA_POINTS_PER_METRIC", "pub(crate) enum AggregationTemporality", "pub(crate) enum MetricData", "pub(crate) struct ExportMetricsServiceRequest"]
+    },
+    {
+      "path": "src/observability/mod.rs",
+      "sha256": "c2adba48b64ecfe3808beb2732636237fdd32446a19c45d1e294c75f36a50130",
+      "line_count": 1168,
+      "anchors": ["private, native-only owned OTLP message staging", "Signal adapters, transport wiring", "pub(crate) mod otlp_proto"]
+    },
+    {
+      "path": "src/grpc/protobuf_wire.rs",
+      "sha256": "468c5fdc699009eb2339107f63cb5abf196131a174ba47ee23a23e025f01dfa0",
+      "line_count": 2724,
+      "anchors": ["The encoder is deterministic for the same ordered sequence", "pub struct ProtobufWireLimits"]
+    },
+    {
+      "path": "src/grpc/protobuf.rs",
+      "sha256": "0360e2f9a2ce86855922f9d523d50f7d4446d5e950276d1181540a22b7e92ad6",
+      "line_count": 2611,
+      "anchors": ["fn encode_to_bytes", "limits: ProtobufWireLimits"]
+    },
+    {
+      "path": "src/runtime/deadline_monitor.rs",
+      "sha256": "ef284c561ed3bccc02441a4447f5657bbf649147eb41f9b774df8884ecfd7a58",
+      "line_count": 1948,
+      "anchors": ["approaching_deadline", "approaching_deadline_no_progress"]
+    },
+    {
+      "path": "src/runtime/metrics.rs",
+      "sha256": "3ed1cc922a918862e15f8dffd3b2fd37273296eaf0a873855b74125272faefbb",
+      "line_count": 354,
+      "anchors": ["pub struct Metrics", "pub fn reset()", "timer_threads_spawned"]
+    },
+    {
+      "path": "src/observability/pressure_governor.rs",
+      "sha256": "7f4d637645964bf63eb11bfb0031ae53da43f5f1d82af0c7d1f602d0a4563c3c",
+      "line_count": 2527,
+      "anchors": ["pressure_governor_decision_latency_ns", "swarm_coordination_latency_seconds"]
+    },
+    {
+      "path": "src/raptorq/pipeline.rs",
+      "sha256": "44d3e478bb6c40578201cfe5f6a5b06132306eec0f486ca5df74faa11c746ac9",
+      "line_count": 1883,
+      "anchors": ["raptorq.symbols_sent", "raptorq.objects_received"]
+    },
+    {
+      "path": "src/net/atp/quic/metrics.rs",
+      "sha256": "400727ac9c6050641ec7df4d52d4c159ae4b564135877267eb008aeccb1dd8e4",
+      "line_count": 1063,
+      "anchors": ["atp_quic_packets_sent_", "atp_quic_congestion_window_"]
+    },
+    {
+      "path": "src/agent_swarm/release_proof_aggregator.rs",
+      "sha256": "dd9584ed24f8ba7eacc94ec8fa9dbbb4fa853072e6b293c8772e69ab13cbb906",
+      "line_count": 2060,
+      "anchors": ["asw_proofs_generated_total", "asw_evidence_freshness_score"]
+    },
+    {
+      "path": "src/observability/network_truth.rs",
+      "sha256": "6331e40b635d72be26b13e5ba977b20e7a68a20357cbe7c5bd1b67005c08e158",
+      "line_count": 454,
+      "anchors": ["atp_network_rtt_seconds", "atp_repair_roi_ratio"]
+    },
+    {
+      "path": "tests/otlp_metrics_request_golden.rs",
+      "sha256": "396daf9c5b322d5cebe98aefccd51bf1870736954b01ebb92e7d1db3bd1b9d25",
+      "line_count": 536,
+      "anchors": ["struct OtlpMetricsRequest", "fn create_baseline_otlp_request", "fn test_golden_snapshot_determinism"]
+    },
+    {
+      "path": "tests/observability_metrics_conformance_harness.rs",
+      "sha256": "186fc08bc91cdd8333b34bb1ce5ddf81a277a8743b89289aab75ddd430b2aa38",
+      "line_count": 675,
+      "anchors": ["fn p2_opentelemetry_semantic_conventions", "fn p4_memory_efficiency", "fn comprehensive_conformance_integration"]
+    },
+    {
+      "path": "tests/otel_metric_counter_monotonicity_audit.rs",
+      "sha256": "68185b97abd540c321176b5d60c10d90679429017040df39df793a5b5dfabd31",
+      "line_count": 387,
+      "anchors": ["fn counter_has_no_decrement_or_reset_api", "fn otlp_counter_encoding_declares_cumulative_and_monotonic", "fn no_silent_delta_temporality_path_on_counter"]
+    },
+    {
+      "path": "tests/otel_metrics.rs",
+      "sha256": "8f81d4f0be546ab50aa5ad0ed52018ccd22a333c231e504962eb6bb60484ccfc",
+      "line_count": 849,
+      "anchors": ["fn otel_config_cardinality_and_sampling", "asupersync.scheduler.tasks_polled", "max_cardinality"]
+    },
+    {
+      "path": "tests/protobuf_owned_otlp_schema_contract.rs",
+      "sha256": "093ff4b7f65431e67384a52f555eabd40861c66106c60c14f8ae0c72794597e7",
+      "line_count": 2200,
+      "anchors": ["The JSON-shaped fixture is not protobuf wire evidence", "Generated request builders are test/fuzz gated"]
+    },
+    {
+      "path": "tests/golden/otel/otlp_metrics_request_README.md",
+      "sha256": "7d63f815a27542ebed852f37412a11130b7c906ff85c3114f4afb075f27b1797",
+      "line_count": 101,
+      "anchors": ["OTLP Metrics Request Golden Artifacts", "complete request structure from metrics collection to protobuf serialization"]
+    },
+    {
+      "path": "artifacts/otlp_capability_inventory_v1.json",
+      "sha256": "ad47a26ce42d8aef4544d5502ff2bf036b657e7e8858eb385a80434419499b53",
+      "line_count": 985,
+      "anchors": ["SHIPPED_VIA_DEPENDENCY", "OTLP-GAP-01", "asupersync-5z2scg.2.3"]
+    },
+    {
+      "path": "artifacts/protobuf_owned_otlp_schema_v1.json",
+      "sha256": "e3210e276d61060bc3487b98c882306f7a3ec356c0f99a76efec195962f142dc",
+      "line_count": 1126,
+      "anchors": ["NEW_A3_SCHEMA_POLICY_NOT_INCUMBENT_PARITY", "data_points_per_metric", "signal_construction_separation"]
+    },
+    {
+      "path": "docs/otlp_capability_inventory.md",
+      "sha256": "57c875073528cf4bc4df7ae24de9ac3605aa78d75bd4f382bfb23d2fbe4ca32f",
+      "line_count": 218,
+      "anchors": ["Metrics | `SHIPPED_VIA_DEPENDENCY`", "no owned production metrics/traces encoder"]
+    },
+    {
+      "path": "docs/adr/dep_plan_adr_003_otlp_ecosystem.md",
+      "sha256": "08825bc11dc00d68c96416c231449ce19b6e5c26a12511caa14c0c92bc694cce",
+      "line_count": 202,
+      "anchors": ["DEP-ADR-003", "only the logs signal has a complete owned production"]
+    }
+  ],
+  "evidence_status": {
+    "claim_time_source_inventory": "COMPLETE_STATIC",
+    "retained_fixed_instrument_census": "COMPLETE_STATIC_23",
+    "all_retained_surface_census": "PARTIAL_STATIC_CLOSURE_BLOCKER",
+    "dynamic_registry_mapping": "COMPLETE_STATIC_WITH_BLOCKERS",
+    "owned_producer_limit_design": "UNRESOLVED_CLOSURE_BLOCKER",
+    "owned_schema_limit_inventory": "COMPLETE_STATIC",
+    "prior_a3_integration_receipt": "PARTIAL_EXECUTED_NOT_ACCEPTANCE_COMPLETE",
+    "dedicated_contract_source": "AUTHORED_UNRUN",
+    "feature_compile": "UNRUN",
+    "contract_execution": "UNRUN",
+    "lab_runtime": "UNRUN",
+    "real_collector": "UNRUN",
+    "tracker_status": "OPEN"
+  },
+  "follow_on_order": [
+    "Complete the exhaustive retained metric surface and producer census, including runtime-metrics, dynamic registry producers, and direct metric instruments.",
+    "Select exact producer point, batch, byte, queue, overload, histogram-boundary, summary-quantile, numeric-domain, and stream-identity policies.",
+    "Implement an explicit owned metric batch builder with stable epoch state, deterministic ordering, typed mapping refusals, and counted admission outcomes.",
+    "Resolve panic callback disposition, u64 range handling, and bounded Warn semantics.",
+    "Add owned-model golden vectors for every required_golden_matrix row and run the focused contract plus feature cells.",
+    "Run deterministic LabRuntime replay and a no-mock collector case with retained evidence.",
+    "Only then evaluate dependency cutover and downstream A8 resource, scope, redaction, and shared cardinality integration."
+  ],
+  "no_claim_boundaries": [
+    "This static packet does not implement or prove an owned production metrics adapter.",
+    "It does not prove compilation, formatting, tests, LabRuntime determinism, collector interoperability, feature-matrix health, or broad workspace health.",
+    "It does not prove that the current external SDK chooses these temporality, aggregation, timestamp, histogram-boundary, or exemplar policies.",
+    "It does not treat the generated-message fixture or JSON-only golden as owned protobuf production evidence.",
+    "It does not authorize removal of opentelemetry, opentelemetry_sdk, the caller-supplied Meter bridge, or any retained public API.",
+    "It does not authorize tracker closure, release readiness, performance claims, or local execution fallback."
+  ]
+}
