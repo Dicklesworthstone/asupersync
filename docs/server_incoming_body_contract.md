@@ -41,7 +41,7 @@ The reusable abstractions and the live server path are currently separate.
 | Size adapter | `Limited<B>` | Decrements a data-byte allowance | Not wrapped around one shared incoming body |
 | H1 scaffold | `IncomingBody` plus `IncomingBodyWriter` | Bounded frame-count channel and fixed/chunked parsing; explicit producer completion is distinguished from premature disconnect, incoming arithmetic is checked before mutation, and a fixed-length size hint decreases on delivery | Errors still use `HttpError`; no queue-byte permits, consumer-drop signal, already-terminal repoll error, protocol cleanup/reuse, obligation/telemetry integration, or live dispatch |
 | H1 live path | `Http1Codec` to `h1::types::Request` | Applies the body cap, then completes a `Vec<u8>` body before dispatch | No concurrent handoff; prospective body and trailer accounting uses saturating addition |
-| H2 live path | pending headers plus `Vec<u8>` per stream | Uses saturating prospective addition against a configured per-stream cap (16 MiB by default), resets an over-cap stream with `ENHANCE_YOUR_CALM`, and otherwise dispatches after `END_STREAM` | No incremental handler consumption, surfaced trailers, or connection-wide aggregate body budget |
+| H2 live path | pending headers plus `Vec<u8>` per stream | Preserves a separate validated trailer block on the shared request, uses saturating prospective addition against a configured per-stream cap (16 MiB by default), resets an over-cap stream with `ENHANCE_YOUR_CALM`, and otherwise dispatches after `END_STREAM` | No incremental handler consumption or connection-wide aggregate body budget |
 | Web request | `web::extract::Request` | Owns cloneable `Bytes` | Conflicts with sole-consumer ownership |
 | Handler/router | `Handler::call(&Cx, Request)` | Moves a complete request into the handler | No head/body split |
 | Retry middleware | cloned buffered `Request` | Redispatches the same materialized body | A live body needs bounded replay prepared before first dispatch or retry refusal |
@@ -336,6 +336,22 @@ before any live H2 integration claim is made.
 The artifact parses, its source hashes and anchors were checked statically, and a
 Rust contract accompanies this document. The BODY-2 inline cases listed above were
 authored but not run. No executable project command was run for this packet.
+
+The 2026-08-06 claim-time refresh at revision
+`0fead94fbdba7302b07ce44ca4ee7a92c87134ef` rechecked all thirty source pins.
+Five hashes and line counts had drifted while every recorded anchor remained
+present: `src/channel/mpsc.rs` gained a fail-closed completed-reserve repoll
+guard and later test formatting;
+`src/stream/stream.rs` gained the owned polling documentation contract;
+`src/codec/framed.rs` gained write-side readiness and bounded backpressure;
+`src/http/h2/listener.rs` preserved request trailers separately, adopted that
+write pump, and gained a test-helper lint annotation; and
+`src/web/middleware.rs` switched panic containment to the owned future helper.
+The H2 matrix now records the landed trailer preservation. No previously
+recorded anchor disappeared, and no buffered/live matrix classification
+changed. The artifact now carries the refreshed exact fingerprints. This was a
+static source and history review only, not behavioral proof; the Rust contract
+was not compiled or executed.
 
 Therefore this packet does not claim:
 
