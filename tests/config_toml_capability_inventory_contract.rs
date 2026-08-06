@@ -318,11 +318,12 @@ fn validate_a2_implementation_receipt(inventory: &Value) -> Result<(), String> {
     }
 
     let canonical = object(a2, "canonical_contract");
+    let expected_envelope_fields: BTreeSet<String> = ["config", "schema_version"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
     if string_set(a2.get("canonical_contract").expect("canonical contract"), "envelope_fields")
-        != ["config", "schema_version"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
+        != expected_envelope_fields
         || canonical
             .get("current_schema_version")
             .and_then(Value::as_u64)
@@ -332,17 +333,11 @@ fn validate_a2_implementation_receipt(inventory: &Value) -> Result<(), String> {
     }
     for (key, expected) in [
         ("missing_schema_version", "MIGRATE_TO_V1"),
-        (
-            "unsupported_explicit_schema",
-            "REJECT_READ_AND_WRITE",
-        ),
+        ("unsupported_explicit_schema", "REJECT_READ_AND_WRITE"),
         ("object_key_order", "RECURSIVE_LEXICOGRAPHIC"),
         ("array_order", "PRESERVE_TYPED_ORDER"),
         ("whitespace", "COMPACT"),
-        (
-            "finite_number_encoding",
-            "SERDE_JSON_STABLE_SHORTEST",
-        ),
+        ("finite_number_encoding", "SERDE_JSON_STABLE_SHORTEST"),
         ("nonfinite_number_policy", "REJECT_MODEL_CONVERSION"),
         (
             "path_policy",
