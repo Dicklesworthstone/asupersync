@@ -1,14 +1,16 @@
 //! Fail-closed TOML/config capability inventory contract.
 //!
-//! Beads: asupersync-5z2scg.4.1, asupersync-5z2scg.4.3
+//! Beads: asupersync-5z2scg.4.1, asupersync-5z2scg.4.2,
+//! asupersync-5z2scg.4.3
 //! Scenario: config-toml-capability-inventory-contract
 //! Fixture: artifacts/config_toml_capability_inventory_v1.json
 //!
 //! This proves source-pinned surface, field, grammar, precedence, I/O, error,
 //! corpus, downstream, child-owner, and gap inventories, plus the fail-closed
-//! A3 incumbent-preservation receipt. It does not prove arbitrary TOML, real
-//! binary journeys, JSON parity, current execution of this contract, or
-//! permission to remove the incumbent `toml` dependency.
+//! A2 source-implementation receipt, and A3 incumbent-preservation receipt. It
+//! does not prove arbitrary TOML or JSON, real binary journeys, execution of
+//! the A2 source tests or this contract, or permission to remove the incumbent
+//! `toml` dependency.
 
 #![allow(missing_docs)]
 
@@ -23,6 +25,7 @@ const ADR_PATH: &str = "docs/adr/dep_plan_adr_004_config_scenario_formats.md";
 const CAPABILITY_REGISTRY_PATH: &str = "artifacts/dependency_capability_registry_v1.json";
 const API_SURFACE_MAP_PATH: &str = "artifacts/api_surface_map_v1.json";
 const BEAD_ID: &str = "asupersync-5z2scg.4.1";
+const A2_BEAD_ID: &str = "asupersync-5z2scg.4.2";
 const A3_BEAD_ID: &str = "asupersync-5z2scg.4.3";
 const A5_BEAD_ID: &str = "asupersync-5z2scg.4.5";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
@@ -205,6 +208,342 @@ fn validate_post_a3_provenance_refresh(inventory: &Value) -> Result<(), String> 
         || !text(refresh, "no_claim_boundary").contains("dependency exit")
     {
         return Err("post-A3 refresh no-claim boundary is incomplete".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_a2_implementation_receipt(inventory: &Value) -> Result<(), String> {
+    let a2 = inventory
+        .get("a2_implementation_receipt")
+        .ok_or_else(|| "a2_implementation_receipt must be present".to_owned())?;
+    if !a2.is_object() {
+        return Err("a2_implementation_receipt must be an object".to_owned());
+    }
+    for (key, expected) in [
+        ("bead_id", A2_BEAD_ID),
+        ("capability_id", CAPABILITY_ID),
+        ("captured_date_utc", "2026-08-06"),
+        ("implementation_state", "SOURCE_IMPLEMENTED_NOT_EXECUTED"),
+        ("execution_state", "NOT_RUN_STATIC_ONLY"),
+    ] {
+        if a2.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("a2_implementation_receipt.{key} must be {expected}"));
+        }
+    }
+
+    let expected_commits: BTreeSet<String> = ["cbe4a452a", "0fb5fadc6", "c05c8cb6d"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let source_commits = array(a2, "source_commits");
+    if source_commits.len() != 3
+        || row_ids(source_commits, "commit") != expected_commits
+        || source_commits
+            .iter()
+            .any(|row| text(row, "scope").trim().is_empty())
+    {
+        return Err("A2 must pin its exact three source commits and scopes".to_owned());
+    }
+
+    let expected_family_ids: BTreeSet<String> = [
+        "CFG-A2-RUNTIME",
+        "CFG-A2-ATP-COMMAND",
+        "CFG-A2-ATP-INSTALL",
+        "CFG-A2-ATPD",
+        "CFG-A2-DEPENDENCY-LEDGER",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    let expected_surface_ids: BTreeSet<String> = [
+        "CFG-TOML-RUNTIME",
+        "CFG-TOML-ATP-COMMAND",
+        "CFG-TOML-ATP-INSTALL",
+        "CFG-TOML-ATPD",
+        "CFG-TOML-DEPENDENCY-LEDGER",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    let families = array(a2, "family_rows");
+    if families.len() != 5 || row_ids(families, "family_id") != expected_family_ids {
+        return Err("A2 must classify the exact five inventoried config families".to_owned());
+    }
+    let actual_surface_ids: BTreeSet<String> = families
+        .iter()
+        .flat_map(|row| {
+            array(row, "surface_ids")
+                .iter()
+                .map(|surface| surface.as_str().expect("surface id").to_owned())
+        })
+        .collect();
+    let classified_surface_count = families
+        .iter()
+        .map(|row| array(row, "surface_ids").len())
+        .sum::<usize>();
+    if actual_surface_ids != expected_surface_ids || classified_surface_count != 5 {
+        return Err("A2 family rows must cover every inventoried TOML surface once".to_owned());
+    }
+    for family_id in [
+        "CFG-A2-RUNTIME",
+        "CFG-A2-ATP-COMMAND",
+        "CFG-A2-ATP-INSTALL",
+        "CFG-A2-ATPD",
+    ] {
+        let row = find_row(families, "family_id", family_id);
+        if text(row, "family_state") != "SOURCE_IMPLEMENTED_NOT_EXECUTED"
+            || text(row, "typed_model").trim().is_empty()
+            || array(row, "toml_entry_points").is_empty()
+            || array(row, "json_entry_points").is_empty()
+            || row.get("precedence_changed").and_then(Value::as_bool) != Some(false)
+            || row
+                .get("physical_writer_changed")
+                .and_then(Value::as_bool)
+                != Some(false)
+        {
+            return Err(format!("{family_id} implementation boundary drifted"));
+        }
+    }
+    let ledger = find_row(families, "family_id", "CFG-A2-DEPENDENCY-LEDGER");
+    if text(ledger, "family_state")
+        != "EXPLICIT_GENERIC_MANIFEST_TRANSFORM_NOT_APPLICATION_CONFIG"
+        || !array(ledger, "json_entry_points").is_empty()
+        || ledger.get("precedence_changed").and_then(Value::as_bool) != Some(false)
+        || ledger
+            .get("physical_writer_changed")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return Err("generic Cargo-manifest transformation must remain explicit".to_owned());
+    }
+
+    let canonical = object(a2, "canonical_contract");
+    if string_set(a2.get("canonical_contract").expect("canonical contract"), "envelope_fields")
+        != ["config", "schema_version"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        || canonical
+            .get("current_schema_version")
+            .and_then(Value::as_u64)
+            != Some(1)
+    {
+        return Err("A2 canonical envelope or schema version drifted".to_owned());
+    }
+    for (key, expected) in [
+        ("missing_schema_version", "MIGRATE_TO_V1"),
+        (
+            "unsupported_explicit_schema",
+            "REJECT_READ_AND_WRITE",
+        ),
+        ("object_key_order", "RECURSIVE_LEXICOGRAPHIC"),
+        ("array_order", "PRESERVE_TYPED_ORDER"),
+        ("whitespace", "COMPACT"),
+        (
+            "finite_number_encoding",
+            "SERDE_JSON_STABLE_SHORTEST",
+        ),
+        ("nonfinite_number_policy", "REJECT_MODEL_CONVERSION"),
+        (
+            "path_policy",
+            "EXACT_LEXICAL_UTF8_WITHOUT_NORMALIZE_RESOLVE_OR_ACCESS",
+        ),
+        (
+            "unknown_field_policy",
+            "RETAIN_SERDE_IGNORE_ON_INPUT_COMPATIBILITY",
+        ),
+        (
+            "required_field_policy",
+            "RETAIN_EACH_EXISTING_TYPED_MODEL_REQUIREMENTS",
+        ),
+    ] {
+        if canonical.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("A2 canonical contract {key} must be {expected}"));
+        }
+    }
+
+    let publication = object(a2, "model_publication_contract");
+    for key in [
+        "parse_then_validate_before_runtime_mutation",
+        "failed_runtime_layer_leaves_fresh_builder_unpublished",
+        "canonical_conversion_performs_no_file_io",
+    ] {
+        if publication.get(key).and_then(Value::as_bool) != Some(true) {
+            return Err(format!("A2 model publication contract {key} must be true"));
+        }
+    }
+    if publication
+        .get("physical_atomic_write_changed")
+        .and_then(Value::as_bool)
+        != Some(false)
+        || publication
+            .get("physical_io_and_diagnostics_owner")
+            .and_then(Value::as_str)
+            != Some("asupersync-5z2scg.4.4")
+        || publication
+            .get("real_user_journey_owner")
+            .and_then(Value::as_str)
+            != Some(A5_BEAD_ID)
+    {
+        return Err("A2 must retain its A4/A5 ownership boundaries".to_owned());
+    }
+
+    let expected_secret_families: BTreeSet<String> = [
+        "CFG-A2-RUNTIME",
+        "CFG-A2-ATP-COMMAND",
+        "CFG-A2-ATP-INSTALL",
+        "CFG-A2-ATPD",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    let secret_rows = array(a2, "secret_rows");
+    if secret_rows.len() != 4
+        || row_ids(secret_rows, "family_id") != expected_secret_families
+        || secret_rows
+            .iter()
+            .any(|row| text(row, "secret_contract").trim().is_empty())
+    {
+        return Err("A2 must classify every typed family's secret boundary".to_owned());
+    }
+    let atpd_secret = find_row(secret_rows, "family_id", "CFG-A2-ATPD");
+    if text(atpd_secret, "secret_contract")
+        != "RQ_AUTH_KEY_REDACTED_BY_SERDE_AND_DEBUG_AND_REDACTION_SENTINEL_REJECTED_ON_JSON_LOAD"
+    {
+        return Err("A2 atpd secret boundary drifted".to_owned());
+    }
+
+    let reconciliation_value = a2
+        .get("source_pin_reconciliation")
+        .expect("A2 source pin reconciliation");
+    let reconciliation = object(a2, "source_pin_reconciliation");
+    if reconciliation
+        .get("comparison_revision")
+        .and_then(Value::as_str)
+        != Some("424134f7338f610e36d5047d3d334128ae4275e4")
+        || reconciliation
+            .get("current_source_commit")
+            .and_then(Value::as_str)
+            != Some("c05c8cb6d")
+        || reconciliation
+            .get("top_level_source_pin_count")
+            .and_then(Value::as_u64)
+            != Some(16)
+        || reconciliation
+            .get("refreshed_path_count")
+            .and_then(Value::as_u64)
+            != Some(7)
+        || reconciliation
+            .get("a2_owned_path_count")
+            .and_then(Value::as_u64)
+            != Some(6)
+        || reconciliation
+            .get("unrelated_path_count")
+            .and_then(Value::as_u64)
+            != Some(1)
+    {
+        return Err("A2 source-pin reconciliation counts drifted".to_owned());
+    }
+    let expected_refreshed_paths: BTreeSet<String> = [
+        "src/config.rs",
+        "src/runtime/env_config.rs",
+        "src/runtime/builder.rs",
+        "src/cli/atp_config.rs",
+        "src/cli/atp_command_tree.rs",
+        "src/bin/atpd.rs",
+        "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    let reconciliation_rows = array(reconciliation_value, "rows");
+    if reconciliation_rows.len() != 7
+        || row_ids(reconciliation_rows, "path") != expected_refreshed_paths
+    {
+        return Err("A2 must reconcile the exact seven changed source pins".to_owned());
+    }
+    let top_level_pins = array(inventory, "source_pins");
+    for row in reconciliation_rows {
+        let path = text(row, "path");
+        let pin = find_row(top_level_pins, "path", path);
+        if text(row, "source_commit").trim().is_empty()
+            || text(row, "classification").trim().is_empty()
+            || text(row, "previous_sha256").trim().is_empty()
+            || text(row, "current_sha256") != text(pin, "sha256")
+            || row.get("current_line_count").and_then(Value::as_u64)
+                != pin.get("line_count").and_then(Value::as_u64)
+            || row
+                .get("accepted_toml_input_changed")
+                .and_then(Value::as_bool)
+                != Some(false)
+        {
+            return Err(format!("A2 reconciliation row for {path} drifted"));
+        }
+    }
+    let unrelated = find_row(
+        reconciliation_rows,
+        "path",
+        "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
+    );
+    if text(unrelated, "classification")
+        != "UNRELATED_DOWNSTREAM_STREAM_AND_ATP_CONTRACT_GROWTH"
+    {
+        return Err("A2 must separate unrelated downstream fixture growth".to_owned());
+    }
+
+    let expected_tests: BTreeSet<String> = [
+        "versioned_config_document_has_recursive_canonical_golden",
+        "versioned_config_document_migrates_missing_v1_and_ignores_unknown_fields",
+        "versioned_config_document_rejects_unsupported_schema_on_read_and_write",
+        "toml_and_json_share_one_typed_layer_with_canonical_golden",
+        "empty_toml_and_empty_json_payload_share_defaults",
+        "json_missing_version_migrates_and_unknown_fields_stay_ignored",
+        "json_rejects_unsupported_schema_and_wrong_field_type",
+        "json_file_uses_the_same_capability_mediated_read_path",
+        "from_json_str_builds_runtime_through_the_shared_typed_layer",
+        "from_json_str_rejects_unsupported_schema_version",
+        "precedence_programmatic_over_env_over_json",
+        "atp_command_toml_and_json_share_one_model_and_exact_golden",
+        "atp_command_empty_unknown_schema_and_nonfinite_rules_are_explicit",
+        "atp_install_toml_and_json_share_one_model_and_exact_golden",
+        "atp_install_outer_schema_is_additive_but_payload_requirements_remain",
+        "atp_install_canonical_paths_require_utf8_without_normalizing",
+        "atpd_toml_and_json_share_one_model_and_exact_golden",
+        "atpd_json_schema_unknown_and_required_field_rules_are_additive",
+        "atpd_secret_is_redacted_from_debug_serde_and_canonical_output",
+        "atpd_loader_selects_json_additively_and_retains_toml",
+        "atpd_canonical_paths_require_utf8_without_normalizing",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if string_set(a2, "source_test_cases") != expected_tests {
+        return Err("A2 must retain the exact twenty-one source test cases".to_owned());
+    }
+    let source = [
+        "src/config.rs",
+        "src/runtime/env_config.rs",
+        "src/runtime/builder.rs",
+        "src/cli/atp_config.rs",
+        "src/cli/atp_command_tree.rs",
+        "src/bin/atpd.rs",
+    ]
+    .into_iter()
+    .map(read_repo_file)
+    .collect::<Vec<_>>()
+    .join("\n");
+    for test_name in &expected_tests {
+        let declaration = format!("fn {test_name}(");
+        if !source.contains(declaration.as_str()) {
+            return Err(format!("A2 source test {test_name} is missing"));
+        }
+    }
+    if array(a2, "open_obligations").len() != 3
+        || !text(a2, "no_claim_boundary").contains("does not claim compilation")
+        || !text(a2, "no_claim_boundary").contains("physical atomic writes")
+        || !text(a2, "no_claim_boundary").contains("permission to remove")
+    {
+        return Err("A2 must retain open obligations and a complete no-claim boundary".to_owned());
     }
     Ok(())
 }
@@ -413,6 +752,12 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     if text(a3_child, "evidence_state") != "SOURCE_BASELINED" {
         return Err("CFG A3 child must record the source-baselined KEEP decision".to_owned());
     }
+    let a2_child = find_row(children, "owner_bead", A2_BEAD_ID);
+    if text(a2_child, "evidence_state") != "SOURCE_IMPLEMENTED_NOT_EXECUTED" {
+        return Err("CFG A2 child must retain its fail-closed source-only state".to_owned());
+    }
+
+    validate_a2_implementation_receipt(inventory)?;
 
     let a3 = inventory
         .get("a3_keep_receipt")
@@ -671,6 +1016,19 @@ fn authority_registry_and_live_source_routes_are_truthful() {
         !non_toml.contains("toml::"),
         "src/config.rs must remain explicitly classified as non-TOML"
     );
+    assert!(non_toml.contains("pub struct VersionedConfigDocument<T>"));
+    assert!(non_toml.contains("pub fn to_canonical_json<T>"));
+    assert!(runtime.contains("pub struct RuntimeConfigLayer"));
+    assert!(runtime.contains("pub fn parse_json_str"));
+    assert!(runtime.contains("pub fn runtime_config_to_canonical_json"));
+    assert!(builder.contains("pub fn from_json("));
+    assert!(builder.contains("pub fn from_json_str("));
+    assert!(atp.contains("pub fn parse_atp_command_json"));
+    assert!(atp.contains("pub fn atp_command_to_canonical_json"));
+    assert!(atp.contains("pub fn to_canonical_json(&self)"));
+    assert!(atpd.contains("pub fn to_redacted_canonical_json(&self)"));
+    assert!(atpd.contains("serialize_redacted_rq_auth_key"));
+    assert!(atpd.contains("extension.eq_ignore_ascii_case(\"json\")"));
 
     let surface_paths: BTreeSet<String> = array(&inventory, "toml_surfaces")
         .iter()
@@ -920,6 +1278,10 @@ fn precedence_io_errors_consumers_and_docs_remain_explicit() {
         "`CFG-NON-TOML-RAPTORQ`",
         "`CFG-GAP-16`",
         "zero `UNKNOWN`",
+        "A2 additive JSON source implementation",
+        "SOURCE_IMPLEMENTED_NOT_EXECUTED",
+        "twenty-one focused source tests",
+        "model-publication rule",
         "A3 incumbent decision",
         "EVIDENCE_BACKED_KEEP",
         "STATIC_DECISION_AUTHORED_NOT_EXECUTED",
@@ -984,6 +1346,33 @@ fn fail_closed_mutations_are_rejected() {
     wrong_cutover_owner["a3_keep_receipt"]["terminal_cutover_owner"] =
         Value::String(A3_BEAD_ID.to_owned());
     assert!(validate_inventory(&wrong_cutover_owner).is_err());
+
+    let mut false_a2_execution = inventory.clone();
+    false_a2_execution["a2_implementation_receipt"]["execution_state"] =
+        Value::String("EXECUTED".to_owned());
+    assert!(validate_inventory(&false_a2_execution).is_err());
+
+    let mut missing_a2_family = inventory.clone();
+    missing_a2_family["a2_implementation_receipt"]["family_rows"]
+        .as_array_mut()
+        .expect("A2 family rows")
+        .pop();
+    assert!(validate_inventory(&missing_a2_family).is_err());
+
+    let mut changed_a2_precedence = inventory.clone();
+    changed_a2_precedence["a2_implementation_receipt"]["family_rows"][0]
+        ["precedence_changed"] = Value::Bool(true);
+    assert!(validate_inventory(&changed_a2_precedence).is_err());
+
+    let mut weakened_a2_redaction = inventory.clone();
+    weakened_a2_redaction["a2_implementation_receipt"]["secret_rows"][3]
+        ["secret_contract"] = Value::String("RAW_SECRET_OUTPUT".to_owned());
+    assert!(validate_inventory(&weakened_a2_redaction).is_err());
+
+    let mut stale_a2_pin = inventory.clone();
+    stale_a2_pin["a2_implementation_receipt"]["source_pin_reconciliation"]["rows"][0]
+        ["current_sha256"] = Value::String("0".repeat(64));
+    assert!(validate_inventory(&stale_a2_pin).is_err());
 
     let mut changed_toml_contract = inventory;
     changed_toml_contract["post_a3_provenance_refresh"]["refreshed_paths"][0]

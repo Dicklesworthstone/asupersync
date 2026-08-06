@@ -3,15 +3,17 @@
 <!-- BEGIN CONFIG TOML CAPABILITY INVENTORY -->
 
 This is the operator-readable companion to
-`artifacts/config_toml_capability_inventory_v1.json`. It freezes the live
-configuration baseline for `asupersync-5z2scg.4.1` and
-`CAP-CONFIG-TOML-JSON` at revision
-`3468d4474e981fd2b19a8020175e6bb8bd4a5dc3`.
+`artifacts/config_toml_capability_inventory_v1.json`. It preserves the live
+configuration baseline frozen by `asupersync-5z2scg.4.1` at revision
+`3468d4474e981fd2b19a8020175e6bb8bd4a5dc3`, records the A2 additive JSON
+source implementation, and retains the A3 incumbent decision for
+`CAP-CONFIG-TOML-JSON`.
 
 The governing `DEP-ADR-004` decision is additive coexistence:
-`KEEP_UNTIL_PARITY` / `KEEP_INCUMBENT`. JSON configuration does not exist yet.
-TOML remains accepted, and no child before terminal A5 may authorize removing
-the incumbent `toml` dependency.
+`KEEP_UNTIL_PARITY` / `KEEP_INCUMBENT`. Versioned JSON source APIs now exist
+for the four typed application-config families, but their focused tests have
+not been executed in the A2 receipt. TOML remains accepted, and no child before
+terminal A5 may authorize removing the incumbent `toml` dependency.
 
 ## What actually parses TOML
 
@@ -19,13 +21,13 @@ The repository does not have one TOML configuration schema. It has five
 production or internal-tool surfaces with different defaults, required fields,
 errors, path policies, and write behavior.
 
-| Stable ID | Build profile | Live owner | Typed fields | Empty document | Write behavior |
-| --- | --- | --- | ---: | --- | --- |
-| `CFG-TOML-RUNTIME` | `config-file` | `runtime/env_config.rs`, `runtime/builder.rs` | 14 | accepted as defaults | none |
-| `CFG-TOML-ATP-COMMAND` | `cli` | `cli/atp_config.rs`, `cli/atp_command_tree.rs` | 11 | accepted as an all-`None` layer | pretty direct write |
-| `CFG-TOML-ATP-INSTALL` | `cli` | `cli/atp_config.rs`, `cli/first_run.rs`, `cli/upgrade.rs` | 14 | rejected: required fields missing | pretty direct write |
-| `CFG-TOML-ATPD` | `atpd-daemon` | `bin/atpd.rs` | 45 | loader rejects; start falls back to defaults | none |
-| `CFG-TOML-DEPENDENCY-LEDGER` | `dependency-ledger` | `bin/dependency_marginal_ledger.rs` | generic `toml::Value` | parser accepts, Cargo consumer may not | pretty generated shadow manifest |
+| Stable ID | Build profile | Live owner | Typed fields | Empty document | Additive JSON source state | Write behavior |
+| --- | --- | --- | ---: | --- | --- | --- |
+| `CFG-TOML-RUNTIME` | `config-file` | `runtime/env_config.rs`, `runtime/builder.rs` | 14 | accepted as defaults | model, string/file entry points, canonical projection | none |
+| `CFG-TOML-ATP-COMMAND` | `cli` | `cli/atp_config.rs`, `cli/atp_command_tree.rs` | 11 | accepted as an all-`None` layer | model parse/projection API | pretty direct TOML write |
+| `CFG-TOML-ATP-INSTALL` | `cli` | `cli/atp_config.rs`, `cli/first_run.rs`, `cli/upgrade.rs` | 14 | rejected: required fields missing | model parse/projection API | pretty direct TOML write |
+| `CFG-TOML-ATPD` | `atpd-daemon` | `bin/atpd.rs` | 45 | loader rejects; start falls back to defaults | `.json` loader plus redacted projection | none |
+| `CFG-TOML-DEPENDENCY-LEDGER` | `dependency-ledger` | `bin/dependency_marginal_ledger.rs` | generic `toml::Value` | parser accepts, Cargo consumer may not | explicitly not an application-config model | pretty generated shadow TOML manifest |
 
 Three adjacent surfaces are deliberately separated:
 
@@ -196,12 +198,86 @@ The last fixture enables `config-file` but exercises only
 `CFG-NON-TOML-RAPTORQ`; it does not call either runtime TOML constructor. A5
 owns replacing that inert feature check with a real external-user journey.
 
+## A2 additive JSON source implementation
+
+A2 is source-implemented at commits `cbe4a452a`, `0fb5fadc6`, and
+`c05c8cb6d`. Its receipt state is
+`SOURCE_IMPLEMENTED_NOT_EXECUTED`: all twenty-one focused source tests are
+present, but none was executed while authoring this receipt.
+
+The shared `VersionedConfigDocument<T>` keeps the format envelope separate
+from each application's existing typed payload. It has two fields, `config`
+and `schema_version`; version 1 is current, an omitted version migrates to 1,
+and any other explicit version is rejected on read or write. Canonical output
+is compact. Object keys are recursively lexicographic, arrays retain typed
+order, and finite numbers use the stable shortest `serde_json`
+representation. Model conversion rejects non-finite values rather than
+silently converting them to `null`.
+
+Path values are exact lexical UTF-8 strings. Conversion does not normalize,
+resolve, canonicalize, or access a path. Unknown input fields retain Serde's
+incumbent ignore-on-input behavior, while required fields remain exactly those
+required by each existing typed model.
+
+The five inventoried TOML families route as follows:
+
+| Family | Single typed payload | JSON surface | Precedence or write effect |
+| --- | --- | --- | --- |
+| runtime | `RuntimeConfigLayer` for TOML, JSON, and environment values | parse/project APIs plus `RuntimeBuilder::from_json[_str]` | same call-order layer application; no writer |
+| ATP command | `AtpConfig` for manager TOML, JSON conversion, and CLI merging | `parse_atp_command_json` and `atp_command_to_canonical_json` | manager inputs and direct TOML writer unchanged |
+| ATP install | `AtpInstallConfig` for persisted TOML and JSON conversion | `from_json` and `to_canonical_json` | existing TOML read/write paths unchanged |
+| atpd | `AtpdConfig` for both file formats | `.json` selects JSON; every other extension selects TOML | missing-file defaults and later start overrides unchanged |
+| dependency ledger | generic `toml::Value` Cargo-manifest transformation | none | explicitly not treated as a typed application-config model |
+
+Runtime parses and validates the complete layer before applying it to a fresh
+builder, so a rejected layer is not partially published. Canonical projection
+does no file I/O. This model-publication rule is not a claim that existing
+physical writes are atomic: ATP install and command writes remain direct TOML
+writes, and A4 retains physical write safety, diagnostics, migration UX, and
+operator examples.
+
+The runtime and ATP command layers contain no credential-bearing fields. The
+install model stores an identity path, not identity key material. Atpd's
+`network.quic.rq_auth_key_hex` is redacted at both the Serde and `Debug`
+boundaries. Its canonical output is intentionally a diagnostic projection when
+a key is present: the JSON loader rejects the `[REDACTED]` sentinel so that a
+projection cannot be mistaken for a credential-bearing round trip.
+
+The source tests cover exact recursive byte goldens, TOML/JSON typed
+equivalence, empty/default behavior, missing and unsupported schema versions,
+unknown and required fields, wrong types, finite-number enforcement, lexical
+UTF-8 paths, runtime file capability mediation, runtime precedence, atpd
+extension routing, and secret redaction. They remain unexecuted; A2 therefore
+does not yet claim its acceptance criteria are green.
+
+### A2 source-pin reconciliation
+
+The current sixteen-path inventory pin set was reconciled against the
+post-A3 comparison revision `424134f7338f610e36d5047d3d334128ae4275e4`.
+Seven pins moved:
+
+| Path | Classification | Accepted TOML input effect |
+| --- | --- | --- |
+| `src/config.rs` | shared versioned document and source tests | none |
+| `src/runtime/env_config.rs` | runtime single typed layer and JSON conversion | none |
+| `src/runtime/builder.rs` | runtime JSON entry points and shared application helper | none |
+| `src/cli/atp_config.rs` | ATP command/install JSON model APIs | none |
+| `src/cli/atp_command_tree.rs` | typed equality for cross-format receipts | none |
+| `src/bin/atpd.rs` | additive atpd JSON loader and redacted projection | none |
+| `tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs` | unrelated downstream stream/ATP contract growth | none |
+
+The seventh path grew by 81 lines in another campaign. Its diff adds stream
+and ATP downstream contract coverage; it does not change configuration parsing
+or representation. The receipt records it separately from the six A2-owned
+paths. The historical A1/A3 revisions and the A3 TOML-token projection remain
+unchanged.
+
 ## Child routing
 
 | Child | Frozen responsibility | Current evidence |
 | --- | --- | --- |
 | A1 | inventory, fields, grammar, corpus, precedence, I/O, errors, consumers, gaps | executed contract |
-| A2 | one versioned typed model and additive canonical JSON | planned |
+| A2 | one versioned typed model and additive canonical JSON | source implemented, tests not executed |
 | A3 | incumbent KEEP or complete bounded owned TOML parser/writer parity | evidence-backed `KEEP_INCUMBENT` receipt |
 | A4 | diagnostics, precedence, secure/atomic I/O, redaction, migration, docs | planned |
 | A5 | real binary journeys and terminal KEEP-or-cutover decision | planned |
@@ -277,7 +353,7 @@ The artifact routes fifteen fail-closed gaps:
 | `CFG-GAP-13` | external portfolio fixture never calls TOML APIs | A5 |
 | `CFG-GAP-14` | ADR optionality wording conflicts with install/atpd reality | A4 |
 | `CFG-GAP-15` | no stable error codes or proven secret redaction | A4 |
-| `CFG-GAP-16` | no JSON config, canonical shared model, or equivalence test | A2 |
+| `CFG-GAP-16` | JSON source and equivalence tests exist, but focused execution is still absent and persisted ATP writers remain TOML | A2 |
 | `CFG-GAP-17` | programmatic default-filled ATP overlays override unrelated lower-priority values | A4 |
 
 There are zero `UNKNOWN` surface, grammar, precedence, I/O, error, corpus,
@@ -303,7 +379,8 @@ RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay \
 ```
 
 The inventory also records exact RCH replay commands for the existing runtime
-and ATP config unit-test groups. The real `config_formats`,
+and ATP config unit-test groups. The A2 receipt adds twenty-one source tests but
+records `NOT_RUN_STATIC_ONLY`; their presence is not a passing result. The real `config_formats`,
 `config_toml_json_roundtrip`, `config_precedence`, and `atpd_config_user`
 journeys remain A5 obligations.
 
@@ -319,12 +396,14 @@ The existing ATP config unit group completed on remote worker `hz2` at
 
 ## No-claim boundary
 
-This packet preserves the A1 source-pinned, zero-`UNKNOWN` inventory and records
-the A3 evidence-backed KEEP branch. It does not add or execute a replacement
-parser or writer, add JSON, change precedence, repair diagnostics or I/O, prove
-the current contract execution, prove real binary journeys, prove arbitrary
-TOML, prove broad workspace health or performance, or authorize removing
-`toml`, `serde`, any feature, field, error, path, input, output, or user
-journey.
+This packet preserves the A1 source-pinned, zero-`UNKNOWN` inventory, records
+the A2 additive JSON source implementation without executable confirmation,
+and retains the A3 evidence-backed KEEP branch. It does not add or execute a
+replacement TOML parser or writer, change precedence or incumbent TOML
+acceptance, repair physical write atomicity or diagnostics, prove the current
+contract or source-test execution, prove real binary journeys, prove arbitrary
+TOML or JSON, prove broad workspace health or performance, or authorize
+removing `toml`, `serde`, any feature, field, error, path, input, output, or
+user journey.
 
 <!-- END CONFIG TOML CAPABILITY INVENTORY -->
