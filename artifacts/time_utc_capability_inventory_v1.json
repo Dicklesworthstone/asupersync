@@ -47,7 +47,7 @@
   "source_snapshot": {
     "git_head": "1afde84d564bd8ea876459624116f90028b80835",
     "dirty_scope": "A1 paths were absent before this inventory. The literal-source census walks every Rust file under its five workspace roots, including untracked files; unmatched peer paths did not affect the frozen projection.",
-    "pin_scope": "Authority, manifests, public and persisted production owners, owned formatter/parser boundaries, database or messaging oracle owners, every direct Chrono alias-import source, test-profile fields, and excluded-conformance sources.",
+    "pin_scope": "Authority, manifests, public and persisted production owners, the generic CLI JSON output boundary, owned formatter/parser boundaries, database or messaging oracle owners, every direct Chrono alias-import source, test-profile fields, and excluded-conformance sources.",
     "files": [
       {
         "path": "Cargo.toml",
@@ -251,8 +251,8 @@
       },
       {
         "path": "src/bin/asupersync.rs",
-        "sha256": "397f3800f4a40ccb4f25366bb10ce641d12b4947b9e1b230359db69c5af1e283",
-        "line_count": 16700
+        "sha256": "8415296574e31367ea2d542082fa7dffd4ec400923b244ed730ae3db02b30d89",
+        "line_count": 16799
       },
       {
         "path": "src/cli/mod.rs",
@@ -268,6 +268,11 @@
         "path": "src/cli/atp_workflows.rs",
         "sha256": "a813070896f9d73f83b4f6f59c8bf2f8d3902805838300a88a9656fa48961125",
         "line_count": 1960
+      },
+      {
+        "path": "src/cli/output.rs",
+        "sha256": "6ae4f717fd64141039fc4a4b6ed34285ded9ccc3274ff61efa63b3b0a06457c6",
+        "line_count": 907
       },
       {
         "path": "src/atp/benchmark/mod.rs",
@@ -286,8 +291,8 @@
       },
       {
         "path": "src/database/postgres.rs",
-        "sha256": "8794fe1b0ad93d741d576c05aa1ccfe09ddd82eff0a25429ede34a909ce2dc27",
-        "line_count": 19716
+        "sha256": "ddc35a5809d998391a0e6ffe6f995fc9f4e9919a39e5ad7d71dd4b644c049a75",
+        "line_count": 19776
       },
       {
         "path": "src/messaging/redis.rs",
@@ -1159,20 +1164,20 @@
     "literal_alias_overlap_line_count": 1,
     "literal_or_alias_unique_line_count": 190,
     "derived_operation_anchor_count": 46,
-    "classified_anchor_count": 252,
+    "classified_anchor_count": 253,
     "literal_use_override_count": 36,
     "additional_derived_operation_anchor_count": 38,
-    "cross_file_consumer_anchor_count": 16,
-    "cross_file_direct_source_anchor_count": 25,
-    "declared_consumer_unique_direct_source_anchor_count": 57,
+    "cross_file_consumer_anchor_count": 17,
+    "cross_file_direct_source_anchor_count": 33,
+    "declared_consumer_unique_direct_source_anchor_count": 65,
     "literal_operation_projection_sha256": "a533497be94a3a8c649a061117053acff88821c102e9cedbe16cb4da0b66990b",
     "literal_source_projection_sha256": "5c4020cfe41d10dbfcab19c64f3677ee78941c65441c12da93dc7e3cd6946f2d",
     "path_classification_projection_sha256": "5f60bb8b7deb36b1aac2123747fd1be426f1888fc759f46afe3baae103dc3b63",
     "literal_override_projection_sha256": "81f3549c7644361eabee937044ba098315b3aeffbd079d9c644eb1d60ccc3f84",
     "additional_derived_projection_sha256": "b20b65d03be1995802d929275531ac96a8a66ec06c1c64f0bf887ee27803f674",
-    "cross_file_consumer_projection_sha256": "121d0363f660c8c605eae024d4e46ac385283550cb1e5ae1d261c201fd90493c",
+    "cross_file_consumer_projection_sha256": "1d2fc96d68cab5db949433a6e8b30232c876b1d7ec70eab472fc4b9571c24209",
     "semantic_consumer_boundary": "Include nonliteral consumers through the first semantic compare, arithmetic, format, serialize, persist, retain, return, extract, or embed boundary in a Chrono-bearing source path; exclude cross-file propagation, external consumers, and later container or arbitrary-byte taint.",
-    "cross_file_consumer_boundary": "Include the first explicit JSON serialization boundary in a different source file when a timestamp-bearing report flows from a direct Chrono producer to a declared executable consumer; exclude delegated in-file renderers, later distinct file or standard-output sink anchors, dynamic dispatch, external consumers, and ambiguous provenance.",
+    "cross_file_consumer_boundary": "Include the first explicit or statically generic JSON value serialization boundary in a different source file when a timestamp-bearing report or public workflow wrapper flows from a direct Chrono producer to a declared in-repository consumer; exclude later encoding or rendering calls, distinct file or standard-output sink anchors, dynamic dispatch, external consumers, and ambiguous provenance.",
     "derived_consumer_category_ids": [
       "TIME-CONSUMER-CLI-CUTOFF-EXPIRY",
       "TIME-CONSUMER-CONFORMANCE-OUTPUT",
@@ -1184,6 +1189,7 @@
     "cross_file_consumer_category_ids": [
       "TIME-CROSS-FILE-CONFORMANCE-JSON",
       "TIME-CROSS-FILE-EXCLUDED-CONFORMANCE-JSON",
+      "TIME-CROSS-FILE-ROOT-CLI-JSON",
       "TIME-CROSS-FILE-STANDALONE-JSON"
     ],
     "literal_operation_rules": [
@@ -2505,6 +2511,28 @@
     ],
     "cross_file_consumer_rows": [
       {
+        "use_id": "TIME-CROSS-FILE-ROOT-CLI-OUTPUTTABLE-JSON-0156",
+        "derivation_sources": [
+          "src/cli/atp_command_tree.rs:1283",
+          "src/cli/atp_command_tree.rs:1285",
+          "src/cli/atp_command_tree.rs:1348",
+          "src/cli/atp_command_tree.rs:1480",
+          "src/cli/atp_command_tree.rs:1553",
+          "src/cli/atp_command_tree.rs:1555",
+          "src/cli/atp_command_tree.rs:1557",
+          "src/cli/atp_command_tree.rs:1589"
+        ],
+        "consumer_category_id": "TIME-CROSS-FILE-ROOT-CLI-JSON",
+        "profile_id": "TIME-PROFILE-CLI",
+        "path": "src/cli/output.rs",
+        "line": 156,
+        "source_anchor": "serde_json::to_value(self)",
+        "operation": "serialize the eight timestamp fields carried by AtpCiOutput, AtpDatasetOutput, AtpReleaseOutput, and AtpArchiveOutput into the generic CLI JSON value",
+        "cfg_or_wiring": "FEATURE_CLI_NATIVE_ONLY",
+        "exposure": "PUBLIC_CLI_JSON_OUTPUT",
+        "persistence_or_public_association": "first cross-file JSON value boundary before compact, pretty, or stream encoding"
+      },
+      {
         "use_id": "TIME-CROSS-FILE-CONFORMANCE-DATA-END-JSON-0098",
         "derivation_sources": [
           "conformance/src/h2_data_end_stream_conformance.rs:142",
@@ -2754,7 +2782,7 @@
         "persistence_or_public_association": "MaintenanceResult.timestamp in maintenance_results.json"
       }
     ],
-    "no_claim": "The literal and direct-alias classification is complete, the declared in-file downstream rows are exact through the stated semantic boundary, and the sixteen declared cross-file JSON rows are exact through their serialization boundary. Other cross-file propagation, delegated render calls, later distinct sinks, external consumers, and later container or arbitrary-byte taint remain open. No profile resolution, compilation, execution, byte preservation, or behavioral evidence follows."
+    "no_claim": "The literal and direct-alias classification is complete, the declared in-file downstream rows are exact through the stated semantic boundary, and the seventeen declared cross-file JSON rows are exact through their first serialization boundary. Other cross-file propagation, later encoding or rendering calls, later distinct sinks, external consumers, and later container or arbitrary-byte taint remain open. No profile resolution, compilation, execution, byte preservation, or behavioral evidence follows."
   },
   "alias_aware_chrono_uses": {
     "scope": "Bounded lexical inventory of every direct Chrono import binding, every line that directly references an imported Chrono symbol in the five census roots, and every adjacent derived temporal arithmetic, comparison, association, or ordering anchor discovered for those bindings.",
@@ -4721,20 +4749,21 @@
   "static_inventory_gaps": [
     {
       "gap_id": "TIME-STATIC-GAP-DERIVED-CONSUMER-CLASSIFICATION",
-      "summary": "All 159 literal Chrono lines, all 32 direct imported-symbol lines, eight imported-alias anchors, the declared in-file downstream consumers through the first semantic boundary, and sixteen declared cross-file JSON serialization boundaries have deterministic source-linked classifications. Other cross-file propagation, external consumers, and second-order container or byte propagation remain outside this bounded static tranche.",
+      "summary": "All 159 literal Chrono lines, all 32 direct imported-symbol lines, eight imported-alias anchors, the declared in-file downstream consumers through the first semantic boundary, and seventeen declared cross-file JSON serialization boundaries have deterministic source-linked classifications. Other cross-file propagation, external consumers, and second-order container or byte propagation remain outside this bounded static tranche.",
       "newly_classified_consumer_categories": [
         "CLI cutoff comparisons and optional-expiry moves",
         "PostgreSQL midnight construction and Kafka recency arithmetic",
         "JetStream timestamp insertion into a wire payload",
         "real-E2E serialization, retention, return, and embedding boundaries",
         "conformance report rendering and output",
+        "root CLI generic JSON value serialization boundary",
         "standalone golden and reporting persistence paths",
         "conformance executable JSON serialization boundaries",
         "excluded-conformance executable JSON serialization boundary",
         "standalone reporting executable JSON serialization boundaries"
       ],
       "representative_unclassified_consumers": [
-        "cross-file consumers beyond the sixteen declared JSON serialization boundaries",
+        "cross-file consumers beyond the seventeen declared JSON serialization boundaries",
         "external consumers not present in the repository snapshot",
         "second-order container and byte propagation beyond the first semantic boundary"
       ],
@@ -4757,7 +4786,7 @@
     },
     {
       "detail_id": "TIME-STATIC-RESOLVED-DECLARED-DERIVED-CONSUMERS",
-      "summary": "Thirty-eight declared in-file consumer anchors across six categories and sixteen declared cross-file JSON consumers across three categories are linked to 57 unique direct source anchors, source-matched, category-routed, and frozen through their stated boundaries. The wider remainder stays explicit in static_inventory_gaps.",
+      "summary": "Thirty-eight declared in-file consumer anchors across six categories and seventeen declared cross-file JSON consumers across four categories are linked to 65 unique direct source anchors, source-matched, category-routed, and frozen through their stated boundaries. The wider remainder stays explicit in static_inventory_gaps.",
       "state": "RESOLVED_BY_STATIC_DECLARED_DERIVED_CLASSIFICATION",
       "owner_bead": "asupersync-5z2scg.6.1"
     }
@@ -4842,6 +4871,80 @@
     "execution_state": "NOT_RUN_STATIC_ONLY",
     "no_claim_boundary": "This maintenance receipt proves only current source-pin reconciliation and equality of the recorded TIME-specific projections before and after the append-only baseline growth. It does not rerun A1, complete the derived-consumer inventory, satisfy downstream evidence, authorize dependency exit, or make a broad-health or performance claim."
   },
+  "post_a1_cli_output_extension": {
+    "extension_id": "TIME-A1-ROOT-CLI-JSON-2026-08-06",
+    "captured_date_utc": "2026-08-06",
+    "extension_state": "STATIC_DECLARED_CROSS_FILE_CONSUMER_EXTENSION",
+    "source_pin_path_count": 69,
+    "added_source_pin": {
+      "path": "src/cli/output.rs",
+      "sha256": "6ae4f717fd64141039fc4a4b6ed34285ded9ccc3274ff61efa63b3b0a06457c6",
+      "line_count": 907
+    },
+    "stale_existing_pin_count": 2,
+    "refreshed_existing_pins": [
+      {
+        "path": "src/bin/asupersync.rs",
+        "previous_revision": "03ae793105ce744c10b878d78d4d0723d23aa81f",
+        "previous_sha256": "397f3800f4a40ccb4f25366bb10ce641d12b4947b9e1b230359db69c5af1e283",
+        "previous_line_count": 16700,
+        "current_revision": "ab1bdba3f6a303da9d51216cb2b8794395daed95",
+        "current_sha256": "8415296574e31367ea2d542082fa7dffd4ec400923b244ed730ae3db02b30d89",
+        "current_line_count": 16799,
+        "inserted_lines": 127,
+        "deleted_lines": 28,
+        "change_revisions": [
+          "fbbd4d065ae4768b84e4161a00d10e5acba04b39",
+          "75778fbf0846be2d3bc965a2809a705aeb1dfe25",
+          "ab1bdba3f6a303da9d51216cb2b8794395daed95"
+        ],
+        "classification": "INDEPENDENT_REPLAY_ARTIFACT_AND_DIAGNOSTIC_CHANGES",
+        "time_acceptance_semantics_changed": false
+      },
+      {
+        "path": "src/database/postgres.rs",
+        "previous_revision": "e9705807ec1b5079d7da267d63ffba179314ff41",
+        "previous_sha256": "8794fe1b0ad93d741d576c05aa1ccfe09ddd82eff0a25429ede34a909ce2dc27",
+        "previous_line_count": 19716,
+        "current_revision": "2e89fda041c6a5bb8b0c2907b3fe76a068180280",
+        "current_sha256": "ddc35a5809d998391a0e6ffe6f995fc9f4e9919a39e5ad7d71dd4b644c049a75",
+        "current_line_count": 19776,
+        "inserted_lines": 87,
+        "deleted_lines": 27,
+        "change_revisions": [
+          "2e89fda041c6a5bb8b0c2907b3fe76a068180280"
+        ],
+        "classification": "INDEPENDENT_READ_CANCELLATION_TEST_SEAM",
+        "time_acceptance_semantics_changed": false
+      }
+    ],
+    "cross_file_consumer_id": "TIME-CROSS-FILE-ROOT-CLI-OUTPUTTABLE-JSON-0156",
+    "direct_timestamp_field_count": 8,
+    "wrapper_types": [
+      "AtpArchiveOutput",
+      "AtpCiOutput",
+      "AtpDatasetOutput",
+      "AtpReleaseOutput"
+    ],
+    "first_semantic_boundary": {
+      "path": "src/cli/output.rs",
+      "line": 156,
+      "source_anchor": "serde_json::to_value(self)",
+      "later_encoding_and_sink_anchors_included": false
+    },
+    "preservation": {
+      "production_source_changed": false,
+      "historical_a1_revision_changed": false,
+      "behavioral_gap_count_changed": false,
+      "time_acceptance_semantics_changed": false,
+      "static_remainder_closed": false,
+      "bead_close_allowed": false,
+      "dependency_exit_allowed": false
+    },
+    "execution_state": "NOT_RUN_STATIC_ONLY",
+    "required_disposition": "KEEP_OPEN",
+    "no_claim_boundary": "This extension freezes one statically generic cross-file JSON value boundary and exact lineage from eight existing timestamp fields. The two refreshed existing pins contain independent replay-diagnostic and PostgreSQL read-cancellation changes with no TIME acceptance-semantic change in their exact Git diffs. It does not execute the CLI, prove emitted bytes or round trips, cover later encoding or sinks, complete the derived-consumer inventory, close A1, or authorize dependency exit."
+  },
   "validation": {
     "contract_path": "tests/time_utc_capability_inventory_contract.rs",
     "doc_path": "docs/time_utc_capability_inventory.md",
@@ -4852,6 +4955,7 @@
       "manifest and authority inspection",
       "path, matching-line, literal-operation, literal-source and classification projection hashing",
       "literal override, declared derived-row, cross-file consumer, and lineage projection hashing",
+      "root CLI generic JSON value boundary source matching",
       "derived and cross-file anchor source matching with direct-source lineage validation",
       "source file hashing",
       "manual cross-review"

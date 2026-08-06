@@ -24,7 +24,7 @@ const CAPABILITY_ID: &str = "CAP-TIME-UTC-RFC3339";
 const ADR_ID: &str = "DEP-ADR-011";
 const BASELINE_REVISION: &str = "1afde84d564bd8ea876459624116f90028b80835";
 const ARTIFACT_SHA256: &str =
-    "7933b9933127178568ebf34eeeb1189d4b7ba55de7990dbcfda7010fe0c80efe";
+    "e566e52feb6e1ae4424d5254ba043faf39f2dffa41f54d7147d340944ce026a9";
 const DOC_BEGIN: &str = "<!-- BEGIN TIME UTC CAPABILITY INVENTORY -->";
 const DOC_END: &str = "<!-- END TIME UTC CAPABILITY INVENTORY -->";
 const CHRONO_TOKEN: &str = concat!("chrono", "::");
@@ -46,7 +46,14 @@ const ALIAS_CLASSIFICATION_PROJECTION_SHA256: &str =
 const ADDITIONAL_DERIVED_PROJECTION_SHA256: &str =
     "b20b65d03be1995802d929275531ac96a8a66ec06c1c64f0bf887ee27803f674";
 const CROSS_FILE_CONSUMER_PROJECTION_SHA256: &str =
-    "121d0363f660c8c605eae024d4e46ac385283550cb1e5ae1d261c201fd90493c";
+    "1d2fc96d68cab5db949433a6e8b30232c876b1d7ec70eab472fc4b9571c24209";
+const ROOT_CLI_REFRESH_REVISIONS: &[&str] = &[
+    "fbbd4d065ae4768b84e4161a00d10e5acba04b39",
+    "75778fbf0846be2d3bc965a2809a705aeb1dfe25",
+    "ab1bdba3f6a303da9d51216cb2b8794395daed95",
+];
+const POSTGRES_REFRESH_REVISIONS: &[&str] =
+    &["2e89fda041c6a5bb8b0c2907b3fe76a068180280"];
 const SEMANTIC_CONSUMER_BOUNDARY: &str = concat!(
     "Include nonliteral consumers through the first semantic compare, arithmetic, format, ",
     "serialize, persist, retain, return, extract, or embed boundary in a Chrono-bearing ",
@@ -54,11 +61,11 @@ const SEMANTIC_CONSUMER_BOUNDARY: &str = concat!(
     "or arbitrary-byte taint.",
 );
 const CROSS_FILE_CONSUMER_BOUNDARY: &str = concat!(
-    "Include the first explicit JSON serialization boundary in a different source file ",
-    "when a timestamp-bearing report flows from a direct Chrono producer to a declared ",
-    "executable consumer; exclude delegated in-file renderers, later distinct file or ",
-    "standard-output sink anchors, dynamic dispatch, external consumers, and ambiguous ",
-    "provenance.",
+    "Include the first explicit or statically generic JSON value serialization boundary in ",
+    "a different source file when a timestamp-bearing report or public workflow wrapper ",
+    "flows from a direct Chrono producer to a declared in-repository consumer; exclude ",
+    "later encoding or rendering calls, distinct file or standard-output sink anchors, ",
+    "dynamic dispatch, external consumers, and ambiguous provenance.",
 );
 
 fn repo_root() -> PathBuf {
@@ -516,8 +523,8 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
             != "RESOLVED_BY_STATIC_DIRECT_PER_USE_CLASSIFICATION"
         || text(resolved_derived, "state")
             != "RESOLVED_BY_STATIC_DECLARED_DERIVED_CLASSIFICATION"
-        || array(derived_gap, "newly_classified_consumer_categories").len() != 9
-        || string_set(derived_gap, "newly_classified_consumer_categories").len() != 9
+        || array(derived_gap, "newly_classified_consumer_categories").len() != 10
+        || string_set(derived_gap, "newly_classified_consumer_categories").len() != 10
         || array(derived_gap, "representative_unclassified_consumers").len() != 3
         || string_set(derived_gap, "representative_unclassified_consumers").len() != 3
         || text(derived_gap, "effect").is_empty()
@@ -538,6 +545,7 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
             "conformance executable JSON serialization boundaries",
             "excluded-conformance executable JSON serialization boundary",
             "real-E2E serialization, retention, return, and embedding boundaries",
+            "root CLI generic JSON value serialization boundary",
             "standalone golden and reporting persistence paths",
             "standalone reporting executable JSON serialization boundaries",
         ],
@@ -546,7 +554,7 @@ fn validate_exact_row_sets(inventory: &Value) -> Result<(), String> {
         derived_gap,
         "representative_unclassified_consumers",
         &[
-            "cross-file consumers beyond the sixteen declared JSON serialization boundaries",
+            "cross-file consumers beyond the seventeen declared JSON serialization boundaries",
             "external consumers not present in the repository snapshot",
             "second-order container and byte propagation beyond the first semantic boundary",
         ],
@@ -1181,6 +1189,7 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
         &[
             "TIME-CROSS-FILE-CONFORMANCE-JSON",
             "TIME-CROSS-FILE-EXCLUDED-CONFORMANCE-JSON",
+            "TIME-CROSS-FILE-ROOT-CLI-JSON",
             "TIME-CROSS-FILE-STANDALONE-JSON",
         ],
     )?;
@@ -1529,6 +1538,8 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
     let excluded_conformance_manifest = read_repo_file("fuzz/conformance/Cargo.toml");
     let standalone_reporting_manifest =
         read_repo_file("tests/conformance/raptorq_rfc6330/reporting/Cargo.toml");
+    let root_lib = read_repo_file("src/lib.rs");
+    let cli_module = read_repo_file("src/cli/mod.rs");
     let mut actual_cross_file_categories = BTreeSet::new();
     let mut cross_file_pairs = BTreeSet::new();
     let mut cross_file_direct_source_ids = BTreeSet::new();
@@ -1573,6 +1584,17 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
                         path.strip_prefix("tests/conformance/raptorq_rfc6330/reporting/")
                             .expect("standalone reporting consumer prefix must match")
                     ))
+            }
+            "TIME-CROSS-FILE-ROOT-CLI-JSON" => {
+                text(row, "profile_id") == "TIME-PROFILE-CLI"
+                    && path == "src/cli/output.rs"
+                    && text(row, "cfg_or_wiring") == "FEATURE_CLI_NATIVE_ONLY"
+                    && text(row, "exposure") == "PUBLIC_CLI_JSON_OUTPUT"
+                    && root_lib.contains("#[cfg(feature = \"cli\")]\npub mod cli;")
+                    && cli_module.contains("pub mod output;")
+                    && cli_module.contains(
+                        "pub use output::{ColorChoice, Output, OutputFormat, Outputtable};",
+                    )
             }
             _ => false,
         };
@@ -2395,7 +2417,7 @@ fn validate_alias_sources(inventory: &Value) -> Result<(), String> {
 
 fn validate_source_pins(inventory: &Value) -> Result<(), String> {
     let pins = array(&inventory["source_snapshot"], "files");
-    if pins.len() != 68 {
+    if pins.len() != 69 {
         return Err("source pin count drifted".to_owned());
     }
     let mut paths = BTreeSet::new();
@@ -2502,6 +2524,264 @@ fn validate_post_a1_provenance_refresh(inventory: &Value) -> Result<(), String> 
         || !text(refresh, "no_claim_boundary").contains("dependency exit")
     {
         return Err("post-A1 refresh no-claim boundary is incomplete".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_post_a1_cli_output_extension(inventory: &Value) -> Result<(), String> {
+    let extension = inventory
+        .get("post_a1_cli_output_extension")
+        .ok_or_else(|| "post_a1_cli_output_extension is required".to_owned())?;
+    for (key, expected) in [
+        ("extension_id", "TIME-A1-ROOT-CLI-JSON-2026-08-06"),
+        ("captured_date_utc", "2026-08-06"),
+        (
+            "extension_state",
+            "STATIC_DECLARED_CROSS_FILE_CONSUMER_EXTENSION",
+        ),
+        (
+            "cross_file_consumer_id",
+            "TIME-CROSS-FILE-ROOT-CLI-OUTPUTTABLE-JSON-0156",
+        ),
+        ("execution_state", "NOT_RUN_STATIC_ONLY"),
+        ("required_disposition", "KEEP_OPEN"),
+    ] {
+        if extension.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("post-A1 CLI extension {key} must be {expected}"));
+        }
+    }
+    if extension.get("source_pin_path_count").and_then(Value::as_u64) != Some(69)
+        || extension
+            .get("direct_timestamp_field_count")
+            .and_then(Value::as_u64)
+            != Some(8)
+        || extension
+            .get("stale_existing_pin_count")
+            .and_then(Value::as_u64)
+            != Some(2)
+    {
+        return Err("post-A1 CLI extension counts drifted".to_owned());
+    }
+    require_exact_strings(
+        extension,
+        "wrapper_types",
+        &[
+            "AtpArchiveOutput",
+            "AtpCiOutput",
+            "AtpDatasetOutput",
+            "AtpReleaseOutput",
+        ],
+    )?;
+
+    let added_pin = &extension["added_source_pin"];
+    if text(added_pin, "path") != "src/cli/output.rs"
+        || text(added_pin, "sha256")
+            != "6ae4f717fd64141039fc4a4b6ed34285ded9ccc3274ff61efa63b3b0a06457c6"
+        || number(added_pin, "line_count") != 907
+    {
+        return Err("post-A1 CLI extension source pin drifted".to_owned());
+    }
+    let matching_pin = array(&inventory["source_snapshot"], "files")
+        .iter()
+        .find(|pin| pin.get("path").and_then(Value::as_str) == Some("src/cli/output.rs"))
+        .ok_or_else(|| "root CLI output source pin is missing".to_owned())?;
+    if matching_pin != added_pin {
+        return Err("post-A1 CLI extension and source snapshot pin disagree".to_owned());
+    }
+
+    let refreshed = array(extension, "refreshed_existing_pins");
+    require_exact_ids(
+        refreshed,
+        "path",
+        &["src/bin/asupersync.rs", "src/database/postgres.rs"],
+        "post-A1 refreshed existing pins",
+    )?;
+    let refreshed_by_path: BTreeMap<_, _> = refreshed
+        .iter()
+        .map(|row| (text(row, "path"), row))
+        .collect();
+    for (
+        source_path,
+        previous_revision,
+        previous_sha256,
+        previous_lines,
+        current_revision,
+        current_sha256,
+        current_lines,
+        inserted_lines,
+        deleted_lines,
+        classification,
+        revisions,
+    ) in [
+        (
+            "src/bin/asupersync.rs",
+            "03ae793105ce744c10b878d78d4d0723d23aa81f",
+            "397f3800f4a40ccb4f25366bb10ce641d12b4947b9e1b230359db69c5af1e283",
+            16_700,
+            "ab1bdba3f6a303da9d51216cb2b8794395daed95",
+            "8415296574e31367ea2d542082fa7dffd4ec400923b244ed730ae3db02b30d89",
+            16_799,
+            127,
+            28,
+            "INDEPENDENT_REPLAY_ARTIFACT_AND_DIAGNOSTIC_CHANGES",
+            ROOT_CLI_REFRESH_REVISIONS,
+        ),
+        (
+            "src/database/postgres.rs",
+            "e9705807ec1b5079d7da267d63ffba179314ff41",
+            "8794fe1b0ad93d741d576c05aa1ccfe09ddd82eff0a25429ede34a909ce2dc27",
+            19_716,
+            "2e89fda041c6a5bb8b0c2907b3fe76a068180280",
+            "ddc35a5809d998391a0e6ffe6f995fc9f4e9919a39e5ad7d71dd4b644c049a75",
+            19_776,
+            87,
+            27,
+            "INDEPENDENT_READ_CANCELLATION_TEST_SEAM",
+            POSTGRES_REFRESH_REVISIONS,
+        ),
+    ] {
+        let row = refreshed_by_path[source_path];
+        if text(row, "previous_revision") != previous_revision
+            || text(row, "previous_sha256") != previous_sha256
+            || number(row, "previous_line_count") != previous_lines
+            || text(row, "current_revision") != current_revision
+            || text(row, "current_sha256") != current_sha256
+            || number(row, "current_line_count") != current_lines
+            || number(row, "inserted_lines") != inserted_lines
+            || number(row, "deleted_lines") != deleted_lines
+            || text(row, "classification") != classification
+            || row
+                .get("time_acceptance_semantics_changed")
+                .and_then(Value::as_bool)
+                != Some(false)
+        {
+            return Err(format!("post-A1 refreshed pin {source_path} drifted"));
+        }
+        require_exact_strings(row, "change_revisions", revisions)?;
+        let current_pin = array(&inventory["source_snapshot"], "files")
+            .iter()
+            .find(|pin| pin.get("path").and_then(Value::as_str) == Some(source_path))
+            .ok_or_else(|| format!("current source pin is missing for {source_path}"))?;
+        if text(current_pin, "sha256") != current_sha256
+            || number(current_pin, "line_count") != current_lines
+        {
+            return Err(format!(
+                "post-A1 refreshed pin receipt and source snapshot disagree for {source_path}"
+            ));
+        }
+    }
+
+    let boundary = &extension["first_semantic_boundary"];
+    if text(boundary, "path") != "src/cli/output.rs"
+        || number(boundary, "line") != 156
+        || text(boundary, "source_anchor") != "serde_json::to_value(self)"
+        || boundary
+            .get("later_encoding_and_sink_anchors_included")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return Err("post-A1 CLI semantic boundary drifted".to_owned());
+    }
+
+    let row = array(
+        &inventory["per_use_classification"],
+        "cross_file_consumer_rows",
+    )
+    .iter()
+    .find(|row| {
+        row.get("use_id").and_then(Value::as_str)
+            == Some("TIME-CROSS-FILE-ROOT-CLI-OUTPUTTABLE-JSON-0156")
+    })
+    .ok_or_else(|| "root CLI cross-file consumer row is missing".to_owned())?;
+    require_exact_strings(
+        row,
+        "derivation_sources",
+        &[
+            "src/cli/atp_command_tree.rs:1283",
+            "src/cli/atp_command_tree.rs:1285",
+            "src/cli/atp_command_tree.rs:1348",
+            "src/cli/atp_command_tree.rs:1480",
+            "src/cli/atp_command_tree.rs:1553",
+            "src/cli/atp_command_tree.rs:1555",
+            "src/cli/atp_command_tree.rs:1557",
+            "src/cli/atp_command_tree.rs:1589",
+        ],
+    )?;
+    if text(row, "path") != text(boundary, "path")
+        || number(row, "line") != number(boundary, "line")
+        || text(row, "source_anchor") != text(boundary, "source_anchor")
+    {
+        return Err("post-A1 CLI receipt and consumer row disagree".to_owned());
+    }
+    let command_tree = read_repo_file("src/cli/atp_command_tree.rs");
+    for wrapper in [
+        "AtpArchiveOutput",
+        "AtpCiOutput",
+        "AtpDatasetOutput",
+        "AtpReleaseOutput",
+    ] {
+        if !command_tree.contains(&format!("pub struct {wrapper}"))
+            || !command_tree.contains(&format!("impl_atp_output!(\n    {wrapper},"))
+        {
+            return Err(format!("root CLI output wrapper {wrapper} wiring drifted"));
+        }
+    }
+    for association in [
+        "pub artifacts: Vec<AtpCiArtifact>",
+        "pub datasets: Vec<AtpDatasetInfo>",
+        "pub releases: Vec<AtpReleaseInfo>",
+        "pub archives: Vec<AtpArchiveEntry>",
+        "pub storage_stats: Option<AtpArchiveStorageStats>",
+        "pub integrity_check_status: AtpIntegrityStatus",
+    ] {
+        if !command_tree.contains(association) {
+            return Err(format!("root CLI timestamp association drifted: {association}"));
+        }
+    }
+    let workflows = read_repo_file("src/cli/atp_workflows.rs");
+    if !workflows.contains("fn write_output<T: Outputtable>")
+        || !workflows.contains("self.output.write(output)")
+    {
+        return Err("root CLI workflow output delegation drifted".to_owned());
+    }
+    let output = read_repo_file("src/cli/output.rs");
+    if !output.contains("fn json(&self) -> Result<serde_json::Value, serde_json::Error>")
+        || !output.contains("serde_json::to_value(self)")
+        || !output.contains("pub fn write<T: Outputtable>")
+    {
+        return Err("root CLI generic JSON boundary wiring drifted".to_owned());
+    }
+
+    let preservation = object(extension, "preservation");
+    let expected_preservation_keys: BTreeSet<String> = [
+        "production_source_changed",
+        "historical_a1_revision_changed",
+        "behavioral_gap_count_changed",
+        "time_acceptance_semantics_changed",
+        "static_remainder_closed",
+        "bead_close_allowed",
+        "dependency_exit_allowed",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if preservation.keys().cloned().collect::<BTreeSet<_>>() != expected_preservation_keys
+        || preservation.values().any(|value| value.as_bool() != Some(false))
+    {
+        return Err("post-A1 CLI preservation boundary drifted".to_owned());
+    }
+
+    let no_claim = text(extension, "no_claim_boundary");
+    for required in [
+        "does not execute the CLI",
+        "prove emitted bytes or round trips",
+        "no TIME acceptance-semantic change",
+        "complete the derived-consumer inventory",
+        "authorize dependency exit",
+    ] {
+        if !no_claim.contains(required) {
+            return Err(format!("post-A1 CLI no-claim boundary missing {required}"));
+        }
     }
     Ok(())
 }
@@ -2971,6 +3251,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     validate_alias_inventory(inventory)?;
     validate_foundation_boundary(inventory)?;
     validate_post_a1_provenance_refresh(inventory)?;
+    validate_post_a1_cli_output_extension(inventory)?;
     Ok(())
 }
 
@@ -2996,8 +3277,13 @@ fn time_utc_inventory_is_exact_and_source_pinned() {
         "one same-line overlap",
         "derived-consumer remainder",
         "38 exact rows",
-        "16 exact cross-file JSON rows",
-        "252 classified",
+        "17 exact cross-file JSON rows",
+        "253 classified",
+        "TIME-A1-ROOT-CLI-JSON-2026-08-06",
+        "src/cli/output.rs:156",
+        "69th current source pin",
+        "+127/-28",
+        "+87/-27",
         "literal-source",
         "bounded lexical scan of production source finds zero external",
         "This is not compiler-resolved name analysis.",
@@ -3160,8 +3446,13 @@ fn time_utc_inventory_rejects_cutover_and_completeness_drift() {
 
     let mut cross_file_lineage_total = inventory.clone();
     cross_file_lineage_total["per_use_classification"]
-        ["declared_consumer_unique_direct_source_anchor_count"] = Value::from(56_u64);
+        ["declared_consumer_unique_direct_source_anchor_count"] = Value::from(64_u64);
     assert!(validate_inventory(&cross_file_lineage_total).is_err());
+
+    let mut cli_extension_overclaim = inventory.clone();
+    cli_extension_overclaim["post_a1_cli_output_extension"]["preservation"]
+        ["static_remainder_closed"] = Value::Bool(true);
+    assert!(validate_inventory(&cli_extension_overclaim).is_err());
 
     let mut alias_route = inventory.clone();
     for binding in alias_route["alias_aware_chrono_uses"]["bindings"]
