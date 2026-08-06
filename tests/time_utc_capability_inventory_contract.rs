@@ -1546,6 +1546,11 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
     let declared_cross_file_categories =
         string_set(per_use, "cross_file_consumer_category_ids");
     let conformance_manifest = read_repo_file("conformance/Cargo.toml");
+    let conformance_root_lib = read_repo_file("conformance/src/lib.rs");
+    let raptorq_reporting_module =
+        read_repo_file("conformance/raptorq_rfc6330/reporting/src/mod.rs");
+    let raptorq_maintenance_bin =
+        read_repo_file("conformance/raptorq_rfc6330/reporting/bin/maintain_fixtures.rs");
     let excluded_conformance_manifest = read_repo_file("fuzz/conformance/Cargo.toml");
     let standalone_reporting_manifest =
         read_repo_file("tests/conformance/raptorq_rfc6330/reporting/Cargo.toml");
@@ -1594,6 +1599,45 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
                     && benchmark_module.contains("pub mod profiles;")
                     && benchmark_module.contains(
                         "pub use reports::{BenchmarkMetrics, BenchmarkReport, BenchmarkResult, ComparisonReport};",
+                    )
+            }
+            "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-MAINTENANCE" => {
+                text(row, "profile_id") == "TIME-PROFILE-CONFORMANCE-MEMBER"
+                    && path
+                        == "conformance/raptorq_rfc6330/reporting/bin/maintain_fixtures.rs"
+                    && text(row, "cfg_or_wiring")
+                        == "EXPLICIT_CARGO_BIN_WITH_PATH_INCLUDED_MODULE"
+                    && text(row, "exposure") == "CONFORMANCE_EXECUTABLE_PRIVATE_CARRIER"
+                    && conformance_manifest.contains(
+                        "path = \"raptorq_rfc6330/reporting/bin/maintain_fixtures.rs\"",
+                    )
+                    && raptorq_maintenance_bin.contains(
+                        "#[path = \"../src/maintenance_workflows.rs\"]\nmod maintenance_workflows;",
+                    )
+            }
+            "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-PIPELINE-CONSTRUCTOR" => {
+                text(row, "profile_id") == "TIME-PROFILE-CONFORMANCE-MEMBER"
+                    && path == "conformance/raptorq_rfc6330/reporting/src/mod.rs"
+                    && text(row, "cfg_or_wiring") == "PUBLIC_CONFORMANCE_LIBRARY_REEXPORT"
+                    && text(row, "exposure") == "PUBLIC_CONFORMANCE_REPORTING_PIPELINE"
+                    && conformance_root_lib.contains(
+                        "#[path = \"../raptorq_rfc6330/reporting/src/mod.rs\"]\npub mod raptorq_rfc6330_reporting;",
+                    )
+                    && raptorq_reporting_module.contains("pub mod coverage_matrix;")
+                    && raptorq_reporting_module.contains("pub mod regression_detection;")
+            }
+            "TIME-CROSS-FILE-CONFORMANCE-RAPTORQ-REPORT" => {
+                text(row, "profile_id") == "TIME-PROFILE-CONFORMANCE-MEMBER"
+                    && path
+                        == "conformance/raptorq_rfc6330/reporting/src/compliance_report.rs"
+                    && text(row, "cfg_or_wiring") == "PUBLIC_CONFORMANCE_LIBRARY_REEXPORT"
+                    && text(row, "exposure") == "PUBLIC_CONFORMANCE_REPORT_OUTPUT"
+                    && conformance_root_lib.contains(
+                        "#[path = \"../raptorq_rfc6330/reporting/src/mod.rs\"]\npub mod raptorq_rfc6330_reporting;",
+                    )
+                    && raptorq_reporting_module.contains("pub mod compliance_report;")
+                    && raptorq_reporting_module.contains(
+                        "pub use compliance_report::{\n    ComplianceReportGenerator, OutputFormat, ReportConfig, generate_ci_summary,\n};",
                     )
             }
             "TIME-CROSS-FILE-CONFORMANCE-JSON" => {
