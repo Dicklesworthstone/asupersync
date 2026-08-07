@@ -104,7 +104,7 @@
       "surface_id": "WEB-EXTRACTOR-LIMITS",
       "state": "PRESENT_AFTER_BUFFERING",
       "current_semantics": "JSON and raw extractors default to 10 MiB and form defaults to 2 MiB, checking Content-Length and the already-buffered body.",
-      "anchors": ["src/web/extract.rs::BodyLimits", "tests/web_extract_content_length_audit.rs"],
+      "anchors": ["src/web/extract.rs::BodyLimits", "tests/web_extract_content_length_audit.rs::json_extractor_rejects_content_length_mismatch"],
       "gap": "Extractor limits do not bound protocol buffering before handler dispatch."
     },
     {
