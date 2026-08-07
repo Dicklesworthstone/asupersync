@@ -10,21 +10,91 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
-Scope window: current Unreleased work through 2026-07-14, reconstructed from git history, beads, benchmark ledgers, and live repo artifacts; latest published GitHub Release/tag baseline is `v0.3.4`.
+Scope window: current work through 2026-08-07, reconstructed from git history,
+beads, benchmark ledgers, and live repo artifacts; the previous published
+GitHub Release/tag baseline is `v0.3.10`.
 
 ## Version Timeline
 
-- **Unreleased**: post-`v0.3.8` ATP, proof-lane, runtime, and skill-refresh work.
+- **v0.4.0 Release**: semantic-versioning re-anchor for the current public API,
+  plus the runtime correctness, capability, codec, protocol, and evidence work
+  landed after `v0.3.10`.
+- **v0.3.10 Release**: 2026-07-27 patch release. It included two coherent but
+  breaking tracked-session-channel API changes and is not yanked; consumers
+  should use `v0.4.0` as the policy-correct compatibility anchor.
 - **v0.3.8 workspace version marker**: source for the standalone ATP v0.3.8
   seven-platform release on 2026-07-10; no upstream asupersync tag is implied.
 - **v0.3.5 workspace version marker**: internal package/version update on 2026-06-18; no `v0.3.5` git tag or GitHub Release existed when this changelog was refreshed.
-- **v0.3.4 Release**: latest published GitHub Release/tag baseline, dated 2026-06-07.
+- **v0.3.4 Release**: published GitHub Release/tag dated 2026-06-07 and
+  superseded by `v0.3.10`.
 - **v0.3.3 Pre-release**: superseded by `v0.3.4`.
 - **v0.3.2 Release** and older entries: retained release-history sections below.
 
 ---
 
 ## [Unreleased]
+
+_No changes yet._
+
+---
+
+## [v0.4.0] - 2026-08-07
+
+### Breaking changes and version-policy correction
+
+- **Tracked session channels are capability-threaded and proof-returning.**
+  `TrackedSender::try_reserve` takes `&Cx`, and `TrackedPermit::try_send`
+  returns `CommittedProof<SendPermit>`. These changes first appeared in
+  `v0.3.10`, where they were incorrectly shipped under a patch version.
+  `v0.4.0` deliberately re-anchors that public API under the project's stated
+  pre-1.0 semver policy. `v0.3.10` remains available because yanking it would
+  disrupt known downstream consumers.
+
+### Runtime and correctness
+
+- **Scheduler and lifecycle repairs.** Timed tasks are promoted when ready
+  work is injected, worker-spawn failure completes affected tasks, deferred
+  regions drain before leak diagnostics, spawn effects retain causal ordering,
+  and artifact-cache admission has deterministic tie and count behavior.
+- **Cancellation-safe synchronization fixes.** The release prevents waiter-ID
+  wraparound, rejects completed MPSC reserve repolls, restores interrupted
+  semaphore acquisitions, preserves RwLock queue order, linearizes OnceCell
+  waiter state, releases mutex rank before wakeup, and removes several stale or
+  duplicate waiter ownership states.
+- **I/O and database boundaries.** Buffered seeks now account for unread
+  buffered data; framed writes have bounded backpressure; SQLite row streams
+  remain connection-exclusive and dropped transactions roll back eagerly; and
+  Redis PubSub validates control acknowledgements.
+
+### Capabilities, codecs, and protocols
+
+- **Explicit io_uring capability control plane.** Linux backends now retain
+  terminal reactor receipts and probe fixed buffers, provided-buffer groups,
+  requested SQPOLL, multishot receive/accept, and mapped buffer rings before
+  selecting those modes. These are capability probes, not performance claims.
+- **First-party bounded codecs and helpers.** Scalar Base64 and hexadecimal
+  kernels, deterministic future combinators, allocation-free helper subsets,
+  owned polling boundaries, and a parked `block_on` kernel expand the native
+  surface without introducing another executor.
+- **Protocol hardening.** HTTP/1 bodies fail closed on incomplete termination,
+  native H2/gRPC retains status context, fragmented QUIC varints decode
+  correctly, bounded OTLP trace/log/metric schemas cover the supported finite
+  wire surface, and replay diagnostics use the stable `ASUP-E401` token.
+
+### Configuration and evidence
+
+- **Typed, redacted configuration models.** Runtime, ATP, and ATP daemon
+  configuration now have versioned canonical JSON models with secret-bearing
+  fields redacted at serialization boundaries.
+- **Proof and artifact governance.** The release expands deterministic proof
+  lanes, source inventories, claim-to-status mappings, and fail-closed artifact
+  graph checks. These records document the surfaces they cover and retain
+  explicit no-claim boundaries; they are not broad performance or security
+  certifications.
+
+---
+
+## [v0.3.10] - 2026-07-27
 
 ### ATP clean-matrix, transport security, and proof-lane consolidation
 
@@ -1659,7 +1729,9 @@ The initial tagged milestone establishing the core async runtime with structured
 
 ---
 
-[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.0...HEAD
+[v0.4.0]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.10...v0.4.0
+[v0.3.10]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.4...v0.3.10
 [v0.3.4]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.3...v0.3.4
 [v0.3.3]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.2...v0.3.3
 [v0.3.2]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.1...v0.3.2
