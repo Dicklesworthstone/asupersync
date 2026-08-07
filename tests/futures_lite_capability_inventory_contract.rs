@@ -90,6 +90,13 @@ fn text<'a>(value: &'a Value, key: &str) -> &'a str {
         .unwrap_or_else(|| panic!("{key} must be a string"))
 }
 
+fn object_text<'a>(value: &'a serde_json::Map<String, Value>, key: &str) -> &'a str {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("{key} must be a string"))
+}
+
 fn row_ids(rows: &[Value], key: &str) -> BTreeSet<String> {
     rows.iter().map(|row| text(row, key).to_owned()).collect()
 }
@@ -170,9 +177,9 @@ fn validate_a3_receipt(inventory: &Value) -> Result<(), String> {
     }
 
     let projection = object(receipt, "kernel_projection");
-    let source = read_repo_file(text(projection, "path"));
-    let start_marker = text(projection, "start_marker");
-    let end_marker = text(projection, "end_marker");
+    let source = read_repo_file(object_text(projection, "path"));
+    let start_marker = object_text(projection, "start_marker");
+    let end_marker = object_text(projection, "end_marker");
     let start = source
         .find(start_marker)
         .ok_or_else(|| "A3 kernel start marker is missing".to_owned())?;
@@ -180,7 +187,7 @@ fn validate_a3_receipt(inventory: &Value) -> Result<(), String> {
         .find(end_marker)
         .ok_or_else(|| "A3 kernel end marker is missing".to_owned())?;
     let kernel = &source.as_bytes()[start..start + relative_end];
-    if hex_bytes(&Sha256::digest(kernel)) != text(projection, "sha256") {
+    if hex_bytes(&Sha256::digest(kernel)) != object_text(projection, "sha256") {
         return Err("A3 kernel projection hash drift".to_owned());
     }
 
@@ -278,9 +285,9 @@ fn validate_a4_receipt(inventory: &Value) -> Result<(), String> {
     }
 
     let projection = object(receipt, "helper_projection");
-    let source = read_repo_file(text(projection, "path"));
-    let start_marker = text(projection, "start_marker");
-    let end_marker = text(projection, "end_marker");
+    let source = read_repo_file(object_text(projection, "path"));
+    let start_marker = object_text(projection, "start_marker");
+    let end_marker = object_text(projection, "end_marker");
     let start = source
         .find(start_marker)
         .ok_or_else(|| "A4 helper start marker is missing".to_owned())?;
@@ -288,7 +295,7 @@ fn validate_a4_receipt(inventory: &Value) -> Result<(), String> {
         .find(end_marker)
         .ok_or_else(|| "A4 helper end marker is missing".to_owned())?;
     let helper_source = &source.as_bytes()[start..start + relative_end];
-    if hex_bytes(&Sha256::digest(helper_source)) != text(projection, "sha256") {
+    if hex_bytes(&Sha256::digest(helper_source)) != object_text(projection, "sha256") {
         return Err("A4 helper projection hash drift".to_owned());
     }
 
@@ -412,9 +419,9 @@ fn validate_a5_receipt(inventory: &Value) -> Result<(), String> {
     }
 
     let projection = object(receipt, "poll_helper_projection");
-    let future_source = read_repo_file(text(projection, "path"));
-    let start_marker = text(projection, "start_marker");
-    let end_marker = text(projection, "end_marker");
+    let future_source = read_repo_file(object_text(projection, "path"));
+    let start_marker = object_text(projection, "start_marker");
+    let end_marker = object_text(projection, "end_marker");
     let start = future_source
         .find(start_marker)
         .ok_or_else(|| "A5 helper start marker is missing".to_owned())?;
@@ -422,7 +429,7 @@ fn validate_a5_receipt(inventory: &Value) -> Result<(), String> {
         .find(end_marker)
         .ok_or_else(|| "A5 helper end marker is missing".to_owned())?;
     let helper_source = &future_source.as_bytes()[start..start + relative_end];
-    if hex_bytes(&Sha256::digest(helper_source)) != text(projection, "sha256") {
+    if hex_bytes(&Sha256::digest(helper_source)) != object_text(projection, "sha256") {
         return Err("A5 poll-helper projection hash drift".to_owned());
     }
 
