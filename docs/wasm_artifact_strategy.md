@@ -65,7 +65,7 @@ members = [
 ```toml
 [package]
 name = "asupersync-browser-core"
-version = "0.1.0"
+version = "0.4.0"
 edition = "2024"
 license-file = "../LICENSE"
 description = "WASM/JS bindings for the Asupersync async runtime (Browser Edition)."
@@ -74,7 +74,7 @@ description = "WASM/JS bindings for the Asupersync async runtime (Browser Editio
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-asupersync = { version = "0.3.4", path = "..", default-features = false, features = ["wasm-browser-prod"] }
+asupersync = { version = "0.4.0", path = "..", default-features = false, features = ["wasm-browser-prod"] }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = [
