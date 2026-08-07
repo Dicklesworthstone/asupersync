@@ -5039,7 +5039,7 @@ mod tests {
 
             let transaction = match conn.begin_immediate(&cx).await {
                 Outcome::Ok(transaction) => transaction,
-                other => panic!("begin immediate failed: {other:?}"),
+                other => panic!("begin immediate failed with {:?}", other.severity()),
             };
             match transaction
                 .execute(&cx, "INSERT INTO t (value) VALUES (1)", &[])
@@ -5094,7 +5094,7 @@ mod tests {
 
         let transaction = match block_on(conn.begin_immediate(&cx)) {
             Outcome::Ok(transaction) => transaction,
-            other => panic!("begin immediate failed: {other:?}"),
+            other => panic!("begin immediate failed with {:?}", other.severity()),
         };
         match block_on(transaction.execute(&cx, "INSERT INTO t (value) VALUES (1)", &[])) {
             Outcome::Ok(1) => {}
