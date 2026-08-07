@@ -3957,11 +3957,11 @@
       "scope": "file-or-item-boundary",
       "feature_or_platform_gate": "see source cfg attributes and Cargo feature gates",
       "why_safe_rust_is_insufficient": "io_uring submission and buffer registration accept raw descriptors and pointers whose kernel-visible lifetimes cannot be expressed to Rust's borrow checker; the module also owns platform FFI for readiness, wakeup and descriptor validation.",
-      "safety_invariant": "Raw file descriptors, sockets, ring entries, and OS handles remain live for every FFI call; ownership transfers are one-way and close/dup paths avoid double-close and stale-handle reuse. The fixed-buffer, provided-group and multishot-receive probes keep their backing allocations and nonblocking Unix stream pairs alive through terminal completions and cleanup attempts, and declare each temporary ring last so it drops before referenced backing on every path. The multishot-receive probe cancels and observes the terminal receive completion before returning selected buffers and removing the group. Every successful multishot-accept completion is immediately wrapped in exactly one OwnedFd, including unexpected positive completions; the listener outlives the temporary ring, and cancellation reaches the terminal accept completion before success. The requested-only SQPOLL probe references no external descriptor or buffer, completes its NOP before return, and drops its temporary ring and polling thread locally.",
-      "expected_evidence": "Category-specific evidence is defined in docs/unsafe_boundary_ledger.md. The reactor-ffi policy requires target-gated RCH compilation plus focused lifecycle tests; the fixed-buffer, provided-group, multishot-accept, multishot-receive and requested-only SQPOLL source probes require an io-uring-feature compile receipt, while any nonterminal executable attempt supplies no live-host support claim.",
+      "safety_invariant": "Raw file descriptors, sockets, ring entries, and OS handles remain live for every FFI call; ownership transfers are one-way and close/dup paths avoid double-close and stale-handle reuse. The fixed-buffer, provided-group, mapped-buffer-ring and multishot-receive probes keep their backing allocations and nonblocking Unix stream pairs alive through terminal completions and cleanup attempts, and declare each temporary ring last so it drops before referenced backing on every path. The mapped buffer-ring probe owns its page-aligned shared mapping with RAII, publishes fully initialized entries with a release-ordered tail update, returns a selected lease, unregisters after terminal completion, and unmaps only after ring teardown on uncertain paths. The multishot-receive probe cancels and observes the terminal receive completion before returning selected buffers and removing the group. Every successful multishot-accept completion is immediately wrapped in exactly one OwnedFd, including unexpected positive completions; the listener outlives the temporary ring, and cancellation reaches the terminal accept completion before success. The requested-only SQPOLL probe references no external descriptor or buffer, completes its NOP before return, and drops its temporary ring and polling thread locally.",
+      "expected_evidence": "Category-specific evidence is defined in docs/unsafe_boundary_ledger.md. The reactor-ffi policy requires target-gated RCH compilation plus focused lifecycle tests; all six bounded advanced-capability source probes require an io-uring-feature compile receipt, while a test-target compilation timeout supplies no executable or live-host support claim.",
       "explicit_no_claims": [
         "This row is an inventory and schema baseline, not fresh execution proof for every platform path.",
-        "Source and contract alignment do not prove fixed-buffer, provided-group, multishot-accept, multishot-receive or SQPOLL completion, cancellation or cleanup on a live host.",
+        "Source and contract alignment do not prove fixed-buffer, provided-group, mapped-buffer-ring, multishot-accept, multishot-receive or SQPOLL completion, cancellation or cleanup on a live host.",
         "Test-only, conformance, fuzz, and compat-boundary rows do not prove core runtime production safety."
       ],
       "operation_locators": [
@@ -3972,102 +3972,127 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 94,
+          "line": 95,
           "pattern": "if unsafe { ring.submission().push(entry) }.is_err() {"
         },
         {
           "kind": "unsafe_block",
-          "line": 125,
+          "line": 126,
           "pattern": "Ok(unsafe { OwnedFd::from_raw_fd(result) })"
         },
         {
           "kind": "unsafe_block",
-          "line": 188,
-          "pattern": "if let Err(error) = unsafe { ring.submitter().register_buffers(&[io_vec]) } {"
+          "line": 148,
+          "pattern": "let mapping = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 662,
-          "pattern": "if unsafe { libc::fcntl(raw_fd, libc::F_GETFD) } == -1 {"
+          "line": 163,
+          "pattern": "let _ = unsafe { libc::munmap(mapping, allocation_len) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 667,
-          "pattern": "let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };"
+          "line": 191,
+          "pattern": "unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 668,
-          "pattern": "if unsafe { libc::fstat(raw_fd, &mut stat_buf) } != 0 {"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 690,
-          "pattern": "let link_len = unsafe {"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 1124,
-          "pattern": "unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 1209,
-          "pattern": "match unsafe { ring.submitter().register_buffers(&io_vecs) } {"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 1350,
-          "pattern": "if unsafe { libc::fcntl(raw_fd, libc::F_GETFD) } == -1 {"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 1373,
-          "pattern": "if unsafe { libc::fcntl(info.raw_fd, libc::F_GETFD) } == -1 {"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 1493,
+          "line": 210,
           "pattern": "let _ = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1559,
+          "line": 279,
+          "pattern": "if let Err(error) = unsafe { ring.submitter().register_buffers(&[io_vec]) } {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 474,
+          "pattern": "if let Err(error) = unsafe {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 848,
+          "pattern": "if unsafe { libc::fcntl(raw_fd, libc::F_GETFD) } == -1 {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 853,
+          "pattern": "let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 854,
+          "pattern": "if unsafe { libc::fstat(raw_fd, &mut stat_buf) } != 0 {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 876,
+          "pattern": "let link_len = unsafe {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1326,
+          "pattern": "unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1411,
+          "pattern": "match unsafe { ring.submitter().register_buffers(&io_vecs) } {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1552,
+          "pattern": "if unsafe { libc::fcntl(raw_fd, libc::F_GETFD) } == -1 {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1575,
+          "pattern": "if unsafe { libc::fcntl(info.raw_fd, libc::F_GETFD) } == -1 {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1695,
+          "pattern": "let _ = unsafe {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1761,
           "pattern": "unsafe { libc::write(fd, bytes.as_ptr().cast::<libc::c_void>(), bytes.len()) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1608,
+          "line": 1810,
           "pattern": "unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1668,
+          "line": 1870,
           "pattern": "unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1733,
+          "line": 1935,
           "pattern": "let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1738,
+          "line": 1940,
           "pattern": "let owned = unsafe { OwnedFd::from_raw_fd(fd) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2397,
+          "line": 2620,
           "pattern": "let pushed = unsafe { ring.submission().push(&entry) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2915,
+          "line": 3138,
           "pattern": "let n = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2942,
+          "line": 3165,
           "pattern": "let n = unsafe {"
         }
       ]

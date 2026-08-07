@@ -1,15 +1,19 @@
-# io_uring Multishot Operation Probes Proof Note
+# io_uring Bounded Operation Probes Proof Note
 
 Bead: `asupersync-sched-hot-path-perf-bt4y5f.7.2`
 
-Source basis: committed `HEAD` `9a3d6b9c5ed4d3005eb7935a241e07a0224d941e`
+Source basis: committed `HEAD` `ec94712c62d084d9da7c76c2b014b3ec44bae1d5`
 plus the reserved `src/runtime/reactor/io_uring.rs` and
 `src/runtime/reactor/mod.rs` clean overlay.
 
 ## Claim
 
-This note covers bounded startup probes for requested `MultishotAccept` and
-dependency-gated `MultishotRecv`. The accept probe binds a loopback listener,
+This note now covers the complete six-operation source set, including the
+current bounded `MappedBufferRing` probe and the preceding requested
+`MultishotAccept` and dependency-gated `MultishotRecv` probes. The mapped-ring
+probe owns one page-aligned shared entry, completes one selected-buffer receive,
+returns that lease, unregisters the group, and unmaps through RAII. The accept
+probe binds a loopback listener,
 owns two distinct accepted descriptors, requires `MORE` on both completions,
 then explicitly cancels and drains the terminal completion. The receive probe
 adds a dependency-gated startup probe for the requested
@@ -21,6 +25,14 @@ group. The result is cached and reported through the existing capability
 policy. It is not used by the reactor data plane.
 
 ## Safety Argument
+
+The mapped-ring backing buffer and mapping owner are declared before their
+temporary ring. The mapping is page aligned, contains exactly one initialized
+entry, and remains live until unregister succeeds or ring teardown releases
+the registration. Each entry is fully written before a release-ordered tail
+update publishes it to the kernel. The selected buffer is verified, returned,
+and unregistered after terminal receive completion; uncertain paths drop the
+ring before the mapping owner unmaps once.
 
 The accept listener is declared before its temporary ring. Every nonnegative
 accept completion is immediately converted into one `OwnedFd`, including any
@@ -43,35 +55,42 @@ unsupported opcode, unexpected completion, failed cancellation, invalid buffer
 identifier, missing terminal event, or cleanup mismatch fails closed to an
 inactive capability decision.
 
-The accept probe adds one narrow unsafe ownership-transfer operation in
-`own_accepted_fd`. Its safe precheck rejects negative completion results before
-`OwnedFd::from_raw_fd`; a successful accept CQE is the kernel's transfer of a
-new descriptor to the caller. The receive probe reuses the existing narrowly
-scoped SQE push operation. The unsafe-boundary ledger accounts for 21 exact
-reactor source operations.
+The mapped probe adds five narrow operations for mmap/munmap ownership, shared
+entry publication, and registration. The accept probe adds one narrow
+ownership-transfer operation in `own_accepted_fd`; its safe precheck rejects
+negative completion results before `OwnedFd::from_raw_fd`. The receive probe
+reuses the existing narrowly scoped SQE push operation. The unsafe-boundary
+ledger accounts for all 26 exact reactor source operations.
 
 ## Evidence
 
-- RCH clean-overlay `cargo check -p asupersync --lib --features io-uring`
-  passed on worker `hz2`; project hash `30d538e3f406ef90`, overlay fingerprint
-  `26f22fd6237fd2fa0194f974ff7c15123a3eba4715c5bef2b5b845323c217361`.
-- RCH clean-overlay feature-library Clippy passed with all warnings denied
+- The current RCH clean-overlay
+  `cargo check -p asupersync --lib --features io-uring` passed on worker `hz2`;
+  project hash `d0377bbff7e312d6`, base
+  `ec94712c62d084d9da7c76c2b014b3ec44bae1d5`, overlay fingerprint
+  `ed1aec7338e99b01215d55267a9bc064fa34e29d740f1677a971d665a7df91d1`.
+- The focused mapped-ring test command exited 124 at its explicit 300-second
+  bound while compiling the project test target, before running a test. Project
+  hash `d6a8da596deb1574`; no executable or live-host outcome is claimed.
+- The required all-target/all-feature `--keep-going` attempt reached its
+  600-second bound with exit 124 after exposing unrelated blockers in the
+  futures-lite inventory contract, time/UTC inventory contract, and SQLite test
+  code. Project hash `f13c6b102aaa0987`; no completed target-matrix outcome is
+  claimed.
+- The current RCH clean-overlay feature-library Clippy passed on worker
+  `vmi1152480` with all warnings denied
   except the known current-main `clippy::redundant_pub_crate` family in
-  `future.rs`; project hash `b7d4130dc08a2763`, overlay fingerprint
-  `26f22fd6237fd2fa0194f974ff7c15123a3eba4715c5bef2b5b845323c217361`.
+  `future.rs`; project hash `208cb44c15c4165d`, overlay fingerprint
+  `ed1aec7338e99b01215d55267a9bc064fa34e29d740f1677a971d665a7df91d1`.
 - The final RCH clean-overlay `io_uring_capability_inventory_contract` passed
-  6/6 on worker `vmi1149989`; project hash `58da686f54026de2`, overlay
+  6/6 on worker `ovh-a`; project hash `5bb2c513de7f5380`, overlay
   fingerprint
-  `85b42affc3df7f3deb7113b88cc2747e176024c822e71d98a7516b1ef5b97164`.
-- The focused lib-test lane did not execute the selected test. Its remote build
-  was cancelled after RCH reported stale progress with a fresh heartbeat, and
-  its terminal output exposed pre-existing `non_snake_case` errors in
-  `src/observability/otlp_proto.rs`, outside this bead's reserved paths.
+  `1b187affe6048f32e5cfa95d80509cffafc1170838100e47d482a0df8c950ec8`.
 
 ## No-Claim Boundary
 
-These receipts do not prove live-kernel support on a named production target,
-reactor data-plane integration, sustained operation, throughput, latency,
-memory improvement, broad lib-test health, or completion of URING-2. Mapped
-buffer-ring probing, a focused executable receipt, and the target evidence
-matrix remain open on the bead.
+These receipts do not prove focused executable success, live-kernel support on
+a named production target, reactor data-plane integration, sustained operation,
+throughput, latency, memory improvement, broad lib-test health, or completion
+of URING-2. A focused executable receipt and the target evidence matrix remain
+open on the bead.

@@ -12,10 +12,10 @@
     "rust_contract_executed": false,
     "live_kernel_probes_executed": false,
     "benchmarks_executed": false,
-    "reason": "URING-1 remains a static inventory. URING-2 has an io-uring-feature source-compilation receipt for fixed-buffer, provided-group, multishot-accept, multishot-receive and requested-only SQPOLL operation probes plus the terminal fallback snapshot, but no executable test receipt exists."
+    "reason": "URING-1 remains a static inventory. URING-2 has an io-uring-feature source-compilation receipt for all six bounded operation probes plus the terminal fallback snapshot, but the focused executable attempt timed out during test-target compilation before running a test."
   },
   "uring_2_checkpoint": {
-    "status": "IN_PROGRESS_FIVE_OPERATION_PROBES_AND_TERMINAL_FALLBACK",
+    "status": "IN_PROGRESS_SIX_OPERATION_PROBES_AND_TERMINAL_FALLBACK",
     "implemented": [
       "stable backend, capability, support and fallback identifiers",
       "fail-closed immutable capability decisions",
@@ -25,12 +25,12 @@
       "driver-independent RuntimeState capability snapshot with Runtime and RuntimeHandle inspectors",
       "cached fixed-buffer opcode, registration, fixed write/read completion and data-integrity probe wired into the immutable snapshot",
       "cached provided-buffer group probe with selected receive, buffer-ID and data verification, re-provide and remove cleanup",
+      "cached mapped buffer-ring probe with bounded shared mapping, selected receive, lease return, unregister and RAII unmap",
       "cached multishot accept probe with two uniquely owned descriptors, MORE checks, explicit cancellation and terminal drain",
       "cached dependency-gated multishot receive probe with two distinct selected buffers, MORE checks, explicit cancellation, terminal drain, buffer return and group removal",
       "cached requested-only SQPOLL probe with bounded ring creation, NOP completion and polling-thread teardown"
     ],
     "remaining": [
-      "one remaining capability probe",
       "focused executable test receipt",
       "io-uring feature and target matrix verification"
     ],
@@ -48,20 +48,33 @@
       "runner": "RCH clean-overlay cargo check",
       "job_id": null,
       "worker": "hz2",
-      "project_hash": "30d538e3f406ef90",
-      "base_commit": "9a3d6b9c5ed4d3005eb7935a241e07a0224d941e",
-      "overlay_fingerprint": "26f22fd6237fd2fa0194f974ff7c15123a3eba4715c5bef2b5b845323c217361",
+      "project_hash": "d0377bbff7e312d6",
+      "base_commit": "ec94712c62d084d9da7c76c2b014b3ec44bae1d5",
+      "overlay_fingerprint": "ed1aec7338e99b01215d55267a9bc064fa34e29d740f1677a971d665a7df91d1",
       "command": "cargo check -p asupersync --lib --features io-uring",
       "exit_code": 0,
       "claim": "io-uring-feature library compilation only"
     },
+    "target_matrix_attempt": {
+      "runner": "RCH clean-overlay cargo check",
+      "worker": "hz2",
+      "project_hash": "f13c6b102aaa0987",
+      "base_commit": "ec94712c62d084d9da7c76c2b014b3ec44bae1d5",
+      "overlay_fingerprint": "ed1aec7338e99b01215d55267a9bc064fa34e29d740f1677a971d665a7df91d1",
+      "command": "timeout 600s cargo check --all-targets --all-features --keep-going",
+      "exit_code": 124,
+      "observed_blocker_paths": ["tests/futures_lite_capability_inventory_contract.rs", "tests/time_utc_capability_inventory_contract.rs", "src/database/sqlite.rs"],
+      "disposition": "TIMED_OUT_AFTER_UNRELATED_KEEP_GOING_BLOCKERS_NO_TARGET_MATRIX_CLAIM"
+    },
     "focused_test_attempt": {
       "worker": "hz2",
-      "project_hash": "6605dee8352b6c69",
-      "command": "cargo test -p asupersync --lib --features io-uring terminal_ -- --nocapture",
+      "project_hash": "d6a8da596deb1574",
+      "base_commit": "ec94712c62d084d9da7c76c2b014b3ec44bae1d5",
+      "overlay_fingerprint": "ed1aec7338e99b01215d55267a9bc064fa34e29d740f1677a971d665a7df91d1",
+      "command": "timeout 300s cargo test -p asupersync --lib --features io-uring mapped_buffer_ring_capability_probe_is_gated_and_cached -- --nocapture",
       "terminal_receipt": null,
-      "local_wait_exit_code": 130,
-      "disposition": "STOPPED_AFTER_NO_TERMINAL_TEST_RESULT_NO_TEST_OR_LIVE_KERNEL_CLAIM"
+      "exit_code": 124,
+      "disposition": "TIMED_OUT_DURING_TEST_TARGET_COMPILATION_NO_TEST_OR_LIVE_KERNEL_CLAIM"
     },
     "focused_test_receipt": null
   },
@@ -96,9 +109,9 @@
     },
     {
       "path": "src/runtime/reactor/io_uring.rs",
-      "sha256": "0b9f21ec344ffaca6126a5ff5bf6d9328b78eec2d301b3817337c8fa119ac88a",
-      "line_count": 3176,
-      "role": "live readiness reactor, cached fixed-buffer, provided-group, multishot-accept, multishot-receive and requested-only SQPOLL operation probes, and classic registered-buffer scaffold"
+      "sha256": "2ab5ea02c723554f2b8a46741045740107ddec1862fd3806c6fba7b7e5de5e1a",
+      "line_count": 3399,
+      "role": "live readiness reactor, all six cached bounded capability probes, terminal fallback inputs, and classic registered-buffer scaffold"
     },
     {
       "path": "src/runtime/reactor/epoll.rs",
@@ -198,8 +211,8 @@
     },
     {
       "path": "tests/io_uring_capability_inventory_contract.rs",
-      "sha256": "05add6d90b2e08178a080f167a90bcc6428a30007c3e9a8e32eb9b2e3cacaf82",
-      "line_count": 1181,
+      "sha256": "062d151cd1767b3693fa11d878533cacefbe3ba1ab5d223230f213af56b849e2",
+      "line_count": 1211,
       "role": "machine contract for the frozen inventory and decision policy"
     },
     {
@@ -234,14 +247,14 @@
     },
     {
       "path": "artifacts/unsafe_boundary_ledger_v1.json",
-      "sha256": "803653c91bb00cd71ee9d9dd04a4a92e7736a3ec3d669dbc9a97409f59e5719b",
-      "line_count": 6313,
+      "sha256": "05a38ac6211691655533f3b5c7de3d67f84c9e7da019be2135f47f2205302568",
+      "line_count": 6338,
       "role": "machine inventory of low-level reactor and harness boundaries"
     },
     {
       "path": "docs/io_uring_capability_inventory.md",
-      "sha256": "7323bbc7d1bd69b949140683bbe2bfd09308b4a90c6a92db94eaf126bf988fd5",
-      "line_count": 373,
+      "sha256": "76ae10a2c3835ff44fd15e8e3c1dc862c7ce65636fda51f9d1adf501654dbdff",
+      "line_count": 387,
       "role": "human interpretation, ownership, and no-claim boundary"
     },
     {
@@ -274,7 +287,7 @@
       "surface_id": "URING-SURFACE-REACTOR",
       "category": "live_backend",
       "paths": ["src/runtime/reactor/io_uring.rs"],
-      "anchors": ["pub struct IoUringReactor", "opcode::PollAdd::new", "opcode::PollRemove::new", "fn probe_multishot_accept_operation", "opcode::AcceptMulti::new", "fn own_accepted_fd", "fn probe_multishot_recv_operation", "opcode::RecvMulti::new", "cqueue::more", "opcode::AsyncCancel::new"],
+      "anchors": ["pub struct IoUringReactor", "opcode::PollAdd::new", "opcode::PollRemove::new", "struct MappedProbeBufRing", "fn probe_mapped_buffer_ring_operation", "register_buf_ring_with_flags", "fn probe_multishot_accept_operation", "opcode::AcceptMulti::new", "fn own_accepted_fd", "fn probe_multishot_recv_operation", "opcode::RecvMulti::new", "cqueue::more", "opcode::AsyncCancel::new"],
       "current_state": "LIVE_ONE_SHOT_READINESS_WITH_BOUNDED_ADVANCED_CAPABILITY_PROBES",
       "gap": "no fixed-buffer, buffer-select, multishot or configured SQPOLL runtime data-plane operation is wired",
       "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.2"
@@ -410,8 +423,8 @@
       "category": "boundary_ledger",
       "paths": ["artifacts/unsafe_boundary_ledger_v1.json", "docs/unsafe_boundary_ledger.md"],
       "anchors": ["unsafe-src-runtime-reactor-io-uring-rs", "reactor-ffi"],
-      "current_state": "FOUR_ROWS_HAVE_42_LOCATORS_OF_WHICH_20_ARE_STALE",
-      "gap": "the 21 io_uring reactor locators are exact; 20 filesystem locators retain a live pattern at a stale line and remain owned by URING-3",
+      "current_state": "FOUR_ROWS_HAVE_47_LOCATORS_OF_WHICH_20_ARE_STALE",
+      "gap": "the 26 io_uring reactor locators are exact; 20 filesystem locators retain a live pattern at a stale line and remain owned by URING-3",
       "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.3"
     },
     {
@@ -527,31 +540,36 @@
     {
       "site_id": "unsafe-src-runtime-reactor-io-uring-rs",
       "path": "src/runtime/reactor/io_uring.rs",
-      "recorded_locator_count": 21,
-      "exact_locator_count": 21,
+      "recorded_locator_count": 26,
+      "exact_locator_count": 26,
       "stale_locator_count": 0,
       "locators": [
         {"kind": "allow_unsafe_code", "pattern": "#![allow(unsafe_code)]", "recorded_line": 20, "current_line": 20, "status": "EXACT_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "if unsafe { ring.submission().push(entry) }.is_err() {", "recorded_line": 94, "current_line": 94, "status": "EXACT_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "Ok(unsafe { OwnedFd::from_raw_fd(result) })", "recorded_line": 125, "current_line": 125, "status": "EXACT_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "if let Err(error) = unsafe { ring.submitter().register_buffers(&[io_vec]) } {", "recorded_line": 188, "current_line": 188, "status": "EXACT_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "if unsafe { libc::fcntl(raw_fd, libc::F_GETFD) } == -1 {", "recorded_line": 662, "current_line": 662, "status": "EXACT_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };", "recorded_line": 667, "current_line": 667, "status": "EXACT_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "if unsafe { libc::fstat(raw_fd, &mut stat_buf) } != 0 {", "recorded_line": 668, "current_line": 668, "status": "EXACT_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "let link_len = unsafe {", "recorded_line": 690, "current_line": 690, "status": "EXACT_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };", "recorded_line": 1124, "current_line": 1124, "status": "EXACT_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "match unsafe { ring.submitter().register_buffers(&io_vecs) } {", "recorded_line": 1209, "current_line": 1209, "status": "EXACT_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "if unsafe { libc::fcntl(raw_fd, libc::F_GETFD) } == -1 {", "recorded_line": 1350, "current_line": 1350, "status": "EXACT_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "if unsafe { libc::fcntl(info.raw_fd, libc::F_GETFD) } == -1 {", "recorded_line": 1373, "current_line": 1373, "status": "EXACT_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "let _ = unsafe {", "recorded_line": 1493, "current_line": 1493, "status": "EXACT_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "unsafe { libc::write(fd, bytes.as_ptr().cast::<libc::c_void>(), bytes.len()) };", "recorded_line": 1559, "current_line": 1559, "status": "EXACT_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "unsafe {", "recorded_line": 1608, "current_line": 1608, "status": "EXACT_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "unsafe {", "recorded_line": 1668, "current_line": 1668, "status": "EXACT_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };", "recorded_line": 1733, "current_line": 1733, "status": "EXACT_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "let owned = unsafe { OwnedFd::from_raw_fd(fd) };", "recorded_line": 1738, "current_line": 1738, "status": "EXACT_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "let pushed = unsafe { ring.submission().push(&entry) };", "recorded_line": 2397, "current_line": 2397, "status": "EXACT_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "let n = unsafe {", "recorded_line": 2915, "current_line": 2915, "status": "EXACT_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "let n = unsafe {", "recorded_line": 2942, "current_line": 2942, "status": "EXACT_LIVE_PATTERN"}
+        {"kind": "unsafe_block", "pattern": "if unsafe { ring.submission().push(entry) }.is_err() {", "recorded_line": 95, "current_line": 95, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "Ok(unsafe { OwnedFd::from_raw_fd(result) })", "recorded_line": 126, "current_line": 126, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let mapping = unsafe {", "recorded_line": 148, "current_line": 148, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let _ = unsafe { libc::munmap(mapping, allocation_len) };", "recorded_line": 163, "current_line": 163, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "unsafe {", "recorded_line": 191, "current_line": 191, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let _ = unsafe {", "recorded_line": 210, "current_line": 210, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "if let Err(error) = unsafe { ring.submitter().register_buffers(&[io_vec]) } {", "recorded_line": 279, "current_line": 279, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "if let Err(error) = unsafe {", "recorded_line": 474, "current_line": 474, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "if unsafe { libc::fcntl(raw_fd, libc::F_GETFD) } == -1 {", "recorded_line": 848, "current_line": 848, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };", "recorded_line": 853, "current_line": 853, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "if unsafe { libc::fstat(raw_fd, &mut stat_buf) } != 0 {", "recorded_line": 854, "current_line": 854, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let link_len = unsafe {", "recorded_line": 876, "current_line": 876, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };", "recorded_line": 1326, "current_line": 1326, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "match unsafe { ring.submitter().register_buffers(&io_vecs) } {", "recorded_line": 1411, "current_line": 1411, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "if unsafe { libc::fcntl(raw_fd, libc::F_GETFD) } == -1 {", "recorded_line": 1552, "current_line": 1552, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "if unsafe { libc::fcntl(info.raw_fd, libc::F_GETFD) } == -1 {", "recorded_line": 1575, "current_line": 1575, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let _ = unsafe {", "recorded_line": 1695, "current_line": 1695, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "unsafe { libc::write(fd, bytes.as_ptr().cast::<libc::c_void>(), bytes.len()) };", "recorded_line": 1761, "current_line": 1761, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "unsafe {", "recorded_line": 1810, "current_line": 1810, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "unsafe {", "recorded_line": 1870, "current_line": 1870, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };", "recorded_line": 1935, "current_line": 1935, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let owned = unsafe { OwnedFd::from_raw_fd(fd) };", "recorded_line": 1940, "current_line": 1940, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let pushed = unsafe { ring.submission().push(&entry) };", "recorded_line": 2620, "current_line": 2620, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let n = unsafe {", "recorded_line": 3138, "current_line": 3138, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let n = unsafe {", "recorded_line": 3165, "current_line": 3165, "status": "EXACT_LIVE_PATTERN"}
       ],
       "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.3"
     }
@@ -561,7 +579,7 @@
       "evidence_id": "URING-EVIDENCE-INLINE-REACTOR",
       "paths": ["src/runtime/reactor/io_uring.rs"],
       "state": "SOURCE_PRESENT_NOT_EXECUTED_BY_URING_1",
-      "covers": ["readiness bookkeeping", "classic buffer-pool bookkeeping", "bounded fixed-buffer, provided-group, multishot-accept, multishot-receive and requested-only SQPOLL operation probe source", "deterministic completion classification and force-off gating"],
+      "covers": ["readiness bookkeeping", "classic buffer-pool bookkeeping", "all six bounded advanced-capability operation probe sources", "deterministic completion classification and force-off gating"],
       "does_not_cover": ["runtime data-plane fixed or provided-buffer I/O", "runtime multishot operations", "configured runtime SQPOLL"],
       "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.7"
     },
@@ -620,9 +638,9 @@
     {
       "capability_id": "URING-CAP-MAPPED-BUFFER-RING",
       "name": "mapped provided-buffer ring",
-      "current_state": "ABSENT",
-      "current_evidence": [],
-      "missing": ["bounded mapped ring registration", "memory lifetime", "buffer selection", "return protocol", "unregister drain"],
+      "current_state": "LIVE_BOUNDED_MAPPED_BUFFER_RING_PROBE_NOT_USED_BY_DATA_PLANE",
+      "current_evidence": ["page-aligned one-entry shared mapping with RAII unmap", "cached register, selected receive, buffer-ID and data-integrity probe", "release-ordered lease return and unregister cleanup"],
+      "missing": ["runtime data-plane consumer", "linear lease integration", "terminal data-plane drain", "real comparator"],
       "implementation_owner": "asupersync-sched-hot-path-perf-bt4y5f.7.3",
       "terminal_evidence_owner": "asupersync-sched-hot-path-perf-bt4y5f.7.7"
     },

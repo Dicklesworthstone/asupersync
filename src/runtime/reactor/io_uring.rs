@@ -34,8 +34,9 @@ mod imp {
     use std::net::{Ipv4Addr, TcpListener, TcpStream};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
     use std::os::unix::net::UnixStream;
+    use std::ptr::NonNull;
     use std::sync::OnceLock;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
     use std::time::Duration;
 
     const DEFAULT_ENTRIES: u32 = 256;
@@ -123,6 +124,96 @@ mod imp {
         // owned by the caller. Wrapping it immediately gives every later
         // validation and early-return path exactly one closing owner.
         Ok(unsafe { OwnedFd::from_raw_fd(result) })
+    }
+
+    struct MappedProbeBufRing {
+        base: NonNull<types::BufRingEntry>,
+        allocation_len: usize,
+        ring_entries: u16,
+        tail: u16,
+    }
+
+    impl MappedProbeBufRing {
+        fn new(ring_entries: u16) -> Result<Self, IoUringProbeOutcome> {
+            if ring_entries == 0 || !ring_entries.is_power_of_two() || ring_entries > 32_768 {
+                return Err(IoUringProbeOutcome::Error);
+            }
+            let allocation_len = size_of::<types::BufRingEntry>()
+                .checked_mul(usize::from(ring_entries))
+                .ok_or(IoUringProbeOutcome::Resource)?;
+            // SAFETY: mmap creates a zeroed, page-aligned private allocation.
+            // `Self` exclusively owns it until `Drop`, and the probe declares
+            // this owner before its ring so the ring always releases the
+            // kernel registration before this mapping is removed.
+            let mapping = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    allocation_len,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            if mapping == libc::MAP_FAILED {
+                return Err(classify_probe_error(&io::Error::last_os_error()));
+            }
+            let Some(base) = NonNull::new(mapping.cast::<types::BufRingEntry>()) else {
+                // SAFETY: `mapping` is the live allocation returned above.
+                let _ = unsafe { libc::munmap(mapping, allocation_len) };
+                return Err(IoUringProbeOutcome::Error);
+            };
+            Ok(Self {
+                base,
+                allocation_len,
+                ring_entries,
+                tail: 0,
+            })
+        }
+
+        fn registration_addr(&self) -> u64 {
+            u64::try_from(self.base.as_ptr().addr())
+                .expect("pointer address must fit the io_uring u64 ABI")
+        }
+
+        fn ring_entries(&self) -> u16 {
+            self.ring_entries
+        }
+
+        fn return_buffer(&mut self, buffer: &mut [u8], buffer_id: u16) {
+            let index = usize::from(self.tail & (self.ring_entries - 1));
+            let buffer_len = u32::try_from(buffer.len())
+                .expect("bounded mapped probe buffer length must fit u32");
+            // SAFETY: `base` owns `ring_entries` initialized, writable entries.
+            // `index` is masked into that allocation, and `buffer` outlives the
+            // temporary io_uring registration. The release store publishes the
+            // fully initialized entry to the kernel before advancing its tail.
+            unsafe {
+                let entry = &mut *self.base.as_ptr().add(index);
+                entry.set_addr(
+                    u64::try_from(buffer.as_mut_ptr().addr())
+                        .expect("buffer address must fit the io_uring u64 ABI"),
+                );
+                entry.set_len(buffer_len);
+                entry.set_bid(buffer_id);
+                let tail = types::BufRingEntry::tail(self.base.as_ptr()).cast_mut();
+                AtomicU16::from_ptr(tail).store(self.tail.wrapping_add(1), Ordering::Release);
+            }
+            self.tail = self.tail.wrapping_add(1);
+        }
+    }
+
+    impl Drop for MappedProbeBufRing {
+        fn drop(&mut self) {
+            // SAFETY: `base` and `allocation_len` are the exact still-live
+            // mapping returned by mmap in `new`; this owner unmaps it once.
+            let _ = unsafe {
+                libc::munmap(
+                    self.base.as_ptr().cast::<libc::c_void>(),
+                    self.allocation_len,
+                )
+            };
+        }
     }
 
     fn submit_probe_entry(
@@ -334,6 +425,101 @@ mod imp {
             (Ok(()), Ok(())) => IoUringProbeOutcome::Supported,
             (Err(outcome), _) => outcome,
             (Ok(()), Err(outcome)) => outcome,
+        }
+    }
+
+    fn probe_mapped_buffer_ring_operation() -> IoUringProbeOutcome {
+        const PROBE_BYTES: usize = size_of::<u64>();
+        const PROBE_BYTES_I32: i32 = 8;
+        const PROBE_BYTES_U32: u32 = 8;
+        const GROUP_ID: u16 = 3;
+        const BUFFER_ID: u16 = 17;
+        const RECV_USER_DATA: u64 = 14;
+
+        // Backing, descriptors and the mapped buffer-ring owner precede the
+        // temporary io_uring so the kernel releases every possible reference
+        // before any userspace storage is dropped.
+        let mut backing = [0_u8; PROBE_BYTES];
+        let (read_stream, mut write_stream) = match UnixStream::pair() {
+            Ok(pair) => pair,
+            Err(error) => return classify_probe_error(&error),
+        };
+        if let Err(error) = read_stream.set_nonblocking(true) {
+            return classify_probe_error(&error);
+        }
+        if let Err(error) = write_stream.set_nonblocking(true) {
+            return classify_probe_error(&error);
+        }
+        let mut buffer_ring = match MappedProbeBufRing::new(1) {
+            Ok(buffer_ring) => buffer_ring,
+            Err(outcome) => return outcome,
+        };
+
+        let mut ring = match IoUring::new(2) {
+            Ok(ring) => ring,
+            Err(error) => return classify_probe_error(&error),
+        };
+        let mut opcode_probe = Probe::new();
+        if let Err(error) = ring.submitter().register_probe(&mut opcode_probe) {
+            return classify_probe_error(&error);
+        }
+        if !opcode_probe.is_supported(opcode::Recv::CODE) {
+            return IoUringProbeOutcome::Unsupported;
+        }
+
+        // SAFETY: `buffer_ring` owns a page-aligned mapping containing exactly
+        // `ring_entries` writable BufRingEntry values. It was declared before
+        // `ring`, so it remains live until unregister succeeds or ring teardown
+        // releases the registration on every early-return path.
+        if let Err(error) = unsafe {
+            ring.submitter().register_buf_ring_with_flags(
+                buffer_ring.registration_addr(),
+                buffer_ring.ring_entries(),
+                GROUP_ID,
+                0,
+            )
+        } {
+            return classify_probe_error(&error);
+        }
+        buffer_ring.return_buffer(&mut backing, BUFFER_ID);
+
+        let payload = 3_u64.to_ne_bytes();
+        let recv_result = write_stream
+            .write_all(&payload)
+            .map_err(|error| classify_probe_error(&error))
+            .and_then(|()| {
+                let recv_entry = opcode::Recv::new(
+                    types::Fd(read_stream.as_raw_fd()),
+                    std::ptr::null_mut(),
+                    PROBE_BYTES_U32,
+                )
+                .buf_group(GROUP_ID)
+                .build()
+                .flags(squeue::Flags::BUFFER_SELECT)
+                .user_data(RECV_USER_DATA);
+                submit_probe_entry(&mut ring, &recv_entry, RECV_USER_DATA, PROBE_BYTES_I32)
+            });
+        let selected_buffer = recv_result
+            .as_ref()
+            .ok()
+            .and_then(|flags| cqueue::buffer_select(*flags));
+        let operation_result = recv_result.and_then(|_| {
+            if selected_buffer == Some(BUFFER_ID) && backing == payload {
+                Ok(())
+            } else {
+                Err(IoUringProbeOutcome::Error)
+            }
+        });
+
+        if selected_buffer.is_some() {
+            buffer_ring.return_buffer(&mut backing, BUFFER_ID);
+        }
+        let unregister_result = ring.submitter().unregister_buf_ring(GROUP_ID);
+
+        match (operation_result, unregister_result) {
+            (Ok(()), Ok(())) => IoUringProbeOutcome::Supported,
+            (Err(outcome), _) => outcome,
+            (Ok(()), Err(error)) => classify_probe_error(&error),
         }
     }
 
@@ -912,6 +1098,7 @@ mod imp {
         buffer_pool: Mutex<Option<RegisteredBufferPool>>,
         fixed_buffer_probe: OnceLock<IoUringProbeOutcome>,
         provided_group_probe: OnceLock<IoUringProbeOutcome>,
+        mapped_buffer_ring_probe: OnceLock<IoUringProbeOutcome>,
         multishot_accept_probe: OnceLock<IoUringProbeOutcome>,
         multishot_recv_probe: OnceLock<IoUringProbeOutcome>,
         sqpoll_probe: OnceLock<IoUringProbeOutcome>,
@@ -930,6 +1117,10 @@ mod imp {
                 .field("buffer_pool", &self.buffer_pool)
                 .field("fixed_buffer_probe", &self.fixed_buffer_probe.get())
                 .field("provided_group_probe", &self.provided_group_probe.get())
+                .field(
+                    "mapped_buffer_ring_probe",
+                    &self.mapped_buffer_ring_probe.get(),
+                )
                 .field("multishot_accept_probe", &self.multishot_accept_probe.get())
                 .field("multishot_recv_probe", &self.multishot_recv_probe.get())
                 .field("sqpoll_probe", &self.sqpoll_probe.get())
@@ -961,6 +1152,7 @@ mod imp {
                 buffer_pool: Mutex::new(None),
                 fixed_buffer_probe: OnceLock::new(),
                 provided_group_probe: OnceLock::new(),
+                mapped_buffer_ring_probe: OnceLock::new(),
                 multishot_accept_probe: OnceLock::new(),
                 multishot_recv_probe: OnceLock::new(),
                 sqpoll_probe: OnceLock::new(),
@@ -977,6 +1169,12 @@ mod imp {
             *self
                 .provided_group_probe
                 .get_or_init(probe_provided_buffer_group_operation)
+        }
+
+        fn mapped_buffer_ring_probe_outcome(&self) -> IoUringProbeOutcome {
+            *self
+                .mapped_buffer_ring_probe
+                .get_or_init(probe_mapped_buffer_ring_operation)
         }
 
         fn multishot_recv_probe_outcome(&self) -> IoUringProbeOutcome {
@@ -1022,6 +1220,10 @@ mod imp {
                         IoUringProbeOutcome::Dependency
                     },
                 );
+            }
+            let capability = IoUringCapability::MappedBufferRing;
+            if policy.is_requested(capability) && !policy.is_forced_off(capability) {
+                probes[capability.index()] = Some(self.mapped_buffer_ring_probe_outcome());
             }
             let capability = IoUringCapability::MultishotAccept;
             if policy.is_requested(capability) && !policy.is_forced_off(capability) {
@@ -1862,6 +2064,27 @@ mod imp {
                 .expect("cached provided-group outcome should remain observable");
             assert_eq!(first, second);
             assert_eq!(reactor.provided_group_probe.get().copied(), Some(first));
+        }
+
+        #[test]
+        fn mapped_buffer_ring_capability_probe_is_gated_and_cached() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+            let capability = IoUringCapability::MappedBufferRing;
+            let forced = IoUringCapabilityPolicy::new()
+                .with_requested(capability, true)
+                .with_forced_off(capability, true);
+            assert!(reactor.capability_probes(forced)[capability.index()].is_none());
+            assert!(reactor.mapped_buffer_ring_probe.get().is_none());
+
+            let requested = IoUringCapabilityPolicy::new().with_requested(capability, true);
+            let first = reactor.capability_probes(requested)[capability.index()]
+                .expect("requested mapped buffer ring should produce one classified outcome");
+            let second = reactor.capability_probes(requested)[capability.index()]
+                .expect("cached mapped buffer-ring outcome should remain observable");
+            assert_eq!(first, second);
+            assert_eq!(reactor.mapped_buffer_ring_probe.get().copied(), Some(first));
         }
 
         #[test]

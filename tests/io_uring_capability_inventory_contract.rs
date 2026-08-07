@@ -411,8 +411,8 @@ fn source_accuracy_ledger_and_existing_evidence_gaps_are_explicit() {
         total_exact += exact;
         total_stale += stale;
     }
-    assert_eq!(total_locators, 42);
-    assert_eq!(total_exact, 22);
+    assert_eq!(total_locators, 47);
+    assert_eq!(total_exact, 27);
     assert_eq!(total_stale, 20);
 
     let expected_evidence = expected_set(&[
@@ -463,6 +463,15 @@ fn capability_levels_and_runtime_probes_are_independent() {
     assert_eq!(
         text(provided, "current_state"),
         "LIVE_SELECTED_RECEIVE_PROBE_NOT_USED_BY_DATA_PLANE"
+    );
+    let mapped = find_row(
+        capabilities,
+        "capability_id",
+        "URING-CAP-MAPPED-BUFFER-RING",
+    );
+    assert_eq!(
+        text(mapped, "current_state"),
+        "LIVE_BOUNDED_MAPPED_BUFFER_RING_PROBE_NOT_USED_BY_DATA_PLANE"
     );
     let multishot_accept = find_row(capabilities, "capability_id", "URING-CAP-MULTISHOT-ACCEPT");
     assert_eq!(
@@ -1063,7 +1072,7 @@ fn docs_and_no_claim_boundary_remain_honest() {
         "URING-FB-NONE",
         "URING-FB-REACTOR-UNAVAILABLE",
         "sole invariant",
-        "42 locators",
+        "47 locators",
         "borrowed split",
         "two distinct host-family keys",
         "relative median absolute deviation",
@@ -1076,14 +1085,15 @@ fn docs_and_no_claim_boundary_remain_honest() {
         "Runtime::io_reactor_capability_snapshot",
         "RuntimeHandle::io_reactor_capability_snapshot",
         "j-29964935379288247",
-        "30d538e3f406ef90",
+        "d0377bbff7e312d6",
         "cached temporary-ring probe",
         "fixed write/read completion",
+        "mapped shared ring",
         "Unexpected positive completions",
         "two distinct selected buffers",
         "explicit cancellation",
         "completes one NOP",
-        "no test claim",
+        "no executable or live-kernel outcome claim",
     ] {
         assert!(docs.contains(required), "missing docs marker: {required}");
     }
@@ -1118,10 +1128,10 @@ fn docs_and_no_claim_boundary_remain_honest() {
     let checkpoint_value = Value::Object(checkpoint.clone());
     assert_eq!(
         text(&checkpoint_value, "status"),
-        "IN_PROGRESS_FIVE_OPERATION_PROBES_AND_TERMINAL_FALLBACK"
+        "IN_PROGRESS_SIX_OPERATION_PROBES_AND_TERMINAL_FALLBACK"
     );
-    assert_eq!(array(&checkpoint_value, "implemented").len(), 11);
-    assert_eq!(array(&checkpoint_value, "remaining").len(), 3);
+    assert_eq!(array(&checkpoint_value, "implemented").len(), 12);
+    assert_eq!(array(&checkpoint_value, "remaining").len(), 2);
     let verification = object(&checkpoint_value, "verification");
     let verification_value = Value::Object(verification.clone());
     assert_eq!(text(&verification_value, "job_id"), "j-29964935379288247");
@@ -1137,24 +1147,44 @@ fn docs_and_no_claim_boundary_remain_honest() {
     assert_eq!(text(&feature_verification_value, "worker"), "hz2");
     assert_eq!(
         text(&feature_verification_value, "project_hash"),
-        "30d538e3f406ef90"
+        "d0377bbff7e312d6"
     );
     assert_eq!(
         text(&feature_verification_value, "command"),
         "cargo check -p asupersync --lib --features io-uring"
     );
     assert_eq!(unsigned(&feature_verification_value, "exit_code"), 0);
+    let matrix_attempt = object(&checkpoint_value, "target_matrix_attempt");
+    let matrix_attempt_value = Value::Object(matrix_attempt.clone());
+    assert_eq!(text(&matrix_attempt_value, "worker"), "hz2");
+    assert_eq!(
+        text(&matrix_attempt_value, "project_hash"),
+        "f13c6b102aaa0987"
+    );
+    assert_eq!(unsigned(&matrix_attempt_value, "exit_code"), 124);
+    assert_eq!(
+        string_set(&matrix_attempt_value, "observed_blocker_paths"),
+        expected_set(&[
+            "src/database/sqlite.rs",
+            "tests/futures_lite_capability_inventory_contract.rs",
+            "tests/time_utc_capability_inventory_contract.rs",
+        ])
+    );
+    assert_eq!(
+        text(&matrix_attempt_value, "disposition"),
+        "TIMED_OUT_AFTER_UNRELATED_KEEP_GOING_BLOCKERS_NO_TARGET_MATRIX_CLAIM"
+    );
     let test_attempt = object(&checkpoint_value, "focused_test_attempt");
     let test_attempt_value = Value::Object(test_attempt.clone());
     assert_eq!(
         text(&test_attempt_value, "project_hash"),
-        "6605dee8352b6c69"
+        "d6a8da596deb1574"
     );
     assert!(test_attempt_value["terminal_receipt"].is_null());
-    assert_eq!(unsigned(&test_attempt_value, "local_wait_exit_code"), 130);
+    assert_eq!(unsigned(&test_attempt_value, "exit_code"), 124);
     assert_eq!(
         text(&test_attempt_value, "disposition"),
-        "STOPPED_AFTER_NO_TERMINAL_TEST_RESULT_NO_TEST_OR_LIVE_KERNEL_CLAIM"
+        "TIMED_OUT_DURING_TEST_TARGET_COMPILATION_NO_TEST_OR_LIVE_KERNEL_CLAIM"
     );
     assert!(checkpoint_value["focused_test_receipt"].is_null());
 
