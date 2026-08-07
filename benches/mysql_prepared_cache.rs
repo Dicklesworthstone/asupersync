@@ -12,10 +12,10 @@
 //! per regime (recorded in the bead close notes) and times the lookup workload.
 //!
 //! Regimes:
-//!   * `hot_fits`    — working set << capacity: steady state ~all hits.
-//!   * `exact_fit`   — working set == capacity: first pass misses, rest hits.
-//!   * `thrash`      — sequential scan, working set > capacity: LRU worst case,
-//!                     0 reuse — proves the measurement is honest, not hard-coded.
+//! - `hot_fits` — working set << capacity: steady state ~all hits.
+//! - `exact_fit` — working set == capacity: first pass misses, rest hits.
+//! - `thrash` — sequential scan, working set > capacity: LRU worst case,
+//!   0 reuse — proves the measurement is honest, not hard-coded.
 
 use asupersync::database::mysql::bench_prepared_cache_repeated_workload;
 use criterion::{Criterion, criterion_group, criterion_main};

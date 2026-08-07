@@ -261,6 +261,9 @@ pub struct NetworkConfig {
 
 const ATPD_REDACTED_RQ_AUTH_KEY: &str = "[REDACTED]";
 
+// Serde's `serialize_with` callback receives the field by reference, including
+// the `Option` wrapper, so this signature cannot use `Option<&String>`.
+#[allow(clippy::ref_option)]
 fn serialize_redacted_rq_auth_key<S>(
     value: &Option<String>,
     serializer: S,

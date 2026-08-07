@@ -755,7 +755,7 @@ mod tests {
         use crate::types::Budget;
 
         let mut explorer = DporExplorer::new(
-            ExplorerConfig::new(0xF074_A4, 8)
+            ExplorerConfig::new(0x00F0_74A4, 8)
                 .worker_count(1)
                 .max_steps(2_000),
         );

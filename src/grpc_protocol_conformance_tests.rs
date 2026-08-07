@@ -328,7 +328,7 @@ impl MockGrpcCodec {
         let mut buffer = Vec::with_capacity(MESSAGE_HEADER_SIZE + message.data.len());
 
         // Compression flag (1 byte)
-        buffer.push(if message.compressed { 1 } else { 0 });
+        buffer.push(u8::from(message.compressed));
 
         // Message length (4 bytes, big-endian)
         let length = message.data.len() as u32;
@@ -440,7 +440,7 @@ impl MockGrpcMetadata {
     pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) {
         let key = key.into();
         let value = value.into();
-        self.headers.entry(key).or_insert_with(Vec::new).push(value);
+        self.headers.entry(key).or_default().push(value);
     }
 
     pub fn get(&self, key: &str) -> Option<&Vec<String>> {
@@ -806,7 +806,7 @@ fn test_grpc_message_framing_identity() -> TestResult {
 
     for (i, message) in test_messages.iter().enumerate() {
         match codec.round_trip(message) {
-            Ok(true) => continue,
+            Ok(true) => {}
             Ok(false) => {
                 return TestResult::Fail {
                     reason: format!("Message {} failed round-trip identity", i),
@@ -1005,7 +1005,7 @@ fn test_arbitrary_message_round_trip() -> TestResult {
         let message = generator.generate_message(size, false);
 
         match codec.round_trip(&message) {
-            Ok(true) => continue,
+            Ok(true) => {}
             Ok(false) => {
                 return TestResult::Fail {
                     reason: format!("Arbitrary message of size {} failed round-trip", size),
@@ -1070,7 +1070,7 @@ fn test_malformed_input_handling() -> TestResult {
                     reason: format!("Malformed input {} should have failed", i),
                 };
             }
-            Err(_) => continue, // Expected failure
+            Err(_) => {} // Expected failure
         }
     }
 

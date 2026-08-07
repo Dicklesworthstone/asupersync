@@ -159,9 +159,7 @@ impl MockMultipartParser {
                     (Some(boundary_pos), Some(end_pos)) if end_pos <= boundary_pos => {
                         Some((end_pos, true))
                     }
-                    (Some(boundary_pos), Some(_)) | (Some(boundary_pos), None) => {
-                        Some((boundary_pos, false))
-                    }
+                    (Some(boundary_pos), Some(_) | None) => Some((boundary_pos, false)),
                     (None, Some(end_pos)) => Some((end_pos, true)),
                     (None, None) => None,
                 };
@@ -290,10 +288,10 @@ impl MockMultipartParser {
                     // Simple parsing for name and filename
                     for param in params.split(';') {
                         let param = param.trim();
-                        if param.starts_with("name=") {
-                            name = param[5..].trim_matches('"').to_string();
-                        } else if param.starts_with("filename=") {
-                            filename = Some(param[9..].trim_matches('"').to_string());
+                        if let Some(value) = param.strip_prefix("name=") {
+                            name = value.trim_matches('"').to_string();
+                        } else if let Some(value) = param.strip_prefix("filename=") {
+                            filename = Some(value.trim_matches('"').to_string());
                         }
                     }
                 }
@@ -386,12 +384,12 @@ impl WebSocketFrameProcessor {
         if payload_len < 126 {
             second_byte |= payload_len as u8;
             result.push(second_byte);
-        } else if payload_len <= u16::MAX as u64 {
-            second_byte |= 126;
+        } else if let Ok(payload_len_u16) = u16::try_from(payload_len) {
+            second_byte |= 0x7e;
             result.push(second_byte);
-            result.extend_from_slice(&(payload_len as u16).to_be_bytes());
+            result.extend_from_slice(&payload_len_u16.to_be_bytes());
         } else {
-            second_byte |= 127;
+            second_byte |= 0x7f;
             result.push(second_byte);
             result.extend_from_slice(&payload_len.to_be_bytes());
         }
@@ -402,8 +400,8 @@ impl WebSocketFrameProcessor {
         }
 
         // Payload (masked if frame.masked)
-        if frame.masked && frame.mask_key.is_some() {
-            let masked_payload = self.apply_mask(&frame.payload, &frame.mask_key.unwrap());
+        if let (true, Some(mask_key)) = (frame.masked, frame.mask_key) {
+            let masked_payload = self.apply_mask(&frame.payload, &mask_key);
             result.extend_from_slice(&masked_payload);
         } else {
             result.extend_from_slice(&frame.payload);
@@ -476,8 +474,8 @@ impl WebSocketFrameProcessor {
         }
 
         let payload_data = &data[pos..pos + payload_length as usize];
-        let payload = if masked && mask_key.is_some() {
-            self.remove_mask(payload_data, &mask_key.unwrap())
+        let payload = if let (true, Some(mask_key)) = (masked, mask_key) {
+            self.remove_mask(payload_data, &mask_key)
         } else {
             payload_data.to_vec()
         };
@@ -596,7 +594,6 @@ impl SseStream {
                 }
             } else if line.starts_with(':') {
                 // Comment line - ignore
-                continue;
             } else if let Some((field, value)) = line.split_once(':') {
                 let field = field.trim();
                 let value = value.trim_start(); // Only trim leading whitespace from value
@@ -626,10 +623,8 @@ impl SseStream {
                 }
             } else if line.contains(':') {
                 // Malformed field:value line - ignore
-                continue;
             } else {
                 // Line with no colon - treat as comment
-                continue;
             }
         }
 
@@ -959,8 +954,7 @@ mod tests {
         let boundary = "----formdata-boundary-1234567890";
         let parser = MockMultipartParser::new(boundary.to_string());
 
-        let multipart_data = format!(
-            "------formdata-boundary-1234567890\r\n\
+        let multipart_data = "------formdata-boundary-1234567890\r\n\
              Content-Disposition: form-data; name=\"field1\"\r\n\
              \r\n\
              value1\r\n\
@@ -968,8 +962,7 @@ mod tests {
              Content-Disposition: form-data; name=\"field2\"\r\n\
              \r\n\
              value2\r\n\
-             ------formdata-boundary-1234567890--\r\n"
-        );
+             ------formdata-boundary-1234567890--\r\n";
 
         match parser.parse(multipart_data.as_bytes()) {
             Ok(parsed) => {
@@ -994,14 +987,12 @@ mod tests {
         let boundary = "boundary123";
         let parser = MockMultipartParser::new(boundary.to_string());
 
-        let multipart_data = format!(
-            "--boundary123\r\n\
+        let multipart_data = "--boundary123\r\n\
              Content-Disposition: form-data; name=\"file\"; filename=\"test.txt\"\r\n\
              Content-Type: text/plain\r\n\
              \r\n\
              file content here\r\n\
-             --boundary123--\r\n"
-        );
+             --boundary123--\r\n";
 
         match parser.parse(multipart_data.as_bytes()) {
             Ok(parsed) => {
@@ -1470,7 +1461,7 @@ mod tests {
                 });
             }
 
-            let original = ParsedMultipart { boundary, fields };
+            let original = ParsedMultipart { fields, boundary };
             let serialized = parser.serialize(&original);
             let parsed = parser.parse(&serialized).unwrap();
 

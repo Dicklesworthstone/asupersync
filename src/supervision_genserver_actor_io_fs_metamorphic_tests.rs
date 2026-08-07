@@ -104,7 +104,7 @@ mod tests {
                     multiplier,
                 } => {
                     let exponential_delay =
-                        (*base_ms as f64) * multiplier.powi((attempt - 1) as i32);
+                        (*base_ms as f64) * multiplier.powi((attempt - 1).cast_signed());
                     (exponential_delay as u64).min(*max_ms)
                 }
                 BackoffStrategy::Linear { step_ms, max_ms } => {
@@ -457,7 +457,8 @@ mod tests {
                 let mut prev_delay = 0u64;
                 for &attempt in &sorted_attempts {
                     let decision = policy.evaluate_restart(0, attempt);
-                    let expected_uncapped = (base_ms as f64 * multiplier.powi((attempt - 1) as i32)) as u64;
+                    let expected_uncapped =
+                        (base_ms as f64 * multiplier.powi((attempt - 1).cast_signed())) as u64;
 
                     if expected_uncapped <= max_ms {
                         // Not capped, should be monotonic

@@ -344,8 +344,10 @@ impl MockLabRuntime {
     // =============================================================================================
 
     pub fn run_scenario(&mut self, scenario: &TestScenario) -> ScenarioResult {
-        self.scenario_state.scenario_id = scenario.id.clone();
-        self.scenario_state.fault_events = scenario.fault_events.clone();
+        self.scenario_state.scenario_id.clone_from(&scenario.id);
+        self.scenario_state
+            .fault_events
+            .clone_from(&scenario.fault_events);
         self.scenario_state.replay_count += 1;
 
         let mut trace_events = Vec::new();
@@ -375,8 +377,10 @@ impl MockLabRuntime {
             oracle_checks.insert(format!("oracle_{}", i), rng.next_bool(0.9));
         }
 
-        self.scenario_state.execution_trace = trace_events.clone();
-        self.scenario_state.oracle_checks = oracle_checks.clone();
+        self.scenario_state
+            .execution_trace
+            .clone_from(&trace_events);
+        self.scenario_state.oracle_checks.clone_from(&oracle_checks);
 
         ScenarioResult {
             scenario_id: scenario.id.clone(),
@@ -469,14 +473,14 @@ impl MockLabRuntime {
 
     fn validate_snapshot_integrity(&self, snapshot: &RuntimeSnapshot) -> bool {
         // Validate task-region relationships
-        for (_task_id, task_state) in &snapshot.task_states {
+        for task_state in snapshot.task_states.values() {
             if !snapshot.region_tree.contains_key(&task_state.region_id) {
                 return false;
             }
         }
 
         // Validate obligation-task relationships
-        for (_, obligation) in &snapshot.obligation_map {
+        for obligation in snapshot.obligation_map.values() {
             if !snapshot.task_states.contains_key(&obligation.task_id) {
                 return false;
             }

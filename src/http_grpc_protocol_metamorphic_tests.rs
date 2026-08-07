@@ -370,7 +370,7 @@ mod tests {
         }
 
         pub fn send_data(&mut self, stream_id: u32, length: u32) -> Result<(), String> {
-            let length = length as i32;
+            let length = length.cast_signed();
 
             // Check connection window
             if self.connection_window < length {
@@ -399,7 +399,7 @@ mod tests {
             stream_id: Option<u32>,
             increment: u32,
         ) -> Result<(), String> {
-            let increment = increment as i32;
+            let increment = increment.cast_signed();
 
             if increment <= 0 {
                 return Err("Window update increment must be positive".to_string());
@@ -734,7 +734,7 @@ mod tests {
             let mut frame = Vec::new();
 
             // Compression flag (1 byte)
-            frame.push(if self.compression.is_some() { 1 } else { 0 });
+            frame.push(u8::from(self.compression.is_some()));
 
             // Message length (4 bytes, big-endian)
             let length = self.payload.len() as u32;
@@ -962,9 +962,7 @@ mod tests {
             let mut encoder_table = MockHpackTable::new(4096);
             let mut decoder_table = MockHpackTable::new(4096);
 
-            let headers: Vec<(String, String)> = header_pairs.into_iter()
-                .map(|(name, value)| (name, value))
-                .collect();
+            let headers: Vec<(String, String)> = header_pairs;
 
             let compressed = encoder_table.compress_headers(&headers);
             let decompressed = decoder_table.decompress_headers(&compressed);
@@ -1207,11 +1205,7 @@ mod tests {
             let expected_final_credit = initial_total_credit + total_updates_received - total_data_sent;
 
             // Allow some tolerance for complex accounting
-            let credit_difference = if final_total_credit > expected_final_credit {
-                final_total_credit - expected_final_credit
-            } else {
-                expected_final_credit - final_total_credit
-            };
+            let credit_difference = final_total_credit.abs_diff(expected_final_credit);
 
             prop_assert!(credit_difference <= total_data_sent / 10, // 10% tolerance
                 "Credit conservation violated: expected {}, got {}, difference {}",
@@ -1256,9 +1250,9 @@ mod tests {
                             pre_stream_window, post_stream_window);
 
                         // Correctness: window should increase by increment
-                        prop_assert_eq!(post_stream_window, pre_stream_window + increment as i32,
+                        prop_assert_eq!(post_stream_window, pre_stream_window + increment.cast_signed(),
                             "Stream window update incorrect: expected {}, got {}",
-                            pre_stream_window + increment as i32, post_stream_window);
+                            pre_stream_window + increment.cast_signed(), post_stream_window);
                     }
 
                     if connection_update_result.is_ok() {
@@ -1324,8 +1318,8 @@ mod tests {
                     stream_b, pre_stream_b_window, post_stream_b_window, stream_a);
 
                 // Stream A window should only change if send succeeded
-                if data_length as i32 <= pre_stream_a_window {
-                    prop_assert_eq!(post_stream_a_window, pre_stream_a_window - data_length as i32,
+                if data_length.cast_signed() <= pre_stream_a_window {
+                    prop_assert_eq!(post_stream_a_window, pre_stream_a_window - data_length.cast_signed(),
                         "Stream {} window update incorrect after sending {} bytes",
                         stream_a, data_length);
                 }
@@ -1436,7 +1430,7 @@ mod tests {
                 }
 
                 // HTTP status should be valid
-                prop_assert!(http_status >= 200 && http_status < 600,
+                prop_assert!((200..600).contains(&http_status),
                     "Invalid HTTP status {} for gRPC status {:?}", http_status, grpc_status);
             }
         }
@@ -1459,7 +1453,7 @@ mod tests {
 
             // Create fragmentation boundaries within frame
             let mut boundaries = fragment_boundaries;
-            boundaries.sort();
+            boundaries.sort_unstable();
             boundaries.dedup();
             boundaries.retain(|&b| b < frame.len());
 

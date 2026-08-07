@@ -167,9 +167,10 @@ fn wait_for_quic_listen_addr(rx: &mpsc::Receiver<String>) -> SocketAddr {
     let mut seen = Vec::new();
     loop {
         let now = Instant::now();
-        if now >= deadline {
-            panic!("receiver did not print QUIC readiness; stderr lines: {seen:?}");
-        }
+        assert!(
+            now < deadline,
+            "receiver did not print QUIC readiness; stderr lines: {seen:?}"
+        );
         let wait = (deadline - now).min(Duration::from_millis(250));
         match rx.recv_timeout(wait) {
             Ok(line) => {
@@ -191,9 +192,10 @@ fn wait_for_tcp_listen_addr(rx: &mpsc::Receiver<String>) -> SocketAddr {
     let mut seen = Vec::new();
     loop {
         let now = Instant::now();
-        if now >= deadline {
-            panic!("receiver did not print TCP readiness; stderr lines: {seen:?}");
-        }
+        assert!(
+            now < deadline,
+            "receiver did not print TCP readiness; stderr lines: {seen:?}"
+        );
         let wait = (deadline - now).min(Duration::from_millis(250));
         match rx.recv_timeout(wait) {
             Ok(line) => {
@@ -215,9 +217,10 @@ fn wait_for_rq_listen_addr(rx: &mpsc::Receiver<String>) -> SocketAddr {
     let mut seen = Vec::new();
     loop {
         let now = Instant::now();
-        if now >= deadline {
-            panic!("receiver did not print RQ readiness; stderr lines: {seen:?}");
-        }
+        assert!(
+            now < deadline,
+            "receiver did not print RQ readiness; stderr lines: {seen:?}"
+        );
         let wait = (deadline - now).min(Duration::from_millis(250));
         match rx.recv_timeout(wait) {
             Ok(line) => {
@@ -247,9 +250,10 @@ fn wait_for_atpd_quic_and_diagnostics_addrs(
             return (quic, diagnostics);
         }
         let now = Instant::now();
-        if now >= deadline {
-            panic!("atpd did not report QUIC and diagnostics readiness; output lines: {seen:?}");
-        }
+        assert!(
+            now < deadline,
+            "atpd did not report QUIC and diagnostics readiness; output lines: {seen:?}"
+        );
         let wait = (deadline - now).min(Duration::from_millis(250));
         match rx.recv_timeout(wait) {
             Ok(line) => {

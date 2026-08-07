@@ -319,7 +319,7 @@ mod edge_case_tests {
     /// Concurrent access test: Multiple threads should get same cached material
     #[test]
     fn test_concurrent_access() {
-        let handles: Vec<_> = (0..10)
+        let results: Vec<_> = (0..10)
             .map(|_| {
                 thread::spawn(|| {
                     let cert = test_certificate();
@@ -329,9 +329,8 @@ mod edge_case_tests {
                     (cert_der, builds_acceptor)
                 })
             })
+            .map(|handle| handle.join().unwrap())
             .collect();
-
-        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
         // All threads should get identical results (due to OnceLock)
         let first = &results[0];

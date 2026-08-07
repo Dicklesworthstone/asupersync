@@ -433,7 +433,7 @@ mod tests {
             match data[0] {
                 b'+' => {
                     if let Some(end) = data[1..].windows(2).position(|w| w == b"\r\n") {
-                        let string = String::from_utf8_lossy(&data[1..end + 1]).to_string();
+                        let string = String::from_utf8_lossy(&data[1..=end]).to_string();
                         Ok((Resp3ValueModel::SimpleString(string), end + 3))
                     } else {
                         Err("Incomplete simple string".to_string())
@@ -441,7 +441,7 @@ mod tests {
                 }
                 b':' => {
                     if let Some(end) = data[1..].windows(2).position(|w| w == b"\r\n") {
-                        let int_str = String::from_utf8_lossy(&data[1..end + 1]);
+                        let int_str = String::from_utf8_lossy(&data[1..=end]);
                         let int_val = int_str.parse::<i64>().map_err(|_| "Invalid integer")?;
                         Ok((Resp3ValueModel::Integer(int_val), end + 3))
                     } else {
@@ -450,7 +450,7 @@ mod tests {
                 }
                 b'$' => {
                     if let Some(len_end) = data[1..].windows(2).position(|w| w == b"\r\n") {
-                        let len_str = String::from_utf8_lossy(&data[1..len_end + 1]);
+                        let len_str = String::from_utf8_lossy(&data[1..=len_end]);
                         let length = len_str
                             .parse::<usize>()
                             .map_err(|_| "Invalid bulk string length")?;
@@ -821,13 +821,11 @@ mod tests {
                 .collect();
 
             let mean = worker_loads.iter().sum::<usize>() as f64 / worker_loads.len() as f64;
-            let variance = worker_loads
+            worker_loads
                 .iter()
                 .map(|&load| (load as f64 - mean).powi(2))
                 .sum::<f64>()
-                / worker_loads.len() as f64;
-
-            variance
+                / worker_loads.len() as f64
         }
 
         pub fn steal_success_rate(&self) -> f64 {
@@ -1135,7 +1133,7 @@ mod tests {
             star_pattern[wildcard_position] = "*".to_string();
             let star_pattern = star_pattern.join(".");
 
-            let mut gt_pattern = segments[..wildcard_position + 1].to_vec();
+            let mut gt_pattern = segments[..=wildcard_position].to_vec();
             gt_pattern.push(">".to_string());
             let gt_pattern = gt_pattern.join(".");
 
@@ -1385,7 +1383,7 @@ mod tests {
             // Coverage: all configured slots should be routable
             let configured_slots: HashSet<u16> = node_configs.iter()
                 .flat_map(|(slots, _)| slots.iter())
-                .cloned()
+                .copied()
                 .collect();
 
             for &slot in &configured_slots {

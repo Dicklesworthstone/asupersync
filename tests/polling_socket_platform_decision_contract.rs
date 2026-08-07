@@ -588,8 +588,7 @@ fn canonical_marginal_rows_match_terminal_graph_summary() {
         );
         assert_eq!(
             hosts,
-            ["x86_64-unknown-linux-gnu"]
-                .into_iter()
+            std::iter::once("x86_64-unknown-linux-gnu")
                 .map(str::to_owned)
                 .collect()
         );

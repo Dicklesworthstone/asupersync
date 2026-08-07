@@ -302,7 +302,7 @@ mod conformance_tests {
 
         // Verify ascending order
         let mut sorted = extracted_deadlines.clone();
-        sorted.sort();
+        sorted.sort_unstable();
         assert_eq!(
             extracted_deadlines, sorted,
             "Timers not extracted in deadline order"
@@ -462,7 +462,7 @@ mod conformance_tests {
 
             // Should extract in ascending deadline order
             let mut expected = deadlines.iter().map(|d| d.nanos()).collect::<Vec<_>>();
-            expected.sort();
+            expected.sort_unstable();
 
             prop_assert_eq!(
                 extracted_deadlines,
@@ -507,7 +507,7 @@ mod conformance_tests {
                 .filter(|(i, _)| !cancelled_set.contains(i))
                 .map(|(_, d)| d.nanos())
                 .collect::<Vec<_>>();
-            expected.sort();
+            expected.sort_unstable();
 
             prop_assert_eq!(
                 extracted_deadlines,

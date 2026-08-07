@@ -162,7 +162,7 @@ impl MockKafkaProducer {
         let mut partitions = self.partitions.lock();
         partitions
             .entry(message.partition.clone())
-            .or_insert_with(VecDeque::new)
+            .or_default()
             .push_back(message.clone());
 
         Ok(message.offset)
@@ -178,7 +178,7 @@ impl MockKafkaProducer {
         for message in tx.messages {
             partitions
                 .entry(message.partition.clone())
-                .or_insert_with(VecDeque::new)
+                .or_default()
                 .push_back(message);
         }
 
@@ -316,9 +316,7 @@ impl MockNatsClient {
 
     pub fn subscribe(&self, subject: &str) -> Result<(), String> {
         let mut subscribers = self.subscribers.lock();
-        subscribers
-            .entry(subject.to_string())
-            .or_insert_with(VecDeque::new);
+        subscribers.entry(subject.to_string()).or_default();
         Ok(())
     }
 
@@ -397,9 +395,7 @@ impl MockJetStreamContext {
         // Check for duplicates
         if let Some(id) = &msg_id {
             let mut dup_window = self.duplicate_window.lock();
-            let window = dup_window
-                .entry(stream.to_string())
-                .or_insert_with(BTreeSet::new);
+            let window = dup_window.entry(stream.to_string()).or_default();
             if window.contains(id) {
                 return Err("Duplicate message".to_string());
             }
@@ -433,7 +429,7 @@ impl MockJetStreamContext {
         let mut streams = self.streams.lock();
         streams
             .entry(stream.to_string())
-            .or_insert_with(VecDeque::new)
+            .or_default()
             .push_back(message);
 
         Ok(seq)
@@ -554,7 +550,7 @@ impl MockRedisClient {
         let mut streams = self.streams.lock();
         streams
             .entry(stream.to_string())
-            .or_insert_with(VecDeque::new)
+            .or_default()
             .push_back(entry);
 
         Ok(id)
@@ -606,7 +602,7 @@ impl MockRedisClient {
             .take(count)
         {
             result.push(entry.clone());
-            group_info.last_delivered_id = entry.id.clone();
+            group_info.last_delivered_id.clone_from(&entry.id);
 
             // Add to consumer's pending list.
             group_info

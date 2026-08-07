@@ -316,8 +316,8 @@ fn test_concurrent_logging_thread_safety() {
                             "timestamp": event_id
                         }),
                         context: EventContext::deterministic(
-                            &format!("session-thread-{}", thread_id),
-                            &format!("trace-{}-{}", thread_id, event_id),
+                            format!("session-thread-{}", thread_id),
+                            format!("trace-{}-{}", thread_id, event_id),
                         ),
                         redacted_fields: Vec::new(),
                     };
@@ -636,17 +636,18 @@ fn test_format_compatibility_edge_cases() {
         // Both formats should handle edge cases without panic
         let json_rendered = logger_json
             .render_event(&event)
-            .expect(&format!("JSON format should handle {}", test_name));
+            .unwrap_or_else(|error| panic!("JSON format should handle {test_name}: {error:?}"));
         let human_rendered = logger_human
             .render_event(&event)
-            .expect(&format!("Human format should handle {}", test_name));
+            .unwrap_or_else(|error| panic!("Human format should handle {test_name}: {error:?}"));
 
         assert!(json_rendered.contains("format_edge_case"));
         assert!(human_rendered.contains("format_edge_case"));
 
         // JSON should be valid JSON
-        let _: Value = serde_json::from_str(&json_rendered)
-            .expect(&format!("JSON output should be valid for {}", test_name));
+        let _: Value = serde_json::from_str(&json_rendered).unwrap_or_else(|error| {
+            panic!("JSON output should be valid for {test_name}: {error:?}")
+        });
     }
 }
 
@@ -868,8 +869,8 @@ fn test_memory_cleanup_and_resource_management() {
                     "metadata": vec![i; 50] // Array of numbers
                 }),
                 context: EventContext::deterministic(
-                    &format!("memory-session-{}", cycle),
-                    &format!("memory-trace-{}-{}", cycle, i),
+                    format!("memory-session-{}", cycle),
+                    format!("memory-trace-{}-{}", cycle, i),
                 ),
                 redacted_fields: Vec::new(),
             };

@@ -1049,8 +1049,12 @@ mod tower_adapter_tests {
         type Response = i32;
         type Error = Infallible;
 
-        async fn call(&self, _cx: &Cx, req: i32) -> Result<Self::Response, Self::Error> {
-            Ok(req + 1)
+        fn call(
+            &self,
+            _cx: &Cx,
+            req: i32,
+        ) -> impl Future<Output = Result<Self::Response, Self::Error>> {
+            future::ready(Ok(req + 1))
         }
     }
 

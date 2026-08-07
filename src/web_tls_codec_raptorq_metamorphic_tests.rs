@@ -122,26 +122,24 @@ mod tests {
 
                 let filename = if let Some(filename_start) = disposition_line.find("filename=\"") {
                     let filename_start = filename_start + 10;
-                    if let Some(filename_end) = disposition_line[filename_start..].find('"') {
-                        Some(
+                    disposition_line[filename_start..]
+                        .find('"')
+                        .map(|filename_end| {
                             disposition_line[filename_start..filename_start + filename_end]
-                                .to_string(),
-                        )
-                    } else {
-                        None
-                    }
+                                .to_string()
+                        })
                 } else {
                     None
                 };
 
                 // Parse Content-Type if present
                 let mut content_type = None;
-                let mut content_start = 2; // Skip disposition line and empty line
-
-                if lines.len() > 2 && lines[1].starts_with("Content-Type:") {
+                let content_start = if lines.len() > 2 && lines[1].starts_with("Content-Type:") {
                     content_type = Some(lines[1][14..].trim().to_string());
-                    content_start = 3; // Skip disposition, content-type, and empty line
-                }
+                    3 // Skip disposition, content-type, and empty line
+                } else {
+                    2 // Skip disposition line and empty line
+                };
 
                 // Extract content (everything after headers)
                 let content_lines = &lines[content_start..];
@@ -149,7 +147,7 @@ mod tests {
 
                 let value = if content_type
                     .as_ref()
-                    .map_or(false, |ct| ct.starts_with("application/octet-stream"))
+                    .is_some_and(|ct| ct.starts_with("application/octet-stream"))
                 {
                     MultipartValue::Binary(content_text.as_bytes().to_vec())
                 } else {
@@ -782,7 +780,7 @@ mod tests {
                     for (&repair_id, repair_data) in &self.received_symbols {
                         if repair_id >= self.source_symbol_count {
                             let repair_index = repair_id - self.source_symbol_count;
-                            let pattern = ((repair_index + i as u32) % 256) as u8;
+                            let pattern = ((repair_index + i) % 256) as u8;
 
                             for k in 0..self.symbol_size {
                                 recovered_symbol[k] ^= repair_data[k] ^ pattern;

@@ -939,12 +939,8 @@ fn check_policy_cells(artifact: &Value) -> Result<(), String> {
     }) {
         return Err("K1.2 must not record an accepted numeric API-version range".to_owned());
     }
-    let api_pair_digest = ordered_newline_sha256(
-        api_pairs
-            .iter()
-            .map(|(key, name)| format!("{key}\t{name}"))
-            .collect::<Vec<_>>(),
-    );
+    let api_pair_digest =
+        ordered_newline_sha256(api_pairs.iter().map(|(key, name)| format!("{key}\t{name}")));
     if api_pair_digest != "3aca9d044b63403f051110d8e9d76173b5c61403f494bd269176c892309dafad" {
         return Err(format!(
             "semantic API-key projection drift: {api_pair_digest}"

@@ -267,7 +267,7 @@ fn test_directory_small_file_early_exposure() {
         report
             .entries
             .iter()
-            .any(|e| e.path.to_string() == "small.txt" && e.content_visible)
+            .any(|e| e.path == "small.txt" && e.content_visible)
     );
 
     // Medium verified file should be withheld (above threshold)
@@ -275,7 +275,7 @@ fn test_directory_small_file_early_exposure() {
         report
             .entries
             .iter()
-            .any(|e| e.path.to_string() == "medium.txt" && !e.content_visible)
+            .any(|e| e.path == "medium.txt" && !e.content_visible)
     );
 
     // Large unverified file should be withheld
@@ -283,7 +283,7 @@ fn test_directory_small_file_early_exposure() {
         report
             .entries
             .iter()
-            .any(|e| e.path.to_string() == "large.bin" && !e.content_visible)
+            .any(|e| e.path == "large.bin" && !e.content_visible)
     );
 
     // Safety caveat should warn about pending final commit
@@ -472,7 +472,7 @@ fn test_directory_metadata_final_commit_separation() {
     let config_entry_committed = committed_report
         .entries
         .iter()
-        .find(|e| e.path.to_string() == "config.json");
+        .find(|e| e.path == "config.json");
     assert!(config_entry_committed.is_some());
 
     // Same file should be withheld in pending if policy is strict
@@ -491,7 +491,7 @@ fn test_directory_metadata_final_commit_separation() {
     let config_entry_strict = strict_pending
         .entries
         .iter()
-        .find(|e| e.path.to_string() == "config.json");
+        .find(|e| e.path == "config.json");
     if let Some(entry) = config_entry_strict {
         assert!(
             !entry.content_visible,

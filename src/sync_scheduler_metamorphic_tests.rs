@@ -1163,7 +1163,7 @@ fn test_mr_work_stealing_fairness() {
 
         // MR: Work distribution should be reasonably fair
         let fairness = MockWorkStealer::fairness_coefficient(&stealers);
-        prop_assert!(fairness >= 0.0 && fairness <= 1.0,
+        prop_assert!((0.0..=1.0).contains(&fairness),
             "Fairness coefficient should be between 0 and 1: {}", fairness);
 
         // Work stealing should not lose tasks

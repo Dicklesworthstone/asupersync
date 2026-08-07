@@ -10559,7 +10559,7 @@ mod tests {
         // App-limited windows BELOW the estimate must not decay it, even
         // after enough folds to rotate the whole ring (the MATRIX-204-era
         // rate-collapse class).
-        for _ in 0..STREAM_RATE_FILTER_WINDOWS + 1 {
+        for _ in 0..=STREAM_RATE_FILTER_WINDOWS {
             let _ = pacer.on_delivery_window(
                 DeliveryWindow {
                     max_bps: None,

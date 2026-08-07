@@ -363,7 +363,7 @@ pub(crate) mod hardened_examples {
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod remediation_plan {
     /// Comprehensive remediation plan for e2e test hardening
-    const REMEDIATION_PLAN: &str = r#"
+    const REMEDIATION_PLAN: &str = r"
 # E2E Test Hardening Remediation Plan
 
 ## Phase 1: Test Double Leakage Elimination (HIGH PRIORITY)
@@ -464,7 +464,7 @@ mod remediation_plan {
 - [ ] Comprehensive test infrastructure
 - [ ] Performance regression detection
 - [ ] Resource leak detection
-"#;
+";
 
     #[test]
     fn test_remediation_plan_coverage() {
@@ -528,13 +528,13 @@ mod hardening_validation {
         // Test the validation criteria with example content
 
         // Example of unhardened test content (current state)
-        let unhardened_content = r#"
+        let unhardened_content = r"
             use std::sync::{Arc, Mutex};
             use tokio::sync::RwLock;
             struct MockTlsAcceptor { }
             std::thread::sleep(Duration::from_millis(100));
             assert_eq!(actual_count, 42);
-        "#;
+        ";
 
         let unhardened_criteria = HardeningCriteria::evaluate_test_file(unhardened_content);
         assert!(
@@ -543,13 +543,13 @@ mod hardening_validation {
         );
 
         // Example of hardened test content (target state)
-        let hardened_content = r#"
+        let hardened_content = r"
             use crate::sync::{RwLock, Mutex};
             use crate::lab::LabRuntime;
             use crate::tls::TlsAcceptor;
             let lab = LabRuntime::new();
             lab.advance_virtual_time(duration);
-        "#;
+        ";
 
         let hardened_criteria = HardeningCriteria::evaluate_test_file(hardened_content);
         assert!(

@@ -243,7 +243,7 @@ async fn test_performance_comparison_analysis() -> Result<(), Box<dyn std::error
     if let Some(metrics) = atp_result.iterations.first() {
         if let Some(ratio) = metrics.compression_ratio() {
             assert!(
-                ratio >= 0.5 && ratio <= 2.0,
+                (0.5..=2.0).contains(&ratio),
                 "Compression ratio should be reasonable"
             );
             println!("Compression ratio: {:.2}", ratio);

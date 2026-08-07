@@ -1350,7 +1350,7 @@ fn real_udp_quic_transfer_recovers_from_symbol_loss() {
 
 #[test]
 // pending SapphireHill netns A/B verification
-#[ignore]
+#[ignore = "pending SapphireHill netns A/B verification"]
 fn real_udp_quic_pivot_a_rate_limited_lossy_proxy_converges_non_dividing_multiblock() {
     let src = tempfile::tempdir().expect("src dir");
     let dst = tempfile::tempdir().expect("dst dir");

@@ -819,14 +819,14 @@ fn validate_full_definition_census(packet: &Value, inputs: &AuthorityInputs) -> 
         .copied()
         .filter(|row| row.contradiction_input)
         .collect::<Vec<_>>();
-    let authority_references = definitions
+    let authority_reference_count = definitions
         .iter()
         .filter(|row| row.authority_reference)
-        .collect::<Vec<_>>();
+        .count();
     if primary.len() != PRIMARY_DEFINITION_COUNT
         || core.len() != CORE_DEFINITION_COUNT
         || contradictions.len() != CONTRADICTION_INPUT_COUNT
-        || authority_references.len() != AUTHORITY_REFERENCE_COUNT
+        || authority_reference_count != AUTHORITY_REFERENCE_COUNT
     {
         return Err("K0 primary/core/contradiction/reference counts drifted".to_owned());
     }
@@ -2066,7 +2066,7 @@ fn active_tracker_has_cycle(rows: &[Value]) -> Result<bool, String> {
         .filter(|row| {
             !matches!(
                 row.get("status").and_then(Value::as_str),
-                Some("closed") | Some("tombstone")
+                Some("closed" | "tombstone")
             )
         })
         .map(|row| text(row, "id").map(str::to_owned))
@@ -2387,7 +2387,7 @@ fn replace_first_exact_state(value: &mut Value, from: &str, to: &str) -> bool {
             .iter_mut()
             .any(|nested| replace_first_exact_state(nested, from, to)),
         Value::String(state) if state == from => {
-            *state = to.to_owned();
+            to.clone_into(state);
             true
         }
         _ => false,

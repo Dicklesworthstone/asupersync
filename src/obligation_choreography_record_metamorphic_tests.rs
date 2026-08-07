@@ -241,7 +241,7 @@ mod tests {
 
             for event in events {
                 match &event.kind {
-                    MarkingEventKind::Reserve { obligation: _, .. } => {
+                    MarkingEventKind::Reserve { .. } => {
                         self.ghost_counter += 1;
                     }
                     MarkingEventKind::Commit { obligation, .. }

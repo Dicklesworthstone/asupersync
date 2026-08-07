@@ -13,7 +13,7 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const ARTIFACT_PATH: &str = "artifacts/kafka_downstream_user_journey_inventory_v1.json";
 const DOC_PATH: &str = "docs/kafka_downstream_user_journey_inventory.md";
@@ -213,7 +213,7 @@ fn local_row_source_is_accounted(row: &Value, pins: &BTreeMap<String, String>) -
         Some(Value::Null) => {
             matches!(
                 row.get("row_kind").and_then(Value::as_str),
-                Some("EXAMPLE") | Some("FIXTURE_ABSENCE") | Some("WORKFLOW_ABSENCE")
+                Some("EXAMPLE" | "FIXTURE_ABSENCE" | "WORKFLOW_ABSENCE")
             ) && row
                 .get("source_anchor")
                 .and_then(Value::as_str)
@@ -524,18 +524,14 @@ fn validate_state_row(row: &Value, label: &str, taxonomies: &Value) -> Result<()
     let freshness = row.get("freshness_state").and_then(Value::as_str);
     let disposition = row.get("claim_disposition").and_then(Value::as_str);
 
-    if matches!(execution, Some("PASS") | Some("FAIL"))
-        && !matches!(
-            evidence,
-            Some("STATIC_SOURCE") | Some("REAL_BROKER_RECEIPT")
-        )
+    if matches!(execution, Some("PASS" | "FAIL"))
+        && !matches!(evidence, Some("STATIC_SOURCE" | "REAL_BROKER_RECEIPT"))
     {
         return Err(format!(
             "{label} cannot promote non-static evidence without a receipt"
         ));
     }
-    if evidence == Some("REAL_BROKER_CAPABLE")
-        && !matches!(execution, Some("NOT_RUN") | Some("BLOCKED"))
+    if evidence == Some("REAL_BROKER_CAPABLE") && !matches!(execution, Some("NOT_RUN" | "BLOCKED"))
     {
         return Err(format!(
             "{label} capability cannot masquerade as broker proof"
@@ -3580,7 +3576,7 @@ fn byte_line_column(bytes: &[u8], offset: usize) -> Result<(u64, u64), String> {
         ));
     }
     let prefix = &bytes[..offset];
-    let line = prefix.iter().filter(|byte| **byte == b'\n').count() + 1;
+    let line = memchr::memchr_iter(b'\n', prefix).count() + 1;
     let column = prefix
         .iter()
         .rposition(|byte| *byte == b'\n')
@@ -3963,7 +3959,12 @@ fn validate_downstream_helper_receipt(inventory: &Value, receipt: &Value) -> Res
         "baseline_occurrence_paths",
     )
     .into_iter()
-    .filter(|path| path.ends_with(".rs") && !excluded.contains(path))
+    .filter(|path| {
+        Path::new(path)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
+            && !excluded.contains(path)
+    })
     .collect::<BTreeSet<_>>();
     let mut tuples = BTreeSet::new();
     for path in paths {

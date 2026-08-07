@@ -306,14 +306,14 @@ mod tests {
         record_timer_cancelled();
 
         let after = snapshot();
-        assert!(after.timer_threads_spawned >= before.timer_threads_spawned + 1);
+        assert!(after.timer_threads_spawned > before.timer_threads_spawned);
         assert!(after.sched_yield_calls >= before.sched_yield_calls + 2);
-        assert!(after.worker_spins >= before.worker_spins + 1);
-        assert!(after.worker_parks >= before.worker_parks + 1);
-        assert!(after.worker_unparks >= before.worker_unparks + 1);
+        assert!(after.worker_spins > before.worker_spins);
+        assert!(after.worker_parks > before.worker_parks);
+        assert!(after.worker_unparks > before.worker_unparks);
         assert!(after.timers_registered >= before.timers_registered + 3);
         assert!(after.timers_fired >= before.timers_fired + 2);
-        assert!(after.timers_cancelled >= before.timers_cancelled + 1);
+        assert!(after.timers_cancelled > before.timers_cancelled);
     }
 
     /// `active_timers` is always the saturating-consistent derivation of the

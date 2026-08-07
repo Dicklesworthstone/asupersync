@@ -241,7 +241,7 @@ impl MockTraceAnalyzer {
         let current_clock = self
             .logical_clock_domains
             .get(&event.task_id)
-            .cloned()
+            .copied()
             .unwrap_or(0);
         let next_clock = current_clock.max(dependency_clock) + 1;
 
@@ -252,7 +252,7 @@ impl MockTraceAnalyzer {
         for access in &event.resource_accesses {
             self.resource_state
                 .entry(access.resource.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(event.id);
         }
 
@@ -580,7 +580,7 @@ impl MockTraceAnalyzer {
             for access in &event.resource_accesses {
                 footprints
                     .entry(access.resource.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(event.id);
             }
         }

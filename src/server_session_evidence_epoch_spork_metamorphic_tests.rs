@@ -1229,11 +1229,11 @@ mod tests {
 
             // All servers should reach the same terminal behavior under same timeout
             // (allowing for differences in connection counts)
-            let force_close_counts: Vec<_> = server_results.iter().map(|(_, _, force_closed)| *force_closed).collect();
-            prop_assert_eq!(
-                force_close_counts.len(),
-                server_results.len(),
-                "Force-close count projection should cover every server"
+            prop_assert!(
+                server_results
+                    .iter()
+                    .all(|(_, total, force_closed)| force_closed <= total),
+                "A server cannot force-close more connections than it owns"
             );
 
             // Servers with more connections should either have more force-closed connections

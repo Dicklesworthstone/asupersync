@@ -383,12 +383,14 @@ fn published_v039_artifacts_survive_current_migration_replay_and_cli_journey() {
             OsStr::new("ndjson"),
         ],
     );
-    let exported_events = String::from_utf8(export.stdout)
+    let exported_event_count = String::from_utf8(export.stdout)
         .expect("UTF-8 NDJSON")
         .lines()
-        .map(|line| serde_json::from_str::<Value>(line).expect("exported NDJSON event"))
-        .collect::<Vec<_>>();
-    assert_eq!(exported_events.len(), ordinary_events.len());
+        .inspect(|line| {
+            serde_json::from_str::<Value>(line).expect("exported NDJSON event");
+        })
+        .count();
+    assert_eq!(exported_event_count, ordinary_events.len());
 
     let compressed = workspace.path().join("cli-compressed-v3.trace");
     cli_success(
@@ -489,7 +491,7 @@ fn published_v039_artifacts_survive_current_migration_replay_and_cli_journey() {
         TraceReader::open(&corrupt_checksum_trace)
             .expect("header remains readable")
             .load_all(),
-        Err(TraceFileError::ChecksumMismatch { .. }) | Err(TraceFileError::Deserialize(_))
+        Err(TraceFileError::ChecksumMismatch { .. } | TraceFileError::Deserialize(_))
     ));
     cli_failure(
         "corrupt trace checksum",

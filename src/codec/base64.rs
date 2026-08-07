@@ -821,10 +821,10 @@ mod tests {
     #[test]
     fn ver_a1_asupersync_d24mms_10_2_ff120f39f884__local_invariants__strict_alphabet() {
         for (engine, forbidden) in [
-            (STANDARD, [b'-', b'_']),
-            (STANDARD_NO_PAD, [b'-', b'_']),
-            (URL_SAFE, [b'+', b'/']),
-            (URL_SAFE_NO_PAD, [b'+', b'/']),
+            (STANDARD, *b"-_"),
+            (STANDARD_NO_PAD, *b"-_"),
+            (URL_SAFE, *b"+/"),
+            (URL_SAFE_NO_PAD, *b"+/"),
         ] {
             for byte in forbidden {
                 let input = [b'A', byte, b'A', b'A'];

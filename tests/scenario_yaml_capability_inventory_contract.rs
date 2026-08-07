@@ -777,8 +777,7 @@ fn validate_a3_acceptance_satisfiability(inventory: &Value) -> Result<(), String
         ("rejected_by_typed_parse", expected_rejected),
         (
             "parsed_then_rejected_semantically",
-            ["SCN-YAML-NAN-INFINITY"]
-                .into_iter()
+            std::iter::once("SCN-YAML-NAN-INFINITY")
                 .map(str::to_owned)
                 .collect(),
         ),
@@ -791,8 +790,7 @@ fn validate_a3_acceptance_satisfiability(inventory: &Value) -> Result<(), String
         ),
         (
             "typed_deserialization_behavior_boundaries",
-            ["SCN-YAML-ARBITRARY-TAGS"]
-                .into_iter()
+            std::iter::once("SCN-YAML-ARBITRARY-TAGS")
                 .map(str::to_owned)
                 .collect(),
         ),
@@ -1443,13 +1441,12 @@ fn validate_a3_keep_incumbent_receipt(inventory: &Value) -> Result<(), String> {
         .collect();
     if finite_limit_ids.len() != 7
         || string_set(bounds_gate, "source_unresolved_row_ids")
-            != ["SCN-A3-UNRESOLVED-OWNER-INPUT-POLICY"]
-                .into_iter()
+            != std::iter::once("SCN-A3-UNRESOLVED-OWNER-INPUT-POLICY")
                 .map(str::to_owned)
                 .collect()
         || string_set(bounds_gate, "source_limit_ids") != finite_limit_ids
         || string_set(bounds_gate, "source_gap_ids")
-            != ["SCN-GAP-10"].into_iter().map(str::to_owned).collect()
+            != std::iter::once("SCN-GAP-10").map(str::to_owned).collect()
     {
         return Err("A3.2 bounds gate must derive all seven finite limits".to_owned());
     }
@@ -1481,15 +1478,13 @@ fn validate_a3_keep_incumbent_receipt(inventory: &Value) -> Result<(), String> {
     }
     let diagnostic_gate = find_row(gates, "gate_id", "SCN-A3-KEEP-GATE-DIAGNOSTIC-PARITY");
     if string_set(diagnostic_gate, "source_gap_ids")
-        != ["SCN-GAP-15"].into_iter().map(str::to_owned).collect()
+        != std::iter::once("SCN-GAP-15").map(str::to_owned).collect()
         || string_set(diagnostic_gate, "source_unresolved_row_ids")
-            != ["SCN-A3-UNRESOLVED-DIAGNOSTIC-PARITY"]
-                .into_iter()
+            != std::iter::once("SCN-A3-UNRESOLVED-DIAGNOSTIC-PARITY")
                 .map(str::to_owned)
                 .collect()
         || string_set(diagnostic_gate, "source_sections")
-            != ["diagnostic_matrix"]
-                .into_iter()
+            != std::iter::once("diagnostic_matrix")
                 .map(str::to_owned)
                 .collect()
     {
@@ -1506,8 +1501,7 @@ fn validate_a3_keep_incumbent_receipt(inventory: &Value) -> Result<(), String> {
         .map(str::to_owned)
         .collect()
         || string_set(consumer_gate, "source_unresolved_row_ids")
-            != ["SCN-A3-UNRESOLVED-CONSUMER-CUTOVER"]
-                .into_iter()
+            != std::iter::once("SCN-A3-UNRESOLVED-CONSUMER-CUTOVER")
                 .map(str::to_owned)
                 .collect()
         || !array(writer_gate, "source_limit_ids").is_empty()
@@ -1515,7 +1509,9 @@ fn validate_a3_keep_incumbent_receipt(inventory: &Value) -> Result<(), String> {
         || !array(consumer_gate, "source_limit_ids").is_empty()
         || !array(consumer_gate, "source_gap_ids").is_empty()
         || string_set(writer_gate, "source_sections")
-            != ["writer_matrix"].into_iter().map(str::to_owned).collect()
+            != std::iter::once("writer_matrix")
+                .map(str::to_owned)
+                .collect()
         || string_set(consumer_gate, "source_sections")
             != ["consumer_matrix", "dependency_edges"]
                 .into_iter()

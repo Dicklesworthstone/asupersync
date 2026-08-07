@@ -974,9 +974,9 @@ fn validate_k0_3_import_and_fixture_scope(matrix: &Value) -> Result<(), String> 
     );
     let anchors = expected_set(FIXTURE_SCOPE_ANCHORS);
     if fixture_paths.iter().any(|path| {
-        !group_paths.contains(path)
-            && !anchors.contains(path)
-            && !(baseline_paths.contains(path)
+        !(group_paths.contains(path)
+            || anchors.contains(path)
+            || baseline_paths.contains(path)
                 && ["tests/", "fuzz/", "conformance/", "scripts/"]
                     .iter()
                     .any(|prefix| path.starts_with(prefix)))

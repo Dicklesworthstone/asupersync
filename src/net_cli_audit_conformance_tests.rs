@@ -137,7 +137,7 @@ impl MockNetworkProcessor {
         &mut self,
         remote_addr: SocketAddr,
     ) -> Result<(), String> {
-        let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
+        let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
         let connect_time = Instant::now();
 
         // Simulate connection establishment
@@ -182,7 +182,7 @@ impl MockNetworkProcessor {
 
     /// Test UDP session round-trip
     pub fn test_udp_session_roundtrip(&mut self, remote_addr: SocketAddr) -> Result<(), String> {
-        let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
+        let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
         let session_start = Instant::now();
 
         let mut session = MockUdpSession {
@@ -1484,12 +1484,12 @@ mod tests {
     fn test_network_tcp_udp_round_trips() {
         let mut processor = MockNetworkProcessor::new();
 
-        let tcp_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
+        let tcp_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
         processor
             .test_tcp_connect_close_roundtrip(tcp_addr)
             .unwrap();
 
-        let udp_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 53);
+        let udp_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 53);
         processor.test_udp_session_roundtrip(udp_addr).unwrap();
 
         processor.validate_network_invariants().unwrap();

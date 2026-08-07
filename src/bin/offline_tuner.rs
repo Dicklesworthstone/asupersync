@@ -21,15 +21,13 @@
 //! ```
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
-
-use clap::{Parser, Subcommand};
-use serde_json;
 
 use asupersync::raptorq::gf256::{Gf256ArchitectureClass, active_kernel};
 use asupersync::raptorq::offline_tuner::{OfflineTuner, OptimizationCriteria};
 use asupersync::runtime::scheduler::SchedulerEvidenceArtifact;
+use clap::{Parser, Subcommand};
 
 /// Test configuration for bit-exactness validation scenarios.
 #[derive(Debug, Clone)]
@@ -321,7 +319,7 @@ fn main() {
 fn run_optimization(
     arch: Option<ArchitectureArg>,
     auto_detect: bool,
-    output_dir: &PathBuf,
+    output_dir: &Path,
     verbose: bool,
     criteria: OptimizationCriteria,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -423,7 +421,7 @@ fn run_optimization(
 
 fn generate_candidates(
     arch: Gf256ArchitectureClass,
-    output_dir: &PathBuf,
+    output_dir: &Path,
     verbose: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let criteria = OptimizationCriteria {

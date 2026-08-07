@@ -2278,12 +2278,7 @@ fn validate_reachable_rows(artifact: &Value) -> Result<(), String> {
 
     let telemetry = rows
         .iter()
-        .filter(|row| {
-            matches!(
-                row.get("api_key").and_then(Value::as_u64),
-                Some(71) | Some(72)
-            )
-        })
+        .filter(|row| matches!(row.get("api_key").and_then(Value::as_u64), Some(71 | 72)))
         .collect::<Vec<_>>();
     if telemetry.len() != 2 {
         return Err("telemetry reachability rows are incomplete".to_owned());
@@ -2711,7 +2706,7 @@ fn validate_historical_schema_sources(artifact: &Value) -> Result<(), String> {
                 expected.profile_id
             ));
         }
-        projection.sort_by(|left, right| left.0.cmp(&right.0));
+        projection.sort_by(|left, right| left.0.cmp(right.0));
         let projection = projection
             .into_iter()
             .map(|(path, object_id, byte_count)| format!("{path}\t{object_id}\t{byte_count}\n"))
@@ -2722,7 +2717,7 @@ fn validate_historical_schema_sources(artifact: &Value) -> Result<(), String> {
                 expected.profile_id
             ));
         }
-        semantic_role_projection.sort_by(|left, right| left.0.cmp(&right.0));
+        semantic_role_projection.sort_by(|left, right| left.0.cmp(right.0));
         let semantic_role_projection = semantic_role_projection
             .into_iter()
             .map(|(path, semantic_role)| format!("{path}\t{semantic_role}\n"))

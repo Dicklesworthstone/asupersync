@@ -6432,7 +6432,7 @@ mod tests {
     }
 
     const PLAIN_RUNNER_FAILURE_PROBE: &str = "lab::runtime::tests::plain_runner_failure_probe";
-    const PLAIN_RUNNER_FAILURE_SEED: u64 = 0x4b_78_0003;
+    const PLAIN_RUNNER_FAILURE_SEED: u64 = 0x4b78_0003;
 
     fn trigger_plain_runner_failure_probe() {
         panic!("intentional plain-runner failure probe"); // ubs:ignore — deliberate subprocess failure injection in a test-only helper

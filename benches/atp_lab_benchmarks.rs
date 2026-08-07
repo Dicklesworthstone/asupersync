@@ -127,7 +127,10 @@ impl BenchmarkExecutor for ForensicsBenchmarkExecutor {
         let cv = std_dev_ns / mean_ns;
 
         let median_ns = if sample_count % 2 == 0 {
-            (measurements[sample_count / 2 - 1] + measurements[sample_count / 2]) / 2.0
+            f64::midpoint(
+                measurements[sample_count / 2 - 1],
+                measurements[sample_count / 2],
+            )
         } else {
             measurements[sample_count / 2]
         };
@@ -286,7 +289,10 @@ impl BenchmarkExecutor for ReplayBenchmarkExecutor {
         let cv = std_dev_ns / mean_ns;
 
         let median_ns = if sample_count % 2 == 0 {
-            (measurements[sample_count / 2 - 1] + measurements[sample_count / 2]) / 2.0
+            f64::midpoint(
+                measurements[sample_count / 2 - 1],
+                measurements[sample_count / 2],
+            )
         } else {
             measurements[sample_count / 2]
         };

@@ -302,14 +302,14 @@ impl DispatchKey {
 
     fn mutate(&mut self, field: &str, value: &str) {
         match field {
-            "origin" => self.origin = value.to_owned(),
-            "detector_id" => self.detector_id = value.to_owned(),
-            "pattern" => self.pattern = value.to_owned(),
-            "regex_mode" => self.regex_mode = value.to_owned(),
-            "match_strategy" => self.match_strategy = value.to_owned(),
-            "post_filter" => self.post_filter = value.to_owned(),
-            "output_token" => self.output_token = value.to_owned(),
-            "replacement_scope" => self.replacement_scope = value.to_owned(),
+            "origin" => value.clone_into(&mut self.origin),
+            "detector_id" => value.clone_into(&mut self.detector_id),
+            "pattern" => value.clone_into(&mut self.pattern),
+            "regex_mode" => value.clone_into(&mut self.regex_mode),
+            "match_strategy" => value.clone_into(&mut self.match_strategy),
+            "post_filter" => value.clone_into(&mut self.post_filter),
+            "output_token" => value.clone_into(&mut self.output_token),
+            "replacement_scope" => value.clone_into(&mut self.replacement_scope),
             _ => panic!("unsupported dispatch mutation field {field}"),
         }
     }
@@ -1036,14 +1036,16 @@ fn public_pipeline_preserves_order_whole_value_tokens_and_custom_origin() {
         );
 
         let mut visited = Vec::new();
-        let mut selected = None;
-        if let Some(pattern) = row.get("custom_pattern").and_then(Value::as_str) {
+        let mut selected = if let Some(pattern) = row.get("custom_pattern").and_then(Value::as_str)
+        {
             visited.push("CUSTOM".to_owned());
-            selected = Regex::new(pattern)
+            Regex::new(pattern)
                 .expect("valid custom pattern")
                 .is_match(&input)
-                .then(|| "CUSTOM".to_owned());
-        }
+                .then(|| "CUSTOM".to_owned())
+        } else {
+            None
+        };
         if selected.is_none() && flag(row, "auto_pii_detection") {
             for detector in detectors {
                 let detector_id = text(detector, "detector_id").to_owned();

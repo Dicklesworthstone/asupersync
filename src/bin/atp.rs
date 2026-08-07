@@ -2184,8 +2184,8 @@ impl CapturedChildPipe {
     }
 }
 
-fn auth_key_hex_secret(key: Option<&AuthKey>) -> Option<SecretString> {
-    key.map(|key| SecretString::from_string(hex::encode(key.as_bytes())))
+fn auth_key_hex_secret(key: &AuthKey) -> SecretString {
+    SecretString::from_string(hex::encode(key.as_bytes()))
 }
 
 fn redact_captured_line(line: String, redaction: Option<&SecretString>) -> String {
@@ -2253,11 +2253,11 @@ fn bond_pull_fetch_descriptor(
     let stdout_log = child
         .stdout
         .take()
-        .map(|pipe| capture_child_pipe(pipe, auth_key_hex_secret(key)));
+        .map(|pipe| capture_child_pipe(pipe, key.map(auth_key_hex_secret)));
     let stderr_log = child
         .stderr
         .take()
-        .map(|pipe| capture_child_pipe(pipe, auth_key_hex_secret(key)));
+        .map(|pipe| capture_child_pipe(pipe, key.map(auth_key_hex_secret)));
     let (Some(mut stdout_log), Some(mut stderr_log)) = (stdout_log, stderr_log) else {
         terminate_and_reap(&mut child);
         return Err("ssh descriptor output pipe unavailable".to_string());
@@ -2595,11 +2595,11 @@ fn run_bond_pull(mut args: BondPullArgs) -> Result<(), String> {
                 let stdout = child
                     .stdout
                     .take()
-                    .map(|pipe| capture_child_pipe(pipe, auth_key_hex_secret(key)));
+                    .map(|pipe| capture_child_pipe(pipe, key.map(auth_key_hex_secret)));
                 let stderr = child
                     .stderr
                     .take()
-                    .map(|pipe| capture_child_pipe(pipe, auth_key_hex_secret(key)));
+                    .map(|pipe| capture_child_pipe(pipe, key.map(auth_key_hex_secret)));
                 let (Some(stdout), Some(stderr)) = (stdout, stderr) else {
                     let _ = child.kill();
                     let _ = child.wait();
@@ -3489,7 +3489,7 @@ fn run_send_via_ssh(
     let data_target = socket_target(&data_host, args.remote_listen.port());
     let addresses = resolve(&data_target)?;
     let mut child = spawn_remote_receiver(&args, remote, transfer_auth.as_ref(), remote_shell)?;
-    let log_redaction = auth_key_hex_secret(rq_auth_key(transfer_auth.as_ref()));
+    let log_redaction = rq_auth_key(transfer_auth.as_ref()).map(auth_key_hex_secret);
     drop(transfer_auth);
     let stderr_log = wait_for_remote_ready(
         &mut child,
@@ -9468,7 +9468,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
     #[test]
     fn captured_remote_output_redacts_exact_stdin_key() {
         let key = auth_key_from_hex(VALID_KEY_HEX).expect("valid key");
-        let redaction = auth_key_hex_secret(Some(&key)).expect("hex redaction token");
+        let redaction = auth_key_hex_secret(&key);
         let redacted = redact_captured_line(
             format!("remote wrapper echoed {VALID_KEY_HEX}"),
             Some(&redaction),

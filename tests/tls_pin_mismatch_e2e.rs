@@ -165,9 +165,7 @@ fn pin_mismatch_aborts_connect_after_handshake() {
             acceptor.accept(server_io),
         ));
 
-    let err = client_result
-        .err()
-        .expect("connect MUST fail when pin set rejects the leaf cert");
+    let err = client_result.expect_err("connect MUST fail when pin set rejects the leaf cert");
     match err {
         TlsError::PinMismatch { expected, actual } => {
             assert!(

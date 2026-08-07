@@ -585,7 +585,7 @@ impl MockDpor {
         for (i, path) in self.execution_paths.iter().enumerate() {
             state_groups
                 .entry(path.final_state.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(i);
         }
 
@@ -786,11 +786,7 @@ impl MockSpectralHealth {
         self.smoothed_series.clear();
 
         for i in 0..self.time_series.len() {
-            let start = if i >= window_size / 2 {
-                i - window_size / 2
-            } else {
-                0
-            };
+            let start = i.saturating_sub(window_size / 2);
             let end = (i + window_size / 2 + 1).min(self.time_series.len());
 
             let sum: f64 = self.time_series[start..end].iter().map(|dp| dp.value).sum();
@@ -1496,7 +1492,7 @@ fn test_mr_diagnostics_percentile_ordering() {
 
         // Filter valid percentiles and sort them
         let mut valid_percentiles: Vec<f64> = percentile_points.into_iter()
-            .filter(|&p| p >= 0.0 && p <= 100.0)
+            .filter(|&p| (0.0..=100.0).contains(&p))
             .collect();
 
         if valid_percentiles.len() < 2 {

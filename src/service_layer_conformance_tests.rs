@@ -210,7 +210,7 @@ pub struct MockLoadBalancer {
 impl MockLoadBalancer {
     fn new(backends: Vec<Backend>) -> Self {
         let total_weight = backends.iter().map(|b| b.weight).sum();
-        let current_weights = backends.iter().map(|b| b.weight as i32).collect();
+        let current_weights = backends.iter().map(|b| b.weight.cast_signed()).collect();
 
         Self {
             backends: backends.into_iter().map(Arc::new).collect(),
@@ -240,9 +240,9 @@ impl MockLoadBalancer {
         }
 
         // Update current weights
-        current_weights[selected_idx] -= self.total_weight as i32;
+        current_weights[selected_idx] -= self.total_weight.cast_signed();
         for (i, backend) in self.backends.iter().enumerate() {
-            current_weights[i] += backend.weight as i32;
+            current_weights[i] += backend.weight.cast_signed();
         }
 
         let selected = self.backends[selected_idx].clone();
@@ -456,7 +456,7 @@ impl<T: Clone> MockRetryHandler<T> {
                 // Simulate backoff delay calculation
                 let delay = std::cmp::min(
                     (self.config.base_delay_ms as f64
-                        * self.config.backoff_multiplier.powi(attempt as i32))
+                        * self.config.backoff_multiplier.powi(attempt.cast_signed()))
                         as u64,
                     self.config.max_delay_ms,
                 );

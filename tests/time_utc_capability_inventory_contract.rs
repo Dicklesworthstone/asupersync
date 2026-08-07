@@ -1960,8 +1960,7 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
     {
         return Err("alias binding aggregates drifted".to_owned());
     }
-    let expected_overlap_pairs: BTreeSet<_> = [236_u64]
-        .into_iter()
+    let expected_overlap_pairs: BTreeSet<_> = std::iter::once(236_u64)
         .map(|line| ("src/cli/atp_workflows.rs".to_owned(), line))
         .collect();
     if overlap_pairs != expected_overlap_pairs {
@@ -3726,7 +3725,7 @@ fn validate_post_a1_public_carrier_lineage_extension(inventory: &Value) -> Resul
             "TIME-CROSS-FILE-EXCLUDED-PING-JSON-0051",
         ),
     ] {
-        let consumers: BTreeSet<String> = [consumer_id.to_owned()].into_iter().collect();
+        let consumers: BTreeSet<String> = std::iter::once(consumer_id.to_owned()).collect();
         if expected
             .insert(field_id.to_owned(), (state.to_owned(), consumers))
             .is_some()
@@ -4396,6 +4395,9 @@ fn count_matching_lines(source: &str, token: &str) -> usize {
     source.lines().filter(|line| line.contains(token)).count()
 }
 
+// This source-inventory contract intentionally matches a literal Rust format
+// string, including its formatting placeholder.
+#[allow(clippy::literal_string_with_formatting_args)]
 fn validate_source_markers(inventory: &Value) -> Result<(), String> {
     let manifest = read_repo_file("Cargo.toml");
     for marker in [
