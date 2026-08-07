@@ -83,9 +83,9 @@ ledger accounts for all 26 exact reactor source operations.
   `future.rs`; project hash `208cb44c15c4165d`, overlay fingerprint
   `ed1aec7338e99b01215d55267a9bc064fa34e29d740f1677a971d665a7df91d1`.
 - The final RCH clean-overlay `io_uring_capability_inventory_contract` passed
-  6/6 on worker `ovh-a`; project hash `5bb2c513de7f5380`, overlay
+  6/6 on worker `ovh-a`; project hash `6a9e598aba55f2e0`, overlay
   fingerprint
-  `1b187affe6048f32e5cfa95d80509cffafc1170838100e47d482a0df8c950ec8`.
+  `7e6ea4ba225ef51dd85deb936c3832f0b4c191311e4c4641699dcfa94bfd9975`.
 
 ## No-Claim Boundary
 
