@@ -348,7 +348,7 @@ fn expect_set(actual: &[Value], expected: &[&str], label: &str) -> Result<(), St
 }
 
 fn sha256(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn sorted_newline_sha256(mut rows: Vec<String>) -> String {
@@ -358,7 +358,7 @@ fn sorted_newline_sha256(mut rows: Vec<String>) -> String {
         hasher.update(row.as_bytes());
         hasher.update(b"\n");
     }
-    format!("{hasher:x}")
+    hex::encode(hasher.finalize())
 }
 
 fn canonicalize(value: &Value) -> Value {

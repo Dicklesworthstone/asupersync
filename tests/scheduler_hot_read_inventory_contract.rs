@@ -98,7 +98,7 @@ fn row_id_set(value: &Value, rows_key: &str, id_key: &str) -> BTreeSet<String> {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn check_anchor_objects(value: &Value) -> usize {

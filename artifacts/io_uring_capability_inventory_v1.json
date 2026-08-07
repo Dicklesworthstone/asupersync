@@ -4,7 +4,7 @@
   "bead_id": "asupersync-sched-hot-path-perf-bt4y5f.7.1",
   "captured_date_utc": "2026-08-05",
   "base_commit": "1efe207a647d8d790dbc553d7c275c1ba620dba6",
-  "disposition": "STATIC_INVENTORY_COMPLETE_PRODUCTION_UNCHANGED",
+  "disposition": "STATIC_INVENTORY_CURRENT_URING2_CONTROL_PLANE_IN_PROGRESS",
   "validation_state": {
     "source_hashes_checked": true,
     "json_shape_checked": true,
@@ -12,7 +12,53 @@
     "rust_contract_executed": false,
     "live_kernel_probes_executed": false,
     "benchmarks_executed": false,
-    "reason": "URING-1 is a static architecture and policy inventory. Executable validation is intentionally outside this lane."
+    "reason": "URING-1 remains a static inventory. URING-2 has source-compilation receipts, but its focused executable probe attempt produced no terminal receipt."
+  },
+  "uring_2_checkpoint": {
+    "status": "IN_PROGRESS_CONTROL_PLANE_ONLY",
+    "implemented": [
+      "stable backend, capability, support and fallback identifiers",
+      "fail-closed immutable capability decisions",
+      "typed requested and forced-off RuntimeBuilder policy",
+      "factory selection fallback classification",
+      "IoDriverHandle immutable capability snapshot",
+      "cached fixed-buffer opcode and registration probe wired into the immutable snapshot"
+    ],
+    "remaining": [
+      "full fixed-operation completion probe and five remaining capability probes",
+      "terminal no-IoDriver fallback snapshot",
+      "focused executable test receipt",
+      "io-uring feature and target matrix verification"
+    ],
+    "verification": {
+      "runner": "RCH clean-overlay cargo check",
+      "job_id": "j-29964935379288247",
+      "worker": "hz2",
+      "base_commit": "90d28c97324a0c42b8453be836f53f8ef6a1e1ce",
+      "overlay_fingerprint": "03f57b6acedb733f54fe90d0f683db1dc686bf9aed93ca4f4c8cb3e22b7e15f6",
+      "command": "cargo check -p asupersync --lib",
+      "exit_code": 0,
+      "claim": "default-feature library compilation only"
+    },
+    "feature_verification": {
+      "runner": "RCH clean-overlay cargo check",
+      "job_id": null,
+      "worker": "hz2",
+      "project_hash": "ec4e32fde9abc324",
+      "base_commit": "23c8149a12aa3efad77adb318ef27150fbfc44aa",
+      "overlay_fingerprint": "0123f12ac80071d051d677f93a53ebd53a098724f8c0b66a13c60bd8f6619033",
+      "command": "cargo check -p asupersync --lib --features io-uring",
+      "exit_code": 0,
+      "claim": "io-uring-feature library compilation only"
+    },
+    "focused_test_attempt": {
+      "worker": "hz2",
+      "project_hash": "c316006ea09ef0d1",
+      "command": "cargo test -p asupersync --features io-uring --lib fixed_buffer_capability_probe_is_classified_gated_and_cached -- --nocapture",
+      "terminal_receipt": null,
+      "disposition": "NO_TEST_OR_LIVE_KERNEL_CLAIM"
+    },
+    "focused_test_receipt": null
   },
   "authority": {
     "live_module_mapping": "src/runtime/reactor/mod.rs maps public module uring to src/runtime/reactor/io_uring.rs",
@@ -39,15 +85,15 @@
     },
     {
       "path": "src/runtime/reactor/mod.rs",
-      "sha256": "df1ce75337c1a4c0549e58cedc7b8390ed418edf35fb738d24fb8380411b5427",
-      "line_count": 1325,
-      "role": "public backend graph and Linux or Android factory fallback"
+      "sha256": "d3c4158b3f544719623dd4e63ac416b328a9e7c90e190695be9d417decaa4e6d",
+      "line_count": 2095,
+      "role": "public backend graph, typed capability decisions, live fixed-buffer probe wiring and platform factory fallback receipts"
     },
     {
       "path": "src/runtime/reactor/io_uring.rs",
-      "sha256": "efc29dca487ebdb6f4b9179e5da1ec3dafec29ce6fbbe136d98f867cd3af242b",
-      "line_count": 2280,
-      "role": "live readiness reactor and classic registered-buffer scaffold"
+      "sha256": "3c87ae6a3bdbc175521f1ec670bddb6727bf0f31d0a192b6b56ad9518b36aeea",
+      "line_count": 2420,
+      "role": "live readiness reactor, cached fixed-buffer registration probe and classic registered-buffer scaffold"
     },
     {
       "path": "src/runtime/reactor/epoll.rs",
@@ -63,15 +109,15 @@
     },
     {
       "path": "src/runtime/io_driver.rs",
-      "sha256": "187bb4543a3f5fb46f2f549cec24262f671ef9794e2be27617fd614526da0e94",
-      "line_count": 2952,
-      "role": "generic reactor consumer and current inspector surface"
+      "sha256": "4d661727d302e20cf106acaf6f7df36d6b3ef1b534ea76bca06ff7dcf007acbe",
+      "line_count": 2982,
+      "role": "generic reactor consumer and immutable capability inspector surface"
     },
     {
       "path": "src/runtime/builder.rs",
-      "sha256": "ced1fd3901169475f1e390324aa11458f97f52288e8d54bd6f9e91cc0ca3570c",
-      "line_count": 8398,
-      "role": "platform-reactor policy, dependency injection and whole-reactor force-off"
+      "sha256": "6ad3317d3f409b9bdf2a3b96305f6bc25dec58b20d0646e571d7d15f5f311444",
+      "line_count": 8542,
+      "role": "platform-reactor policy, dependency injection and typed per-capability force-off"
     },
     {
       "path": "src/fs/mod.rs",
@@ -141,8 +187,8 @@
     },
     {
       "path": "tests/io_uring_capability_inventory_contract.rs",
-      "sha256": "f5582a79953fc2821e95cc2cd33bb6d1d00bf72f339bc87a9215e5066a0892e8",
-      "line_count": 1077,
+      "sha256": "1c6baa8c81c3c4bd08654ae032629ca1ceba923f89e72df3e9cf2b9e056ceac7",
+      "line_count": 1135,
       "role": "machine contract for the frozen inventory and decision policy"
     },
     {
@@ -183,8 +229,8 @@
     },
     {
       "path": "docs/io_uring_capability_inventory.md",
-      "sha256": "e99f7cfd01150cc2ea684895adcd7632999da2be882eaaaefc6446314b4d89fe",
-      "line_count": 300,
+      "sha256": "156ff9681cf9fa42a6372f940be5afda950216502a90bc4b72c76e7bdff8c045",
+      "line_count": 332,
       "role": "human interpretation, ownership, and no-claim boundary"
     },
     {
@@ -382,9 +428,9 @@
       "gap_id": "URING-ACCURACY-BUFFER-SUPPORT",
       "path": "src/runtime/reactor/io_uring.rs",
       "recorded_claim": "is_buffer_registration_supported reports runtime support",
-      "pinned_reality": "the method returns Ok(true) without an operation or registration probe",
-      "source_anchors": ["pub fn is_buffer_registration_supported", "Ok(true)"],
-      "disposition": "FAIL_CLOSED_TO_NOT_PROBED",
+      "pinned_reality": "the method now caches a bounded temporary-ring probe that checks fixed read and write opcodes plus actual registration and unregistration; it does not complete a fixed I/O operation",
+      "source_anchors": ["fn probe_fixed_buffer_registration", "register_buffers", "unregister_buffers"],
+      "disposition": "PARTIALLY_RESOLVED_REGISTRATION_PROVEN_OPERATION_PENDING",
       "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.2"
     },
     {
@@ -542,8 +588,8 @@
     {
       "capability_id": "URING-CAP-FIXED-BUFFERS",
       "name": "classic fixed registered buffers",
-      "current_state": "SCAFFOLD_ONLY_NOT_USED_BY_DATA_PLANE",
-      "current_evidence": ["register_buffers call", "manual buffer ID pool", "mock conformance suite"],
+      "current_state": "LIVE_REGISTRATION_PROBE_AND_SCAFFOLD_NOT_USED_BY_DATA_PLANE",
+      "current_evidence": ["cached fixed opcode probe", "bounded register and unregister probe", "manual buffer ID pool", "mock conformance suite"],
       "missing": ["operation probe", "ReadFixed or WriteFixed consumer", "linear lease", "terminal drain", "real comparator"],
       "implementation_owner": "asupersync-sched-hot-path-perf-bt4y5f.7.3",
       "terminal_evidence_owner": "asupersync-sched-hot-path-perf-bt4y5f.7.7"
@@ -685,8 +731,8 @@
     "ordinary_ring_failure_reason_id": "URING-FB-RING-CREATE",
     "terminal_reactor_failure_reason_id": "URING-FB-REACTOR-UNAVAILABLE",
     "terminal_runtime_state": "runtime construction continues without an IoDriver; socket paths use one-millisecond timer backoff when a timer driver exists and immediate rewake otherwise",
-    "current_observability": "runtime_builder_platform_reactor_unavailable startup warning only",
-    "missing_observability": "immutable backend and terminal fallback-reason snapshot"
+    "current_observability": "IoDriverHandle::capability_snapshot records the selected backend, per-capability decisions and feature-disabled or ring-create selection fallback; total reactor failure still emits only runtime_builder_platform_reactor_unavailable",
+    "missing_observability": "terminal reactor-unavailable state has no snapshot because no IoDriver exists"
   },
   "force_off_contract": {
     "owner": "asupersync-sched-hot-path-perf-bt4y5f.7.2",
@@ -695,6 +741,7 @@
     "global_disable_precedes_probe": true,
     "per_capability_mask_precedes_probe": true,
     "deterministic_fixture": "inject requested capability states and probe outcomes without consulting the host",
+    "implementation_state": "typed policy and deterministic resolution are implemented; authoritative live operation probes remain pending",
     "forced_off_result": {
       "requested": true,
       "supported": "NOT_PROBED",
@@ -722,9 +769,10 @@
   ],
   "observability_contract": {
     "owner": "asupersync-sched-hot-path-perf-bt4y5f.7.2",
-    "current_inspector": "IoDriverHandle::stats returns generic IoStats counters",
+    "current_inspector": "IoDriverHandle::stats returns generic IoStats counters and IoDriverHandle::capability_snapshot returns immutable bounded capability state",
     "current_fields": ["polls", "events_received", "wakers_dispatched", "unknown_tokens", "registrations", "deregistrations"],
-    "missing_fields": ["backend", "capability_id", "requested", "supported", "active", "fallback_reason"],
+    "current_snapshot_fields": ["backend", "capability_id", "requested", "supported", "active", "fallback_reason"],
+    "missing_fields": [],
     "required_snapshot_fields": ["backend", "capability_id", "requested", "supported", "active", "fallback_reason"],
     "bounded_cardinality": true,
     "free_form_host_error_in_metric_label": false,
@@ -785,8 +833,8 @@
     "no_win_action": "retain the incumbent path, mark the lever NO_WIN, preserve rollback and make no improvement claim"
   },
   "no_claims": [
-    "This artifact changes no reactor, filesystem, TCP, bytes, builder or observability behavior.",
-    "It does not prove compilation, test success, live-kernel support, capability activation or fallback behavior.",
+    "The URING-2 checkpoint changes reactor selection, builder policy, driver observability metadata and a bounded construction-time fixed-buffer probe; it changes no filesystem, TCP, bytes or advanced io_uring data-plane behavior.",
+    "Its RCH cargo checks prove default-feature and io-uring-feature library compilation only; the focused test attempt has no terminal receipt and therefore proves no live-kernel outcome, capability activation or fallback behavior.",
     "It does not prove buffer ownership, cancellation drain, descriptor cleanup or low-level boundary correctness.",
     "It records no benchmark result and proves no latency, throughput, syscall, CPU, memory or efficiency improvement.",
     "It does not prove broad workspace health, release readiness, production-on-by-default status or fleet availability.",

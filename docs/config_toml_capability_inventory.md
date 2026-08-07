@@ -272,6 +272,15 @@ or representation. The receipt records it separately from the six A2-owned
 paths. The historical A1/A3 revisions and the A3 TOML-token projection remain
 unchanged.
 
+A later repository-wide formatting pass at
+`8d94b8b9e4361863599db9a17f7badd4179b2609` changed the byte pins for
+`src/config.rs`, `src/runtime/env_config.rs`, `src/cli/atp_config.rs`, and
+`src/bin/atpd.rs`. Each of those four diffs was inspected and contained only
+rustfmt line wrapping or expression layout. The machine receipt retains both
+the pre-format and current hashes and line counts, records no accepted-TOML
+input change, and keeps the A2 implementation commits distinct from this
+source-pin maintenance.
+
 ## Child routing
 
 | Child | Frozen responsibility | Current evidence |
@@ -323,9 +332,9 @@ line in `src/runtime/builder.rs`: it documented the production request-context
 entry point and changed `request_cx_with_budget` from `pub(crate)` to `pub`.
 The ordered `from_toml`, `from_toml_str`, and direct `toml::` token projection
 remained byte-identical. The 16-path pin set, historical A1/A3 revisions,
-`KEEP_INCUMBENT` decision, and all blocked gaps are unchanged. This is static
-source-pin maintenance only; it does not add JSON, rerun either receipt, or
-authorize dependency exit.
+`KEEP_INCUMBENT` decision, and all blocked gaps are unchanged.
+This is static source-pin maintenance only; it does not add JSON, rerun either
+receipt, or authorize dependency exit.
 
 The receipt fails closed on seven absent replacement rows: parser parity,
 writer parity, explicit resource bounds, independent comparison, generated

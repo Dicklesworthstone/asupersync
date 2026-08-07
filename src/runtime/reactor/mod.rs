@@ -364,6 +364,508 @@ impl IntoIterator for Events {
     }
 }
 
+/// Stable identity for the reactor backend selected at runtime construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IoReactorBackend {
+    /// Linux/Android io_uring backend.
+    IoUring,
+    /// Linux/Android epoll backend.
+    Epoll,
+    /// BSD-family kqueue backend.
+    Kqueue,
+    /// Windows I/O completion-port backend.
+    Iocp,
+    /// Browser event-loop backend.
+    Browser,
+    /// Explicitly injected reactor whose concrete backend is not known here.
+    Injected,
+}
+
+impl IoReactorBackend {
+    /// Returns the bounded-cardinality identifier used by diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::IoUring => "io_uring",
+            Self::Epoll => "epoll",
+            Self::Kqueue => "kqueue",
+            Self::Iocp => "iocp",
+            Self::Browser => "browser",
+            Self::Injected => "injected",
+        }
+    }
+}
+
+/// Advanced io_uring capability governed by the runtime policy spine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum IoUringCapability {
+    /// Classic fixed registered buffers.
+    FixedBuffers = 0,
+    /// Provided-buffer groups.
+    ProvidedGroups = 1,
+    /// Ring-mapped provided buffers.
+    MappedBufferRing = 2,
+    /// Multishot accept.
+    MultishotAccept = 3,
+    /// Multishot receive.
+    MultishotRecv = 4,
+    /// Submission-queue polling.
+    SqPoll = 5,
+}
+
+impl IoUringCapability {
+    /// Every capability in stable artifact order.
+    pub const ALL: [Self; 6] = [
+        Self::FixedBuffers,
+        Self::ProvidedGroups,
+        Self::MappedBufferRing,
+        Self::MultishotAccept,
+        Self::MultishotRecv,
+        Self::SqPoll,
+    ];
+
+    /// Returns the stable capability identifier.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::FixedBuffers => "URING-CAP-FIXED-BUFFERS",
+            Self::ProvidedGroups => "URING-CAP-PROVIDED-GROUPS",
+            Self::MappedBufferRing => "URING-CAP-MAPPED-BUFFER-RING",
+            Self::MultishotAccept => "URING-CAP-MULTISHOT-ACCEPT",
+            Self::MultishotRecv => "URING-CAP-MULTISHOT-RECV",
+            Self::SqPoll => "URING-CAP-SQPOLL",
+        }
+    }
+
+    const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// Result state for a bounded io_uring capability probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IoUringSupportState {
+    /// The bounded operation probe completed successfully.
+    Supported,
+    /// The bounded operation probe classified the capability as unavailable.
+    Unsupported,
+    /// No authoritative operation probe ran.
+    NotProbed,
+}
+
+impl IoUringSupportState {
+    /// Returns the stable diagnostic identifier.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Supported => "SUPPORTED",
+            Self::Unsupported => "UNSUPPORTED",
+            Self::NotProbed => "NOT_PROBED",
+        }
+    }
+}
+
+/// Deterministic result of one bounded capability probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IoUringProbeOutcome {
+    /// The bounded probe completed successfully.
+    Supported,
+    /// The required operation is not supported.
+    Unsupported,
+    /// Host policy or permissions rejected the probe.
+    Permission,
+    /// A bounded resource operation failed.
+    Resource,
+    /// The probe failed without a narrower classification.
+    Error,
+}
+
+/// Typed request and force-off policy for advanced io_uring capabilities.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct IoUringCapabilityPolicy {
+    requested: u8,
+    forced_off: u8,
+}
+
+impl IoUringCapabilityPolicy {
+    /// Builds a policy with no advanced capabilities requested.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            requested: 0,
+            forced_off: 0,
+        }
+    }
+
+    const fn bit(capability: IoUringCapability) -> u8 {
+        1 << capability.index()
+    }
+
+    /// Sets whether one capability is requested.
+    #[must_use]
+    pub const fn with_requested(mut self, capability: IoUringCapability, requested: bool) -> Self {
+        let bit = Self::bit(capability);
+        if requested {
+            self.requested |= bit;
+        } else {
+            self.requested &= !bit;
+        }
+        self
+    }
+
+    /// Sets deterministic force-off policy for one capability.
+    #[must_use]
+    pub const fn with_forced_off(
+        mut self,
+        capability: IoUringCapability,
+        forced_off: bool,
+    ) -> Self {
+        let bit = Self::bit(capability);
+        if forced_off {
+            self.forced_off |= bit;
+        } else {
+            self.forced_off &= !bit;
+        }
+        self
+    }
+
+    /// Returns whether one capability is requested.
+    #[must_use]
+    pub const fn is_requested(self, capability: IoUringCapability) -> bool {
+        self.requested & Self::bit(capability) != 0
+    }
+
+    /// Returns whether one capability is forced off.
+    #[must_use]
+    pub const fn is_forced_off(self, capability: IoUringCapability) -> bool {
+        self.forced_off & Self::bit(capability) != 0
+    }
+
+    /// Resolves one deterministic injected probe outcome.
+    #[must_use]
+    pub const fn decide(
+        self,
+        capability: IoUringCapability,
+        probe: Option<IoUringProbeOutcome>,
+    ) -> IoUringCapabilityDecision {
+        if !self.is_requested(capability) {
+            return IoUringCapabilityDecision::not_requested(capability);
+        }
+        if self.is_forced_off(capability) {
+            return IoUringCapabilityDecision::new(
+                capability,
+                true,
+                IoUringSupportState::NotProbed,
+                false,
+                IoUringFallbackReason::ForcedOff,
+            );
+        }
+
+        match probe {
+            Some(IoUringProbeOutcome::Supported) => IoUringCapabilityDecision::new(
+                capability,
+                true,
+                IoUringSupportState::Supported,
+                true,
+                IoUringFallbackReason::None,
+            ),
+            Some(IoUringProbeOutcome::Unsupported) => IoUringCapabilityDecision::new(
+                capability,
+                true,
+                IoUringSupportState::Unsupported,
+                false,
+                IoUringFallbackReason::OperationUnsupported,
+            ),
+            Some(IoUringProbeOutcome::Permission) => IoUringCapabilityDecision::new(
+                capability,
+                true,
+                IoUringSupportState::NotProbed,
+                false,
+                IoUringFallbackReason::Permission,
+            ),
+            Some(IoUringProbeOutcome::Resource) => IoUringCapabilityDecision::new(
+                capability,
+                true,
+                IoUringSupportState::NotProbed,
+                false,
+                IoUringFallbackReason::Resource,
+            ),
+            Some(IoUringProbeOutcome::Error) | None => IoUringCapabilityDecision::new(
+                capability,
+                true,
+                IoUringSupportState::NotProbed,
+                false,
+                IoUringFallbackReason::ProbeError,
+            ),
+        }
+    }
+}
+
+/// Bounded reason explaining why an io_uring capability is inactive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IoUringFallbackReason {
+    /// Requested, supported, and active.
+    None,
+    /// The capability was not requested.
+    NotRequested,
+    /// The build excludes the optional feature.
+    FeatureDisabled,
+    /// The target has no supported backend.
+    TargetUnsupported,
+    /// Typed injected policy disabled the capability.
+    ForcedOff,
+    /// Configured ring construction failed.
+    RingCreate,
+    /// Preferred and fallback reactor construction both failed.
+    ReactorUnavailable,
+    /// The required operation is unavailable.
+    OperationUnsupported,
+    /// Host policy or permissions rejected the mode.
+    Permission,
+    /// Bounded registration or allocation failed.
+    Resource,
+    /// The bounded probe failed without a narrower classification.
+    ProbeError,
+    /// A prerequisite capability is inactive.
+    Dependency,
+    /// Evidence classified the candidate as no-win.
+    NoWin,
+    /// An inconsistent or unknown tuple failed closed.
+    Unknown,
+}
+
+impl IoUringFallbackReason {
+    /// Returns the stable fallback identifier.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::None => "URING-FB-NONE",
+            Self::NotRequested => "URING-FB-NOT-REQUESTED",
+            Self::FeatureDisabled => "URING-FB-FEATURE-DISABLED",
+            Self::TargetUnsupported => "URING-FB-TARGET-UNSUPPORTED",
+            Self::ForcedOff => "URING-FB-FORCED-OFF",
+            Self::RingCreate => "URING-FB-RING-CREATE",
+            Self::ReactorUnavailable => "URING-FB-REACTOR-UNAVAILABLE",
+            Self::OperationUnsupported => "URING-FB-OP-UNSUPPORTED",
+            Self::Permission => "URING-FB-PERMISSION",
+            Self::Resource => "URING-FB-RESOURCE",
+            Self::ProbeError => "URING-FB-PROBE-ERROR",
+            Self::Dependency => "URING-FB-DEPENDENCY",
+            Self::NoWin => "URING-FB-NO-WIN",
+            Self::Unknown => "URING-FB-UNKNOWN",
+        }
+    }
+}
+
+/// Immutable, normalized decision for one io_uring capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct IoUringCapabilityDecision {
+    capability: IoUringCapability,
+    requested: bool,
+    supported: IoUringSupportState,
+    active: bool,
+    fallback_reason: IoUringFallbackReason,
+}
+
+impl IoUringCapabilityDecision {
+    /// Builds a decision and fails inconsistent tuples closed to `URING-FB-UNKNOWN`.
+    #[must_use]
+    pub const fn new(
+        capability: IoUringCapability,
+        requested: bool,
+        supported: IoUringSupportState,
+        active: bool,
+        fallback_reason: IoUringFallbackReason,
+    ) -> Self {
+        let valid = match fallback_reason {
+            IoUringFallbackReason::None => {
+                requested && matches!(supported, IoUringSupportState::Supported) && active
+            }
+            IoUringFallbackReason::NotRequested => {
+                !requested && matches!(supported, IoUringSupportState::NotProbed) && !active
+            }
+            IoUringFallbackReason::TargetUnsupported
+            | IoUringFallbackReason::OperationUnsupported => {
+                requested && matches!(supported, IoUringSupportState::Unsupported) && !active
+            }
+            IoUringFallbackReason::NoWin => {
+                requested && matches!(supported, IoUringSupportState::Supported) && !active
+            }
+            IoUringFallbackReason::FeatureDisabled
+            | IoUringFallbackReason::ForcedOff
+            | IoUringFallbackReason::RingCreate
+            | IoUringFallbackReason::ReactorUnavailable
+            | IoUringFallbackReason::Permission
+            | IoUringFallbackReason::Resource
+            | IoUringFallbackReason::ProbeError
+            | IoUringFallbackReason::Dependency => {
+                requested && matches!(supported, IoUringSupportState::NotProbed) && !active
+            }
+            IoUringFallbackReason::Unknown => !active,
+        };
+
+        Self {
+            capability,
+            requested,
+            supported,
+            active: if valid { active } else { false },
+            fallback_reason: if valid {
+                fallback_reason
+            } else {
+                IoUringFallbackReason::Unknown
+            },
+        }
+    }
+
+    /// Builds the default not-requested decision.
+    #[must_use]
+    pub const fn not_requested(capability: IoUringCapability) -> Self {
+        Self::new(
+            capability,
+            false,
+            IoUringSupportState::NotProbed,
+            false,
+            IoUringFallbackReason::NotRequested,
+        )
+    }
+
+    /// Capability identity.
+    #[must_use]
+    pub const fn capability(self) -> IoUringCapability {
+        self.capability
+    }
+
+    /// Whether policy requested the capability.
+    #[must_use]
+    pub const fn requested(self) -> bool {
+        self.requested
+    }
+
+    /// Authoritative support state.
+    #[must_use]
+    pub const fn supported(self) -> IoUringSupportState {
+        self.supported
+    }
+
+    /// Whether the capability is active.
+    #[must_use]
+    pub const fn active(self) -> bool {
+        self.active
+    }
+
+    /// Stable inactive or success reason.
+    #[must_use]
+    pub const fn fallback_reason(self) -> IoUringFallbackReason {
+        self.fallback_reason
+    }
+}
+
+/// Immutable reactor-backend and io_uring capability snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IoReactorCapabilitySnapshot {
+    backend: IoReactorBackend,
+    selection_fallback: Option<IoUringFallbackReason>,
+    decisions: [IoUringCapabilityDecision; 6],
+}
+
+impl IoReactorCapabilitySnapshot {
+    /// Resolves a complete deterministic snapshot from typed policy and probe outcomes.
+    #[must_use]
+    pub fn from_policy(
+        backend: IoReactorBackend,
+        selection_fallback: Option<IoUringFallbackReason>,
+        policy: IoUringCapabilityPolicy,
+        probes: [Option<IoUringProbeOutcome>; 6],
+    ) -> Self {
+        let decisions = IoUringCapability::ALL
+            .map(|capability| policy.decide(capability, probes[capability.index()]));
+        Self {
+            backend,
+            selection_fallback,
+            decisions,
+        }
+    }
+
+    fn unavailable(
+        backend: IoReactorBackend,
+        selection_fallback: Option<IoUringFallbackReason>,
+        policy: IoUringCapabilityPolicy,
+        reason: IoUringFallbackReason,
+    ) -> Self {
+        let decisions = IoUringCapability::ALL.map(|capability| {
+            if !policy.is_requested(capability) {
+                return IoUringCapabilityDecision::not_requested(capability);
+            }
+            if policy.is_forced_off(capability) {
+                return policy.decide(capability, None);
+            }
+
+            let supported = if matches!(reason, IoUringFallbackReason::TargetUnsupported) {
+                IoUringSupportState::Unsupported
+            } else {
+                IoUringSupportState::NotProbed
+            };
+            IoUringCapabilityDecision::new(capability, true, supported, false, reason)
+        });
+        Self {
+            backend,
+            selection_fallback,
+            decisions,
+        }
+    }
+
+    /// Builds a snapshot whose advanced capabilities are not requested.
+    #[must_use]
+    pub const fn not_requested(
+        backend: IoReactorBackend,
+        selection_fallback: Option<IoUringFallbackReason>,
+    ) -> Self {
+        Self {
+            backend,
+            selection_fallback,
+            decisions: [
+                IoUringCapabilityDecision::not_requested(IoUringCapability::FixedBuffers),
+                IoUringCapabilityDecision::not_requested(IoUringCapability::ProvidedGroups),
+                IoUringCapabilityDecision::not_requested(IoUringCapability::MappedBufferRing),
+                IoUringCapabilityDecision::not_requested(IoUringCapability::MultishotAccept),
+                IoUringCapabilityDecision::not_requested(IoUringCapability::MultishotRecv),
+                IoUringCapabilityDecision::not_requested(IoUringCapability::SqPoll),
+            ],
+        }
+    }
+
+    /// Builds a snapshot for an explicitly injected reactor.
+    #[must_use]
+    pub const fn injected() -> Self {
+        Self::not_requested(IoReactorBackend::Injected, None)
+    }
+
+    /// Selected backend.
+    #[must_use]
+    pub const fn backend(self) -> IoReactorBackend {
+        self.backend
+    }
+
+    /// Why platform selection fell back before choosing `backend`.
+    #[must_use]
+    pub const fn selection_fallback(self) -> Option<IoUringFallbackReason> {
+        self.selection_fallback
+    }
+
+    /// Stable decision for one advanced capability.
+    #[must_use]
+    pub const fn decision(self, capability: IoUringCapability) -> IoUringCapabilityDecision {
+        self.decisions[capability.index()]
+    }
+
+    /// All decisions in stable capability order.
+    #[must_use]
+    pub const fn decisions(self) -> [IoUringCapabilityDecision; 6] {
+        self.decisions
+    }
+}
+
 /// Platform-agnostic reactor for I/O event notification.
 ///
 /// A reactor provides the core I/O multiplexing functionality for an async runtime.
@@ -427,6 +929,15 @@ impl IntoIterator for Events {
 /// }
 /// ```
 pub trait Reactor: Send + Sync {
+    /// Returns the immutable backend and capability snapshot.
+    ///
+    /// Explicitly injected reactors default to the bounded `injected` identity.
+    /// Platform factory wrappers override this with their construction receipt.
+    #[must_use]
+    fn capability_snapshot(&self) -> IoReactorCapabilitySnapshot {
+        IoReactorCapabilitySnapshot::injected()
+    }
+
     /// Registers interest in I/O events for a source.
     ///
     /// Creates a new registration for the given source, associating it with the
@@ -573,6 +1084,47 @@ pub trait Reactor: Send + Sync {
     }
 }
 
+struct ObservedReactor {
+    inner: Arc<dyn Reactor>,
+    snapshot: IoReactorCapabilitySnapshot,
+}
+
+impl ObservedReactor {
+    fn wrap(inner: Arc<dyn Reactor>, snapshot: IoReactorCapabilitySnapshot) -> Arc<dyn Reactor> {
+        Arc::new(Self { inner, snapshot })
+    }
+}
+
+impl Reactor for ObservedReactor {
+    fn capability_snapshot(&self) -> IoReactorCapabilitySnapshot {
+        self.snapshot
+    }
+
+    fn register(&self, source: &dyn Source, token: Token, interest: Interest) -> io::Result<()> {
+        self.inner.register(source, token, interest)
+    }
+
+    fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
+        self.inner.modify(token, interest)
+    }
+
+    fn deregister(&self, token: Token) -> io::Result<()> {
+        self.inner.deregister(token)
+    }
+
+    fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
+        self.inner.poll(events, timeout)
+    }
+
+    fn wake(&self) -> io::Result<()> {
+        self.inner.wake()
+    }
+
+    fn registration_count(&self) -> usize {
+        self.inner.registration_count()
+    }
+}
+
 /// Create the best available reactor for the current platform.
 ///
 /// This is a convenience factory that selects the most capable backend
@@ -587,14 +1139,48 @@ pub trait Reactor: Send + Sync {
 /// Returns an error if no supported reactor backend can be created.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
+    create_reactor_with_policy(IoUringCapabilityPolicy::default())
+}
+
+/// Creates the Linux/Android reactor with typed advanced-capability policy.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub fn create_reactor_with_policy(policy: IoUringCapabilityPolicy) -> io::Result<Arc<dyn Reactor>> {
     #[cfg(feature = "io-uring")]
     {
         if let Ok(reactor) = IoUringReactor::new() {
-            return Ok(Arc::new(reactor));
+            let probes = reactor.capability_probes(policy);
+            return Ok(ObservedReactor::wrap(
+                Arc::new(reactor),
+                IoReactorCapabilitySnapshot::from_policy(
+                    IoReactorBackend::IoUring,
+                    None,
+                    policy,
+                    probes,
+                ),
+            ));
         }
+
+        return Ok(ObservedReactor::wrap(
+            Arc::new(EpollReactor::new()?),
+            IoReactorCapabilitySnapshot::unavailable(
+                IoReactorBackend::Epoll,
+                Some(IoUringFallbackReason::RingCreate),
+                policy,
+                IoUringFallbackReason::RingCreate,
+            ),
+        ));
     }
 
-    Ok(Arc::new(EpollReactor::new()?))
+    #[cfg(not(feature = "io-uring"))]
+    Ok(ObservedReactor::wrap(
+        Arc::new(EpollReactor::new()?),
+        IoReactorCapabilitySnapshot::unavailable(
+            IoReactorBackend::Epoll,
+            Some(IoUringFallbackReason::FeatureDisabled),
+            policy,
+            IoUringFallbackReason::FeatureDisabled,
+        ),
+    ))
 }
 
 #[cfg(any(
@@ -606,19 +1192,67 @@ pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
 ))]
 /// Creates the default reactor implementation for the current target.
 pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
-    Ok(Arc::new(KqueueReactor::new()?))
+    create_reactor_with_policy(IoUringCapabilityPolicy::default())
+}
+
+/// Creates the BSD-family reactor with typed advanced-capability policy.
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
+pub fn create_reactor_with_policy(policy: IoUringCapabilityPolicy) -> io::Result<Arc<dyn Reactor>> {
+    Ok(ObservedReactor::wrap(
+        Arc::new(KqueueReactor::new()?),
+        IoReactorCapabilitySnapshot::unavailable(
+            IoReactorBackend::Kqueue,
+            None,
+            policy,
+            IoUringFallbackReason::TargetUnsupported,
+        ),
+    ))
 }
 
 #[cfg(target_os = "windows")]
 /// Creates the default reactor implementation for the current target.
 pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
-    Ok(Arc::new(IocpReactor::new()?))
+    create_reactor_with_policy(IoUringCapabilityPolicy::default())
+}
+
+/// Creates the Windows reactor with typed advanced-capability policy.
+#[cfg(target_os = "windows")]
+pub fn create_reactor_with_policy(policy: IoUringCapabilityPolicy) -> io::Result<Arc<dyn Reactor>> {
+    Ok(ObservedReactor::wrap(
+        Arc::new(IocpReactor::new()?),
+        IoReactorCapabilitySnapshot::unavailable(
+            IoReactorBackend::Iocp,
+            None,
+            policy,
+            IoUringFallbackReason::TargetUnsupported,
+        ),
+    ))
 }
 
 #[cfg(target_arch = "wasm32")]
 /// Creates the default reactor implementation for the current target.
 pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
-    Ok(Arc::new(BrowserReactor::default()))
+    create_reactor_with_policy(IoUringCapabilityPolicy::default())
+}
+
+/// Creates the browser reactor with typed advanced-capability policy.
+#[cfg(target_arch = "wasm32")]
+pub fn create_reactor_with_policy(policy: IoUringCapabilityPolicy) -> io::Result<Arc<dyn Reactor>> {
+    Ok(ObservedReactor::wrap(
+        Arc::new(BrowserReactor::default()),
+        IoReactorCapabilitySnapshot::unavailable(
+            IoReactorBackend::Browser,
+            None,
+            policy,
+            IoUringFallbackReason::TargetUnsupported,
+        ),
+    ))
 }
 
 #[cfg(not(any(
@@ -634,6 +1268,24 @@ pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
 )))]
 /// Creates the default reactor implementation for the current target.
 pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
+    create_reactor_with_policy(IoUringCapabilityPolicy::default())
+}
+
+/// Returns unsupported for targets without a reactor backend.
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly",
+    target_os = "windows",
+    target_arch = "wasm32"
+)))]
+pub fn create_reactor_with_policy(
+    _policy: IoUringCapabilityPolicy,
+) -> io::Result<Arc<dyn Reactor>> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "no supported reactor backend for this platform",
@@ -672,6 +1324,7 @@ mod tests {
     fn create_reactor_factory() {
         init_test("create_reactor_factory");
         let reactor = create_reactor().expect("failed to create reactor");
+        let snapshot = reactor.capability_snapshot();
         crate::assert_with_log!(
             reactor.is_empty(),
             "reactor empty",
@@ -684,7 +1337,124 @@ mod tests {
             0usize,
             reactor.registration_count()
         );
+        assert_ne!(snapshot.backend(), IoReactorBackend::Injected);
+        for capability in IoUringCapability::ALL {
+            assert_eq!(
+                snapshot.decision(capability),
+                IoUringCapabilityDecision::not_requested(capability)
+            );
+        }
         crate::test_complete!("create_reactor_factory");
+    }
+
+    #[test]
+    fn io_uring_capability_ids_and_fallback_ids_are_stable() {
+        assert_eq!(
+            IoUringCapability::ALL.map(IoUringCapability::id),
+            [
+                "URING-CAP-FIXED-BUFFERS",
+                "URING-CAP-PROVIDED-GROUPS",
+                "URING-CAP-MAPPED-BUFFER-RING",
+                "URING-CAP-MULTISHOT-ACCEPT",
+                "URING-CAP-MULTISHOT-RECV",
+                "URING-CAP-SQPOLL",
+            ]
+        );
+        assert_eq!(IoUringFallbackReason::None.id(), "URING-FB-NONE");
+        assert_eq!(
+            IoUringFallbackReason::NotRequested.id(),
+            "URING-FB-NOT-REQUESTED"
+        );
+        assert_eq!(
+            IoUringFallbackReason::FeatureDisabled.id(),
+            "URING-FB-FEATURE-DISABLED"
+        );
+        assert_eq!(
+            IoUringFallbackReason::TargetUnsupported.id(),
+            "URING-FB-TARGET-UNSUPPORTED"
+        );
+        assert_eq!(IoUringFallbackReason::ForcedOff.id(), "URING-FB-FORCED-OFF");
+        assert_eq!(
+            IoUringFallbackReason::RingCreate.id(),
+            "URING-FB-RING-CREATE"
+        );
+        assert_eq!(
+            IoUringFallbackReason::ReactorUnavailable.id(),
+            "URING-FB-REACTOR-UNAVAILABLE"
+        );
+        assert_eq!(
+            IoUringFallbackReason::OperationUnsupported.id(),
+            "URING-FB-OP-UNSUPPORTED"
+        );
+        assert_eq!(
+            IoUringFallbackReason::Permission.id(),
+            "URING-FB-PERMISSION"
+        );
+        assert_eq!(IoUringFallbackReason::Resource.id(), "URING-FB-RESOURCE");
+        assert_eq!(
+            IoUringFallbackReason::ProbeError.id(),
+            "URING-FB-PROBE-ERROR"
+        );
+        assert_eq!(
+            IoUringFallbackReason::Dependency.id(),
+            "URING-FB-DEPENDENCY"
+        );
+        assert_eq!(IoUringFallbackReason::NoWin.id(), "URING-FB-NO-WIN");
+        assert_eq!(IoUringFallbackReason::Unknown.id(), "URING-FB-UNKNOWN");
+    }
+
+    #[test]
+    fn io_uring_capability_decision_fails_inconsistent_tuples_closed() {
+        let capability = IoUringCapability::FixedBuffers;
+        let valid = IoUringCapabilityDecision::new(
+            capability,
+            true,
+            IoUringSupportState::Supported,
+            true,
+            IoUringFallbackReason::None,
+        );
+        assert!(valid.active());
+        assert_eq!(valid.fallback_reason(), IoUringFallbackReason::None);
+
+        let invalid = IoUringCapabilityDecision::new(
+            capability,
+            false,
+            IoUringSupportState::Supported,
+            true,
+            IoUringFallbackReason::None,
+        );
+        assert_eq!(invalid.capability(), capability);
+        assert!(!invalid.requested());
+        assert_eq!(invalid.supported(), IoUringSupportState::Supported);
+        assert!(!invalid.active());
+        assert_eq!(invalid.fallback_reason(), IoUringFallbackReason::Unknown);
+    }
+
+    #[test]
+    fn io_uring_capability_policy_precedence_is_deterministic() {
+        let requested = IoUringCapability::FixedBuffers;
+        let unrequested = IoUringCapability::ProvidedGroups;
+        let policy = IoUringCapabilityPolicy::new()
+            .with_requested(requested, true)
+            .with_forced_off(requested, true);
+
+        let forced = policy.decide(requested, Some(IoUringProbeOutcome::Supported));
+        assert!(forced.requested());
+        assert_eq!(forced.supported(), IoUringSupportState::NotProbed);
+        assert!(!forced.active());
+        assert_eq!(forced.fallback_reason(), IoUringFallbackReason::ForcedOff);
+
+        let skipped = policy.decide(unrequested, Some(IoUringProbeOutcome::Supported));
+        assert_eq!(
+            skipped,
+            IoUringCapabilityDecision::not_requested(unrequested)
+        );
+
+        let active = IoUringCapabilityPolicy::new()
+            .with_requested(requested, true)
+            .decide(requested, Some(IoUringProbeOutcome::Supported));
+        assert!(active.active());
+        assert_eq!(active.fallback_reason(), IoUringFallbackReason::None);
     }
 
     // Event tests

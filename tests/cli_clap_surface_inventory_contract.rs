@@ -91,7 +91,7 @@ fn expected_set(values: &[&str]) -> BTreeSet<String> {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn count_attribute_starts(source: &str, attribute: &str) -> u64 {

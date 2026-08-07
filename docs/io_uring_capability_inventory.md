@@ -63,10 +63,10 @@ the runtime inspector and cannot establish operation support.
 | Surface | Current state | Material gap | Next owner |
 |---|---|---|---|
 | Build edge | optional feature and dependency | compilation does not establish host support | URING-2 |
-| Backend factory | try io_uring, then epoll | construction error is discarded | URING-2 |
+| Backend factory | try io_uring, then epoll, retain immutable selection metadata, and probe requested fixed-buffer registration | five capability probes and fixed-I/O completion remain | URING-2 |
 | Reactor | live one-shot readiness | no advanced data-plane operations | URING-2 onward |
-| Epoll fallback | live Linux/Android readiness backend | fallback reason is discarded | URING-2 |
-| Buffer scaffold | kernel registration plus manual IDs | hardcoded support answer; IDs unused by I/O | URING-3 |
+| Epoll fallback | live Linux/Android readiness backend with feature-disabled or ring-create receipt | total reactor failure has no driver snapshot | URING-2 |
+| Buffer scaffold | cached fixed-opcode plus bounded register/unregister probe, kernel registration, and manual IDs | no fixed-I/O completion; IDs unused by I/O | URING-3 |
 | Default file API | owned helpers offload; poll traits block directly | separate from opt-in io_uring and unsuitable as an async comparator | URING-7 |
 | File I/O | Linux-only file-local ring driven synchronously in poll | no fixed/selected buffer and unsuitable as an async comparator | URING-3 |
 | Path and directory I/O | Linux-only independent one-operation rings | outside one capability/fallback model | URING-2 |
@@ -74,9 +74,9 @@ the runtime inspector and cannot establish operation support.
 | TCP full and owned split streams | ordinary socket I/O plus readiness | no selected-buffer leases | URING-5 |
 | TCP borrowed split streams | timer backoff or immediate re-wake | no reactor registration or advanced receive | URING-5 |
 | `Bytes` / `BytesMut` | empty/static/shared heap bytes; exclusive mutable `Vec<u8>` | no kernel-in-flight lease state | URING-3 |
-| Builder | whole-reactor enable/disable or injection | no per-capability immutable policy | URING-2 |
+| Builder | whole-reactor enable/disable, injection, and typed per-capability policy | live operation outcomes remain | URING-2 |
 | No-reactor fallback | runtime continues with socket re-polls | startup warning only; no reason snapshot | URING-2 |
-| Inspector | generic `IoStats` counters | no backend or capability decision state | URING-2 |
+| Inspector | generic `IoStats` plus immutable capability snapshot | total reactor failure remains warning-only | URING-2 |
 | Tests | mock pool, live readiness, filesystem lifecycle | no advanced-capability matrix | URING-7 |
 | Benchmark | synthetic completion bookkeeping | no real-socket comparison | URING-7 |
 | Boundary ledger | four relevant rows and 39 locators | 33 locators are stale | URING-3 |
@@ -87,14 +87,16 @@ pinned rows contain 39 locators: six still match exactly and 33 retain their
 pattern at a different line. The artifact reconciles every recorded locator to
 its current line. URING-3 owns alignment when it changes these boundaries.
 
-Five material source-accuracy gaps are explicit. The file module header names
+Five material source-accuracy records are explicit. The file module header names
 `OPENAT` and `CLOSE` as ring operations even though constructors call
 `libc::openat` synchronously and no corresponding ring opcode consumer exists;
 it also claims nonblocking asynchronous completion although poll drives
 `submit_and_wait`. The directory header misclassifies the `MkDirAt` path. The
-reactor's buffer-support method returns `Ok(true)` without probing. Finally, an
-E2E comment labels default `fs::write`/`fs::read` as io_uring evidence. None of
-those statements may be promoted into capability or execution evidence.
+former hardcoded buffer-support answer is partially resolved by a cached,
+bounded fixed-opcode and register/unregister probe; a real fixed-I/O completion
+is still absent. Finally, an E2E comment labels default
+`fs::write`/`fs::read` as io_uring evidence. Unresolved statements may not be
+promoted into capability or execution evidence.
 
 ## Existing evidence
 
@@ -117,7 +119,7 @@ later one.
 
 | Capability ID | Current state | Required before activation |
 |---|---|---|
-| `URING-CAP-FIXED-BUFFERS` | scaffold only; not used by the data plane | real fixed operation, linear lease, terminal drain |
+| `URING-CAP-FIXED-BUFFERS` | live registration probe plus scaffold; not used by the data plane | real fixed operation, linear lease, terminal drain |
 | `URING-CAP-PROVIDED-GROUPS` | absent | bounded group, selection, buffer-ID completion, cleanup |
 | `URING-CAP-MAPPED-BUFFER-RING` | absent | bounded mapped ring, lifetime proof, selection and return |
 | `URING-CAP-MULTISHOT-ACCEPT` | absent | generation-tagged MORE/terminal state and descriptor ownership |
@@ -190,14 +192,14 @@ terminal branch.
 
 ## Deterministic force-off
 
-URING-2 owns a typed policy carried from `RuntimeBuilder` into immutable reactor
-construction. Production code must not read an ambient environment variable to
-control the hot path. A global disable and per-capability mask take effect
-before probing.
+`IoUringCapabilityPolicy` is now carried from `RuntimeBuilder` into immutable
+reactor construction. Production code does not read an ambient environment
+variable to control the hot path. Unrequested capabilities are not probed, and
+the per-capability force-off mask takes effect before an injected probe outcome.
 
-Tests need an injected fixture containing requested states and probe outcomes.
-That fixture must not consult the host. A requested but forced-off capability
-has `supported=NOT_PROBED`, `active=false`, and
+The deterministic fixture accepts requested states and bounded probe outcomes
+without consulting the host. A requested but forced-off capability has
+`supported=NOT_PROBED`, `active=false`, and
 `fallback_reason=URING-FB-FORCED-OFF`.
 
 The existing `enable_platform_reactor(false)` remains a whole-platform escape
@@ -216,14 +218,14 @@ The factory order is explicit injection, requested ordinary io_uring, epoll,
 then no reactor with socket re-poll fallback. Whole-reactor force-off uses
 `URING-FB-FORCED-OFF`; ordinary ring creation failure uses
 `URING-FB-RING-CREATE`; exhaustion of the reactor chain uses
-`URING-FB-REACTOR-UNAVAILABLE`. Today only the last branch's startup warning is
-observable; URING-2 owns its immutable snapshot.
+`URING-FB-REACTOR-UNAVAILABLE`. Feature-disabled and ring-creation fallback are
+now retained in the immutable driver snapshot. The terminal no-reactor branch
+still has only its startup warning because no `IoDriverHandle` exists.
 
-The current inspector is `IoDriverHandle::stats`, which exposes polls, received
-events, dispatched wakers, unknown tokens, registrations, and deregistrations.
-It does not identify the backend or expose any capability decision.
-
-URING-2 must add an immutable snapshot with:
+`IoDriverHandle::stats` continues to expose polls, received events, dispatched
+wakers, unknown tokens, registrations, and deregistrations. The new
+`IoDriverHandle::capability_snapshot` separately exposes immutable bounded
+control-plane state:
 
 - backend;
 - capability ID;
@@ -231,6 +233,13 @@ URING-2 must add an immutable snapshot with:
 - supported;
 - active;
 - fallback reason.
+
+This checkpoint supplies one conservative support outcome: requested fixed
+buffers run a cached temporary-ring probe that checks fixed read/write opcodes
+and actual registration/unregistration. It does not execute fixed I/O, and the
+other five capabilities still have no authoritative live outcome. Any requested
+capability without an outcome fails closed with `URING-FB-PROBE-ERROR`; no
+advanced capability is requested or active by default.
 
 Metric labels use only the frozen identifiers. A raw host error may appear in a
 bounded startup diagnostic or trace detail, never as an unbounded metric label.
@@ -256,14 +265,14 @@ exercise.
 Each lever ends as `ADOPT`, `KEEP`, `UNSUPPORTED`, or `NO_WIN`. Measurement is
 admissible only after active and forced-fallback correctness, cancellation
 drain, and zero outstanding descriptors, completions, buffer leases, and
-obligations. A correctness failure reaches `NO_WIN` without creating a metric
-claim.
+obligations. A correctness failure reaches `NO_WIN`
+without creating a metric claim.
 
 The terminal comparison requires two distinct host-family keys, at least five
 repetitions per cell, p50 and p95 latency, and exact source, toolchain, features,
 host, kernel, configuration, environment, workload, and sample-count identity.
-The primary metric is median echo requests per second. Per-cell relative median
-absolute deviation may not exceed five percent.
+The primary metric is median echo requests per second. The per-cell
+relative median absolute deviation may not exceed five percent.
 
 The numeric resource envelope permits at most five percent additional peak RSS
 and CPU seconds per request, no extra default thread, and exactly one extra
@@ -287,14 +296,37 @@ The dispositions are disjoint. Their precedence is `UNSUPPORTED`, then
 
 ## Static validation boundary
 
+The 2026-08-07 claim-time pin audit found two later source changes. The
+`RuntimeBuilder` diff adds the versioned TOML/JSON configuration layer while
+leaving its platform-reactor policy, dependency injection, and force-off
+surface intact. The inventory contract itself received a formatting-only pass.
+Both diffs were inspected before refreshing their exact hashes and line counts;
+the remaining twenty-five pins already matched.
+
 This lane checked JSON shape, recorded exact hashes and line counts, and authored
 the Rust contract. The Rust contract, project tests, live kernel probes, and
 benchmarks were not executed in this static lane.
 
-Accordingly, this inventory does not prove compilation, test success, live-host
-support, activation, fallback behavior, lifecycle correctness, performance,
+The later URING-2 control-plane checkpoint added the immutable model, typed
+policy, factory selection receipt, and driver snapshot. RCH job
+`j-29964935379288247` checked the default-feature library at clean-overlay base
+`90d28c97324a0c42b8453be836f53f8ef6a1e1ce` and exited zero. The next checkpoint
+replaced the fixed-buffer support placeholder with the bounded cached probe.
+An RCH clean-overlay feature compile on `hz2` used project hash
+`ec4e32fde9abc324`, base `23c8149a12aa3efad77adb318ef27150fbfc44aa`,
+overlay fingerprint
+`0123f12ac80071d051d677f93a53ebd53a098724f8c0b66a13c60bd8f6619033`,
+and exited zero for `cargo check -p asupersync --lib --features io-uring`.
+A focused test attempt under project hash `c316006ea09ef0d1` disappeared from the
+active RCH set without a terminal receipt; its orphaned local hook was stopped,
+so this checkpoint makes no test or live-kernel outcome claim.
+
+Accordingly, this inventory and checkpoint do not prove focused test success,
+live-host support, fixed-I/O completion or the other five operation probes,
+advanced data-plane behavior, lifecycle correctness, performance,
 broad workspace health, release readiness, production-on-by-default status, or
-fleet availability. It changes no production behavior and authorizes no
-dependency, capability, or file removal, tracker closure, or terminal adoption.
+fleet availability. The checkpoint changes control-plane metadata only and
+authorizes no dependency, capability, or file removal, tracker closure, or
+terminal adoption.
 
 <!-- END IO URING CAPABILITY INVENTORY -->

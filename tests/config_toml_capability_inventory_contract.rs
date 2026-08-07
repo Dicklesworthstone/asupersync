@@ -453,6 +453,74 @@ fn validate_a2_implementation_receipt(inventory: &Value) -> Result<(), String> {
         return Err("A2 must reconcile the exact seven changed source pins".to_owned());
     }
     let top_level_pins = array(inventory, "source_pins");
+    let maintenance_value = reconciliation_value
+        .get("format_only_maintenance")
+        .expect("A2 formatting-only maintenance receipt");
+    let maintenance = object(reconciliation_value, "format_only_maintenance");
+    if text(maintenance_value, "commit") != "8d94b8b9e4361863599db9a17f7badd4179b2609"
+        || text(maintenance_value, "classification")
+            != "FORMAT_ONLY_RUSTFMT_NO_CONFIG_CONTRACT_CHANGE"
+        || maintenance
+            .get("refreshed_path_count")
+            .and_then(Value::as_u64)
+            != Some(4)
+        || maintenance
+            .get("accepted_toml_input_changed")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return Err("A2 format-only source-pin maintenance receipt drifted".to_owned());
+    }
+    let maintenance_rows = array(maintenance_value, "rows");
+    let expected_maintenance_paths: BTreeSet<String> = [
+        "src/config.rs",
+        "src/runtime/env_config.rs",
+        "src/cli/atp_config.rs",
+        "src/bin/atpd.rs",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if maintenance_rows.len() != 4
+        || row_ids(maintenance_rows, "path") != expected_maintenance_paths
+    {
+        return Err("A2 must reconcile the exact four formatting-only pin drifts".to_owned());
+    }
+    for (path, previous_sha256, previous_line_count) in [
+        (
+            "src/config.rs",
+            "8315e1e2d4b0fe2223356d364c2656f2f6d4b93ca71b705a7b328ee41cb3f05e",
+            2164,
+        ),
+        (
+            "src/runtime/env_config.rs",
+            "84222f9f0f62163c47947ae7805a275c4192ffa712c6fff83c3035acae65ff90",
+            1170,
+        ),
+        (
+            "src/cli/atp_config.rs",
+            "9bb110bceb286d9dfbce19657a09b239c08de71641b5517fb3f699f35bc2ec2f",
+            1016,
+        ),
+        (
+            "src/bin/atpd.rs",
+            "aa1ff63fbd19e4252171c66fb6c02aeb8358a3c100ae73b2169db2399ee857c9",
+            2664,
+        ),
+    ] {
+        let row = find_row(maintenance_rows, "path", path);
+        let pin = find_row(top_level_pins, "path", path);
+        if text(row, "previous_sha256") != previous_sha256
+            || row.get("previous_line_count").and_then(Value::as_u64) != Some(previous_line_count)
+            || text(row, "current_sha256") != text(pin, "sha256")
+            || row.get("current_line_count").and_then(Value::as_u64)
+                != pin.get("line_count").and_then(Value::as_u64)
+        {
+            return Err(format!(
+                "A2 formatting-only maintenance row for {path} drifted"
+            ));
+        }
+    }
     for row in reconciliation_rows {
         let path = text(row, "path");
         let pin = find_row(top_level_pins, "path", path);
@@ -1354,6 +1422,11 @@ fn fail_closed_mutations_are_rejected() {
     stale_a2_pin["a2_implementation_receipt"]["source_pin_reconciliation"]["rows"][0]["current_sha256"] =
         Value::String("0".repeat(64));
     assert!(validate_inventory(&stale_a2_pin).is_err());
+
+    let mut stale_maintenance_pin = inventory.clone();
+    stale_maintenance_pin["a2_implementation_receipt"]["source_pin_reconciliation"]["format_only_maintenance"]
+        ["rows"][0]["current_sha256"] = Value::String("0".repeat(64));
+    assert!(validate_inventory(&stale_maintenance_pin).is_err());
 
     let mut changed_toml_contract = inventory;
     changed_toml_contract["post_a3_provenance_refresh"]["refreshed_paths"][0]["accepted_toml_contract_changed"] =

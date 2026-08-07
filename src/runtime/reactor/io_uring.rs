@@ -22,17 +22,78 @@ mod imp {
     #![allow(clippy::significant_drop_in_scrutinee)]
     #![allow(clippy::cast_sign_loss)]
 
-    use super::super::{Event, Events, Interest, Reactor, Source, Token};
-    use io_uring::{IoUring, opcode, types};
+    use super::super::{
+        Event, Events, Interest, IoUringCapability, IoUringCapabilityPolicy, IoUringProbeOutcome,
+        Reactor, Source, Token,
+    };
+    use io_uring::{IoUring, Probe, opcode, types};
     use parking_lot::Mutex;
     use smallvec::SmallVec;
     use std::collections::HashMap;
     use std::io;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+    use std::sync::OnceLock;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     const DEFAULT_ENTRIES: u32 = 256;
+
+    fn classify_probe_error(error: &io::Error) -> IoUringProbeOutcome {
+        match error.raw_os_error() {
+            Some(code)
+                if code == libc::EINVAL || code == libc::ENOSYS || code == libc::EOPNOTSUPP =>
+            {
+                IoUringProbeOutcome::Unsupported
+            }
+            Some(code) if code == libc::EPERM || code == libc::EACCES => {
+                IoUringProbeOutcome::Permission
+            }
+            Some(code)
+                if code == libc::ENOMEM
+                    || code == libc::ENOSPC
+                    || code == libc::EMFILE
+                    || code == libc::ENFILE
+                    || code == libc::EAGAIN =>
+            {
+                IoUringProbeOutcome::Resource
+            }
+            _ => IoUringProbeOutcome::Error,
+        }
+    }
+
+    fn probe_fixed_buffer_registration() -> IoUringProbeOutcome {
+        // The backing allocation is declared before the temporary ring so the
+        // ring is always dropped first, including an unregister-error path.
+        let mut backing = [0_u8; 8];
+        let ring = match IoUring::new(2) {
+            Ok(ring) => ring,
+            Err(error) => return classify_probe_error(&error),
+        };
+
+        let mut opcode_probe = Probe::new();
+        if let Err(error) = ring.submitter().register_probe(&mut opcode_probe) {
+            return classify_probe_error(&error);
+        }
+        if !opcode_probe.is_supported(opcode::ReadFixed::CODE)
+            || !opcode_probe.is_supported(opcode::WriteFixed::CODE)
+        {
+            return IoUringProbeOutcome::Unsupported;
+        }
+
+        let io_vec = libc::iovec {
+            iov_base: backing.as_mut_ptr().cast::<libc::c_void>(),
+            iov_len: backing.len(),
+        };
+        // SAFETY: `io_vec` points at `backing`, which remains live until after
+        // the temporary ring is unregistered or dropped on every return path.
+        if let Err(error) = unsafe { ring.submitter().register_buffers(&[io_vec]) } {
+            return classify_probe_error(&error);
+        }
+        match ring.submitter().unregister_buffers() {
+            Ok(()) => IoUringProbeOutcome::Supported,
+            Err(error) => classify_probe_error(&error),
+        }
+    }
 
     /// Validates a file descriptor for safe use in io_uring operations.
     ///
@@ -291,6 +352,7 @@ mod imp {
         /// without discarding the completions of the failing cycle.
         wake_rearm_needed: AtomicBool,
         buffer_pool: Mutex<Option<RegisteredBufferPool>>,
+        fixed_buffer_probe: OnceLock<IoUringProbeOutcome>,
     }
 
     impl std::fmt::Debug for IoUringReactor {
@@ -304,6 +366,7 @@ mod imp {
                     &self.wake_rearm_needed.load(Ordering::Relaxed),
                 )
                 .field("buffer_pool", &self.buffer_pool)
+                .field("fixed_buffer_probe", &self.fixed_buffer_probe.get())
                 .finish_non_exhaustive()
         }
     }
@@ -330,7 +393,26 @@ mod imp {
                 wake_pending: AtomicBool::new(false),
                 wake_rearm_needed: AtomicBool::new(false),
                 buffer_pool: Mutex::new(None),
+                fixed_buffer_probe: OnceLock::new(),
             })
+        }
+
+        fn fixed_buffer_probe_outcome(&self) -> IoUringProbeOutcome {
+            *self
+                .fixed_buffer_probe
+                .get_or_init(probe_fixed_buffer_registration)
+        }
+
+        pub(in crate::runtime::reactor) fn capability_probes(
+            &self,
+            policy: IoUringCapabilityPolicy,
+        ) -> [Option<IoUringProbeOutcome>; 6] {
+            let mut probes = [None; 6];
+            let capability = IoUringCapability::FixedBuffers;
+            if policy.is_requested(capability) && !policy.is_forced_off(capability) {
+                probes[capability.index()] = Some(self.fixed_buffer_probe_outcome());
+            }
+            probes
         }
 
         /// Seeds synthetic poll-registration state for test/benchmark harnesses.
@@ -595,12 +677,26 @@ mod imp {
                 .is_some_and(RegisteredBufferPool::is_exhausted)
         }
 
-        /// Checks if buffer registration is supported by the kernel.
+        /// Checks whether the kernel accepts fixed-buffer registration.
         ///
         /// # Errors
-        /// Returns error if kernel version cannot be determined.
+        /// Returns a classified error if the bounded registration probe could
+        /// not establish either support or an authoritative unsupported result.
         pub fn is_buffer_registration_supported(&self) -> io::Result<bool> {
-            Ok(true)
+            match self.fixed_buffer_probe_outcome() {
+                IoUringProbeOutcome::Supported => Ok(true),
+                IoUringProbeOutcome::Unsupported => Ok(false),
+                IoUringProbeOutcome::Permission => Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "fixed-buffer registration probe was denied",
+                )),
+                IoUringProbeOutcome::Resource => Err(io::Error::other(
+                    "fixed-buffer registration probe exhausted a bounded resource",
+                )),
+                IoUringProbeOutcome::Error => Err(io::Error::other(
+                    "fixed-buffer registration probe failed without a supported classification",
+                )),
+            }
         }
     }
 
@@ -1053,6 +1149,50 @@ mod imp {
                     None
                 }
             }
+        }
+
+        #[test]
+        fn fixed_buffer_capability_probe_is_classified_gated_and_cached() {
+            assert_eq!(
+                classify_probe_error(&io::Error::from_raw_os_error(libc::EINVAL)),
+                IoUringProbeOutcome::Unsupported
+            );
+            assert_eq!(
+                classify_probe_error(&io::Error::from_raw_os_error(libc::EPERM)),
+                IoUringProbeOutcome::Permission
+            );
+            assert_eq!(
+                classify_probe_error(&io::Error::from_raw_os_error(libc::ENOMEM)),
+                IoUringProbeOutcome::Resource
+            );
+            assert_eq!(
+                classify_probe_error(&io::Error::from_raw_os_error(libc::EIO)),
+                IoUringProbeOutcome::Error
+            );
+
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+            let capability = IoUringCapability::FixedBuffers;
+            let forced = IoUringCapabilityPolicy::new()
+                .with_requested(capability, true)
+                .with_forced_off(capability, true);
+            assert!(
+                reactor.capability_probes(forced)[capability.index()].is_none(),
+                "forced-off capability should not be probed"
+            );
+            assert!(
+                reactor.fixed_buffer_probe.get().is_none(),
+                "force-off must precede kernel work"
+            );
+
+            let requested = IoUringCapabilityPolicy::new().with_requested(capability, true);
+            let first = reactor.capability_probes(requested)[capability.index()]
+                .expect("requested fixed buffers should produce one classified outcome");
+            let second = reactor.capability_probes(requested)[capability.index()]
+                .expect("cached fixed-buffer outcome should remain observable");
+            assert_eq!(first, second);
+            assert_eq!(reactor.fixed_buffer_probe.get().copied(), Some(first));
         }
 
         #[test]

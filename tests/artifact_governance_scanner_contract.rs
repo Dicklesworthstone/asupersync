@@ -196,7 +196,7 @@ fn live_file_pin(path: &str) -> Result<(String, u64), String> {
     let bytes = std::fs::read(repo_path(path)).map_err(|error| format!("read {path}: {error}"))?;
     let text = std::str::from_utf8(&bytes).map_err(|error| format!("utf8 {path}: {error}"))?;
     Ok((
-        format!("{:x}", Sha256::digest(&bytes)),
+        hex::encode(Sha256::digest(&bytes)),
         text.lines().count() as u64,
     ))
 }
