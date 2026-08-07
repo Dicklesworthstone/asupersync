@@ -3957,11 +3957,11 @@
       "scope": "file-or-item-boundary",
       "feature_or_platform_gate": "see source cfg attributes and Cargo feature gates",
       "why_safe_rust_is_insufficient": "io_uring submission and buffer registration accept raw descriptors and pointers whose kernel-visible lifetimes cannot be expressed to Rust's borrow checker; the module also owns platform FFI for readiness, wakeup and descriptor validation.",
-      "safety_invariant": "Raw file descriptors, sockets, ring entries, and OS handles remain live for every FFI call; ownership transfers are one-way and close/dup paths avoid double-close and stale-handle reuse. The fixed-buffer and provided-group probes keep their backing allocations and nonblocking Unix stream pairs alive through terminal completions and cleanup attempts, and declare each temporary ring last so it drops before referenced backing on every path.",
-      "expected_evidence": "Category-specific evidence is defined in docs/unsafe_boundary_ledger.md. The reactor-ffi policy requires target-gated RCH compilation plus focused lifecycle tests; the fixed-buffer and provided-group source probes require an io-uring-feature compile receipt, while any nonterminal executable attempt supplies no live-host support claim.",
+      "safety_invariant": "Raw file descriptors, sockets, ring entries, and OS handles remain live for every FFI call; ownership transfers are one-way and close/dup paths avoid double-close and stale-handle reuse. The fixed-buffer and provided-group probes keep their backing allocations and nonblocking Unix stream pairs alive through terminal completions and cleanup attempts, and declare each temporary ring last so it drops before referenced backing on every path. The requested-only SQPOLL probe references no external descriptor or buffer, completes its NOP before return, and drops its temporary ring and polling thread locally.",
+      "expected_evidence": "Category-specific evidence is defined in docs/unsafe_boundary_ledger.md. The reactor-ffi policy requires target-gated RCH compilation plus focused lifecycle tests; the fixed-buffer, provided-group and requested-only SQPOLL source probes require an io-uring-feature compile receipt, while any nonterminal executable attempt supplies no live-host support claim.",
       "explicit_no_claims": [
         "This row is an inventory and schema baseline, not fresh execution proof for every platform path.",
-        "Source and contract alignment do not prove fixed-buffer completion, cancellation or cleanup on a live host.",
+        "Source and contract alignment do not prove fixed-buffer, provided-group or SQPOLL completion, cancellation or cleanup on a live host.",
         "Test-only, conformance, fuzz, and compat-boundary rows do not prove core runtime production safety."
       ],
       "operation_locators": [
@@ -3982,87 +3982,87 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 318,
+          "line": 340,
           "pattern": "if unsafe { libc::fcntl(raw_fd, libc::F_GETFD) } == -1 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 323,
+          "line": 345,
           "pattern": "let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };"
         },
         {
           "kind": "unsafe_block",
-          "line": 324,
+          "line": 346,
           "pattern": "if unsafe { libc::fstat(raw_fd, &mut stat_buf) } != 0 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 346,
+          "line": 368,
           "pattern": "let link_len = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 732,
+          "line": 765,
           "pattern": "unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 817,
+          "line": 850,
           "pattern": "match unsafe { ring.submitter().register_buffers(&io_vecs) } {"
         },
         {
           "kind": "unsafe_block",
-          "line": 955,
+          "line": 988,
           "pattern": "if unsafe { libc::fcntl(raw_fd, libc::F_GETFD) } == -1 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 978,
+          "line": 1011,
           "pattern": "if unsafe { libc::fcntl(info.raw_fd, libc::F_GETFD) } == -1 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1098,
+          "line": 1131,
           "pattern": "let _ = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1164,
+          "line": 1197,
           "pattern": "unsafe { libc::write(fd, bytes.as_ptr().cast::<libc::c_void>(), bytes.len()) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1213,
+          "line": 1246,
           "pattern": "unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1273,
+          "line": 1306,
           "pattern": "unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1338,
+          "line": 1371,
           "pattern": "let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1343,
+          "line": 1376,
           "pattern": "let owned = unsafe { OwnedFd::from_raw_fd(fd) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1915,
+          "line": 1975,
           "pattern": "let pushed = unsafe { ring.submission().push(&entry) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2433,
+          "line": 2493,
           "pattern": "let n = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2460,
+          "line": 2520,
           "pattern": "let n = unsafe {"
         }
       ]

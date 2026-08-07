@@ -89,9 +89,11 @@ The `src/runtime/reactor/io_uring.rs` row includes the capability probes' unsafe
 submission helper and the fixed-buffer registration call. Fixed and provided
 probe backing allocations and nonblocking Unix stream pairs live through every
 terminal completion and cleanup attempt; each temporary ring drops before the
-backing on every error path. An io_uring-feature RCH compile checks this source
-boundary, but a nonterminal executable attempt proves neither live-host support
-nor cleanup behavior.
+backing on every error path. The requested-only SQPOLL probe references no
+external descriptor or buffer, completes its NOP, and drops its temporary ring
+and polling thread before returning. An io_uring-feature RCH compile checks this
+source boundary, but a nonterminal executable attempt proves neither live-host
+support nor cleanup behavior.
 
 ## Review Rules
 

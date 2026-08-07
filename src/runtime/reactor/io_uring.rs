@@ -309,6 +309,28 @@ mod imp {
         }
     }
 
+    fn probe_sqpoll_ring_creation() -> IoUringProbeOutcome {
+        const PROBE_ENTRIES: u32 = 2;
+        const IDLE_MILLIS: u32 = 1;
+        const NOP_USER_DATA: u64 = 7;
+
+        let mut builder = IoUring::<squeue::Entry, cqueue::Entry>::builder();
+        builder.setup_sqpoll(IDLE_MILLIS);
+        let mut ring = match builder.build(PROBE_ENTRIES) {
+            Ok(ring) => ring,
+            Err(error) => return classify_probe_error(&error),
+        };
+        if !ring.params().is_setup_sqpoll() {
+            return IoUringProbeOutcome::Error;
+        }
+
+        let nop_entry = opcode::Nop::new().build().user_data(NOP_USER_DATA);
+        match submit_probe_entry(&mut ring, &nop_entry, NOP_USER_DATA, 0) {
+            Ok(_) => IoUringProbeOutcome::Supported,
+            Err(outcome) => outcome,
+        }
+    }
+
     /// Validates a file descriptor for safe use in io_uring operations.
     ///
     /// This prevents SQE injection attacks by rejecting file descriptors that
@@ -568,6 +590,7 @@ mod imp {
         buffer_pool: Mutex<Option<RegisteredBufferPool>>,
         fixed_buffer_probe: OnceLock<IoUringProbeOutcome>,
         provided_group_probe: OnceLock<IoUringProbeOutcome>,
+        sqpoll_probe: OnceLock<IoUringProbeOutcome>,
     }
 
     impl std::fmt::Debug for IoUringReactor {
@@ -583,6 +606,7 @@ mod imp {
                 .field("buffer_pool", &self.buffer_pool)
                 .field("fixed_buffer_probe", &self.fixed_buffer_probe.get())
                 .field("provided_group_probe", &self.provided_group_probe.get())
+                .field("sqpoll_probe", &self.sqpoll_probe.get())
                 .finish_non_exhaustive()
         }
     }
@@ -611,6 +635,7 @@ mod imp {
                 buffer_pool: Mutex::new(None),
                 fixed_buffer_probe: OnceLock::new(),
                 provided_group_probe: OnceLock::new(),
+                sqpoll_probe: OnceLock::new(),
             })
         }
 
@@ -626,6 +651,10 @@ mod imp {
                 .get_or_init(probe_provided_buffer_group_operation)
         }
 
+        fn sqpoll_probe_outcome(&self) -> IoUringProbeOutcome {
+            *self.sqpoll_probe.get_or_init(probe_sqpoll_ring_creation)
+        }
+
         pub(in crate::runtime::reactor) fn capability_probes(
             &self,
             policy: IoUringCapabilityPolicy,
@@ -638,6 +667,10 @@ mod imp {
             let capability = IoUringCapability::ProvidedGroups;
             if policy.is_requested(capability) && !policy.is_forced_off(capability) {
                 probes[capability.index()] = Some(self.provided_group_probe_outcome());
+            }
+            let capability = IoUringCapability::SqPoll;
+            if policy.is_requested(capability) && !policy.is_forced_off(capability) {
+                probes[capability.index()] = Some(self.sqpoll_probe_outcome());
             }
             probes
         }
@@ -1467,6 +1500,33 @@ mod imp {
                 .expect("cached provided-group outcome should remain observable");
             assert_eq!(first, second);
             assert_eq!(reactor.provided_group_probe.get().copied(), Some(first));
+        }
+
+        #[test]
+        fn sqpoll_capability_probe_is_gated_and_cached() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+            let capability = IoUringCapability::SqPoll;
+            let forced = IoUringCapabilityPolicy::new()
+                .with_requested(capability, true)
+                .with_forced_off(capability, true);
+            assert!(
+                reactor.capability_probes(forced)[capability.index()].is_none(),
+                "forced-off capability should not be probed"
+            );
+            assert!(
+                reactor.sqpoll_probe.get().is_none(),
+                "force-off must precede kernel work"
+            );
+
+            let requested = IoUringCapabilityPolicy::new().with_requested(capability, true);
+            let first = reactor.capability_probes(requested)[capability.index()]
+                .expect("requested SQPOLL should produce one classified outcome");
+            let second = reactor.capability_probes(requested)[capability.index()]
+                .expect("cached SQPOLL outcome should remain observable");
+            assert_eq!(first, second);
+            assert_eq!(reactor.sqpoll_probe.get().copied(), Some(first));
         }
 
         #[test]
