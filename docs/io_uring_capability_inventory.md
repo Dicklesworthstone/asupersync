@@ -15,10 +15,11 @@ an advanced io_uring data plane. `IoUringReactor` submits one-shot `PollAdd`
 and `PollRemove` operations. A classic registered-buffer pool exists beside
 that readiness path, but no live operation consumes one of its buffer IDs.
 A bounded provided-buffer-group probe now performs one selected receive and
-cleanup, but no runtime data-plane operation uses that group. Mapped buffer
-rings, multishot accept, and multishot receive are absent. A requested-only
-SQPOLL probe creates a bounded temporary ring and completes one NOP, while
-SQPOLL remains off by default and absent from the runtime data plane.
+cleanup, but no runtime data-plane operation uses that group. Separate bounded
+probes exercise multishot accept and dependency-gated multishot receive without
+wiring either into the TCP data plane. Mapped buffer rings remain absent. A
+requested-only SQPOLL probe creates a bounded temporary ring and completes one
+NOP, while SQPOLL remains off by default and absent from the runtime data plane.
 
 URING-1 freezes that boundary and the contract for evaluating later work. It
 does not change production behavior. Kernel versions are metadata; bounded
@@ -67,26 +68,26 @@ the runtime inspector and cannot establish operation support.
 | Surface | Current state | Material gap | Next owner |
 |---|---|---|---|
 | Build edge | optional feature and dependency | compilation does not establish host support | URING-2 |
-| Backend factory | try io_uring, then epoll, retain immutable selection metadata, and probe requested fixed-buffer, provided-group, and SQPOLL operations | three capability probes remain | URING-2 |
+| Backend factory | try io_uring, then epoll, retain immutable selection metadata, and probe five requested advanced operations | mapped buffer-ring probe remains | URING-2 |
 | Reactor | live one-shot readiness | no advanced data-plane operations | URING-2 onward |
-| Epoll fallback | live Linux/Android readiness backend with feature-disabled or ring-create receipt | three capability probes remain | URING-2 |
+| Epoll fallback | live Linux/Android readiness backend with feature-disabled or ring-create receipt | mapped buffer-ring probe remains | URING-2 |
 | Buffer scaffold | cached fixed-buffer and provided-group selected-receive probes, classic kernel registration, and manual IDs | probe buffers and IDs remain unused by runtime data-plane I/O | URING-3 |
 | Default file API | owned helpers offload; poll traits block directly | separate from opt-in io_uring and unsuitable as an async comparator | URING-7 |
 | File I/O | Linux-only file-local ring driven synchronously in poll | no fixed/selected buffer and unsuitable as an async comparator | URING-3 |
 | Path and directory I/O | Linux-only independent one-operation rings | outside one capability/fallback model | URING-2 |
-| TCP listener | ordinary accept plus readiness | no multishot lifecycle | URING-4 |
+| TCP listener | ordinary accept plus readiness; bounded multishot accept probe is separate | no runtime multishot lifecycle | URING-4 |
 | TCP full and owned split streams | ordinary socket I/O plus readiness | no selected-buffer leases | URING-5 |
 | TCP borrowed split streams | timer backoff or immediate re-wake | no reactor registration or advanced receive | URING-5 |
 | `Bytes` / `BytesMut` | empty/static/shared heap bytes; exclusive mutable `Vec<u8>` | no kernel-in-flight lease state | URING-3 |
 | Builder | whole-reactor enable/disable, injection, and typed per-capability policy | live operation outcomes remain | URING-2 |
 | No-reactor fallback | runtime continues with socket re-polls and retains a typed terminal snapshot | data-plane behavior remains the incumbent re-poll path | URING-2 |
-| Inspector | generic `IoStats` plus immutable driver/runtime capability snapshots | three capability probes remain | URING-2 |
+| Inspector | generic `IoStats` plus immutable driver/runtime capability snapshots | one capability probe remains | URING-2 |
 | Tests | mock pool, live readiness, filesystem lifecycle | no advanced-capability matrix | URING-7 |
 | Benchmark | synthetic completion bookkeeping | no real-socket comparison | URING-7 |
-| Boundary ledger | four relevant rows and 41 locators | 20 filesystem locators are stale; all 20 reactor locators are exact | URING-3 |
+| Boundary ledger | four relevant rows and 42 locators | 20 filesystem locators are stale; all 21 reactor locators are exact | URING-3 |
 | Historical file | excluded from live module graph | version heuristic is not authority | URING-2 |
 
-The four pinned rows contain 41 locators. All 20 reactor locators and one
+The four pinned rows contain 42 locators. All 21 reactor locators and one
 filesystem locator match exactly; 20 filesystem locators retain their pattern
 at a different line. The artifact reconciles every recorded locator to its
 current line. URING-3 owns the remaining filesystem alignment.
@@ -127,7 +128,7 @@ later one.
 | `URING-CAP-FIXED-BUFFERS` | live registration probe plus scaffold; not used by the data plane | real fixed operation, linear lease, terminal drain |
 | `URING-CAP-PROVIDED-GROUPS` | live bounded selected-receive probe; not used by the data plane | runtime lease and data-plane integration |
 | `URING-CAP-MAPPED-BUFFER-RING` | absent | bounded mapped ring, lifetime proof, selection and return |
-| `URING-CAP-MULTISHOT-ACCEPT` | absent | generation-tagged MORE/terminal state and descriptor ownership |
+| `URING-CAP-MULTISHOT-ACCEPT` | live bounded loopback probe; not used by the data plane | runtime generation tags, bounded descriptor queue and listener lifecycle |
 | `URING-CAP-MULTISHOT-RECV` | live dependency-gated multishot receive probe; not used by the data plane | runtime selected-buffer obligations, bounded queues and split-half cancellation |
 | `URING-CAP-SQPOLL` | live requested-only temporary-ring and NOP probe; off by default | operator-configurable settings, runtime ring, cost visibility and rollback |
 
@@ -243,13 +244,18 @@ control-plane state:
 - active;
 - fallback reason.
 
-This checkpoint supplies four conservative support outcomes. Requested fixed
+This checkpoint supplies five conservative support outcomes. Requested fixed
 buffers run a cached temporary-ring probe that checks fixed read/write opcodes,
 registers one eight-byte buffer, completes a fixed write and read through a
 nonblocking Unix stream pair, verifies both completions and the returned data,
 then unregisters. Requested provided groups run a separate cached temporary
 ring that provides one buffer, completes a selected receive, verifies the
 buffer ID and bytes, re-provides the consumed buffer, and removes the group.
+Requested multishot accept binds one bounded loopback listener, connects two
+clients, immediately gives each distinct accepted descriptor one RAII owner,
+requires `MORE` on both accept completions, explicitly cancels the request, and
+observes its terminal completion. Unexpected positive completions are also
+owned before the probe fails closed, so no accepted descriptor is leaked.
 Requested multishot receive first requires that same provided-group capability
 to be requested and independently proven. Its separate cached ring then
 receives two exact payloads into two distinct selected buffers, requires `MORE`
@@ -257,8 +263,8 @@ on both data completions, submits an explicit cancellation, observes the cancel
 and terminal completions, returns both buffers, and removes the group.
 Requested SQPOLL creates a separate two-entry ring with a one-millisecond idle,
 completes one NOP, and drops the ring and its polling thread. The runtime data
-plane uses none of the probe buffers and does not enable SQPOLL; the other two
-capabilities still have no authoritative live outcome. Any requested capability
+plane uses none of these probe operations and does not enable SQPOLL; mapped
+buffer rings still have no authoritative live outcome. Any requested capability
 without an outcome fails closed with `URING-FB-PROBE-ERROR`; no advanced
 capability is requested or active by default.
 
@@ -340,13 +346,15 @@ checkpoint added the bounded provided-group selected-receive and cleanup probe.
 The SQPOLL checkpoint added an off-by-default, requested-only probe that
 creates a two-entry ring, completes one NOP, and drops the ring and polling
 thread before returning its cached classified outcome. The current checkpoint
-adds the dependency-gated multishot receive operation probe, including two
-distinct selected buffers, `MORE`, explicit cancellation, terminal drain,
-buffer return, and group removal.
+adds the bounded multishot accept operation probe: two distinct RAII-owned
+accepted descriptors with `MORE`, explicit cancellation, terminal drain, and
+fail-closed ownership of any unexpected positive completion. The preceding
+checkpoint added dependency-gated multishot receive with two distinct selected
+buffers, `MORE`, cancellation, terminal drain, buffer return, and group removal.
 An RCH clean-overlay feature compile on `hz2` used project hash
-`abd5f27f7d240023`, base `6211ab5cc22ef68dbe3c4c4da1bb17160240e982`,
+`30d538e3f406ef90`, base `9a3d6b9c5ed4d3005eb7935a241e07a0224d941e`,
 overlay fingerprint
-`37504271985ea1cad0aa420a4f8ef20a2d13274f24ad6ab57da383e0cfb70a82`,
+`26f22fd6237fd2fa0194f974ff7c15123a3eba4715c5bef2b5b845323c217361`,
 and exited zero for `cargo check -p asupersync --lib --features io-uring`.
 A focused `terminal_` test attempt under project hash `6605dee8352b6c69`
 stopped emitting output after compiling the edited library and the local wait
@@ -355,7 +363,7 @@ produced no terminal test result, so this checkpoint makes no test claim and no
 live-kernel outcome claim.
 
 Accordingly, this inventory and checkpoint do not prove focused test success,
-live-host support, the other two operation probes, advanced data-plane
+live-host support, the remaining mapped-buffer operation probe, advanced data-plane
 behavior, lifecycle correctness, performance,
 broad workspace health, release readiness, production-on-by-default status, or
 fleet availability. The checkpoint changes control-plane metadata only and

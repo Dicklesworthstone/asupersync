@@ -31,6 +31,7 @@ mod imp {
     use smallvec::SmallVec;
     use std::collections::HashMap;
     use std::io::{self, Write};
+    use std::net::{Ipv4Addr, TcpListener, TcpStream};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
     use std::os::unix::net::UnixStream;
     use std::sync::OnceLock;
@@ -108,6 +109,20 @@ mod imp {
             completion.result(),
             completion.flags(),
         ))
+    }
+
+    fn own_accepted_fd(result: i32) -> Result<OwnedFd, IoUringProbeOutcome> {
+        if result < 0 {
+            return Err(result
+                .checked_neg()
+                .map_or(IoUringProbeOutcome::Error, |errno| {
+                    classify_probe_error(&io::Error::from_raw_os_error(errno))
+                }));
+        }
+        // SAFETY: a successful accept completion returns a new descriptor
+        // owned by the caller. Wrapping it immediately gives every later
+        // validation and early-return path exactly one closing owner.
+        Ok(unsafe { OwnedFd::from_raw_fd(result) })
     }
 
     fn submit_probe_entry(
@@ -319,6 +334,130 @@ mod imp {
             (Ok(()), Ok(())) => IoUringProbeOutcome::Supported,
             (Err(outcome), _) => outcome,
             (Ok(()), Err(outcome)) => outcome,
+        }
+    }
+
+    fn probe_multishot_accept_operation() -> IoUringProbeOutcome {
+        const ACCEPT_USER_DATA: u64 = 12;
+        const CANCEL_USER_DATA: u64 = 13;
+
+        // The listener precedes the temporary ring so the ring always drops
+        // first if an uncertain multishot request remains in flight.
+        let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, 0)) {
+            Ok(listener) => listener,
+            Err(error) => return classify_probe_error(&error),
+        };
+        if let Err(error) = listener.set_nonblocking(true) {
+            return classify_probe_error(&error);
+        }
+        let address = match listener.local_addr() {
+            Ok(address) => address,
+            Err(error) => return classify_probe_error(&error),
+        };
+
+        let mut ring = match IoUring::new(8) {
+            Ok(ring) => ring,
+            Err(error) => return classify_probe_error(&error),
+        };
+        let mut opcode_probe = Probe::new();
+        if let Err(error) = ring.submitter().register_probe(&mut opcode_probe) {
+            return classify_probe_error(&error);
+        }
+        if !opcode_probe.is_supported(opcode::AcceptMulti::CODE)
+            || !opcode_probe.is_supported(opcode::AsyncCancel::CODE)
+        {
+            return IoUringProbeOutcome::Unsupported;
+        }
+
+        let accept_entry = opcode::AcceptMulti::new(types::Fd(listener.as_raw_fd()))
+            .flags(libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC)
+            .build()
+            .user_data(ACCEPT_USER_DATA);
+        if let Err(outcome) = push_probe_entry(&mut ring, &accept_entry) {
+            return outcome;
+        }
+        if let Err(error) = ring.submit() {
+            return classify_probe_error(&error);
+        }
+
+        let mut clients = Vec::with_capacity(2);
+        let mut accepted = Vec::with_capacity(2);
+        for _ in 0..2 {
+            let client = match TcpStream::connect_timeout(&address, Duration::from_secs(1)) {
+                Ok(client) => client,
+                Err(error) => return classify_probe_error(&error),
+            };
+            clients.push(client);
+
+            let (user_data, result, flags) = match wait_probe_completion(&mut ring) {
+                Ok(completion) => completion,
+                Err(outcome) => return outcome,
+            };
+            if user_data != ACCEPT_USER_DATA {
+                if result >= 0 {
+                    let _unexpected = match own_accepted_fd(result) {
+                        Ok(fd) => fd,
+                        Err(outcome) => return outcome,
+                    };
+                }
+                return IoUringProbeOutcome::Error;
+            }
+            let accepted_fd = match own_accepted_fd(result) {
+                Ok(fd) => fd,
+                Err(outcome) => return outcome,
+            };
+            if !cqueue::more(flags)
+                || accepted
+                    .iter()
+                    .any(|existing: &OwnedFd| existing.as_raw_fd() == accepted_fd.as_raw_fd())
+            {
+                return IoUringProbeOutcome::Error;
+            }
+            accepted.push(accepted_fd);
+        }
+
+        let cancel_entry = opcode::AsyncCancel::new(ACCEPT_USER_DATA)
+            .build()
+            .user_data(CANCEL_USER_DATA);
+        if let Err(outcome) = push_probe_entry(&mut ring, &cancel_entry) {
+            return outcome;
+        }
+        if let Err(error) = ring.submit_and_wait(2) {
+            return classify_probe_error(&error);
+        }
+
+        let mut cancel_seen = false;
+        let mut terminal_seen = false;
+        for _ in 0..2 {
+            let Some(completion) = ring.completion().next() else {
+                return IoUringProbeOutcome::Error;
+            };
+            if completion.user_data() == ACCEPT_USER_DATA && completion.result() >= 0 {
+                let _unexpected = match own_accepted_fd(completion.result()) {
+                    Ok(fd) => fd,
+                    Err(outcome) => return outcome,
+                };
+                return IoUringProbeOutcome::Error;
+            }
+            match completion.user_data() {
+                CANCEL_USER_DATA
+                    if completion.result() == 0 && !cqueue::more(completion.flags()) =>
+                {
+                    cancel_seen = true;
+                }
+                ACCEPT_USER_DATA
+                    if completion.result() == -libc::ECANCELED
+                        && !cqueue::more(completion.flags()) =>
+                {
+                    terminal_seen = true;
+                }
+                _ => return IoUringProbeOutcome::Error,
+            }
+        }
+        if cancel_seen && terminal_seen && accepted.len() == 2 && clients.len() == 2 {
+            IoUringProbeOutcome::Supported
+        } else {
+            IoUringProbeOutcome::Error
         }
     }
 
@@ -773,6 +912,7 @@ mod imp {
         buffer_pool: Mutex<Option<RegisteredBufferPool>>,
         fixed_buffer_probe: OnceLock<IoUringProbeOutcome>,
         provided_group_probe: OnceLock<IoUringProbeOutcome>,
+        multishot_accept_probe: OnceLock<IoUringProbeOutcome>,
         multishot_recv_probe: OnceLock<IoUringProbeOutcome>,
         sqpoll_probe: OnceLock<IoUringProbeOutcome>,
     }
@@ -790,6 +930,7 @@ mod imp {
                 .field("buffer_pool", &self.buffer_pool)
                 .field("fixed_buffer_probe", &self.fixed_buffer_probe.get())
                 .field("provided_group_probe", &self.provided_group_probe.get())
+                .field("multishot_accept_probe", &self.multishot_accept_probe.get())
                 .field("multishot_recv_probe", &self.multishot_recv_probe.get())
                 .field("sqpoll_probe", &self.sqpoll_probe.get())
                 .finish_non_exhaustive()
@@ -820,6 +961,7 @@ mod imp {
                 buffer_pool: Mutex::new(None),
                 fixed_buffer_probe: OnceLock::new(),
                 provided_group_probe: OnceLock::new(),
+                multishot_accept_probe: OnceLock::new(),
                 multishot_recv_probe: OnceLock::new(),
                 sqpoll_probe: OnceLock::new(),
             })
@@ -841,6 +983,12 @@ mod imp {
             *self
                 .multishot_recv_probe
                 .get_or_init(probe_multishot_recv_operation)
+        }
+
+        fn multishot_accept_probe_outcome(&self) -> IoUringProbeOutcome {
+            *self
+                .multishot_accept_probe
+                .get_or_init(probe_multishot_accept_operation)
         }
 
         fn sqpoll_probe_outcome(&self) -> IoUringProbeOutcome {
@@ -874,6 +1022,10 @@ mod imp {
                         IoUringProbeOutcome::Dependency
                     },
                 );
+            }
+            let capability = IoUringCapability::MultishotAccept;
+            if policy.is_requested(capability) && !policy.is_forced_off(capability) {
+                probes[capability.index()] = Some(self.multishot_accept_probe_outcome());
             }
             let capability = IoUringCapability::SqPoll;
             if policy.is_requested(capability) && !policy.is_forced_off(capability) {
@@ -1749,6 +1901,27 @@ mod imp {
                 assert_eq!(first, IoUringProbeOutcome::Dependency);
                 assert!(reactor.multishot_recv_probe.get().is_none());
             }
+        }
+
+        #[test]
+        fn multishot_accept_capability_probe_is_gated_and_cached() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+            let capability = IoUringCapability::MultishotAccept;
+            let forced = IoUringCapabilityPolicy::new()
+                .with_requested(capability, true)
+                .with_forced_off(capability, true);
+            assert!(reactor.capability_probes(forced)[capability.index()].is_none());
+            assert!(reactor.multishot_accept_probe.get().is_none());
+
+            let requested = IoUringCapabilityPolicy::new().with_requested(capability, true);
+            let first = reactor.capability_probes(requested)[capability.index()]
+                .expect("requested multishot accept should produce one classified outcome");
+            let second = reactor.capability_probes(requested)[capability.index()]
+                .expect("cached multishot accept outcome should remain observable");
+            assert_eq!(first, second);
+            assert_eq!(reactor.multishot_accept_probe.get().copied(), Some(first));
         }
 
         #[test]
