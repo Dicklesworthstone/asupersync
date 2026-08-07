@@ -588,12 +588,7 @@ mod tests {
         }
 
         fn find_pivot(&self, col: usize) -> Option<usize> {
-            for row in col..self.matrix.len() {
-                if self.matrix[row][col].0 != 0 {
-                    return Some(row);
-                }
-            }
-            None
+            (col..self.matrix.len()).find(|&row| self.matrix[row][col].0 != 0)
         }
 
         fn swap_rows(&mut self, row1: usize, row2: usize) {
@@ -1054,9 +1049,8 @@ mod tests {
                 }
 
                 // All reconstructions should be identical (if any succeeded)
-                let successful_reconstructions: Vec<_> = reconstruction_results.into_iter()
-                    .filter_map(|r| r)
-                    .collect();
+                let successful_reconstructions: Vec<_> =
+                    reconstruction_results.into_iter().flatten().collect();
 
                 if successful_reconstructions.len() > 1 {
                     let first_reconstruction = &successful_reconstructions[0];

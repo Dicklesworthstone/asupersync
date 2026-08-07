@@ -317,7 +317,7 @@ mod tests {
             self.monitors.insert(monitor_ref, monitor);
             self.watchers
                 .entry(monitored_id)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(monitor_ref);
 
             monitor_ref
@@ -502,14 +502,8 @@ mod tests {
             };
 
             self.links.insert(link_id, link);
-            self.task_links
-                .entry(task_a)
-                .or_insert_with(Vec::new)
-                .push(link_id);
-            self.task_links
-                .entry(task_b)
-                .or_insert_with(Vec::new)
-                .push(link_id);
+            self.task_links.entry(task_a).or_default().push(link_id);
+            self.task_links.entry(task_b).or_default().push(link_id);
 
             link_id
         }
@@ -716,7 +710,7 @@ mod tests {
                 // Group messages by priority
                 let mut priority_groups: BTreeMap<u8, Vec<&MockMessage>> = BTreeMap::new();
                 for msg in &successfully_sent {
-                    priority_groups.entry(msg.priority).or_insert_with(Vec::new).push(msg);
+                    priority_groups.entry(msg.priority).or_default().push(msg);
                 }
 
                 // Process all messages
@@ -728,7 +722,7 @@ mod tests {
                 // Verify FIFO ordering within each priority group
                 let mut processed_by_priority: BTreeMap<u8, Vec<&MockMessage>> = BTreeMap::new();
                 for msg in &processed {
-                    processed_by_priority.entry(msg.priority).or_insert_with(Vec::new).push(msg);
+                    processed_by_priority.entry(msg.priority).or_default().push(msg);
                 }
 
                 for (priority, original_msgs) in &priority_groups {
@@ -1077,12 +1071,10 @@ mod tests {
                     let notifications = monitor_set.get_sorted_notifications();
 
                     // There should be at least one notification for task B's failure observable by task A
-                    let a_notifications: Vec<_> = notifications.iter()
-                        .filter(|n| n.monitored == task_b)
-                        .collect();
+                    let has_a_notification = notifications.iter().any(|n| n.monitored == task_b);
 
                     prop_assert!(
-                        !a_notifications.is_empty(),
+                        has_a_notification,
                         "Task A should receive notification about B's failure in transitive chain: A={}, B={}, C={}",
                         task_a, task_b, task_c
                     );
@@ -1110,10 +1102,12 @@ mod tests {
 
                 // Cleanup consistency: if a task has no watchers, it shouldn't have monitors either
                 if !has_a_watchers {
-                    let a_monitors: Vec<_> = monitor_set.monitors.values()
-                        .filter(|m| m.monitored_id == *task_a).collect();
+                    let has_a_monitor = monitor_set
+                        .monitors
+                        .values()
+                        .any(|m| m.monitored_id == *task_a);
                     prop_assert!(
-                        a_monitors.is_empty(),
+                        !has_a_monitor,
                         "Task A should have no monitors if not in watchers: task={}",
                         task_a
                     );
@@ -1557,12 +1551,12 @@ mod tests {
                 // Test A → B propagation
                 link_set.propagate_exit(task_a, MockDownReason::Error("test_a_failure".to_string()), *failure_vt);
 
-                let a_to_b_signals: Vec<_> = link_set.exit_signals.iter()
+                let a_to_b_signal_count = link_set.exit_signals.iter()
                     .filter(|s| s.source_task == task_a && s.target_task == task_b && s.link_id == link_id)
-                    .collect();
+                    .count();
 
                 prop_assert_eq!(
-                    a_to_b_signals.len(), 1,
+                    a_to_b_signal_count, 1,
                     "Should have exactly one exit signal from A to B: A={}, B={}, link={}",
                     task_a, task_b, link_id
                 );
@@ -1581,12 +1575,12 @@ mod tests {
 
                 link_set.propagate_exit(task_b, MockDownReason::Error("test_b_failure".to_string()), failure_vt + 100);
 
-                let b_to_a_signals: Vec<_> = link_set.exit_signals.iter()
+                let b_to_a_signal_count = link_set.exit_signals.iter()
                     .filter(|s| s.source_task == task_b && s.target_task == task_a && s.link_id == new_link_id)
-                    .collect();
+                    .count();
 
                 prop_assert_eq!(
-                    b_to_a_signals.len(), 1,
+                    b_to_a_signal_count, 1,
                     "Should have exactly one exit signal from B to A: A={}, B={}, link={}",
                     task_a, task_b, new_link_id
                 );
@@ -1624,14 +1618,14 @@ mod tests {
             // A fails → B should receive signal
             link_set.propagate_exit(asym_task_a, MockDownReason::Error("asymmetric test".to_string()), 9000);
 
-            let asym_signals: Vec<_> = link_set.exit_signals.iter()
+            let asym_signal_count = link_set.exit_signals.iter()
                 .filter(|s| s.source_task == asym_task_a && s.target_task == asym_task_b)
-                .collect();
+                .count();
 
             // With Propagate policy, B should receive the signal
             // (Though with Trap policy, B would convert it to a message rather than propagate further)
             prop_assert!(
-                asym_signals.len() <= 1, // 0 if trapped, 1 if propagated
+                asym_signal_count <= 1, // 0 if trapped, 1 if propagated
                 "Asymmetric link should respect policy differences: A→B propagate, B traps"
             );
         });
@@ -1682,7 +1676,7 @@ mod tests {
                 // Start the process
                 process.start();
                 prop_assert_eq!(
-                    process.state.clone(), MockProcessState::Running,
+                    process.state, MockProcessState::Running,
                     "Process should be in Running state after start: pid={}",
                     process.pid
                 );
@@ -1744,8 +1738,9 @@ mod tests {
             // Test deterministic behavior for identical commands
             let mut command_groups: BTreeMap<(&str, &[String]), Vec<&MockProcess>> = BTreeMap::new();
             for process in &processes {
-                command_groups.entry((&process.command, &process.args))
-                    .or_insert_with(Vec::new)
+                command_groups
+                    .entry((&process.command, &process.args))
+                    .or_default()
                     .push(process);
             }
 
@@ -1767,7 +1762,7 @@ mod tests {
                         // State progression should be consistent
                         if first_process.state == MockProcessState::Finished {
                             prop_assert_eq!(
-                                other_process.state.clone(), MockProcessState::Finished,
+                                other_process.state, MockProcessState::Finished,
                                 "Identical commands should reach same final state: cmd='{}' args={:?}",
                                 command, args
                             );
@@ -1810,7 +1805,7 @@ mod tests {
 
                 let idx = process_idx % processes.len();
                 let current_time = processes[idx].spawn_time + time_offset;
-                let original_state = processes[idx].state.clone();
+                let original_state = processes[idx].state;
 
                 match transition_type % 4 {
                     0 => {
@@ -1846,7 +1841,7 @@ mod tests {
                     }
                     3 => {
                         // Invalid transition attempt (should be rejected)
-                        let pre_transition_state = processes[idx].state.clone();
+                        let pre_transition_state = processes[idx].state;
 
                         // Try to transition from terminal state (should not change)
                         if matches!(processes[idx].state, MockProcessState::Finished | MockProcessState::Failed) {

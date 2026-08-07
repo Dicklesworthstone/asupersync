@@ -490,9 +490,9 @@ mod tests {
                 }
 
                 // Verify backpressure behavior
-                let result = if message_count > capacity && backpressure_hits > 0 {
-                    Ok(())
-                } else if message_count <= capacity && backpressure_hits == 0 {
+                let backpressure_is_correct = (message_count > capacity && backpressure_hits > 0)
+                    || (message_count <= capacity && backpressure_hits == 0);
+                let result = if backpressure_is_correct {
                     Ok(())
                 } else {
                     Err(format!(
@@ -917,7 +917,7 @@ mod tests {
         println!("| CHN-2.2 | SHOULD | PASS | Broadcast lag tracking accuracy |");
         println!("| CHN-3.1 | MUST | PASS | Watch latest value semantics |");
         println!("| CHN-3.2 | SHOULD | PASS | Watch change notification consistency |");
-        println!("");
+        println!();
         println!("Overall Conformance: PASS");
         println!("Message Ordering: GUARANTEED");
         println!("Channel Invariants: VERIFIED");

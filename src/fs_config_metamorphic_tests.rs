@@ -73,7 +73,7 @@ mod fs_config_tests {
                 if let Some(temp_dir) = &self.temp_dir {
                     canonical.push(temp_dir);
                 } else {
-                    canonical.push("/mock_root");
+                    canonical = PathBuf::from("/mock_root");
                 }
             }
 
@@ -194,6 +194,9 @@ mod fs_config_tests {
     // ═══ Deterministic Config Parser Model ═══════════════════════════════════════
 
     /// Deterministic configuration parser for testing config metamorphic relations.
+    // The only unsafe methods are test-scoped environment mutation helpers;
+    // deserialization does not invoke them or rely on an unsafe invariant.
+    #[allow(clippy::unsafe_derive_deserialize)]
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
     pub struct MockRuntimeConfig {
         pub worker_threads: usize,
@@ -866,7 +869,7 @@ mod fs_config_tests {
             // MR1: Path canonicalization from config
             let config_file_path = parsed_config.custom_settings
                 .get("config_file")
-                .map(|p| PathBuf::from(p))
+                .map(PathBuf::from)
                 .unwrap();
 
             let canonical_config_path = mock_vfs.canonicalize(&config_file_path).unwrap();

@@ -731,9 +731,7 @@ mod tests {
                 result_2.is_err(),
                 "outer_content_type_mutation_rejected",
                 true,
-                format!(
-                    "Mutating outer record ContentType from 0x17 to 0x16 must produce a parse/decrypt error post-handshake, got Ok"
-                )
+                "Mutating outer record ContentType from 0x17 to 0x16 must produce a parse/decrypt error post-handshake, got Ok".to_string()
             );
         });
 
@@ -777,9 +775,7 @@ mod tests {
                 result.is_err(),
                 "post_handshake_unencrypted_app_data_rejected",
                 true,
-                format!(
-                    "Post-handshake injection of plaintext application_data record without valid AEAD must fail decryption, got Ok"
-                )
+                "Post-handshake injection of plaintext application_data record without valid AEAD must fail decryption, got Ok".to_string()
             );
 
             // Test that early data records have proper length limits

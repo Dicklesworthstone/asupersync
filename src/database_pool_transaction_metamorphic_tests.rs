@@ -135,8 +135,7 @@ mod tests {
 
         fn normalize_sql(sql: &str) -> String {
             sql.trim()
-                .replace('\n', " ")
-                .replace('\t', " ")
+                .replace(['\n', '\t'], " ")
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ")
@@ -145,10 +144,7 @@ mod tests {
 
         pub fn parse_and_serialize(&self) -> String {
             // Deterministic implementation: parse SQL and serialize back.
-            let parsed = Self::normalize_sql(&self.sql);
-            parsed
-                .replace(" WHERE ", " WHERE ")
-                .replace(" AND ", " AND ")
+            Self::normalize_sql(&self.sql)
         }
 
         pub fn bind_parameters(&self, params: &[MockValue]) -> Result<String, String> {
@@ -955,7 +951,7 @@ mod tests {
                     if can_see_changes {
                         prop_assert!(tx2_committed.committed);
                         // Additional constraint: transaction ordering
-                        prop_assert!(tx1.id < tx2_committed.id || tx1.id > tx2_committed.id);
+                        prop_assert!(tx1.id != tx2_committed.id);
                     }
                 }
             }

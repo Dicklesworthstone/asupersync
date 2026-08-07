@@ -491,7 +491,7 @@ mod tests {
 
             // Should move approximately 1/4 of keys (100 keys / 4 nodes = 25)
             // Allow some variance due to hash distribution
-            if moved_keys < 15 || moved_keys > 35 {
+            if !(15..=35).contains(&moved_keys) {
                 return TestStatus::Fail(format!(
                     "Unexpected rebalancing: {} keys moved",
                     moved_keys

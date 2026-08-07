@@ -538,7 +538,7 @@ mod tests {
             0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
             0x32, 0x10,
         ];
-        let trace_id_hex = hex::encode(&trace_id_bytes);
+        let trace_id_hex = hex::encode(trace_id_bytes);
 
         let events_data = vec![
             (
@@ -611,7 +611,7 @@ mod tests {
         output.push_str("=====================================\n");
         output.push_str(&format!("Trace ID: {}\n", trace_id_hex));
         output.push_str(&format!("Event Count: {}\n", events_data.len()));
-        output.push_str("\n");
+        output.push('\n');
 
         let mut total_bytes = 0;
         for (i, (event_id, event_type, payload)) in events_data.iter().enumerate() {
@@ -634,7 +634,7 @@ mod tests {
             output.push_str(&format!("Event {}: {} ({})\n", i + 1, event_type, event_id));
             output.push_str(&format!("Bytes: {}\n", event_hex));
             output.push_str(&format!("Length: {} bytes\n", event_canonical_bytes.len()));
-            output.push_str("\n");
+            output.push('\n');
 
             total_bytes += event_canonical_bytes.len();
         }
@@ -713,19 +713,19 @@ mod tests {
         output.push_str("Chain ID: golden_evidence_chain\n");
         output.push_str(&format!("Evidence Count: {}\n", evidence_entries.len()));
         output.push_str(&format!("Root Hash: {}\n", root_hash));
-        output.push_str("\n");
+        output.push('\n');
 
         output.push_str("Proof Structure:\n");
         for (i, node_hash) in proof_nodes.iter().enumerate() {
             output.push_str(&format!("  Node {}: {}\n", i, node_hash));
         }
-        output.push_str("\n");
+        output.push('\n');
 
         output.push_str("Evidence Hashes:\n");
         for (i, evidence_hash) in evidence_hashes.iter().enumerate() {
             output.push_str(&format!("  Evidence {}: {}\n", i, evidence_hash));
         }
-        output.push_str("\n");
+        output.push('\n');
 
         // Generate proof bytes representation
         let mut proof_bytes = Vec::new();
@@ -761,37 +761,37 @@ mod tests {
         let n = 12; // Total symbols (K + overhead)
         let symbol_size = 64; // bytes per symbol
 
-        output.push_str(&format!("Decoder Parameters:\n"));
+        output.push_str("Decoder Parameters:\n");
         output.push_str(&format!("K (source symbols): {}\n", k));
         output.push_str(&format!("N (total symbols): {}\n", n));
         output.push_str(&format!("Symbol size: {} bytes\n", symbol_size));
-        output.push_str("\n");
+        output.push('\n');
 
         // Deterministic systematic symbol reception.
         output.push_str("Systematic Symbol Reception:\n");
         for i in 0..k {
             let symbol_id = i;
             let symbol_data = format!("SYM_{:02X}", i * 17); // Deterministic data
-            let symbol_bytes = symbol_data.as_bytes().len();
+            let symbol_bytes = symbol_data.len();
             output.push_str(&format!(
                 "Symbol {}: {} ({} bytes)\n",
                 symbol_id, symbol_data, symbol_bytes
             ));
         }
-        output.push_str("\n");
+        output.push('\n');
 
         // Deterministic repair symbol reception.
         output.push_str("Repair Symbol Reception:\n");
         for i in k..n {
             let symbol_id = i;
             let repair_data = format!("REP_{:02X}", (i - k) * 23); // Deterministic repair data
-            let repair_bytes = repair_data.as_bytes().len();
+            let repair_bytes = repair_data.len();
             output.push_str(&format!(
                 "Symbol {}: {} ({} bytes)\n",
                 symbol_id, repair_data, repair_bytes
             ));
         }
-        output.push_str("\n");
+        output.push('\n');
 
         // Decode process model.
         output.push_str("Decode Process:\n");
@@ -812,13 +812,13 @@ mod tests {
                 step, recovered_symbol
             ));
         }
-        output.push_str("\n");
+        output.push('\n');
 
         // Decode statistics
         output.push_str("Decode Statistics:\n");
         output.push_str(&format!("Total operations: {}\n", k * (k + 1) / 2));
         output.push_str(&format!("Symbols processed: {}\n", n));
-        output.push_str(&format!("Decode success: true\n"));
+        output.push_str("Decode success: true\n");
         output.push_str(&format!(
             "Recovery efficiency: {:.2}%\n",
             (k as f64 / n as f64) * 100.0
@@ -898,7 +898,7 @@ mod tests {
                 indent, timestamp, reason, component, description, depth
             ));
         }
-        output.push_str("\n");
+        output.push('\n');
 
         // Restart tree analysis
         output.push_str("Restart Tree Analysis:\n");
@@ -907,7 +907,7 @@ mod tests {
         output.push_str("Max Depth: 4\n");
         output.push_str("Recovery Strategy: one_for_all\n");
         output.push_str("Total Restart Time: 47s\n");
-        output.push_str("\n");
+        output.push('\n');
 
         // Canonical restart order
         output.push_str("Canonical Restart Order:\n");
@@ -925,7 +925,7 @@ mod tests {
         for line in restart_order {
             output.push_str(&format!("{}\n", line));
         }
-        output.push_str("\n");
+        output.push('\n');
 
         // Restart metadata
         output.push_str("Restart Metadata:\n");
@@ -954,7 +954,7 @@ mod tests {
         output.push_str("Target: x86_64-unknown-linux-gnu\n");
         output.push_str("Build Profile: release\n");
         output.push_str("Features: [\"metrics\", \"tracing-integration\", \"test-internals\"]\n");
-        output.push_str("\n");
+        output.push('\n');
 
         // Runtime diagnostics
         output.push_str("## Runtime Diagnostics\n");
@@ -963,19 +963,19 @@ mod tests {
         output.push_str("├─ Queue Depth: 12\n");
         output.push_str("├─ Pending Tasks: 43\n");
         output.push_str("└─ Last Heartbeat: 2ms ago\n");
-        output.push_str("\n");
+        output.push('\n');
         output.push_str("Region Manager: HEALTHY\n");
         output.push_str("├─ Active Regions: 15\n");
         output.push_str("├─ Pending Close: 2\n");
         output.push_str("├─ Memory Usage: 2.4 MB\n");
         output.push_str("└─ Leak Detection: PASSED\n");
-        output.push_str("\n");
+        output.push('\n');
         output.push_str("Obligation Tracker: HEALTHY\n");
         output.push_str("├─ Active Obligations: 67\n");
         output.push_str("├─ Pending Commits: 3\n");
         output.push_str("├─ Failed Aborts: 0\n");
         output.push_str("└─ Leak Detection: PASSED\n");
-        output.push_str("\n");
+        output.push('\n');
 
         // Subsystem status
         output.push_str("## Subsystem Status\n");
@@ -997,7 +997,7 @@ mod tests {
             output.push_str(&format!("{}: {}\n", name, status));
             output.push_str(&format!("├─ Implementation: {}\n", variant));
             output.push_str(&format!("└─ Current Load: {}\n", details));
-            output.push_str("\n");
+            output.push('\n');
         }
 
         // Performance metrics
@@ -1007,7 +1007,7 @@ mod tests {
         output.push_str("Memory Allocation Rate: 12.4 MB/sec\n");
         output.push_str("GC Pressure: LOW (0.2% overhead)\n");
         output.push_str("Lock Contention: 0.01% (23 contentions/sec)\n");
-        output.push_str("\n");
+        output.push('\n');
 
         // Recommendations
         output.push_str("## Recommendations\n");
@@ -1016,7 +1016,7 @@ mod tests {
         output.push_str("✓ Cancellation protocol functioning correctly\n");
         output.push_str("! Consider increasing worker pool size for higher throughput\n");
         output.push_str("! Monitor lock contention under heavy load\n");
-        output.push_str("\n");
+        output.push('\n');
 
         // Report metadata
         output.push_str("## Report Metadata\n");
@@ -1075,7 +1075,7 @@ mod tests {
             output.push_str(&format!("{}: {}\n", frame_type, hex_string));
             output.push_str(&format!("Length: {} bytes\n", frame_bytes.len()));
         }
-        output.push_str("\n");
+        output.push('\n');
 
         // NATS frame serialization. Cast each `b"..."` byte literal to
         // `&[u8]` so the vec doesn't lock to the first element's array size
@@ -1094,7 +1094,7 @@ mod tests {
             output.push_str(&format!("{}: {}\n", frame_type, hex_string));
             output.push_str(&format!("Length: {} bytes\n", frame_bytes.len()));
         }
-        output.push_str("\n");
+        output.push('\n');
 
         // Redis frame serialization (RESP protocol). Same `&[u8]` annotation
         // as nats_frames so the differently-sized byte literals coexist.
@@ -1114,7 +1114,7 @@ mod tests {
             output.push_str(&format!("{}: {}\n", frame_type, hex_string));
             output.push_str(&format!("Length: {} bytes\n", frame_bytes.len()));
         }
-        output.push_str("\n");
+        output.push('\n');
 
         // Frame analysis summary
         output.push_str("## Frame Analysis Summary\n");
@@ -1149,7 +1149,7 @@ mod tests {
         for (name, address, weight) in &nodes {
             output.push_str(&format!("{}: {} (weight: {})\n", name, address, weight));
         }
-        output.push_str("\n");
+        output.push('\n');
 
         // Virtual node distribution
         output.push_str("## Virtual Node Distribution\n");
@@ -1174,7 +1174,7 @@ mod tests {
             "... ({} more virtual nodes)\n",
             virtual_nodes.len() - 10
         ));
-        output.push_str("\n");
+        output.push('\n');
 
         // Key distribution model.
         output.push_str("## Key Distribution Model\n");
@@ -1197,7 +1197,7 @@ mod tests {
                 key, key_hash, assigned_node
             ));
         }
-        output.push_str("\n");
+        output.push('\n');
 
         // Ring statistics
         output.push_str("## Ring Statistics\n");
@@ -1337,7 +1337,7 @@ debug_mode = false
 "#;
 
         output.push_str(toml_config);
-        output.push_str("\n");
+        output.push('\n');
 
         // Configuration validation summary
         output.push_str("# Configuration Validation Summary\n");
@@ -1449,7 +1449,7 @@ debug_mode = false
             output.push_str(&format!("{}: {}\n", message_type, hex_string));
             output.push_str(&format!("Length: {} bytes\n", message_bytes.len()));
         }
-        output.push_str("\n");
+        output.push('\n');
 
         // Handshake transcript analysis
         output.push_str("## Handshake Transcript Analysis\n");
@@ -1557,7 +1557,7 @@ debug_mode = false
             let index = i + 1;
             output.push_str(&format!("{:2}: {} = {}\n", index, name, value));
         }
-        output.push_str("\n");
+        output.push('\n');
 
         // HPACK encoding examples
         output.push_str("## HPACK Encoding Examples\n");
@@ -1610,7 +1610,7 @@ debug_mode = false
             output.push_str(&format!("{}: {} = {}\n", encoding_type, name, value));
             output.push_str(&format!("Bytes: {}\n", hex_string));
             output.push_str(&format!("Length: {} bytes\n", bytes.len()));
-            output.push_str("\n");
+            output.push('\n');
         }
 
         // HPACK table state model.
@@ -1620,7 +1620,7 @@ debug_mode = false
         output.push_str("Available Space: 4041 bytes\n");
         output.push_str("Dynamic Entries:\n");
         output.push_str("  62: custom-key = custom-value (55 bytes)\n");
-        output.push_str("\n");
+        output.push('\n');
 
         // Compression statistics
         output.push_str("## Compression Statistics\n");
@@ -1651,7 +1651,7 @@ debug_mode = false
         output.push_str("Boundary Threshold: 0.05\n");
         output.push_str("Stopping Time: Adaptive\n");
         output.push_str("Test Type: Sequential Obligation Leak Detection\n");
-        output.push_str("\n");
+        output.push('\n');
 
         // E-value trajectory model.
         output.push_str("## E-Value Trajectory\n");
@@ -1695,7 +1695,7 @@ debug_mode = false
                 step, e_value, event_type, description
             ));
         }
-        output.push_str("\n");
+        output.push('\n');
 
         // Trajectory bytes representation
         output.push_str("## Trajectory Bytes Representation\n");
@@ -1707,10 +1707,11 @@ debug_mode = false
         trajectory_bytes.extend_from_slice(&0.05f64.to_be_bytes()); // Confidence level
 
         // Trajectory points: Step (4 bytes) + E-value (8 bytes) + Event type (1 byte).
-        // Cast e_value to f64 so to_be_bytes is resolved on a concrete IEEE-754 value.
+        // Bind e_value as f64 so to_be_bytes resolves to the intended IEEE-754 width.
         for (step, e_value, event_type, _) in &trajectory_points {
+            let e_value: f64 = *e_value;
             trajectory_bytes.extend_from_slice(&(*step as u32).to_be_bytes());
-            trajectory_bytes.extend_from_slice(&(*e_value as f64).to_be_bytes());
+            trajectory_bytes.extend_from_slice(&e_value.to_be_bytes());
             let event_byte = match *event_type {
                 "Initial" => 0x00,
                 "Update" => 0x01,
@@ -1724,7 +1725,7 @@ debug_mode = false
         let trajectory_hex = hex::encode(&trajectory_bytes);
         output.push_str(&format!("Trajectory Bytes: {}\n", trajectory_hex));
         output.push_str(&format!("Total Bytes: {}\n", trajectory_bytes.len()));
-        output.push_str("\n");
+        output.push('\n');
 
         // Statistical analysis
         output.push_str("## Statistical Analysis\n");
@@ -1735,7 +1736,7 @@ debug_mode = false
         output.push_str("Statistical Decision: REJECT H0 (obligation leak detected)\n");
         output.push_str("False Discovery Rate: 3.21%\n");
         output.push_str("Power Analysis: 96.8% power to detect leak\n");
-        output.push_str("\n");
+        output.push('\n');
 
         // E-process verdict
         output.push_str("## E-Process Verdict\n");
@@ -1777,7 +1778,7 @@ debug_mode = false
         let request_hex = hex::encode(request_bytes);
         output.push_str(&format!("Request Bytes: {}\n", request_hex));
         output.push_str(&format!("Length: {} bytes\n", request_bytes.len()));
-        output.push_str("\n");
+        output.push('\n');
 
         // HTTP request components analysis
         output.push_str("## Request Components Analysis\n");
@@ -1788,7 +1789,7 @@ debug_mode = false
         output.push_str("Header Count: 10\n");
         output.push_str("Body Length: 0 bytes\n");
         output.push_str("Request ID: req_01234567890abcdef\n");
-        output.push_str("\n");
+        output.push('\n');
 
         // Session cookie hash computation
         output.push_str("## Session Cookie Hash Computation\n");
@@ -1805,7 +1806,7 @@ debug_mode = false
         for (key, value) in &session_data {
             output.push_str(&format!("  {}: {}\n", key, value));
         }
-        output.push_str("\n");
+        output.push('\n');
 
         // Hash computation (simple deterministic hash for testing)
         let mut session_hash_input = String::new();
@@ -1820,8 +1821,8 @@ debug_mode = false
             "Session Hash (SHA256-like): {}\n",
             session_hash_hex
         ));
-        output.push_str(&format!("Hash Algorithm: deterministic_hash_v1\n"));
-        output.push_str("\n");
+        output.push_str("Hash Algorithm: deterministic_hash_v1\n");
+        output.push('\n');
 
         // HTTP response model.
         output.push_str("## HTTP Response (Set-Cookie)\n");
@@ -1918,7 +1919,7 @@ debug_mode = false
             output.push_str(&format!("{}: {}\n", op_name, sqe_hex));
             output.push_str(&format!("Length: {} bytes\n", sqe_bytes.len()));
         }
-        output.push_str("\n");
+        output.push('\n');
 
         // CQE (Completion Queue Entry) sequence
         output.push_str("## CQE (Completion Queue Entry) Sequence\n");
@@ -1954,7 +1955,7 @@ debug_mode = false
             output.push_str(&format!("{}: {}\n", completion_name, cqe_hex));
             output.push_str(&format!("Length: {} bytes\n", cqe_bytes.len()));
         }
-        output.push_str("\n");
+        output.push('\n');
 
         // io_uring ring statistics
         output.push_str("## io_uring Ring Statistics\n");
@@ -1994,7 +1995,7 @@ debug_mode = false
         output.push_str("Length Encoding: Big-endian (network byte order)\n");
         output.push_str("Maximum Frame Size: 16MB (16777216 bytes)\n");
         output.push_str("Minimum Frame Size: 4 bytes (length header)\n");
-        output.push_str("\n");
+        output.push('\n');
 
         // Frame sequence examples
         output.push_str("## Frame Sequence Examples\n");
@@ -2051,7 +2052,7 @@ debug_mode = false
                 payload.len()
             ));
         }
-        output.push_str("\n");
+        output.push('\n');
 
         // Frame parsing model.
         output.push_str("## Frame Parsing Model\n");
@@ -2076,7 +2077,7 @@ debug_mode = false
             total_bytes += frame_bytes.len();
             frame_count += 1;
         }
-        output.push_str("\n");
+        output.push('\n');
 
         // Codec statistics
         output.push_str("## Codec Statistics\n");

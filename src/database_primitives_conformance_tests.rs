@@ -192,7 +192,7 @@ impl MockPgProtocol {
         self.connection_state = ConnectionState::Authenticating;
 
         // Return SCRAM-SHA-256 authentication request
-        let auth_payload = format!("SCRAM-SHA-256\0");
+        let auth_payload = "SCRAM-SHA-256\0".to_string();
 
         Ok(vec![PgMessage {
             msg_type: PgMessageType::Authentication,
@@ -250,8 +250,7 @@ impl MockPgProtocol {
         }
 
         // Extract channel binding and proof (simplified validation)
-        let parts: Vec<&str> = client_final_message.split(',').collect();
-        if parts.len() < 3 {
+        if client_final_message.split(',').count() < 3 {
             return Err("Incomplete client-final-message".to_string());
         }
 
@@ -442,7 +441,7 @@ impl MockPgProtocol {
             return Err("Incomplete message".to_string());
         }
 
-        let payload = bytes[5..1 + length as usize].to_vec();
+        let payload = bytes[5..=length as usize].to_vec();
 
         let msg_type = match msg_type_byte {
             b'Q' => PgMessageType::Query,
@@ -1564,7 +1563,7 @@ fn test_sql_parser_round_trip() -> TestResult {
 
     for sql in &test_sqls {
         match parser.round_trip(sql) {
-            Ok(true) => continue,
+            Ok(true) => {}
             Ok(false) => {
                 return TestResult::Fail {
                     reason: format!("Round-trip failed for SQL: {}", sql),
@@ -1651,13 +1650,7 @@ fn test_connection_pool_health_checks() -> TestResult {
     let health_result = pool.health_check(manager.as_ref());
 
     match health_result {
-        Ok(result) => {
-            if result.healthy_connections == 0 && result.unhealthy_connections == 0 {
-                TestResult::Pass // No idle connections to check
-            } else {
-                TestResult::Pass // Health check ran successfully
-            }
-        }
+        Ok(_) => TestResult::Pass,
         Err(e) => TestResult::Fail {
             reason: format!("Health check failed: {}", e),
         },

@@ -320,7 +320,7 @@ impl MockStateMachine {
             return Err("Snapshot checksum verification failed".to_string());
         }
 
-        self.state = snapshot.data.clone();
+        self.state.clone_from(&snapshot.data);
         self.version.store(snapshot.version, Ordering::SeqCst);
 
         let mut log = self.operation_log.lock().unwrap();

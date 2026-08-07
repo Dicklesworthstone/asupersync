@@ -246,24 +246,17 @@ mod tests {
         for (name, frame_type, flags, stream_id, payload) in &frame_examples {
             // Construct frame header (9 bytes)
             let length = payload.len() as u32;
-            let mut frame = Vec::new();
-
-            // Length (24 bits, big-endian)
-            frame.push((length >> 16) as u8);
-            frame.push((length >> 8) as u8);
-            frame.push(length as u8);
-
-            // Type (8 bits)
-            frame.push(*frame_type);
-
-            // Flags (8 bits)
-            frame.push(*flags);
-
-            // Reserved (1 bit) + Stream ID (31 bits, big-endian)
-            frame.push((stream_id >> 24) as u8);
-            frame.push((stream_id >> 16) as u8);
-            frame.push((stream_id >> 8) as u8);
-            frame.push(*stream_id as u8);
+            let mut frame = vec![
+                (length >> 16) as u8,
+                (length >> 8) as u8,
+                length as u8,
+                *frame_type,
+                *flags,
+                (stream_id >> 24) as u8,
+                (stream_id >> 16) as u8,
+                (stream_id >> 8) as u8,
+                *stream_id as u8,
+            ];
 
             // Payload
             frame.extend_from_slice(payload);
@@ -278,7 +271,7 @@ mod tests {
 
             // Break down header bytes
             let header = &frame[0..9];
-            output.push_str(&format!("Header breakdown:\n"));
+            output.push_str("Header breakdown:\n");
             output.push_str(&format!(
                 "  Length: {:02x}{:02x}{:02x} ({} bytes)\n",
                 header[0], header[1], header[2], length
@@ -289,7 +282,7 @@ mod tests {
                 "  Stream: {:02x}{:02x}{:02x}{:02x} ({})\n",
                 header[5], header[6], header[7], header[8], stream_id
             ));
-            output.push_str("\n");
+            output.push('\n');
         }
 
         tester.assert_golden(&tester.canonicalize(&output));
@@ -440,11 +433,11 @@ mod tests {
             output.push_str(&format!("  {} (0x{:x}): {}\n", name, identifier, value));
             output.push_str(&format!(
                 "    ID varint: {}\n",
-                hex::encode(&encode_varint(*identifier))
+                hex::encode(encode_varint(*identifier))
             ));
             output.push_str(&format!(
                 "    Value varint: {}\n",
-                hex::encode(&encode_varint(*value))
+                hex::encode(encode_varint(*value))
             ));
         }
 
@@ -569,7 +562,7 @@ mod tests {
                 frame.push(mask_bit | (payload.len() as u8));
             } else {
                 // Payload lengths at 126..=65535 use the 16-bit extended form.
-                frame.push(mask_bit | 126);
+                frame.push(mask_bit | 0x7e);
                 frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
             }
 

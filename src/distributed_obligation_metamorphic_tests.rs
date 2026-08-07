@@ -452,7 +452,7 @@ mod tests {
             config in monitor_config(),
             ages in obligation_ages().prop_filter("Non-empty", |ages| !ages.is_empty()),
         ) {
-            let mut monitor = MockLeakMonitor::new(config.clone());
+            let mut monitor = MockLeakMonitor::new(config);
 
             // Capture initial state
             let initial_e_value = monitor.e_value();
@@ -497,7 +497,7 @@ mod tests {
             config in monitor_config(),
             ages in obligation_ages(),
         ) {
-            let mut monitor = MockLeakMonitor::new(config.clone());
+            let mut monitor = MockLeakMonitor::new(config);
 
             let expected_threshold = 1.0 / config.alpha;
             let initial_threshold = monitor.threshold();

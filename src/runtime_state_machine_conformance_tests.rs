@@ -188,7 +188,7 @@ mod tests {
                 }
                 self.parent_child_map
                     .entry(parent_id)
-                    .or_insert_with(HashSet::new)
+                    .or_default()
                     .insert(id);
             }
 
@@ -826,7 +826,7 @@ mod tests {
         println!("| RTM-1.2 | MUST | PASS | Region close ordering determinism |");
         println!("| RTM-2.1 | MUST | PASS | Task state transition validity |");
         println!("| RTM-3.1 | MUST | PASS | Quiescence detection accuracy |");
-        println!("");
+        println!();
         println!("Overall Conformance: PASS");
         println!("Core Invariant: REGION CLOSE = QUIESCENCE VERIFIED");
         println!("Structured Concurrency: GUARANTEED");

@@ -757,7 +757,7 @@ mod tests {
         println!("| SCH-2.1 | MUST | PASS | Priority ordering monotonicity |");
         println!("| SCH-2.3 | SHOULD | XFAIL | Equal priority FIFO ordering |");
         println!("| SCH-3.1 | MUST | PASS | Cancellation heap validity |");
-        println!("");
+        println!();
         println!("Overall Conformance: PASS");
         println!("Priority Monotonicity: GUARANTEED");
         println!("Heap Invariants: VERIFIED");

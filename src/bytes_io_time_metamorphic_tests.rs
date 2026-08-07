@@ -33,9 +33,12 @@ mod bytes_io_time_tests {
 
         /// Split off a portion at the given position.
         pub fn mock_split_off(&mut self, at: usize) -> Self {
-            if at > self.len() {
-                panic!("split_off out of bounds: at={}, len={}", at, self.len());
-            }
+            assert!(
+                at <= self.len(),
+                "split_off out of bounds: at={}, len={}",
+                at,
+                self.len()
+            );
 
             let split_point = self.offset + at;
             let tail_data = self.data.split_off(split_point);
@@ -48,9 +51,12 @@ mod bytes_io_time_tests {
 
         /// Split to a given position.
         pub fn mock_split_to(&mut self, at: usize) -> Self {
-            if at > self.len() {
-                panic!("split_to out of bounds: at={}, len={}", at, self.len());
-            }
+            assert!(
+                at <= self.len(),
+                "split_to out of bounds: at={}, len={}",
+                at,
+                self.len()
+            );
 
             let head_data = self.data[self.offset..self.offset + at].to_vec();
             self.offset += at;
@@ -137,12 +143,10 @@ mod bytes_io_time_tests {
         pub fn remaining(&self) -> usize {
             let mut total = 0;
             for (i, buf) in self.buffers.iter().enumerate() {
-                if i < self.current_buf {
-                    continue;
-                } else if i == self.current_buf {
-                    total += buf.len() - self.current_pos;
-                } else {
-                    total += buf.len();
+                match i.cmp(&self.current_buf) {
+                    std::cmp::Ordering::Less => {}
+                    std::cmp::Ordering::Equal => total += buf.len() - self.current_pos,
+                    std::cmp::Ordering::Greater => total += buf.len(),
                 }
             }
             total

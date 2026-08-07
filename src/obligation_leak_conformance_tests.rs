@@ -658,7 +658,7 @@ mod tests {
         println!("| OBL-2.1 | MUST | PASS | Quiescence detection accuracy |");
         println!("| OBL-3.1 | MUST | PASS | Lyapunov potential non-negativity |");
         println!("| OBL-3.2 | MUST | PASS | Quiescent state zero potential |");
-        println!("");
+        println!();
         println!("Overall Conformance: PASS");
         println!("Critical Invariant: NO OBLIGATION LEAKS DETECTED");
         println!("Known Divergences: See tests/conformance/DISCREPANCIES.md");

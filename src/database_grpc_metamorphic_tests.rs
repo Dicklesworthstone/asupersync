@@ -333,11 +333,7 @@ impl MockSqliteTransaction {
                             row_id: r2,
                             ..
                         },
-                    ) => {
-                        if t1 == t2 && r1 == r2 {
-                            return true;
-                        }
-                    }
+                    ) if t1 == t2 && r1 == r2 => return true,
                     _ => {}
                 }
             }
@@ -686,7 +682,7 @@ fn test_mr_mysql_prepared_statement_caching() {
         // Cache effectiveness should improve with repeated queries
         if queries.len() > cache_size {
             let effectiveness = cache.cache_effectiveness();
-            prop_assert!(effectiveness >= 0.0 && effectiveness <= 1.0,
+            prop_assert!((0.0..=1.0).contains(&effectiveness),
                 "Cache effectiveness should be between 0 and 1: {}", effectiveness);
         }
     });

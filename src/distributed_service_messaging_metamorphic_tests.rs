@@ -680,8 +680,10 @@ impl MockRetryAttempt {
             0
         } else {
             let base_delay = policy.backoff_base_ms as f64;
-            let exponential_delay =
-                base_delay * policy.backoff_multiplier.powi((attempt_number - 2) as i32);
+            let exponential_delay = base_delay
+                * policy
+                    .backoff_multiplier
+                    .powi((attempt_number - 2).cast_signed());
 
             let jitter_factor = if policy.jitter {
                 0.9 + (attempt_number as f64 * 0.1) % 0.2 // Simple jitter simulation
@@ -917,15 +919,12 @@ impl MockMessageBroker {
                     .messages
                     .iter()
                     .filter(|msg| msg.offset >= start_offset)
-                    .map(|msg| {
-                        let consumed = ConsumedMessage {
-                            topic: topic_name.to_string(),
-                            partition: partition_id,
-                            offset: msg.offset,
-                            message: msg.clone(),
-                            consume_timestamp: (self.consume_order.len() as u64 + 1) * 1000,
-                        };
-                        consumed
+                    .map(|msg| ConsumedMessage {
+                        topic: topic_name.to_string(),
+                        partition: partition_id,
+                        offset: msg.offset,
+                        message: msg.clone(),
+                        consume_timestamp: (self.consume_order.len() as u64 + 1) * 1000,
                     })
                     .collect();
 
@@ -964,7 +963,7 @@ impl MockMessageBroker {
                 let key = (published.topic.clone(), partition_id);
                 partition_sequences
                     .entry(key)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(published.message.offset);
             }
         }
@@ -1174,7 +1173,7 @@ fn test_mr_rate_limit_fairness() {
 
         // MR: Rate limiting should be reasonably fair across keys
         let fairness = MockRateLimit::fairness_across_keys(&rate_limits);
-        prop_assert!(fairness >= 0.0 && fairness <= 1.0,
+        prop_assert!((0.0..=1.0).contains(&fairness),
             "Rate limit fairness coefficient should be between 0 and 1: {}", fairness);
 
         // All rate limits should respect their maximum
@@ -1225,7 +1224,7 @@ fn test_mr_load_balance_steady_state() {
 
         // MR: Load balancer should achieve reasonable distribution
         let distribution_quality = load_balancer.steady_state_distribution();
-        prop_assert!(distribution_quality >= 0.0 && distribution_quality <= 1.0,
+        prop_assert!((0.0..=1.0).contains(&distribution_quality),
             "Load balance distribution quality should be between 0 and 1: {}", distribution_quality);
 
         // Total requests should match

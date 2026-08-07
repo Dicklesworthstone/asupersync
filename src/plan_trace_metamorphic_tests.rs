@@ -227,11 +227,11 @@ fn mr_plan_hash_consistency() {
     )| {
         // Create identical plan DAGs
         let mut plan1 = PlanDag::new();
-        let leaf1 = plan1.leaf(&format!("test_{}", label_suffix1));
+        let leaf1 = plan1.leaf(format!("test_{}", label_suffix1));
         plan1.set_root(leaf1);
 
         let mut plan2 = PlanDag::new();
-        let leaf2 = plan2.leaf(&format!("test_{}", label_suffix1));
+        let leaf2 = plan2.leaf(format!("test_{}", label_suffix1));
         plan2.set_root(leaf2);
 
         // Identical plans should have identical hashes
@@ -246,7 +246,7 @@ fn mr_plan_hash_consistency() {
         // Different plans should have different hashes (high probability)
         if label_suffix1 != label_suffix2 {
             let mut plan3 = PlanDag::new();
-            let leaf3 = plan3.leaf(&format!("test_{}", label_suffix2));
+            let leaf3 = plan3.leaf(format!("test_{}", label_suffix2));
             plan3.set_root(leaf3);
             let hash3 = PlanHash::of(&plan3);
 
@@ -451,7 +451,7 @@ fn mr_plan_fixture_round_trip() {
 
         // Add some leaf nodes
         for i in 0..node_count {
-            let leaf = original_plan.leaf(&format!("leaf_{}_{}", label_base, i));
+            let leaf = original_plan.leaf(format!("leaf_{}_{}", label_base, i));
             leaves.push(leaf);
         }
 
@@ -473,7 +473,7 @@ fn mr_plan_fixture_round_trip() {
         let mut new_leaves = Vec::new();
 
         for i in 0..node_count {
-            let leaf = reconstructed_plan.leaf(&format!("leaf_{}_{}", label_base, i));
+            let leaf = reconstructed_plan.leaf(format!("leaf_{}_{}", label_base, i));
             new_leaves.push(leaf);
         }
 

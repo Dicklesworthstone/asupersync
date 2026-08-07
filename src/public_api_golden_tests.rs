@@ -169,7 +169,7 @@ mod tests {
 
         for (long, short, value, description) in &options {
             output.push_str(&format_cli_option(long, short, value, description));
-            output.push_str("\n");
+            output.push('\n');
         }
 
         output.push_str("\nGlobal Options Section:\n");
@@ -266,7 +266,7 @@ mod tests {
 
         for (check_name, status, message) in &health_checks {
             output.push_str(&format_health_check(check_name, status, message));
-            output.push_str("\n");
+            output.push('\n');
         }
 
         output.push_str("\nSummary:\n");
@@ -329,7 +329,7 @@ mod tests {
 
         // Verify byte sequence
         let script_bytes = bash_script.as_bytes();
-        output.push_str(&format!("\n# Byte sequence verification:\n"));
+        output.push_str("\n# Byte sequence verification:\n");
         output.push_str(&format!("# Length: {} bytes\n", script_bytes.len()));
         output.push_str(&format!("# SHA256: {}\n", sha256_hash(script_bytes)));
 
@@ -349,7 +349,7 @@ mod tests {
         output.push_str(&zsh_script);
 
         let script_bytes = zsh_script.as_bytes();
-        output.push_str(&format!("\n# Byte sequence verification:\n"));
+        output.push_str("\n# Byte sequence verification:\n");
         output.push_str(&format!("# Length: {} bytes\n", script_bytes.len()));
         output.push_str(&format!("# SHA256: {}\n", sha256_hash(script_bytes)));
 
@@ -369,7 +369,7 @@ mod tests {
         output.push_str(&fish_script);
 
         let script_bytes = fish_script.as_bytes();
-        output.push_str(&format!("\n# Byte sequence verification:\n"));
+        output.push_str("\n# Byte sequence verification:\n");
         output.push_str(&format!("# Length: {} bytes\n", script_bytes.len()));
         output.push_str(&format!("# SHA256: {}\n", sha256_hash(script_bytes)));
 
@@ -493,7 +493,7 @@ mod tests {
                     output.push_str(&format!("  Help: {}\n", get_error_help_text(error)));
                 }
             }
-            output.push_str("\n");
+            output.push('\n');
         }
 
         tester.assert_golden(&tester.canonicalize(&output));
@@ -576,7 +576,7 @@ mod tests {
             format!("{}, ", short)
         };
         let value_part = if value.is_empty() {
-            "".to_string()
+            String::new()
         } else {
             format!(" <{}>", value)
         };

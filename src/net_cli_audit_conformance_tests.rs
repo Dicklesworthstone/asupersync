@@ -661,17 +661,17 @@ impl MockCliProcessor {
         match command {
             "doctor" => {
                 let stdout = "System diagnostics: All checks passed\n".to_string();
-                let stderr = "".to_string();
+                let stderr = String::new();
                 (stdout, stderr, 0)
             }
             "status" => {
                 let stdout = "Runtime status: OK\n".to_string();
-                let stderr = "".to_string();
+                let stderr = String::new();
                 (stdout, stderr, 0)
             }
             _ => {
                 let stderr = format!("Unknown command: {}\n", command);
-                ("".to_string(), stderr, 1)
+                (String::new(), stderr, 1)
             }
         }
     }
@@ -1164,7 +1164,7 @@ impl NetCliAuditConformanceHarness {
         // Validate overall network invariants
         self.network_processor
             .validate_network_invariants()
-            .map_err(|e| {
+            .inspect_err(|e| {
                 self.record_test(
                     "net_overall_invariants",
                     "network",
@@ -1172,7 +1172,6 @@ impl NetCliAuditConformanceHarness {
                     TestStatus::Fail,
                     Some(e.clone()),
                 );
-                e
             })?;
         self.record_test(
             "net_overall_invariants",
@@ -1247,16 +1246,17 @@ impl NetCliAuditConformanceHarness {
         }
 
         // Validate overall CLI invariants
-        self.cli_processor.validate_cli_invariants().map_err(|e| {
-            self.record_test(
-                "cli_overall_invariants",
-                "cli",
-                RequirementLevel::Must,
-                TestStatus::Fail,
-                Some(e.clone()),
-            );
-            e
-        })?;
+        self.cli_processor
+            .validate_cli_invariants()
+            .inspect_err(|e| {
+                self.record_test(
+                    "cli_overall_invariants",
+                    "cli",
+                    RequirementLevel::Must,
+                    TestStatus::Fail,
+                    Some(e.clone()),
+                );
+            })?;
         self.record_test(
             "cli_overall_invariants",
             "cli",
@@ -1314,7 +1314,7 @@ impl NetCliAuditConformanceHarness {
         // Validate overall audit invariants
         self.audit_processor
             .validate_audit_invariants()
-            .map_err(|e| {
+            .inspect_err(|e| {
                 self.record_test(
                     "audit_overall_invariants",
                     "audit",
@@ -1322,7 +1322,6 @@ impl NetCliAuditConformanceHarness {
                     TestStatus::Fail,
                     Some(e.clone()),
                 );
-                e
             })?;
         self.record_test(
             "audit_overall_invariants",

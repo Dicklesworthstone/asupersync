@@ -492,10 +492,7 @@ mod tests {
         }
 
         pub fn schedule_timed(&mut self, task_id: u64, deadline: u64) {
-            self.timed_lane
-                .entry(deadline)
-                .or_insert_with(Vec::new)
-                .push(task_id);
+            self.timed_lane.entry(deadline).or_default().push(task_id);
         }
 
         pub fn schedule_ready(&mut self, task_id: u64) {
@@ -530,38 +527,38 @@ mod tests {
             }
 
             // Check timed lane for due tasks
-            let due_tasks: Vec<u64> = self
+            let has_due_tasks = self
                 .timed_lane
                 .range(..=self.current_time)
-                .flat_map(|(_, tasks)| tasks.iter().cloned())
-                .collect();
+                .any(|(_, tasks)| !tasks.is_empty());
 
-            if !due_tasks.is_empty()
+            if has_due_tasks
                 && (self.timed_streak < self.timed_streak_limit || self.ready_lane.is_empty())
             {
                 // Remove from timed lane and dispatch
-                for deadline in self.timed_lane.keys().cloned().collect::<Vec<_>>() {
-                    if deadline <= self.current_time {
-                        if let Some(mut tasks) = self.timed_lane.remove(&deadline) {
+                while let Some((&deadline, _)) = self.timed_lane.first_key_value() {
+                    if deadline > self.current_time {
+                        break;
+                    }
+                    if let Some(mut tasks) = self.timed_lane.remove(&deadline) {
+                        if !tasks.is_empty() {
+                            let task_id = tasks.remove(0);
                             if !tasks.is_empty() {
-                                let task_id = tasks.remove(0);
-                                if !tasks.is_empty() {
-                                    self.timed_lane.insert(deadline, tasks);
-                                }
-
-                                self.cancel_streak = 0;
-                                self.timed_streak += 1;
-                                self.stolen_streak = 0;
-
-                                let dispatch = MockDispatch {
-                                    task_id,
-                                    lane: MockLaneType::Timed,
-                                    timestamp: self.current_time,
-                                    streak_count: self.timed_streak,
-                                };
-                                self.dispatch_history.push(dispatch.clone());
-                                return Some(dispatch);
+                                self.timed_lane.insert(deadline, tasks);
                             }
+
+                            self.cancel_streak = 0;
+                            self.timed_streak += 1;
+                            self.stolen_streak = 0;
+
+                            let dispatch = MockDispatch {
+                                task_id,
+                                lane: MockLaneType::Timed,
+                                timestamp: self.current_time,
+                                streak_count: self.timed_streak,
+                            };
+                            self.dispatch_history.push(dispatch.clone());
+                            return Some(dispatch);
                         }
                     }
                 }
@@ -598,7 +595,7 @@ mod tests {
             let mut current_cancel_streak = 0;
 
             for window in self.dispatch_history.windows(2) {
-                if let MockLaneType::Cancel = window[0].lane {
+                if window[0].lane == MockLaneType::Cancel {
                     current_cancel_streak += 1;
                     max_cancel_streak = max_cancel_streak.max(current_cancel_streak);
                 } else {
@@ -968,7 +965,7 @@ mod tests {
             );
 
             // For each name, the winning lease should be the one with earliest timestamp
-            for name in original_registrations.iter().map(|(n, _, _)| n).collect::<BTreeSet<_>>() {
+            for name in original_registrations.iter().map(|(name, _, _)| name) {
                 let original_winner = registry_original.leases.get(name);
                 let permuted_winner = registry_permuted.leases.get(name);
 
@@ -981,11 +978,9 @@ mod tests {
                         );
 
                         // Winner should have earliest timestamp among all attempts for this name
-                        let all_attempts_for_name: Vec<_> = original_registrations.iter()
-                            .filter(|(n, _, _)| n == name)
-                            .collect();
-
-                        if let Some((_, _, earliest_timestamp)) = all_attempts_for_name.iter()
+                        if let Some((_, _, earliest_timestamp)) = original_registrations
+                            .iter()
+                            .filter(|(candidate, _, _)| candidate == name)
                             .min_by_key(|(_, task_id, timestamp)| (*timestamp, *task_id)) {
 
                             prop_assert_eq!(
@@ -1218,7 +1213,7 @@ mod tests {
             }
 
             // Verify that tasks with same priority come out in generation order
-            let task_priorities: HashMap<u64, u8> = task_insertions.iter().cloned().collect();
+            let task_priorities: HashMap<u64, u8> = task_insertions.iter().copied().collect();
 
             for window in popped_tasks.windows(2) {
                 let task1 = window[0];
@@ -1417,8 +1412,8 @@ mod tests {
             // (allowing some reordering within combiner batches)
             for window_size in [3, 5, 7] {
                 if injection_order.len() >= window_size && extracted_tasks.len() >= window_size {
-                    let early_tasks: BTreeSet<_> = injection_order[..window_size].iter().cloned().collect();
-                    let late_tasks: BTreeSet<_> = injection_order[injection_order.len()-window_size..].iter().cloned().collect();
+                    let early_tasks: BTreeSet<_> = injection_order[..window_size].iter().copied().collect();
+                    let late_tasks: BTreeSet<_> = injection_order[injection_order.len()-window_size..].iter().copied().collect();
 
                     let early_positions: Vec<usize> = extracted_tasks.iter()
                         .enumerate()

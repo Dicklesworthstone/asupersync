@@ -73,7 +73,7 @@ fn mr_obligation_ledger_ordering() {
                 // Test state consistency: committed obligations should be in terminal state
                 if let Some(record) = ledger.get(obligation_id) {
                     match record.state {
-                        ObligationState::Committed { .. } => {
+                        ObligationState::Committed => {
                             // Expected - commitment succeeded
                         }
                         other_state => {

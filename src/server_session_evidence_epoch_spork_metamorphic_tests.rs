@@ -55,6 +55,9 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════════════════
 
     // Server Module Mocks
+    // The suffix makes these variants read as explicit protocol-state nodes,
+    // matching the terminology used by the session-model assertions below.
+    #[allow(clippy::enum_variant_names)]
     #[derive(Debug, Clone, PartialEq)]
     pub struct MockServer {
         pub state: MockServerState,
@@ -1088,8 +1091,10 @@ mod tests {
 
                 // Randomly complete some requests
                 if step_idx % 3 == 0 {
-                    for connection_id in server.connections.keys().cloned().collect::<Vec<_>>() {
-                        server.complete_request(connection_id);
+                    for connection in server.connections.values_mut() {
+                        if connection.in_flight_requests > 0 {
+                            connection.in_flight_requests -= 1;
+                        }
                     }
                 }
             }

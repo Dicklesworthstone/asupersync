@@ -229,7 +229,7 @@ impl MockVfsCanonicalizer {
 
         for component in path.components() {
             match component {
-                std::path::Component::CurDir => continue,
+                std::path::Component::CurDir => {}
                 std::path::Component::ParentDir => {
                     if components.is_empty() {
                         return Err(std::io::Error::new(
@@ -275,7 +275,7 @@ impl MockVfsCanonicalizer {
                         canonical.display()
                     ));
                 }
-                _ => continue,
+                _ => {}
             }
         }
 
@@ -519,15 +519,16 @@ impl FsProtocolConformanceHarness {
         }
 
         // Test 3: Operation ordering
-        self.uring_processor.validate_consistency().map_err(|e| {
-            self.record_test(
-                "uring_operation_ordering",
-                RequirementLevel::Must,
-                TestStatus::Fail,
-                Some(e.clone()),
-            );
-            e
-        })?;
+        self.uring_processor
+            .validate_consistency()
+            .inspect_err(|e| {
+                self.record_test(
+                    "uring_operation_ordering",
+                    RequirementLevel::Must,
+                    TestStatus::Fail,
+                    Some(e.clone()),
+                );
+            })?;
         self.record_test(
             "uring_operation_ordering",
             RequirementLevel::Must,
@@ -703,14 +704,13 @@ impl FsProtocolConformanceHarness {
         // Test 3: Boundary semantics validation
         self.buf_processor
             .validate_boundary_semantics()
-            .map_err(|e| {
+            .inspect_err(|e| {
                 self.record_test(
                     "buf_boundary_semantics",
                     RequirementLevel::Must,
                     TestStatus::Fail,
                     Some(e.clone()),
                 );
-                e
             })?;
         self.record_test(
             "buf_boundary_semantics",

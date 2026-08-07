@@ -131,7 +131,7 @@ mod tests {
 
         for (event_type, task_id, region_id, metadata, timestamp) in &trace_events {
             // Canonical TLA+ record format
-            output.push_str(&format!("[\n"));
+            output.push_str("[\n");
             output.push_str(&format!("  timestamp_us |-> {},\n", timestamp));
             output.push_str(&format!("  event_type |-> \"{}\",\n", event_type));
             output.push_str(&format!("  task_id |-> {},\n", task_id));
@@ -224,7 +224,7 @@ mod tests {
         for (i, entry) in dictionary.iter().enumerate() {
             output.push_str(&format!("  {:02}: {}\n", i, entry));
         }
-        output.push_str("\n");
+        output.push('\n');
 
         output.push_str("Compressed Events:\n");
         for (timestamp, event_type, id, metadata) in &events {
@@ -280,7 +280,7 @@ mod tests {
             "  finalized_regions: {}\n",
             ledger_state.finalized_regions.len()
         ));
-        output.push_str("\n");
+        output.push('\n');
 
         output.push_str("Active Obligations:\n");
         for (id, record) in &ledger_state.obligations {
@@ -291,7 +291,7 @@ mod tests {
             output.push_str(&format!("    task_id: {}\n", record.task_id));
             output.push_str(&format!("    reserved_at: {}\n", record.reserved_at));
         }
-        output.push_str("\n");
+        output.push('\n');
 
         // Serialize to canonical binary format
         let snapshot_bytes = serialize_ledger_snapshot(&ledger_state);
@@ -487,12 +487,12 @@ mod tests {
 
             // Verify proof links to previous
             if i > 0 {
-                output.push_str(&format!("  Links to previous: ✓\n"));
+                output.push_str("  Links to previous: ✓\n");
             }
-            output.push_str("\n");
+            output.push('\n');
         }
 
-        output.push_str(&format!("Chain verification: ✓ All proofs valid\n"));
+        output.push_str("Chain verification: ✓ All proofs valid\n");
         output.push_str(&format!("Final chain hash: 0x{:08x}\n", chain_hash));
 
         tester.assert_golden(&tester.canonicalize(&output));
@@ -528,10 +528,10 @@ mod tests {
         output.push_str("# Used by RaptorQ encoding/decoding operations\n\n");
 
         output.push_str("Table Properties:\n");
-        output.push_str(&format!("  Field size: 256 elements\n"));
+        output.push_str("  Field size: 256 elements\n");
         output.push_str(&format!("  Table entries: {} (256×256)\n", mul_table.len()));
-        output.push_str(&format!("  Primitive polynomial: 0x11D\n"));
-        output.push_str(&format!("  Generator element: 2\n\n"));
+        output.push_str("  Primitive polynomial: 0x11D\n");
+        output.push_str("  Generator element: 2\n\n");
 
         // Test key properties
         output.push_str("Property Verification:\n");
@@ -629,7 +629,7 @@ mod tests {
             "  EXP table size: {} entries (extended)\n",
             exp_table.len()
         ));
-        output.push_str(&format!("  Generator: 2\n"));
+        output.push_str("  Generator: 2\n");
 
         // Verify table consistency
         output.push_str("\nTable Verification:\n");
@@ -735,7 +735,7 @@ mod tests {
         for j in 0..std::cmp::min(8, matrix.cols) {
             output.push_str(&format!("{:3} ", j));
         }
-        output.push_str("\n");
+        output.push('\n');
 
         for i in 0..std::cmp::min(8, matrix.rows) {
             output.push_str(&format!("{:2}: ", i));
@@ -743,7 +743,7 @@ mod tests {
                 let value = matrix.get(i, j);
                 output.push_str(&format!("{:3} ", value));
             }
-            output.push_str("\n");
+            output.push('\n');
         }
 
         // Matrix serialization
@@ -977,7 +977,7 @@ mod tests {
             next_id: 3,
             obligations,
             active_regions: [1, 2].into_iter().collect(),
-            finalized_regions: [].into_iter().collect(),
+            finalized_regions: BTreeSet::new(),
         }
     }
 
@@ -1106,7 +1106,7 @@ mod tests {
     }
 
     fn build_gf256_exp_table() -> Vec<u8> {
-        (0..512).map(|i| gf256_exp(i)).collect()
+        (0..512).map(gf256_exp).collect()
     }
 
     // RaptorQ schedule generation
