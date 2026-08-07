@@ -1036,8 +1036,9 @@ fn docs_and_no_claim_boundary_remain_honest() {
         "IoUringCapabilityPolicy",
         "IoDriverHandle::capability_snapshot",
         "j-29964935379288247",
-        "ec4e32fde9abc324",
+        "fdf9590b1c19d7a3",
         "cached temporary-ring probe",
+        "fixed write/read completion",
         "no test claim",
     ] {
         assert!(docs.contains(required), "missing docs marker: {required}");
@@ -1073,7 +1074,7 @@ fn docs_and_no_claim_boundary_remain_honest() {
     let checkpoint_value = Value::Object(checkpoint.clone());
     assert_eq!(
         text(&checkpoint_value, "status"),
-        "IN_PROGRESS_CONTROL_PLANE_ONLY"
+        "IN_PROGRESS_FIXED_BUFFER_PROBE_ONLY"
     );
     assert_eq!(array(&checkpoint_value, "implemented").len(), 6);
     assert_eq!(array(&checkpoint_value, "remaining").len(), 4);
@@ -1089,10 +1090,10 @@ fn docs_and_no_claim_boundary_remain_honest() {
     let feature_verification = object(&checkpoint_value, "feature_verification");
     let feature_verification_value = Value::Object(feature_verification.clone());
     assert!(feature_verification_value["job_id"].is_null());
-    assert_eq!(text(&feature_verification_value, "worker"), "hz2");
+    assert_eq!(text(&feature_verification_value, "worker"), "ovh-a");
     assert_eq!(
         text(&feature_verification_value, "project_hash"),
-        "ec4e32fde9abc324"
+        "fdf9590b1c19d7a3"
     );
     assert_eq!(
         text(&feature_verification_value, "command"),
@@ -1103,12 +1104,13 @@ fn docs_and_no_claim_boundary_remain_honest() {
     let test_attempt_value = Value::Object(test_attempt.clone());
     assert_eq!(
         text(&test_attempt_value, "project_hash"),
-        "c316006ea09ef0d1"
+        "98179d1f2cd5b5dd"
     );
     assert!(test_attempt_value["terminal_receipt"].is_null());
+    assert_eq!(unsigned(&test_attempt_value, "local_wait_exit_code"), 130);
     assert_eq!(
         text(&test_attempt_value, "disposition"),
-        "NO_TEST_OR_LIVE_KERNEL_CLAIM"
+        "STOPPED_AFTER_NO_TERMINAL_TEST_RESULT_NO_TEST_OR_LIVE_KERNEL_CLAIM"
     );
     assert!(checkpoint_value["focused_test_receipt"].is_null());
 

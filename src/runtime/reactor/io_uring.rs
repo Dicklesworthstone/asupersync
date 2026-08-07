@@ -26,12 +26,13 @@ mod imp {
         Event, Events, Interest, IoUringCapability, IoUringCapabilityPolicy, IoUringProbeOutcome,
         Reactor, Source, Token,
     };
-    use io_uring::{IoUring, Probe, opcode, types};
+    use io_uring::{IoUring, Probe, opcode, squeue, types};
     use parking_lot::Mutex;
     use smallvec::SmallVec;
     use std::collections::HashMap;
     use std::io;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+    use std::os::unix::net::UnixStream;
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
@@ -61,11 +62,80 @@ mod imp {
         }
     }
 
-    fn probe_fixed_buffer_registration() -> IoUringProbeOutcome {
-        // The backing allocation is declared before the temporary ring so the
-        // ring is always dropped first, including an unregister-error path.
-        let mut backing = [0_u8; 8];
-        let ring = match IoUring::new(2) {
+    fn classify_probe_completion(
+        user_data: u64,
+        result: i32,
+        expected_user_data: u64,
+        expected_len: i32,
+    ) -> IoUringProbeOutcome {
+        if user_data != expected_user_data {
+            return IoUringProbeOutcome::Error;
+        }
+        if result < 0 {
+            return result
+                .checked_neg()
+                .map_or(IoUringProbeOutcome::Error, |errno| {
+                    classify_probe_error(&io::Error::from_raw_os_error(errno))
+                });
+        }
+        if result != expected_len {
+            return IoUringProbeOutcome::Error;
+        }
+        IoUringProbeOutcome::Supported
+    }
+
+    fn submit_fixed_probe_entry(
+        ring: &mut IoUring,
+        entry: &squeue::Entry,
+        expected_user_data: u64,
+        expected_len: i32,
+    ) -> Result<(), IoUringProbeOutcome> {
+        // SAFETY: each entry references an owned descriptor and the registered
+        // `backing` buffer in `probe_fixed_buffer_operation`. Both remain live
+        // until this entry's terminal completion is consumed.
+        if unsafe { ring.submission().push(entry) }.is_err() {
+            return Err(IoUringProbeOutcome::Resource);
+        }
+        if let Err(error) = ring.submit_and_wait(1) {
+            return Err(classify_probe_error(&error));
+        }
+        let Some(completion) = ring.completion().next() else {
+            return Err(IoUringProbeOutcome::Error);
+        };
+        match classify_probe_completion(
+            completion.user_data(),
+            completion.result(),
+            expected_user_data,
+            expected_len,
+        ) {
+            IoUringProbeOutcome::Supported => Ok(()),
+            outcome => Err(outcome),
+        }
+    }
+
+    fn probe_fixed_buffer_operation() -> IoUringProbeOutcome {
+        const PROBE_BYTES: usize = size_of::<u64>();
+        const PROBE_BYTES_U32: u32 = 8;
+        const PROBE_BYTES_I32: i32 = 8;
+        const WRITE_USER_DATA: u64 = 1;
+        const READ_USER_DATA: u64 = 2;
+
+        // The fixture and backing are declared before the temporary ring so
+        // the ring is always dropped first, including submission and
+        // unregister errors.
+        let mut backing = [0_u8; PROBE_BYTES];
+        let (read_stream, write_stream) = match UnixStream::pair() {
+            Ok(pair) => pair,
+            Err(error) => return classify_probe_error(&error),
+        };
+        if let Err(error) = read_stream.set_nonblocking(true) {
+            return classify_probe_error(&error);
+        }
+        if let Err(error) = write_stream.set_nonblocking(true) {
+            return classify_probe_error(&error);
+        }
+
+        let mut ring = match IoUring::new(2) {
             Ok(ring) => ring,
             Err(error) => return classify_probe_error(&error),
         };
@@ -89,9 +159,50 @@ mod imp {
         if let Err(error) = unsafe { ring.submitter().register_buffers(&[io_vec]) } {
             return classify_probe_error(&error);
         }
-        match ring.submitter().unregister_buffers() {
-            Ok(()) => IoUringProbeOutcome::Supported,
-            Err(error) => classify_probe_error(&error),
+
+        backing.copy_from_slice(&1_u64.to_ne_bytes());
+        let write_entry = opcode::WriteFixed::new(
+            types::Fd(write_stream.as_raw_fd()),
+            backing.as_ptr(),
+            PROBE_BYTES_U32,
+            0,
+        )
+        .offset(u64::MAX)
+        .build()
+        .user_data(WRITE_USER_DATA);
+        let operation_result =
+            submit_fixed_probe_entry(&mut ring, &write_entry, WRITE_USER_DATA, PROBE_BYTES_I32)
+                .and_then(|()| {
+                    backing.fill(0);
+                    let read_entry = opcode::ReadFixed::new(
+                        types::Fd(read_stream.as_raw_fd()),
+                        backing.as_mut_ptr(),
+                        PROBE_BYTES_U32,
+                        0,
+                    )
+                    .offset(u64::MAX)
+                    .build()
+                    .user_data(READ_USER_DATA);
+                    submit_fixed_probe_entry(
+                        &mut ring,
+                        &read_entry,
+                        READ_USER_DATA,
+                        PROBE_BYTES_I32,
+                    )
+                })
+                .and_then(|()| {
+                    if backing == 1_u64.to_ne_bytes() {
+                        Ok(())
+                    } else {
+                        Err(IoUringProbeOutcome::Error)
+                    }
+                });
+        let unregister_result = ring.submitter().unregister_buffers();
+
+        match (operation_result, unregister_result) {
+            (Ok(()), Ok(())) => IoUringProbeOutcome::Supported,
+            (Err(outcome), _) => outcome,
+            (Ok(()), Err(error)) => classify_probe_error(&error),
         }
     }
 
@@ -400,7 +511,7 @@ mod imp {
         fn fixed_buffer_probe_outcome(&self) -> IoUringProbeOutcome {
             *self
                 .fixed_buffer_probe
-                .get_or_init(probe_fixed_buffer_registration)
+                .get_or_init(probe_fixed_buffer_operation)
         }
 
         pub(in crate::runtime::reactor) fn capability_probes(
@@ -1152,7 +1263,7 @@ mod imp {
         }
 
         #[test]
-        fn fixed_buffer_capability_probe_is_classified_gated_and_cached() {
+        fn fixed_buffer_capability_probe_executes_is_classified_gated_and_cached() {
             assert_eq!(
                 classify_probe_error(&io::Error::from_raw_os_error(libc::EINVAL)),
                 IoUringProbeOutcome::Unsupported
@@ -1167,6 +1278,26 @@ mod imp {
             );
             assert_eq!(
                 classify_probe_error(&io::Error::from_raw_os_error(libc::EIO)),
+                IoUringProbeOutcome::Error
+            );
+            assert_eq!(
+                classify_probe_completion(11, 8, 11, 8),
+                IoUringProbeOutcome::Supported
+            );
+            assert_eq!(
+                classify_probe_completion(12, 8, 11, 8),
+                IoUringProbeOutcome::Error
+            );
+            assert_eq!(
+                classify_probe_completion(11, 7, 11, 8),
+                IoUringProbeOutcome::Error
+            );
+            assert_eq!(
+                classify_probe_completion(11, -libc::EPERM, 11, 8),
+                IoUringProbeOutcome::Permission
+            );
+            assert_eq!(
+                classify_probe_completion(11, i32::MIN, 11, 8),
                 IoUringProbeOutcome::Error
             );
 

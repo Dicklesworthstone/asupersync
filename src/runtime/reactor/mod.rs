@@ -1160,7 +1160,7 @@ pub fn create_reactor_with_policy(policy: IoUringCapabilityPolicy) -> io::Result
             ));
         }
 
-        return Ok(ObservedReactor::wrap(
+        Ok(ObservedReactor::wrap(
             Arc::new(EpollReactor::new()?),
             IoReactorCapabilitySnapshot::unavailable(
                 IoReactorBackend::Epoll,
@@ -1168,7 +1168,7 @@ pub fn create_reactor_with_policy(policy: IoUringCapabilityPolicy) -> io::Result
                 policy,
                 IoUringFallbackReason::RingCreate,
             ),
-        ));
+        ))
     }
 
     #[cfg(not(feature = "io-uring"))]

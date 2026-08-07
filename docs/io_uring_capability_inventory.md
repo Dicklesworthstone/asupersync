@@ -63,10 +63,10 @@ the runtime inspector and cannot establish operation support.
 | Surface | Current state | Material gap | Next owner |
 |---|---|---|---|
 | Build edge | optional feature and dependency | compilation does not establish host support | URING-2 |
-| Backend factory | try io_uring, then epoll, retain immutable selection metadata, and probe requested fixed-buffer registration | five capability probes and fixed-I/O completion remain | URING-2 |
+| Backend factory | try io_uring, then epoll, retain immutable selection metadata, and probe requested fixed-buffer operations | five capability probes remain | URING-2 |
 | Reactor | live one-shot readiness | no advanced data-plane operations | URING-2 onward |
 | Epoll fallback | live Linux/Android readiness backend with feature-disabled or ring-create receipt | total reactor failure has no driver snapshot | URING-2 |
-| Buffer scaffold | cached fixed-opcode plus bounded register/unregister probe, kernel registration, and manual IDs | no fixed-I/O completion; IDs unused by I/O | URING-3 |
+| Buffer scaffold | cached fixed-opcode plus bounded register/write/read/unregister probe, kernel registration, and manual IDs | IDs remain unused by runtime data-plane I/O | URING-3 |
 | Default file API | owned helpers offload; poll traits block directly | separate from opt-in io_uring and unsuitable as an async comparator | URING-7 |
 | File I/O | Linux-only file-local ring driven synchronously in poll | no fixed/selected buffer and unsuitable as an async comparator | URING-3 |
 | Path and directory I/O | Linux-only independent one-operation rings | outside one capability/fallback model | URING-2 |
@@ -92,9 +92,10 @@ Five material source-accuracy records are explicit. The file module header names
 `libc::openat` synchronously and no corresponding ring opcode consumer exists;
 it also claims nonblocking asynchronous completion although poll drives
 `submit_and_wait`. The directory header misclassifies the `MkDirAt` path. The
-former hardcoded buffer-support answer is partially resolved by a cached,
-bounded fixed-opcode and register/unregister probe; a real fixed-I/O completion
-is still absent. Finally, an E2E comment labels default
+former hardcoded buffer-support answer is resolved at the capability-probe
+boundary by a cached, bounded fixed-opcode, register, fixed write/read,
+completion-integrity, and unregister sequence; the runtime data plane still
+does not consume the registered pool. Finally, an E2E comment labels default
 `fs::write`/`fs::read` as io_uring evidence. Unresolved statements may not be
 promoted into capability or execution evidence.
 
@@ -102,7 +103,7 @@ promoted into capability or execution evidence.
 
 | Evidence | What it currently covers | What it does not cover |
 |---|---|---|
-| Inline reactor tests | intended readiness and pool bookkeeping | real fixed I/O or later capabilities |
+| Inline reactor tests | intended readiness and pool bookkeeping plus deterministic fixed-completion classification | runtime data-plane fixed I/O or later capabilities |
 | Buffer-pool conformance test | simulated API shape | kernel registration, live acquisition, leases |
 | Reactor integration and stress | one-shot readiness lifecycle | advanced buffer, multishot, or SQPOLL paths |
 | Filesystem E2E | opt-in file lifecycle and attribution | its mislabeled default-helper case, advanced buffers, network paths |
@@ -235,9 +236,11 @@ control-plane state:
 - fallback reason.
 
 This checkpoint supplies one conservative support outcome: requested fixed
-buffers run a cached temporary-ring probe that checks fixed read/write opcodes
-and actual registration/unregistration. It does not execute fixed I/O, and the
-other five capabilities still have no authoritative live outcome. Any requested
+buffers run a cached temporary-ring probe that checks fixed read/write opcodes,
+registers one eight-byte buffer, completes a fixed write and read through a
+nonblocking Unix stream pair, verifies both completions and the returned data,
+then unregisters. The runtime data plane does not use this probe buffer, and
+the other five capabilities still have no authoritative live outcome. Any requested
 capability without an outcome fails closed with `URING-FB-PROBE-ERROR`; no
 advanced capability is requested or active by default.
 
@@ -311,19 +314,21 @@ The later URING-2 control-plane checkpoint added the immutable model, typed
 policy, factory selection receipt, and driver snapshot. RCH job
 `j-29964935379288247` checked the default-feature library at clean-overlay base
 `90d28c97324a0c42b8453be836f53f8ef6a1e1ce` and exited zero. The next checkpoint
-replaced the fixed-buffer support placeholder with the bounded cached probe.
-An RCH clean-overlay feature compile on `hz2` used project hash
-`ec4e32fde9abc324`, base `23c8149a12aa3efad77adb318ef27150fbfc44aa`,
+replaced the fixed-buffer support placeholder with the bounded cached probe and
+then extended it through fixed write/read completion and data verification.
+An RCH clean-overlay feature compile on `ovh-a` used project hash
+`fdf9590b1c19d7a3`, base `9c53f4d2e8a2144c5a30573469318db51ee9e28b`,
 overlay fingerprint
-`0123f12ac80071d051d677f93a53ebd53a098724f8c0b66a13c60bd8f6619033`,
+`d83435fff20af242eb5c3ef27fa5715ca1c7b3c540b135cf67117dfa4846c9b4`,
 and exited zero for `cargo check -p asupersync --lib --features io-uring`.
-A focused test attempt under project hash `c316006ea09ef0d1` disappeared from the
-active RCH set without a terminal receipt; its orphaned local hook was stopped,
-so this checkpoint makes no test or live-kernel outcome claim.
+A focused test attempt under project hash `98179d1f2cd5b5dd` stopped emitting
+output during test linking and the local wait was stopped with exit 130. It
+produced no terminal test result, so this checkpoint makes no test claim and no
+live-kernel outcome claim.
 
 Accordingly, this inventory and checkpoint do not prove focused test success,
-live-host support, fixed-I/O completion or the other five operation probes,
-advanced data-plane behavior, lifecycle correctness, performance,
+live-host support, the other five operation probes, advanced data-plane
+behavior, lifecycle correctness, performance,
 broad workspace health, release readiness, production-on-by-default status, or
 fleet availability. The checkpoint changes control-plane metadata only and
 authorizes no dependency, capability, or file removal, tracker closure, or

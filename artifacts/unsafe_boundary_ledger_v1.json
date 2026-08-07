@@ -335,10 +335,10 @@
   },
   "summary": {
     "boundary_rows": 97,
-    "operation_count": 873,
+    "operation_count": 875,
     "operation_kind_counts": {
       "allow_unsafe_code": 100,
-      "unsafe_block": 651,
+      "unsafe_block": 653,
       "unsafe_fn": 102,
       "unsafe_impl": 20,
       "unsafe_trait": 0
@@ -3956,11 +3956,12 @@
       "category": "reactor-ffi",
       "scope": "file-or-item-boundary",
       "feature_or_platform_gate": "see source cfg attributes and Cargo feature gates",
-      "why_safe_rust_is_insufficient": "Initial inventory row: this path contains one or more unsafe operations or unsafe-code allow scopes. UNSAFE-2 must enforce exact live-site matching and may split this row into narrower item rows where useful.",
-      "safety_invariant": "Raw file descriptors, sockets, ring entries, and OS handles must be live for the duration of each FFI call; ownership transfers must be one-way and close/dup paths must avoid double-close and stale-handle reuse.",
-      "expected_evidence": "Category-specific evidence is defined in docs/unsafe_boundary_ledger.md; this inventory row records the current boundary and must be refined before closing UNSAFE-2 if exact per-block enforcement needs a narrower row.",
+      "why_safe_rust_is_insufficient": "io_uring submission and buffer registration accept raw descriptors and pointers whose kernel-visible lifetimes cannot be expressed to Rust's borrow checker; the module also owns platform FFI for readiness, wakeup and descriptor validation.",
+      "safety_invariant": "Raw file descriptors, sockets, ring entries, and OS handles remain live for every FFI call; ownership transfers are one-way and close/dup paths avoid double-close and stale-handle reuse. The fixed-buffer probe keeps its backing allocation and nonblocking Unix stream pair alive through both terminal completions, attempts unregister before return, and declares the temporary ring last so it drops before the registered backing on every path.",
+      "expected_evidence": "Category-specific evidence is defined in docs/unsafe_boundary_ledger.md. The reactor-ffi policy requires target-gated RCH compilation plus focused lifecycle tests; the fixed-buffer probe has an io-uring-feature compile receipt, while its focused executable attempt produced no terminal test result and supplies no live-host support claim.",
       "explicit_no_claims": [
         "This row is an inventory and schema baseline, not fresh execution proof for every platform path.",
+        "Source and contract alignment do not prove fixed-buffer completion, cancellation or cleanup on a live host.",
         "Test-only, conformance, fuzz, and compat-boundary rows do not prove core runtime production safety."
       ],
       "operation_locators": [
@@ -3971,87 +3972,97 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 43,
+          "line": 96,
+          "pattern": "if unsafe { ring.submission().push(entry) }.is_err() {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 159,
+          "pattern": "if let Err(error) = unsafe { ring.submitter().register_buffers(&[io_vec]) } {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 215,
           "pattern": "if unsafe { libc::fcntl(raw_fd, libc::F_GETFD) } == -1 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 48,
+          "line": 220,
           "pattern": "let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };"
         },
         {
           "kind": "unsafe_block",
-          "line": 49,
+          "line": 221,
           "pattern": "if unsafe { libc::fstat(raw_fd, &mut stat_buf) } != 0 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 71,
+          "line": 243,
           "pattern": "let link_len = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 412,
+          "line": 616,
           "pattern": "unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 497,
+          "line": 701,
           "pattern": "match unsafe { ring.submitter().register_buffers(&io_vecs) } {"
         },
         {
           "kind": "unsafe_block",
-          "line": 621,
+          "line": 839,
           "pattern": "if unsafe { libc::fcntl(raw_fd, libc::F_GETFD) } == -1 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 644,
+          "line": 862,
           "pattern": "if unsafe { libc::fcntl(info.raw_fd, libc::F_GETFD) } == -1 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 744,
+          "line": 982,
           "pattern": "let _ = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 790,
+          "line": 1048,
           "pattern": "unsafe { libc::write(fd, bytes.as_ptr().cast::<libc::c_void>(), bytes.len()) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 839,
+          "line": 1097,
           "pattern": "unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 899,
+          "line": 1157,
           "pattern": "unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 959,
+          "line": 1222,
           "pattern": "let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 964,
+          "line": 1227,
           "pattern": "let owned = unsafe { OwnedFd::from_raw_fd(fd) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1429,
+          "line": 1772,
           "pattern": "let pushed = unsafe { ring.submission().push(&entry) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1947,
+          "line": 2290,
           "pattern": "let n = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1974,
+          "line": 2317,
           "pattern": "let n = unsafe {"
         }
       ]
