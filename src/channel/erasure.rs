@@ -603,9 +603,9 @@ impl EcReceiver {
                 .await
                 .map_err(|_| EcError::TransportClosed)?;
             let message_id = self.ingest_unit(unit);
-            // Check readiness after EITHER a header or a symbol: a zero-source
-            // (empty) message is decodable the moment its header arrives, with no
-            // symbols of its own.
+            // Check readiness after either a header or a symbol: an empty
+            // message is decodable the moment its header arrives, with no
+            // symbol frames of its own.
             if let Some(bytes) = self.try_complete(message_id)? {
                 return Ok(bytes);
             }
@@ -656,7 +656,9 @@ impl EcReceiver {
         let Some((header, reassembler)) = self.pending.get(&message_id) else {
             return Ok(None);
         };
-        if !reassembler.is_ready() {
+        // Empty messages carry no symbol frames: the validated header is the
+        // complete representation, so they are ready as soon as it arrives.
+        if header.message_size != 0 && !reassembler.is_ready() {
             return Ok(None);
         }
         let header = *header;

@@ -168,10 +168,14 @@ impl TraceBufferHandle {
 
     /// Pushes a pre-built trace event into the buffer.
     ///
-    /// This preserves the event's existing sequence number. Callers that need
-    /// a fresh sequence number from this handle should prefer
-    /// [`record_event`](Self::record_event).
+    /// This preserves the event's existing sequence number and advances the
+    /// handle's allocator past it. The latter matters when importing a replay
+    /// prefix before recording new events. Callers that need a fresh sequence
+    /// number from this handle should prefer [`record_event`](Self::record_event).
     pub fn push_event(&self, event: TraceEvent) {
+        self.inner
+            .next_seq
+            .fetch_max(event.seq.saturating_add(1), Ordering::Relaxed);
         {
             let mut buffer = self.inner.buffer.lock();
             buffer.push(event);
@@ -430,6 +434,16 @@ mod tests {
         assert_eq!(snap.len(), 2);
         assert_eq!(snap[0].seq, 10);
         assert_eq!(snap[1].seq, 20);
+    }
+
+    #[test]
+    fn trace_buffer_handle_push_advances_sequence_allocator() {
+        let handle = TraceBufferHandle::new(4);
+        handle.push_event(make_event(10));
+        handle.record_event(make_event);
+
+        let seqs: Vec<_> = handle.snapshot().iter().map(|event| event.seq).collect();
+        assert_eq!(seqs, vec![10, 11]);
     }
 
     #[test]

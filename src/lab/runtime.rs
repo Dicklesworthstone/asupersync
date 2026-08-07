@@ -665,7 +665,7 @@ impl SporkHarnessReport {
             test_name: None,
             commit_hash: compiled_commit_hash(),
         };
-        let replay = ReplayCommand::from_config(&crash_config);
+        let replay = ReplayCommand::from_config_cli(&crash_config, &path);
         Some(CrashpackLink {
             id: format!(
                 "crashpack-{seed:016x}-{fingerprint:016x}",

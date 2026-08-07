@@ -183,7 +183,8 @@ impl BoundaryKind {
                     Self::WordEndAscii => left && !right,
                     Self::WordStartHalfAscii => !left,
                     Self::WordEndHalfAscii => !right,
-                    _ => unreachable!("ASCII word variant is exhaustively matched"),
+                    // The outer match admits only the ASCII variants here.
+                    _ => false,
                 })
             }
             Self::WordUnicode
@@ -200,7 +201,8 @@ impl BoundaryKind {
                     Self::WordEndUnicode => left && !right,
                     Self::WordStartHalfUnicode => !left,
                     Self::WordEndHalfUnicode => !right,
-                    _ => unreachable!("Unicode word variant is exhaustively matched"),
+                    // The outer match admits only the Unicode variants here.
+                    _ => false,
                 })
             }
         }

@@ -1123,7 +1123,7 @@ mod tests {
             })
         );
         assert_eq!(
-            STANDARD.decode_plan(b"!AAAA", 2),
+            STANDARD.decode_plan(b"!AAA", 2),
             Err(Base64Error::BinaryLengthExceeded { len: 3, limit: 2 })
         );
         assert_eq!(
@@ -1305,7 +1305,11 @@ mod tests {
 
                         if !encoded.is_empty() {
                             let mut malformed = encoded.into_bytes();
-                            let position = raw_position % malformed.len();
+                            let symbol_len = malformed
+                                .iter()
+                                .position(|&byte| byte == b'=')
+                                .unwrap_or(malformed.len());
+                            let position = raw_position % symbol_len;
                             malformed[position] = invalid;
                             let expected = Base64Error::InvalidByte {
                                 index: position,

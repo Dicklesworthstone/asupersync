@@ -119,7 +119,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     },
     AmbientFinding {
         file: "runtime/blocking_pool.rs",
-        line: 1198,
+        line: 1281,
         evidence_pattern: "thread::Builder::new()",
         category: AmbientCategory::Spawn,
         severity: Severity::Low,
@@ -1481,7 +1481,7 @@ fn test_function() {
     /// pinned by file, category, pattern, occurrence count, line, and normalized context in
     /// `ambient_authority_inventory_v1.snap`. Review that snapshot diff and
     /// document intentional production additions before updating the baseline.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 701;
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 705;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")

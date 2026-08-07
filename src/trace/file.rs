@@ -2446,7 +2446,8 @@ mod tests {
         let directory = tempfile::tempdir().expect("create migration directory");
         let source = directory.path().join("truncated-v2.trace");
         let destination = directory.path().join("must-not-exist.trace");
-        write_v2_trace(&source, &TraceMetadata::new(19), &sample_events(), 3);
+        let events = sample_events();
+        write_v2_trace(&source, &TraceMetadata::new(19), &events[..3], 3);
         let source_before = std::fs::read(&source).expect("read complete v2 source");
         std::fs::write(&source, &source_before[..source_before.len() - 1])
             .expect("truncate final event");

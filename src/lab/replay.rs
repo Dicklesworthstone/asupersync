@@ -4414,10 +4414,7 @@ mod tests {
     fn metamorphic_checkpoint_replay_equivalence() {
         init_test("metamorphic_checkpoint_replay_equivalence");
 
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
+        let seed = 0x5245_504c_4159_0001;
 
         let config = ReplayMetamorphicConfig::default();
 

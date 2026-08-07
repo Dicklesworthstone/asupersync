@@ -31,26 +31,26 @@
   "source_pins": [
     {
       "path": "src/bin/asupersync.rs",
-      "sha256": "397f3800f4a40ccb4f25366bb10ce641d12b4947b9e1b230359db69c5af1e283",
-      "line_count": 16700,
+      "sha256": "39719e72f1c00122ec4730aab2e2404086292ac46ced4e9290bb206a3b618ec7",
+      "line_count": 16791,
       "role": "reachable asupersync parser and dispatch"
     },
     {
       "path": "src/bin/atp.rs",
-      "sha256": "b77dd1e90ae1ab81bf084feac214b31cc8f17557d6f3c476dcdb1868075eee4b",
+      "sha256": "898b6c4e15cf95d4382c617ce0ded5a856b2f6f238df7fa7f86b4e999f1a2d86",
       "line_count": 11912,
       "role": "reachable standalone ATP parser and dispatch"
     },
     {
       "path": "src/bin/atpd.rs",
-      "sha256": "8d969a0669bcd865be9589f5a408cab2b861c1a14ab0a3e5a9e8b1f1fb731cf8",
-      "line_count": 2333,
+      "sha256": "53f0dae1caaf9a46064b19337bc5efc99408274469d3dbd85078b0b28c51d424",
+      "line_count": 2663,
       "role": "reachable ATP daemon parser and dispatch"
     },
     {
       "path": "src/bin/offline_tuner.rs",
-      "sha256": "f7a240cac88da235924221ed88a93bd4059ee831c4ec530a58f1fa926e47e203",
-      "line_count": 652,
+      "sha256": "1333ecb1172c084cd2ea3e768d37e585563d751d290d746f5b82cbe8d7037d74",
+      "line_count": 650,
       "role": "reachable offline tuner parser and dispatch"
     },
     {
@@ -61,13 +61,13 @@
     },
     {
       "path": "src/cli/atp_command_tree.rs",
-      "sha256": "b79d4f01345274f6260d3ce911e48e2c2d2cd7c0c49ff7562f5ecf1a58d2e603",
+      "sha256": "72f9659b1dd2f7ee1e05b30eb285bde1bafd965911c87675d52148fc86c6bb46",
       "line_count": 1706,
       "role": "exported but binary-detached ATP command model"
     },
     {
       "path": "Cargo.toml",
-      "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+      "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
       "line_count": 1038,
       "role": "clap feature and binary admission boundary"
     },
@@ -91,8 +91,8 @@
     },
     {
       "path": "src/cli/atp_config.rs",
-      "sha256": "6251a2f39ef6175d8bc9d195adbe5626950ae14261a91aee7e75ad0ee76dd2c2",
-      "line_count": 775,
+      "sha256": "b6e56aefd2d04371f37958f7070053374cfe2aa2ce1db0ada2eab56161f27a2f",
+      "line_count": 1016,
       "role": "configuration precedence implementation adjacent to detached ATP tree"
     },
     {
@@ -7244,20 +7244,20 @@
     "source_pins": [
       {
         "path": "Cargo.toml",
-        "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+        "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
         "line_count": 1038,
         "role": "cli feature, optional env_logger edge, and offline_tuner binary admission"
       },
       {
         "path": "Cargo.lock",
-        "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+        "sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
         "line_count": 4666,
         "role": "locked env_logger package and dependency closure inventory"
       },
       {
         "path": "src/bin/offline_tuner.rs",
-        "sha256": "f7a240cac88da235924221ed88a93bd4059ee831c4ec530a58f1fa926e47e203",
-        "line_count": 652,
+        "sha256": "1333ecb1172c084cd2ea3e768d37e585563d751d290d746f5b82cbe8d7037d74",
+        "line_count": 650,
         "role": "parser, logger initialization, command dispatch, streams, exits, and artifacts"
       },
       {

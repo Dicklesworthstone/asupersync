@@ -29,7 +29,7 @@ expression: inventory
 1	Env	net/atp/bonding/receiver.rs	std::env::var_os(
 3	Env	net/atp/transport_quic/mod.rs	std::env::var_os(
 1	Env	net/atp/transport_quic/native_link.rs	std::env::var(
-8	Env	net/atp/transport_quic/native_link.rs	std::env::var_os(
+9	Env	net/atp/transport_quic/native_link.rs	std::env::var_os(
 6	Env	net/atp/transport_rq/mod.rs	std::env::var_os(
 2	Env	net/quic_native/connection.rs	std::env::var_os(
 2	Env	net/quic_native/endpoint.rs	std::env::var_os(
@@ -99,13 +99,16 @@ expression: inventory
 1	Io	net/tcp/traits.rs	TcpListener::
 1	Io	net/tcp/traits.rs	std::net::TcpListener
 2	Io	net/websocket/client.rs	TcpStream::
+1	Io	process.rs	std::fs::OpenOptions
+1	Io	runtime/reactor/io_uring.rs	TcpListener::
+1	Io	runtime/reactor/io_uring.rs	TcpStream::
 1	Io	security/keys/mod.rs	File::open(
 1	Io	tls/connector.rs	std::fs::read(
 2	Io	tls/types.rs	std::fs::read(
 1	Io	trace/compat.rs	File::open(
 1	Io	trace/crashpack.rs	std::fs::write(
-1	Io	trace/file.rs	File::create(
-1	Io	trace/file.rs	File::open(
+2	Io	trace/file.rs	File::create(
+2	Io	trace/file.rs	File::open(
 1	Io	trace/integrity.rs	File::open(
 2	Io	web/static_files.rs	std::fs::OpenOptions
 1	Output	atp/journal/append_journal.rs	eprintln!(
@@ -121,7 +124,6 @@ expression: inventory
 1	Output	net/quic_native/endpoint_api.rs	eprintln!(
 1	Spawn	database/mysql.rs	std::thread::Builder
 1	Spawn	observability/debt_runtime_integration.rs	thread::spawn
-2	Spawn	process.rs	std::thread::Builder
 2	Spawn	runtime/builder.rs	std::thread::Builder
 1	Spawn	runtime/spawn_blocking.rs	thread::Builder
 2	Spawn	signal/shutdown.rs	std::thread::Builder
@@ -259,7 +261,7 @@ Entropy	cancel/symbol_cancel.rs	1177	getrandom::	getrandom::fill(&mut tag_buf).e
 Entropy	net/atp/crypto/mod.rs	419	getrandom::	getrandom::fill(&mut iv).map_err(|err| {
 Entropy	net/atp/datagram/probes.rs	367	getrandom::	match getrandom::fill(&mut challenge) {
 Entropy	net/atp/handshake/transport_params.rs	232	getrandom::	getrandom::fill(&mut stateless_reset_token)
-Entropy	net/atp/transport_quic/native_link.rs	8114	getrandom::	getrandom::fill(&mut nonce)
+Entropy	net/atp/transport_quic/native_link.rs	8151	getrandom::	getrandom::fill(&mut nonce)
 Entropy	observability/otel.rs	474	std::collections::hash_map::RandomState	hasher_seed: std::collections::hash_map::RandomState,
 Entropy	observability/otel.rs	482	std::collections::hash_map::RandomState	hasher_seed: std::collections::hash_map::RandomState::new(),
 Entropy	observability/otel.rs	578	std::collections::hash_map::RandomState	use std::collections::hash_map::RandomState;
@@ -273,26 +275,27 @@ Env	agent_swarm/release_proof_aggregator.rs	616	std::env::var_os(	let home = std
 Env	atp/daemon_control.rs	602	std::env::var_os(	std::env::var_os().as_deref(),
 Env	atp/logging/failure_bundle.rs	471	env::var(	if let Ok(value) = env::var(var) {
 Env	bytes/profiling.rs	129	std::env::var(	val = if std::env::var().is_ok() {
-Env	config.rs	756	std::env::vars(	for (key, value) in std::env::vars() {
+Env	config.rs	927	std::env::vars(	for (key, value) in std::env::vars() {
 Env	console.rs	981	std::env::var(	std::env::var(key).ok()
-Env	database/postgres.rs	4108	std::env::var(	if let Ok(ca_path) = std::env::var() {
+Env	database/postgres.rs	4165	std::env::var(	if let Ok(ca_path) = std::env::var() {
 Env	decoding.rs	240	std::env::var_os(	if std::env::var_os().is_none() {
 Env	net/atp/bonding/receiver.rs	481	std::env::var_os(	if std::env::var_os(ATP_BOND_TRACE_ENV).is_some() {
 Env	net/atp/transport_quic/mod.rs	147	std::env::var_os(	if std::env::var_os().is_some() {
 Env	net/atp/transport_quic/mod.rs	3447	std::env::var_os(	if std::env::var_os().is_some() {
 Env	net/atp/transport_quic/mod.rs	3543	std::env::var_os(	if std::env::var_os().is_some() {
-Env	net/atp/transport_quic/native_link.rs	1157	std::env::var_os(	if std::env::var_os().is_none() {
-Env	net/atp/transport_quic/native_link.rs	1462	std::env::var_os(	if std::env::var_os().is_none() {
-Env	net/atp/transport_quic/native_link.rs	1530	std::env::var_os(	if std::env::var_os().is_none() {
+Env	net/atp/transport_quic/native_link.rs	1169	std::env::var_os(	if std::env::var_os().is_none() {
+Env	net/atp/transport_quic/native_link.rs	1474	std::env::var_os(	if std::env::var_os().is_none() {
+Env	net/atp/transport_quic/native_link.rs	1542	std::env::var_os(	if std::env::var_os().is_none() {
 Env	net/atp/transport_quic/native_link.rs	435	std::env::var(	std::env::var()
-Env	net/atp/transport_quic/native_link.rs	5007	std::env::var_os(	if std::env::var_os().is_some() {
+Env	net/atp/transport_quic/native_link.rs	5020	std::env::var_os(	if std::env::var_os().is_some() {
 Env	net/atp/transport_quic/native_link.rs	546	std::env::var_os(	if std::env::var_os().is_some() {
-Env	net/atp/transport_quic/native_link.rs	564	std::env::var_os(	if packets == 0 || std::env::var_os().is_none() {
-Env	net/atp/transport_quic/native_link.rs	632	std::env::var_os(	if symbols == 0 || std::env::var_os().is_none() {
-Env	net/atp/transport_quic/native_link.rs	9195	std::env::var_os(	let recv_profile = std::env::var_os().is_some();
-Env	net/atp/transport_rq/mod.rs	10521	std::env::var_os(	let trace_receiver_intake = std::env::var_os().is_some();
-Env	net/atp/transport_rq/mod.rs	12092	std::env::var_os(	if std::env::var_os().is_none() {
-Env	net/atp/transport_rq/mod.rs	13021	std::env::var_os(	let trace_commit = std::env::var_os().is_some();
+Env	net/atp/transport_quic/native_link.rs	559	std::env::var_os(	*ENABLED.get_or_init(|| std::env::var_os().is_some())
+Env	net/atp/transport_quic/native_link.rs	574	std::env::var_os(	if packets == 0 || std::env::var_os().is_none() {
+Env	net/atp/transport_quic/native_link.rs	642	std::env::var_os(	if symbols == 0 || std::env::var_os().is_none() {
+Env	net/atp/transport_quic/native_link.rs	9232	std::env::var_os(	let recv_profile = std::env::var_os().is_some();
+Env	net/atp/transport_rq/mod.rs	10546	std::env::var_os(	let trace_receiver_intake = std::env::var_os().is_some();
+Env	net/atp/transport_rq/mod.rs	12117	std::env::var_os(	if std::env::var_os().is_none() {
+Env	net/atp/transport_rq/mod.rs	13046	std::env::var_os(	let trace_commit = std::env::var_os().is_some();
 Env	net/atp/transport_rq/mod.rs	470	std::env::var_os(	*ENABLED.get_or_init(|| std::env::var_os().is_some())
 Env	net/atp/transport_rq/mod.rs	477	std::env::var_os(	if std::env::var_os().is_some() {
 Env	net/atp/transport_rq/mod.rs	487	std::env::var_os(	if std::env::var_os().is_some() {
@@ -328,21 +331,21 @@ Io	atp/mailbox/relay.rs	284	TcpStream::	let mut stream = TcpStream::connect_time
 Io	atp/mailbox/storage.rs	410	std::fs::write(	if let Err(error) = std::fs::write(&full_path, &prepared.bytes) {
 Io	atp/mailbox/storage.rs	435	std::fs::read(	std::fs::read(&chunk_path).map_err(|e| MailboxError::NetworkError {
 Io	atp/writer.rs	401	File::open(	let mut file = match File::open(path).await {
-Io	database/mysql.rs	1902	TcpStream::	match TcpStream::connect_timeout(addr, timeout).await {
-Io	database/mysql.rs	1907	TcpStream::	match TcpStream::connect(addr).await {
-Io	database/postgres.rs	3491	TcpStream::	let mut stream = crate::net::TcpStream::connect_timeout(addr, target.connect_timeout)
-Io	database/postgres.rs	3705	TcpStream::	TcpStream::connect_timeout(addr, timeout).await
-Io	database/postgres.rs	3707	TcpStream::	TcpStream::connect(addr).await
-Io	database/postgres.rs	8489	std::net::TcpStream	fn fuzz_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
-Io	database/postgres.rs	8490	std::net::TcpListener	let listener = match std::net::TcpListener::bind() {
-Io	database/postgres.rs	8498	std::net::TcpStream	let std_stream = match std::net::TcpStream::connect(addr) {
-Io	database/postgres.rs	8506	TcpStream::	let stream = match crate::net::TcpStream::from_std(std_stream) {
-Io	grpc/server.rs	1846	std::net::TcpListener	let listener = std::net::TcpListener::bind(addr).map_err(|error| {
+Io	database/mysql.rs	1992	TcpStream::	match TcpStream::connect_timeout(addr, timeout).await {
+Io	database/mysql.rs	1997	TcpStream::	match TcpStream::connect(addr).await {
+Io	database/postgres.rs	3548	TcpStream::	let mut stream = crate::net::TcpStream::connect_timeout(addr, target.connect_timeout)
+Io	database/postgres.rs	3762	TcpStream::	TcpStream::connect_timeout(addr, timeout).await
+Io	database/postgres.rs	3764	TcpStream::	TcpStream::connect(addr).await
+Io	database/postgres.rs	8525	std::net::TcpStream	fn fuzz_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
+Io	database/postgres.rs	8526	std::net::TcpListener	let listener = match std::net::TcpListener::bind() {
+Io	database/postgres.rs	8534	std::net::TcpStream	let std_stream = match std::net::TcpStream::connect(addr) {
+Io	database/postgres.rs	8542	TcpStream::	let stream = match crate::net::TcpStream::from_std(std_stream) {
+Io	grpc/server.rs	1969	std::net::TcpListener	let listener = std::net::TcpListener::bind(addr).map_err(|error| {
 Io	http/h1/http_client.rs	2019	TcpStream::	TcpStream::connect_socket_addr(socket_addr)
 Io	http/h1/http_client.rs	2024	TcpStream::	TcpStream::connect(addr)
 Io	http/h1/http_client.rs	2532	TcpStream::	let mut stream = TcpStream::connect(addr)
 Io	http/h1/listener.rs	373	TcpListener::	let tcp_listener = TcpListener::bind(addr).await?;
-Io	http/h2/listener.rs	1994	TcpListener::	let tcp_listener = TcpListener::bind(addr).await?;
+Io	http/h2/listener.rs	2029	TcpListener::	let tcp_listener = TcpListener::bind(addr).await?;
 Io	messaging/nats.rs	1623	TcpStream::	let stream = TcpStream::connect(addr).await?;
 Io	messaging/redis.rs	1922	TcpStream::	let tcp_stream = TcpStream::connect(addr).await?;
 Io	messaging/stream.rs	532	File::open(	let file = File::open(path).map_err(|error| StreamError::wal_io(, path, &error))?;
@@ -368,23 +371,23 @@ Io	net/atp/transport_quic/mod.rs	3941	std::fs::File::create	let mut pack = std::
 Io	net/atp/transport_quic/mod.rs	3946	std::fs::File::open	let mut src = std::fs::File::open(path)?;
 Io	net/atp/transport_quic/mod.rs	4826	File::open(	let mut file = crate::fs::File::open(&entry.abs_path)
 Io	net/atp/transport_quic/mod.rs	7584	File::open(	let mut file = crate::fs::File::open(&entry.abs_path)
-Io	net/atp/transport_quic/native_link.rs	7124	File::open(	let mut file = crate::fs::File::open(&entry.abs_path)
-Io	net/atp/transport_quic/native_link.rs	8329	std::fs::File::open	let mut source = std::fs::File::open(&staging_path)?;
-Io	net/atp/transport_quic/native_link.rs	8341	std::fs::OpenOptions	let mut out = std::fs::OpenOptions::new()
-Io	net/atp/transport_quic/native_link.rs	8391	std::fs::File::open	let mut source = std::fs::File::open(&staging_path)?;
-Io	net/atp/transport_quic/native_link.rs	8394	std::fs::OpenOptions	let mut out = std::fs::OpenOptions::new()
-Io	net/atp/transport_quic/native_link.rs	8501	File::open(	let mut file = crate::fs::File::open(staging_path)
+Io	net/atp/transport_quic/native_link.rs	7137	File::open(	let mut file = crate::fs::File::open(&entry.abs_path)
+Io	net/atp/transport_quic/native_link.rs	8366	std::fs::File::open	let mut source = std::fs::File::open(&staging_path)?;
+Io	net/atp/transport_quic/native_link.rs	8378	std::fs::OpenOptions	let mut out = std::fs::OpenOptions::new()
+Io	net/atp/transport_quic/native_link.rs	8428	std::fs::File::open	let mut source = std::fs::File::open(&staging_path)?;
+Io	net/atp/transport_quic/native_link.rs	8431	std::fs::OpenOptions	let mut out = std::fs::OpenOptions::new()
+Io	net/atp/transport_quic/native_link.rs	8538	File::open(	let mut file = crate::fs::File::open(staging_path)
 Io	net/atp/transport_rq/bonded.rs	1556	TcpStream::	TcpStream::connect(control_addr),
-Io	net/atp/transport_rq/mod.rs	11778	File::open(	let Some(mut reader) = crate::fs::File::open(&dec.staging_path).await.ok() else {
-Io	net/atp/transport_rq/mod.rs	12113	File::open(	let Ok(mut reader) = crate::fs::File::open(&dec.staging_path).await else {
-Io	net/atp/transport_rq/mod.rs	12705	File::open(	let mut file = crate::fs::File::open(staging_path)
-Io	net/atp/transport_rq/mod.rs	12785	std::fs::File::open	let mut source = std::fs::File::open(&staging_path)?;
-Io	net/atp/transport_rq/mod.rs	12805	std::fs::write(	std::fs::write(&member.write_path, &staged[start..end])?;
-Io	net/atp/transport_rq/mod.rs	12845	File::open(	let mut source = crate::fs::File::open(staging_path)
-Io	net/atp/transport_rq/mod.rs	12863	File::create(	let mut out = crate::fs::File::create(&member.write_path).await?;
-Io	net/atp/transport_rq/mod.rs	12897	File::open(	let mut file = crate::fs::File::open(&shard.staging_path)
-Io	net/atp/transport_rq/mod.rs	12936	File::create(	let mut out = crate::fs::File::create(out_path).await?;
-Io	net/atp/transport_rq/mod.rs	12938	File::open(	let mut file = crate::fs::File::open(&shard.staging_path)
+Io	net/atp/transport_rq/mod.rs	11803	File::open(	let Some(mut reader) = crate::fs::File::open(&dec.staging_path).await.ok() else {
+Io	net/atp/transport_rq/mod.rs	12138	File::open(	let Ok(mut reader) = crate::fs::File::open(&dec.staging_path).await else {
+Io	net/atp/transport_rq/mod.rs	12730	File::open(	let mut file = crate::fs::File::open(staging_path)
+Io	net/atp/transport_rq/mod.rs	12810	std::fs::File::open	let mut source = std::fs::File::open(&staging_path)?;
+Io	net/atp/transport_rq/mod.rs	12830	std::fs::write(	std::fs::write(&member.write_path, &staged[start..end])?;
+Io	net/atp/transport_rq/mod.rs	12870	File::open(	let mut source = crate::fs::File::open(staging_path)
+Io	net/atp/transport_rq/mod.rs	12888	File::create(	let mut out = crate::fs::File::create(&member.write_path).await?;
+Io	net/atp/transport_rq/mod.rs	12922	File::open(	let mut file = crate::fs::File::open(&shard.staging_path)
+Io	net/atp/transport_rq/mod.rs	12961	File::create(	let mut out = crate::fs::File::create(out_path).await?;
+Io	net/atp/transport_rq/mod.rs	12963	File::open(	let mut file = crate::fs::File::open(&shard.staging_path)
 Io	net/atp/transport_rq/mod.rs	4766	File::open(	let mut file = crate::fs::File::open(path)
 Io	net/atp/transport_rq/mod.rs	5622	File::create(	let mut pack_file = crate::fs::File::create(&pack_path)
 Io	net/atp/transport_rq/mod.rs	5676	File::open(	let mut src = crate::fs::File::open(path)
@@ -392,7 +395,7 @@ Io	net/atp/transport_rq/mod.rs	7697	TcpStream::	TcpStream::connect(addr),
 Io	net/atp/transport_rq/mod.rs	7936	TcpStream::	TcpStream::connect(addr),
 Io	net/atp/transport_rq/mod.rs	9479	File::open(	let mut file = crate::fs::File::open(path)
 Io	net/atp/transport_rq/mod.rs	9526	File::open(	let mut file = crate::fs::File::open(path)
-Io	net/atp/transport_rq/mod.rs	9662	File::open(	let mut file = crate::fs::File::open(&enc.abs_path)
+Io	net/atp/transport_rq/mod.rs	9687	File::open(	let mut file = crate::fs::File::open(&enc.abs_path)
 Io	net/atp/transport_tcp/mod.rs	1144	File::open(	let mut file = crate::fs::File::open(path)
 Io	net/atp/transport_tcp/mod.rs	1838	File::open(	let mut file = crate::fs::File::open(path)
 Io	net/atp/transport_tcp/mod.rs	1950	File::open(	let mut file = crate::fs::File::open(&entry.abs_path)
@@ -422,15 +425,20 @@ Io	net/tcp/traits.rs	287	std::net::TcpListener	let listener: std::net::TcpListen
 Io	net/tcp/traits.rs	288	TcpListener::	match super::listener::TcpListener::from_std(listener) {
 Io	net/websocket/client.rs	1039	TcpStream::	TcpStream::connect_timeout(addr, timeout).await
 Io	net/websocket/client.rs	1041	TcpStream::	TcpStream::connect(addr).await
+Io	process.rs	1032	std::fs::OpenOptions	let file = std::fs::OpenOptions::new()
+Io	runtime/reactor/io_uring.rs	532	TcpListener::	let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, 0)) {
+Io	runtime/reactor/io_uring.rs	572	TcpStream::	let client = match TcpStream::connect_timeout(&address, Duration::from_secs(1)) {
 Io	security/keys/mod.rs	642	File::open(	if let Ok(dir) = fs::File::open(parent) {
 Io	tls/connector.rs	641	std::fs::read(	let Ok(pem_data) = std::fs::read(path) else {
 Io	tls/types.rs	241	std::fs::read(	let pem = std::fs::read(path.as_ref())
 Io	tls/types.rs	69	std::fs::read(	let pem = std::fs::read(path.as_ref())
-Io	trace/compat.rs	195	File::open(	let file = File::open(path)?;
-Io	trace/crashpack.rs	1137	std::fs::write(	std::fs::write(&tmp_path, json.as_bytes()).map_err(CrashPackWriteError::Io)?;
-Io	trace/file.rs	466	File::create(	let file = File::create(path)?;
-Io	trace/file.rs	882	File::open(	let file = File::open(path)?;
-Io	trace/integrity.rs	433	File::open(	let file = File::open(path)?;
+Io	trace/compat.rs	201	File::open(	let file = File::open(path)?;
+Io	trace/crashpack.rs	1148	std::fs::write(	std::fs::write(&tmp_path, json.as_bytes()).map_err(CrashPackWriteError::Io)?;
+Io	trace/file.rs	1028	File::open(	let file = File::open(path)?;
+Io	trace/file.rs	1882	File::open(	File::open(&staged_path.path)?.sync_all()?;
+Io	trace/file.rs	1914	File::create(	let file = File::create(path)?;
+Io	trace/file.rs	569	File::create(	let file = File::create(path)?;
+Io	trace/integrity.rs	438	File::open(	let mut file = File::open(path)?;
 Io	web/static_files.rs	536	std::fs::OpenOptions	std::fs::OpenOptions::new()
 Io	web/static_files.rs	544	std::fs::OpenOptions	std::fs::OpenOptions::new().read(true).open(path)
 Output	atp/journal/append_journal.rs	1576	eprintln!(	eprintln!(
@@ -452,21 +460,19 @@ Output	messaging/kafka.rs	702	eprintln!(	eprintln!(
 Output	net/atp/bonding/receiver.rs	483	eprintln!(	eprintln!();
 Output	net/atp/transport_quic/mod.rs	148	eprintln!(	eprintln!();
 Output	net/atp/transport_quic/mod.rs	154	eprintln!(	eprintln!();
-Output	net/atp/transport_quic/native_link.rs	1161	eprintln!(	eprintln!(
+Output	net/atp/transport_quic/native_link.rs	1173	eprintln!(	eprintln!(
 Output	net/atp/transport_quic/native_link.rs	547	eprintln!(	eprintln!(, format!($($arg)*));
-Output	net/atp/transport_quic/native_link.rs	9252	eprintln!(	eprintln!(
-Output	net/atp/transport_rq/mod.rs	12129	eprintln!(	eprintln!(
-Output	net/atp/transport_rq/mod.rs	12145	eprintln!(	eprintln!(
+Output	net/atp/transport_quic/native_link.rs	9289	eprintln!(	eprintln!(
+Output	net/atp/transport_rq/mod.rs	12154	eprintln!(	eprintln!(
+Output	net/atp/transport_rq/mod.rs	12170	eprintln!(	eprintln!(
 Output	net/atp/transport_rq/mod.rs	478	eprintln!(	eprintln!(, format!($($arg)*));
 Output	net/atp/transport_rq/mod.rs	488	eprintln!(	eprintln!(, format!($($arg)*));
 Output	net/quic_native/connection.rs	316	eprintln!(	eprintln!(, format!($($arg)*));
 Output	net/quic_native/endpoint_api.rs	71	eprintln!(	eprintln!(, format!($($arg)*));
 Spawn	database/mysql.rs	1810	std::thread::Builder	std::thread::Builder::new()
 Spawn	observability/debt_runtime_integration.rs	107	thread::spawn	let handle = thread::spawn(move || {
-Spawn	process.rs	1693	std::thread::Builder	let handle = std::thread::Builder::new()
-Spawn	process.rs	1826	std::thread::Builder	if std::thread::Builder::new()
-Spawn	runtime/builder.rs	353	std::thread::Builder	let mut builder = std::thread::Builder::new().name(name);
-Spawn	runtime/builder.rs	406	std::thread::Builder	let thread = std::thread::Builder::new()
+Spawn	runtime/builder.rs	365	std::thread::Builder	let mut builder = std::thread::Builder::new().name(name);
+Spawn	runtime/builder.rs	419	std::thread::Builder	let thread = std::thread::Builder::new()
 Spawn	runtime/spawn_blocking.rs	293	thread::Builder	let thread_result = thread::Builder::new()
 Spawn	signal/shutdown.rs	158	std::thread::Builder	std::thread::Builder::new()
 Spawn	signal/shutdown.rs	493	std::thread::Builder	std::thread::Builder::new()
@@ -769,67 +775,67 @@ Time	net/atp/transport_quic/mod.rs	5167	Instant::now()	let started_at = Instant:
 Time	net/atp/transport_quic/mod.rs	5372	Instant::now()	started_at: Instant::now(),
 Time	net/atp/transport_quic/mod.rs	5408	Instant::now()	let started_at = Instant::now();
 Time	net/atp/transport_quic/mod.rs	5833	Instant::now()	let started_at = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	2138	Instant::now()	let now = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	2168	Instant::now()	let now = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	2207	Instant::now()	let now = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	2823	Instant::now()	self.beacons.mark_peer_activity(Instant::now());
-Time	net/atp/transport_quic/native_link.rs	3036	Instant::now()	let mut last_progress = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	3055	Instant::now()	last_progress = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	3095	Instant::now()	.next_action(Instant::now(), measurement)
-Time	net/atp/transport_quic/native_link.rs	3225	Instant::now()	let generate_started = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	3324	Instant::now()	let pacer_wait_started = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	3338	Instant::now()	let now = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	3487	Instant::now()	let protect_started = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	3524	Instant::now()	let udp_send_started = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	4018	Instant::now()	let mut last_progress = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	4115	Instant::now()	last_progress = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	4567	Instant::now()	self.last_final_flight_resend = Some(Instant::now());
-Time	net/atp/transport_quic/native_link.rs	4593	Instant::now()	let zero_progress_deadline = Instant::now().checked_add(timeout);
-Time	net/atp/transport_quic/native_link.rs	4655	Instant::now()	.map(|deadline| deadline.saturating_duration_since(Instant::now()));
-Time	net/atp/transport_quic/native_link.rs	4770	Instant::now()	let flush_start = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	4776	Instant::now()	let liveness_start = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	4825	Instant::now()	let trace_start = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	4916	Instant::now()	let enqueue_start = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	4955	Instant::now()	let enqueue_start = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	5142	Instant::now()	let mut last_retransmit = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	5166	Instant::now()	last_retransmit = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	5175	Instant::now()	last_retransmit = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	5225	Instant::now()	let started = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	5226	Instant::now()	let mut last_retransmit = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	5286	Instant::now()	last_retransmit = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	5326	Instant::now()	last_retransmit = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	5330	Instant::now()	last_retransmit = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	5459	Instant::now()	stream_rate_epoch: Instant::now(),
-Time	net/atp/transport_quic/native_link.rs	5469	Instant::now()	beacons: BeaconScheduler::new(1, Instant::now()),
-Time	net/atp/transport_quic/native_link.rs	5641	Instant::now()	let accept_started = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	5735	Instant::now()	last_early_data_resend = Some(Instant::now());
-Time	net/atp/transport_quic/native_link.rs	6386	Instant::now()	let send_start = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	6642	Instant::now()	let send_start = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	6752	Instant::now()	let send_start = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	6912	Instant::now()	let started = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	6913	Instant::now()	let mut last_progress = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	6926	Instant::now()	last_progress = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	6955	Instant::now()	last_progress = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	10020	Instant::now()	let pump_started = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	2151	Instant::now()	let now = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	2181	Instant::now()	let now = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	2220	Instant::now()	let now = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	2836	Instant::now()	self.beacons.mark_peer_activity(Instant::now());
+Time	net/atp/transport_quic/native_link.rs	3049	Instant::now()	let mut last_progress = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	3068	Instant::now()	last_progress = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	3108	Instant::now()	.next_action(Instant::now(), measurement)
+Time	net/atp/transport_quic/native_link.rs	3238	Instant::now()	let generate_started = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	3337	Instant::now()	let pacer_wait_started = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	3351	Instant::now()	let now = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	3500	Instant::now()	let protect_started = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	3537	Instant::now()	let udp_send_started = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	4031	Instant::now()	let mut last_progress = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	4128	Instant::now()	last_progress = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	4580	Instant::now()	self.last_final_flight_resend = Some(Instant::now());
+Time	net/atp/transport_quic/native_link.rs	4606	Instant::now()	let zero_progress_deadline = Instant::now().checked_add(timeout);
+Time	net/atp/transport_quic/native_link.rs	4668	Instant::now()	.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+Time	net/atp/transport_quic/native_link.rs	4783	Instant::now()	let flush_start = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	4789	Instant::now()	let liveness_start = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	4838	Instant::now()	let trace_start = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	4929	Instant::now()	let enqueue_start = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	4968	Instant::now()	let enqueue_start = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	5155	Instant::now()	let mut last_retransmit = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	5179	Instant::now()	last_retransmit = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	5188	Instant::now()	last_retransmit = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	5238	Instant::now()	let started = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	5239	Instant::now()	let mut last_retransmit = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	5299	Instant::now()	last_retransmit = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	5339	Instant::now()	last_retransmit = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	5343	Instant::now()	last_retransmit = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	5472	Instant::now()	stream_rate_epoch: Instant::now(),
+Time	net/atp/transport_quic/native_link.rs	5482	Instant::now()	beacons: BeaconScheduler::new(1, Instant::now()),
+Time	net/atp/transport_quic/native_link.rs	5654	Instant::now()	let accept_started = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	5748	Instant::now()	last_early_data_resend = Some(Instant::now());
+Time	net/atp/transport_quic/native_link.rs	6399	Instant::now()	let send_start = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	6655	Instant::now()	let send_start = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	6765	Instant::now()	let send_start = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	6925	Instant::now()	let started = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	6926	Instant::now()	let mut last_progress = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	6939	Instant::now()	last_progress = Instant::now();
 Time	net/atp/transport_quic/native_link.rs	6968	Instant::now()	last_progress = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	7001	Instant::now()	last_progress = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	7006	Instant::now()	last_progress = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	7032	Instant::now()	let gate_started = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	7033	Instant::now()	let mut last_progress = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	7059	Instant::now()	last_progress = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	7093	Instant::now()	last_progress = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	7097	Instant::now()	last_progress = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	9295	Instant::now()	let drain_started = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	9340	Instant::now()	let pump_started = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	9382	Instant::now()	let write_started = Instant::now();
-Time	net/atp/transport_quic/native_link.rs	9983	Instant::now()	let pump_started = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	6981	Instant::now()	last_progress = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	7014	Instant::now()	last_progress = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	7019	Instant::now()	last_progress = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	7045	Instant::now()	let gate_started = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	7046	Instant::now()	let mut last_progress = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	7072	Instant::now()	last_progress = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	7106	Instant::now()	last_progress = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	7110	Instant::now()	last_progress = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	9332	Instant::now()	let drain_started = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	9377	Instant::now()	let pump_started = Instant::now();
+Time	net/atp/transport_quic/native_link.rs	9419	Instant::now()	let write_started = Instant::now();
 Time	net/atp/transport_rq/mod.rs	1105	Instant::now()	let now = Instant::now();
 Time	net/atp/transport_rq/mod.rs	1133	Instant::now()	let now = Instant::now();
 Time	net/atp/transport_rq/mod.rs	1145	Instant::now()	burst.next_burst_at = Instant::now().checked_add(burst_interval);
-Time	net/atp/transport_rq/mod.rs	14596	Instant::now()	let persist_start = Instant::now();
-Time	net/atp/transport_rq/mod.rs	14647	Instant::now()	let apply_start = Instant::now();
-Time	net/atp/transport_rq/mod.rs	14715	Instant::now()	let apply_start = Instant::now();
-Time	net/atp/transport_rq/mod.rs	14768	Instant::now()	let apply_start = Instant::now();
-Time	net/atp/transport_rq/mod.rs	14882	Instant::now()	let join_start = Instant::now();
+Time	net/atp/transport_rq/mod.rs	14621	Instant::now()	let persist_start = Instant::now();
+Time	net/atp/transport_rq/mod.rs	14672	Instant::now()	let apply_start = Instant::now();
+Time	net/atp/transport_rq/mod.rs	14740	Instant::now()	let apply_start = Instant::now();
+Time	net/atp/transport_rq/mod.rs	14793	Instant::now()	let apply_start = Instant::now();
+Time	net/atp/transport_rq/mod.rs	14907	Instant::now()	let join_start = Instant::now();
 Time	net/atp/transport_rq/mod.rs	1558	Instant::now()	beacons: BeaconScheduler::new(seed, Instant::now()),
 Time	net/atp/transport_rq/mod.rs	1578	Instant::now()	let now = Instant::now();
 Time	net/atp/transport_rq/mod.rs	1585	Instant::now()	self.beacons.mark_peer_activity(Instant::now());
@@ -850,17 +856,17 @@ Time	net/quic_native/connection_manager.rs	394	Instant::now()	last_activity: Ins
 Time	net/quic_native/endpoint.rs	381	Instant::now()	let batch_start = Instant::now();
 Time	net/quic_native/endpoint.rs	421	Instant::now()	receive_time: Instant::now(),
 Time	net/quic_native/endpoint.rs	541	Instant::now()	let batch_start = Instant::now();
-Time	net/quic_native/handshake_driver.rs	696	Instant::now()	let mut flight_sent_at = Instant::now();
-Time	net/quic_native/handshake_driver.rs	715	Instant::now()	flight_sent_at = Instant::now();
+Time	net/quic_native/handshake_driver.rs	727	Instant::now()	let mut flight_sent_at = Instant::now();
+Time	net/quic_native/handshake_driver.rs	746	Instant::now()	flight_sent_at = Instant::now();
 Time	net/quic_native/managed_endpoint.rs	285	std::time::SystemTime::now()	std::time::SystemTime::now()
 Time	net/quic_native/managed_endpoint.rs	444	Instant::now()	let now = Instant::now();
 Time	net/quic_native/managed_endpoint.rs	478	Instant::now()	let closed_connections = self.connection_router.close_all(cx, Instant::now(), 0)?;
 Time	net/stun.rs	196	SystemTime::now()	let now = SystemTime::now()
-Time	observability/mod.rs	385	std::time::SystemTime::now()	std::time::SystemTime::now()
+Time	observability/mod.rs	431	std::time::SystemTime::now()	std::time::SystemTime::now()
 Time	observability/network_diagnostics.rs	192	std::time::SystemTime::now()	timestamp: std::time::SystemTime::now(),
 Time	observability/otel_structured_concurrency.rs	228	SystemTime::now()	created_at: SystemTime::now(),
 Time	observability/otel_structured_concurrency.rs	530	SystemTime::now()	let now = SystemTime::now();
-Time	observability/otlp_trace_exporter.rs	705	std::time::Instant::now()	let flush_start = std::time::Instant::now();
+Time	observability/otlp_trace_exporter.rs	707	std::time::Instant::now()	let flush_start = std::time::Instant::now();
 Time	observability/pressure_governor.rs	1138	Instant::now()	let coordination_start = Instant::now();
 Time	observability/pressure_governor.rs	1164	Instant::now()	let coordination_duration = Instant::now().duration_since(coordination_start);
 Time	observability/pressure_governor.rs	405	Instant::now()	let started_at = Instant::now();
@@ -910,12 +916,12 @@ Time	runtime/panic_isolation.rs	381	Instant::now()	timestamp: Instant::now(),
 Time	runtime/panic_isolation.rs	447	Instant::now()	timestamp: Instant::now(),
 Time	runtime/resource_cleanup_verifier.rs	232	SystemTime::now()	let now = SystemTime::now();
 Time	runtime/resource_cleanup_verifier.rs	258	SystemTime::now()	self.last_updated = SystemTime::now();
-Time	runtime/resource_monitor.rs	3082	Instant::now()	timestamp: Instant::now(),
-Time	runtime/resource_monitor.rs	3317	Instant::now()	let start = Instant::now();
-Time	runtime/resource_monitor.rs	3341	Instant::now()	changes.insert(resource_type, Instant::now());
-Time	runtime/resource_monitor.rs	3531	Instant::now()	let start = Instant::now();
-Time	runtime/resource_monitor.rs	6023	Instant::now()	let _start = Instant::now();
-Time	runtime/resource_monitor.rs	6319	Instant::now()	let cycle_start = Instant::now();
+Time	runtime/resource_monitor.rs	3086	Instant::now()	timestamp: Instant::now(),
+Time	runtime/resource_monitor.rs	3321	Instant::now()	let start = Instant::now();
+Time	runtime/resource_monitor.rs	3345	Instant::now()	changes.insert(resource_type, Instant::now());
+Time	runtime/resource_monitor.rs	3535	Instant::now()	let start = Instant::now();
+Time	runtime/resource_monitor.rs	6027	Instant::now()	let _start = Instant::now();
+Time	runtime/resource_monitor.rs	6323	Instant::now()	let cycle_start = Instant::now();
 Time	runtime/scheduler/autotuner.rs	1733	Instant::now()	timestamp: Some(Instant::now()),
 Time	runtime/scheduler/autotuner.rs	753	Instant::now()	self.last_adjustment_time = Some(Instant::now());
 Time	runtime/scheduler/invariant_monitor.rs	409	std::time::Instant::now()	let start = std::time::Instant::now();
@@ -931,23 +937,23 @@ Time	runtime/scheduler/priority_inversion_oracle.rs	399	Instant::now()	let start
 Time	runtime/scheduler/priority_inversion_oracle.rs	523	Instant::now()	start_time: Instant::now(),
 Time	runtime/scheduler/priority_inversion_oracle.rs	599	Instant::now()	let end_time = Instant::now();
 Time	runtime/scheduler/work_stealing_checker.rs	226	Instant::now()	start_time: Instant::now(),
-Time	runtime/state.rs	153	Instant::now()	let started = Instant::now();
-Time	runtime/state.rs	224	Instant::now()	let started = Instant::now();
+Time	runtime/state.rs	156	Instant::now()	let started = Instant::now();
+Time	runtime/state.rs	227	Instant::now()	let started = Instant::now();
 Time	runtime/state_verifier.rs	180	SystemTime::now()	timestamp: SystemTime::now(),
 Time	runtime/state_verifier.rs	216	SystemTime::now()	timestamp: SystemTime::now(),
 Time	runtime/state_verifier.rs	253	SystemTime::now()	timestamp: SystemTime::now(),
 Time	signal/graceful.rs	16	std::time::Instant::now()	std::time::Instant::now()
-Time	sync/contended_mutex.rs	276	Instant::now()	let start = Instant::now();
-Time	sync/contended_mutex.rs	285	Instant::now()	let acquired_at = Instant::now();
-Time	sync/contended_mutex.rs	343	Instant::now()	let acquired_at = Instant::now();
-Time	sync/contended_mutex.rs	362	Instant::now()	let acquired_at = Instant::now();
+Time	sync/contended_mutex.rs	411	Instant::now()	let start = Instant::now();
+Time	sync/contended_mutex.rs	420	Instant::now()	let acquired_at = Instant::now();
+Time	sync/contended_mutex.rs	478	Instant::now()	let acquired_at = Instant::now();
+Time	sync/contended_mutex.rs	497	Instant::now()	let acquired_at = Instant::now();
 Time	sync/pool.rs	221	Instant::now()	Instant::now()
 Time	time/intrusive_wheel.rs	121	Instant::now()	deadline: Cell::new(Instant::now()),
 Time	time/intrusive_wheel.rs	348	Instant::now()	Self::new_at(resolution, Instant::now())
 Time	time/intrusive_wheel.rs	678	Instant::now()	Self::new_at(DEFAULT_LEVEL0_RESOLUTION, Instant::now())
 Time	time/sleep.rs	248	Instant::now()	let now = Instant::now();
 Time	tls/acceptor.rs	498	std::time::SystemTime::now()	let now = std::time::SystemTime::now()
-Time	trace/crashpack.rs	1212	std::time::SystemTime::now()	std::time::SystemTime::now()
+Time	trace/crashpack.rs	1223	std::time::SystemTime::now()	std::time::SystemTime::now()
 Time	trace/minimizer.rs	49	Instant::now()	started_at: Instant::now(),
 Time	util/det_rng.rs	106	std::time::SystemTime::now()	std::time::SystemTime::now()
 Time	web/session.rs	160	SystemTime::now()	SystemTime::now()

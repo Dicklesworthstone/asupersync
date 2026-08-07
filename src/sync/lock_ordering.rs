@@ -288,19 +288,20 @@ impl LockRank {
     /// rank. Returns `None` for names with no recognized prefix (no ordering
     /// is enforced for such locks).
     pub fn from_name(name: &str) -> Option<Self> {
-        let name = name.to_ascii_lowercase();
-        if name.starts_with("config") {
+        if starts_with_ignore_ascii_case(name, "config") {
             Some(LockRank::Config)
-        } else if name.starts_with("metrics")
-            || name.starts_with("instrumentation")
-            || name.starts_with("trace")
+        } else if starts_with_ignore_ascii_case(name, "metrics")
+            || starts_with_ignore_ascii_case(name, "instrumentation")
+            || starts_with_ignore_ascii_case(name, "trace")
         {
             Some(LockRank::Instrumentation)
-        } else if name.starts_with("region") {
+        } else if starts_with_ignore_ascii_case(name, "region") {
             Some(LockRank::Regions)
-        } else if name.starts_with("task") || name.starts_with("scheduler") {
+        } else if starts_with_ignore_ascii_case(name, "task")
+            || starts_with_ignore_ascii_case(name, "scheduler")
+        {
             Some(LockRank::Tasks)
-        } else if name.starts_with("obligation") {
+        } else if starts_with_ignore_ascii_case(name, "obligation") {
             Some(LockRank::Obligations)
         } else {
             None // Unknown rank, no ordering enforced
@@ -931,17 +932,22 @@ mod tests {
     #[test]
     fn test_lock_rank_from_name() {
         assert_eq!(LockRank::from_name("config_cache"), Some(LockRank::Config));
+        assert_eq!(LockRank::from_name("CONFIG_CACHE"), Some(LockRank::Config));
         assert_eq!(
             LockRank::from_name("metrics_collector"),
+            Some(LockRank::Instrumentation)
+        );
+        assert_eq!(
+            LockRank::from_name("InStRuMeNtAtIoN_State"),
             Some(LockRank::Instrumentation)
         );
         assert_eq!(
             LockRank::from_name("regions_table"),
             Some(LockRank::Regions)
         );
-        assert_eq!(LockRank::from_name("tasks_queue"), Some(LockRank::Tasks));
+        assert_eq!(LockRank::from_name("TASKS_QUEUE"), Some(LockRank::Tasks));
         assert_eq!(
-            LockRank::from_name("obligations_ledger"),
+            LockRank::from_name("ObLiGaTiOnS_Ledger"),
             Some(LockRank::Obligations)
         );
         assert_eq!(LockRank::from_name("unknown_lock"), None);
