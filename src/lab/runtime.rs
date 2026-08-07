@@ -2607,45 +2607,53 @@ impl LabRuntime {
         // Record replay event
         self.replay_recorder.record_cancel_injection(task_id);
 
-        // Record the cancel request in the oracle
         let reason = CancelReason::user("chaos-injected");
-        if self.config.has_cancellation_oracle() {
-            self.oracles.cancellation_protocol.on_cancel_request(
-                task_id,
-                reason.clone(),
-                self.virtual_time,
-            );
-        }
-
-        // Mark the task as cancel-requested with chaos reason.
+        // Mark the task as cancel-requested with the chaos reason, preserving
+        // any stronger cancellation that already won for this task.
         let transition = self
             .state
             .update_task(task_id, |record| {
                 if !record.state.is_terminal() {
                     let old_state = record.state.clone();
-                    let effects = record.request_cancel_with_budget(reason, Budget::ZERO);
+                    let effects = record.request_cancel_with_budget(reason.clone(), Budget::ZERO);
                     let (_, cancel_wakes) = effects.into_parts();
-                    Some((old_state, record.state.clone(), cancel_wakes))
+                    let effective_reason = record
+                        .cancel_reason()
+                        .cloned()
+                        .unwrap_or_else(|| reason.clone());
+                    Some((
+                        old_state,
+                        record.state.clone(),
+                        effective_reason,
+                        cancel_wakes,
+                    ))
                 } else {
                     None
                 }
             })
             .flatten();
 
-        // Record the state transition in the oracle after mutation is complete.
-        let cancel_wakes = if let Some((old_state, new_state, cancel_wakes)) = transition {
-            if self.config.has_cancellation_oracle() {
-                self.oracles.cancellation_protocol.on_transition(
-                    task_id,
-                    &old_state,
-                    &new_state,
-                    self.virtual_time,
-                );
-            }
-            cancel_wakes
-        } else {
-            crate::types::task_context::CancelWakeEffects::empty()
-        };
+        // Publish the authoritative post-strengthening reason to the oracle
+        // after mutation, then record the corresponding state transition.
+        let cancel_wakes =
+            if let Some((old_state, new_state, effective_reason, cancel_wakes)) = transition {
+                if self.config.has_cancellation_oracle() {
+                    self.oracles.cancellation_protocol.on_cancel_request(
+                        task_id,
+                        effective_reason,
+                        self.virtual_time,
+                    );
+                    self.oracles.cancellation_protocol.on_transition(
+                        task_id,
+                        &old_state,
+                        &new_state,
+                        self.virtual_time,
+                    );
+                }
+                cancel_wakes
+            } else {
+                crate::types::task_context::CancelWakeEffects::empty()
+            };
 
         // Emit trace event
         self.state.record_trace_event(|seq| {

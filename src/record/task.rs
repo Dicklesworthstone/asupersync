@@ -616,10 +616,8 @@ impl TaskRecord {
             // Budget update is deferred to acknowledge_cancel to prevent
             // pre-empting the cancellation check with a budget exhaustion error.
         }
-        let cancel_kind = reason.kind;
-        #[cfg(not(feature = "tracing-integration"))]
-        let _ = (&previous_state, &cancel_kind);
-
+        let requested_cancel_kind = reason.kind;
+        let requested_cleanup_poll_quota = cleanup_budget.poll_quota;
         let mut updated_reason_for_inner = None;
 
         let result = match &mut self.state {
@@ -706,6 +704,28 @@ impl TaskRecord {
             }
             TaskState::Completed(_) => (false, false, CancelTaskTraceKind::StrengthenedCleanup),
         };
+        // Trace the authoritative post-strengthening reason and budget. Using
+        // the incoming request here can falsely publish a weaker cancellation
+        // even though the task record correctly preserved its stronger reason.
+        let (cancel_kind, trace_cleanup_poll_quota) = match &self.state {
+            TaskState::CancelRequested {
+                reason,
+                cleanup_budget,
+            }
+            | TaskState::Cancelling {
+                reason,
+                cleanup_budget,
+            }
+            | TaskState::Finalizing {
+                reason,
+                cleanup_budget,
+            } => (reason.kind, cleanup_budget.poll_quota),
+            TaskState::Created | TaskState::Running | TaskState::Completed(_) => {
+                (requested_cancel_kind, requested_cleanup_poll_quota)
+            }
+        };
+        #[cfg(not(feature = "tracing-integration"))]
+        let _ = (&previous_state, &cancel_kind, trace_cleanup_poll_quota);
         if let Some(reason) = updated_reason_for_inner {
             if let Some(guard) = inner_guard.as_mut() {
                 let reason_changed = if let Some(existing) = guard.cancel_reason.as_mut() {
@@ -746,7 +766,7 @@ impl TaskRecord {
                 self.owner,
                 previous_state,
                 cancel_kind,
-                cleanup_budget.poll_quota,
+                trace_cleanup_poll_quota,
             );
             if runnable_publication.is_published() {
                 trace.append_to(&mut wakes);
