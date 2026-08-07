@@ -480,6 +480,8 @@ pub enum IoUringProbeOutcome {
     Permission,
     /// A bounded resource operation failed.
     Resource,
+    /// A prerequisite capability is inactive.
+    Dependency,
     /// The probe failed without a narrower classification.
     Error,
 }
@@ -593,6 +595,13 @@ impl IoUringCapabilityPolicy {
                 IoUringSupportState::NotProbed,
                 false,
                 IoUringFallbackReason::Resource,
+            ),
+            Some(IoUringProbeOutcome::Dependency) => IoUringCapabilityDecision::new(
+                capability,
+                true,
+                IoUringSupportState::NotProbed,
+                false,
+                IoUringFallbackReason::Dependency,
             ),
             Some(IoUringProbeOutcome::Error) | None => IoUringCapabilityDecision::new(
                 capability,
@@ -1518,6 +1527,21 @@ mod tests {
             .decide(requested, Some(IoUringProbeOutcome::Supported));
         assert!(active.active());
         assert_eq!(active.fallback_reason(), IoUringFallbackReason::None);
+
+        let dependent = IoUringCapability::MultishotRecv;
+        let dependency_blocked = IoUringCapabilityPolicy::new()
+            .with_requested(dependent, true)
+            .decide(dependent, Some(IoUringProbeOutcome::Dependency));
+        assert!(dependency_blocked.requested());
+        assert_eq!(
+            dependency_blocked.supported(),
+            IoUringSupportState::NotProbed
+        );
+        assert!(!dependency_blocked.active());
+        assert_eq!(
+            dependency_blocked.fallback_reason(),
+            IoUringFallbackReason::Dependency
+        );
     }
 
     // Event tests

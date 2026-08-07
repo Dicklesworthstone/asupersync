@@ -128,7 +128,7 @@ later one.
 | `URING-CAP-PROVIDED-GROUPS` | live bounded selected-receive probe; not used by the data plane | runtime lease and data-plane integration |
 | `URING-CAP-MAPPED-BUFFER-RING` | absent | bounded mapped ring, lifetime proof, selection and return |
 | `URING-CAP-MULTISHOT-ACCEPT` | absent | generation-tagged MORE/terminal state and descriptor ownership |
-| `URING-CAP-MULTISHOT-RECV` | absent | selected-buffer obligations, bounded queues and terminal drain |
+| `URING-CAP-MULTISHOT-RECV` | live dependency-gated multishot receive probe; not used by the data plane | runtime selected-buffer obligations, bounded queues and split-half cancellation |
 | `URING-CAP-SQPOLL` | live requested-only temporary-ring and NOP probe; off by default | operator-configurable settings, runtime ring, cost visibility and rollback |
 
 The ordinary readiness backend is already live, but it is deliberately not a
@@ -243,16 +243,21 @@ control-plane state:
 - active;
 - fallback reason.
 
-This checkpoint supplies three conservative support outcomes. Requested fixed
+This checkpoint supplies four conservative support outcomes. Requested fixed
 buffers run a cached temporary-ring probe that checks fixed read/write opcodes,
 registers one eight-byte buffer, completes a fixed write and read through a
 nonblocking Unix stream pair, verifies both completions and the returned data,
 then unregisters. Requested provided groups run a separate cached temporary
 ring that provides one buffer, completes a selected receive, verifies the
 buffer ID and bytes, re-provides the consumed buffer, and removes the group.
+Requested multishot receive first requires that same provided-group capability
+to be requested and independently proven. Its separate cached ring then
+receives two exact payloads into two distinct selected buffers, requires `MORE`
+on both data completions, submits an explicit cancellation, observes the cancel
+and terminal completions, returns both buffers, and removes the group.
 Requested SQPOLL creates a separate two-entry ring with a one-millisecond idle,
 completes one NOP, and drops the ring and its polling thread. The runtime data
-plane uses neither probe buffer and does not enable SQPOLL; the other three
+plane uses none of the probe buffers and does not enable SQPOLL; the other two
 capabilities still have no authoritative live outcome. Any requested capability
 without an outcome fails closed with `URING-FB-PROBE-ERROR`; no advanced
 capability is requested or active by default.
@@ -332,13 +337,16 @@ then extended it through fixed write/read completion and data verification.
 The terminal no-driver checkpoint retained the fallback decision in
 `RuntimeState` and exposed it through `Runtime` and `RuntimeHandle`. The next
 checkpoint added the bounded provided-group selected-receive and cleanup probe.
-The current checkpoint adds an off-by-default, requested-only SQPOLL probe that
+The SQPOLL checkpoint added an off-by-default, requested-only probe that
 creates a two-entry ring, completes one NOP, and drops the ring and polling
-thread before returning its cached classified outcome.
-An RCH clean-overlay feature compile on `ovh-a` used project hash
-`8dfcc9b5e299c45d`, base `48d52673a7c20939c12ba6b1387b9644f05e244b`,
+thread before returning its cached classified outcome. The current checkpoint
+adds the dependency-gated multishot receive operation probe, including two
+distinct selected buffers, `MORE`, explicit cancellation, terminal drain,
+buffer return, and group removal.
+An RCH clean-overlay feature compile on `hz2` used project hash
+`abd5f27f7d240023`, base `6211ab5cc22ef68dbe3c4c4da1bb17160240e982`,
 overlay fingerprint
-`68e09e7a2419a30f09c75c326fc5beb9fcb844b389e92d3b67af28a295899e30`,
+`37504271985ea1cad0aa420a4f8ef20a2d13274f24ad6ab57da383e0cfb70a82`,
 and exited zero for `cargo check -p asupersync --lib --features io-uring`.
 A focused `terminal_` test attempt under project hash `6605dee8352b6c69`
 stopped emitting output after compiling the edited library and the local wait
@@ -347,7 +355,7 @@ produced no terminal test result, so this checkpoint makes no test claim and no
 live-kernel outcome claim.
 
 Accordingly, this inventory and checkpoint do not prove focused test success,
-live-host support, the other three operation probes, advanced data-plane
+live-host support, the other two operation probes, advanced data-plane
 behavior, lifecycle correctness, performance,
 broad workspace health, release readiness, production-on-by-default status, or
 fleet availability. The checkpoint changes control-plane metadata only and

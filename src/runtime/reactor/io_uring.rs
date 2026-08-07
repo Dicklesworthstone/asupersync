@@ -84,31 +84,44 @@ mod imp {
         IoUringProbeOutcome::Supported
     }
 
-    fn submit_probe_entry(
+    fn push_probe_entry(
         ring: &mut IoUring,
         entry: &squeue::Entry,
-        expected_user_data: u64,
-        expected_len: i32,
-    ) -> Result<u32, IoUringProbeOutcome> {
+    ) -> Result<(), IoUringProbeOutcome> {
         // SAFETY: callers keep every descriptor and buffer referenced by
-        // `entry` live until this function consumes its terminal completion.
+        // `entry` live until they consume its terminal completion.
         if unsafe { ring.submission().push(entry) }.is_err() {
             return Err(IoUringProbeOutcome::Resource);
         }
+        Ok(())
+    }
+
+    fn wait_probe_completion(ring: &mut IoUring) -> Result<(u64, i32, u32), IoUringProbeOutcome> {
         if let Err(error) = ring.submit_and_wait(1) {
             return Err(classify_probe_error(&error));
         }
         let Some(completion) = ring.completion().next() else {
             return Err(IoUringProbeOutcome::Error);
         };
-        let outcome = classify_probe_completion(
+        Ok((
             completion.user_data(),
             completion.result(),
-            expected_user_data,
-            expected_len,
-        );
+            completion.flags(),
+        ))
+    }
+
+    fn submit_probe_entry(
+        ring: &mut IoUring,
+        entry: &squeue::Entry,
+        expected_user_data: u64,
+        expected_len: i32,
+    ) -> Result<u32, IoUringProbeOutcome> {
+        push_probe_entry(ring, entry)?;
+        let (user_data, result, flags) = wait_probe_completion(ring)?;
+        let outcome =
+            classify_probe_completion(user_data, result, expected_user_data, expected_len);
         if matches!(outcome, IoUringProbeOutcome::Supported) {
-            Ok(completion.flags())
+            Ok(flags)
         } else {
             Err(outcome)
         }
@@ -306,6 +319,176 @@ mod imp {
             (Ok(()), Ok(())) => IoUringProbeOutcome::Supported,
             (Err(outcome), _) => outcome,
             (Ok(()), Err(outcome)) => outcome,
+        }
+    }
+
+    fn probe_multishot_recv_operation() -> IoUringProbeOutcome {
+        const PROBE_BYTES: usize = size_of::<u64>();
+        const PROBE_BYTES_I32: i32 = 8;
+        const PROBE_BYTES_U32: u32 = 8;
+        const BUFFER_COUNT: u16 = 3;
+        const GROUP_ID: u16 = 2;
+        const FIRST_BUFFER_ID: u16 = 11;
+        const PROVIDE_USER_DATA: u64 = 7;
+        const RECV_USER_DATA: u64 = 8;
+        const CANCEL_USER_DATA: u64 = 9;
+        const REPROVIDE_USER_DATA: u64 = 10;
+        const REMOVE_USER_DATA: u64 = 11;
+
+        // Backing and descriptors precede the temporary ring so ring drop
+        // always cancels any uncertain multishot request before their storage
+        // can go out of scope.
+        let mut backing = [[0_u8; PROBE_BYTES]; BUFFER_COUNT as usize];
+        let (read_stream, mut write_stream) = match UnixStream::pair() {
+            Ok(pair) => pair,
+            Err(error) => return classify_probe_error(&error),
+        };
+        if let Err(error) = read_stream.set_nonblocking(true) {
+            return classify_probe_error(&error);
+        }
+        if let Err(error) = write_stream.set_nonblocking(true) {
+            return classify_probe_error(&error);
+        }
+
+        let mut ring = match IoUring::new(8) {
+            Ok(ring) => ring,
+            Err(error) => return classify_probe_error(&error),
+        };
+        let mut opcode_probe = Probe::new();
+        if let Err(error) = ring.submitter().register_probe(&mut opcode_probe) {
+            return classify_probe_error(&error);
+        }
+        if !opcode_probe.is_supported(opcode::ProvideBuffers::CODE)
+            || !opcode_probe.is_supported(opcode::RemoveBuffers::CODE)
+            || !opcode_probe.is_supported(opcode::RecvMulti::CODE)
+            || !opcode_probe.is_supported(opcode::AsyncCancel::CODE)
+        {
+            return IoUringProbeOutcome::Unsupported;
+        }
+
+        let provide_entry = opcode::ProvideBuffers::new(
+            backing.as_mut_ptr().cast::<u8>(),
+            PROBE_BYTES_I32,
+            BUFFER_COUNT,
+            GROUP_ID,
+            FIRST_BUFFER_ID,
+        )
+        .build()
+        .user_data(PROVIDE_USER_DATA);
+        if let Err(outcome) = submit_probe_entry(&mut ring, &provide_entry, PROVIDE_USER_DATA, 0) {
+            return outcome;
+        }
+
+        let recv_entry = opcode::RecvMulti::new(types::Fd(read_stream.as_raw_fd()), GROUP_ID)
+            .len(PROBE_BYTES_U32)
+            .build()
+            .user_data(RECV_USER_DATA);
+        if let Err(outcome) = push_probe_entry(&mut ring, &recv_entry) {
+            return outcome;
+        }
+        if let Err(error) = ring.submit() {
+            return classify_probe_error(&error);
+        }
+
+        let payloads = [3_u64.to_ne_bytes(), 4_u64.to_ne_bytes()];
+        let mut selected_ids = [None; 2];
+        for (index, payload) in payloads.iter().enumerate() {
+            if let Err(error) = write_stream.write_all(payload) {
+                return classify_probe_error(&error);
+            }
+            let (user_data, result, flags) = match wait_probe_completion(&mut ring) {
+                Ok(completion) => completion,
+                Err(outcome) => return outcome,
+            };
+            let outcome =
+                classify_probe_completion(user_data, result, RECV_USER_DATA, PROBE_BYTES_I32);
+            if !matches!(outcome, IoUringProbeOutcome::Supported) {
+                return outcome;
+            }
+            if !cqueue::more(flags) {
+                return IoUringProbeOutcome::Error;
+            }
+            let Some(buffer_id) = cqueue::buffer_select(flags) else {
+                return IoUringProbeOutcome::Error;
+            };
+            let Some(buffer_index) = buffer_id
+                .checked_sub(FIRST_BUFFER_ID)
+                .map(usize::from)
+                .filter(|buffer_index| *buffer_index < backing.len())
+            else {
+                return IoUringProbeOutcome::Error;
+            };
+            if selected_ids[..index].contains(&Some(buffer_id)) || backing[buffer_index] != *payload
+            {
+                return IoUringProbeOutcome::Error;
+            }
+            selected_ids[index] = Some(buffer_id);
+        }
+
+        let cancel_entry = opcode::AsyncCancel::new(RECV_USER_DATA)
+            .build()
+            .user_data(CANCEL_USER_DATA);
+        if let Err(outcome) = push_probe_entry(&mut ring, &cancel_entry) {
+            return outcome;
+        }
+        if let Err(error) = ring.submit_and_wait(2) {
+            return classify_probe_error(&error);
+        }
+
+        let mut cancel_seen = false;
+        let mut terminal_seen = false;
+        for _ in 0..2 {
+            let Some(completion) = ring.completion().next() else {
+                return IoUringProbeOutcome::Error;
+            };
+            match completion.user_data() {
+                CANCEL_USER_DATA
+                    if completion.result() == 0 && !cqueue::more(completion.flags()) =>
+                {
+                    cancel_seen = true;
+                }
+                RECV_USER_DATA
+                    if completion.result() == -libc::ECANCELED
+                        && !cqueue::more(completion.flags()) =>
+                {
+                    terminal_seen = true;
+                }
+                _ => return IoUringProbeOutcome::Error,
+            }
+        }
+        if !cancel_seen || !terminal_seen {
+            return IoUringProbeOutcome::Error;
+        }
+
+        for buffer_id in selected_ids.into_iter().flatten() {
+            let buffer_index = usize::from(buffer_id - FIRST_BUFFER_ID);
+            let reprovide_entry = opcode::ProvideBuffers::new(
+                backing[buffer_index].as_mut_ptr(),
+                PROBE_BYTES_I32,
+                1,
+                GROUP_ID,
+                buffer_id,
+            )
+            .build()
+            .user_data(REPROVIDE_USER_DATA);
+            if let Err(outcome) =
+                submit_probe_entry(&mut ring, &reprovide_entry, REPROVIDE_USER_DATA, 0)
+            {
+                return outcome;
+            }
+        }
+
+        let remove_entry = opcode::RemoveBuffers::new(BUFFER_COUNT, GROUP_ID)
+            .build()
+            .user_data(REMOVE_USER_DATA);
+        match submit_probe_entry(
+            &mut ring,
+            &remove_entry,
+            REMOVE_USER_DATA,
+            i32::from(BUFFER_COUNT),
+        ) {
+            Ok(_) => IoUringProbeOutcome::Supported,
+            Err(outcome) => outcome,
         }
     }
 
@@ -590,6 +773,7 @@ mod imp {
         buffer_pool: Mutex<Option<RegisteredBufferPool>>,
         fixed_buffer_probe: OnceLock<IoUringProbeOutcome>,
         provided_group_probe: OnceLock<IoUringProbeOutcome>,
+        multishot_recv_probe: OnceLock<IoUringProbeOutcome>,
         sqpoll_probe: OnceLock<IoUringProbeOutcome>,
     }
 
@@ -606,6 +790,7 @@ mod imp {
                 .field("buffer_pool", &self.buffer_pool)
                 .field("fixed_buffer_probe", &self.fixed_buffer_probe.get())
                 .field("provided_group_probe", &self.provided_group_probe.get())
+                .field("multishot_recv_probe", &self.multishot_recv_probe.get())
                 .field("sqpoll_probe", &self.sqpoll_probe.get())
                 .finish_non_exhaustive()
         }
@@ -635,6 +820,7 @@ mod imp {
                 buffer_pool: Mutex::new(None),
                 fixed_buffer_probe: OnceLock::new(),
                 provided_group_probe: OnceLock::new(),
+                multishot_recv_probe: OnceLock::new(),
                 sqpoll_probe: OnceLock::new(),
             })
         }
@@ -651,6 +837,12 @@ mod imp {
                 .get_or_init(probe_provided_buffer_group_operation)
         }
 
+        fn multishot_recv_probe_outcome(&self) -> IoUringProbeOutcome {
+            *self
+                .multishot_recv_probe
+                .get_or_init(probe_multishot_recv_operation)
+        }
+
         fn sqpoll_probe_outcome(&self) -> IoUringProbeOutcome {
             *self.sqpoll_probe.get_or_init(probe_sqpoll_ring_creation)
         }
@@ -665,8 +857,23 @@ mod imp {
                 probes[capability.index()] = Some(self.fixed_buffer_probe_outcome());
             }
             let capability = IoUringCapability::ProvidedGroups;
+            let provided_group_outcome =
+                if policy.is_requested(capability) && !policy.is_forced_off(capability) {
+                    let outcome = self.provided_group_probe_outcome();
+                    probes[capability.index()] = Some(outcome);
+                    Some(outcome)
+                } else {
+                    None
+                };
+            let capability = IoUringCapability::MultishotRecv;
             if policy.is_requested(capability) && !policy.is_forced_off(capability) {
-                probes[capability.index()] = Some(self.provided_group_probe_outcome());
+                probes[capability.index()] = Some(
+                    if matches!(provided_group_outcome, Some(IoUringProbeOutcome::Supported)) {
+                        self.multishot_recv_probe_outcome()
+                    } else {
+                        IoUringProbeOutcome::Dependency
+                    },
+                );
             }
             let capability = IoUringCapability::SqPoll;
             if policy.is_requested(capability) && !policy.is_forced_off(capability) {
@@ -952,6 +1159,9 @@ mod imp {
                 )),
                 IoUringProbeOutcome::Resource => Err(io::Error::other(
                     "fixed-buffer registration probe exhausted a bounded resource",
+                )),
+                IoUringProbeOutcome::Dependency => Err(io::Error::other(
+                    "fixed-buffer registration probe dependency was inactive",
                 )),
                 IoUringProbeOutcome::Error => Err(io::Error::other(
                     "fixed-buffer registration probe failed without a supported classification",
@@ -1500,6 +1710,45 @@ mod imp {
                 .expect("cached provided-group outcome should remain observable");
             assert_eq!(first, second);
             assert_eq!(reactor.provided_group_probe.get().copied(), Some(first));
+        }
+
+        #[test]
+        fn multishot_recv_capability_probe_requires_dependency_and_is_cached() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+            let capability = IoUringCapability::MultishotRecv;
+            let without_dependency =
+                IoUringCapabilityPolicy::new().with_requested(capability, true);
+            assert_eq!(
+                reactor.capability_probes(without_dependency)[capability.index()],
+                Some(IoUringProbeOutcome::Dependency)
+            );
+            assert!(reactor.provided_group_probe.get().is_none());
+            assert!(reactor.multishot_recv_probe.get().is_none());
+
+            let forced = IoUringCapabilityPolicy::new()
+                .with_requested(IoUringCapability::ProvidedGroups, true)
+                .with_requested(capability, true)
+                .with_forced_off(capability, true);
+            let forced_probes = reactor.capability_probes(forced);
+            assert!(forced_probes[capability.index()].is_none());
+            assert!(reactor.multishot_recv_probe.get().is_none());
+
+            let requested = IoUringCapabilityPolicy::new()
+                .with_requested(IoUringCapability::ProvidedGroups, true)
+                .with_requested(capability, true);
+            let first = reactor.capability_probes(requested)[capability.index()]
+                .expect("requested multishot receive should produce one classified outcome");
+            let second = reactor.capability_probes(requested)[capability.index()]
+                .expect("cached multishot receive outcome should remain observable");
+            assert_eq!(first, second);
+            if reactor.provided_group_probe.get().copied() == Some(IoUringProbeOutcome::Supported) {
+                assert_eq!(reactor.multishot_recv_probe.get().copied(), Some(first));
+            } else {
+                assert_eq!(first, IoUringProbeOutcome::Dependency);
+                assert!(reactor.multishot_recv_probe.get().is_none());
+            }
         }
 
         #[test]
