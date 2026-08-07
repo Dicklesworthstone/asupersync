@@ -39,7 +39,7 @@ struct DropVisitor<'a> {
 
 impl<'ast, 'a> Visit<'ast> for DropVisitor<'a> {
     fn visit_item_impl(&mut self, i: &'ast syn::ItemImpl) {
-        if let Some((_, path, _)) = &i.trait_
+        if let Some((path, _)) = &i.trait_
             && let Some(segment) = path.segments.last()
             && segment.ident == "Drop"
         {
