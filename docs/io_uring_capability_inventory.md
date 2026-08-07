@@ -63,9 +63,9 @@ the runtime inspector and cannot establish operation support.
 | Surface | Current state | Material gap | Next owner |
 |---|---|---|---|
 | Build edge | optional feature and dependency | compilation does not establish host support | URING-2 |
-| Backend factory | try io_uring, then epoll | construction error is discarded | URING-2 |
+| Backend factory | try io_uring, then epoll, and retain immutable selection metadata | live operation probes remain | URING-2 |
 | Reactor | live one-shot readiness | no advanced data-plane operations | URING-2 onward |
-| Epoll fallback | live Linux/Android readiness backend | fallback reason is discarded | URING-2 |
+| Epoll fallback | live Linux/Android readiness backend with feature-disabled or ring-create receipt | total reactor failure has no driver snapshot | URING-2 |
 | Buffer scaffold | kernel registration plus manual IDs | hardcoded support answer; IDs unused by I/O | URING-3 |
 | Default file API | owned helpers offload; poll traits block directly | separate from opt-in io_uring and unsuitable as an async comparator | URING-7 |
 | File I/O | Linux-only file-local ring driven synchronously in poll | no fixed/selected buffer and unsuitable as an async comparator | URING-3 |
@@ -74,9 +74,9 @@ the runtime inspector and cannot establish operation support.
 | TCP full and owned split streams | ordinary socket I/O plus readiness | no selected-buffer leases | URING-5 |
 | TCP borrowed split streams | timer backoff or immediate re-wake | no reactor registration or advanced receive | URING-5 |
 | `Bytes` / `BytesMut` | empty/static/shared heap bytes; exclusive mutable `Vec<u8>` | no kernel-in-flight lease state | URING-3 |
-| Builder | whole-reactor enable/disable or injection | no per-capability immutable policy | URING-2 |
+| Builder | whole-reactor enable/disable, injection, and typed per-capability policy | live operation outcomes remain | URING-2 |
 | No-reactor fallback | runtime continues with socket re-polls | startup warning only; no reason snapshot | URING-2 |
-| Inspector | generic `IoStats` counters | no backend or capability decision state | URING-2 |
+| Inspector | generic `IoStats` plus immutable capability snapshot | total reactor failure remains warning-only | URING-2 |
 | Tests | mock pool, live readiness, filesystem lifecycle | no advanced-capability matrix | URING-7 |
 | Benchmark | synthetic completion bookkeeping | no real-socket comparison | URING-7 |
 | Boundary ledger | four relevant rows and 39 locators | 33 locators are stale | URING-3 |
@@ -190,14 +190,14 @@ terminal branch.
 
 ## Deterministic force-off
 
-URING-2 owns a typed policy carried from `RuntimeBuilder` into immutable reactor
-construction. Production code must not read an ambient environment variable to
-control the hot path. A global disable and per-capability mask take effect
-before probing.
+`IoUringCapabilityPolicy` is now carried from `RuntimeBuilder` into immutable
+reactor construction. Production code does not read an ambient environment
+variable to control the hot path. Unrequested capabilities are not probed, and
+the per-capability force-off mask takes effect before an injected probe outcome.
 
-Tests need an injected fixture containing requested states and probe outcomes.
-That fixture must not consult the host. A requested but forced-off capability
-has `supported=NOT_PROBED`, `active=false`, and
+The deterministic fixture accepts requested states and bounded probe outcomes
+without consulting the host. A requested but forced-off capability has
+`supported=NOT_PROBED`, `active=false`, and
 `fallback_reason=URING-FB-FORCED-OFF`.
 
 The existing `enable_platform_reactor(false)` remains a whole-platform escape
@@ -216,14 +216,14 @@ The factory order is explicit injection, requested ordinary io_uring, epoll,
 then no reactor with socket re-poll fallback. Whole-reactor force-off uses
 `URING-FB-FORCED-OFF`; ordinary ring creation failure uses
 `URING-FB-RING-CREATE`; exhaustion of the reactor chain uses
-`URING-FB-REACTOR-UNAVAILABLE`. Today only the last branch's startup warning is
-observable; URING-2 owns its immutable snapshot.
+`URING-FB-REACTOR-UNAVAILABLE`. Feature-disabled and ring-creation fallback are
+now retained in the immutable driver snapshot. The terminal no-reactor branch
+still has only its startup warning because no `IoDriverHandle` exists.
 
-The current inspector is `IoDriverHandle::stats`, which exposes polls, received
-events, dispatched wakers, unknown tokens, registrations, and deregistrations.
-It does not identify the backend or expose any capability decision.
-
-URING-2 must add an immutable snapshot with:
+`IoDriverHandle::stats` continues to expose polls, received events, dispatched
+wakers, unknown tokens, registrations, and deregistrations. The new
+`IoDriverHandle::capability_snapshot` separately exposes immutable bounded
+control-plane state:
 
 - backend;
 - capability ID;
@@ -231,6 +231,11 @@ URING-2 must add an immutable snapshot with:
 - supported;
 - active;
 - fallback reason.
+
+This checkpoint does not supply authoritative live operation outcomes. A
+requested capability without such an outcome fails closed with
+`URING-FB-PROBE-ERROR`; no advanced capability is requested or active by
+default.
 
 Metric labels use only the frozen identifiers. A raw host error may appear in a
 bounded startup diagnostic or trace detail, never as an unbounded metric label.
@@ -298,10 +303,18 @@ This lane checked JSON shape, recorded exact hashes and line counts, and authore
 the Rust contract. The Rust contract, project tests, live kernel probes, and
 benchmarks were not executed in this static lane.
 
-Accordingly, this inventory does not prove compilation, test success, live-host
-support, activation, fallback behavior, lifecycle correctness, performance,
+The later URING-2 control-plane checkpoint added the immutable model, typed
+policy, factory selection receipt, and driver snapshot. RCH job
+`j-29964935379288247` checked the default-feature library at clean-overlay base
+`90d28c97324a0c42b8453be836f53f8ef6a1e1ce` and exited zero. A focused test
+attempt produced no terminal receipt, so this checkpoint makes no test claim.
+
+Accordingly, this inventory and checkpoint do not prove focused test success,
+live-host support, authoritative operation probes, advanced capability
+activation, data-plane fallback behavior, lifecycle correctness, performance,
 broad workspace health, release readiness, production-on-by-default status, or
-fleet availability. It changes no production behavior and authorizes no
-dependency, capability, or file removal, tracker closure, or terminal adoption.
+fleet availability. The checkpoint changes control-plane metadata only and
+authorizes no dependency, capability, or file removal, tracker closure, or
+terminal adoption.
 
 <!-- END IO URING CAPABILITY INVENTORY -->

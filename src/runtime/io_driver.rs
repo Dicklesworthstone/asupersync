@@ -39,7 +39,8 @@
 //! ```
 
 use crate::runtime::reactor::{
-    Event, Events, Interest, Reactor, SlabToken, Source, Token, TokenSlab,
+    Event, Events, Interest, IoReactorCapabilitySnapshot, Reactor, SlabToken, Source, Token,
+    TokenSlab,
 };
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -466,6 +467,7 @@ impl IoDriver {
 pub struct IoDriverHandle {
     inner: Arc<Mutex<IoDriver>>,
     reactor: Arc<dyn Reactor>,
+    capabilities: IoReactorCapabilitySnapshot,
     is_polling: Arc<AtomicBool>,
 }
 
@@ -517,6 +519,7 @@ impl std::fmt::Debug for IoDriverHandle {
         f.debug_struct("IoDriverHandle")
             .field("inner", &self.inner)
             .field("reactor", &"<dyn Reactor>")
+            .field("capabilities", &self.capabilities)
             .field("is_polling", &self.is_polling.load(Ordering::Relaxed))
             .finish()
     }
@@ -526,9 +529,11 @@ impl IoDriverHandle {
     /// Creates a new handle with the default events buffer capacity.
     #[must_use]
     pub fn new(reactor: Arc<dyn Reactor>) -> Self {
+        let capabilities = reactor.capability_snapshot();
         Self {
             inner: Arc::new(Mutex::new(IoDriver::new(reactor.clone()))),
             reactor,
+            capabilities,
             is_polling: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -536,12 +541,14 @@ impl IoDriverHandle {
     /// Creates a new handle with a custom events buffer capacity.
     #[must_use]
     pub fn with_capacity(reactor: Arc<dyn Reactor>, events_capacity: usize) -> Self {
+        let capabilities = reactor.capability_snapshot();
         Self {
             inner: Arc::new(Mutex::new(IoDriver::with_capacity(
                 reactor.clone(),
                 events_capacity,
             ))),
             reactor,
+            capabilities,
             is_polling: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -601,6 +608,12 @@ impl IoDriverHandle {
     pub fn stats(&self) -> IoStats {
         let driver = self.inner.lock();
         driver.stats().clone()
+    }
+
+    /// Returns the immutable reactor backend and capability snapshot.
+    #[must_use]
+    pub const fn capability_snapshot(&self) -> IoReactorCapabilitySnapshot {
+        self.capabilities
     }
 
     /// Processes pending I/O events with a per-event callback.
@@ -2851,6 +2864,23 @@ mod tests {
         assert_eq!(s2.polls, 0);
         assert_eq!(s2.events_received, 0);
         assert_eq!(s2.registrations, 0);
+    }
+
+    #[test]
+    fn io_uring_capability_snapshot_is_immutable_for_injected_driver() {
+        use crate::runtime::reactor::{IoReactorBackend, IoUringCapability};
+
+        let handle = IoDriverHandle::new(Arc::new(LabReactor::new()));
+        let snapshot = handle.capability_snapshot();
+        assert_eq!(snapshot.backend(), IoReactorBackend::Injected);
+        assert_eq!(snapshot.selection_fallback(), None);
+        for capability in IoUringCapability::ALL {
+            let decision = snapshot.decision(capability);
+            assert_eq!(decision.capability(), capability);
+            assert!(!decision.requested());
+            assert!(!decision.active());
+        }
+        assert_eq!(handle.clone().capability_snapshot(), snapshot);
     }
 
     #[test]

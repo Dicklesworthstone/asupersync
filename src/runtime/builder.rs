@@ -171,7 +171,7 @@ use crate::runtime::deadline_monitor::{
     default_warning_handler,
 };
 use crate::runtime::io_driver::IoDriverHandle;
-use crate::runtime::reactor::Reactor;
+use crate::runtime::reactor::{IoUringCapabilityPolicy, Reactor};
 use crate::runtime::resource_monitor::ResourceMonitor;
 use crate::runtime::scheduler::three_lane::{
     AdaptiveBatchSizingProfile, SchedulerConstructionHandles,
@@ -2226,6 +2226,7 @@ pub struct RuntimeBuilder {
     config: RuntimeConfig,
     reactor: Option<Arc<dyn Reactor>>,
     io_driver: Option<IoDriverHandle>,
+    io_uring_capability_policy: IoUringCapabilityPolicy,
     /// Construct the platform reactor at build time by default
     /// (br-asupersync-1ajbtl).
     platform_reactor: bool,
@@ -2242,6 +2243,7 @@ impl RuntimeBuilder {
             config: RuntimeConfig::default(),
             reactor: None,
             io_driver: None,
+            io_uring_capability_policy: IoUringCapabilityPolicy::default(),
             platform_reactor: true,
             timer_driver: None,
             entropy_source: None,
@@ -2858,13 +2860,14 @@ impl RuntimeBuilder {
             config,
             reactor,
             io_driver,
+            io_uring_capability_policy,
             platform_reactor,
             timer_driver,
             entropy_source,
             host_services,
         } = self;
         #[cfg(target_arch = "wasm32")]
-        let _ = platform_reactor;
+        let _ = (platform_reactor, io_uring_capability_policy);
         // br-asupersync-1ajbtl: default builds construct the platform reactor
         // so socket I/O uses readiness wakeups instead of the 1ms timer-paced
         // fallback re-poll path. Explicit with_reactor / with_io_driver
@@ -2872,7 +2875,7 @@ impl RuntimeBuilder {
         // the fallback regime available for burn-in/debugging.
         #[cfg(not(target_arch = "wasm32"))]
         let reactor = if platform_reactor && reactor.is_none() && io_driver.is_none() {
-            match crate::runtime::reactor::create_reactor() {
+            match crate::runtime::reactor::create_reactor_with_policy(io_uring_capability_policy) {
                 Ok(reactor) => Some(reactor),
                 Err(err) => {
                     #[cfg(not(feature = "tracing-integration"))]
@@ -3027,6 +3030,19 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn with_io_driver(mut self, driver: IoDriverHandle) -> Self {
         self.io_driver = Some(driver);
+        self
+    }
+
+    /// Sets typed request and force-off policy for advanced io_uring capabilities.
+    ///
+    /// The policy is consulted only when this builder constructs its default
+    /// platform reactor. Explicit [`with_reactor`](Self::with_reactor) or
+    /// [`with_io_driver`](Self::with_io_driver) injection takes precedence.
+    /// Unrequested capabilities are not probed. Forced-off capabilities are
+    /// reported as `URING-FB-FORCED-OFF` without consulting the host.
+    #[must_use]
+    pub fn io_uring_capability_policy(mut self, policy: IoUringCapabilityPolicy) -> Self {
+        self.io_uring_capability_policy = policy;
         self
     }
 
@@ -7735,6 +7751,43 @@ worker_threads = 16
         assert!(
             !has_driver,
             "explicitly disabled platform reactor must keep fallback I/O regime"
+        );
+    }
+
+    #[test]
+    fn io_uring_capability_force_off_is_immutable_and_host_independent() {
+        use crate::runtime::reactor::{
+            IoUringCapability, IoUringFallbackReason, IoUringSupportState,
+        };
+
+        let policy = IoUringCapabilityPolicy::new()
+            .with_requested(IoUringCapability::FixedBuffers, true)
+            .with_forced_off(IoUringCapability::FixedBuffers, true);
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .io_uring_capability_policy(policy)
+            .build()
+            .expect("runtime build");
+
+        let snapshot = runtime
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .io_driver_handle()
+            .expect("default platform driver")
+            .capability_snapshot();
+        let forced = snapshot.decision(IoUringCapability::FixedBuffers);
+        assert!(forced.requested());
+        assert_eq!(forced.supported(), IoUringSupportState::NotProbed);
+        assert!(!forced.active());
+        assert_eq!(forced.fallback_reason(), IoUringFallbackReason::ForcedOff);
+
+        let unrequested = snapshot.decision(IoUringCapability::MultishotAccept);
+        assert!(!unrequested.requested());
+        assert_eq!(
+            unrequested.fallback_reason(),
+            IoUringFallbackReason::NotRequested
         );
     }
 

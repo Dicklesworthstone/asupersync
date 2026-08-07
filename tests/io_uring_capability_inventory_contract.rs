@@ -148,7 +148,7 @@ fn source_pins_and_live_surface_anchors_match_the_tree() {
     assert_eq!(text(&inventory, "bead_id"), BEAD_ID);
     assert_eq!(
         text(&inventory, "disposition"),
-        "STATIC_INVENTORY_COMPLETE_PRODUCTION_UNCHANGED"
+        "STATIC_INVENTORY_CURRENT_URING2_CONTROL_PLANE_IN_PROGRESS"
     );
 
     let scope = object(&inventory, "inventory_scope");
@@ -757,6 +757,10 @@ fn force_off_fallback_and_observability_contracts_fail_closed() {
         "free_form_host_error_in_metric_label"
     ));
     assert!(text(&observability_value, "current_inspector").contains("IoDriverHandle::stats"));
+    assert!(
+        text(&observability_value, "current_inspector")
+            .contains("IoDriverHandle::capability_snapshot")
+    );
     assert_eq!(
         string_set(&observability_value, "current_fields"),
         expected_set(&[
@@ -770,7 +774,7 @@ fn force_off_fallback_and_observability_contracts_fail_closed() {
     );
     assert_eq!(array(&observability_value, "current_fields").len(), 6);
     assert_eq!(
-        string_set(&observability_value, "missing_fields"),
+        string_set(&observability_value, "current_snapshot_fields"),
         expected_set(&[
             "active",
             "backend",
@@ -780,7 +784,11 @@ fn force_off_fallback_and_observability_contracts_fail_closed() {
             "supported",
         ])
     );
-    assert_eq!(array(&observability_value, "missing_fields").len(), 6);
+    assert_eq!(
+        array(&observability_value, "current_snapshot_fields").len(),
+        6
+    );
+    assert!(array(&observability_value, "missing_fields").is_empty());
 }
 
 #[test]
@@ -1025,6 +1033,10 @@ fn docs_and_no_claim_boundary_remain_honest() {
         "without creating a metric claim",
         "Their precedence is `UNSUPPORTED`, then",
         "not executed in this static lane",
+        "IoUringCapabilityPolicy",
+        "IoDriverHandle::capability_snapshot",
+        "j-29964935379288247",
+        "no test claim",
     ] {
         assert!(docs.contains(required), "missing docs marker: {required}");
     }
@@ -1055,6 +1067,25 @@ fn docs_and_no_claim_boundary_remain_honest() {
         "benchmarks_executed"
     ));
 
+    let checkpoint = object(&inventory, "uring_2_checkpoint");
+    let checkpoint_value = Value::Object(checkpoint.clone());
+    assert_eq!(
+        text(&checkpoint_value, "status"),
+        "IN_PROGRESS_CONTROL_PLANE_ONLY"
+    );
+    assert_eq!(array(&checkpoint_value, "implemented").len(), 5);
+    assert_eq!(array(&checkpoint_value, "remaining").len(), 4);
+    let verification = object(&checkpoint_value, "verification");
+    let verification_value = Value::Object(verification.clone());
+    assert_eq!(text(&verification_value, "job_id"), "j-29964935379288247");
+    assert_eq!(text(&verification_value, "worker"), "hz2");
+    assert_eq!(
+        text(&verification_value, "command"),
+        "cargo check -p asupersync --lib"
+    );
+    assert_eq!(unsigned(&verification_value, "exit_code"), 0);
+    assert!(checkpoint_value["focused_test_receipt"].is_null());
+
     let claims = array(&inventory, "no_claims");
     assert_eq!(claims.len(), 6);
     let joined = claims
@@ -1063,8 +1094,8 @@ fn docs_and_no_claim_boundary_remain_honest() {
         .collect::<Vec<_>>()
         .join(" ");
     for boundary in [
-        "changes no reactor",
-        "does not prove compilation",
+        "changes no filesystem",
+        "cargo check proves default-feature library compilation only",
         "does not prove buffer ownership",
         "records no benchmark result",
         "does not prove broad workspace health",
