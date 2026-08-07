@@ -457,7 +457,12 @@ fn capability_levels_and_runtime_probes_are_independent() {
     let fixed = find_row(capabilities, "capability_id", "URING-CAP-FIXED-BUFFERS");
     assert_eq!(
         text(fixed, "current_state"),
-        "SCAFFOLD_ONLY_NOT_USED_BY_DATA_PLANE"
+        "LIVE_FIXED_OPERATION_PROBE_AND_SCAFFOLD_NOT_USED_BY_DATA_PLANE"
+    );
+    let provided = find_row(capabilities, "capability_id", "URING-CAP-PROVIDED-GROUPS");
+    assert_eq!(
+        text(provided, "current_state"),
+        "LIVE_SELECTED_RECEIVE_PROBE_NOT_USED_BY_DATA_PLANE"
     );
     for capability in capabilities {
         assert!(!text(capability, "name").is_empty());
@@ -1056,7 +1061,7 @@ fn docs_and_no_claim_boundary_remain_honest() {
         "Runtime::io_reactor_capability_snapshot",
         "RuntimeHandle::io_reactor_capability_snapshot",
         "j-29964935379288247",
-        "16ec096ad3b7446f",
+        "d3475c48848a80ee",
         "cached temporary-ring probe",
         "fixed write/read completion",
         "no test claim",
@@ -1094,9 +1099,9 @@ fn docs_and_no_claim_boundary_remain_honest() {
     let checkpoint_value = Value::Object(checkpoint.clone());
     assert_eq!(
         text(&checkpoint_value, "status"),
-        "IN_PROGRESS_FIXED_BUFFER_AND_TERMINAL_FALLBACK"
+        "IN_PROGRESS_TWO_OPERATION_PROBES_AND_TERMINAL_FALLBACK"
     );
-    assert_eq!(array(&checkpoint_value, "implemented").len(), 7);
+    assert_eq!(array(&checkpoint_value, "implemented").len(), 8);
     assert_eq!(array(&checkpoint_value, "remaining").len(), 3);
     let verification = object(&checkpoint_value, "verification");
     let verification_value = Value::Object(verification.clone());
@@ -1110,10 +1115,10 @@ fn docs_and_no_claim_boundary_remain_honest() {
     let feature_verification = object(&checkpoint_value, "feature_verification");
     let feature_verification_value = Value::Object(feature_verification.clone());
     assert!(feature_verification_value["job_id"].is_null());
-    assert_eq!(text(&feature_verification_value, "worker"), "hz2");
+    assert_eq!(text(&feature_verification_value, "worker"), "ovh-a");
     assert_eq!(
         text(&feature_verification_value, "project_hash"),
-        "16ec096ad3b7446f"
+        "d3475c48848a80ee"
     );
     assert_eq!(
         text(&feature_verification_value, "command"),

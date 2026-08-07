@@ -26,11 +26,11 @@ mod imp {
         Event, Events, Interest, IoUringCapability, IoUringCapabilityPolicy, IoUringProbeOutcome,
         Reactor, Source, Token,
     };
-    use io_uring::{IoUring, Probe, opcode, squeue, types};
+    use io_uring::{IoUring, Probe, cqueue, opcode, squeue, types};
     use parking_lot::Mutex;
     use smallvec::SmallVec;
     use std::collections::HashMap;
-    use std::io;
+    use std::io::{self, Write};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
     use std::os::unix::net::UnixStream;
     use std::sync::OnceLock;
@@ -84,15 +84,14 @@ mod imp {
         IoUringProbeOutcome::Supported
     }
 
-    fn submit_fixed_probe_entry(
+    fn submit_probe_entry(
         ring: &mut IoUring,
         entry: &squeue::Entry,
         expected_user_data: u64,
         expected_len: i32,
-    ) -> Result<(), IoUringProbeOutcome> {
-        // SAFETY: each entry references an owned descriptor and the registered
-        // `backing` buffer in `probe_fixed_buffer_operation`. Both remain live
-        // until this entry's terminal completion is consumed.
+    ) -> Result<u32, IoUringProbeOutcome> {
+        // SAFETY: callers keep every descriptor and buffer referenced by
+        // `entry` live until this function consumes its terminal completion.
         if unsafe { ring.submission().push(entry) }.is_err() {
             return Err(IoUringProbeOutcome::Resource);
         }
@@ -102,14 +101,16 @@ mod imp {
         let Some(completion) = ring.completion().next() else {
             return Err(IoUringProbeOutcome::Error);
         };
-        match classify_probe_completion(
+        let outcome = classify_probe_completion(
             completion.user_data(),
             completion.result(),
             expected_user_data,
             expected_len,
-        ) {
-            IoUringProbeOutcome::Supported => Ok(()),
-            outcome => Err(outcome),
+        );
+        if matches!(outcome, IoUringProbeOutcome::Supported) {
+            Ok(completion.flags())
+        } else {
+            Err(outcome)
         }
     }
 
@@ -171,8 +172,8 @@ mod imp {
         .build()
         .user_data(WRITE_USER_DATA);
         let operation_result =
-            submit_fixed_probe_entry(&mut ring, &write_entry, WRITE_USER_DATA, PROBE_BYTES_I32)
-                .and_then(|()| {
+            submit_probe_entry(&mut ring, &write_entry, WRITE_USER_DATA, PROBE_BYTES_I32)
+                .and_then(|_| {
                     backing.fill(0);
                     let read_entry = opcode::ReadFixed::new(
                         types::Fd(read_stream.as_raw_fd()),
@@ -183,14 +184,9 @@ mod imp {
                     .offset(u64::MAX)
                     .build()
                     .user_data(READ_USER_DATA);
-                    submit_fixed_probe_entry(
-                        &mut ring,
-                        &read_entry,
-                        READ_USER_DATA,
-                        PROBE_BYTES_I32,
-                    )
+                    submit_probe_entry(&mut ring, &read_entry, READ_USER_DATA, PROBE_BYTES_I32)
                 })
-                .and_then(|()| {
+                .and_then(|_| {
                     if backing == 1_u64.to_ne_bytes() {
                         Ok(())
                     } else {
@@ -203,6 +199,113 @@ mod imp {
             (Ok(()), Ok(())) => IoUringProbeOutcome::Supported,
             (Err(outcome), _) => outcome,
             (Ok(()), Err(error)) => classify_probe_error(&error),
+        }
+    }
+
+    fn probe_provided_buffer_group_operation() -> IoUringProbeOutcome {
+        const PROBE_BYTES: usize = size_of::<u64>();
+        const PROBE_BYTES_I32: i32 = 8;
+        const PROBE_BYTES_U32: u32 = 8;
+        const GROUP_ID: u16 = 1;
+        const BUFFER_ID: u16 = 7;
+        const PROVIDE_USER_DATA: u64 = 3;
+        const RECV_USER_DATA: u64 = 4;
+        const REPROVIDE_USER_DATA: u64 = 5;
+        const REMOVE_USER_DATA: u64 = 6;
+
+        // Backing and descriptors precede the temporary ring so the ring is
+        // always dropped before resources that an uncertain submission could
+        // still reference.
+        let mut backing = [0_u8; PROBE_BYTES];
+        let (read_stream, mut write_stream) = match UnixStream::pair() {
+            Ok(pair) => pair,
+            Err(error) => return classify_probe_error(&error),
+        };
+        if let Err(error) = read_stream.set_nonblocking(true) {
+            return classify_probe_error(&error);
+        }
+        if let Err(error) = write_stream.set_nonblocking(true) {
+            return classify_probe_error(&error);
+        }
+
+        let mut ring = match IoUring::new(4) {
+            Ok(ring) => ring,
+            Err(error) => return classify_probe_error(&error),
+        };
+        let mut opcode_probe = Probe::new();
+        if let Err(error) = ring.submitter().register_probe(&mut opcode_probe) {
+            return classify_probe_error(&error);
+        }
+        if !opcode_probe.is_supported(opcode::ProvideBuffers::CODE)
+            || !opcode_probe.is_supported(opcode::RemoveBuffers::CODE)
+            || !opcode_probe.is_supported(opcode::Recv::CODE)
+        {
+            return IoUringProbeOutcome::Unsupported;
+        }
+
+        let provide_entry = opcode::ProvideBuffers::new(
+            backing.as_mut_ptr(),
+            PROBE_BYTES_I32,
+            1,
+            GROUP_ID,
+            BUFFER_ID,
+        )
+        .build()
+        .user_data(PROVIDE_USER_DATA);
+        if let Err(outcome) = submit_probe_entry(&mut ring, &provide_entry, PROVIDE_USER_DATA, 0) {
+            return outcome;
+        }
+
+        let payload = 2_u64.to_ne_bytes();
+        let send_result = write_stream
+            .write_all(&payload)
+            .map_err(|error| classify_probe_error(&error));
+        let recv_result = send_result.and_then(|()| {
+            let recv_entry = opcode::Recv::new(
+                types::Fd(read_stream.as_raw_fd()),
+                std::ptr::null_mut(),
+                PROBE_BYTES_U32,
+            )
+            .buf_group(GROUP_ID)
+            .build()
+            .flags(squeue::Flags::BUFFER_SELECT)
+            .user_data(RECV_USER_DATA);
+            submit_probe_entry(&mut ring, &recv_entry, RECV_USER_DATA, PROBE_BYTES_I32)
+        });
+        let buffer_was_selected = recv_result.is_ok();
+        let operation_result = recv_result.and_then(|flags| {
+            if cqueue::buffer_select(flags) == Some(BUFFER_ID) && backing == payload {
+                Ok(())
+            } else {
+                Err(IoUringProbeOutcome::Error)
+            }
+        });
+
+        let cleanup_result = if buffer_was_selected {
+            let reprovide_entry = opcode::ProvideBuffers::new(
+                backing.as_mut_ptr(),
+                PROBE_BYTES_I32,
+                1,
+                GROUP_ID,
+                BUFFER_ID,
+            )
+            .build()
+            .user_data(REPROVIDE_USER_DATA);
+            submit_probe_entry(&mut ring, &reprovide_entry, REPROVIDE_USER_DATA, 0).map(|_| ())
+        } else {
+            Ok(())
+        }
+        .and_then(|()| {
+            let remove_entry = opcode::RemoveBuffers::new(1, GROUP_ID)
+                .build()
+                .user_data(REMOVE_USER_DATA);
+            submit_probe_entry(&mut ring, &remove_entry, REMOVE_USER_DATA, 1).map(|_| ())
+        });
+
+        match (operation_result, cleanup_result) {
+            (Ok(()), Ok(())) => IoUringProbeOutcome::Supported,
+            (Err(outcome), _) => outcome,
+            (Ok(()), Err(outcome)) => outcome,
         }
     }
 
@@ -464,6 +567,7 @@ mod imp {
         wake_rearm_needed: AtomicBool,
         buffer_pool: Mutex<Option<RegisteredBufferPool>>,
         fixed_buffer_probe: OnceLock<IoUringProbeOutcome>,
+        provided_group_probe: OnceLock<IoUringProbeOutcome>,
     }
 
     impl std::fmt::Debug for IoUringReactor {
@@ -478,6 +582,7 @@ mod imp {
                 )
                 .field("buffer_pool", &self.buffer_pool)
                 .field("fixed_buffer_probe", &self.fixed_buffer_probe.get())
+                .field("provided_group_probe", &self.provided_group_probe.get())
                 .finish_non_exhaustive()
         }
     }
@@ -505,6 +610,7 @@ mod imp {
                 wake_rearm_needed: AtomicBool::new(false),
                 buffer_pool: Mutex::new(None),
                 fixed_buffer_probe: OnceLock::new(),
+                provided_group_probe: OnceLock::new(),
             })
         }
 
@@ -512,6 +618,12 @@ mod imp {
             *self
                 .fixed_buffer_probe
                 .get_or_init(probe_fixed_buffer_operation)
+        }
+
+        fn provided_group_probe_outcome(&self) -> IoUringProbeOutcome {
+            *self
+                .provided_group_probe
+                .get_or_init(probe_provided_buffer_group_operation)
         }
 
         pub(in crate::runtime::reactor) fn capability_probes(
@@ -522,6 +634,10 @@ mod imp {
             let capability = IoUringCapability::FixedBuffers;
             if policy.is_requested(capability) && !policy.is_forced_off(capability) {
                 probes[capability.index()] = Some(self.fixed_buffer_probe_outcome());
+            }
+            let capability = IoUringCapability::ProvidedGroups;
+            if policy.is_requested(capability) && !policy.is_forced_off(capability) {
+                probes[capability.index()] = Some(self.provided_group_probe_outcome());
             }
             probes
         }
@@ -1324,6 +1440,33 @@ mod imp {
                 .expect("cached fixed-buffer outcome should remain observable");
             assert_eq!(first, second);
             assert_eq!(reactor.fixed_buffer_probe.get().copied(), Some(first));
+        }
+
+        #[test]
+        fn provided_group_capability_probe_is_gated_and_cached() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+            let capability = IoUringCapability::ProvidedGroups;
+            let forced = IoUringCapabilityPolicy::new()
+                .with_requested(capability, true)
+                .with_forced_off(capability, true);
+            assert!(
+                reactor.capability_probes(forced)[capability.index()].is_none(),
+                "forced-off capability should not be probed"
+            );
+            assert!(
+                reactor.provided_group_probe.get().is_none(),
+                "force-off must precede kernel work"
+            );
+
+            let requested = IoUringCapabilityPolicy::new().with_requested(capability, true);
+            let first = reactor.capability_probes(requested)[capability.index()]
+                .expect("requested provided groups should produce one classified outcome");
+            let second = reactor.capability_probes(requested)[capability.index()]
+                .expect("cached provided-group outcome should remain observable");
+            assert_eq!(first, second);
+            assert_eq!(reactor.provided_group_probe.get().copied(), Some(first));
         }
 
         #[test]

@@ -85,13 +85,13 @@ the migration in the child bead closeout.
 | `observability-test-boundary` | invalid telemetry/resource data construction | Sanitization/rejection tests only. |
 | `atp-platform-boundary` | ATP platform capability or journal probes | Platform-gated RCH command or explicit no-host boundary. |
 
-The `src/runtime/reactor/io_uring.rs` row includes the fixed-buffer capability
-probe's unsafe submission and registration calls. Its backing allocation and
-nonblocking Unix stream pair live through both terminal completions; unregister
-is attempted before return, and the temporary ring drops before the backing on
-every error path. The io_uring-feature RCH compile checks this source boundary,
-but the focused executable attempt produced no terminal test result, so neither
-the ledger nor that attempt proves live-host support or cleanup behavior.
+The `src/runtime/reactor/io_uring.rs` row includes the capability probes' unsafe
+submission helper and the fixed-buffer registration call. Fixed and provided
+probe backing allocations and nonblocking Unix stream pairs live through every
+terminal completion and cleanup attempt; each temporary ring drops before the
+backing on every error path. An io_uring-feature RCH compile checks this source
+boundary, but a nonterminal executable attempt proves neither live-host support
+nor cleanup behavior.
 
 ## Review Rules
 

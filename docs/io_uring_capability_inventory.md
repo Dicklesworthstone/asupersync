@@ -14,8 +14,9 @@ The current implementation is a useful, feature-gated readiness backend, not
 an advanced io_uring data plane. `IoUringReactor` submits one-shot `PollAdd`
 and `PollRemove` operations. A classic registered-buffer pool exists beside
 that readiness path, but no live operation consumes one of its buffer IDs.
-Provided-buffer groups, mapped buffer rings, multishot accept, multishot
-receive, and SQPOLL are absent.
+A bounded provided-buffer-group probe now performs one selected receive and
+cleanup, but no runtime data-plane operation uses that group. Mapped buffer
+rings, multishot accept, multishot receive, and SQPOLL are absent.
 
 URING-1 freezes that boundary and the contract for evaluating later work. It
 does not change production behavior. Kernel versions are metadata; bounded
@@ -64,10 +65,10 @@ the runtime inspector and cannot establish operation support.
 | Surface | Current state | Material gap | Next owner |
 |---|---|---|---|
 | Build edge | optional feature and dependency | compilation does not establish host support | URING-2 |
-| Backend factory | try io_uring, then epoll, retain immutable selection metadata, and probe requested fixed-buffer operations | five capability probes remain | URING-2 |
+| Backend factory | try io_uring, then epoll, retain immutable selection metadata, and probe requested fixed-buffer and provided-group operations | four capability probes remain | URING-2 |
 | Reactor | live one-shot readiness | no advanced data-plane operations | URING-2 onward |
-| Epoll fallback | live Linux/Android readiness backend with feature-disabled or ring-create receipt | five capability probes remain | URING-2 |
-| Buffer scaffold | cached fixed-opcode plus bounded register/write/read/unregister probe, kernel registration, and manual IDs | IDs remain unused by runtime data-plane I/O | URING-3 |
+| Epoll fallback | live Linux/Android readiness backend with feature-disabled or ring-create receipt | four capability probes remain | URING-2 |
+| Buffer scaffold | cached fixed-buffer and provided-group selected-receive probes, classic kernel registration, and manual IDs | probe buffers and IDs remain unused by runtime data-plane I/O | URING-3 |
 | Default file API | owned helpers offload; poll traits block directly | separate from opt-in io_uring and unsuitable as an async comparator | URING-7 |
 | File I/O | Linux-only file-local ring driven synchronously in poll | no fixed/selected buffer and unsuitable as an async comparator | URING-3 |
 | Path and directory I/O | Linux-only independent one-operation rings | outside one capability/fallback model | URING-2 |
@@ -77,7 +78,7 @@ the runtime inspector and cannot establish operation support.
 | `Bytes` / `BytesMut` | empty/static/shared heap bytes; exclusive mutable `Vec<u8>` | no kernel-in-flight lease state | URING-3 |
 | Builder | whole-reactor enable/disable, injection, and typed per-capability policy | live operation outcomes remain | URING-2 |
 | No-reactor fallback | runtime continues with socket re-polls and retains a typed terminal snapshot | data-plane behavior remains the incumbent re-poll path | URING-2 |
-| Inspector | generic `IoStats` plus immutable driver/runtime capability snapshots | five capability probes remain | URING-2 |
+| Inspector | generic `IoStats` plus immutable driver/runtime capability snapshots | four capability probes remain | URING-2 |
 | Tests | mock pool, live readiness, filesystem lifecycle | no advanced-capability matrix | URING-7 |
 | Benchmark | synthetic completion bookkeeping | no real-socket comparison | URING-7 |
 | Boundary ledger | four relevant rows and 39 locators | 33 locators are stale | URING-3 |
@@ -122,7 +123,7 @@ later one.
 | Capability ID | Current state | Required before activation |
 |---|---|---|
 | `URING-CAP-FIXED-BUFFERS` | live registration probe plus scaffold; not used by the data plane | real fixed operation, linear lease, terminal drain |
-| `URING-CAP-PROVIDED-GROUPS` | absent | bounded group, selection, buffer-ID completion, cleanup |
+| `URING-CAP-PROVIDED-GROUPS` | live bounded selected-receive probe; not used by the data plane | runtime lease and data-plane integration |
 | `URING-CAP-MAPPED-BUFFER-RING` | absent | bounded mapped ring, lifetime proof, selection and return |
 | `URING-CAP-MULTISHOT-ACCEPT` | absent | generation-tagged MORE/terminal state and descriptor ownership |
 | `URING-CAP-MULTISHOT-RECV` | absent | selected-buffer obligations, bounded queues and terminal drain |
@@ -239,14 +240,17 @@ control-plane state:
 - active;
 - fallback reason.
 
-This checkpoint supplies one conservative support outcome: requested fixed
+This checkpoint supplies two conservative support outcomes. Requested fixed
 buffers run a cached temporary-ring probe that checks fixed read/write opcodes,
 registers one eight-byte buffer, completes a fixed write and read through a
 nonblocking Unix stream pair, verifies both completions and the returned data,
-then unregisters. The runtime data plane does not use this probe buffer, and
-the other five capabilities still have no authoritative live outcome. Any requested
-capability without an outcome fails closed with `URING-FB-PROBE-ERROR`; no
-advanced capability is requested or active by default.
+then unregisters. Requested provided groups run a separate cached temporary
+ring that provides one buffer, completes a selected receive, verifies the
+buffer ID and bytes, re-provides the consumed buffer, and removes the group.
+The runtime data plane uses neither probe buffer, and the other four
+capabilities still have no authoritative live outcome. Any requested capability
+without an outcome fails closed with `URING-FB-PROBE-ERROR`; no advanced
+capability is requested or active by default.
 
 Metric labels use only the frozen identifiers. A raw host error may appear in a
 bounded startup diagnostic or trace detail, never as an unbounded metric label.
@@ -320,12 +324,13 @@ policy, factory selection receipt, and driver snapshot. RCH job
 `90d28c97324a0c42b8453be836f53f8ef6a1e1ce` and exited zero. The next checkpoint
 replaced the fixed-buffer support placeholder with the bounded cached probe and
 then extended it through fixed write/read completion and data verification.
-The terminal no-driver checkpoint then retained the fallback decision in
-`RuntimeState` and exposed it through `Runtime` and `RuntimeHandle`. An RCH
-clean-overlay feature compile on `hz2` used project hash
-`16ec096ad3b7446f`, base `539d096565b3b111d08969e2ab6010819882614c`,
+The terminal no-driver checkpoint retained the fallback decision in
+`RuntimeState` and exposed it through `Runtime` and `RuntimeHandle`. The next
+checkpoint added the bounded provided-group selected-receive and cleanup probe.
+An RCH clean-overlay feature compile on `ovh-a` used project hash
+`d3475c48848a80ee`, base `c623c9a3dcc79d39c6f6d106290a3d1d686987e1`,
 overlay fingerprint
-`7ddbaaa2eaeca4e82e419b37c27706aa6e3329a5508aca9aa182cb1bff31a89d`,
+`f84d5877c3ad1b361a2d496cd9df40f9de1dc4ad38d9c018f6c287c677277e2d`,
 and exited zero for `cargo check -p asupersync --lib --features io-uring`.
 A focused `terminal_` test attempt under project hash `6605dee8352b6c69`
 stopped emitting output after compiling the edited library and the local wait
@@ -334,7 +339,7 @@ produced no terminal test result, so this checkpoint makes no test claim and no
 live-kernel outcome claim.
 
 Accordingly, this inventory and checkpoint do not prove focused test success,
-live-host support, the other five operation probes, advanced data-plane
+live-host support, the other four operation probes, advanced data-plane
 behavior, lifecycle correctness, performance,
 broad workspace health, release readiness, production-on-by-default status, or
 fleet availability. The checkpoint changes control-plane metadata only and
