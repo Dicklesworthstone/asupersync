@@ -271,15 +271,15 @@ fn validate_a4_receipt(inventory: &Value) -> Result<(), String> {
     let source_pin = object(receipt, "current_source_pin");
     if source_pin.get("path").and_then(Value::as_str) != Some("src/future.rs")
         || source_pin.get("sha256").and_then(Value::as_str)
-            != Some("c0a02784a010e9709dfab3b40259bccf8d312e9101834d8c110f2b1f19bd8598")
-        || source_pin.get("line_count").and_then(Value::as_u64) != Some(972)
+            != Some("da6ef76c90a77c430149cabc5556343bb6408e179f62b1615c0a57b7643067b0")
+        || source_pin.get("line_count").and_then(Value::as_u64) != Some(1088)
     {
         return Err("A4 current source pin drift".to_owned());
     }
     let source_bytes = read_repo_bytes("src/future.rs");
     if hex_bytes(&Sha256::digest(&source_bytes))
-        != "c0a02784a010e9709dfab3b40259bccf8d312e9101834d8c110f2b1f19bd8598"
-        || read_repo_file("src/future.rs").lines().count() != 972
+        != "da6ef76c90a77c430149cabc5556343bb6408e179f62b1615c0a57b7643067b0"
+        || read_repo_file("src/future.rs").lines().count() != 1088
     {
         return Err("A4 current source no longer matches its receipt".to_owned());
     }
@@ -331,12 +331,14 @@ fn validate_a4_receipt(inventory: &Value) -> Result<(), String> {
         "zip_polls_left_then_right_and_stops_polling_completed_children",
         "dropping_pending_zip_drops_retained_output_and_unfinished_child",
         "or_is_left_biased_and_drops_the_loser_with_the_wrapper",
+        "zip_and_or_readiness_matrix_is_deterministic",
+        "helper_futures_quiesce_under_lab_dpor_exploration",
     ]
     .into_iter()
     .map(str::to_owned)
     .collect();
     if string_set(receipt, "authored_inline_tests") != expected_tests {
-        return Err("A4 receipt must list the exact seven authored source cases".to_owned());
+        return Err("A4 receipt must list the exact nine authored source cases".to_owned());
     }
     for test_name in expected_tests {
         if !source.contains(&format!("fn {test_name}()")) {

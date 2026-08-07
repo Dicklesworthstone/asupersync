@@ -320,7 +320,11 @@ order and completed-child suppression, retained-output and unfinished-child
 drop, and left-biased `or` selection, fallthrough, and loser drop. None of those
 cases has been executed in these static-only increments.
 
-The machine receipt names the exact seven authored functions. They remain
+Two additional source cases now exhaustively cover the 4-by-4 readiness matrix
+for deterministic `zip`/left-biased `or` traces and run all six owned helpers
+inside two LabRuntime tasks under bounded DPOR exploration, checking runtime
+quiescence and zero pending obligations. The machine receipt therefore names
+the exact nine authored functions. They remain
 source cases, not unit-test evidence. There is no standalone property or
 differential corpus, LabRuntime/DPOR scheduling receipt, deterministic trace
 receipt, or expiry-independent replacement for the incumbent oracle.
@@ -343,8 +347,9 @@ comment and the pinned dependency exports no such helper. The actual `zip`,
 
 Three `BLOCKED_GAP` rows preserve what remains:
 
-- `FUT-A4-GAP-16`: no focused execution or standalone property,
-  differential, lab, or DPOR evidence for the seven source-authored cases;
+- `FUT-A4-GAP-16`: no terminal focused execution or independent differential
+  evidence for the nine source-authored cases, including the bounded readiness
+  matrix and LabRuntime/DPOR scenario;
 - `FUT-A4-GAP-17`: generic-future drop cannot establish structured race-loser
   cancellation, obligation resolution, drain, and quiescence;
 - `FUT-A4-GAP-18`: no deterministic race fairness/trace policy or
@@ -585,7 +590,7 @@ static contract. It does not prove that its authored cases ran, that all
 wake/park interleavings are covered, that runtime or foreign-executor contexts
 are safe, that cancellation reaches quiescence, or that idle CPU and latency
 match the incumbent.
-The FUT A4 receipt likewise does not turn seven source-authored cases into
+The FUT A4 receipt likewise does not turn nine source-authored cases into
 executed proof, implement `race`, treat comment-only `join_all` as live, prove
 deterministic fairness, or equate dropping a generic future with structured
 loser drain and quiescence.

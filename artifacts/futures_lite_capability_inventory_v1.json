@@ -251,8 +251,8 @@
     "visibility": "crate-private alongside-incumbent",
     "current_source_pin": {
       "path": "src/future.rs",
-      "sha256": "c0a02784a010e9709dfab3b40259bccf8d312e9101834d8c110f2b1f19bd8598",
-      "line_count": 972
+      "sha256": "da6ef76c90a77c430149cabc5556343bb6408e179f62b1615c0a57b7643067b0",
+      "line_count": 1088
     },
     "helper_projection": {
       "path": "src/future.rs",
@@ -325,7 +325,9 @@
       "pending_never_completes_or_schedules_a_wake",
       "zip_polls_left_then_right_and_stops_polling_completed_children",
       "dropping_pending_zip_drops_retained_output_and_unfinished_child",
-      "or_is_left_biased_and_drops_the_loser_with_the_wrapper"
+      "or_is_left_biased_and_drops_the_loser_with_the_wrapper",
+      "zip_and_or_readiness_matrix_is_deterministic",
+      "helper_futures_quiesce_under_lab_dpor_exploration"
     ],
     "race_policy_boundary": {
       "incumbent_first_poll_policy": "a newly seeded fastrand Rng advances and chooses the first child on every wrapper poll",
@@ -339,7 +341,7 @@
     "completion_boundary": "Future does not generally promise a post-Ready repoll contract; only the authored YieldNow explicitly remains Ready on later polls.",
     "incumbent_call_sites_migrated": 0,
     "missing_terminal_evidence": [
-      "focused compile and execution of the seven authored source cases",
+      "focused compile and execution of the nine authored source cases",
       "standalone property and differential corpus for every source-authored helper",
       "LabRuntime or DPOR scheduling, cancellation, and trace evidence",
       "expiry-independent tests that do not require the incumbent oracle",
@@ -1378,7 +1380,7 @@
     },
     {
       "gap_id": "FUT-A4-GAP-16",
-      "summary": "The seven source-authored helper cases have no focused execution receipt and no standalone property, differential, LabRuntime, or DPOR evidence.",
+      "summary": "The nine source-authored helper cases, including the bounded readiness matrix and LabRuntime/DPOR scenario, have no terminal focused execution receipt or independent differential evidence.",
       "owner_bead": "asupersync-d24mms.6.4",
       "state": "BLOCKED_GAP"
     },

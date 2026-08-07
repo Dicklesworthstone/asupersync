@@ -496,6 +496,25 @@ mod tests {
         }
     }
 
+    fn ready_after(
+        label: &'static str,
+        pending_polls: usize,
+        output: u8,
+        trace: Rc<RefCell<Vec<&'static str>>>,
+    ) -> impl Future<Output = u8> {
+        let mut remaining = pending_polls;
+        poll_fn(move |context| {
+            trace.borrow_mut().push(label);
+            if remaining == 0 {
+                Poll::Ready(output)
+            } else {
+                remaining -= 1;
+                context.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+    }
+
     #[test]
     fn poll_fn_forwards_context_and_calls_once_per_wrapper_poll() {
         let wake_state = Arc::new(CountingWaker::default());
@@ -672,6 +691,103 @@ mod tests {
         assert_eq!(pending_drops.get(), 1);
         assert_eq!(right_polls.get(), 1);
         assert_eq!(right_drops.get(), 1);
+    }
+
+    #[test]
+    fn zip_and_or_readiness_matrix_is_deterministic() {
+        fn run_zip(left_pending: usize, right_pending: usize) -> ((u8, u8), Vec<&'static str>) {
+            let trace = Rc::new(RefCell::new(Vec::new()));
+            let result = block_on(zip(
+                ready_after("left", left_pending, 71, Rc::clone(&trace)),
+                ready_after("right", right_pending, 73, Rc::clone(&trace)),
+            ));
+            let events = trace.borrow().clone();
+            (result, events)
+        }
+
+        fn run_or(left_pending: usize, right_pending: usize) -> (u8, Vec<&'static str>) {
+            let trace = Rc::new(RefCell::new(Vec::new()));
+            let result = block_on(or(
+                ready_after("left", left_pending, 79, Rc::clone(&trace)),
+                ready_after("right", right_pending, 83, Rc::clone(&trace)),
+            ));
+            let events = trace.borrow().clone();
+            (result, events)
+        }
+
+        for left_pending in 0..=3 {
+            for right_pending in 0..=3 {
+                let first_zip = run_zip(left_pending, right_pending);
+                let second_zip = run_zip(left_pending, right_pending);
+                assert_eq!(first_zip, second_zip);
+                assert_eq!(first_zip.0, (71, 73));
+                assert_eq!(
+                    first_zip.1.iter().filter(|event| **event == "left").count(),
+                    left_pending + 1
+                );
+                assert_eq!(
+                    first_zip
+                        .1
+                        .iter()
+                        .filter(|event| **event == "right")
+                        .count(),
+                    right_pending + 1
+                );
+
+                let first_or = run_or(left_pending, right_pending);
+                let second_or = run_or(left_pending, right_pending);
+                assert_eq!(first_or, second_or);
+                assert_eq!(
+                    first_or.0,
+                    if left_pending <= right_pending {
+                        79
+                    } else {
+                        83
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn helper_futures_quiesce_under_lab_dpor_exploration() {
+        use crate::lab::{DporExplorer, ExplorerConfig};
+        use crate::types::Budget;
+
+        let mut explorer = DporExplorer::new(
+            ExplorerConfig::new(0xF074_A4, 8)
+                .worker_count(1)
+                .max_steps(2_000),
+        );
+        let report = explorer.explore(|runtime| {
+            let region = runtime.state.create_root_region(Budget::INFINITE);
+            let (zip_task, _) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async {
+                    assert_eq!(poll_once(async { 89_u8 }).await, Some(89));
+                    assert_eq!(poll_once(pending::<u8>()).await, None);
+                    assert_eq!(zip(async { 97_u8 }, async { 101_u8 }).await, (97, 101));
+                })
+                .expect("create zip helper task");
+            let (or_task, _) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async {
+                    yield_now().await;
+                    assert_eq!(or(async { 103_u8 }, async { 107_u8 }).await, 103);
+                })
+                .expect("create or helper task");
+            {
+                let mut scheduler = runtime.scheduler.lock();
+                scheduler.schedule(zip_task, 0);
+                scheduler.schedule(or_task, 0);
+            }
+            runtime.run_until_quiescent();
+            assert!(runtime.is_quiescent());
+            assert_eq!(runtime.state.pending_obligation_count(), 0);
+        });
+
+        assert!(!report.has_violations());
+        assert!(report.unique_classes >= 1);
     }
 
     #[test]
