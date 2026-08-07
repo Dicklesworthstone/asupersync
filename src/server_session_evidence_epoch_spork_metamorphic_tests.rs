@@ -55,9 +55,6 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════════════════
 
     // Server Module Mocks
-    // The suffix makes these variants read as explicit protocol-state nodes,
-    // matching the terminology used by the session-model assertions below.
-    #[allow(clippy::enum_variant_names)]
     #[derive(Debug, Clone, PartialEq)]
     pub struct MockServer {
         pub state: MockServerState,
@@ -314,6 +311,9 @@ mod tests {
         pub dual_session: Option<Box<MockSession>>,
     }
 
+    // The suffix makes these variants read as explicit protocol-state nodes,
+    // matching the terminology used by the session-model assertions below.
+    #[allow(clippy::enum_variant_names)]
     #[derive(Debug, Clone, PartialEq)]
     pub enum MockProtocolState {
         SendState { next_send: Vec<u8> },
