@@ -69,8 +69,8 @@
     },
     {
       "path": "src/runtime/builder.rs",
-      "sha256": "ced1fd3901169475f1e390324aa11458f97f52288e8d54bd6f9e91cc0ca3570c",
-      "line_count": 8398,
+      "sha256": "5f8e9cb956e9d93cc70bedd0a3e1415f32d682f5714be26b18d4ece08548a4aa",
+      "line_count": 8489,
       "role": "platform-reactor policy, dependency injection and whole-reactor force-off"
     },
     {
@@ -141,8 +141,8 @@
     },
     {
       "path": "tests/io_uring_capability_inventory_contract.rs",
-      "sha256": "f5582a79953fc2821e95cc2cd33bb6d1d00bf72f339bc87a9215e5066a0892e8",
-      "line_count": 1077,
+      "sha256": "21148fc97874e75a78bb2e27b87b54d4f76ca22ba6e70ccbab3fb806da92d8ed",
+      "line_count": 1078,
       "role": "machine contract for the frozen inventory and decision policy"
     },
     {
@@ -183,8 +183,8 @@
     },
     {
       "path": "docs/io_uring_capability_inventory.md",
-      "sha256": "e99f7cfd01150cc2ea684895adcd7632999da2be882eaaaefc6446314b4d89fe",
-      "line_count": 300,
+      "sha256": "eea771c605aa0164edcbf90898922a7dc57acf6a2226cd8bfacaffb36e922818",
+      "line_count": 307,
       "role": "human interpretation, ownership, and no-claim boundary"
     },
     {

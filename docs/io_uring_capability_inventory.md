@@ -256,14 +256,14 @@ exercise.
 Each lever ends as `ADOPT`, `KEEP`, `UNSUPPORTED`, or `NO_WIN`. Measurement is
 admissible only after active and forced-fallback correctness, cancellation
 drain, and zero outstanding descriptors, completions, buffer leases, and
-obligations. A correctness failure reaches `NO_WIN` without creating a metric
-claim.
+obligations. A correctness failure reaches `NO_WIN`
+without creating a metric claim.
 
 The terminal comparison requires two distinct host-family keys, at least five
 repetitions per cell, p50 and p95 latency, and exact source, toolchain, features,
 host, kernel, configuration, environment, workload, and sample-count identity.
-The primary metric is median echo requests per second. Per-cell relative median
-absolute deviation may not exceed five percent.
+The primary metric is median echo requests per second. The per-cell
+relative median absolute deviation may not exceed five percent.
 
 The numeric resource envelope permits at most five percent additional peak RSS
 and CPU seconds per request, no extra default thread, and exactly one extra
@@ -286,6 +286,13 @@ The dispositions are disjoint. Their precedence is `UNSUPPORTED`, then
   retained and rollback remains explicit.
 
 ## Static validation boundary
+
+The 2026-08-07 claim-time pin audit found two later source changes. The
+`RuntimeBuilder` diff adds the versioned TOML/JSON configuration layer while
+leaving its platform-reactor policy, dependency injection, and force-off
+surface intact. The inventory contract itself received a formatting-only pass.
+Both diffs were inspected before refreshing their exact hashes and line counts;
+the remaining twenty-five pins already matched.
 
 This lane checked JSON shape, recorded exact hashes and line counts, and authored
 the Rust contract. The Rust contract, project tests, live kernel probes, and
