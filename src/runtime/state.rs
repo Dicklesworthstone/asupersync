@@ -31,7 +31,7 @@ use crate::runtime::config::{
     LeakEscalation, ObligationLeakResponse, RuntimeCapacityHints, TraceStorageProfile,
 };
 use crate::runtime::io_driver::{IoDriver, IoDriverHandle};
-use crate::runtime::reactor::Reactor;
+use crate::runtime::reactor::{IoReactorCapabilitySnapshot, Reactor};
 use crate::runtime::resource_monitor::{
     DegradationLevel, DegradationStatsSnapshot, MonitorConfig, RegionPriority, ResourceMonitor,
 };
@@ -1705,6 +1705,11 @@ pub struct RuntimeState {
     /// When present, the runtime can wait on I/O events via the reactor.
     /// When `None`, the runtime operates in pure Lab mode without real I/O.
     io_driver: Option<IoDriverHandle>,
+    /// Immutable reactor selection and advanced-capability receipt.
+    ///
+    /// This remains available when reactor construction fails and no
+    /// [`IoDriverHandle`] exists.
+    io_reactor_capability_snapshot: IoReactorCapabilitySnapshot,
     /// Timer driver for sleep/timeout operations.
     ///
     /// When present, timers use the driver's timing wheel for efficient
@@ -1880,6 +1885,10 @@ impl std::fmt::Debug for RuntimeState {
                 &self.task_spawn_observer_panics.load(Ordering::Relaxed),
             )
             .field("io_driver", &self.io_driver)
+            .field(
+                "io_reactor_capability_snapshot",
+                &self.io_reactor_capability_snapshot,
+            )
             .field("timer_driver", &self.timer_driver)
             .field("logical_clock_mode", &self.logical_clock_mode)
             .field("cancel_attribution", &self.cancel_attribution)
@@ -1973,6 +1982,7 @@ impl RuntimeState {
             task_completion_observer_panics: Arc::new(AtomicU64::new(0)),
             task_spawn_observer_panics: Arc::new(AtomicU64::new(0)),
             io_driver: None,
+            io_reactor_capability_snapshot: IoReactorCapabilitySnapshot::no_reactor(),
             timer_driver: None,
             logical_clock_mode: LogicalClockMode::Lamport,
             cancel_attribution: CancelAttributionConfig::default(),
@@ -2079,7 +2089,7 @@ impl RuntimeState {
         metrics: Arc<dyn MetricsProvider>,
     ) -> Self {
         let mut state = Self::new_with_metrics(metrics);
-        state.io_driver = Some(IoDriverHandle::new(reactor));
+        state.set_io_driver(IoDriverHandle::new(reactor));
         state.timer_driver = Some(TimerDriverHandle::with_wall_clock());
         state.logical_clock_mode = LogicalClockMode::Hybrid;
         state
@@ -2186,9 +2196,30 @@ impl RuntimeState {
         self.io_driver.clone()
     }
 
+    /// Returns the immutable reactor selection and capability receipt.
+    #[inline]
+    #[must_use]
+    pub const fn io_reactor_capability_snapshot(&self) -> IoReactorCapabilitySnapshot {
+        self.io_reactor_capability_snapshot
+    }
+
     /// Sets the I/O driver for this runtime.
     pub fn set_io_driver(&mut self, driver: IoDriverHandle) {
+        self.io_reactor_capability_snapshot = driver.capability_snapshot();
         self.io_driver = Some(driver);
+    }
+
+    /// Retains a terminal reactor selection receipt when no I/O driver exists.
+    pub(crate) fn set_unavailable_io_reactor_capability_snapshot(
+        &mut self,
+        snapshot: IoReactorCapabilitySnapshot,
+    ) {
+        debug_assert!(self.io_driver.is_none());
+        debug_assert_eq!(
+            snapshot.backend(),
+            crate::runtime::reactor::IoReactorBackend::Unavailable
+        );
+        self.io_reactor_capability_snapshot = snapshot;
     }
 
     /// Returns a reference to the timer driver handle, if present.

@@ -199,6 +199,7 @@ fn source_pins_and_live_surface_anchors_match_the_tree() {
         "src/runtime/reactor/io_uring.rs",
         "src/runtime/reactor/mod.rs",
         "src/runtime/reactor/uring.rs",
+        "src/runtime/state.rs",
         "tests/conformance_io_uring_buffer_pool.rs",
         "tests/e2e_fs.rs",
         "tests/io_uring_reactor.rs",
@@ -733,6 +734,15 @@ fn force_off_fallback_and_observability_contracts_fail_closed() {
         text(&factory_value, "current_observability")
             .contains("runtime_builder_platform_reactor_unavailable")
     );
+    assert!(
+        text(&factory_value, "current_observability")
+            .contains("Runtime::io_reactor_capability_snapshot")
+    );
+    assert!(
+        text(&factory_value, "current_observability")
+            .contains("RuntimeHandle::io_reactor_capability_snapshot")
+    );
+    assert!(text(&factory_value, "missing_observability").starts_with("none"));
 
     let observability = object(&inventory, "observability_contract");
     let observability_value = Value::Object(observability.clone());
@@ -760,6 +770,14 @@ fn force_off_fallback_and_observability_contracts_fail_closed() {
     assert!(
         text(&observability_value, "current_inspector")
             .contains("IoDriverHandle::capability_snapshot")
+    );
+    assert!(
+        text(&observability_value, "current_inspector")
+            .contains("Runtime::io_reactor_capability_snapshot")
+    );
+    assert!(
+        text(&observability_value, "current_inspector")
+            .contains("RuntimeHandle::io_reactor_capability_snapshot")
     );
     assert_eq!(
         string_set(&observability_value, "current_fields"),
@@ -1035,8 +1053,10 @@ fn docs_and_no_claim_boundary_remain_honest() {
         "not executed in this static lane",
         "IoUringCapabilityPolicy",
         "IoDriverHandle::capability_snapshot",
+        "Runtime::io_reactor_capability_snapshot",
+        "RuntimeHandle::io_reactor_capability_snapshot",
         "j-29964935379288247",
-        "fdf9590b1c19d7a3",
+        "16ec096ad3b7446f",
         "cached temporary-ring probe",
         "fixed write/read completion",
         "no test claim",
@@ -1074,10 +1094,10 @@ fn docs_and_no_claim_boundary_remain_honest() {
     let checkpoint_value = Value::Object(checkpoint.clone());
     assert_eq!(
         text(&checkpoint_value, "status"),
-        "IN_PROGRESS_FIXED_BUFFER_PROBE_ONLY"
+        "IN_PROGRESS_FIXED_BUFFER_AND_TERMINAL_FALLBACK"
     );
-    assert_eq!(array(&checkpoint_value, "implemented").len(), 6);
-    assert_eq!(array(&checkpoint_value, "remaining").len(), 4);
+    assert_eq!(array(&checkpoint_value, "implemented").len(), 7);
+    assert_eq!(array(&checkpoint_value, "remaining").len(), 3);
     let verification = object(&checkpoint_value, "verification");
     let verification_value = Value::Object(verification.clone());
     assert_eq!(text(&verification_value, "job_id"), "j-29964935379288247");
@@ -1090,10 +1110,10 @@ fn docs_and_no_claim_boundary_remain_honest() {
     let feature_verification = object(&checkpoint_value, "feature_verification");
     let feature_verification_value = Value::Object(feature_verification.clone());
     assert!(feature_verification_value["job_id"].is_null());
-    assert_eq!(text(&feature_verification_value, "worker"), "ovh-a");
+    assert_eq!(text(&feature_verification_value, "worker"), "hz2");
     assert_eq!(
         text(&feature_verification_value, "project_hash"),
-        "fdf9590b1c19d7a3"
+        "16ec096ad3b7446f"
     );
     assert_eq!(
         text(&feature_verification_value, "command"),
@@ -1104,7 +1124,7 @@ fn docs_and_no_claim_boundary_remain_honest() {
     let test_attempt_value = Value::Object(test_attempt.clone());
     assert_eq!(
         text(&test_attempt_value, "project_hash"),
-        "98179d1f2cd5b5dd"
+        "6605dee8352b6c69"
     );
     assert!(test_attempt_value["terminal_receipt"].is_null());
     assert_eq!(unsigned(&test_attempt_value, "local_wait_exit_code"), 130);

@@ -28,14 +28,15 @@ selected; its filesystem ring surfaces are Linux-only. `KqueueReactor`,
 `IocpReactor`, `BrowserReactor`, and `LabReactor` are live elsewhere, but none
 is reachable as an io_uring fallback, so they are outside this campaign matrix.
 
-The machine artifact pins 27 source and evidence files and classifies 19
+The machine artifact pins 28 source and evidence files and classifies 19
 surfaces. The important ownership flow is:
 
 1. `Cargo.toml` enables the optional dependency edge.
 2. `runtime::reactor::create_reactor` tries `IoUringReactor::new()` and falls
    back to the live `EpollReactor` backend if construction fails.
 3. If epoll construction also fails, `RuntimeBuilder` continues without an
-   `IoDriver`, emits one startup warning, and socket paths re-poll.
+   `IoDriver`, retains a typed `URING-FB-REACTOR-UNAVAILABLE` runtime snapshot,
+   emits one startup warning, and socket paths re-poll.
 4. `RuntimeBuilder` otherwise installs the selected platform reactor unless a
    caller injects a reactor or driver, or disables the whole platform path.
 5. `IoDriver` consumes only the generic `Reactor` readiness interface.
@@ -65,7 +66,7 @@ the runtime inspector and cannot establish operation support.
 | Build edge | optional feature and dependency | compilation does not establish host support | URING-2 |
 | Backend factory | try io_uring, then epoll, retain immutable selection metadata, and probe requested fixed-buffer operations | five capability probes remain | URING-2 |
 | Reactor | live one-shot readiness | no advanced data-plane operations | URING-2 onward |
-| Epoll fallback | live Linux/Android readiness backend with feature-disabled or ring-create receipt | total reactor failure has no driver snapshot | URING-2 |
+| Epoll fallback | live Linux/Android readiness backend with feature-disabled or ring-create receipt | five capability probes remain | URING-2 |
 | Buffer scaffold | cached fixed-opcode plus bounded register/write/read/unregister probe, kernel registration, and manual IDs | IDs remain unused by runtime data-plane I/O | URING-3 |
 | Default file API | owned helpers offload; poll traits block directly | separate from opt-in io_uring and unsuitable as an async comparator | URING-7 |
 | File I/O | Linux-only file-local ring driven synchronously in poll | no fixed/selected buffer and unsuitable as an async comparator | URING-3 |
@@ -75,8 +76,8 @@ the runtime inspector and cannot establish operation support.
 | TCP borrowed split streams | timer backoff or immediate re-wake | no reactor registration or advanced receive | URING-5 |
 | `Bytes` / `BytesMut` | empty/static/shared heap bytes; exclusive mutable `Vec<u8>` | no kernel-in-flight lease state | URING-3 |
 | Builder | whole-reactor enable/disable, injection, and typed per-capability policy | live operation outcomes remain | URING-2 |
-| No-reactor fallback | runtime continues with socket re-polls | startup warning only; no reason snapshot | URING-2 |
-| Inspector | generic `IoStats` plus immutable capability snapshot | total reactor failure remains warning-only | URING-2 |
+| No-reactor fallback | runtime continues with socket re-polls and retains a typed terminal snapshot | data-plane behavior remains the incumbent re-poll path | URING-2 |
+| Inspector | generic `IoStats` plus immutable driver/runtime capability snapshots | five capability probes remain | URING-2 |
 | Tests | mock pool, live readiness, filesystem lifecycle | no advanced-capability matrix | URING-7 |
 | Benchmark | synthetic completion bookkeeping | no real-socket comparison | URING-7 |
 | Boundary ledger | four relevant rows and 39 locators | 33 locators are stale | URING-3 |
@@ -220,8 +221,11 @@ then no reactor with socket re-poll fallback. Whole-reactor force-off uses
 `URING-FB-FORCED-OFF`; ordinary ring creation failure uses
 `URING-FB-RING-CREATE`; exhaustion of the reactor chain uses
 `URING-FB-REACTOR-UNAVAILABLE`. Feature-disabled and ring-creation fallback are
-now retained in the immutable driver snapshot. The terminal no-reactor branch
-still has only its startup warning because no `IoDriverHandle` exists.
+retained in the immutable driver snapshot. The terminal no-reactor branch
+stores the same bounded model in `RuntimeState`, exposed through
+`Runtime::io_reactor_capability_snapshot` and
+`RuntimeHandle::io_reactor_capability_snapshot`, even though no
+`IoDriverHandle` exists.
 
 `IoDriverHandle::stats` continues to expose polls, received events, dispatched
 wakers, unknown tokens, registrations, and deregistrations. The new
@@ -316,13 +320,16 @@ policy, factory selection receipt, and driver snapshot. RCH job
 `90d28c97324a0c42b8453be836f53f8ef6a1e1ce` and exited zero. The next checkpoint
 replaced the fixed-buffer support placeholder with the bounded cached probe and
 then extended it through fixed write/read completion and data verification.
-An RCH clean-overlay feature compile on `ovh-a` used project hash
-`fdf9590b1c19d7a3`, base `9c53f4d2e8a2144c5a30573469318db51ee9e28b`,
+The terminal no-driver checkpoint then retained the fallback decision in
+`RuntimeState` and exposed it through `Runtime` and `RuntimeHandle`. An RCH
+clean-overlay feature compile on `hz2` used project hash
+`16ec096ad3b7446f`, base `539d096565b3b111d08969e2ab6010819882614c`,
 overlay fingerprint
-`d83435fff20af242eb5c3ef27fa5715ca1c7b3c540b135cf67117dfa4846c9b4`,
+`7ddbaaa2eaeca4e82e419b37c27706aa6e3329a5508aca9aa182cb1bff31a89d`,
 and exited zero for `cargo check -p asupersync --lib --features io-uring`.
-A focused test attempt under project hash `98179d1f2cd5b5dd` stopped emitting
-output during test linking and the local wait was stopped with exit 130. It
+A focused `terminal_` test attempt under project hash `6605dee8352b6c69`
+stopped emitting output after compiling the edited library and the local wait
+was stopped with exit 130. It
 produced no terminal test result, so this checkpoint makes no test claim and no
 live-kernel outcome claim.
 

@@ -171,7 +171,7 @@ use crate::runtime::deadline_monitor::{
     default_warning_handler,
 };
 use crate::runtime::io_driver::IoDriverHandle;
-use crate::runtime::reactor::{IoUringCapabilityPolicy, Reactor};
+use crate::runtime::reactor::{IoReactorCapabilitySnapshot, IoUringCapabilityPolicy, Reactor};
 use crate::runtime::resource_monitor::ResourceMonitor;
 use crate::runtime::scheduler::three_lane::{
     AdaptiveBatchSizingProfile, SchedulerConstructionHandles,
@@ -2874,9 +2874,12 @@ impl RuntimeBuilder {
         // injections take precedence, and enable_platform_reactor(false) keeps
         // the fallback regime available for burn-in/debugging.
         #[cfg(not(target_arch = "wasm32"))]
-        let reactor = if platform_reactor && reactor.is_none() && io_driver.is_none() {
+        let (reactor, terminal_io_reactor_snapshot) = if platform_reactor
+            && reactor.is_none()
+            && io_driver.is_none()
+        {
             match crate::runtime::reactor::create_reactor_with_policy(io_uring_capability_policy) {
-                Ok(reactor) => Some(reactor),
+                Ok(reactor) => (Some(reactor), None),
                 Err(err) => {
                     #[cfg(not(feature = "tracing-integration"))]
                     let _ = &err;
@@ -2885,14 +2888,21 @@ impl RuntimeBuilder {
                         error = %err,
                         "platform reactor unavailable; falling back to timer-paced I/O polling"
                     );
-                    None
+                    (
+                        None,
+                        Some(IoReactorCapabilitySnapshot::reactor_unavailable(
+                            io_uring_capability_policy,
+                        )),
+                    )
                 }
             }
         } else {
-            reactor
+            (reactor, None)
         };
         #[cfg(target_arch = "wasm32")]
         let reactor = reactor;
+        #[cfg(target_arch = "wasm32")]
+        let terminal_io_reactor_snapshot = None;
         // br-asupersync-8fuxnt / br-asupersync-sched-hot-path-perf-bt4y5f.2.2:
         // the Sharded shape is publicly constructible. The former build-time
         // ConfigError gate flipped once its stated preconditions landed:
@@ -2903,12 +2913,13 @@ impl RuntimeBuilder {
         // deadline-monitor surfaces (E1.2 subsystems 1-3d + step 4). The
         // default shape remains `Unified`; the default flip is E1.3
         // (br-asupersync-sched-hot-path-perf-bt4y5f.2.3) bake evidence.
-        Runtime::with_config_and_platform(
+        Runtime::with_config_and_platform_snapshot(
             config,
             reactor,
             io_driver,
             timer_driver,
             entropy_source,
+            terminal_io_reactor_snapshot,
             host_services.as_ref(),
         )
     }
@@ -3390,11 +3401,32 @@ impl Runtime {
     /// startup host services.
     #[allow(clippy::result_large_err)]
     fn with_config_and_platform(
+        config: RuntimeConfig,
+        reactor: Option<Arc<dyn Reactor>>,
+        io_driver: Option<IoDriverHandle>,
+        timer_driver: Option<TimerDriverHandle>,
+        entropy_source: Option<Arc<dyn EntropySource>>,
+        host_services: &dyn RuntimeHostServices,
+    ) -> Result<Self, Error> {
+        Self::with_config_and_platform_snapshot(
+            config,
+            reactor,
+            io_driver,
+            timer_driver,
+            entropy_source,
+            None,
+            host_services,
+        )
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn with_config_and_platform_snapshot(
         mut config: RuntimeConfig,
         reactor: Option<Arc<dyn Reactor>>,
         io_driver: Option<IoDriverHandle>,
         timer_driver: Option<TimerDriverHandle>,
         entropy_source: Option<Arc<dyn EntropySource>>,
+        terminal_io_reactor_snapshot: Option<IoReactorCapabilitySnapshot>,
         host_services: &dyn RuntimeHostServices,
     ) -> Result<Self, Error> {
         config.normalize();
@@ -3413,7 +3445,13 @@ impl Runtime {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = (reactor, io_driver, timer_driver, entropy_source);
+            let _ = (
+                reactor,
+                io_driver,
+                timer_driver,
+                entropy_source,
+                terminal_io_reactor_snapshot,
+            );
             Err(Error::new(crate::error::ErrorKind::ConfigError)
                 .with_message(unsupported_browser_bootstrap_message(host_services)))
         }
@@ -3425,6 +3463,7 @@ impl Runtime {
                 io_driver,
                 timer_driver,
                 entropy_source,
+                terminal_io_reactor_snapshot,
                 host_services,
             );
             let inner = Arc::new(inner);
@@ -3552,6 +3591,16 @@ impl Runtime {
     #[must_use]
     pub fn config(&self) -> &RuntimeConfig {
         &self.inner.config
+    }
+
+    /// Returns the immutable reactor selection and advanced-capability receipt.
+    #[must_use]
+    pub fn io_reactor_capability_snapshot(&self) -> IoReactorCapabilitySnapshot {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .io_reactor_capability_snapshot()
     }
 
     /// Returns true if the runtime is quiescent (no live tasks or I/O).
@@ -3732,6 +3781,19 @@ impl RuntimeHandle {
             RuntimeHandleRef::Strong(inner) => Ok(Arc::clone(inner)),
             RuntimeHandleRef::Weak(inner) => inner.upgrade().ok_or(SpawnError::RuntimeUnavailable),
         }
+    }
+
+    /// Returns the immutable reactor receipt while the runtime remains alive.
+    #[must_use]
+    pub fn io_reactor_capability_snapshot(&self) -> Option<IoReactorCapabilitySnapshot> {
+        let inner = self.try_inner().ok()?;
+        Some(
+            inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .io_reactor_capability_snapshot(),
+        )
     }
 
     /// Spawn a task from outside async context.
@@ -3999,6 +4061,7 @@ impl RuntimeInner {
         io_driver: Option<IoDriverHandle>,
         timer_driver: Option<TimerDriverHandle>,
         entropy_source: Option<Arc<dyn EntropySource>>,
+        terminal_io_reactor_snapshot: Option<IoReactorCapabilitySnapshot>,
     ) -> RuntimeState {
         let capacity_hints = config.resolved_capacity_hints();
         let trace_capacity = config.trace_storage_profile.trace_buffer_capacity();
@@ -4026,6 +4089,9 @@ impl RuntimeInner {
                 state
             },
         );
+        if let Some(snapshot) = terminal_io_reactor_snapshot {
+            runtime_state.set_unavailable_io_reactor_capability_snapshot(snapshot);
+        }
         if let Some(driver) = io_driver {
             runtime_state.set_io_driver(driver);
         }
@@ -4074,6 +4140,7 @@ impl RuntimeInner {
         io_driver: Option<IoDriverHandle>,
         timer_driver: Option<TimerDriverHandle>,
         entropy_source: Option<Arc<dyn EntropySource>>,
+        terminal_io_reactor_snapshot: Option<IoReactorCapabilitySnapshot>,
         host_services: &dyn RuntimeHostServices,
     ) -> (Self, Vec<ThreeLaneWorker>) {
         // br-asupersync-8fuxnt: RuntimeConfig::runtime_state_shape routes
@@ -4092,6 +4159,7 @@ impl RuntimeInner {
             io_driver,
             timer_driver,
             entropy_source,
+            terminal_io_reactor_snapshot,
         );
         let state = Arc::new(crate::sync::ContendedMutex::new(
             "runtime_state",
@@ -7730,6 +7798,10 @@ worker_threads = 16
                 .is_some()
         }));
         assert!(has_driver, "default runtime builds must attach an IoDriver");
+        assert_ne!(
+            runtime.io_reactor_capability_snapshot().backend(),
+            crate::runtime::reactor::IoReactorBackend::Unavailable
+        );
     }
 
     /// Pins the explicit fallback regime: callers may still disable the
@@ -7751,6 +7823,60 @@ worker_threads = 16
         assert!(
             !has_driver,
             "explicitly disabled platform reactor must keep fallback I/O regime"
+        );
+        let snapshot = runtime.io_reactor_capability_snapshot();
+        assert_eq!(
+            snapshot.backend(),
+            crate::runtime::reactor::IoReactorBackend::Unavailable
+        );
+        assert_eq!(snapshot.selection_fallback(), None);
+    }
+
+    #[test]
+    fn terminal_platform_reactor_snapshot_survives_without_io_driver() {
+        use crate::runtime::reactor::{
+            IoReactorBackend, IoUringCapability, IoUringFallbackReason, IoUringSupportState,
+        };
+
+        let policy =
+            IoUringCapabilityPolicy::new().with_requested(IoUringCapability::FixedBuffers, true);
+        let expected = IoReactorCapabilitySnapshot::reactor_unavailable(policy);
+        let runtime = Runtime::with_config_and_platform_snapshot(
+            RuntimeConfig::default(),
+            None,
+            None,
+            None,
+            None,
+            Some(expected),
+            &NativeThreadHostServices::new(),
+        )
+        .expect("runtime construction continues without a reactor");
+
+        let state = runtime
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(state.io_driver_handle().is_none());
+        drop(state);
+
+        let snapshot = runtime.io_reactor_capability_snapshot();
+        assert_eq!(snapshot, expected);
+        assert_eq!(snapshot.backend(), IoReactorBackend::Unavailable);
+        assert_eq!(
+            snapshot.selection_fallback(),
+            Some(IoUringFallbackReason::ReactorUnavailable)
+        );
+        let fixed = snapshot.decision(IoUringCapability::FixedBuffers);
+        assert_eq!(fixed.supported(), IoUringSupportState::NotProbed);
+        assert!(!fixed.active());
+        assert_eq!(
+            fixed.fallback_reason(),
+            IoUringFallbackReason::ReactorUnavailable
+        );
+        assert_eq!(
+            runtime.handle().io_reactor_capability_snapshot(),
+            Some(expected)
         );
     }
 
@@ -8357,7 +8483,7 @@ worker_threads = 16
             worker_threads: 64,
             ..RuntimeConfig::default()
         };
-        let state = RuntimeInner::initialize_runtime_state(&config, None, None, None, None);
+        let state = RuntimeInner::initialize_runtime_state(&config, None, None, None, None, None);
 
         assert_eq!(
             state.capacity_hints(),
@@ -8374,7 +8500,7 @@ worker_threads = 16
             capacity_hints: Some(RuntimeCapacityHints::new(4096, 1024, 2048)),
             ..RuntimeConfig::default()
         };
-        let state = RuntimeInner::initialize_runtime_state(&config, None, None, None, None);
+        let state = RuntimeInner::initialize_runtime_state(&config, None, None, None, None, None);
 
         assert_eq!(
             state.capacity_hints(),
@@ -8391,7 +8517,7 @@ worker_threads = 16
             enable_read_biased_region_snapshot: true,
             ..RuntimeConfig::default()
         };
-        let state = RuntimeInner::initialize_runtime_state(&config, None, None, None, None);
+        let state = RuntimeInner::initialize_runtime_state(&config, None, None, None, None, None);
 
         assert!(
             state.read_biased_region_snapshot_enabled(),

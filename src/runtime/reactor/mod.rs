@@ -367,6 +367,8 @@ impl IntoIterator for Events {
 /// Stable identity for the reactor backend selected at runtime construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IoReactorBackend {
+    /// No reactor backend is active.
+    Unavailable,
     /// Linux/Android io_uring backend.
     IoUring,
     /// Linux/Android epoll backend.
@@ -386,6 +388,7 @@ impl IoReactorBackend {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Unavailable => "unavailable",
             Self::IoUring => "io_uring",
             Self::Epoll => "epoll",
             Self::Kqueue => "kqueue",
@@ -839,6 +842,23 @@ impl IoReactorCapabilitySnapshot {
     #[must_use]
     pub const fn injected() -> Self {
         Self::not_requested(IoReactorBackend::Injected, None)
+    }
+
+    /// Builds the neutral receipt for a runtime configured without a reactor.
+    #[must_use]
+    pub const fn no_reactor() -> Self {
+        Self::not_requested(IoReactorBackend::Unavailable, None)
+    }
+
+    /// Builds the terminal receipt for an exhausted platform reactor chain.
+    #[must_use]
+    pub(crate) fn reactor_unavailable(policy: IoUringCapabilityPolicy) -> Self {
+        Self::unavailable(
+            IoReactorBackend::Unavailable,
+            Some(IoUringFallbackReason::ReactorUnavailable),
+            policy,
+            IoUringFallbackReason::ReactorUnavailable,
+        )
     }
 
     /// Selected backend.
@@ -1349,6 +1369,7 @@ mod tests {
 
     #[test]
     fn io_uring_capability_ids_and_fallback_ids_are_stable() {
+        assert_eq!(IoReactorBackend::Unavailable.as_str(), "unavailable");
         assert_eq!(
             IoUringCapability::ALL.map(IoUringCapability::id),
             [
@@ -1401,6 +1422,48 @@ mod tests {
         );
         assert_eq!(IoUringFallbackReason::NoWin.id(), "URING-FB-NO-WIN");
         assert_eq!(IoUringFallbackReason::Unknown.id(), "URING-FB-UNKNOWN");
+    }
+
+    #[test]
+    fn terminal_reactor_snapshot_preserves_policy_without_probing() {
+        let policy = IoUringCapabilityPolicy::new()
+            .with_requested(IoUringCapability::FixedBuffers, true)
+            .with_requested(IoUringCapability::SqPoll, true)
+            .with_forced_off(IoUringCapability::SqPoll, true);
+
+        let snapshot = IoReactorCapabilitySnapshot::reactor_unavailable(policy);
+        assert_eq!(snapshot.backend(), IoReactorBackend::Unavailable);
+        assert_eq!(
+            snapshot.selection_fallback(),
+            Some(IoUringFallbackReason::ReactorUnavailable)
+        );
+
+        let requested = snapshot.decision(IoUringCapability::FixedBuffers);
+        assert!(requested.requested());
+        assert_eq!(requested.supported(), IoUringSupportState::NotProbed);
+        assert!(!requested.active());
+        assert_eq!(
+            requested.fallback_reason(),
+            IoUringFallbackReason::ReactorUnavailable
+        );
+
+        let forced_off = snapshot.decision(IoUringCapability::SqPoll);
+        assert!(forced_off.requested());
+        assert_eq!(forced_off.supported(), IoUringSupportState::NotProbed);
+        assert!(!forced_off.active());
+        assert_eq!(
+            forced_off.fallback_reason(),
+            IoUringFallbackReason::ForcedOff
+        );
+
+        let unrequested = snapshot.decision(IoUringCapability::MultishotAccept);
+        assert!(!unrequested.requested());
+        assert_eq!(unrequested.supported(), IoUringSupportState::NotProbed);
+        assert!(!unrequested.active());
+        assert_eq!(
+            unrequested.fallback_reason(),
+            IoUringFallbackReason::NotRequested
+        );
     }
 
     #[test]
