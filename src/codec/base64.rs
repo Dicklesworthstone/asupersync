@@ -257,7 +257,7 @@ impl Base64Engine {
             }
         }
 
-        let mut suffix_symbols = 0;
+        let mut suffix_symbols = 0_usize;
         let mut suffix_padding = 0;
         let mut first_padding_offset = 0;
         let mut last_symbol = 0;
