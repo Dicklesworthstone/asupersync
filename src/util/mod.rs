@@ -31,5 +31,10 @@ pub use stack_trace::{StackTrace, capture_stack_trace};
 // Alongside-incumbent FUT A3 kernel. It remains crate-private until the
 // dependency-parity campaign has executable context and performance evidence.
 #[allow(dead_code)]
+// Keep the implementation's explicit crate-visibility contract even though
+// this crate-private module already caps its effective visibility. Replacing
+// those declarations with `pub` would be equivalent today but would obscure
+// the intended boundary if the module is reorganized later.
+#[allow(clippy::redundant_pub_crate)]
 #[path = "../future.rs"]
 pub(crate) mod future;

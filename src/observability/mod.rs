@@ -76,6 +76,10 @@ pub mod otlp_attribute_size_cap_audit_test;
 // remain outside this module's authority.
 #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
 #[allow(dead_code)]
+// The owned schema deliberately spells its internal contract as crate-visible.
+// This crate-private staging boundary keeps the effective API private while
+// avoiding a misleading mass rewrite of generated-shaped declarations to `pub`.
+#[allow(clippy::redundant_pub_crate)]
 pub(crate) mod otlp_proto;
 // br-asupersync-lf1a77: stale OTLP audit files that depended on removed
 // synthetic HTTP/span APIs remain tracked in-place, but their invariants are
