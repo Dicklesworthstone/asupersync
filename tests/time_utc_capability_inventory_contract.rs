@@ -2228,7 +2228,7 @@ fn direct_crate_use_tree(value: &str, crate_name: &str) -> bool {
 
 fn find_last_keyword(value: &str, keyword: &str) -> Option<usize> {
     let bytes = value.as_bytes();
-    value.match_indices(keyword).rev().find_map(|(index, _)| {
+    value.rmatch_indices(keyword).find_map(|(index, _)| {
         let end = index + keyword.len();
         let left_boundary = index == 0 || !is_identifier_byte(bytes[index - 1]);
         let right_boundary = end == bytes.len() || !is_identifier_byte(bytes[end]);
@@ -3298,7 +3298,10 @@ fn validate_post_a1_conformance_raptorq_lineage_extension(inventory: &Value) -> 
         }
     }
 
-    let reconciliation = object(extension, "line_sensitive_pin_reconciliation");
+    let reconciliation = extension
+        .get("line_sensitive_pin_reconciliation")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| "line_sensitive_pin_reconciliation must be an object".to_owned())?;
     if text(reconciliation, "path") != "src/database/postgres.rs"
         || text(reconciliation, "current_sha256")
             != "ddc35a5809d998391a0e6ffe6f995fc9f4e9919a39e5ad7d71dd4b644c049a75"
