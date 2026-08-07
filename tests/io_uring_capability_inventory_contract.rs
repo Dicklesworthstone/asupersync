@@ -1036,6 +1036,8 @@ fn docs_and_no_claim_boundary_remain_honest() {
         "IoUringCapabilityPolicy",
         "IoDriverHandle::capability_snapshot",
         "j-29964935379288247",
+        "ec4e32fde9abc324",
+        "cached temporary-ring probe",
         "no test claim",
     ] {
         assert!(docs.contains(required), "missing docs marker: {required}");
@@ -1073,7 +1075,7 @@ fn docs_and_no_claim_boundary_remain_honest() {
         text(&checkpoint_value, "status"),
         "IN_PROGRESS_CONTROL_PLANE_ONLY"
     );
-    assert_eq!(array(&checkpoint_value, "implemented").len(), 5);
+    assert_eq!(array(&checkpoint_value, "implemented").len(), 6);
     assert_eq!(array(&checkpoint_value, "remaining").len(), 4);
     let verification = object(&checkpoint_value, "verification");
     let verification_value = Value::Object(verification.clone());
@@ -1084,6 +1086,30 @@ fn docs_and_no_claim_boundary_remain_honest() {
         "cargo check -p asupersync --lib"
     );
     assert_eq!(unsigned(&verification_value, "exit_code"), 0);
+    let feature_verification = object(&checkpoint_value, "feature_verification");
+    let feature_verification_value = Value::Object(feature_verification.clone());
+    assert!(feature_verification_value["job_id"].is_null());
+    assert_eq!(text(&feature_verification_value, "worker"), "hz2");
+    assert_eq!(
+        text(&feature_verification_value, "project_hash"),
+        "ec4e32fde9abc324"
+    );
+    assert_eq!(
+        text(&feature_verification_value, "command"),
+        "cargo check -p asupersync --lib --features io-uring"
+    );
+    assert_eq!(unsigned(&feature_verification_value, "exit_code"), 0);
+    let test_attempt = object(&checkpoint_value, "focused_test_attempt");
+    let test_attempt_value = Value::Object(test_attempt.clone());
+    assert_eq!(
+        text(&test_attempt_value, "project_hash"),
+        "c316006ea09ef0d1"
+    );
+    assert!(test_attempt_value["terminal_receipt"].is_null());
+    assert_eq!(
+        text(&test_attempt_value, "disposition"),
+        "NO_TEST_OR_LIVE_KERNEL_CLAIM"
+    );
     assert!(checkpoint_value["focused_test_receipt"].is_null());
 
     let claims = array(&inventory, "no_claims");
@@ -1095,7 +1121,7 @@ fn docs_and_no_claim_boundary_remain_honest() {
         .join(" ");
     for boundary in [
         "changes no filesystem",
-        "cargo check proves default-feature library compilation only",
+        "cargo checks prove default-feature and io-uring-feature library compilation only",
         "does not prove buffer ownership",
         "records no benchmark result",
         "does not prove broad workspace health",

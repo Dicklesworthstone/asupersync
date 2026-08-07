@@ -63,10 +63,10 @@ the runtime inspector and cannot establish operation support.
 | Surface | Current state | Material gap | Next owner |
 |---|---|---|---|
 | Build edge | optional feature and dependency | compilation does not establish host support | URING-2 |
-| Backend factory | try io_uring, then epoll, and retain immutable selection metadata | live operation probes remain | URING-2 |
+| Backend factory | try io_uring, then epoll, retain immutable selection metadata, and probe requested fixed-buffer registration | five capability probes and fixed-I/O completion remain | URING-2 |
 | Reactor | live one-shot readiness | no advanced data-plane operations | URING-2 onward |
 | Epoll fallback | live Linux/Android readiness backend with feature-disabled or ring-create receipt | total reactor failure has no driver snapshot | URING-2 |
-| Buffer scaffold | kernel registration plus manual IDs | hardcoded support answer; IDs unused by I/O | URING-3 |
+| Buffer scaffold | cached fixed-opcode plus bounded register/unregister probe, kernel registration, and manual IDs | no fixed-I/O completion; IDs unused by I/O | URING-3 |
 | Default file API | owned helpers offload; poll traits block directly | separate from opt-in io_uring and unsuitable as an async comparator | URING-7 |
 | File I/O | Linux-only file-local ring driven synchronously in poll | no fixed/selected buffer and unsuitable as an async comparator | URING-3 |
 | Path and directory I/O | Linux-only independent one-operation rings | outside one capability/fallback model | URING-2 |
@@ -87,14 +87,16 @@ pinned rows contain 39 locators: six still match exactly and 33 retain their
 pattern at a different line. The artifact reconciles every recorded locator to
 its current line. URING-3 owns alignment when it changes these boundaries.
 
-Five material source-accuracy gaps are explicit. The file module header names
+Five material source-accuracy records are explicit. The file module header names
 `OPENAT` and `CLOSE` as ring operations even though constructors call
 `libc::openat` synchronously and no corresponding ring opcode consumer exists;
 it also claims nonblocking asynchronous completion although poll drives
 `submit_and_wait`. The directory header misclassifies the `MkDirAt` path. The
-reactor's buffer-support method returns `Ok(true)` without probing. Finally, an
-E2E comment labels default `fs::write`/`fs::read` as io_uring evidence. None of
-those statements may be promoted into capability or execution evidence.
+former hardcoded buffer-support answer is partially resolved by a cached,
+bounded fixed-opcode and register/unregister probe; a real fixed-I/O completion
+is still absent. Finally, an E2E comment labels default
+`fs::write`/`fs::read` as io_uring evidence. Unresolved statements may not be
+promoted into capability or execution evidence.
 
 ## Existing evidence
 
@@ -117,7 +119,7 @@ later one.
 
 | Capability ID | Current state | Required before activation |
 |---|---|---|
-| `URING-CAP-FIXED-BUFFERS` | scaffold only; not used by the data plane | real fixed operation, linear lease, terminal drain |
+| `URING-CAP-FIXED-BUFFERS` | live registration probe plus scaffold; not used by the data plane | real fixed operation, linear lease, terminal drain |
 | `URING-CAP-PROVIDED-GROUPS` | absent | bounded group, selection, buffer-ID completion, cleanup |
 | `URING-CAP-MAPPED-BUFFER-RING` | absent | bounded mapped ring, lifetime proof, selection and return |
 | `URING-CAP-MULTISHOT-ACCEPT` | absent | generation-tagged MORE/terminal state and descriptor ownership |
@@ -232,10 +234,12 @@ control-plane state:
 - active;
 - fallback reason.
 
-This checkpoint does not supply authoritative live operation outcomes. A
-requested capability without such an outcome fails closed with
-`URING-FB-PROBE-ERROR`; no advanced capability is requested or active by
-default.
+This checkpoint supplies one conservative support outcome: requested fixed
+buffers run a cached temporary-ring probe that checks fixed read/write opcodes
+and actual registration/unregistration. It does not execute fixed I/O, and the
+other five capabilities still have no authoritative live outcome. Any requested
+capability without an outcome fails closed with `URING-FB-PROBE-ERROR`; no
+advanced capability is requested or active by default.
 
 Metric labels use only the frozen identifiers. A raw host error may appear in a
 bounded startup diagnostic or trace detail, never as an unbounded metric label.
@@ -306,12 +310,20 @@ benchmarks were not executed in this static lane.
 The later URING-2 control-plane checkpoint added the immutable model, typed
 policy, factory selection receipt, and driver snapshot. RCH job
 `j-29964935379288247` checked the default-feature library at clean-overlay base
-`90d28c97324a0c42b8453be836f53f8ef6a1e1ce` and exited zero. A focused test
-attempt produced no terminal receipt, so this checkpoint makes no test claim.
+`90d28c97324a0c42b8453be836f53f8ef6a1e1ce` and exited zero. The next checkpoint
+replaced the fixed-buffer support placeholder with the bounded cached probe.
+An RCH clean-overlay feature compile on `hz2` used project hash
+`ec4e32fde9abc324`, base `23c8149a12aa3efad77adb318ef27150fbfc44aa`,
+overlay fingerprint
+`0123f12ac80071d051d677f93a53ebd53a098724f8c0b66a13c60bd8f6619033`,
+and exited zero for `cargo check -p asupersync --lib --features io-uring`.
+A focused test attempt under project hash `c316006ea09ef0d1` disappeared from the
+active RCH set without a terminal receipt; its orphaned local hook was stopped,
+so this checkpoint makes no test or live-kernel outcome claim.
 
 Accordingly, this inventory and checkpoint do not prove focused test success,
-live-host support, authoritative operation probes, advanced capability
-activation, data-plane fallback behavior, lifecycle correctness, performance,
+live-host support, fixed-I/O completion or the other five operation probes,
+advanced data-plane behavior, lifecycle correctness, performance,
 broad workspace health, release readiness, production-on-by-default status, or
 fleet availability. The checkpoint changes control-plane metadata only and
 authorizes no dependency, capability, or file removal, tracker closure, or

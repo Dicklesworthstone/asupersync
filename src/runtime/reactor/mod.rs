@@ -1148,13 +1148,14 @@ pub fn create_reactor_with_policy(policy: IoUringCapabilityPolicy) -> io::Result
     #[cfg(feature = "io-uring")]
     {
         if let Ok(reactor) = IoUringReactor::new() {
+            let probes = reactor.capability_probes(policy);
             return Ok(ObservedReactor::wrap(
                 Arc::new(reactor),
                 IoReactorCapabilitySnapshot::from_policy(
                     IoReactorBackend::IoUring,
                     None,
                     policy,
-                    [None; 6],
+                    probes,
                 ),
             ));
         }
