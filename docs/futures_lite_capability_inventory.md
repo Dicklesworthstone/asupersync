@@ -46,7 +46,7 @@ Six production source tokens in five files preserve seven behaviors:
 
 | ID | Source | Contract |
 |---|---|---|
-| `FUT-PROD-ATP-STREAM` | `src/net/atp/sdk/stream.rs` | One trait import supports public `Stream<Item = TransferProgress>` impls for both `AtpWriter` and `AtpReader`. Empty progress queues self-wake and return `Pending`; disconnected or cancelled queues terminate. Drop best-effort signals cancellation and aborts an outstanding obligation. |
+| `FUT-PROD-ATP-STREAM` | `src/net/atp/sdk/stream.rs` | One trait import supports public `Stream<Item = TransferProgress>` impls for both `AtpWriter` and `AtpReader`. Empty progress queues register the latest task waker and return `Pending` without self-waking; disconnected or creation-context-cancelled queues terminate. Drop best-effort signals cancellation and aborts an outstanding obligation. |
 | `FUT-PROD-MIDDLEWARE-CATCH` | `src/web/middleware.rs` | `CatchPanicMiddleware` separately catches construction panic with `std`, then catches poll panic with `FutureExt`. It emits stable `ASUP-E502` behavior and never intentionally repolls after panic. |
 | `FUT-PROD-NEGOTIATE-CATCH` | `src/web/negotiate.rs` | `ErrorHandlerMiddleware` catches poll panic and converts it through content negotiation. Construction happens before the adapter and is not contained by this site. |
 | `FUT-PROD-ROUTER-BLOCK` | `src/web/router.rs` | Public synchronous `Router::handle` drives `handle_with_cx` on the caller thread without an ambient runtime. |
@@ -69,32 +69,34 @@ types. The follow-on A2 source contract below adds owned-side ATP assertions,
 but deliberately adds no futures-lite dependency and therefore cannot catch a
 break to the retained foreign impls.
 
-### FUT A2 static owned-Stream progress
+### FUT A2 executed contract progress
 
 At base revision `9f3684b48af00f93a6717af8575bbb4c984d5873`, bead
 `asupersync-d24mms.6.2` adds alongside-incumbent owned Stream implementations
-for `AtpWriter` and `AtpReader`. This is `STATIC_SOURCE_PROGRESS`; its
-executable state is `NOT_RUN_STATIC_ONLY`, and the bead remains open.
+for `AtpWriter` and `AtpReader`. The public compile and documentation contracts
+now have terminal RCH receipts, while ATP runtime behavior and the user trial
+remain open.
 
 The incumbent and owned trait implementations all delegate to one private
-`poll_progress` kernel. That kernel preserves the frozen behavior: one queued
-`TransferProgress` becomes `Ready(Some(_))`, an empty queue self-wakes and
-returns `Pending`, and a disconnected or cancelled queue becomes `Ready(None)`.
-The types' existing Drop implementations still best-effort signal cancellation
-and abort an outstanding graded obligation. The incumbent public trait remains
-implemented; no downstream break or dependency cutover is authorized.
+`poll_progress` kernel. One queued `TransferProgress` becomes `Ready(Some(_))`;
+an empty queue registers the latest task waker and returns `Pending` without
+self-waking; and a disconnected or creation-context-cancelled queue becomes
+`Ready(None)`. The types' existing Drop implementations still best-effort
+signal cancellation and abort an outstanding graded obligation. The incumbent
+public trait remains implemented; no downstream break or dependency cutover is
+authorized.
 
-Inline and public-contract compile assertions have been authored for both ATP
-types under `asupersync::stream::Stream<Item = TransferProgress>`. They have not
-been compiled or executed in this static-only increment.
+Public-contract assertions for both ATP types under
+`asupersync::stream::Stream<Item = TransferProgress>` compiled in the standalone
+downstream fixture. Focused inline ATP wake and cancellation tests are authored
+but still lack a terminal execution receipt.
 
 At follow-on base revision `aa23f536a5c22d3c16ecd592f9c3b743d3e78fc2`,
 the standalone downstream fixture also names both ATP types, asserts the owned
 Stream item contract, and instantiates their `StreamExt::next` function shape.
-This source-authored compile contract does not construct an ATP stream and has
-not been run. It therefore does not prove Pending/wake/item/EOF behavior,
-cancellation, Drop cleanup, region quiescence, or the separately retained
-foreign Stream journey.
+This compile contract executed successfully, but it does not construct an ATP
+stream. It therefore does not prove ATP Pending/wake/item/EOF behavior, Drop
+cleanup, region quiescence, or the separately retained foreign Stream journey.
 
 At documentation-contract base revision
 `862c58a609c1c7b6087e992903b287d08208d7ad`, the owned trait and `Next`
@@ -114,10 +116,10 @@ documentation now freeze the semantic boundary that A2 requires:
   and size-hint semantics under their stated bounds.
 
 This corrects the former blanket claim that every stream poll is losslessly
-cancel-safe. It changes documentation only. The source contract has not been
-compiled as rustdoc or executed, and it does not prove that every existing
-implementation satisfies the documented wake, pinning, size-hint, cancellation,
-or drop obligations.
+cancel-safe. The focused rustdoc lane passed two positive examples and the
+direct-`next` `!Unpin` compile-fail example. That scoped receipt does not prove
+that every existing implementation satisfies the documented wake, pinning,
+size-hint, cancellation, or drop obligations.
 
 At pinned-downstream base revision
 `64a80ef684d277238a5b2e19ccef684ebcf7984b`, the standalone consumer adds
@@ -129,30 +131,38 @@ adapter, drops the unpolled `Next`, and then source-authors size-hint, item, and
 EOF observations. The `StreamExt::next` rustdoc also adds the inverse
 compile-fail case for calling `next` directly on an address-sensitive value.
 
-Neither case has been compiled or run. They do not claim a stable compiler
-diagnostic, runtime cancellation behavior, ATP progress behavior, ecosystem
-trait parity, or permission to remove the incumbent dependency.
+The downstream fixture executed 15 tests, including the pinned local stream and
+owned ATP compile shapes; the rustdoc lane also executed the inverse compile-fail
+case. These receipts do not claim a stable compiler diagnostic, ATP progress
+runtime behavior, ecosystem trait parity, or permission to remove the incumbent
+dependency.
 
 The same downstream fixture now also maps its custom stream into
 `Result<u32, &'static str>` items and names
-`StreamExt::try_collect::<u32, &'static str, Vec<u32>>`. This is compile-shape
-coverage only; it has not exercised error short-circuiting or completion.
+`StreamExt::try_collect::<u32, &'static str, Vec<u32>>`. The downstream fixture
+executed its error short-circuiting and completion observations.
 
 #### A2 acceptance status
 
-| Requirement | Source status | Missing terminal evidence |
+| Requirement | Source status | Terminal evidence or gap |
 |---|---|---|
-| Owned API | Authored, not executed | Focused compile |
-| Downstream ergonomics | Authored, not executed | Fixture execution |
-| Compile-fail rustdoc | Authored, not executed | Rustdoc execution |
-| Pin/drop/bounds | Authored, not executed | Behavior execution |
-| Error adapter | Authored, not executed | Behavior execution |
-| ATP runtime E2E | Runtime scenario missing | ATP runtime E2E |
+| Owned API | Implemented alongside incumbent | Downstream fixture passed |
+| Downstream ergonomics | Implemented | 15 fixture tests passed |
+| Compile-fail rustdoc | Implemented | Focused rustdoc passed |
+| Pin/drop/bounds | Implemented | Downstream fixture passed |
+| Error adapter | Implemented | Downstream fixture passed |
+| ATP runtime E2E | Focused tests authored, not executed | Runtime E2E missing |
 | User trial | Missing | SAME-or-BETTER receipt |
 | Cutover | Blocked | Every receipt above |
 
-This matrix is fail-closed. It is not a terminal receipt, does not authorize closing A2,
-and does not convert source-authored assertions into executed evidence.
+The terminal receipts are scoped: the standalone fixture passed 15 tests and the
+Stream rustdoc lane passed two positive examples plus one compile-fail example.
+The focused ATP inline lane reached the final workspace crate on `ovh-a` but
+emitted no test output before bounded stuck-link cancellation; build
+`29967068015099936` exited 130 with cleanup complete and proves neither compile
+success nor behavior.
+This matrix remains fail-closed, does not authorize closing A2, and does not
+convert the unexecuted ATP behavior tests into runtime evidence.
 
 ### Post-baseline current snapshot
 
@@ -552,8 +562,10 @@ resource state, timings, redaction scan, and deterministic replay command.
 - Its feature list implies a gate that does not exist.
 - Registry and baseline evidence states disagree.
 - The manifest comment describes only the two web adapter sites.
-- Public ATP ecosystem Stream behavior and downstream usability are untested.
-- ATP's Empty path self-wakes and has no focused wake-churn test.
+- Public ATP ecosystem Stream runtime behavior remains untested; owned
+  downstream compile usability is executed.
+- ATP's Empty path no longer self-wakes and focused wake/cancellation tests are
+  authored, but those inline tests still lack a terminal execution receipt.
 - The ADR count drifted, listed comment-only `join_all`, omitted live `or`, and
   omitted the compatibility-member direct dev edge.
 - Two fuzz comments imply direct use that does not exist.
@@ -582,8 +594,9 @@ compatibility, replacement parity, broad workspace health, release readiness,
 performance, no regression, live RCH fleet availability, local Cargo fallback
 approval, or permission to remove futures-lite. Package-count marginals are not
 behavioral evidence. Dropping a race loser is not the project's required loser
-drain. The owned Stream semantics and ATP additions described above are
-source-authored and unexecuted; they do not extend the historical proof state.
+drain. The owned Stream documentation and downstream contracts described above
+have scoped execution receipts; the ATP progress runtime path remains
+unexecuted and does not establish replacement parity.
 The FUT A3 receipt likewise proves only current source identity and a reviewed
 static contract. It does not prove that its authored cases ran, that all
 wake/park interleavings are covered, that runtime or foreign-executor contexts

@@ -24,6 +24,7 @@
     "allowed_inventory_states": [
       "FROZEN",
       "EXPLICIT_ADJACENT",
+      "EXECUTED_TEST",
       "COMMENT_ONLY",
       "PLANNED",
       "BLOCKED_GAP"
@@ -32,6 +33,7 @@
       "SOURCE_BASELINED",
       "EXECUTED_CONTRACT",
       "EXISTING_TEST",
+      "PARTIAL_EXECUTED",
       "PLANNED",
       "BLOCKED_GAP",
       "EXPLICIT_ADJACENT"
@@ -75,45 +77,45 @@
       "source": "src/stream/mod.rs",
       "rejected_shape": "AddressSensitive: !Unpin; direct StreamExt::next call",
       "required_bound": "Self: Unpin",
-      "implementation_state": "SOURCE_AUTHORED_NOT_EXECUTED"
+      "implementation_state": "EXECUTED_RUSTDOC_COMPILE_FAIL"
     },
-    "documentation_state": "SOURCE_AUTHORED_NOT_EXECUTED",
+    "documentation_state": "EXECUTED_RUSTDOC",
     "behavior_change": false,
     "cutover_authorized": false
   },
   "a2_acceptance_status": {
     "owner_bead": "asupersync-d24mms.6.2",
-    "overall_status": "PARTIAL_SOURCE_ONLY",
+    "overall_status": "PARTIAL_EXECUTED",
     "requirements": [
       {
         "requirement_id": "FUT-A2-OWNED-API",
-        "source_status": "AUTHORED_NOT_EXECUTED",
-        "terminal_status": "MISSING_FOCUSED_COMPILE"
+        "source_status": "IMPLEMENTED_ALONGSIDE_INCUMBENT",
+        "terminal_status": "EXECUTED_DOWNSTREAM_FIXTURE"
       },
       {
         "requirement_id": "FUT-A2-DOWNSTREAM-ERGONOMICS",
-        "source_status": "AUTHORED_NOT_EXECUTED",
-        "terminal_status": "MISSING_FIXTURE_EXECUTION"
+        "source_status": "IMPLEMENTED",
+        "terminal_status": "EXECUTED_15_TESTS"
       },
       {
         "requirement_id": "FUT-A2-COMPILE-FAIL-RUSTDOC",
-        "source_status": "AUTHORED_NOT_EXECUTED",
-        "terminal_status": "MISSING_RUSTDOC_EXECUTION"
+        "source_status": "IMPLEMENTED",
+        "terminal_status": "EXECUTED_RUSTDOC"
       },
       {
         "requirement_id": "FUT-A2-PIN-DROP-BOUNDS",
-        "source_status": "AUTHORED_NOT_EXECUTED",
-        "terminal_status": "MISSING_BEHAVIOR_EXECUTION"
+        "source_status": "IMPLEMENTED",
+        "terminal_status": "EXECUTED_DOWNSTREAM_FIXTURE"
       },
       {
         "requirement_id": "FUT-A2-ERROR-ADAPTER",
-        "source_status": "AUTHORED_NOT_EXECUTED",
-        "terminal_status": "MISSING_BEHAVIOR_EXECUTION"
+        "source_status": "IMPLEMENTED",
+        "terminal_status": "EXECUTED_DOWNSTREAM_FIXTURE"
       },
       {
         "requirement_id": "FUT-A2-ATP-RUNTIME-E2E",
-        "source_status": "MISSING_RUNTIME_SCENARIO",
-        "terminal_status": "MISSING"
+        "source_status": "SOURCE_AUTHORED_TESTS_NOT_EXECUTED",
+        "terminal_status": "MISSING_RUNTIME_E2E"
       },
       {
         "requirement_id": "FUT-A2-USER-TRIAL",
@@ -132,6 +134,41 @@
       "downstream fixture",
       "ATP runtime E2E",
       "SAME-or-BETTER user trial"
+    ],
+    "validated_terminal_receipts": [
+      {
+        "receipt_id": "FUT-A2-DOWNSTREAM-CONSUMER-20260808",
+        "base_revision": "c8ad48df5122b14c8df5b316e874f3ca55bbd642",
+        "clean_overlay_fingerprint_prefix": "780d5c",
+        "command": "cargo test --manifest-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml --locked -- --nocapture",
+        "result": "PASS",
+        "tests_passed": 15,
+        "tests_failed": 0,
+        "scope": "owned ATP compile contract, pinned borrowed non-Send !Unpin stream behavior, drop cancellation shape, and fallible terminal adapter"
+      },
+      {
+        "receipt_id": "FUT-A2-STREAM-RUSTDOC-20260808",
+        "base_revision": "c8ad48df5122b14c8df5b316e874f3ca55bbd642",
+        "clean_overlay_fingerprint_prefix": "fe0d",
+        "command": "cargo test -p asupersync --doc stream -- --nocapture",
+        "result": "PASS",
+        "positive_examples_passed": 2,
+        "compile_fail_examples_passed": 1,
+        "scope": "owned Stream documentation and direct-next !Unpin compile-fail contract"
+      }
+    ],
+    "blocked_execution_receipts": [
+      {
+        "receipt_id": "FUT-A2-ATP-OWNED-TESTS-20260808",
+        "build_id": 29967068015099936,
+        "worker": "ovh-a",
+        "duration_ms": 289813,
+        "exit_code": 130,
+        "terminal_state": "CANCELLED_STUCK_LINK",
+        "tests_executed": 0,
+        "cleanup_ok": true,
+        "no_claim": "Compilation reached the final workspace crate without a source diagnostic, but no test output was emitted; this is not compile or behavior evidence."
+      }
     ],
     "closure_allowed": false
   },
@@ -528,8 +565,8 @@
       {
         "path": "Cargo.toml",
         "baseline_sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
-        "current_sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
-        "current_line_count": 1038,
+        "current_sha256": "eabf901043ddb44d084aa68e6b068977eccdbbf715d35656da0998ac76554fcc",
+        "current_line_count": 1051,
         "classification": "CAPABILITY_PROJECTION_UNCHANGED",
         "projection": "root futures-lite manifest requirement",
         "projection_sha256": "81edacba422d047cd609290f9b0a95a8cda255ef326afe8d34afd7dfa7b80def"
@@ -840,7 +877,7 @@
         "api": "asupersync::stream::Stream",
         "behavioral_impl_count": 2,
         "shared_poll_kernel": "poll_progress",
-        "implementation_state": "SOURCE_AUTHORED_NOT_EXECUTED",
+        "implementation_state": "COMPILE_CONTRACT_EXECUTED_BEHAVIOR_UNVERIFIED",
         "cutover_authorized": false
       },
       "public_symbols": [
@@ -850,12 +887,12 @@
       "item_type": "TransferProgress",
       "feature_gate": null,
       "target_gate": null,
-      "poll_semantics": "try_recv returns one progress item; Empty self-wakes and returns Pending; Disconnected or Cancelled returns Ready(None)",
+      "poll_semantics": "poll_recv returns one progress item; Empty registers the latest task waker and returns Pending without self-waking; Disconnected or creation-context Cancelled returns Ready(None)",
       "cancellation_drop_semantics": "dropping either SDK stream best-effort sends cancellation and resolves an outstanding graded obligation as Abort",
       "send_lifetime_semantics": "the foreign Stream trait itself adds no Send, Sync, Unpin, or static bound",
       "public_exposure": "foreign trait implementation is downstream-observable even though futures-lite is not re-exported",
       "inventory_state": "FROZEN",
-      "evidence_state": "BLOCKED_GAP"
+      "evidence_state": "PARTIAL_EXECUTED"
     },
     {
       "surface_id": "FUT-PROD-MIDDLEWARE-CATCH",
@@ -1069,7 +1106,7 @@
       "api": "futures_lite::Stream",
       "classification": "CONSUMED",
       "poll_order": "delegated to downstream poll_next calls",
-      "wake_behavior": "implementations own wake registration; the ATP impls currently self-wake on Empty",
+      "wake_behavior": "implementations own wake registration; the ATP impls register the latest task waker on Empty without self-waking",
       "completion": "Ready(None) terminates; ATP maps disconnected and cancelled progress channels to termination",
       "cancellation": "drop semantics belong to the stream implementation; ATP drop signals cancellation and aborts its obligation",
       "panic": "trait supplies no panic containment",
@@ -1211,7 +1248,7 @@
       "journey_id": "FUT-JOURNEY-OWNED-STREAM",
       "surface": "downstream-authored asupersync::stream::Stream plus StreamExt",
       "fixture": "tests/fixtures/dependency-capability-baseline-consumer",
-      "state": "EXISTING_TEST",
+      "state": "EXECUTED_TEST",
       "owned_atp_progress_compile_contract": {
         "types": [
           "AtpWriter",
@@ -1219,7 +1256,7 @@
         ],
         "trait": "asupersync::stream::Stream<Item = TransferProgress>",
         "extension_method": "StreamExt::next",
-        "implementation_state": "SOURCE_AUTHORED_NOT_EXECUTED"
+        "implementation_state": "EXECUTED_DOWNSTREAM_FIXTURE"
       },
       "pinned_local_downstream_contract": {
         "type": "DownstreamPinnedLocalStream<'_>",
@@ -1235,14 +1272,14 @@
           "dropped unpolled Next preserves the item",
           "one item then EOF"
         ],
-        "implementation_state": "SOURCE_AUTHORED_NOT_EXECUTED"
+        "implementation_state": "EXECUTED_DOWNSTREAM_FIXTURE"
       },
       "fallible_terminal_compile_contract": {
         "item": "Result<u32, &'static str>",
         "adapter": "StreamExt::try_collect::<u32, &'static str, Vec<u32>>",
-        "implementation_state": "SOURCE_AUTHORED_NOT_EXECUTED"
+        "implementation_state": "EXECUTED_DOWNSTREAM_FIXTURE"
       },
-      "gap": "The fixture still has no futures-lite edge and now source-authors owned ATP, pinned local, and fallible terminal Stream contracts, but those assertions are unexecuted and do not cover ATP progress behavior or the foreign Stream journey."
+      "gap": "The fixture has no futures-lite edge and now executes owned ATP, pinned local, and fallible terminal Stream contracts, but it does not construct ATP progress streams or cover the foreign Stream journey."
     },
     {
       "journey_id": "FUT-JOURNEY-ECOSYSTEM-STREAM",
@@ -1344,7 +1381,7 @@
     },
     {
       "gap_id": "FUT-A1-GAP-10",
-      "summary": "The ATP foreign Stream impls self-wake on Empty, which can create wake churn and has no focused pending/wake test.",
+      "summary": "The ATP Stream impls now register the latest sender wake without self-waking and source-author focused wake/cancellation tests, but those inline behavior tests lack a terminal execution receipt.",
       "owner_bead": "asupersync-d24mms.6.2",
       "state": "BLOCKED_GAP"
     },
@@ -1424,8 +1461,8 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
-      "line_count": 1038
+      "sha256": "eabf901043ddb44d084aa68e6b068977eccdbbf715d35656da0998ac76554fcc",
+      "line_count": 1051
     },
     {
       "path": "Cargo.lock",
@@ -1439,8 +1476,8 @@
     },
     {
       "path": "src/net/atp/sdk/stream.rs",
-      "sha256": "b58fdea526809eeb0db13afb7d083d672845c7efe7e0747ca9b26cb08937953b",
-      "line_count": 714
+      "sha256": "62a3d350095d89440ee2bbfc14f0a1aeb1aae9acae25db80157e6d7aaab38091",
+      "line_count": 853
     },
     {
       "path": "src/web/middleware.rs",
@@ -1491,6 +1528,11 @@
       "path": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml",
       "sha256": "51368bfe60c10a87532cf77155bb18103bd51db5dd26d7cb37be775ead44507a",
       "line_count": 29
+    },
+    {
+      "path": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock",
+      "sha256": "1c68bb36d8a237eb9009c18d7afc0e1b6eb2383a35a5d59ea563950bd6645c78",
+      "line_count": 2021
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",

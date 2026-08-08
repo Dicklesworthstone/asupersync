@@ -759,7 +759,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         || string_set(owned_contract_value, "source_paths") != expected_owned_sources
         || string_set(owned_contract_value, "dimensions") != expected_owned_dimensions
         || text(owned_contract_value, "next_future_cancellation") != expected_next_cancellation
-        || text(owned_contract_value, "documentation_state") != "SOURCE_AUTHORED_NOT_EXECUTED"
+        || text(owned_contract_value, "documentation_state") != "EXECUTED_RUSTDOC"
         || owned_contract_value.get("behavior_change") != Some(&Value::Bool(false))
         || owned_contract_value.get("cutover_authorized") != Some(&Value::Bool(false))
     {
@@ -773,16 +773,16 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         || direct_next
             .get("implementation_state")
             .and_then(Value::as_str)
-            != Some("SOURCE_AUTHORED_NOT_EXECUTED")
+            != Some("EXECUTED_RUSTDOC_COMPILE_FAIL")
     {
-        return Err("direct next compile-fail contract must remain source-only".into());
+        return Err("direct next compile-fail contract must retain its rustdoc receipt".into());
     }
 
     let a2_status = inventory
         .get("a2_acceptance_status")
         .expect("A2 acceptance status");
     if text(a2_status, "owner_bead") != "asupersync-d24mms.6.2"
-        || text(a2_status, "overall_status") != "PARTIAL_SOURCE_ONLY"
+        || text(a2_status, "overall_status") != "PARTIAL_EXECUTED"
         || a2_status.get("closure_allowed") != Some(&Value::Bool(false))
     {
         return Err("A2 acceptance status must remain partial and fail closed".to_owned());
@@ -807,33 +807,33 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     for (requirement_id, source_status, terminal_status) in [
         (
             "FUT-A2-OWNED-API",
-            "AUTHORED_NOT_EXECUTED",
-            "MISSING_FOCUSED_COMPILE",
+            "IMPLEMENTED_ALONGSIDE_INCUMBENT",
+            "EXECUTED_DOWNSTREAM_FIXTURE",
         ),
         (
             "FUT-A2-DOWNSTREAM-ERGONOMICS",
-            "AUTHORED_NOT_EXECUTED",
-            "MISSING_FIXTURE_EXECUTION",
+            "IMPLEMENTED",
+            "EXECUTED_15_TESTS",
         ),
         (
             "FUT-A2-COMPILE-FAIL-RUSTDOC",
-            "AUTHORED_NOT_EXECUTED",
-            "MISSING_RUSTDOC_EXECUTION",
+            "IMPLEMENTED",
+            "EXECUTED_RUSTDOC",
         ),
         (
             "FUT-A2-PIN-DROP-BOUNDS",
-            "AUTHORED_NOT_EXECUTED",
-            "MISSING_BEHAVIOR_EXECUTION",
+            "IMPLEMENTED",
+            "EXECUTED_DOWNSTREAM_FIXTURE",
         ),
         (
             "FUT-A2-ERROR-ADAPTER",
-            "AUTHORED_NOT_EXECUTED",
-            "MISSING_BEHAVIOR_EXECUTION",
+            "IMPLEMENTED",
+            "EXECUTED_DOWNSTREAM_FIXTURE",
         ),
         (
             "FUT-A2-ATP-RUNTIME-E2E",
-            "MISSING_RUNTIME_SCENARIO",
-            "MISSING",
+            "SOURCE_AUTHORED_TESTS_NOT_EXECUTED",
+            "MISSING_RUNTIME_E2E",
         ),
         (
             "FUT-A2-USER-TRIAL",
@@ -861,6 +861,70 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     .collect();
     if string_set(a2_status, "required_terminal_receipts") != expected_a2_receipts {
         return Err("A2 terminal receipt set must remain complete".to_owned());
+    }
+    let validated_receipts = array(a2_status, "validated_terminal_receipts");
+    if validated_receipts.len() != 2 {
+        return Err("A2 must retain the exact two terminal contract receipts".to_owned());
+    }
+    let downstream_receipt = find_row(
+        validated_receipts,
+        "receipt_id",
+        "FUT-A2-DOWNSTREAM-CONSUMER-20260808",
+    );
+    if text(downstream_receipt, "base_revision") != "c8ad48df5122b14c8df5b316e874f3ca55bbd642"
+        || text(downstream_receipt, "clean_overlay_fingerprint_prefix") != "780d5c"
+        || !text(downstream_receipt, "command")
+            .contains("dependency-capability-baseline-consumer/Cargo.toml --locked")
+        || text(downstream_receipt, "result") != "PASS"
+        || downstream_receipt
+            .get("tests_passed")
+            .and_then(Value::as_u64)
+            != Some(15)
+        || downstream_receipt
+            .get("tests_failed")
+            .and_then(Value::as_u64)
+            != Some(0)
+    {
+        return Err("A2 downstream receipt drift".to_owned());
+    }
+    let rustdoc_receipt = find_row(
+        validated_receipts,
+        "receipt_id",
+        "FUT-A2-STREAM-RUSTDOC-20260808",
+    );
+    if text(rustdoc_receipt, "base_revision") != "c8ad48df5122b14c8df5b316e874f3ca55bbd642"
+        || text(rustdoc_receipt, "clean_overlay_fingerprint_prefix") != "fe0d"
+        || !text(rustdoc_receipt, "command").contains("--doc stream")
+        || text(rustdoc_receipt, "result") != "PASS"
+        || rustdoc_receipt
+            .get("positive_examples_passed")
+            .and_then(Value::as_u64)
+            != Some(2)
+        || rustdoc_receipt
+            .get("compile_fail_examples_passed")
+            .and_then(Value::as_u64)
+            != Some(1)
+    {
+        return Err("A2 rustdoc receipt drift".to_owned());
+    }
+    let blocked_receipts = array(a2_status, "blocked_execution_receipts");
+    if blocked_receipts.len() != 1 {
+        return Err("A2 must retain the bounded ATP execution blocker".to_owned());
+    }
+    let blocked = find_row(
+        blocked_receipts,
+        "receipt_id",
+        "FUT-A2-ATP-OWNED-TESTS-20260808",
+    );
+    if blocked.get("build_id").and_then(Value::as_u64) != Some(29967068015099936)
+        || text(blocked, "worker") != "ovh-a"
+        || blocked.get("exit_code").and_then(Value::as_u64) != Some(130)
+        || text(blocked, "terminal_state") != "CANCELLED_STUCK_LINK"
+        || blocked.get("tests_executed").and_then(Value::as_u64) != Some(0)
+        || blocked.get("cleanup_ok").and_then(Value::as_bool) != Some(true)
+        || !text(blocked, "no_claim").contains("not compile or behavior evidence")
+    {
+        return Err("A2 ATP execution blocker drift".to_owned());
     }
 
     let expected_profiles: BTreeSet<String> = [
@@ -911,13 +975,13 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         || owned_surface
             .get("implementation_state")
             .and_then(Value::as_str)
-            != Some("SOURCE_AUTHORED_NOT_EXECUTED")
+            != Some("COMPILE_CONTRACT_EXECUTED_BEHAVIOR_UNVERIFIED")
         || owned_surface
             .get("cutover_authorized")
             .and_then(Value::as_bool)
             != Some(false)
     {
-        return Err("owned ATP Stream progress must remain source-only and fail closed".to_owned());
+        return Err("owned ATP Stream progress must retain scoped compile evidence".to_owned());
     }
     let token_total: u64 = surfaces
         .iter()
@@ -1050,9 +1114,9 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         || owned_atp
             .get("implementation_state")
             .and_then(Value::as_str)
-            != Some("SOURCE_AUTHORED_NOT_EXECUTED")
+            != Some("EXECUTED_DOWNSTREAM_FIXTURE")
     {
-        return Err("owned ATP downstream progress must remain source-only".to_owned());
+        return Err("owned ATP downstream progress must retain fixture evidence".to_owned());
     }
     let pinned_local = owned_journey
         .get("pinned_local_downstream_contract")
@@ -1078,18 +1142,18 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         || text(pinned_local, "forwarding_adapter") != "Pin<Box<S>> through impl Stream for Pin<P>"
         || text(pinned_local, "extension_method") != "StreamExt::next on Pin<Box<S>>"
         || string_set(pinned_local, "observations") != expected_pinned_observations
-        || text(pinned_local, "implementation_state") != "SOURCE_AUTHORED_NOT_EXECUTED"
+        || text(pinned_local, "implementation_state") != "EXECUTED_DOWNSTREAM_FIXTURE"
     {
-        return Err("pinned local downstream contract must remain source-only".to_owned());
+        return Err("pinned local downstream contract must retain fixture evidence".to_owned());
     }
     let fallible = object(owned_journey, "fallible_terminal_compile_contract");
     if fallible.get("item").and_then(Value::as_str) != Some("Result<u32, &'static str>")
         || fallible.get("adapter").and_then(Value::as_str)
             != Some("StreamExt::try_collect::<u32, &'static str, Vec<u32>>")
         || fallible.get("implementation_state").and_then(Value::as_str)
-            != Some("SOURCE_AUTHORED_NOT_EXECUTED")
+            != Some("EXECUTED_DOWNSTREAM_FIXTURE")
     {
-        return Err("fallible downstream contract must remain source-only".to_owned());
+        return Err("fallible downstream contract must retain fixture evidence".to_owned());
     }
 
     if journeys.len() != 4
@@ -1269,11 +1333,13 @@ fn identity_authority_zero_unknown_and_docs_are_fail_closed() {
         "former blanket claim that every stream poll is losslessly",
         "pinned-downstream base revision",
         "DownstreamPinnedLocalStream<'_>",
-        "Neither case has been compiled or run",
+        "downstream fixture executed 15 tests",
         "StreamExt::try_collect::<u32, &'static str, Vec<u32>>",
+        "FUT A2 executed contract progress",
         "A2 acceptance status",
+        "29967068015099936",
         "does not authorize closing A2",
-        "source-authored and unexecuted",
+        "ATP progress runtime path remains",
         "Post-baseline current snapshot",
         "315",
         "1,382",
@@ -1502,10 +1568,20 @@ fn production_public_and_comment_only_sites_match_source() {
         .split_once("// Keep the incumbent public trait implementations")
         .expect("owned progress kernel terminator")
         .0;
+    assert!(!progress_kernel.contains("wake_by_ref"));
+    assert!(progress_kernel.contains("progress_rx.poll_recv(progress_cx, task_cx)"));
     assert_eq!(
-        progress_kernel.matches("cx.waker().wake_by_ref();").count(),
-        1
+        stream
+            .matches("Capability context used by progress polling for cancellation checks.")
+            .count(),
+        2
     );
+    for test_name in [
+        "owned_writer_progress_registers_sender_wake_without_self_wake",
+        "owned_reader_progress_observes_creation_context_cancellation",
+    ] {
+        assert!(stream.contains(&format!("fn {test_name}()")));
+    }
     assert!(stream.contains("obligation.resolve(Resolution::Abort)"));
 
     let middleware = read_repo_file("src/web/middleware.rs");
@@ -1870,7 +1946,7 @@ fn incumbent_helper_probes_freeze_poll_wake_drop_and_lifetime_semantics() {
 }
 
 #[test]
-fn public_stream_impls_compile_but_downstream_evidence_remains_planned() {
+fn public_stream_impls_compile_with_scoped_downstream_evidence() {
     fn assert_progress_stream<S>()
     where
         S: Stream<Item = TransferProgress>,
@@ -1890,13 +1966,13 @@ fn public_stream_impls_compile_but_downstream_evidence_remains_planned() {
     let inventory = artifact();
     let journeys = array(&inventory, "downstream_and_e2e");
     let owned_journey = find_row(journeys, "journey_id", "FUT-JOURNEY-OWNED-STREAM");
-    assert_eq!(text(owned_journey, "state"), "EXISTING_TEST");
+    assert_eq!(text(owned_journey, "state"), "EXECUTED_TEST");
     assert_eq!(
         owned_journey
             .get("owned_atp_progress_compile_contract")
             .and_then(|value| value.get("implementation_state"))
             .and_then(Value::as_str),
-        Some("SOURCE_AUTHORED_NOT_EXECUTED")
+        Some("EXECUTED_DOWNSTREAM_FIXTURE")
     );
     for journey_id in [
         "FUT-JOURNEY-ECOSYSTEM-STREAM",
