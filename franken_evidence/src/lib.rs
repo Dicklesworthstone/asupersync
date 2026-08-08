@@ -223,6 +223,18 @@ pub enum ValidationError {
         /// The value recorded in `expected_loss_by_action`.
         mapped: f64,
     },
+    /// A `top_features` weight is non-finite.
+    ///
+    /// Non-finite weights must be rejected before an entry is content-hashed:
+    /// `serde_json` serializes NaN/Infinity as `null`, so two distinct
+    /// non-finite entries would otherwise collapse onto the same
+    /// `artifact_hash` (FrankenEngine bd-zjkyu).
+    InvalidTopFeatureWeight {
+        /// The feature whose weight is non-finite.
+        name: String,
+        /// The non-finite weight value.
+        value: f64,
+    },
     /// `component` is empty.
     EmptyComponent,
     /// `action` is empty.
@@ -276,6 +288,12 @@ impl fmt::Display for ValidationError {
                     "chosen_expected_loss {chosen} disagrees with expected_loss_by_action['{action}']={mapped}"
                 )
             }
+            Self::InvalidTopFeatureWeight { name, value } => {
+                write!(
+                    f,
+                    "top_feature weight for '{name}' must be finite, got {value}"
+                )
+            }
             Self::EmptyComponent => write!(f, "component must not be empty"),
             Self::EmptyAction => write!(f, "action must not be empty"),
         }
@@ -292,6 +310,9 @@ impl EvidenceLedger {
     /// - `calibration_score` must be in [0, 1].
     /// - All expected losses must be finite and non-negative.
     /// - `component` and `action` must be non-empty.
+    /// - All `top_features` weights must be finite (`serde_json` maps
+    ///   NaN/Infinity to `null`, which would collapse distinct entries onto
+    ///   one content hash — FrankenEngine bd-zjkyu).
     pub fn validate(&self) -> Vec<ValidationError> {
         let mut errors = Vec::new();
 
@@ -350,6 +371,15 @@ impl EvidenceLedger {
                 errors.push(ValidationError::NegativeExpectedLoss {
                     action: action.clone(),
                     value: loss,
+                });
+            }
+        }
+
+        for (name, weight) in &self.top_features {
+            if !weight.is_finite() {
+                errors.push(ValidationError::InvalidTopFeatureWeight {
+                    name: name.clone(),
+                    value: *weight,
                 });
             }
         }
@@ -568,6 +598,34 @@ mod tests {
                 panic!("expected Validation error, got MissingField({field})")
             }
         }
+    }
+
+    #[test]
+    fn validate_rejects_non_finite_top_feature_weights() {
+        // serde_json serializes NaN/Infinity as `null`, so two distinct
+        // non-finite entries would collapse onto one content hash if they
+        // reached hashing (FrankenEngine bd-zjkyu).
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let errors = expect_validation(valid_builder().top_feature("poisoned", bad).build());
+            assert!(
+                errors.iter().any(|error| matches!(
+                    error,
+                    ValidationError::InvalidTopFeatureWeight { name, .. }
+                        if name == "poisoned"
+                )),
+                "expected InvalidTopFeatureWeight for {bad}, got {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_accepts_finite_top_feature_weights() {
+        let entry = valid_builder()
+            .top_feature("negative_is_fine", -0.25)
+            .top_feature("zero_is_fine", 0.0)
+            .build()
+            .expect("finite weights of any sign are valid");
+        assert!(entry.is_valid());
     }
 
     #[test]
