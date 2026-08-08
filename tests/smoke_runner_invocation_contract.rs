@@ -15,24 +15,61 @@ fn tracked_smoke_runners() -> Vec<(String, String)> {
         .args(["ls-files", "-s", "scripts/run_*_smoke.sh"])
         .output()
         .expect("git ls-files should run");
-    assert!(
-        output.status.success(),
-        "git ls-files failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    if output.status.success() {
+        return String::from_utf8(output.stdout)
+            .expect("git output should be utf8")
+            .lines()
+            .map(|line| {
+                let mut parts = line.split_whitespace();
+                let mode = parts.next().expect("mode").to_string();
+                let _object = parts.next().expect("object");
+                let _stage = parts.next().expect("stage");
+                let path = parts.next().expect("path").to_string();
+                (mode, path)
+            })
+            .collect();
+    }
 
-    String::from_utf8(output.stdout)
-        .expect("git output should be utf8")
-        .lines()
-        .map(|line| {
-            let mut parts = line.split_whitespace();
-            let mode = parts.next().expect("mode").to_string();
-            let _object = parts.next().expect("object");
-            let _stage = parts.next().expect("stage");
-            let path = parts.next().expect("path").to_string();
-            (mode, path)
+    // RCH clean-overlay exports contain exactly the tracked source snapshot but
+    // intentionally omit `.git`. Preserve the executable-mode check by reading
+    // the exported filesystem metadata instead of treating that absence as a
+    // product failure.
+    let mut runners = std::fs::read_dir(repo_root().join("scripts"))
+        .expect("scripts directory")
+        .map(|entry| entry.expect("script directory entry").path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("run_") && name.ends_with("_smoke.sh"))
         })
-        .collect()
+        .map(|path| {
+            #[cfg(unix)]
+            let mode = {
+                use std::os::unix::fs::PermissionsExt;
+                if std::fs::metadata(&path)
+                    .expect("smoke runner metadata")
+                    .permissions()
+                    .mode()
+                    & 0o111
+                    != 0
+                {
+                    "100755"
+                } else {
+                    "100644"
+                }
+            };
+            #[cfg(not(unix))]
+            let mode = "100755";
+            let relative = path
+                .strip_prefix(repo_root())
+                .expect("script below repo root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            (mode.to_string(), relative)
+        })
+        .collect::<Vec<_>>();
+    runners.sort();
+    runners
 }
 
 #[test]

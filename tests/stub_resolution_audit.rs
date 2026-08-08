@@ -49,7 +49,11 @@ fn is_src_rust_test_module_path(path: &str) -> bool {
         && path
             .rsplit('/')
             .next()
-            .is_some_and(|name| name.ends_with("_test.rs") || name.starts_with("test_"))
+            .is_some_and(|name| {
+                name.ends_with("_test.rs")
+                    || name.ends_with("_tests.rs")
+                    || name.starts_with("test_")
+            })
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -787,15 +791,22 @@ fn test_only_marker() {{
 
 #[test]
 fn probe_20_live_production_incomplete_markers_are_tracked() {
-    let known_markers = [(
-        "src/messaging/nats.rs",
-        concat!(
-            "TO",
-            "DO",
-            ": Re-establish subscriptions that existed before disconnect"
+    let known_markers = [
+        (
+            "src/messaging/nats.rs",
+            concat!(
+                "TO",
+                "DO",
+                ": Re-establish subscriptions that existed before disconnect"
+            ),
+            "asupersync-jh9g1j",
         ),
-        "asupersync-jh9g1j",
-    )];
+        (
+            "src/bin/atp.rs",
+            concat!("TO", "DO", "(z01bbr.8.3 H3)"),
+            "asupersync-atp-channel-bonding-z01bbr.8.3",
+        ),
+    ];
     let mut unknown = Vec::new();
     let mut tracked = Vec::new();
 

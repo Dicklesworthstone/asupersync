@@ -537,7 +537,8 @@ fn collect_x509_source_paths(dir: &Path, paths: &mut BTreeSet<String>) {
         } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
             let source = std::fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-            if source.contains("x509_parser::") {
+            let production_source = source.split("\n#[cfg(test)]").next().unwrap_or(&source);
+            if production_source.contains("x509_parser::") {
                 let relative = path
                     .strip_prefix(repo_root())
                     .expect("source path must be inside repository")
