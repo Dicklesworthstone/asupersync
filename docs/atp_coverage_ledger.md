@@ -293,6 +293,12 @@ This ledger maps every ATP module to required unit/property/metamorphic tests an
 | `src/atp/swarm/strategy.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
 | `src/atp/sync/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
 | `src/atp/verify/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/dedupe.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/reconcile.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/bonding/derive.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sdk/bonded.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/transport_common/delta.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/transport_rq/transport_rq_tests.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
 
 ## CLI Integration
 
@@ -323,10 +329,10 @@ This ledger maps every ATP module to required unit/property/metamorphic tests an
 
 ### Compliance Tracking
 
-Total Modules: 221
+Total Modules: 227
 - TESTED: 0 (0%)
 - PARTIAL: 0 (0%) 
-- PLANNED: 221 (100%)
+- PLANNED: 227 (100%)
 - MISSING: 0 (0%)
 
 **Critical Path Modules** (must be TESTED before any release):
