@@ -118,7 +118,7 @@
     {"path":"artifacts/dependency_capability_registry_v1.json","sha256":"402ed38f8756c32dd34f24680b96390469f87f851a41e968f350d5e14b221996","line_count":6908},
     {"path":"artifacts/dependency_capability_baseline_v1.json","sha256":"88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8","line_count":1357},
     {"path":"artifacts/dependency_verification_matrix_v1.json","sha256":"c42345e9bbd771a1fb525504bce4162b2af6caca8a75b642d6e14bbb14f7d36b","line_count":83691},
-    {"path":"artifacts/dependency_marginal_ledger_v1.json","sha256":"9382d8357e59b49b01775f3efad2db95f2186c63bc432b5616ba20f3b9a218a9","line_count":188045},
+    {"path":"artifacts/dependency_marginal_ledger_v1.json","sha256":"4e36ca29d7187e3237cfd9f422b2661009a608e93bb5761c7d511d412d66a047","line_count":188447},
     {"path":"artifacts/api_surface_map_v1.json","sha256":"7dfbb239422630e1ef9c875e7542c4cee440211233dc7b734611fa8481d54178","line_count":4824},
     {"path":"scripts/run_dependency_sovereignty_e2e.sh","sha256":"3d9fd36912939dd480d479c8f60030e4839f81a6315f08fa5a0137b3960807ea","line_count":1251},
     {"path":"scripts/run_all_e2e.sh","sha256":"183b9cccec81d18909feddad4022c084f5fcac27823191b6ea64a2adba8a6aad","line_count":1259}

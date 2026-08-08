@@ -1968,10 +1968,10 @@
           "feature_gate": "config-file",
           "source_file": "src/runtime/env_config.rs",
           "symbols": [
-            "RuntimeTomlConfig",
-            "SchedulerToml",
-            "BlockingToml",
-            "apply_toml_config",
+            "RuntimeConfigLayer",
+            "SchedulerConfigLayer",
+            "BlockingConfigLayer",
+            "apply_runtime_config_layer",
             "parse_toml_str",
             "parse_toml_file"
           ],
@@ -2123,12 +2123,12 @@
           "wire_encoder": "toml crate 1.0",
           "transport": "local file or in-memory string",
           "public_entry_points": [
-            "RuntimeTomlConfig",
-            "SchedulerToml",
-            "BlockingToml",
+            "RuntimeConfigLayer",
+            "SchedulerConfigLayer",
+            "BlockingConfigLayer",
             "parse_toml_str",
             "parse_toml_file",
-            "apply_toml_config"
+            "apply_runtime_config_layer"
           ],
           "note": "Accepts the twelve `[scheduler]` keys and the two `[blocking]` keys, all optional, with both tables defaulted. Field renaming happens on apply, not on parse."
         },
@@ -2255,17 +2255,17 @@
         },
         {
           "name": "partial_and_empty_documents",
-          "surface": "RuntimeTomlConfig",
+          "surface": "RuntimeConfigLayer",
           "contract": "Both tables and all fields are optional. An empty document is valid and yields defaults. Making any field mandatory is accepted-input loss."
         },
         {
           "name": "unknown_field_policy",
-          "surface": "RuntimeTomlConfig / Scenario",
+          "surface": "RuntimeConfigLayer / Scenario",
           "contract": "Current behavior is whatever serde derives produce without a deny-unknown-fields attribute. Tightening this is a narrowing change and requires its own evidence."
         },
         {
           "name": "thread_name_prefix_validation",
-          "surface": "apply_toml_config",
+          "surface": "apply_runtime_config_layer",
           "contract": "Validated on apply with an actionable error rather than silently accepted."
         },
         {
@@ -2342,7 +2342,7 @@
         },
         {
           "gap_id": "CFG-GAP-06",
-          "summary": "`src/fs_config_metamorphic_tests.rs` provides TOML round-trip and canonical-form metamorphic coverage, but it operates on a local mock config struct rather than on `RuntimeTomlConfig`, and the module is gated behind `legacy-internal-test-harnesses`.",
+          "summary": "`src/fs_config_metamorphic_tests.rs` provides TOML round-trip and canonical-form metamorphic coverage, but it operates on a local mock config struct rather than on `RuntimeConfigLayer`, and the module is gated behind `legacy-internal-test-harnesses`.",
           "consequence": "That coverage may not be cited as evidence for the real configuration types.",
           "owner_bead": "asupersync-5z2scg.4.3",
           "may_widen": false
@@ -5160,7 +5160,7 @@
       },
       "evidence": {
         "state": "BASELINE_PLANNED",
-        "baseline_owner": "asupersync-dep-p7-kafka-removal-sarszu.1",
+        "baseline_owner": "asupersync-dep-p7-kafka-removal-sarszu.1.5",
         "unit_test_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
         "e2e_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
         "scenario_ids": [

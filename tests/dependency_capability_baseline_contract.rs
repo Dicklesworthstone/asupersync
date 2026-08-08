@@ -1742,8 +1742,8 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         (
             "artifacts/dependency_marginal_ledger_v1.json",
             (
-                "9382d8357e59b49b01775f3efad2db95f2186c63bc432b5616ba20f3b9a218a9",
-                188_045_u64,
+                "4e36ca29d7187e3237cfd9f422b2661009a608e93bb5761c7d511d412d66a047",
+                188_447_u64,
             ),
         ),
         (

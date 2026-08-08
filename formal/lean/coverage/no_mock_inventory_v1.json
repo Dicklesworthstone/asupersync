@@ -15,9 +15,9 @@
     ]
   },
   "summary": {
-    "matching_paths_total": 19,
+    "matching_paths_total": 20,
     "allowlisted_count": 14,
-    "waiver_count": 5,
+    "waiver_count": 6,
     "remediation_required_count": 0
   },
   "allowlisted_paths": [
@@ -135,6 +135,18 @@
     }
   ],
   "waiver_paths": [
+    {
+      "path": "src/bin/atp.rs",
+      "classification": "temporary_waiver",
+      "waiver_id": "waiver.atp.bond-pull-ssh-tunnel.2026-07-25",
+      "owner": "runtime-core",
+      "status": "active",
+      "expires_at_utc": "2026-10-31T00:00:00Z",
+      "replacement_issue": "asupersync-atp-channel-bonding-z01bbr.8.3",
+      "hit_count": 2,
+      "first_hit_line": 2338,
+      "policy_rationale": "The SSH-selected bond-pull leg reports a tunnel plan but still dials the selected endpoint directly; the live forward and UDP-in-TCP proof remain explicitly tracked work."
+    },
     {
       "path": "src/messaging/kafka.rs",
       "classification": "temporary_waiver",

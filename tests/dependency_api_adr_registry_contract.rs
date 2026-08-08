@@ -89,6 +89,28 @@ fn contains_identifier(haystack: &str, needle: &str) -> bool {
     false
 }
 
+fn manifest_array_definition(manifest: &str, name: &str) -> String {
+    let prefix = format!("{name} = [");
+    let mut lines = manifest
+        .lines()
+        .skip_while(|line| !line.trim_start().starts_with(&prefix));
+    let first = lines
+        .next()
+        .unwrap_or_else(|| panic!("{MANIFEST_PATH} must define the {name} feature"));
+    let mut definition = first.to_owned();
+    if first.trim_end().ends_with(']') {
+        return definition;
+    }
+    for line in lines {
+        definition.push('\n');
+        definition.push_str(line);
+        if line.trim() == "]" {
+            return definition;
+        }
+    }
+    panic!("{MANIFEST_PATH} has an unterminated {name} feature definition")
+}
+
 /// Bead ids that exist in the live tracker. Malformed lines are skipped rather
 /// than failing the lane, matching the tolerant parsing used elsewhere.
 fn live_bead_ids() -> BTreeSet<String> {
@@ -692,10 +714,7 @@ fn frozen_feature_definitions_match_the_manifest() {
 fn opentelemetry_proto_stays_out_of_the_metrics_feature() {
     let manifest = read_repo_file(MANIFEST_PATH);
 
-    let metrics_definition = manifest
-        .lines()
-        .find(|line| line.trim_start().starts_with("metrics = ["))
-        .expect("Cargo.toml must define the metrics feature");
+    let metrics_definition = manifest_array_definition(&manifest, "metrics");
     assert!(
         metrics_definition.contains("dep:opentelemetry")
             && metrics_definition.contains("dep:opentelemetry_sdk"),
@@ -706,10 +725,7 @@ fn opentelemetry_proto_stays_out_of_the_metrics_feature() {
         "opentelemetry-proto must never enter the metrics production graph: {metrics_definition}"
     );
 
-    let fuzz_definition = manifest
-        .lines()
-        .find(|line| line.trim_start().starts_with("fuzz = ["))
-        .expect("Cargo.toml must define the fuzz feature");
+    let fuzz_definition = manifest_array_definition(&manifest, "fuzz");
     assert!(
         fuzz_definition.contains("dep:opentelemetry-proto"),
         "opentelemetry-proto must stay quarantined behind the fuzz feature: {fuzz_definition}"

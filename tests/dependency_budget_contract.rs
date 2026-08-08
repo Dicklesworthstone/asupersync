@@ -451,9 +451,13 @@ fn reviewed_exception_shape_is_narrow_and_explicit() {
             kind => panic!("unknown reviewed exception kind {kind}"),
         }
     }
-    assert!(
-        array(&budget, "reviewed_exceptions").is_empty(),
-        "initial frozen baseline requires no upward-budget exceptions"
+    assert_eq!(
+        ids,
+        BTreeSet::from([
+            "release-v040-dev-tracing-log",
+            "release-v040-normal-tracing-log",
+        ]),
+        "only the reviewed v0.4.0 tracing-log additions may widen the direct-edge allowset"
     );
 }
 

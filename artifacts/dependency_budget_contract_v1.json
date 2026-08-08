@@ -182,6 +182,15 @@
     },
     {
       "dependency_edge_kind": "dev",
+      "dependency_name": "tracing-log",
+      "edge_id": "dev:tracing-log",
+      "manifest_table": "dev-dependencies",
+      "optional": false,
+      "package_name": "tracing-log",
+      "target_condition": null
+    },
+    {
+      "dependency_edge_kind": "dev",
       "dependency_name": "tracing-subscriber",
       "edge_id": "dev:tracing-subscriber",
       "manifest_table": "dev-dependencies",
@@ -736,6 +745,15 @@
       "manifest_table": "dependencies",
       "optional": true,
       "package_name": "tracing",
+      "target_condition": null
+    },
+    {
+      "dependency_edge_kind": "normal",
+      "dependency_name": "tracing-log",
+      "edge_id": "normal:tracing-log",
+      "manifest_table": "dependencies",
+      "optional": true,
+      "package_name": "tracing-log",
       "target_condition": null
     },
     {
@@ -3748,8 +3766,8 @@
   "generator_path": "src/bin/dependency_marginal_ledger.rs",
   "graph_ceilings": [
     {
-      "baseline_lockfile_hash": "71738d421d333a628f25018151c2f9d652b0de4b4976207f92700d7d7f9eea78",
-      "baseline_manifest_hash": "4a10645f3fb8d672f952d2f9635c77c7b6a798f88971ea6ca326c7e9ac2bd491",
+      "baseline_lockfile_hash": "608d728e7297157fabacce04841ba421886f9f43aabebed647b37e5ce872e3b6",
+      "baseline_manifest_hash": "404cef516a9c9c2f2257d6a83874f974df64b75bfd7dee3e362d7061f8d2dc37",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/cli/aarch64-apple-darwin/baseline/consumer/Cargo.toml --filter-platform aarch64-apple-darwin",
       "feature_profile": "cli",
       "graph_scope": "synthesized-consumer",
@@ -3759,8 +3777,8 @@
       "unique_package_name_ceiling": 178
     },
     {
-      "baseline_lockfile_hash": "71738d421d333a628f25018151c2f9d652b0de4b4976207f92700d7d7f9eea78",
-      "baseline_manifest_hash": "6801093490c09ae7e559f5b6926a3ebdae9a8bd076f4d7ecb55b3894d6198fc3",
+      "baseline_lockfile_hash": "608d728e7297157fabacce04841ba421886f9f43aabebed647b37e5ce872e3b6",
+      "baseline_manifest_hash": "06a99df8b2dc7914440d50fdcce4d48e675975e9f2e4ba6024c3c622a5b29c54",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/cli/wasm32-unknown-unknown/baseline/consumer/Cargo.toml --filter-platform wasm32-unknown-unknown",
       "feature_profile": "cli",
       "graph_scope": "synthesized-consumer",
@@ -3770,8 +3788,8 @@
       "unique_package_name_ceiling": 154
     },
     {
-      "baseline_lockfile_hash": "71738d421d333a628f25018151c2f9d652b0de4b4976207f92700d7d7f9eea78",
-      "baseline_manifest_hash": "012cdfcf9ee691b9f59b00f11df43c64ca44b4f8da46431958f8ea855708b5a7",
+      "baseline_lockfile_hash": "608d728e7297157fabacce04841ba421886f9f43aabebed647b37e5ce872e3b6",
+      "baseline_manifest_hash": "d428de8518f4bb38fe60473376b61140d5aabdf87e83beba8931b37395a18e0b",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/cli/x86_64-pc-windows-msvc/baseline/consumer/Cargo.toml --filter-platform x86_64-pc-windows-msvc",
       "feature_profile": "cli",
       "graph_scope": "synthesized-consumer",
@@ -3781,8 +3799,8 @@
       "unique_package_name_ceiling": 185
     },
     {
-      "baseline_lockfile_hash": "71738d421d333a628f25018151c2f9d652b0de4b4976207f92700d7d7f9eea78",
-      "baseline_manifest_hash": "506a7f04ebdf1647cf1aa7b7c0f57c7cffa39704caadd3e8b9497c5defa6f37a",
+      "baseline_lockfile_hash": "608d728e7297157fabacce04841ba421886f9f43aabebed647b37e5ce872e3b6",
+      "baseline_manifest_hash": "836148adb122a2b976d0e11ed0aff31da3ca791a509fa0edcc218f1418988520",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/cli/x86_64-unknown-linux-gnu/baseline/consumer/Cargo.toml --filter-platform x86_64-unknown-linux-gnu",
       "feature_profile": "cli",
       "graph_scope": "synthesized-consumer",
@@ -3792,8 +3810,8 @@
       "unique_package_name_ceiling": 172
     },
     {
-      "baseline_lockfile_hash": "d55d213d3061612f2c6e2c19f5257718a22504e818ad25a75d70f8e9c88a630b",
-      "baseline_manifest_hash": "b48acf3af835e650ec4cc9cde38f0e1966217235f19b3881df0d1feb80292490",
+      "baseline_lockfile_hash": "b88be99efaafe814924899f380a00141b890ffd6986e896f55e195eab3e2ece3",
+      "baseline_manifest_hash": "bbb25c84f3e44017260cbcd8a6f26d294b1cf414c5495b012d7a220bcdfdc6b5",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/compression/aarch64-apple-darwin/baseline/consumer/Cargo.toml --filter-platform aarch64-apple-darwin",
       "feature_profile": "compression",
       "graph_scope": "synthesized-consumer",
@@ -3803,8 +3821,8 @@
       "unique_package_name_ceiling": 138
     },
     {
-      "baseline_lockfile_hash": "d55d213d3061612f2c6e2c19f5257718a22504e818ad25a75d70f8e9c88a630b",
-      "baseline_manifest_hash": "9668a6b4810d5f64cc11303de97a0147ed5463f5fe5197093fe189b14330d760",
+      "baseline_lockfile_hash": "b88be99efaafe814924899f380a00141b890ffd6986e896f55e195eab3e2ece3",
+      "baseline_manifest_hash": "971ee43fb1096d30d6a0e7ade72008045f9ba405c2174d43ea3b7446624ab3de",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/compression/wasm32-unknown-unknown/baseline/consumer/Cargo.toml --filter-platform wasm32-unknown-unknown",
       "feature_profile": "compression",
       "graph_scope": "synthesized-consumer",
@@ -3814,8 +3832,8 @@
       "unique_package_name_ceiling": 115
     },
     {
-      "baseline_lockfile_hash": "d55d213d3061612f2c6e2c19f5257718a22504e818ad25a75d70f8e9c88a630b",
-      "baseline_manifest_hash": "d9bb52b67fabcd2647fb577660a908ff9cfd69ae3a43fff515e37117e4f6a5a2",
+      "baseline_lockfile_hash": "b88be99efaafe814924899f380a00141b890ffd6986e896f55e195eab3e2ece3",
+      "baseline_manifest_hash": "e80a6e8e7ef774f5ca2c220b0c75133ff3fa3cd8f1362092c98d0be5da0cbac7",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/compression/x86_64-pc-windows-msvc/baseline/consumer/Cargo.toml --filter-platform x86_64-pc-windows-msvc",
       "feature_profile": "compression",
       "graph_scope": "synthesized-consumer",
@@ -3825,8 +3843,8 @@
       "unique_package_name_ceiling": 145
     },
     {
-      "baseline_lockfile_hash": "d55d213d3061612f2c6e2c19f5257718a22504e818ad25a75d70f8e9c88a630b",
-      "baseline_manifest_hash": "c9697e48e71736aff867133c10aaa1a0e02757f78112ca4155752cb323947f41",
+      "baseline_lockfile_hash": "b88be99efaafe814924899f380a00141b890ffd6986e896f55e195eab3e2ece3",
+      "baseline_manifest_hash": "d6091140246e60579402e4514d151b9e3b5a5f102fa8fc884aa5d7dd05ad2c6b",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/compression/x86_64-unknown-linux-gnu/baseline/consumer/Cargo.toml --filter-platform x86_64-unknown-linux-gnu",
       "feature_profile": "compression",
       "graph_scope": "synthesized-consumer",
@@ -3836,8 +3854,8 @@
       "unique_package_name_ceiling": 133
     },
     {
-      "baseline_lockfile_hash": "e69a04ea3c7a3421f608b7a6e7c64ba3b5068aa55b20e774bdd5d703ba5ad984",
-      "baseline_manifest_hash": "9258c755470830e5f464b776e16d922a03ebfebc33b9d410981d00d4206da377",
+      "baseline_lockfile_hash": "762d840767695a2e16adf3b292f05f44c474256bdf146fdb870525b85184b1b0",
+      "baseline_manifest_hash": "ad8cf5c3c617fffbb32b47bb9ddfccc04fd9dffee3d83f6d11636b5368b061a6",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/default/aarch64-apple-darwin/baseline/consumer/Cargo.toml --filter-platform aarch64-apple-darwin",
       "feature_profile": "default",
       "graph_scope": "synthesized-consumer",
@@ -3847,8 +3865,8 @@
       "unique_package_name_ceiling": 130
     },
     {
-      "baseline_lockfile_hash": "e69a04ea3c7a3421f608b7a6e7c64ba3b5068aa55b20e774bdd5d703ba5ad984",
-      "baseline_manifest_hash": "1b0ac2bf80ce111c77b461a4e0ce843e32f462f079a2232a3b683408fc9eb6b8",
+      "baseline_lockfile_hash": "762d840767695a2e16adf3b292f05f44c474256bdf146fdb870525b85184b1b0",
+      "baseline_manifest_hash": "caf4f10557a0c2506dfecb1d5832727282024d4c3ca7440f0460e4294eedeb08",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/default/wasm32-unknown-unknown/baseline/consumer/Cargo.toml --filter-platform wasm32-unknown-unknown",
       "feature_profile": "default",
       "graph_scope": "synthesized-consumer",
@@ -3858,8 +3876,8 @@
       "unique_package_name_ceiling": 107
     },
     {
-      "baseline_lockfile_hash": "e69a04ea3c7a3421f608b7a6e7c64ba3b5068aa55b20e774bdd5d703ba5ad984",
-      "baseline_manifest_hash": "6451ce382b7f38d47a66a7af5dddf7994e73f85106bf16e7f5cd0bad89138051",
+      "baseline_lockfile_hash": "762d840767695a2e16adf3b292f05f44c474256bdf146fdb870525b85184b1b0",
+      "baseline_manifest_hash": "8424a4657b15f4ab09d048e628bf3ee93bb0159bbbcf264e46d94c7472903242",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/default/x86_64-pc-windows-msvc/baseline/consumer/Cargo.toml --filter-platform x86_64-pc-windows-msvc",
       "feature_profile": "default",
       "graph_scope": "synthesized-consumer",
@@ -3869,8 +3887,8 @@
       "unique_package_name_ceiling": 137
     },
     {
-      "baseline_lockfile_hash": "e69a04ea3c7a3421f608b7a6e7c64ba3b5068aa55b20e774bdd5d703ba5ad984",
-      "baseline_manifest_hash": "992be7643f3a9385472fc9df46caeed7c8422d0ed71e27f048b7741c394bb3af",
+      "baseline_lockfile_hash": "762d840767695a2e16adf3b292f05f44c474256bdf146fdb870525b85184b1b0",
+      "baseline_manifest_hash": "8b5fc1544ad88fa2d07bfa79bdbebc944c18251b5ea07c0013669f28f7d1c896",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/default/x86_64-unknown-linux-gnu/baseline/consumer/Cargo.toml --filter-platform x86_64-unknown-linux-gnu",
       "feature_profile": "default",
       "graph_scope": "synthesized-consumer",
@@ -3880,8 +3898,8 @@
       "unique_package_name_ceiling": 125
     },
     {
-      "baseline_lockfile_hash": "8550a8f5f352e893d54caeed9dd64ad1e55b9bf9cc937d82a52a310d7e06f424",
-      "baseline_manifest_hash": "1423e655993c3cc3e07e3104e6f1905bf9e290bd25f9c5c6a382ef3d72eea939",
+      "baseline_lockfile_hash": "23e9f19f5fc9b700b26982d1299c838be3e8ccfebc5143fdfc6e74bf76816300",
+      "baseline_manifest_hash": "ec5fa0ed456f19edb91450145538a91aff8bd3b64ca3a620c95795db127d6927",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/fuzz-quarantine/aarch64-apple-darwin/baseline/consumer/Cargo.toml --filter-platform aarch64-apple-darwin",
       "feature_profile": "fuzz-quarantine",
       "graph_scope": "synthesized-consumer",
@@ -3891,8 +3909,8 @@
       "unique_package_name_ceiling": 142
     },
     {
-      "baseline_lockfile_hash": "8550a8f5f352e893d54caeed9dd64ad1e55b9bf9cc937d82a52a310d7e06f424",
-      "baseline_manifest_hash": "cb9d70743f3fcaa83edf8c6b5aa9b30f1cf2c3d728116a24a903d24d1fc5c8b2",
+      "baseline_lockfile_hash": "23e9f19f5fc9b700b26982d1299c838be3e8ccfebc5143fdfc6e74bf76816300",
+      "baseline_manifest_hash": "49e572a5bea3c7a3a33940366e17e1fa7f7c4dba887e98341e08704af572b154",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/fuzz-quarantine/wasm32-unknown-unknown/baseline/consumer/Cargo.toml --filter-platform wasm32-unknown-unknown",
       "feature_profile": "fuzz-quarantine",
       "graph_scope": "synthesized-consumer",
@@ -3902,8 +3920,8 @@
       "unique_package_name_ceiling": 117
     },
     {
-      "baseline_lockfile_hash": "8550a8f5f352e893d54caeed9dd64ad1e55b9bf9cc937d82a52a310d7e06f424",
-      "baseline_manifest_hash": "e6dcbab0daa8d3ca400518b5a6adeaa9e4b58cefa451725d28eb3761357d8840",
+      "baseline_lockfile_hash": "23e9f19f5fc9b700b26982d1299c838be3e8ccfebc5143fdfc6e74bf76816300",
+      "baseline_manifest_hash": "a2333327d150cc67ee5eaf2e066638f59047e80ceb3d0c6c748488384b28ca79",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/fuzz-quarantine/x86_64-pc-windows-msvc/baseline/consumer/Cargo.toml --filter-platform x86_64-pc-windows-msvc",
       "feature_profile": "fuzz-quarantine",
       "graph_scope": "synthesized-consumer",
@@ -3913,8 +3931,8 @@
       "unique_package_name_ceiling": 149
     },
     {
-      "baseline_lockfile_hash": "8550a8f5f352e893d54caeed9dd64ad1e55b9bf9cc937d82a52a310d7e06f424",
-      "baseline_manifest_hash": "1a7f20dbc9c6b3e775c266ccc104a62d1f44fe4114ca60402c12ba2e71b7d080",
+      "baseline_lockfile_hash": "23e9f19f5fc9b700b26982d1299c838be3e8ccfebc5143fdfc6e74bf76816300",
+      "baseline_manifest_hash": "918a1e58587eb8325fb082c366bbd8f49883436b21d76f35a719dbe827e9efb6",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/fuzz-quarantine/x86_64-unknown-linux-gnu/baseline/consumer/Cargo.toml --filter-platform x86_64-unknown-linux-gnu",
       "feature_profile": "fuzz-quarantine",
       "graph_scope": "synthesized-consumer",
@@ -3924,8 +3942,8 @@
       "unique_package_name_ceiling": 137
     },
     {
-      "baseline_lockfile_hash": "cf0cbf157a450b53ba122e68ecb7453d26f432c84aaa131ad54c24859350542a",
-      "baseline_manifest_hash": "73f92f2b4d3b79097fab98b5155818c0c74df598969c9a9ab91675d7b3aafc49",
+      "baseline_lockfile_hash": "c826e6b62510557188241b14b73db123779bd4c05b9c81a5cfe3212324d35f06",
+      "baseline_manifest_hash": "ebfc8db52463efa8bff1bb69148d8c23af9e51f014897ac2634d7e8c0b8ee017",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/io-uring/aarch64-apple-darwin/baseline/consumer/Cargo.toml --filter-platform aarch64-apple-darwin",
       "feature_profile": "io-uring",
       "graph_scope": "synthesized-consumer",
@@ -3935,8 +3953,8 @@
       "unique_package_name_ceiling": 130
     },
     {
-      "baseline_lockfile_hash": "cf0cbf157a450b53ba122e68ecb7453d26f432c84aaa131ad54c24859350542a",
-      "baseline_manifest_hash": "a3a8124e1891c9f44c1351034ae8dbcccabd4605ee235553845cbf417e7e6473",
+      "baseline_lockfile_hash": "c826e6b62510557188241b14b73db123779bd4c05b9c81a5cfe3212324d35f06",
+      "baseline_manifest_hash": "c4f3c1ae2648f67a5164936324599abc7ef70479ec57319b30fd254a46ce1405",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/io-uring/wasm32-unknown-unknown/baseline/consumer/Cargo.toml --filter-platform wasm32-unknown-unknown",
       "feature_profile": "io-uring",
       "graph_scope": "synthesized-consumer",
@@ -3946,8 +3964,8 @@
       "unique_package_name_ceiling": 107
     },
     {
-      "baseline_lockfile_hash": "cf0cbf157a450b53ba122e68ecb7453d26f432c84aaa131ad54c24859350542a",
-      "baseline_manifest_hash": "393cf62ca104b4ff8d40065575a0cca6e4b213d38bee720f36d5e80d1dd74dea",
+      "baseline_lockfile_hash": "c826e6b62510557188241b14b73db123779bd4c05b9c81a5cfe3212324d35f06",
+      "baseline_manifest_hash": "7490c3badc1dab6e15e878c5f0bbc2443141a8e13d79051f47e0825b0f74cd21",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/io-uring/x86_64-pc-windows-msvc/baseline/consumer/Cargo.toml --filter-platform x86_64-pc-windows-msvc",
       "feature_profile": "io-uring",
       "graph_scope": "synthesized-consumer",
@@ -3957,8 +3975,8 @@
       "unique_package_name_ceiling": 137
     },
     {
-      "baseline_lockfile_hash": "cf0cbf157a450b53ba122e68ecb7453d26f432c84aaa131ad54c24859350542a",
-      "baseline_manifest_hash": "3cc06b9d6da7296d39b77bf58a15fa08479ee766eda6c274b13b74bd8843221a",
+      "baseline_lockfile_hash": "c826e6b62510557188241b14b73db123779bd4c05b9c81a5cfe3212324d35f06",
+      "baseline_manifest_hash": "1ee0fbff64c5d3dd92c295f507990a6a5d58967926a145ad3efa1a5e3d8a754d",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/io-uring/x86_64-unknown-linux-gnu/baseline/consumer/Cargo.toml --filter-platform x86_64-unknown-linux-gnu",
       "feature_profile": "io-uring",
       "graph_scope": "synthesized-consumer",
@@ -3968,8 +3986,8 @@
       "unique_package_name_ceiling": 126
     },
     {
-      "baseline_lockfile_hash": "f6fdfc80c85ba71d0dcddfffb85f2721e137b4313dd602c1b7db6f7d9b197b34",
-      "baseline_manifest_hash": "2145af283d8b44d630cee73aceb886ea86bda6232988ca953455f080ee664469",
+      "baseline_lockfile_hash": "0f0f62baf3e2d2677da0d778c017f87fb1c3e0635f48d307625ee6a4105cf4e2",
+      "baseline_manifest_hash": "50c8799af21fcbd7253a911ae247635c673ab890db53cf09d3a5a5367a315397",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/kafka/aarch64-apple-darwin/baseline/consumer/Cargo.toml --filter-platform aarch64-apple-darwin",
       "feature_profile": "kafka",
       "graph_scope": "synthesized-consumer",
@@ -3979,8 +3997,8 @@
       "unique_package_name_ceiling": 144
     },
     {
-      "baseline_lockfile_hash": "f6fdfc80c85ba71d0dcddfffb85f2721e137b4313dd602c1b7db6f7d9b197b34",
-      "baseline_manifest_hash": "9d2948262e7a6818a7f45f5b6b24cb57a2103ade24c451a2717f04fa40cadb92",
+      "baseline_lockfile_hash": "0f0f62baf3e2d2677da0d778c017f87fb1c3e0635f48d307625ee6a4105cf4e2",
+      "baseline_manifest_hash": "8e394dfcf8ec9dbe6621e524433b315f0358959f9f60f3b049c2d9f9cd37041f",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/kafka/wasm32-unknown-unknown/baseline/consumer/Cargo.toml --filter-platform wasm32-unknown-unknown",
       "feature_profile": "kafka",
       "graph_scope": "synthesized-consumer",
@@ -3990,8 +4008,8 @@
       "unique_package_name_ceiling": 120
     },
     {
-      "baseline_lockfile_hash": "f6fdfc80c85ba71d0dcddfffb85f2721e137b4313dd602c1b7db6f7d9b197b34",
-      "baseline_manifest_hash": "ca572fe5e1fcb993d08b3b324e20d83261f7e4852dd3d697ba88f7cf6f2469f5",
+      "baseline_lockfile_hash": "0f0f62baf3e2d2677da0d778c017f87fb1c3e0635f48d307625ee6a4105cf4e2",
+      "baseline_manifest_hash": "fe6c1a2ccb44018cb1e980537ba001c4edf174d3cb837b8d4b900d7753ec05f2",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/kafka/x86_64-pc-windows-msvc/baseline/consumer/Cargo.toml --filter-platform x86_64-pc-windows-msvc",
       "feature_profile": "kafka",
       "graph_scope": "synthesized-consumer",
@@ -4001,8 +4019,8 @@
       "unique_package_name_ceiling": 151
     },
     {
-      "baseline_lockfile_hash": "f6fdfc80c85ba71d0dcddfffb85f2721e137b4313dd602c1b7db6f7d9b197b34",
-      "baseline_manifest_hash": "be9a70bc3e109b9120572901fd51901de80291f73ddbbc9c07d5cfa2467f90be",
+      "baseline_lockfile_hash": "0f0f62baf3e2d2677da0d778c017f87fb1c3e0635f48d307625ee6a4105cf4e2",
+      "baseline_manifest_hash": "8c5bf069866e355855e19903cd545cb21de180f52f73082079ae85db6e1b7d2f",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/kafka/x86_64-unknown-linux-gnu/baseline/consumer/Cargo.toml --filter-platform x86_64-unknown-linux-gnu",
       "feature_profile": "kafka",
       "graph_scope": "synthesized-consumer",
@@ -4012,8 +4030,8 @@
       "unique_package_name_ceiling": 139
     },
     {
-      "baseline_lockfile_hash": "ba381d3957f0235073a7691e765d273cd0869173646eb266c9f4a6c49e2e8b70",
-      "baseline_manifest_hash": "3ba9d8fd20ad77311944dc63016f682a01bcb8073ac54cefb1bb45d6945684e2",
+      "baseline_lockfile_hash": "d090c86ebee889b291273ea072422e818768c9a346b57f693c868be20c66d15e",
+      "baseline_manifest_hash": "fb52dc10a8ed51f8cfb54cb57b4e8edc5f65543219a9ca44b7aab991e47c65eb",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/loom-tests/aarch64-apple-darwin/baseline/consumer/Cargo.toml --filter-platform aarch64-apple-darwin",
       "feature_profile": "loom-tests",
       "graph_scope": "synthesized-consumer",
@@ -4023,8 +4041,8 @@
       "unique_package_name_ceiling": 148
     },
     {
-      "baseline_lockfile_hash": "ba381d3957f0235073a7691e765d273cd0869173646eb266c9f4a6c49e2e8b70",
-      "baseline_manifest_hash": "87909a5fd577cd50644eec61f5cd8404c9eabb9131f05e676d0d2de64a086d62",
+      "baseline_lockfile_hash": "d090c86ebee889b291273ea072422e818768c9a346b57f693c868be20c66d15e",
+      "baseline_manifest_hash": "e6e6a02741342b1dd99d0716cf3519a6e35dc724288da918ba33b53c476ee1a8",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/loom-tests/wasm32-unknown-unknown/baseline/consumer/Cargo.toml --filter-platform wasm32-unknown-unknown",
       "feature_profile": "loom-tests",
       "graph_scope": "synthesized-consumer",
@@ -4034,8 +4052,8 @@
       "unique_package_name_ceiling": 125
     },
     {
-      "baseline_lockfile_hash": "ba381d3957f0235073a7691e765d273cd0869173646eb266c9f4a6c49e2e8b70",
-      "baseline_manifest_hash": "0a5c1b12350861687d486f0b89461e93acdb1cc05b82b71622f88344897d51c9",
+      "baseline_lockfile_hash": "d090c86ebee889b291273ea072422e818768c9a346b57f693c868be20c66d15e",
+      "baseline_manifest_hash": "644f87a6c82b9dc636b180cecd8aa53d00606f0f1e17a9eb0f8713f8e4ab26bc",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/loom-tests/x86_64-pc-windows-msvc/baseline/consumer/Cargo.toml --filter-platform x86_64-pc-windows-msvc",
       "feature_profile": "loom-tests",
       "graph_scope": "synthesized-consumer",
@@ -4045,8 +4063,8 @@
       "unique_package_name_ceiling": 155
     },
     {
-      "baseline_lockfile_hash": "ba381d3957f0235073a7691e765d273cd0869173646eb266c9f4a6c49e2e8b70",
-      "baseline_manifest_hash": "5cc0d0e20300485d074dead94667b97bad51a8832d456cc56dfc1b541fc1765f",
+      "baseline_lockfile_hash": "d090c86ebee889b291273ea072422e818768c9a346b57f693c868be20c66d15e",
+      "baseline_manifest_hash": "4787a93034c894f7c7228b82dfe1cd6d79dd67e5d92c6b5873fc83f9656d76c6",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/loom-tests/x86_64-unknown-linux-gnu/baseline/consumer/Cargo.toml --filter-platform x86_64-unknown-linux-gnu",
       "feature_profile": "loom-tests",
       "graph_scope": "synthesized-consumer",
@@ -4056,8 +4074,8 @@
       "unique_package_name_ceiling": 143
     },
     {
-      "baseline_lockfile_hash": "0db446dfa1f93d95dfeef65b550f675f0b28754a8ee9644a41b72fc90be53611",
-      "baseline_manifest_hash": "8469fcde32f7afa77b889349506a2b0397878f00b86d62774dfe118aacedc8ec",
+      "baseline_lockfile_hash": "65636da7e866aab9f5c354e4f1efa4897a33257868bef56e97d267d262313e83",
+      "baseline_manifest_hash": "f109e9d502044ffca4c81cd42f0c5835e04687a1848d9fed6ddf3c855da0d129",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/metrics/aarch64-apple-darwin/baseline/consumer/Cargo.toml --filter-platform aarch64-apple-darwin",
       "feature_profile": "metrics",
       "graph_scope": "synthesized-consumer",
@@ -4067,8 +4085,8 @@
       "unique_package_name_ceiling": 143
     },
     {
-      "baseline_lockfile_hash": "0db446dfa1f93d95dfeef65b550f675f0b28754a8ee9644a41b72fc90be53611",
-      "baseline_manifest_hash": "260061a1abd37c12ecbd021dd9692c955e436fe0d4046cdc922289af9981657e",
+      "baseline_lockfile_hash": "65636da7e866aab9f5c354e4f1efa4897a33257868bef56e97d267d262313e83",
+      "baseline_manifest_hash": "d76b3d940c92a5f7fbb3d58d8595bfa00814682ea279cad68da2a35a3b3b9751",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/metrics/wasm32-unknown-unknown/baseline/consumer/Cargo.toml --filter-platform wasm32-unknown-unknown",
       "feature_profile": "metrics",
       "graph_scope": "synthesized-consumer",
@@ -4078,8 +4096,8 @@
       "unique_package_name_ceiling": 118
     },
     {
-      "baseline_lockfile_hash": "0db446dfa1f93d95dfeef65b550f675f0b28754a8ee9644a41b72fc90be53611",
-      "baseline_manifest_hash": "c6f053db9881cd1ad24a3cb758fdb551018bf7ce2d167f402caf13dd6737c47b",
+      "baseline_lockfile_hash": "65636da7e866aab9f5c354e4f1efa4897a33257868bef56e97d267d262313e83",
+      "baseline_manifest_hash": "710eb8dcf8847784dc677c0d493a15c57b8d0db6dae46c2cf207cf30a7afbe27",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/metrics/x86_64-pc-windows-msvc/baseline/consumer/Cargo.toml --filter-platform x86_64-pc-windows-msvc",
       "feature_profile": "metrics",
       "graph_scope": "synthesized-consumer",
@@ -4089,8 +4107,8 @@
       "unique_package_name_ceiling": 150
     },
     {
-      "baseline_lockfile_hash": "0db446dfa1f93d95dfeef65b550f675f0b28754a8ee9644a41b72fc90be53611",
-      "baseline_manifest_hash": "96289f8fc27f2d6c99c903ad47e40badb5364fd67fd66f83eac2e18c24dd94ce",
+      "baseline_lockfile_hash": "65636da7e866aab9f5c354e4f1efa4897a33257868bef56e97d267d262313e83",
+      "baseline_manifest_hash": "ca6f0b423d3070082d7f0e8ef9743759c09d079fb5e94015b54560397ec2f7d9",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/metrics/x86_64-unknown-linux-gnu/baseline/consumer/Cargo.toml --filter-platform x86_64-unknown-linux-gnu",
       "feature_profile": "metrics",
       "graph_scope": "synthesized-consumer",
@@ -4100,8 +4118,8 @@
       "unique_package_name_ceiling": 138
     },
     {
-      "baseline_lockfile_hash": "40948203d0a74920fbe5461d8fb741ba64f554af2e892445da3e6c05e0a08f7a",
-      "baseline_manifest_hash": "fd2cdb4922c312e178064b71096b7816687812ef5dd72ea00f630a7452ea275f",
+      "baseline_lockfile_hash": "b1ec432e82fa908dc9e65cfce517f5e5046edc0e31c0135c61c93f4a6000fcb5",
+      "baseline_manifest_hash": "e6da77e1ea6a8d37e7b01cbf1e9fd65e9b442853d6d957b77ad6c90c3495e7f0",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/minimal/aarch64-apple-darwin/baseline/consumer/Cargo.toml --filter-platform aarch64-apple-darwin",
       "feature_profile": "minimal",
       "graph_scope": "synthesized-consumer",
@@ -4111,8 +4129,8 @@
       "unique_package_name_ceiling": 130
     },
     {
-      "baseline_lockfile_hash": "40948203d0a74920fbe5461d8fb741ba64f554af2e892445da3e6c05e0a08f7a",
-      "baseline_manifest_hash": "d0e720177f5525e7edbcf39302f3474f9df75821e7dd50f9600124793ac53b8b",
+      "baseline_lockfile_hash": "b1ec432e82fa908dc9e65cfce517f5e5046edc0e31c0135c61c93f4a6000fcb5",
+      "baseline_manifest_hash": "65d694692c81166224fc4a681003905028aca033a57f994ddcb0e9de79e1cfd7",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/minimal/wasm32-unknown-unknown/baseline/consumer/Cargo.toml --filter-platform wasm32-unknown-unknown",
       "feature_profile": "minimal",
       "graph_scope": "synthesized-consumer",
@@ -4122,8 +4140,8 @@
       "unique_package_name_ceiling": 107
     },
     {
-      "baseline_lockfile_hash": "40948203d0a74920fbe5461d8fb741ba64f554af2e892445da3e6c05e0a08f7a",
-      "baseline_manifest_hash": "30de4d85099db478d470927f741357872921c4af3b92ba7b5873099978f578cf",
+      "baseline_lockfile_hash": "b1ec432e82fa908dc9e65cfce517f5e5046edc0e31c0135c61c93f4a6000fcb5",
+      "baseline_manifest_hash": "9279226c8a22bfac14742d8f9846013a185e19ebef1dccfb2d6f386860a534eb",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/minimal/x86_64-pc-windows-msvc/baseline/consumer/Cargo.toml --filter-platform x86_64-pc-windows-msvc",
       "feature_profile": "minimal",
       "graph_scope": "synthesized-consumer",
@@ -4133,8 +4151,8 @@
       "unique_package_name_ceiling": 137
     },
     {
-      "baseline_lockfile_hash": "40948203d0a74920fbe5461d8fb741ba64f554af2e892445da3e6c05e0a08f7a",
-      "baseline_manifest_hash": "362b46c165e0ddd3ee2cd4f533c35401d1681c6d84b91b6a7e90ff9127ed777e",
+      "baseline_lockfile_hash": "b1ec432e82fa908dc9e65cfce517f5e5046edc0e31c0135c61c93f4a6000fcb5",
+      "baseline_manifest_hash": "530802ef61fb6a628ff83c48e056e7bd726b9dac5f2d0c83717f7ee2afba8435",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/minimal/x86_64-unknown-linux-gnu/baseline/consumer/Cargo.toml --filter-platform x86_64-unknown-linux-gnu",
       "feature_profile": "minimal",
       "graph_scope": "synthesized-consumer",
@@ -4144,8 +4162,8 @@
       "unique_package_name_ceiling": 125
     },
     {
-      "baseline_lockfile_hash": "609b182e3cd55a3cc3ed15b66f824d2153c15f55e05bd0922a6eedd2a966fd10",
-      "baseline_manifest_hash": "1d2deb600b0b3f6012e19be27ad961b54524e807fd8d612936df932bc8a60e42",
+      "baseline_lockfile_hash": "a6e5d407d1c86befa6a12bb97b3e65415c1ed4ca197f015d8829fb3ed939c0f3",
+      "baseline_manifest_hash": "0b81544c2799cd84b67e8105347c6b25daa89d0c04a6a167488c3a4c9fc96f95",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/sqlite/aarch64-apple-darwin/baseline/consumer/Cargo.toml --filter-platform aarch64-apple-darwin",
       "feature_profile": "sqlite",
       "graph_scope": "synthesized-consumer",
@@ -4155,8 +4173,8 @@
       "unique_package_name_ceiling": 147
     },
     {
-      "baseline_lockfile_hash": "609b182e3cd55a3cc3ed15b66f824d2153c15f55e05bd0922a6eedd2a966fd10",
-      "baseline_manifest_hash": "b91ad3f8420b486005383c7e0a7b05fa2b4d890671bda3f8ce066502de3c13a1",
+      "baseline_lockfile_hash": "a6e5d407d1c86befa6a12bb97b3e65415c1ed4ca197f015d8829fb3ed939c0f3",
+      "baseline_manifest_hash": "a362df34c345c1c7766543d08537d32ecd3196ad10a485f39ed6353f0b288c73",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/sqlite/wasm32-unknown-unknown/baseline/consumer/Cargo.toml --filter-platform wasm32-unknown-unknown",
       "feature_profile": "sqlite",
       "graph_scope": "synthesized-consumer",
@@ -4166,8 +4184,8 @@
       "unique_package_name_ceiling": 128
     },
     {
-      "baseline_lockfile_hash": "609b182e3cd55a3cc3ed15b66f824d2153c15f55e05bd0922a6eedd2a966fd10",
-      "baseline_manifest_hash": "72dd7ce3d57e2ba2b3d45b7d4ecbcaba86cb2c565917f81c69cf3e81d8f1cf67",
+      "baseline_lockfile_hash": "a6e5d407d1c86befa6a12bb97b3e65415c1ed4ca197f015d8829fb3ed939c0f3",
+      "baseline_manifest_hash": "a9748a094400db023c1b212fc02023e38d0cc5baca52b84f088ec7cba041203e",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/sqlite/x86_64-pc-windows-msvc/baseline/consumer/Cargo.toml --filter-platform x86_64-pc-windows-msvc",
       "feature_profile": "sqlite",
       "graph_scope": "synthesized-consumer",
@@ -4177,8 +4195,8 @@
       "unique_package_name_ceiling": 154
     },
     {
-      "baseline_lockfile_hash": "609b182e3cd55a3cc3ed15b66f824d2153c15f55e05bd0922a6eedd2a966fd10",
-      "baseline_manifest_hash": "297a441d611db45fbb2e8b956dde2a66e3718ebb2618e28c32921e2b5c540caf",
+      "baseline_lockfile_hash": "a6e5d407d1c86befa6a12bb97b3e65415c1ed4ca197f015d8829fb3ed939c0f3",
+      "baseline_manifest_hash": "8ebe3fbf8c1bd999bd68b7e15564c5e93555bf51bddf5dfa511c41af23761e22",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/sqlite/x86_64-unknown-linux-gnu/baseline/consumer/Cargo.toml --filter-platform x86_64-unknown-linux-gnu",
       "feature_profile": "sqlite",
       "graph_scope": "synthesized-consumer",
@@ -4188,8 +4206,8 @@
       "unique_package_name_ceiling": 142
     },
     {
-      "baseline_lockfile_hash": "c2044a84ca4d1f3a5c7edaa56b469a796437624b569e0aa90b16968598647d61",
-      "baseline_manifest_hash": "7e1103e0fecfe225758f8b2943d54d41b5297892fd50841341ed0fd07e50e3c8",
+      "baseline_lockfile_hash": "d79567257c5f3ec4d31cbab52bb7e4f776df4c95eac27d48a43f392100691a79",
+      "baseline_manifest_hash": "8baaee0bfe6612fc171343e4d2845fa14ce56804bf95402b74b77cdef4a1e382",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/tls/aarch64-apple-darwin/baseline/consumer/Cargo.toml --filter-platform aarch64-apple-darwin",
       "feature_profile": "tls",
       "graph_scope": "synthesized-consumer",
@@ -4199,8 +4217,8 @@
       "unique_package_name_ceiling": 159
     },
     {
-      "baseline_lockfile_hash": "c2044a84ca4d1f3a5c7edaa56b469a796437624b569e0aa90b16968598647d61",
-      "baseline_manifest_hash": "0fd65ce26baec1f3b693a2ae864a9b0ea8322d61cc59b9bf604fb66700806ae2",
+      "baseline_lockfile_hash": "d79567257c5f3ec4d31cbab52bb7e4f776df4c95eac27d48a43f392100691a79",
+      "baseline_manifest_hash": "23d69827bba97a0073f3614549da9d9519ac0c5290358298be19eb1f7e4948ae",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/tls/wasm32-unknown-unknown/baseline/consumer/Cargo.toml --filter-platform wasm32-unknown-unknown",
       "feature_profile": "tls",
       "graph_scope": "synthesized-consumer",
@@ -4210,8 +4228,8 @@
       "unique_package_name_ceiling": 136
     },
     {
-      "baseline_lockfile_hash": "c2044a84ca4d1f3a5c7edaa56b469a796437624b569e0aa90b16968598647d61",
-      "baseline_manifest_hash": "de67adf954c8cd4c5c66112f81558e56c6e4e92cc5aba3257333ca7147367052",
+      "baseline_lockfile_hash": "d79567257c5f3ec4d31cbab52bb7e4f776df4c95eac27d48a43f392100691a79",
+      "baseline_manifest_hash": "b48adc70ae0f7504a3d55276992be266eb286c7000bd9ead1ec53331965b362e",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/tls/x86_64-pc-windows-msvc/baseline/consumer/Cargo.toml --filter-platform x86_64-pc-windows-msvc",
       "feature_profile": "tls",
       "graph_scope": "synthesized-consumer",
@@ -4221,8 +4239,8 @@
       "unique_package_name_ceiling": 166
     },
     {
-      "baseline_lockfile_hash": "c2044a84ca4d1f3a5c7edaa56b469a796437624b569e0aa90b16968598647d61",
-      "baseline_manifest_hash": "adcdef24e4189ea02ac544d4f718267a0b8c2f6c93bc9b185c82dc77a737b64c",
+      "baseline_lockfile_hash": "d79567257c5f3ec4d31cbab52bb7e4f776df4c95eac27d48a43f392100691a79",
+      "baseline_manifest_hash": "2a3a32ef0182d4b7ce90bc81b2b529a5ca648b210c8377a4156729cf93f364c3",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/tls/x86_64-unknown-linux-gnu/baseline/consumer/Cargo.toml --filter-platform x86_64-unknown-linux-gnu",
       "feature_profile": "tls",
       "graph_scope": "synthesized-consumer",
@@ -4232,8 +4250,8 @@
       "unique_package_name_ceiling": 154
     },
     {
-      "baseline_lockfile_hash": "6430ce6c829d823126f9dc4b48439967bbf6f37d4de174f786772d987e31afda",
-      "baseline_manifest_hash": "d698974ca599766b46cc4b44d94cf6b339ae42383eda5c2b5714374ac9196529",
+      "baseline_lockfile_hash": "ffc8a6970d279a6625764c2f7c432f05249879827707d6d1e96718fa13ab1fe1",
+      "baseline_manifest_hash": "e9385e97ac5e469f61dd7531995863676f21b6f7e39aa31a2d76e66dd265cbf1",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/trace-compression/aarch64-apple-darwin/baseline/consumer/Cargo.toml --filter-platform aarch64-apple-darwin",
       "feature_profile": "trace-compression",
       "graph_scope": "synthesized-consumer",
@@ -4243,8 +4261,8 @@
       "unique_package_name_ceiling": 132
     },
     {
-      "baseline_lockfile_hash": "6430ce6c829d823126f9dc4b48439967bbf6f37d4de174f786772d987e31afda",
-      "baseline_manifest_hash": "d8d4ec49ebc158e26317d47ffc686c03a3f78e4c70bf4f1253b22648ef6acc19",
+      "baseline_lockfile_hash": "ffc8a6970d279a6625764c2f7c432f05249879827707d6d1e96718fa13ab1fe1",
+      "baseline_manifest_hash": "27dd0330ce8c16a4c271b21c1ab9f46900887a01e3da81a31c83065d061509b9",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/trace-compression/wasm32-unknown-unknown/baseline/consumer/Cargo.toml --filter-platform wasm32-unknown-unknown",
       "feature_profile": "trace-compression",
       "graph_scope": "synthesized-consumer",
@@ -4254,8 +4272,8 @@
       "unique_package_name_ceiling": 109
     },
     {
-      "baseline_lockfile_hash": "6430ce6c829d823126f9dc4b48439967bbf6f37d4de174f786772d987e31afda",
-      "baseline_manifest_hash": "c06e4fee2a2bd4148c7ad34aada1fc63b527ff6f325bd43cab4bf3eeb8714e8c",
+      "baseline_lockfile_hash": "ffc8a6970d279a6625764c2f7c432f05249879827707d6d1e96718fa13ab1fe1",
+      "baseline_manifest_hash": "b0294ea5895db7fb32b0157396fcc5fb3753dd4d1df536c2b923bd8aa6ca6826",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/trace-compression/x86_64-pc-windows-msvc/baseline/consumer/Cargo.toml --filter-platform x86_64-pc-windows-msvc",
       "feature_profile": "trace-compression",
       "graph_scope": "synthesized-consumer",
@@ -4265,8 +4283,8 @@
       "unique_package_name_ceiling": 139
     },
     {
-      "baseline_lockfile_hash": "6430ce6c829d823126f9dc4b48439967bbf6f37d4de174f786772d987e31afda",
-      "baseline_manifest_hash": "ddff3a2ec5e82937f6ad7338ae336ed11187f3834b76b467eaef66c954337ffb",
+      "baseline_lockfile_hash": "ffc8a6970d279a6625764c2f7c432f05249879827707d6d1e96718fa13ab1fe1",
+      "baseline_manifest_hash": "5f678e01ffddd362dca7de3440dd77c21f6529917832d0c7d2cc9b49f85db730",
       "exact_command": "cargo metadata --format-version 1 --manifest-path $LEDGER_WORK_DIR/profiles/trace-compression/x86_64-unknown-linux-gnu/baseline/consumer/Cargo.toml --filter-platform x86_64-unknown-linux-gnu",
       "feature_profile": "trace-compression",
       "graph_scope": "synthesized-consumer",
@@ -4301,15 +4319,36 @@
     "fail_closed": true,
     "graph_ceilings": "Per profile/target/host ceilings lower automatically with the source ledger; increases require a reviewed graph-ceiling-increase exception before regeneration."
   },
-  "reviewed_exceptions": [],
+  "reviewed_exceptions": [
+    {
+      "approved_on": "2026-08-08",
+      "direct_root_edge": "dev:tracing-log",
+      "exception_id": "release-v040-dev-tracing-log",
+      "exception_kind": "direct-dependency-addition",
+      "expires_on": "2026-11-08",
+      "rationale": "The test harness needs an explicit log-to-tracing bridge so tests can opt in without installing ambient global logging state. This is a dev-only edge and does not enter published consumer graphs.",
+      "review_reference": "asupersync-djivtj release-v0.4.0; Cargo.toml:554-560",
+      "reviewed_by": "FoggyPrairie"
+    },
+    {
+      "approved_on": "2026-08-08",
+      "direct_root_edge": "normal:tracing-log",
+      "exception_id": "release-v040-normal-tracing-log",
+      "exception_kind": "direct-dependency-addition",
+      "expires_on": "2026-11-08",
+      "rationale": "The optional edge is confined to test-internals and provides an explicit bridge for dependencies that emit through log. Default production consumers do not enable it, and the bridge is never installed implicitly.",
+      "review_reference": "asupersync-djivtj release-v0.4.0; Cargo.toml:109-114,367-372",
+      "reviewed_by": "FoggyPrairie"
+    }
+  ],
   "schema_version": 1,
-  "source_commit": "ddea6250aee80357756fa1f39456823df88f7af1",
+  "source_commit": "00a42d75c072044cbc8a7093885ec19420f21bdc",
   "source_ledger": {
     "artifact_id": "dependency-marginal-ledger-v1",
     "bead_id": "asupersync-dep-p1-foundations-upksjk.2",
     "measurement_basis": "Cargo package IDs from synthesized out-of-workspace consumer resolution",
     "path": "artifacts/dependency_marginal_ledger_v1.json",
-    "sha256": "9382d8357e59b49b01775f3efad2db95f2186c63bc432b5616ba20f3b9a218a9",
-    "source_commit": "ddea6250aee80357756fa1f39456823df88f7af1"
+    "sha256": "4e36ca29d7187e3237cfd9f422b2661009a608e93bb5761c7d511d412d66a047",
+    "source_commit": "00a42d75c072044cbc8a7093885ec19420f21bdc"
   }
 }

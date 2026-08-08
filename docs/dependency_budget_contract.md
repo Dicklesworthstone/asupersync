@@ -271,7 +271,11 @@ The generator also verifies that the frozen ledger's direct-edge inventory
 still equals the current root `Cargo.toml`. A manifest change therefore cannot
 be admitted by updating only one artifact.
 
-The ordinary reviewed state has an empty `reviewed_exceptions` array.
+The ordinary reviewed state has an empty `reviewed_exceptions` array. The
+v0.4.0 release carries two finite, exact exceptions for `dev:tracing-log` and
+`normal:tracing-log`: the former is dev-only, while the latter is optional and
+confined to `test-internals`. Both support an explicit log-to-tracing bridge,
+never install it implicitly, and expire on 2026-11-08 for follow-up review.
 
 ## Rare reviewed exception
 
