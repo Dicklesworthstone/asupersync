@@ -81,7 +81,7 @@
   },
   "source_pins": [
     {"path":".gitignore","sha256":"5b9694c84261a60f80d47ec5fc53c6ad0413cd768dd51b0cd0b239800d388d4b","line_count":567,"role":"ignored lock and tracked artifact policy"},
-    {"path":"Cargo.toml","sha256":"f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02","line_count":1038,"role":"root dependency selector"},
+    {"path":"Cargo.toml","sha256":"f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb","line_count":1038,"role":"root dependency selector"},
     {"path":"Cargo.lock","sha256":"a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4","line_count":4666,"role":"root dependency resolution"},
     {"path":"fuzz/Cargo.toml","sha256":"857925379ab7068f3faf94435e44b87adfc96c2d716f19b5c1cfdffbbfbd580d","line_count":6233,"role":"excluded fuzz dependency selector and target registry"},
     {"path":"tests/conformance/raptorq_differential/Cargo.toml","sha256":"6e94b40563ab8643b59272655d91132221d65a22c11c8dde604d1728a952ef7c","line_count":33,"role":"standalone differential selector"},
@@ -150,7 +150,7 @@
     {"path":"packages/browser/src/index.ts","sha256":"a9efd084a34978f6828d206ec549d263c78e68fd6acabb418f0d9436ee226aaf","line_count":9271,"role":"cross-runtime collision"},
     {"path":"scripts/capture_baseline.sh","sha256":"44b238d3791262d9c3769d1bf17e29fef7369cc45568c261f1a2ecf2545772b6","line_count":777,"role":"host-tool collision"},
     {"path":"tests/tls_pin_mismatch_e2e.rs","sha256":"ed24d3fe8a40754fe8eca2750119769c36353d4211de2091599e5c9dbaed80d5","line_count":228,"role":"manual collision"},
-    {"path":"asupersync-wasm/Cargo.toml","sha256":"931714aacdb7623dcfc60a5f5fd55d7cdf99812e1689d6e210ca862eaeaffad9","line_count":60,"role":"excluded wasm scaffold dependency selector"},
+    {"path":"asupersync-wasm/Cargo.toml","sha256":"c4f69adea5e0a40b796ff63e3b5d38b652ab175897f1d0bc7c834dd6b1ee520b","line_count":60,"role":"excluded wasm scaffold dependency selector"},
     {"path":"asupersync-wasm/src/lib.rs","sha256":"0b6eaa61ca5747df5d191d902122e48d066792be6d25f99a92c5c6ce409afe56","line_count":39,"role":"excluded wasm scaffold compilation gate"},
     {"path":"fuzz/create_postgres_scram_seeds.py","sha256":"a54f3ae51e2bb1b894908a8ef2ad28b2a1136b67f61ffcbc6ccae8b76ed26d47","line_count":182,"role":"cross-runtime fixture collision"},
     {"path":"fuzz/create_tls_seeds.py","sha256":"8b55ba98ba257ec9c25ca6b43bc5bc86e867780626c6a653c98f4746c40b2ed6","line_count":191,"role":"cross-runtime fixture collision"},
@@ -183,8 +183,8 @@
       "scope": "EXCLUDED_WORKSPACE_NOT_ROOT_PRODUCTION_GRAPH"
     },
     "excluded_wasm_scaffold": {
-      "manifest_path_requirement": "asupersync ^0.3.5",
-      "current_path_package_version": "0.3.10",
+      "manifest_path_requirement": "asupersync ^0.4.0",
+      "current_path_package_version": "0.4.0",
       "repository_lock_state": "ABSENT_IGNORED",
       "local_snapshot": {
         "state": "STALE_OBSERVED_NOT_REPOSITORY_PINNED",
@@ -987,7 +987,7 @@
     {"gap_id":"B64-GAP-BROWSER-HOST","state":"ROUTED","owner":"asupersync-d24mms.10.6","detail":"Host atob and btoa acceptance must be normalized by canonical re-encode rather than treated as the Rust oracle."},
     {"gap_id":"B64-GAP-HOST-COMMAND","state":"ROUTED","owner":"asupersync-d24mms.10.5","detail":"The shell baseline helper inherits host decoder behavior and is not parity evidence."},
     {"gap_id":"B64-GAP-VERSION-SKEW","state":"ROUTED","owner":"asupersync-d24mms.10.5","detail":"Root repository resolution pins 0.23.0; the excluded fuzz manifest selects 0.22 without a tracked lock, and standalone RaptorQ likewise does not pin a patch."},
-    {"gap_id":"B64-GAP-EXCLUDED-WASM-LOCK","state":"BLOCKED","owner":"asupersync-d24mms.10.5","detail":"The excluded non-canonical asupersync-wasm scaffold requests the local 0.3.5 package but has no tracked lock; an ignored local snapshot still records asupersync 0.3.2 and base64 0.22.1. A5 owns reconciliation without treating the snapshot as repository or root production-graph evidence."},
+    {"gap_id":"B64-GAP-EXCLUDED-WASM-LOCK","state":"BLOCKED","owner":"asupersync-d24mms.10.5","detail":"The excluded non-canonical asupersync-wasm scaffold requests the local 0.4.0 package but has no tracked lock; an ignored local snapshot still records asupersync 0.3.2 and base64 0.22.1. A5 owns reconciliation without treating the snapshot as repository or root production-graph evidence."},
     {"gap_id":"B64-GAP-ORPHAN-SOURCES","state":"ROUTED","owner":"asupersync-d24mms.10.5","detail":"Two legacy src files and one nested H2 source are unwired; one uses deprecated free functions still present in 0.23 and needs warning-policy review before rewiring."},
     {"gap_id":"B64-GAP-LOCAL-MOCKS","state":"ROUTED","owner":"asupersync-d24mms.10.6","detail":"Two local modules are not external codec oracles and must not admit parity."},
     {"gap_id":"B64-GAP-DEBUG-WS-KEY","state":"ROUTED","owner":"asupersync-d24mms.10.4","detail":"The debug WebSocket accept path hashes the supplied key without the 16-byte decode validation used by public handshake paths."},

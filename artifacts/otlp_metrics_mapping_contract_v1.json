@@ -33,7 +33,7 @@
     "mapping_design_completion": "PARTIAL_STATIC_WITH_BLOCKING_DECISIONS",
     "owned_production_mapping_state": "ABSENT"
   },
-  "retained_instrument_row_semantics": "The 23 rows below are the complete fixed OtelMetrics provider census only. Every owned_* field is a minimum future owned-adapter mapping requirement, not a complete producer design or a claim about the current embedder-controlled MeterProvider wire output.",
+  "retained_instrument_row_semantics": "The 23 rows below are the complete fixed OtelMetrics provider census only. Every owned_* field is a required future owned-adapter mapping, not a complete producer design or a claim about the current embedder-controlled MeterProvider wire output.",
   "retained_instruments": [
     {
       "name": "asupersync.tasks.active",
@@ -877,14 +877,14 @@
     },
     {
       "path": "src/observability/otlp_proto.rs",
-      "sha256": "2429b5f46dd985fa7c700e6255f0070b0c0c43eaa627377843ac96ef94048ca4",
+      "sha256": "cc04fb98d1cc5d14f0e26c3941d336250ec958d9e51fa651eec2f644357776b2",
       "line_count": 8556,
       "anchors": ["MAX_DATA_POINTS_PER_METRIC", "pub(crate) enum AggregationTemporality", "pub(crate) enum MetricData", "pub(crate) struct ExportMetricsServiceRequest"]
     },
     {
       "path": "src/observability/mod.rs",
-      "sha256": "c2adba48b64ecfe3808beb2732636237fdd32446a19c45d1e294c75f36a50130",
-      "line_count": 1168,
+      "sha256": "2b92ccd15d9ad7c731b0f04e8acba64b593fc09922267a4acf2be853446fc269",
+      "line_count": 1172,
       "anchors": ["private, native-only owned OTLP message staging", "Signal adapters, transport wiring", "pub(crate) mod otlp_proto"]
     },
     {
@@ -907,7 +907,7 @@
     },
     {
       "path": "src/runtime/metrics.rs",
-      "sha256": "3ed1cc922a918862e15f8dffd3b2fd37273296eaf0a873855b74125272faefbb",
+      "sha256": "4f2aacbccb5f3a3b5a0d915b379d86d34a8b99d45ffd5c589f10debe30a37dd9",
       "line_count": 354,
       "anchors": ["pub struct Metrics", "pub fn reset()", "timer_threads_spawned"]
     },
@@ -967,7 +967,7 @@
     },
     {
       "path": "tests/protobuf_owned_otlp_schema_contract.rs",
-      "sha256": "093ff4b7f65431e67384a52f555eabd40861c66106c60c14f8ae0c72794597e7",
+      "sha256": "9c311513d7d23ff9e8a9dbb183470d354bfb360d14bc2d5a45130e64f9c8c20f",
       "line_count": 2200,
       "anchors": ["The JSON-shaped fixture is not protobuf wire evidence", "Generated request builders are test/fuzz gated"]
     },
@@ -979,13 +979,13 @@
     },
     {
       "path": "artifacts/otlp_capability_inventory_v1.json",
-      "sha256": "ad47a26ce42d8aef4544d5502ff2bf036b657e7e8858eb385a80434419499b53",
+      "sha256": "4804c855bbacd19e687be19753c92ac346313c64c8f9378bcc5b1e307f47b872",
       "line_count": 985,
       "anchors": ["SHIPPED_VIA_DEPENDENCY", "OTLP-GAP-01", "asupersync-5z2scg.2.3"]
     },
     {
       "path": "artifacts/protobuf_owned_otlp_schema_v1.json",
-      "sha256": "e3210e276d61060bc3487b98c882306f7a3ec356c0f99a76efec195962f142dc",
+      "sha256": "3126a1a82575028cda77ac0944bc795f12c1e11702e6d5b510e22edeeb4fa867",
       "line_count": 1126,
       "anchors": ["NEW_A3_SCHEMA_POLICY_NOT_INCUMBENT_PARITY", "data_points_per_metric", "signal_construction_separation"]
     },

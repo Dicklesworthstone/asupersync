@@ -317,7 +317,7 @@ fn validate_contract(contract: &Value, inventory: &Value, terminal: &Value) -> R
         ),
         (
             INVENTORY_PATH,
-            "eb4058b888b33a152975d7be576d117663f8560ed55a634369991d091f76d6ea",
+            "87ac79de7f5b1f9e03324822edbbe4af08b2736d487f6d2a15b71a3693721fb9",
         ),
         (
             TERMINAL_RECEIPT_PATH,

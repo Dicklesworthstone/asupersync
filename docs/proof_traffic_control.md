@@ -168,8 +168,8 @@ The A3 report includes `selected_paths`, `included_paths`, `excluded_paths`,
 `report_only`, retry condition, terminal execution evidence,
 `rch_worker_or_refusal`, dirty-frontier/rollback guidance, and no-claim
 boundaries. Agent Mail and `br` bodies are structured-field-first. Generated
-handshake bodies set terminal evidence to `none` because they are pre-execution
-admission receipts; an operator must enrich the handoff after terminal output.
+handshake bodies set terminal evidence to `none` because they are pre-execution admission receipts;
+an operator must enrich the handoff after terminal output.
 
 No handshake path uses local Cargo fallback, branch creation, worktree creation,
 scratch clones, file deletion, `git clean`, or `git reset`.

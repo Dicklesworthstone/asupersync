@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 const ARTIFACT_PATH: &str = "artifacts/protobuf_owned_otlp_schema_v1.json";
 const DOC_PATH: &str = "docs/protobuf_owned_otlp_schema.md";
-const ARTIFACT_SHA256: &str = "e3210e276d61060bc3487b98c882306f7a3ec356c0f99a76efec195962f142dc";
+const ARTIFACT_SHA256: &str = "3126a1a82575028cda77ac0944bc795f12c1e11702e6d5b510e22edeeb4fa867";
 const DOC_SHA256: &str = "17360f46fff6ba94487780ce5e5b692c5af80c3be19442cd5d89c0317fb2337f";
 const SCHEMA_SIGNATURE_SHA256: &str =
     "2b9311b5c766da1b2fb88262aeb89e125c41f8ea4d8406e534a2e9b42839256b";

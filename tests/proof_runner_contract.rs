@@ -1286,12 +1286,23 @@ fn proof_runner_rank_fallback_beads_blocks_bare_cargo_validation() {
         {"id": "rch-cargo", "title": "rch cargo validation", "priority": 1,
          "validation_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner cargo test -p asupersync --test proof_runner_contract"}
     ]}));
+    let healthy = write_json_fixture(&json!({
+        "root": {"path": "/", "available": true, "free_bytes": 2_097_152_u64, "total_bytes": 4_194_304_u64},
+        "dev_shm": {"path": "/dev/shm", "available": true, "free_bytes": 2_097_152_u64, "total_bytes": 4_194_304_u64}
+    }));
     let fallback_path = fallback.path().to_str().expect("fallback path utf8");
+    let healthy_path = healthy.path().to_str().expect("healthy path utf8");
 
     let result = proof_runner_json(&[
         "--rank-fallback-beads",
         "--fallback-bead-snapshot",
         fallback_path,
+        "--disk-preflight-snapshot",
+        healthy_path,
+        "--disk-min-free-bytes",
+        "1048576",
+        "--disk-dev-shm-min-free-bytes",
+        "1048576",
         "--output",
         "json",
     ]);

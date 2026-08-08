@@ -31,7 +31,7 @@
     {
       "bead_id": "asupersync-5z2scg.8.3.2.1",
       "path": "artifacts/regex_unicode_table_contract_v1.json",
-      "sha256": "61e38fe79120fc9e79b7f55c3142f92ce0032bfed0ced8742d1063675790d24a",
+      "sha256": "dbf8de484d4f3b60b5ce9222b0ca6471f4770c6cef3617fd4461e9d2088c0e4e",
       "decision": "KEEP_INCUMBENT_DEFER"
     },
     {
@@ -43,7 +43,7 @@
     {
       "bead_id": "asupersync-5z2scg.8.3.2.3",
       "path": "artifacts/regex_folding_boundary_contract_v1.json",
-      "sha256": "c462ddc3903335e7895ef54e1a1a4085c814cb5881a4f2fdcb523483cb45478d",
+      "sha256": "666cdd5b66254f4fa638e5e41f5ddb98c90b1131f52236d09b40e65fe059df62",
       "decision": "STAGED_SIMPLE_FOLD_AND_BOUNDARY_SEMANTICS"
     }
   ],
@@ -60,16 +60,16 @@
     },
     {
       "path": "src/observability/regex_boundaries.rs",
-      "sha256": "bac41152af892d6fb3c84fcc4c1ee2a75d70219ec877604207dbcd4c8efafbbd",
-      "bytes": 49494
+      "sha256": "406f280de9dcc99cedc47c5fcef4f32b6574f2d0d178d3061540c00b15128ab0",
+      "bytes": 49540
     }
   ],
   "source_revisions": {
-    "cargo_toml_sha256": "6f23d63e0addc5c10841c3a425a6c4aed5e00cea37bc9a0752b94ca98ee3ab7d",
-    "cargo_lock_sha256": "e23937c9cafef508e7fb72861c11388b9960edb3b13665ae91f4c0670fb67e2d",
+    "cargo_toml_sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
+    "cargo_lock_sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
     "rust_toolchain_sha256": "7be955420e9a82164d4c4307e141035b29cd395ba6f621af32f3fddfb4013f63",
     "package": "asupersync",
-    "package_version": "0.3.9",
+    "package_version": "0.4.0",
     "edition": "2024",
     "pinned_toolchain": "nightly-2026-07-05"
   },

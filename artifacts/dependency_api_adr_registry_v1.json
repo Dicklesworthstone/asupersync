@@ -1522,7 +1522,7 @@
       "preserved_feature_flags": [
         {
           "name": "metrics",
-          "cargo_definition": "metrics = [\"dep:opentelemetry\", \"dep:opentelemetry_sdk\", \"dep:regex\"]",
+          "cargo_definition": "metrics = [\n    \"dep:opentelemetry\",\n    \"dep:opentelemetry_sdk\",\n    \"dep:regex\",\n    \"dep:retained-regex-syntax\",\n]",
           "effect": "Enables `observability::otel` (owned OTLP/HTTP logs exporter, the shared `OtlpHttpExporter` transport, the external `Meter` bridge, privacy/redaction, and cardinality control) plus `observability::histogram_conformance`. `regex` is required by the PII redaction engine.",
           "must_remain": true,
           "no_tokio_guarantee": "The `metrics` production graph must have no normal-edge dependency on tokio. Proof lane `metrics-production-tokio-tree`: `cargo tree -e normal -p asupersync --features metrics -i tokio` must print `warning: nothing to print.`"
@@ -6341,7 +6341,7 @@
         },
         {
           "name": "metrics",
-          "cargo_definition": "metrics = [\"dep:opentelemetry\", \"dep:opentelemetry_sdk\", \"dep:regex\"]",
+          "cargo_definition": "metrics = [\n    \"dep:opentelemetry\",\n    \"dep:opentelemetry_sdk\",\n    \"dep:regex\",\n    \"dep:retained-regex-syntax\",\n]",
           "effect": "The only feature that enables the regex crate directly. It therefore also gates the entire privacy redaction surface, which means a build without metrics has no PII redaction engine at all.",
           "must_remain": true,
           "no_tokio_guarantee": "The metrics production graph must have no normal-edge dependency on tokio, per the proof lane frozen by DEP-ADR-003."

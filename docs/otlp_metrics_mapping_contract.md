@@ -27,9 +27,9 @@ conflated:
    to those messages.
 
 That list is not the complete repository-wide metrics census. The A3 artifact
-freezes this reviewed subset, records minimum future owned-message mapping
-requirements, and keeps unresolved producer limits and descriptor decisions as
-closure blockers. Fields named `owned_*` are requirements, not descriptions of
+freezes this reviewed subset, records each required future owned-adapter mapping,
+and keeps unresolved producer limits and descriptor decisions as closure blockers.
+Fields named `owned_*` are requirements, not descriptions of
 the current external `MeterProvider` output or a complete adapter design.
 
 This distinction corrects three overstatements in the earlier frozen inventory:

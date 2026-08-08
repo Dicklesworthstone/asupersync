@@ -31,11 +31,11 @@ The scanner also carries a static, read-only `PASS_NO_CONTENT_ADDRESSED_CYCLE_WI
 
 Collapsing every version of an artifact to its path produces one strongly connected component with four paths and six directed edges:
 
-- `artifacts/dependency_capability_baseline_v1.json` pins the Base64 inventory, Hex inventory, and Phase-1 signoff at their current captured bytes.
-- Each of those three artifacts records SHA-256 `88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8`, the 1,357-line historical dependency baseline at commit `7390d33f4ac297cd28138c8e1ece38f60b278660` and blob `4e56ad4bc05dbd1614583f8cdf8586a0d1f88cc7`.
-- The live baseline has different content identity `ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4`. The three reverse edges therefore terminate at the historical baseline node, not at the live baseline node that emits the forward edges.
+- `artifacts/dependency_capability_baseline_v1.json` pins historical Base64 inventory bytes plus the current Hex inventory and Phase-1 signoff bytes.
+- The current Base64 inventory pins the live baseline identity `ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4`; the baseline still pins the earlier Base64 identity `28171082ff529b93cbe951b9de84db9423b8922fde531c82aa21051b933c83eb`.
+- The Hex and Phase-1 artifacts record SHA-256 `88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8`, the 1,357-line historical dependency baseline at commit `7390d33f4ac297cd28138c8e1ece38f60b278660` and blob `4e56ad4bc05dbd1614583f8cdf8586a0d1f88cc7`.
 
-The content-addressed graph has five nodes, six edges, and no directed cycle. No full-file edge replacement is required. Operators must preserve the three historical back-references as immutable provenance and must not refresh or relabel them as current. A future path-only strongly connected component is a warning to recompute the versioned topology, not sufficient evidence of a blocking content cycle.
+The content-addressed graph has six nodes, six edges, and no directed cycle. No full-file edge replacement is required. Operators must preserve the three historical back-references as immutable provenance and must not refresh or relabel them as current. A future path-only strongly connected component is a warning to recompute the versioned topology, not sufficient evidence of a blocking content cycle.
 
 ## Boundaries
 
@@ -43,4 +43,4 @@ The content-addressed graph has five nodes, six edges, and no directed cycle. No
 - Orphan does not mean unused, ownerless, or safe to delete.
 - Excluded means outside this durable artifact scanner, not safe to remove.
 - Stale means cite the successor for current evidence and retain the stale path for lineage.
-- The versioned receipt does not make historical pins current, authorize blind hash refresh, prove that Git history is available in every checkout, or prove that the executable Rust contract passed.
+- The versioned receipt does not make historical pins current and does not authorize blind hash refresh. It also does not prove that Git history is available in every checkout or that the executable Rust contract passed.

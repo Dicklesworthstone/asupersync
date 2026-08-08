@@ -159,7 +159,7 @@ The required broad frontier uses the exact suffix
 No local Cargo fallback is approved.
 
 The terminal receipts for source digest
-`bac41152af892d6fb3c84fcc4c1ee2a75d70219ec877604207dbcd4c8efafbbd`
+`406f280de9dcc99cedc47c5fcef4f32b6574f2d0d178d3061540c00b15128ab0`
 are:
 
 | Lane | Result | RCH receipt |

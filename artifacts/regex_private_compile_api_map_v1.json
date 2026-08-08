@@ -51,7 +51,7 @@
   "predecessor_receipts": [
     {
       "path": "artifacts/regex_syntax_terminal_receipt_v1.json",
-      "sha256": "b3e77f4ea172b5ae08654b54006f2c016e5416085f0c23fe1f868d923eb4fe0a",
+      "sha256": "89617a9d74970dba085dd6811fc602a32922131689beceb8d0022b539850d788",
       "line_count": 391,
       "revision": "7de0e9d84a178868355a766278cc717fd60f8065",
       "decision": "KEEP_INCUMBENT_DEFER",
@@ -59,7 +59,7 @@
     },
     {
       "path": "artifacts/regex_semantic_terminal_receipt_v1.json",
-      "sha256": "887dd0b97c6794ef7481090a8c1677830093cfdce440ebdb720c3c337b260d23",
+      "sha256": "0f6482523661aff2ded0450f569a871abff52e91f7645a79dc4281c1a4bafe08",
       "line_count": 433,
       "revision": "697105a0c038dbc24277a74cc528e143ac904607",
       "decision": "KEEP_INCUMBENT_DEFER",
@@ -67,7 +67,7 @@
     },
     {
       "path": "artifacts/regex_compiler_terminal_receipt_v1.json",
-      "sha256": "caf2507d626b25c55b4371c84bd2c946f2b5a7d60f7578582b86994d97f59668",
+      "sha256": "677f5a8f1df756299d72a4e816a212c1d75e8f95e185beade4e9b45402ecdeb4",
       "line_count": 252,
       "revision": "f3c906c89c7b2fed787c038107e3700bc72316d4",
       "decision": "KEEP_INCUMBENT_DEFER",
@@ -75,7 +75,7 @@
     },
     {
       "path": "artifacts/regex_vm_terminal_receipt_v1.json",
-      "sha256": "84a1b10d21e20d66ee32beff922022be1d55f20ccf4ee9f6be2309474a268ae7",
+      "sha256": "b8baac5790aaf4f687598294db5df9331fdb8bc149556856ebd335421e1c9221",
       "line_count": 337,
       "revision": "181203e5d8dafe7f33b70d2652ff05ce688c8a6f",
       "decision": "KEEP_INCUMBENT_DEFER",
@@ -97,8 +97,8 @@
     },
     {
       "path": "src/observability/regex_boundaries.rs",
-      "sha256": "bac41152af892d6fb3c84fcc4c1ee2a75d70219ec877604207dbcd4c8efafbbd",
-      "line_count": 1396,
+      "sha256": "406f280de9dcc99cedc47c5fcef4f32b6574f2d0d178d3061540c00b15128ab0",
+      "line_count": 1398,
       "revision": "bdc6ad3d84b4332c9a40183cb4ac2348c7b7796e"
     },
     {

@@ -247,7 +247,10 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     }
     for gap in gaps {
         if text(gap, "owner").is_empty()
-            || !matches!(text(gap, "state"), "ROUTED" | "RESOLVED_BEFORE_BASELINE")
+            || !matches!(
+                text(gap, "state"),
+                "ROUTED" | "RESOLVED" | "RESOLVED_BEFORE_BASELINE"
+            )
         {
             return Err(format!(
                 "{} must be routed or explicitly resolved",
@@ -398,18 +401,18 @@ fn occurrence_census_separates_real_dependency_mock_and_literal() {
     let otel = read_repo_file("src/observability/otel.rs");
     let fixture =
         read_repo_file("tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs");
-    let mock = read_repo_file("src/net/atp/chunk/artifact.rs");
+    let former_mock = read_repo_file("src/net/atp/chunk/artifact.rs");
     let audit = read_repo_file("tests/otel_metric_attribute_denylist_audit.rs");
     assert_eq!(otel.matches("PrivacyConfig").count(), 17);
     assert_eq!(fixture.matches("PrivacyConfig").count(), 2);
     assert_eq!(otel.matches("SpanConfig").count(), 6);
     assert_eq!(otel.matches("regex::").count(), 2);
-    assert_eq!(mock.matches("regex::").count(), 1);
+    assert_eq!(former_mock.matches("regex::").count(), 0);
     assert_eq!(audit.matches("regex::").count(), 1);
     assert_eq!(otel.matches("Regex").count(), 12);
-    assert_eq!(mock.matches("Regex").count(), 3);
-    assert!(mock.contains("mod regex"));
-    assert!(mock.contains("pub struct Regex"));
+    assert_eq!(former_mock.matches("Regex").count(), 0);
+    assert!(!former_mock.contains("mod regex"));
+    assert!(!former_mock.contains("pub struct Regex"));
 }
 
 #[test]

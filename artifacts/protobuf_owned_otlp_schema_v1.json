@@ -24,7 +24,7 @@
       "crate_version": "0.32.0",
       "crates_io_checksum_sha256": "56d658ba1faf63f7b9c492cfbe6e0ec365440a16132d3270c1065f7b33f1b638",
       "cargo_lock_path": "Cargo.lock",
-      "cargo_lock_sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+      "cargo_lock_sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
       "wrapper_repository": "https://github.com/open-telemetry/opentelemetry-rust",
       "wrapper_repository_commit": "ec289cb3c6f8260951699c51df968560943c1451",
       "path_in_wrapper_repository": "opentelemetry-proto",

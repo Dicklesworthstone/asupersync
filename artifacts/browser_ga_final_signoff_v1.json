@@ -134,7 +134,7 @@
       "artifact_hashes": [
         {
           "path": "packages/browser-core/index.js",
-          "sha256": "43541cf9633c5def5e67e820b37b8da32a9130d8c97de5cf9571facb7f27de19"
+          "sha256": "13cac4230f8eeb574d74133379814c8234803e8fa7c8c7b0b7940346a4a591b5"
         },
         {
           "path": "packages/browser-core/index.d.ts",

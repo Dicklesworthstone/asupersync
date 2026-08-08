@@ -224,8 +224,9 @@ and same-profile only.
 
 The JOIN candidate is limited to the legacy completion transport. The first
 experiment may reuse the existing oneshot behavior, while retaining the
-legacy handle's public panic semantics. The canonical TaskHandle is measured
-as a separate incumbent comparator.
+legacy handle's public panic semantics. The canonical TaskHandle and gateway
+sender slot are also mutex-backed and are measured as separate incumbent
+comparators, not assumed speedups.
 
 The BATCH candidate is limited to structured producer publication. Its first
 shape is one validated request and one queue publication per member with only

@@ -10,7 +10,7 @@
   "compiler_terminal": {
     "bead_id": "asupersync-5z2scg.8.3.3.4",
     "path": "artifacts/regex_compiler_terminal_receipt_v1.json",
-    "sha256": "caf2507d626b25c55b4371c84bd2c946f2b5a7d60f7578582b86994d97f59668",
+    "sha256": "677f5a8f1df756299d72a4e816a212c1d75e8f95e185beade4e9b45402ecdeb4",
     "disposition": "KEEP_INCUMBENT_DEFER",
     "vm_experimentation_authorized": true,
     "production_cutover_eligible": false
@@ -93,8 +93,8 @@
     },
     {
       "path": "src/observability/regex_boundaries.rs",
-      "sha256": "bac41152af892d6fb3c84fcc4c1ee2a75d70219ec877604207dbcd4c8efafbbd",
-      "bytes": 49494,
+      "sha256": "406f280de9dcc99cedc47c5fcef4f32b6574f2d0d178d3061540c00b15128ab0",
+      "bytes": 49540,
       "revision": "bdc6ad3d84b4332c9a40183cb4ac2348c7b7796e"
     },
     {
@@ -118,17 +118,17 @@
     },
     {
       "path": "src/observability/mod.rs",
-      "sha256": "9008a30ec981e63ef07f2351b5ad80bfcd89dea8d191869fd027d2dd76fd7a80",
-      "bytes": 43361,
+      "sha256": "2b92ccd15d9ad7c731b0f04e8acba64b593fc09922267a4acf2be853446fc269",
+      "bytes": 43947,
       "revision": "asupersync-5z2scg.8.3.4.1"
     }
   ],
   "source_revisions": {
-    "cargo_toml_sha256": "6f23d63e0addc5c10841c3a425a6c4aed5e00cea37bc9a0752b94ca98ee3ab7d",
-    "cargo_lock_sha256": "e23937c9cafef508e7fb72861c11388b9960edb3b13665ae91f4c0670fb67e2d",
+    "cargo_toml_sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
+    "cargo_lock_sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
     "rust_toolchain_sha256": "7be955420e9a82164d4c4307e141035b29cd395ba6f621af32f3fddfb4013f63",
     "package": "asupersync",
-    "package_version": "0.3.9",
+    "package_version": "0.4.0",
     "edition": "2024",
     "pinned_toolchain": "nightly-2026-07-05"
   },

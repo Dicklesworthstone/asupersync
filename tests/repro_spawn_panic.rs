@@ -51,37 +51,42 @@ fn spawn_factory_panic_causes_leak() {
 }
 
 #[test]
-fn repro_zombie_task() {
-    // We'll use a RefCell to hold state so we can access it after the panic
+fn repro_factory_panic_is_deferred_without_zombie_registration() {
     use std::cell::RefCell;
+    use std::task::{Context, Poll};
+
     let state = RefCell::new(RuntimeState::new());
     let cx = test_cx();
 
     let region = state.borrow_mut().create_root_region(Budget::INFINITE);
     let scope = test_scope(region, Budget::INFINITE);
 
-    // Wrapper to allow catch_unwind with mutable borrow
     let res = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let mut state_ref = state.borrow_mut();
-        let _ = scope.spawn_registered(&mut state_ref, &cx, |_| {
+        scope.spawn_registered(&mut state_ref, &cx, |_| {
             panic!("factory panic");
             #[allow(unreachable_code)]
             async {
                 0
             }
-        });
+        })
     }));
 
-    assert!(res.is_err(), "spawn should have panicked");
+    let handle = res
+        .expect("task registration must not run the factory")
+        .expect("task registration must succeed");
 
-    // Inspect state
-    let state_ref = state.borrow();
+    let mut state_ref = state.borrow_mut();
     let region_record = state_ref.regions.get(region.arena_index()).unwrap();
+    assert_eq!(region_record.task_ids(), vec![handle.task_id()]);
 
-    // BUG: The task was added to the region but never removed
-    let tasks = region_record.task_ids();
-    assert!(
-        tasks.is_empty(),
-        "Region should be empty but has zombie tasks: {tasks:?}",
-    );
+    let waker = std::task::Waker::noop().clone();
+    let mut poll_cx = Context::from_waker(&waker);
+    let stored = state_ref
+        .get_stored_future(handle.task_id())
+        .expect("registered task must retain its lazy factory");
+    assert!(matches!(
+        stored.poll(&mut poll_cx),
+        Poll::Ready(asupersync::types::Outcome::Panicked(_))
+    ));
 }

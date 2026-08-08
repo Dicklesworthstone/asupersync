@@ -40,18 +40,18 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
-      "line_count": 991
+      "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
+      "line_count": 1038
     },
     {
       "path": "Cargo.lock",
-      "sha256": "fc35c9184d5d670bbbb5d8ce425cbf8c6ea11312f4daf85dc87909d3bd82bfbd",
-      "line_count": 4664
+      "sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
+      "line_count": 4666
     },
     {
       "path": "src/observability/mod.rs",
-      "sha256": "099e1e6e581cd9239cd19de1590323b5ec061591c25096026b76b4a247296d06",
-      "line_count": 1126
+      "sha256": "2b92ccd15d9ad7c731b0f04e8acba64b593fc09922267a4acf2be853446fc269",
+      "line_count": 1172
     },
     {
       "path": "src/observability/otel.rs",
@@ -60,8 +60,8 @@
     },
     {
       "path": "src/observability/otlp_trace_exporter.rs",
-      "sha256": "8ffc4eb8c89f8a8c8e939a2c957098f1656106baa5e26e1cbf766079efb0b3d4",
-      "line_count": 1046
+      "sha256": "186ba75ae2312f04b84304ea175eb5e3debc1b9c211c66990a313825791f1e73",
+      "line_count": 1048
     },
     {
       "path": "src/observability/otel_structured_concurrency.rs",
@@ -105,8 +105,8 @@
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
-      "sha256": "9016a1e0ed3bfeb1f2eb1c3e287323d64488a16077300a7c817269b30b719da6",
-      "line_count": 354
+      "sha256": "a28cd08953d5eb112db6ba43d69ebeb262f74f15f4c36f51753df0cfb8c598ea",
+      "line_count": 940
     }
   ],
   "feature_profiles": [

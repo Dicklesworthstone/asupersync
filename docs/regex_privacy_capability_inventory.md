@@ -21,11 +21,11 @@ the captured lockfile resolves `1.13.1`. The edge is enabled by `metrics` and
 is absent from the default feature profile. Upstream default features retain
 `std`, `perf`, Unicode, and `regex-syntax/default`.
 
-The only real dependency source owner is `src/observability/otel.rs`.
-`src/net/atp/chunk/artifact.rs` contains a local module named `regex`; that
-mock is not the dependency and is owned by a different campaign. A separate
-independent conformance workspace also declares its own regex dependency, but
-it is not a member of the root workspace.
+The only real dependency source owner is `src/observability/otel.rs`. The
+historical local `regex` mock in `src/net/atp/chunk/artifact.rs` has been
+removed and supplies no dependency evidence. A separate independent
+conformance workspace also declares its own regex dependency, but it is not a
+member of the root workspace.
 
 The current public path is
 `asupersync::observability::otel::PrivacyConfig`, behind `metrics`.
@@ -196,7 +196,7 @@ build script, proc macro, or native code.
 | `RGX-R1-GAP-08` | `SpanConfig` is not compiler-deprecated | A3.5 |
 | `RGX-R1-GAP-09` | registry language is broader than the consumed API | A3.7 |
 | `RGX-R1-GAP-10` | fixed detector scanners do not yet exist | A2 |
-| `RGX-R1-GAP-11` | the ATP local regex module is a non-equivalent mock | ATP owner |
+| `RGX-R1-GAP-11` | the historical ATP local regex mock was removed | resolved |
 | `RGX-R1-GAP-12` | no default-feature privacy journey exists | A5 |
 | `RGX-R1-GAP-13` | stale ADR source-owner gap was already repaired | registry owner |
 | `RGX-R1-GAP-14` | attribute and label drop lists are signal-merged | A5 |

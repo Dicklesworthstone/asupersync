@@ -75,9 +75,9 @@ this index.
 ## Scenario fixtures
 
 These 13 YAML files are typed `Scenario` fixtures. Their filenames, comments,
-and descriptions are authoring narratives, not evidence that the runner
-schedules the named workload or simulates every declared network, cancellation,
-or fault effect. In particular, include paths are validated but not merged, and
+and descriptions are authoring narratives, not evidence that the runner simulates
+every declared network, cancellation, or fault effect or schedules the named
+workload. In particular, include paths are validated but not merged, and
 the schema itself schedules no application tasks. See the
 [FrankenLab author guide](../docs/adoption/getting_started.md) for the current
 input, output, diagnostics, and field-consumption boundaries.

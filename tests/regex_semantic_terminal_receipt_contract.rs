@@ -108,7 +108,7 @@ fn terminal_validate(value: &Value) -> Result<(), String> {
     let expected_predecessors = [
         (
             "artifacts/regex_unicode_table_contract_v1.json",
-            "61e38fe79120fc9e79b7f55c3142f92ce0032bfed0ced8742d1063675790d24a",
+            "dbf8de484d4f3b60b5ce9222b0ca6471f4770c6cef3617fd4461e9d2088c0e4e",
         ),
         (
             "artifacts/regex_character_semantics_contract_v1.json",
@@ -116,7 +116,7 @@ fn terminal_validate(value: &Value) -> Result<(), String> {
         ),
         (
             "artifacts/regex_folding_boundary_contract_v1.json",
-            "c462ddc3903335e7895ef54e1a1a4085c814cb5881a4f2fdcb523483cb45478d",
+            "666cdd5b66254f4fa638e5e41f5ddb98c90b1131f52236d09b40e65fe059df62",
         ),
     ];
     if predecessors.len() != expected_predecessors.len() {
@@ -238,8 +238,8 @@ fn identity_predecessors_sources_and_decision_are_fail_closed() {
         ),
         (
             BOUNDARIES_PATH,
-            "bac41152af892d6fb3c84fcc4c1ee2a75d70219ec877604207dbcd4c8efafbbd",
-            49_494,
+            "406f280de9dcc99cedc47c5fcef4f32b6574f2d0d178d3061540c00b15128ab0",
+            49_540,
         ),
     ];
     let sources = array(&value, "candidate_sources").expect("candidate sources");

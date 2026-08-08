@@ -250,8 +250,7 @@ The dispositions are:
 
 This lane used static source anchors, Git history, source hashes, baseline JSON
 inspection, and the authored contract. The contract is intentionally recorded
-as not executed in this lane. No compiler, test, benchmark, profiler, or remote
-worker was invoked.
+as not executed in this lane. No compiler, test, benchmark, profiler, or remote worker was invoked.
 
 This inventory does not prove compilation, runtime correctness, wake
 correctness, cancellation correctness, deterministic replay, performance,

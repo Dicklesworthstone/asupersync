@@ -23,7 +23,7 @@
   },
   "authority": {
     "semantic_terminal_path": "artifacts/regex_semantic_terminal_receipt_v1.json",
-    "semantic_terminal_sha256": "887dd0b97c6794ef7481090a8c1677830093cfdce440ebdb720c3c337b260d23",
+    "semantic_terminal_sha256": "0f6482523661aff2ded0450f569a871abff52e91f7645a79dc4281c1a4bafe08",
     "semantic_terminal_disposition": "KEEP_INCUMBENT_DEFER",
     "ir_schema_source_path": "src/observability/regex_ir.rs",
     "ir_schema_source_sha256": "de4906beb838fda2c57bccfdb16316e8de661e564940a47e7b9b87f065311cb3",
@@ -58,8 +58,8 @@
     },
     {
       "path": "src/observability/regex_boundaries.rs",
-      "sha256": "bac41152af892d6fb3c84fcc4c1ee2a75d70219ec877604207dbcd4c8efafbbd",
-      "bytes": 49494,
+      "sha256": "406f280de9dcc99cedc47c5fcef4f32b6574f2d0d178d3061540c00b15128ab0",
+      "bytes": 49540,
       "role": "frozen fold and zero-width assertion authority"
     }
   ],

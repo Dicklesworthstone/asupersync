@@ -53,13 +53,13 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+      "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
       "line_count": 1038,
       "role": "optional regex dependency selector and metrics feature gate"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+      "sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
       "line_count": 4666,
       "role": "incumbent regex dependency resolution"
     },
@@ -71,14 +71,14 @@
     },
     {
       "path": "src/observability/mod.rs",
-      "sha256": "c2adba48b64ecfe3808beb2732636237fdd32446a19c45d1e294c75f36a50130",
-      "line_count": 1168,
+      "sha256": "2b92ccd15d9ad7c731b0f04e8acba64b593fc09922267a4acf2be853446fc269",
+      "line_count": 1172,
       "role": "observability compilation and feature gate"
     },
     {
       "path": "artifacts/regex_privacy_capability_inventory_v1.json",
-      "sha256": "eb4058b888b33a152975d7be576d117663f8560ed55a634369991d091f76d6ea",
-      "line_count": 1025,
+      "sha256": "87ac79de7f5b1f9e03324822edbbe4af08b2736d487f6d2a15b71a3693721fb9",
+      "line_count": 1015,
       "role": "R1 capability and historical detector baseline"
     },
     {

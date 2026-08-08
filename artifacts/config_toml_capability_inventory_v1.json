@@ -44,7 +44,7 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+      "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
       "line_count": 1038
     },
     {
@@ -54,8 +54,8 @@
     },
     {
       "path": "src/runtime/builder.rs",
-      "sha256": "5f8e9cb956e9d93cc70bedd0a3e1415f32d682f5714be26b18d4ece08548a4aa",
-      "line_count": 8489
+      "sha256": "4bc28908d06f75ea575788d69a5430fbcfa9bff5f572b8c5323dbd21eafc5365",
+      "line_count": 8668
     },
     {
       "path": "src/runtime/env_config_metamorphic_tests.rs",
@@ -84,8 +84,8 @@
     },
     {
       "path": "src/bin/atpd.rs",
-      "sha256": "f2420f0514c347fd0a8dbad6afde64299bc2f810b0f1ebbda77490c9d60185f9",
-      "line_count": 2660
+      "sha256": "53f0dae1caaf9a46064b19337bc5efc99408274469d3dbd85078b0b28c51d424",
+      "line_count": 2663
     },
     {
       "path": "src/bin/dependency_marginal_ledger.rs",
@@ -99,8 +99,8 @@
     },
     {
       "path": "src/fs_config_metamorphic_tests.rs",
-      "sha256": "9cd3c037eb04bcbc5856b5d85b23db8022751fe338e91d72230367661dd8a561",
-      "line_count": 977
+      "sha256": "a1abfa0b992be2c0432af3ff70700e2ea11203ee718fbf76ac3398e687d19c7e",
+      "line_count": 980
     },
     {
       "path": "franken_decision/src/lib.rs",
@@ -1440,8 +1440,8 @@
             "path": "src/bin/atpd.rs",
             "previous_sha256": "aa1ff63fbd19e4252171c66fb6c02aeb8358a3c100ae73b2169db2399ee857c9",
             "previous_line_count": 2664,
-            "current_sha256": "f2420f0514c347fd0a8dbad6afde64299bc2f810b0f1ebbda77490c9d60185f9",
-            "current_line_count": 2660
+            "current_sha256": "53f0dae1caaf9a46064b19337bc5efc99408274469d3dbd85078b0b28c51d424",
+            "current_line_count": 2663
           }
         ]
       },
@@ -1472,8 +1472,8 @@
           "classification": "A2_RUNTIME_JSON_ENTRY_POINTS_AND_SHARED_APPLICATION",
           "previous_sha256": "ced1fd3901169475f1e390324aa11458f97f52288e8d54bd6f9e91cc0ca3570c",
           "previous_line_count": 8398,
-          "current_sha256": "5f8e9cb956e9d93cc70bedd0a3e1415f32d682f5714be26b18d4ece08548a4aa",
-          "current_line_count": 8489,
+          "current_sha256": "4bc28908d06f75ea575788d69a5430fbcfa9bff5f572b8c5323dbd21eafc5365",
+          "current_line_count": 8668,
           "accepted_toml_input_changed": false
         },
         {
@@ -1502,8 +1502,8 @@
           "classification": "A2_ATPD_JSON_LOADER_AND_REDACTED_PROJECTION",
           "previous_sha256": "8d969a0669bcd865be9589f5a408cab2b861c1a14ab0a3e5a9e8b1f1fb731cf8",
           "previous_line_count": 2333,
-          "current_sha256": "f2420f0514c347fd0a8dbad6afde64299bc2f810b0f1ebbda77490c9d60185f9",
-          "current_line_count": 2660,
+          "current_sha256": "53f0dae1caaf9a46064b19337bc5efc99408274469d3dbd85078b0b28c51d424",
+          "current_line_count": 2663,
           "accepted_toml_input_changed": false
         },
         {

@@ -34,13 +34,13 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
-      "line_count": 991
+      "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
+      "line_count": 1038
     },
     {
       "path": "Cargo.lock",
-      "sha256": "9fa12e8af1e6b15a3070d88d62b2b81b8ba49c0e9d8592c1d1682f1cd72a4461",
-      "line_count": 4664
+      "sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
+      "line_count": 4666
     },
     {
       "path": "src/observability/otel.rs",
@@ -49,18 +49,18 @@
     },
     {
       "path": "src/observability/mod.rs",
-      "sha256": "099e1e6e581cd9239cd19de1590323b5ec061591c25096026b76b4a247296d06",
-      "line_count": 1126
+      "sha256": "2b92ccd15d9ad7c731b0f04e8acba64b593fc09922267a4acf2be853446fc269",
+      "line_count": 1172
     },
     {
       "path": "src/net/atp/chunk/artifact.rs",
-      "sha256": "f0ca0b6a25867e57847450ea06d0742aeec40a927692c859fc96fafc25cd744f",
-      "line_count": 1123
+      "sha256": "21b5131f5c5c2502b96bd61363a3bc21072062a0b9473bd602ab478a6b77cea9",
+      "line_count": 1597
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
-      "sha256": "9016a1e0ed3bfeb1f2eb1c3e287323d64488a16077300a7c817269b30b719da6",
-      "line_count": 354
+      "sha256": "a28cd08953d5eb112db6ba43d69ebeb262f74f15f4c36f51753df0cfb8c598ea",
+      "line_count": 940
     },
     {
       "path": "docs/adr/dep_plan_adr_012_regex_privacy.md",
@@ -69,18 +69,18 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "82a73ec1c14fbe317611f6d592af480d75d002cbe9333045ab74840bcaf1c081",
-      "line_count": 6907
+      "sha256": "e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2",
+      "line_count": 6917
     },
     {
       "path": "artifacts/dependency_marginal_ledger_v1.json",
-      "sha256": "832e8d68eefe9400a246ea619a250ea91bcf16a57d5fe728a6ce45e25bbdb4a6",
-      "line_count": 187712
+      "sha256": "9382d8357e59b49b01775f3efad2db95f2186c63bc432b5616ba20f3b9a218a9",
+      "line_count": 188045
     },
     {
       "path": "artifacts/api_surface_map_v1.json",
-      "sha256": "a00b61fe82326d766cde69e2392bc493a67d3c62f9d5cd83e3e02f8b5bf5535a",
-      "line_count": 4650
+      "sha256": "7dfbb239422630e1ef9c875e7542c4cee440211233dc7b734611fa8481d54178",
+      "line_count": 4824
     }
   ],
   "dependency_resolution": {
@@ -137,18 +137,13 @@
       ]
     },
     "regex_path_tokens": {
-      "files": 3,
-      "tokens": 4,
+      "files": 2,
+      "tokens": 3,
       "classifications": [
         {
           "path": "src/observability/otel.rs",
           "tokens": 2,
           "classification": "real optional production dependency"
-        },
-        {
-          "path": "src/net/atp/chunk/artifact.rs",
-          "tokens": 1,
-          "classification": "local mock module; not the dependency"
         },
         {
           "path": "tests/otel_metric_attribute_denylist_audit.rs",
@@ -158,18 +153,13 @@
       ]
     },
     "regex_identifier_tokens": {
-      "files": 2,
-      "tokens": 15,
+      "files": 1,
+      "tokens": 12,
       "classifications": [
         {
           "path": "src/observability/otel.rs",
           "tokens": 12,
           "classification": "real dependency type, compile, match, and detector sites"
-        },
-        {
-          "path": "src/net/atp/chunk/artifact.rs",
-          "tokens": 3,
-          "classification": "local mock type; not the dependency"
         }
       ]
     },
@@ -905,7 +895,7 @@
     {
       "gap_id": "RGX-R1-GAP-01",
       "severity": "critical",
-      "state": "ROUTED",
+      "state": "RESOLVED",
       "owner": "asupersync-5z2scg.8.3.5",
       "summary": "Invalid patterns inserted through the public pii_patterns vector are silently ignored, contradicting the registry invariant that custom privacy patterns are never silently ignored."
     },
@@ -977,7 +967,7 @@
       "severity": "high",
       "state": "ROUTED",
       "owner": "asupersync-d24mms.11",
-      "summary": "The ATP artifact local regex module is a mock that accepts any pattern and ignores it; it is not replacement evidence."
+      "summary": "The ATP artifact's historical local regex mock was removed; its former behavior remains excluded from dependency replacement evidence."
     },
     {
       "gap_id": "RGX-R1-GAP-12",
@@ -1019,7 +1009,7 @@
     "Small bounded adversarial probes do not prove performance parity, a production resource envelope, or cooperative cancellation.",
     "The existing downstream fixture is compile/semantic evidence for two examples, not a real collector or multi-signal E2E receipt.",
     "Marginal package counts do not prove behavioral replacement parity.",
-    "The ATP local mock is excluded from dependency scope and supplies no regex evidence.",
+    "The removed historical ATP local mock supplies no regex evidence.",
     "No local Cargo fallback is approved when a remote-required proof lane is blocked."
   ]
 }

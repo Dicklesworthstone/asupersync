@@ -229,7 +229,16 @@ json_escape() {
 }
 
 git_head() {
-  /usr/bin/git -C "${REPO_ROOT}" rev-parse HEAD
+  local resolved
+  if resolved="$(/usr/bin/git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null)"; then
+    printf '%s\n' "${resolved}"
+    return
+  fi
+  if [[ "${ATP_MATRIX_GIT_HEAD:-}" =~ ^[0-9a-f]{40}$ ]]; then
+    printf '%s\n' "${ATP_MATRIX_GIT_HEAD}"
+    return
+  fi
+  die "cannot resolve checkout HEAD; callers outside a Git worktree must provide ATP_MATRIX_GIT_HEAD"
 }
 
 verify_commit_bound_atp_binary() {

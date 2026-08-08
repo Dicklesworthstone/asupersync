@@ -758,7 +758,7 @@ run_cell_strict fixture failing_cell
     assert!(matrix_doc.contains("commit-bound-atp-binary"));
     assert!(matrix_doc.contains("offline GitHub attestation identity/ref/SHA"));
     assert!(matrix_spec.contains("authenticated-delta-unchanged-v1"));
-    assert!(matrix_spec.contains("These rows must never enter `score_matrix.py`"));
+    assert!(matrix_spec.contains("must never enter `score_matrix.py`"));
     assert!(matrix_spec.contains("Checksum or filename matching without"));
     assert!(matrix_spec.contains("signed archive attestation is not admissible"));
     for legacy_name in [
@@ -1257,12 +1257,15 @@ cell_done 500K perfect encrypted atp-quic-tls13 1 1 \
 
 #[test]
 fn authenticated_delta_matrix_profile_is_isolated_and_fail_closed() {
+    const FIXTURE_GIT_HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
+
     let scripts = repo_root().join("scripts/atp_bench");
     let planner = scripts.join("matrix_bench.sh");
     let runner = scripts.join("run_matrix_cell.sh");
     let root = unique_tmp("authenticated_delta_matrix_profile");
 
     let delta_plan = Command::new(&planner)
+        .env("ATP_MATRIX_GIT_HEAD", FIXTURE_GIT_HEAD)
         .args([
             "--cell-profile",
             "authenticated-delta-unchanged-v1",
@@ -1318,6 +1321,7 @@ fn authenticated_delta_matrix_profile_is_isolated_and_fail_closed() {
     }
 
     let default_plan = Command::new(&planner)
+        .env("ATP_MATRIX_GIT_HEAD", FIXTURE_GIT_HEAD)
         .args([
             "--out",
             root.join("default").to_str().unwrap(),
@@ -1346,6 +1350,7 @@ fn authenticated_delta_matrix_profile_is_isolated_and_fail_closed() {
     }));
 
     let rejected_5g = Command::new(&planner)
+        .env("ATP_MATRIX_GIT_HEAD", FIXTURE_GIT_HEAD)
         .args([
             "--cell-profile",
             "authenticated-delta-unchanged-v1",
@@ -1364,6 +1369,7 @@ fn authenticated_delta_matrix_profile_is_isolated_and_fail_closed() {
 
     let missing_packet_out = root.join("missing_commit_bound_packet");
     let missing_packet = Command::new(&planner)
+        .env("ATP_MATRIX_GIT_HEAD", FIXTURE_GIT_HEAD)
         .args([
             "--cell-profile",
             "authenticated-delta-unchanged-v1",
@@ -1402,6 +1408,7 @@ fn authenticated_delta_matrix_profile_is_isolated_and_fail_closed() {
 "#,
     );
     let mixed_profile = Command::new(&planner)
+        .env("ATP_MATRIX_GIT_HEAD", FIXTURE_GIT_HEAD)
         .args([
             "--cell-profile",
             "authenticated-delta-unchanged-v1",

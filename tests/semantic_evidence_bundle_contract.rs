@@ -164,7 +164,9 @@ fn scrub_string(text: &str) -> String {
     let repo = env!("CARGO_MANIFEST_DIR");
     let tmp = std::env::temp_dir();
     let tmp = tmp.to_string_lossy();
-    let scrubbed = text.replace(repo, "$REPO").replace(tmp.as_ref(), "$TMP");
+    // RCH can place TMPDIR beneath the clean-overlay checkout. Scrub the more
+    // specific temporary root first so it is not hidden by the repo prefix.
+    let scrubbed = text.replace(tmp.as_ref(), "$TMP").replace(repo, "$REPO");
     collapse_evidence_bundle_temp_names(scrubbed)
 }
 

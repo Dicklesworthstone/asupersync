@@ -81,14 +81,14 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+      "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
       "line_count": 1038,
       "role": "existing spawn_throughput benchmark registration and feature gate"
     },
     {
       "path": "src/runtime/builder.rs",
-      "sha256": "ced1fd3901169475f1e390324aa11458f97f52288e8d54bd6f9e91cc0ca3570c",
-      "line_count": 8398,
+      "sha256": "4bc28908d06f75ea575788d69a5430fbcfa9bff5f572b8c5323dbd21eafc5365",
+      "line_count": 8668,
       "role": "public request-scoped Cx entry plus legacy RuntimeHandle spawn, JoinHandle state, completion, admission, and shutdown"
     },
     {
@@ -135,8 +135,8 @@
     },
     {
       "path": "src/runtime/state.rs",
-      "sha256": "a9ed4e41e2f08548e9f421914181c4a7311cc518d0d3ae3a1fc21d3167bd40b2",
-      "line_count": 10177,
+      "sha256": "df558f0d733eb583ed26a6b61c025e8cd671027c8aeea526546c783a48a92f92",
+      "line_count": 10202,
       "role": "admission result taxonomy, canonical identity, quota rollback, and successor publication"
     },
     {

@@ -59,7 +59,10 @@ fn run_runner(paths: &[&str]) -> (String, Value) {
         .arg("--rule")
         .arg(RULE_ID)
         .arg("--engine")
-        .arg("auto")
+        // Keep the contract suite hermetic and bounded. The reviewed engine
+        // selection is asserted from the artifact below; fixture semantics use
+        // the runner's deterministic built-in implementation.
+        .arg("portable-fallback")
         .arg("--json")
         .arg("--exit-zero")
         .args(paths.iter().map(|path| repo_path(path)))

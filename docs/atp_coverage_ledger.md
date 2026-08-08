@@ -142,6 +142,7 @@ This ledger maps every ATP module to required unit/property/metamorphic tests an
 | `src/net/atp/bonding/handshake.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
 | `src/net/atp/bonding/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
 | `src/net/atp/bonding/receiver.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/bonding/transport_select.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
 | `src/net/atp/channel_bonding.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
 | `src/net/atp/chunk/bulk_file.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
 | `src/net/atp/chunk/cas.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |

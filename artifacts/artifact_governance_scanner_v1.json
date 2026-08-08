@@ -161,7 +161,7 @@
           {
             "kind": "readme_agents_reference",
             "path": "AGENTS.md",
-            "match": "${TMPDIR:-/tmp}/rch_target_check_all_targets"
+            "match": "${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_check_all_targets"
           }
         ]
       },
@@ -524,7 +524,7 @@
       "content_addressed_cyclic_component_count": 0
     },
     "finding_state": "PASS_NO_CONTENT_ADDRESSED_CYCLE_WITH_PATH_ALIAS_WARNING",
-    "finding": "The path-collapsed graph has three reciprocal aliases around dependency_capability_baseline_v1.json, but the content-addressed graph is acyclic: all three reverse edges target the same immutable historical baseline object while the forward edges target current inventory/signoff objects.",
+    "finding": "The path-collapsed graph has three reciprocal aliases around dependency_capability_baseline_v1.json, but the content-addressed graph is acyclic: each reciprocal pair crosses a historical content identity rather than closing over the live nodes.",
     "path_collapsed_component_members": [
       "artifacts/base64_capability_inventory_v1.json",
       "artifacts/dependency_capability_baseline_v1.json",
@@ -533,7 +533,7 @@
     ],
     "path_collapsed_component_edge_count": 6,
     "path_collapsed_simple_two_edge_cycle_count": 3,
-    "content_addressed_node_count": 5,
+    "content_addressed_node_count": 6,
     "content_addressed_edge_count": 6,
     "historical_target_receipt": {
       "target_artifact": "artifacts/dependency_capability_baseline_v1.json",
@@ -547,16 +547,16 @@
       {
         "path_alias_id": "base64-baseline",
         "source_artifact": "artifacts/base64_capability_inventory_v1.json",
-        "source_artifact_sha256": "28171082ff529b93cbe951b9de84db9423b8922fde531c82aa21051b933c83eb",
+        "source_artifact_sha256": "5bc351ef55338d6e49d514083a4586c16f0da401c80a656a6cb717c84e60aa08",
         "target_artifact": "artifacts/dependency_capability_baseline_v1.json",
-        "stored_target_sha256": "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8",
-        "stored_target_line_count": 1357,
+        "stored_target_sha256": "ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4",
+        "stored_target_line_count": 3210,
         "live_target_sha256": "ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4",
         "live_target_line_count": 3210,
-        "pin_state_at_capture": "historical",
-        "edge_classification": "historical_back_reference",
-        "source_node": "artifacts/base64_capability_inventory_v1.json@28171082ff529b93cbe951b9de84db9423b8922fde531c82aa21051b933c83eb",
-        "target_node": "artifacts/dependency_capability_baseline_v1.json@88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8"
+        "pin_state_at_capture": "current",
+        "edge_classification": "current_forward_reference",
+        "source_node": "artifacts/base64_capability_inventory_v1.json@5bc351ef55338d6e49d514083a4586c16f0da401c80a656a6cb717c84e60aa08",
+        "target_node": "artifacts/dependency_capability_baseline_v1.json@ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4"
       },
       {
         "path_alias_id": "base64-baseline",
@@ -565,10 +565,10 @@
         "target_artifact": "artifacts/base64_capability_inventory_v1.json",
         "stored_target_sha256": "28171082ff529b93cbe951b9de84db9423b8922fde531c82aa21051b933c83eb",
         "stored_target_line_count": 417,
-        "live_target_sha256": "28171082ff529b93cbe951b9de84db9423b8922fde531c82aa21051b933c83eb",
-        "live_target_line_count": 417,
-        "pin_state_at_capture": "current",
-        "edge_classification": "current_forward_reference",
+        "live_target_sha256": "5bc351ef55338d6e49d514083a4586c16f0da401c80a656a6cb717c84e60aa08",
+        "live_target_line_count": 1018,
+        "pin_state_at_capture": "historical",
+        "edge_classification": "historical_back_reference",
         "source_node": "artifacts/dependency_capability_baseline_v1.json@ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4",
         "target_node": "artifacts/base64_capability_inventory_v1.json@28171082ff529b93cbe951b9de84db9423b8922fde531c82aa21051b933c83eb"
       },

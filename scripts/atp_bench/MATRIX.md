@@ -183,8 +183,8 @@ to headline results or pass them to `score_matrix.py`.
 This profile proves only that an identical pre-seeded single file negotiates
 `AlreadyInSync` over authenticated framed control, both endpoints close
 successfully, payload counters remain zero, and the destination remains
-unchanged. Recorded wall time and wire bytes are diagnostic only. It does not
-prove zero total wire traffic, throughput or bandwidth improvement, rsync
+unchanged. Recorded wall time and wire bytes are diagnostic only. It
+does not prove zero total wire traffic, throughput or bandwidth improvement, rsync
 superiority/inferiority, changed-chunk reuse, `DeltaChunks`, tree/rename
 behavior, lossy-link resilience, broad transport correctness, release
 readiness, broad workspace health, reproducible builds, or privileged-execution
