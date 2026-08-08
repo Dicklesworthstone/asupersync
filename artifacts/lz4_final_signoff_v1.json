@@ -134,7 +134,7 @@
     },
     {
       "path": "artifacts/lz4_surface_artifact_inventory_v1.json",
-      "sha256": "e36e697592ed4f4005f348c1f153cb8aba6bf2fe57be35a81e1861b9c66d2bcd",
+      "sha256": "35763f235656536a7b6070bdb370653f9ec3a3806a5d0265b9a2c2648a43d9b2",
       "role": "A1 machine inventory and routed gap authority"
     },
     {
@@ -144,7 +144,7 @@
     },
     {
       "path": "artifacts/lz4_trace_integration_go_no_go_v1.json",
-      "sha256": "d4faa2d065bdfd6a9e91c09327afc509edb9c687a0c5e08a8a9d652236421d73",
+      "sha256": "4152b9b4a336c180b7f483f037026a20fa0bc757e28e5a4f09986fb4a2c60738",
       "role": "A4 compatibility, measurement, blocker, and KEEP receipt"
     },
     {
