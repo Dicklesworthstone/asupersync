@@ -1176,7 +1176,7 @@
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock",
-      "sha256": "b8f24fd13354a95b42ca0f23dd9f5284f7f58bea740b45c20bce7fcb891eee7f"
+      "sha256": "1c68bb36d8a237eb9009c18d7afc0e1b6eb2383a35a5d59ea563950bd6645c78"
     },
     {
       "path": "tests/fixtures/typed-format-cross-version-consumer/Cargo.toml",

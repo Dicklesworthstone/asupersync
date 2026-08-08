@@ -108,7 +108,7 @@
     {"path":"tests/conformance/raptorq_differential/src/lib.rs","sha256":"624a1d7557ae672d17cc705af279ad9c287a7c0ff5ff87d8a179a227802ce80b","line_count":305,"role":"standalone differential crate gate"},
     {"path":"tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs","sha256":"a28cd08953d5eb112db6ba43d69ebeb262f74f15f4c36f51753df0cfb8c598ea","line_count":940,"role":"partial public baseline consumer"},
     {"path":"tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml","sha256":"51368bfe60c10a87532cf77155bb18103bd51db5dd26d7cb37be775ead44507a","line_count":29,"role":"partial public baseline consumer manifest"},
-    {"path":"tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock","sha256":"b8f24fd13354a95b42ca0f23dd9f5284f7f58bea740b45c20bce7fcb891eee7f","line_count":2021,"role":"partial public baseline consumer resolution"},
+    {"path":"tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock","sha256":"1c68bb36d8a237eb9009c18d7afc0e1b6eb2383a35a5d59ea563950bd6645c78","line_count":2021,"role":"partial public baseline consumer resolution"},
     {"path":"fuzz/fuzz_targets/grpc_status_trailers.rs","sha256":"1ac9d85db3e214b3f922eb6683bdd84d4faad26b25117bee4cb791319be56de6","line_count":114,"role":"literal census"},
     {"path":"fuzz/fuzz_targets/nats_creds_jwt.rs","sha256":"e34d434909a63d93f6b131ffcc74e493898f54e6be81c6fc85c635fccc535786","line_count":567,"role":"literal census"},
     {"path":"fuzz/fuzz_targets/postgres_scram.rs","sha256":"8e8a9860bc59d3dd31d30de51e79f84606523b7481845757a75f36bbfa255b5c","line_count":683,"role":"literal census"},
