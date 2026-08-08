@@ -74,8 +74,9 @@ break to the retained foreign impls.
 At base revision `9f3684b48af00f93a6717af8575bbb4c984d5873`, bead
 `asupersync-d24mms.6.2` adds alongside-incumbent owned Stream implementations
 for `AtpWriter` and `AtpReader`. The public compile and documentation contracts
-now have terminal RCH receipts, while ATP runtime behavior and the user trial
-remain open.
+now have terminal RCH receipts. Two inline ATP behavior tests also have a
+terminal receipt, while the constructed ATP runtime E2E and user trial remain
+open.
 
 The incumbent and owned trait implementations all delegate to one private
 `poll_progress` kernel. One queued `TransferProgress` becomes `Ready(Some(_))`;
@@ -88,8 +89,12 @@ authorized.
 
 Public-contract assertions for both ATP types under
 `asupersync::stream::Stream<Item = TransferProgress>` compiled in the standalone
-downstream fixture. Focused inline ATP wake and cancellation tests are authored
-but still lack a terminal execution receipt.
+downstream fixture. The focused inline ATP wake and cancellation lane passed two
+tests on remote worker `ovh-a`: latest-waker replacement and sender wake
+delivery complete without synthetic self-wake, and creation-context
+cancellation terminates the owned reader stream while clearing a stale wake.
+That unit receipt does not construct a live ATP transfer and therefore is not
+the separately required runtime E2E.
 
 At follow-on base revision `aa23f536a5c22d3c16ecd592f9c3b743d3e78fc2`,
 the standalone downstream fixture also names both ATP types, asserts the owned
@@ -151,18 +156,21 @@ executed its error short-circuiting and completion observations.
 | Compile-fail rustdoc | Implemented | Focused rustdoc passed |
 | Pin/drop/bounds | Implemented | Downstream fixture passed |
 | Error adapter | Implemented | Downstream fixture passed |
-| ATP runtime E2E | Focused tests authored, not executed | Runtime E2E missing |
+| ATP runtime E2E | Two focused inline behavior tests executed | Constructed runtime E2E missing |
 | User trial | Missing | SAME-or-BETTER receipt |
 | Cutover | Blocked | Every receipt above |
 
-The terminal receipts are scoped: the standalone fixture passed 15 tests and the
-Stream rustdoc lane passed two positive examples plus one compile-fail example.
-The focused ATP inline lane reached the final workspace crate on `ovh-a` but
-emitted no test output before bounded stuck-link cancellation; build
-`29967068015099936` exited 130 with cleanup complete and proves neither compile
-success nor behavior.
+The terminal receipts are scoped: the standalone fixture passed 15 tests, the
+Stream rustdoc lane passed two positive examples plus one compile-fail example,
+and clean-overlay build `29967068015099952` passed both focused inline ATP
+behavior tests on `ovh-a` in 896,042 ms. An earlier focused attempt reached the
+final workspace crate but emitted no test output before bounded stuck-link
+cancellation; build `29967068015099936` exited 130 with cleanup complete and
+remains recorded as non-evidence. Neither receipt proves a constructed ATP
+runtime E2E, Drop cleanup under a real transfer, region quiescence, or the
+SAME-or-BETTER user trial.
 This matrix remains fail-closed, does not authorize closing A2, and does not
-convert the unexecuted ATP behavior tests into runtime evidence.
+convert focused unit behavior into runtime E2E evidence.
 
 ### Post-baseline current snapshot
 

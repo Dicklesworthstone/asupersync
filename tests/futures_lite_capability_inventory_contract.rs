@@ -832,7 +832,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         ),
         (
             "FUT-A2-ATP-RUNTIME-E2E",
-            "SOURCE_AUTHORED_TESTS_NOT_EXECUTED",
+            "INLINE_BEHAVIOR_TESTS_EXECUTED",
             "MISSING_RUNTIME_E2E",
         ),
         (
@@ -863,8 +863,8 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         return Err("A2 terminal receipt set must remain complete".to_owned());
     }
     let validated_receipts = array(a2_status, "validated_terminal_receipts");
-    if validated_receipts.len() != 2 {
-        return Err("A2 must retain the exact two terminal contract receipts".to_owned());
+    if validated_receipts.len() != 3 {
+        return Err("A2 must retain the exact three terminal contract receipts".to_owned());
     }
     let downstream_receipt = find_row(
         validated_receipts,
@@ -906,6 +906,25 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             != Some(1)
     {
         return Err("A2 rustdoc receipt drift".to_owned());
+    }
+    let atp_unit_receipt = find_row(
+        validated_receipts,
+        "receipt_id",
+        "FUT-A2-ATP-OWNED-UNIT-20260808",
+    );
+    if text(atp_unit_receipt, "base_revision") != "3f130dbdaca0bc9ae0d25d6d227ab0c228c765b4"
+        || text(atp_unit_receipt, "clean_overlay_fingerprint_prefix") != "fe0d"
+        || atp_unit_receipt.get("build_id").and_then(Value::as_u64) != Some(29967068015099952)
+        || text(atp_unit_receipt, "worker") != "ovh-a"
+        || !text(atp_unit_receipt, "command").contains("net::atp::sdk::stream::tests::owned_")
+        || text(atp_unit_receipt, "result") != "PASS"
+        || atp_unit_receipt.get("duration_ms").and_then(Value::as_u64) != Some(896042)
+        || atp_unit_receipt.get("exit_code").and_then(Value::as_u64) != Some(0)
+        || atp_unit_receipt.get("tests_passed").and_then(Value::as_u64) != Some(2)
+        || atp_unit_receipt.get("tests_failed").and_then(Value::as_u64) != Some(0)
+        || !text(atp_unit_receipt, "scope").contains("latest-waker registration")
+    {
+        return Err("A2 ATP unit receipt drift".to_owned());
     }
     let blocked_receipts = array(a2_status, "blocked_execution_receipts");
     if blocked_receipts.len() != 1 {

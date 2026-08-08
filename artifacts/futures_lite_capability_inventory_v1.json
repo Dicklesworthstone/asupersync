@@ -114,7 +114,7 @@
       },
       {
         "requirement_id": "FUT-A2-ATP-RUNTIME-E2E",
-        "source_status": "SOURCE_AUTHORED_TESTS_NOT_EXECUTED",
+        "source_status": "INLINE_BEHAVIOR_TESTS_EXECUTED",
         "terminal_status": "MISSING_RUNTIME_E2E"
       },
       {
@@ -155,6 +155,20 @@
         "positive_examples_passed": 2,
         "compile_fail_examples_passed": 1,
         "scope": "owned Stream documentation and direct-next !Unpin compile-fail contract"
+      },
+      {
+        "receipt_id": "FUT-A2-ATP-OWNED-UNIT-20260808",
+        "base_revision": "3f130dbdaca0bc9ae0d25d6d227ab0c228c765b4",
+        "clean_overlay_fingerprint_prefix": "fe0d",
+        "build_id": 29967068015099952,
+        "worker": "ovh-a",
+        "command": "cargo test -p asupersync --locked --lib net::atp::sdk::stream::tests::owned_ -- --nocapture",
+        "result": "PASS",
+        "duration_ms": 896042,
+        "exit_code": 0,
+        "tests_passed": 2,
+        "tests_failed": 0,
+        "scope": "inline owned ATP Stream latest-waker registration, no-self-wake Pending behavior, sender wake delivery, and creation-context cancellation termination"
       }
     ],
     "blocked_execution_receipts": [
