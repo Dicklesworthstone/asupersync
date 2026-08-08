@@ -194,14 +194,15 @@ fn ac3_determinism_end_to_end() {
     );
 }
 
-/// Soundness — Lamport clocks over-approximate but never miss the true fault.
+/// Soundness — scalar Lamport order does not fabricate causality.
 ///
-/// Re-running the same delivery shape with a total-order Lamport clock pulls more
-/// events into each cone, so LDFI emits *more* (sound, refutable) hypotheses; the
-/// true breaking fault `{send}` is still present. Under-approximation — dropping
-/// `{send}` — would be the unsafe failure the contract forbids.
+/// Re-running the delivery shape with only scalar Lamport timestamps cannot
+/// prove the cross-task send-to-ack edges: a smaller Lamport counter is necessary
+/// for causality, but is not sufficient. The adapter therefore produces no fault
+/// hypothesis from those timestamps alone, while the vector-clock trace retains
+/// the true `{send}` fault through its explicit happens-before relation.
 #[test]
-fn soundness_lamport_overapproximates_but_keeps_true_fault() {
+fn soundness_lamport_does_not_fabricate_happens_before() {
     let clock = LamportClock::new();
     let send = LogicalTime::Lamport(clock.tick());
     let ack_a = LogicalTime::Lamport(clock.tick());
@@ -225,10 +226,9 @@ fn soundness_lamport_overapproximates_but_keeps_true_fault() {
     )
     .minimal_hitting_sets(HittingSetBudget::default());
 
-    // The true fault is never under-approximated away.
-    assert!(lamport.hypotheses.contains(&set(&[1])));
-    // The total order is a strictly looser relation -> at least as many hypotheses.
-    assert!(lamport.hypotheses.len() >= vector.hypotheses.len());
+    assert!(lamport.hypotheses.is_empty());
+    assert!(lamport.unbreakable);
+    assert!(vector.hypotheses.contains(&set(&[1])));
 }
 
 /// Extraction rules — the structural sources assemble the cone without any

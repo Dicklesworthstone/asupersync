@@ -1,0 +1,15 @@
+{
+  "default_stun_port": 3478,
+  "default_turn_port": 3478,
+  "fingerprint_enabled": true,
+  "ice_version": "RFC 8445",
+  "magic_cookie": "0x2112A442",
+  "software_attribute": "asupersync-stun-0.3.2",
+  "stun_version": "RFC 5389",
+  "supported_candidate_types": [
+    "host",
+    "srflx",
+    "prflx",
+    "relay"
+  ]
+}
