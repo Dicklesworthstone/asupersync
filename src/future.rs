@@ -324,6 +324,12 @@ where
 /// [`Runtime::current_handle`](crate::runtime::Runtime::current_handle) is
 /// present. Returns [`BlockOnError::UnsupportedPlatform`] on targets without
 /// native host-thread parking.
+///
+/// Arbitrary foreign executors cannot be identified through Asupersync's
+/// runtime handle. Such callers are admitted, but may only use this
+/// crate-private helper for a self-contained future whose progress does not
+/// depend on the paused outer executor. Migration owners must keep that
+/// precondition explicit at each call site.
 pub(crate) fn try_block_on<F>(future: F) -> Result<F::Output, BlockOnError>
 where
     F: Future,
@@ -940,6 +946,46 @@ mod tests {
     }
 
     #[test]
+    fn notification_state_model_exhausts_spurious_and_coalesced_wakes() {
+        for spurious_returns in 0..=4 {
+            for coalesced_wakes in 1..=4 {
+                let ready = Cell::new(false);
+                let polls = Cell::new(0_usize);
+                let park_calls = Cell::new(0_usize);
+
+                let output = block_on_with_park(
+                    poll_fn(|_| {
+                        polls.set(polls.get() + 1);
+                        if ready.get() {
+                            Poll::Ready(13_u8)
+                        } else {
+                            Poll::Pending
+                        }
+                    }),
+                    |notification| {
+                        let current = park_calls.get();
+                        park_calls.set(current + 1);
+                        if current == spurious_returns {
+                            ready.set(true);
+                            for _ in 0..coalesced_wakes {
+                                notification.record_notification();
+                            }
+                        }
+                    },
+                );
+
+                assert_eq!(output, 13);
+                assert_eq!(polls.get(), 2, "spurious returns must not repoll");
+                assert_eq!(
+                    park_calls.get(),
+                    spurious_returns + 1,
+                    "the model must park until its first recorded wake"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn repeated_polls_receive_the_same_waker_identity() {
         let first_waker = RefCell::new(None::<Waker>);
         let polls = Cell::new(0_usize);
@@ -1070,6 +1116,59 @@ mod tests {
 
         assert_eq!(result, Err(BlockOnError::RuntimeContext));
         assert_eq!(polls.get(), 0);
+    }
+
+    #[test]
+    fn scheduler_worker_context_is_refused_before_poll() {
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .build()
+            .expect("runtime build");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let task_polls = Arc::clone(&polls);
+        let task = runtime.handle().spawn(async move {
+            try_block_on(poll_fn(|_| {
+                task_polls.fetch_add(1, Ordering::Relaxed);
+                Poll::Ready(41_u8)
+            }))
+        });
+
+        assert_eq!(runtime.block_on(task), Err(BlockOnError::RuntimeContext));
+        assert_eq!(polls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn foreign_executor_admits_self_contained_nested_future() {
+        let wake_state = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&wake_state));
+        let mut context = Context::from_waker(&waker);
+        let polls = Cell::new(0_usize);
+        let mut outer = std::pin::pin!(async {
+            try_block_on(poll_fn(|context| {
+                let current = polls.get();
+                polls.set(current + 1);
+                if current == 0 {
+                    context.waker().wake_by_ref();
+                    Poll::Pending
+                } else {
+                    Poll::Ready(43_u8)
+                }
+            }))
+        });
+
+        assert_eq!(outer.as_mut().poll(&mut context), Poll::Ready(Ok(43)));
+        assert_eq!(polls.get(), 2);
+        assert_eq!(wake_state.wakes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn owned_kernel_leaves_lab_runtime_quiescent() {
+        let mut lab = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(0xF07A_0003));
+        assert!(lab.is_quiescent());
+
+        assert_eq!(block_on(async { 47_u8 }), 47);
+        assert_eq!(lab.run_until_quiescent(), 0);
+        assert!(lab.is_quiescent());
     }
 
     #[test]

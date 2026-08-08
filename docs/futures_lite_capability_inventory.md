@@ -224,12 +224,13 @@ runtime and lab helpers, blocking-pool tests, benchmarks, examples, and the
 Tokio compatibility member. A replacement must explicitly test all of those
 contexts. “Works in a normal unit test” is not parity.
 
-### FUT A3 static kernel progress
+### FUT A3 compile-checked kernel progress
 
 At base revision `02b380ee063e7e643105b1a7997360a7021bf32e`, bead
 `asupersync-d24mms.6.3` added an alongside-incumbent owned kernel at the
-crate-private `crate::util::future` module. This is `STATIC_SOURCE_PROGRESS`; its
-executable state is `NOT_RUN_STATIC_ONLY`, and the bead remains open.
+crate-private `crate::util::future` module. The current continuation is
+`COMPILE_CHECKED_TEST_AND_POLICY_EXPANSION`; its executable state is
+`TERMINAL_LIBRARY_CHECK_PASSED_TESTS_NOT_EXECUTED`, and the bead remains open.
 
 The implementation landed in revision
 `050fd0f08e4cf127e348bbf545c1e46cc392f6b5`. The current source receipt pins
@@ -237,6 +238,13 @@ The implementation landed in revision
 `pub(crate) enum BlockOnError` through the line before the inline test module is
 hashed independently. Later FUT A4 helper work in the same source file is
 therefore outside the A3 kernel projection.
+
+The 2026-08-08 continuation makes the context boundary explicit without
+pretending the kernel can identify every executor. Both a thread driving an
+Asupersync runtime and an Asupersync scheduler worker are conservatively
+refused before polling. A foreign executor thread is admitted only for a
+self-contained future whose progress does not depend on that paused outer
+executor; each crate-private migration site must establish that precondition.
 
 The kernel pins its future on the calling stack and uses one `Arc`-owned
 thread-notification state per invocation. The waker records a release-ordered
@@ -263,29 +271,47 @@ The kernel policy is deliberately conservative:
 - cancellation remains explicit future behavior: progress requires the
   cancellation source to wake the future after changing its state.
 
-Inline cases have been authored for ready-without-park, borrowed non-`Send`
-recursion, wake coalescing, deterministic spurious returns, stable waker
-identity, wake-after-pending, explicit cancellation wake, panic propagation,
-refusal before polling in an installed runtime context, and execution on the
-real blocking-pool implementation. None of those cases has been executed in
-this static-only increment.
+Fourteen inline cases have been authored for ready-without-park, borrowed
+non-`Send` recursion, wake coalescing, deterministic spurious returns, a bounded
+notification-state matrix, stable waker identity, wake-after-pending, explicit
+cancellation wake, panic propagation, separate driver and scheduler-worker
+refusals, safe self-contained nesting under a foreign executor, LabRuntime
+quiescence, and execution on the real blocking-pool implementation. None of
+those cases has a terminal execution result in this source-only increment.
 
-The artifact names all ten functions rather than summarizing them as a green
-test result. Three explicit `BLOCKED_GAP` rows keep the remaining acceptance
+A current-source clean-overlay library check did terminate successfully. RCH
+build `29967986903220229` ran `cargo check --locked -p asupersync --lib` on
+`hz2` with warnings denied and returned exit code 0 in 107,797 milliseconds.
+That is implementation compilation evidence only: a library check does not
+compile or execute the `cfg(test)` inline cases.
+
+Two clean-overlay focused attempts against preceding source states reached
+final workspace compilation but were lost across RCH daemon restarts before any
+terminal compiler or test result. Both clients were cancelled with exit code
+130 after `rch status` showed no active build. A third attempt covered the
+current source on RCH build `29967986903220226`; its heartbeat remained fresh,
+but it emitted no progress for 479 seconds and no test output before a graceful
+cancel at the bounded 620-second ceiling returned exit code 143. The artifact
+pins all three attempted source states, records zero executed tests, and carries
+an explicit no-claim for each. None is terminal compile or behavior evidence,
+and no unbounded or automatic retry was started.
+
+The artifact names all fourteen functions rather than summarizing them as a
+green test result. Three explicit A3 gap rows keep the remaining acceptance
 work visible:
 
-- `FUT-A3-GAP-13`: no focused execution, loom or equivalent state-model
-  receipt, or LabRuntime/DPOR cancellation and quiescence evidence;
-- `FUT-A3-GAP-14`: the installed-handle check conflates the runtime driver and
-  scheduler worker, while arbitrary foreign executors remain unidentified;
+- `FUT-A3-GAP-13`: the state-model and LabRuntime quiescence cases are authored,
+  but no focused execution or broader DPOR cancellation receipt exists;
+- `FUT-A3-GAP-14`: the driver, worker, and foreign-executor policies are now
+  explicit and source-tested, but terminal execution is pending;
 - `FUT-A3-GAP-15`: no incumbent comparison for idle CPU or completion latency.
 
 This is not parity and is not a migration authorization. In particular, the
-kernel cannot distinguish an Asupersync scheduler worker from the external
-thread driving a runtime, cannot identify arbitrary foreign executors, has no
-loom/lab receipt, and carries no idle-CPU or latency measurement. The three
-production blocking sites and every test call remain on the incumbent. The
-dependency, manifests, capability registry, source-pinned A1 artifact, and
+kernel deliberately refuses both kinds of Asupersync runtime context and cannot
+automatically identify arbitrary foreign executors. It has no terminal
+state-model/lab receipt and carries no idle-CPU or latency measurement. The
+three production blocking sites and every test call remain on the incumbent.
+The dependency, manifests, capability registry, source-pinned A1 artifact, and
 cutover state remain unchanged at `KEEP_UNTIL_PARITY` /
 `BLOCKED_PENDING_EVIDENCE`.
 

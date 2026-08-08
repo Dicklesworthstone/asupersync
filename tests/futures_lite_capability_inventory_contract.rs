@@ -126,22 +126,22 @@ fn validate_a3_receipt(inventory: &Value) -> Result<(), String> {
     if text(receipt, "owner_bead") != A3_BEAD_ID
         || text(receipt, "base_revision") != "02b380ee063e7e643105b1a7997360a7021bf32e"
         || text(receipt, "implementation_revision") != "050fd0f08e4cf127e348bbf545c1e46cc392f6b5"
-        || text(receipt, "source_status") != "STATIC_SOURCE_PROGRESS"
-        || text(receipt, "execution_status") != "NOT_RUN_STATIC_ONLY"
+        || text(receipt, "source_status") != "COMPILE_CHECKED_TEST_AND_POLICY_EXPANSION"
+        || text(receipt, "execution_status") != "TERMINAL_LIBRARY_CHECK_PASSED_TESTS_NOT_EXECUTED"
         || text(receipt, "module") != "crate::util::future"
         || text(receipt, "visibility") != "crate-private alongside-incumbent"
         || receipt.get("cutover_authorized") != Some(&Value::Bool(false))
         || receipt.get("closure_allowed") != Some(&Value::Bool(false))
     {
-        return Err("A3 receipt must remain static-only and fail closed".to_owned());
+        return Err("A3 receipt must remain compile-only and fail closed".to_owned());
     }
 
     let expected_source_pins = BTreeMap::from([
         (
             "src/future.rs",
             (
-                "86a23894ae5f37d0541e12074ab8eecb0b3331bc4ae0e7627fd61b4926254b50",
-                1088_u64,
+                "ec3463e516e26c40a5f690277ba1782e114fea93ea0e430abcd381426aa01779",
+                1187_u64,
             ),
         ),
         (
@@ -196,18 +196,22 @@ fn validate_a3_receipt(inventory: &Value) -> Result<(), String> {
         "borrowed_non_send_future_and_recursive_call_are_admitted",
         "wakes_during_poll_are_coalesced_without_parking",
         "spurious_park_return_does_not_trigger_an_unnotified_poll",
+        "notification_state_model_exhausts_spurious_and_coalesced_wakes",
         "repeated_polls_receive_the_same_waker_identity",
         "wake_after_pending_makes_progress",
         "explicit_cancellation_wake_makes_progress",
         "future_panic_propagates_without_poisoning_kernel_state",
         "installed_runtime_context_is_refused_before_poll",
+        "scheduler_worker_context_is_refused_before_poll",
+        "foreign_executor_admits_self_contained_nested_future",
+        "owned_kernel_leaves_lab_runtime_quiescent",
         "blocking_pool_thread_is_admitted",
     ]
     .into_iter()
     .map(str::to_owned)
     .collect();
     if string_set(receipt, "authored_inline_tests") != expected_tests {
-        return Err("A3 receipt must list the exact ten authored source cases".to_owned());
+        return Err("A3 receipt must list the exact fourteen authored source cases".to_owned());
     }
     let future_source = read_repo_file("src/future.rs");
     for test_name in expected_tests {
@@ -220,22 +224,85 @@ fn validate_a3_receipt(inventory: &Value) -> Result<(), String> {
     if contexts.len() != 7
         || !contexts.iter().any(|row| {
             text(row, "context") == "Asupersync runtime driver versus scheduler worker"
-                && text(row, "decision") == "UNRESOLVED_CONFLATED_BY_CURRENT_HANDLE_CHECK"
-                && text(row, "evidence") == "BLOCKED_GAP"
+                && text(row, "decision") == "REFUSE_BOTH_CONSERVATIVELY"
+                && text(row, "evidence") == "SOURCE_AUTHORED_NOT_EXECUTED"
         })
         || !contexts.iter().any(|row| {
             text(row, "context") == "foreign executor thread"
-                && text(row, "decision") == "UNRESOLVED_NOT_IDENTIFIABLE"
-                && text(row, "evidence") == "BLOCKED_GAP"
+                && text(row, "decision") == "ADMIT_SELF_CONTAINED_FUTURE_ONLY"
+                && text(row, "evidence") == "SOURCE_AUTHORED_NOT_EXECUTED"
         })
     {
         return Err("A3 context policy must preserve both unresolved boundaries".to_owned());
     }
     if array(receipt, "semantic_guarantees").len() != 9
         || array(receipt, "incumbent_production_sites").len() != 3
-        || array(receipt, "missing_terminal_evidence").len() != 7
+        || array(receipt, "missing_terminal_evidence").len() != 5
+        || array(receipt, "blocked_execution_receipts").len() != 3
     {
         return Err("A3 semantics, incumbent sites, or evidence gaps are incomplete".to_owned());
+    }
+
+    let compile = object(receipt, "terminal_compile_receipt");
+    if object_text(compile, "receipt_id") != "FUT-A3-OWNED-BLOCK-ON-CHECK-20260808"
+        || compile.get("build_id").and_then(Value::as_u64) != Some(29_967_986_903_220_229)
+        || object_text(compile, "worker") != "hz2"
+        || object_text(compile, "clean_overlay_base_revision")
+            != "96d59b686ecef0b50d3ffec01f0f89041cf531aa"
+        || object_text(compile, "overlay_fingerprint")
+            != "24ef86505fe606017c66d22bed85f82b645d57a5401b4bb0e125b640a6c2461c"
+        || object_text(compile, "source_sha256")
+            != "ec3463e516e26c40a5f690277ba1782e114fea93ea0e430abcd381426aa01779"
+        || object_text(compile, "command") != "cargo check --locked -p asupersync --lib"
+        || object_text(compile, "rustflags") != "-D warnings -C debuginfo=0"
+        || compile.get("duration_ms").and_then(Value::as_u64) != Some(107_797)
+        || compile.get("exit_code").and_then(Value::as_i64) != Some(0)
+        || !object_text(compile, "evidence_scope").contains("not compiled or executed")
+    {
+        return Err("A3 terminal receipt must remain scoped to library compilation".to_owned());
+    }
+
+    for attempt in array(receipt, "blocked_execution_receipts") {
+        if attempt.get("tests_executed").and_then(Value::as_u64) != Some(0)
+            || attempt.get("cleanup_ok") != Some(&Value::Bool(true))
+            || !text(attempt, "no_claim")
+                .to_ascii_lowercase()
+                .contains("terminal compiler or test result")
+        {
+            return Err("A3 blocked execution receipt must remain an explicit no-claim".to_owned());
+        }
+    }
+    let attempts = array(receipt, "blocked_execution_receipts");
+    if !attempts.iter().any(|attempt| {
+        text(attempt, "receipt_id") == "FUT-A3-OWNED-BLOCK-ON-UNIT-20260808-A"
+            && attempt.get("build_id") == Some(&Value::Null)
+            && attempt.get("exit_code").and_then(Value::as_i64) == Some(130)
+            && text(attempt, "terminal_state") == "CANCELLED_AFTER_DAEMON_LOST_JOB"
+            && text(attempt, "source_sha256")
+                == "86a23894ae5f37d0541e12074ab8eecb0b3331bc4ae0e7627fd61b4926254b50"
+    }) || !attempts.iter().any(|attempt| {
+        text(attempt, "receipt_id") == "FUT-A3-OWNED-BLOCK-ON-UNIT-20260808-B"
+            && attempt.get("build_id").and_then(Value::as_u64) == Some(29_967_977_726_083_073)
+            && attempt.get("exit_code").and_then(Value::as_i64) == Some(130)
+            && text(attempt, "terminal_state") == "CANCELLED_AFTER_DAEMON_LOST_JOB"
+            && text(attempt, "source_sha256")
+                == "323eef3753247c3a659d662e2403d1917729acd3b89685c0df9db1d4fd1ef569"
+    }) || !attempts.iter().any(|attempt| {
+        text(attempt, "receipt_id") == "FUT-A3-OWNED-BLOCK-ON-UNIT-20260808-C"
+            && attempt.get("build_id").and_then(Value::as_u64) == Some(29_967_986_903_220_226)
+            && attempt.get("exit_code").and_then(Value::as_i64) == Some(143)
+            && text(attempt, "terminal_state") == "CANCELLED_AFTER_BOUNDED_NO_PROGRESS_WINDOW"
+            && attempt.get("build_age_seconds").and_then(Value::as_u64) == Some(620)
+            && attempt
+                .get("progress_silence_seconds")
+                .and_then(Value::as_u64)
+                == Some(479)
+            && text(attempt, "source_sha256")
+                == "ec3463e516e26c40a5f690277ba1782e114fea93ea0e430abcd381426aa01779"
+    }) {
+        return Err(
+            "A3 blocked execution receipts must pin all three attempted source states".to_owned(),
+        );
     }
 
     Ok(())
@@ -271,15 +338,15 @@ fn validate_a4_receipt(inventory: &Value) -> Result<(), String> {
     let source_pin = object(receipt, "current_source_pin");
     if source_pin.get("path").and_then(Value::as_str) != Some("src/future.rs")
         || source_pin.get("sha256").and_then(Value::as_str)
-            != Some("86a23894ae5f37d0541e12074ab8eecb0b3331bc4ae0e7627fd61b4926254b50")
-        || source_pin.get("line_count").and_then(Value::as_u64) != Some(1088)
+            != Some("ec3463e516e26c40a5f690277ba1782e114fea93ea0e430abcd381426aa01779")
+        || source_pin.get("line_count").and_then(Value::as_u64) != Some(1187)
     {
         return Err("A4 current source pin drift".to_owned());
     }
     let source_bytes = read_repo_bytes("src/future.rs");
     if hex_bytes(&Sha256::digest(&source_bytes))
-        != "86a23894ae5f37d0541e12074ab8eecb0b3331bc4ae0e7627fd61b4926254b50"
-        || read_repo_file("src/future.rs").lines().count() != 1088
+        != "ec3463e516e26c40a5f690277ba1782e114fea93ea0e430abcd381426aa01779"
+        || read_repo_file("src/future.rs").lines().count() != 1187
     {
         return Err("A4 current source no longer matches its receipt".to_owned());
     }
@@ -383,8 +450,8 @@ fn validate_a5_receipt(inventory: &Value) -> Result<(), String> {
         (
             "src/future.rs",
             (
-                "86a23894ae5f37d0541e12074ab8eecb0b3331bc4ae0e7627fd61b4926254b50",
-                1088_u64,
+                "ec3463e516e26c40a5f690277ba1782e114fea93ea0e430abcd381426aa01779",
+                1187_u64,
             ),
         ),
         (
@@ -1362,9 +1429,9 @@ fn identity_authority_zero_unknown_and_docs_are_fail_closed() {
         "Post-baseline current snapshot",
         "315",
         "1,382",
-        "FUT A3 static kernel progress",
-        "STATIC_SOURCE_PROGRESS",
-        "NOT_RUN_STATIC_ONLY",
+        "FUT A3 compile-checked kernel progress",
+        "COMPILE_CHECKED_TEST_AND_POLICY_EXPANSION",
+        "TERMINAL_LIBRARY_CHECK_PASSED_TESTS_NOT_EXECUTED",
         "FUT-A3-GAP-13",
         "FUT-A3-GAP-14",
         "FUT-A3-GAP-15",
@@ -2037,7 +2104,7 @@ fn malformed_inventory_mutations_fail_closed() {
 
     let mut a3_promoted = canonical.clone();
     a3_promoted["a3_block_on_receipt"]["execution_status"] =
-        Value::String("EXECUTED_CONTRACT".to_owned());
+        Value::String("FOCUSED_UNIT_TESTS_PASSED".to_owned());
     assert!(validate_inventory(&a3_promoted).is_err());
 
     let mut a3_cutover = canonical.clone();
