@@ -4394,7 +4394,7 @@ where
                     }
                     Err(payload) => {
                         let message = crate::cx::scope::payload_to_string(&payload);
-                        std::mem::forget(payload);
+                        drop(payload);
                         let panic_payload = crate::types::outcome::PanicPayload::new(message);
                         if let Some(tx) = factory_tx
                             .lock()
@@ -4527,7 +4527,7 @@ where
                     }
                     Err(payload) => {
                         let message = crate::cx::scope::payload_to_string(&payload);
-                        std::mem::forget(payload);
+                        drop(payload);
                         let panic_payload = crate::types::outcome::PanicPayload::new(message);
                         if let Some(tx) = factory_tx
                             .lock()

@@ -453,7 +453,7 @@ pub trait StreamExt: Stream {
     ///     iter(jobs).map(run).try_buffered(4).try_collect().await
     /// }
     /// # struct Job; struct Out; struct Error;
-    /// # async fn run(_j: Job) -> Result<Out, Error> { unimplemented!() }
+    /// # async fn run(_j: Job) -> Result<Out, Error> { std::future::pending().await }
     /// ```
     fn try_buffered(self, n: usize) -> TryBuffered<Self>
     where

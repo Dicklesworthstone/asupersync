@@ -698,7 +698,7 @@ impl MetricCalibration {
 /// let mut cal = HealthThresholdCalibrator::new(config);
 ///
 /// // Calibrate with normal observations
-/// for depth in [3.0, 5.0, 4.0, 6.0, 3.0, 5.0, 4.0] {
+/// for depth in (1..=20).map(f64::from) {
 ///     cal.calibrate("queue_depth", depth);
 /// }
 ///
