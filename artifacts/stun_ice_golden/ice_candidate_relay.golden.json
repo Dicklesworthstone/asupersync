@@ -1,0 +1,9 @@
+{
+  "foundation": "3",
+  "component": 1,
+  "protocol": "udp",
+  "priority": 16777215,
+  "address": "203.0.113.80:49200",
+  "candidate_type": "Relay",
+  "related_address": "203.0.113.45:54401"
+}

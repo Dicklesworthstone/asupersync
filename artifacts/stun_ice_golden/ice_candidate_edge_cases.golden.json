@@ -1,0 +1,9 @@
+{
+  "foundation": "",
+  "component": 65535,
+  "protocol": "tcp",
+  "priority": 0,
+  "address": "0.0.0.0:0",
+  "candidate_type": "PeerReflexive",
+  "related_address": "255.255.255.255:65535"
+}
