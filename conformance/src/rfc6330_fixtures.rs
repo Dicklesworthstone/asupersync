@@ -186,8 +186,14 @@ pub struct SystematicIndexEntry {
     pub w: u32,
 }
 
+/// Reads the IN-PACKAGE copy, not `src/raptorq/`'s original one directory up
+/// and over. See the note on `SOURCE_CONFORMANCE_REGISTRY_CONTRACT`: an
+/// `include!` that escapes the package directory is absent from the published
+/// tarball and breaks every registry consumer (frankenlibc bd-kcmnj4).
+/// `packaged_index_table_matches_workspace_canonical` below pins the two copies
+/// byte-identical.
 const SYSTEMATIC_INDEX_ROWS: &[(u32, u16, u16, u8, u32)] =
-    &include!("../../src/raptorq/rfc6330_systematic_index_table.inc");
+    &include!("rfc6330_systematic_index_table.inc");
 
 /// RFC 6330 Table 2 reference data.
 pub static RFC6330_SYSTEMATIC_INDEX_TABLE: LazyLock<Vec<SystematicIndexEntry>> =
@@ -441,6 +447,41 @@ pub fn validate_lookup_table(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The in-package copy of RFC 6330 Table 2 is what ships in the `.crate`
+    /// tarball; `src/raptorq/`'s copy is what the root crate compiles against.
+    /// A silent divergence would give registry consumers a different table than
+    /// the runtime uses. Guards the repair made for frankenlibc bd-kcmnj4.
+    #[test]
+    fn packaged_index_table_matches_workspace_canonical() {
+        // The table must be real in every build, tarball included, so the
+        // tarball arm below is still an assertion rather than a bare return.
+        assert_eq!(
+            SYSTEMATIC_INDEX_ROWS.len(),
+            477,
+            "RFC 6330 Table 2 must carry all 477 rows"
+        );
+
+        let Some(canonical) =
+            crate::reference_registry::workspace_canonical("src/raptorq/rfc6330_systematic_index_table.inc")
+        else {
+            return;
+        };
+        let canonical_text = std::fs::read_to_string(&canonical).unwrap_or_else(|err| {
+            panic!(
+                "canonical {} must exist in a source checkout: {err}",
+                canonical.display()
+            )
+        });
+        let packaged_text = include_str!("rfc6330_systematic_index_table.inc");
+        assert_eq!(
+            canonical_text,
+            packaged_text,
+            "conformance/src/rfc6330_systematic_index_table.inc has drifted from {}. \
+             The in-package copy is the one that ships.",
+            canonical.display()
+        );
+    }
 
     #[test]
     fn test_systematic_index_lookup() {

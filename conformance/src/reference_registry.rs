@@ -8,8 +8,20 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 /// The root conformance registry contract embedded in the conformance crate.
+///
+/// This reads the IN-PACKAGE copy at `conformance/artifacts/`, not the
+/// workspace-root original. `include_str!` is resolved at compile time against
+/// files that must be present in the published `.crate` tarball, and
+/// `cargo package` ships only the package directory — a path escaping upward
+/// with `../../` builds fine from a git checkout and then fails for every
+/// consumer who installs from the registry. That is exactly how 0.3.4 and 0.4.0
+/// both shipped unbuildable (frankenlibc bd-kcmnj4).
+///
+/// `packaged_contract_matches_workspace_canonical` below keeps this copy
+/// byte-identical to `artifacts/conformance_registry_contract_v1.json`, which
+/// remains the canonical source the workspace tests and README point at.
 pub const SOURCE_CONFORMANCE_REGISTRY_CONTRACT: &str =
-    include_str!("../../artifacts/conformance_registry_contract_v1.json");
+    include_str!("../artifacts/conformance_registry_contract_v1.json");
 
 /// Runtime verdicts a conformance harness can report through the registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
@@ -345,9 +357,86 @@ fn push_failure(
     });
 }
 
+/// Resolves a workspace-root path for a file this crate also ships a copy of.
+///
+/// Returns `None` when the crate is being built from a published `.crate`
+/// tarball, where the workspace does not exist by construction: a tarball
+/// unpacks to `<registry>/asupersync-conformance-X.Y.Z/`, whose parent holds
+/// unrelated crate sources rather than this workspace.
+#[cfg(test)]
+pub(crate) fn workspace_canonical(relative: &str) -> Option<std::path::PathBuf> {
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent()?;
+    if !workspace_root.join("Cargo.toml").is_file() || !workspace_root.join(".git").exists() {
+        return None;
+    }
+    Some(workspace_root.join(relative))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The in-package copy is what actually ships, so it must not drift from
+    /// the workspace-root original that the README and the workspace tests
+    /// treat as canonical. Guards the repair made for frankenlibc bd-kcmnj4.
+    #[test]
+    fn packaged_contract_matches_workspace_canonical() {
+        let Some(canonical) = workspace_canonical("artifacts/conformance_registry_contract_v1.json")
+        else {
+            // Built from the published tarball. Still assert the embedded copy
+            // is real, so this never degenerates into a silent pass.
+            assert!(
+                SOURCE_CONFORMANCE_REGISTRY_CONTRACT.contains("\"reference_surfaces\""),
+                "packaged crate must embed a non-trivial contract"
+            );
+            return;
+        };
+        let canonical_text = std::fs::read_to_string(&canonical).unwrap_or_else(|err| {
+            panic!(
+                "canonical {} must exist in a source checkout: {err}",
+                canonical.display()
+            )
+        });
+        assert_eq!(
+            canonical_text,
+            SOURCE_CONFORMANCE_REGISTRY_CONTRACT,
+            "conformance/artifacts/conformance_registry_contract_v1.json has drifted from {}. \
+             The in-package copy is the one that ships, so drift here means published crates \
+             embed stale contract data while the workspace tests still pass.",
+            canonical.display()
+        );
+    }
+
+    /// The QUIC migration bin compiles the in-package copy of the harness;
+    /// `tests/conformance/` keeps the original that the workspace test tree
+    /// uses. Both must stay identical or the shipped bin tests different
+    /// behaviour than the workspace does.
+    #[test]
+    fn packaged_quic_harness_matches_workspace_canonical() {
+        let packaged = include_str!("quic_connection_migration_rfc9000.rs");
+        assert!(
+            packaged.contains("QuicConnectionMigrationConformanceHarness"),
+            "packaged crate must embed the real QUIC harness"
+        );
+        let Some(canonical) =
+            workspace_canonical("tests/conformance/quic_connection_migration_rfc9000.rs")
+        else {
+            return;
+        };
+        let canonical_text = std::fs::read_to_string(&canonical).unwrap_or_else(|err| {
+            panic!(
+                "canonical {} must exist in a source checkout: {err}",
+                canonical.display()
+            )
+        });
+        assert_eq!(
+            canonical_text,
+            packaged,
+            "conformance/src/quic_connection_migration_rfc9000.rs has drifted from {}. \
+             The in-package copy is the one that ships.",
+            canonical.display()
+        );
+    }
 
     fn inline_contract(reference_status: &str, allowed: &[&str]) -> String {
         let allowed = allowed

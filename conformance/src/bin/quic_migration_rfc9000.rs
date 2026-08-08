@@ -5,7 +5,18 @@
 //! `NativeQuicConnection` where the native QUIC seam exists, and reports explicit
 //! unsupported-boundary evidence where RFC 9000 behavior is not exposed yet.
 
-#[path = "../../../tests/conformance/quic_connection_migration_rfc9000.rs"]
+// Reads the IN-PACKAGE copy at `conformance/src/`. The previous
+// `../../../tests/conformance/...` reached above the package directory, and
+// `cargo package` ships only the package directory, so this bin failed to
+// compile from the published tarball while building fine from a git checkout
+// (frankenlibc bd-kcmnj4 — same defect class as the two include! sites in
+// reference_registry.rs and rfc6330_fixtures.rs).
+//
+// `conformance/src/quic_connection_migration_rfc9000.rs` is not an implicit
+// target: this package sets `autobins = false` and the file is outside
+// `src/bin/`. `packaged_quic_harness_matches_workspace_canonical` in
+// reference_registry.rs pins it byte-identical to the workspace-root original.
+#[path = "../quic_connection_migration_rfc9000.rs"]
 mod quic_connection_migration_rfc9000;
 
 use quic_connection_migration_rfc9000::{QuicConnectionMigrationConformanceHarness, TestVerdict};
