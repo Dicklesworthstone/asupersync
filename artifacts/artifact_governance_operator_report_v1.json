@@ -299,7 +299,7 @@
             "artifacts/hex_capability_inventory_v1.json"
           ],
           "path_alias_edge_count": 6,
-          "content_addressed_node_count": 5,
+      "content_addressed_node_count": 6,
           "content_addressed_edge_count": 6,
           "content_addressed_cycle_count": 0,
           "historical_target_commit": "7390d33f4ac297cd28138c8e1ece38f60b278660",

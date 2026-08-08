@@ -5,27 +5,27 @@
   "entries": [
     {
       "path": "docs/wasm_browser_sbom_v1.json",
-      "sha256": "814c4b07bad962f5993808a43170dae4ec284810f939e4d8952aa57a92018cb2",
+      "sha256": "00fc2eef6f4195dce227eed051e350398d8551ee564256d4b0ec94f69d2230c4",
       "kind": "sbom"
     },
     {
       "path": "docs/wasm_browser_provenance_attestation_v1.json",
-      "sha256": "51418639d5ea12ff9ed7947c654ede3132ddead49a996b937d936c43cce5dd1b",
+      "sha256": "6789277e391d913ef6b48d42438470ba37cbd2add4f2bed58f40338a337c294e",
       "kind": "provenance"
     },
     {
       "path": "packages/browser-core/package.json",
-      "sha256": "d5dcfce1c590ac6022c33fe39c554353580617b65dd735f664f074f7ae4b2e80",
+      "sha256": "9494ef8c66b1805bec66bda46f9f5f4a7cabb6945d98336baf966a22a033611e",
       "kind": "manifest"
     },
     {
       "path": "packages/browser-core/index.js",
-      "sha256": "43541cf9633c5def5e67e820b37b8da32a9130d8c97de5cf9571facb7f27de19",
+      "sha256": "13cac4230f8eeb574d74133379814c8234803e8fa7c8c7b0b7940346a4a591b5",
       "kind": "package-file"
     },
     {
       "path": "packages/browser-core/index.d.ts",
-      "sha256": "49ab350f652c4a0de6877d39162b485b6b52bb3c52e2965d3b48afb489bfe793",
+      "sha256": "45ecd7db8149042ab1b28f51641b93d490d1afc9b76af6d8ceefd8e42a498a19",
       "kind": "package-file"
     },
     {
@@ -65,17 +65,17 @@
     },
     {
       "path": "packages/browser/package.json",
-      "sha256": "d19e3b67521d88eba9485c327a26b92b28c21d009b8878ba982710508aa1885e",
+      "sha256": "8ed85480dc4d103146ac6c747d9f906460a7cd462f9a08e187e07c9ce533ea9d",
       "kind": "manifest"
     },
     {
       "path": "packages/react/package.json",
-      "sha256": "434b63c424fd31f99e2844b77943e8d8f9494c04ef436ae4bf97055efea27da3",
+      "sha256": "6386db8067e6898ab0c4c0a48831baf9d57e683986050a77e4b4182879dbf911",
       "kind": "manifest"
     },
     {
       "path": "packages/next/package.json",
-      "sha256": "da6aa1e36bf58cd8984fbcdd4274407994f64ecaf6ddf418f974663affee7242",
+      "sha256": "c0d0f487ed60ad88d7dcc326d83d924f7198cb856ce125f7a77de875c8bc6143",
       "kind": "manifest"
     }
   ]

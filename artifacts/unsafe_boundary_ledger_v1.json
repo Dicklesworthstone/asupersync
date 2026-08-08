@@ -335,7 +335,7 @@
   },
   "summary": {
     "boundary_rows": 97,
-    "operation_count": 875,
+    "operation_count": 881,
     "operation_kind_counts": {
       "allow_unsafe_code": 100,
       "unsafe_block": 653,
