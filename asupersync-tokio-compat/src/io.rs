@@ -190,15 +190,6 @@ where
         let unfilled = asupersync_buf.unfilled();
         let mut tokio_buf = tokio::io::ReadBuf::new(unfilled);
 
-        // Asupersync's ReadBuf guarantees that `unfilled()` returns a fully initialized slice.
-        // We inform Tokio of this to prevent it from zeroing the buffer unnecessarily.
-        let capacity = tokio_buf.capacity();
-        // Safety: the slice was returned from `unfilled()` which is guaranteed to be initialized
-        // up to its length by Asupersync's `ReadBuf` invariants.
-        unsafe {
-            tokio_buf.assume_init(capacity);
-        }
-
         match self.project().inner.poll_read(cx, &mut tokio_buf) {
             Poll::Ready(Ok(())) => {
                 let n = tokio_buf.filled().len();
@@ -343,8 +334,7 @@ mod tests {
     #[cfg(feature = "tokio-io")]
     mod tokio_io_tests {
         use super::*;
-        use std::sync::Arc;
-        use std::task::{Wake, Waker};
+        use std::task::Waker;
         use tokio::io::AsyncRead as _;
 
         fn noop_waker() -> Waker {

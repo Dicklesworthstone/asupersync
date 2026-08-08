@@ -64,10 +64,11 @@ impl<S, Request> FromTower<S, Request> {
 
     /// Consume the bridge and return the inner tower service.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the internal mutex is poisoned.
-    pub fn into_inner(self) -> S {
+    /// Returns [`asupersync::sync::LockError::Poisoned`] if a panic occurred
+    /// while the internal mutex was locked.
+    pub fn into_inner(self) -> Result<S, asupersync::sync::LockError> {
         self.inner.into_inner()
     }
 }
@@ -291,7 +292,7 @@ mod tests {
     use std::convert::Infallible;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::task::{Wake, Waker};
+    use std::task::Waker;
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
@@ -357,6 +358,12 @@ mod tests {
         let result = block_on(bridge.call(&cx, "hello".to_string()));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "echo: hello");
+    }
+
+    #[test]
+    fn from_tower_unwraps_inner_service() {
+        let bridge: FromTower<EchoService, String> = FromTower::new(EchoService);
+        assert!(bridge.into_inner().is_ok());
     }
 
     #[test]
