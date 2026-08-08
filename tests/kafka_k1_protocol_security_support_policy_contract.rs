@@ -22,8 +22,8 @@ const MANIFEST_PATH: &str = "Cargo.toml";
 const ADR_PATH: &str = "docs/adr/dep_plan_adr_009_kafka_client.md";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
 
-const ARTIFACT_SHA256: &str = "a7cc20d1d6805f238b7aef6dda23410f20845eeb5e1ba522791188e07d75c3d8";
-const DOC_SHA256: &str = "d28f1b08f273a71ecd4ba303e9efc197d5394d3ae0f3a6e2efb7eebe83b8d5df";
+const ARTIFACT_SHA256: &str = "66304e400291e32f2a2bc805084d1991385b88fd1c05b1370888c4559d57ccd9";
+const DOC_SHA256: &str = "c9142b9d00a0b07187a50d224534e9268e5226829dfc5e0bbd04de80bf2a4949";
 
 const ARTIFACT_ID: &str = "kafka-k1-protocol-security-support-policy-v1";
 const PROGRAM_ID: &str = "dependency-sovereignty-rev5";
@@ -1329,7 +1329,7 @@ fn check_source_and_document(root: &Path) -> Result<(), String> {
     for marker in [
         "pub enum KafkaSaslMechanism {\n    /// SCRAM with SHA-256.\n    ScramSha256,\n    /// SCRAM with SHA-512.\n    ScramSha512,\n}",
         "Self::ScramSha256 => \"SCRAM-SHA-256\",\n            Self::ScramSha512 => \"SCRAM-SHA-512\"",
-        "must reject salts shorter than 8 bytes,\n    /// reject iteration counts outside `4096..=65536`, verify server-final proofs",
+        "must reject salts shorter than 8 bytes,\n/// reject iteration counts outside `4096..=65536`, verify server-final proofs",
         "pub enum KafkaSecurityConfig {\n    /// Plaintext transport. Valid only for loopback brokers unless the",
         "Tls(KafkaTlsConfig),\n    /// SASL/SCRAM over TLS. SASL_PLAINTEXT is intentionally not exposed.\n    SaslSsl(KafkaSaslConfig),",
         "KafkaSecurityConfig::SaslSsl(sasl) => {\n            client.set(\"security.protocol\", \"sasl_ssl\");\n            client.set(\"sasl.mechanisms\", sasl.mechanism.as_librdkafka_str());",

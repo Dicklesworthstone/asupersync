@@ -1150,7 +1150,7 @@ fn validate_high_risk_semantics(matrix: &Value) -> Result<(), String> {
     let subscribe = find_row(operations, "semantic_id", "KCO-OP-004");
     let poll = find_row(operations, "semantic_id", "KCO-OP-006");
     let close = find_row(operations, "semantic_id", "KCO-OP-009");
-    if !text(subscribe, "shutdown_rule").contains("re-subscribe")
+    if !text(subscribe, "shutdown_rule").contains("subscribe the already-cleaned backend")
         || !text(poll, "shutdown_rule").contains("return a record after close")
         || !text(poll, "success_outcome").contains("discard it if offset storage")
         || !text(poll, "success_outcome").contains("nonnegative absolute Offset")

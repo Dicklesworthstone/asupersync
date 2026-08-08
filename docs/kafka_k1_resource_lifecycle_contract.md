@@ -93,8 +93,8 @@ implementation owner, independent verification owner, terminal gates, and
 blocking state.
 
 All 43 K0.2 configuration semantics have an explicit machine binding to at
-least one resource row. Sixteen composite resource classes also have 43
-per-unit limit dimensions, so a bytes cap cannot stand in for an entry-count
+least one resource row. Sixteen composite resource classes also have
+43 per-unit limit dimensions, so a bytes cap cannot stand in for an entry-count
 cap and a worker cap cannot stand in for a pending-task cap.
 
 | ID | Resource class | Current numeric state | Primary implementation owner |

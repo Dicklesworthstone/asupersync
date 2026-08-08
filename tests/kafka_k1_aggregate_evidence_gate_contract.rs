@@ -1825,7 +1825,8 @@ fn validate_document_and_no_claims(inputs: &Inputs, artifact: &Value) -> Result<
         MARKER_END,
         "KEEP_INCUMBENT",
         "No compiler, formatter, linter, test process, fuzz harness, benchmark",
-        "K15 remains the sole conditional cutover owner",
+        "K15 remains",
+        "the sole conditional cutover owner",
     ] {
         if !document.contains(required) {
             return Err(format!("document marker/boundary missing: {required}"));

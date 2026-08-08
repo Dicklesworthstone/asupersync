@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 const ARTIFACT_PATH: &str = "artifacts/kafka_k2_reachable_schema_broker_matrix_v1.json";
 const DOC_PATH: &str = "docs/kafka_k2_reachable_schema_broker_matrix.md";
-const ARTIFACT_SHA256: &str = "b74accafa98c7dff7c47e3fc6f53cba3202bd7ce7a01b3db0327f11e0139cb54";
+const ARTIFACT_SHA256: &str = "bd64536a3df3e8f440f6f1acf39103a7b6c41982dee49111cefc69350d6aa5f7";
 const DOC_SHA256: &str = "949f40c1c68009357dc38ea108509d8a51b63e43e7fc7a39feaa2c52cb42785f";
 
 const DOC_BEGIN: &str = "<!-- BEGIN KAFKA K2.1 REACHABLE SCHEMA BROKER MATRIX -->";
@@ -2245,13 +2245,16 @@ fn validate_reachable_rows(artifact: &Value) -> Result<(), String> {
             None => return Err(format!("API key {api_key} flexible threshold changed")),
         }
 
-        let reaches_flexible = flex_first.is_some_and(|first| first <= *client_max);
-        let expected_request_headers: &[u64] = if reaches_flexible { &[1, 2] } else { &[1] };
-        let expected_response_headers: &[u64] = if *api_key == 18 || !reaches_flexible {
-            &[0]
-        } else {
-            &[0, 1]
-        };
+        let (expected_request_headers, expected_response_headers): (&[u64], &[u64]) =
+            match flex_first {
+                Some(first) if *first <= expected_client_min => {
+                    (&[2], if *api_key == 18 { &[0] } else { &[1] })
+                }
+                Some(first) if *first <= *client_max => {
+                    (&[1, 2], if *api_key == 18 { &[0] } else { &[0, 1] })
+                }
+                _ => (&[1], &[0]),
+            };
         if numeric_array(row, "candidate_request_header_versions")?.as_slice()
             != expected_request_headers
         {
@@ -4350,7 +4353,7 @@ fn validate_document(root: &Path) -> Result<(), String> {
         "five producer identifiers or epochs use `-1`",
         "source marks v6 unstable",
         "current API 36 source-only v2 form does not expand",
-        "nullability alone does not make null the generated default",
+        "nullability alone does not make null the\ngenerated default",
         "historical nullable field instead falls back to null",
         "`Type` (and `ArrayOf` for mechanisms)",
         "two-argument `SaslAuthenticateResponse` convenience overload",
@@ -4359,7 +4362,7 @@ fn validate_document(root: &Path) -> Result<(), String> {
         "stale code 57",
         "GetTelemetrySubscriptions",
         "PushTelemetry",
-        "no numeric range is accepted",
+        "no numeric range is\naccepted",
         "K2.2 therefore remains blocked",
         "The packet does not prove full schema or error completeness",
         "defaults outside\nthe 88 API 10, API 18, API 22, and authentication-body rows",

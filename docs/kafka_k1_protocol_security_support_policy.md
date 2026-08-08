@@ -273,8 +273,8 @@ delivery, transactions, group behavior, recovery, performance, release
 readiness, broad workspace health, or absence of defects.
 
 It authorizes no production wiring, migration, cutover, dependency exit,
-feature/API/capability removal, oracle retirement, or file deletion. Any
-missing, extra, duplicate, changed, unowned, unknown, unsupported, or regressed
+feature/API/capability removal, oracle retirement, or file deletion.
+Any missing, extra, duplicate, changed, unowned, unknown, unsupported, or regressed
 cell leaves `KEEP_INCUMBENT` in force.
 
 <!-- END KAFKA K1.2 PROTOCOL SECURITY SUPPORT POLICY -->
