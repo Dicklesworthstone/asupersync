@@ -37,9 +37,9 @@
       "input_id": "K1-2-INPUT-K1-1-ARTIFACT",
       "role": "K1_AUTHORITY_AND_NAMESPACE_PACKET",
       "path": "artifacts/kafka_k1_obligation_index_v1.json",
-      "byte_count": 42551,
+      "byte_count": 42549,
       "record_count": 737,
-      "sha256": "7c8b4b00f18e84abd5ae9cb671a5c5822699eace98bbf82d1d0adb0969f50635"
+      "sha256": "0fdc48a56dbd4899b50c0108aa6fbd4060de5c9db2bc5227de238ee99b59ccd8"
     },
     {
       "input_id": "K1-2-INPUT-K1-1-DOCUMENT",
@@ -47,31 +47,31 @@
       "path": "docs/kafka_k1_client_contract.md",
       "byte_count": 12809,
       "record_count": 291,
-      "sha256": "7d6c2e4e13c0c1204592ff0c654dd1c603c11593dd6e2497d6ddea33ffc9331c"
+      "sha256": "d42f7c0ec6b0c31a32de0cde29982b6de6efabc54413ef3d327d1f71a8a584f0"
     },
     {
       "input_id": "K1-2-INPUT-K1-1-CONTRACT",
       "role": "K1_AUTHORITY_CONTRACT_SOURCE",
       "path": "tests/kafka_k1_client_contract.rs",
-      "byte_count": 96045,
-      "record_count": 2647,
-      "sha256": "e3187237d4bc5d5b57f3fc6e03423368e4726fb3a349f480e18a048c31a96b66"
+      "byte_count": 95396,
+      "record_count": 2585,
+      "sha256": "3c5c5336cce27019bce4d1b19bf6cbb868e6120c9079292ecccf53aaf4802fde"
     },
     {
       "input_id": "K1-2-INPUT-K0-5",
       "role": "K0_AGGREGATE_AUTHORITY",
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
-      "byte_count": 29269,
-      "record_count": 283,
-      "sha256": "010093127dee0aecf9ba63160bb78f525fe34c2e23877855d1f978e0a1fdc24b"
+      "byte_count": 29494,
+      "record_count": 284,
+      "sha256": "e5c3172bb76ff0304c9c1d1a6b9a09afed241c48c32007edcb68d7fbb2957de9"
     },
     {
       "input_id": "K1-2-INPUT-K0-4",
       "role": "BROKER_VERSION_FIXTURE_AND_SECURITY_AUTHORITY",
       "path": "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
-      "byte_count": 119245,
+      "byte_count": 119250,
       "record_count": 2187,
-      "sha256": "03406fe1146345ef7c50ec5e4077f0c6131db963e3776215629e9d34a781a643"
+      "sha256": "cb8a15491d1ad39b20ff01419bdc42665230bd2ffeedf6935b03ac168febfc3d"
     },
     {
       "input_id": "K1-2-INPUT-K0-2",
@@ -79,7 +79,7 @@
       "path": "artifacts/kafka_incumbent_semantics_matrix_v1.json",
       "byte_count": 228933,
       "record_count": 2560,
-      "sha256": "fec9ac1a1e9ac63ce25393962c843f9169cae804c16c470ada2bf670ab0fc4ec"
+      "sha256": "b36a2a28626f10f54f46963fb96929ba12849af2d2ec6b8892adbcc03b105432"
     },
     {
       "input_id": "K1-2-INPUT-K1-3",
@@ -117,17 +117,17 @@
       "input_id": "K1-2-INPUT-MANIFEST",
       "role": "CURRENT_FEATURE_AND_NATIVE_CAPABILITY_DECLARATION",
       "path": "Cargo.toml",
-      "byte_count": 37112,
+      "byte_count": 37107,
       "record_count": 1038,
-      "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02"
+      "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb"
     },
     {
       "input_id": "K1-2-INPUT-LOCKFILE",
       "role": "CURRENT_DEPENDENCY_IDENTITY",
       "path": "Cargo.lock",
-      "byte_count": 114619,
+      "byte_count": 114614,
       "record_count": 4666,
-      "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4"
+      "sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af"
     },
     {
       "input_id": "K1-2-INPUT-REAL-BROKER",

@@ -23,7 +23,7 @@ const K0_4_PATH: &str = "artifacts/kafka_broker_fixture_provenance_matrix_v1.jso
 const K1_2_PATH: &str = "artifacts/kafka_k1_protocol_security_support_policy_v1.json";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
 
-const ARTIFACT_SHA256: &str = "c47731ebfa593d64b47b16a0b1ecf0aabba7a47613f4c48ce850f67313f8d367";
+const ARTIFACT_SHA256: &str = "5da2c339a881e80da59dd5d68501771d01dfcc763b7fc40bd8cf8ed985e32d1c";
 const DOC_SHA256: &str = "1c10719363ac92627c4ad260625ff47e8aef70d7cb641d7994f4a230d6aa9de9";
 
 const ARTIFACT_ID: &str = "kafka-k1-resource-lifecycle-contract-v1";
