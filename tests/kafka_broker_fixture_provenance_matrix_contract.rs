@@ -18,7 +18,7 @@ use std::path::PathBuf;
 const ARTIFACT_PATH: &str = "artifacts/kafka_broker_fixture_provenance_matrix_v1.json";
 const DOC_PATH: &str = "docs/kafka_broker_fixture_provenance_matrix.md";
 const K0_3_PATH: &str = "artifacts/kafka_downstream_user_journey_inventory_v1.json";
-const ARTIFACT_SHA256: &str = "03406fe1146345ef7c50ec5e4077f0c6131db963e3776215629e9d34a781a643";
+const ARTIFACT_SHA256: &str = "cb8a15491d1ad39b20ff01419bdc42665230bd2ffeedf6935b03ac168febfc3d";
 const DOC_SHA256: &str = "e9b4e04d8d3dd5ccf967182dabcb9f1e16cb712e7a154123d82bfe0318a201a9";
 const ARTIFACT_ID: &str = "kafka-broker-fixture-provenance-matrix-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
@@ -29,10 +29,10 @@ const CAPTURED_DATE_UTC: &str = "2026-08-03";
 const INVENTORY_STATE: &str = "K0_4_STATIC_FIXTURE_AND_PROVENANCE_MATRIX_FROZEN_RUNTIME_UNKNOWN";
 const K0_3_ARTIFACT_ID: &str = "kafka-downstream-user-journey-inventory-v1";
 const K0_3_BASELINE_REVISION: &str = "ae22e710d87412b38e546b32e9702106619481d5";
-const K0_3_SHA256: &str = "52f8dc9a2695a170b14c85c9b29b6e60f95e05bd013d3d9db0dab8d94a1ced09";
+const K0_3_SHA256: &str = "187f74196bf0973082703b102813bc267987b643572164d40a8b6eb3a3fd8db3";
 const K0_3_TEST_GROUP_COUNT: usize = 35;
-const K0_3_TEST_DECLARATION_COUNT: usize = 936;
-const K0_3_EXACT_TEST_DECLARATION_COUNT: usize = 888;
+const K0_3_TEST_DECLARATION_COUNT: usize = 939;
+const K0_3_EXACT_TEST_DECLARATION_COUNT: usize = 891;
 const K0_3_TOKIO_TEST_DECLARATION_COUNT: usize = 48;
 const K0_3_LOCAL_ROW_COUNT: usize = 34;
 const K0_3_ATOMIC_CASE_COUNT: usize = 16;
@@ -177,16 +177,16 @@ const DIRECT_FIXTURE_PINS: &[(&str, &str, u64, u64, &str)] = &[
     ),
     (
         "tests/kafka_capability_inventory_contract.rs",
-        "d1e7492185f798b5affc7dea4c62761552bc6a8804f1b61b14d379f75df23c5e",
-        28_908,
-        858,
+        "f724da5840e98c5edf13a2b931145cbef5b1769e16c541dd3be458e16ce55efb",
+        28_870,
+        853,
         "UTF8_LINES",
     ),
     (
         "tests/kafka_incumbent_semantics_matrix_contract.rs",
-        "36bd4fe722d8ac79c05c21a29772d592211c8f8e3b5a78c0ba6ebd7aeb41caf9",
-        69_301,
-        1_692,
+        "ff7961f57f1f638285f967f408d0843008a2efe6a27722f6860acf10fe9036a7",
+        69_476,
+        1_696,
         "UTF8_LINES",
     ),
     (

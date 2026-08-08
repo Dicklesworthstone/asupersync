@@ -63,9 +63,9 @@
       "input_id": "K1-INPUT-K0-5-ARTIFACT",
       "role": "SOLE_K0_BASELINE_ARTIFACT",
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
-      "byte_count": 29269,
-      "record_count": 283,
-      "sha256": "010093127dee0aecf9ba63160bb78f525fe34c2e23877855d1f978e0a1fdc24b"
+      "byte_count": 29494,
+      "record_count": 284,
+      "sha256": "e5c3172bb76ff0304c9c1d1a6b9a09afed241c48c32007edcb68d7fbb2957de9"
     },
     {
       "input_id": "K1-INPUT-K0-5-DOCUMENT",
@@ -73,15 +73,15 @@
       "path": "docs/kafka_k0_baseline_disposition.md",
       "byte_count": 21799,
       "record_count": 349,
-      "sha256": "1ad9d98beea995dfcedc1a55400f61c24567e3b881202968c5f1f7adcb68ec75"
+      "sha256": "8271e58aa693177601f6ef19e825f4e12650b056ee119b7b3899d3847d8f0ed0"
     },
     {
       "input_id": "K1-INPUT-K0-5-CONTRACT",
       "role": "SOLE_K0_BASELINE_CONTRACT_SOURCE",
       "path": "tests/kafka_k0_baseline_disposition_contract.rs",
-      "byte_count": 105642,
-      "record_count": 2601,
-      "sha256": "703dd79c0feb6b2535a36deb049022a003459ed95c4766985d737e5e8ed2fc3f"
+      "byte_count": 106003,
+      "record_count": 2599,
+      "sha256": "96d7b322faa6a535f7156a57d11b9deb3b2b9596bf788d9fe3653fa2bc4a9b0e"
     },
     {
       "input_id": "K1-INPUT-ADR",
@@ -119,9 +119,9 @@
       "input_id": "K1-INPUT-MANIFEST",
       "role": "CURRENT_FEATURE_GRAPH_TRUTH",
       "path": "Cargo.toml",
-      "byte_count": 37112,
+      "byte_count": 37107,
       "record_count": 1038,
-      "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02"
+      "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb"
     },
     {
       "input_id": "K1-INPUT-RECORD-BATCH-CODEC",
@@ -172,7 +172,7 @@
       "locator": "adrs[adr_id=DEP-ADR-009]",
       "row_count": 1,
       "canonicalization": "Recursively key-sort and compactly serialize the selected object with one trailing LF.",
-      "sha256": "8b7ef1722013835173b2fe7396e960e40bbae2f8a9b6754e1eed050b7f97b2c1"
+    "sha256": "755b30159dfabe677cb5455910754f3abe7913e93baa8a60a023cc3af2ed4aa4"
     },
     {
       "pin_id": "K1-ROW-ADR-LOSS-FIXTURE",
@@ -216,16 +216,16 @@
     },
     "k0_5_aggregate_namespace": {
       "relation": "K0_5_OWNED_DEFINITIONS_OUTSIDE_CHILD_903_127_CENSUS",
-      "row_count": 31,
+      "row_count": 32,
       "group_counts": {
         "canonicalization_ids": 2,
         "exact_join_ids": 6,
         "unknown_selector_ids": 12,
         "aggregate_claim_ids": 7,
-        "terminal_gate_ids": 4
+        "terminal_gate_ids": 5
       },
-      "projection_rule": "Project collection<TAB>id for the two K0.5 canonicalization IDs, six exact_joins join_id values, twelve unknown_disposition selectors selector_id values, seven aggregate claims claim_id values, and four independent terminal gates gate_id values; bytewise sort unique rows and append one LF per row.",
-      "projection_sha256": "57fd004ea3570015aac52694669d683c2827cf6f161c83e437ad80053920edce",
+      "projection_rule": "Project collection<TAB>id for the two K0.5 canonicalization IDs, six exact_joins join_id values, twelve unknown_disposition selectors selector_id values, seven aggregate claims claim_id values, and five independent terminal gates gate_id values; bytewise sort unique rows and append one LF per row.",
+      "projection_sha256": "b37d690dd8293c23a0ed2449bcd019864341f97fe0651798583602804da2fd45",
       "state": "EXACT_STATIC_K0_5_AGGREGATE_NAMESPACE"
     },
     "primary_definitions": {
@@ -525,12 +525,12 @@
     "source_pin_rollup": {
       "row_count": 266,
       "stage_counts": {"K0.1": 13, "K0.2": 8, "K0.3": 225, "K0.4": 20},
-      "canonical_json_sha256": "24dbef7eff2ceb1bc09c1558802f81352f0ba2e78e8940547ca7d15d8583a0d2",
+      "canonical_json_sha256": "609f66f76e2da77c1e880780322940760ed2a0706b4eb4f499d0f32e29632760",
       "unique_path_count": 247,
       "unique_path_set_sha256": "d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3",
       "overlap_group_count": 15,
       "overlap_pin_row_count": 34,
-      "overlap_pin_projection_sha256": "401cc0ed50ca786de031643b8faf34376fde06a2c2aa2f9badcde66cca19c414",
+      "overlap_pin_projection_sha256": "7ab033d0aa9d30856188b273c5b557c43c0be9e2d59e9566c23a338f306406bd",
       "conflicting_overlap_groups": []
     },
     "unknown_blockers": {
@@ -571,7 +571,7 @@
     },
     "claims_projection": {
       "child_claim_record_count": 93,
-      "child_claim_projection_sha256": "7aa4a92f32d0c69a67a6cedbb1d5b5157b2f9b7d4243bd53c3a4491007bb3727",
+      "child_claim_projection_sha256": "d44e20b18402d96013a201213cbf090f9dcd75e67be0b601e377743b3ab9ed47",
       "aggregate_claim_count": 7,
       "aggregate_claim_projection_sha256": "2a4867239016cef413e38d68bc1d788de89a23bac7ac08890632256013b4d1b6",
       "migration_claim_state": "BLOCKED",
@@ -710,7 +710,7 @@
     "primary_definitions_complete_and_unique": true,
     "definition_and_reference_row_count": 1030,
     "sanctioned_authority_reference_count": 127,
-    "k0_5_aggregate_definition_count": 31,
+    "k0_5_aggregate_definition_count": 32,
     "k1_obligation_projection_row_count": 279,
     "low_evidence_state_projection_row_count": 446,
     "named_definition_view_count": 11,

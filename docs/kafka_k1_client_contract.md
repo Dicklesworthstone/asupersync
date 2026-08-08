@@ -96,11 +96,11 @@ and authority-to-reference mapping digest
 `0a88e36135222e48bfeab5095be3896ef946cc9fa05f38cbd19d2cb656107cf9`.
 No other definition collision is permitted.
 
-K0.5 also owns 31 aggregate identifiers outside the child 903/127 census:
+K0.5 also owns 32 aggregate identifiers outside the child 903/127 census:
 two canonicalization IDs, six exact-join IDs, twelve unknown-selector IDs,
-seven aggregate-claim IDs, and four terminal-gate IDs. Their
+seven aggregate-claim IDs, and five terminal-gate IDs. Their
 `collection<TAB>id` projection digest is
-`57fd004ea3570015aac52694669d683c2827cf6f161c83e437ad80053920edce`.
+`b37d690dd8293c23a0ed2449bcd019864341f97fe0651798583602804da2fd45`.
 These receipt identifiers remain separate from both the child definition
 census and the K1 obligation projection.
 

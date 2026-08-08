@@ -134,7 +134,7 @@
     "authority_anchor": {
       "artifact_id": "kafka-downstream-user-journey-inventory-v1",
       "path": "artifacts/kafka_downstream_user_journey_inventory_v1.json",
-      "sha256": "52f8dc9a2695a170b14c85c9b29b6e60f95e05bd013d3d9db0dab8d94a1ced09",
+      "sha256": "187f74196bf0973082703b102813bc267987b643572164d40a8b6eb3a3fd8db3",
       "authority_revision": "ae22e710d87412b38e546b32e9702106619481d5",
       "captured_date_utc": "2026-08-03",
       "inventory_state": "K0_3_LOCAL_STATIC_AND_CALL_SITE_CENSUS_FROZEN_EXTERNAL_UNKNOWN"
@@ -145,8 +145,8 @@
       "k0_1_public_symbols": 30,
       "k0_2_semantic_rows": 97,
       "test_declaration_groups": 35,
-      "test_declarations": 936,
-      "exact_test_declarations": 888,
+      "test_declarations": 939,
+      "exact_test_declarations": 891,
       "tokio_test_declarations": 48,
       "local_inventory_rows": 34,
       "atomic_test_cases": 16,
@@ -266,9 +266,9 @@
     {
       "pin_id": "KAFKA-K0-4-PIN-001-K0-3-AUTHORITY",
       "path": "artifacts/kafka_downstream_user_journey_inventory_v1.json",
-      "sha256": "52f8dc9a2695a170b14c85c9b29b6e60f95e05bd013d3d9db0dab8d94a1ced09",
-      "byte_count": 1171732,
-      "record_count": 17988
+      "sha256": "187f74196bf0973082703b102813bc267987b643572164d40a8b6eb3a3fd8db3",
+      "byte_count": 1171766,
+      "record_count": 17987
     },
     {
       "pin_id": "KAFKA-K0-4-PIN-002-RECORD-BATCH-CONFORMANCE",
@@ -385,16 +385,16 @@
     {
       "pin_id": "KAFKA-K0-4-PIN-018-K0-1-CONTRACT",
       "path": "tests/kafka_capability_inventory_contract.rs",
-      "sha256": "d1e7492185f798b5affc7dea4c62761552bc6a8804f1b61b14d379f75df23c5e",
-      "byte_count": 28908,
-      "record_count": 858
+      "sha256": "f724da5840e98c5edf13a2b931145cbef5b1769e16c541dd3be458e16ce55efb",
+      "byte_count": 28870,
+      "record_count": 853
     },
     {
       "pin_id": "KAFKA-K0-4-PIN-019-K0-2-CONTRACT",
       "path": "tests/kafka_incumbent_semantics_matrix_contract.rs",
-      "sha256": "36bd4fe722d8ac79c05c21a29772d592211c8f8e3b5a78c0ba6ebd7aeb41caf9",
-      "byte_count": 69301,
-      "record_count": 1692
+      "sha256": "ff7961f57f1f638285f967f408d0843008a2efe6a27722f6860acf10fe9036a7",
+      "byte_count": 69476,
+      "record_count": 1696
     },
     {
       "pin_id": "KAFKA-K0-4-PIN-020-RECORD-BATCH-INTEGRATION",
@@ -2169,7 +2169,7 @@
     "The oldest and current supported broker coordinates and accepted API-version ranges remain UNKNOWN and BLOCKED.",
     "Local request/response tables, parser seeds, and RecordBatch implementations are wire-only evidence and do not prove production negotiation or broker interoperability.",
     "The five public compression selections do not prove that the actual native library can encode or decode those codecs on any host.",
-    "Public TLS and SCRAM configuration mappings do not prove native capability, certificate validation, credential rejection, or authenticated broker transport.",
+    "Public TLS and SCRAM/sasl configuration mappings do not prove native capability, certificate validation, credential rejection, or authenticated broker transport.",
     "Environment-variable presence and an auth_mode proof field do not prove that security settings were applied.",
     "A two-consumer source test does not prove coordinator, assignment, revocation, rebalance, slow-handler, or multi-broker behavior without a terminal receipt.",
     "Ordinary load sends, a loopback unavailable endpoint, or a constructed reconnect count do not prove broker fault injection, restart, leader migration, or recovery.",

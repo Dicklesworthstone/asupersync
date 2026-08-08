@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 const ARTIFACT_PATH: &str = "artifacts/kafka_k1_obligation_index_v1.json";
 const DOC_PATH: &str = "docs/kafka_k1_client_contract.md";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
-const ARTIFACT_SHA256: &str = "7c8b4b00f18e84abd5ae9cb671a5c5822699eace98bbf82d1d0adb0969f50635";
-const DOC_SHA256: &str = "7d6c2e4e13c0c1204592ff0c654dd1c603c11593dd6e2497d6ddea33ffc9331c";
+const ARTIFACT_SHA256: &str = "0fdc48a56dbd4899b50c0108aa6fbd4060de5c9db2bc5227de238ee99b59ccd8";
+const DOC_SHA256: &str = "d42f7c0ec6b0c31a32de0cde29982b6de6efabc54413ef3d327d1f71a8a584f0";
 
 const ARTIFACT_ID: &str = "kafka-k1-obligation-index-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
@@ -44,7 +44,7 @@ const PRIMARY_DEFINITION_COUNT: usize = 903;
 const CORE_DEFINITION_COUNT: usize = 892;
 const CONTRADICTION_INPUT_COUNT: usize = 11;
 const AUTHORITY_REFERENCE_COUNT: usize = 127;
-const K0_5_AGGREGATE_ID_COUNT: usize = 31;
+const K0_5_AGGREGATE_ID_COUNT: usize = 32;
 const K1_OBLIGATION_COUNT: usize = 279;
 const LOW_EVIDENCE_STATE_COUNT: usize = 446;
 
@@ -57,7 +57,7 @@ const AUTHORITY_REFERENCE_ID_SHA256: &str =
 const AUTHORITY_REFERENCE_MAPPING_SHA256: &str =
     "0a88e36135222e48bfeab5095be3896ef946cc9fa05f38cbd19d2cb656107cf9";
 const K0_5_AGGREGATE_ID_SHA256: &str =
-    "57fd004ea3570015aac52694669d683c2827cf6f161c83e437ad80053920edce";
+    "b37d690dd8293c23a0ed2449bcd019864341f97fe0651798583602804da2fd45";
 const NORMALIZED_OBLIGATION_SHA256: &str =
     "cd4ff24ac2deed867d81d1fb9d81c08f31e57de5c7e77c84e1ea3657e2fa0f37";
 const SOURCE_PRECISE_OBLIGATION_SHA256: &str =
@@ -2254,7 +2254,7 @@ fn validate_disposition_and_coverage(packet: &Value) -> Result<(), String> {
         ("primary_definition_count", 903),
         ("definition_and_reference_row_count", 1_030),
         ("sanctioned_authority_reference_count", 127),
-        ("k0_5_aggregate_definition_count", 31),
+        ("k0_5_aggregate_definition_count", 32),
         ("k1_obligation_projection_row_count", 279),
         ("low_evidence_state_projection_row_count", 446),
         ("named_definition_view_count", 11),

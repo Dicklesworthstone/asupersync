@@ -79,10 +79,10 @@ The canonical machine projections are:
 
 | Projection | Count | SHA-256 |
 |---|---:|---|
-| Source-pin canonical JSON | 266 | `24dbef7eff2ceb1bc09c1558802f81352f0ba2e78e8940547ca7d15d8583a0d2` |
+| Source-pin canonical JSON | 266 | `609f66f76e2da77c1e880780322940760ed2a0706b4eb4f499d0f32e29632760` |
 | Unique source-pin paths | 247 | `d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3` |
 | Source-pin overlap paths | 15 | membership is bound by the 34-row projection below |
-| Source-pin rows on overlap paths | 34 | `401cc0ed50ca786de031643b8faf34376fde06a2c2aa2f9badcde66cca19c414` |
+| Source-pin rows on overlap paths | 34 | `7ab033d0aa9d30856188b273c5b557c43c0be9e2d59e9566c23a338f306406bd` |
 | Core typed definitions | 892 | `43d9deb2ff6bfa772ec058e8e32e4eb4fb3be099d93c3b152685721be05d4eea` |
 | Contradiction typed inputs | 11 | `60a656176b398a9b045b8c5cc1c2f2cede611683d3330c2a519a70ebf9bb72f0` |
 | All primary typed IDs | 903 | `38eb986feff75d2e1e172e444e7d488c765ab42910b6b470056852dea3b0cb6e` |
@@ -143,7 +143,7 @@ The mapping tuple is
 `left_child<TAB>left_collection<TAB>id<TAB>K0.3<TAB>right_collection<TAB>id`,
 bytewise-sorted with one LF per row.
 The lexical-exclusion mapping digest is
-`bdd6ae2026e2675419b2a9b4614fd10e713b6077e1c4a945f5770f5f469888aa`.
+`c1808f3d8ce85fc70642af0424653f0bb287a71998774c9206b80172f8e175db`.
 For each `EXCLUDED_NAME_COLLISION` atomic site, it recursively key-sorts and
 compactly serializes an object containing the parent `group_id`, parent `path`,
 and complete site object, bytewise-sorts the 232 records, and appends one LF
@@ -250,7 +250,7 @@ receipt for any later routed owner.
 
 The 93 projected child claim records preserve their source evidence classes.
 Their canonical JSON digest is
-`7aa4a92f32d0c69a67a6cedbb1d5b5157b2f9b7d4243bd53c3a4491007bb3727`.
+`d44e20b18402d96013a201213cbf090f9dcd75e67be0b601e377743b3ab9ed47`.
 Each child record is wrapped with `child`, `collection`, `id`, and `row`; no-claim
 rows use their zero-based array index as the ID, while claim/evidence rows retain
 their declared IDs. Records are ordered by child, collection, and ID before

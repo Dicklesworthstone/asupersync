@@ -18,8 +18,8 @@ use std::path::PathBuf;
 const ARTIFACT_PATH: &str = "artifacts/kafka_k0_baseline_disposition_v1.json";
 const DOC_PATH: &str = "docs/kafka_k0_baseline_disposition.md";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
-const ARTIFACT_SHA256: &str = "010093127dee0aecf9ba63160bb78f525fe34c2e23877855d1f978e0a1fdc24b";
-const DOC_SHA256: &str = "1ad9d98beea995dfcedc1a55400f61c24567e3b881202968c5f1f7adcb68ec75";
+const ARTIFACT_SHA256: &str = "e5c3172bb76ff0304c9c1d1a6b9a09afed241c48c32007edcb68d7fbb2957de9";
+const DOC_SHA256: &str = "8271e58aa693177601f6ef19e825f4e12650b056ee119b7b3899d3847d8f0ed0";
 const ARTIFACT_ID: &str = "kafka-k0-baseline-disposition-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const BEAD_ID: &str = "asupersync-dep-p7-kafka-removal-sarszu.1.5";
@@ -33,6 +33,7 @@ const K12_TERMINAL: &str = "asupersync-dep-p7-kafka-removal-sarszu.2.12.5";
 const K13_TERMINAL: &str = "asupersync-dep-p7-kafka-removal-sarszu.2.13.6";
 const K14_REFRESH: &str = "asupersync-dep-p7-kafka-removal-sarszu.2.14.1";
 const K15_CUTOVER: &str = "asupersync-dep-p7-kafka-removal-sarszu.2.15";
+const VF5_DOWNSTREAM: &str = "asupersync-validation-frontier-v2-b5cjsv.5";
 const DOC_BEGIN: &str = "<!-- BEGIN KAFKA K0.5 BASELINE DISPOSITION -->";
 const DOC_END: &str = "<!-- END KAFKA K0.5 BASELINE DISPOSITION -->";
 
@@ -82,11 +83,11 @@ const ROUTE_OWNER_ID_SHA256: &str =
 const REDUCED_UNKNOWN_SELECTOR_SHA256: &str =
     "5c7fb727bc79d4f8be1c979fadda8bcfd261da0953e972a32a89bef27a28b18c";
 const SOURCE_PIN_FULL_ROW_SHA256: &str =
-    "24dbef7eff2ceb1bc09c1558802f81352f0ba2e78e8940547ca7d15d8583a0d2";
+    "609f66f76e2da77c1e880780322940760ed2a0706b4eb4f499d0f32e29632760";
 const SOURCE_PIN_PATH_SHA256: &str =
     "d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3";
 const SOURCE_PIN_OVERLAP_SHA256: &str =
-    "401cc0ed50ca786de031643b8faf34376fde06a2c2aa2f9badcde66cca19c414";
+    "7ab033d0aa9d30856188b273c5b557c43c0be9e2d59e9566c23a338f306406bd";
 const JOURNEY_ID_SHA256: &str = "c5a9f1947a5ecf55898c61414bb39bf753cd236fe33157083994acd63176367f";
 const VECTOR_ID_SHA256: &str = "73491562ae3df3f7ea6729c30834cf3cb134a002ec5d682255277df5e508e73f";
 const FIXTURE_ID_SHA256: &str = "bb8f922cc63f97efcfb0c76a6e26fdf923775650af8cd613f50da55c95cbb376";
@@ -103,7 +104,7 @@ const EXPLICIT_UNKNOWN_ID_SHA256: &str =
 const ROUTE_FULL_ROW_SHA256: &str =
     "efbc7795ffa4c5144ffcedf6ac2659603e9a298800b6d7130df1081d47722b43";
 const CLAIMS_FULL_ROW_SHA256: &str =
-    "7aa4a92f32d0c69a67a6cedbb1d5b5157b2f9b7d4243bd53c3a4491007bb3727";
+    "d44e20b18402d96013a201213cbf090f9dcd75e67be0b601e377743b3ab9ed47";
 const AGGREGATE_CLAIMS_SHA256: &str =
     "2a4867239016cef413e38d68bc1d788de89a23bac7ac08890632256013b4d1b6";
 const FIXTURE_PROFILE_MAPPING_SHA256: &str =
@@ -113,9 +114,9 @@ const AUTHORITY_REFERENCE_MAPPING_SHA256: &str =
 const LEXICAL_GROUP_ID_SHA256: &str =
     "e6a23cd6c436c1dd6b775481d2683eb53ca860a928572306f2ea910af3c8231b";
 const LEXICAL_SITE_ID_SHA256: &str =
-    "5daaea539090869d6391f8d3011fa0a116cb15a6f29f540aa3cceccff4961440";
+    "6423c12c5408b96d42bac70f994f0ac07901603a801ae6bf91778df085afc7d9";
 const LEXICAL_MAPPING_SHA256: &str =
-    "bdd6ae2026e2675419b2a9b4614fd10e713b6077e1c4a945f5770f5f469888aa";
+    "c1808f3d8ce85fc70642af0424653f0bb287a71998774c9206b80172f8e175db";
 const EXPLICIT_UNKNOWN_OWNER_EDGE_SHA256: &str =
     "7b36d67eb6a635bf112838ea0104aab9b45ad918798af627ec176d01c61e554c";
 const EXPLICIT_UNKNOWN_OWNER_ID_SHA256: &str =
@@ -162,7 +163,7 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.1",
         role: "artifact_file",
         path: "artifacts/kafka_capability_inventory_v1.json",
-        sha256: "5dfe71df6daaa056f8f4d22d08fa934b5398baeeff0d5ff27eb0f544405251d6",
+        sha256: "b9e62e3f419309bda14a91739d42dc347293e6d92b4c5c3678c342bfb3378933",
         byte_count: 41_921,
         record_count: 1_015,
     },
@@ -178,15 +179,15 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.1",
         role: "contract_file",
         path: "tests/kafka_capability_inventory_contract.rs",
-        sha256: "d1e7492185f798b5affc7dea4c62761552bc6a8804f1b61b14d379f75df23c5e",
-        byte_count: 28_908,
-        record_count: 858,
+        sha256: "f724da5840e98c5edf13a2b931145cbef5b1769e16c541dd3be458e16ce55efb",
+        byte_count: 28_870,
+        record_count: 853,
     },
     ChildFilePin {
         packet_id: "K0.2",
         role: "artifact_file",
         path: "artifacts/kafka_incumbent_semantics_matrix_v1.json",
-        sha256: "fec9ac1a1e9ac63ce25393962c843f9169cae804c16c470ada2bf670ab0fc4ec",
+        sha256: "b36a2a28626f10f54f46963fb96929ba12849af2d2ec6b8892adbcc03b105432",
         byte_count: 228_933,
         record_count: 2_560,
     },
@@ -202,17 +203,17 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.2",
         role: "contract_file",
         path: "tests/kafka_incumbent_semantics_matrix_contract.rs",
-        sha256: "36bd4fe722d8ac79c05c21a29772d592211c8f8e3b5a78c0ba6ebd7aeb41caf9",
-        byte_count: 69_301,
-        record_count: 1_692,
+        sha256: "ff7961f57f1f638285f967f408d0843008a2efe6a27722f6860acf10fe9036a7",
+        byte_count: 69_476,
+        record_count: 1_696,
     },
     ChildFilePin {
         packet_id: "K0.3",
         role: "artifact_file",
         path: "artifacts/kafka_downstream_user_journey_inventory_v1.json",
-        sha256: "52f8dc9a2695a170b14c85c9b29b6e60f95e05bd013d3d9db0dab8d94a1ced09",
-        byte_count: 1_171_732,
-        record_count: 17_988,
+        sha256: "187f74196bf0973082703b102813bc267987b643572164d40a8b6eb3a3fd8db3",
+        byte_count: 1_171_766,
+        record_count: 17_987,
     },
     ChildFilePin {
         packet_id: "K0.3",
@@ -226,16 +227,16 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.3",
         role: "contract_file",
         path: "tests/kafka_downstream_user_journey_inventory_contract.rs",
-        sha256: "a0f1d8dd4f66ba2c9617ef0ba7bce4113203ae14a0b4bcd1dc7b725f1f9edf37",
-        byte_count: 215_240,
-        record_count: 5_290,
+        sha256: "066d4646b5e73c1d3109712b640c76eb0fd825775211f2d941d2fe9a6b80808b",
+        byte_count: 216_707,
+        record_count: 5_382,
     },
     ChildFilePin {
         packet_id: "K0.4",
         role: "artifact_file",
         path: "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
-        sha256: "03406fe1146345ef7c50ec5e4077f0c6131db963e3776215629e9d34a781a643",
-        byte_count: 119_245,
+        sha256: "cb8a15491d1ad39b20ff01419bdc42665230bd2ffeedf6935b03ac168febfc3d",
+        byte_count: 119_250,
         record_count: 2_187,
     },
     ChildFilePin {
@@ -250,9 +251,9 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.4",
         role: "contract_file",
         path: "tests/kafka_broker_fixture_provenance_matrix_contract.rs",
-        sha256: "824dc03bc9636378f9b554f44affa8a24def57b89c34d6a631429304b00ee73b",
-        byte_count: 128_726,
-        record_count: 3_410,
+        sha256: "7e5b9b18f834af01670f9336e0108edbf72393e76812094e8a6601db4e98a42e",
+        byte_count: 129_665,
+        record_count: 3_462,
     },
 ];
 
@@ -2149,7 +2150,13 @@ fn validate_aggregate_unknown_disposition(
                 .to_owned()
         })
         .collect::<BTreeSet<_>>();
-    let terminal_gates = expected_set(&[K12_TERMINAL, K13_TERMINAL, K14_REFRESH, K15_CUTOVER]);
+    let terminal_gates = expected_set(&[
+        K12_TERMINAL,
+        K13_TERMINAL,
+        K14_REFRESH,
+        K15_CUTOVER,
+        VF5_DOWNSTREAM,
+    ]);
     for selector in collect_reduced_unknown_selectors(children) {
         let fields = selector.split('\t').collect::<Vec<_>>();
         let owner = fields[3];
@@ -2394,7 +2401,8 @@ fn validate_disposition_gates_and_receipt(packet: &Value) -> Result<(), String> 
             {"gate_id":"K12.5","bead_id":K12_TERMINAL,"scope":"independent protocol, state, corpus, and oracle verification","state":"REQUIRED_NOT_PROVEN_BY_K0"},
             {"gate_id":"K13.6","bead_id":K13_TERMINAL,"scope":"terminal immutable real-service receipts and teardown","state":"REQUIRED_NOT_PROVEN_BY_K0"},
             {"gate_id":"K14.1","bead_id":K14_REFRESH,"scope":"claim-time source, downstream, fixture, owner, and receipt refresh","state":"REQUIRED_NOT_PROVEN_BY_K0"},
-            {"gate_id":"K15","bead_id":K15_CUTOVER,"scope":"conditional no-loss cutover or terminal KEEP","state":"SOLE_CUTOVER_AUTHORITY"}
+            {"gate_id":"K15","bead_id":K15_CUTOVER,"scope":"conditional no-loss cutover or terminal KEEP","state":"SOLE_CUTOVER_AUTHORITY"},
+            {"gate_id":"VF5","bead_id":VF5_DOWNSTREAM,"scope":"external downstream-consumer proof ownership only; not Kafka runtime evidence","state":"CLOSED_OWNER_ONLY_DOES_NOT_RESOLVE_KAFKA_UNKNOWN"}
         ]),
         "independent terminal gates",
     )?;
