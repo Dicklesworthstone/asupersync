@@ -1428,10 +1428,10 @@ green; consult the live receipt for its explicit non-green status.
 ```toml
 [dependencies]
 # crates.io
-asupersync = "0.4.0"
+asupersync = "0.4.1"
 
 # or git
-# asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", version = "0.4.0" }
+# asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", version = "0.4.1" }
 ```
 
 ### Feature Flags

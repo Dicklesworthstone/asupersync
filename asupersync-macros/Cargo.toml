@@ -1,6 +1,6 @@
 [package]
 name = "asupersync-macros"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 license = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
 description = "Proc macros for asupersync structured concurrency runtime"

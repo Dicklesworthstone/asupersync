@@ -10,12 +10,14 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
-Scope window: current work through 2026-08-07, reconstructed from git history,
+Scope window: current work through 2026-08-08, reconstructed from git history,
 beads, benchmark ledgers, and live repo artifacts; the previous published
-GitHub Release/tag baseline is `v0.3.10`.
+GitHub Release/tag baseline is `v0.4.0`.
 
 ## Version Timeline
 
+- **v0.4.1 Release**: patch release for capability-aware ATP Stream progress,
+  packaged RFC conformance fixtures, and release-evidence pin reconciliation.
 - **v0.4.0 Release**: semantic-versioning re-anchor for the current public API,
   plus the runtime correctness, capability, codec, protocol, and evidence work
   landed after `v0.3.10`.
@@ -35,6 +37,28 @@ GitHub Release/tag baseline is `v0.3.10`.
 ## [Unreleased]
 
 _No changes yet._
+
+---
+
+## [v0.4.1] - 2026-08-08
+
+### Runtime correctness
+
+- **ATP progress Streams now retain their capability context.** Owned send and
+  receive progress Streams poll the underlying channel with the creation `Cx`,
+  preserving sender wake registration and cancellation observation without
+  introducing a detached executor or compatibility shim.
+
+### Conformance and packaging
+
+- **RFC conformance inputs ship inside the crate package.** The QUIC migration
+  RFC 9000 reference registry and the RFC 6330 systematic-index fixture are
+  included from package-local paths, so `asupersync-conformance` verifies from
+  its crates.io tarball instead of escaping to repository-only files.
+- **Release evidence pins are exact again.** Downstream consumer locks and the
+  affected typed-format, Base64, and artifact-governance inventories are
+  reconciled to the shipped bytes while retaining their existing no-claim
+  boundaries.
 
 ---
 
