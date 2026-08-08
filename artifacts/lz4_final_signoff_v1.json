@@ -134,7 +134,7 @@
     },
     {
       "path": "artifacts/lz4_surface_artifact_inventory_v1.json",
-      "sha256": "f113af36818fd2e3c6d5adf1bbebf1470d5022893ca63e3600b4081d67bd9144",
+      "sha256": "6a96120f09288ad738f4f53506fbe00c7c9ebba23d2ffe0bde08c5d14b61c3ba",
       "role": "A1 machine inventory and routed gap authority"
     },
     {

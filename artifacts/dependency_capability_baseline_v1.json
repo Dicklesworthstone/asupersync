@@ -2919,7 +2919,7 @@
       },
       {
         "path": "artifacts/hex_capability_inventory_v1.json",
-        "sha256": "abfa1d24ea067fbab58b862f8d5ba0e624589ad313d765f9e88e5e7ebb94d760",
+        "sha256": "971385dfaf02570e6a02d52b494bc231e089ab8281bbcde812ff529727c10478",
         "line_count": 960,
         "role": "hex A1 inventory preceding the still-missing A5 terminal"
       },

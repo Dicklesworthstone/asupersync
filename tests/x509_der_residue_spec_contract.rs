@@ -14,9 +14,9 @@ const ARTIFACT_PATH: &str = "artifacts/x509_der_residue_spec_v1.json";
 const DOC_PATH: &str = "docs/x509_der_residue_spec.md";
 const INVENTORY_PATH: &str = "artifacts/x509_validation_ownership_inventory_v1.json";
 const EXPECTED_NORMATIVE_PAYLOAD_SHA256: &str =
-    "198b6c049ec394137f42685d42fd9413251e0a4bb9fedabb59068e3f4adc3219";
+    "64931d7e49e04c75c7c3a9870256b73e9480877736a996ca283145ef08c442ca";
 const EXPECTED_REVIEWED_DRAFT_SHA256: &str =
-    "718c50456c2d0bfab5b0d601e66bb4dca7d88804642a9e74b34542c2312d59dd";
+    "2dd67b01719a7b06c324a27490686d7b1eacd4e20f0a13d1f30146a29de5a1b5";
 const A1_RECONCILIATION_PATHS: [&str; 3] = [
     "artifacts/x509_validation_ownership_inventory_v1.json",
     "docs/x509_validation_ownership_inventory.md",

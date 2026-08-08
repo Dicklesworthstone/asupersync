@@ -35,7 +35,7 @@ Collapsing every version of an artifact to its path produces one strongly connec
 - The current Base64 inventory pins the live baseline identity `ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4`; the baseline still pins the earlier Base64 identity `28171082ff529b93cbe951b9de84db9423b8922fde531c82aa21051b933c83eb`.
 - The Hex and Phase-1 artifacts record SHA-256 `88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8`, the 1,357-line historical dependency baseline at commit `7390d33f4ac297cd28138c8e1ece38f60b278660` and blob `4e56ad4bc05dbd1614583f8cdf8586a0d1f88cc7`.
 
-The content-addressed graph has six nodes, six edges, and no directed cycle. No full-file edge replacement is required. Operators must preserve the three historical back-references as immutable provenance and must not refresh or relabel them as current. A future path-only strongly connected component is a warning to recompute the versioned topology, not sufficient evidence of a blocking content cycle.
+The content-addressed graph has seven nodes, six edges, and no directed cycle. No full-file edge replacement is required. Operators must preserve the three historical back-references as immutable provenance and must not refresh or relabel them as current. A future path-only strongly connected component is a warning to recompute the versioned topology, not sufficient evidence of a blocking content cycle.
 
 ## Boundaries
 

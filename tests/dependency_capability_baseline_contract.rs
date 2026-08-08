@@ -1728,7 +1728,7 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         (
             "artifacts/dependency_capability_baseline_v1.json",
             (
-                "42739ea20b7d144636be3b5d19ee1b144cdd2667bca159d993c083cd06ccfe9d",
+                "2343192b5124aa10671f941b08684edba1d08f921d57eebb947a354600afbb0d",
                 3210_u64,
             ),
         ),
@@ -3250,7 +3250,7 @@ fn phase2_terminal_readiness_frontier_is_exact_and_fail_closed() {
         (
             HEX_INVENTORY_PATH,
             (
-                "abfa1d24ea067fbab58b862f8d5ba0e624589ad313d765f9e88e5e7ebb94d760",
+                "971385dfaf02570e6a02d52b494bc231e089ab8281bbcde812ff529727c10478",
                 960_u64,
             ),
         ),

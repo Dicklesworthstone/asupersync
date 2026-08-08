@@ -20,7 +20,7 @@ const DOC_PATH: &str = "docs/kafka_downstream_user_journey_inventory.md";
 const K0_1_PATH: &str = "artifacts/kafka_capability_inventory_v1.json";
 const K0_2_PATH: &str = "artifacts/kafka_incumbent_semantics_matrix_v1.json";
 const ADR_REGISTRY_PATH: &str = "artifacts/dependency_api_adr_registry_v1.json";
-const ARTIFACT_SHA256: &str = "187f74196bf0973082703b102813bc267987b643572164d40a8b6eb3a3fd8db3";
+const ARTIFACT_SHA256: &str = "a982c4bee1a162ec2ce5155ffa67a3e8240f79937533b1628f25edaaabdf7051";
 const DOC_SHA256: &str = "12ccb95710c004751634d7c41218a0d6855675870b4246ab680aa0eb63d90434";
 const ARTIFACT_ID: &str = "kafka-downstream-user-journey-inventory-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
@@ -2989,8 +2989,7 @@ fn validate_documentation_claim_census(inventory: &Value) -> Result<(), String> 
         || text(derived, "classification") != "OWNED_UNRESOLVED_CLAIM"
         || text(derived, "semantic_state") != "UNKNOWN"
         || text(derived, "evidence_class") != "NON_BROKER_STATIC_IDENTITY_ONLY"
-        || derived.get("owner_bead").and_then(Value::as_str)
-            != Some(DOCUMENTATION_OWNER_BEAD_ID)
+        || derived.get("owner_bead").and_then(Value::as_str) != Some(DOCUMENTATION_OWNER_BEAD_ID)
         || derived.get("refresh_owner_bead").and_then(Value::as_str) != Some(REFRESH_BEAD_ID)
         || !bool_field(derived, "migration_blocking")
         || !bool_field(derived, "no_removal_authority")

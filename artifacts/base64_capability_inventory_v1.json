@@ -86,7 +86,7 @@
     {"path":"fuzz/Cargo.toml","sha256":"857925379ab7068f3faf94435e44b87adfc96c2d716f19b5c1cfdffbbfbd580d","line_count":6233,"role":"excluded fuzz dependency selector and target registry"},
     {"path":"tests/conformance/raptorq_differential/Cargo.toml","sha256":"6e94b40563ab8643b59272655d91132221d65a22c11c8dde604d1728a952ef7c","line_count":33,"role":"standalone differential selector"},
     {"path":"artifacts/dependency_capability_registry_v1.json","sha256":"e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2","line_count":6917,"role":"capability authority"},
-    {"path":"artifacts/dependency_capability_baseline_v1.json","sha256":"42739ea20b7d144636be3b5d19ee1b144cdd2667bca159d993c083cd06ccfe9d","line_count":3210,"role":"baseline authority"},
+    {"path":"artifacts/dependency_capability_baseline_v1.json","sha256":"2343192b5124aa10671f941b08684edba1d08f921d57eebb947a354600afbb0d","line_count":3210,"role":"baseline authority"},
     {"path":"artifacts/dependency_verification_matrix_v1.json","sha256":"c42345e9bbd771a1fb525504bce4162b2af6caca8a75b642d6e14bbb14f7d36b","line_count":83691,"role":"verification authority"},
     {"path":"artifacts/dependency_marginal_ledger_v1.json","sha256":"4e36ca29d7187e3237cfd9f422b2661009a608e93bb5761c7d511d412d66a047","line_count":188447,"role":"dependency graph authority"},
     {"path":"COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md","sha256":"401b39c99f4909a7e805e0992327d2408fe54aed65610783830031b66083b7b0","line_count":332,"role":"program authority"},
