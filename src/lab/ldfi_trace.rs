@@ -21,8 +21,10 @@
 //!    token, obligation id, timer id, monitor/link ref) are linked: the request
 //!    or grant happens-before the later delivery on the same handle.
 //! 3. **Logical clocks** — when events carry a [`LogicalTime`], every strictly
-//!    `Before` pair (per the vector/Lamport causal order) becomes an edge. This
-//!    is the cross-task happens-before machinery shared with `trace/causality`.
+//!    `Before` pair becomes an edge. Vector clocks can establish this relation;
+//!    scalar Lamport and hybrid timestamps cannot prove causality by themselves.
+//!    This is the cross-task happens-before machinery shared with
+//!    `trace/causality`.
 //!
 //! # Soundness
 //!
@@ -30,10 +32,11 @@
 //! relation (adding edges, enlarging cones) is safe — it only yields extra fault
 //! hypotheses the experiment loop will refute. *Under-approximation* is unsafe:
 //! a missing edge can hide the fault that breaks the outcome. The three sources
-//! above are therefore additive and the classifier errs toward fault-able. With
-//! vector clocks source (3) is precise; with Lamport clocks it over-approximates
-//! to the total order (still sound, but every earlier event joins the cone), so
-//! prefer vector clocks or the structural sources (1)/(2) for precise lineages.
+//! above are therefore additive and the classifier errs toward fault-able.
+//! Vector clocks make source (3) precise. Scalar Lamport and hybrid timestamps
+//! intentionally add no edge because timestamp order alone does not establish
+//! causality; use vector clocks or the structural sources (1)/(2) when the
+//! lineage requires cross-task edges.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -90,8 +93,9 @@ pub const fn default_faultable(kind: TraceEventKind) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TraceLineageConfig {
     /// Recover cross-task edges from logical clocks when events carry them.
-    /// Precise for vector clocks; a sound over-approximation for Lamport. This
-    /// pass is `O(n^2)` in the number of clock-carrying events.
+    /// Precise for vector clocks. Scalar Lamport and hybrid timestamps do not
+    /// establish causality and therefore add no edge. This pass is `O(n^2)` in
+    /// the number of clock-carrying events.
     pub use_logical_time: bool,
     /// Recover edges by correlating shared resource handles (I/O tokens,
     /// obligation ids, timer ids, monitor/link refs).
