@@ -140,15 +140,15 @@ fn validate_a3_receipt(inventory: &Value) -> Result<(), String> {
         (
             "src/future.rs",
             (
-                "c0a02784a010e9709dfab3b40259bccf8d312e9101834d8c110f2b1f19bd8598",
-                972_u64,
+                "86a23894ae5f37d0541e12074ab8eecb0b3331bc4ae0e7627fd61b4926254b50",
+                1088_u64,
             ),
         ),
         (
             "src/util/mod.rs",
             (
-                "2f833ed4e8c6b11701490669d96bcea63239af4e6868ff379daf3606b569ef4a",
-                35_u64,
+                "00a03123d4d96708dcc8d9c0fad8971f87130fae2ed172eb277b8a0b9c90121f",
+                40_u64,
             ),
         ),
     ]);
@@ -271,14 +271,14 @@ fn validate_a4_receipt(inventory: &Value) -> Result<(), String> {
     let source_pin = object(receipt, "current_source_pin");
     if source_pin.get("path").and_then(Value::as_str) != Some("src/future.rs")
         || source_pin.get("sha256").and_then(Value::as_str)
-            != Some("da6ef76c90a77c430149cabc5556343bb6408e179f62b1615c0a57b7643067b0")
+            != Some("86a23894ae5f37d0541e12074ab8eecb0b3331bc4ae0e7627fd61b4926254b50")
         || source_pin.get("line_count").and_then(Value::as_u64) != Some(1088)
     {
         return Err("A4 current source pin drift".to_owned());
     }
     let source_bytes = read_repo_bytes("src/future.rs");
     if hex_bytes(&Sha256::digest(&source_bytes))
-        != "da6ef76c90a77c430149cabc5556343bb6408e179f62b1615c0a57b7643067b0"
+        != "86a23894ae5f37d0541e12074ab8eecb0b3331bc4ae0e7627fd61b4926254b50"
         || read_repo_file("src/future.rs").lines().count() != 1088
     {
         return Err("A4 current source no longer matches its receipt".to_owned());
@@ -383,22 +383,22 @@ fn validate_a5_receipt(inventory: &Value) -> Result<(), String> {
         (
             "src/future.rs",
             (
-                "c0a02784a010e9709dfab3b40259bccf8d312e9101834d8c110f2b1f19bd8598",
-                972_u64,
+                "86a23894ae5f37d0541e12074ab8eecb0b3331bc4ae0e7627fd61b4926254b50",
+                1088_u64,
             ),
         ),
         (
             "src/web/middleware.rs",
             (
-                "d4f6e9bbe0cb18849ce58aa293301c796ac079ad016f261d0db8affd8a0bb10a",
-                6030_u64,
+                "ea9f19f2f53325a9c837545678a697ee3ca2c0a204cbd2de21b974b537fbc74c",
+                6028_u64,
             ),
         ),
         (
             "src/web/negotiate.rs",
             (
-                "4a98a71fe252c26e059e2bb4f0b2350a4a6e9b4bd13519f35590627788794c61",
-                903_u64,
+                "3cef1b7e979de61a241138e10be0bdaf9d8e8dac4837cd17e662e8adc9fec220",
+                899_u64,
             ),
         ),
     ]);
@@ -561,10 +561,10 @@ fn validate_current_snapshot(inventory: &Value) -> Result<(), String> {
     let current = snapshot
         .get("current_occurrence")
         .expect("current occurrence snapshot");
-    if current.get("file_count").and_then(Value::as_u64) != Some(315)
-        || current.get("token_count").and_then(Value::as_u64) != Some(1382)
+    if current.get("file_count").and_then(Value::as_u64) != Some(316)
+        || current.get("token_count").and_then(Value::as_u64) != Some(1383)
         || text(current, "digest_sha256")
-            != "86755aabb204be53aca205404e7449a9218bb7353a3adb45fc019cddc581b30a"
+            != "d895cfbcf2b137b650d5270c7028a829bf967f0840ec150f906f8c3e50dc7e69"
         || array(current, "scope_rows").len() != 6
         || array(snapshot, "current_migration_reservation_groups").len() != 4
     {

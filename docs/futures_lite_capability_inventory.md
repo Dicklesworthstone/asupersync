@@ -151,9 +151,8 @@ coverage only; it has not exercised error short-circuiting or completion.
 | User trial | Missing | SAME-or-BETTER receipt |
 | Cutover | Blocked | Every receipt above |
 
-This matrix is fail-closed. It is not a terminal receipt, does not authorize
-closing A2, and does not convert source-authored assertions into executed
-evidence.
+This matrix is fail-closed. It is not a terminal receipt, does not authorize closing A2,
+and does not convert source-authored assertions into executed evidence.
 
 ### Post-baseline current snapshot
 

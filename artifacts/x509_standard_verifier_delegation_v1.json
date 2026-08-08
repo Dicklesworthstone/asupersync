@@ -20,13 +20,13 @@
   "source_contracts": [
     {
       "path": "Cargo.toml",
-      "sha256": "b6789b10b8e984a98004cde19952c6b73418afdde30aa61e1c5a6a45377f17bb",
-      "line_count": 1015,
+      "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
+      "line_count": 1038,
       "role": "dependency and feature baseline"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "c670712ab8713897bacc9591c170db2d030df83011dc7b9d092f16099f1540dd",
+      "sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
       "line_count": 4666,
       "role": "resolved dependency baseline"
     },
@@ -38,26 +38,26 @@
     },
     {
       "path": "src/bin/atp.rs",
-      "sha256": "b77dd1e90ae1ab81bf084feac214b31cc8f17557d6f3c476dcdb1868075eee4b",
+      "sha256": "898b6c4e15cf95d4382c617ce0ded5a856b2f6f238df7fa7f86b4e999f1a2d86",
       "line_count": 11912,
       "role": "ATP delegation caller and preserved CLI error mapping"
     },
     {
       "path": "artifacts/x509_validation_ownership_inventory_v1.json",
-      "sha256": "288196669bd9b7da09e34e5aae4881a30b45c5fc3cbbed7ea8b5ed93d45f1b63",
-      "line_count": 1062,
+      "sha256": "42e4fccfa1414081d7065dba9be38cfc0bc171becd985977bbb5ecd35e0fe9db",
+      "line_count": 1073,
       "role": "A1 ownership, residue, and routed-gap inventory"
     },
     {
       "path": "docs/x509_validation_ownership_inventory.md",
-      "sha256": "ad4ea53a2711adab303b202c3ca5fd89726899298668d8c800a76ee6d8c57ce3",
-      "line_count": 298,
+      "sha256": "bbb1ee2367d186c4c415b7413596c1891951999e9b8c40cb0f4711f9ad880991",
+      "line_count": 308,
       "role": "A1 operator inventory"
     },
     {
       "path": "tests/x509_validation_ownership_inventory_contract.rs",
-      "sha256": "7927c120342ce6ef3ae819a0125bf4c308aa3df7a147804cc6aa12cc37fd7f7b",
-      "line_count": 873,
+      "sha256": "d5905b8b758cc1a8c2d43c5702c8fc6c2818f824f79e1de3c586cc62009be136",
+      "line_count": 914,
       "role": "A1 fail-closed ownership contract"
     }
   ],

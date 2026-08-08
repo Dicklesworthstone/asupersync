@@ -41,13 +41,13 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
-      "line_count": 991
+      "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
+      "line_count": 1038
     },
     {
       "path": "Cargo.lock",
-      "sha256": "9fa12e8af1e6b15a3070d88d62b2b81b8ba49c0e9d8592c1d1682f1cd72a4461",
-      "line_count": 4664
+      "sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
+      "line_count": 4666
     },
     {
       "path": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md",
@@ -56,23 +56,23 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "82a73ec1c14fbe317611f6d592af480d75d002cbe9333045ab74840bcaf1c081",
-      "line_count": 6907
+      "sha256": "e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2",
+      "line_count": 6917
     },
     {
       "path": "artifacts/dependency_marginal_ledger_v1.json",
-      "sha256": "832e8d68eefe9400a246ea619a250ea91bcf16a57d5fe728a6ce45e25bbdb4a6",
-      "line_count": 187712
+      "sha256": "4e36ca29d7187e3237cfd9f422b2661009a608e93bb5761c7d511d412d66a047",
+      "line_count": 188447
     },
     {
       "path": "artifacts/api_surface_map_v1.json",
-      "sha256": "a00b61fe82326d766cde69e2392bc493a67d3c62f9d5cd83e3e02f8b5bf5535a",
-      "line_count": 4650
+      "sha256": "7dfbb239422630e1ef9c875e7542c4cee440211233dc7b734611fa8481d54178",
+      "line_count": 4824
     },
     {
       "path": "artifacts/unsafe_boundary_ledger_v1.json",
-      "sha256": "d18e2e1ee44a00695f54f596e48de6efa1715b24b5e1172579637c7528e0afae",
-      "line_count": 6217
+      "sha256": "f32cea1f0abb4ae8ce61d91caf22c5b812d05793cf7e2ecfe899d4a0de1bd8d9",
+      "line_count": 6338
     },
     {
       "path": "src/signal/mod.rs",
@@ -111,13 +111,13 @@
     },
     {
       "path": "src/bin/atpd.rs",
-      "sha256": "8d969a0669bcd865be9589f5a408cab2b861c1a14ab0a3e5a9e8b1f1fb731cf8",
-      "line_count": 2333
+      "sha256": "53f0dae1caaf9a46064b19337bc5efc99408274469d3dbd85078b0b28c51d424",
+      "line_count": 2663
     },
     {
       "path": "src/process.rs",
-      "sha256": "90fe4feb116838840b62fec8b5825bc35b6af050439dd8fec3e0c736dea26aa8",
-      "line_count": 3854
+      "sha256": "51a964a7549b63f08b549720b8c86391b9b198d5ce9ae5389d642ea2b62a4c2e",
+      "line_count": 5230
     },
     {
       "path": "src/atp/daemon_control.rs",
@@ -136,13 +136,13 @@
     },
     {
       "path": "tests/windows_platform_completeness.rs",
-      "sha256": "a6700ca0ca6d2251bd00928c0b241e9975b1d02f2c95784ffbb94670053347f2",
-      "line_count": 337
+      "sha256": "ad454ea2524c3acf354af0593f2b812b30da1ae31bc47c93b1fb880b1e5e2ccc",
+      "line_count": 338
     },
     {
       "path": "scripts/run_dependency_sovereignty_e2e.sh",
-      "sha256": "59ccb2212cb55b9fae8c28ec880fff532ab762a69669277f26940008ebd01af2",
-      "line_count": 1077
+      "sha256": "388af46854549b837e7de602fbb84f99d26dcf2fef6b7e4f8575f1f6478d33a0",
+      "line_count": 1276
     }
   ],
   "dependency_resolution": {

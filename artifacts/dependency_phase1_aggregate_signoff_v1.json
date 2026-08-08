@@ -15,26 +15,26 @@
       "bead_id": "asupersync-dep-p1-foundations-upksjk.2",
       "role": "MARGINAL_LEDGER",
       "path": "artifacts/dependency_marginal_ledger_v1.json",
-      "sha256": "832e8d68eefe9400a246ea619a250ea91bcf16a57d5fe728a6ce45e25bbdb4a6"
+      "sha256": "4e36ca29d7187e3237cfd9f422b2661009a608e93bb5761c7d511d412d66a047"
     },
     {
       "bead_id": "asupersync-dep-p1-foundations-upksjk.3",
       "role": "ORACLE_POLICY",
       "path": "artifacts/dependency_oracle_policy_v1.json",
-      "sha256": "f75c1fd5aa130a98d693c768da3b79285b7305b76bc02015ef6667ca0cac4784"
+      "sha256": "98550709b39ff4de1292a12c1ed0d2d7091492e64710b7f08fa078e56bf8c45c"
     },
     {
       "bead_id": "asupersync-dep-p1-foundations-upksjk.5.4",
       "role": "CAPABILITY_REGISTRY_AND_GRAPH_SIGNOFF",
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "82a73ec1c14fbe317611f6d592af480d75d002cbe9333045ab74840bcaf1c081",
+      "sha256": "e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2",
       "repin_note": "Re-pinned 2026-07-25 under br-asupersync-dvgpji: 17 source_owners rows corrected, CAP-NKEY-AUTH dependency_owners de-invented (base32/crc16 do not exist), the 'tls' feature removed from CAP-DATABASE-WIRE dependency_owners, the encoding::/decoding:: selectors re-pointed away from CAP-SERDE-GENERIC, and two structural checks added so the class cannot recur. Corrections only; no capability, disposition, evidence state or cutover state changed."
     },
     {
       "bead_id": "asupersync-dep-p1-foundations-upksjk.5.2",
       "role": "CAPABILITY_BASELINE",
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8"
+      "sha256": "61481a3ce5113420393ac3d3c647b8c3f00f46fd2cb5bfb21f8efbda82241d15"
     },
     {
       "bead_id": "asupersync-dep-p1-foundations-upksjk.5.3",
@@ -46,7 +46,7 @@
       "bead_id": "asupersync-dep-p1-foundations-upksjk.6.1",
       "role": "INVARIANT_TO_EVIDENCE_MATRIX",
       "path": "artifacts/dependency_verification_matrix_v1.json",
-      "sha256": "586e31ad462e8bac2ea9bc8f20619cfce9fcb71e2ffa46af057e30e376a0267f"
+      "sha256": "c42345e9bbd771a1fb525504bce4162b2af6caca8a75b642d6e14bbb14f7d36b"
     },
     {
       "bead_id": "asupersync-dep-p1-foundations-upksjk.6.6",
@@ -56,7 +56,7 @@
     }
   ],
   "baseline_provenance": {
-    "ledger_source_commit": "f606e28983199a1b51af11e6f65bb9b00686ceb3",
+    "ledger_source_commit": "00a42d75c072044cbc8a7093885ec19420f21bdc",
     "capability_baseline_revision": "6a0d2c79eaf989b649ad0b63dcbec9a1169e3abf",
     "tracker_plan_semantic_sha256": "f83003c1b99336b90d3237e5002d50d3b0c7695393288760829539b8fe3229ec",
     "cargo_version": "cargo 1.98.0-nightly (a335d47ff 2026-06-26)",
@@ -209,8 +209,8 @@
   },
   "graph_gate": {
     "gate_bead_id": "asupersync-dep-p1-foundations-upksjk.4",
-    "direct_blocked_issue_count": 65,
-    "later_matrix_row_count": 320,
+    "direct_blocked_issue_count": 66,
+    "later_matrix_row_count": 317,
     "later_implementation_row_count": 104,
     "later_role_counts": {
       "architecture": 14,
@@ -229,7 +229,7 @@
   "operator_summary": {
     "authorized_work": {
       "scope": "DOWNSTREAM_EVIDENCE_WORK_ONLY",
-      "direct_issue_count": 65,
+      "direct_issue_count": 66,
       "dependency_exit_allowed": false,
       "cutover_allowed": false
     },
@@ -290,7 +290,7 @@
     }
   ],
   "canonical_commands": {
-    "ledger_regeneration": "set -o pipefail; GENERATOR_COMMIT=f606e28983199a1b51af11e6f65bb9b00686ceb3; RCH_REQUIRE_REMOTE=1 rch exec -q --base \"$GENERATOR_COMMIT\" --clean-overlay --no-overlay -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_dependency_marginal_ledger_generate\" CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run -j 8 --quiet -p asupersync --bin dependency_marginal_ledger --no-default-features --features dependency-ledger -- --source-commit \"$GENERATOR_COMMIT\" --jobs 8 --output - 2>&1 | sed '/^\\[RCH\\] remote /d' > artifacts/dependency_marginal_ledger_v1.json",
+    "ledger_regeneration": "set -o pipefail; GENERATOR_COMMIT=00a42d75c072044cbc8a7093885ec19420f21bdc; RCH_REQUIRE_REMOTE=1 rch exec -q --base \"$GENERATOR_COMMIT\" --clean-overlay --no-overlay -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_dependency_marginal_ledger_generate\" CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run -j 8 --quiet -p asupersync --bin dependency_marginal_ledger --no-default-features --features dependency-ledger -- --source-commit \"$GENERATOR_COMMIT\" --jobs 8 --output - 2>&1 | sed '/^\\[RCH\\] remote /d' > artifacts/dependency_marginal_ledger_v1.json",
     "focused_foundation_and_aggregate_contracts": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_dependency_phase1_aggregate_signoff\" cargo test -p asupersync --test dependency_safety_taxonomy_contract --test dependency_marginal_ledger_contract --test dependency_oracle_policy_contract --test dependency_phase1_aggregate_signoff_contract -- --nocapture",
     "verification_final_contract": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_dependency_verification_final_signoff\" cargo test -p asupersync --test dependency_verification_final_signoff_contract -- --nocapture",
     "live_prerequisite_audit": "br show asupersync-dep-p1-foundations-upksjk.1 asupersync-dep-p1-foundations-upksjk.2 asupersync-dep-p1-foundations-upksjk.3 asupersync-dep-p1-foundations-upksjk.5.4 asupersync-dep-p1-foundations-upksjk.6.6 --json",

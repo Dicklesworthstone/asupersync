@@ -815,12 +815,11 @@
     "cells": 8,
     "metrics_cells": 4,
     "workspace_dev_build_audit_cells": 4,
-    "metrics_marginal_package_count": 4,
+    "metrics_marginal_package_count": 3,
     "metrics_marginal_packages": [
       "aho-corasick@1.1.4",
       "regex@1.13.1",
-      "regex-automata@0.4.16",
-      "regex-syntax@0.8.11"
+      "regex-automata@0.4.16"
     ],
     "workspace_dev_build_audit_marginal_package_count": 0,
     "workspace_retention_reason": "other workspace/dev graph edges retain the incumbent family",

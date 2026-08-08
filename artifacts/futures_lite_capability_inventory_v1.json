@@ -146,13 +146,13 @@
     "current_source_pins": [
       {
         "path": "src/future.rs",
-        "sha256": "c0a02784a010e9709dfab3b40259bccf8d312e9101834d8c110f2b1f19bd8598",
-        "line_count": 972
+        "sha256": "86a23894ae5f37d0541e12074ab8eecb0b3331bc4ae0e7627fd61b4926254b50",
+        "line_count": 1088
       },
       {
         "path": "src/util/mod.rs",
-        "sha256": "2f833ed4e8c6b11701490669d96bcea63239af4e6868ff379daf3606b569ef4a",
-        "line_count": 35
+        "sha256": "00a03123d4d96708dcc8d9c0fad8971f87130fae2ed172eb277b8a0b9c90121f",
+        "line_count": 40
       }
     ],
     "kernel_projection": {
@@ -251,7 +251,7 @@
     "visibility": "crate-private alongside-incumbent",
     "current_source_pin": {
       "path": "src/future.rs",
-      "sha256": "da6ef76c90a77c430149cabc5556343bb6408e179f62b1615c0a57b7643067b0",
+      "sha256": "86a23894ae5f37d0541e12074ab8eecb0b3331bc4ae0e7627fd61b4926254b50",
       "line_count": 1088
     },
     "helper_projection": {
@@ -360,18 +360,18 @@
     "current_source_pins": [
       {
         "path": "src/future.rs",
-        "sha256": "c0a02784a010e9709dfab3b40259bccf8d312e9101834d8c110f2b1f19bd8598",
-        "line_count": 972
+        "sha256": "86a23894ae5f37d0541e12074ab8eecb0b3331bc4ae0e7627fd61b4926254b50",
+        "line_count": 1088
       },
       {
         "path": "src/web/middleware.rs",
-        "sha256": "d4f6e9bbe0cb18849ce58aa293301c796ac079ad016f261d0db8affd8a0bb10a",
-        "line_count": 6030
+        "sha256": "ea9f19f2f53325a9c837545678a697ee3ca2c0a204cbd2de21b974b537fbc74c",
+        "line_count": 6028
       },
       {
         "path": "src/web/negotiate.rs",
-        "sha256": "4a98a71fe252c26e059e2bb4f0b2350a4a6e9b4bd13519f35590627788794c61",
-        "line_count": 903
+        "sha256": "3cef1b7e979de61a241138e10be0bdaf9d8e8dac4837cd17e662e8adc9fec220",
+        "line_count": 899
       }
     ],
     "poll_helper_projection": {
@@ -456,9 +456,9 @@
     "current_occurrence": {
       "unit": "non-overlapping textual token occurrences in current tracked Rust source, excluding this contract",
       "ordering": "bytewise path order; digest input is path, tab, decimal count, newline",
-      "file_count": 315,
-      "token_count": 1382,
-      "digest_sha256": "86755aabb204be53aca205404e7449a9218bb7353a3adb45fc019cddc581b30a",
+      "file_count": 316,
+      "token_count": 1383,
+      "digest_sha256": "d895cfbcf2b137b650d5270c7028a829bf967f0840ec150f906f8c3e50dc7e69",
       "scope_rows": [
         {
           "scope": "src",
@@ -468,9 +468,9 @@
         },
         {
           "scope": "tests",
-          "file_count": 154,
-          "token_count": 542,
-          "digest_sha256": "73e35c82f2bbdd8f6af9c9f3a2979bad0ad546d174c73e21fd112cbfed40bac5"
+          "file_count": 155,
+          "token_count": 543,
+          "digest_sha256": "57c4626f9dd9f897c65104f4ee4743df0e4a9869363541a2c56713db1cf89345"
         },
         {
           "scope": "benches",
@@ -519,16 +519,16 @@
       },
       {
         "group_id": "FUT-A9-ATP-DEV",
-        "file_count": 208,
-        "token_count": 776,
-        "digest_sha256": "4746f8c8a8862b82fe0e836d2fcb60cf53430f1cd093f6af8c0751f889166e3f"
+        "file_count": 209,
+        "token_count": 777,
+        "digest_sha256": "ebf8ced3579a0fb6fe309adf567c7439bc7f5f10a6e02936ae3e4cf5866656be"
       }
     ],
     "source_pin_reconciliations": [
       {
         "path": "Cargo.toml",
         "baseline_sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
-        "current_sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+        "current_sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
         "current_line_count": 1038,
         "classification": "CAPABILITY_PROJECTION_UNCHANGED",
         "projection": "root futures-lite manifest requirement",
@@ -537,7 +537,7 @@
       {
         "path": "Cargo.lock",
         "baseline_sha256": "9fa12e8af1e6b15a3070d88d62b2b81b8ba49c0e9d8592c1d1682f1cd72a4461",
-        "current_sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+        "current_sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
         "current_line_count": 4666,
         "classification": "CAPABILITY_PROJECTION_UNCHANGED",
         "projection": "resolved futures-lite package block",
@@ -1424,17 +1424,17 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+      "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
       "line_count": 1038
     },
     {
       "path": "Cargo.lock",
-      "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+      "sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
       "line_count": 4666
     },
     {
       "path": "asupersync-tokio-compat/Cargo.toml",
-      "sha256": "fca13737334e95f75083d3e037ab234404d9a9402c5e2a8ed7f4bcb9f6574cac",
+      "sha256": "67fd985d0a701ec3b9a66f4c164ee53d59e0c55973d76a97bf74aea5ab6a1a4a",
       "line_count": 68
     },
     {
@@ -1444,13 +1444,13 @@
     },
     {
       "path": "src/web/middleware.rs",
-      "sha256": "d4f6e9bbe0cb18849ce58aa293301c796ac079ad016f261d0db8affd8a0bb10a",
-      "line_count": 6030
+      "sha256": "ea9f19f2f53325a9c837545678a697ee3ca2c0a204cbd2de21b974b537fbc74c",
+      "line_count": 6028
     },
     {
       "path": "src/web/negotiate.rs",
-      "sha256": "4a98a71fe252c26e059e2bb4f0b2350a4a6e9b4bd13519f35590627788794c61",
-      "line_count": 903
+      "sha256": "3cef1b7e979de61a241138e10be0bdaf9d8e8dac4837cd17e662e8adc9fec220",
+      "line_count": 899
     },
     {
       "path": "src/web/router.rs",

@@ -674,7 +674,7 @@ fn marginal_graph_downstream_routing_docs_and_no_claims_are_exact() {
         marginal
             .get("metrics_marginal_package_count")
             .and_then(Value::as_u64),
-        Some(4)
+        Some(3)
     );
     assert_eq!(
         marginal
@@ -715,7 +715,7 @@ fn marginal_graph_downstream_routing_docs_and_no_claims_are_exact() {
         assert_eq!(
             row.get("marginal_package_version_count")
                 .and_then(Value::as_u64),
-            Some(4)
+            Some(3)
         );
         assert!(array(row, "build_scripts").is_empty());
         assert!(array(row, "proc_macros").is_empty());

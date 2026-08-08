@@ -9,7 +9,7 @@
   "source_transition": {
     "a1_baseline_revision": "a4a92df81109afa362814c4e0638afcbe16424d0",
     "a1_trace_file_sha256": "67d22662b847644524e088edf08d05eeeb59aa670c99be725d016ed825d456d9",
-    "a4_trace_file_sha256": "c0b163a5fb758cc0a056133b55d5f799b68add1479a7a63ed9599361b5c5e774",
+    "a4_trace_file_sha256": "57c7c5602420154601095e7a00f639732bcdb209cf09cb7d72cb446067068827",
     "root_manifest_changed": false,
     "root_manifest_sha256": "b6789b10b8e984a98004cde19952c6b73418afdde30aa61e1c5a6a45377f17bb",
     "root_lockfile_changed": false,

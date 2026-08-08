@@ -104,17 +104,17 @@
   "source_contracts": [
     {
       "path": "Cargo.toml",
-      "sha256": "b6789b10b8e984a98004cde19952c6b73418afdde30aa61e1c5a6a45377f17bb",
+      "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
       "role": "retained root normal feature edge and development oracle edge"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "c670712ab8713897bacc9591c170db2d030df83011dc7b9d092f16099f1540dd",
+      "sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
       "role": "locked lz4_flex 0.14.0 package and checksum"
     },
     {
       "path": "fuzz/Cargo.toml",
-      "sha256": "8756d0bf2578d20726a63285daa2f7a6a789e4811c5756c9c9c6871a66551473",
+      "sha256": "857925379ab7068f3faf94435e44b87adfc96c2d716f19b5c1cfdffbbfbd580d",
       "role": "excluded differential workspace pinned to incumbent 0.14.0"
     },
     {
@@ -124,7 +124,7 @@
     },
     {
       "path": "src/trace/file.rs",
-      "sha256": "c0b163a5fb758cc0a056133b55d5f799b68add1479a7a63ed9599361b5c5e774",
+      "sha256": "57c7c5602420154601095e7a00f639732bcdb209cf09cb7d72cb446067068827",
       "role": "incumbent production default and test-internals shadow selector"
     },
     {
@@ -134,12 +134,12 @@
     },
     {
       "path": "artifacts/lz4_surface_artifact_inventory_v1.json",
-      "sha256": "642d1a84fc6d391508b75eda1548ddc8aa62436ed4519cb16f877b37009217fa",
+      "sha256": "e36e697592ed4f4005f348c1f153cb8aba6bf2fe57be35a81e1861b9c66d2bcd",
       "role": "A1 machine inventory and routed gap authority"
     },
     {
       "path": "artifacts/lz4_owned_codec_corpus_v1.json",
-      "sha256": "0f599946032eedbb46f336256d456229909d4b2dcf7d552b06e49ddbaa0f1417",
+      "sha256": "e43d62bcfad745ce839e40fa04d9bdf2f5eaa88b920804efd817c4af1b341c9b",
       "role": "A3 independent corpus and bounded execution receipt"
     },
     {
@@ -184,7 +184,7 @@
     },
     {
       "path": "scripts/run_dependency_sovereignty_e2e.sh",
-      "sha256": "a1908b10016b633cd5e2f923cb077533eaa66290c218e4f1c7de09e70e8400a2",
+      "sha256": "388af46854549b837e7de602fbb84f99d26dcf2fef6b7e4f8575f1f6478d33a0",
       "role": "canonical sparse plus aggregate terminal runner"
     },
     {

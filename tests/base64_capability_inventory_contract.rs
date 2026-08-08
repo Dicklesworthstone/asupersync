@@ -35,9 +35,9 @@ const PATH_TOKEN: &str = concat!("base", "64::");
 const SOURCE_PIN_PATHS_SHA256: &str =
     "996efa7ae8c2105ab6d8a059f8cafef646c323e1791e40895becc43f68157fe4";
 const RECORDED_OPERATION_SEMANTICS_SHA256: &str =
-    "bddb32296014409a7237fb9cd68ebc94a4eb538ca47fbaa22a6d4aa2b0217b5d";
+    "50e92552029c51f5d9c7d7d5fd7853dbfb050fb30d434d78a3091b939ca8feb0";
 const CLAIMS_PROJECTION_SHA256: &str =
-    "067fce80f3a0289e540f0e0847aba0c64786a4657fc9d8fd9fabc0952f8e1610";
+    "27ceb8e3876ae99ecbe6ed930021d7c1e552e3f052b1fa2b7fcb7e4b1384ccd7";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1538,7 +1538,7 @@ fn validate_claims_projection(inventory: &Value) -> Result<(), String> {
     validate_inventory(inventory)?;
     let actual = sha256_hex(&canonical_json_bytes(&claims_projection(inventory)));
     if actual != CLAIMS_PROJECTION_SHA256 {
-        return Err("canonical claims projection drifted".to_owned());
+        return Err(format!("canonical claims projection drifted: {actual}"));
     }
     Ok(())
 }

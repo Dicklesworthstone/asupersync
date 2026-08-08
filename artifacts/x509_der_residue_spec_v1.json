@@ -19,16 +19,16 @@
     "required": true,
     "author": "GreenCove",
     "state": "APPROVED",
-    "reviewer": "/root/architecture_trace",
+    "reviewer": "/root/x509_release_review",
     "review_channel": "collaboration_agent",
     "review_receipt": {
-      "agent_task": "/root/architecture_trace",
+      "agent_task": "/root/x509_release_review",
       "decision": "APPROVE",
-      "reviewed_normative_payload_sha256": "8a619557ce3a8d87833d7e8733ac89a5fe78a1286c7cdb93c9c88bbd37e17274"
+      "reviewed_normative_payload_sha256": "547a5fc3e1241ffc46ca4b3928cd20064fadea6d4c93f2854906e95f9148e948"
     },
-    "reviewed_draft_sha256": "9a1d64225bbce6fbcf671964f2f567d7b9cdb500929f61a2e0b46872b4bbcfd2",
-    "reviewed_normative_payload_sha256": "8a619557ce3a8d87833d7e8733ac89a5fe78a1286c7cdb93c9c88bbd37e17274",
-    "candidate_normative_payload_sha256": "8a619557ce3a8d87833d7e8733ac89a5fe78a1286c7cdb93c9c88bbd37e17274",
+    "reviewed_draft_sha256": "ce9de830876ce37e72f243b07d93daa39f881a70bf4d0d130465f93520fcb1dc",
+    "reviewed_normative_payload_sha256": "547a5fc3e1241ffc46ca4b3928cd20064fadea6d4c93f2854906e95f9148e948",
+    "candidate_normative_payload_sha256": "547a5fc3e1241ffc46ca4b3928cd20064fadea6d4c93f2854906e95f9148e948",
     "normative_projection": {
       "algorithm": "SHA-256",
       "canonicalization": "compact JSON with object keys sorted lexicographically and array order preserved",
@@ -54,13 +54,13 @@
   "source_contracts": [
     {
       "path": "Cargo.toml",
-      "sha256": "b6789b10b8e984a98004cde19952c6b73418afdde30aa61e1c5a6a45377f17bb",
-      "line_count": 1015,
+      "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
+      "line_count": 1038,
       "role": "tls feature and x509-parser dependency baseline"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "c670712ab8713897bacc9591c170db2d030df83011dc7b9d092f16099f1540dd",
+      "sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
       "line_count": 4666,
       "role": "resolved dependency baseline"
     },
@@ -90,7 +90,7 @@
     },
     {
       "path": "artifacts/x509_validation_ownership_inventory_v1.json",
-      "sha256": "1492f449a1430ba2c06c6feebe44754bd92e85259c5e8ff5d1afa553e98665a2",
+      "sha256": "42e4fccfa1414081d7065dba9be38cfc0bc171becd985977bbb5ecd35e0fe9db",
       "line_count": 1073,
       "role": "A1 call-site, owner, residue, and routed-gap authority"
     },
@@ -102,13 +102,13 @@
     },
     {
       "path": "tests/x509_validation_ownership_inventory_contract.rs",
-      "sha256": "55895b057cb7afbd236844bdeed26c292fca7441c5f59cb49113310962e7b0fd",
-      "line_count": 913,
+      "sha256": "d5905b8b758cc1a8c2d43c5702c8fc6c2818f824f79e1de3c586cc62009be136",
+      "line_count": 914,
       "role": "A1 executable ownership contract"
     },
     {
       "path": "artifacts/x509_standard_verifier_delegation_v1.json",
-      "sha256": "86901cdbc800fe478dcb25a956b315848ae8b2e4a8c10fce004b8a3baa18e86d",
+      "sha256": "65d905e4007ead2aa660be757d61d3b7c7cacfc5ce8aab2b5ffb46be091a59be",
       "line_count": 345,
       "role": "A2 standard-first delegation and retained-policy authority"
     },
@@ -120,7 +120,7 @@
     },
     {
       "path": "tests/x509_standard_verifier_delegation_contract.rs",
-      "sha256": "39df49e5bb206c292a9c0a71e916604c57abb7f55c505eeb5f876c8617f2cfce",
+      "sha256": "37a47a28fcc0e8c5af945a3e0812ba8502c05017c980166245e808d8e851be90",
       "line_count": 466,
       "role": "A2 executable delegation contract"
     }

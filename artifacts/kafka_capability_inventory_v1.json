@@ -45,7 +45,7 @@
       "pin_id": "KAFKA-PIN-ROOT-MANIFEST",
       "path": "Cargo.toml",
       "record_count": 1038,
-      "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+      "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
       "role": "root feature and optional dependency owner",
       "pin_state": "BASELINE_HEAD"
     },
@@ -53,7 +53,7 @@
       "pin_id": "KAFKA-PIN-ROOT-LOCK",
       "path": "Cargo.lock",
       "record_count": 4666,
-      "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+      "sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
       "role": "rdkafka and rdkafka-sys resolved identity",
       "pin_state": "BASELINE_HEAD"
     },

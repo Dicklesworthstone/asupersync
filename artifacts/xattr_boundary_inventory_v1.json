@@ -30,12 +30,12 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+      "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
       "line_count": 1038
     },
     {
       "path": "Cargo.lock",
-      "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+      "sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
       "line_count": 4666
     },
     {
@@ -45,8 +45,8 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "6eb22d0ead0ad25c8b51bf4435a3ccdb4c41b52bed88eb5ac45a35be116e32bb",
-      "line_count": 6908
+      "sha256": "e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2",
+      "line_count": 6917
     },
     {
       "path": "artifacts/dependency_marginal_ledger_v1.json",
@@ -55,8 +55,8 @@
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8",
-      "line_count": 1357
+      "sha256": "61481a3ce5113420393ac3d3c647b8c3f00f46fd2cb5bfb21f8efbda82241d15",
+      "line_count": 3210
     },
     {
       "path": "artifacts/api_surface_map_v1.json",
@@ -65,8 +65,8 @@
     },
     {
       "path": "artifacts/unsafe_boundary_ledger_v1.json",
-      "sha256": "498daaf6154c923fed8d62d5c3096c06ad88297ef95c2f0ef317980c2949464a",
-      "line_count": 6297
+      "sha256": "f32cea1f0abb4ae8ce61d91caf22c5b812d05793cf7e2ecfe899d4a0de1bd8d9",
+      "line_count": 6338
     },
     {
       "path": "src/net/atp/transport_common/metadata.rs",
@@ -80,7 +80,7 @@
     },
     {
       "path": "src/bin/atp.rs",
-      "sha256": "b77dd1e90ae1ab81bf084feac214b31cc8f17557d6f3c476dcdb1868075eee4b",
+      "sha256": "898b6c4e15cf95d4382c617ce0ded5a856b2f6f238df7fa7f86b4e999f1a2d86",
       "line_count": 11912
     },
     {
@@ -90,8 +90,8 @@
     },
     {
       "path": "scripts/run_dependency_sovereignty_e2e.sh",
-      "sha256": "a1908b10016b633cd5e2f923cb077533eaa66290c218e4f1c7de09e70e8400a2",
-      "line_count": 1208
+      "sha256": "388af46854549b837e7de602fbb84f99d26dcf2fef6b7e4f8575f1f6478d33a0",
+      "line_count": 1276
     }
   ],
   "reviewed_upstream_sources": {

@@ -86,12 +86,12 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "b6789b10b8e984a98004cde19952c6b73418afdde30aa61e1c5a6a45377f17bb",
+      "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
       "role": "root normal/dev dependency and feature authority"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "c670712ab8713897bacc9591c170db2d030df83011dc7b9d092f16099f1540dd",
+      "sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
       "role": "root resolved dependency graph"
     },
     {
@@ -101,7 +101,7 @@
     },
     {
       "path": "src/bin/asupersync.rs",
-      "sha256": "7578b320c1e911375597851aa1821ec1ed871313545b5b159b0df7daa12761df",
+      "sha256": "39719e72f1c00122ec4730aab2e2404086292ac46ced4e9290bb206a3b618ec7",
       "role": "trace info, compress, migrate, and replay CLI journeys"
     },
     {
@@ -136,12 +136,12 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "82a73ec1c14fbe317611f6d592af480d75d002cbe9333045ab74840bcaf1c081",
+      "sha256": "e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2",
       "role": "capability and owner authority"
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8",
+      "sha256": "61481a3ce5113420393ac3d3c647b8c3f00f46fd2cb5bfb21f8efbda82241d15",
       "role": "baseline evidence authority"
     },
     {

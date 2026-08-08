@@ -40,13 +40,13 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
-      "line_count": 991
+      "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
+      "line_count": 1038
     },
     {
       "path": "Cargo.lock",
-      "sha256": "9fa12e8af1e6b15a3070d88d62b2b81b8ba49c0e9d8592c1d1682f1cd72a4461",
-      "line_count": 4664
+      "sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
+      "line_count": 4666
     },
     {
       "path": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md",
@@ -55,18 +55,18 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "82a73ec1c14fbe317611f6d592af480d75d002cbe9333045ab74840bcaf1c081",
-      "line_count": 6907
+      "sha256": "e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2",
+      "line_count": 6917
     },
     {
       "path": "artifacts/dependency_api_adr_registry_v1.json",
-      "sha256": "ca0b3f80af74b296e6beae0f7bf76aef0f8e73b161efa177de3239742c324786",
+      "sha256": "4765bb6d17b676fd63529ee75047477656851474300601e05cbc5492b32f9dbc",
       "line_count": 6831
     },
     {
       "path": "artifacts/api_surface_map_v1.json",
-      "sha256": "a00b61fe82326d766cde69e2392bc493a67d3c62f9d5cd83e3e02f8b5bf5535a",
-      "line_count": 4650
+      "sha256": "7dfbb239422630e1ef9c875e7542c4cee440211233dc7b734611fa8481d54178",
+      "line_count": 4824
     },
     {
       "path": "docs/adr/dep_plan_adr_007_nkey_auth.md",
@@ -75,7 +75,7 @@
     },
     {
       "path": "src/messaging/nats.rs",
-      "sha256": "be280b4bdbcf3e557e96e4989cc7c05c8b920f7cb89e5fee58d1fdfd6a5915fd",
+      "sha256": "f3328827942abbb04b904275744a30847062e9f01715cb65a1bf93cef3a5f5c0",
       "line_count": 5539
     },
     {
@@ -85,8 +85,8 @@
     },
     {
       "path": "src/runtime/config.rs",
-      "sha256": "4058034fd1a594171e3ad3220cf3d0628c0c43959ff21185ebc2a9287e8bcf84",
-      "line_count": 10763
+      "sha256": "1e351b452f35c348cff7dbb586263531afaeaab05ce8eba71830b0144f82504a",
+      "line_count": 10769
     },
     {
       "path": "src/atp/identity/mod.rs",
@@ -120,8 +120,8 @@
     },
     {
       "path": "scripts/run_dependency_sovereignty_e2e.sh",
-      "sha256": "59ccb2212cb55b9fae8c28ec880fff532ab762a69669277f26940008ebd01af2",
-      "line_count": 1077
+      "sha256": "388af46854549b837e7de602fbb84f99d26dcf2fef6b7e4f8575f1f6478d33a0",
+      "line_count": 1276
     }
   ],
   "upstream_baselines": {

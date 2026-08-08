@@ -89,32 +89,32 @@
       "SerializationFormat::Custom"
     ],
     "totals": {
-      "rust_files": 4274,
-      "serde_json::": 6102,
-      "rmp_serde::": 67,
+      "rust_files": 4334,
+      "serde_json::": 6335,
+      "rmp_serde::": 70,
       "bincode::": 32,
       "SerializationFormat::": 160,
-      "SerdeCodec": 29,
+      "SerdeCodec": 30,
       "SerializationFormat::Custom": 28
     },
     "roots": [
       {
         "path": "src",
         "classification": "MIXED_PRODUCTION_AND_INLINE_TEST; SEMANTIC unless an explicit persisted/public surface overrides it",
-        "rust_files": 1441,
-        "serde_json::": 2428,
+        "rust_files": 1451,
+        "serde_json::": 2459,
         "rmp_serde::": 48,
         "bincode::": 21,
         "SerializationFormat::": 82,
-        "SerdeCodec": 9,
+        "SerdeCodec": 10,
         "SerializationFormat::Custom": 17
       },
       {
         "path": "tests",
         "classification": "TEST_OR_EXTERNAL_CONSUMER_EVIDENCE; no production compatibility claim",
-        "rust_files": 1875,
-        "serde_json::": 3105,
-        "rmp_serde::": 6,
+        "rust_files": 1915,
+        "serde_json::": 3306,
+        "rmp_serde::": 9,
         "bincode::": 11,
         "SerializationFormat::": 23,
         "SerdeCodec": 10,
@@ -123,7 +123,7 @@
       {
         "path": "examples",
         "classification": "EXAMPLE_EVIDENCE; no production compatibility claim",
-        "rust_files": 21,
+        "rust_files": 25,
         "serde_json::": 11,
         "rmp_serde::": 0,
         "bincode::": 0,
@@ -134,8 +134,8 @@
       {
         "path": "benches",
         "classification": "BENCHMARK_EVIDENCE; no production compatibility claim",
-        "rust_files": 46,
-        "serde_json::": 27,
+        "rust_files": 51,
+        "serde_json::": 28,
         "rmp_serde::": 0,
         "bincode::": 0,
         "SerializationFormat::": 0,
@@ -233,7 +233,7 @@
       {
         "path": "fuzz",
         "classification": "FUZZ_EVIDENCE; current-corpus robustness only",
-        "rust_files": 776,
+        "rust_files": 777,
         "serde_json::": 134,
         "rmp_serde::": 13,
         "bincode::": 0,
@@ -268,7 +268,7 @@
     },
     {
       "token": "serde_json::",
-      "path_count": 250,
+      "path_count": 251,
       "classification": "All src paths are lexically covered by scan_profile. Persisted/public exceptions are enumerated below; the remainder is semantic JSON or inline-test/tooling use and carries no exact-byte claim."
     }
   ],
@@ -1052,15 +1052,15 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "b6789b10b8e984a98004cde19952c6b73418afdde30aa61e1c5a6a45377f17bb"
+      "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "c670712ab8713897bacc9591c170db2d030df83011dc7b9d092f16099f1540dd"
+      "sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af"
     },
     {
       "path": "src/types/mod.rs",
-      "sha256": "6f2ed2f5d9f35bf82eb4c9364a59575f0d630deeaaff274a8a9b97b599c6812a"
+      "sha256": "4f5915a7c73c3a96ad78cf6b4853374dbf5e9256d9b58ab119d9757791054d46"
     },
     {
       "path": "src/types/typed_symbol.rs",
@@ -1068,11 +1068,11 @@
     },
     {
       "path": "src/trace/file.rs",
-      "sha256": "67d22662b847644524e088edf08d05eeeb59aa670c99be725d016ed825d456d9"
+      "sha256": "57c7c5602420154601095e7a00f639732bcdb209cf09cb7d72cb446067068827"
     },
     {
       "path": "src/trace/mod.rs",
-      "sha256": "88f71a3703b871cb84f1bafb80bc459a9da56790e101ee5d1d94fb808864a57c"
+      "sha256": "49392d9a64ca911ce644624f181236cc9d1fa4e4c5f1f8d9ba8a462a31c9f47e"
     },
     {
       "path": "src/trace/replay.rs",
@@ -1092,7 +1092,7 @@
     },
     {
       "path": "src/trace/crashpack.rs",
-      "sha256": "76082b54047d2f5a95d1a01a51da2ea462d0545f2e69583350b8c4ef98a8354d"
+      "sha256": "4d6dee7bd6c0f170207564161aabd084abb35b3aab091cbc516616a5ad8a415c"
     },
     {
       "path": "src/trace/event.rs",
@@ -1120,11 +1120,11 @@
     },
     {
       "path": "src/lab/scenario.rs",
-      "sha256": "ce653696f29f9478d1ed3fb1b39a69df5205f0ce6f45de11e7a03bcb0448a180"
+      "sha256": "94d7609990eee98fb4d9e98140965cdd535f6a8faeca53770dfbf1e6dd764b65"
     },
     {
       "path": "src/lab/explorer.rs",
-      "sha256": "ea0a821e7a002a1d8410fc73bd98045c98aa130e21f69a725f0d2d185a1d99a9"
+      "sha256": "1159d0d1cb4aaa572094bd089168f502cc20e2bec4e71187dd606b18e8d34ddc"
     },
     {
       "path": "src/lab/crashpack/mod.rs",
@@ -1148,7 +1148,7 @@
     },
     {
       "path": "src/bin/asupersync.rs",
-      "sha256": "7578b320c1e911375597851aa1821ec1ed871313545b5b159b0df7daa12761df"
+      "sha256": "39719e72f1c00122ec4730aab2e2404086292ac46ced4e9290bb206a3b618ec7"
     },
     {
       "path": "tests/property_trace_schema.rs",
@@ -1172,11 +1172,11 @@
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
-      "sha256": "2b7b408f39508d2604d3d384a5184eb66b24d59b3945f39e0231492a5b6cc2bc"
+      "sha256": "a28cd08953d5eb112db6ba43d69ebeb262f74f15f4c36f51753df0cfb8c598ea"
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock",
-      "sha256": "6d442849149134f242eb99aad3a795c850cb05e9c0f549f29f72a02493734d47"
+      "sha256": "b8f24fd13354a95b42ca0f23dd9f5284f7f58bea740b45c20bce7fcb891eee7f"
     },
     {
       "path": "tests/fixtures/typed-format-cross-version-consumer/Cargo.toml",
@@ -1196,11 +1196,11 @@
     },
     {
       "path": "tests/typed_format_cross_version_e2e.rs",
-      "sha256": "6a5ce2b2e97b11e65e434e5b50c7c818172d059dae84711a62dd58f67bd77270"
+      "sha256": "957a348bc4a207fcc3bfc0cfe19135e20c7f81831f850bf19c4419c1441fff8e"
     },
     {
       "path": "scripts/run_dependency_sovereignty_e2e.sh",
-      "sha256": "3e0050fb53b52ceb0ad139d77e1ce657b5a0170cf7f926c689e0d6c9eac97de0"
+      "sha256": "388af46854549b837e7de602fbb84f99d26dcf2fef6b7e4f8575f1f6478d33a0"
     },
     {
       "path": "tests/raptorq_journal_kill_recover_replay_e2e.rs",
@@ -1208,7 +1208,7 @@
     },
     {
       "path": "tests/distributed_trace_remote_invariants.rs",
-      "sha256": "6ce7041a5232cfa022f2d5552c730545f5492a25c8438bbdabd1dd05c9a0c2b1"
+      "sha256": "6ceb68f3e128a4e9612896445e671d3fa2080a1429817b9c6e928ded00d0541b"
     },
     {
       "path": "fuzz/fuzz_targets/typed_symbol_parser.rs",
@@ -1240,7 +1240,7 @@
     },
     {
       "path": "artifacts/dependency_api_adr_registry_v1.json",
-      "sha256": "ca0b3f80af74b296e6beae0f7bf76aef0f8e73b161efa177de3239742c324786"
+      "sha256": "4765bb6d17b676fd63529ee75047477656851474300601e05cbc5492b32f9dbc"
     }
   ],
   "unknown_blockers": [],

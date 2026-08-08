@@ -553,7 +553,7 @@ fn canonical_marginal_rows_match_terminal_graph_summary() {
     let ledger = parse_repo_json(LEDGER_PATH);
     assert_eq!(
         ledger.get("source_commit").and_then(Value::as_str),
-        Some("ddea6250aee80357756fa1f39456823df88f7af1")
+        Some("00a42d75c072044cbc8a7093885ec19420f21bdc")
     );
 
     let polling = marginal_rows(&ledger, "polling");

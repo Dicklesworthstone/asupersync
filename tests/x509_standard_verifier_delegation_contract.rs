@@ -366,11 +366,11 @@ fn focused_failure_matrix_and_local_policy_owners_remain_present() {
 }
 
 #[test]
-fn a1_inventory_reconciles_with_the_a2_decision() {
+fn a1_inventory_reconciles_with_current_residue_state() {
     let inventory = parse(INVENTORY_PATH);
     assert_eq!(
         inventory["authority"]["residue_status"].as_str(),
-        Some("A2_SHARED_PIN_DELEGATION_COMPLETE_A3_SPEC_PENDING")
+        Some("A3_SPEC_APPROVED_A4_IMPLEMENTATION_PENDING")
     );
     assert_eq!(
         inventory["occurrence_census"]["active_production_call_sites"].as_u64(),
@@ -390,7 +390,7 @@ fn a1_inventory_reconciles_with_the_a2_decision() {
     let residues = array(&inventory, "provisional_residue");
     assert_eq!(
         row(residues, "residue_id", "X509-R4-NATIVE-PIN-FALLBACK")["state"].as_str(),
-        Some("A2_SHARED_POLICY_ACTIVE_PENDING_A3_OWNED_READER")
+        Some("A3_SPEC_APPROVED_A4_IMPLEMENTATION_PENDING")
     );
     assert_eq!(
         row(residues, "residue_id", "X509-R5-ATP-PIN-FALLBACK")["state"].as_str(),

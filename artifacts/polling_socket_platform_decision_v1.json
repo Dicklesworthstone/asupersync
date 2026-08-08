@@ -86,7 +86,7 @@
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4",
+      "sha256": "61481a3ce5113420393ac3d3c647b8c3f00f46fd2cb5bfb21f8efbda82241d15",
       "line_count": 3210
     },
     {
@@ -245,7 +245,7 @@
   },
   "marginal_graph": {
     "ledger": "artifacts/dependency_marginal_ledger_v1.json",
-    "ledger_source_commit": "ddea6250aee80357756fa1f39456823df88f7af1",
+    "ledger_source_commit": "00a42d75c072044cbc8a7093885ec19420f21bdc",
     "claim_revision": "e263782a6d5a793b78e53065f70ce7f76605e863",
     "freshness_state": "HISTORICAL_CANONICAL_MEASUREMENT_STATICALLY_CORROBORATED",
     "freshness_note": "The ledger predates the claim revision. Current static inspection confirms that the two manifest declarations and resolved versions are unchanged, but the ledger was not regenerated. These counts are canonical historical graph evidence, not fresh build, runtime, or platform evidence.",

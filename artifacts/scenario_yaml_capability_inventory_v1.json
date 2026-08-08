@@ -61,12 +61,12 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+      "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
       "line_count": 1038
     },
     {
       "path": "Cargo.lock",
-      "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+      "sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
       "line_count": 4666
     },
     {
@@ -91,12 +91,12 @@
     },
     {
       "path": "src/bin/asupersync.rs",
-      "sha256": "8415296574e31367ea2d542082fa7dffd4ec400923b244ed730ae3db02b30d89",
-      "line_count": 16799
+      "sha256": "39719e72f1c00122ec4730aab2e2404086292ac46ced4e9290bb206a3b618ec7",
+      "line_count": 16791
     },
     {
       "path": "frankenlab/Cargo.toml",
-      "sha256": "c6cb2a985132c0297e71c894815c0233c3f70cfbde550885118e6344351f2a48",
+      "sha256": "55449f733f4319743b929f327bee4b6c4ab539e4e3d8d11cb288bfa1733e766b",
       "line_count": 33
     },
     {
@@ -146,8 +146,8 @@
     },
     {
       "path": "tests/scenario_yaml_capability_inventory_contract.rs",
-      "sha256": "c4adfcafd3b0219c7ec6a00b26e8337cd9a66dc60691942b38afb2b449b18a7a",
-      "line_count": 3805
+      "sha256": "253bf45f8348e8a4f3f22e826261edb07843c854a9b3b12e03b126fdfdddd405",
+      "line_count": 3783
     },
     {
       "path": "tests/phase6_methodology_gate_contract.rs",
@@ -156,7 +156,7 @@
     },
     {
       "path": "tests/examples_metadata_contract.rs",
-      "sha256": "d56cc841fc511092a52e5ae19074945daaf09a6ecfced5cfcf5ad16d368ad17d",
+      "sha256": "a5b2850a9062d0d37fdefd6d06dba60bfc0f2228e36d73f6497cd34de5fd5129",
       "line_count": 467
     },
     {
@@ -211,7 +211,7 @@
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4",
+      "sha256": "61481a3ce5113420393ac3d3c647b8c3f00f46fd2cb5bfb21f8efbda82241d15",
       "line_count": 3210
     },
     {
@@ -2359,5 +2359,5 @@
       "claim": "existing frankenlab example author journey only"
     }
   ],
-  "no_claim_boundary": "This A1/A2/A3.1/A3.2 packet combines the earlier executable inventory and canonical-JSON evidence with a current static acceptance-satisfiability audit and fail-closed KEEP_INCUMBENT governance receipt. The A4 additions record source-level example-registry, GAP-12 claim-truth, author-guidance alignment, authored GAP-15 replay-code diagnostics, and an authored GAP-16 replay-persistence change; no Rust contract was executed for them, and SCN-GAP-01, SCN-GAP-12, SCN-GAP-13, SCN-GAP-15, and SCN-GAP-16 remain blocked. A3.1, A3.2, and these A4 static slices did not rerun executable lanes or implement an owned YAML parser or production Scenario YAML writer. The GAP-15 source was not compiled or executed and semantic validation still lacks YAML source spans. The GAP-16 source was not compiled or executed and therefore does not establish cross-platform filesystem behavior or crash durability after destination publication. The packet proves no complete parity, runtime behavior outside the authored replay-persistence source, performance, resource, security, broad-health, release, or terminal decision, and authorizes no input narrowing, dependency or file removal, tracker closure, or cutover. It grants no permission to remove serde_yaml, serde, any accepted field, error, document, or workflow. It also does not implement include merging, network or cancellation simulation, participant workloads, full fault effects, resource-policy bounds, or stable located semantic diagnostics. KEEP_INCUMBENT and dependency_exit_allowed=false remain mandatory. Only A5 may issue a terminal KEEP, DEFER, or CUTOVER decision; CUTOVER and dependency exit remain unauthorized until every declared prerequisite is satisfied."
+  "no_claim_boundary": "This A1/A2/A3.1/A3.2 packet combines the earlier executable inventory and canonical-JSON evidence with a current static acceptance-satisfiability audit and fail-closed KEEP_INCUMBENT governance receipt. The A4 additions record source-level example-registry, GAP-12 claim-truth, author-guidance alignment, authored GAP-15 replay-code diagnostics, and an authored GAP-16 replay-persistence change; no Rust contract was executed for them, and SCN-GAP-01, SCN-GAP-12, SCN-GAP-13, SCN-GAP-15, and SCN-GAP-16 remain blocked. SCN-GAP-13 remains blocked until its focused execution evidence exists. A3.1, A3.2, and these A4 static slices did not rerun executable lanes or implement an owned YAML parser or production Scenario YAML writer. The GAP-15 source was not compiled or executed and semantic validation still lacks YAML source spans. The GAP-16 source was not compiled or executed and therefore does not establish cross-platform filesystem behavior or crash durability after destination publication. The packet proves no complete parity, runtime behavior outside the authored replay-persistence source, performance, resource, security, broad-health, release, or terminal decision, and authorizes no input narrowing, dependency or file removal, tracker closure, or cutover. It grants no permission to remove serde_yaml, serde, any accepted field, error, document, or workflow. It also does not implement include merging, network or cancellation simulation, participant workloads, full fault effects, resource-policy bounds, or stable located semantic diagnostics. KEEP_INCUMBENT and dependency_exit_allowed=false remain mandatory. Only A5 may issue a terminal KEEP, DEFER, or CUTOVER decision; CUTOVER and dependency exit remain unauthorized until every declared prerequisite is satisfied."
 }

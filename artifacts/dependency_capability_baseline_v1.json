@@ -1375,13 +1375,13 @@
     "source_pins": [
       {
         "path": "Cargo.toml",
-        "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+        "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
         "line_count": 1038,
         "role": "unconditional normal hashbrown dependency declaration and feature profiles"
       },
       {
         "path": "Cargo.lock",
-        "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+        "sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
         "line_count": 4666,
         "role": "direct hashbrown 0.17.1 resolution plus transitive 0.16.1 and 0.17.1 graph context"
       },
@@ -1393,14 +1393,14 @@
       },
       {
         "path": "src/runtime/scheduler/local_queue.rs",
-        "sha256": "74c3895d96057869f0ebdd554c426efe37c2399ca80d20f3f8d09062c4925d66",
-        "line_count": 1798,
+        "sha256": "47a237d7d5f286135f21960c1984c4b750b57465dc7d2f5b484ea2b645789e81",
+        "line_count": 1816,
         "role": "scheduler presence HashSet consumer, operations, invariants, and source-local tests"
       },
       {
         "path": "src/runtime/reactor/mod.rs",
-        "sha256": "df1ce75337c1a4c0549e58cedc7b8390ed418edf35fb738d24fb8380411b5427",
-        "line_count": 1325,
+        "sha256": "3251b51049ed2af6a4cf6d8f9ea05db3480910beb600b61bdfbb1574ab876220",
+        "line_count": 2182,
         "role": "Linux and Android epoll platform gate and reactor selection boundary"
       },
       {
@@ -1424,7 +1424,7 @@
       {
         "path": "tests/metamorphic/local_queue.rs",
         "sha256": "fae5e0699f1d4625c4c1ee67a95326a208c5f0179841f6b7ad134952a05fb9ed",
-        "line_count": 819,
+        "line_count": 820,
         "role": "declared local-queue property and metamorphic test surface without a current execution receipt"
       },
       {
@@ -1470,7 +1470,7 @@
             "LocalQueueInner.presence: HashSet<TaskId>"
           ],
           "operation_counts": {
-            "presence_insert": 4,
+            "presence_insert": 5,
             "presence_remove": 3,
             "presence_reserve": 1,
             "default_initialization": 1,
@@ -1564,7 +1564,7 @@
     },
     "marginal_ledger_assessment": {
       "artifact_path": "artifacts/dependency_marginal_ledger_v1.json",
-      "ledger_source_commit": "ddea6250aee80357756fa1f39456823df88f7af1",
+      "ledger_source_commit": "00a42d75c072044cbc8a7093885ec19420f21bdc",
       "source_commit_matches_observed_revision": false,
       "fresh_for_cutover": false,
       "hashbrown_measurement_row_count": 52,
@@ -1753,13 +1753,13 @@
     "source_pins": [
       {
         "path": "Cargo.toml",
-        "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+        "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
         "line_count": 1038,
         "role": "default and benchmark-adapters feature boundary plus optional dependency declarations"
       },
       {
         "path": "Cargo.lock",
-        "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+        "sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
         "line_count": 4666,
         "role": "locked num_cpus, whoami, and sysinfo package identities"
       },
@@ -1795,8 +1795,8 @@
       },
       {
         "path": "tests/atp_benchmark_integration.rs",
-        "sha256": "884ac058b426eb89dffd3ae02c749d2bb9affbf2d17f1dfdb74baebc3e7f8420",
-        "line_count": 415,
+        "sha256": "db199620f29ae31d6ef9f6e58c1b2e737cb7a0ce17c8412a7e4eade48e990a80",
+        "line_count": 467,
         "role": "benchmark-adapters integration surface lacking host metadata assertions"
       },
       {
@@ -2051,19 +2051,19 @@
     "source_pins": [
       {
         "path": "Cargo.toml",
-        "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+        "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
         "line_count": 1038,
         "role": "default, proc-macros, and test-internals feature edges plus optional dependency declarations"
       },
       {
         "path": "Cargo.lock",
-        "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+        "sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
         "line_count": 4666,
         "role": "root dependency edge and visibility 0.1.1 transitive package identity"
       },
       {
         "path": "asupersync-macros/Cargo.toml",
-        "sha256": "69dae442965f4321758cbfb5f9ef1ffb413c474938ccc5d5a0eeed2600c2b26e",
+        "sha256": "9ed7f3f857dc4fb711298180de899692d9ed8994f4125405eeecc8ce097fa7c9",
         "line_count": 36,
         "role": "owned proc-macro crate dependencies, trybuild harness, and root dev-dependency topology"
       },
@@ -2087,13 +2087,13 @@
       },
       {
         "path": "src/cx/cx.rs",
-        "sha256": "516af14e3110790d510943d4e329c1afb957d8257c73e2f4fb1b29d139b933a8",
+        "sha256": "f7fdf7931f1552cef4305a6d09d25b36061d2ef27052892e7d0afbd4e44ed0fa",
         "line_count": 7391,
         "role": "one already-public struct, four constructors, and one receiver method guarded by the incumbent attribute"
       },
       {
         "path": "src/cx/scope.rs",
-        "sha256": "4521de4139fbe9aabe42baba8da7b826dde4472025a32149325bd9490b687bec",
+        "sha256": "176b4340b144f88a40304f55d8afb40f9aa354e92590e6874ccf27636f5a9a57",
         "line_count": 3529,
         "role": "three pub(crate) functions in a generic inherent impl guarded by the incumbent attribute"
       },
@@ -2129,8 +2129,8 @@
       },
       {
         "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
-        "sha256": "b8f78479ddcd426448b224ef6d627b20787e1d6d25c8a74b786bade7bff8778b",
-        "line_count": 859,
+        "sha256": "a28cd08953d5eb112db6ba43d69ebeb262f74f15f4c36f51753df0cfb8c598ea",
+        "line_count": 940,
         "role": "standalone public consumer source with no visibility-specific journey"
       }
     ],
@@ -2290,7 +2290,7 @@
     },
     "marginal_ledger_assessment": {
       "artifact_path": "artifacts/dependency_marginal_ledger_v1.json",
-      "ledger_source_commit": "ddea6250aee80357756fa1f39456823df88f7af1",
+      "ledger_source_commit": "00a42d75c072044cbc8a7093885ec19420f21bdc",
       "source_commit_matches_observed_revision": false,
       "fresh_for_cutover": false,
       "visibility_measurement_row_count": 4,
@@ -2461,13 +2461,13 @@
     "source_pins": [
       {
         "path": "Cargo.toml",
-        "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+        "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
         "line_count": 1038,
         "role": "unconditional direct slab dependency declaration and default feature boundary"
       },
       {
         "path": "Cargo.lock",
-        "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+        "sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
         "line_count": 4666,
         "role": "root direct edge and slab 0.4.12 package identity"
       },
@@ -2485,8 +2485,8 @@
       },
       {
         "path": "src/sync/waiter.rs",
-        "sha256": "77d776a525d101d76e3bbbb243204610893b7ea9b7970965fe24bbde92d7525d",
-        "line_count": 585,
+        "sha256": "e4f1f45c565f0005dc3ea45b763bb3a45200b6d73dba41560ad0430f66dce96a",
+        "line_count": 588,
         "role": "stable WaiterId to reusable slab-index map and doubly linked FIFO"
       },
       {
@@ -2601,9 +2601,9 @@
           "path": "src/sync/waiter.rs",
           "role": "WaiterChain reusable slot store",
           "key_contract": "monotonic WaiterId maps separately to a reusable slab index",
-          "initialization": "Slab::with_capacity(4)",
+          "initialization": "Slab::new()",
           "operation_counts": {
-            "with_capacity": 1,
+            "new": 1,
             "len": 1,
             "vacant_key": 2,
             "insert": 2,
@@ -2675,7 +2675,7 @@
     },
     "marginal_ledger_assessment": {
       "artifact_path": "artifacts/dependency_marginal_ledger_v1.json",
-      "ledger_source_commit": "ddea6250aee80357756fa1f39456823df88f7af1",
+      "ledger_source_commit": "00a42d75c072044cbc8a7093885ec19420f21bdc",
       "source_commit_matches_observed_revision": false,
       "fresh_for_cutover": false,
       "slab_measurement_row_count": 52,
