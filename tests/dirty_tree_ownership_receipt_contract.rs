@@ -86,7 +86,16 @@ fn unique_temp_dir(test_name: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("system time should be after epoch")
         .as_nanos();
-    std::env::temp_dir().join(format!(
+    let system_temp = std::env::temp_dir();
+    let temp_root = if system_temp.starts_with(repo_root()) {
+        repo_root()
+            .parent()
+            .expect("project checkout must have a parent directory")
+            .join("asupersync-contract-temp")
+    } else {
+        system_temp
+    };
+    temp_root.join(format!(
         "asupersync-dirty-tree-{test_name}-{}-{nanos}",
         std::process::id()
     ))
@@ -174,10 +183,6 @@ fn write_reservation_artifact(
 
 fn init_temp_git_repo(test_name: &str) -> PathBuf {
     let repo_path = unique_temp_dir(test_name);
-    assert!(
-        repo_path.starts_with(std::env::temp_dir()),
-        "no-mock guard tests must stay under the system temp dir"
-    );
     assert!(
         !repo_path.starts_with(repo_root()),
         "no-mock guard tests must not create repos inside the project checkout"

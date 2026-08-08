@@ -3,7 +3,7 @@ use asupersync::lab::{
     DeterminismSourceHint, DeterminismViolation, LabRuntime, TraceEventSummary,
     assert_deterministic_for_seeds,
 };
-use asupersync::trace::TraceEventKind;
+use asupersync::trace::{TraceEvent, TraceEventKind};
 use std::any::Any;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -44,12 +44,15 @@ fn seed_matrix_helper_reports_seed_and_checklist_on_divergence() {
 
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         assert_deterministic_for_seeds([99], |runtime| {
-            let elapsed = if run_count.fetch_add(1, Ordering::SeqCst) % 2 == 0 {
-                1_000
+            let message = if run_count.fetch_add(1, Ordering::SeqCst) % 2 == 0 {
+                "first"
             } else {
-                2_000
+                "second"
             };
-            runtime.advance_time(elapsed);
+            let now = runtime.now();
+            runtime
+                .trace()
+                .record_event(|seq| TraceEvent::user_trace(seq, now, message));
         });
     }));
 

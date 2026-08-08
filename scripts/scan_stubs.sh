@@ -310,7 +310,7 @@ def is_src_rust_test_module(rel_path: str) -> bool:
     if not rel_path.startswith("src/"):
         return False
     name = pathlib.PurePosixPath(rel_path).name
-    return name.endswith("_test.rs") or name.startswith("test_")
+    return name.endswith(("_test.rs", "_tests.rs")) or name.startswith("test_")
 
 
 # The filename heuristic above only catches whole test FILES. It says nothing

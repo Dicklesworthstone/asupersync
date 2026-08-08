@@ -477,7 +477,7 @@ impl<P: Policy> Scope<'_, P> {
                 }
                 Err(payload) => {
                     let msg = payload_to_string(&payload);
-                    std::mem::forget(payload);
+                    drop(payload);
                     let panic_payload = PanicPayload::new(msg);
                     let _ = tx.send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
                     crate::types::Outcome::Panicked(panic_payload)
