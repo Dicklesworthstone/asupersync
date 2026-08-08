@@ -69,6 +69,13 @@ fn fixture_text(fixture: &str) -> String {
         .unwrap_or_else(|err| panic!("read fixture {fixture}: {err}"))
 }
 
+fn normalize_repo_root(text: &str) -> String {
+    text.replace(
+        repo_root().to_string_lossy().as_ref(),
+        "/data/projects/asupersync",
+    )
+}
+
 fn assert_output_matches_golden(input_fixture: &str, expected_fixture: &str, drift_message: &str) {
     let output = run_receipt(input_fixture);
     assert_output_matches_golden_output(output, input_fixture, expected_fixture, drift_message);
@@ -87,7 +94,9 @@ fn assert_output_matches_golden_output(
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout must be UTF-8");
+    let actual = normalize_repo_root(
+        &String::from_utf8(output.stdout).expect("receipt stdout must be UTF-8"),
+    );
     let expected = fixture_text(expected_fixture);
 
     let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");

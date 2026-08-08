@@ -793,11 +793,13 @@ fn proof_runner_execute_allows_owned_build_slot_and_records_release_path() {
         result["build_slot_check"]["classifications"][0]["classification"].as_str(),
         Some("acquired")
     );
+    let expected_release_command = format!(
+        "release_build_slot(project_key='{}', agent_name='BlackDove', slot='proof-runner-rch')",
+        env!("CARGO_MANIFEST_DIR")
+    );
     assert_eq!(
         result["build_slot_check"]["release_after_command"].as_str(),
-        Some(
-            "release_build_slot(project_key='/data/projects/asupersync', agent_name='BlackDove', slot='proof-runner-rch')"
-        )
+        Some(expected_release_command.as_str())
     );
 }
 

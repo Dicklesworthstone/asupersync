@@ -94,6 +94,10 @@ fn stale_audit_evidence_script_emits_valid_jsonl() {
             "scripts/run_stale_audit_normalization_evidence.sh",
         ))
         .env("STUB_SCAN_ARTIFACT_ROOT", &artifact_root)
+        .env(
+            "ASUPERSYNC_SOURCE_GIT_SHA",
+            "1111111111111111111111111111111111111111",
+        )
         .output()
         .expect("run stale audit evidence script");
 

@@ -393,6 +393,10 @@ fn dry_run_manifest_is_deterministic_and_operator_grade() {
         .arg("contract-dry-run")
         .arg("--output-root")
         .arg(repo_path("target/no-mock-massive-agent-swarm-e2e-contract"))
+        .env(
+            "ASUPERSYNC_SOURCE_GIT_SHA",
+            "1111111111111111111111111111111111111111",
+        )
         .output()
         .expect("run dry-run script");
 

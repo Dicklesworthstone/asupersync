@@ -424,10 +424,16 @@ if [[ -n "$SAVE_DIR" ]]; then
 import json
 import os
 import platform
+import re
 import subprocess
 import time
 
 def git_sha():
+    override = os.environ.get("ASUPERSYNC_SOURCE_GIT_SHA")
+    if override:
+        if not re.fullmatch(r"[0-9a-f]{7,40}(?:\+dirty)?", override):
+            raise SystemExit("ASUPERSYNC_SOURCE_GIT_SHA must be 7-40 lowercase hex characters with optional +dirty suffix")
+        return override
     try:
         return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     except Exception:
@@ -490,6 +496,11 @@ except FileNotFoundError:
 os.makedirs(hist, exist_ok=True)
 
 def git_sha():
+    override = os.environ.get("ASUPERSYNC_SOURCE_GIT_SHA")
+    if override:
+        if not re.fullmatch(r"[0-9a-f]{7,40}(?:\+dirty)?", override):
+            raise SystemExit("ASUPERSYNC_SOURCE_GIT_SHA must be 7-40 lowercase hex characters with optional +dirty suffix")
+        return override
     try:
         return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     except Exception:
@@ -560,6 +571,11 @@ def env_first(*names):
 
 
 def git_sha() -> str:
+    override = os.environ.get("ASUPERSYNC_SOURCE_GIT_SHA")
+    if override:
+        if not re.fullmatch(r"[0-9a-f]{7,40}(?:\+dirty)?", override):
+            fail("ASUPERSYNC_SOURCE_GIT_SHA must be 7-40 lowercase hex characters with optional +dirty suffix")
+        return override
     try:
         return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     except Exception as exc:

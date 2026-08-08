@@ -133,6 +133,17 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&path).expect("read source file")
 }
 
+fn source_between<'a>(source: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
+    let start = source
+        .find(start_marker)
+        .unwrap_or_else(|| panic!("missing {start_marker}"));
+    let end = source[start..]
+        .find(end_marker)
+        .map(|offset| start + offset)
+        .unwrap_or_else(|| panic!("missing {end_marker} after {start_marker}"));
+    &source[start..end]
+}
+
 #[test]
 fn sleep_poll_priority_order_is_bound_then_getter_then_ambient_then_wall() {
     // Pin: the 4-tier priority order. If reordered, lab
@@ -141,8 +152,7 @@ fn sleep_poll_priority_order_is_bound_then_getter_then_ambient_then_wall() {
     let source = read("src/time/sleep.rs");
 
     let fn_marker = "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
-    let pos = source.find(fn_marker).expect("Sleep::poll fn");
-    let body_window = &source[pos..pos + 2000];
+    let body_window = source_between(&source, fn_marker, "\n}\n\nimpl Drop for Sleep");
 
     // Tier 1: bound_timer_driver first.
     assert!(
@@ -195,8 +205,7 @@ fn sleep_ambient_driver_resolution_uses_cx_current_timer_driver() {
     let source = read("src/time/sleep.rs");
 
     let fn_marker = "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
-    let pos = source.find(fn_marker).expect("Sleep::poll fn");
-    let body_window = &source[pos..pos + 1000];
+    let body_window = source_between(&source, fn_marker, "\n}\n\nimpl Drop for Sleep");
 
     assert!(
         body_window.contains("Cx::current()") && body_window.contains(".timer_driver()"),
@@ -254,8 +263,7 @@ fn sleep_timer_register_uses_self_deadline_not_recomputed_from_wall() {
     let source = read("src/time/sleep.rs");
 
     let fn_marker = "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
-    let pos = source.find(fn_marker).expect("Sleep::poll fn");
-    let body_window = &source[pos..pos + 5000];
+    let body_window = source_between(&source, fn_marker, "\n}\n\nimpl Drop for Sleep");
 
     assert!(
         body_window.contains("timer.register(\n                        self.deadline,")
@@ -352,8 +360,7 @@ fn sleep_pending_path_registers_with_ambient_lab_driver() {
     let source = read("src/time/sleep.rs");
 
     let fn_marker = "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
-    let pos = source.find(fn_marker).expect("Sleep::poll fn");
-    let body_window = &source[pos..pos + 5000];
+    let body_window = source_between(&source, fn_marker, "\n}\n\nimpl Drop for Sleep");
 
     assert!(
         body_window.contains("if let Some(timer) = timer_driver.as_ref() {"),

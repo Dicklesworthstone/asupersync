@@ -80,7 +80,8 @@ fn track_i_process_surface_contains_windows_output_path() {
     assert!(
         process_src.contains("use std::os::windows::io::{AsRawHandle, RawHandle};")
             || (process_src.contains("use std::os::windows::{")
-                && process_src.contains("io::{AsRawHandle, RawHandle},")),
+                && process_src.contains("io::{AsRawHandle,")
+                && process_src.contains("RawHandle}")),
         "process module must import Windows raw-handle traits for process I/O"
     );
     assert!(

@@ -241,6 +241,7 @@ mod cx_tracing_tests {
 #[cfg(feature = "tracing-integration")]
 mod tests {
     use crate::common::*;
+    use asupersync::lab::LabRuntime;
     use asupersync::runtime::RuntimeState;
     use asupersync::types::Budget;
     use parking_lot::Mutex;
@@ -378,18 +379,23 @@ mod tests {
 
         tracing::subscriber::with_default(subscriber, || {
             test_section!("exercise");
-            let mut state = RuntimeState::new();
-            let region = state.create_root_region(Budget::INFINITE);
+            let mut runtime = LabRuntime::new(Default::default());
+            let region = runtime.state.create_root_region(Budget::INFINITE);
 
-            // Create a task
-            let _ = state.create_task(region, Budget::INFINITE, async { 42 });
+            // Spawn effects are intentionally dispatched at first poll, after
+            // executable publication, so drive the task before inspecting the log.
+            let _ = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async { 42 })
+                .expect("create traced task");
+            runtime.run_until_quiescent();
 
             // Check for log
             {
                 let has_task_log = logs
                     .lock()
                     .iter()
-                    .any(|s| s.contains("event") && s.contains("task created"));
+                    .any(|s| s.contains("event") && s.contains("task published for execution"));
                 assert_with_log!(
                     has_task_log,
                     "should record task creation log",

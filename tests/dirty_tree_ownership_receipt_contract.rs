@@ -74,6 +74,13 @@ fn fixture_text(fixture: &str) -> String {
         .expect("fixture golden must be readable")
 }
 
+fn normalize_repo_root(text: &str) -> String {
+    text.replace(
+        repo_root().to_string_lossy().as_ref(),
+        "/data/projects/asupersync",
+    )
+}
+
 fn unique_temp_dir(test_name: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -246,7 +253,7 @@ fn json_string_array<'a>(value: &'a Value, key: &str) -> Vec<&'a str> {
 }
 
 fn assert_receipt_output_matches_golden(fixture: &str, expected_fixture: &str) {
-    let actual_text = receipt_stdout(fixture);
+    let actual_text = normalize_repo_root(&receipt_stdout(fixture));
     let expected_text = fixture_text(expected_fixture);
     let actual_json: Value = serde_json::from_str(&actual_text).expect("actual receipt JSON");
     let expected_json: Value = serde_json::from_str(&expected_text).expect("expected receipt JSON");

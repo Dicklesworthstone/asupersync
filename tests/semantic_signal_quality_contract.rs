@@ -117,7 +117,7 @@ fn scrub_string(text: &str) -> String {
     let repo = env!("CARGO_MANIFEST_DIR");
     let tmp = std::env::temp_dir();
     let tmp = tmp.to_string_lossy();
-    let scrubbed = text.replace(repo, "$REPO").replace(tmp.as_ref(), "$TMP");
+    let scrubbed = text.replace(tmp.as_ref(), "$TMP").replace(repo, "$REPO");
     collapse_signal_quality_temp_names(scrubbed)
 }
 

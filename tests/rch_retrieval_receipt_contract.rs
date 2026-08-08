@@ -113,8 +113,15 @@ fn fixture_text(fixture: &str) -> String {
     fs::read_to_string(repo_root().join(FIXTURE_ROOT).join(fixture)).expect("read fixture text")
 }
 
+fn normalize_repo_root(text: &str) -> String {
+    text.replace(
+        repo_root().to_string_lossy().as_ref(),
+        "/data/projects/asupersync",
+    )
+}
+
 fn assert_output_matches_golden(output: Output, expected_fixture: &str, drift_message: &str) {
-    let actual = receipt_text_from_output(output);
+    let actual = normalize_repo_root(&receipt_text_from_output(output));
     let expected = fixture_text(expected_fixture);
 
     assert_json_text_eq(&actual, &expected, expected_fixture, drift_message);

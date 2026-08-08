@@ -385,7 +385,8 @@ mod tests {
             .surface("otel-trace-context-propagation")
             .expect("trace-context surface row");
         assert_eq!(row.binary, "otel_trace_context_propagation_conformance");
-        assert!(!row.has_live_reference());
+        assert!(row.has_live_reference());
+        assert!(row.allows(RuntimeConformanceVerdict::Pass));
     }
 
     #[test]

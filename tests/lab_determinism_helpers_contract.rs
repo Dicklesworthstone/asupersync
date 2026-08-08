@@ -44,12 +44,12 @@ fn seed_matrix_helper_reports_seed_and_checklist_on_divergence() {
 
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         assert_deterministic_for_seeds([99], |runtime| {
-            let task_count = if run_count.fetch_add(1, Ordering::SeqCst) % 2 == 0 {
-                1
+            let elapsed = if run_count.fetch_add(1, Ordering::SeqCst) % 2 == 0 {
+                1_000
             } else {
-                2
+                2_000
             };
-            spawn_empty_tasks(runtime, task_count);
+            runtime.advance_time(elapsed);
         });
     }));
 

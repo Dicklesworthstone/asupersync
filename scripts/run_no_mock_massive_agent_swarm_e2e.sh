@@ -121,9 +121,17 @@ RUN_LOG="${REPORT_DIR}/run.log"
 RUN_REPORT="${REPORT_DIR}/run_report.json"
 mkdir -p "${REPORT_DIR}"
 
-GIT_COMMIT="$(git -C "${REPO_ROOT}" rev-parse --short HEAD)"
-if ! git -C "${REPO_ROOT}" diff --quiet -- . ':!target' 2>/dev/null || ! git -C "${REPO_ROOT}" diff --cached --quiet -- . ':!target' 2>/dev/null; then
-    GIT_COMMIT="${GIT_COMMIT}+dirty"
+if [[ -n "${ASUPERSYNC_SOURCE_GIT_SHA:-}" ]]; then
+    if [[ ! "${ASUPERSYNC_SOURCE_GIT_SHA}" =~ ^[0-9a-f]{7,40}(\+dirty)?$ ]]; then
+        echo "FATAL: ASUPERSYNC_SOURCE_GIT_SHA must be 7-40 lowercase hex characters with optional +dirty suffix" >&2
+        exit 2
+    fi
+    GIT_COMMIT="${ASUPERSYNC_SOURCE_GIT_SHA}"
+else
+    GIT_COMMIT="$(git -C "${REPO_ROOT}" rev-parse --short HEAD)"
+    if ! git -C "${REPO_ROOT}" diff --quiet -- . ':!target' 2>/dev/null || ! git -C "${REPO_ROOT}" diff --cached --quiet -- . ':!target' 2>/dev/null; then
+        GIT_COMMIT="${GIT_COMMIT}+dirty"
+    fi
 fi
 
 OVERRIDES_JSON="$(python3 - "$WORKER_COUNT" "$REGION_COUNT" "$TASKS_PER_REGION" "$CHANNEL_FANOUT" "$CANCELLATION_RATE" "$OBLIGATION_RATE" <<'PY'

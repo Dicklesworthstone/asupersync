@@ -324,6 +324,10 @@ fn run_capture_baseline_with_command(arg_name: &str, arg_value: &str) -> std::pr
 
 fn add_valid_swarm_ledger_env(command: &mut Command) -> &mut Command {
     command
+        .env(
+            "ASUPERSYNC_SOURCE_GIT_SHA",
+            "1111111111111111111111111111111111111111",
+        )
         .env("RCH_REQUIRE_REMOTE", "1")
         .env("SWARM_LEDGER_RCH_WORKER_ID", "vmi-ledger-test")
         .env("SWARM_LEDGER_RCH_BUILD_ID", "29863361030127999")
@@ -924,6 +928,10 @@ fn capture_baseline_bench_history_is_opt_in_and_appends_runs_log() {
             .arg("--profile")
             .arg("release-perf")
             .env("CRITERION_DIR", temp.path().join("criterion"))
+            .env(
+                "ASUPERSYNC_SOURCE_GIT_SHA",
+                "1111111111111111111111111111111111111111",
+            )
             .current_dir(&repo)
             .output()
             .expect("run capture_baseline.sh");
@@ -1145,6 +1153,10 @@ fn capture_baseline_swarm_ledger_derives_rch_provenance_from_run_log() {
         .env("RCH_REQUIRE_REMOTE", "1")
         .env("SWARM_LEDGER_MEMORY_ENVELOPE_BYTES", "4096")
         .env("SWARM_LEDGER_QUIESCENCE_VERDICT", "not_applicable")
+        .env(
+            "ASUPERSYNC_SOURCE_GIT_SHA",
+            "1111111111111111111111111111111111111111",
+        )
         .current_dir(&repo)
         .output()
         .expect("run capture_baseline.sh with RCH log-derived provenance");
@@ -1266,6 +1278,10 @@ fn capture_baseline_swarm_ledger_rejects_malformed_rch_provenance() {
         .env("SWARM_LEDGER_RCH_WORKER_ID", "bad worker id")
         .env("SWARM_LEDGER_RCH_BUILD_ID", "not-a-number")
         .env("SWARM_LEDGER_MEMORY_ENVELOPE_BYTES", "1024")
+        .env(
+            "ASUPERSYNC_SOURCE_GIT_SHA",
+            "1111111111111111111111111111111111111111",
+        )
         .current_dir(&repo)
         .output()
         .expect("run capture_baseline.sh with malformed RCH provenance");

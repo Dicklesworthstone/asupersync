@@ -8,23 +8,35 @@ const AGENTS: &str = "AGENTS.md";
 fn feature_arrays(manifest: &str) -> BTreeMap<String, Vec<String>> {
     let mut in_features = false;
     let mut rows = BTreeMap::new();
+    let mut statement = String::new();
 
     for raw_line in manifest.lines() {
         let line = raw_line.trim();
         if line.starts_with('[') {
             in_features = line == "[features]";
+            statement.clear();
             continue;
         }
         if !in_features || line.is_empty() || line.starts_with('#') {
             continue;
         }
 
-        let Some((key, raw_values)) = line.split_once('=') else {
+        if !statement.is_empty() {
+            statement.push(' ');
+        }
+        statement.push_str(line);
+        if !statement.contains('=') || !statement.trim_end().ends_with(']') {
+            continue;
+        }
+
+        let Some((key, raw_values)) = statement.split_once('=') else {
+            statement.clear();
             continue;
         };
         let key = key.trim().to_string();
         let raw_values = raw_values.trim();
         if !raw_values.starts_with('[') || !raw_values.ends_with(']') {
+            statement.clear();
             continue;
         }
 
@@ -38,6 +50,7 @@ fn feature_arrays(manifest: &str) -> BTreeMap<String, Vec<String>> {
             })
             .collect::<Vec<_>>();
         rows.insert(key, values);
+        statement.clear();
     }
 
     rows

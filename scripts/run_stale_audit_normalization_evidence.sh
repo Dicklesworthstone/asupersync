@@ -9,9 +9,17 @@ jsonl="$artifact_root/stale-audit-normalization.jsonl"
 summary="$artifact_root/stale-audit-normalization.summary.json"
 mkdir -p "$artifact_root"
 
-git_state="$(git rev-parse --short HEAD)"
-if ! git diff --quiet -- . ':!target' 2>/dev/null; then
-  git_state="${git_state}+dirty"
+if [[ -n "${ASUPERSYNC_SOURCE_GIT_SHA:-}" ]]; then
+  if [[ ! "${ASUPERSYNC_SOURCE_GIT_SHA}" =~ ^[0-9a-f]{7,40}(\+dirty)?$ ]]; then
+    echo "ERROR: ASUPERSYNC_SOURCE_GIT_SHA must be 7-40 lowercase hex characters with optional +dirty suffix" >&2
+    exit 2
+  fi
+  git_state="${ASUPERSYNC_SOURCE_GIT_SHA}"
+else
+  git_state="$(git rev-parse --short HEAD)"
+  if ! git diff --quiet -- . ':!target' 2>/dev/null; then
+    git_state="${git_state}+dirty"
+  fi
 fi
 
 echo "STALE_AUDIT_NORMALIZATION start bead=asupersync-dq4 output=$jsonl" >&2

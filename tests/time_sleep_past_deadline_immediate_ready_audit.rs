@@ -97,6 +97,17 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&path).expect("read source file")
 }
 
+fn source_between<'a>(source: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
+    let start = source
+        .find(start_marker)
+        .unwrap_or_else(|| panic!("missing {start_marker}"));
+    let end = source[start..]
+        .find(end_marker)
+        .map(|offset| start + offset)
+        .unwrap_or_else(|| panic!("missing {end_marker} after {start_marker}"));
+    &source[start..end]
+}
+
 #[test]
 fn sleep_poll_with_time_uses_geq_predicate_for_past_deadline() {
     // Pin: the critical predicate `now >= self.deadline`
@@ -194,8 +205,7 @@ fn sleep_main_poll_delegates_to_poll_with_time() {
     let source = read("src/time/sleep.rs");
 
     let fn_marker = "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
-    let pos = source.find(fn_marker).expect("Future::poll");
-    let body_window = &source[pos..pos + 1500];
+    let body_window = source_between(&source, fn_marker, "\n}\n\nimpl Drop for Sleep");
 
     assert!(
         body_window.contains("self.poll_with_time(now)"),
@@ -217,15 +227,15 @@ fn sleep_ready_branch_cancels_timer_handle_if_any() {
     let source = read("src/time/sleep.rs");
 
     let fn_marker = "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
-    let pos = source.find(fn_marker).expect("Future::poll");
-    let body_window = &source[pos..pos + 2500];
+    let body_window = source_between(&source, fn_marker, "\n}\n\nimpl Drop for Sleep");
 
     let helper_marker =
         "fn complete_ready_registration(&self, now: Time, timer_driver: Option<TimerDriverHandle>)";
-    let helper_pos = source
-        .find(helper_marker)
-        .expect("complete_ready_registration helper");
-    let helper_window = &source[helper_pos..helper_pos + 1200];
+    let helper_window = source_between(
+        &source,
+        helper_marker,
+        "\n    /// Returns whether this sleep uses a custom time source.",
+    );
 
     assert!(
         body_window.contains("Poll::Ready(()) => {")
@@ -247,8 +257,7 @@ fn sleep_ready_branch_runs_before_pending_branch_setup() {
     let source = read("src/time/sleep.rs");
 
     let fn_marker = "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
-    let pos = source.find(fn_marker).expect("Future::poll");
-    let body_window = &source[pos..pos + 4000];
+    let body_window = source_between(&source, fn_marker, "\n}\n\nimpl Drop for Sleep");
 
     assert!(
         body_window.contains("match self.poll_with_time(now) {")

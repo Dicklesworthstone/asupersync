@@ -81,6 +81,13 @@ fn fixture_text(fixture: &str) -> String {
         .expect("fixture text should be readable")
 }
 
+fn normalize_repo_root(text: &str) -> String {
+    text.replace(
+        repo_root().to_string_lossy().as_ref(),
+        "/data/projects/asupersync",
+    )
+}
+
 #[test]
 fn script_exists_and_help_is_non_mutating() {
     assert!(
@@ -352,7 +359,7 @@ fn disk_pressure_autopilot_e2e_fixture_matches_closeout_handoff_golden() {
 
 #[test]
 fn markdown_dashboard_disk_red_fixture_matches_golden() {
-    let markdown = finder_markdown("disk_pressure_autopilot_e2e.json");
+    let markdown = normalize_repo_root(&finder_markdown("disk_pressure_autopilot_e2e.json"));
     let expected = fixture_text("swarm_dashboard_disk_red_expected.md");
 
     assert_eq!(markdown, expected);
@@ -368,7 +375,7 @@ fn markdown_dashboard_disk_red_fixture_matches_golden() {
 
 #[test]
 fn markdown_dashboard_reports_stale_in_progress_without_actions() {
-    let markdown = finder_markdown("stale_in_progress_tracker_lock.json");
+    let markdown = normalize_repo_root(&finder_markdown("stale_in_progress_tracker_lock.json"));
     let expected = fixture_text("stale_in_progress_tracker_lock_expected.md");
 
     assert_eq!(markdown, expected);
@@ -724,7 +731,7 @@ fn stale_in_progress_owned_by_active_agent_recommends_owner_coordination_first()
 
 #[test]
 fn markdown_dashboard_reports_coordination_churn_governor() {
-    let markdown = finder_markdown("coordination_churn_governor.json");
+    let markdown = normalize_repo_root(&finder_markdown("coordination_churn_governor.json"));
     let expected = fixture_text("coordination_churn_governor_expected.md");
 
     assert_eq!(markdown, expected);

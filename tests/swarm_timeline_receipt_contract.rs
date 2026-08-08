@@ -41,6 +41,13 @@ fn fixture_text(fixture: &str) -> String {
     fs::read_to_string(fixture_path(fixture)).expect("read fixture text")
 }
 
+fn normalize_repo_root(text: &str) -> String {
+    text.replace(
+        repo_root().to_string_lossy().as_ref(),
+        "/data/projects/asupersync",
+    )
+}
+
 fn receipt_json(fixture: &str) -> Value {
     let output = run_receipt(fixture);
     assert!(
@@ -98,7 +105,7 @@ fn receipt_text(fixture: &str) -> String {
 }
 
 fn assert_output_matches_golden(fixture: &str, expected_fixture: &str, drift_message: &str) {
-    let actual = receipt_text(fixture);
+    let actual = normalize_repo_root(&receipt_text(fixture));
     let expected = fixture_text(expected_fixture);
 
     let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");

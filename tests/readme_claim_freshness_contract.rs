@@ -64,6 +64,13 @@ fn fixture_text(name: &str) -> String {
     std::fs::read_to_string(fixture_path(name)).expect("fixture golden must be readable")
 }
 
+fn normalize_repo_root(text: &str) -> String {
+    text.replace(
+        repo_root().to_string_lossy().as_ref(),
+        "/data/projects/asupersync",
+    )
+}
+
 #[test]
 fn script_exists_and_help_is_non_mutating() {
     assert!(
@@ -202,11 +209,11 @@ fn stale_fixture_reports_exact_missing_doc_marker() {
 #[test]
 fn stale_fixture_matches_full_output_golden() {
     let expected_fixture = "stale_doc_marker_expected.json";
-    let actual_text = receipt_stdout(
+    let actual_text = normalize_repo_root(&receipt_stdout(
         &fixture_path("stale_doc_marker_snapshot.json"),
         &fixture_path("stale_README.md"),
         &fixture_path("stale_AGENTS.md"),
-    );
+    ));
     let expected_text = fixture_text(expected_fixture);
     let actual_json: Value = serde_json::from_str(&actual_text).unwrap_or_else(|err| {
         panic!("actual README claim freshness receipt JSON for {expected_fixture}: {err}")
@@ -341,11 +348,11 @@ fn blocked_proof_evidence_requires_frontier_and_no_claim_boundary() {
 #[test]
 fn stale_proof_fixture_matches_full_output_golden() {
     let expected_fixture = "stale_proof_evidence_expected.json";
-    let actual_text = receipt_stdout(
+    let actual_text = normalize_repo_root(&receipt_stdout(
         &fixture_path("stale_proof_evidence_snapshot.json"),
         &fixture_path("stale_proof_README.md"),
         &fixture_path("stale_proof_AGENTS.md"),
-    );
+    ));
     let expected_text = fixture_text(expected_fixture);
     let actual_json: Value = serde_json::from_str(&actual_text).unwrap_or_else(|err| {
         panic!("actual README proof evidence receipt JSON for {expected_fixture}: {err}")
