@@ -1530,7 +1530,7 @@
     },
     "existing_evidence_assessment": {
       "source_declared_test_counts": {
-        "local_queue_unit_tests": 39,
+        "local_queue_unit_tests": 40,
         "epoll_unit_tests": 36,
         "local_queue_metamorphic_test_attributes": 10,
         "local_queue_proptest_blocks": 7,

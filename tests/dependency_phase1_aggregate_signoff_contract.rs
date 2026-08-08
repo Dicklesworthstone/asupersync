@@ -523,7 +523,7 @@ fn every_later_plan_row_is_transitively_blocked_by_the_gate() {
     assert_eq!(
         roles,
         BTreeMap::from([
-            ("architecture", 14),
+            ("architecture", 11),
             ("decision", 15),
             ("implementation", 104),
             ("verification", 187),

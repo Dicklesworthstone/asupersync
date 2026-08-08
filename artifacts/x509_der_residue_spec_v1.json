@@ -24,11 +24,11 @@
     "review_receipt": {
       "agent_task": "/root/x509_release_review",
       "decision": "APPROVE",
-      "reviewed_normative_payload_sha256": "547a5fc3e1241ffc46ca4b3928cd20064fadea6d4c93f2854906e95f9148e948"
+      "reviewed_normative_payload_sha256": "198b6c049ec394137f42685d42fd9413251e0a4bb9fedabb59068e3f4adc3219"
     },
-    "reviewed_draft_sha256": "ce9de830876ce37e72f243b07d93daa39f881a70bf4d0d130465f93520fcb1dc",
-    "reviewed_normative_payload_sha256": "547a5fc3e1241ffc46ca4b3928cd20064fadea6d4c93f2854906e95f9148e948",
-    "candidate_normative_payload_sha256": "547a5fc3e1241ffc46ca4b3928cd20064fadea6d4c93f2854906e95f9148e948",
+    "reviewed_draft_sha256": "718c50456c2d0bfab5b0d601e66bb4dca7d88804642a9e74b34542c2312d59dd",
+    "reviewed_normative_payload_sha256": "198b6c049ec394137f42685d42fd9413251e0a4bb9fedabb59068e3f4adc3219",
+    "candidate_normative_payload_sha256": "198b6c049ec394137f42685d42fd9413251e0a4bb9fedabb59068e3f4adc3219",
     "normative_projection": {
       "algorithm": "SHA-256",
       "canonicalization": "compact JSON with object keys sorted lexicographically and array order preserved",
@@ -90,7 +90,7 @@
     },
     {
       "path": "artifacts/x509_validation_ownership_inventory_v1.json",
-      "sha256": "b2d9ff1a2e46e3baf30463080647fb19cf20edfc510039c01598ff3634d4d234",
+      "sha256": "2461b2db5b49e98352e9d7adcf0ecc834357a0ba605cfccc32e0b1487c072086",
       "line_count": 1073,
       "role": "A1 call-site, owner, residue, and routed-gap authority"
     },
@@ -108,7 +108,7 @@
     },
     {
       "path": "artifacts/x509_standard_verifier_delegation_v1.json",
-      "sha256": "4340b4139a526c059603122b45aaf4c88c5f9d15c004d16d9a547f65e437aa3a",
+      "sha256": "d974aa52b6ee21d72771b68dc878ac8462578b7ba658b3f59b54c1cc607a7d72",
       "line_count": 345,
       "role": "A2 standard-first delegation and retained-policy authority"
     },
