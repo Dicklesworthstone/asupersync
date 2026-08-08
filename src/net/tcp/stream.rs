@@ -29,6 +29,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 const FALLBACK_IO_BACKOFF: Duration = Duration::from_millis(1);
 
@@ -356,9 +357,15 @@ impl TcpStream {
         // 2. Attempt connect (non-blocking)
         let sock_addr = SockAddr::from(addr);
         let registration = match socket.connect(&sock_addr) {
-            Ok(()) => None,
-            Err(err) if connect_in_progress(&err) => wait_for_connect(&socket).await?,
-            Err(err) => return Err(err),
+            Ok(()) => {
+                None
+            }
+            Err(err) if connect_in_progress(&err) => {
+                wait_for_connect(&socket).await?
+            }
+            Err(err) => {
+                return Err(err);
+            }
         };
 
         // #35: on Windows, a non-blocking `connect()` can return Ok while
@@ -379,6 +386,25 @@ impl TcpStream {
         // peer_addr() is cheap on connected sockets across platforms and
         // is also a no-op for already-validated paths, so this stays a
         // strict subset of the prior behaviour for non-Windows targets.
+        // #35 (Windows root cause): a non-blocking connect() returning Ok does
+        // not prove the kernel-side handshake completed. peer_addr()
+        // (getpeername) succeeds immediately after connect() because it only
+        // reflects whether a peer was set, not whether the connection finished.
+        // The old probe skipped wait_for_connect on peer_addr Ok, handing a
+        // still-pending socket to TLS whose first send then failed with
+        // WSAENOTCONN (os error 10057). On Windows always route through
+        // wait_for_connect so the IO reactor confirms writable readiness +
+        // SO_ERROR before the socket is handed off. Non-Windows keeps the
+        // probe: Linux/macOS peer_addr is reliable after a non-blocking
+        // connect Ok, and the probe is a cheap no-op there.
+        #[cfg(target_os = "windows")]
+        let registration = if registration.is_none() {
+            wait_for_connect(&socket).await?
+        } else {
+            registration
+        };
+
+        #[cfg(not(target_os = "windows"))]
         let registration = if registration.is_none() {
             match socket.peer_addr() {
                 Ok(_) => None,
@@ -914,7 +940,7 @@ fn connect_in_progress(err: &io::Error) -> bool {
     ) || err.raw_os_error() == Some(libc::EINPROGRESS)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "windows")))]
 async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>> {
     let Some(driver) = Cx::current().and_then(|cx| cx.io_driver_handle()) else {
         wait_for_connect_fallback(socket).await?;
@@ -980,16 +1006,96 @@ async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>>
     Ok(registration)
 }
 
+#[cfg(all(not(target_arch = "wasm32"), target_os = "windows"))]
+async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>> {
+    let Some(driver) = Cx::current().and_then(|cx| cx.io_driver_handle()) else {
+        wait_for_connect_fallback(socket).await?;
+        return Ok(None);
+    };
+
+    let mut registration: Option<IoRegistration> = None;
+    let mut fallback = false;
+    // #35 (Windows root cause): connect() Ok + peer_addr() Ok does not prove the
+    // connection is established — getpeername succeeds immediately after
+    // connect() regardless of handshake completion, so poll_connect_complete
+    // would report Ok(true) on a still-pending socket and hand it to TLS, whose
+    // first write then fails with WSAENOTCONN (os error 10057). Require at
+    // least one reactor writable-readiness event before trusting the completion
+    // check: only after writable arrives does take_error()/SO_ERROR reflect the
+    // real connect outcome (0 = success, non-zero = RST/refused/timeout).
+    let mut writable_observed = false;
+    std::future::poll_fn(|cx| {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
+
+        if !writable_observed {
+            // Never decide completion here: arm/refresh the WRITABLE interest
+            // and wait for the reactor to report readiness at least once.
+            if let Err(err) = rearm_connect_registration(&mut registration, cx) {
+                return Poll::Ready(Err(err));
+            }
+            if registration.is_none() {
+                match driver.register(socket, Interest::WRITABLE, cx.waker().clone()) {
+                    Ok(new_reg) => registration = Some(new_reg),
+                    Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+                        fallback = true;
+                        return Poll::Ready(Ok(()));
+                    }
+                    Err(err) if err.kind() == io::ErrorKind::NotConnected => {
+                        fallback = true;
+                        return Poll::Ready(Ok(()));
+                    }
+                    Err(err) => return Poll::Ready(Err(err)),
+                }
+            }
+            writable_observed = true;
+            fallback_rewake(cx);
+            return Poll::Pending;
+        }
+
+        // Writable readiness observed: poll_connect_complete is now trustworthy.
+        match poll_connect_complete(socket) {
+            Ok(true) => {
+                Poll::Ready(Ok(()))
+            }
+            Ok(false) => {
+                // Rare: writable arrived but the connect still isn't reflected
+                // as complete. Re-arm and wait for the next readiness event.
+                writable_observed = false;
+                fallback_rewake(cx);
+                Poll::Pending
+            }
+            Err(err) => {
+                Poll::Ready(Err(err))
+            }
+        }
+    })
+    .await?;
+
+    if fallback {
+        wait_for_connect_fallback(socket).await?;
+        return Ok(None);
+    }
+
+    Ok(registration)
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn poll_connect_complete(socket: &Socket) -> io::Result<bool> {
-    if let Some(err) = socket.take_error()? {
+    let so_error = socket.take_error()?;
+    if let Some(err) = so_error {
         return Err(err);
     }
 
     match socket.peer_addr() {
         Ok(_) => Ok(true),
-        Err(err) if err.kind() == io::ErrorKind::NotConnected => Ok(false),
-        Err(err) => Err(err),
+        Err(err) if err.kind() == io::ErrorKind::NotConnected => {
+            Ok(false)
+        }
+        Err(err) => {
+            Err(err)
+        }
     }
 }
 
@@ -1023,7 +1129,62 @@ fn rearm_connect_registration(
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+/// #35 Windows fallback 同步等待超时：无 reactor 时用 select 等 connect writable。
+/// connect 通常亚秒级，30s 是兜底防永久阻塞。
+#[cfg(target_os = "windows")]
+const CONNECT_FALLBACK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// #35 Windows 无 reactor 兜底：用 winsock `select` 同步等 socket writable。
+/// connect 完成时 socket 变 writable（成功）或进 exceptfds（失败），由调用方
+/// `take_error()` 判定。select 会阻塞当前线程，但 fallback 本就是降级路径，且
+/// connect 正常亚秒级完成。这是 Windows 10057 的真正修复点：原 fallback 用
+/// `peer_addr()` 判完成，Windows 上 peer_addr 在 connect pending 时也返 Ok，把
+/// 未真正连接的 socket 交给 TLS，首个 send 命中 WSAENOTCONN (os error 10057)。
+#[cfg(target_os = "windows")]
+fn wait_socket_writable_windows(socket: &Socket, timeout: Duration) -> io::Result<()> {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Networking::WinSock::{select, FD_SET, SOCKET, SOCKET_ERROR, TIMEVAL};
+
+    let s = socket.as_raw_socket() as SOCKET;
+
+    let mut writefds: FD_SET = unsafe { std::mem::zeroed() };
+    writefds.fd_count = 1;
+    writefds.fd_array[0] = s;
+    let mut exceptfds: FD_SET = unsafe { std::mem::zeroed() };
+    exceptfds.fd_count = 1;
+    exceptfds.fd_array[0] = s;
+
+    let tv = TIMEVAL {
+        tv_sec: timeout.as_secs() as i32,
+        tv_usec: timeout.subsec_micros() as i32,
+    };
+
+    let ret = unsafe { select(0, std::ptr::null_mut(), &mut writefds, &mut exceptfds, &tv) };
+
+    if ret == SOCKET_ERROR {
+        return Err(io::Error::last_os_error());
+    }
+    if ret == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "connect writable wait (select) timed out",
+        ));
+    }
+    // writable 或 except：均表示 connect 已结束（成功或失败），交 take_error 判定。
+    Ok(())
+}
+
+#[cfg(all(not(target_arch = "wasm32"), target_os = "windows"))]
+async fn wait_for_connect_fallback(socket: &Socket) -> io::Result<()> {
+    wait_socket_writable_windows(socket, CONNECT_FALLBACK_TIMEOUT)?;
+    let so_error = socket.take_error()?;
+    if let Some(err) = so_error {
+        return Err(err);
+    }
+    Ok(())
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "windows")))]
 async fn wait_for_connect_fallback(socket: &Socket) -> io::Result<()> {
     std::future::poll_fn(|cx| {
         if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
