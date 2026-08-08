@@ -133,7 +133,7 @@
       "pin_id": "KAFKA-PIN-ADR-REGISTRY",
       "path": "artifacts/dependency_api_adr_registry_v1.json",
       "record_count": 6831,
-      "sha256": "ca0b3f80af74b296e6beae0f7bf76aef0f8e73b161efa177de3239742c324786",
+      "sha256": "4765bb6d17b676fd63529ee75047477656851474300601e05cbc5492b32f9dbc",
       "role": "ADR-to-capability authority mapping",
       "pin_state": "BASELINE_HEAD"
     },

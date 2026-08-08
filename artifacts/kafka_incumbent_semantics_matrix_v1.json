@@ -96,15 +96,15 @@
     {
       "pin_id": "KAFKA-K0-2-PIN-BLOCKING-POOL",
       "path": "src/runtime/blocking_pool.rs",
-      "record_count": 3626,
-      "sha256": "6bbf8cf9f31a911685195ed715622609bdbb3d395bdf1ab8ff82220e618ccf53",
+      "record_count": 3816,
+      "sha256": "74cca2354df83980f1b68ebf19bd5f6a76b619e14b5abe90be3d9c7affbbbd02",
       "role": "configured blocking-pool queue, worker cap, cancellation and shutdown-rejection semantics"
     },
     {
       "pin_id": "KAFKA-K0-2-PIN-K0-1-ARTIFACT",
       "path": "artifacts/kafka_capability_inventory_v1.json",
       "record_count": 1015,
-      "sha256": "5dfe71df6daaa056f8f4d22d08fa934b5398baeeff0d5ff27eb0f544405251d6",
+      "sha256": "b9e62e3f419309bda14a91739d42dc347293e6d92b4c5c3678c342bfb3378933",
       "role": "exact public-surface and cfg-branch authority"
     },
     {
@@ -2533,7 +2533,7 @@
     "helper_ids_unique": true,
     "public_methods_exactly_once": true,
     "configuration_fields_exactly_once": true,
-    "source_pin_map_sha256": "2d0297b10099c4e490ab13eb21843e237c07a1c8e9005c34d6d2f1fbf6bc0c56",
+    "source_pin_map_sha256": "91a9f2318847eba65db7eb60e54b5a1f196da0ab2716cf9599f6a9ac50b193d9",
     "all_row_source_anchor_map_sha256": "a895bcf372e6fcdd834fea2ca918e1bbc22623193098e0f4ebda684ef7735d33",
     "public_entry_anchor_map_sha256": "8deea5e3080636eed2b7282749ce52b9b22642829b7f74b101bf8769817428e6",
     "row_gap_owner_map_sha256": "5c4cb0c1edc74b5f8de090bd8f166de14e8f263d4b681d5fa23cdcb20a1ea760",
