@@ -224,13 +224,13 @@ runtime and lab helpers, blocking-pool tests, benchmarks, examples, and the
 Tokio compatibility member. A replacement must explicitly test all of those
 contexts. “Works in a normal unit test” is not parity.
 
-### FUT A3 compile-checked kernel progress
+### FUT A3 focused unit kernel progress
 
 At base revision `02b380ee063e7e643105b1a7997360a7021bf32e`, bead
 `asupersync-d24mms.6.3` added an alongside-incumbent owned kernel at the
 crate-private `crate::util::future` module. The current continuation is
-`COMPILE_CHECKED_TEST_AND_POLICY_EXPANSION`; its executable state is
-`TERMINAL_LIBRARY_CHECK_PASSED_TESTS_NOT_EXECUTED`, and the bead remains open.
+`FOCUSED_UNIT_TEST_AND_POLICY_EXPANSION`; its executable state is
+`FOCUSED_UNIT_TESTS_PASSED`, and the bead remains open.
 
 The implementation landed in revision
 `050fd0f08e4cf127e348bbf545c1e46cc392f6b5`. The current source receipt pins
@@ -271,19 +271,25 @@ The kernel policy is deliberately conservative:
 - cancellation remains explicit future behavior: progress requires the
   cancellation source to wake the future after changing its state.
 
-Fourteen inline cases have been authored for ready-without-park, borrowed
+Fourteen inline cases cover ready-without-park, borrowed
 non-`Send` recursion, wake coalescing, deterministic spurious returns, a bounded
 notification-state matrix, stable waker identity, wake-after-pending, explicit
 cancellation wake, panic propagation, separate driver and scheduler-worker
 refusals, safe self-contained nesting under a foreign executor, LabRuntime
-quiescence, and execution on the real blocking-pool implementation. None of
-those cases has a terminal execution result in this source-only increment.
+quiescence, and execution on the real blocking-pool implementation.
 
 A current-source clean-overlay library check did terminate successfully. RCH
 build `29967986903220229` ran `cargo check --locked -p asupersync --lib` on
 `hz2` with warnings denied and returned exit code 0 in 107,797 milliseconds.
 That is implementation compilation evidence only: a library check does not
 compile or execute the `cfg(test)` inline cases.
+
+The terminal focused lane is RCH build `29967986903220231` on `hz2`. It ran
+`cargo test -p asupersync --lib util::future::tests -- --nocapture
+--test-threads=1` with warnings denied. Compilation took 11 minutes 10 seconds;
+the full remote receipt completed in 696,612 milliseconds with exit code 0.
+All 26 `util::future` tests passed, including the fourteen A3-authored cases;
+there were zero failures and 21,826 unrelated tests were filtered out.
 
 Two clean-overlay focused attempts against preceding source states reached
 final workspace compilation but were lost across RCH daemon restarts before any
@@ -300,10 +306,10 @@ The artifact names all fourteen functions rather than summarizing them as a
 green test result. Three explicit A3 gap rows keep the remaining acceptance
 work visible:
 
-- `FUT-A3-GAP-13`: the state-model and LabRuntime quiescence cases are authored,
-  but no focused execution or broader DPOR cancellation receipt exists;
+- `FUT-A3-GAP-13`: the bounded state matrix and LabRuntime quiescence case pass,
+  but broader DPOR cancellation evidence is still missing;
 - `FUT-A3-GAP-14`: the driver, worker, and foreign-executor policies are now
-  explicit and source-tested, but terminal execution is pending;
+  explicit and their focused cases pass;
 - `FUT-A3-GAP-15`: no incumbent comparison for idle CPU or completion latency.
 
 This is not parity and is not a migration authorization. In particular, the

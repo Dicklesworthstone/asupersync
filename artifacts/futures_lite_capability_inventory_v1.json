@@ -190,8 +190,8 @@
     "owner_bead": "asupersync-d24mms.6.3",
     "base_revision": "02b380ee063e7e643105b1a7997360a7021bf32e",
     "implementation_revision": "050fd0f08e4cf127e348bbf545c1e46cc392f6b5",
-    "source_status": "COMPILE_CHECKED_TEST_AND_POLICY_EXPANSION",
-    "execution_status": "TERMINAL_LIBRARY_CHECK_PASSED_TESTS_NOT_EXECUTED",
+    "source_status": "FOCUSED_UNIT_TEST_AND_POLICY_EXPANSION",
+    "execution_status": "FOCUSED_UNIT_TESTS_PASSED",
     "module": "crate::util::future",
     "visibility": "crate-private alongside-incumbent",
     "current_source_pins": [
@@ -227,32 +227,32 @@
       {
         "context": "ordinary host thread",
         "decision": "ADMIT",
-        "evidence": "SOURCE_AUTHORED_NOT_EXECUTED"
+        "evidence": "FOCUSED_UNIT_TEST_PASSED"
       },
       {
         "context": "recursive ordinary-thread invocation",
         "decision": "ADMIT",
-        "evidence": "SOURCE_AUTHORED_NOT_EXECUTED"
+        "evidence": "FOCUSED_UNIT_TEST_PASSED"
       },
       {
         "context": "Asupersync blocking-pool thread",
         "decision": "ADMIT",
-        "evidence": "SOURCE_AUTHORED_NOT_EXECUTED"
+        "evidence": "FOCUSED_UNIT_TEST_PASSED"
       },
       {
         "context": "thread with an installed Asupersync runtime handle",
         "decision": "REFUSE_BEFORE_POLL",
-        "evidence": "SOURCE_AUTHORED_NOT_EXECUTED"
+        "evidence": "FOCUSED_UNIT_TEST_PASSED"
       },
       {
         "context": "Asupersync runtime driver versus scheduler worker",
         "decision": "REFUSE_BOTH_CONSERVATIVELY",
-        "evidence": "SOURCE_AUTHORED_NOT_EXECUTED"
+        "evidence": "FOCUSED_UNIT_TEST_PASSED"
       },
       {
         "context": "foreign executor thread",
         "decision": "ADMIT_SELF_CONTAINED_FUTURE_ONLY",
-        "evidence": "SOURCE_AUTHORED_NOT_EXECUTED"
+        "evidence": "FOCUSED_UNIT_TEST_PASSED"
       },
       {
         "context": "wasm32 without host-thread parking",
@@ -282,7 +282,6 @@
       "src/signal/shutdown.rs:499"
     ],
     "missing_terminal_evidence": [
-      "focused compile and execution of the fourteen authored source cases",
       "loom or equivalent state-model coverage of wake and park interleavings",
       "LabRuntime or DPOR cancellation and quiescence evidence",
       "idle CPU and completion-latency comparison against the incumbent",
@@ -302,6 +301,26 @@
       "duration_ms": 107797,
       "exit_code": 0,
       "evidence_scope": "Current-source library compilation only; cfg(test) inline cases were not compiled or executed."
+    },
+    "focused_unit_test_receipt": {
+      "receipt_id": "FUT-A3-OWNED-BLOCK-ON-UNIT-20260809",
+      "build_id": 29967986903220231,
+      "worker": "hz2",
+      "clean_overlay_base_revision": "96d59b686ecef0b50d3ffec01f0f89041cf531aa",
+      "overlay_fingerprint": "24ef86505fe606017c66d22bed85f82b645d57a5401b4bb0e125b640a6c2461c",
+      "source_sha256": "ec3463e516e26c40a5f690277ba1782e114fea93ea0e430abcd381426aa01779",
+      "command": "cargo test -p asupersync --lib util::future::tests -- --nocapture --test-threads=1",
+      "rustflags": "-D warnings -C debuginfo=0",
+      "started_at": "2026-08-08T23:52:14.735641994Z",
+      "completed_at": "2026-08-09T00:03:51.348375431Z",
+      "duration_ms": 696612,
+      "module_tests_passed": 26,
+      "a3_authored_tests_passed": 14,
+      "failed": 0,
+      "ignored": 0,
+      "filtered_out": 21826,
+      "exit_code": 0,
+      "evidence_scope": "The complete util::future focused module passed, including all fourteen A3-authored cases; this is not exhaustive interleaving, performance, or cutover evidence."
     },
     "blocked_execution_receipts": [
       {
@@ -636,7 +655,7 @@
       {
         "path": "Cargo.toml",
         "baseline_sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
-        "current_sha256": "eabf901043ddb44d084aa68e6b068977eccdbbf715d35656da0998ac76554fcc",
+        "current_sha256": "c4dc6f243c82e4a679130ee9278b55f8b30064e6dee7e43aafcda1ecddad6917",
         "current_line_count": 1051,
         "classification": "CAPABILITY_PROJECTION_UNCHANGED",
         "projection": "root futures-lite manifest requirement",
@@ -645,7 +664,7 @@
       {
         "path": "Cargo.lock",
         "baseline_sha256": "9fa12e8af1e6b15a3070d88d62b2b81b8ba49c0e9d8592c1d1682f1cd72a4461",
-        "current_sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
+        "current_sha256": "9b2201a45d928257e7ee081293247e3557901d9cfe6a297543b52599ae3e263e",
         "current_line_count": 4666,
         "classification": "CAPABILITY_PROJECTION_UNCHANGED",
         "projection": "resolved futures-lite package block",
@@ -1470,15 +1489,15 @@
     },
     {
       "gap_id": "FUT-A3-GAP-13",
-      "summary": "The safe blocking kernel and fourteen inline cases are source-authored, including a bounded notification state matrix and LabRuntime quiescence check, but have no terminal focused execution or broader DPOR cancellation receipt.",
+      "summary": "The safe blocking kernel and all fourteen authored cases passed the focused util::future lane, including the bounded notification state matrix and LabRuntime quiescence check, but broader DPOR cancellation evidence remains missing.",
       "owner_bead": "asupersync-d24mms.6.3",
-      "state": "BLOCKED_GAP"
+      "state": "FOCUSED_EXECUTION_PASSED_BROADER_MODEL_PENDING"
     },
     {
       "gap_id": "FUT-A3-GAP-14",
-      "summary": "The policy now conservatively refuses both Asupersync runtime drivers and scheduler workers, while admitting foreign executors only for self-contained futures that do not depend on the paused outer executor; terminal execution is still pending.",
+      "summary": "The policy conservatively refuses both Asupersync runtime drivers and scheduler workers, while admitting foreign executors only for self-contained futures that do not depend on the paused outer executor; the focused policy cases passed.",
       "owner_bead": "asupersync-d24mms.6.3",
-      "state": "POLICY_RESOLVED_PENDING_EXECUTION"
+      "state": "POLICY_FOCUSED_EXECUTION_PASSED"
     },
     {
       "gap_id": "FUT-A3-GAP-15",
@@ -1532,17 +1551,17 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "eabf901043ddb44d084aa68e6b068977eccdbbf715d35656da0998ac76554fcc",
+      "sha256": "c4dc6f243c82e4a679130ee9278b55f8b30064e6dee7e43aafcda1ecddad6917",
       "line_count": 1051
     },
     {
       "path": "Cargo.lock",
-      "sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
+      "sha256": "9b2201a45d928257e7ee081293247e3557901d9cfe6a297543b52599ae3e263e",
       "line_count": 4666
     },
     {
       "path": "asupersync-tokio-compat/Cargo.toml",
-      "sha256": "67fd985d0a701ec3b9a66f4c164ee53d59e0c55973d76a97bf74aea5ab6a1a4a",
+      "sha256": "8ab0657b4398131ed600b8c18a6aa22dbbb7c2c0b69eef269279acf898e2740c",
       "line_count": 68
     },
     {
@@ -1630,7 +1649,7 @@
     "The owned Stream semantics documentation freezes a source contract only; it does not prove that every implementation obeys its wake, pinning, size-hint, cancellation, or drop obligations.",
     "The pinned-local downstream case and direct-next compile-fail rustdoc are source-authored but unexecuted and do not prove compiler-diagnostic stability or runtime behavior.",
     "The A2 acceptance matrix is a fail-closed status inventory, not a terminal receipt; closure remains forbidden while any required receipt is missing.",
-    "The A3 blocking-kernel receipt is compile-only: the terminal library check does not compile or execute the authored inline cases and does not prove interleaving completeness, runtime-context safety, cancellation quiescence, idle CPU, latency parity, or cutover readiness.",
+    "The A3 focused unit receipt proves the named util::future cases only; it does not prove exhaustive interleaving completeness, cancellation quiescence beyond the named cases, idle CPU, latency parity, broad workspace health, or cutover readiness.",
     "The A4 helper receipt is partial and static-only: it does not implement race, treat comment-only join_all as live, convert generic Future drop into structured loser drain, prove deterministic fairness, or promote authored source cases to executed evidence.",
     "The A5 panic-boundary receipt is partial and static-only: it does not contain destructor panics, define nested-panic payload precedence, prove resource or obligation drain, add a stable ErrorHandlerMiddleware diagnostic, produce Outcome values, or establish panic-unwind and real-web E2E evidence.",
     "Marginal package counts do not prove behavioral replacement parity.",

@@ -126,14 +126,14 @@ fn validate_a3_receipt(inventory: &Value) -> Result<(), String> {
     if text(receipt, "owner_bead") != A3_BEAD_ID
         || text(receipt, "base_revision") != "02b380ee063e7e643105b1a7997360a7021bf32e"
         || text(receipt, "implementation_revision") != "050fd0f08e4cf127e348bbf545c1e46cc392f6b5"
-        || text(receipt, "source_status") != "COMPILE_CHECKED_TEST_AND_POLICY_EXPANSION"
-        || text(receipt, "execution_status") != "TERMINAL_LIBRARY_CHECK_PASSED_TESTS_NOT_EXECUTED"
+        || text(receipt, "source_status") != "FOCUSED_UNIT_TEST_AND_POLICY_EXPANSION"
+        || text(receipt, "execution_status") != "FOCUSED_UNIT_TESTS_PASSED"
         || text(receipt, "module") != "crate::util::future"
         || text(receipt, "visibility") != "crate-private alongside-incumbent"
         || receipt.get("cutover_authorized") != Some(&Value::Bool(false))
         || receipt.get("closure_allowed") != Some(&Value::Bool(false))
     {
-        return Err("A3 receipt must remain compile-only and fail closed".to_owned());
+        return Err("A3 receipt must remain focused-only and fail closed".to_owned());
     }
 
     let expected_source_pins = BTreeMap::from([
@@ -222,14 +222,24 @@ fn validate_a3_receipt(inventory: &Value) -> Result<(), String> {
 
     let contexts = array(receipt, "context_policy");
     if contexts.len() != 7
+        || contexts
+            .iter()
+            .filter(|row| text(row, "evidence") == "FOCUSED_UNIT_TEST_PASSED")
+            .count()
+            != 6
         || !contexts.iter().any(|row| {
             text(row, "context") == "Asupersync runtime driver versus scheduler worker"
                 && text(row, "decision") == "REFUSE_BOTH_CONSERVATIVELY"
-                && text(row, "evidence") == "SOURCE_AUTHORED_NOT_EXECUTED"
+                && text(row, "evidence") == "FOCUSED_UNIT_TEST_PASSED"
         })
         || !contexts.iter().any(|row| {
             text(row, "context") == "foreign executor thread"
                 && text(row, "decision") == "ADMIT_SELF_CONTAINED_FUTURE_ONLY"
+                && text(row, "evidence") == "FOCUSED_UNIT_TEST_PASSED"
+        })
+        || !contexts.iter().any(|row| {
+            text(row, "context") == "wasm32 without host-thread parking"
+                && text(row, "decision") == "REFUSE_UNSUPPORTED_PLATFORM"
                 && text(row, "evidence") == "SOURCE_AUTHORED_NOT_EXECUTED"
         })
     {
@@ -237,7 +247,7 @@ fn validate_a3_receipt(inventory: &Value) -> Result<(), String> {
     }
     if array(receipt, "semantic_guarantees").len() != 9
         || array(receipt, "incumbent_production_sites").len() != 3
-        || array(receipt, "missing_terminal_evidence").len() != 5
+        || array(receipt, "missing_terminal_evidence").len() != 4
         || array(receipt, "blocked_execution_receipts").len() != 3
     {
         return Err("A3 semantics, incumbent sites, or evidence gaps are incomplete".to_owned());
@@ -260,6 +270,32 @@ fn validate_a3_receipt(inventory: &Value) -> Result<(), String> {
         || !object_text(compile, "evidence_scope").contains("not compiled or executed")
     {
         return Err("A3 terminal receipt must remain scoped to library compilation".to_owned());
+    }
+
+    let focused = object(receipt, "focused_unit_test_receipt");
+    if object_text(focused, "receipt_id") != "FUT-A3-OWNED-BLOCK-ON-UNIT-20260809"
+        || focused.get("build_id").and_then(Value::as_u64) != Some(29_967_986_903_220_231)
+        || object_text(focused, "worker") != "hz2"
+        || object_text(focused, "clean_overlay_base_revision")
+            != "96d59b686ecef0b50d3ffec01f0f89041cf531aa"
+        || object_text(focused, "overlay_fingerprint")
+            != "24ef86505fe606017c66d22bed85f82b645d57a5401b4bb0e125b640a6c2461c"
+        || object_text(focused, "source_sha256")
+            != "ec3463e516e26c40a5f690277ba1782e114fea93ea0e430abcd381426aa01779"
+        || object_text(focused, "command")
+            != "cargo test -p asupersync --lib util::future::tests -- --nocapture --test-threads=1"
+        || focused.get("duration_ms").and_then(Value::as_u64) != Some(696_612)
+        || focused.get("module_tests_passed").and_then(Value::as_u64) != Some(26)
+        || focused
+            .get("a3_authored_tests_passed")
+            .and_then(Value::as_u64)
+            != Some(14)
+        || focused.get("failed").and_then(Value::as_u64) != Some(0)
+        || focused.get("filtered_out").and_then(Value::as_u64) != Some(21_826)
+        || focused.get("exit_code").and_then(Value::as_i64) != Some(0)
+        || !object_text(focused, "evidence_scope").contains("not exhaustive")
+    {
+        return Err("A3 focused receipt must pin the exact passing module lane".to_owned());
     }
 
     for attempt in array(receipt, "blocked_execution_receipts") {
@@ -1429,9 +1465,9 @@ fn identity_authority_zero_unknown_and_docs_are_fail_closed() {
         "Post-baseline current snapshot",
         "315",
         "1,382",
-        "FUT A3 compile-checked kernel progress",
-        "COMPILE_CHECKED_TEST_AND_POLICY_EXPANSION",
-        "TERMINAL_LIBRARY_CHECK_PASSED_TESTS_NOT_EXECUTED",
+        "FUT A3 focused unit kernel progress",
+        "FOCUSED_UNIT_TEST_AND_POLICY_EXPANSION",
+        "FOCUSED_UNIT_TESTS_PASSED",
         "FUT-A3-GAP-13",
         "FUT-A3-GAP-14",
         "FUT-A3-GAP-15",
@@ -2104,7 +2140,7 @@ fn malformed_inventory_mutations_fail_closed() {
 
     let mut a3_promoted = canonical.clone();
     a3_promoted["a3_block_on_receipt"]["execution_status"] =
-        Value::String("FOCUSED_UNIT_TESTS_PASSED".to_owned());
+        Value::String("FULL_PARITY_PASSED".to_owned());
     assert!(validate_inventory(&a3_promoted).is_err());
 
     let mut a3_cutover = canonical.clone();
