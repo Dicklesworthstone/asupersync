@@ -209,15 +209,16 @@ where
 /// The wrapper forwards the caller's Context unchanged and adds no allocation,
 /// executor, or lifetime bound. A normal ready value becomes `Ok`; a poll
 /// panic becomes the original boxed payload in `Err`. After either terminal
-/// result the inner future is never polled again. Dropping the wrapper still
-/// drops the inner future normally; a panic raised by that destructor is not
-/// part of this poll-only boundary.
+/// result the inner future is never polled again. The inner future is dropped
+/// before the terminal result is returned, inside a second unwind boundary.
+/// If polling and cleanup both panic, the poll panic remains the primary
+/// payload; if only terminal cleanup panics, that cleanup payload is returned.
 pub(crate) fn catch_unwind<F>(future: F) -> CatchUnwind<F>
 where
     F: Future + std::panic::UnwindSafe,
 {
     CatchUnwind {
-        inner: future,
+        inner: Some(future),
         completed: false,
     }
 }
@@ -228,8 +229,14 @@ where
 #[must_use = "futures do nothing unless polled or awaited"]
 pub(crate) struct CatchUnwind<F> {
     #[pin]
-    inner: F,
+    inner: Option<F>,
     completed: bool,
+}
+
+fn drop_pinned_future<F>(
+    mut inner: Pin<&mut Option<F>>,
+) -> Result<(), Box<dyn std::any::Any + Send>> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.set(None)))
 }
 
 impl<F> Future for CatchUnwind<F>
@@ -244,16 +251,29 @@ where
             return Poll::Pending;
         }
 
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            this.inner.as_mut().poll(context)
-        })) {
+        let poll_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            this.inner
+                .as_mut()
+                .as_pin_mut()
+                .expect("incomplete catch_unwind must retain its future")
+                .poll(context)
+        }));
+
+        match poll_result {
             Ok(Poll::Ready(output)) => {
                 *this.completed = true;
-                Poll::Ready(Ok(output))
+                match drop_pinned_future(this.inner) {
+                    Ok(()) => Poll::Ready(Ok(output)),
+                    Err(cleanup_payload) => Poll::Ready(Err(cleanup_payload)),
+                }
             }
             Ok(Poll::Pending) => Poll::Pending,
             Err(payload) => {
                 *this.completed = true;
+                // The poll panic is the primary failure. Cleanup still runs so
+                // the terminal wrapper cannot retain resources, but a nested
+                // destructor panic must not replace the original payload.
+                let _cleanup_result = drop_pinned_future(this.inner);
                 Poll::Ready(Err(payload))
             }
         }
@@ -914,6 +934,133 @@ mod tests {
         }
         assert_eq!(polls.get(), 0);
         assert_eq!(drops.get(), 1);
+    }
+
+    #[test]
+    fn catch_unwind_preserves_poll_panic_when_terminal_drop_also_panics() {
+        struct PollAndDropPanic {
+            drops: Rc<Cell<usize>>,
+        }
+
+        impl Future for PollAndDropPanic {
+            type Output = ();
+
+            fn poll(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Self::Output> {
+                std::panic::panic_any(String::from("primary poll panic"));
+            }
+        }
+
+        impl Drop for PollAndDropPanic {
+            fn drop(&mut self) {
+                self.drops.set(self.drops.get() + 1);
+                std::panic::panic_any(String::from("nested drop panic"));
+            }
+        }
+
+        let drops = Rc::new(Cell::new(0_usize));
+        let mut caught = Box::pin(catch_unwind(std::panic::AssertUnwindSafe(
+            PollAndDropPanic {
+                drops: Rc::clone(&drops),
+            },
+        )));
+        let wake_state = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&wake_state));
+        let mut context = Context::from_waker(&waker);
+
+        let outer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            caught.as_mut().poll(&mut context)
+        }));
+        let Poll::Ready(Err(payload)) = outer.expect("nested cleanup panic must be contained")
+        else {
+            panic!("poll panic must remain the terminal error");
+        };
+        assert_eq!(
+            payload.downcast_ref::<String>().map(String::as_str),
+            Some("primary poll panic")
+        );
+        assert_eq!(drops.get(), 1);
+        assert!(caught.as_mut().poll(&mut context).is_pending());
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(caught))).is_ok(),
+            "terminal cleanup must remove the inner future exactly once"
+        );
+        assert_eq!(drops.get(), 1);
+    }
+
+    #[test]
+    fn catch_unwind_surfaces_terminal_drop_panic_after_ready_poll() {
+        struct ReadyThenDropPanic;
+
+        impl Future for ReadyThenDropPanic {
+            type Output = u8;
+
+            fn poll(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Self::Output> {
+                Poll::Ready(73)
+            }
+        }
+
+        impl Drop for ReadyThenDropPanic {
+            fn drop(&mut self) {
+                std::panic::panic_any(String::from("ready cleanup panic"));
+            }
+        }
+
+        let observed = block_on(catch_unwind(std::panic::AssertUnwindSafe(
+            ReadyThenDropPanic,
+        )));
+        let payload = observed.expect_err("terminal cleanup panic must become an error");
+        assert_eq!(
+            payload.downcast_ref::<String>().map(String::as_str),
+            Some("ready cleanup panic")
+        );
+    }
+
+    #[test]
+    fn catch_unwind_task_quiesces_and_resolves_orphaned_obligation_in_lab() {
+        use crate::lab::{DporExplorer, ExplorerConfig};
+        use crate::record::ObligationKind;
+        use crate::runtime::config::ObligationLeakResponse;
+        use crate::types::Budget;
+
+        let mut explorer = DporExplorer::new(
+            ExplorerConfig::new(0x00F0_75A5, 4)
+                .worker_count(1)
+                .max_steps(512),
+        );
+        let report = explorer.explore(|runtime| {
+            runtime
+                .state
+                .set_obligation_leak_response(ObligationLeakResponse::Silent);
+            let region = runtime.state.create_root_region(Budget::INFINITE);
+            let (task, _) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async {
+                    let outcome =
+                        catch_unwind(std::panic::AssertUnwindSafe(poll_fn(|_| -> Poll<()> {
+                            panic!("lab-contained poll panic")
+                        })))
+                        .await;
+                    assert!(outcome.is_err());
+                })
+                .expect("create panic-boundary task");
+            runtime
+                .state
+                .create_obligation(
+                    ObligationKind::Lease,
+                    task,
+                    region,
+                    Some("panic-boundary cleanup".to_owned()),
+                )
+                .expect("create task obligation");
+            runtime.scheduler.lock().schedule(task, 0);
+
+            runtime.run_until_quiescent();
+            assert!(runtime.is_quiescent());
+            assert_eq!(runtime.state.pending_obligation_count(), 0);
+        });
+
+        assert!(!report.has_violations());
+        assert!(report.unique_classes >= 1);
     }
 
     #[test]
