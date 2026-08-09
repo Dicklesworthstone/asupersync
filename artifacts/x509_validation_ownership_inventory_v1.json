@@ -109,12 +109,12 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "97f9ebcc94a9cd19c64ec63e76261ef7add4172dca055914a5121f773083a90b",
+      "sha256": "bc4c31e765a7b03ad2cc96cef94a1df60597246395e77588077dfbbf60e26377",
       "line_count": 6929
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "c5f2dd1d5a135b53751625fb9bf4fe2787d7691d239c5c6cb2d2e40e2c37873a",
+      "sha256": "770656eb2ba5c48f0db02e4b144cb8860c235f48dace37f92819bd0e2e25bba1",
       "line_count": 3210
     },
     {

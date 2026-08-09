@@ -523,13 +523,13 @@ fn every_later_plan_row_is_transitively_blocked_by_the_gate() {
     assert_eq!(
         roles,
         BTreeMap::from([
-            ("architecture", 11),
+            ("architecture", 15),
             ("decision", 15),
-            ("implementation", 104),
-            ("verification", 187),
+            ("implementation", 109),
+            ("verification", 200),
         ])
     );
-    assert_eq!(graph["later_implementation_row_count"], 104);
+    assert_eq!(graph["later_implementation_row_count"], 109);
     assert_eq!(graph["blocking_graph_cycle_count"], 0);
 }
 
@@ -746,7 +746,7 @@ fn commands_docs_and_no_claim_boundaries_are_exact() {
         "33 taxonomy candidates",
         "13 feature profiles",
         "4 target triples",
-        "104 later implementation rows",
+        "109 later implementation rows",
         "35 baseline cases",
         "No-claim boundary",
     ] {

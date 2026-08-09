@@ -622,13 +622,13 @@
     },
     {
       "path": "src/runtime/scheduler/three_lane.rs",
-      "sha256": "840da9f9a86c9d62b142c11810d7b3c5bcac246cc10477777f96c8fb549cd568",
-      "line_count": 18768
+      "sha256": "ba804763dd1fd8ca2f495bc01933563f51fd7b403de60a03e52e68a667cc7065",
+      "line_count": 8190
     },
     {
       "path": "src/runtime/spawn_mailbox.rs",
-      "sha256": "b5f18c95eb3a5cf2cd74a10f70e7aabf2d17536738a04ec7ab402d54768c1c5d",
-      "line_count": 4809
+      "sha256": "f948047d55b9d0ae27b62c2863398e61c1b8ba77a53720bc72a4dc3165b0b655",
+      "line_count": 4962
     },
     {
       "path": "src/runtime/epoch_tracking.rs",
@@ -642,8 +642,8 @@
     },
     {
       "path": "src/sync/contended_mutex.rs",
-      "sha256": "55ac901c5f13f91fd32e11e58cd415bc082eaddc303c2b0e078587aa75f112b5",
-      "line_count": 1190
+      "sha256": "437a1966e758d5af358675649154a0d4c455017c7b2120f4041675c216bc23b9",
+      "line_count": 1327
     }
   ],
   "no_claim_boundaries": [

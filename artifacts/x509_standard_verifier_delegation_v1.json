@@ -44,7 +44,7 @@
     },
     {
       "path": "artifacts/x509_validation_ownership_inventory_v1.json",
-      "sha256": "3ebe77495f22c7ab6412de9957e9954ab0c835bc35fd9612a99c0c6524ca2cf1",
+      "sha256": "d349b5314138d4174a95ed4b713c95484a1de3f80a8549ae4877c6207eb55a0b",
       "line_count": 1073,
       "role": "A1 ownership, residue, and routed-gap inventory"
     },

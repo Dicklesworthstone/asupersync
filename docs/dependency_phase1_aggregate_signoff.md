@@ -85,7 +85,7 @@ an expired active oracle fails the aggregate.
 
 Closing this gate authorizes downstream evidence work only:
 
-- 104 later implementation rows remain evidence-gated through this node;
+- 109 later implementation rows remain evidence-gated through this node;
 - 18 capabilities are `BLOCKED_PENDING_EVIDENCE`;
 - 23 capabilities are `KEEP_INCUMBENT`;
 - 9 cross-cutting capabilities are `NOT_A_CUTOVER`;
