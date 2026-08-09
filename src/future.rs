@@ -434,7 +434,69 @@ mod tests {
     use std::rc::Rc;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
+
+    #[cfg(target_os = "linux")]
+    fn process_cpu_ticks() -> u64 {
+        let stat = std::fs::read_to_string("/proc/self/stat").expect("read process stat");
+        let close = stat.rfind(')').expect("process stat comm terminator");
+        let fields: Vec<&str> = stat[close + 1..].split_whitespace().collect();
+        let user: u64 = fields[11].parse().expect("process user ticks");
+        let system: u64 = fields[12].parse().expect("process system ticks");
+        user + system
+    }
+
+    #[cfg(target_os = "linux")]
+    fn delayed_wake(delay: Duration) -> (impl Future<Output = ()>, std::thread::JoinHandle<()>) {
+        let ready = Arc::new(AtomicBool::new(false));
+        let parked_waker = Arc::new(Mutex::new(None::<Waker>));
+        let (polled_tx, polled_rx) = std::sync::mpsc::sync_channel(1);
+
+        let helper_ready = Arc::clone(&ready);
+        let helper_waker = Arc::clone(&parked_waker);
+        let helper = std::thread::spawn(move || {
+            polled_rx.recv().expect("future reports its pending poll");
+            std::thread::sleep(delay);
+            helper_ready.store(true, Ordering::Release);
+            helper_waker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                .expect("pending future installed its waker")
+                .wake();
+        });
+
+        let mut reported_pending = false;
+        let future = poll_fn(move |context| {
+            if ready.load(Ordering::Acquire) {
+                return Poll::Ready(());
+            }
+            parked_waker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .replace(context.waker().clone());
+            if !reported_pending {
+                reported_pending = true;
+                polled_tx.send(()).expect("wake helper remains available");
+            }
+            Poll::Pending
+        });
+        (future, helper)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn ready_batch<D>(driver: &mut D, iterations: u64) -> (u128, u64)
+    where
+        D: FnMut(u64) -> u64,
+    {
+        let start = Instant::now();
+        let mut checksum = 0_u64;
+        for value in 0..iterations {
+            checksum =
+                checksum.wrapping_add(std::hint::black_box(driver(std::hint::black_box(value))));
+        }
+        (start.elapsed().as_nanos(), checksum)
+    }
 
     #[derive(Default)]
     struct CountingWaker {
@@ -983,6 +1045,87 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "explicit FUT A3 measurement receipt"]
+    fn block_on_incumbent_idle_cpu_and_ready_latency_receipt() {
+        const IDLE_MILLIS: u64 = 750;
+        const READY_ITERATIONS: u64 = 50_000;
+        const READY_SAMPLES: usize = 7;
+
+        let idle_delay = Duration::from_millis(IDLE_MILLIS);
+
+        let (owned_idle_future, owned_helper) = delayed_wake(idle_delay);
+        let owned_cpu_before = process_cpu_ticks();
+        let owned_idle_started = Instant::now();
+        block_on(owned_idle_future);
+        let owned_idle_elapsed = owned_idle_started.elapsed();
+        let owned_idle_cpu_ticks = process_cpu_ticks().saturating_sub(owned_cpu_before);
+        owned_helper.join().expect("owned wake helper completes");
+
+        let (incumbent_idle_future, incumbent_helper) = delayed_wake(idle_delay);
+        let incumbent_cpu_before = process_cpu_ticks();
+        let incumbent_idle_started = Instant::now();
+        futures_lite::future::block_on(incumbent_idle_future);
+        let incumbent_idle_elapsed = incumbent_idle_started.elapsed();
+        let incumbent_idle_cpu_ticks = process_cpu_ticks().saturating_sub(incumbent_cpu_before);
+        incumbent_helper
+            .join()
+            .expect("incumbent wake helper completes");
+
+        let mut owned_driver = |value| block_on(std::hint::black_box(async move { value }));
+        let mut incumbent_driver =
+            |value| futures_lite::future::block_on(std::hint::black_box(async move { value }));
+        let mut owned_ready_samples = Vec::with_capacity(READY_SAMPLES);
+        let mut incumbent_ready_samples = Vec::with_capacity(READY_SAMPLES);
+        let mut owned_checksum = 0_u64;
+        let mut incumbent_checksum = 0_u64;
+
+        for sample in 0..READY_SAMPLES {
+            let (first_ns, first_checksum);
+            let (second_ns, second_checksum);
+            if sample % 2 == 0 {
+                (first_ns, first_checksum) = ready_batch(&mut owned_driver, READY_ITERATIONS);
+                (second_ns, second_checksum) = ready_batch(&mut incumbent_driver, READY_ITERATIONS);
+                owned_ready_samples.push(first_ns);
+                incumbent_ready_samples.push(second_ns);
+                owned_checksum = first_checksum;
+                incumbent_checksum = second_checksum;
+            } else {
+                (first_ns, first_checksum) = ready_batch(&mut incumbent_driver, READY_ITERATIONS);
+                (second_ns, second_checksum) = ready_batch(&mut owned_driver, READY_ITERATIONS);
+                incumbent_ready_samples.push(first_ns);
+                owned_ready_samples.push(second_ns);
+                incumbent_checksum = first_checksum;
+                owned_checksum = second_checksum;
+            }
+        }
+        owned_ready_samples.sort_unstable();
+        incumbent_ready_samples.sort_unstable();
+        let owned_ready_median_ns = owned_ready_samples[READY_SAMPLES / 2];
+        let incumbent_ready_median_ns = incumbent_ready_samples[READY_SAMPLES / 2];
+
+        assert!(owned_idle_elapsed >= idle_delay);
+        assert!(incumbent_idle_elapsed >= idle_delay);
+        assert!(
+            owned_idle_cpu_ticks <= incumbent_idle_cpu_ticks.saturating_add(3),
+            "owned idle process CPU exceeded the incumbent by more than three clock ticks"
+        );
+        assert_eq!(owned_checksum, incumbent_checksum);
+
+        println!(
+            "FUT_A3_PERF_RECEIPT platform=linux idle_wait_ms={IDLE_MILLIS} \
+             owned_idle_cpu_ticks={owned_idle_cpu_ticks} \
+             incumbent_idle_cpu_ticks={incumbent_idle_cpu_ticks} \
+             owned_idle_wall_ns={} incumbent_idle_wall_ns={} \
+             ready_iterations_per_sample={READY_ITERATIONS} ready_samples={READY_SAMPLES} \
+             owned_ready_median_batch_ns={owned_ready_median_ns} \
+             incumbent_ready_median_batch_ns={incumbent_ready_median_ns}",
+            owned_idle_elapsed.as_nanos(),
+            incumbent_idle_elapsed.as_nanos(),
+        );
     }
 
     #[test]
