@@ -381,7 +381,8 @@ mod tests {
     /// treat as canonical. Guards the repair made for frankenlibc bd-kcmnj4.
     #[test]
     fn packaged_contract_matches_workspace_canonical() {
-        let Some(canonical) = workspace_canonical("artifacts/conformance_registry_contract_v1.json")
+        let Some(canonical) =
+            workspace_canonical("artifacts/conformance_registry_contract_v1.json")
         else {
             // Built from the published tarball. Still assert the embedded copy
             // is real, so this never degenerates into a silent pass.

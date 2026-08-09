@@ -462,9 +462,9 @@ mod tests {
             "RFC 6330 Table 2 must carry all 477 rows"
         );
 
-        let Some(canonical) =
-            crate::reference_registry::workspace_canonical("src/raptorq/rfc6330_systematic_index_table.inc")
-        else {
+        let Some(canonical) = crate::reference_registry::workspace_canonical(
+            "src/raptorq/rfc6330_systematic_index_table.inc",
+        ) else {
             return;
         };
         let canonical_text = std::fs::read_to_string(&canonical).unwrap_or_else(|err| {

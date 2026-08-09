@@ -46,14 +46,9 @@ fn path_is_git_ignored(path: &Path) -> bool {
 
 fn is_src_rust_test_module_path(path: &str) -> bool {
     path.starts_with("src/")
-        && path
-            .rsplit('/')
-            .next()
-            .is_some_and(|name| {
-                name.ends_with("_test.rs")
-                    || name.ends_with("_tests.rs")
-                    || name.starts_with("test_")
-            })
+        && path.rsplit('/').next().is_some_and(|name| {
+            name.ends_with("_test.rs") || name.ends_with("_tests.rs") || name.starts_with("test_")
+        })
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
