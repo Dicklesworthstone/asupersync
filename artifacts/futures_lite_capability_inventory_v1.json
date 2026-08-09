@@ -197,8 +197,8 @@
     "current_source_pins": [
       {
         "path": "src/future.rs",
-        "sha256": "c2156b9b43b1caf9c172c736839bb877fc09854edc8ec245156d93d4822d7b88",
-        "line_count": 1330
+        "sha256": "e50101022865b42d1a9a506388824e0e0d5187223df47f3473db056023dd904b",
+        "line_count": 1477
       },
       {
         "path": "src/util/mod.rs",
@@ -407,8 +407,8 @@
     "visibility": "crate-private alongside-incumbent",
     "current_source_pin": {
       "path": "src/future.rs",
-      "sha256": "c2156b9b43b1caf9c172c736839bb877fc09854edc8ec245156d93d4822d7b88",
-      "line_count": 1330
+      "sha256": "e50101022865b42d1a9a506388824e0e0d5187223df47f3473db056023dd904b",
+      "line_count": 1477
     },
     "helper_projection": {
       "path": "src/future.rs",
@@ -541,7 +541,7 @@
       "input_bound": "Future + UnwindSafe; web call sites use AssertUnwindSafe around existing handler futures",
       "poll_behavior": "forwards the caller Context and polls the pinned inner future once per wrapper poll inside std::panic::catch_unwind",
       "completion_behavior": "Ready becomes Ok after contained terminal cleanup; a ready-path destructor panic becomes Err; a poll panic remains the primary original Box<dyn Any + Send> payload even if terminal cleanup also panics",
-      "post_terminal_behavior": "the inner Option is taken exactly once, preventing every later inner poll and returning Pending",
+      "post_terminal_behavior": "the inner Option is taken exactly once, prevents every later inner poll, and returns Pending",
       "drop_behavior": "terminal cleanup is contained inside a second std::panic::catch_unwind; abandoning an unpolled or pending wrapper still performs ordinary Rust drop outside a poll",
       "allocation_behavior": "the wrapper stores only an Option-wrapped inner future; panic payload allocation belongs to the panic runtime",
       "drop_panic_contained": true
@@ -702,7 +702,7 @@
       {
         "path": "Cargo.toml",
         "baseline_sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
-        "current_sha256": "c4dc6f243c82e4a679130ee9278b55f8b30064e6dee7e43aafcda1ecddad6917",
+        "current_sha256": "8b465e993e3bdef63f2a1ade7e1fb591eead388d3d7d1c9e7eaf1526dba4f8b0",
         "current_line_count": 1051,
         "classification": "CAPABILITY_PROJECTION_UNCHANGED",
         "projection": "root futures-lite manifest requirement",
@@ -711,7 +711,7 @@
       {
         "path": "Cargo.lock",
         "baseline_sha256": "9fa12e8af1e6b15a3070d88d62b2b81b8ba49c0e9d8592c1d1682f1cd72a4461",
-        "current_sha256": "9b2201a45d928257e7ee081293247e3557901d9cfe6a297543b52599ae3e263e",
+        "current_sha256": "870fb3f68f54431462bb7231866f0d44bf7f1e655cd5abaea8dcc1ac60622848",
         "current_line_count": 4666,
         "classification": "CAPABILITY_PROJECTION_UNCHANGED",
         "projection": "resolved futures-lite package block",
@@ -1598,17 +1598,17 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "c4dc6f243c82e4a679130ee9278b55f8b30064e6dee7e43aafcda1ecddad6917",
+      "sha256": "8b465e993e3bdef63f2a1ade7e1fb591eead388d3d7d1c9e7eaf1526dba4f8b0",
       "line_count": 1051
     },
     {
       "path": "Cargo.lock",
-      "sha256": "9b2201a45d928257e7ee081293247e3557901d9cfe6a297543b52599ae3e263e",
+      "sha256": "870fb3f68f54431462bb7231866f0d44bf7f1e655cd5abaea8dcc1ac60622848",
       "line_count": 4666
     },
     {
       "path": "asupersync-tokio-compat/Cargo.toml",
-      "sha256": "8ab0657b4398131ed600b8c18a6aa22dbbb7c2c0b69eef269279acf898e2740c",
+      "sha256": "7b15ecf5f26fa5555eca4f0dea038b0dd596f7b59d9e5da605c425d06d219ba4",
       "line_count": 68
     },
     {
@@ -1618,13 +1618,13 @@
     },
     {
       "path": "src/web/middleware.rs",
-      "sha256": "ea9f19f2f53325a9c837545678a697ee3ca2c0a204cbd2de21b974b537fbc74c",
-      "line_count": 6028
+      "sha256": "1a34c4d8dc70dc65b6a2af11f447e86b388594752e43821e971ad22086f25ea2",
+      "line_count": 6027
     },
     {
       "path": "src/web/negotiate.rs",
-      "sha256": "3cef1b7e979de61a241138e10be0bdaf9d8e8dac4837cd17e662e8adc9fec220",
-      "line_count": 899
+      "sha256": "1de762df22252cfb483d36e0628b9093b431c7f18de0fd68cb34c4a2819eabd1",
+      "line_count": 916
     },
     {
       "path": "src/web/router.rs",

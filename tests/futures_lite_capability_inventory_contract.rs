@@ -140,8 +140,8 @@ fn validate_a3_receipt(inventory: &Value) -> Result<(), String> {
         (
             "src/future.rs",
             (
-                "c2156b9b43b1caf9c172c736839bb877fc09854edc8ec245156d93d4822d7b88",
-                1330_u64,
+                "e50101022865b42d1a9a506388824e0e0d5187223df47f3473db056023dd904b",
+                1477_u64,
             ),
         ),
         (
@@ -432,15 +432,15 @@ fn validate_a4_receipt(inventory: &Value) -> Result<(), String> {
     let source_pin = object(receipt, "current_source_pin");
     if source_pin.get("path").and_then(Value::as_str) != Some("src/future.rs")
         || source_pin.get("sha256").and_then(Value::as_str)
-            != Some("c2156b9b43b1caf9c172c736839bb877fc09854edc8ec245156d93d4822d7b88")
-        || source_pin.get("line_count").and_then(Value::as_u64) != Some(1330)
+            != Some("e50101022865b42d1a9a506388824e0e0d5187223df47f3473db056023dd904b")
+        || source_pin.get("line_count").and_then(Value::as_u64) != Some(1477)
     {
         return Err("A4 current source pin drift".to_owned());
     }
     let source_bytes = read_repo_bytes("src/future.rs");
     if hex_bytes(&Sha256::digest(&source_bytes))
-        != "c2156b9b43b1caf9c172c736839bb877fc09854edc8ec245156d93d4822d7b88"
-        || read_repo_file("src/future.rs").lines().count() != 1330
+        != "e50101022865b42d1a9a506388824e0e0d5187223df47f3473db056023dd904b"
+        || read_repo_file("src/future.rs").lines().count() != 1477
     {
         return Err("A4 current source no longer matches its receipt".to_owned());
     }
@@ -603,7 +603,10 @@ fn validate_a5_receipt(inventory: &Value) -> Result<(), String> {
             .get("post_terminal_behavior")
             .and_then(Value::as_str)
             .is_some_and(|value| value.contains("prevents every later inner poll"))
-        || !text(helper, "completion_behavior").contains("poll panic remains the primary")
+        || !helper
+            .get("completion_behavior")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.contains("poll panic remains the primary"))
     {
         return Err("A5 owned poll-helper contract drift".to_owned());
     }
