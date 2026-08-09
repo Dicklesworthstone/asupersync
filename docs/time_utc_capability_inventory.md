@@ -40,8 +40,8 @@ registry without mutating those shared authorities:
 5. The release-proof aggregator also owns a private parser for Agent Mail
    timestamp strings, so the ADR's claim that nothing owned parses RFC3339 is
    no longer true.
-6. Four files directly import Chrono symbols. Those bindings account for 32
-   alias-bearing code lines and 45 imported-symbol occurrences. One line also
+6. Four files directly import Chrono symbols. Those bindings account for
+   32 alias-bearing code lines and 45 imported-symbol occurrences. One line also
    contains a literal Chrono namespace reference; the other three formerly
    reported overlaps have their literal `chrono::Duration` call on the
    preceding line. The corrected literal-or-alias union is therefore 190
@@ -114,8 +114,8 @@ freezes every matching path and per-path matching-line count.
 | standalone golden workspace | 2 | 4 | conformance tools |
 | standalone reporting workspace | 7 | 11 | conformance tools |
 
-The direct-import companion inventory finds four binding paths, 32
-alias-bearing code lines, and 45 imported-symbol occurrences. Only workflow
+The direct-import companion inventory finds four binding paths,
+32 alias-bearing code lines, and 45 imported-symbol occurrences. Only workflow
 line 236 contains both an imported `Utc` reference and a literal
 `chrono::Duration` reference. The alias scan therefore exposes 31 additional
 lines beyond the literal census and reconciles to 190 unique literal-or-alias
