@@ -19,16 +19,16 @@
     "required": true,
     "author": "GreenCove",
     "state": "APPROVED",
-    "reviewer": "/root/x509_release_review",
+    "reviewer": "/root/x509_final_independent_review",
     "review_channel": "collaboration_agent",
     "review_receipt": {
-      "agent_task": "/root/x509_release_review",
+      "agent_task": "/root/x509_final_independent_review",
       "decision": "APPROVE",
-      "reviewed_normative_payload_sha256": "9821d95d0b9e27205d9dc8dc442b8e8c2a55db1b6c273b3a416c7a6cf274e49b"
+      "reviewed_normative_payload_sha256": "860307dcad95d3991a17f9ca14fc57a173534f43d0a4896761571cea30062434"
     },
-    "reviewed_draft_sha256": "2dd67b01719a7b06c324a27490686d7b1eacd4e20f0a13d1f30146a29de5a1b5",
-  "reviewed_normative_payload_sha256": "9821d95d0b9e27205d9dc8dc442b8e8c2a55db1b6c273b3a416c7a6cf274e49b",
-  "candidate_normative_payload_sha256": "9821d95d0b9e27205d9dc8dc442b8e8c2a55db1b6c273b3a416c7a6cf274e49b",
+    "reviewed_draft_sha256": "2c9324eb77e54284d038d70a9b8e0791873dc4ea9126c3af4fc20a45a17600e8",
+    "reviewed_normative_payload_sha256": "860307dcad95d3991a17f9ca14fc57a173534f43d0a4896761571cea30062434",
+    "candidate_normative_payload_sha256": "860307dcad95d3991a17f9ca14fc57a173534f43d0a4896761571cea30062434",
     "normative_projection": {
       "algorithm": "SHA-256",
       "canonicalization": "compact JSON with object keys sorted lexicographically and array order preserved",

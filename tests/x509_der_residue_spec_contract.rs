@@ -14,9 +14,9 @@ const ARTIFACT_PATH: &str = "artifacts/x509_der_residue_spec_v1.json";
 const DOC_PATH: &str = "docs/x509_der_residue_spec.md";
 const INVENTORY_PATH: &str = "artifacts/x509_validation_ownership_inventory_v1.json";
 const EXPECTED_NORMATIVE_PAYLOAD_SHA256: &str =
-    "9821d95d0b9e27205d9dc8dc442b8e8c2a55db1b6c273b3a416c7a6cf274e49b";
+    "860307dcad95d3991a17f9ca14fc57a173534f43d0a4896761571cea30062434";
 const EXPECTED_REVIEWED_DRAFT_SHA256: &str =
-    "2dd67b01719a7b06c324a27490686d7b1eacd4e20f0a13d1f30146a29de5a1b5";
+    "2c9324eb77e54284d038d70a9b8e0791873dc4ea9126c3af4fc20a45a17600e8";
 const A1_RECONCILIATION_PATHS: [&str; 3] = [
     "artifacts/x509_validation_ownership_inventory_v1.json",
     "docs/x509_validation_ownership_inventory.md",
@@ -817,7 +817,7 @@ fn validate_review(value: &Value) -> Result<(), String> {
         .as_str()
         .ok_or_else(|| "review receipt agent_task must be recorded".to_owned())?;
     if author != "GreenCove"
-        || reviewer != "/root/x509_release_review"
+        || reviewer != "/root/x509_final_independent_review"
         || reviewer != receipt_reviewer
         || reviewer == author
     {
