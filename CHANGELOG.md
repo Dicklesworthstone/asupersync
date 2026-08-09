@@ -10,12 +10,14 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
-Scope window: current work through 2026-08-08, reconstructed from git history,
+Scope window: current work through 2026-08-09, reconstructed from git history,
 beads, benchmark ledgers, and live repo artifacts; the previous published
-GitHub Release/tag baseline is `v0.4.0`.
+GitHub Release/tag baseline is `v0.4.1`.
 
 ## Version Timeline
 
+- **v0.4.2 Release**: patch release for the owned safe blocking kernel and its
+  executable wake, context-policy, quiescence, and performance evidence.
 - **v0.4.1 Release**: patch release for capability-aware ATP Stream progress,
   packaged RFC conformance fixtures, and release-evidence pin reconciliation.
 - **v0.4.0 Release**: semantic-versioning re-anchor for the current public API,
@@ -37,6 +39,31 @@ GitHub Release/tag baseline is `v0.4.0`.
 ## [Unreleased]
 
 _No changes yet._
+
+---
+
+## [v0.4.2] - 2026-08-09
+
+### Runtime correctness
+
+- **The internal blocking driver now owns its wake and parking semantics.** The
+  safe kernel uses an `Arc<Wake>` notification state to avoid lost wakes and
+  busy spinning, admits borrowed non-`Send` futures and recursive calls, and
+  refuses runtime scheduler contexts before polling while retaining the
+  blocking-pool path. It introduces no ambient executor or orphan task.
+- **Acceptance behavior is executable and bounded.** Focused unit, notification
+  state-model, cross-thread wake/cancellation, context-policy, and LabRuntime
+  quiescence cases passed. A Linux comparison receipt observed zero process CPU
+  ticks during separate 750 ms idle waits for both the owned and incumbent
+  drivers. The owned ready path was slower in the recorded micro-measurement,
+  so this release makes no latency-parity or performance-improvement claim.
+
+### Migration boundary
+
+- **The incumbent remains until downstream parity work lands.** This release
+  accepts the owned kernel without migrating futures-lite call sites or
+  authorizing dependency removal; those cutovers remain assigned to the FUT
+  A6-A9 migration groups.
 
 ---
 

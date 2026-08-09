@@ -20,7 +20,7 @@
     },
     {
       "path": "docs/rust_crate_release_provenance_policy.md",
-      "sha256": "sha256:bfe8508f895684832348ff86912cb8846dbb4865160d5457ff42469304924e1e",
+      "sha256": "sha256:74c4a003afef6ae58036d5630889b6c411c2341fac15e386ab42a96c427d311e",
       "role": "policy_baseline",
       "citeability": "release_surface_inventory"
     }
