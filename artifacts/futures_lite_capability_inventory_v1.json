@@ -601,10 +601,12 @@
       {
         "lane": "real-web-error-handler-construction-and-poll-panic",
         "command": "RCH_WORKER=ovh-a RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/future.rs --overlay-path src/web/middleware.rs --overlay-path src/web/negotiate.rs --overlay-path tests/e2e_web.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0 -C panic=unwind' cargo test -p asupersync --test e2e_web --features tracing-integration e2e_error_handler_contains_construction_and_poll_panics_with_redacted_diagnostics -- --nocapture",
-        "result": "PENDING FINAL RERUN",
+        "result": "PASS: 1 passed, 0 failed; both construction and poll panics contained",
         "panic_strategy": "unwind",
         "remote_worker": "ovh-a",
-        "exit_code": null
+        "clean_overlay_base": "fc687fbbe677f25e6c00d7a6adc9403be88a0f2b",
+        "clean_overlay_fingerprint": "8f451ed0bfaa117bb96259cff2b8b70ab3815dd3768eff149476b16af27d425e",
+        "exit_code": 0
       }
     ],
     "dependency_token_delta": {
