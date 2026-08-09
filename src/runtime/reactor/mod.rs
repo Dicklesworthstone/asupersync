@@ -860,7 +860,12 @@ impl IoReactorCapabilitySnapshot {
     }
 
     /// Builds the terminal receipt for an exhausted platform reactor chain.
+    ///
+    /// On wasm32 every platform-reactor call site compiles out, leaving this constructor
+    /// caller-less; the allow keeps the wasm-browser profiles compiling without loosening the
+    /// dead-code lint anywhere else.
     #[must_use]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn reactor_unavailable(policy: IoUringCapabilityPolicy) -> Self {
         Self::unavailable(
             IoReactorBackend::Unavailable,
