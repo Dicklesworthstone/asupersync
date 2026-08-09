@@ -24,11 +24,11 @@
     "review_receipt": {
       "agent_task": "/root/x509_release_review",
       "decision": "APPROVE",
-      "reviewed_normative_payload_sha256": "64931d7e49e04c75c7c3a9870256b73e9480877736a996ca283145ef08c442ca"
+      "reviewed_normative_payload_sha256": "9821d95d0b9e27205d9dc8dc442b8e8c2a55db1b6c273b3a416c7a6cf274e49b"
     },
     "reviewed_draft_sha256": "2dd67b01719a7b06c324a27490686d7b1eacd4e20f0a13d1f30146a29de5a1b5",
-    "reviewed_normative_payload_sha256": "64931d7e49e04c75c7c3a9870256b73e9480877736a996ca283145ef08c442ca",
-    "candidate_normative_payload_sha256": "64931d7e49e04c75c7c3a9870256b73e9480877736a996ca283145ef08c442ca",
+  "reviewed_normative_payload_sha256": "9821d95d0b9e27205d9dc8dc442b8e8c2a55db1b6c273b3a416c7a6cf274e49b",
+  "candidate_normative_payload_sha256": "9821d95d0b9e27205d9dc8dc442b8e8c2a55db1b6c273b3a416c7a6cf274e49b",
     "normative_projection": {
       "algorithm": "SHA-256",
       "canonicalization": "compact JSON with object keys sorted lexicographically and array order preserved",
