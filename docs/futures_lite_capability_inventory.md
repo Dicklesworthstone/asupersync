@@ -175,21 +175,21 @@ convert focused unit behavior into runtime E2E evidence.
 ### Post-baseline current snapshot
 
 The historical A1 census remains frozen at 310 files and 1,362 textual tokens.
-A separate post-baseline current snapshot, captured on 2026-08-06, records 315
-files and 1,382 tokens after the A5 production poll-adapter migration. It does
-not rewrite the historical baseline:
+A separate post-baseline current snapshot, captured on 2026-08-09, records 317
+files and 1,385 tokens after the A5 production poll-adapter migration and A3
+incumbent-comparison receipt. It does not rewrite the historical baseline:
 
 | Scope | Current files | Current tokens |
 |---|---:|---:|
-| `src` | 151 | 828 |
-| `tests` | 154 | 542 |
+| `src` | 152 | 830 |
+| `tests` | 155 | 543 |
 | `benches` | 4 | 4 |
 | `examples` | 1 | 1 |
 | `asupersync-tokio-compat` | 3 | 5 |
 | `fuzz` | 2 | 2 |
 
-The current ownership projection is 42 files / 258 tokens for `FUT-A6-CORE`,
-32 / 153 for `FUT-A7-IO`, 33 / 195 for `FUT-A8-SERVICES`, and 208 / 776 for
+The current ownership projection is 43 files / 260 tokens for `FUT-A6-CORE`,
+32 / 153 for `FUT-A7-IO`, 33 / 195 for `FUT-A8-SERVICES`, and 209 / 777 for
 `FUT-A9-ATP-DEV`. Owners must use these current projections for reservation
 drift checks while retaining the A1 rows as historical evidence.
 

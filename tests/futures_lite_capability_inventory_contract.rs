@@ -698,7 +698,7 @@ fn validate_current_snapshot(inventory: &Value) -> Result<(), String> {
     let snapshot = inventory
         .get("post_baseline_current_snapshot")
         .expect("post-baseline current snapshot");
-    if text(snapshot, "captured_date_utc") != "2026-08-06"
+    if text(snapshot, "captured_date_utc") != "2026-08-09"
         || snapshot.get("historical_baseline_preserved") != Some(&Value::Bool(true))
         || text(snapshot, "source_status") != "STATIC_SOURCE_PROGRESS"
         || text(snapshot, "evidence_state") != "SOURCE_BASELINED"
@@ -722,10 +722,10 @@ fn validate_current_snapshot(inventory: &Value) -> Result<(), String> {
     let current = snapshot
         .get("current_occurrence")
         .expect("current occurrence snapshot");
-    if current.get("file_count").and_then(Value::as_u64) != Some(316)
-        || current.get("token_count").and_then(Value::as_u64) != Some(1383)
+    if current.get("file_count").and_then(Value::as_u64) != Some(317)
+        || current.get("token_count").and_then(Value::as_u64) != Some(1385)
         || text(current, "digest_sha256")
-            != "d895cfbcf2b137b650d5270c7028a829bf967f0840ec150f906f8c3e50dc7e69"
+            != "e339bb63c52a610e693f70d181fb3e2ca860ac2b2f6f99abde444608ecd1e3f4"
         || array(current, "scope_rows").len() != 6
         || array(snapshot, "current_migration_reservation_groups").len() != 4
     {
@@ -1530,8 +1530,8 @@ fn identity_authority_zero_unknown_and_docs_are_fail_closed() {
         "does not authorize closing A2",
         "ATP progress runtime path remains",
         "Post-baseline current snapshot",
-        "315",
-        "1,382",
+        "317",
+        "1,385",
         "FUT A3 focused unit kernel progress",
         "ACCEPTANCE_IMPLEMENTED_ALONGSIDE_INCUMBENT",
         "ACCEPTANCE_FOCUSED_TESTS_PASSED",
