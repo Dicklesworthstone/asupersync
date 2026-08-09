@@ -303,17 +303,17 @@
         {"path": "src/record/task.rs", "line": 529, "fragment": "pub fn is_runnable"},
         {"path": "src/record/task.rs", "line": 536, "fragment": "pub fn state_name"},
         {"path": "src/record/task.rs", "line": 586, "fragment": "fn request_cancel_with_budget_and_publication"},
-        {"path": "src/record/task.rs", "line": 919, "fragment": "pub fn cancel_witness"},
-        {"path": "src/record/task.rs", "line": 1114, "fragment": "pub fn complete"},
-        {"path": "src/record/task.rs", "line": 1319, "fragment": "pub fn cancel_reason"},
+        {"path": "src/record/task.rs", "line": 939, "fragment": "pub fn cancel_witness"},
+        {"path": "src/record/task.rs", "line": 1134, "fragment": "pub fn complete"},
+        {"path": "src/record/task.rs", "line": 1339, "fragment": "pub fn cancel_reason"},
         {"path": "src/runtime/scheduler/three_lane.rs", "line": 7552, "fragment": "record.state.is_terminal()"},
         {"path": "src/runtime/scheduler/three_lane.rs", "line": 7885, "fragment": "fn complete_polled_record"},
         {"path": "src/runtime/scheduler/worker.rs", "line": 391, "fragment": "record.state.is_terminal()"},
         {"path": "src/runtime/scheduler/worker.rs", "line": 607, "fragment": "record.state.is_terminal()"},
         {"path": "src/runtime/scheduler/worker.rs", "line": 770, "fragment": "record.state.is_terminal()"},
-        {"path": "src/runtime/state.rs", "line": 6432, "fragment": "match &task.state"},
-        {"path": "src/runtime/state.rs", "line": 6506, "fragment": "match &task.state"},
-        {"path": "src/runtime/state.rs", "line": 8899, "fragment": "from_state(&record.state)"},
+        {"path": "src/runtime/state.rs", "line": 6457, "fragment": "match &task.state"},
+        {"path": "src/runtime/state.rs", "line": 6531, "fragment": "match &task.state"},
+        {"path": "src/runtime/state.rs", "line": 8924, "fragment": "from_state(&record.state)"},
         {"path": "src/observability/task_inspector.rs", "line": 533, "fragment": "from(&task.state)"},
         {"path": "src/observability/diagnostics.rs", "line": 454, "fragment": "match &task.state"}
       ]
@@ -387,8 +387,8 @@
       "semantic_payload": "rich TaskState, phase, wake pending, timing, and waiter metadata",
       "disposition": "INVENTORY_ONLY_SHARDED_VISIBILITY_REQUIRES_SEPARATE_OWNER",
       "anchors": [
-        {"path": "src/runtime/state.rs", "line": 3192, "fragment": "pub fn snapshot(&self)"},
-        {"path": "src/runtime/state.rs", "line": 3213, "fragment": ".tasks_iter()"},
+        {"path": "src/runtime/state.rs", "line": 3223, "fragment": "pub fn snapshot(&self)"},
+        {"path": "src/runtime/state.rs", "line": 3244, "fragment": ".tasks_iter()"},
         {"path": "src/observability/task_inspector.rs", "line": 499, "fragment": "pub fn inspect_task"},
         {"path": "src/observability/task_inspector.rs", "line": 540, "fragment": "wake_pending: task.wake_state.is_notified()"},
         {"path": "src/observability/diagnostics.rs", "line": 439, "fragment": "pub fn explain_task_blocked"},
@@ -519,7 +519,7 @@
       "expected_frequency": "pre-admission or deferred handle cancellation",
       "semantic_payload": "strongest reason priority, wake snapshots, and first-lane publication",
       "anchors": [
-        {"path": "src/record/task.rs", "line": 814, "fragment": "self.wake_state.notify()"},
+        {"path": "src/record/task.rs", "line": 834, "fragment": "self.wake_state.notify()"},
         {"path": "src/runtime/scheduler/three_lane.rs", "line": 5147, "fragment": "record.wake_state.notify()"}
       ]
     },
@@ -534,7 +534,7 @@
       "anchors": [
         {"path": "src/runtime/scheduler/three_lane.rs", "line": 5758, "fragment": "record.wake_state.notify()"},
         {"path": "src/runtime/scheduler/three_lane.rs", "line": 5763, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/state.rs", "line": 7234, "fragment": "record.wake_state.notify()"}
+        {"path": "src/runtime/state.rs", "line": 7259, "fragment": "record.wake_state.notify()"}
       ]
     },
     {
@@ -628,10 +628,10 @@
       "owner": "TaskRecord Recyclable implementation",
       "rule": "reset replaces phase and clears rich state; wake state is reset in place only with unique Arc ownership, otherwise replaced",
       "anchors": [
-        {"path": "src/record/task.rs", "line": 1440, "fragment": "fn reset(&mut self)"},
-        {"path": "src/record/task.rs", "line": 1445, "fragment": "TaskPhaseCell::new"},
-        {"path": "src/record/task.rs", "line": 1489, "fragment": "Arc::get_mut"},
-        {"path": "src/record/task.rs", "line": 1492, "fragment": "Arc::new(TaskWakeState::new())"}
+        {"path": "src/record/task.rs", "line": 1460, "fragment": "fn reset(&mut self)"},
+        {"path": "src/record/task.rs", "line": 1465, "fragment": "TaskPhaseCell::new"},
+        {"path": "src/record/task.rs", "line": 1509, "fragment": "Arc::get_mut"},
+        {"path": "src/record/task.rs", "line": 1512, "fragment": "Arc::new(TaskWakeState::new())"}
       ]
     },
     {

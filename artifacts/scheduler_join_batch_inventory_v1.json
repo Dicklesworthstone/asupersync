@@ -183,12 +183,12 @@
       "repoll_shape": "assertion panic after terminal consumption",
       "selected_for_safe_experiment": true,
       "anchors": [
-        {"path": "src/runtime/builder.rs", "line": 3688, "fragment": "pub fn spawn<F>(&self, future: F)"},
-        {"path": "src/runtime/builder.rs", "line": 3699, "fragment": "pub fn try_spawn<F>(&self, future: F)"},
-        {"path": "src/runtime/builder.rs", "line": 3804, "fragment": "pub struct JoinHandle<T>"},
-        {"path": "src/runtime/builder.rs", "line": 3828, "fragment": "impl<T> Future for JoinHandle<T>"},
-        {"path": "src/runtime/builder.rs", "line": 4471, "fragment": "struct JoinState<T>"},
-        {"path": "src/runtime/builder.rs", "line": 4489, "fragment": "fn complete_task<T>"}
+        {"path": "src/runtime/builder.rs", "line": 3804, "fragment": "pub fn spawn<F>(&self, future: F)"},
+        {"path": "src/runtime/builder.rs", "line": 3815, "fragment": "pub fn try_spawn<F>(&self, future: F)"},
+        {"path": "src/runtime/builder.rs", "line": 3920, "fragment": "pub struct JoinHandle<T>"},
+        {"path": "src/runtime/builder.rs", "line": 3944, "fragment": "impl<T> Future for JoinHandle<T>"},
+        {"path": "src/runtime/builder.rs", "line": 4593, "fragment": "struct JoinState<T>"},
+        {"path": "src/runtime/builder.rs", "line": 4611, "fragment": "fn complete_task<T>"}
       ]
     },
     {
@@ -221,8 +221,8 @@
       "incumbent_contract": "try_spawn returns SpawnError; spawn panics through expect",
       "must_preserve": "fallible and panicking entry points remain distinct",
       "anchors": [
-        {"path": "src/runtime/builder.rs", "line": 3688, "fragment": "pub fn spawn<F>(&self, future: F)"},
-        {"path": "src/runtime/builder.rs", "line": 3699, "fragment": "pub fn try_spawn<F>(&self, future: F)"}
+        {"path": "src/runtime/builder.rs", "line": 3804, "fragment": "pub fn spawn<F>(&self, future: F)"},
+        {"path": "src/runtime/builder.rs", "line": 3815, "fragment": "pub fn try_spawn<F>(&self, future: F)"}
       ]
     },
     {
@@ -232,8 +232,8 @@
       "incumbent_contract": "complete_task stores one result; poll takes it once and returns T",
       "must_preserve": "exactly one terminal value is observable",
       "anchors": [
-        {"path": "src/runtime/builder.rs", "line": 3838, "fragment": "match guard.result.take()"},
-        {"path": "src/runtime/builder.rs", "line": 4489, "fragment": "fn complete_task<T>"}
+        {"path": "src/runtime/builder.rs", "line": 3954, "fragment": "match guard.result.take()"},
+        {"path": "src/runtime/builder.rs", "line": 4611, "fragment": "fn complete_task<T>"}
       ]
     },
     {
@@ -243,8 +243,8 @@
       "incumbent_contract": "one equivalent Waker slot is retained or replaced under the mutex and taken before wake outside the mutex",
       "must_preserve": "no lost wake and no callback under the completion mutex",
       "anchors": [
-        {"path": "src/runtime/builder.rs", "line": 3853, "fragment": "guard.waker = Some(cx.waker().clone())"},
-        {"path": "src/runtime/builder.rs", "line": 4489, "fragment": "fn complete_task<T>"}
+        {"path": "src/runtime/builder.rs", "line": 3969, "fragment": "guard.waker = Some(cx.waker().clone())"},
+        {"path": "src/runtime/builder.rs", "line": 4611, "fragment": "fn complete_task<T>"}
       ]
     },
     {
@@ -254,8 +254,8 @@
       "incumbent_contract": "CatchUnwind stores the panic payload and the awaiter resumes that payload",
       "must_preserve": "this family remains panic-based rather than silently converting to typed JoinError",
       "anchors": [
-        {"path": "src/runtime/builder.rs", "line": 4236, "fragment": "fn spawn<F>(&self, future: F)"},
-        {"path": "src/runtime/builder.rs", "line": 3828, "fragment": "impl<T> Future for JoinHandle<T>"}
+        {"path": "src/runtime/builder.rs", "line": 4358, "fragment": "fn spawn<F>(&self, future: F)"},
+        {"path": "src/runtime/builder.rs", "line": 3944, "fragment": "impl<T> Future for JoinHandle<T>"}
       ]
     },
     {
@@ -265,7 +265,7 @@
       "incumbent_contract": "the unadmitted callback stores an error payload that becomes an awaiter panic",
       "must_preserve": "the observer resolves exactly once; no typed-cancellation claim is added to this family",
       "anchors": [
-        {"path": "src/runtime/builder.rs", "line": 4258, "fragment": "if let Some(mailbox) = &self.spawn_mailbox"},
+        {"path": "src/runtime/builder.rs", "line": 4380, "fragment": "if let Some(mailbox) = &self.spawn_mailbox"},
         {"path": "src/runtime/spawn_mailbox.rs", "line": 1117, "fragment": "pub fn resolve_failed(self, error: SpawnError)"}
       ]
     },
@@ -276,8 +276,8 @@
       "incumbent_contract": "runtime drain resolves pending requests; a handle with no result and no executor-side Arc panics when polled",
       "must_preserve": "is_finished becomes true and a subsequent await does not park forever",
       "anchors": [
-        {"path": "src/runtime/builder.rs", "line": 4462, "fragment": "while let Some(request) = mailbox.dequeue()"},
-        {"path": "src/runtime/builder.rs", "line": 3819, "fragment": "pub fn is_finished(&self) -> bool"}
+        {"path": "src/runtime/builder.rs", "line": 4584, "fragment": "while let Some(request) = mailbox.dequeue()"},
+        {"path": "src/runtime/builder.rs", "line": 3935, "fragment": "pub fn is_finished(&self) -> bool"}
       ]
     },
     {
@@ -287,7 +287,7 @@
       "incumbent_contract": "there is no JoinHandle Drop implementation and task execution is not cancelled by observer drop",
       "must_preserve": "a completion transport replacement must not introduce abort-on-handle-drop",
       "anchors": [
-        {"path": "src/runtime/builder.rs", "line": 3804, "fragment": "pub struct JoinHandle<T>"}
+        {"path": "src/runtime/builder.rs", "line": 3920, "fragment": "pub struct JoinHandle<T>"}
       ]
     },
     {
@@ -297,8 +297,8 @@
       "incumbent_contract": "is_finished checks local completion, stored result, or executor-side disappearance; repoll asserts",
       "must_preserve": "the query remains non-consuming and repoll remains an explicit failure",
       "anchors": [
-        {"path": "src/runtime/builder.rs", "line": 3819, "fragment": "pub fn is_finished(&self) -> bool"},
-        {"path": "src/runtime/builder.rs", "line": 3828, "fragment": "impl<T> Future for JoinHandle<T>"}
+        {"path": "src/runtime/builder.rs", "line": 3935, "fragment": "pub fn is_finished(&self) -> bool"},
+        {"path": "src/runtime/builder.rs", "line": 3944, "fragment": "impl<T> Future for JoinHandle<T>"}
       ]
     },
     {
@@ -444,9 +444,9 @@
       "anchors": [
         {"path": "src/record/region.rs", "line": 363, "fragment": "pub struct PendingSpawnCounter"},
         {"path": "src/record/region.rs", "line": 391, "fragment": "pub fn reserve(self: &Arc<Self>)"},
-        {"path": "src/runtime/state.rs", "line": 3939, "fragment": "pub(crate) fn admit_spawn_request_in"},
-        {"path": "src/runtime/state.rs", "line": 4098, "fragment": "fn finish_send_spawn_admission_in"},
-        {"path": "src/runtime/state.rs", "line": 4156, "fragment": "drop(pending_reservation)"}
+        {"path": "src/runtime/state.rs", "line": 3970, "fragment": "pub(crate) fn admit_spawn_request_in"},
+        {"path": "src/runtime/state.rs", "line": 4129, "fragment": "fn finish_send_spawn_admission_in"},
+        {"path": "src/runtime/state.rs", "line": 4187, "fragment": "drop(pending_reservation)"}
       ]
     },
     "join_set_now": {
@@ -639,7 +639,7 @@
         "profile_ids": ["submit_only", "submit_then_join_all"],
         "baseline_required": true,
         "setup_anchors": [
-          {"path": "src/runtime/builder.rs", "line": 3458, "fragment": "pub fn request_cx_with_budget"}
+          {"path": "src/runtime/builder.rs", "line": 3551, "fragment": "pub fn request_cx_with_budget"}
         ]
       },
       {
