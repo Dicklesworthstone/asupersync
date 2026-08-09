@@ -1196,7 +1196,7 @@
     "cross_file_direct_source_anchor_count": 41,
     "declared_consumer_unique_direct_source_anchor_count": 76,
     "literal_operation_projection_sha256": "7faffe9031ee795c8fc84549c65f70d564ffd7a433d09ae82fc01d87f14ea4c3",
-    "literal_source_projection_sha256": "fdc95e79f2d3a8d16236e9c48e606e082ad5d9fb55aacd16f518b6738b8ae860",
+    "literal_source_projection_sha256": "5ef63aba768de40b2cf0a84e514fc184df6d57f93869f2a8108b3c2b9c4a87e2",
     "path_classification_projection_sha256": "5f60bb8b7deb36b1aac2123747fd1be426f1888fc759f46afe3baae103dc3b63",
     "literal_override_projection_sha256": "c33fc35568d9de398e4e0ab84e91aeb567703e72e33c8b15cc0a7eaba7358f06",
     "additional_derived_projection_sha256": "fa3f27e183745af01595417e0a59d6b239d0dc0f06fe914aeb80c5c82e957d18",
@@ -5516,7 +5516,7 @@
       },
       "current_projection_sha256": {
         "literal_operation": "7faffe9031ee795c8fc84549c65f70d564ffd7a433d09ae82fc01d87f14ea4c3",
-        "literal_source": "fdc95e79f2d3a8d16236e9c48e606e082ad5d9fb55aacd16f518b6738b8ae860",
+        "literal_source": "5ef63aba768de40b2cf0a84e514fc184df6d57f93869f2a8108b3c2b9c4a87e2",
         "literal_override": "c33fc35568d9de398e4e0ab84e91aeb567703e72e33c8b15cc0a7eaba7358f06",
         "additional_derived": "f41dab083731bc95f246db17e7a5b1e3d50ac60cf1d2af96696c556b0dd512f2"
       },
