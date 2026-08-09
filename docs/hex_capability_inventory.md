@@ -125,26 +125,27 @@ non-ASCII bytes, destination mismatch, partial-prefix mutation, and success.
 
 ## Complete call-site census
 
-The source snapshot contains 90 Rust files and 230 literal path tokens. Of
-those, 228 are code or type references, two are comments, and four code
+The source snapshot contains 102 Rust files and 250 literal path tokens. Of
+those, 247 are code or type references, three are comments, and four code
 references are disabled by `cfg(any())`. Another 25 references sit in
 `cfg(test)` sections embedded in five otherwise production-owned files. Both
 references in `src/test_logging.rs` are separately gated to tests or
-`test-internals`. The test/conformance reservation group owns 102 references,
+`test-internals`. The test/conformance reservation group owns 121 code or type
+references,
 leaving 95 active production references after comment, disabled, and
 non-production separation.
 
 | Root | Files | Literal tokens |
 | --- | ---: | ---: |
-| `src` | 50 | 181 |
-| `tests` | 39 | 47 |
+| `src` | 51 | 182 |
+| `tests` | 50 | 66 |
 | `conformance` | 1 | 2 |
 | `examples` | 0 | 0 |
 | `benches` | 0 | 0 |
 | separate robustness workspace | 0 | 0 |
 
-The two comment-only tokens are in
-`src/database/postgres.rs:12714` and
+The three comment-only tokens are in `src/codec/hex.rs:296`,
+`src/database/postgres.rs:12714`, and
 `src/observability/w3c_trace_context.rs:576`. The four disabled references
 are in `src/bin/atp.rs:7810,7992,8009` and
 `src/net/atp/transport_tcp/mod.rs:569`.
@@ -161,7 +162,7 @@ added, or recategorized path.
 
 ## Collision-free migration groups
 
-The 90-path census is partitioned into four deterministic, non-overlapping
+The 102-path census is partitioned into four deterministic, non-overlapping
 reservation groups. Digest input is byte-sorted
 `path<TAB>literal_token_count\n`.
 
@@ -170,7 +171,7 @@ reservation groups. Digest input is byte-sorted
 | `HEX-A3-ATP-PROTOCOL-CLI` | 33/94 | `a1432140334c3763e9823e9ea06286a0308c618f03a13b08095d3a3bd5fc5a80` | A3 |
 | `HEX-A3-SECURITY-OBSERVABILITY` | 9/21 | `3238b9a702154b696580eb534ac15bb3e5e10abb42e6769fa43ea54e3d2ce71a` | A3 |
 | `HEX-A3-DATABASE` | 1/13 | `8b1b81a6b635c208085693fb6ed788bca8c50f08aecb8dac07aab0734acc5b0d` | A3 |
-| `HEX-A3-TEST-CONFORMANCE` | 47/102 | `e766658ca7dd79e2439036e74a8b6e3222048f1c5f1e1a4088474968cff97fe2` | A3 |
+| `HEX-A3-TEST-CONFORMANCE` | 59/122 | `fb8a1f9190aa2d12ab8134a6dcf24741c5dfa3f066d7c74e2471d25236a8e583` | A3 |
 
 A2 owns the scalar kernel and owned error. A3 migrates one reserved group at a
 time without touching the manifest. A4 owns independent evidence and real
