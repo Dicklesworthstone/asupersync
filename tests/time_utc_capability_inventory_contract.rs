@@ -23,7 +23,7 @@ const BEAD_ID: &str = "asupersync-5z2scg.6.1";
 const CAPABILITY_ID: &str = "CAP-TIME-UTC-RFC3339";
 const ADR_ID: &str = "DEP-ADR-011";
 const BASELINE_REVISION: &str = "1afde84d564bd8ea876459624116f90028b80835";
-const ARTIFACT_SHA256: &str = "aa0840c09e23d9e00224bba6111cd21541cfd89ee62c7b1ca3b9041ec6300d2f";
+const ARTIFACT_SHA256: &str = "1590b53e0293308864e5bc862f2acdc9d5df9051c3dd95b1fdd325f48ceec906";
 const DOC_BEGIN: &str = "<!-- BEGIN TIME UTC CAPABILITY INVENTORY -->";
 const DOC_END: &str = "<!-- END TIME UTC CAPABILITY INVENTORY -->";
 const CHRONO_TOKEN: &str = concat!("chrono", "::");
@@ -33,21 +33,21 @@ const CENSUS_PROJECTION_SHA256: &str =
 const CENSUS_PATHS_SHA256: &str =
     "f16dea3b2143a0502579cdde842a5b00694031ec504eb674750554f6030f9700";
 const LITERAL_OPERATION_PROJECTION_SHA256: &str =
-    "7faffe9031ee795c8fc84549c65f70d564ffd7a433d09ae82fc01d87f14ea4c3";
+    "a99e910a9793650e07f345f91dbbbabec6e28f118ac57887035344dd040125ac";
 const LITERAL_SOURCE_PROJECTION_SHA256: &str =
     "5ef63aba768de40b2cf0a84e514fc184df6d57f93869f2a8108b3c2b9c4a87e2";
 const PATH_CLASSIFICATION_PROJECTION_SHA256: &str =
     "5f60bb8b7deb36b1aac2123747fd1be426f1888fc759f46afe3baae103dc3b63";
 const LITERAL_OVERRIDE_PROJECTION_SHA256: &str =
-    "c33fc35568d9de398e4e0ab84e91aeb567703e72e33c8b15cc0a7eaba7358f06";
+    "ea3196fcf2526570e2d848036125a226047dccc9acf570dbe53cd92835287f02";
 const ALIAS_CLASSIFICATION_PROJECTION_SHA256: &str =
     "867c7f39911b829635b5a28413179e8cc2d4156f0cfe2a1218fbb3f4819c5118";
 const ADDITIONAL_DERIVED_PROJECTION_SHA256: &str =
-    "fa3f27e183745af01595417e0a59d6b239d0dc0f06fe914aeb80c5c82e957d18";
+    "df697103ce3389ef4c0fe5db8cb04f75fee90336c4e917401bf763fd454889f2";
 const RAPTORQ_LINEAGE_ADDITIONAL_DERIVED_PROJECTION_SHA256: &str =
-    "f41dab083731bc95f246db17e7a5b1e3d50ac60cf1d2af96696c556b0dd512f2";
+    "6b1a4e86af89748dd08fef01e10c2417b9641ba1bf0f262a59ce57f0dd21ad44";
 const CROSS_FILE_CONSUMER_PROJECTION_SHA256: &str =
-    "d7b4020e22cb33af7d359836b80e0d66f20574d2b9fb29566ecae0691831ff99";
+    "ca8cec49608f6762b7984ba4bc3b6e3b816ecee73cb008510ea11c1677fa728c";
 const PUBLIC_CARRIER_LINEAGE_PROJECTION_SHA256: &str =
     "c14a1beb11f2c57890a9907a2c29092183974a56f2c2b521f0b37ae40c077eb7";
 const TEST_PROFILE_CARRIER_LINEAGE_PROJECTION_SHA256: &str =
@@ -3309,11 +3309,11 @@ fn validate_post_a1_conformance_raptorq_lineage_extension(inventory: &Value) -> 
         || text(reconciliation, "current_sha256")
             != "c4050dea66a46e0719ec53925beb64db42997a7612ea9de0cc9e9e775513e32d"
         || number(reconciliation, "current_line_count") != 19_779
-        || number(reconciliation, "uniform_line_delta") != 60
+        || number(reconciliation, "uniform_line_delta") != 63
         || number(reconciliation, "refreshed_explicit_anchor_count") != 3
         || number(reconciliation, "refreshed_direct_source_reference_count") != 1
         || text(reconciliation, "previous_direct_source_id") != "src/database/postgres.rs:18086"
-        || text(reconciliation, "current_direct_source_id") != "src/database/postgres.rs:18146"
+        || text(reconciliation, "current_direct_source_id") != "src/database/postgres.rs:18149"
         || text(reconciliation, "classification")
             != "LINE_ONLY_SHIFT_FROM_PREVIOUSLY_CLASSIFIED_READ_CANCELLATION_SEAM"
         || reconciliation
@@ -3331,9 +3331,9 @@ fn validate_post_a1_conformance_raptorq_lineage_extension(inventory: &Value) -> 
         reconciliation,
         "refreshed_anchor_ids",
         &[
-            "TIME-DERIVED-POSTGRES-MIDNIGHT-CONSTRUCTION-18148",
-            "TIME-LITERAL-OVERRIDE-POSTGRES-18139",
-            "TIME-LITERAL-OVERRIDE-POSTGRES-18150",
+            "TIME-DERIVED-POSTGRES-MIDNIGHT-CONSTRUCTION-18151",
+            "TIME-LITERAL-OVERRIDE-POSTGRES-18142",
+            "TIME-LITERAL-OVERRIDE-POSTGRES-18153",
         ],
     )?;
     let previous_projections = object(reconciliation, "previous_projection_sha256");

@@ -1195,12 +1195,12 @@
     "cross_file_consumer_anchor_count": 34,
     "cross_file_direct_source_anchor_count": 41,
     "declared_consumer_unique_direct_source_anchor_count": 76,
-    "literal_operation_projection_sha256": "7faffe9031ee795c8fc84549c65f70d564ffd7a433d09ae82fc01d87f14ea4c3",
+    "literal_operation_projection_sha256": "a99e910a9793650e07f345f91dbbbabec6e28f118ac57887035344dd040125ac",
     "literal_source_projection_sha256": "5ef63aba768de40b2cf0a84e514fc184df6d57f93869f2a8108b3c2b9c4a87e2",
     "path_classification_projection_sha256": "5f60bb8b7deb36b1aac2123747fd1be426f1888fc759f46afe3baae103dc3b63",
-    "literal_override_projection_sha256": "c33fc35568d9de398e4e0ab84e91aeb567703e72e33c8b15cc0a7eaba7358f06",
-    "additional_derived_projection_sha256": "fa3f27e183745af01595417e0a59d6b239d0dc0f06fe914aeb80c5c82e957d18",
-    "cross_file_consumer_projection_sha256": "d7b4020e22cb33af7d359836b80e0d66f20574d2b9fb29566ecae0691831ff99",
+    "literal_override_projection_sha256": "ea3196fcf2526570e2d848036125a226047dccc9acf570dbe53cd92835287f02",
+    "additional_derived_projection_sha256": "df697103ce3389ef4c0fe5db8cb04f75fee90336c4e917401bf763fd454889f2",
+    "cross_file_consumer_projection_sha256": "ca8cec49608f6762b7984ba4bc3b6e3b816ecee73cb008510ea11c1677fa728c",
     "semantic_consumer_boundary": "Include nonliteral consumers through the first semantic compare, arithmetic, format, serialize, persist, retain, return, extract, or embed boundary in a Chrono-bearing source path; exclude cross-file propagation, external consumers, and later container or arbitrary-byte taint.",
     "cross_file_consumer_boundary": "Include the first explicit embedding, constructor, return, or statically generic JSON value serialization boundary in a different source file when a timestamp-bearing public carrier flows from a direct Chrono producer to a declared in-repository consumer; exclude later encoding or rendering calls, later container propagation, distinct file or standard-output sink anchors, dynamic dispatch, external consumers, and ambiguous provenance.",
     "derived_consumer_category_ids": [
@@ -1723,9 +1723,9 @@
         "persistence_or_public_association": "BenchmarkEnvironment collection unit test"
       },
       {
-        "use_id": "TIME-LITERAL-OVERRIDE-POSTGRES-18139",
+        "use_id": "TIME-LITERAL-OVERRIDE-POSTGRES-18142",
         "path": "src/database/postgres.rs",
-        "line": 18139,
+        "line": 18142,
         "source_anchor": "(epoch + chrono::TimeDelta::days(days)).to_string()",
         "operation": "add a PostgreSQL day offset to the calendar epoch and render expected DATE text",
         "cfg_or_wiring": "FEATURE_POSTGRES_AND_CFG_TEST_IN_MODULE",
@@ -1733,9 +1733,9 @@
         "persistence_or_public_association": "independent PostgreSQL DATE decode expectation"
       },
       {
-        "use_id": "TIME-LITERAL-OVERRIDE-POSTGRES-18150",
+        "use_id": "TIME-LITERAL-OVERRIDE-POSTGRES-18153",
         "path": "src/database/postgres.rs",
-        "line": 18150,
+        "line": 18153,
         "source_anchor": "(epoch + chrono::TimeDelta::microseconds(micros)).to_string()",
         "operation": "add a PostgreSQL microsecond offset to the midnight epoch and render expected TIMESTAMP text",
         "cfg_or_wiring": "FEATURE_POSTGRES_AND_CFG_TEST_IN_MODULE",
@@ -2054,13 +2054,13 @@
         "persistence_or_public_association": "AtpArchiveEntry.expires_at"
       },
       {
-        "use_id": "TIME-DERIVED-POSTGRES-MIDNIGHT-CONSTRUCTION-18148",
+        "use_id": "TIME-DERIVED-POSTGRES-MIDNIGHT-CONSTRUCTION-18151",
         "derivation_sources": [
-          "src/database/postgres.rs:18146"
+          "src/database/postgres.rs:18149"
         ],
         "consumer_category_id": "TIME-CONSUMER-DATABASE-MESSAGING-ARITHMETIC",
         "path": "src/database/postgres.rs",
-        "line": 18148,
+        "line": 18151,
         "source_anchor": ".and_hms_opt(0, 0, 0)",
         "operation": "extend the PostgreSQL calendar epoch date to a midnight timestamp",
         "cfg_or_wiring": "FEATURE_POSTGRES_AND_CFG_TEST_IN_MODULE",
@@ -5498,15 +5498,15 @@
       "path": "src/database/postgres.rs",
       "current_sha256": "c4050dea66a46e0719ec53925beb64db42997a7612ea9de0cc9e9e775513e32d",
       "current_line_count": 19779,
-      "uniform_line_delta": 60,
+      "uniform_line_delta": 63,
       "refreshed_explicit_anchor_count": 3,
       "refreshed_direct_source_reference_count": 1,
       "previous_direct_source_id": "src/database/postgres.rs:18086",
-      "current_direct_source_id": "src/database/postgres.rs:18146",
+      "current_direct_source_id": "src/database/postgres.rs:18149",
       "refreshed_anchor_ids": [
-        "TIME-DERIVED-POSTGRES-MIDNIGHT-CONSTRUCTION-18148",
-        "TIME-LITERAL-OVERRIDE-POSTGRES-18139",
-        "TIME-LITERAL-OVERRIDE-POSTGRES-18150"
+        "TIME-DERIVED-POSTGRES-MIDNIGHT-CONSTRUCTION-18151",
+        "TIME-LITERAL-OVERRIDE-POSTGRES-18142",
+        "TIME-LITERAL-OVERRIDE-POSTGRES-18153"
       ],
       "previous_projection_sha256": {
         "literal_operation": "a533497be94a3a8c649a061117053acff88821c102e9cedbe16cb4da0b66990b",
@@ -5515,10 +5515,10 @@
         "additional_derived": "b20b65d03be1995802d929275531ac96a8a66ec06c1c64f0bf887ee27803f674"
       },
       "current_projection_sha256": {
-        "literal_operation": "7faffe9031ee795c8fc84549c65f70d564ffd7a433d09ae82fc01d87f14ea4c3",
+        "literal_operation": "a99e910a9793650e07f345f91dbbbabec6e28f118ac57887035344dd040125ac",
         "literal_source": "5ef63aba768de40b2cf0a84e514fc184df6d57f93869f2a8108b3c2b9c4a87e2",
-        "literal_override": "c33fc35568d9de398e4e0ab84e91aeb567703e72e33c8b15cc0a7eaba7358f06",
-        "additional_derived": "f41dab083731bc95f246db17e7a5b1e3d50ac60cf1d2af96696c556b0dd512f2"
+        "literal_override": "ea3196fcf2526570e2d848036125a226047dccc9acf570dbe53cd92835287f02",
+        "additional_derived": "6b1a4e86af89748dd08fef01e10c2417b9641ba1bf0f262a59ce57f0dd21ad44"
       },
       "additional_derived_projection_change_includes_new_history_row": true,
       "classification": "LINE_ONLY_SHIFT_FROM_PREVIOUSLY_CLASSIFIED_READ_CANCELLATION_SEAM",
