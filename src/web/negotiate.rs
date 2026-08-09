@@ -301,14 +301,18 @@ fn error_message_from_response(resp: &Response, expose_details: bool) -> String 
     default_error_message(resp.status).to_string()
 }
 
-fn format_error_response(mut resp: Response, accept: &str, expose_details: bool) -> Response {
+fn format_error_response(resp: Response, accept: &str, expose_details: bool) -> Response {
     if !(resp.status.is_client_error() || resp.status.is_server_error()) {
         return resp;
     }
 
-    let format = error_format_from_accept(accept);
     let message = error_message_from_response(&resp, expose_details);
-    let (body, content_type) = format_error_body(resp.status, &message, format);
+    format_error_response_with_message(resp, accept, &message)
+}
+
+fn format_error_response_with_message(mut resp: Response, accept: &str, message: &str) -> Response {
+    let format = error_format_from_accept(accept);
+    let (body, content_type) = format_error_body(resp.status, message, format);
     resp.body = body.into_bytes().into();
     let _ = resp.remove_header("content-length");
     let _ = resp.remove_header("content-encoding");
@@ -421,13 +425,13 @@ impl<H: Handler> Handler for ErrorHandlerMiddleware<H> {
                     } else {
                         "[ASUP-E502] Internal Server Error"
                     };
-                    format_error_response(
+                    format_error_response_with_message(
                         Response::new(
                             StatusCode::INTERNAL_SERVER_ERROR,
                             message.as_bytes().to_vec(),
                         ),
                         &accept,
-                        self.config.expose_details,
+                        message,
                     )
                 }
             }
