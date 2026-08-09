@@ -96,7 +96,7 @@
       "files": [
         {"role":"ARTIFACT","path":"artifacts/kafka_broker_fixture_provenance_matrix_v1.json","byte_count":119250,"record_count":2187,"sha256":"d9b4bd30cd5ceed0c473861fb2432639f9322d4f91821e3515e475cd369b0761"},
         {"role":"DOCUMENT","path":"docs/kafka_broker_fixture_provenance_matrix.md","byte_count":25259,"record_count":346,"sha256":"80f76324a74a536d23552d3ded294bf2fbe4448de24adaa93d872bf203378f40"},
-        {"role":"CONTRACT","path":"tests/kafka_broker_fixture_provenance_matrix_contract.rs","byte_count":129665,"record_count":3462,"sha256":"4914166fd5fe5b193ab6da5d730d1f28d73850e552a1af06d7445c5513365db4"}
+        {"role":"CONTRACT","path":"tests/kafka_broker_fixture_provenance_matrix_contract.rs","byte_count":129665,"record_count":3462,"sha256":"994ec41a62f34af6580d7eb072770b748d53ebac2b28e5a936062254921a125e"}
       ]
     }
   ],
