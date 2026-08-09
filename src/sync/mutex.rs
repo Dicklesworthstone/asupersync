@@ -3079,32 +3079,32 @@ mod tests {
     #[test]
     fn mutex_queued_waiter_sees_poison_after_holder_panics() {
         init_test("mutex_queued_waiter_sees_poison_after_holder_panics");
-        let mutex = Arc::new(Mutex::new(0_u32));
-
-        // Hold the lock on a thread that will panic.
         let cx = test_cx();
+        let mutex = Mutex::new(0_u32);
+        let active_holder = lock_blocking(&mutex, &cx);
         let mut fut_wait = mutex.lock(&cx);
 
-        // First, lock from another thread.
-        let m2 = Arc::clone(&mutex);
-        let handle = std::thread::spawn(move || {
-            let cx = test_cx();
-            let _guard = lock_blocking(&m2, &cx);
-            // Waiter registers here on the main thread.
-            // We panic to poison the mutex.
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            panic!("poison while waiter is queued");
-        });
-
-        // Give the thread time to acquire the lock.
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
-        // Register as a waiter.
+        // Register the waiter before poisoning the active holder.
         let pending = poll_once(&mut fut_wait).is_none();
         crate::assert_with_log!(pending, "waiter is pending", true, pending);
+        let queued_waiters = mutex.waiters();
+        crate::assert_with_log!(
+            queued_waiters == 1,
+            "one queued waiter",
+            1usize,
+            queued_waiters
+        );
 
-        // Wait for the panicking thread to finish.
-        let _ = handle.join();
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = active_holder;
+            panic!("poison while waiter is queued");
+        }));
+        crate::assert_with_log!(
+            panic_result.is_err(),
+            "holder panicked while waiter was queued",
+            true,
+            panic_result.is_err()
+        );
 
         // Now poll the waiter — it should see Poisoned.
         let result = poll_once(&mut fut_wait);
