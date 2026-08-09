@@ -10,7 +10,7 @@
   "compiler_terminal": {
     "bead_id": "asupersync-5z2scg.8.3.3.4",
     "path": "artifacts/regex_compiler_terminal_receipt_v1.json",
-    "sha256": "a3f1aac48c1ffa1857ea07dcc7dc7c872d0ea4fed1c60cdb078c7e1a6fd5dcd4",
+    "sha256": "bbaf03403578c3857cfe38c0800c431e2e9acd89a493c676a31b4e3eca57aafa",
     "disposition": "KEEP_INCUMBENT_DEFER",
     "vm_experimentation_authorized": true,
     "production_cutover_eligible": false

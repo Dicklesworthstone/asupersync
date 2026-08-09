@@ -317,11 +317,11 @@ fn validate_contract(contract: &Value, inventory: &Value, terminal: &Value) -> R
         ),
         (
             INVENTORY_PATH,
-            "61eb90c08454ebb5bce9bf265bb185c100041cfdfbe74d4a713698c8ef07016e",
+            "287b3204a103fd97c86f7d13693f2c6180e96e5199a9048c912f09908ef607a7",
         ),
         (
             TERMINAL_RECEIPT_PATH,
-            "a9295fe1bd77c56a705abf9270e9b1b7cee3b1c7d47580adb17678870a2174ad",
+            "193cc9845856dc1721945e859ca4faa85ff5fb235d82c3d77a8c7592b8fffc34",
         ),
     ]);
     let digest_rows = array(contract, "source_digests")?;

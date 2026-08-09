@@ -21,11 +21,11 @@
     },
     {
       "path": "artifacts/regex_privacy_capability_inventory_v1.json",
-      "sha256": "61eb90c08454ebb5bce9bf265bb185c100041cfdfbe74d4a713698c8ef07016e"
+      "sha256": "287b3204a103fd97c86f7d13693f2c6180e96e5199a9048c912f09908ef607a7"
     },
     {
       "path": "artifacts/regex_syntax_terminal_receipt_v1.json",
-      "sha256": "a9295fe1bd77c56a705abf9270e9b1b7cee3b1c7d47580adb17678870a2174ad"
+      "sha256": "193cc9845856dc1721945e859ca4faa85ff5fb235d82c3d77a8c7592b8fffc34"
     }
   ],
   "decision": {

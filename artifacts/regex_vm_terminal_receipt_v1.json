@@ -7,10 +7,10 @@
   "generated_at_utc": "2026-07-26T06:56:02Z",
   "authority": {
     "compiler_terminal_path": "artifacts/regex_compiler_terminal_receipt_v1.json",
-    "compiler_terminal_sha256": "a3f1aac48c1ffa1857ea07dcc7dc7c872d0ea4fed1c60cdb078c7e1a6fd5dcd4",
+    "compiler_terminal_sha256": "bbaf03403578c3857cfe38c0800c431e2e9acd89a493c676a31b4e3eca57aafa",
     "compiler_disposition": "KEEP_INCUMBENT_DEFER",
     "iteration_predecessor_path": "artifacts/regex_vm_iteration_contract_v1.json",
-    "iteration_predecessor_sha256": "a8978ba0b9e401326216bf1aa31389449105066efa1de036db6044cc7220631f",
+    "iteration_predecessor_sha256": "e6f56c0373c213701ee1cb59f97fd0da3ef496ba23cab93107c268334fd9b5f8",
     "incumbent": "regex@1.13.1",
     "production_cutover_eligible": false
   },

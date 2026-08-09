@@ -42,9 +42,9 @@ const DOC_PATH: &str = "docs/regex_vm_terminal_receipt.md";
 const COMPILER_TERMINAL_PATH: &str = "artifacts/regex_compiler_terminal_receipt_v1.json";
 const ITERATION_PREDECESSOR_PATH: &str = "artifacts/regex_vm_iteration_contract_v1.json";
 const COMPILER_TERMINAL_SHA256: &str =
-    "a3f1aac48c1ffa1857ea07dcc7dc7c872d0ea4fed1c60cdb078c7e1a6fd5dcd4";
+    "bbaf03403578c3857cfe38c0800c431e2e9acd89a493c676a31b4e3eca57aafa";
 const ITERATION_PREDECESSOR_SHA256: &str =
-    "a8978ba0b9e401326216bf1aa31389449105066efa1de036db6044cc7220631f";
+    "e6f56c0373c213701ee1cb59f97fd0da3ef496ba23cab93107c268334fd9b5f8";
 const VM_SOURCE_SHA256: &str = "c4dd00a1346a5954a2ff5d1a12b0c567d8c0b15cf45977c5d987503513bdf673";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
