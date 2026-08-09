@@ -19,6 +19,7 @@
 use super::extract::Request;
 use super::handler::Handler;
 use super::response::{Response, StatusCode};
+use crate::tracing_compat::error;
 use std::cmp::Ordering;
 use std::panic::AssertUnwindSafe;
 
@@ -384,6 +385,9 @@ impl<H: Handler> Handler for ErrorHandlerMiddleware<H> {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
+            let method = req.method.clone();
+            let path = req.path.clone();
+            let trace_id = super::middleware::resolve_trace_id(&req);
             let accept = req
                 .headers
                 .iter()
@@ -402,11 +406,20 @@ impl<H: Handler> Handler for ErrorHandlerMiddleware<H> {
 
             match result {
                 Ok(resp) => format_error_response(resp, &accept, self.config.expose_details),
-                Err(_panic) => {
+                Err(payload) => {
+                    let panic_message = super::middleware::panic_payload_message(payload.as_ref());
+                    let _panic_log_fields = (&method, &path, &trace_id, &panic_message);
+                    error!(
+                        method = %method,
+                        path = %path,
+                        trace_id = trace_id.as_deref().unwrap_or(""),
+                        panic_message = %panic_message,
+                        "[ASUP-E502] web handler panic recovered"
+                    );
                     let message = if self.config.expose_details {
-                        "Internal Server Error: handler panicked"
+                        "[ASUP-E502] Internal Server Error: handler panicked"
                     } else {
-                        "Internal Server Error"
+                        "[ASUP-E502] Internal Server Error"
                     };
                     format_error_response(
                         Response::new(

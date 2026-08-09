@@ -1836,8 +1836,7 @@ impl<H: Handler> CatchPanicMiddleware<H> {
 /// downcast to both. Anything else surfaces as a sentinel string so the
 /// log site never panics on the panic — the recovery path must be
 /// totally infallible.
-#[allow(dead_code)]
-fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+pub(super) fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         return (*s).to_string();
     }

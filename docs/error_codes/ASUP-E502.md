@@ -3,9 +3,10 @@
 ## Symptom
 
 `[ASUP-E502]` means a web handler (or something it called) panicked while
-serving a request. `CatchPanicMiddleware` caught the unwind and converted it
-into a `500 Internal Server Error` response carrying this token, so the
-connection and worker stayed alive.
+serving a request. `CatchPanicMiddleware` or a panic-enabled
+`ErrorHandlerMiddleware` caught the unwind and converted it into a
+`500 Internal Server Error` response carrying this token, so the connection
+and worker stayed alive.
 
 ## Probable Causes
 
@@ -21,7 +22,8 @@ connection and worker stayed alive.
 - Fix the handler to return an error `Response` (4xx/5xx) for the failing
   input instead of panicking.
 - Keep `CatchPanicMiddleware` (or `Router::layer(CatchPanicLayer::new())`)
-  outermost so panics cannot tear down the connection or worker.
+  outermost so panics cannot tear down the connection or worker. If using
+  `ErrorHandlerMiddleware` instead, keep `catch_panics` enabled.
 
 ## Example
 

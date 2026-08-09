@@ -596,7 +596,7 @@
       "name": "web-handler-panic-recovered",
       "area": "net-http",
       "status": "live",
-      "summary": "A web handler panicked; CatchPanicMiddleware recovered it into a 500 response.",
+      "summary": "A web handler panicked; a configured web panic boundary recovered it into a 500 response.",
       "probable_causes": [
         "A handler or extractor hit an unwrap/expect or index out of bounds on request data.",
         "Application logic panicked on an unexpected state instead of returning an error response."
@@ -609,7 +609,8 @@
       "doc_path": "docs/error_codes/ASUP-E502.md",
       "since": "0.3.4",
       "source_refs": [
-        "src/web/middleware.rs"
+        "src/web/middleware.rs",
+        "src/web/negotiate.rs"
       ]
     },
     {

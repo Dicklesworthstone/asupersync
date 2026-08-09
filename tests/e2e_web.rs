@@ -21,8 +21,19 @@ use std::future::Future;
 use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+#[cfg(feature = "tracing-integration")]
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
+#[cfg(feature = "tracing-integration")]
+use tracing::Subscriber;
+#[cfg(feature = "tracing-integration")]
+use tracing::field::{Field, Visit};
+#[cfg(feature = "tracing-integration")]
+use tracing_subscriber::layer::{Context as LayerContext, Layer};
+#[cfg(feature = "tracing-integration")]
+use tracing_subscriber::registry::LookupSpan;
 
 // =========================================================================
 // Handlers
@@ -254,6 +265,74 @@ struct WebProofPanicHandler;
 impl Handler for WebProofPanicHandler {
     fn call(&self, _cx: &Cx, _req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
         Box::pin(async { panic!("web framework proof panic") })
+    }
+}
+
+#[cfg(feature = "tracing-integration")]
+struct DropTrackedPanicHandler {
+    drops: Arc<AtomicUsize>,
+}
+
+#[cfg(feature = "tracing-integration")]
+struct DropTrackedPanicFuture {
+    drops: Arc<AtomicUsize>,
+}
+
+#[cfg(feature = "tracing-integration")]
+impl Future for DropTrackedPanicFuture {
+    type Output = Response;
+
+    fn poll(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Self::Output> {
+        panic!("server-only panic detail")
+    }
+}
+
+#[cfg(feature = "tracing-integration")]
+impl Drop for DropTrackedPanicFuture {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[cfg(feature = "tracing-integration")]
+impl Handler for DropTrackedPanicHandler {
+    fn call(&self, _cx: &Cx, _req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        Box::pin(DropTrackedPanicFuture {
+            drops: Arc::clone(&self.drops),
+        })
+    }
+}
+
+#[cfg(feature = "tracing-integration")]
+#[derive(Default)]
+struct EventFields {
+    fields: Vec<String>,
+}
+
+#[cfg(feature = "tracing-integration")]
+impl Visit for EventFields {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.fields.push(format!("{}={value:?}", field.name()));
+    }
+}
+
+#[cfg(feature = "tracing-integration")]
+struct PanicEventLayer {
+    events: Arc<Mutex<Vec<String>>>,
+}
+
+#[cfg(feature = "tracing-integration")]
+impl<S> Layer<S> for PanicEventLayer
+where
+    S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, _context: LayerContext<'_, S>) {
+        let mut fields = EventFields::default();
+        event.record(&mut fields);
+        self.events
+            .lock()
+            .expect("panic event log remains available")
+            .push(fields.fields.join(" "));
     }
 }
 
@@ -706,6 +785,57 @@ fn web_framework_wave2_run() -> io::Result<Vec<Value>> {
 // =========================================================================
 // Tests
 // =========================================================================
+
+#[cfg(feature = "tracing-integration")]
+#[test]
+fn e2e_error_handler_contains_poll_panic_drops_future_and_emits_correlated_diagnostic() {
+    use asupersync::web::negotiate::{ErrorHandlerConfig, ErrorHandlerMiddleware};
+    use tracing_subscriber::prelude::*;
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(PanicEventLayer {
+        events: Arc::clone(&events),
+    });
+
+    let response = tracing::subscriber::with_default(subscriber, || {
+        let handler = ErrorHandlerMiddleware::new(
+            DropTrackedPanicHandler {
+                drops: Arc::clone(&drops),
+            },
+            ErrorHandlerConfig::default(),
+        );
+        let mut request =
+            Request::new("PATCH", "/panic-boundary").with_header("accept", "application/json");
+        request
+            .extensions
+            .insert("request_id", "fut-a5-trace".to_owned());
+        handler.call_sync(request)
+    });
+
+    assert_eq!(response.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    let client_body = std::str::from_utf8(&response.body).expect("panic response is utf-8");
+    assert!(client_body.contains("ASUP-E502"));
+    assert!(!client_body.contains("server-only panic detail"));
+
+    let event_text = events
+        .lock()
+        .expect("panic event log remains available")
+        .join("\n");
+    for expected in [
+        "ASUP-E502",
+        "method=PATCH",
+        "path=/panic-boundary",
+        "trace_id=fut-a5-trace",
+        "panic_message=server-only panic detail",
+    ] {
+        assert!(
+            event_text.contains(expected),
+            "missing {expected:?} in structured panic event: {event_text}"
+        );
+    }
+}
 
 #[test]
 fn web_framework_wave2_proof_runner_logs_required_scenarios() {
