@@ -4763,7 +4763,22 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
         use std::thread;
-        use std::time::Duration;
+
+        fn wait_for_registered_waiters(notify: &Notify, expected: usize) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+
+            loop {
+                let observed = notify.waiter_count();
+                if observed == expected {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for {expected} registered Notify waiters; observed {observed}"
+                );
+                std::thread::yield_now();
+            }
+        }
 
         let notify = Arc::new(Notify::new());
         let shared_flag = Arc::new(AtomicBool::new(false));
@@ -4780,19 +4795,14 @@ mod tests {
             let notify_clone = notify.clone();
             let flag_clone = shared_flag.clone();
             let counter_clone = shared_counter.clone();
-            let waiter_ready = Arc::new(AtomicBool::new(false));
-            let waiter_ready_clone = waiter_ready.clone();
 
             // Reset state
             shared_flag.store(false, Ordering::Relaxed);
             shared_counter.store(0, Ordering::Relaxed);
-            waiter_ready.store(false, Ordering::Relaxed);
 
             // Spawn waiter thread
             let waiter_handle = thread::spawn(move || {
                 block_on(async {
-                    waiter_ready_clone.store(true, Ordering::Release);
-
                     // Wait for notification
                     notify_clone.notified().await;
 
@@ -4805,13 +4815,9 @@ mod tests {
                 })
             });
 
-            // Wait for waiter to register
-            while !waiter_ready.load(Ordering::Acquire) {
-                thread::yield_now();
-            }
-
-            // Give waiter time to register and park
-            thread::sleep(Duration::from_millis(1));
+            // Readiness before `.await` does not prove that the future has
+            // been polled. Wait until the first poll has installed its waker.
+            wait_for_registered_waiters(&notify, 1);
 
             // Notifier writes data then notifies (Release ordering should make writes visible)
             shared_flag.store(true, Ordering::Release);
@@ -4874,11 +4880,11 @@ mod tests {
             handles.push(handle);
         }
 
-        // Wait for all waiters to be ready
+        // The barrier only proves that each thread reached the async block;
+        // wait for every future's first poll to register its waker before the
+        // edge-triggered broadcast.
         barrier.wait();
-
-        // Give waiters time to register
-        thread::sleep(Duration::from_millis(10));
+        wait_for_registered_waiters(&notify2, num_waiters);
 
         // Write data then broadcast notify (Release ordering should make write visible)
         shared_data.store(42, Ordering::Release);
