@@ -229,8 +229,8 @@ contexts. “Works in a normal unit test” is not parity.
 At base revision `02b380ee063e7e643105b1a7997360a7021bf32e`, bead
 `asupersync-d24mms.6.3` added an alongside-incumbent owned kernel at the
 crate-private `crate::util::future` module. The current continuation is
-`FOCUSED_UNIT_TEST_AND_POLICY_EXPANSION`; its executable state is
-`FOCUSED_UNIT_TESTS_PASSED`, and the bead remains open.
+`ACCEPTANCE_IMPLEMENTED_ALONGSIDE_INCUMBENT`; its executable state is
+`ACCEPTANCE_FOCUSED_TESTS_PASSED`.
 
 The implementation landed in revision
 `050fd0f08e4cf127e348bbf545c1e46cc392f6b5`. The current source receipt pins
@@ -271,12 +271,18 @@ The kernel policy is deliberately conservative:
 - cancellation remains explicit future behavior: progress requires the
   cancellation source to wake the future after changing its state.
 
-Fourteen inline cases cover ready-without-park, borrowed
+Fourteen inline behavior cases cover ready-without-park, borrowed
 non-`Send` recursion, wake coalescing, deterministic spurious returns, a bounded
 notification-state matrix, stable waker identity, wake-after-pending, explicit
 cancellation wake, panic propagation, separate driver and scheduler-worker
 refusals, safe self-contained nesting under a foreign executor, LabRuntime
 quiescence, and execution on the real blocking-pool implementation.
+
+A fifteenth ignored measurement case compares the owned kernel with the
+incumbent on Linux. It is excluded from ordinary unit runs because it contains
+two 750 millisecond idle waits and seven alternating 50,000-call ready batches
+per implementation; it is executed explicitly when producing a performance
+receipt.
 
 A current-source clean-overlay library check did terminate successfully. RCH
 build `29967986903220229` ran `cargo check --locked -p asupersync --lib` on
@@ -291,6 +297,16 @@ the full remote receipt completed in 696,612 milliseconds with exit code 0.
 All 26 `util::future` tests passed, including the fourteen A3-authored cases;
 there were zero failures and 21,826 unrelated tests were filtered out.
 
+The explicit comparison passed in clean-overlay RCH build
+`29967986903220250` on `hz2`. Both implementations consumed zero observed
+process CPU ticks during their separate 750 millisecond idle waits. Across
+seven alternating 50,000-call ready batches, the owned median was 6,755,423
+nanoseconds (about 135 nanoseconds per call) and the incumbent median was
+1,941,878 nanoseconds (about 39 nanoseconds per call). The owned implementation
+is therefore slower on this ready-future micro-workload, while the idle result
+shows no observed spin. This one Linux run is not a cross-platform performance,
+throughput, or exhaustive-interleaving claim.
+
 Two clean-overlay focused attempts against preceding source states reached
 final workspace compilation but were lost across RCH daemon restarts before any
 terminal compiler or test result. Both clients were cancelled with exit code
@@ -302,21 +318,24 @@ pins all three attempted source states, records zero executed tests, and carries
 an explicit no-claim for each. None is terminal compile or behavior evidence,
 and no unbounded or automatic retry was started.
 
-The artifact names all fourteen functions rather than summarizing them as a
-green test result. Three explicit A3 gap rows keep the remaining acceptance
-work visible:
+The artifact names all fifteen functions rather than summarizing them as a
+green test result. The three explicit A3 rows now record their exact
+dispositions:
 
-- `FUT-A3-GAP-13`: the bounded state matrix and LabRuntime quiescence case pass,
-  but broader DPOR cancellation evidence is still missing;
+- `FUT-A3-GAP-13`: the bounded state model, real cross-thread wake and
+  cancellation cases, and LabRuntime quiescence satisfy the acceptance choice
+  of loom or a deterministic state machine where applicable; no exhaustive
+  CPU-interleaving claim is made;
 - `FUT-A3-GAP-14`: the driver, worker, and foreign-executor policies are now
   explicit and their focused cases pass;
-- `FUT-A3-GAP-15`: no incumbent comparison for idle CPU or completion latency.
+- `FUT-A3-GAP-15`: idle CPU ticks and ready-completion latency are measured in
+  build `29967986903220250`, with the slower owned ready path reported above.
 
 This is not parity and is not a migration authorization. In particular, the
 kernel deliberately refuses both kinds of Asupersync runtime context and cannot
-automatically identify arbitrary foreign executors. It has no terminal
-state-model/lab receipt and carries no idle-CPU or latency measurement. The
-three production blocking sites and every test call remain on the incumbent.
+automatically identify arbitrary foreign executors. The three production
+blocking sites and every test call remain on the incumbent; their migration is
+owned by FUT A6 through A9, not this kernel bead.
 The dependency, manifests, capability registry, source-pinned A1 artifact, and
 cutover state remain unchanged at `KEEP_UNTIL_PARITY` /
 `BLOCKED_PENDING_EVIDENCE`.
@@ -637,11 +656,12 @@ behavioral evidence. Dropping a race loser is not the project's required loser
 drain. The owned Stream documentation and downstream contracts described above
 have scoped execution receipts; the ATP progress runtime path remains
 unexecuted and does not establish replacement parity.
-The FUT A3 receipt likewise proves only current source identity and a reviewed
-static contract. It does not prove that its authored cases ran, that all
-wake/park interleavings are covered, that runtime or foreign-executor contexts
-are safe, that cancellation reaches quiescence, or that idle CPU and latency
-match the incumbent.
+The FUT A3 receipts prove the named behavior cases, deterministic bounded state
+model, LabRuntime quiescence case, explicit context-policy cases, and one Linux
+idle/ready comparison. They do not prove exhaustive wake/park interleavings,
+safe dependency on a paused foreign executor, cross-platform performance,
+throughput, incumbent latency parity, broad workspace health, or cutover
+readiness.
 The FUT A4 receipt likewise does not turn nine source-authored cases into
 executed proof, implement `race`, treat comment-only `join_all` as live, prove
 deterministic fairness, or equate dropping a generic future with structured

@@ -126,22 +126,22 @@ fn validate_a3_receipt(inventory: &Value) -> Result<(), String> {
     if text(receipt, "owner_bead") != A3_BEAD_ID
         || text(receipt, "base_revision") != "02b380ee063e7e643105b1a7997360a7021bf32e"
         || text(receipt, "implementation_revision") != "050fd0f08e4cf127e348bbf545c1e46cc392f6b5"
-        || text(receipt, "source_status") != "FOCUSED_UNIT_TEST_AND_POLICY_EXPANSION"
-        || text(receipt, "execution_status") != "FOCUSED_UNIT_TESTS_PASSED"
+        || text(receipt, "source_status") != "ACCEPTANCE_IMPLEMENTED_ALONGSIDE_INCUMBENT"
+        || text(receipt, "execution_status") != "ACCEPTANCE_FOCUSED_TESTS_PASSED"
         || text(receipt, "module") != "crate::util::future"
         || text(receipt, "visibility") != "crate-private alongside-incumbent"
         || receipt.get("cutover_authorized") != Some(&Value::Bool(false))
-        || receipt.get("closure_allowed") != Some(&Value::Bool(false))
+        || receipt.get("closure_allowed") != Some(&Value::Bool(true))
     {
-        return Err("A3 receipt must remain focused-only and fail closed".to_owned());
+        return Err("A3 receipt must remain acceptance-scoped and cutover-closed".to_owned());
     }
 
     let expected_source_pins = BTreeMap::from([
         (
             "src/future.rs",
             (
-                "ec3463e516e26c40a5f690277ba1782e114fea93ea0e430abcd381426aa01779",
-                1187_u64,
+                "c2156b9b43b1caf9c172c736839bb877fc09854edc8ec245156d93d4822d7b88",
+                1330_u64,
             ),
         ),
         (
@@ -206,12 +206,13 @@ fn validate_a3_receipt(inventory: &Value) -> Result<(), String> {
         "foreign_executor_admits_self_contained_nested_future",
         "owned_kernel_leaves_lab_runtime_quiescent",
         "blocking_pool_thread_is_admitted",
+        "block_on_incumbent_idle_cpu_and_ready_latency_receipt",
     ]
     .into_iter()
     .map(str::to_owned)
     .collect();
     if string_set(receipt, "authored_inline_tests") != expected_tests {
-        return Err("A3 receipt must list the exact fourteen authored source cases".to_owned());
+        return Err("A3 receipt must list the exact fifteen authored source cases".to_owned());
     }
     let future_source = read_repo_file("src/future.rs");
     for test_name in expected_tests {
@@ -247,7 +248,8 @@ fn validate_a3_receipt(inventory: &Value) -> Result<(), String> {
     }
     if array(receipt, "semantic_guarantees").len() != 9
         || array(receipt, "incumbent_production_sites").len() != 3
-        || array(receipt, "missing_terminal_evidence").len() != 4
+        || !array(receipt, "missing_terminal_evidence").is_empty()
+        || array(receipt, "remaining_cutover_work").len() != 1
         || array(receipt, "blocked_execution_receipts").len() != 3
     {
         return Err("A3 semantics, incumbent sites, or evidence gaps are incomplete".to_owned());
@@ -296,6 +298,62 @@ fn validate_a3_receipt(inventory: &Value) -> Result<(), String> {
         || !object_text(focused, "evidence_scope").contains("not exhaustive")
     {
         return Err("A3 focused receipt must pin the exact passing module lane".to_owned());
+    }
+
+    let performance = object(receipt, "performance_receipt");
+    if object_text(performance, "receipt_id") != "FUT-A3-OWNED-BLOCK-ON-PERF-20260809"
+        || performance.get("build_id").and_then(Value::as_u64) != Some(29_967_986_903_220_250)
+        || object_text(performance, "worker") != "hz2"
+        || object_text(performance, "clean_overlay_base_revision")
+            != "d301a85212c493d837f2a355c309385dceb5c0e6"
+        || object_text(performance, "overlay_fingerprint")
+            != "b407f779fb36cbf129efcbf0ce723e9c7687d9a2fbb85440b6411c4c5c13d695"
+        || object_text(performance, "source_sha256")
+            != "c2156b9b43b1caf9c172c736839bb877fc09854edc8ec245156d93d4822d7b88"
+        || object_text(performance, "kernel_projection_sha256") != object_text(projection, "sha256")
+        || object_text(performance, "command")
+            != "cargo test -p asupersync --lib util::future::tests::block_on_incumbent_idle_cpu_and_ready_latency_receipt -- --ignored --exact --nocapture --test-threads=1"
+        || object_text(performance, "rustflags") != "-D warnings -C debuginfo=0"
+        || performance.get("duration_ms").and_then(Value::as_u64) != Some(783_177)
+        || performance.get("tests_passed").and_then(Value::as_u64) != Some(1)
+        || performance.get("failed").and_then(Value::as_u64) != Some(0)
+        || performance.get("filtered_out").and_then(Value::as_u64) != Some(21_852)
+        || performance.get("exit_code").and_then(Value::as_i64) != Some(0)
+        || object_text(performance, "platform") != "linux"
+        || performance
+            .get("idle_wait_ms_per_implementation")
+            .and_then(Value::as_u64)
+            != Some(750)
+        || performance
+            .get("owned_idle_cpu_ticks")
+            .and_then(Value::as_u64)
+            != Some(0)
+        || performance
+            .get("incumbent_idle_cpu_ticks")
+            .and_then(Value::as_u64)
+            != Some(0)
+        || performance
+            .get("ready_iterations_per_sample")
+            .and_then(Value::as_u64)
+            != Some(50_000)
+        || performance
+            .get("ready_samples_per_implementation")
+            .and_then(Value::as_u64)
+            != Some(7)
+        || performance
+            .get("owned_ready_median_batch_ns")
+            .and_then(Value::as_u64)
+            != Some(6_755_423)
+        || performance
+            .get("incumbent_ready_median_batch_ns")
+            .and_then(Value::as_u64)
+            != Some(1_941_878)
+        || !object_text(performance, "interpretation").contains("slower")
+        || !object_text(performance, "no_claim").contains("not cross-platform")
+    {
+        return Err(
+            "A3 performance receipt must pin the exact bounded Linux comparison".to_owned(),
+        );
     }
 
     for attempt in array(receipt, "blocked_execution_receipts") {
@@ -374,15 +432,15 @@ fn validate_a4_receipt(inventory: &Value) -> Result<(), String> {
     let source_pin = object(receipt, "current_source_pin");
     if source_pin.get("path").and_then(Value::as_str) != Some("src/future.rs")
         || source_pin.get("sha256").and_then(Value::as_str)
-            != Some("ec3463e516e26c40a5f690277ba1782e114fea93ea0e430abcd381426aa01779")
-        || source_pin.get("line_count").and_then(Value::as_u64) != Some(1187)
+            != Some("c2156b9b43b1caf9c172c736839bb877fc09854edc8ec245156d93d4822d7b88")
+        || source_pin.get("line_count").and_then(Value::as_u64) != Some(1330)
     {
         return Err("A4 current source pin drift".to_owned());
     }
     let source_bytes = read_repo_bytes("src/future.rs");
     if hex_bytes(&Sha256::digest(&source_bytes))
-        != "ec3463e516e26c40a5f690277ba1782e114fea93ea0e430abcd381426aa01779"
-        || read_repo_file("src/future.rs").lines().count() != 1187
+        != "c2156b9b43b1caf9c172c736839bb877fc09854edc8ec245156d93d4822d7b88"
+        || read_repo_file("src/future.rs").lines().count() != 1330
     {
         return Err("A4 current source no longer matches its receipt".to_owned());
     }
@@ -486,8 +544,8 @@ fn validate_a5_receipt(inventory: &Value) -> Result<(), String> {
         (
             "src/future.rs",
             (
-                "ec3463e516e26c40a5f690277ba1782e114fea93ea0e430abcd381426aa01779",
-                1187_u64,
+                "c2156b9b43b1caf9c172c736839bb877fc09854edc8ec245156d93d4822d7b88",
+                1330_u64,
             ),
         ),
         (
@@ -1219,6 +1277,15 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     if row_ids(gaps, "gap_id") != expected_gaps {
         return Err("all ADR and A1 through A5 gaps must remain routed".to_owned());
     }
+    if text(find_row(gaps, "gap_id", "FUT-A3-GAP-13"), "state")
+        != "ACCEPTANCE_STATE_MODEL_AND_LAB_EXECUTION_PASSED"
+        || text(find_row(gaps, "gap_id", "FUT-A3-GAP-14"), "state")
+            != "POLICY_FOCUSED_EXECUTION_PASSED"
+        || text(find_row(gaps, "gap_id", "FUT-A3-GAP-15"), "state")
+            != "MEASURED_NO_IDLE_SPIN_LATENCY_RECORDED"
+    {
+        return Err("A3 gap dispositions must match the terminal acceptance receipts".to_owned());
+    }
 
     let journeys = array(inventory, "downstream_and_e2e");
     let owned_journey = find_row(journeys, "journey_id", "FUT-JOURNEY-OWNED-STREAM");
@@ -1466,8 +1533,8 @@ fn identity_authority_zero_unknown_and_docs_are_fail_closed() {
         "315",
         "1,382",
         "FUT A3 focused unit kernel progress",
-        "FOCUSED_UNIT_TEST_AND_POLICY_EXPANSION",
-        "FOCUSED_UNIT_TESTS_PASSED",
+        "ACCEPTANCE_IMPLEMENTED_ALONGSIDE_INCUMBENT",
+        "ACCEPTANCE_FOCUSED_TESTS_PASSED",
         "FUT-A3-GAP-13",
         "FUT-A3-GAP-14",
         "FUT-A3-GAP-15",

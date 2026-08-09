@@ -190,15 +190,15 @@
     "owner_bead": "asupersync-d24mms.6.3",
     "base_revision": "02b380ee063e7e643105b1a7997360a7021bf32e",
     "implementation_revision": "050fd0f08e4cf127e348bbf545c1e46cc392f6b5",
-    "source_status": "FOCUSED_UNIT_TEST_AND_POLICY_EXPANSION",
-    "execution_status": "FOCUSED_UNIT_TESTS_PASSED",
+    "source_status": "ACCEPTANCE_IMPLEMENTED_ALONGSIDE_INCUMBENT",
+    "execution_status": "ACCEPTANCE_FOCUSED_TESTS_PASSED",
     "module": "crate::util::future",
     "visibility": "crate-private alongside-incumbent",
     "current_source_pins": [
       {
         "path": "src/future.rs",
-        "sha256": "ec3463e516e26c40a5f690277ba1782e114fea93ea0e430abcd381426aa01779",
-        "line_count": 1187
+        "sha256": "c2156b9b43b1caf9c172c736839bb877fc09854edc8ec245156d93d4822d7b88",
+        "line_count": 1330
       },
       {
         "path": "src/util/mod.rs",
@@ -274,18 +274,17 @@
       "scheduler_worker_context_is_refused_before_poll",
       "foreign_executor_admits_self_contained_nested_future",
       "owned_kernel_leaves_lab_runtime_quiescent",
-      "blocking_pool_thread_is_admitted"
+      "blocking_pool_thread_is_admitted",
+      "block_on_incumbent_idle_cpu_and_ready_latency_receipt"
     ],
     "incumbent_production_sites": [
       "src/web/router.rs:662",
       "src/signal/shutdown.rs:161",
       "src/signal/shutdown.rs:499"
     ],
-    "missing_terminal_evidence": [
-      "loom or equivalent state-model coverage of wake and park interleavings",
-      "LabRuntime or DPOR cancellation and quiescence evidence",
-      "idle CPU and completion-latency comparison against the incumbent",
-      "migration of any production or test call site"
+    "missing_terminal_evidence": [],
+    "remaining_cutover_work": [
+      "migration of production and test call sites remains assigned to FUT A6 through A9"
     ],
     "terminal_compile_receipt": {
       "receipt_id": "FUT-A3-OWNED-BLOCK-ON-CHECK-20260808",
@@ -321,6 +320,36 @@
       "filtered_out": 21826,
       "exit_code": 0,
       "evidence_scope": "The complete util::future focused module passed, including all fourteen A3-authored cases; this is not exhaustive interleaving, performance, or cutover evidence."
+    },
+    "performance_receipt": {
+      "receipt_id": "FUT-A3-OWNED-BLOCK-ON-PERF-20260809",
+      "build_id": 29967986903220250,
+      "worker": "hz2",
+      "clean_overlay_base_revision": "d301a85212c493d837f2a355c309385dceb5c0e6",
+      "overlay_fingerprint": "b407f779fb36cbf129efcbf0ce723e9c7687d9a2fbb85440b6411c4c5c13d695",
+      "source_sha256": "c2156b9b43b1caf9c172c736839bb877fc09854edc8ec245156d93d4822d7b88",
+      "kernel_projection_sha256": "6e176ebcc729d898d85eda7350f7d13c9d6e1577af2691e22bbeab2825037ce4",
+      "command": "cargo test -p asupersync --lib util::future::tests::block_on_incumbent_idle_cpu_and_ready_latency_receipt -- --ignored --exact --nocapture --test-threads=1",
+      "rustflags": "-D warnings -C debuginfo=0",
+      "started_at": "2026-08-09T00:22:17.276928609Z",
+      "completed_at": "2026-08-09T00:35:20.454785980Z",
+      "duration_ms": 783177,
+      "tests_passed": 1,
+      "failed": 0,
+      "filtered_out": 21852,
+      "exit_code": 0,
+      "platform": "linux",
+      "idle_wait_ms_per_implementation": 750,
+      "owned_idle_cpu_ticks": 0,
+      "incumbent_idle_cpu_ticks": 0,
+      "owned_idle_wall_ns": 750627442,
+      "incumbent_idle_wall_ns": 750338907,
+      "ready_iterations_per_sample": 50000,
+      "ready_samples_per_implementation": 7,
+      "owned_ready_median_batch_ns": 6755423,
+      "incumbent_ready_median_batch_ns": 1941878,
+      "interpretation": "The owned kernel matched the incumbent at zero observed process CPU ticks during the idle wait. Its median ready batch was slower: about 135 ns per call versus about 39 ns per call for the incumbent.",
+      "no_claim": "One remote Linux process run measures this bounded workload only; it is not cross-platform performance parity, a throughput claim, or exhaustive interleaving evidence."
     },
     "blocked_execution_receipts": [
       {
@@ -363,7 +392,7 @@
       }
     ],
     "cutover_authorized": false,
-    "closure_allowed": false
+    "closure_allowed": true
   },
   "a4_helper_receipt": {
     "owner_bead": "asupersync-d24mms.6.4",
@@ -378,8 +407,8 @@
     "visibility": "crate-private alongside-incumbent",
     "current_source_pin": {
       "path": "src/future.rs",
-      "sha256": "ec3463e516e26c40a5f690277ba1782e114fea93ea0e430abcd381426aa01779",
-      "line_count": 1187
+      "sha256": "c2156b9b43b1caf9c172c736839bb877fc09854edc8ec245156d93d4822d7b88",
+      "line_count": 1330
     },
     "helper_projection": {
       "path": "src/future.rs",
@@ -487,8 +516,8 @@
     "current_source_pins": [
       {
         "path": "src/future.rs",
-        "sha256": "ec3463e516e26c40a5f690277ba1782e114fea93ea0e430abcd381426aa01779",
-        "line_count": 1187
+        "sha256": "c2156b9b43b1caf9c172c736839bb877fc09854edc8ec245156d93d4822d7b88",
+        "line_count": 1330
       },
       {
         "path": "src/web/middleware.rs",
@@ -1489,9 +1518,9 @@
     },
     {
       "gap_id": "FUT-A3-GAP-13",
-      "summary": "The safe blocking kernel and all fourteen authored cases passed the focused util::future lane, including the bounded notification state matrix and LabRuntime quiescence check, but broader DPOR cancellation evidence remains missing.",
+      "summary": "The safe blocking kernel's fourteen behavioral cases passed, including the deterministic bounded notification state model, real cross-thread wake and cancellation cases, and LabRuntime quiescence. The bead required loom or a state model where applicable, not both; no exhaustive CPU-interleaving claim is made.",
       "owner_bead": "asupersync-d24mms.6.3",
-      "state": "FOCUSED_EXECUTION_PASSED_BROADER_MODEL_PENDING"
+      "state": "ACCEPTANCE_STATE_MODEL_AND_LAB_EXECUTION_PASSED"
     },
     {
       "gap_id": "FUT-A3-GAP-14",
@@ -1501,9 +1530,9 @@
     },
     {
       "gap_id": "FUT-A3-GAP-15",
-      "summary": "The owned blocking kernel has no incumbent comparison for idle CPU or completion latency.",
+      "summary": "RCH build 29967986903220250 measured zero process CPU ticks for both implementations during separate 750 ms idle waits. Across seven alternating 50,000-call ready batches, owned median latency was 6,755,423 ns versus 1,941,878 ns incumbent; the result is recorded without a performance-parity claim.",
       "owner_bead": "asupersync-d24mms.6.3",
-      "state": "BLOCKED_GAP"
+      "state": "MEASURED_NO_IDLE_SPIN_LATENCY_RECORDED"
     },
     {
       "gap_id": "FUT-A4-GAP-16",
