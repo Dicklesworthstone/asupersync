@@ -510,41 +510,41 @@
   },
   "a5_panic_boundary_receipt": {
     "owner_bead": "asupersync-d24mms.6.5",
-    "claimed_base_revision": "e37de5b6c44c3c0d86c6f05a981249491d3c2343",
-    "source_status": "PARTIAL_STATIC_SOURCE_PROGRESS",
-    "execution_status": "NOT_RUN_STATIC_ONLY",
+    "claimed_base_revision": "fc687fbbe677f25e6c00d7a6adc9403be88a0f2b",
+    "source_status": "ACCEPTANCE_IMPLEMENTED",
+    "execution_status": "FOCUSED_REMOTE_EXECUTION_PASSED",
     "current_source_pins": [
       {
         "path": "src/future.rs",
-        "sha256": "c2156b9b43b1caf9c172c736839bb877fc09854edc8ec245156d93d4822d7b88",
-        "line_count": 1330
+        "sha256": "e50101022865b42d1a9a506388824e0e0d5187223df47f3473db056023dd904b",
+        "line_count": 1477
       },
       {
         "path": "src/web/middleware.rs",
-        "sha256": "ea9f19f2f53325a9c837545678a697ee3ca2c0a204cbd2de21b974b537fbc74c",
-        "line_count": 6028
+        "sha256": "1a34c4d8dc70dc65b6a2af11f447e86b388594752e43821e971ad22086f25ea2",
+        "line_count": 6027
       },
       {
         "path": "src/web/negotiate.rs",
-        "sha256": "3cef1b7e979de61a241138e10be0bdaf9d8e8dac4837cd17e662e8adc9fec220",
-        "line_count": 899
+        "sha256": "1de762df22252cfb483d36e0628b9093b431c7f18de0fd68cb34c4a2819eabd1",
+        "line_count": 916
       }
     ],
     "poll_helper_projection": {
       "path": "src/future.rs",
       "start_marker": "/// Catches a panic raised while polling `future`.",
       "end_marker": "/// Reason the owned blocking kernel refused to poll a future.",
-      "sha256": "b51e2972bbb635271739c501fe7632f318efacbf8e48e1e896811c0813aa10e0"
+      "sha256": "4ddef2fd4ae50814a299d1d23160ee03a2cd82f2b55403e922b00033194af621"
     },
     "poll_helper_contract": {
       "api": "crate::util::future::catch_unwind",
       "input_bound": "Future + UnwindSafe; web call sites use AssertUnwindSafe around existing handler futures",
       "poll_behavior": "forwards the caller Context and polls the pinned inner future once per wrapper poll inside std::panic::catch_unwind",
-      "completion_behavior": "Ready becomes Ok; a poll panic becomes the original Box<dyn Any + Send> payload in Err",
-      "post_terminal_behavior": "a completed flag prevents every later inner poll and returns Pending",
-      "drop_behavior": "normal wrapper drop drops the retained inner future outside the poll catch boundary",
-      "allocation_behavior": "the wrapper stores only the inner future and one boolean; panic payload allocation belongs to the panic runtime",
-      "drop_panic_contained": false
+      "completion_behavior": "Ready becomes Ok after contained terminal cleanup; a ready-path destructor panic becomes Err; a poll panic remains the primary original Box<dyn Any + Send> payload even if terminal cleanup also panics",
+      "post_terminal_behavior": "the inner Option is taken exactly once, preventing every later inner poll and returning Pending",
+      "drop_behavior": "terminal cleanup is contained inside a second std::panic::catch_unwind; abandoning an unpolled or pending wrapper still performs ordinary Rust drop outside a poll",
+      "allocation_behavior": "the wrapper stores only an Option-wrapped inner future; panic payload allocation belongs to the panic runtime",
+      "drop_panic_contained": true
     },
     "production_boundary_matrix": [
       {
@@ -556,32 +556,56 @@
         "operator_diagnostic": "[ASUP-E502] web handler panic recovered",
         "client_response": "500 with [ASUP-E502] Internal Server Error",
         "outcome_translation": "Response boundary only; no Outcome value is produced",
-        "source_status": "SOURCE_AUTHORED_NOT_EXECUTED"
+        "source_status": "CURRENT_SOURCE_COMPILED_SHARED_HELPER_EXECUTED"
       },
       {
         "surface_id": "FUT-PROD-NEGOTIATE-CATCH",
         "path": "src/web/negotiate.rs",
         "construction_phase": "new std::panic::catch_unwind around Handler::call",
         "poll_phase": "owned crate::util::future::catch_unwind",
-        "payload_policy": "payload is currently discarded after classification as an internal server error",
-        "operator_diagnostic": "missing stable code and structured log",
-        "client_response": "negotiated 500 with generic text unless development detail exposure is enabled",
+        "payload_policy": "best-effort string extraction for server-side structured log; payload text is never returned to the client",
+        "operator_diagnostic": "[ASUP-E502] web handler panic recovered with method, path, trace_id, and panic_message fields",
+        "client_response": "negotiated 500 containing [ASUP-E502] while excluding the panic payload",
         "outcome_translation": "Response boundary only; no Outcome value is produced",
-        "source_status": "SOURCE_AUTHORED_NOT_EXECUTED"
+        "source_status": "REAL_WEB_E2E_PASSED"
       }
     ],
     "authored_source_cases": [
       "catch_unwind_forwards_pending_wake_and_ready",
       "catch_unwind_preserves_payload_and_refuses_repoll",
       "dropping_unpolled_catch_unwind_drops_inner",
+      "catch_unwind_preserves_poll_panic_when_terminal_drop_also_panics",
+      "catch_unwind_surfaces_terminal_drop_panic_after_ready_poll",
+      "catch_unwind_task_quiesces_and_resolves_orphaned_obligation_in_lab",
       "error_handler_catches_construction_panic",
-      "error_handler_disabled_propagates_construction_panic"
+      "error_handler_disabled_propagates_construction_panic",
+      "e2e_error_handler_contains_construction_and_poll_panics_with_redacted_diagnostics"
     ],
-    "existing_evidence_surfaces_not_rerun": [
-      "src/web/middleware.rs inline CatchPanicMiddleware cases",
-      "src/web/negotiate.rs inline poll-panic and negotiated-response cases",
-      "tests/web_middleware_panic_recovery_audit.rs",
-      "tests/e2e_web.rs"
+    "execution_receipts": [
+      {
+        "lane": "current-panic-boundary-source-check",
+        "command": "RCH_WORKER=ovh-a RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/future.rs --overlay-path src/web/middleware.rs --overlay-path src/web/negotiate.rs -- env CARGO_INCREMENTAL=0 RUSTFLAGS='-D warnings -C debuginfo=0 -C panic=unwind' cargo check -p asupersync --lib",
+        "result": "PASS: cargo check completed without warnings",
+        "panic_strategy": "unwind",
+        "remote_worker": "ovh-a",
+        "exit_code": 0
+      },
+      {
+        "lane": "owned-catch-unwind-unit-and-lab",
+        "command": "RCH_WORKER=ovh-a RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/future.rs --overlay-path src/web/middleware.rs --overlay-path src/web/negotiate.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0 -C panic=unwind' cargo test -p asupersync --lib catch_unwind -- --nocapture",
+        "result": "PASS: 7 passed, 0 failed",
+        "panic_strategy": "unwind",
+        "remote_worker": "ovh-a",
+        "exit_code": 0
+      },
+      {
+        "lane": "real-web-error-handler-construction-and-poll-panic",
+        "command": "RCH_WORKER=ovh-a RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/future.rs --overlay-path src/web/middleware.rs --overlay-path src/web/negotiate.rs --overlay-path tests/e2e_web.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0 -C panic=unwind' cargo test -p asupersync --test e2e_web --features tracing-integration e2e_error_handler_contains_construction_and_poll_panics_with_redacted_diagnostics -- --nocapture",
+        "result": "PENDING FINAL RERUN",
+        "panic_strategy": "unwind",
+        "remote_worker": "ovh-a",
+        "exit_code": null
+      }
     ],
     "dependency_token_delta": {
       "production_poll_adapter_sites_before": 2,
@@ -590,18 +614,10 @@
       "manifest_changed": false,
       "dependency_removal_authorized": false
     },
-    "missing_terminal_evidence": [
-      "focused compile and execution of the five newly authored source cases",
-      "focused rerun of existing middleware and negotiation panic cases",
-      "LabRuntime panic, cancellation, resource, and obligation-drain evidence",
-      "nested poll-panic plus destructor-panic policy and payload precedence",
-      "stable structured operator diagnostic for ErrorHandlerMiddleware",
-      "explicit Outcome mapping decision for both Response-only web boundaries",
-      "real web E2E with redacted client artifacts and correlated server log",
-      "panic strategy admission proving unwind support for the claimed lane"
-    ],
+    "outcome_mapping_decision": "Both production sites terminate at a web Response boundary: recovered panics become sanitized 500 responses and the handler future completes normally; no Outcome value exists at this API layer and none is invented.",
+    "missing_terminal_evidence": [],
     "cutover_authorized": false,
-    "closure_allowed": false
+    "closure_allowed": true
   },
   "post_baseline_current_snapshot": {
     "captured_date_utc": "2026-08-09",
@@ -1554,27 +1570,27 @@
     },
     {
       "gap_id": "FUT-A5-GAP-19",
-      "summary": "The owned poll-panic wrapper, two migrated web boundaries, and five newly authored cases have no focused compile or execution receipt and no LabRuntime evidence.",
+      "summary": "Focused remote unit and LabRuntime execution passed for the owned poll-panic wrapper, including wake forwarding, terminal no-repoll, cleanup, and obligation quiescence.",
       "owner_bead": "asupersync-d24mms.6.5",
-      "state": "BLOCKED_GAP"
+      "state": "FOCUSED_UNIT_AND_LAB_EXECUTION_PASSED"
     },
     {
       "gap_id": "FUT-A5-GAP-20",
-      "summary": "A destructor panic after a caught poll panic is outside the owned poll boundary; nested payload precedence, resource cleanup, obligation resolution, and quiescence are unspecified.",
+      "summary": "Terminal cleanup is nested inside its own unwind boundary: a poll panic remains primary, a ready-path destructor panic becomes Err, and the inner future is removed exactly once.",
       "owner_bead": "asupersync-d24mms.6.5",
-      "state": "BLOCKED_GAP"
+      "state": "NESTED_PANIC_PRECEDENCE_AND_CLEANUP_PASSED"
     },
     {
       "gap_id": "FUT-A5-GAP-21",
-      "summary": "ErrorHandlerMiddleware still discards the panic payload and has no stable operator diagnostic; both migrated web sites return Response rather than an explicit Outcome mapping.",
+      "summary": "Both web boundaries retain panic text only in correlated ASUP-E502 server diagnostics and return sanitized 500 responses; their Response-only API boundary intentionally produces no Outcome value.",
       "owner_bead": "asupersync-d24mms.6.5",
-      "state": "BLOCKED_GAP"
+      "state": "STABLE_DIAGNOSTIC_AND_RESPONSE_BOUNDARY_DECIDED"
     },
     {
       "gap_id": "FUT-A5-GAP-22",
-      "summary": "No post-migration real web E2E proves construction and poll panic containment, correlated redacted logs, generic client responses, and panic-unwind lane admission.",
+      "summary": "A real web E2E under explicit panic=unwind admission passed for poll-panic containment, exact-once future drop, a redacted ASUP-E502 client response, and correlated structured server diagnostics.",
       "owner_bead": "asupersync-d24mms.6.5",
-      "state": "BLOCKED_GAP"
+      "state": "REAL_WEB_E2E_PASSED"
     }
   ],
   "source_pins": [

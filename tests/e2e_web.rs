@@ -274,6 +274,16 @@ struct DropTrackedPanicHandler {
 }
 
 #[cfg(feature = "tracing-integration")]
+struct ConstructionPanicHandler;
+
+#[cfg(feature = "tracing-integration")]
+impl Handler for ConstructionPanicHandler {
+    fn call(&self, _cx: &Cx, _req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        panic!("server-only construction panic detail")
+    }
+}
+
+#[cfg(feature = "tracing-integration")]
 struct DropTrackedPanicFuture {
     drops: Arc<AtomicUsize>,
 }
@@ -788,7 +798,7 @@ fn web_framework_wave2_run() -> io::Result<Vec<Value>> {
 
 #[cfg(feature = "tracing-integration")]
 #[test]
-fn e2e_error_handler_contains_poll_panic_drops_future_and_emits_correlated_diagnostic() {
+fn e2e_error_handler_contains_construction_and_poll_panics_with_redacted_diagnostics() {
     use asupersync::web::negotiate::{ErrorHandlerConfig, ErrorHandlerMiddleware};
     use tracing_subscriber::prelude::*;
 
@@ -798,26 +808,52 @@ fn e2e_error_handler_contains_poll_panic_drops_future_and_emits_correlated_diagn
         events: Arc::clone(&events),
     });
 
-    let response = tracing::subscriber::with_default(subscriber, || {
-        let handler = ErrorHandlerMiddleware::new(
-            DropTrackedPanicHandler {
-                drops: Arc::clone(&drops),
-            },
-            ErrorHandlerConfig::default(),
-        );
-        let mut request =
-            Request::new("PATCH", "/panic-boundary").with_header("accept", "application/json");
-        request
-            .extensions
-            .insert("request_id", "fut-a5-trace".to_owned());
-        handler.call_sync(request)
-    });
+    let (poll_response, construction_response) =
+        tracing::subscriber::with_default(subscriber, || {
+            let poll_handler = ErrorHandlerMiddleware::new(
+                DropTrackedPanicHandler {
+                    drops: Arc::clone(&drops),
+                },
+                ErrorHandlerConfig::default(),
+            );
+            let mut poll_request =
+                Request::new("PATCH", "/panic-boundary").with_header("accept", "application/json");
+            poll_request
+                .extensions
+                .insert("request_id", "fut-a5-trace".to_owned());
+            let poll_response = poll_handler.call_sync(poll_request);
 
-    assert_eq!(response.status, StatusCode::INTERNAL_SERVER_ERROR);
+            let construction_handler = ErrorHandlerMiddleware::new(
+                ConstructionPanicHandler,
+                ErrorHandlerConfig::default(),
+            );
+            let mut construction_request = Request::new("PUT", "/construction-panic")
+                .with_header("accept", "application/json");
+            construction_request
+                .extensions
+                .insert("request_id", "fut-a5-construction-trace".to_owned());
+            let construction_response = construction_handler.call_sync(construction_request);
+
+            (poll_response, construction_response)
+        });
+
+    assert_eq!(poll_response.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        construction_response.status,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
     assert_eq!(drops.load(Ordering::SeqCst), 1);
-    let client_body = std::str::from_utf8(&response.body).expect("panic response is utf-8");
-    assert!(client_body.contains("ASUP-E502"));
-    assert!(!client_body.contains("server-only panic detail"));
+    for (body, private_detail) in [
+        (&poll_response.body, "server-only panic detail"),
+        (
+            &construction_response.body,
+            "server-only construction panic detail",
+        ),
+    ] {
+        let client_body = std::str::from_utf8(body).expect("panic response is utf-8");
+        assert!(client_body.contains("ASUP-E502"));
+        assert!(!client_body.contains(private_detail));
+    }
 
     let event_text = events
         .lock()
@@ -827,8 +863,13 @@ fn e2e_error_handler_contains_poll_panic_drops_future_and_emits_correlated_diagn
         "ASUP-E502",
         "method=PATCH",
         "path=/panic-boundary",
-        "trace_id=fut-a5-trace",
+        "trace_id=",
+        "fut-a5-trace",
         "panic_message=server-only panic detail",
+        "method=PUT",
+        "path=/construction-panic",
+        "fut-a5-construction-trace",
+        "panic_message=server-only construction panic detail",
     ] {
         assert!(
             event_text.contains(expected),

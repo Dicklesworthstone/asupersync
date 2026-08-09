@@ -531,35 +531,35 @@ fn validate_a5_receipt(inventory: &Value) -> Result<(), String> {
         .get("a5_panic_boundary_receipt")
         .expect("A5 panic-boundary receipt");
     if text(receipt, "owner_bead") != A5_BEAD_ID
-        || text(receipt, "claimed_base_revision") != "e37de5b6c44c3c0d86c6f05a981249491d3c2343"
-        || text(receipt, "source_status") != "PARTIAL_STATIC_SOURCE_PROGRESS"
-        || text(receipt, "execution_status") != "NOT_RUN_STATIC_ONLY"
+        || text(receipt, "claimed_base_revision") != "fc687fbbe677f25e6c00d7a6adc9403be88a0f2b"
+        || text(receipt, "source_status") != "ACCEPTANCE_IMPLEMENTED"
+        || text(receipt, "execution_status") != "FOCUSED_REMOTE_EXECUTION_PASSED"
         || receipt.get("cutover_authorized") != Some(&Value::Bool(false))
-        || receipt.get("closure_allowed") != Some(&Value::Bool(false))
+        || receipt.get("closure_allowed") != Some(&Value::Bool(true))
     {
-        return Err("A5 receipt must remain partial, static-only, and fail closed".to_owned());
+        return Err("A5 receipt must record scoped focused acceptance without cutover".to_owned());
     }
 
     let expected_source_pins = BTreeMap::from([
         (
             "src/future.rs",
             (
-                "c2156b9b43b1caf9c172c736839bb877fc09854edc8ec245156d93d4822d7b88",
-                1330_u64,
+                "e50101022865b42d1a9a506388824e0e0d5187223df47f3473db056023dd904b",
+                1477_u64,
             ),
         ),
         (
             "src/web/middleware.rs",
             (
-                "ea9f19f2f53325a9c837545678a697ee3ca2c0a204cbd2de21b974b537fbc74c",
-                6028_u64,
+                "1a34c4d8dc70dc65b6a2af11f447e86b388594752e43821e971ad22086f25ea2",
+                6027_u64,
             ),
         ),
         (
             "src/web/negotiate.rs",
             (
-                "3cef1b7e979de61a241138e10be0bdaf9d8e8dac4837cd17e662e8adc9fec220",
-                899_u64,
+                "1de762df22252cfb483d36e0628b9093b431c7f18de0fd68cb34c4a2819eabd1",
+                916_u64,
             ),
         ),
     ]);
@@ -598,11 +598,12 @@ fn validate_a5_receipt(inventory: &Value) -> Result<(), String> {
 
     let helper = object(receipt, "poll_helper_contract");
     if helper.get("api").and_then(Value::as_str) != Some("crate::util::future::catch_unwind")
-        || helper.get("drop_panic_contained").and_then(Value::as_bool) != Some(false)
+        || helper.get("drop_panic_contained").and_then(Value::as_bool) != Some(true)
         || !helper
             .get("post_terminal_behavior")
             .and_then(Value::as_str)
             .is_some_and(|value| value.contains("prevents every later inner poll"))
+        || !text(helper, "completion_behavior").contains("poll panic remains the primary")
     {
         return Err("A5 owned poll-helper contract drift".to_owned());
     }
@@ -619,10 +620,12 @@ fn validate_a5_receipt(inventory: &Value) -> Result<(), String> {
     let middleware_boundary = find_row(boundaries, "surface_id", "FUT-PROD-MIDDLEWARE-CATCH");
     let negotiate_boundary = find_row(boundaries, "surface_id", "FUT-PROD-NEGOTIATE-CATCH");
     if !text(middleware_boundary, "operator_diagnostic").contains("ASUP-E502")
-        || text(negotiate_boundary, "operator_diagnostic")
-            != "missing stable code and structured log"
-        || text(middleware_boundary, "source_status") != "SOURCE_AUTHORED_NOT_EXECUTED"
-        || text(negotiate_boundary, "source_status") != "SOURCE_AUTHORED_NOT_EXECUTED"
+        || !text(negotiate_boundary, "operator_diagnostic").contains("ASUP-E502")
+        || text(middleware_boundary, "source_status")
+            != "CURRENT_SOURCE_COMPILED_SHARED_HELPER_EXECUTED"
+        || text(negotiate_boundary, "source_status") != "REAL_WEB_E2E_PASSED"
+        || !text(middleware_boundary, "client_response").contains("ASUP-E502")
+        || !text(negotiate_boundary, "client_response").contains("ASUP-E502")
     {
         return Err("A5 production diagnostic boundary drift".to_owned());
     }
@@ -631,19 +634,25 @@ fn validate_a5_receipt(inventory: &Value) -> Result<(), String> {
         "catch_unwind_forwards_pending_wake_and_ready",
         "catch_unwind_preserves_payload_and_refuses_repoll",
         "dropping_unpolled_catch_unwind_drops_inner",
+        "catch_unwind_preserves_poll_panic_when_terminal_drop_also_panics",
+        "catch_unwind_surfaces_terminal_drop_panic_after_ready_poll",
+        "catch_unwind_task_quiesces_and_resolves_orphaned_obligation_in_lab",
         "error_handler_catches_construction_panic",
         "error_handler_disabled_propagates_construction_panic",
+        "e2e_error_handler_contains_construction_and_poll_panics_with_redacted_diagnostics",
     ]
     .into_iter()
     .map(str::to_owned)
     .collect();
     if string_set(receipt, "authored_source_cases") != expected_tests {
-        return Err("A5 receipt must list the exact five authored source cases".to_owned());
+        return Err("A5 receipt must list the exact nine authored source cases".to_owned());
     }
     let negotiate_source = read_repo_file("src/web/negotiate.rs");
+    let e2e_source = read_repo_file("tests/e2e_web.rs");
     for test_name in expected_tests {
         if !future_source.contains(&format!("fn {test_name}()"))
             && !negotiate_source.contains(&format!("fn {test_name}()"))
+            && !e2e_source.contains(&format!("fn {test_name}()"))
         {
             return Err(format!("A5 authored source case is missing: {test_name}"));
         }
@@ -668,6 +677,30 @@ fn validate_a5_receipt(inventory: &Value) -> Result<(), String> {
         return Err("both A5 production sites must contain construction panic".to_owned());
     }
 
+    let receipts = array(receipt, "execution_receipts");
+    let expected_lanes: BTreeSet<String> = [
+        "current-panic-boundary-source-check",
+        "owned-catch-unwind-unit-and-lab",
+        "real-web-error-handler-construction-and-poll-panic",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if row_ids(receipts, "lane") != expected_lanes {
+        return Err("A5 receipt must contain the exact three focused lanes".to_owned());
+    }
+    for execution in receipts {
+        if execution.get("exit_code").and_then(Value::as_u64) != Some(0)
+            || text(execution, "panic_strategy") != "unwind"
+            || text(execution, "remote_worker") != "ovh-a"
+            || !text(execution, "result").starts_with("PASS:")
+            || !text(execution, "command").contains("RCH_REQUIRE_REMOTE=1")
+            || !text(execution, "command").contains("-C panic=unwind")
+        {
+            return Err("A5 execution receipt must be terminal remote unwind proof".to_owned());
+        }
+    }
+
     let delta = object(receipt, "dependency_token_delta");
     if delta
         .get("production_poll_adapter_sites_before")
@@ -686,7 +719,8 @@ fn validate_a5_receipt(inventory: &Value) -> Result<(), String> {
             .get("dependency_removal_authorized")
             .and_then(Value::as_bool)
             != Some(false)
-        || array(receipt, "missing_terminal_evidence").len() != 8
+        || !array(receipt, "missing_terminal_evidence").is_empty()
+        || !text(receipt, "outcome_mapping_decision").contains("no Outcome value")
     {
         return Err("A5 dependency delta or terminal-evidence boundary drift".to_owned());
     }
@@ -1286,6 +1320,16 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     {
         return Err("A3 gap dispositions must match the terminal acceptance receipts".to_owned());
     }
+    if text(find_row(gaps, "gap_id", "FUT-A5-GAP-19"), "state")
+        != "FOCUSED_UNIT_AND_LAB_EXECUTION_PASSED"
+        || text(find_row(gaps, "gap_id", "FUT-A5-GAP-20"), "state")
+            != "NESTED_PANIC_PRECEDENCE_AND_CLEANUP_PASSED"
+        || text(find_row(gaps, "gap_id", "FUT-A5-GAP-21"), "state")
+            != "STABLE_DIAGNOSTIC_AND_RESPONSE_BOUNDARY_DECIDED"
+        || text(find_row(gaps, "gap_id", "FUT-A5-GAP-22"), "state") != "REAL_WEB_E2E_PASSED"
+    {
+        return Err("A5 gap dispositions must match the focused acceptance receipts".to_owned());
+    }
 
     let journeys = array(inventory, "downstream_and_e2e");
     let owned_journey = find_row(journeys, "journey_id", "FUT-JOURNEY-OWNED-STREAM");
@@ -1544,8 +1588,9 @@ fn identity_authority_zero_unknown_and_docs_are_fail_closed() {
         "FUT-A4-GAP-16",
         "FUT-A4-GAP-17",
         "FUT-A4-GAP-18",
-        "FUT A5 static panic-boundary progress",
+        "FUT A5 focused panic-boundary acceptance",
         "crate::util::future::catch_unwind",
+        "FOCUSED_REMOTE_EXECUTION_PASSED",
         "FUT-A5-GAP-19",
         "FUT-A5-GAP-20",
         "FUT-A5-GAP-21",
@@ -2231,7 +2276,7 @@ fn malformed_inventory_mutations_fail_closed() {
 
     let mut drop_panic_contained = canonical.clone();
     drop_panic_contained["a5_panic_boundary_receipt"]["poll_helper_contract"]["drop_panic_contained"] =
-        Value::Bool(true);
+        Value::Bool(false);
     assert!(validate_inventory(&drop_panic_contained).is_err());
 
     let mut baseline_rewritten = canonical;

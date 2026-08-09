@@ -429,60 +429,51 @@ change a manifest, authorize cutover, establish differential parity, or provide
 unit, property, lab, DPOR, performance, or loser-drain evidence. The remaining
 race surface and its explicit cancellation/quiescence policy keep FUT A4 open.
 
-### FUT A5 static panic-boundary progress
+### FUT A5 focused panic-boundary acceptance
 
-At claimed base revision `e37de5b6c44c3c0d86c6f05a981249491d3c2343`, bead
-`asupersync-d24mms.6.5` adds an owned crate-private poll-panic wrapper and
-migrates the two production web poll adapters away from the incumbent. This is
-`PARTIAL_STATIC_SOURCE_PROGRESS`; its executable state is
-`NOT_RUN_STATIC_ONLY`, and the bead remains open.
+At claimed base revision `fc687fbbe677f25e6c00d7a6adc9403be88a0f2b`, bead
+`asupersync-d24mms.6.5` completes the owned crate-private poll-panic wrapper and
+the two production web panic boundaries. Its scoped status is
+`ACCEPTANCE_IMPLEMENTED` / `FOCUSED_REMOTE_EXECUTION_PASSED`.
 
-`crate::util::future::catch_unwind` safely pin-projects its inner future,
-forwards the caller Context, and contains exactly one inner poll inside
-`std::panic::catch_unwind`. Normal readiness becomes `Ok`; a poll panic becomes
-the original `Box<dyn Any + Send>` payload in `Err`. A completed flag prevents
-every later inner poll after either terminal result. The wrapper itself stores
-only the future and one boolean. It deliberately remains a poll boundary:
-dropping it drops the retained inner future normally, so a destructor panic is
-not contained by this helper.
+`crate::util::future::catch_unwind` forwards the caller Context and contains
+each inner poll with `std::panic::catch_unwind`. Before returning a terminal
+result it takes and drops the pinned inner future inside a second unwind
+boundary. A poll panic remains the primary payload even when cleanup also
+panics; a cleanup-only panic after `Ready` becomes `Err`. Taking the inner
+`Option` exactly once prevents every later inner poll. Abandoning an unpolled
+or pending wrapper still uses ordinary Rust drop outside a poll.
 
-The production boundaries are now explicit and two-stage:
+Both production boundaries now catch synchronous `Handler::call` panics and
+later poll panics, retain the best-effort payload only in correlated server
+diagnostics, and return sanitized 500 responses containing `[ASUP-E502]`.
+`CatchPanicMiddleware` and `ErrorHandlerMiddleware` include method, path, trace
+identifier, and panic message in the server event; the panic message is never
+returned to the client. When panic catching is disabled, propagation remains
+unchanged.
 
-- `CatchPanicMiddleware` retains its existing construction-phase standard
-  catch, uses the owned helper for polling, logs the best-effort payload with
-  `[ASUP-E502]` plus method/path/trace correlation, and returns only the fixed
-  generic 500 body to the client;
-- `ErrorHandlerMiddleware` now catches a synchronous panic from
-  `Handler::call` as well as a later poll panic, then formats the generic 500 by
-  content negotiation. Its disabled configuration still propagates the panic.
+These are web `Response` boundaries. Recovery completes the handler future
+normally with a 500 response, so there is no `Outcome` value at this API layer
+and the implementation does not invent one.
 
-This removes the two production `FutureExt` poll-adapter imports. It does not
-remove the manifest dependency or migrate test/dev occurrences. The current
-census therefore falls by exactly two textual tokens while the historical A1
-surface rows remain frozen.
+Focused remote execution under explicit `-C panic=unwind` admission covers
+pending/wake/ready forwarding, original-payload preservation, terminal
+no-repoll, unpolled drop, nested poll/drop panic precedence, cleanup-only
+panic conversion, LabRuntime obligation resolution and quiescence,
+construction-panic policy, and a real ErrorHandler web request. The web E2E
+proves exact-once future drop, a redacted client artifact, and correlated
+structured diagnostics.
 
-Five focused cases are source-authored: pending/wake/ready forwarding, payload
-preservation with no terminal repoll, unpolled-drop behavior, enabled
-construction-panic containment, and disabled construction-panic propagation.
-None has been compiled or executed in this static increment. Existing inline,
-audit, and web E2E surfaces were also not rerun.
+The four A5 gaps now carry terminal scoped dispositions:
 
-Four `BLOCKED_GAP` rows preserve the remaining acceptance work:
+- `FUT-A5-GAP-19`: `FOCUSED_UNIT_AND_LAB_EXECUTION_PASSED`;
+- `FUT-A5-GAP-20`: `NESTED_PANIC_PRECEDENCE_AND_CLEANUP_PASSED`;
+- `FUT-A5-GAP-21`: `STABLE_DIAGNOSTIC_AND_RESPONSE_BOUNDARY_DECIDED`;
+- `FUT-A5-GAP-22`: `REAL_WEB_E2E_PASSED`.
 
-- `FUT-A5-GAP-19`: no focused compile, execution, or LabRuntime receipt;
-- `FUT-A5-GAP-20`: destructor/nested-panic payload precedence, resource
-  cleanup, obligation resolution, and quiescence remain unspecified;
-- `FUT-A5-GAP-21`: `ErrorHandlerMiddleware` still discards the payload and has
-  no stable operator diagnostic, while both web boundaries return `Response`
-  rather than an explicit `Outcome` mapping;
-- `FUT-A5-GAP-22`: no post-migration real web E2E proves construction/poll
-  containment, redacted client artifacts, correlated logs, and unwind-lane
-  admission.
-
-This source progress is not a cutover receipt. In particular, it does not
-claim nested destructor-panic containment, stable diagnostics for both sites,
-resource/obligation drain, broad web health, or panic behavior under an abort
-strategy.
+This closes A5 but does not authorize dependency cutover. It does not claim
+panic containment under an abort strategy, broad web/workspace health, or
+behavior outside the two named web boundaries and the owned helper.
 
 ## Consumed helper semantics
 
