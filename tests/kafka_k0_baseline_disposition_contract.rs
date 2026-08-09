@@ -18,7 +18,7 @@ use std::path::PathBuf;
 const ARTIFACT_PATH: &str = "artifacts/kafka_k0_baseline_disposition_v1.json";
 const DOC_PATH: &str = "docs/kafka_k0_baseline_disposition.md";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
-const ARTIFACT_SHA256: &str = "dc45af3b308e9d4ce75ce08e8e9f6a4f5743ea35d5945f34d80bd1cedbb7feab";
+const ARTIFACT_SHA256: &str = "3126530fc0073029ad897db92a1cb03dae564cbea60999b585141444790cef3f";
 const DOC_SHA256: &str = "1c0eea16e7825a5851d2bd5adf8077ae5715d1ce4373bf5f61db42b6b7b78571";
 const ARTIFACT_ID: &str = "kafka-k0-baseline-disposition-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
@@ -251,7 +251,7 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.4",
         role: "contract_file",
         path: "tests/kafka_broker_fixture_provenance_matrix_contract.rs",
-        sha256: "4914166fd5fe5b193ab6da5d730d1f28d73850e552a1af06d7445c5513365db4",
+        sha256: "994ec41a62f34af6580d7eb072770b748d53ebac2b28e5a936062254921a125e",
         byte_count: 129_665,
         record_count: 3_462,
     },
