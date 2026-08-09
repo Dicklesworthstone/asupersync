@@ -12,10 +12,12 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 
 Scope window: current work through 2026-08-09, reconstructed from git history,
 beads, benchmark ledgers, and live repo artifacts; the previous published
-GitHub Release/tag baseline is `v0.4.1`.
+GitHub Release/tag baseline is `v0.4.2`.
 
 ## Version Timeline
 
+- **v0.4.3 Release**: patch release for panic containment across the owned
+  future boundary and web error-handler middleware.
 - **v0.4.2 Release**: patch release for the owned safe blocking kernel and its
   executable wake, context-policy, quiescence, and performance evidence.
 - **v0.4.1 Release**: patch release for capability-aware ATP Stream progress,
@@ -39,6 +41,32 @@ GitHub Release/tag baseline is `v0.4.1`.
 ## [Unreleased]
 
 _No changes yet._
+
+---
+
+## [v0.4.3] - 2026-08-09
+
+### Runtime correctness
+
+- **Owned futures contain construction, polling, and terminal cleanup panics.**
+  The internal `catch_unwind` boundary owns its future until one terminal drop,
+  never polls after completion, preserves the polling panic when cleanup also
+  panics, and surfaces cleanup-only panics. Deterministic LabRuntime coverage
+  verifies that the exercised region returns to quiescence.
+
+### Web diagnostics
+
+- **Error-handler panics become structured `ASUP-E502` failures.** Middleware
+  and content-negotiation construction/poll failures preserve method, path,
+  trace, server, phase, and panic details in structured logs while returning a
+  redacted internal-server-error response to the client.
+
+### Verification boundary
+
+- **The acceptance proof is focused and executable.** Owned-future unit/Lab
+  cases, a real web request path, and the futures-lite capability contract
+  passed before release preparation. This release does not claim the later FUT
+  A6-A9 dependency cutover or removal of the incumbent compatibility crate.
 
 ---
 
@@ -1780,7 +1808,10 @@ The initial tagged milestone establishing the core async runtime with structured
 
 ---
 
-[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.3...HEAD
+[v0.4.3]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.2...v0.4.3
+[v0.4.2]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.1...v0.4.2
+[v0.4.1]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.0...v0.4.1
 [v0.4.0]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.10...v0.4.0
 [v0.3.10]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.4...v0.3.10
 [v0.3.4]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.3...v0.3.4
