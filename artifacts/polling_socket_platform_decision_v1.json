@@ -81,12 +81,12 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2",
-      "line_count": 6917
+      "sha256": "97f9ebcc94a9cd19c64ec63e76261ef7add4172dca055914a5121f773083a90b",
+      "line_count": 6929
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "ad9cc1584a64fdda3728fb12df2f996ac28a4c4015cac99246a11e4d9e3bb7c3",
+      "sha256": "c5f2dd1d5a135b53751625fb9bf4fe2787d7691d239c5c6cb2d2e40e2c37873a",
       "line_count": 3210
     },
     {
@@ -106,13 +106,13 @@
     },
     {
       "path": "artifacts/dependency_verification_matrix_v1.json",
-      "sha256": "c42345e9bbd771a1fb525504bce4162b2af6caca8a75b642d6e14bbb14f7d36b",
-      "line_count": 83691
+      "sha256": "dbd746da3ff126815573ad00df8d6f18f286950bc523224c74dbe5c7869c4c49",
+      "line_count": 88541
     },
     {
       "path": "src/runtime/reactor/mod.rs",
-      "sha256": "3251b51049ed2af6a4cf6d8f9ea05db3480910beb600b61bdfbb1574ab876220",
-      "line_count": 2182
+      "sha256": "0d5d4f826f1fe33313565eaafb0ed405ed92c57ccaea60cd71c2361e99c28669",
+      "line_count": 2187
     },
     {
       "path": "src/runtime/reactor/interest.rs",

@@ -2506,147 +2506,147 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 1187,
+          "line": 1228,
           "pattern": "if unsafe { GetExitCodeProcess(self.process.as_raw_handle(), &mut code) } == 0 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1208,
+          "line": 1249,
           "pattern": "let wait = unsafe { WaitForSingleObject(self.process.as_raw_handle(), 0) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1219,
+          "line": 1260,
           "pattern": "let wait = unsafe { WaitForSingleObject(self.process.as_raw_handle(), INFINITE) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1232,
+          "line": 1273,
           "pattern": "if unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) } == 0 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1255,
+          "line": 1296,
           "pattern": "let _ = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1267,
+          "line": 1308,
           "pattern": "if unsafe { InitializeProcThreadAttributeList(pointer, attribute_count, 0, &mut bytes) }"
         },
         {
           "kind": "unsafe_block",
-          "line": 1288,
+          "line": 1329,
           "pattern": "if unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1315,
+          "line": 1356,
           "pattern": "unsafe { DeleteProcThreadAttributeList(self.pointer) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1326,
+          "line": 1367,
           "pattern": "let _ = unsafe { CloseHandle(handle) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1344,
+          "line": 1385,
           "pattern": "Ok(unsafe { OwnedHandle::from_raw_handle(handle) })"
         },
         {
           "kind": "unsafe_block",
-          "line": 1363,
+          "line": 1404,
           "pattern": "if unsafe { CreatePipe(&mut read, &mut write, &mut security, 0) } == 0 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1379,
+          "line": 1420,
           "pattern": "if unsafe { SetHandleInformation(handle.as_raw_handle(), HANDLE_FLAG_INHERIT, 0) } == 0 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1398,
+          "line": 1439,
           "pattern": "let raw = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1402,
+          "line": 1443,
           "pattern": "if unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1602,
+          "line": 1643,
           "pattern": "if unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2018,
+          "line": 2059,
           "pattern": "unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 3073,
+          "line": 3114,
           "pattern": "let _ = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4044,
+          "line": 4085,
           "pattern": "let _ = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4084,
+          "line": 4125,
           "pattern": "let _ = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4268,
+          "line": 4309,
           "pattern": "let waited = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4311,
+          "line": 4352,
           "pattern": "let waited = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4737,
+          "line": 4778,
           "pattern": "let sigterm_result = unsafe { libc::kill(pid.cast_signed(), libc::SIGTERM) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4749,
+          "line": 4790,
           "pattern": "let still_alive = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 4760,
+          "line": 4801,
           "pattern": "let sigkill_result = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4830,
+          "line": 4871,
           "pattern": "let process_gone = unsafe { libc::kill(pid.cast_signed(), 0) == -1 }"
         },
         {
           "kind": "unsafe_block",
-          "line": 4906,
+          "line": 4947,
           "pattern": "let our_pgid = unsafe { libc::getpgid(0) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4911,
+          "line": 4952,
           "pattern": "let read_isolated_pgid = || -> libc::pid_t { unsafe { libc::getpgid(isolated_pid) } };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4965,
+          "line": 5006,
           "pattern": "let read_target_pgid = || -> libc::pid_t { unsafe { libc::getpgid(target_pid) } };"
         },
         {
           "kind": "unsafe_block",
-          "line": 5029,
+          "line": 5070,
           "pattern": "let child_alive = unsafe { libc::kill(isolated_pid, 0) == 0 };"
         }
       ]

@@ -1573,7 +1573,7 @@
       "disposition": "KEEP_UNTIL_PARITY",
       "evidence_state": "BASELINE_PLANNED",
       "cutover_state": "KEEP_INCUMBENT",
-      "unit_test_owner": "asupersync-5z2scg.5.3",
+      "unit_test_owner": "asupersync-5z2scg.5.3.2",
       "e2e_owner": "asupersync-5z2scg.5.5",
       "scenario_ids": [
         "lab_scenario_yaml",
@@ -4165,8 +4165,8 @@
     "snapshot_files": [
       {
         "source_path": "src/bin/asupersync.rs",
-        "line_count": 16705,
-        "sha256": "7578b320c1e911375597851aa1821ec1ed871313545b5b159b0df7daa12761df",
+        "line_count": 16791,
+        "sha256": "39719e72f1c00122ec4730aab2e2404086292ac46ced4e9290bb206a3b618ec7",
         "capability_ids": [
           "CAP-CLI-ASUPERSYNC"
         ]
@@ -6504,8 +6504,8 @@
     "status": "PASS_SCOPED",
     "scope": "All canonical dep-plan issues after excluding explicit superseded duplicates, effective exact-or-longest-prefix capability mappings, terminal evidence owners, cutover-policy gates, and explicit feature-loss authorization phrases.",
     "mapping_resolution": "An exact rule overrides every prefix rule. Otherwise the unique longest matching prefix is authoritative. Missing or equal-precedence competing rules fail closed.",
-    "dep_plan_issue_count": 419,
-    "non_epic_work_count": 353,
+    "dep_plan_issue_count": 424,
+    "non_epic_work_count": 357,
     "capability_count": 50,
     "mapping_rule_count": 109,
     "cutover_target_count": 41,
@@ -6545,6 +6545,12 @@
         "owner_kind": "unit",
         "superseded_epic_id": "asupersync-5z2scg.8.3.7",
         "terminal_owner_id": "asupersync-5z2scg.8.3.7.4"
+      },
+      {
+        "capability_id": "CAP-SCENARIO-YAML-JSON",
+        "owner_kind": "unit",
+        "superseded_epic_id": "asupersync-5z2scg.5.3",
+        "terminal_owner_id": "asupersync-5z2scg.5.3.2"
       },
       {
         "capability_id": "CAP-SQLITE",
@@ -6624,6 +6630,12 @@
         "epic_id": "asupersync-dep-p7-kafka-removal-sarszu.2.14",
         "terminal_ids": [
           "asupersync-dep-p7-kafka-removal-sarszu.2.14.5"
+        ]
+      },
+      {
+        "epic_id": "asupersync-5z2scg.5.3",
+        "terminal_ids": [
+          "asupersync-5z2scg.5.3.2"
         ]
       },
       {

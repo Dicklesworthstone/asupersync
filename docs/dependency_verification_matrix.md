@@ -22,24 +22,24 @@ The checked artifact currently contains:
 | --- | ---: |
 | Stable capabilities | 50 |
 | Capability invariants | 473 |
-| Covered work beads | 335 |
-| Evidence-plan rows | 1,595 |
-| Implementation leaves | 106 |
-| Architecture leaves | 14 |
-| Verification leaves | 199 |
+| Covered work beads | 354 |
+| Evidence-plan rows | 1,677 |
+| Implementation leaves | 111 |
+| Architecture leaves | 15 |
+| Verification leaves | 212 |
 | Decision leaves | 16 |
 
 The specialized plan counts are:
 
 | Evidence class | Count |
 | --- | ---: |
-| Local unit plans | 106 |
-| Local structural contract plans | 229 |
-| Deterministic property plans | 296 |
-| Lab lifecycle plans | 263 |
-| Bounded fuzz plans | 303 |
-| Public downstream plans | 201 |
-| No-mock E2E plans | 197 |
+| Local unit plans | 111 |
+| Local structural contract plans | 243 |
+| Deterministic property plans | 315 |
+| Lab lifecycle plans | 270 |
+| Bounded fuzz plans | 323 |
+| Public downstream plans | 215 |
+| No-mock E2E plans | 200 |
 
 Counts are regenerated from `.beads/issues.jsonl` and
 `artifacts/dependency_capability_registry_v1.json`; they are not handwritten
@@ -183,8 +183,8 @@ it as `dependency-sovereignty` with canonical suite ID
 
 The default smoke profile runs two local, non-Cargo contract scenarios:
 
-- `catalog` checks the live 335-bead, 50-capability, 1,595-plan VER A1 matrix
-  and its 197 planned E2E rows;
+- `catalog` checks the live 354-bead, 50-capability, 1,677-plan VER A1 matrix
+  and its 200 planned E2E rows;
 - `runner-contract` exercises the happy path and eleven fail-closed outcome
   classes: assertion failure, command failure, timeout, signal, unsupported
   platform, blocked RCH, local fallback, corrupt summary, missing artifact,
@@ -330,7 +330,7 @@ VER A1-A5 into one deterministic, 50-row capability projection. Its focused
 contract is `tests/dependency_verification_final_signoff_contract.rs`; its
 stable E2E step is `ver-a6-aggregate-signoff-contract`.
 
-The aggregate requires focused unit evidence for all 106 implementation rows.
+The aggregate requires focused unit evidence for all 111 implementation rows.
 A row without a direct E2E/downstream plan is accepted only as
 `N/A_ROW_LOCAL_AGGREGATE_CAPABILITY_COVERAGE`, after the contract proves that
 every capability on that row has an E2E/downstream plan elsewhere in the same

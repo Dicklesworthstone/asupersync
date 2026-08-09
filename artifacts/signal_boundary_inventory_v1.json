@@ -71,7 +71,7 @@
     },
     {
       "path": "artifacts/unsafe_boundary_ledger_v1.json",
-      "sha256": "f32cea1f0abb4ae8ce61d91caf22c5b812d05793cf7e2ecfe899d4a0de1bd8d9",
+      "sha256": "c609c6f8b4b4baa9861b875bccdb7a49b747a33e1eb91a5e2ed0bc8b292be7ce",
       "line_count": 6338
     },
     {
@@ -116,8 +116,8 @@
     },
     {
       "path": "src/process.rs",
-      "sha256": "51a964a7549b63f08b549720b8c86391b9b198d5ce9ae5389d642ea2b62a4c2e",
-      "line_count": 5230
+      "sha256": "b381737d1cf98532f04902d6eea79ad1d7fd8ca4c6a71ac15f49116d928181e2",
+      "line_count": 5271
     },
     {
       "path": "src/atp/daemon_control.rs",

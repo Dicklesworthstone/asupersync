@@ -710,7 +710,7 @@ fn ver_a1_asupersync_dep_p1_foundations_upksjk_6_4_4f6cbc4927a2__local_invariant
         artifact["source_of_truth"]["e2e_runner"].as_str(),
         Some(RUNNER_PATH)
     );
-    assert_eq!(inventory["counts"]["matrix_beads"].as_u64(), Some(335));
+    assert_eq!(inventory["counts"]["matrix_beads"].as_u64(), Some(354));
 
     let docs = std::fs::read_to_string(DOC_PATH).expect("failure-injection docs");
     let runner = std::fs::read_to_string(RUNNER_PATH).expect("dependency-sovereignty runner");

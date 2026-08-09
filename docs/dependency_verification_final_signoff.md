@@ -31,7 +31,7 @@ Empty values and silent skips are invalid. N/A is allowed only for a
 non-service capability under the explicit label
 `NOT_APPLICABLE_NON_SERVICE_CAPABILITY`.
 
-All 106 `role=implementation` rows in the VER A1 matrix must have a focused
+All 111 `role=implementation` rows in the VER A1 matrix must have a focused
 unit plan. An implementation row also needs a direct E2E/downstream plan. When
 that row is not itself a user-journey boundary, the only accepted alternative
 is `N/A_ROW_LOCAL_AGGREGATE_CAPABILITY_COVERAGE`: every capability on the row

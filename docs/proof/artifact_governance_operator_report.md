@@ -16,7 +16,7 @@ The report summarizes representative ledger, scanner, and seed-backfill rows by 
 | `blocked` | `proof-lane-manifest-canonical`, `runtime-pressure-control-evidence-contract`, `validation-frontier-inventory` | Route proof work and reruns; do not treat blocker rows as green proof. |
 | `ambiguous_ownership` | `rch-stale-progress-receipt-contract` | Keep both owner signals visible and select no winner. |
 | `owner_missing` | `artifacts/raptorq_track_e_gf256_p95p99_v1.json` | Add governance metadata or an explicit non-citeable exclusion before citation. |
-| `reference_topology` | `dependency-capability-baseline-versioned-reference-topology` | Preserve the three immutable historical baseline back-references; the five-node content-addressed graph is acyclic even though its four paths form reciprocal aliases. |
+| `reference_topology` | `dependency-capability-baseline-versioned-reference-topology` | Preserve the three historical baseline back-references without repinning; the seven-node content-addressed graph is acyclic, and separate immutable provenance is still required for each historical target. |
 | `stale_superseded` | `raptorq-gf256-multiscenario-refresh-v3` | Retain lineage and cite the successor for current evidence. |
 | `excluded` | `remote-build-target-cache-roots` | Explain why the cache pattern is outside durable artifact governance. |
 | `missing_tests` | `remote-build-target-cache-roots` | Empty tests are allowed only because this is an excluded generated/cache pattern. |

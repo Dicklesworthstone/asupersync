@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
 const CONTRACT_PATH: &str = "artifacts/semantic_lint_cleanup_budget_rule_contract_v1.json";
 const INVENTORY_PATH: &str = "artifacts/semantic_lint_rule_inventory_v1.json";
@@ -11,6 +12,7 @@ const DOCS_PATH: &str = "docs/semantic_lint_cleanup_budget_rule.md";
 const RUNNER_PATH: &str = "scripts/semantic_lint.py";
 const RULE_ID: &str = "unbounded-cleanup-budget";
 const BEAD_ID: &str = "asupersync-idea-wizard-fifth-wave-3gaiun.3.2";
+static RUNNER_LOCK: Mutex<()> = Mutex::new(());
 
 fn repo_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -54,6 +56,9 @@ fn child<'a>(value: &'a Value, key: &str) -> &'a Value {
 }
 
 fn run_runner(paths: &[&str]) -> (String, Value) {
+    let _runner_guard = RUNNER_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let output = Command::new("python3")
         .arg(repo_path(RUNNER_PATH))
         .arg("--rule")

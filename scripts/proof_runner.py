@@ -99,6 +99,13 @@ WORKER_FIELD_RE = re.compile(r"\bworker=[A-Za-z0-9_.-]+")
 ACTIVE_PROJECT_EXCLUSION_RE = re.compile(r"active_project_exclusion=\d+")
 DURATION_VALUE_RE = re.compile(r"\b\d+(?:\.\d+)?(?:ms|us|ns|s)\b")
 TMP_PATH_RE = re.compile(r"/tmp/[A-Za-z0-9._/\-]+")
+LABELED_REPO_PATH_RE = re.compile(
+    r"(?P<label>\b(?:file|source|path|artifact|workspace|repo)=)"
+    r"(?:[A-Za-z]:)?(?:[/\\][^/\\\s=]+)+[/\\]"
+    r"(?P<relative>(?:(?:src|tests|scripts|artifacts|docs|examples|benches|"
+    r"conformance|fuzz|packages)[/\\][^\s]+|Cargo\.(?:toml|lock)|"
+    r"README\.md|AGENTS\.md))"
+)
 WRAPPER_RETRIEVAL_HANG_HINTS = (
     "retrieval timed out",
     "retrieval stalled",
@@ -718,9 +725,15 @@ def _int_or_zero(value: Any) -> int:
 
 def scrub_failure_corpus_text(raw_text: str, repo_root: Path) -> str:
     """Scrub nondeterministic proof-failure text for replayable corpus entries."""
+
+    def replace_labeled_repo_path(match: re.Match[str]) -> str:
+        relative = match.group("relative").replace("\\", "/")
+        return f"{match.group('label')}[REPO]/{relative}"
+
     scrubbed = raw_text.replace("\r\n", "\n").replace("\r", "\n")
     repo = repo_root.as_posix().rstrip("/")
     scrubbed = scrubbed.replace(repo, "[REPO]")
+    scrubbed = LABELED_REPO_PATH_RE.sub(replace_labeled_repo_path, scrubbed)
     scrubbed = ISO_TIMESTAMP_RE.sub("[TIMESTAMP]", scrubbed)
     scrubbed = SHA256_VALUE_RE.sub("sha256:[HASH]", scrubbed)
     scrubbed = RCH_COMMAND_FIELD_RE.sub("command=[RCH_COMMAND]", scrubbed)

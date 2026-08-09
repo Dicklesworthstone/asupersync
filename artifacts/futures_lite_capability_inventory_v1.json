@@ -720,8 +720,8 @@
       {
         "path": "src/sync/notify.rs",
         "baseline_sha256": "11d85d8cc9bcd7ec6c21245dba5b58f381b3aa4c54dc3d8d17d01f68b213a3ef",
-        "current_sha256": "3df286c11ba03629b29838e75798454cc3899a6836d0efd381ef0afef9b960d7",
-        "current_line_count": 7060,
+        "current_sha256": "5633efd9c1b8110bd5a384a7160b967bb908d0de53db58a0b1abb068947fe1d6",
+        "current_line_count": 7066,
         "classification": "CAPABILITY_PROJECTION_UNCHANGED",
         "projection": "sorted futures-lite token lines",
         "projection_sha256": "ff73e9793bd9748d2e82dba7b4d16e27830b5d35491c2759021dcbb81b33b2c7"
@@ -1638,8 +1638,8 @@
     },
     {
       "path": "src/sync/notify.rs",
-      "sha256": "3df286c11ba03629b29838e75798454cc3899a6836d0efd381ef0afef9b960d7",
-      "line_count": 7060
+      "sha256": "5633efd9c1b8110bd5a384a7160b967bb908d0de53db58a0b1abb068947fe1d6",
+      "line_count": 7066
     },
     {
       "path": "docs/adr/dep_plan_adr_008_futures_streams.md",

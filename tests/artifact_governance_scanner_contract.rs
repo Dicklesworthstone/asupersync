@@ -334,6 +334,7 @@ fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
     let mut declared_edges = BTreeSet::new();
     let mut path_alias_edges: BTreeMap<String, BTreeSet<(String, String)>> = BTreeMap::new();
     let mut content_edges = BTreeSet::new();
+    let mut current_historical_targets = BTreeSet::new();
     let mut historical_edge_count = 0_u64;
     let mut current_edge_count = 0_u64;
     for edge in array(&audit_value, "edges")? {
@@ -380,6 +381,13 @@ fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
             "current_forward_reference"
         } else {
             historical_edge_count += 1;
+            current_historical_targets.insert((
+                target.clone(),
+                stored_sha256.clone(),
+                (*stored_line_count).ok_or_else(|| {
+                    format!("{source} -> {target}: historical pin must retain a line count")
+                })?,
+            ));
             "historical_back_reference"
         };
         if string(edge, "edge_classification")? != expected_classification {
@@ -457,13 +465,55 @@ fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
     {
         return Err("historical baseline object receipt drifted".to_owned());
     }
+    if current_historical_targets
+        .iter()
+        .any(|(_, sha256, _)| sha256 == HISTORICAL_BASELINE_SHA256)
+    {
+        return Err("legacy baseline receipt must not be attributed to a current edge".to_owned());
+    }
+
+    let provenance = object(&audit_value, "historical_edge_provenance")?;
+    let provenance_value = Value::Object(provenance.clone());
+    if string(&provenance_value, "state")? != "UNRESOLVED_FOR_CURRENT_HISTORICAL_EDGES"
+        || u64_field(&provenance_value, "current_historical_edge_count")? != historical_edge_count
+        || bool_field(
+            &provenance_value,
+            "legacy_receipt_matches_current_historical_edge",
+        )?
+    {
+        return Err("current historical-edge provenance state drifted".to_owned());
+    }
+    let mut unresolved_targets = BTreeSet::new();
+    for target in array(&provenance_value, "unresolved_targets")? {
+        let target_artifact = string(target, "target_artifact")?.to_owned();
+        let stored_sha256 = string(target, "stored_sha256")?.to_owned();
+        let stored_line_count = u64_field(target, "stored_line_count")?;
+        if !unresolved_targets.insert((target_artifact, stored_sha256, stored_line_count)) {
+            return Err("duplicate unresolved historical target".to_owned());
+        }
+    }
+    if unresolved_targets != current_historical_targets {
+        return Err("unresolved historical target set drifted".to_owned());
+    }
+    let follow_up = string(&provenance_value, "required_follow_up")?;
+    for required in [
+        "immutable commit and blob receipt",
+        "each current historical target",
+    ] {
+        if !follow_up.contains(required) {
+            return Err(format!(
+                "historical provenance follow-up must mention {required}"
+            ));
+        }
+    }
 
     let resolution = object(&audit_value, "resolution")?;
     let resolution_value = Value::Object(resolution.clone());
     if string(&resolution_value, "resolution_state")?
-        != "HISTORICAL_BACK_REFERENCES_RESOLVED_TO_IMMUTABLE_GIT_OBJECT"
+        != "CONTENT_GRAPH_ACYCLIC_HISTORICAL_PROVENANCE_UNRESOLVED"
         || u64_field(&resolution_value, "minimum_full_file_edges_to_replace")? != 0
-        || string(&resolution_value, "resolved_by")? != "immutable_commit_or_blob_provenance"
+        || string(&resolution_value, "resolved_by")?
+            != "content-addressed topology only; the current historical target byte provenance remains unresolved"
     {
         return Err("versioned-reference resolution drifted".to_owned());
     }
@@ -471,6 +521,7 @@ fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
     for required in [
         "historical back-references",
         "do not refresh",
+        "Do not claim immutable target-byte provenance",
         "content-addressed",
     ] {
         if !rule.contains(required) {
@@ -484,6 +535,7 @@ fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
         "does_not_prove_full_corpus_coverage",
         "does_not_make_historical_pins_current",
         "does_not_authorize_blind_hash_refresh",
+        "does_not_authenticate_current_historical_target_bytes",
         "does_not_prove_git_history_is_available_in_every_checkout",
         "does_not_prove_executable_contract_pass",
     ] {
@@ -791,7 +843,10 @@ fn scanner_report_is_concise_and_matches_artifact_boundaries() {
         "excluded",
         "PASS_NO_CONTENT_ADDRESSED_CYCLE_WITH_PATH_ALIAS_WARNING",
         "content-addressed graph",
-        "immutable provenance",
+        "seven nodes, six edges",
+        "does not independently authenticate",
+        "requires separate receipts",
+        "immutable byte provenance",
         "does not authorize blind hash refresh",
     ] {
         assert!(

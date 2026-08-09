@@ -178,7 +178,7 @@
       "artifact_hashes": [
         {
           "path": "packages/browser/src/index.ts",
-          "sha256": "9795a81ca48ade51af52187e07dfbb1dca154dec6531993f37161f64f4fc3129"
+          "sha256": "a9efd084a34978f6828d206ec549d263c78e68fd6acabb418f0d9436ee226aaf"
         },
         {
           "path": "packages/browser/src/tracing.ts",

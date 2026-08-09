@@ -18,13 +18,12 @@
 //!       diagnostic strings — not body content.
 //!
 //!   (b) **`println!` / `eprintln!` calls in src/grpc/ are
-//!       restricted to `#[cfg(test)]` modules** (test harness
-//!       output for conformance verifiers), the
-//!       `eprintln!("[GOLDEN]")` in `streaming.rs:1972` (golden-
-//!       file update path, only fires under explicit operator
-//!       command), and `eprintln!` in `server.rs:156` /
-//!       `server.rs:2506+` (test/conformance verdicts). None of
-//!       these paths emit user-supplied body content.
+//!       restricted to `#[cfg(test)]` modules.** They are test-
+//!       harness output for conformance verifiers and explicit
+//!       golden-file update paths. `server.rs` has no production-
+//!       path stdio call; its stale-registration sweep is silent.
+//!       None of the remaining test paths emit user-supplied body
+//!       content.
 //!
 //!   (c) **Built-in LoggingInterceptor doesn't actually log**
 //!       (covered by tick #153 audit). It stamps `x-logged=true`
@@ -176,51 +175,27 @@ fn no_body_or_payload_in_log_macros_under_src_grpc() {
 }
 
 #[test]
-fn known_eprintln_at_server_rs_156_does_not_log_body_content() {
-    // Pin: the one production-path eprintln! in src/grpc/server.rs
-    // at line 156 logs ONLY metadata (count of removed streams,
-    // connection id, list of stream ids) — not body content. Pin
-    // the contents of the format string so a future commit that
-    // changed it to include a body / payload reference would trip
-    // this test, forcing an intentional re-baseline.
-    //
-    // Note: this eprintln! is itself an AGENTS.md "Output Style"
-    // violation (runtime must not write to stdio). Documented as
-    // a separate audit follow-up; orthogonal to body-logging.
+fn production_server_cleanup_is_stdio_silent() {
+    // The stale-registration sweep deliberately emits no production-path
+    // stdio. This is stronger than pinning a metadata-only format string:
+    // there is no format string or argument list that could grow a body or
+    // payload reference.
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let server_rs = std::fs::read_to_string(Path::new(manifest_dir).join("src/grpc/server.rs"))
         .expect("read src/grpc/server.rs");
+    let (production, _) = server_rs
+        .split_once("\n#[cfg(test)]\nmod tests {")
+        .expect("src/grpc/server.rs must retain its cfg(test) module boundary");
 
-    // The known-clean format string. A regression that altered it
-    // to log body content would surface here.
-    let argument_marker = format!("{}{}", '{', '}');
-    let debug_marker = format!("{}:?{}", '{', '}');
-    let cleanup_log_format = format!(
-        "Cleaned up {argument_marker} idle streams on connection {argument_marker}: {debug_marker}"
-    );
     assert!(
-        server_rs.contains(&cleanup_log_format),
-        "the known-clean eprintln! at server.rs:156 must keep its \
-         metadata-only format string. A regression that added \
-         body or payload fields to the format args would be a \
-         body-logging violation.",
+        production.contains("connection.cleanup_idle_streams(timeout);"),
+        "the production stale-registration sweep must remain present"
     );
-    // And the body/payload tokens must NOT appear within ~10 lines
-    // either side of the eprintln!.
-    let lines: Vec<&str> = server_rs.lines().collect();
-    let eprintln_idx = lines
-        .iter()
-        .position(|l| l.contains("eprintln!") && l.trim().starts_with("eprintln!"))
-        .expect("locate the known eprintln! entry line");
-    let start = eprintln_idx.saturating_sub(2);
-    let end = (eprintln_idx + 8).min(lines.len());
-    let window = lines[start..end].join("\n");
-    for token in ["body", "payload", "request_data", "response_data"] {
+
+    for forbidden in ["eprintln!", "println!", "Cleaned up "] {
         assert!(
-            !window.contains(token),
-            "eprintln! at server.rs:{} window contains {token:?} — \
-             body-content reference suspected. window:\n{window}",
-            eprintln_idx + 1,
+            !production.contains(forbidden),
+            "production src/grpc/server.rs must remain stdio-silent; found {forbidden:?}"
         );
     }
 }

@@ -39,6 +39,8 @@ ForensicDump {
                     task_id: TaskId(0:0),
                     task_state: "Running",
                     poll_count: 0,
+                    waiters: [],
+                    last_checkpoint_message: None,
                 },
             ],
             recommendations: [
@@ -64,6 +66,8 @@ ForensicDump {
                     task_id: TaskId(2:0),
                     task_state: "CancelRequested",
                     poll_count: 0,
+                    waiters: [],
+                    last_checkpoint_message: None,
                 },
             ],
             recommendations: [

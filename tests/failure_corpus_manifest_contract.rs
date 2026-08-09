@@ -218,6 +218,11 @@ fn failure_corpus_scrubber_masks_nondeterminism() {
         "first_failure file=/data/projects/asupersync/src/lib.rs digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb elapsed=42ms"
     )
     .expect("write fixture line");
+    writeln!(
+        input,
+        "retained artifact=/data/tmp/rch/asupersync/alternate-checkout/artifacts/proof.json"
+    )
+    .expect("write alternate-checkout fixture line");
 
     let input_path = input.path().to_str().expect("temp path utf8");
     let scrub = proof_runner_json(&[
@@ -235,6 +240,7 @@ fn failure_corpus_scrubber_masks_nondeterminism() {
         "command=[RCH_COMMAND]",
         "active_project_exclusion=[COUNT]",
         "[REPO]/src/lib.rs",
+        "artifact=[REPO]/artifacts/proof.json",
         "sha256:[HASH]",
         "[DURATION]",
     ] {
@@ -248,6 +254,7 @@ fn failure_corpus_scrubber_masks_nondeterminism() {
         "worker=ts2",
         "/tmp/rch_target_x",
         "/data/projects/asupersync",
+        "/data/tmp/rch/asupersync/alternate-checkout",
         "sha256:bbbbbbbb",
         "42ms",
     ] {

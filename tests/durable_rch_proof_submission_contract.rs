@@ -445,6 +445,38 @@ fn record_output_writes_to_explicit_tmp_path_and_rejects_tracker_paths() {
 }
 
 #[test]
+fn absolute_repo_rch_tmp_output_is_allowed_without_opening_the_file() {
+    let root = repo_root();
+    let allowed_path = root.join(".rch-tmp/durable-submission.json");
+    let tracker_path = root.join(".beads/durable-submission.json");
+    let allowed_path_existed = allowed_path.exists();
+    let probe = Command::new("python3")
+        .arg("-c")
+        .arg(
+            "import json, runpy, sys; from pathlib import Path; module = runpy.run_path(sys.argv[1]); allowed = module['output_path_allowed']; print(json.dumps({'rch_tmp': allowed(Path(sys.argv[2]), Path(sys.argv[3])), 'tracker': allowed(Path(sys.argv[2]), Path(sys.argv[4]))}))",
+        )
+        .arg(root.join(SCRIPT_PATH))
+        .arg(&root)
+        .arg(&allowed_path)
+        .arg(&tracker_path)
+        .output()
+        .expect("probe output path policy");
+    assert!(
+        probe.status.success(),
+        "output path policy probe failed: {}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    let result: Value = serde_json::from_slice(&probe.stdout).expect("policy probe JSON");
+    assert_eq!(result["rch_tmp"].as_bool(), Some(true));
+    assert_eq!(result["tracker"].as_bool(), Some(false));
+    assert_eq!(
+        allowed_path.exists(),
+        allowed_path_existed,
+        "policy probe must not change the allowed output file"
+    );
+}
+
+#[test]
 fn status_running_submission_surfaces_lane_head_and_progress_metadata() {
     let mut submission = accepted_submission();
     submission["lifecycle_state"] = Value::String("running".to_string());

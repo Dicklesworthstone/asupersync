@@ -1728,15 +1728,15 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         (
             "artifacts/dependency_capability_baseline_v1.json",
             (
-                "ad9cc1584a64fdda3728fb12df2f996ac28a4c4015cac99246a11e4d9e3bb7c3",
+                "1183ad5ad431e8fbf6be753663e408c3fe4b4047360ee5e02e3eb5c3dd4a76cf",
                 3210_u64,
             ),
         ),
         (
             "artifacts/dependency_capability_registry_v1.json",
             (
-                "e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2",
-                6917_u64,
+                "97f9ebcc94a9cd19c64ec63e76261ef7add4172dca055914a5121f773083a90b",
+                6929_u64,
             ),
         ),
         (
@@ -3215,8 +3215,8 @@ fn phase2_terminal_readiness_frontier_is_exact_and_fail_closed() {
         (
             REGISTRY_PATH,
             (
-                "e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2",
-                6917_u64,
+                "97f9ebcc94a9cd19c64ec63e76261ef7add4172dca055914a5121f773083a90b",
+                6929_u64,
             ),
         ),
         (

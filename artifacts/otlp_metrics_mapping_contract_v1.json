@@ -967,7 +967,7 @@
     },
     {
       "path": "tests/protobuf_owned_otlp_schema_contract.rs",
-      "sha256": "9c311513d7d23ff9e8a9dbb183470d354bfb360d14bc2d5a45130e64f9c8c20f",
+      "sha256": "2d10e865077ad4e45d9fccb45d879e9a5f5b43a1defb010dee53133f97556ace",
       "line_count": 2200,
       "anchors": ["The JSON-shaped fixture is not protobuf wire evidence", "Generated request builders are test/fuzz gated"]
     },

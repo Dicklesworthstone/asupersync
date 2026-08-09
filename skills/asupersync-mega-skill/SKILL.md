@@ -74,6 +74,16 @@ Choose one lane before touching code:
    For serious migrations, run the repo's read-only migration readiness planner
    and use its verdict, proof commands, semantic recommendations, and operator
    phase plan as inputs rather than treating `cargo tree` grep output as a plan.
+
+   ```bash
+   python3 scripts/migration_readiness_planner.py --dry-run --scenario tokio-http-service
+   python3 scripts/migration_readiness_planner.py --execute --output-root "${TMPDIR:-/tmp}/asupersync_migration_planner_e2e"
+   python3 scripts/migration_readiness_planner.py --project-root /path/to/rust/project --output-root target/migration-readiness
+   ```
+
+   For a real project, review `summary.final_verdict`,
+   `proof_pack.proof_commands`, `semantic_map.recommendations`, and
+   `operator_report.phase_plan` before editing the target.
 3. **Boundary interop**
    Use `asupersync-tokio-compat` only for crates you cannot remove yet. Keep Tokio out of core business logic.
 

@@ -16,16 +16,22 @@ ForensicDump {
                     task_id: TaskId(0:0),
                     task_state: "Running",
                     poll_count: 0,
+                    waiters: [],
+                    last_checkpoint_message: None,
                 },
                 ObligationHeld {
                     obligation_id: ObligationId(0:0),
                     obligation_type: "Ack",
                     holder_task: TaskId(0:0),
+                    holder_waiters: [],
+                    holder_last_checkpoint_message: None,
                 },
                 ObligationHeld {
                     obligation_id: ObligationId(1:0),
                     obligation_type: "SendPermit",
                     holder_task: TaskId(0:0),
+                    holder_waiters: [],
+                    holder_last_checkpoint_message: None,
                 },
             ],
             recommendations: [

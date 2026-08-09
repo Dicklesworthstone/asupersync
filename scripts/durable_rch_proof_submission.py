@@ -43,6 +43,7 @@ TERMINAL_STATES = {
     "terminal_infra_error",
 }
 TRACKER_ROOTS = {".beads", "agents", "messages", "file_reservations"}
+RCH_TEMP_OUTPUT_ROOT = ".rch-tmp"
 TEMP_OUTPUT_ROOTS = (Path("/tmp"), Path("/data/tmp"))
 SUBCOMMANDS = {"submit", "status", "query", "cancel"}
 
@@ -290,7 +291,9 @@ def output_path_allowed(repo_root: Path, output_path: Path) -> bool:
         return False
     if relative.parts[0] in TRACKER_ROOTS:
         return False
-    return relative.parts[0] == "artifacts"
+    if relative.parts[0] == "artifacts":
+        return True
+    return output_path.is_absolute() and relative.parts[0] == RCH_TEMP_OUTPUT_ROOT
 
 
 def path_is_under(path: Path, root: Path) -> bool:

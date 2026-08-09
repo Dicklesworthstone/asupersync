@@ -2101,9 +2101,7 @@
       "source_paths": [
         "scripts/atp_quic_vs_rsync_benchmark.sh",
         "scripts/atp_bench/collect_metrics.sh",
-        "scripts/atp_bench/report.py",
-        "artifacts/atp_quic_vs_rsync_benchmark_2026-06-16.md",
-        "artifacts/atp_quic_vs_rsync_benchmark_2026-06-16.jsonl"
+        "scripts/atp_bench/report.py"
       ],
       "common_unrelated_blockers": [
         "SENDER/RECEIVER fleet credentials unavailable",

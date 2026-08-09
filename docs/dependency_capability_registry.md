@@ -63,8 +63,8 @@ promote planned broker rows to evidence or weaken `KEEP_INCUMBENT`.
 ## CAP A4 graph-wide no-loss signoff
 
 The canonical artifact now contains the deterministic
-`graph_signoff_report`. It joins all 419 canonical `dep-plan` issues, including
-353 non-epic executable work nodes, to the 50-capability registry through 109
+`graph_signoff_report`. It joins all 424 canonical `dep-plan` issues, including
+357 non-epic executable work nodes, to the 50-capability registry through 109
 effective exact-or-longest-prefix rules. The only excluded tracker row is the
 explicitly superseded duplicate `asupersync-5z2scg.9`, whose closure names
 `asupersync-5z2scg.10` as the canonical no-loss aggregate. The report records
@@ -86,10 +86,10 @@ authority.
 
 Evidence owners must be executable terminal leaves, never coordination epics.
 The registry therefore points Kafka unit/security evidence to K12.5 and real
-E2E to K13.6, full regex evidence to R3.7.4, and SQLite parity evidence to P9.
-The report also checks all decomposed Kafka, regex, OS-lock, signal, NKey, and
-SQLite parent epics against their explicit terminal children and parent-child
-edges.
+E2E to K13.6, full regex evidence to R3.7.4, Scenario YAML/JSON KEEP evidence
+to SCN A3.2, and SQLite parity evidence to P9. The report also checks all
+decomposed Kafka, regex, scenario-format, OS-lock, signal, NKey, and SQLite
+parent epics against their explicit terminal children and parent-child edges.
 
 Every one of the 41 cutover targets remains `dependency_exit_allowed=false`
 and inherits all twelve CAP A3 global gates: capability map, baseline, safety,

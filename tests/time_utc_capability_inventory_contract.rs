@@ -23,7 +23,7 @@ const BEAD_ID: &str = "asupersync-5z2scg.6.1";
 const CAPABILITY_ID: &str = "CAP-TIME-UTC-RFC3339";
 const ADR_ID: &str = "DEP-ADR-011";
 const BASELINE_REVISION: &str = "1afde84d564bd8ea876459624116f90028b80835";
-const ARTIFACT_SHA256: &str = "1590b53e0293308864e5bc862f2acdc9d5df9051c3dd95b1fdd325f48ceec906";
+const ARTIFACT_SHA256: &str = "5d5c345852f3f960d5c7a5ff2f38b0d1b84b898915fd99e0fcc53413c04a48fc";
 const DOC_BEGIN: &str = "<!-- BEGIN TIME UTC CAPABILITY INVENTORY -->";
 const DOC_END: &str = "<!-- END TIME UTC CAPABILITY INVENTORY -->";
 const CHRONO_TOKEN: &str = concat!("chrono", "::");
@@ -2637,7 +2637,7 @@ fn validate_post_a1_provenance_refresh(inventory: &Value) -> Result<(), String> 
         || text(baseline, "previous_sha256") != "88575b016105828ce8a3687ef6be2509e0412dee949cda8"
         || baseline.get("previous_line_count").and_then(Value::as_u64) != Some(1357)
         || text(baseline, "current_sha256")
-            != "ad9cc1584a64fdda3728fb12df2f996ac28a4c4015cac99246a11e4d9e3bb7c3"
+            != "c5f2dd1d5a135b53751625fb9bf4fe2787d7691d239c5c6cb2d2e40e2c37873a"
         || baseline.get("current_line_count").and_then(Value::as_u64) != Some(3210)
         || baseline.get("added_line_count").and_then(Value::as_u64) != Some(1853)
         || baseline.get("deleted_line_count").and_then(Value::as_u64) != Some(0)

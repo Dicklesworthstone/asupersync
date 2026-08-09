@@ -236,7 +236,7 @@ fn aggregate_join_emits_a_zero_gap_capability_matrix() {
         .iter()
         .filter(|row| string(row, "role") == "implementation")
         .collect();
-    assert_eq!(implementation_rows.len(), 106);
+    assert_eq!(implementation_rows.len(), 111);
     for row in &implementation_rows {
         let classes = evidence_classes(row);
         assert!(

@@ -17,7 +17,7 @@
   },
   "tracker_snapshot": {
     "source_path": ".beads/issues.jsonl",
-    "plan_semantic_sha256": "f83003c1b99336b90d3237e5002d50d3b0c7695393288760829539b8fe3229ec",
+    "plan_semantic_sha256": "816ae4e67fd27af787eb3bb03e4c1ffd1336caa71a7e09676ea0fe3cf09269d7",
     "graph_signoff_pointer": "artifacts/dependency_capability_registry_v1.json#/graph_signoff_report",
     "graph_signoff_bead_id": "asupersync-dep-p1-foundations-upksjk.5.4",
     "graph_signoff_status": "PASS_SCOPED",
@@ -174,7 +174,7 @@
     "not_applicable_policy": "N/A is valid only for a non-service capability and must resolve to NOT_APPLICABLE_NON_SERVICE_CAPABILITY; empty, skipped, inferred pass, and silent omission are contract failures."
   },
   "implementation_coverage_contract": {
-    "expected_implementation_beads": 106,
+    "expected_implementation_beads": 111,
     "focused_unit_rule": "Every role=implementation matrix row has at least one class=unit plan.",
     "e2e_rule": "Every role=implementation matrix row has a direct class=e2e or class=downstream plan, or every capability on that row has a capability-aggregate e2e/downstream plan on another checked matrix row.",
     "aggregate_na_label": "N/A_ROW_LOCAL_AGGREGATE_CAPABILITY_COVERAGE",
@@ -358,7 +358,7 @@
     "outcome": "PASS_SCOPED_KEEP_DEFER",
     "zero_gap_matrix": true,
     "capabilities": 50,
-    "implementation_beads": 106,
+    "implementation_beads": 111,
     "guard_only": 9,
     "keep_incumbent": 23,
     "blocked_pending_evidence": 18,

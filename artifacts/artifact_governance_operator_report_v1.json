@@ -50,7 +50,7 @@
     },
     "reference_topology": {
       "meaning": "Path-collapsed references can look cyclic even when their content-addressed targets form an acyclic historical/current topology.",
-      "next_action_rule": "Resolve every historical target to immutable provenance, preserve it without repinning, and treat only a content-addressed directed cycle as blocking."
+      "next_action_rule": "Preserve historical targets without repinning, record separate immutable provenance for each target before claiming authentication, and treat only a content-addressed directed cycle as blocking."
     },
     "stale_superseded": {
       "meaning": "Historical rows have a successor and must not be cited as current evidence.",
@@ -299,13 +299,13 @@
             "artifacts/hex_capability_inventory_v1.json"
           ],
           "path_alias_edge_count": 6,
-      "content_addressed_node_count": 6,
+          "content_addressed_node_count": 7,
           "content_addressed_edge_count": 6,
           "content_addressed_cycle_count": 0,
           "historical_target_commit": "7390d33f4ac297cd28138c8e1ece38f60b278660",
           "historical_target_blob_oid": "4e56ad4bc05dbd1614583f8cdf8586a0d1f88cc7",
           "minimum_full_file_edges_to_replace": 0,
-          "next_action": "Preserve the three historical baseline back-references as immutable commit/blob provenance; do not refresh them, and recompute content-addressed topology before escalating any future path-only cycle warning.",
+          "next_action": "Preserve the three historical baseline back-references without repinning; the retained legacy commit/blob receipt does not authenticate them, so record separate immutable provenance for each target before making that claim, and recompute content-addressed topology before escalating any future path-only cycle warning.",
           "no_claim_boundaries": [
             "does_not_make_historical_pins_current",
             "does_not_authorize_blind_hash_refresh",

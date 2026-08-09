@@ -103,8 +103,8 @@
     },
     {
       "path": "src/runtime/reactor/mod.rs",
-      "sha256": "3251b51049ed2af6a4cf6d8f9ea05db3480910beb600b61bdfbb1574ab876220",
-      "line_count": 2182,
+      "sha256": "0d5d4f826f1fe33313565eaafb0ed405ed92c57ccaea60cd71c2361e99c28669",
+      "line_count": 2187,
       "role": "public backend graph, typed capability decisions including dependency classification, live probe wiring and platform factory fallback receipts"
     },
     {
@@ -247,7 +247,7 @@
     },
     {
       "path": "artifacts/unsafe_boundary_ledger_v1.json",
-      "sha256": "f32cea1f0abb4ae8ce61d91caf22c5b812d05793cf7e2ecfe899d4a0de1bd8d9",
+      "sha256": "c609c6f8b4b4baa9861b875bccdb7a49b747a33e1eb91a5e2ed0bc8b292be7ce",
       "line_count": 6338,
       "role": "machine inventory of low-level reactor and harness boundaries"
     },

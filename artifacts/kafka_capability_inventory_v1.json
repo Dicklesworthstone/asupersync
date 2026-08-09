@@ -108,8 +108,8 @@
     {
       "pin_id": "KAFKA-PIN-CAPABILITY-REGISTRY",
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "record_count": 6917,
-      "sha256": "e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2",
+      "record_count": 6929,
+      "sha256": "97f9ebcc94a9cd19c64ec63e76261ef7add4172dca055914a5121f773083a90b",
       "role": "corrected CAP-KAFKA authority and graph mapping",
       "pin_state": "K0_1_CORRECTED"
     },
@@ -117,7 +117,7 @@
       "pin_id": "KAFKA-PIN-CAPABILITY-REGISTRY-DOC",
       "path": "docs/dependency_capability_registry.md",
       "record_count": 212,
-      "sha256": "4bd46b6490a4b562c0b11f1b3eb6b95b3cc0eb2aa19a7f4bb7e83ba4e9b397dc",
+      "sha256": "e17ec45b39921adcd495692f6741a2f55578a798b360c68ef989fffe0f88471d",
       "role": "corrected human registry companion",
       "pin_state": "K0_1_CORRECTED"
     },

@@ -947,6 +947,28 @@ impl ExactImagePlatformChild {
                     "exact-image process group no longer exists",
                 ))
             }
+            // Darwin refuses to signal a zombie, and `killpg` reports `EPERM`
+            // only when *no* group member could be signalled. For a group this
+            // capability spawned unprivileged, every live descendant is
+            // signalable, so `EPERM` means the group has decayed to unreaped
+            // zombies (an exited leader whose status the caller has not
+            // collected yet). Confirm by reaping the leader non-blockingly —
+            // `try_wait` caches the status for the caller — and only then
+            // report the group gone; a still-live leader keeps `EPERM` a real
+            // error. Linux signals zombies successfully and never takes this
+            // path.
+            #[cfg(target_os = "macos")]
+            Err(nix::errno::Errno::EPERM) => match self.try_wait() {
+                Ok(Some(_)) => {
+                    self.tree_terminated = true;
+                    Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "exact-image process group no longer exists",
+                    ))
+                }
+                Ok(None) => Err(nix_errno_to_io(nix::errno::Errno::EPERM)),
+                Err(error) => Err(error),
+            },
             Err(error) => Err(nix_errno_to_io(error)),
         }
     }
@@ -1054,6 +1076,25 @@ fn add_exact_image_close_action(
     Ok(())
 }
 
+/// Directional-hygiene shutdown for the exact-image stdio socket pairs.
+///
+/// Darwin reports `ENOTCONN` when asked to shut down the read side of a
+/// socket whose peer has already shut down the matching write side: the
+/// direction this call wants closed is already closed, so that report is
+/// this call's success condition, not a failure. Linux accepts the same
+/// sequence and returns `Ok`. These sockets come straight from
+/// `UnixStream::pair()`, so no other source of `ENOTCONN` is reachable.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn shutdown_exact_image_direction(
+    stream: &UnixStream,
+    direction: std::net::Shutdown,
+) -> io::Result<()> {
+    match stream.shutdown(direction) {
+        Err(error) if error.raw_os_error() == Some(libc::ENOTCONN) => Ok(()),
+        other => other,
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn spawn_exact_image_unix(command: &ExactImageCommand) -> Result<ExactImageChild, ProcessError> {
     use std::net::Shutdown;
@@ -1068,12 +1109,12 @@ fn spawn_exact_image_unix(command: &ExactImageCommand) -> Result<ExactImageChild
     let (parent_stdin, child_stdin) = UnixStream::pair()?;
     let (parent_stdout, child_stdout) = UnixStream::pair()?;
     let (parent_stderr, child_stderr) = UnixStream::pair()?;
-    parent_stdin.shutdown(Shutdown::Read)?;
-    child_stdin.shutdown(Shutdown::Write)?;
-    parent_stdout.shutdown(Shutdown::Write)?;
-    child_stdout.shutdown(Shutdown::Read)?;
-    parent_stderr.shutdown(Shutdown::Write)?;
-    child_stderr.shutdown(Shutdown::Read)?;
+    shutdown_exact_image_direction(&parent_stdin, Shutdown::Read)?;
+    shutdown_exact_image_direction(&child_stdin, Shutdown::Write)?;
+    shutdown_exact_image_direction(&parent_stdout, Shutdown::Write)?;
+    shutdown_exact_image_direction(&child_stdout, Shutdown::Read)?;
+    shutdown_exact_image_direction(&parent_stderr, Shutdown::Write)?;
+    shutdown_exact_image_direction(&child_stderr, Shutdown::Read)?;
 
     let mut actions = nix::spawn::PosixSpawnFileActions::init()
         .map_err(|error| ProcessError::Io(nix_errno_to_io(error)))?;

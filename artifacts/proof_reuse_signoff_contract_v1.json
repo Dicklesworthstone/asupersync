@@ -47,7 +47,7 @@
     },
     {
       "path": "artifacts/proof_lane_manifest_v1.json",
-      "sha256": "288d060dac42737016bbd7fca6efbb78b64f3999f77aeaa69fd2c31b0a9cf4b9",
+      "sha256": "48aa00d8a55544da5609b81c959c108aada1797eaffaf079bca975b0ed734fa0",
       "covers": "RCH lane command policy and cache-hit claim scopes"
     },
     {

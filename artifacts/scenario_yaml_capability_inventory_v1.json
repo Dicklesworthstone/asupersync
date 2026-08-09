@@ -116,7 +116,7 @@
     },
     {
       "path": "examples/metadata.json",
-      "sha256": "649df89c44cb619f5511b70a23032d1e2e0eb898580cb88264a861bb6dcf5843",
+      "sha256": "d12e92a1dd6ea27a9df3e58336f6483726a8fd9e13290cd1caf8aebecb502c84",
       "line_count": 908
     },
     {
@@ -206,12 +206,12 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2",
-      "line_count": 6917
+      "sha256": "97f9ebcc94a9cd19c64ec63e76261ef7add4172dca055914a5121f773083a90b",
+      "line_count": 6929
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "ad9cc1584a64fdda3728fb12df2f996ac28a4c4015cac99246a11e4d9e3bb7c3",
+      "sha256": "c5f2dd1d5a135b53751625fb9bf4fe2787d7691d239c5c6cb2d2e40e2c37873a",
       "line_count": 3210
     },
     {
