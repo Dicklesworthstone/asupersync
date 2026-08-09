@@ -798,7 +798,7 @@ fn web_framework_wave2_run() -> io::Result<Vec<Value>> {
 
 #[cfg(feature = "tracing-integration")]
 #[test]
-fn e2e_error_handler_contains_construction_and_poll_panics_with_redacted_diagnostics() {
+fn error_handler_boundary_contains_construction_and_poll_panics_with_redacted_diagnostics() {
     use asupersync::web::negotiate::{ErrorHandlerConfig, ErrorHandlerMiddleware};
     use tracing_subscriber::prelude::*;
 

@@ -626,7 +626,7 @@ fn validate_a5_receipt(inventory: &Value) -> Result<(), String> {
         || !text(negotiate_boundary, "operator_diagnostic").contains("ASUP-E502")
         || text(middleware_boundary, "source_status")
             != "CURRENT_SOURCE_COMPILED_SHARED_HELPER_EXECUTED"
-        || text(negotiate_boundary, "source_status") != "REAL_WEB_E2E_PASSED"
+        || text(negotiate_boundary, "source_status") != "HANDLER_BOUNDARY_TEST_PASSED"
         || !text(middleware_boundary, "client_response").contains("ASUP-E502")
         || !text(negotiate_boundary, "client_response").contains("ASUP-E502")
     {
@@ -642,7 +642,7 @@ fn validate_a5_receipt(inventory: &Value) -> Result<(), String> {
         "catch_unwind_task_quiesces_and_resolves_orphaned_obligation_in_lab",
         "error_handler_catches_construction_panic",
         "error_handler_disabled_propagates_construction_panic",
-        "e2e_error_handler_contains_construction_and_poll_panics_with_redacted_diagnostics",
+        "error_handler_boundary_contains_construction_and_poll_panics_with_redacted_diagnostics",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -684,7 +684,7 @@ fn validate_a5_receipt(inventory: &Value) -> Result<(), String> {
     let expected_lanes: BTreeSet<String> = [
         "current-panic-boundary-source-check",
         "owned-catch-unwind-unit-and-lab",
-        "real-web-error-handler-construction-and-poll-panic",
+        "error-handler-boundary-construction-and-poll-panic",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -1329,7 +1329,8 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             != "NESTED_PANIC_PRECEDENCE_AND_CLEANUP_PASSED"
         || text(find_row(gaps, "gap_id", "FUT-A5-GAP-21"), "state")
             != "STABLE_DIAGNOSTIC_AND_RESPONSE_BOUNDARY_DECIDED"
-        || text(find_row(gaps, "gap_id", "FUT-A5-GAP-22"), "state") != "REAL_WEB_E2E_PASSED"
+        || text(find_row(gaps, "gap_id", "FUT-A5-GAP-22"), "state")
+            != "HANDLER_BOUNDARY_TEST_PASSED"
     {
         return Err("A5 gap dispositions must match the focused acceptance receipts".to_owned());
     }

@@ -460,20 +460,22 @@ Focused remote execution under explicit `-C panic=unwind` admission covers
 pending/wake/ready forwarding, original-payload preservation, terminal
 no-repoll, unpolled drop, nested poll/drop panic precedence, cleanup-only
 panic conversion, LabRuntime obligation resolution and quiescence,
-construction-panic policy, and a real ErrorHandler web request. The web E2E
-proves exact-once future drop, a redacted client artifact, and correlated
-structured diagnostics.
+construction-panic policy, and a direct `ErrorHandlerMiddleware`
+request/response boundary. The handler-boundary test proves exact-once future
+drop, a redacted response, and correlated structured diagnostics. It does not
+exercise a listener, router, or transport.
 
 The four A5 gaps now carry terminal scoped dispositions:
 
 - `FUT-A5-GAP-19`: `FOCUSED_UNIT_AND_LAB_EXECUTION_PASSED`;
 - `FUT-A5-GAP-20`: `NESTED_PANIC_PRECEDENCE_AND_CLEANUP_PASSED`;
 - `FUT-A5-GAP-21`: `STABLE_DIAGNOSTIC_AND_RESPONSE_BOUNDARY_DECIDED`;
-- `FUT-A5-GAP-22`: `REAL_WEB_E2E_PASSED`.
+- `FUT-A5-GAP-22`: `HANDLER_BOUNDARY_TEST_PASSED`.
 
 This closes A5 but does not authorize dependency cutover. It does not claim
 panic containment under an abort strategy, broad web/workspace health, or
-behavior outside the two named web boundaries and the owned helper.
+behavior outside the two named web boundaries and the owned helper. In
+particular, it does not claim listener/router/transport end-to-end coverage.
 
 ## Consumed helper semantics
 
@@ -657,10 +659,9 @@ The FUT A4 receipt likewise does not turn nine source-authored cases into
 executed proof, implement `race`, treat comment-only `join_all` as live, prove
 deterministic fairness, or equate dropping a generic future with structured
 loser drain and quiescence.
-The FUT A5 receipt likewise does not turn the owned poll wrapper or migrated
-source sites into executed proof, contain destructor panics, define nested
-payload precedence, prove cleanup or obligation drain, establish a stable
-diagnostic and `Outcome` mapping at both sites, or prove the real web and
-panic-unwind lanes.
+The FUT A5 receipt proves the named owned-wrapper and direct handler-boundary
+lanes under `panic=unwind`; it does not prove listener/router/transport
+end-to-end behavior, abort-strategy containment, broad web or workspace health,
+performance, or dependency cutover readiness.
 
 <!-- END FUTURES LITE CAPABILITY INVENTORY -->

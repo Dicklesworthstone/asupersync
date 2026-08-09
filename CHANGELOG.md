@@ -48,25 +48,28 @@ _No changes yet._
 
 ### Runtime correctness
 
-- **Owned futures contain construction, polling, and terminal cleanup panics.**
-  The internal `catch_unwind` boundary owns its future until one terminal drop,
+- **Owned poll wrappers contain polling and terminal cleanup panics.** The
+  internal `catch_unwind` boundary owns its future until one terminal drop,
   never polls after completion, preserves the polling panic when cleanup also
-  panics, and surfaces cleanup-only panics. Deterministic LabRuntime coverage
-  verifies that the exercised region returns to quiescence.
+  panics, and surfaces cleanup-only panics. The web boundaries separately
+  contain synchronous handler-construction panics. Deterministic LabRuntime
+  coverage verifies that the exercised region returns to quiescence.
 
 ### Web diagnostics
 
-- **Error-handler panics become structured `ASUP-E502` failures.** Middleware
-  and content-negotiation construction/poll failures preserve method, path,
-  trace, server, phase, and panic details in structured logs while returning a
-  redacted internal-server-error response to the client.
+- **Error-handler panics become `ASUP-E502` failures.** Middleware and
+  content-negotiation construction/poll failures return a redacted
+  internal-server-error response. With `tracing-integration` enabled, their
+  structured events include method, path, trace identifier, and panic details.
 
 ### Verification boundary
 
 - **The acceptance proof is focused and executable.** Owned-future unit/Lab
-  cases, a real web request path, and the futures-lite capability contract
-  passed before release preparation. This release does not claim the later FUT
-  A6-A9 dependency cutover or removal of the incumbent compatibility crate.
+  cases, a direct `ErrorHandlerMiddleware` request/response boundary, and the
+  futures-lite capability contract passed before release preparation. This is
+  not listener/router/transport end-to-end evidence, and this release does not
+  claim the later FUT A6-A9 dependency cutover or removal of the incumbent
+  compatibility crate.
 
 ---
 
