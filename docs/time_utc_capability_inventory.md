@@ -543,8 +543,8 @@ literal-operation, literal-source, in-file derived-row, and cross-file consumer
 projections; direct timestamp lineage checks; the complete 30-field public
 carrier disposition matrix; the complete seven-field test-profile carrier
 matrix; terminal downstream-owner routing reconciliation; and independent
-static cross-review. It did not execute the companion contract. The resulting
-bounded static inventory meets A1 acceptance with zero unresolved static gaps,
+static cross-review. The earlier pass was source-pin maintenance only; the bounded
+static inventory meets A1 acceptance with zero unresolved static gaps,
 and `bead_close_allowed=true` permits closing A1 while retaining every A2-A8
 behavioral obligation and the incumbent dependencies.
 
