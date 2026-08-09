@@ -89,7 +89,7 @@
       "SerializationFormat::Custom"
     ],
     "totals": {
-      "rust_files": 4334,
+      "rust_files": 4335,
       "serde_json::": 6335,
       "rmp_serde::": 70,
       "bincode::": 32,
@@ -145,7 +145,7 @@
       {
         "path": "conformance",
         "classification": "CONFORMANCE_EVIDENCE; no core-runtime production compatibility claim",
-        "rust_files": 95,
+        "rust_files": 96,
         "serde_json::": 260,
         "rmp_serde::": 0,
         "bincode::": 0,

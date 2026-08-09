@@ -79,9 +79,9 @@
       "authority_revision_state": "PRESENT_MATCHES_BASELINE",
       "inventory_state": "K0_3_LOCAL_STATIC_AND_CALL_SITE_CENSUS_FROZEN_EXTERNAL_UNKNOWN",
       "files": [
-        {"role":"ARTIFACT","path":"artifacts/kafka_downstream_user_journey_inventory_v1.json","byte_count":1171766,"record_count":17987,"sha256":"d01f83f46aafacf44540a6e4706332dfeb381440efd91bb9a8fab5819826438f"},
+        {"role":"ARTIFACT","path":"artifacts/kafka_downstream_user_journey_inventory_v1.json","byte_count":1171766,"record_count":17987,"sha256":"efa2df90709235cd2f351ff1d7963e48fe233acbb71245c6ebd2081ea750f090"},
         {"role":"DOCUMENT","path":"docs/kafka_downstream_user_journey_inventory.md","byte_count":40663,"record_count":612,"sha256":"12ccb95710c004751634d7c41218a0d6855675870b4246ab680aa0eb63d90434"},
-        {"role":"CONTRACT","path":"tests/kafka_downstream_user_journey_inventory_contract.rs","byte_count":216695,"record_count":5381,"sha256":"02446d5726e5e4ea04c8b778565221d5ea6577ed429bdd5dc62b153c9004abf7"}
+        {"role":"CONTRACT","path":"tests/kafka_downstream_user_journey_inventory_contract.rs","byte_count":216695,"record_count":5381,"sha256":"3c96ecadeedc557c7e0fe95c8d0bc6e30eecc22614b2e149d2e70f8f40efc570"}
       ]
     },
     {

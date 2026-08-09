@@ -62,9 +62,9 @@
   "excluded_fuzz_workspace": {
     "manifest_path": "fuzz/Cargo.toml",
     "lockfile_path": "fuzz/Cargo.lock",
-    "manifest_sha256": "1a90bcc6869fcca866b6572f6c571b42dcdbcea43960211901ed21bdad83f21f",
+    "manifest_sha256": "857925379ab7068f3faf94435e44b87adfc96c2d716f19b5c1cfdffbbfbd580d",
     "lockfile_sha256": "d91db6afd228ec60aa57d5782cbe5ae3bf7170f5e2c37dd15280e7b476e95271",
-    "manifest_line_count": 6226,
+    "manifest_line_count": 6233,
     "lockfile_line_count": 3731,
     "cargo_deny_status": "blocked_stale_lockfile",
     "cargo_deny_blocker": "cargo metadata --locked requires updating fuzz/Cargo.lock; a dry run would relock 165 packages, which is outside this policy-only bead.",

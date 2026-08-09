@@ -2637,7 +2637,7 @@ fn validate_post_a1_provenance_refresh(inventory: &Value) -> Result<(), String> 
         || text(baseline, "previous_sha256") != "88575b016105828ce8a3687ef6be2509e0412dee949cda8"
         || baseline.get("previous_line_count").and_then(Value::as_u64) != Some(1357)
         || text(baseline, "current_sha256")
-            != "ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4"
+            != "ad9cc1584a64fdda3728fb12df2f996ac28a4c4015cac99246a11e4d9e3bb7c3"
         || baseline.get("current_line_count").and_then(Value::as_u64) != Some(3210)
         || baseline.get("added_line_count").and_then(Value::as_u64) != Some(1853)
         || baseline.get("deleted_line_count").and_then(Value::as_u64) != Some(0)

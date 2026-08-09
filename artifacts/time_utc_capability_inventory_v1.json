@@ -211,7 +211,7 @@
       },
       {
         "path": "artifacts/dependency_capability_baseline_v1.json",
-        "sha256": "ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4",
+        "sha256": "ad9cc1584a64fdda3728fb12df2f996ac28a4c4015cac99246a11e4d9e3bb7c3",
         "line_count": 3210
       },
       {
@@ -5278,7 +5278,7 @@
         "classification": "APPEND_ONLY_INDEPENDENT_STATIC_AUDITS",
         "previous_sha256": "88575b016105828ce8a3687ef6be2509e0412dee949cda8",
         "previous_line_count": 1357,
-        "current_sha256": "ef55131b286ca2a8802e28c52a3dab3bfbb3973b072134b7d7e4325e043219f4",
+        "current_sha256": "ad9cc1584a64fdda3728fb12df2f996ac28a4c4015cac99246a11e4d9e3bb7c3",
         "current_line_count": 3210,
         "added_line_count": 1853,
         "deleted_line_count": 0,
