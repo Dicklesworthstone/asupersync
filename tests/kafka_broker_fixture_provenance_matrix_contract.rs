@@ -184,7 +184,7 @@ const DIRECT_FIXTURE_PINS: &[(&str, &str, u64, u64, &str)] = &[
     ),
     (
         "tests/kafka_incumbent_semantics_matrix_contract.rs",
-        "116dce2e0b8d7e55986ecd801e4d639be4df43ab7bf0371701168500aa6c3204",
+        "ec0000bc19dbf8ecf7506bdbe4c0a5561a0527b86990690d4c092f6aa7bd7c7f",
         69_501,
         1_696,
         "UTF8_LINES",
