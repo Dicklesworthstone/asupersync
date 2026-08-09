@@ -65,7 +65,7 @@
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
       "byte_count": 29494,
       "record_count": 284,
-      "sha256": "e6394c2a1c487746df44e0877287412d530113d3b83c4122cd13b16845ef5032"
+      "sha256": "dc45af3b308e9d4ce75ce08e8e9f6a4f5743ea35d5945f34d80bd1cedbb7feab"
     },
     {
       "input_id": "K1-INPUT-K0-5-DOCUMENT",
@@ -81,7 +81,7 @@
       "path": "tests/kafka_k0_baseline_disposition_contract.rs",
       "byte_count": 106003,
       "record_count": 2599,
-      "sha256": "80e520df9445dddf79abdc132f5210dca148f294f5deb1f8105a2e48f6c44f26"
+      "sha256": "42b236b3af8c359583636669adfcc29b50bef6564a22bcecc32a4ef3fea4acd0"
     },
     {
       "input_id": "K1-INPUT-ADR",
@@ -119,9 +119,9 @@
       "input_id": "K1-INPUT-MANIFEST",
       "role": "CURRENT_FEATURE_GRAPH_TRUTH",
       "path": "Cargo.toml",
-      "byte_count": 37107,
-      "record_count": 1038,
-      "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb"
+      "byte_count": 37394,
+      "record_count": 1051,
+      "sha256": "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239"
     },
     {
       "input_id": "K1-INPUT-RECORD-BATCH-CODEC",

@@ -18,7 +18,7 @@ use std::path::PathBuf;
 const ARTIFACT_PATH: &str = "artifacts/kafka_k0_baseline_disposition_v1.json";
 const DOC_PATH: &str = "docs/kafka_k0_baseline_disposition.md";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
-const ARTIFACT_SHA256: &str = "e6394c2a1c487746df44e0877287412d530113d3b83c4122cd13b16845ef5032";
+const ARTIFACT_SHA256: &str = "dc45af3b308e9d4ce75ce08e8e9f6a4f5743ea35d5945f34d80bd1cedbb7feab";
 const DOC_SHA256: &str = "1c0eea16e7825a5851d2bd5adf8077ae5715d1ce4373bf5f61db42b6b7b78571";
 const ARTIFACT_ID: &str = "kafka-k0-baseline-disposition-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
@@ -163,7 +163,7 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.1",
         role: "artifact_file",
         path: "artifacts/kafka_capability_inventory_v1.json",
-        sha256: "b9e62e3f419309bda14a91739d42dc347293e6d92b4c5c3678c342bfb3378933",
+        sha256: "9e7549e2b07e9c95d8a6ab94917bfac4f7b237978b484465b0c340dba20363c5",
         byte_count: 41_921,
         record_count: 1_015,
     },
@@ -187,7 +187,7 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.2",
         role: "artifact_file",
         path: "artifacts/kafka_incumbent_semantics_matrix_v1.json",
-        sha256: "b36a2a28626f10f54f46963fb96929ba12849af2d2ec6b8892adbcc03b105432",
+        sha256: "24767d4c09d821ddfeff9b3b8f3a5ce7273e65442bb54266f3355cc1acd66e86",
         byte_count: 228_933,
         record_count: 2_560,
     },
@@ -203,7 +203,7 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.2",
         role: "contract_file",
         path: "tests/kafka_incumbent_semantics_matrix_contract.rs",
-        sha256: "116dce2e0b8d7e55986ecd801e4d639be4df43ab7bf0371701168500aa6c3204",
+        sha256: "ec0000bc19dbf8ecf7506bdbe4c0a5561a0527b86990690d4c092f6aa7bd7c7f",
         byte_count: 69_501,
         record_count: 1_696,
     },
@@ -211,7 +211,7 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.3",
         role: "artifact_file",
         path: "artifacts/kafka_downstream_user_journey_inventory_v1.json",
-        sha256: "a982c4bee1a162ec2ce5155ffa67a3e8240f79937533b1628f25edaaabdf7051",
+        sha256: "d01f83f46aafacf44540a6e4706332dfeb381440efd91bb9a8fab5819826438f",
         byte_count: 1_171_766,
         record_count: 17_987,
     },
@@ -227,7 +227,7 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.3",
         role: "contract_file",
         path: "tests/kafka_downstream_user_journey_inventory_contract.rs",
-        sha256: "8979c3b35320454125dd59158553b0ff6bfbb35d52960babdb784b7b9f936af4",
+        sha256: "02446d5726e5e4ea04c8b778565221d5ea6577ed429bdd5dc62b153c9004abf7",
         byte_count: 216_695,
         record_count: 5_381,
     },
@@ -235,7 +235,7 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.4",
         role: "artifact_file",
         path: "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
-        sha256: "c8fd86d274daaba937b209d1e3714735ed4f3fe62eadf674294bd495f251e4ef",
+        sha256: "d9b4bd30cd5ceed0c473861fb2432639f9322d4f91821e3515e475cd369b0761",
         byte_count: 119_250,
         record_count: 2_187,
     },
@@ -243,7 +243,7 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.4",
         role: "document_file",
         path: "docs/kafka_broker_fixture_provenance_matrix.md",
-        sha256: "e9b4e04d8d3dd5ccf967182dabcb9f1e16cb712e7a154123d82bfe0318a201a9",
+        sha256: "80f76324a74a536d23552d3ded294bf2fbe4448de24adaa93d872bf203378f40",
         byte_count: 25_259,
         record_count: 346,
     },
@@ -251,7 +251,7 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.4",
         role: "contract_file",
         path: "tests/kafka_broker_fixture_provenance_matrix_contract.rs",
-        sha256: "9030f503c59aee4d77047799ca547ba9bad7cbc60cb253c942c489329a34ec41",
+        sha256: "4914166fd5fe5b193ab6da5d730d1f28d73850e552a1af06d7445c5513365db4",
         byte_count: 129_665,
         record_count: 3_462,
     },

@@ -84,7 +84,7 @@
   "source_contracts": [
     {
       "path": "artifacts/typed_format_registry_v1.json",
-      "sha256": "80e3b81889bfd12d7481cd94c2397db21a096ca020c48a0b56f2797aa8940e8d",
+      "sha256": "46506a00b476a76ace572268fe06c371d9ccda80491cf3fbfe41a7201037507d",
       "role": "canonical row-level inventory, pins, corpora, consumers, and A6 decisions"
     },
     {

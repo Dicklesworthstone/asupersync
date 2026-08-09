@@ -56,8 +56,12 @@ const ROOT_CLI_REFRESH_REVISIONS: &[&str] = &[
     "fbbd4d065ae4768b84e4161a00d10e5acba04b39",
     "75778fbf0846be2d3bc965a2809a705aeb1dfe25",
     "ab1bdba3f6a303da9d51216cb2b8794395daed95",
+    "0b2c1beaa0447d9e1e7d26f4c598ef68a1fdd087",
 ];
-const POSTGRES_REFRESH_REVISIONS: &[&str] = &["2e89fda041c6a5bb8b0c2907b3fe76a068180280"];
+const POSTGRES_REFRESH_REVISIONS: &[&str] = &[
+    "2e89fda041c6a5bb8b0c2907b3fe76a068180280",
+    "0b2c1beaa0447d9e1e7d26f4c598ef68a1fdd087",
+];
 const SEMANTIC_CONSUMER_BOUNDARY: &str = concat!(
     "Include nonliteral consumers through the first semantic compare, arithmetic, format, ",
     "serialize, persist, retain, return, extract, or embed boundary in a Chrono-bearing ",
@@ -2769,11 +2773,11 @@ fn validate_post_a1_cli_output_extension(inventory: &Value) -> Result<(), String
             "03ae793105ce744c10b878d78d4d0723d23aa81f",
             "397f3800f4a40ccb4f25366bb10ce641d12b4947b9e1b230359db69c5af1e283",
             16_700,
-            "ab1bdba3f6a303da9d51216cb2b8794395daed95",
-            "8415296574e31367ea2d542082fa7dffd4ec400923b244ed730ae3db02b30d89",
-            16_799,
-            127,
-            28,
+            "0b2c1beaa0447d9e1e7d26f4c598ef68a1fdd087",
+            "39719e72f1c00122ec4730aab2e2404086292ac46ced4e9290bb206a3b618ec7",
+            16_791,
+            116,
+            25,
             "INDEPENDENT_REPLAY_ARTIFACT_AND_DIAGNOSTIC_CHANGES",
             ROOT_CLI_REFRESH_REVISIONS,
         ),
@@ -2782,10 +2786,10 @@ fn validate_post_a1_cli_output_extension(inventory: &Value) -> Result<(), String
             "e9705807ec1b5079d7da267d63ffba179314ff41",
             "8794fe1b0ad93d741d576c05aa1ccfe09ddd82eff0a25429ede34a909ce2dc27",
             19_716,
-            "2e89fda041c6a5bb8b0c2907b3fe76a068180280",
-            "ddc35a5809d998391a0e6ffe6f995fc9f4e9919a39e5ad7d71dd4b644c049a75",
-            19_776,
-            87,
+            "0b2c1beaa0447d9e1e7d26f4c598ef68a1fdd087",
+            "c4050dea66a46e0719ec53925beb64db42997a7612ea9de0cc9e9e775513e32d",
+            19_779,
+            90,
             27,
             "INDEPENDENT_READ_CANCELLATION_TEST_SEAM",
             POSTGRES_REFRESH_REVISIONS,
@@ -3303,8 +3307,8 @@ fn validate_post_a1_conformance_raptorq_lineage_extension(inventory: &Value) -> 
         .ok_or_else(|| "line_sensitive_pin_reconciliation must be an object".to_owned())?;
     if text(reconciliation, "path") != "src/database/postgres.rs"
         || text(reconciliation, "current_sha256")
-            != "ddc35a5809d998391a0e6ffe6f995fc9f4e9919a39e5ad7d71dd4b644c049a75"
-        || number(reconciliation, "current_line_count") != 19_776
+            != "c4050dea66a46e0719ec53925beb64db42997a7612ea9de0cc9e9e775513e32d"
+        || number(reconciliation, "current_line_count") != 19_779
         || number(reconciliation, "uniform_line_delta") != 60
         || number(reconciliation, "refreshed_explicit_anchor_count") != 3
         || number(reconciliation, "refreshed_direct_source_reference_count") != 1
@@ -4931,8 +4935,8 @@ fn time_utc_inventory_is_exact_and_source_pinned() {
         "lines 254 and 464",
         "12 exact derived consumer IDs",
         "seven test-profile",
-        "+127/-28",
-        "+87/-27",
+        "+116/-25",
+        "+90/-27",
         "literal-source",
         "bounded lexical scan of production source finds zero external",
         "This is not compiler-resolved name analysis.",

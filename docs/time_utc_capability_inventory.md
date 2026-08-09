@@ -196,9 +196,10 @@ the historical 68-path pin set and A1 revision. The later
 `TIME-A1-ROOT-CLI-JSON-2026-08-06` extension adds `src/cli/output.rs` as the
 69th current source pin solely to bind the generic JSON-value anchor. Its pin
 review also refreshed two existing paths after exact Git classification: the
-root CLI changed by `+127/-28` lines solely in replay artifact and diagnostic
-work, while PostgreSQL changed by `+87/-27` lines solely in a read-cancellation
-seam and its test. Neither diff changes a TIME acceptance semantic. Neither
+root CLI changed by `+116/-25` lines through replay artifact, diagnostic, and
+formatting work, while PostgreSQL changed by `+90/-27` lines through its
+read-cancellation seam, test, and formatting. Neither diff changes a TIME
+acceptance semantic. Neither
 receipt completes the derived-consumer inventory, reruns A1 evidence, or
 changes the then-current `bead_close_allowed=false` state.
 

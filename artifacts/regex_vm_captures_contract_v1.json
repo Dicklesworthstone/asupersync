@@ -8,10 +8,10 @@
   "generated_at_utc": "2026-07-26T05:25:00Z",
   "authority": {
     "compiler_terminal_path": "artifacts/regex_compiler_terminal_receipt_v1.json",
-    "compiler_terminal_sha256": "677f5a8f1df756299d72a4e816a212c1d75e8f95e185beade4e9b45402ecdeb4",
+    "compiler_terminal_sha256": "a3f1aac48c1ffa1857ea07dcc7dc7c872d0ea4fed1c60cdb078c7e1a6fd5dcd4",
     "compiler_disposition": "KEEP_INCUMBENT_DEFER",
     "priority_capture_lowering_path": "artifacts/regex_priority_capture_lowering_contract_v1.json",
-    "priority_capture_lowering_sha256": "f944e4904990ced328e5576f08604a8019f84785161630f9d8d847aacf1fb7c5",
+    "priority_capture_lowering_sha256": "e011cc0b24479805d937baec994e4d11015b520cff6698d83b7f25a2d6c244b9",
     "predecessor_vm_path": "artifacts/regex_vm_core_contract_v1.json",
     "production_cutover_eligible": false
   },

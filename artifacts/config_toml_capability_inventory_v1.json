@@ -44,8 +44,8 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
-      "line_count": 1038
+      "sha256": "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239",
+      "line_count": 1051
     },
     {
       "path": "src/runtime/env_config.rs",

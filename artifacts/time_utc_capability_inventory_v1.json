@@ -51,12 +51,12 @@
     "files": [
       {
         "path": "Cargo.toml",
-        "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
-        "line_count": 1038
+        "sha256": "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239",
+        "line_count": 1051
       },
       {
         "path": "Cargo.lock",
-        "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+        "sha256": "194f7d634555c129adb4d72a0a842275de47638f87c13c483361bfaaeec3c22f",
         "line_count": 4666
       },
       {
@@ -66,7 +66,7 @@
       },
       {
         "path": "conformance/Cargo.toml",
-        "sha256": "1b734acb9c81e0bbf10b26c5b8dddbd0131d9e9915d447f349567ce2d4be2bfb",
+        "sha256": "0eb7f799632b162c740478bd25224a407ca083c1adf8cbe51f661b182985f8e9",
         "line_count": 213
       },
       {
@@ -216,7 +216,7 @@
       },
       {
         "path": "artifacts/dependency_api_adr_registry_v1.json",
-        "sha256": "ed172c361aa25c3bd7156dfc731a6a90944494a5fd1c7c388f0ab538acef1973",
+        "sha256": "4765bb6d17b676fd63529ee75047477656851474300601e05cbc5492b32f9dbc",
         "line_count": 6831
       },
       {
@@ -261,8 +261,8 @@
       },
       {
         "path": "src/bin/asupersync.rs",
-        "sha256": "8415296574e31367ea2d542082fa7dffd4ec400923b244ed730ae3db02b30d89",
-        "line_count": 16799
+        "sha256": "39719e72f1c00122ec4730aab2e2404086292ac46ced4e9290bb206a3b618ec7",
+        "line_count": 16791
       },
       {
         "path": "src/cli/mod.rs",
@@ -271,7 +271,7 @@
       },
       {
         "path": "src/cli/atp_command_tree.rs",
-        "sha256": "b79d4f01345274f6260d3ce911e48e2c2d2cd7c0c49ff7562f5ecf1a58d2e603",
+        "sha256": "72f9659b1dd2f7ee1e05b30eb285bde1bafd965911c87675d52148fc86c6bb46",
         "line_count": 1706
       },
       {
@@ -316,8 +316,8 @@
       },
       {
         "path": "src/database/postgres.rs",
-        "sha256": "ddc35a5809d998391a0e6ffe6f995fc9f4e9919a39e5ad7d71dd4b644c049a75",
-        "line_count": 19776
+        "sha256": "c4050dea66a46e0719ec53925beb64db42997a7612ea9de0cc9e9e775513e32d",
+        "line_count": 19779
       },
       {
         "path": "src/messaging/redis.rs",
@@ -336,8 +336,8 @@
       },
       {
         "path": "src/bin/offline_tuner.rs",
-        "sha256": "f7a240cac88da235924221ed88a93bd4059ee831c4ec530a58f1fa926e47e203",
-        "line_count": 652
+        "sha256": "1333ecb1172c084cd2ea3e768d37e585563d751d290d746f5b82cbe8d7037d74",
+        "line_count": 650
       },
       {
         "path": "src/trace/replay.rs",
@@ -5315,15 +5315,16 @@
         "previous_revision": "03ae793105ce744c10b878d78d4d0723d23aa81f",
         "previous_sha256": "397f3800f4a40ccb4f25366bb10ce641d12b4947b9e1b230359db69c5af1e283",
         "previous_line_count": 16700,
-        "current_revision": "ab1bdba3f6a303da9d51216cb2b8794395daed95",
-        "current_sha256": "8415296574e31367ea2d542082fa7dffd4ec400923b244ed730ae3db02b30d89",
-        "current_line_count": 16799,
-        "inserted_lines": 127,
-        "deleted_lines": 28,
+        "current_revision": "0b2c1beaa0447d9e1e7d26f4c598ef68a1fdd087",
+        "current_sha256": "39719e72f1c00122ec4730aab2e2404086292ac46ced4e9290bb206a3b618ec7",
+        "current_line_count": 16791,
+        "inserted_lines": 116,
+        "deleted_lines": 25,
         "change_revisions": [
           "fbbd4d065ae4768b84e4161a00d10e5acba04b39",
           "75778fbf0846be2d3bc965a2809a705aeb1dfe25",
-          "ab1bdba3f6a303da9d51216cb2b8794395daed95"
+          "ab1bdba3f6a303da9d51216cb2b8794395daed95",
+          "0b2c1beaa0447d9e1e7d26f4c598ef68a1fdd087"
         ],
         "classification": "INDEPENDENT_REPLAY_ARTIFACT_AND_DIAGNOSTIC_CHANGES",
         "time_acceptance_semantics_changed": false
@@ -5333,13 +5334,14 @@
         "previous_revision": "e9705807ec1b5079d7da267d63ffba179314ff41",
         "previous_sha256": "8794fe1b0ad93d741d576c05aa1ccfe09ddd82eff0a25429ede34a909ce2dc27",
         "previous_line_count": 19716,
-        "current_revision": "2e89fda041c6a5bb8b0c2907b3fe76a068180280",
-        "current_sha256": "ddc35a5809d998391a0e6ffe6f995fc9f4e9919a39e5ad7d71dd4b644c049a75",
-        "current_line_count": 19776,
-        "inserted_lines": 87,
+        "current_revision": "0b2c1beaa0447d9e1e7d26f4c598ef68a1fdd087",
+        "current_sha256": "c4050dea66a46e0719ec53925beb64db42997a7612ea9de0cc9e9e775513e32d",
+        "current_line_count": 19779,
+        "inserted_lines": 90,
         "deleted_lines": 27,
         "change_revisions": [
-          "2e89fda041c6a5bb8b0c2907b3fe76a068180280"
+          "2e89fda041c6a5bb8b0c2907b3fe76a068180280",
+          "0b2c1beaa0447d9e1e7d26f4c598ef68a1fdd087"
         ],
         "classification": "INDEPENDENT_READ_CANCELLATION_TEST_SEAM",
         "time_acceptance_semantics_changed": false
@@ -5494,8 +5496,8 @@
     ],
     "line_sensitive_pin_reconciliation": {
       "path": "src/database/postgres.rs",
-      "current_sha256": "ddc35a5809d998391a0e6ffe6f995fc9f4e9919a39e5ad7d71dd4b644c049a75",
-      "current_line_count": 19776,
+      "current_sha256": "c4050dea66a46e0719ec53925beb64db42997a7612ea9de0cc9e9e775513e32d",
+      "current_line_count": 19779,
       "uniform_line_delta": 60,
       "refreshed_explicit_anchor_count": 3,
       "refreshed_direct_source_reference_count": 1,

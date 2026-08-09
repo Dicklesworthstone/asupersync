@@ -81,8 +81,8 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
-      "line_count": 1038,
+      "sha256": "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239",
+      "line_count": 1051,
       "role": "existing spawn_throughput benchmark registration and feature gate"
     },
     {
@@ -105,13 +105,13 @@
     },
     {
       "path": "src/cx/cx.rs",
-      "sha256": "516af14e3110790d510943d4e329c1afb957d8257c73e2f4fb1b29d139b933a8",
+      "sha256": "f7fdf7931f1552cef4305a6d09d25b36061d2ef27052892e7d0afbd4e44ed0fa",
       "line_count": 7391,
       "role": "public structured spawn producer and take-once completion sender"
     },
     {
       "path": "src/cx/scope.rs",
-      "sha256": "4521de4139fbe9aabe42baba8da7b826dde4472025a32149325bd9490b687bec",
+      "sha256": "176b4340b144f88a40304f55d8afb40f9aa354e92590e6874ccf27636f5a9a57",
       "line_count": 3529,
       "role": "state-threaded structured spawn and input-order join_all"
     },

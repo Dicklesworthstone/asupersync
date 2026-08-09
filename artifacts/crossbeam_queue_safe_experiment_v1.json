@@ -263,18 +263,18 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "9ba1cd63bcaee1665f101d8804e5deae5e046313dab1735f69564c5def18280e",
-      "line_count": 1035
+      "sha256": "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239",
+      "line_count": 1051
     },
     {
       "path": "Cargo.lock",
-      "sha256": "a11ed9ec69a0e1822886fc6894c6d5e9c327e8a794c00700e96c25caeddd2cf4",
+      "sha256": "194f7d634555c129adb4d72a0a842275de47638f87c13c483361bfaaeec3c22f",
       "line_count": 4666
     },
     {
       "path": "src/channel/mpsc.rs",
-      "sha256": "ea58ac0b1d78738a4625f366be28e7fa91fadd0ef662446e761ded0b30bb338d",
-      "line_count": 6283
+      "sha256": "4cf8cb372493f93d8ec82b72edf565a23ba17a3c65a7a06e5c534a476c48fef7",
+      "line_count": 6353
     },
     {
       "path": "src/runtime/scheduler/global_queue.rs",
@@ -283,8 +283,8 @@
     },
     {
       "path": "src/runtime/blocking_pool.rs",
-      "sha256": "6bbf8cf9f31a911685195ed715622609bdbb3d395bdf1ab8ff82220e618ccf53",
-      "line_count": 3626
+      "sha256": "74cca2354df83980f1b68ebf19bd5f6a76b619e14b5abe90be3d9c7affbbbd02",
+      "line_count": 3816
     },
     {
       "path": "src/runtime/epoch_gc.rs",

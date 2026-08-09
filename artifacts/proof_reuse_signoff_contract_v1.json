@@ -52,7 +52,7 @@
     },
     {
       "path": "artifacts/proof_status_snapshot_v1.json",
-      "sha256": "97e438e202804b36c81fc15b45ba44f7626062b955610bd44fd071c07a8e256f",
+      "sha256": "6965235ed8273a7e85c91de081a6a7a75f6a87d4cd584c5ee0c6f3c3dfb16baa",
       "covers": "fresh pass, approved cache hit, rerun-required, blocked, no-win, and unsupported status rows"
     },
     {

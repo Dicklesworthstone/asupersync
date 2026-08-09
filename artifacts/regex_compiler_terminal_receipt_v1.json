@@ -38,25 +38,25 @@
     {
       "bead_id": "asupersync-5z2scg.8.3.2.4",
       "path": "artifacts/regex_semantic_terminal_receipt_v1.json",
-      "sha256": "0f6482523661aff2ded0450f569a871abff52e91f7645a79dc4281c1a4bafe08",
+      "sha256": "1d024432b80447bc4f7736b3634ebafb3add06f32d4102c4d06f47f05bc5cbd9",
       "disposition": "KEEP_INCUMBENT_DEFER"
     },
     {
       "bead_id": "asupersync-5z2scg.8.3.3.1",
       "path": "artifacts/regex_ir_schema_contract_v1.json",
-      "sha256": "fdf65488a6e0f2adce3facb5448d334a83d618d4885f7f5ebde924be601678db",
+      "sha256": "9392ee2d72d2d1db63a93f5c20ec43832382d59ea7991e2e8f9784d7d9f72b3a",
       "disposition": "STAGED_BOUNDED_IR_SCHEMA"
     },
     {
       "bead_id": "asupersync-5z2scg.8.3.3.2",
       "path": "artifacts/regex_ir_lowering_contract_v1.json",
-      "sha256": "6436b96a9e8ccac9254ce5351894dc17ef1caa19995d15cf4332b34f95b9563f",
+      "sha256": "f53da5222133290c3e0e4a991ea9ecc28c7bc6f1ea4540afbf80b9832e335381",
       "disposition": "STAGED_CHECKED_STRUCTURAL_LOWERING"
     },
     {
       "bead_id": "asupersync-5z2scg.8.3.3.3",
       "path": "artifacts/regex_priority_capture_lowering_contract_v1.json",
-      "sha256": "f944e4904990ced328e5576f08604a8019f84785161630f9d8d847aacf1fb7c5",
+      "sha256": "e011cc0b24479805d937baec994e4d11015b520cff6698d83b7f25a2d6c244b9",
       "disposition": "STAGED_PRIORITY_CAPTURE_LOWERING"
     }
   ],
@@ -93,11 +93,11 @@
     }
   ],
   "source_revisions": {
-    "cargo_toml_sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
-    "cargo_lock_sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
+    "cargo_toml_sha256": "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239",
+    "cargo_lock_sha256": "194f7d634555c129adb4d72a0a842275de47638f87c13c483361bfaaeec3c22f",
     "rust_toolchain_sha256": "7be955420e9a82164d4c4307e141035b29cd395ba6f621af32f3fddfb4013f63",
     "package": "asupersync",
-    "package_version": "0.4.0",
+    "package_version": "0.4.3",
     "edition": "2024",
     "pinned_toolchain": "nightly-2026-07-05"
   },

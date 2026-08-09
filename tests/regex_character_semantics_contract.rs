@@ -385,7 +385,7 @@ fn dependency_edge_is_exact_optional_and_already_locked() {
     assert!(lock.contains("name = \"regex-syntax\"\nversion = \"0.8.11\""));
     let root = lock
         .split("[[package]]")
-        .find(|package| package.contains("name = \"asupersync\"\nversion = \"0.4.0\""))
+        .find(|package| package.contains("name = \"asupersync\"\nversion = \"0.4.3\""))
         .expect("root package must exist");
     assert!(root.contains("\"regex-syntax\""));
 }

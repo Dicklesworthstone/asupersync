@@ -30,12 +30,12 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "f4262fc9ad8b51f802d88d8cd94c26f5efa8abdec5754b76e67a3a9d2ac77ccb",
-      "line_count": 1038
+      "sha256": "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239",
+      "line_count": 1051
     },
     {
       "path": "Cargo.lock",
-      "sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
+      "sha256": "194f7d634555c129adb4d72a0a842275de47638f87c13c483361bfaaeec3c22f",
       "line_count": 4666
     },
     {
@@ -102,8 +102,8 @@
       "files": [
         {
           "path": "src/lib.rs",
-          "sha256": "da098a27c3a46b8d630fa11755ec7eeeab8a38c15f04d986dd7b46e6aafabffd",
-          "line_count": 168
+          "sha256": "22ce17632d6a98843ebd6b9f855a430aef3ea6da07a6657e3311ad87b78c1b7f",
+          "line_count": 468
         },
         {
           "path": "src/sys/mod.rs",
@@ -132,8 +132,8 @@
         },
         {
           "path": "src/error.rs",
-          "sha256": "4e8b8e248aac111b056bed44692be0397daf9c34a39829309e58dbf12e0dc7a6",
-          "line_count": 28
+          "sha256": "4009e93a199d284abb1edf9727e73316641a404128c9bb9bdf816c66db982e69",
+          "line_count": 1659
         },
         {
           "path": "Cargo.toml.orig",

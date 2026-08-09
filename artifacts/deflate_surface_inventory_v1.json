@@ -635,18 +635,18 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "2b1141b8d3d465b6fd387025973a3ee3a2706aecfaff9012b37722d21dbe8e4d",
-      "line_count": 1035
+      "sha256": "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239",
+      "line_count": 1051
     },
     {
       "path": "Cargo.lock",
-      "sha256": "c670712ab8713897bacc9591c170db2d030df83011dc7b9d092f16099f1540dd",
+      "sha256": "194f7d634555c129adb4d72a0a842275de47638f87c13c483361bfaaeec3c22f",
       "line_count": 4666
     },
     {
       "path": "src/http/compress.rs",
-      "sha256": "bb86bbc4eba019bd6ad9debecb9e9e20bb46a86b8cd6271e734271386c0cae5a",
-      "line_count": 2600
+      "sha256": "ad84c77374ba4280038c46123a11fe845a0fdbf5a6348f15f1289af14af67f62",
+      "line_count": 2601
     },
     {
       "path": "src/web/compress.rs",
@@ -655,8 +655,8 @@
     },
     {
       "path": "src/web/middleware.rs",
-      "sha256": "979a0b3b3665bba209f8ad84a929a35e70008d8c37096c577f91780d1ba51fff",
-      "line_count": 6029
+      "sha256": "1a34c4d8dc70dc65b6a2af11f447e86b388594752e43821e971ad22086f25ea2",
+      "line_count": 6027
     },
     {
       "path": "src/grpc/codec.rs",
@@ -745,18 +745,18 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "82a73ec1c14fbe317611f6d592af480d75d002cbe9333045ab74840bcaf1c081",
-      "line_count": 6907
+      "sha256": "e887142f8df8ecc33b6f4011eb5dd82fa0eae569cafe335b6e791128cdedf6f2",
+      "line_count": 6917
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8",
-      "line_count": 1357
+      "sha256": "ad9cc1584a64fdda3728fb12df2f996ac28a4c4015cac99246a11e4d9e3bb7c3",
+      "line_count": 3210
     },
     {
       "path": "artifacts/dependency_budget_contract_v1.json",
-      "sha256": "b45ffcea151f15c0ae52add672d403fa9ba202ee6d67945c14f3ccc1755817fe",
-      "line_count": 4315
+      "sha256": "fe7540712c246809b05496beeb482a93ecd3de4ea8dc96e05eea123ba4e1be57",
+      "line_count": 4354
     },
     {
       "path": "artifacts/dependency_real_service_fixture_matrix_v1.json",
@@ -765,8 +765,8 @@
     },
     {
       "path": "src/lib.rs",
-      "sha256": "8afb93328139e32d9474f6164faec62b038c2d76bc9d2b697e5202dda5a9832a",
-      "line_count": 465
+      "sha256": "22ce17632d6a98843ebd6b9f855a430aef3ea6da07a6657e3311ad87b78c1b7f",
+      "line_count": 468
     },
     {
       "path": "src/web/mod.rs",

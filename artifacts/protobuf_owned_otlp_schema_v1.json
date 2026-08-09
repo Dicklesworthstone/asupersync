@@ -24,7 +24,7 @@
       "crate_version": "0.32.0",
       "crates_io_checksum_sha256": "56d658ba1faf63f7b9c492cfbe6e0ec365440a16132d3270c1065f7b33f1b638",
       "cargo_lock_path": "Cargo.lock",
-      "cargo_lock_sha256": "114838afda406a749bef5e7d501df85f4f84ac475b0e4450e69d00a1163418af",
+      "cargo_lock_sha256": "194f7d634555c129adb4d72a0a842275de47638f87c13c483361bfaaeec3c22f",
       "wrapper_repository": "https://github.com/open-telemetry/opentelemetry-rust",
       "wrapper_repository_commit": "ec289cb3c6f8260951699c51df968560943c1451",
       "path_in_wrapper_repository": "opentelemetry-proto",
@@ -137,7 +137,7 @@
     "repository_source_baseline": [
       {
         "path": "Cargo.toml",
-        "sha256": "f4afc0f7654611334f2712063fd6e6271cd8cf5d01628e329089229ca0d7bf02",
+        "sha256": "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239",
         "role": "feature and dependency quarantine authority"
       },
       {
@@ -152,12 +152,12 @@
       },
       {
         "path": "src/observability/mod.rs",
-        "sha256": "c2adba48b64ecfe3808beb2732636237fdd32446a19c45d1e294c75f36a50130",
+        "sha256": "2b92ccd15d9ad7c731b0f04e8acba64b593fc09922267a4acf2be853446fc269",
         "role": "private native metrics module gate"
       },
       {
         "path": "src/observability/otlp_proto.rs",
-        "sha256": "2429b5f46dd985fa7c700e6255f0070b0c0c43eaa627377843ac96ef94048ca4",
+        "sha256": "cc04fb98d1cc5d14f0e26c3941d336250ec958d9e51fa651eec2f644357776b2",
         "role": "complete bounded common, resource, metrics, trace, logs, and collector implementation"
       },
       {

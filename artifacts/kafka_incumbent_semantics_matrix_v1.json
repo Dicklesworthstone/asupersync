@@ -104,7 +104,7 @@
       "pin_id": "KAFKA-K0-2-PIN-K0-1-ARTIFACT",
       "path": "artifacts/kafka_capability_inventory_v1.json",
       "record_count": 1015,
-      "sha256": "b9e62e3f419309bda14a91739d42dc347293e6d92b4c5c3678c342bfb3378933",
+      "sha256": "9e7549e2b07e9c95d8a6ab94917bfac4f7b237978b484465b0c340dba20363c5",
       "role": "exact public-surface and cfg-branch authority"
     },
     {
