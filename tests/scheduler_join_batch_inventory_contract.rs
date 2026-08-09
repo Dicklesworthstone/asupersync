@@ -246,7 +246,7 @@ fn post_capture_provenance_refresh_is_exact_and_non_semantic() {
         "6688f15be0acb724b264dd6ca6051201fe0e7f06"
     );
     assert_eq!(unsigned(state, "previous_line_count"), 10160);
-    assert_eq!(unsigned(state, "current_line_count"), 10177);
+    assert_eq!(unsigned(state, "current_line_count"), 10202);
     assert_eq!(unsigned(state, "exact_anchor_count"), 3);
     assert!(boolean(state, "all_exact_anchors_match"));
     assert!(text(state, "classification").contains("OBLIGATION_LEAK"));

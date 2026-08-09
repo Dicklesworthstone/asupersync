@@ -418,7 +418,7 @@
     "lexical_tokens": 250,
     "code_or_type_references": 247,
     "comment_tokens": 3,
-    "cfg_any_disabled_references": 4,
+    "cfg_any_disabled_reference_count": 4,
     "cfg_test_references_embedded_in_production_files": 25,
     "test_or_test_internals_module_references": 2,
     "test_or_conformance_group_references": 121,

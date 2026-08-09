@@ -79,10 +79,10 @@ The canonical machine projections are:
 
 | Projection | Count | SHA-256 |
 |---|---:|---|
-| Source-pin canonical JSON | 266 | `f72c936b36edb8c2921b6d6c49170b5e4830f9324b2b0a348bf858853a292e8b` |
+| Source-pin canonical JSON | 266 | `3b127f4dd845b41acf8ba8fe8e36193611664f01c0287b159c8d624469e169cf` |
 | Unique source-pin paths | 247 | `d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3` |
 | Source-pin overlap paths | 15 | membership is bound by the 34-row projection below |
-| Source-pin rows on overlap paths | 34 | `7ab033d0aa9d30856188b273c5b557c43c0be9e2d59e9566c23a338f306406bd` |
+| Source-pin rows on overlap paths | 34 | `e5ebf9ca7d9dfc22de6afbf126f0bffa4c9f07f8a9bda5a77878a8bd66e42d49` |
 | Core typed definitions | 892 | `43d9deb2ff6bfa772ec058e8e32e4eb4fb3be099d93c3b152685721be05d4eea` |
 | Contradiction typed inputs | 11 | `60a656176b398a9b045b8c5cc1c2f2cede611683d3330c2a519a70ebf9bb72f0` |
 | All primary typed IDs | 903 | `38eb986feff75d2e1e172e444e7d488c765ab42910b6b470056852dea3b0cb6e` |

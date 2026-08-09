@@ -38,7 +38,7 @@ const PATH_TOKEN: &str = concat!("hex", "::");
 const SOURCE_PIN_PATHS_SHA256: &str =
     "8ff7aa63a3c44e801fc536f894aff787d209a9032de2ac69d163bcca1f6cb156";
 const CLAIMS_PROJECTION_SHA256: &str =
-    "81df63ab896b7f74eb497909d6f47ce43f95ac0e9ac593770c9643e78e697bd3";
+    "724f3fef0d72662698f7f8f8889f724ad83cb21218724f4b292e63de5a82d940";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -534,7 +534,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         ("lexical_tokens", 250),
         ("code_or_type_references", 247),
         ("comment_tokens", 3),
-        ("cfg_any_disabled_references", 4),
+        ("cfg_any_disabled_reference_count", 4),
         ("cfg_test_references_embedded_in_production_files", 25),
         ("test_or_test_internals_module_references", 2),
         ("test_or_conformance_group_references", 121),

@@ -20,7 +20,7 @@ const DOC_PATH: &str = "docs/kafka_downstream_user_journey_inventory.md";
 const K0_1_PATH: &str = "artifacts/kafka_capability_inventory_v1.json";
 const K0_2_PATH: &str = "artifacts/kafka_incumbent_semantics_matrix_v1.json";
 const ADR_REGISTRY_PATH: &str = "artifacts/dependency_api_adr_registry_v1.json";
-const ARTIFACT_SHA256: &str = "3bc51061681537df6ac7ee97adc398dd598d8110866b92896013abde9baa6d6a";
+const ARTIFACT_SHA256: &str = "8313f91c59c54b85051b1777c13579e83f8135eb28cf93721688efc1f7d8e50a";
 const DOC_SHA256: &str = "12ccb95710c004751634d7c41218a0d6855675870b4246ab680aa0eb63d90434";
 const ARTIFACT_ID: &str = "kafka-downstream-user-journey-inventory-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
@@ -73,23 +73,23 @@ const PROVIDER_TEST_CANDIDATE_TUPLE_SHA256: &str =
     "1c1f5c263973f83026f7a4235cbe21252de23b4f22ba8833d5fd433659a2e255";
 const DOCUMENTATION_ACTUAL_SURFACE_COUNT: usize = 149;
 const DOCUMENTATION_SURFACE_COUNT: usize = 150;
-const DOCUMENTATION_OCCURRENCE_COUNT: usize = 8_638;
-const DOCUMENTATION_MATCHING_LINE_COUNT: usize = 7_309;
+const DOCUMENTATION_OCCURRENCE_COUNT: usize = 8_644;
+const DOCUMENTATION_MATCHING_LINE_COUNT: usize = 7_315;
 const DOCUMENTATION_CANONICAL_OCCURRENCE_COUNT: usize = 37;
-const DOCUMENTATION_REMAINDER_OCCURRENCE_COUNT: usize = 8_601;
+const DOCUMENTATION_REMAINDER_OCCURRENCE_COUNT: usize = 8_607;
 const DOCUMENTATION_OCCURRENCE_GROUP_COUNT: usize = 173;
 const DOCUMENTATION_PATH_SHA256: &str =
     "092daf94a5e428430bc2e6fab7a13a30649aca53e30680c300f9eb76cbbfec67";
 const DOCUMENTATION_OCCURRENCE_TUPLE_SHA256: &str =
-    "bb03c081a16428025b0580ade0deaec3e3bc19829d71c0e1ed4f4a1d7eb41680";
+    "3d70847693dfaa3722921015b8138b22bffdcc4ecd6f080ac4786beede781cc2";
 const DOCUMENTATION_LINE_TUPLE_SHA256: &str =
-    "b741764c20cd3da66bb95a9186bdf80b0e066675b33ddedd61275b5f0208fd6a";
+    "0b68281a32d1a045407a9ea93c495b180b32cad20ab7257288960cb114d35984";
 const DOCUMENTATION_OCCURRENCE_ID_SHA256: &str =
-    "0233bef9d652c1afae6db513c8061638b3330630790a7a3f4b596944a8078729";
+    "52627ef9f82aca64e8401fc3b5de326e35dd520bc23df7f53b7603bc1910d983";
 const DOCUMENTATION_CANONICAL_ID_SHA256: &str =
     "07ed0126fbff68f568e2076bff0a4da17fa102e420fe6abba6afaa9ff6b99e7f";
 const DOCUMENTATION_REMAINDER_ID_SHA256: &str =
-    "182699717c2aa89d1df53a9b54e67b0b0f6a103ee5159f7a56d79e72ec577801";
+    "e003b98dfe6b7cb81863bf2dadeb366805bb5ae01b9a478f1425444e0c32f8be";
 const DOCUMENTATION_GROUP_ID_SHA256: &str =
     "5e36b023be812fd3887b84af75d46e7b220c0138317b2a4face21917bdf180dd";
 const DOCUMENTATION_SOURCE_PIN_TUPLE_SHA256: &str =
@@ -2204,7 +2204,7 @@ fn validate_handoff_and_receipt(inventory: &Value) -> Result<(), String> {
         "8 stale call-site candidate nodes remain unresolved against the current K0.1 surface".to_owned(),
         "162 baseline occurrence paths are explicitly owned and conservatively POLICY_OR_CONTEXT_RETAINED pending K14 recheck".to_owned(),
         "923 of 939 literal test declarations use owned group-inherited classifications rather than individual atomic migration analysis".to_owned(),
-        "8,601 literal documentation occurrences have stable identity and ownership but remain semantically UNKNOWN and migration-blocking".to_owned(),
+        "8,607 literal documentation occurrences have stable identity and ownership but remain semantically UNKNOWN and migration-blocking".to_owned(),
         "all seven external downstream search domains are NOT_RUN and UNKNOWN".to_owned(),
         "all fifteen real-broker-capable atomic cases are NOT_RUN and retain no immutable broker receipt".to_owned(),
     ];
@@ -2215,7 +2215,7 @@ fn validate_handoff_and_receipt(inventory: &Value) -> Result<(), String> {
             .get("local_static_scope_definition")
             .and_then(Value::as_str)
             != Some(
-                "the exact 245-path five-tier occurrence partition, 939 named declarations across exact test and tokio::test attributes, 16 atomic overrides, 1,363-node candidate call-site grammar, and 8,638-occurrence documentation-claim identity and ownership partition are complete; 266 call-site candidates are explicit exclusions and 8,601 documentation occurrences remain semantically UNKNOWN",
+                "the exact 245-path five-tier occurrence partition, 939 named declarations across exact test and tokio::test attributes, 16 atomic overrides, 1,363-node candidate call-site grammar, and 8,644-occurrence documentation-claim identity and ownership partition are complete; 266 call-site candidates are explicit exclusions and 8,607 documentation occurrences remain semantically UNKNOWN",
             )
         || receipt
             .get("test_declaration_classification_rule")
