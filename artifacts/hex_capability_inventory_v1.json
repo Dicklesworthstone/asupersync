@@ -234,6 +234,7 @@
       "state": "PRESENT",
       "requirements": ["cfg(test)"],
       "direct_paths": [
+        "src/codec/hex.rs",
         "src/observability/span_id_collision_audit_test.rs",
         "src/observability/w3c_trace_id_randomness_audit_test.rs"
       ]
@@ -319,7 +320,7 @@
       "api": "encode",
       "signature": "encode<T: AsRef<[u8]>>(data: T) -> String",
       "feature": "alloc",
-      "used_code_or_type_references": 180
+      "used_code_or_type_references": 199
     },
     {
       "api": "decode",
@@ -413,36 +414,38 @@
   ],
   "occurrence_census": {
     "roots": ["src", "tests", "examples", "benches", "conformance", "fuzz"],
-    "files": 90,
-    "lexical_tokens": 230,
-    "code_or_type_references": 228,
-    "comment_tokens": 2,
+    "files": 102,
+    "lexical_tokens": 250,
+    "code_or_type_references": 247,
+    "comment_tokens": 3,
     "cfg_any_disabled_references": 4,
     "cfg_test_references_embedded_in_production_files": 25,
     "test_or_test_internals_module_references": 2,
-    "test_or_conformance_group_references": 102,
+    "test_or_conformance_group_references": 121,
     "active_production_references": 95,
     "symbols": {
-      "encode": 180,
+      "encode": 199,
       "decode": 35,
       "decode_to_slice": 11,
-      "FromHexError": 4
+      "FromHexError": 4,
+      "tests": 1
     },
     "code_or_type_symbols": {
-      "encode": 180,
+      "encode": 199,
       "decode": 33,
       "decode_to_slice": 11,
       "FromHexError": 4
     },
     "by_root": [
-      {"root":"src","files":50,"lexical_tokens":181},
-      {"root":"tests","files":39,"lexical_tokens":47},
+      {"root":"src","files":51,"lexical_tokens":182},
+      {"root":"tests","files":50,"lexical_tokens":66},
       {"root":"conformance","files":1,"lexical_tokens":2},
       {"root":"examples","files":0,"lexical_tokens":0},
       {"root":"benches","files":0,"lexical_tokens":0},
       {"root":"fuzz","files":0,"lexical_tokens":0}
     ],
     "comment_references": [
+      {"path":"src/codec/hex.rs","line":296,"symbol":"tests"},
       {"path":"src/database/postgres.rs","line":12714,"symbol":"decode"},
       {"path":"src/observability/w3c_trace_context.rs","line":576,"symbol":"decode"}
     ],
@@ -489,6 +492,7 @@
     {"path":"src/atp/sync/mod.rs","profile":"native-atp-library","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":5},"cfg_test_symbols":{"encode":2}},
     {"path":"src/bin/atp.rs","profile":"atp-cli-binary","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":20,"decode":4,"decode_to_slice":1},"cfg_any_disabled_symbols":{"encode":2,"decode":1},"cfg_test_symbols":{"encode":9}},
     {"path":"src/cli/atp_workflows.rs","profile":"cli-module","group_id":"HEX-A3-ATP-PROTOCOL-CLI","symbols":{"encode":2}},
+    {"path":"src/codec/hex.rs","profile":"default-lib-tests","group_id":"HEX-A3-TEST-CONFORMANCE","comment_symbols":{"tests":1}},
     {"path":"src/database/postgres.rs","profile":"postgres","group_id":"HEX-A3-DATABASE","symbols":{"encode":1,"decode":11},"comment_symbols":{"decode":1},"cfg_test_symbols":{"decode":9}},
     {"path":"src/deterministic_state_golden_tests.rs","profile":"legacy-internal-lib-tests","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":10}},
     {"path":"src/distributed/consensus/types.rs","profile":"portable-library","group_id":"HEX-A3-SECURITY-OBSERVABILITY","symbols":{"encode":1}},
@@ -513,21 +517,30 @@
     {"path":"src/security/keys/mod.rs","profile":"portable-library","group_id":"HEX-A3-SECURITY-OBSERVABILITY","symbols":{"encode":2,"decode":1}},
     {"path":"src/test_logging.rs","profile":"test-or-test-internals","group_id":"HEX-A3-SECURITY-OBSERVABILITY","symbols":{"encode":2},"module_gate":"cfg(any(test, feature = test-internals))"},
     {"path":"src/trace/crashpack.rs","profile":"portable-library","group_id":"HEX-A3-SECURITY-OBSERVABILITY","symbols":{"encode":1}},
+    {"path":"tests/artifact_governance_scanner_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
     {"path":"tests/atp/journal/mod.rs","profile":"root-nested-object-journal","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
     {"path":"tests/atp/multi_peer/contracts.rs","profile":"root-nested-multi-peer","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
     {"path":"tests/atp/object/mod.rs","profile":"root-nested-object-journal","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
     {"path":"tests/atp_cli_quic_loopback.rs","profile":"root-auto-atp-cli-windows","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1},"direct_occurrence_gate":"cfg(windows)"},
     {"path":"tests/atp_e2e_proof_suite.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":2}},
     {"path":"tests/cache_padded_alignment_experiment_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
-    {"path":"tests/config_toml_capability_inventory_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/cli_clap_surface_inventory_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/config_toml_capability_inventory_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":2}},
     {"path":"tests/conformance/raptorq_rfc6330/golden/src/golden_file_manager_simple.rs","profile":"unwired-lexical-fixture","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
     {"path":"tests/crossbeam_queue_safe_experiment_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
     {"path":"tests/deflate_surface_inventory_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
     {"path":"tests/dependency_budget_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/dependency_capability_baseline_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
     {"path":"tests/dependency_oracle_policy_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
     {"path":"tests/dependency_supply_chain_policy_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
     {"path":"tests/golden_outputs.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
     {"path":"tests/integration/kafka_real_broker.rs","profile":"root-explicit-kafka","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/kafka_k1_aggregate_evidence_gate_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":2}},
+    {"path":"tests/kafka_k1_client_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":2}},
+    {"path":"tests/kafka_k1_protocol_security_support_policy_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":3}},
+    {"path":"tests/kafka_k1_public_api_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":2}},
+    {"path":"tests/kafka_k1_resource_lifecycle_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":2}},
+    {"path":"tests/kafka_k2_reachable_schema_broker_matrix_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
     {"path":"tests/lz4_owned_codec_corpus_contract.rs","profile":"root-auto-test-internals","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"decode":1}},
     {"path":"tests/manual_raptorq_stability_check.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
     {"path":"tests/nkey_normative_spec_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1,"decode":2}},
@@ -548,7 +561,9 @@
     {"path":"tests/regex_vm_core_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
     {"path":"tests/regex_vm_iteration_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":2}},
     {"path":"tests/regex_vm_terminal_receipt_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
-    {"path":"tests/scenario_yaml_capability_inventory_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":2}},
+    {"path":"tests/scenario_yaml_capability_inventory_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":3}},
+    {"path":"tests/scheduler_hot_read_inventory_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
+    {"path":"tests/scheduler_join_batch_inventory_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
     {"path":"tests/signal_boundary_inventory_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}},
     {"path":"tests/stun_ice_golden_artifact_tests.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":2}},
     {"path":"tests/xattr_boundary_inventory_contract.rs","profile":"root-auto-ungated","group_id":"HEX-A3-TEST-CONFORMANCE","symbols":{"encode":1}}
@@ -584,9 +599,9 @@
     {
       "group_id": "HEX-A3-TEST-CONFORMANCE",
       "owner": "asupersync-d24mms.9.3",
-      "files": 47,
-      "lexical_tokens": 102,
-      "projection_sha256": "e766658ca7dd79e2439036e74a8b6e3222048f1c5f1e1a4088474968cff97fe2",
+      "files": 59,
+      "lexical_tokens": 122,
+      "projection_sha256": "fb8a1f9190aa2d12ab8134a6dcf24741c5dfa3f066d7c74e2471d25236a8e583",
       "sensitivity": "goldens, evidence fingerprints, integration helpers, and conformance fixtures",
       "journey_owner": "asupersync-d24mms.9.4"
     }
