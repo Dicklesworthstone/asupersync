@@ -979,7 +979,7 @@
     },
     {
       "path": "artifacts/otlp_capability_inventory_v1.json",
-      "sha256": "4804c855bbacd19e687be19753c92ac346313c64c8f9378bcc5b1e307f47b872",
+      "sha256": "076c3582a354fc831edf08f223bad74f275fb66f3bcb825f9dc07c106f40da71",
       "line_count": 985,
       "anchors": ["SHIPPED_VIA_DEPENDENCY", "OTLP-GAP-01", "asupersync-5z2scg.2.3"]
     },
