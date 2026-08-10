@@ -140,7 +140,7 @@ fn contention_ledger(
         baseline_age_secs: 30,
         max_baseline_age_secs: 86_400,
         trace_summary: Some(trace),
-        lock_metrics: vec![lock_metric("runtime_state", 8_000, 16_000)],
+        lock_metrics: vec![lock_metric("runtime_state", 20_000, 40_000)],
         scheduler_lanes: vec![lane_metric("ready", 10_000, 20_000)],
         source_trace_ids: vec!["trace-summary-cockpit-fixture".to_string()],
         proof_command: Some(replay_command()),
