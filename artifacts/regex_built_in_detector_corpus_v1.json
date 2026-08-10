@@ -77,7 +77,7 @@
     },
     {
       "path": "artifacts/regex_privacy_capability_inventory_v1.json",
-      "sha256": "287b3204a103fd97c86f7d13693f2c6180e96e5199a9048c912f09908ef607a7",
+      "sha256": "878823c03e5f3c49af62548bde30252c81c7096d86946709db983f5f6c8203fe",
       "line_count": 1014,
       "role": "R1 capability and historical detector baseline"
     },
@@ -89,13 +89,13 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "bc4c31e765a7b03ad2cc96cef94a1df60597246395e77588077dfbbf60e26377",
+      "sha256": "6dc49782fbc4d6d1f2c750091a482126dd61793ee2479625091bff191ea51e6c",
       "line_count": 6929,
       "role": "CAP-REGEX-PRIVACY authority"
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "770656eb2ba5c48f0db02e4b144cb8860c235f48dace37f92819bd0e2e25bba1",
+      "sha256": "7a94026143e7b81f268a3e3a06d3f7177178a5193dfee1cbd31d45dc34363f0e",
       "line_count": 3210,
       "role": "executable-partial blocking baseline authority"
     }
@@ -113,7 +113,7 @@
     },
     "current_pin": {
       "last_change_revision": "612a82a546634ba1de2d06fe6e429bf85516a475",
-      "sha256": "770656eb2ba5c48f0db02e4b144cb8860c235f48dace37f92819bd0e2e25bba1",
+      "sha256": "7a94026143e7b81f268a3e3a06d3f7177178a5193dfee1cbd31d45dc34363f0e",
       "line_count": 3210
     },
     "change_classification": {

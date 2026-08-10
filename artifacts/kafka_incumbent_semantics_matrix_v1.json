@@ -104,7 +104,7 @@
       "pin_id": "KAFKA-K0-2-PIN-K0-1-ARTIFACT",
       "path": "artifacts/kafka_capability_inventory_v1.json",
       "record_count": 1015,
-      "sha256": "899aedaed6fe57608b0218e19a430664e8cc368d9bed2517fcb91d6bb3e3f074",
+      "sha256": "5be191ec36de77f684345092110d18a2066edcac770d2c431f504151d835ed94",
       "role": "exact public-surface and cfg-branch authority"
     },
     {
@@ -125,7 +125,7 @@
       "pin_id": "KAFKA-K0-2-PIN-REGISTRY",
       "path": "artifacts/dependency_capability_registry_v1.json",
       "record_count": 6929,
-      "sha256": "bc4c31e765a7b03ad2cc96cef94a1df60597246395e77588077dfbbf60e26377",
+      "sha256": "6dc49782fbc4d6d1f2c750091a482126dd61793ee2479625091bff191ea51e6c",
       "role": "CAP-KAFKA ownership and graph mapping"
     }
   ],
@@ -2533,7 +2533,7 @@
     "helper_ids_unique": true,
     "public_methods_exactly_once": true,
     "configuration_fields_exactly_once": true,
-    "source_pin_map_sha256": "66d1585ebb9e6eed5cdd26c85cc9819224b69290b481d8df820ac957a95e8c8b",
+    "source_pin_map_sha256": "0346701cbc49f494064044e74d82fbbf66df43a073be41628bf5c33a1f6eb5eb",
     "all_row_source_anchor_map_sha256": "a895bcf372e6fcdd834fea2ca918e1bbc22623193098e0f4ebda684ef7735d33",
     "public_entry_anchor_map_sha256": "8deea5e3080636eed2b7282749ce52b9b22642829b7f74b101bf8769817428e6",
     "row_gap_owner_map_sha256": "5c4cb0c1edc74b5f8de090bd8f166de14e8f263d4b681d5fa23cdcb20a1ea760",

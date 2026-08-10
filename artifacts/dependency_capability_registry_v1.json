@@ -4181,8 +4181,8 @@
       },
       {
         "source_path": "src/bin/atpd.rs",
-        "line_count": 2333,
-        "sha256": "8d969a0669bcd865be9589f5a408cab2b861c1a14ab0a3e5a9e8b1f1fb731cf8",
+        "line_count": 2663,
+        "sha256": "53f0dae1caaf9a46064b19337bc5efc99408274469d3dbd85078b0b28c51d424",
         "capability_ids": [
           "CAP-CLI-ATPD"
         ]

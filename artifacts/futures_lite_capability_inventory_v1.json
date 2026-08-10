@@ -729,7 +729,7 @@
       {
         "path": "artifacts/dependency_capability_registry_v1.json",
         "baseline_sha256": "4d91239e2f2e83069414ca36eafc4aaba283cd3f89576fbb5e75f3374bd41b11",
-        "current_sha256": "bc4c31e765a7b03ad2cc96cef94a1df60597246395e77588077dfbbf60e26377",
+        "current_sha256": "6dc49782fbc4d6d1f2c750091a482126dd61793ee2479625091bff191ea51e6c",
         "current_line_count": 6929,
         "classification": "CAPABILITY_PROJECTION_UNCHANGED",
         "projection": "canonical CAP-FUTURES-STREAMS row",
@@ -1648,7 +1648,7 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "bc4c31e765a7b03ad2cc96cef94a1df60597246395e77588077dfbbf60e26377",
+      "sha256": "6dc49782fbc4d6d1f2c750091a482126dd61793ee2479625091bff191ea51e6c",
       "line_count": 6929
     },
     {
