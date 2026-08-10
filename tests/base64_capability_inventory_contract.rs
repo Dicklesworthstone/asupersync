@@ -37,7 +37,7 @@ const SOURCE_PIN_PATHS_SHA256: &str =
 const RECORDED_OPERATION_SEMANTICS_SHA256: &str =
     "50e92552029c51f5d9c7d7d5fd7853dbfb050fb30d434d78a3091b939ca8feb0";
 const CLAIMS_PROJECTION_SHA256: &str =
-    "3ddbd3ff5dc7d0b129f2141fd957ddb85e89adb4de707d0825318474fa2ddd30";
+    "034e6a0244619a52e57bd664b9a83a4c6daa5af5ece85de9d5c39b7911126bcb";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
