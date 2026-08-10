@@ -985,7 +985,7 @@
     },
     {
       "path": "artifacts/protobuf_owned_otlp_schema_v1.json",
-      "sha256": "3126a1a82575028cda77ac0944bc795f12c1e11702e6d5b510e22edeeb4fa867",
+      "sha256": "1ba0bcf9d0df7951ad76bbb84b25462d957b5d14c9d419117664f47e890f2ce7",
       "line_count": 1126,
       "anchors": ["NEW_A3_SCHEMA_POLICY_NOT_INCUMBENT_PARITY", "data_points_per_metric", "signal_construction_separation"]
     },
