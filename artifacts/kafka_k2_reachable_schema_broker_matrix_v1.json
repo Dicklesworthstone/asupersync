@@ -61,7 +61,7 @@
       "path": "artifacts/kafka_k1_protocol_security_support_policy_v1.json",
       "byte_count": 82178,
       "record_count": 1399,
-      "sha256": "4d0c20646b2886c09d4bb9c56df563bc41d29cc823cde7358deae735df1b7e6c"
+      "sha256": "02ab995af2be3bb1c4997b69bbaef8f7e0f962d1a11989b7c289e4c042be6750"
     },
     {
       "input_id": "KAFKA-K2-1-INPUT-K1-5",
@@ -69,7 +69,7 @@
       "path": "artifacts/kafka_k1_aggregate_evidence_gate_v1.json",
       "byte_count": 111408,
       "record_count": 2122,
-      "sha256": "ba4b4d8c845dd460d83cb57f0df5aea82370c22769c25819965f381ceb55bd91"
+      "sha256": "4711073c4014d3e3b331b020c59cd99cee724ff6d9ab491b48ccbbb433752300"
     },
     {
       "input_id": "KAFKA-K2-1-INPUT-K0-4",
@@ -85,7 +85,7 @@
       "path": "artifacts/kafka_k1_public_api_contract_v1.json",
       "byte_count": 37860,
       "record_count": 753,
-      "sha256": "b18bd8545882c7353a06ae6615a2988d5228e3bda448e8bd07d6ac6dbee0d480"
+      "sha256": "58ca38a2f355b0f08a1f5877b09ed873560d6c30e4c7747bdb4c8a51d9dc290b"
     }
   ],
   "external_authorities": [
