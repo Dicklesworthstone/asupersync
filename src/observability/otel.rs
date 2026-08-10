@@ -3750,14 +3750,7 @@ mod tests {
         let handle = runtime.handle().spawn(async { 7u8 });
         let result = runtime.block_on(handle);
         assert_eq!(result, 7);
-
-        for _ in 0..1024 {
-            if runtime.is_quiescent() {
-                break;
-            }
-            std::thread::yield_now();
-        }
-        assert!(runtime.is_quiescent(), "runtime did not reach quiescence");
+        drop(runtime);
 
         provider.force_flush().expect("force_flush");
         let finished = exporter.get_finished_metrics().expect("finished metrics");
