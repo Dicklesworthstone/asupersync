@@ -1118,12 +1118,14 @@ pub trait Reactor: Send + Sync {
     }
 }
 
+#[cfg_attr(target_os = "ios", allow(dead_code))] // iOS builds cfg away the wrapping call site
 struct ObservedReactor {
     inner: Arc<dyn Reactor>,
     snapshot: IoReactorCapabilitySnapshot,
 }
 
 impl ObservedReactor {
+    #[cfg_attr(target_os = "ios", allow(dead_code))]
     fn wrap(inner: Arc<dyn Reactor>, snapshot: IoReactorCapabilitySnapshot) -> Arc<dyn Reactor> {
         Arc::new(Self { inner, snapshot })
     }

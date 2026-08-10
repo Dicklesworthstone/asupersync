@@ -681,6 +681,7 @@ struct ExactImagePipe;
 
 /// Parent write end of an exact-image child's stdin pipe.
 #[derive(Debug)]
+#[cfg_attr(target_os = "ios", allow(dead_code))] // iOS spawns no child processes
 pub struct ExactImageChildStdin {
     inner: ExactImagePipe,
 }
@@ -718,6 +719,7 @@ impl std::io::Write for ExactImageChildStdin {
 
 /// Parent read end of an exact-image child's stdout pipe.
 #[derive(Debug)]
+#[cfg_attr(target_os = "ios", allow(dead_code))] // iOS spawns no child processes
 pub struct ExactImageChildStdout {
     inner: ExactImagePipe,
 }
@@ -741,6 +743,7 @@ impl std::io::Read for ExactImageChildStdout {
 
 /// Parent read end of an exact-image child's stderr pipe.
 #[derive(Debug)]
+#[cfg_attr(target_os = "ios", allow(dead_code))] // iOS spawns no child processes
 pub struct ExactImageChildStderr {
     inner: ExactImagePipe,
 }
