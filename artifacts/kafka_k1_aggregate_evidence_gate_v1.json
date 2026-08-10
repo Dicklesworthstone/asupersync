@@ -2054,7 +2054,7 @@
     "obligation_partition_projection_sha256": "960794c3f3e4a66dc614147e083772c38bdec23bc0fa5b8b75f1864659c5ccbe",
     "semantic_resource_lifecycle_join_projection_sha256": "ecdb3c7849849e16a80541f2842ade8547399a46c9f329d839cd4e1642d35a5f",
     "semantic_binding_adjudication_projection_sha256": "d272517d070a5da6b107cd5739d521a8ed2a1c39abd287acaf36f1f50d741f1b",
-    "capability_evidence_contract_projection_sha256": "1aa189e4008b2d5a5773e4c42e74bc6bec764da65b6a9867a40a883bb960fac2",
+    "capability_evidence_contract_projection_sha256": "3d0e1756b6023788ccf271e36c6f01a62112d6a67636e2537629b3c0aa5170b9",
     "capability_route_projection_sha256": "68ec5cf270f773130e1de1c294f4d314d1b65b81cd0d470fc2a9a4ece8c7f9f3",
     "feature_coexistence_mode_projection_sha256": "d7907da645683a56469b9dc387bd8d4f29738d88f368ab3421be8979f4632dac",
     "feature_profile_projection_sha256": "0fc0221918113296ff7645368113990a0694240623473b01b408ca914af5934d",
