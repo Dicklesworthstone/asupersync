@@ -42,7 +42,7 @@ use asupersync::io::cap::{
 };
 use asupersync::runtime::RuntimeConfig;
 use asupersync::time::{
-    BrowserClockConfig, BrowserMonotonicClock, TimeSource, VirtualClock, WallClock,
+    BrowserClockConfig, BrowserMonotonicClock, TimeSource, VirtualClock, WallClock, wall_now,
 };
 use asupersync::types::Time;
 use std::sync::Arc;
@@ -72,14 +72,17 @@ fn wall_clock_is_monotonic_through_trait_dispatch() {
 }
 
 #[test]
-fn wall_clock_starts_near_zero_through_trait() {
+fn wall_clock_trait_dispatch_preserves_shared_process_epoch() {
+    let before = wall_now();
     let clock = WallClock::new();
     let source: &dyn TimeSource = &clock;
-    let now = source.now();
-    // Should be within 10ms of creation
+    let via_trait = source.now();
+    let after = wall_now();
+
     assert!(
-        now.as_nanos() < 10_000_000,
-        "WallClock should start near zero, got {now:?}"
+        before <= via_trait && via_trait <= after,
+        "trait-dispatched WallClock must share wall_now's process epoch: \
+         before={before:?}, via_trait={via_trait:?}, after={after:?}"
     );
 }
 
@@ -208,16 +211,20 @@ fn trait_object_dispatch_preserves_behavior_across_implementations() {
     let virtual_clk = Arc::new(VirtualClock::new()) as Arc<dyn TimeSource>;
     let browser = Arc::new(BrowserMonotonicClock::default()) as Arc<dyn TimeSource>;
 
+    let wall_before_dispatch = wall.now();
     let sources: Vec<Arc<dyn TimeSource>> = vec![wall, virtual_clk, browser];
+    let readings: Vec<Time> = sources.iter().map(|source| source.now()).collect();
 
-    // All start near zero (WallClock within 10ms, others exactly zero)
-    for (i, src) in sources.iter().enumerate() {
-        let now = src.now();
-        assert!(
-            now.as_nanos() < 10_000_000,
-            "source[{i}] should start near zero, got {now:?}"
-        );
-    }
+    assert!(
+        readings[0] >= wall_before_dispatch,
+        "WallClock must remain monotonic through trait-object dispatch"
+    );
+    assert_eq!(readings[1], Time::ZERO, "VirtualClock starts at zero");
+    assert_eq!(
+        readings[2],
+        Time::ZERO,
+        "BrowserMonotonicClock starts at zero"
+    );
 }
 
 // ============================================================================
@@ -483,7 +490,8 @@ fn browser_clock_config_defaults_stable() {
 // ============================================================================
 
 #[test]
-fn all_clocks_use_consistent_time_zero() {
+fn all_clocks_preserve_their_documented_epoch_semantics() {
+    let wall_before = wall_now();
     let wall = WallClock::new();
     let virtual_clk = VirtualClock::new();
     let browser = BrowserMonotonicClock::default();
@@ -492,8 +500,11 @@ fn all_clocks_use_consistent_time_zero() {
     assert_eq!(virtual_clk.now(), Time::ZERO);
     assert_eq!(browser.now(), Time::ZERO);
 
-    // Wall starts near zero (within 5ms of creation)
-    assert!(wall.now().as_nanos() < 5_000_000);
+    // WallClock intentionally measures from the shared process epoch, not
+    // from construction, so compare it with wall_now() instead of Time::ZERO.
+    let wall_read = wall.now();
+    let wall_after = wall_now();
+    assert!(wall_before <= wall_read && wall_read <= wall_after);
 }
 
 // ============================================================================
