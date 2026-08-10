@@ -65,7 +65,7 @@
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
       "byte_count": 29494,
       "record_count": 284,
-      "sha256": "66cfac760a0014c932968c0207b474a2106b8fbccc9b0b57a89e2b0addee0f78"
+      "sha256": "c6a20712af544d9e5a5c85edbe8766a6e439217df657b87a8f618029591ed1cb"
     },
     {
       "input_id": "K1-INPUT-K0-5-DOCUMENT",
@@ -73,7 +73,7 @@
       "path": "docs/kafka_k0_baseline_disposition.md",
       "byte_count": 21799,
       "record_count": 349,
-      "sha256": "feea05b1bc477faeeca441a0c586004776c2d718a74d76a1e22a83d0fd171143"
+      "sha256": "6330df1dcc64ffc2a8be14ca84dc8ba61cc1d2a660d7b1c6c6ebdbd12eabbdb4"
     },
     {
       "input_id": "K1-INPUT-K0-5-CONTRACT",
@@ -81,7 +81,7 @@
       "path": "tests/kafka_k0_baseline_disposition_contract.rs",
       "byte_count": 106003,
       "record_count": 2599,
-      "sha256": "65e3a0e3ea85b3ff0e6be66621d7162f619b7f6c7738c7ab498ab73193d77e29"
+      "sha256": "0bc8b0f7268930e755d27432a8b9e1bbdc88d7316be44bdf8ed494ee504275f0"
     },
     {
       "input_id": "K1-INPUT-ADR",
@@ -189,7 +189,7 @@
     "child_count": 5,
     "child_estimate_minutes": 1920,
     "projection_rule": "For K1, K1.1-K1.5, K2, K2.1, and K2.2, serialize issue_id<TAB>issue_type<TAB>estimated_minutes<TAB>sorted-parent-child-targets<TAB>sorted-blocking-targets; bytewise sort rows and append one LF per row.",
-    "projection_sha256": "d379d1676c0805c3c48f15e05e674d8d648a62c71d3a73fd121f7d10176d1dba",
+    "projection_sha256": "6ea2a9c24adbe6c1618be0e946116e71c20a4ed2bfefde2459f17534cfd53372",
     "k2_epic_gate": "asupersync-dep-p7-kafka-removal-sarszu.2.1.5",
     "k2_schema_gate": "asupersync-dep-p7-kafka-removal-sarszu.2.1.2",
     "k2_codec_aggregate_gate": "asupersync-dep-p7-kafka-removal-sarszu.2.1.5",
@@ -525,7 +525,7 @@
     "source_pin_rollup": {
       "row_count": 266,
       "stage_counts": {"K0.1": 13, "K0.2": 8, "K0.3": 225, "K0.4": 20},
-      "canonical_json_sha256": "ac878b97a05874516544006115fca29d398b54c65e2da1aeba2784669911703c",
+      "canonical_json_sha256": "6ae631a678bad4373b77de474b1d1e13e1d729626e562425e45f3edea51b1bab",
       "unique_path_count": 247,
       "unique_path_set_sha256": "d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3",
       "overlap_group_count": 15,

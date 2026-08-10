@@ -95,7 +95,7 @@
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "2cc72453659c2209713d6779c6d12aa6a114201893cbbd6e840d9f73786d38a3",
+      "sha256": "7d73dc99cf9be276ce6adcd66b631a1e60bfe0e44a419d574e5a2414c967befc",
       "line_count": 3210,
       "role": "executable-partial blocking baseline authority"
     }
@@ -112,8 +112,8 @@
       "line_count": 1357
     },
     "current_pin": {
-      "last_change_revision": "612a82a546634ba1de2d06fe6e429bf85516a475",
-      "sha256": "2cc72453659c2209713d6779c6d12aa6a114201893cbbd6e840d9f73786d38a3",
+      "last_change_revision": "4376cddb3ec421767029bff87ed1ef747e693ce5",
+      "sha256": "7d73dc99cf9be276ce6adcd66b631a1e60bfe0e44a419d574e5a2414c967befc",
       "line_count": 3210
     },
     "change_classification": {
@@ -132,7 +132,8 @@
         "42a66e7f4e6733c28c59405c052c68f7a32ea0d7",
         "1472b388e365460c2dc067b57f084291e6d8d407",
         "33f94643ced8f5415ad3c1f0a30cd42ddcb738c9",
-        "612a82a546634ba1de2d06fe6e429bf85516a475"
+        "612a82a546634ba1de2d06fe6e429bf85516a475",
+        "4376cddb3ec421767029bff87ed1ef747e693ce5"
       ],
       "unchanged_capability_rows": {
         "CAP-REGEX-PRIVACY": "5053806ac9a546ea240a6efc0190969da549f31ed03cf17e4b7b40f45adedc5b",

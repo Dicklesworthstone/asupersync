@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 const ARTIFACT_PATH: &str = "artifacts/kafka_k1_obligation_index_v1.json";
 const DOC_PATH: &str = "docs/kafka_k1_client_contract.md";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
-const ARTIFACT_SHA256: &str = "dc2e3413fb5703a6d4f6f60454e4efa9ea405a61d2ad18fc16d4a9aa18145d52";
+const ARTIFACT_SHA256: &str = "92a5f67cb1d27785f9eb7ac2d2b8726287c8da13d752082176a40b395d2596fb";
 const DOC_SHA256: &str = "d42f7c0ec6b0c31a32de0cde29982b6de6efabc54413ef3d327d1f71a8a584f0";
 
 const ARTIFACT_ID: &str = "kafka-k1-obligation-index-v1";
@@ -70,7 +70,7 @@ const COARSE_EXPOSURE_SHA256: &str =
 const DERIVED_SHARED_SHA256: &str =
     "0c50366802e6fbe8d8c2eccfebcd60a20d7daeed1f0304741ee464fb368a717f";
 const TRACKER_PROJECTION_SHA256: &str =
-    "d379d1676c0805c3c48f15e05e674d8d648a62c71d3a73fd121f7d10176d1dba";
+    "6ea2a9c24adbe6c1618be0e946116e71c20a4ed2bfefde2459f17534cfd53372";
 
 const DOC_BEGIN: &str = "<!-- BEGIN KAFKA K1 CLIENT CONTRACT -->";
 const DOC_END: &str = "<!-- END KAFKA K1 CLIENT CONTRACT -->";
