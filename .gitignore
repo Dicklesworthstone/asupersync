@@ -565,3 +565,15 @@ opencode.json
 /tests/tests/
 # RCH virtual FS workload workspaces
 .rch-vfs-*/
+
+# === multi-repo ephemeral patterns 2026-08-10 ===
+# git-repo-janitor skill scratch + recovery bundles (regenerable)
+.repo_janitor_workspace/
+# Eidetic Engine local runtime memory
+.ee/
+# br fsqlite-ns VFS sidecars
+.beads/beads.db-fsqlite-ns-*
+.beads/.write.lock.stale-*
+# Skill-loop progress scratch
+.skill-loop-progress.md
+.skill-loop-progress-*.md
