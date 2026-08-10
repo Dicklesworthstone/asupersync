@@ -34,7 +34,7 @@ The capability registry names both primary source owners and the root manifest:
 
 It also points to the machine inventory. The K0 prefix mapping now resolves
 `asupersync-dep-p7-kafka-removal-sarszu.1.*` to `CAP-KAFKA`, and the corrected
-graph snapshot contains 419 dep-plan issues, 353 non-epic work items, and 109
+graph snapshot contains 424 dep-plan issues, 357 non-epic work items, and 109
 mapping rules.
 
 ## Dependency identity

@@ -783,7 +783,7 @@ fn validate_static_source_and_docs(inventory: &Value) -> Result<(), String> {
 
     let registry_doc = read_repo_file(REGISTRY_DOC_PATH);
     if !registry_doc.contains(ARTIFACT_PATH)
-        || !registry_doc.contains("all 419 canonical `dep-plan` issues")
+        || !registry_doc.contains("all 424 canonical `dep-plan` issues")
         || !registry_doc.contains("through 109")
     {
         return Err("capability registry document lost Kafka reconciliation".to_owned());

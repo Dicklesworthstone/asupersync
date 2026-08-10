@@ -109,7 +109,7 @@
       "pin_id": "KAFKA-PIN-CAPABILITY-REGISTRY",
       "path": "artifacts/dependency_capability_registry_v1.json",
       "record_count": 6929,
-      "sha256": "97f9ebcc94a9cd19c64ec63e76261ef7add4172dca055914a5121f773083a90b",
+      "sha256": "bc4c31e765a7b03ad2cc96cef94a1df60597246395e77588077dfbbf60e26377",
       "role": "corrected CAP-KAFKA authority and graph mapping",
       "pin_state": "K0_1_CORRECTED"
     },
@@ -883,8 +883,8 @@
       "capability_ids": ["CAP-KAFKA"]
     },
     "graph_signoff_counts": {
-      "dep_plan_issue_count": 419,
-      "non_epic_work_count": 353,
+      "dep_plan_issue_count": 424,
+      "non_epic_work_count": 357,
       "mapping_rule_count": 109
     },
     "resolved_gap_id": "KFK-GAP-01",
