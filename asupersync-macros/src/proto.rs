@@ -790,9 +790,12 @@ fn encode_field(spec: &FieldSpec) -> TokenStream2 {
     match &spec.kind {
         Kind::UnknownFields => quote_spanned!(span=> self.#ident.encode(encoder)?;),
         Kind::Oneof => quote_spanned!(span=>
-            if let ::core::option::Option::Some(value) = &self.#ident {
-                ::asupersync::grpc::protobuf::ProtoOneof::encode_oneof(value, encoder)?;
-            };
+            self.#ident.as_ref().map_or(
+                ::core::result::Result::Ok(()),
+                |value| {
+                    ::asupersync::grpc::protobuf::ProtoOneof::encode_oneof(value, encoder)
+                },
+            )?;
         ),
         Kind::Map { key, value } => {
             encode_map(ident, key, value, spec.tag.expect("validated map tag"))

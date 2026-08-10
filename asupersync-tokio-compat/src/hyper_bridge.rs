@@ -26,6 +26,9 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+type BoxedTask = Pin<Box<dyn Future<Output = ()> + Send>>;
+type SpawnFn = dyn Fn(BoxedTask) + Send + Sync;
+
 /// Executor that spawns futures on the Asupersync runtime.
 ///
 /// Tasks spawned through this executor are region-owned: they will be
@@ -45,7 +48,7 @@ use std::time::{Duration, Instant};
 /// - **INV-4 (No obligation leaks)**: Task handles are tracked
 #[derive(Clone)]
 pub struct AsupersyncExecutor {
-    spawn_fn: Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>,
+    spawn_fn: Arc<SpawnFn>,
 }
 
 impl std::fmt::Debug for AsupersyncExecutor {
@@ -63,7 +66,7 @@ impl AsupersyncExecutor {
     /// route the future into the appropriate Asupersync region.
     pub fn with_spawn_fn<F>(spawn_fn: F) -> Self
     where
-        F: Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync + 'static,
+        F: Fn(BoxedTask) + Send + Sync + 'static,
     {
         Self {
             spawn_fn: Arc::new(spawn_fn),
@@ -121,7 +124,7 @@ pub struct AsupersyncTimer {
 impl AsupersyncTimer {
     /// Create a new timer backed by wall-clock time.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self { _private: () }
     }
 }

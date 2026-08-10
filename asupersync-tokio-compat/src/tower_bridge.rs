@@ -31,10 +31,11 @@
 //! let response = bridge.call(&cx, request).await?;
 //! ```
 
-use asupersync::sync::Mutex;
+use asupersync::sync::{Mutex, OwnedMutexGuard};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 /// Wraps a `tower::Service` for use as an Asupersync-style service.
@@ -49,7 +50,7 @@ use std::task::{Context, Poll};
 /// - `S`: The tower service type
 /// - `Request`: The request type accepted by the tower service
 pub struct FromTower<S, Request = ()> {
-    inner: Mutex<S>,
+    inner: Arc<Mutex<S>>,
     _marker: PhantomData<fn(Request)>,
 }
 
@@ -57,7 +58,7 @@ impl<S, Request> FromTower<S, Request> {
     /// Wrap a tower service for use in asupersync.
     pub fn new(service: S) -> Self {
         Self {
-            inner: Mutex::new(service),
+            inner: Arc::new(Mutex::new(service)),
             _marker: PhantomData,
         }
     }
@@ -69,7 +70,9 @@ impl<S, Request> FromTower<S, Request> {
     /// Returns [`asupersync::sync::LockError::Poisoned`] if a panic occurred
     /// while the internal mutex was locked.
     pub fn into_inner(self) -> Result<S, asupersync::sync::LockError> {
-        self.inner.into_inner()
+        Arc::into_inner(self.inner)
+            .unwrap_or_else(|| unreachable!("owned bridge cannot retain a mutex clone"))
+            .into_inner()
     }
 }
 
@@ -105,9 +108,7 @@ where
         // poll_ready loop to ensure exclusive access to the service and prevent
         // waker overwrites from concurrent callers.
         let mut request = Some(request);
-        let mut svc = self
-            .inner
-            .lock(cx)
+        let mut svc = OwnedMutexGuard::lock(Arc::clone(&self.inner), cx)
             .await
             .map_err(|_| BridgeError::Cancelled)?;
 
@@ -151,14 +152,14 @@ where
             }
 
             match response_future.as_mut().poll(task_cx) {
-                Poll::Ready(crate::cancel::CancelResult::Completed(Ok(response)))
-                | Poll::Ready(crate::cancel::CancelResult::CancellationIgnored(Ok(response))) => {
-                    Poll::Ready(Ok(response))
-                }
-                Poll::Ready(crate::cancel::CancelResult::Completed(Err(err)))
-                | Poll::Ready(crate::cancel::CancelResult::CancellationIgnored(Err(err))) => {
-                    Poll::Ready(Err(BridgeError::Service(err)))
-                }
+                Poll::Ready(
+                    crate::cancel::CancelResult::Completed(Ok(response))
+                    | crate::cancel::CancelResult::CancellationIgnored(Ok(response)),
+                ) => Poll::Ready(Ok(response)),
+                Poll::Ready(
+                    crate::cancel::CancelResult::Completed(Err(err))
+                    | crate::cancel::CancelResult::CancellationIgnored(Err(err)),
+                ) => Poll::Ready(Err(BridgeError::Service(err))),
                 Poll::Ready(crate::cancel::CancelResult::Cancelled) => {
                     Poll::Ready(Err(BridgeError::Cancelled))
                 }

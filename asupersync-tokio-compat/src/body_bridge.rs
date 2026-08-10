@@ -139,13 +139,10 @@ where
             BodyKind::Stream(stream) => match Pin::new(stream).poll_next(cx) {
                 Poll::Ready(Some(Ok(data))) => Poll::Ready(Some(Ok(Frame::data(data)))),
                 Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
-                Poll::Ready(None) => {
-                    if let Some(trailers) = this.trailers.take() {
-                        Poll::Ready(Some(Ok(Frame::trailers(trailers))))
-                    } else {
-                        Poll::Ready(None)
-                    }
-                }
+                Poll::Ready(None) => this.trailers.take().map_or_else(
+                    || Poll::Ready(None),
+                    |trailers| Poll::Ready(Some(Ok(Frame::trailers(trailers)))),
+                ),
                 Poll::Pending => Poll::Pending,
             },
         }

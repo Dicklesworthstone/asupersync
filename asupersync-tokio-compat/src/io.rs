@@ -256,9 +256,9 @@ where
         // initialized memory. The advance() call is valid because
         // n <= buffer length (guaranteed by ReadBuf::filled().len()).
         let uninit = unsafe { hyper_buf.as_mut() };
-        uninit.iter_mut().for_each(|b| {
+        for b in uninit.iter_mut() {
             b.write(0);
-        });
+        }
         let len = uninit.len();
         let buf = unsafe { std::slice::from_raw_parts_mut(uninit.as_mut_ptr().cast::<u8>(), len) };
 
