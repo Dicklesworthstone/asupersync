@@ -155,7 +155,7 @@
       "path": "artifacts/kafka_k1_resource_lifecycle_contract_v1.json",
       "byte_count": 196050,
       "record_count": 1901,
-      "sha256": "f8c8d0b509cecc4f0d1c3218c448d147306f0424bc4174a9e6d980611d20e2ca"
+      "sha256": "5f6544baaa18a412a78a0a05bc0549b89972448fe423523868a8d72d671f543b"
     },
     {
       "input_id": "K1-5-INPUT-K1-4-DOCUMENT",
@@ -173,7 +173,7 @@
       "path": "tests/kafka_k1_resource_lifecycle_contract.rs",
       "byte_count": 75469,
       "record_count": 2082,
-      "sha256": "4df0f665b410780abce580e23f7a7205151954633874a6a43cf9d1205e7572d9"
+      "sha256": "628eb626d3d5ead41c0e2333f81eaa641ce92269ec27411d655f884cd9166d00"
     }
   ],
   "child_packet_receipts": [
@@ -2048,7 +2048,7 @@
       "approval_projection_sha256": {"pointer": "/approval_gates", "rule": "ROW_SET_V1"},
       "no_claim_boundary_sha256": {"pointer": "/no_claim_boundaries", "rule": "STRING_SET_V1"}
     },
-    "authority_input_projection_sha256": "08eb75fa715f0afab0864fcad317d0dbb81d51f6214591a25cb9e08e4ecf3b71",
+    "authority_input_projection_sha256": "d1b304df7c189e246af5389bb09d4c7d6c3b7924dfc2b053ad9a00d72c45d8a7",
     "child_receipt_projection_sha256": "64626f739641a6821591cfc0efd08b7556e759d4c3f70f7d8496b682ca880938",
     "lineage_conflict_projection_sha256": "9548fc723b4803575fd901618b66f45931e657c116ef00a287cfd5b75d733acc",
     "obligation_partition_projection_sha256": "960794c3f3e4a66dc614147e083772c38bdec23bc0fa5b8b75f1864659c5ccbe",
