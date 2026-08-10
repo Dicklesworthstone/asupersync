@@ -318,7 +318,7 @@ fn observed_pins_are_explicit_and_asupersync_pins_match_the_tree() {
 
     let manifest = read_repo_file("Cargo.toml");
     assert!(manifest.contains("name = \"asupersync\""));
-    assert!(manifest.contains("version = \"0.3.10\""));
+    assert!(manifest.contains(&format!("version = \"{}\"", env!("CARGO_PKG_VERSION"))));
     let toolchain = read_repo_file("rust-toolchain.toml");
     assert!(toolchain.contains("channel = \"nightly-2026-07-05\""));
 
