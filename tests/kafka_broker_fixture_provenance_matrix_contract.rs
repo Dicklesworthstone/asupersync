@@ -18,7 +18,7 @@ use std::path::PathBuf;
 const ARTIFACT_PATH: &str = "artifacts/kafka_broker_fixture_provenance_matrix_v1.json";
 const DOC_PATH: &str = "docs/kafka_broker_fixture_provenance_matrix.md";
 const K0_3_PATH: &str = "artifacts/kafka_downstream_user_journey_inventory_v1.json";
-const ARTIFACT_SHA256: &str = "3cdef5a73b95e8f351cb7014bed11f1501ab1391c6361866860022bffcf2c77a";
+const ARTIFACT_SHA256: &str = "bc7ac1cd0894fc2721be929c501bb1ba47add1710bf3458e187052e38ec258d0";
 const DOC_SHA256: &str = "80f76324a74a536d23552d3ded294bf2fbe4448de24adaa93d872bf203378f40";
 const ARTIFACT_ID: &str = "kafka-broker-fixture-provenance-matrix-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
@@ -29,7 +29,7 @@ const CAPTURED_DATE_UTC: &str = "2026-08-03";
 const INVENTORY_STATE: &str = "K0_4_STATIC_FIXTURE_AND_PROVENANCE_MATRIX_FROZEN_RUNTIME_UNKNOWN";
 const K0_3_ARTIFACT_ID: &str = "kafka-downstream-user-journey-inventory-v1";
 const K0_3_BASELINE_REVISION: &str = "ae22e710d87412b38e546b32e9702106619481d5";
-const K0_3_SHA256: &str = "3b320c09f32a7089d4641588cd7dc977d4c824b4fb2135798ef126fcd0cc2e81";
+const K0_3_SHA256: &str = "6b51233da22c0d07a891d3d6d4fe932e6746823f0f4e0c48bef00836415e5e62";
 const K0_3_TEST_GROUP_COUNT: usize = 35;
 const K0_3_TEST_DECLARATION_COUNT: usize = 939;
 const K0_3_EXACT_TEST_DECLARATION_COUNT: usize = 891;
@@ -177,14 +177,14 @@ const DIRECT_FIXTURE_PINS: &[(&str, &str, u64, u64, &str)] = &[
     ),
     (
         "tests/kafka_capability_inventory_contract.rs",
-        "f724da5840e98c5edf13a2b931145cbef5b1769e16c541dd3be458e16ce55efb",
+        "204ff7d5911aa8759a9e5e87df7707e1de406dbdf92bd1ba0787a63093354634",
         28_870,
         853,
         "UTF8_LINES",
     ),
     (
         "tests/kafka_incumbent_semantics_matrix_contract.rs",
-        "c8712bfb35f00da6325d3998424e8513647b52a92727f676d912450bd8bb83ef",
+        "32cbeb6fea945c9218c864ea7089a287dd7ad44943ad5aa2ed92794848cbf4a0",
         69_501,
         1_696,
         "UTF8_LINES",

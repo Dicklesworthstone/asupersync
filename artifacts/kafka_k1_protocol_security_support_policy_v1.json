@@ -39,7 +39,7 @@
       "path": "artifacts/kafka_k1_obligation_index_v1.json",
       "byte_count": 42758,
       "record_count": 738,
-      "sha256": "3016a58c4e8fd2a30a5197cfbe5fb80c2a0967b1c13c56a9d517beac16a2c6da"
+      "sha256": "6a2dbe28da3731b5d6626d781bdc99c830a6eff046ce3dc21cc50316f143d4b9"
     },
     {
       "input_id": "K1-2-INPUT-K1-1-DOCUMENT",
@@ -55,7 +55,7 @@
       "path": "tests/kafka_k1_client_contract.rs",
       "byte_count": 95396,
       "record_count": 2585,
-      "sha256": "f6a8559137bd78b02d8ac7f70a6a01551f0d797a07ec489d769ee0e7c90fe7e1"
+      "sha256": "58f538e3f13e12f94be09af73e698bc618f05624ab7c64a3b950529028df9453"
     },
     {
       "input_id": "K1-2-INPUT-K0-5",
@@ -63,7 +63,7 @@
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
       "byte_count": 29494,
       "record_count": 284,
-      "sha256": "6f5d7ab68630cb52ba86d149e2c9d74d048cb864980fbe44b64b8ea753ac7d95"
+      "sha256": "3b28aaeea5093e7bdda0683305c0fdcd7858ee2a1a21a441cc2b31c65a957ba9"
     },
     {
       "input_id": "K1-2-INPUT-K0-4",
@@ -71,7 +71,7 @@
       "path": "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
       "byte_count": 119250,
       "record_count": 2187,
-      "sha256": "3cdef5a73b95e8f351cb7014bed11f1501ab1391c6361866860022bffcf2c77a"
+      "sha256": "bc7ac1cd0894fc2721be929c501bb1ba47add1710bf3458e187052e38ec258d0"
     },
     {
       "input_id": "K1-2-INPUT-K0-2",
@@ -79,7 +79,7 @@
       "path": "artifacts/kafka_incumbent_semantics_matrix_v1.json",
       "byte_count": 228933,
       "record_count": 2560,
-      "sha256": "811fc95651fe09d9968aa362ebebd8c737d970ed675486dfae4644894423b0d3"
+      "sha256": "afb9858fa23700c5c22fde0ce1582d1ea301ca0fcdfa3293f169b4f28738f8a7"
     },
     {
       "input_id": "K1-2-INPUT-K1-3",
@@ -87,7 +87,7 @@
       "path": "artifacts/kafka_k1_public_api_contract_v1.json",
       "byte_count": 37860,
       "record_count": 753,
-      "sha256": "11bc118637a1eccec04144384672976709335c17ad9fcfabc9856b46f4218486"
+      "sha256": "cf27860f2e8cc9479aa0905c58b3b50f89ef20734fc9b8a54065d1e7de0e3ca7"
     },
     {
       "input_id": "K1-2-INPUT-ADR",
