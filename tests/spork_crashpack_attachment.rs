@@ -37,11 +37,11 @@ fn scenario_report_includes_deterministic_crashpack_linkage() {
     let scenario = SporkScenarioSpec::new("crashpack.linking", |_| {
         AppSpec::new("crashpack_linking_app").child(leaking_child())
     })
-    .with_description("intentionally leaks an obligation to force crashpack linkage")
+    .with_description("intentionally truncates the trace to force crashpack linkage")
     .with_default_config(SporkScenarioConfig {
         seed: 77,
         worker_count: 1,
-        trace_capacity: 2048,
+        trace_capacity: 1,
         max_steps: Some(50_000),
         panic_on_obligation_leak: false,
         panic_on_futurelock: false,
@@ -50,7 +50,7 @@ fn scenario_report_includes_deterministic_crashpack_linkage() {
 
     let result_a = runner.run("crashpack.linking").expect("run scenario A");
     let result_b = runner.run("crashpack.linking").expect("run scenario B");
-    assert!(!result_a.passed(), "leaking scenario should fail");
+    assert!(!result_a.passed(), "trace-truncated scenario should fail");
 
     let json_a = result_a.to_json();
     let json_b = result_b.to_json();
@@ -87,9 +87,26 @@ fn scenario_report_includes_deterministic_crashpack_linkage() {
     let command_line = crashpack["replay"]["command_line"]
         .as_str()
         .expect("replay command line");
+    assert_eq!(crashpack["replay"]["program"], "asupersync");
+    let replay_args = crashpack["replay"]["args"]
+        .as_array()
+        .expect("replay command args");
+    assert_eq!(
+        replay_args.first().and_then(serde_json::Value::as_str),
+        Some("trace")
+    );
+    assert_eq!(
+        replay_args.get(1).and_then(serde_json::Value::as_str),
+        Some("replay")
+    );
+    assert_eq!(
+        replay_args.last().and_then(serde_json::Value::as_str),
+        Some(crashpack_path),
+        "crashpack path must be the replay command's final positional argument"
+    );
     assert!(
-        command_line.contains("--crashpack"),
-        "replay command must include crashpack flag"
+        command_line.starts_with("asupersync trace replay "),
+        "replay command must use the canonical trace replay subcommand"
     );
     assert!(
         command_line.contains(crashpack_path),
