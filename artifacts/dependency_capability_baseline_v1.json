@@ -1429,7 +1429,7 @@
       },
       {
         "path": "artifacts/dependency_capability_registry_v1.json",
-        "sha256": "6dc49782fbc4d6d1f2c750091a482126dd61793ee2479625091bff191ea51e6c",
+        "sha256": "d255864fdd4f314d309e3f749c782a79f8ae4ac70bf63baa57edb14b14b6a6ea",
         "line_count": 6929,
         "role": "CAP-HASH-MAPS capability, platform, security, lifecycle, and ownership authority"
       },
@@ -1801,7 +1801,7 @@
       },
       {
         "path": "artifacts/dependency_capability_registry_v1.json",
-        "sha256": "6dc49782fbc4d6d1f2c750091a482126dd61793ee2479625091bff191ea51e6c",
+        "sha256": "d255864fdd4f314d309e3f749c782a79f8ae4ac70bf63baa57edb14b14b6a6ea",
         "line_count": 6929,
         "role": "CAP-HOST-BENCH-METADATA and CAP-HOST-INTROSPECTION authority"
       },
@@ -2105,7 +2105,7 @@
       },
       {
         "path": "artifacts/dependency_capability_registry_v1.json",
-        "sha256": "6dc49782fbc4d6d1f2c750091a482126dd61793ee2479625091bff191ea51e6c",
+        "sha256": "d255864fdd4f314d309e3f749c782a79f8ae4ac70bf63baa57edb14b14b6a6ea",
         "line_count": 6929,
         "role": "CAP-VISIBILITY-MACRO ownership, semantics, feature, and planned-fixture authority"
       },
@@ -2515,7 +2515,7 @@
       },
       {
         "path": "artifacts/dependency_capability_registry_v1.json",
-        "sha256": "6dc49782fbc4d6d1f2c750091a482126dd61793ee2479625091bff191ea51e6c",
+        "sha256": "d255864fdd4f314d309e3f749c782a79f8ae4ac70bf63baa57edb14b14b6a6ea",
         "line_count": 6929,
         "role": "CAP-TOKEN-SLAB source ownership, scenario, safety, and lifecycle authority"
       },
@@ -2889,7 +2889,7 @@
     "source_pins": [
       {
         "path": "artifacts/dependency_capability_registry_v1.json",
-        "sha256": "6dc49782fbc4d6d1f2c750091a482126dd61793ee2479625091bff191ea51e6c",
+        "sha256": "d255864fdd4f314d309e3f749c782a79f8ae4ac70bf63baa57edb14b14b6a6ea",
         "line_count": 6929,
         "role": "exact Phase-2 terminal capability binding"
       },

@@ -60,7 +60,7 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "6dc49782fbc4d6d1f2c750091a482126dd61793ee2479625091bff191ea51e6c",
+      "sha256": "d255864fdd4f314d309e3f749c782a79f8ae4ac70bf63baa57edb14b14b6a6ea",
       "line_count": 6929
     },
     {
@@ -95,7 +95,7 @@
     },
     {
       "path": "src/sync/mutex.rs",
-      "sha256": "c4b6f520dd8db7e6847de880e6686969bf95bef5ed430704c0679b7369eced31",
+      "sha256": "dab6b2d241172780f0a19cf58770b2fd8318e3cb5a921033e9a78aee8b2cd423",
       "line_count": 5270
     },
     {

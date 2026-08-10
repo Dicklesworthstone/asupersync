@@ -32,7 +32,7 @@ The scanner also carries a static, read-only `PASS_NO_CONTENT_ADDRESSED_CYCLE_WI
 Collapsing every version of an artifact to its path produces one strongly connected component with four paths and six directed edges:
 
 - `artifacts/dependency_capability_baseline_v1.json` retains historical pins for Base64 `28171082ff529b93cbe951b9de84db9423b8922fde531c82aa21051b933c83eb`, Phase-1 `f99bb9e88291d122b1f075c43480436ed1a94c0389174a472c9684d9b2ebf3c4`, and Hex `971385dfaf02570e6a02d52b494bc231e089ab8281bbcde812ff529727c10478`.
-- The current Base64, Phase-1, and Hex artifacts each pin the live baseline identity `7a94026143e7b81f268a3e3a06d3f7177178a5193dfee1cbd31d45dc34363f0e`.
+- The current Base64, Phase-1, and Hex artifacts each pin the live baseline identity `2cc72453659c2209713d6779c6d12aa6a114201893cbbd6e840d9f73786d38a3`.
 - The standalone historical-target receipt retains SHA-256 `88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8`, the 1,357-line baseline at commit `7390d33f4ac297cd28138c8e1ece38f60b278660` and blob `4e56ad4bc05dbd1614583f8cdf8586a0d1f88cc7`. That legacy receipt no longer corresponds to one of the six live-member edges and does not independently authenticate the three stored historical targets above.
 
 The content-addressed graph has seven nodes, six edges, and no directed cycle. No full-file edge replacement is required. Operators must preserve the three historical back-references as recorded historical pins and must not refresh or relabel them as current; claiming immutable byte provenance for those three targets requires separate receipts. A future path-only strongly connected component is a warning to recompute the versioned topology, not sufficient evidence of a blocking content cycle.

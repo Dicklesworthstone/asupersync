@@ -37,7 +37,7 @@ const FROZEN_SOURCE_SHA256: &str =
 const FROZEN_IR_SOURCE_SHA256: &str =
     "de4906beb838fda2c57bccfdb16316e8de661e564940a47e7b9b87f065311cb3";
 const FROZEN_TERMINAL_SHA256: &str =
-    "0259f61ba5e71946b5e116c52f52ad90f2da35d3075f567e1ecf3d40a7ef355c";
+    "40277bdb0a6e8bd14deabf28222881646d0acc924c8db0a3c544f9c85c66afec";
 
 fn read(path: &str) -> String {
     fs::read_to_string(path).unwrap_or_else(|error| panic!("read {path}: {error}"))

@@ -8,7 +8,7 @@
   "generated_at_utc": "2026-07-26T06:02:00Z",
   "authority": {
     "compiler_terminal_path": "artifacts/regex_compiler_terminal_receipt_v1.json",
-    "compiler_terminal_sha256": "5644af87a7fdd96523fab5348863bc20354dc810ad904047b0119d5f221e8fb7",
+    "compiler_terminal_sha256": "20339f3bbef521576d7cc6843cdf39e630473ee9f4c492fa67bc84d4dbe3a10d",
     "compiler_disposition": "KEEP_INCUMBENT_DEFER",
     "priority_capture_predecessor_path": "artifacts/regex_vm_captures_contract_v1.json",
     "production_cutover_eligible": false

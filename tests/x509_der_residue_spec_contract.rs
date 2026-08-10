@@ -14,9 +14,9 @@ const ARTIFACT_PATH: &str = "artifacts/x509_der_residue_spec_v1.json";
 const DOC_PATH: &str = "docs/x509_der_residue_spec.md";
 const INVENTORY_PATH: &str = "artifacts/x509_validation_ownership_inventory_v1.json";
 const EXPECTED_NORMATIVE_PAYLOAD_SHA256: &str =
-    "0a254fac4bc90085f80314d374ad70cfbc1a4a7ac3e625b0dad8d3f2b65fc76b";
+    "308855e598e0e0d663241b19263aeb2f3bdd1101630b5c8c9018bb8421a8c1de";
 const EXPECTED_REVIEWED_DRAFT_SHA256: &str =
-    "51cae2f6327705af2e6224ee811e0c3d9fe4a67cf9b372730c4c142b1fe8cb8e";
+    "121b4ad0fc39ecd7085566b9a51219e413b1d09ff0de61ed7c3720b311d6b4d9";
 const A1_RECONCILIATION_PATHS: [&str; 3] = [
     "artifacts/x509_validation_ownership_inventory_v1.json",
     "docs/x509_validation_ownership_inventory.md",
@@ -817,7 +817,7 @@ fn validate_review(value: &Value) -> Result<(), String> {
         .as_str()
         .ok_or_else(|| "review receipt agent_task must be recorded".to_owned())?;
     if author != "GreenCove"
-        || reviewer != "/root/x509_atpd_independent_review"
+        || reviewer != "/root/x509_final_registry_review"
         || reviewer != receipt_reviewer
         || reviewer == author
     {
@@ -827,7 +827,7 @@ fn validate_review(value: &Value) -> Result<(), String> {
     if review["review_channel"].as_str() != Some("collaboration_agent")
         || review["review_receipt"]
             != json!({
-                "agent_task": "/root/x509_atpd_independent_review",
+                "agent_task": "/root/x509_final_registry_review",
                 "decision": "APPROVE",
                 "reviewed_normative_payload_sha256": EXPECTED_NORMATIVE_PAYLOAD_SHA256
             })

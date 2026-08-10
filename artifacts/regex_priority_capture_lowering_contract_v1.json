@@ -26,7 +26,7 @@
   },
   "authority": {
     "semantic_terminal_path": "artifacts/regex_semantic_terminal_receipt_v1.json",
-    "semantic_terminal_sha256": "0259f61ba5e71946b5e116c52f52ad90f2da35d3075f567e1ecf3d40a7ef355c",
+    "semantic_terminal_sha256": "40277bdb0a6e8bd14deabf28222881646d0acc924c8db0a3c544f9c85c66afec",
     "semantic_terminal_disposition": "KEEP_INCUMBENT_DEFER",
     "ir_schema_source_path": "src/observability/regex_ir.rs",
     "ir_schema_source_sha256": "de4906beb838fda2c57bccfdb16316e8de661e564940a47e7b9b87f065311cb3",
