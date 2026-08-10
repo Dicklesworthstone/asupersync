@@ -5912,6 +5912,7 @@ mod platform {
 
     #[cfg(unix)]
     #[allow(unsafe_code, clippy::unnecessary_cast)]
+    #[cfg_attr(target_os = "ios", allow(dead_code))] // no rlimit consumer on iOS
     pub fn address_space_rlimit() -> std::io::Result<(u64, u64)> {
         // SAFETY: same shape as `fd_rlimit`.
         let mut rlim = std::mem::MaybeUninit::<libc::rlimit>::uninit();
