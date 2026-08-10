@@ -47,7 +47,7 @@
       "path": "docs/kafka_k1_client_contract.md",
       "byte_count": 12809,
       "record_count": 291,
-      "sha256": "d42f7c0ec6b0c31a32de0cde29982b6de6efabc54413ef3d327d1f71a8a584f0"
+      "sha256": "3657c47298408fdd5f6906376265ac3c587085ba5b0df67988fac7266fd6e116"
     },
     {
       "input_id": "K1-4-INPUT-K1-1-CONTRACT",
@@ -55,7 +55,7 @@
       "path": "tests/kafka_k1_client_contract.rs",
       "byte_count": 95396,
       "record_count": 2585,
-      "sha256": "0e33093a6495bb8a80c8e8eac45e5bb661fcc5bc69ad5460be578fb10b8c87ac"
+      "sha256": "e7526d0b740918ee2bc69e35d242622aea9af3e533b047589280a646f083c588"
     },
     {
       "input_id": "K1-4-INPUT-K1-2",
@@ -63,7 +63,7 @@
       "path": "artifacts/kafka_k1_protocol_security_support_policy_v1.json",
       "byte_count": 82178,
       "record_count": 1399,
-      "sha256": "02ab995af2be3bb1c4997b69bbaef8f7e0f962d1a11989b7c289e4c042be6750"
+      "sha256": "b6b8302e5738f0fe46cd5202c7e89d9e931159aeeb4ad1fb48dd6d8aaa16f548"
     },
     {
       "input_id": "K1-4-INPUT-K1-3",
@@ -71,7 +71,7 @@
       "path": "artifacts/kafka_k1_public_api_contract_v1.json",
       "byte_count": 37860,
       "record_count": 753,
-      "sha256": "58ca38a2f355b0f08a1f5877b09ed873560d6c30e4c7747bdb4c8a51d9dc290b"
+      "sha256": "92a57eb12c79eb9a12d04e41ef45b763f6ce393345c858487bd145aa185711a1"
     },
     {
       "input_id": "K1-4-INPUT-K0-5",
@@ -1854,7 +1854,7 @@
     "source_authority_reference_sha256": "634bb51f85fe7d54015ccc24a83b52590d23b77c11c9aa522dc89d9af88357e7",
     "no_claim_boundary_sha256": "bc5703ea9ef717f0796db249350ceafac85544acc31ef47f2da2b6ac33be9ce3",
     "authority_contract_sha256": "6a51fa1221869f3125a3ec478dc5e729eac868efc200a4779fdcaff35599cbf7",
-    "authority_input_contract_sha256": "37645991f13a1403883f2b86852a3ee84e1f788546f02aa412d289053d2000d8",
+    "authority_input_contract_sha256": "dbe6a0152b2dbe5cd1fcf948a5d136f90a28c2dcca8833842df97a0b23626da2",
     "authority_views_contract_sha256": "b7c9cb4e15efb45cdca0c64316e4869b9cd93302205a52e4cf12ad88a19cb6b7",
     "policy_contract_sha256": "ec236faf14c33462c00c5c365e188b1a7089a3215329dd856699633ca4c2b396",
     "semantic_coverage_contract_sha256": "b86d984aa4061fe4770c4aeb7f639750193540deb4226522e48e1dfd6a441b27",

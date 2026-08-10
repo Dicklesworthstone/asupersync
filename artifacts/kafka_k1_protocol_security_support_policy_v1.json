@@ -47,7 +47,7 @@
       "path": "docs/kafka_k1_client_contract.md",
       "byte_count": 12809,
       "record_count": 291,
-      "sha256": "d42f7c0ec6b0c31a32de0cde29982b6de6efabc54413ef3d327d1f71a8a584f0"
+      "sha256": "3657c47298408fdd5f6906376265ac3c587085ba5b0df67988fac7266fd6e116"
     },
     {
       "input_id": "K1-2-INPUT-K1-1-CONTRACT",
@@ -55,7 +55,7 @@
       "path": "tests/kafka_k1_client_contract.rs",
       "byte_count": 95396,
       "record_count": 2585,
-      "sha256": "0e33093a6495bb8a80c8e8eac45e5bb661fcc5bc69ad5460be578fb10b8c87ac"
+      "sha256": "e7526d0b740918ee2bc69e35d242622aea9af3e533b047589280a646f083c588"
     },
     {
       "input_id": "K1-2-INPUT-K0-5",
@@ -87,7 +87,7 @@
       "path": "artifacts/kafka_k1_public_api_contract_v1.json",
       "byte_count": 37860,
       "record_count": 753,
-      "sha256": "58ca38a2f355b0f08a1f5877b09ed873560d6c30e4c7747bdb4c8a51d9dc290b"
+      "sha256": "92a57eb12c79eb9a12d04e41ef45b763f6ce393345c858487bd145aa185711a1"
     },
     {
       "input_id": "K1-2-INPUT-ADR",
