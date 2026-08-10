@@ -384,11 +384,15 @@ mod tests {
 
             // Spawn effects are intentionally dispatched at first poll, after
             // executable publication, so drive the task before inspecting the log.
-            let _ = runtime
+            let (task_id, _handle) = runtime
                 .state
                 .create_task(region, Budget::INFINITE, async { 42 })
                 .expect("create traced task");
-            runtime.run_until_quiescent();
+            runtime
+                .scheduler
+                .lock()
+                .schedule(task_id, Budget::INFINITE.priority);
+            assert_eq!(runtime.run_until_quiescent(), 1);
 
             // Check for log
             {
