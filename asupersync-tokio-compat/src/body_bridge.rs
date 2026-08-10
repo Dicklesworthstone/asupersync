@@ -311,7 +311,7 @@ mod tests {
         let body = IntoHttpBody::full(bytes::Bytes::from_static(b"hello"));
 
         let waker = std::task::Waker::noop();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(waker);
         let mut body = std::pin::pin!(body);
 
         // First poll: data frame.
@@ -344,7 +344,7 @@ mod tests {
             IntoHttpBody::full(bytes::Bytes::from_static(b"data")).with_trailers(headers.clone());
 
         let waker = std::task::Waker::noop();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(waker);
         let mut body = std::pin::pin!(body);
 
         // First: data.
@@ -424,7 +424,7 @@ mod tests {
         let body = IntoHttpBody::full(bytes::Bytes::new()).with_trailers(headers);
 
         let waker = std::task::Waker::noop();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(waker);
         let mut body = std::pin::pin!(body);
 
         // Empty data is skipped, trailers come first.

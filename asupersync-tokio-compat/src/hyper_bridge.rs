@@ -194,6 +194,14 @@ mod tests {
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 
+    struct FlagWaker(std::sync::atomic::AtomicBool);
+
+    impl Wake for FlagWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
     }
@@ -252,12 +260,6 @@ mod tests {
         let _flag_clone = Arc::clone(&flag);
 
         // Create a waker that sets the flag when woken.
-        struct FlagWaker(std::sync::atomic::AtomicBool);
-        impl Wake for FlagWaker {
-            fn wake(self: Arc<Self>) {
-                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-        }
         let waker_obj = Arc::new(FlagWaker(std::sync::atomic::AtomicBool::new(false)));
         let waker = Waker::from(Arc::clone(&waker_obj));
         let mut cx = Context::from_waker(&waker);
@@ -282,7 +284,10 @@ mod tests {
         let mut sleep = timer.sleep(Duration::from_secs(60));
 
         // Reset to past deadline.
-        timer.reset(&mut sleep, Instant::now() - Duration::from_secs(1));
+        let past_deadline = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
+        timer.reset(&mut sleep, past_deadline);
 
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);

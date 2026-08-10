@@ -343,9 +343,13 @@ mod tests {
         type Response = u64;
         type Error = Infallible;
 
-        async fn call(&self, _cx: &asupersync::Cx, request: u64) -> Result<u64, Infallible> {
+        fn call(
+            &self,
+            _cx: &asupersync::Cx,
+            request: u64,
+        ) -> impl Future<Output = Result<u64, Infallible>> {
             let prev = self.counter.fetch_add(request, Ordering::SeqCst);
-            Ok(prev + request)
+            std::future::ready(Ok(prev + request))
         }
     }
 
