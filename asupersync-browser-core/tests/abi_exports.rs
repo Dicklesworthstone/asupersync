@@ -51,7 +51,7 @@ fn runtime_create_request_json(
     consumer_version_json: Option<&str>,
     allow_example_fetch: bool,
 ) -> String {
-    let consumer_version = consumer_version_json.map(|raw| parse_json::<WasmAbiVersion>(raw));
+    let consumer_version = consumer_version_json.map(parse_json::<WasmAbiVersion>);
     let fetch_authority = if allow_example_fetch {
         serde_json::json!({
             "allowedOrigins": ["https://example.com"],
