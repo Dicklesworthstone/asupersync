@@ -69,7 +69,7 @@
       "path": "artifacts/kafka_k1_aggregate_evidence_gate_v1.json",
       "byte_count": 111408,
       "record_count": 2122,
-      "sha256": "3e012b2360e8cb358da027afba97b71703dd23963e35c20f6b8dc6706a24d195"
+      "sha256": "1d46a599db4c489d4c13c1611da71f44a1c266e7259ae89ac773f16c89f27697"
     },
     {
       "input_id": "KAFKA-K2-1-INPUT-K0-4",
