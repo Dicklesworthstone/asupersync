@@ -67,7 +67,7 @@
       "input_id": "KAFKA-K2-1-INPUT-K1-5",
       "authority_class": "GOVERNING_AGGREGATE_GATE",
       "path": "artifacts/kafka_k1_aggregate_evidence_gate_v1.json",
-      "byte_count": 111404,
+      "byte_count": 111408,
       "record_count": 2122,
       "sha256": "ffcdde14f4c2b3b949e01d13901cee719574454084932aaf605eab09439084bb"
     },
