@@ -46,3 +46,5 @@ export-state/
 # contributors to accidentally commit upstream issue databases.
 # The JSONL files (issues.jsonl, interactions.jsonl) and config files
 # are tracked by git by default since no pattern above ignores them.
+.write.lock
+*.tmp
