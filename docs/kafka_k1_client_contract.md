@@ -38,7 +38,7 @@ from outrunning the complete K1 contract.
 The tracker projection covers K1, its five children, K2, K2.1, and K2.2. It
 serializes issue ID, issue type, estimate, parent, and blocking dependencies.
 The nine-row SHA-256 is
-`d379d1676c0805c3c48f15e05e674d8d648a62c71d3a73fd121f7d10176d1dba`.
+`6ea2a9c24adbe6c1618be0e946116e71c20a4ed2bfefde2459f17534cfd53372`.
 
 ## Authority chain
 
