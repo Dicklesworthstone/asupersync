@@ -692,18 +692,18 @@ fn encode_call(
         Kind::Bool => quote!(#encoder.write_bool(#tag, *#value)?;),
         Kind::String => quote!(#encoder.write_string(#tag, #value.as_ref())?;),
         Kind::Bytes => quote!(#encoder.write_bytes(#tag, #value.as_ref())?;),
-        Kind::Message => quote!({
+        Kind::Message => quote! {
             let __proto_nested =
                 ::asupersync::grpc::protobuf::ProtoMessage::encode_to_bytes(
                     #value,
                     ::asupersync::grpc::protobuf::ProtobufWireLimits::default(),
                 )?;
             #encoder.write_message(#tag, __proto_nested.as_ref())?;
-        }),
-        Kind::Enumeration(path) => quote!({
+        },
+        Kind::Enumeration(path) => quote! {
             let _: ::core::marker::PhantomData<#path> = ::core::marker::PhantomData;
             #encoder.write_enum(#tag, *#value)?;
-        }),
+        },
         Kind::Map { .. } | Kind::Oneof | Kind::UnknownFields => {
             unreachable!("container kinds are expanded separately")
         }
@@ -792,7 +792,7 @@ fn encode_field(spec: &FieldSpec) -> TokenStream2 {
         Kind::Oneof => quote_spanned!(span=>
             if let ::core::option::Option::Some(value) = &self.#ident {
                 ::asupersync::grpc::protobuf::ProtoOneof::encode_oneof(value, encoder)?;
-            }
+            };
         ),
         Kind::Map { key, value } => {
             encode_map(ident, key, value, spec.tag.expect("validated map tag"))
