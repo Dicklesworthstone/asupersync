@@ -109,7 +109,7 @@
       "path": "artifacts/kafka_downstream_user_journey_inventory_v1.json",
       "byte_count": 1171766,
       "record_count": 17987,
-      "sha256": "c2186e01dfb4011835d370c70f8639b67f2158f6a784df5227ea3488f0cd94f6"
+      "sha256": "14a8dc444825f2b46c22bcddeba9671015d63f02ac83a4dd09dd17bd135df6fc"
     },
     {
       "input_id": "K1-3-INPUT-ADR",

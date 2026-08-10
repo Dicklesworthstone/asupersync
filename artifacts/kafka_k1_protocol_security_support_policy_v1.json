@@ -87,7 +87,7 @@
       "path": "artifacts/kafka_k1_public_api_contract_v1.json",
       "byte_count": 37860,
       "record_count": 753,
-      "sha256": "e65fc3e45265198f89efe304c18bff6216d247f1fd233f56538200450cc56d79"
+      "sha256": "59532e53f1afad934f32773dcb439eb28d68f474a72190259d42a5b6d69d318d"
     },
     {
       "input_id": "K1-2-INPUT-ADR",
