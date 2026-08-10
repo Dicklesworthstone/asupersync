@@ -90,7 +90,7 @@
     ],
     "totals": {
       "rust_files": 4335,
-      "serde_json::": 6335,
+      "serde_json::": 6339,
       "rmp_serde::": 70,
       "bincode::": 32,
       "SerializationFormat::": 160,
@@ -113,7 +113,7 @@
         "path": "tests",
         "classification": "TEST_OR_EXTERNAL_CONSUMER_EVIDENCE; no production compatibility claim",
         "rust_files": 1915,
-        "serde_json::": 3306,
+        "serde_json::": 3310,
         "rmp_serde::": 9,
         "bincode::": 11,
         "SerializationFormat::": 23,
