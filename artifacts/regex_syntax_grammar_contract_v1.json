@@ -21,7 +21,7 @@
   "source_pins": [
     {
       "path": "artifacts/regex_privacy_capability_inventory_v1.json",
-      "sha256": "154c0e7f6e37b5937afa332784ef4a5d10acf73d9872a11efb8177dac03b734c",
+      "sha256": "227026d6e5e6e95e10810aaed6c077facd5e4697fee94b76c9f32ae7368d1715",
       "line_count": 1014,
       "role": "R1 executable syntax and negative-class inventory"
     },

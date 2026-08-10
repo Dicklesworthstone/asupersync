@@ -162,7 +162,7 @@
       },
       {
         "path": "src/observability/otel.rs",
-        "sha256": "c6cc312af370ee4485bedeb49aa0d900ed649b813c849179c68f5d03944de311",
+        "sha256": "1fafcd630490e8f5707f01b934291961ff78921bf07d39f54efbb67165b74a5f",
         "role": "current metrics, logs, reference builder, and producer-limit baseline"
       },
       {

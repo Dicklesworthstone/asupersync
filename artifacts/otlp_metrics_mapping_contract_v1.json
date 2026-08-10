@@ -871,8 +871,8 @@
     },
     {
       "path": "src/observability/otel.rs",
-      "sha256": "c6cc312af370ee4485bedeb49aa0d900ed649b813c849179c68f5d03944de311",
-      "line_count": 9427,
+      "sha256": "1fafcd630490e8f5707f01b934291961ff78921bf07d39f54efbb67165b74a5f",
+      "line_count": 9420,
       "anchors": ["pub enum CardinalityOverflow", "pub struct MetricsSnapshot", "pub struct OtelMetrics", "pub fn metrics_request_from_snapshot"]
     },
     {
@@ -967,7 +967,7 @@
     },
     {
       "path": "tests/protobuf_owned_otlp_schema_contract.rs",
-      "sha256": "2d10e865077ad4e45d9fccb45d879e9a5f5b43a1defb010dee53133f97556ace",
+      "sha256": "dc9a219b15a98bd4aa6ddfe97362b6340c2f8b065a401167a97e008c9a4d30b2",
       "line_count": 2200,
       "anchors": ["The JSON-shaped fixture is not protobuf wire evidence", "Generated request builders are test/fuzz gated"]
     },
@@ -979,13 +979,13 @@
     },
     {
       "path": "artifacts/otlp_capability_inventory_v1.json",
-      "sha256": "076c3582a354fc831edf08f223bad74f275fb66f3bcb825f9dc07c106f40da71",
+      "sha256": "623a6c8d6e2168dd71f8ebe1239db7b6e42ebd3b78b5c45f1e85a9e4da0a50b4",
       "line_count": 985,
       "anchors": ["SHIPPED_VIA_DEPENDENCY", "OTLP-GAP-01", "asupersync-5z2scg.2.3"]
     },
     {
       "path": "artifacts/protobuf_owned_otlp_schema_v1.json",
-      "sha256": "1ba0bcf9d0df7951ad76bbb84b25462d957b5d14c9d419117664f47e890f2ce7",
+      "sha256": "1fc2d717842541271b7c449fda90f93cdceeb667006f6c9674dafb5b9054cdf7",
       "line_count": 1126,
       "anchors": ["NEW_A3_SCHEMA_POLICY_NOT_INCUMBENT_PARITY", "data_points_per_metric", "signal_construction_separation"]
     },

@@ -65,8 +65,8 @@
     },
     {
       "path": "src/observability/otel.rs",
-      "sha256": "c6cc312af370ee4485bedeb49aa0d900ed649b813c849179c68f5d03944de311",
-      "line_count": 9427,
+      "sha256": "1fafcd630490e8f5707f01b934291961ff78921bf07d39f54efbb67165b74a5f",
+      "line_count": 9420,
       "role": "live custom-first redaction pipeline, built-in patterns, order, tokens and Luhn join"
     },
     {
@@ -77,7 +77,7 @@
     },
     {
       "path": "artifacts/regex_privacy_capability_inventory_v1.json",
-      "sha256": "154c0e7f6e37b5937afa332784ef4a5d10acf73d9872a11efb8177dac03b734c",
+      "sha256": "227026d6e5e6e95e10810aaed6c077facd5e4697fee94b76c9f32ae7368d1715",
       "line_count": 1014,
       "role": "R1 capability and historical detector baseline"
     },

@@ -47,7 +47,7 @@ const LAB_CAPABILITY_ROW_SHA256: &str =
 const SOURCE_PIN_PATHS_SHA256: &str =
     "b5ba6ff6a6eb152e0c3bb263205e8a7d9f9a58fbbb27ec13fd276eb909d9552a";
 const CLAIMS_PROJECTION_SHA256: &str =
-    "81dc5debee8de4ecbd1f83ea3add909fb0638b6ca3780ffaad2b9d181c3316f0";
+    "31cd51cfedfa40cc67d6331d1b9d1d8b3ea3af89ab93a5c3eb777d24b473702a";
 const DOC_BEGIN: &str = "<!-- BEGIN REGEX BUILT-IN DETECTOR CORPUS -->";
 const DOC_END: &str = "<!-- END REGEX BUILT-IN DETECTOR CORPUS -->";
 

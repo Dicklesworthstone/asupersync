@@ -882,8 +882,8 @@
     {
       "pin_id": "KAFKA-K0-3-PIN-CALLSITE-OTEL",
       "path": "src/observability/otel.rs",
-      "record_count": 9427,
-      "sha256": "c6cc312af370ee4485bedeb49aa0d900ed649b813c849179c68f5d03944de311",
+      "record_count": 9420,
+      "sha256": "1fafcd630490e8f5707f01b934291961ff78921bf07d39f54efbb67165b74a5f",
       "role": "exact source pin for an excluded telemetry Compression name collision"
     },
     {
@@ -956,7 +956,7 @@
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-017","path":"artifacts/appspec_v1_schema.json","record_count":604,"sha256":"765358ab3c86a808b169f854861dab05adfe0c3bff26b21f36e4022b76f154d1","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-018","path":"artifacts/browser_edition_readiness_matrix_v1.json","record_count":884,"sha256":"fd5318a3602cfb55d90a50bd6b6dbc14446eddd598377b3c64aa6cb70f73ec61","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-019","path":"artifacts/conformance_registry_contract_v1.json","record_count":390,"sha256":"f85683e7759b2596fb1cd82e574b73f1e8e0ff795e968e5b7bffe45aab1b9629","role":"exact baseline content pin for a documentation-claim candidate surface"},
-    {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-020","path":"artifacts/deflate_surface_inventory_v1.json","record_count":788,"sha256":"014203ea1f7ad8cee0982122a2afbc85d34933cbfabc8e497af343e988b97e17","role":"exact baseline content pin for a documentation-claim candidate surface"},
+    {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-020","path":"artifacts/deflate_surface_inventory_v1.json","record_count":788,"sha256":"8690c66e633c9d652dccbb0fba47d9a861272e9898771904eaab9aca7c6a2c0e","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-021","path":"artifacts/dependency_api_adr_phase3_signoff_v1.json","record_count":701,"sha256":"3fff9fa7429a9bde5a4b4bcb827e7400d426a42eab8e6ce5336dd904b5881904","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-023","path":"artifacts/dependency_budget_contract_v1.json","record_count":4354,"sha256":"fe7540712c246809b05496beeb482a93ecd3de4ea8dc96e05eea123ba4e1be57","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-024","path":"artifacts/dependency_capability_baseline_v1.json","record_count":3210,"sha256":"2cc72453659c2209713d6779c6d12aa6a114201893cbbd6e840d9f73786d38a3","role":"exact baseline content pin for a documentation-claim candidate surface"},
