@@ -18,8 +18,8 @@ use std::path::PathBuf;
 const ARTIFACT_PATH: &str = "artifacts/kafka_k0_baseline_disposition_v1.json";
 const DOC_PATH: &str = "docs/kafka_k0_baseline_disposition.md";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
-const ARTIFACT_SHA256: &str = "c7283187a805dd7839d55135bb79e21865647aed78abdc0f8297a820e2ba228f";
-const DOC_SHA256: &str = "ee84b3ebe9a261651df9c154b93292639ee2f9aeea1a7b41d7fe3fdf4df32a55";
+const ARTIFACT_SHA256: &str = "6e6aa8634775e39ea1550460ed66d04a05c9a97048fec1c9c3fdb2601663ea57";
+const DOC_SHA256: &str = "10f2d6b80aa6e1e56a236edd8d7a2ae83ade60b613d58b631ceaae7e6aa32ddd";
 const ARTIFACT_ID: &str = "kafka-k0-baseline-disposition-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const BEAD_ID: &str = "asupersync-dep-p7-kafka-removal-sarszu.1.5";
@@ -83,7 +83,7 @@ const ROUTE_OWNER_ID_SHA256: &str =
 const REDUCED_UNKNOWN_SELECTOR_SHA256: &str =
     "5c7fb727bc79d4f8be1c979fadda8bcfd261da0953e972a32a89bef27a28b18c";
 const SOURCE_PIN_FULL_ROW_SHA256: &str =
-    "7942a3af6873d33ce06fd3c7f791e3cf06a699e94d52f842e1b821cfb6173967";
+    "723d7c13a94f35b7b6e4f0ec2ae1b4ce254b4e161ca424756a6acba783f152b0";
 const SOURCE_PIN_PATH_SHA256: &str =
     "d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3";
 const SOURCE_PIN_OVERLAP_SHA256: &str =
@@ -235,7 +235,7 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.4",
         role: "artifact_file",
         path: "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
-        sha256: "289a19533c3a08fb4d75af8aa7036932efda14fbeec7855bd9aa166fa6c458fe",
+        sha256: "6eaa5217def106b560fc6e231a91a53ef4d6cf6b65d6435fabe642ff178cea65",
         byte_count: 119_250,
         record_count: 2_187,
     },
@@ -251,7 +251,7 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.4",
         role: "contract_file",
         path: "tests/kafka_broker_fixture_provenance_matrix_contract.rs",
-        sha256: "f5f62a3e92cce15a44639368c996a4e3a063ef21861ceebb1f09f1db85a20ee0",
+        sha256: "119745d99d2304d73e4e14ff98b842b6191ab8629f5a303820b0030fa1f9c217",
         byte_count: 129_665,
         record_count: 3_462,
     },
