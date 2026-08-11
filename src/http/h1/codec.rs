@@ -6,6 +6,7 @@
 
 use crate::bytes::BytesMut;
 use crate::codec::{Decoder, Encoder};
+use crate::http::h1::stream::{BodyKind as StreamingBodyKind, RequestHead};
 use crate::http::h1::types::{self, Method, Request, Response, Version};
 use memchr::{memchr, memchr_iter, memmem};
 use std::fmt;
@@ -1098,6 +1099,47 @@ fn decode_head(
     // http1/parse is allocation-bound and this is one of its allocations.
     src.advance(end);
     Ok(Some((method, uri, version, headers, kind)))
+}
+
+/// Decodes and consumes one request head without buffering its body.
+///
+/// This is the protocol boundary used by the streaming server. It shares the
+/// exact hardened request-line, header, Content-Length, and Transfer-Encoding
+/// parser with [`Http1Codec`] while publishing the validated head before any
+/// body bytes are required.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn decode_streaming_request_head(
+    src: &mut BytesMut,
+    max_headers_size: usize,
+    max_body_size: usize,
+) -> Result<Option<(RequestHead, StreamingBodyKind)>, HttpError> {
+    let Some((method, uri, version, headers, kind)) = decode_head(src, max_headers_size)? else {
+        return Ok(None);
+    };
+    let kind = match kind {
+        BodyKind::ContentLength(0) => StreamingBodyKind::Empty,
+        BodyKind::ContentLength(len) => {
+            if len > max_body_size {
+                return Err(HttpError::BodyTooLargeDetailed {
+                    actual: u64::try_from(len).unwrap_or(u64::MAX),
+                    limit: u64::try_from(max_body_size).unwrap_or(u64::MAX),
+                });
+            }
+            StreamingBodyKind::ContentLength(
+                u64::try_from(len).map_err(|_| HttpError::BodyTooLarge)?,
+            )
+        }
+        BodyKind::Chunked => StreamingBodyKind::Chunked,
+    };
+    Ok(Some((
+        RequestHead {
+            method,
+            uri,
+            version,
+            headers,
+        },
+        kind,
+    )))
 }
 
 #[cfg(not(target_arch = "wasm32"))]

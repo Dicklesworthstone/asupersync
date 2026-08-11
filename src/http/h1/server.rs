@@ -5,11 +5,18 @@
 //! framed transport. Supports keep-alive, request limits, idle timeouts,
 //! and graceful shutdown.
 
-use crate::codec::Framed;
+use crate::bytes::BytesMut;
+use crate::codec::{Encoder, Framed};
 use crate::cx::Cx;
-use crate::http::h1::codec::{Http1Codec, HttpError, preview_request_head};
+use crate::http::h1::codec::{
+    Http1Codec, HttpError, decode_streaming_request_head, preview_request_head,
+};
+use crate::http::h1::stream::{
+    BodyKind, IncomingBodyDrainProgress, IncomingBodyError, IncomingBodyWriter,
+    IncomingRequestBody, RequestHead, StreamingRequest,
+};
 use crate::http::h1::types::{Method, Request, Response, Version, default_reason};
-use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use crate::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::server::shutdown::{ShutdownPhase, ShutdownSignal};
 use crate::stream::Stream;
 use crate::time::{timeout, wall_now};
@@ -95,6 +102,16 @@ pub struct Http1Config {
     /// connection cancel: the handler gets this long to observe the
     /// cancel and finish cleanly before the drop backstop.
     pub request_drain_grace: Duration,
+    /// Maximum number of decoded request-body frames queued for a handler.
+    pub incoming_body_frame_capacity: usize,
+    /// Maximum request-body bytes queued independently of frame capacity.
+    pub incoming_body_queued_bytes: usize,
+    /// Maximum unread decoded frames discarded after a handler returns.
+    pub unread_body_drain_frames: u64,
+    /// Maximum unread body bytes discarded after a handler returns.
+    pub unread_body_drain_bytes: u64,
+    /// Maximum time spent synchronizing unread request-body EOF.
+    pub unread_body_drain_timeout: Duration,
 }
 
 impl Default for Http1Config {
@@ -109,6 +126,11 @@ impl Default for Http1Config {
             request_timeout: None,
             request_timeout_header_cap: None,
             request_drain_grace: Duration::from_millis(500),
+            incoming_body_frame_capacity: 8,
+            incoming_body_queued_bytes: 512 * 1024,
+            unread_body_drain_frames: 8,
+            unread_body_drain_bytes: 512 * 1024,
+            unread_body_drain_timeout: Duration::from_millis(500),
         }
     }
 }
@@ -193,6 +215,23 @@ impl Http1Config {
     #[must_use]
     pub fn request_drain_grace(mut self, grace: Duration) -> Self {
         self.request_drain_grace = grace;
+        self
+    }
+
+    /// Set independent request-body frame and queued-byte backpressure caps.
+    #[must_use]
+    pub fn incoming_body_queue(mut self, frame_capacity: usize, queued_bytes: usize) -> Self {
+        self.incoming_body_frame_capacity = frame_capacity.max(1);
+        self.incoming_body_queued_bytes = queued_bytes.max(1);
+        self
+    }
+
+    /// Set bounded unread-body drain frame, byte, and time limits.
+    #[must_use]
+    pub fn unread_body_drain(mut self, frames: u64, bytes: u64, timeout: Duration) -> Self {
+        self.unread_body_drain_frames = frames;
+        self.unread_body_drain_bytes = bytes;
+        self.unread_body_drain_timeout = timeout;
         self
     }
 }
@@ -933,6 +972,434 @@ where
     }
 }
 
+/// HTTP/1.1 server that publishes a validated request head before reading its body.
+///
+/// The handler and wire-body driver are polled concurrently. Request bytes flow
+/// through independently bounded frame and byte queues, so a slow handler
+/// applies backpressure to the socket. If the handler returns without consuming
+/// the body, the driver performs a bounded framing-aware drain; the connection
+/// is reusable only after synchronized body EOF.
+pub struct Http1StreamingServer<F> {
+    handler: F,
+    config: Http1Config,
+    shutdown_signal: Option<ShutdownSignal>,
+    in_flight_requests: Option<Arc<AtomicUsize>>,
+}
+
+impl<F, Fut> Http1StreamingServer<F>
+where
+    F: Fn(Cx, StreamingRequest) -> Fut + Send + Sync,
+    Fut: Future<Output = Response> + Send,
+{
+    /// Creates a streaming HTTP/1 server with default connection limits.
+    pub fn new(handler: F) -> Self {
+        Self::with_config(handler, Http1Config::default())
+    }
+
+    /// Creates a streaming HTTP/1 server with explicit connection limits.
+    pub fn with_config(handler: F, config: Http1Config) -> Self {
+        Self {
+            handler,
+            config,
+            shutdown_signal: None,
+            in_flight_requests: None,
+        }
+    }
+
+    /// Attaches graceful shutdown coordination.
+    #[must_use]
+    pub fn with_shutdown_signal(mut self, signal: ShutdownSignal) -> Self {
+        self.shutdown_signal = Some(signal);
+        self
+    }
+
+    /// Attaches the listener-shared in-flight request counter.
+    #[must_use]
+    pub fn with_in_flight_requests(mut self, counter: Arc<AtomicUsize>) -> Self {
+        self.in_flight_requests = Some(counter);
+        self
+    }
+
+    /// Serves one streaming HTTP/1 connection under an explicit capability context.
+    pub async fn serve<T>(self, cx: &Cx, io: T) -> Result<ConnectionState, HttpError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        self.serve_with_peer_addr(cx, io, None).await
+    }
+
+    /// Serves one streaming HTTP/1 connection and records its peer address.
+    #[allow(clippy::too_many_lines)]
+    pub async fn serve_with_peer_addr<T>(
+        self,
+        cx: &Cx,
+        mut io: T,
+        peer_addr: Option<SocketAddr>,
+    ) -> Result<ConnectionState, HttpError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        let mut read_buffer = BytesMut::with_capacity(8192);
+        let mut state = ConnectionState::new(connection_now(cx));
+
+        loop {
+            state.phase = ConnectionPhase::Idle;
+            if cx.checkpoint().is_err()
+                || self
+                    .shutdown_signal
+                    .as_ref()
+                    .is_some_and(ShutdownSignal::is_shutting_down)
+                || state.exceeded_request_limit(self.config.max_requests_per_connection)
+                || state.exceeded_idle_timeout(self.config.idle_timeout, connection_now(cx))
+            {
+                state.phase = ConnectionPhase::Closing;
+                break;
+            }
+
+            state.phase = ConnectionPhase::Reading;
+            let Some((head, body_kind)) =
+                read_streaming_request_head(cx, &mut io, &mut read_buffer, &self.config).await?
+            else {
+                state.phase = ConnectionPhase::Closing;
+                break;
+            };
+            let _in_flight = InFlightRequestGuard::acquire(self.in_flight_requests.as_ref());
+
+            if let Err(rejected_host) =
+                validate_host_header(&head.headers, &self.config.allowed_hosts)
+            {
+                let body = if rejected_host.is_empty() {
+                    "Missing required Host header".to_owned()
+                } else {
+                    format!("Host '{rejected_host}' not in allowed-hosts allow-list")
+                };
+                let response = Response {
+                    status: 421,
+                    reason: String::new(),
+                    version: head.version,
+                    headers: vec![
+                        (
+                            "content-type".to_owned(),
+                            "text/plain; charset=utf-8".to_owned(),
+                        ),
+                        ("connection".to_owned(), "close".to_owned()),
+                    ],
+                    body: body.into_bytes(),
+                    trailers: Vec::new(),
+                };
+                state.phase = ConnectionPhase::Writing;
+                write_streaming_response(cx, &mut io, response).await?;
+                state.requests_served += 1;
+                state.phase = ConnectionPhase::Closing;
+                break;
+            }
+
+            let expectation = classify_expectation_from_parts(head.version, &head.headers);
+            if expectation == ExpectationAction::Reject {
+                let response = expectation_response(head.version, expectation)
+                    .expect("rejected expectation must have a response");
+                state.phase = ConnectionPhase::Writing;
+                write_streaming_response(cx, &mut io, response).await?;
+                state.requests_served += 1;
+                state.phase = ConnectionPhase::Closing;
+                break;
+            }
+            if expectation == ExpectationAction::Continue && !body_kind.is_empty() {
+                let response = expectation_response(head.version, expectation)
+                    .expect("100-continue expectation must have a response");
+                state.phase = ConnectionPhase::Writing;
+                write_streaming_response(cx, &mut io, response).await?;
+            }
+
+            let close_after =
+                should_close_connection_parts(head.version, &head.headers, &self.config, &state);
+            let request_version = head.version;
+            let request_method = head.method.clone();
+            let request_now = connection_now(cx);
+            let (request_budget, budget_source) = derive_request_budget(
+                cx.budget(),
+                request_now,
+                self.config.request_timeout,
+                parse_request_timeout_header(&head.headers),
+                self.config.request_timeout_header_cap,
+            );
+            let region =
+                ServerRequestRegion::mint_from_connection("h1", request_budget, request_now, cx);
+            let request_cx = region.cx().clone();
+            let (writer, body) = IncomingRequestBody::channel_with_limits(
+                &request_cx,
+                body_kind,
+                self.config.incoming_body_frame_capacity,
+                self.config.incoming_body_queued_bytes,
+            );
+            let request = StreamingRequest {
+                head,
+                peer_addr,
+                body,
+            };
+
+            state.phase = ConnectionPhase::Processing;
+            let handler = race_force_close(
+                self.shutdown_signal.as_ref(),
+                region.run_with_protocol_drain(
+                    budget_source,
+                    Some(cx.clone()),
+                    self.config.request_drain_grace,
+                    (self.handler)(request_cx, request),
+                ),
+            );
+            let body_driver = drive_incoming_body(
+                cx,
+                &mut io,
+                &mut read_buffer,
+                writer.max_body_size(u64::try_from(self.config.max_body_size).unwrap_or(u64::MAX)),
+                &self.config,
+            );
+
+            let Some((hop, writer)) =
+                join_streaming_handler_and_body(cx, handler, body_driver, &self.config).await
+            else {
+                state.phase = ConnectionPhase::Closing;
+                break;
+            };
+            if validate_unread_drain(writer.drain_progress(), &self.config).is_err() {
+                state.phase = ConnectionPhase::Closing;
+                break;
+            }
+
+            let mut forced_close = false;
+            let mut response = match hop {
+                ServerHopOutcome::Ok(response) => response,
+                ServerHopOutcome::Cancelled | ServerHopOutcome::ConnectionLost => {
+                    state.requests_served += 1;
+                    state.phase = ConnectionPhase::Closing;
+                    break;
+                }
+                ServerHopOutcome::Panicked(_) => {
+                    forced_close = true;
+                    hop_error_response(request_version, 500, "Internal Server Error")
+                }
+                ServerHopOutcome::DeadlineExceeded => {
+                    hop_error_response(request_version, 503, "request budget deadline exceeded")
+                }
+            };
+            if request_method == Method::Head {
+                suppress_response_body_for_head(&mut response);
+            }
+            let draining = self
+                .shutdown_signal
+                .as_ref()
+                .is_some_and(ShutdownSignal::is_shutting_down);
+            let close_after = finalize_response_persistence(
+                request_version,
+                &mut response,
+                close_after || forced_close || draining,
+            );
+
+            state.phase = ConnectionPhase::Writing;
+            write_streaming_response(cx, &mut io, response).await?;
+            state.requests_served += 1;
+            state.last_request_at = connection_now(cx);
+            if close_after {
+                state.phase = ConnectionPhase::Closing;
+                break;
+            }
+        }
+
+        let _ = io.shutdown().await;
+        Ok(state)
+    }
+}
+
+fn connection_now(cx: &Cx) -> crate::types::Time {
+    cx.timer_driver().map_or_else(wall_now, |timer| timer.now())
+}
+
+async fn read_streaming_request_head<T>(
+    cx: &Cx,
+    io: &mut T,
+    buffer: &mut BytesMut,
+    config: &Http1Config,
+) -> Result<Option<(RequestHead, BodyKind)>, HttpError>
+where
+    T: AsyncRead + Unpin,
+{
+    loop {
+        if let Some(head) =
+            decode_streaming_request_head(buffer, config.max_headers_size, config.max_body_size)?
+        {
+            return Ok(Some(head));
+        }
+        if cx.checkpoint().is_err() {
+            return Ok(None);
+        }
+        let mut chunk = [0_u8; 8192];
+        let read = io.read(&mut chunk);
+        let count = if let Some(idle_timeout) = config.idle_timeout {
+            match timeout(connection_now(cx), idle_timeout, read).await {
+                Ok(result) => result.map_err(HttpError::Io)?,
+                Err(_) => return Ok(None),
+            }
+        } else {
+            read.await.map_err(HttpError::Io)?
+        };
+        if count == 0 {
+            if buffer.is_empty() {
+                return Ok(None);
+            }
+            return Err(HttpError::BadRequestLine);
+        }
+        buffer.extend_from_slice(&chunk[..count]);
+    }
+}
+
+async fn write_streaming_response<T>(
+    cx: &Cx,
+    io: &mut T,
+    response: Response,
+) -> Result<(), HttpError>
+where
+    T: AsyncWrite + Unpin,
+{
+    if cx.checkpoint().is_err() {
+        return Err(HttpError::Io(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "connection cancelled",
+        )));
+    }
+    let mut encoded = BytesMut::new();
+    Http1Codec::new().encode(response, &mut encoded)?;
+    io.write_all(encoded.as_ref())
+        .await
+        .map_err(HttpError::Io)?;
+    io.flush().await.map_err(HttpError::Io)
+}
+
+async fn drive_incoming_body<T>(
+    cx: &Cx,
+    io: &mut T,
+    read_buffer: &mut BytesMut,
+    mut writer: IncomingBodyWriter,
+    config: &Http1Config,
+) -> Result<IncomingBodyWriter, IncomingBodyError>
+where
+    T: AsyncRead + Unpin,
+{
+    loop {
+        if writer.is_done() {
+            let remainder = writer.take_remainder();
+            if !remainder.is_empty() {
+                *read_buffer = remainder;
+            }
+            return Ok(writer);
+        }
+
+        if !read_buffer.is_empty() {
+            let input = std::mem::take(read_buffer);
+            if writer.consumer_dropped() {
+                let progress = writer.discard_bytes(input.as_ref())?;
+                validate_unread_drain(progress, config)?;
+            } else if let Err(error) = writer.push_bytes(cx, input.as_ref()).await {
+                if error != IncomingBodyError::ConsumerDropped {
+                    return Err(error);
+                }
+                let progress = writer.discard_bytes(&[])?;
+                validate_unread_drain(progress, config)?;
+            }
+            continue;
+        }
+
+        let mut chunk = [0_u8; 8192];
+        let count = io
+            .read(&mut chunk)
+            .await
+            .map_err(|_| IncomingBodyError::SourceDisconnected)?;
+        if count == 0 {
+            writer.finish(cx)?;
+            continue;
+        }
+        read_buffer.extend_from_slice(&chunk[..count]);
+    }
+}
+
+async fn join_streaming_handler_and_body<H, B>(
+    cx: &Cx,
+    handler: H,
+    body: B,
+    config: &Http1Config,
+) -> Option<(ServerHopOutcome<Response>, IncomingBodyWriter)>
+where
+    H: Future<Output = Option<ServerHopOutcome<Response>>>,
+    B: Future<Output = Result<IncomingBodyWriter, IncomingBodyError>>,
+{
+    let mut handler = Some(Box::pin(handler));
+    let mut body = Some(Box::pin(body));
+    let first = poll_fn(|task_cx| {
+        if let Some(handler) = handler.as_mut() {
+            if let Poll::Ready(result) = handler.as_mut().poll(task_cx) {
+                return Poll::Ready(StreamingJoinFirst::Handler(result));
+            }
+        }
+        if let Some(body) = body.as_mut() {
+            if let Poll::Ready(result) = body.as_mut().poll(task_cx) {
+                return Poll::Ready(StreamingJoinFirst::Body(result));
+            }
+        }
+        Poll::Pending
+    })
+    .await;
+
+    match first {
+        StreamingJoinFirst::Body(Ok(writer)) => {
+            body.take();
+            let hop = handler.take()?.await?;
+            Some((hop, writer))
+        }
+        StreamingJoinFirst::Body(Err(_)) => {
+            body.take();
+            if let Some(handler) = handler.take() {
+                let _ = timeout(connection_now(cx), config.request_drain_grace, handler).await;
+            }
+            None
+        }
+        StreamingJoinFirst::Handler(Some(hop)) => {
+            handler.take();
+            let body = body.take()?;
+            let writer = timeout(connection_now(cx), config.unread_body_drain_timeout, body)
+                .await
+                .ok()?
+                .ok()?;
+            Some((hop, writer))
+        }
+        StreamingJoinFirst::Handler(None) => None,
+    }
+}
+
+enum StreamingJoinFirst {
+    Handler(Option<ServerHopOutcome<Response>>),
+    Body(Result<IncomingBodyWriter, IncomingBodyError>),
+}
+
+fn validate_unread_drain(
+    progress: IncomingBodyDrainProgress,
+    config: &Http1Config,
+) -> Result<(), IncomingBodyError> {
+    if progress.frames > config.unread_body_drain_frames
+        || progress.bytes > config.unread_body_drain_bytes
+    {
+        return Err(IncomingBodyError::DrainLimitExceeded {
+            frames: progress.frames,
+            bytes: progress.bytes,
+            frame_limit: config.unread_body_drain_frames,
+            byte_limit: config.unread_body_drain_bytes,
+        });
+    }
+    if !progress.synchronized_eof {
+        return Err(IncomingBodyError::DrainTimeout);
+    }
+    Ok(())
+}
+
 /// RAII guard for the listener-shared in-flight request counter
 /// (br-asupersync-server-stack-hardening-eeexl1.2, D2.2b).
 ///
@@ -1177,6 +1644,15 @@ fn expectation_response(version: Version, action: ExpectationAction) -> Option<R
 /// Considers: explicit Connection header, HTTP version defaults,
 /// server keep-alive config, and request limits.
 fn should_close_connection(req: &Request, config: &Http1Config, state: &ConnectionState) -> bool {
+    should_close_connection_parts(req.version, &req.headers, config, state)
+}
+
+fn should_close_connection_parts(
+    version: Version,
+    headers: &[(String, String)],
+    config: &Http1Config,
+    state: &ConnectionState,
+) -> bool {
     // If keep-alive is disabled server-wide, always close
     if !config.keep_alive {
         return true;
@@ -1193,7 +1669,7 @@ fn should_close_connection(req: &Request, config: &Http1Config, state: &Connecti
     let mut has_close = false;
 
     // Check explicit Connection header from client (RFC 9110 §7.6.1: comma-separated tokens)
-    for (name, value) in &req.headers {
+    for (name, value) in headers {
         if name.eq_ignore_ascii_case("connection") {
             for token in value.split(',').map(str::trim) {
                 if token.eq_ignore_ascii_case("close") {
@@ -1214,7 +1690,7 @@ fn should_close_connection(req: &Request, config: &Http1Config, state: &Connecti
     }
 
     // HTTP/1.0 defaults to close; HTTP/1.1 defaults to keep-alive
-    req.version == Version::Http10
+    version == Version::Http10
 }
 
 /// Add a `Connection: close` header to the response if not already present.
@@ -1357,6 +1833,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use crate::http::body::Body;
     use crate::http::h1::types::Method;
     use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
     use crate::runtime::RuntimeBuilder;
@@ -1485,6 +1962,57 @@ mod tests {
     }
 
     impl AsyncWrite for GatedBodyIo {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.written.lock().unwrap().extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct HeadFirstIo {
+        head: Vec<u8>,
+        body_and_pipeline: Vec<u8>,
+        head_published: Arc<AtomicBool>,
+        written: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl AsyncRead for HeadFirstIo {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let source = if self.head.is_empty() {
+                assert!(
+                    self.head_published.load(Ordering::SeqCst),
+                    "server read request-body bytes before publishing the request head"
+                );
+                &mut self.body_and_pipeline
+            } else {
+                &mut self.head
+            };
+            if source.is_empty() {
+                return Poll::Ready(Ok(()));
+            }
+            let count = buf.remaining().min(source.len());
+            buf.put_slice(&source[..count]);
+            source.drain(..count);
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for HeadFirstIo {
         fn poll_write(
             self: Pin<&mut Self>,
             _cx: &mut Context<'_>,
@@ -1967,6 +2495,272 @@ mod tests {
             vec![("Transfer-Encoding".into(), "chunked".into())],
         );
         assert!(request_expects_body(&req));
+    }
+
+    #[test]
+    fn streaming_server_publishes_head_before_reading_body() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let head_published = Arc::new(AtomicBool::new(false));
+        let io = HeadFirstIo {
+            head: b"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nConnection: close\r\n\r\n".to_vec(),
+            body_and_pipeline: b"hello".to_vec(),
+            head_published: Arc::clone(&head_published),
+            written: Arc::clone(&written),
+        };
+        let published_by_handler = Arc::clone(&head_published);
+        let server = Http1StreamingServer::with_config(
+            move |_cx, mut request| {
+                let published_by_handler = Arc::clone(&published_by_handler);
+                async move {
+                    published_by_handler.store(true, Ordering::SeqCst);
+                    let mut body = Vec::new();
+                    while let Some(frame) =
+                        poll_fn(|task_cx| Pin::new(&mut request.body).poll_frame(task_cx)).await
+                    {
+                        if let Some(data) = frame.expect("valid body frame").into_data() {
+                            body.extend_from_slice(data.into_inner().as_ref());
+                        }
+                    }
+                    assert_eq!(body, b"hello");
+                    Response::new(200, "OK", b"done")
+                }
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let state = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve(&cx, io).await
+            })
+            .expect("serve streaming request");
+
+        assert_eq!(state.requests_served, 1);
+        assert!(head_published.load(Ordering::SeqCst));
+        assert!(String::from_utf8_lossy(&written.lock().unwrap()).contains("200 OK"));
+    }
+
+    #[test]
+    fn streaming_server_drains_unread_body_before_pipeline_reuse() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"POST /first HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhelloGET /second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_by_handler = Arc::clone(&seen);
+        let server = Http1StreamingServer::with_config(
+            move |_cx, request| {
+                seen_by_handler
+                    .lock()
+                    .unwrap()
+                    .push(request.head.uri.clone());
+                async move { Response::new(200, "OK", request.head.uri.into_bytes()) }
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let state = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve(&cx, io).await
+            })
+            .expect("serve pipelined streaming requests");
+
+        assert_eq!(state.requests_served, 2);
+        assert_eq!(&*seen.lock().unwrap(), &["/first", "/second"]);
+        let written = String::from_utf8_lossy(&written.lock().unwrap()).into_owned();
+        assert_eq!(written.matches("HTTP/1.1 200 OK").count(), 2);
+    }
+
+    #[test]
+    fn streaming_server_closes_when_unread_body_exceeds_drain_limit() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"POST /first HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\n0123456789GET /second HTTP/1.1\r\nHost: localhost\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let config = localhost_server_config().unread_body_drain(8, 4, Duration::from_secs(1));
+        let server = Http1StreamingServer::with_config(
+            |_cx, _request| async move { Response::new(200, "OK", b"must not commit") },
+            config,
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let state = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve(&cx, io).await
+            })
+            .expect("drain-limit close is a clean connection outcome");
+
+        assert_eq!(state.requests_served, 0);
+        assert!(written.lock().unwrap().is_empty());
+        assert_eq!(state.phase, ConnectionPhase::Closing);
+    }
+
+    #[test]
+    fn streaming_server_preserves_chunked_frames_and_trailers() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"POST /chunk HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\nX-Checksum: yes\r\n\r\n"
+                .to_vec(),
+            Arc::clone(&written),
+        );
+        let observed = Arc::new(Mutex::new((Vec::new(), Vec::new())));
+        let observed_by_handler = Arc::clone(&observed);
+        let server = Http1StreamingServer::with_config(
+            move |_cx, mut request| {
+                let observed_by_handler = Arc::clone(&observed_by_handler);
+                async move {
+                    while let Some(frame) =
+                        poll_fn(|task_cx| Pin::new(&mut request.body).poll_frame(task_cx)).await
+                    {
+                        match frame.expect("valid chunked frame") {
+                            crate::http::body::Frame::Data(data) => observed_by_handler
+                                .lock()
+                                .unwrap()
+                                .0
+                                .extend_from_slice(data.into_inner().as_ref()),
+                            crate::http::body::Frame::Trailers(trailers) => {
+                                observed_by_handler.lock().unwrap().1 = trailers
+                                    .iter()
+                                    .map(|(name, value)| {
+                                        (
+                                            name.as_str().to_owned(),
+                                            String::from_utf8_lossy(value.as_bytes()).into_owned(),
+                                        )
+                                    })
+                                    .collect();
+                            }
+                        }
+                    }
+                    Response::new(204, "No Content", Vec::new())
+                }
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let state = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve(&cx, io).await
+            })
+            .expect("serve chunked streaming request");
+
+        assert_eq!(state.requests_served, 1);
+        assert_eq!(observed.lock().unwrap().0, b"hello");
+        assert_eq!(
+            observed.lock().unwrap().1,
+            vec![("x-checksum".to_owned(), "yes".to_owned())]
+        );
+    }
+
+    #[test]
+    fn streaming_server_refuses_actual_chunked_bytes_over_limit() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"POST /chunk HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+                .to_vec(),
+            Arc::clone(&written),
+        );
+        let observed_error: Arc<Mutex<Option<IncomingBodyError>>> = Arc::new(Mutex::new(None));
+        let observed_by_handler = Arc::clone(&observed_error);
+        let server = Http1StreamingServer::with_config(
+            move |_cx, mut request| {
+                let observed_by_handler = Arc::clone(&observed_by_handler);
+                async move {
+                    while let Some(frame) =
+                        poll_fn(|task_cx| Pin::new(&mut request.body).poll_frame(task_cx)).await
+                    {
+                        if let Err(error) = frame {
+                            *observed_by_handler.lock().unwrap() = Some(error);
+                            break;
+                        }
+                    }
+                    Response::new(200, "OK", b"must not commit")
+                }
+            },
+            localhost_server_config().max_body_size(4),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let state = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve(&cx, io).await
+            })
+            .expect("over-limit body closes the connection cleanly");
+
+        assert_eq!(state.requests_served, 0);
+        assert!(written.lock().unwrap().is_empty());
+        assert_eq!(state.phase, ConnectionPhase::Closing);
+        assert_eq!(
+            *observed_error.lock().unwrap(),
+            Some(IncomingBodyError::BodyTooLarge {
+                actual: Some(5),
+                limit: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn streaming_server_reports_truncated_content_length_and_closes() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"POST /short HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhi".to_vec(),
+            Arc::clone(&written),
+        );
+        let observed_error: Arc<Mutex<Option<IncomingBodyError>>> = Arc::new(Mutex::new(None));
+        let observed_by_handler = Arc::clone(&observed_error);
+        let server = Http1StreamingServer::with_config(
+            move |_cx, mut request| {
+                let observed_by_handler = Arc::clone(&observed_by_handler);
+                async move {
+                    while let Some(frame) =
+                        poll_fn(|task_cx| Pin::new(&mut request.body).poll_frame(task_cx)).await
+                    {
+                        if let Err(error) = frame {
+                            *observed_by_handler.lock().unwrap() = Some(error);
+                            break;
+                        }
+                    }
+                    Response::new(200, "OK", b"must not commit")
+                }
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let state = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve(&cx, io).await
+            })
+            .expect("truncated body closes the connection cleanly");
+
+        assert_eq!(state.requests_served, 0);
+        assert!(written.lock().unwrap().is_empty());
+        assert_eq!(state.phase, ConnectionPhase::Closing);
+        assert_eq!(
+            *observed_error.lock().unwrap(),
+            Some(IncomingBodyError::BadContentLength)
+        );
     }
 
     #[test]
