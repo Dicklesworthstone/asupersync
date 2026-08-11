@@ -234,6 +234,13 @@ pub(crate) struct CancelWakerToken {
 #[derive(Debug)]
 pub struct Cx<Caps = cap::All> {
     pub(crate) inner: Arc<parking_lot::RwLock<CxInner>>,
+    /// Shared cancellation publication flag from [`CxInner`].
+    ///
+    /// This `Arc` is cloned from `CxInner::fast_cancel` at construction and
+    /// never replaced, so cancellation queries can pair their `Acquire` load
+    /// with the `Release` store made by every cancellation publisher without
+    /// acquiring `inner`'s `RwLock`.
+    fast_cancel: Arc<std::sync::atomic::AtomicBool>,
     observability: Arc<parking_lot::RwLock<ObservabilityState>>,
     handles: Arc<CxHandles>,
     /// br-asupersync-5ckssb: runtime capability mask. Mirrors the
@@ -256,12 +263,13 @@ pub struct Cx<Caps = cap::All> {
 }
 
 // Manual Clone impl to avoid requiring `Caps: Clone` (Caps is just a phantom marker type).
-// Only 3 Arc increments instead of ~15.
+// Only 4 Arc increments instead of ~15.
 impl<Caps> Clone for Cx<Caps> {
     #[inline]
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
+            fast_cancel: Arc::clone(&self.fast_cancel),
             observability: Arc::clone(&self.observability),
             handles: Arc::clone(&self.handles),
             runtime_mask: self.runtime_mask,
@@ -903,12 +911,13 @@ impl<Caps> Cx<Caps> {
     /// Creates a new capability context from shared state (internal use).
     #[allow(dead_code)] // Internal construction path for runtime integration
     pub(crate) fn from_inner(inner: Arc<parking_lot::RwLock<CxInner>>) -> Self {
-        let (region, task) = {
+        let (region, task, fast_cancel) = {
             let guard = inner.read();
-            (guard.region, guard.task)
+            (guard.region, guard.task, Arc::clone(&guard.fast_cancel))
         };
         Self {
             inner,
+            fast_cancel,
             observability: Arc::new(parking_lot::RwLock::new(ObservabilityState::new(
                 region, task,
             ))),
@@ -996,6 +1005,7 @@ impl<Caps> Cx<Caps> {
         entropy: Option<Arc<dyn EntropySource>>,
     ) -> Self {
         let inner = Arc::new(parking_lot::RwLock::new(CxInner::new(region, task, budget)));
+        let fast_cancel = Arc::clone(&inner.read().fast_cancel);
         let observability_state =
             observability.unwrap_or_else(|| ObservabilityState::new(region, task));
         let observability = Arc::new(parking_lot::RwLock::new(observability_state));
@@ -1014,6 +1024,7 @@ impl<Caps> Cx<Caps> {
 
         Self {
             inner,
+            fast_cancel,
             observability,
             handles: Arc::new(CxHandles {
                 io_driver,
@@ -1085,6 +1096,7 @@ impl<Caps> Cx<Caps> {
     pub(crate) fn retype<NewCaps>(&self) -> Cx<NewCaps> {
         Cx {
             inner: self.inner.clone(),
+            fast_cancel: self.fast_cancel.clone(),
             observability: self.observability.clone(),
             handles: self.handles.clone(),
             // br-asupersync-5ckssb: preserve the runtime mask across
@@ -2124,7 +2136,7 @@ impl<Caps> Cx<Caps> {
     #[inline]
     #[must_use]
     pub fn is_cancel_requested(&self) -> bool {
-        self.inner.read().cancel_requested
+        self.fast_cancel.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Checks for cancellation and returns an error if cancelled.
@@ -5367,6 +5379,115 @@ mod tests {
             cx.checkpoint().is_err(),
             "checkpoint should fail after unmasking"
         );
+    }
+
+    #[test]
+    fn is_cancel_requested_tracks_clear_and_mask_transitions() {
+        let cx = test_cx();
+
+        assert!(!cx.is_cancel_requested());
+        assert!(!cx.inner.read().cancel_requested);
+
+        cx.set_cancel_requested(true);
+        assert!(cx.is_cancel_requested());
+        assert!(cx.inner.read().cancel_requested);
+
+        cx.masked(|| {
+            assert!(
+                cx.is_cancel_requested(),
+                "masking defers checkpoint delivery, not cancellation visibility"
+            );
+            assert!(cx.checkpoint().is_ok());
+
+            cx.set_cancel_requested(false);
+            assert!(
+                !cx.is_cancel_requested(),
+                "clearing cancellation must publish false while masked"
+            );
+            assert!(!cx.inner.read().cancel_requested);
+            assert!(cx.checkpoint().is_ok());
+
+            cx.set_cancel_requested(true);
+            assert!(cx.is_cancel_requested());
+            assert!(cx.inner.read().cancel_requested);
+        });
+
+        assert!(cx.is_cancel_requested());
+        assert!(cx.checkpoint().is_err());
+
+        cx.set_cancel_requested(false);
+        assert!(!cx.is_cancel_requested());
+        assert!(!cx.inner.read().cancel_requested);
+        assert!(cx.checkpoint().is_ok());
+    }
+
+    #[test]
+    fn is_cancel_requested_shares_clone_and_republishes_deadline() {
+        let cx = Cx::for_testing_with_budget(Budget::new().with_deadline(Time::ZERO));
+        let clone = cx.clone();
+        let from_inner: Cx<cap::All> = Cx::from_inner(Arc::clone(&cx.inner));
+        let restricted: Cx<cap::None> = cx.restrict();
+
+        assert!(!cx.is_cancel_requested());
+        assert!(!clone.is_cancel_requested());
+        assert!(!from_inner.is_cancel_requested());
+        assert!(!restricted.is_cancel_requested());
+
+        assert!(cx.checkpoint().is_err());
+        assert!(cx.is_cancel_requested());
+        assert!(clone.is_cancel_requested());
+        assert!(from_inner.is_cancel_requested());
+        assert!(restricted.is_cancel_requested());
+
+        clone.set_cancel_requested(false);
+        assert!(!cx.is_cancel_requested());
+        assert!(!clone.is_cancel_requested());
+        assert!(!from_inner.is_cancel_requested());
+        assert!(!restricted.is_cancel_requested());
+        assert!(!cx.inner.read().cancel_requested);
+
+        assert!(clone.checkpoint().is_err());
+        assert!(cx.is_cancel_requested());
+        assert!(clone.is_cancel_requested());
+        assert!(from_inner.is_cancel_requested());
+        assert!(restricted.is_cancel_requested());
+    }
+
+    #[test]
+    fn is_cancel_requested_observes_release_published_clone_transitions() {
+        const ROUNDS: usize = 128;
+
+        let cx = test_cx();
+        let writer_cx = cx.clone();
+        let turn = Arc::new(std::sync::Barrier::new(2));
+        let writer_turn = Arc::clone(&turn);
+        let writer = std::thread::spawn(move || {
+            for _ in 0..ROUNDS {
+                writer_cx.set_cancel_requested(true);
+                writer_turn.wait();
+                writer_turn.wait();
+
+                writer_cx.set_cancel_requested(false);
+                writer_turn.wait();
+                writer_turn.wait();
+            }
+        });
+
+        for _ in 0..ROUNDS {
+            turn.wait();
+            assert!(cx.is_cancel_requested());
+            assert!(cx.inner.read().cancel_requested);
+            turn.wait();
+
+            turn.wait();
+            assert!(!cx.is_cancel_requested());
+            assert!(!cx.inner.read().cancel_requested);
+            turn.wait();
+        }
+
+        writer
+            .join()
+            .expect("release-published cancellation writer must not panic");
     }
 
     #[test]
