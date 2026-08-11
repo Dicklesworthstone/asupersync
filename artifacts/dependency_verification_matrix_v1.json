@@ -2731,7 +2731,7 @@
     "capability_registry_path": "artifacts/dependency_capability_registry_v1.json",
     "capability_registry_sha256": "c7a9a9f87d6cc395e8b45b51f8cb4d9519ffc341450712a0e68ea45833018f9c",
     "tracker_path": ".beads/issues.jsonl",
-    "tracker_plan_sha256": "816ae4e67fd27af787eb3bb03e4c1ffd1336caa71a7e09676ea0fe3cf09269d7"
+    "tracker_plan_sha256": "29bb9b5062bddf5cd0f4ee508c97631a8c0542aa6f8753d28e4c680214d47b77"
   },
   "matrix": [
     {
