@@ -103,8 +103,8 @@
     },
     {
       "path": "src/runtime/reactor/mod.rs",
-      "sha256": "0d5d4f826f1fe33313565eaafb0ed405ed92c57ccaea60cd71c2361e99c28669",
-      "line_count": 2187,
+      "sha256": "1d967bdfabe98012b3fbd16046c40671908d2dd6e61ed148a040e84d87803a87",
+      "line_count": 2189,
       "role": "public backend graph, typed capability decisions including dependency classification, live probe wiring and platform factory fallback receipts"
     },
     {
