@@ -898,11 +898,11 @@ fn staggered_wave_injection() {
 }
 
 // ===========================================================================
-// SHUTDOWN DRAINS ALL LANES
+// SHUTDOWN STOPS WORKERS WITHOUT DRAINING APPLICATION WORK
 // ===========================================================================
 
 #[test]
-fn shutdown_drains_remaining_work() {
+fn shutdown_stops_workers_without_draining_queued_work() {
     init_test_logging();
     let state = setup_state();
     let region = state.lock().unwrap().create_root_region(Budget::INFINITE);
@@ -919,27 +919,38 @@ fn shutdown_drains_remaining_work() {
         scheduler.inject_ready(*id, 50);
     }
 
+    // The scheduler owns only the worker-stop signal. Application/region
+    // shutdown owns cancellation, finalization, and draining, so pre-signal
+    // the workers to make that boundary deterministic under load.
+    scheduler.shutdown();
     let handles = spawn_workers(&mut scheduler);
 
-    // Immediate shutdown — workers should still drain.
-    std::thread::sleep(Duration::from_millis(200));
-    scheduler.shutdown();
-
-    let _metrics = collect_metrics(handles);
+    let metrics = collect_metrics(handles);
+    let dispatches: u64 = metrics
+        .iter()
+        .map(|m| m.cancel_dispatches + m.timed_dispatches + m.ready_dispatches)
+        .sum();
 
     let guard = state.lock().unwrap();
-    let cancel_done = cancel_ids
+    let cancel_remaining = cancel_ids
         .iter()
-        .filter(|id| guard.task(**id).is_none())
+        .filter(|id| guard.task(**id).is_some())
         .count();
-    let ready_done = ready_ids
+    let ready_remaining = ready_ids
         .iter()
-        .filter(|id| guard.task(**id).is_none())
+        .filter(|id| guard.task(**id).is_some())
         .count();
     drop(guard);
 
-    assert_eq!(cancel_done, 50, "cancel tasks should drain on shutdown");
-    assert_eq!(ready_done, 50, "ready tasks should drain on shutdown");
+    assert_eq!(dispatches, 0, "pre-signaled workers must not dispatch");
+    assert_eq!(
+        cancel_remaining, 50,
+        "scheduler shutdown must not drain cancel work"
+    );
+    assert_eq!(
+        ready_remaining, 50,
+        "scheduler shutdown must not drain ready work"
+    );
 }
 
 // ===========================================================================
