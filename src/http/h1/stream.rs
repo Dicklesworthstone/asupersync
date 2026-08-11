@@ -12,17 +12,18 @@
 //! - [`ChunkedEncoder`]: Encoder for HTTP/1.1 chunked transfer encoding
 //! - [`BodyKind`]: Body length determination (fixed vs chunked)
 
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 use parking_lot::Mutex;
 
 use crate::bytes::{Buf, Bytes, BytesCursor, BytesMut};
 use crate::channel::mpsc;
 use crate::channel::mpsc::{RecvError, SendError};
-use crate::cx::Cx;
+use crate::cx::{CancelWakerToken, Cx};
 use crate::http::body::{Body, Frame, HeaderMap, HeaderName, HeaderValue, SizeHint};
 use crate::http::h1::codec::{
     HttpError, is_forbidden_trailer, parse_chunk_size_line, validate_header_field,
@@ -203,7 +204,14 @@ enum IncomingConsumerTerminal {
 #[derive(Debug)]
 struct QueuedByteState {
     queued: usize,
-    waiter: Option<std::task::Waker>,
+    next_waiter_id: u64,
+    waiter: Option<QueuedByteWaiter>,
+}
+
+#[derive(Debug)]
+struct QueuedByteWaiter {
+    id: u64,
+    waker: Waker,
 }
 
 #[derive(Debug)]
@@ -218,6 +226,7 @@ impl QueuedByteBudget {
             limit,
             state: Mutex::new(QueuedByteState {
                 queued: 0,
+                next_waiter_id: 0,
                 waiter: None,
             }),
         })
@@ -235,32 +244,14 @@ impl QueuedByteBudget {
             });
         }
 
-        std::future::poll_fn(|poll_cx| {
-            if cx.cancel_reason().is_some() {
-                return Poll::Ready(Err(IncomingBodyError::cancelled(cx)));
-            }
-
-            let mut state = self.state.lock();
-            let Some(next) = state.queued.checked_add(amount) else {
-                return Poll::Ready(Err(IncomingBodyError::AccountingOverflow));
-            };
-            if next <= self.limit {
-                state.queued = next;
-                state.waiter = None;
-                return Poll::Ready(Ok(QueuedBytePermit {
-                    budget: Arc::clone(self),
-                    amount,
-                }));
-            }
-            if !state
-                .waiter
-                .as_ref()
-                .is_some_and(|waker| waker.will_wake(poll_cx.waker()))
-            {
-                state.waiter = Some(poll_cx.waker().clone());
-            }
-            Poll::Pending
-        })
+        QueuedByteReserve {
+            budget: Arc::clone(self),
+            cx,
+            amount,
+            waiter_id: None,
+            cancel_waker: None,
+            completed: false,
+        }
         .await
     }
 
@@ -270,11 +261,211 @@ impl QueuedByteBudget {
             .queued
             .checked_sub(amount)
             .expect("queued request-body byte accounting underflow");
-        let waiter = state.waiter.take();
+        let waiter = state.waiter.take().map(|waiter| waiter.waker);
         drop(state);
         if let Some(waiter) = waiter {
             waiter.wake();
         }
+    }
+}
+
+#[derive(Debug)]
+struct QueuedByteCancelWaker {
+    waker: Waker,
+    token: CancelWakerToken,
+}
+
+struct QueuedByteReserve<'a> {
+    budget: Arc<QueuedByteBudget>,
+    cx: &'a Cx,
+    amount: usize,
+    waiter_id: Option<u64>,
+    cancel_waker: Option<QueuedByteCancelWaker>,
+    completed: bool,
+}
+
+impl QueuedByteReserve<'_> {
+    fn refresh_cancel_waker(&mut self, waker: &Waker) {
+        let same_local_waker = self
+            .cancel_waker
+            .as_ref()
+            .is_some_and(|registered| registered.waker.will_wake(waker));
+        let incoming_waker = (!same_local_waker).then(|| waker.clone());
+        let previous_token = self
+            .cancel_waker
+            .as_ref()
+            .map(|registered| registered.token);
+        let token = self.cx.refresh_cancel_waker(previous_token, waker);
+        let retired_waker = if let Some(incoming_waker) = incoming_waker {
+            self.cancel_waker.replace(QueuedByteCancelWaker {
+                waker: incoming_waker,
+                token,
+            })
+        } else {
+            self.cancel_waker
+                .as_mut()
+                .expect("same local Waker requires an existing registration")
+                .token = token;
+            None
+        };
+        drop(retired_waker);
+    }
+
+    fn clear_cancel_waker(&mut self) {
+        let Some(registered) = self.cancel_waker.take() else {
+            return;
+        };
+        self.cx.clear_cancel_waker(registered.token);
+        drop(registered);
+    }
+
+    fn clear_queue_waiter(&mut self) {
+        let Some(waiter_id) = self.waiter_id.take() else {
+            return;
+        };
+        let retired_waker = {
+            let mut state = self.budget.state.lock();
+            if state
+                .waiter
+                .as_ref()
+                .is_some_and(|waiter| waiter.id == waiter_id)
+            {
+                state.waiter.take().map(|waiter| waiter.waker)
+            } else {
+                None
+            }
+        };
+        drop(retired_waker);
+    }
+
+    fn finish_error(
+        &mut self,
+        error: IncomingBodyError,
+    ) -> Poll<Result<QueuedBytePermit, IncomingBodyError>> {
+        self.completed = true;
+        self.clear_queue_waiter();
+        self.clear_cancel_waker();
+        Poll::Ready(Err(error))
+    }
+}
+
+impl Future for QueuedByteReserve<'_> {
+    type Output = Result<QueuedBytePermit, IncomingBodyError>;
+
+    fn poll(mut self: Pin<&mut Self>, task_cx: &mut Context<'_>) -> Poll<Self::Output> {
+        assert!(
+            !self.completed,
+            "queued-byte reserve polled after completion"
+        );
+
+        if self.cx.checkpoint().is_err() {
+            let error = IncomingBodyError::cancelled(self.cx);
+            return self.finish_error(error);
+        }
+
+        self.refresh_cancel_waker(task_cx.waker());
+        if self.cx.checkpoint().is_err() {
+            let error = IncomingBodyError::cancelled(self.cx);
+            return self.finish_error(error);
+        }
+
+        // Prepare the replacement outside the budget mutex. Custom RawWaker
+        // clone/drop callbacks may re-enter this queue.
+        let mut incoming_waker = Some(task_cx.waker().clone());
+        let budget = Arc::clone(&self.budget);
+        let result = {
+            let mut state = budget.state.lock();
+            let Some(next) = state.queued.checked_add(self.amount) else {
+                drop(state);
+                drop(incoming_waker);
+                return self.finish_error(IncomingBodyError::AccountingOverflow);
+            };
+
+            if next <= budget.limit {
+                state.queued = next;
+                let retired_waker = if self.waiter_id.is_some_and(|waiter_id| {
+                    state
+                        .waiter
+                        .as_ref()
+                        .is_some_and(|waiter| waiter.id == waiter_id)
+                }) {
+                    state.waiter.take().map(|waiter| waiter.waker)
+                } else {
+                    None
+                };
+                self.waiter_id = None;
+                Ok((
+                    QueuedBytePermit {
+                        budget: Arc::clone(&budget),
+                        amount: self.amount,
+                    },
+                    retired_waker,
+                ))
+            } else {
+                let current_waiter = self.waiter_id.and_then(|waiter_id| {
+                    state
+                        .waiter
+                        .as_ref()
+                        .filter(|waiter| waiter.id == waiter_id)
+                });
+                let retired_waker = if current_waiter
+                    .is_some_and(|waiter| waiter.waker.will_wake(task_cx.waker()))
+                {
+                    None
+                } else if let Some(waiter_id) = self.waiter_id
+                    && state
+                        .waiter
+                        .as_ref()
+                        .is_some_and(|waiter| waiter.id == waiter_id)
+                {
+                    let replacement = incoming_waker
+                        .take()
+                        .expect("prepared queued-byte Waker must be available");
+                    state
+                        .waiter
+                        .as_mut()
+                        .map(|waiter| std::mem::replace(&mut waiter.waker, replacement))
+                } else {
+                    let Some(waiter_id) = state.next_waiter_id.checked_add(1) else {
+                        drop(state);
+                        drop(incoming_waker);
+                        return self.finish_error(IncomingBodyError::AccountingOverflow);
+                    };
+                    state.next_waiter_id = waiter_id;
+                    self.waiter_id = Some(waiter_id);
+                    let replacement = QueuedByteWaiter {
+                        id: waiter_id,
+                        waker: incoming_waker
+                            .take()
+                            .expect("prepared queued-byte Waker must be available"),
+                    };
+                    state.waiter.replace(replacement).map(|waiter| waiter.waker)
+                };
+                Err(retired_waker)
+            }
+        };
+
+        match result {
+            Ok((permit, retired_waker)) => {
+                self.completed = true;
+                drop(retired_waker);
+                drop(incoming_waker);
+                self.clear_cancel_waker();
+                Poll::Ready(Ok(permit))
+            }
+            Err(retired_waker) => {
+                drop(retired_waker);
+                drop(incoming_waker);
+                Poll::Pending
+            }
+        }
+    }
+}
+
+impl Drop for QueuedByteReserve<'_> {
+    fn drop(&mut self) {
+        self.clear_queue_waiter();
+        self.clear_cancel_waker();
     }
 }
 
@@ -302,8 +493,6 @@ struct IncomingBodyShared {
     consumer_terminal: AtomicU8,
     terminal_error: Mutex<Option<IncomingBodyError>>,
     queued_bytes: Arc<QueuedByteBudget>,
-    published_frames: AtomicU64,
-    published_bytes: AtomicU64,
     abandoned_frames: AtomicU64,
     abandoned_bytes: AtomicU64,
 }
@@ -402,7 +591,6 @@ pub struct IncomingRequestBody {
     done: bool,
     terminal_observed: bool,
     received: u64,
-    received_frames: u64,
     size_hint: SizeHint,
     kind: BodyKind,
 }
@@ -448,8 +636,6 @@ impl IncomingRequestBody {
             consumer_terminal: AtomicU8::new(IncomingConsumerTerminal::Active as u8),
             terminal_error: Mutex::new(None),
             queued_bytes: QueuedByteBudget::new(queued_byte_limit),
-            published_frames: AtomicU64::new(0),
-            published_bytes: AtomicU64::new(0),
             abandoned_frames: AtomicU64::new(0),
             abandoned_bytes: AtomicU64::new(0),
         });
@@ -460,7 +646,6 @@ impl IncomingRequestBody {
             done,
             terminal_observed: false,
             received: 0,
-            received_frames: 0,
             size_hint: kind.size_hint(),
             kind,
         };
@@ -508,7 +693,6 @@ impl Body for IncomingRequestBody {
                     _byte_permit,
                 } = queued;
                 drop(_byte_permit);
-                self.received_frames = self.received_frames.saturating_add(1);
                 if frame.is_trailers() {
                     // Trailers mark the end of a chunked body.
                     self.done = true;
@@ -602,16 +786,25 @@ impl Body for IncomingRequestBody {
 impl Drop for IncomingRequestBody {
     fn drop(&mut self) {
         if !self.done {
-            let published_frames = self.shared.published_frames.load(Ordering::Acquire);
-            let published_bytes = self.shared.published_bytes.load(Ordering::Acquire);
-            self.shared.abandoned_frames.store(
-                published_frames.saturating_sub(self.received_frames),
-                Ordering::Release,
-            );
-            self.shared.abandoned_bytes.store(
-                published_bytes.saturating_sub(self.received),
-                Ordering::Release,
-            );
+            // Close before draining so no producer can commit another frame
+            // between the queue snapshot and the consumer-drop signal. A
+            // sender that already owns a channel permit gets its frame back as
+            // Disconnected and accounts it on the producer side instead.
+            self.receiver.close();
+            let mut abandoned_frames = 0_u64;
+            let mut abandoned_bytes = 0_u64;
+            while let Ok(queued) = self.receiver.try_recv() {
+                abandoned_frames = abandoned_frames.saturating_add(1);
+                let data_bytes = queued.frame.data_ref().map_or(0, Buf::remaining);
+                abandoned_bytes =
+                    abandoned_bytes.saturating_add(u64::try_from(data_bytes).unwrap_or(u64::MAX));
+            }
+            self.shared
+                .abandoned_frames
+                .store(abandoned_frames, Ordering::Release);
+            self.shared
+                .abandoned_bytes
+                .store(abandoned_bytes, Ordering::Release);
             self.shared
                 .consumer_terminal
                 .store(IncomingConsumerTerminal::Dropped as u8, Ordering::Release);
@@ -978,15 +1171,7 @@ impl IncomingBodyWriter {
             _byte_permit: byte_permit,
         };
         match sender.send(cx, queued).await {
-            Ok(()) => {
-                let data_bytes =
-                    u64::try_from(data_bytes).map_err(|_| IncomingBodyError::AccountingOverflow)?;
-                self.shared.published_frames.fetch_add(1, Ordering::AcqRel);
-                self.shared
-                    .published_bytes
-                    .fetch_add(data_bytes, Ordering::AcqRel);
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err(SendError::Disconnected(_) | SendError::Full(_)) => {
                 self.record_discard_counts(data_bytes)?;
                 Err(IncomingBodyError::ConsumerDropped)
@@ -2103,6 +2288,34 @@ mod tests {
     }
 
     #[test]
+    fn incoming_body_queue_byte_wait_is_woken_by_cancellation() {
+        let cx = Cx::for_testing();
+        let (writer, body) =
+            IncomingRequestBody::channel_with_limits(&cx, BodyKind::ContentLength(4), 8, 2);
+        let mut writer = writer.max_chunk_size(2);
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let reserve_waker = counting_waker(Arc::clone(&wake_count));
+        let mut task_cx = Context::from_waker(&reserve_waker);
+
+        let mut push = std::pin::pin!(writer.push_bytes(&cx, b"data"));
+        assert!(matches!(push.as_mut().poll(&mut task_cx), Poll::Pending));
+        assert_eq!(body.queued_bytes(), 2, "first frame holds the byte cap");
+
+        cx.cancel_fast(CancelKind::Deadline);
+        assert_eq!(
+            wake_count.load(Ordering::SeqCst),
+            1,
+            "context cancellation must wake the byte-budget waiter"
+        );
+        assert!(matches!(
+            push.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(IncomingBodyError::Cancelled {
+                kind: CancelKind::Deadline,
+            }))
+        ));
+    }
+
+    #[test]
     fn incoming_body_consumer_drop_drains_and_preserves_pipeline_remainder() {
         let cx = Cx::for_testing();
         let (mut writer, body) = IncomingRequestBody::channel(&cx, BodyKind::ContentLength(5));
@@ -2120,6 +2333,23 @@ mod tests {
         assert_eq!(progress.bytes, 5);
         assert!(progress.synchronized_eof);
         assert_eq!(writer.take_remainder().as_ref(), b"GET /next HTTP/1.1\r\n");
+    }
+
+    #[test]
+    fn incoming_body_consumer_drop_counts_exact_queued_frames() {
+        let cx = Cx::for_testing();
+        let (writer, body) =
+            IncomingRequestBody::channel_with_limits(&cx, BodyKind::ContentLength(4), 8, 8);
+        let mut writer = writer.max_chunk_size(2);
+
+        block_on(writer.push_bytes(&cx, b"data")).expect("queue complete body");
+        assert_eq!(body.queued_bytes(), 4);
+        drop(body);
+
+        let progress = writer.drain_progress();
+        assert_eq!(progress.frames, 2);
+        assert_eq!(progress.bytes, 4);
+        assert!(progress.synchronized_eof);
     }
 
     #[test]
