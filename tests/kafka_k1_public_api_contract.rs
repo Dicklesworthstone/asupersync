@@ -22,7 +22,7 @@ const K0_2_PATH: &str = "artifacts/kafka_incumbent_semantics_matrix_v1.json";
 const K0_3_PATH: &str = "artifacts/kafka_downstream_user_journey_inventory_v1.json";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
 
-const ARTIFACT_SHA256: &str = "52fce683f1a39511a32f3f03d68b8c1ec9a102cf43b2038d2e7035c387c1496a";
+const ARTIFACT_SHA256: &str = "d1e54bfd4bff45a4e437f12d592cae4b2ba8ca6e8e9d9a38affc5fe5aa349353";
 const DOC_SHA256: &str = "ee938c6af5aa904c824b46697a996973c6248fdc6de56bf6db1d158ab54ba153";
 
 const ARTIFACT_ID: &str = "kafka-k1-public-api-contract-v1";
