@@ -21,6 +21,13 @@ Example:
 python3 scripts/semantic_lint.py --rule unbounded-cleanup-budget --json src/runtime src/cancel
 ```
 
+`--engine auto` prefers `ast-grep`, but bounds each external invocation to 10
+seconds plus one second per input file, capped at 300 seconds. If the binary is
+missing or exceeds that deadline, auto mode uses the deterministic,
+contract-limited portable matcher and marks the result with
+`"engine_fallback": true`. Explicit `--engine ast-grep` remains strict and
+fails closed on timeout.
+
 Allowed findings must name a reason and an owner bead on the same line or the
 immediately preceding line:
 

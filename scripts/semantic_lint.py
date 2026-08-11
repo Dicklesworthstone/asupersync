@@ -21,6 +21,8 @@ IGNORED_OUTCOME_RULE_ID = "ignored-outcome-severity"
 AWAIT_HOLDING_RULE_ID = "await-while-holding-capability-resource"
 DROP_RACE_LOSER_RULE_ID = "drop-based-race-loser-handling"
 SCHEMA_VERSION = "semantic-lint-results-v1"
+AST_GREP_TIMEOUT_BASE_SECONDS = 10
+AST_GREP_TIMEOUT_MAX_SECONDS = 300
 ALLOW_PREFIX = "asupersync-lint:allow"
 OWNER_RE = re.compile(r"^asupersync-[A-Za-z0-9_.-]+$")
 SEMANTIC_LINT_ASUP_CODES = {
@@ -494,6 +496,10 @@ def run_ast_grep(
     rule: RuleConfig,
 ) -> list[RawMatch]:
     matches: list[RawMatch] = []
+    timeout_seconds = min(
+        AST_GREP_TIMEOUT_MAX_SECONDS,
+        AST_GREP_TIMEOUT_BASE_SECONDS + len(files),
+    )
     for pattern in rule.patterns:
         command = [
             "ast-grep",
@@ -514,6 +520,7 @@ def run_ast_grep(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            timeout=timeout_seconds,
         )
         if completed.returncode not in (0, 1):
             raise RuntimeError(
@@ -2056,13 +2063,33 @@ def main(argv: list[str]) -> int:
     if engine == "ast-grep" and not shutil.which("ast-grep"):
         result = missing_engine_result(files, cwd, rule)
     else:
-        matches = (
-            run_ast_grep(files, cwd, rule)
-            if engine == "ast-grep"
-            else run_portable_fallback(files, cwd, rule)
-        )
-        matches = postprocess_matches(files, matches, cwd, rule)
-        result = build_result(files, matches, engine, cwd, rule)
+        matches: list[RawMatch] | None
+        if engine == "ast-grep":
+            try:
+                matches = run_ast_grep(files, cwd, rule)
+            except subprocess.TimeoutExpired:
+                if args.engine == "auto":
+                    engine = "portable-fallback"
+                    matches = run_portable_fallback(files, cwd, rule)
+                else:
+                    matches = None
+                    result = unsupported_engine_result(
+                        files,
+                        cwd,
+                        rule_id=rule.rule_id,
+                        engine=engine,
+                        diagnostic=(
+                            "ast-grep exceeded its bounded execution deadline; "
+                            "retry with --engine portable-fallback or repair the "
+                            "ast-grep installation"
+                        ),
+                    )
+        else:
+            matches = run_portable_fallback(files, cwd, rule)
+
+        if matches is not None:
+            matches = postprocess_matches(files, matches, cwd, rule)
+            result = build_result(files, matches, engine, cwd, rule)
 
     output = json.dumps(result, indent=2, sort_keys=True)
     if args.json:

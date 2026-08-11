@@ -16,7 +16,8 @@
   "implementation": {
     "selected_engine": "ast-grep",
     "runner_default_engine": "auto",
-    "portable_fallback": "contract-limited deterministic syntax matcher used only when ast-grep is unavailable",
+    "portable_fallback": "contract-limited deterministic syntax matcher used when auto mode cannot find ast-grep or ast-grep exceeds its bounded execution deadline",
+    "ast_grep_timeout_policy": "10 seconds plus 1 second per input file, capped at 300 seconds; explicit ast-grep mode fails closed",
     "result_schema": "semantic-lint-results-v1",
     "no_source_rewrites": true,
     "no_runtime_behavior_change": true,

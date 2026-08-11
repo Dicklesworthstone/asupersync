@@ -115,6 +115,14 @@ fn contract_links_inventory_runner_docs_and_fixtures() {
     let implementation = child(&contract, "implementation");
     assert_eq!(string(implementation, "selected_engine"), "ast-grep");
     assert_eq!(string(implementation, "runner_default_engine"), "auto");
+    assert!(
+        string(implementation, "portable_fallback").contains("bounded execution deadline"),
+        "auto mode must have a deterministic escape from an unresponsive ast-grep process"
+    );
+    assert_eq!(
+        string(implementation, "ast_grep_timeout_policy"),
+        "10 seconds plus 1 second per input file, capped at 300 seconds; explicit ast-grep mode fails closed"
+    );
     assert!(bool_field(implementation, "no_source_rewrites"));
     assert!(bool_field(implementation, "no_runtime_behavior_change"));
 }
