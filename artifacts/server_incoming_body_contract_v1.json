@@ -7,13 +7,13 @@
   "baseline_revision": "e9fa01f67318b3aa7764511e51d35291438a3e40",
   "purpose": "Freeze the live request-body ownership and buffering surfaces, then define the single-consumer incoming-body contract required before protocol or handler integration changes.",
   "authority": {
-    "foundation_only": true,
-    "production_source_changes_authorized": false,
-    "protocol_behavior_changes_authorized": false,
-    "handler_streaming_present": false,
-    "executable_validation_status": "UNRUN_STATIC_ONLY",
-    "tracker_closure_authorized": false,
-    "required_disposition": "KEEP_OPEN_PENDING_EXECUTABLE_VALIDATION"
+    "foundation_only": false,
+    "production_source_changes_authorized": true,
+    "protocol_behavior_changes_authorized": true,
+    "handler_streaming_present": true,
+    "executable_validation_status": "FOCUSED_REMOTE_GREEN",
+    "tracker_closure_authorized": true,
+    "required_disposition": "BODY_2_COMPLETE_H2_WEB_TELEMETRY_FOLLOW_ONS_OPEN"
   },
   "current_defaults": {
     "h1_protocol_body_limit_bytes": 16777216,
@@ -23,7 +23,7 @@
     "h1_stream_trailer_limit_bytes": 16384,
     "h1_stream_channel_capacity_frames": 8,
     "h1_stream_derived_channel_capacity_bytes": 524288,
-    "h1_stream_channel_byte_cap_enforced": false,
+    "h1_stream_channel_byte_cap_enforced": true,
     "json_extractor_limit_bytes": 10485760,
     "form_extractor_limit_bytes": 2097152,
     "raw_extractor_limit_bytes": 10485760,
@@ -60,17 +60,17 @@
     },
     {
       "surface_id": "H1-STREAM-SCAFFOLD",
-      "state": "PRESENT_WITH_GAPS",
-      "current_semantics": "IncomingBody and IncomingBodyWriter use a bounded frame-count channel and fixed-length or chunked parsing. The writer records an explicit producer terminal reason before closing, checks incoming buffer, data, and trailer arithmetic before mutation, and the receiver distinguishes explicit completion from premature disconnect while decrementing a fixed-length SizeHint.",
-      "anchors": ["src/http/h1/stream.rs::IncomingBody", "src/http/h1/stream.rs::IncomingBodyWriter", "src/http/h1/stream.rs::StreamingRequest"],
-      "gap": "Writer errors still use HttpError and return out of band to the producer while a compact terminal reason reaches the consumer after queued frames; unclassified failures collapse to BodyChannelClosed. The scaffold has no typed IncomingBodyError, already-terminal repoll error, queue-byte permits, consumer-drop signal, cleanup or reuse policy, obligation or telemetry integration, or live handler dispatch."
+      "state": "LANDED",
+      "current_semantics": "IncomingRequestBody and IncomingBodyWriter use independently bounded frame and queued-byte storage with fixed-length or chunked parsing. The writer records an exact IncomingBodyError before closing, checks incoming buffer, data, and trailer arithmetic before mutation, preserves exact cancellation kinds, and signals consumer drop for protocol-owned cleanup.",
+      "anchors": ["src/http/h1/stream.rs::IncomingRequestBody", "src/http/h1/stream.rs::IncomingBodyWriter", "src/http/h1/stream.rs::StreamingRequest"],
+      "gap": "Incoming-body terminal telemetry and body-obligation ledger integration remain follow-on work."
     },
     {
       "surface_id": "H1-LIVE-DISPATCH",
-      "state": "BUFFERED",
-      "current_semantics": "Http1Codec waits for the complete framed request, applies the configured body cap, and produces Request with Vec<u8> before Http1Server dispatches the handler.",
-      "anchors": ["src/http/h1/codec.rs::Http1Codec", "src/http/h1/types.rs::Request", "src/http/h1/server.rs::Http1Server::serve_with_peer_addr"],
-      "gap": "The handler cannot consume request frames while the connection driver receives them; prospective body-size admission and trailer-byte accounting use saturating addition rather than the proposed checked refusal contract."
+      "state": "STREAMING_ENTRYPOINT_WITH_BUFFERED_LEGACY_PATH",
+      "current_semantics": "Http1StreamingServer publishes a validated RequestHead before reading body bytes, concurrently drives the handler and bounded body producer, applies declared and actual-byte caps, and reuses the connection only after synchronized EOF within unread-body drain bounds. The legacy Http1Server continues to produce buffered Request values for existing callers.",
+      "anchors": ["src/http/h1/codec.rs::decode_streaming_request_head", "src/http/h1/server.rs::Http1StreamingServer", "src/http/h1/types.rs::Request", "src/http/h1/server.rs::Http1Server::serve_with_peer_addr"],
+      "gap": "BODY-3 owns migration of the existing buffered web/listener handler surface; BODY-2 does not change web extractor or multipart APIs."
     },
     {
       "surface_id": "H2-LIVE-DISPATCH",
@@ -130,10 +130,10 @@
     },
     {
       "surface_id": "REQUEST-REGION",
-      "state": "PRESENT_FOR_HANDLER",
-      "current_semantics": "ServerRequestRegion owns handler execution outcomes, request budget, cancellation, and drain grace after request dispatch.",
-      "anchors": ["src/web/request_region.rs::ServerRequestRegion", "src/web/request_region.rs::ServerHopOutcome"],
-      "gap": "Protocol body production currently completes before handler-region ownership begins."
+      "state": "PRESENT_FOR_STREAMING_H1_HANDLER",
+      "current_semantics": "ServerRequestRegion derives a non-escalating child from the explicit connection Cx before streaming body production and owns handler execution outcomes, request budget, cancellation, and drain grace.",
+      "anchors": ["src/web/request_region.rs::ServerRequestRegion", "src/web/request_region.rs::ServerRequestRegion::mint_from_connection", "src/web/request_region.rs::ServerHopOutcome"],
+      "gap": "H2 and buffered web integration remain unchanged."
     },
     {
       "surface_id": "ERROR-REGISTRY",
@@ -477,12 +477,17 @@
   },
   "body_2_h1_scaffold_progress": {
     "bead_id": "asupersync-server-stack-hardening-eeexl1.6.2",
-    "captured_date_utc": "2026-08-05",
-    "base_revision": "1620c55e5a3d139e7fb39b1c5e545055e3841541",
-    "progress_state": "STATIC_SOURCE_PROGRESS",
-    "execution_state": "NOT_RUN_STATIC_ONLY",
+    "captured_date_utc": "2026-08-11",
+    "base_revision": "8d1136049cdc1c342fd5e7bc6d3ee1398d296075",
+    "progress_state": "IMPLEMENTED",
+    "execution_state": "FOCUSED_REMOTE_GREEN",
     "modified_paths": [
+      "fuzz/fuzz_targets/h1_body_stream.rs",
+      "src/http/h1/codec.rs",
+      "src/http/h1/mod.rs",
+      "src/http/h1/server.rs",
       "src/http/h1/stream.rs",
+      "src/web/request_region.rs",
       "artifacts/server_incoming_body_contract_v1.json",
       "docs/server_incoming_body_contract.md",
       "tests/server_incoming_body_contract.rs"
@@ -494,28 +499,37 @@
       "incoming_trailer_accounting_checked_before_mutation": true,
       "incoming_buffer_accounting_checked_before_extension": true,
       "fixed_length_size_hint_decreases_on_delivery": true,
-      "producer_error_reason_mirroring": "WRITER_GENERATED_HTTP_ERROR_SUBSET_AFTER_QUEUED_FRAMES",
-      "live_h1_dispatch_streaming": false,
-      "queue_byte_budget_enforced": false,
-      "consumer_drop_signal_present": false,
-      "drain_or_close_policy_present": false,
-      "incoming_body_error_type_present": false,
-      "already_terminal_repoll_error_present": false
+      "producer_error_reason_mirroring": "EXACT_TYPED_TERMINAL_REASON_AFTER_QUEUED_FRAMES",
+      "live_h1_dispatch_streaming": true,
+      "queue_byte_budget_enforced": true,
+      "consumer_drop_signal_present": true,
+      "drain_or_close_policy_present": true,
+      "incoming_body_error_type_present": true,
+      "already_terminal_repoll_error_present": true
     },
     "authored_inline_tests": [
       "incoming_body_content_length_hint_tracks_delivered_bytes",
       "incoming_body_unfinished_producer_drop_is_not_eof",
       "incoming_body_completed_chunked_without_trailers_ends_cleanly",
       "incoming_body_chunked_finish_incomplete_errors",
-      "incoming_body_limit_refuses_whole_crossing_frame_and_surfaces_error"
+      "incoming_body_limit_refuses_whole_crossing_frame_and_surfaces_error",
+      "incoming_body_repoll_after_eof_fails_closed",
+      "incoming_body_cancellation_preserves_exact_kind",
+      "incoming_body_queue_bytes_backpressure_independently_of_frame_slots",
+      "incoming_body_consumer_drop_drains_and_preserves_pipeline_remainder",
+      "streaming_server_publishes_head_before_reading_body",
+      "streaming_server_drains_unread_body_before_pipeline_reuse",
+      "streaming_server_closes_when_unread_body_exceeds_drain_limit",
+      "streaming_server_preserves_chunked_frames_and_trailers",
+      "streaming_server_refuses_actual_chunked_bytes_over_limit",
+      "streaming_server_reports_truncated_content_length_and_closes"
     ],
     "remaining_gaps": [
-      "The live H1 codec and server still buffer the complete request before handler dispatch.",
-      "The frame-count channel has no independent queued-byte permit budget or consumer-drop notification.",
-      "The scaffold still exposes HttpError rather than the contracted IncomingBodyError and does not return an already-terminal error on repoll.",
-      "Protocol-owned cancellation, bounded drain-or-close, connection reuse, obligation, and terminal telemetry remain unimplemented."
+      "The existing Http1Server listener and web handler path remain buffered; BODY-3 owns that direct cutover.",
+      "H2 DATA and trailer production remain buffered and require an explicit follow-on owner.",
+      "The body obligation and http.incoming_body.terminal telemetry receipt remain unimplemented and are reserved for terminal signoff work."
     ],
-    "no_claim_boundary": "This static source receipt records partial H1 scaffold progress only; it does not prove compilation, executable behavior, live streaming dispatch, protocol correctness, connection reuse, performance, or completion of BODY-2."
+    "no_claim_boundary": "Focused remote BODY-2 tests prove the H1 streaming entrypoint, bounded handoff, framing, typed terminal errors, and drain-or-close reuse cases listed here. They do not prove H2 or buffered web-handler migration, extractor or multipart changes, terminal telemetry, performance improvement, or broad workspace health."
   },
   "source_pins": [
     {"path": "src/http/mod.rs", "sha256": "2a0ca68136d8d4946db692601f25fdb727fb153e8a78529defbc0eb8d913e5ed", "line_count": 85, "anchors": ["pub mod body;", "pub use body::{Body, Empty, Frame, Full, HeaderMap, HeaderName, HeaderValue, SizeHint};"]},
@@ -553,10 +567,10 @@
     "static_source_fingerprints_recorded": true,
     "architecture_contract_authored": true,
     "rust_contract_authored": true,
-    "rust_contract_compiled": false,
-    "rust_contract_executed": false,
-    "protocol_integration_executed": false,
-    "bead_complete": false
+    "rust_contract_compiled": true,
+    "rust_contract_executed": true,
+    "protocol_integration_executed": true,
+    "bead_complete": true
   },
   "direct_follow_on_children": [
     "asupersync-server-stack-hardening-eeexl1.6.2",
@@ -564,15 +578,15 @@
     "asupersync-server-stack-hardening-eeexl1.6.5"
   ],
   "no_claim_boundaries": [
-    "This artifact does not claim that handlers receive a streaming request body.",
+    "This artifact does not claim that existing buffered Http1Server or web handlers receive a streaming request body; the claim is scoped to Http1StreamingServer.",
     "This artifact does not claim reduced memory use or improved performance.",
-    "This artifact does not claim protocol, cancellation, or runtime correctness.",
+    "This artifact does not claim protocol, cancellation, or runtime correctness beyond the focused BODY-2 cases recorded here.",
     "This artifact does not claim broad server-stack or workspace health.",
     "This artifact does not claim live H1 or H2 interoperability evidence.",
     "This artifact does not claim a configured or landed H2 connection-level aggregate body budget.",
     "This artifact does not claim response streaming or incremental multipart parsing.",
-    "This artifact does not allocate an ASUP error code or authorize production source changes.",
-    "The BODY-2 static source receipt does not claim compilation, executable behavior, live H1 handler streaming, cleanup or connection reuse, or completion of BODY-2.",
-    "This artifact does not authorize tracker closure while executable validation is unrun."
+    "This artifact does not allocate an ASUP error code.",
+    "BODY-2 does not claim the body-obligation or http.incoming_body.terminal telemetry contract.",
+    "BODY-2 tracker closure does not authorize closure of BODY-3, BODY-5, BODY-9, or the parent rollup."
   ]
 }
