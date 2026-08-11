@@ -1,6 +1,6 @@
 {
   "name": "@asupersync/react",
-  "version": "0.4.0",
+  "version": "0.4.3",
   "description": "React adapter layer for the Asupersync Browser Edition.",
   "homepage": "https://github.com/Dicklesworthstone/asupersync#readme",
   "bugs": {
