@@ -2076,23 +2076,24 @@ mod tests {
         let (writer, mut body) =
             IncomingRequestBody::channel_with_limits(&cx, BodyKind::ContentLength(4), 8, 2);
         let mut writer = writer.max_chunk_size(2);
-        let mut push = std::pin::pin!(writer.push_bytes(&cx, b"data"));
         let waker = noop_waker();
         let mut task_cx = Context::from_waker(&waker);
 
-        assert!(matches!(push.as_mut().poll(&mut task_cx), Poll::Pending));
-        assert_eq!(body.queued_bytes(), 2);
+        {
+            let mut push = std::pin::pin!(writer.push_bytes(&cx, b"data"));
+            assert!(matches!(push.as_mut().poll(&mut task_cx), Poll::Pending));
+            assert_eq!(body.queued_bytes(), 2);
 
-        let first = poll_body(&mut body)
-            .expect("first frame")
-            .expect("valid first frame");
-        assert_eq!(first.into_data().expect("data").chunk(), b"da");
-        assert!(matches!(
-            push.as_mut().poll(&mut task_cx),
-            Poll::Ready(Ok(()))
-        ));
-        assert_eq!(body.queued_bytes(), 2);
-        drop(push);
+            let first = poll_body(&mut body)
+                .expect("first frame")
+                .expect("valid first frame");
+            assert_eq!(first.into_data().expect("data").chunk(), b"da");
+            assert!(matches!(
+                push.as_mut().poll(&mut task_cx),
+                Poll::Ready(Ok(()))
+            ));
+            assert_eq!(body.queued_bytes(), 2);
+        }
 
         let second = poll_body(&mut body)
             .expect("second frame")
