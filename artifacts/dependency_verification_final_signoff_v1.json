@@ -17,7 +17,7 @@
   },
   "tracker_snapshot": {
     "source_path": ".beads/issues.jsonl",
-    "plan_semantic_sha256": "29bb9b5062bddf5cd0f4ee508c97631a8c0542aa6f8753d28e4c680214d47b77",
+    "plan_semantic_sha256": "d198eb77367ddef5df615506b3451d9cb971ba2a02452e00fa3cac6369671258",
     "graph_signoff_pointer": "artifacts/dependency_capability_registry_v1.json#/graph_signoff_report",
     "graph_signoff_bead_id": "asupersync-dep-p1-foundations-upksjk.5.4",
     "graph_signoff_status": "PASS_SCOPED",
