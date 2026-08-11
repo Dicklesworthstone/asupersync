@@ -741,6 +741,28 @@ impl ServerRequestRegion {
         })
     }
 
+    /// Mints a request region from an explicit connection capability context.
+    ///
+    /// Protocol drivers that already receive `&Cx` should use this constructor
+    /// instead of relying on ambient task-local state. The child inherits the
+    /// connection's drivers and runtime capability mask, receives independent
+    /// cancellation state, and installs the tightened request budget without
+    /// any capability escalation.
+    #[must_use]
+    pub fn mint_from_connection(
+        protocol: &'static str,
+        budget: Budget,
+        now: Time,
+        connection_cx: &Cx,
+    ) -> Self {
+        Self {
+            cx: Self::child_cx_from_connection(connection_cx, budget),
+            started_at: now,
+            protocol,
+            consumed: AtomicBool::new(false),
+        }
+    }
+
     fn mint_cx(budget: Budget) -> Option<Cx> {
         if let Some(cx) = crate::runtime::Runtime::current_request_cx_with_budget(budget) {
             return Some(cx);
@@ -754,24 +776,7 @@ impl ServerRequestRegion {
         // the ambient runtime mask, so this path cannot escalate
         // capabilities (br-asupersync-ovztin).
         if let Some(ambient) = Cx::current() {
-            let region = ambient.region_id();
-            let task = ambient.task_id();
-            let mut cx = Cx::new_with_drivers(
-                region,
-                task,
-                budget,
-                Some(ambient.child_observability(region, task)),
-                ambient.io_driver_handle(),
-                ambient.io_cap_handle(),
-                ambient.timer_driver(),
-                Some(ambient.child_entropy(task)),
-            )
-            .with_blocking_pool_handle(ambient.blocking_pool_handle());
-            if let Some(trace) = ambient.trace_buffer() {
-                cx.set_trace_buffer(trace);
-            }
-            cx.runtime_mask = ambient.runtime_mask;
-            return Some(cx);
+            return Some(Self::child_cx_from_connection(&ambient, budget));
         }
         // Last resort, test builds only: a detached request context so
         // plain unit tests can exercise the region without any runtime.
@@ -783,6 +788,27 @@ impl ServerRequestRegion {
         {
             None
         }
+    }
+
+    fn child_cx_from_connection(connection_cx: &Cx, budget: Budget) -> Cx {
+        let region = connection_cx.region_id();
+        let task = connection_cx.task_id();
+        let mut cx = Cx::new_with_drivers(
+            region,
+            task,
+            budget,
+            Some(connection_cx.child_observability(region, task)),
+            connection_cx.io_driver_handle(),
+            connection_cx.io_cap_handle(),
+            connection_cx.timer_driver(),
+            Some(connection_cx.child_entropy(task)),
+        )
+        .with_blocking_pool_handle(connection_cx.blocking_pool_handle());
+        if let Some(trace) = connection_cx.trace_buffer() {
+            cx.set_trace_buffer(trace);
+        }
+        cx.runtime_mask = connection_cx.runtime_mask;
+        cx
     }
 
     /// The request-scoped capability context.

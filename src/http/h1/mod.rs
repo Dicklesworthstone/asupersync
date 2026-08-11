@@ -39,10 +39,13 @@ pub use http_client::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use listener::{Http1Listener, Http1ListenerConfig};
 #[cfg(not(target_arch = "wasm32"))]
-pub use server::{ConnectionPhase, ConnectionState, Http1Config, Http1Server};
+pub use server::{
+    ConnectionPhase, ConnectionState, Http1Config, Http1Server, Http1StreamingServer,
+};
 pub use stream::{
-    BodyKind, ChunkedEncoder, IncomingBody, IncomingBodyWriter, OutgoingBody, OutgoingBodySender,
-    RequestHead, ResponseHead, StreamingRequest, StreamingResponse,
+    BodyKind, ChunkedEncoder, IncomingBodyError, IncomingBodyWriter, IncomingRequestBody,
+    OutgoingBody, OutgoingBodySender, RequestHead, ResponseHead, StreamingRequest,
+    StreamingResponse,
 };
 pub use types::{
     Method, MultipartError, MultipartForm, Request, RequestBuilder, Response, ResponseBuilder,

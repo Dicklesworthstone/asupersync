@@ -28,7 +28,7 @@ use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::http::h1::stream::{BodyKind, ChunkedEncoder, IncomingBody};
+use asupersync::http::h1::stream::{BodyKind, ChunkedEncoder};
 
 /// Maximum input size to prevent memory exhaustion during fuzzing
 const MAX_INPUT_SIZE: usize = 512 * 1024; // 512KB
