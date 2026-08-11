@@ -65,7 +65,7 @@
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
       "byte_count": 29494,
       "record_count": 284,
-      "sha256": "c0f7bb4f5ca94c6597eaced093ff901b8ceadfb48d94257c6b5411c00ef37ef3"
+      "sha256": "1eef93d7c3db3791fd88a22505b037413521ec7284b6918a0cb19f674307c76c"
     },
     {
       "input_id": "K1-INPUT-K0-5-DOCUMENT",
@@ -73,7 +73,7 @@
       "path": "docs/kafka_k0_baseline_disposition.md",
       "byte_count": 21799,
       "record_count": 349,
-      "sha256": "376cc3b65c679a292e2716d06d539ed9f8e756d84b0ac1480f2ba31c59707cae"
+      "sha256": "e527dc1be9e80752703472764a2e5b2c5354b2599bc5c3067b0eebdbb10a2473"
     },
     {
       "input_id": "K1-INPUT-K0-5-CONTRACT",
@@ -81,7 +81,7 @@
       "path": "tests/kafka_k0_baseline_disposition_contract.rs",
       "byte_count": 106003,
       "record_count": 2599,
-      "sha256": "03ba457d51fbcc831a73b4ec9750c298bbd791a19086411acd55bf3745d81ab0"
+      "sha256": "a0fadf1521d138000988293c5270d554903504e85f0ca80a6292e9a2758568d6"
     },
     {
       "input_id": "K1-INPUT-ADR",
@@ -525,7 +525,7 @@
     "source_pin_rollup": {
       "row_count": 266,
       "stage_counts": {"K0.1": 13, "K0.2": 8, "K0.3": 225, "K0.4": 20},
-      "canonical_json_sha256": "bf9d9b4262736ae5c1ae00fdb334e14685b8a68011f398c620bf5f1e21888b3a",
+      "canonical_json_sha256": "e6c0443271a2dfb220035b42395159b12d01ada2035f532d9d7d130df097122b",
       "unique_path_count": 247,
       "unique_path_set_sha256": "d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3",
       "overlap_group_count": 15,
