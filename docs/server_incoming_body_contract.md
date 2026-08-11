@@ -6,17 +6,18 @@ Bead: `asupersync-server-stack-hardening-eeexl1.6.1`
 
 Canonical artifact: `artifacts/server_incoming_body_contract_v1.json`
 
-Status: static foundation authored; partial BODY-2 H1 scaffold source progress is
-recorded below; executable validation and live integration are unrun. The BODY-2
-bead remains open.
+Status: foundation contract retained; BODY-2 H1 streaming ingress, bounded
+backpressure, and drain-or-close connection reuse are implemented through the
+public `Http1StreamingServer` entry point. H2, buffered web extraction,
+multipart, and incoming-body terminal telemetry remain follow-on work.
 
 ## Purpose and authority
 
 This packet freezes the current request-body pipeline and defines the ownership,
 budget, terminal-state, and connection-reuse contract that later H1, H2, and web
-integration work must implement. The foundation itself authorizes no production
-source change; the separately owned BODY-2 follow-on records partial source work
-below without widening that authority.
+integration work must implement. BODY-2 is the separately owned implementation
+slice authorized to change the H1 protocol path while preserving the foundation's
+H2, web-extractor, multipart, error-registry, and telemetry boundaries.
 
 The authority boundary is intentionally narrow:
 
@@ -28,7 +29,7 @@ The authority boundary is intentionally narrow:
 - define explicit EOF, error, cancellation, client-abort, and consumer-drop states;
 - assign unread-body cleanup and connection reuse to the protocol driver;
 - leave emitted ASUP error-code allocation to a later implementation change; and
-- keep tracker closure pending until the Rust contract receives executable validation.
+- close BODY-2 only after focused Rust contract and live H1 streaming validation.
 
 ## Current architecture
 
@@ -39,8 +40,8 @@ The reusable abstractions and the live server path are currently separate.
 | Generic body | `Body`, `Frame`, `SizeHint` | Poll-based data/trailer frames | Not owned by live request dispatch |
 | Stream adapter | `StreamBody<S>` | Converts a frame stream into `Body` | Not the incoming request type |
 | Size adapter | `Limited<B>` | Decrements a data-byte allowance | Not wrapped around one shared incoming body |
-| H1 scaffold | `IncomingBody` plus `IncomingBodyWriter` | Bounded frame-count channel and fixed/chunked parsing; explicit producer completion is distinguished from premature disconnect, incoming arithmetic is checked before mutation, and a fixed-length size hint decreases on delivery | Errors still use `HttpError`; no queue-byte permits, consumer-drop signal, already-terminal repoll error, protocol cleanup/reuse, obligation/telemetry integration, or live dispatch |
-| H1 live path | `Http1Codec` to `h1::types::Request` | Applies the body cap, then completes a `Vec<u8>` body before dispatch | No concurrent handoff; prospective body and trailer accounting uses saturating addition |
+| H1 streaming scaffold | `IncomingRequestBody` plus `IncomingBodyWriter` | Fixed-length and chunked parsing feed a single consumer through independent frame-count and queued-byte bounds; typed terminal reasons, exact cancellation kinds, consumer drop, checked actual-byte accounting, and fail-closed repoll are explicit | The terminal telemetry and obligation ledger described below are not yet emitted |
+| H1 live paths | `Http1StreamingServer` to `StreamingRequest`; legacy `Http1Server` to `h1::types::Request` | The streaming entry point publishes a validated head before body reads, drives the handler and body concurrently, and reuses a connection only after synchronized EOF within drain bounds. The legacy buffered entry point remains available for existing web callers | BODY-3 owns the buffered web/listener cutover; this slice does not claim that existing `Http1Server` handlers changed type |
 | H2 live path | pending headers plus `Vec<u8>` per stream | Preserves a separate validated trailer block on the shared request, uses saturating prospective addition against a configured per-stream cap (16 MiB by default), resets an over-cap stream with `ENHANCE_YOUR_CALM`, and otherwise dispatches after `END_STREAM` | No incremental handler consumption or connection-wide aggregate body budget |
 | Web request | `web::extract::Request` | Owns cloneable `Bytes` | Conflicts with sole-consumer ownership |
 | Handler/router | `Handler::call(&Cx, Request)` | Moves a complete request into the handler | No head/body split |
@@ -48,49 +49,58 @@ The reusable abstractions and the live server path are currently separate.
 | Extractor limits | `BodyLimits` | Checks `Content-Length` and buffered bytes | Cannot bound pre-dispatch buffering |
 | Multipart | contiguous buffered parse | Applies aggregate, part-count, per-part body/header, request-time, and idle-time limits after materialization | No bounded asynchronous collector; timing currently reads wall time directly |
 | Web response | buffered `Bytes` | Materializes response bodies | Explicitly outside BODY-1 |
-| Request region | `ServerRequestRegion` | Owns handler budget and terminal outcome | Starts after protocol body assembly |
+| Request region | `ServerRequestRegion` | The streaming H1 entry point derives a non-escalating request child from the explicit connection `Cx` before body production and owns handler budget/terminal outcome | H2 and buffered web integration remain unchanged |
 
 The source-fingerprinted matrix in the artifact is authoritative. In particular,
-the mere presence of `IncomingBody`, `StreamBody`, or `Limited` is not evidence that
-live handlers receive body frames incrementally.
+the mere presence of `StreamBody` or `Limited` is not evidence that buffered web or
+H2 handlers receive body frames incrementally. The narrower H1 streaming entry
+point is executable; it does not silently reclassify the legacy buffered path.
 
-## BODY-2 static H1 scaffold progress
+## BODY-2 H1 streaming ingress
 
-The follow-on bead `asupersync-server-stack-hardening-eeexl1.6.2` has one bounded
-source-only increment based on revision
-`1620c55e5a3d139e7fb39b1c5e545055e3841541`. `IncomingBodyWriter` now stores a
-compact producer terminal reason before releasing its final sender. The consumer
-therefore treats explicit framing completion as EOF and a producer that disappears
-while framing remains open as `HttpError::BodyChannelClosed`. Writer-generated
-framing, limit, header, and cancellation failures retain their matching reason for
-the consumer after any already-queued frames are delivered.
+The follow-on bead `asupersync-server-stack-hardening-eeexl1.6.2` replaces the
+coexisting scaffold name with the one public `IncomingRequestBody` authority.
+`IncomingBodyWriter` stores an exact `IncomingBodyError` before releasing its
+final sender. The consumer therefore distinguishes explicit framing completion,
+malformed or truncated framing, actual-byte limit refusal, source disconnect,
+consumer drop, and cancellation with the exact `CancelKind`, even after already
+queued frames are delivered.
 
 Incoming buffer, accepted body-byte, and trailer-byte totals are checked against
 overflow and their configured limit before the corresponding mutation. Fixed
 `Content-Length` size hints decrease only as frames are delivered and reach exact
 zero at completion or terminal failure. Inline cases were authored for declining
 size hints, premature producer drop, completed trailer-free chunked input, queued
-data followed by a framing failure, and whole-frame refusal at the body limit.
-Those cases have not been compiled or run.
+data followed by a framing failure, whole-frame refusal at the body limit,
+already-terminal repoll, exact cancellation identity, independent queued-byte
+backpressure, and consumer-drop remainder preservation.
 
-This remains partial scaffold progress. The public error is still `HttpError`,
-unclassified producer failures collapse to `BodyChannelClosed`, and a poll after a
-terminal result returns ordinary end-of-stream rather than `AlreadyTerminal`.
-There is no independent queue-byte permit budget, consumer-drop notification,
-request-budget cancellation bridge, bounded drain-or-close/reuse policy,
-obligation or terminal telemetry integration, or live H1 handler dispatch.
+`Http1StreamingServer` decodes and consumes the request head with the hardened
+`Http1Codec` head parser, then polls the handler before the body driver. Body bytes
+flow through the bounded frame/byte handoff. Content-Length and chunked bodies use
+the same framing and trailer restrictions as the buffered codec, and the aggregate
+limit is checked against actual decoded bytes. A handler that returns early drops
+the consumer; the protocol driver then drains only within the configured frame,
+byte, and time allowances. Pipelined bytes are restored only after synchronized
+body EOF. Over-limit, truncated, disconnected, cancelled, or ambiguous bodies
+close the connection without committing the handler response.
+
+Focused cases cover head-before-body publication, unread-body drain followed by
+pipelined reuse, drain-limit close, chunked frames and trailers, actual chunked-byte
+overrun, and truncated Content-Length. The remaining gaps are the legacy buffered
+listener/web cutover, H2 streaming, and the terminal telemetry/obligation receipt;
+none is claimed by BODY-2.
 
 ## Public ownership contract
 
-The proposed public value is `IncomingRequestBody`, implementing
-`crate::http::body::Body<Data = BytesCursor, Error = IncomingBodyError>`. Both names
-are contract names, not claims that the types have landed.
+The public value is `IncomingRequestBody`, implementing
+`crate::http::body::Body<Data = BytesCursor, Error = IncomingBodyError>`.
 
 `StreamBody` remains a useful generic adapter, but its underlying `None` is ordinary
 EOF and it does not own producer completion, consumer-drop notification, or the
 body obligation. The public incoming type therefore does not have to wrap it. The
-existing H1 `IncomingBody` must be replaced or generalized into the one public
-incoming type; a second coexisting public incoming-body authority is forbidden.
+former H1 `IncomingBody` name has been replaced by this one public incoming type;
+a second coexisting public incoming-body authority remains forbidden.
 The concrete type is `Send + Unpin + 'static`, allowing the existing `Limited<B>`
 implementation to wrap it. `Sync` is not required for a single consumer; BODY-3
 must remove any `Sync` bound from the final body-consuming extractor while retaining
@@ -162,12 +172,12 @@ while making every bound independently enforceable:
 | Decoder partial-buffer capacity | 262,144 bytes |
 | Trailer capacity | 16,384 bytes |
 | Default protocol total | 16,777,216 bytes |
-| Proposed H1 unread-body cleanup | 8 frames, 524,288 bytes, and 500 ms |
+| H1 unread-body cleanup | 8 frames, 524,288 bytes, and 500 ms |
 | Proposed H2 reset-in-flight cleanup | 8 frames, 524,288 bytes, and 500 ms |
 
-The 500-ms values are proposed initial body-cleanup values derived from the landed
-handler-future drain grace. They are not evidence that live unread-body cleanup is
-currently enforced.
+The 500-ms H1 value is the live default for bounded unread-body synchronization
+in `Http1StreamingServer`, derived from the landed handler-future drain grace.
+The H2 value remains a proposal and is not evidence of live H2 cleanup.
 
 The effective total is the minimum of the protocol/server hard cap,
 `RequestBodyLimitMiddleware` or route policy, the selected extractor cap, and any
@@ -270,11 +280,11 @@ or both. Pre-body mappings never imply that a body obligation existed:
 - `BODY-CONSUMER-DROPPED` invokes protocol cleanup but also lacks a distinct landed
   variant.
 
-`HttpError::BodyChannelClosed` remains ambiguous: producer-side code uses it for
-missing sender and full/disconnected sends, and the partial BODY-2 scaffold also
-uses it for premature or unclassified producer termination. The receiver no longer
-turns that termination into EOF, but the contracted typed source-disconnect and
-consumer-drop outcomes are still required before live integration.
+The H1 streaming carrier no longer exposes the ambiguous
+`HttpError::BodyChannelClosed`. Its closed `IncomingBodyError` set distinguishes
+source disconnect, consumer drop, cancellation, framing refusal, aggregate limit,
+queue-frame refusal, checked-accounting overflow, drain limit/timeout, and terminal
+repoll. The legacy buffered codec retains `HttpError` for its own API.
 
 These IDs are artifact-level contract identifiers. `ASUP-E501` is an already-live
 request-deadline code; this foundation allocates no new ASUP code. Before later
@@ -309,14 +319,16 @@ tracked separately and excluded from received totals; drain counters are subsets
 discarded counters. Transport bytes not yet admitted are not invented, and an
 unknown unread amount remains null.
 
-No incoming-body terminal receipt is present in the live path today.
+No incoming-body terminal receipt or body-obligation ledger integration is present
+in the live path today. BODY-2 does not claim that follow-on evidence.
 
 ## Direct migration order
 
 The project does not require a compatibility shim. Later children should cut over
 the real types directly in this order:
 
-1. connect the H1 producer to the single body handoff;
+1. connect the H1 producer to the single body handoff (landed in BODY-2 through
+   `Http1StreamingServer`);
 2. connect H2 DATA and trailer production to per-stream handoff;
 3. replace buffered web request ownership and update handler/router boundaries;
 4. adapt JSON, form, and raw extractors to bounded collection through `Limited`;

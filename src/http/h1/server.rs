@@ -2709,8 +2709,8 @@ mod tests {
         assert!(written.lock().unwrap().is_empty());
         assert_eq!(state.phase, ConnectionPhase::Closing);
         assert_eq!(
-            *observed_error.lock().unwrap(),
-            Some(IncomingBodyError::BodyTooLarge {
+            observed_error.lock().unwrap().as_ref(),
+            Some(&IncomingBodyError::BodyTooLarge {
                 actual: Some(5),
                 limit: 4,
             })
@@ -2758,8 +2758,8 @@ mod tests {
         assert!(written.lock().unwrap().is_empty());
         assert_eq!(state.phase, ConnectionPhase::Closing);
         assert_eq!(
-            *observed_error.lock().unwrap(),
-            Some(IncomingBodyError::BadContentLength)
+            observed_error.lock().unwrap().as_ref(),
+            Some(&IncomingBodyError::BadContentLength)
         );
     }
 
