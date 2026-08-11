@@ -52,7 +52,7 @@
       "bead_id": "asupersync-dep-p1-foundations-upksjk.6.6",
       "role": "VERIFICATION_FINAL_SIGNOFF",
       "path": "artifacts/dependency_verification_final_signoff_v1.json",
-      "sha256": "33155fcf2ca7232b584bfe777ecb002c1541e2b647da6a5bf7d40cca56cce760"
+      "sha256": "5e64ae97064ab8e08be929ab2c4d22cd7c12f6a49f3b2f4b91298cf8d785fa3f"
     }
   ],
   "baseline_provenance": {
