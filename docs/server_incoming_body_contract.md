@@ -73,7 +73,19 @@ zero at completion or terminal failure. Inline cases were authored for declining
 size hints, premature producer drop, completed trailer-free chunked input, queued
 data followed by a framing failure, whole-frame refusal at the body limit,
 already-terminal repoll, exact cancellation identity, independent queued-byte
-backpressure, and consumer-drop remainder preservation.
+backpressure, cancellation while waiting for queued-byte capacity, consumer-drop
+remainder preservation, and exact accounting of frames already committed to the
+queue when the consumer disappears.
+
+A 2026-08-11 fresh-eyes pass closed three lifecycle gaps without widening this
+packet's claim. A queued-byte reservation now owns an exact request-cancellation
+waker registration, closes the check/register race, and clears both its queue and
+cancellation registrations on completion or drop. Consumer drop closes and drains
+the receiver before publishing the drop state, so every committed queued frame is
+counted exactly once even when the producer and consumer race. The request-region
+connection-cancel watcher likewise owns and clears its exact registration when
+Phase A ends instead of retaining an untracked connection waker through drain or
+response completion.
 
 `Http1StreamingServer` decodes and consumes the request head with the hardened
 `Http1Codec` head parser, then polls the handler before the body driver. Body bytes
