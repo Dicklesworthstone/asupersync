@@ -345,9 +345,12 @@ before any live H2 integration claim is made.
 
 ## Evidence status and no-claim boundary
 
-The artifact parses, its source hashes and anchors were checked statically, and a
-Rust contract accompanies this document. The BODY-2 inline cases listed above were
-authored but not run. No executable project command was run for this packet.
+BODY-2 is complete at its narrow H1 ingress boundary. The implementation base is
+`8d1136049cdc1c342fd5e7bc6d3ee1398d296075`; the artifact records
+`FOCUSED_REMOTE_GREEN` for the inline body-carrier and streaming-server cases.
+`Http1StreamingServer` is the live streaming entry point covered by that evidence.
+The existing `Http1Server` and web handler path remain the legacy buffered path and
+are deliberately assigned to BODY-3 rather than silently reclassified here.
 
 The 2026-08-06 claim-time refresh at revision
 `0fead94fbdba7302b07ce44ca4ee7a92c87134ef` rechecked all thirty source pins.
@@ -378,17 +381,18 @@ coverage meaning, and runtime behavior are unchanged.
 
 Therefore this packet does not claim:
 
-- that handlers receive a streaming request body;
+- that the buffered `Http1Server` or web handlers receive a streaming request body;
 - lower memory use or improved performance;
-- protocol, cancellation, or runtime correctness;
-- live H1/H2 interoperability;
+- protocol, cancellation, or runtime correctness beyond the focused BODY-2 cases;
+- live H1 or H2 interoperability evidence;
 - a configured or landed H2 connection-level aggregate body budget;
 - response streaming or incremental multipart parsing;
 - broad server-stack or workspace health;
-- an allocated ASUP error code; or
-- completion of the foundation or BODY-2 bead.
+- an allocated ASUP error code;
+- the body-obligation or `http.incoming_body.terminal` telemetry contract; or
+- closure of BODY-3, BODY-5, BODY-9, or the parent rollup.
 
-The bead must remain open until the remaining ownership, queue-budget, cleanup,
-live-dispatch, and executable-validation work is admitted and recorded.
+BODY-2 tracker closure is scoped to this streaming H1 entry point. The remaining
+buffered-web cutover, H2 producer, multipart, and terminal-receipt work stays open.
 
 <!-- END SERVER INCOMING BODY CONTRACT -->

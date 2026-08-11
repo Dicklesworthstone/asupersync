@@ -276,11 +276,6 @@ impl QueuedByteBudget {
             waiter.wake();
         }
     }
-
-    #[cfg(test)]
-    fn queued(&self) -> usize {
-        self.state.lock().queued
-    }
 }
 
 #[derive(Debug)]

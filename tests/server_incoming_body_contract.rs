@@ -1,13 +1,13 @@
-//! Static contract for the server incoming-body foundation packet.
+//! Executable contract for the server incoming-body foundation and BODY-2 packet.
 //!
 //! Bead: asupersync-server-stack-hardening-eeexl1.6.1
 //! Artifact: artifacts/server_incoming_body_contract_v1.json
 //!
-//! This contract checks source fingerprints, current buffered boundaries,
+//! This contract checks source fingerprints, current streaming and buffered boundaries,
 //! single-consumer ownership, checked budgets, terminal states, protocol-specific
-//! unread-body cleanup, unchanged extractor defaults, the bounded BODY-2 static
-//! H1 scaffold receipt, and explicit no-claim boundaries. It does not prove live
-//! handler integration or runtime behavior.
+//! unread-body cleanup, unchanged extractor defaults, the bounded BODY-2 H1
+//! streaming receipt, and explicit no-claim boundaries. It does not prove H2 or
+//! buffered web-handler migration, performance, or broad workspace health.
 
 #![allow(missing_docs)]
 
@@ -21,7 +21,7 @@ const ARTIFACT_PATH: &str = "artifacts/server_incoming_body_contract_v1.json";
 const DOC_PATH: &str = "docs/server_incoming_body_contract.md";
 const BEAD_ID: &str = "asupersync-server-stack-hardening-eeexl1.6.1";
 const BODY_2_BEAD_ID: &str = "asupersync-server-stack-hardening-eeexl1.6.2";
-const BODY_2_BASE_REVISION: &str = "1620c55e5a3d139e7fb39b1c5e545055e3841541";
+const BODY_2_BASE_REVISION: &str = "8d1136049cdc1c342fd5e7bc6d3ee1398d296075";
 const PROGRAM_ID: &str = "asupersync-server-stack-hardening-eeexl1";
 const BASELINE_REVISION: &str = "e9fa01f67318b3aa7764511e51d35291438a3e40";
 const DOC_BEGIN: &str = "<!-- BEGIN SERVER INCOMING BODY CONTRACT -->";
@@ -256,8 +256,8 @@ fn validate_identity_and_authority(inventory: &Value) -> Result<(), String> {
     }
 
     let authority = object(inventory, "authority")?;
-    if !map_bool(authority, "foundation_only")? {
-        return Err("authority must remain foundation-only".to_owned());
+    if map_bool(authority, "foundation_only")? {
+        return Err("authority must record the landed BODY-2 implementation".to_owned());
     }
     for key in [
         "production_source_changes_authorized",
@@ -265,14 +265,15 @@ fn validate_identity_and_authority(inventory: &Value) -> Result<(), String> {
         "handler_streaming_present",
         "tracker_closure_authorized",
     ] {
-        if map_bool(authority, key)? {
-            return Err(format!("authority.{key} must remain false"));
+        if !map_bool(authority, key)? {
+            return Err(format!("authority.{key} must be true"));
         }
     }
-    if map_text(authority, "executable_validation_status")? != "UNRUN_STATIC_ONLY"
-        || map_text(authority, "required_disposition")? != "KEEP_OPEN_PENDING_EXECUTABLE_VALIDATION"
+    if map_text(authority, "executable_validation_status")? != "FOCUSED_REMOTE_GREEN"
+        || map_text(authority, "required_disposition")?
+            != "BODY_2_COMPLETE_H2_WEB_TELEMETRY_FOLLOW_ONS_OPEN"
     {
-        return Err("static validation disposition drifted".to_owned());
+        return Err("BODY-2 validation disposition drifted".to_owned());
     }
     validate_no_unknown(inventory, "artifact")
 }
@@ -303,8 +304,8 @@ fn validate_defaults_and_inventory(inventory: &Value) -> Result<(), String> {
             return Err(format!("current_defaults.{key} must be {expected}"));
         }
     }
-    if map_bool(defaults, "h1_stream_channel_byte_cap_enforced")? {
-        return Err("current H1 scaffold must not claim a byte-enforced queue".to_owned());
+    if !map_bool(defaults, "h1_stream_channel_byte_cap_enforced")? {
+        return Err("BODY-2 must enforce the H1 queued-byte cap".to_owned());
     }
     if map_text(defaults, "json_and_raw_default_policy")?
         != "RETAIN_10_MIB_UNLESS_OWNER_APPROVES_A_LOWER_DEFAULT"
@@ -317,8 +318,11 @@ fn validate_defaults_and_inventory(inventory: &Value) -> Result<(), String> {
         ("BODY-TRAIT", "PRESENT"),
         ("STREAM-BODY-ADAPTER", "PRESENT"),
         ("LIMITED-ADAPTER", "PRESENT"),
-        ("H1-STREAM-SCAFFOLD", "PRESENT_WITH_GAPS"),
-        ("H1-LIVE-DISPATCH", "BUFFERED"),
+        ("H1-STREAM-SCAFFOLD", "LANDED"),
+        (
+            "H1-LIVE-DISPATCH",
+            "STREAMING_ENTRYPOINT_WITH_BUFFERED_LEGACY_PATH",
+        ),
         ("H2-LIVE-DISPATCH", "BUFFERED"),
         ("WEB-REQUEST", "BUFFERED"),
         ("WEB-HANDLER-ROUTER", "BUFFERED"),
@@ -327,7 +331,7 @@ fn validate_defaults_and_inventory(inventory: &Value) -> Result<(), String> {
         ("WEB-MIDDLEWARE-LIMIT", "PRESENT_AFTER_BUFFERING"),
         ("WEB-MULTIPART", "CONTIGUOUS_BUFFERED_PARSE"),
         ("WEB-RESPONSE", "BUFFERED_OUT_OF_SCOPE"),
-        ("REQUEST-REGION", "PRESENT_FOR_HANDLER"),
+        ("REQUEST-REGION", "PRESENT_FOR_STREAMING_H1_HANDLER"),
         ("ERROR-REGISTRY", "NO_INCOMING_BODY_CODE"),
     ];
     let expected_ids: BTreeSet<String> = expected_states
@@ -370,16 +374,23 @@ fn validate_defaults_and_inventory(inventory: &Value) -> Result<(), String> {
     let h1_scaffold = find_row(surfaces, "surface_id", "H1-STREAM-SCAFFOLD")?;
     let h1_semantics = text(h1_scaffold, "current_semantics")?;
     let h1_gap = text(h1_scaffold, "gap")?;
-    if !h1_semantics.contains("producer terminal reason")
+    if !h1_semantics.contains("exact IncomingBodyError")
         || !h1_semantics.contains("before mutation")
-        || !h1_semantics.contains("premature disconnect")
-        || !h1_semantics.contains("decrementing a fixed-length SizeHint")
-        || !h1_gap.contains("HttpError")
-        || !h1_gap.contains("queue-byte permits")
-        || !h1_gap.contains("consumer-drop signal")
-        || !h1_gap.contains("live handler dispatch")
-        || !text(find_row(surfaces, "surface_id", "H1-LIVE-DISPATCH")?, "gap")?
-            .contains("saturating addition")
+        || !h1_semantics.contains("queued-byte")
+        || !h1_semantics.contains("consumer drop")
+        || !h1_gap.contains("terminal telemetry")
+        || !h1_gap.contains("body-obligation")
+        || !text(
+            find_row(surfaces, "surface_id", "H1-LIVE-DISPATCH")?,
+            "current_semantics",
+        )?
+        .contains("validated RequestHead before reading body bytes")
+        || !text(
+            find_row(surfaces, "surface_id", "H1-LIVE-DISPATCH")?,
+            "current_semantics",
+        )?
+        .contains("synchronized EOF")
+        || !text(find_row(surfaces, "surface_id", "H1-LIVE-DISPATCH")?, "gap")?.contains("BODY-3")
         || !text(
             find_row(surfaces, "surface_id", "H2-LIVE-DISPATCH")?,
             "current_semantics",
@@ -1204,26 +1215,23 @@ fn validate_cleanup_errors_and_evidence(inventory: &Value) -> Result<(), String>
 
     let evidence = object(inventory, "evidence_status")?;
     for key in [
+        "static_source_fingerprints_recorded",
+        "architecture_contract_authored",
+        "rust_contract_authored",
         "rust_contract_compiled",
         "rust_contract_executed",
         "protocol_integration_executed",
         "bead_complete",
     ] {
-        if map_bool(evidence, key)? {
-            return Err(format!("evidence_status.{key} must remain false"));
+        if !map_bool(evidence, key)? {
+            return Err(format!("evidence_status.{key} must be true"));
         }
-    }
-    if !map_bool(evidence, "static_source_fingerprints_recorded")?
-        || !map_bool(evidence, "architecture_contract_authored")?
-        || !map_bool(evidence, "rust_contract_authored")?
-    {
-        return Err("static evidence status is incomplete".to_owned());
     }
     Ok(())
 }
 
 #[allow(clippy::too_many_lines)]
-fn validate_body_2_static_progress(inventory: &Value) -> Result<(), String> {
+fn validate_body_2_progress(inventory: &Value) -> Result<(), String> {
     let progress_value = inventory
         .get("body_2_h1_scaffold_progress")
         .ok_or_else(|| "body_2_h1_scaffold_progress must be present".to_owned())?;
@@ -1244,14 +1252,14 @@ fn validate_body_2_static_progress(inventory: &Value) -> Result<(), String> {
     ]);
     let actual_keys: BTreeSet<String> = progress.keys().cloned().collect();
     if actual_keys != expected_keys {
-        return Err("BODY-2 static progress keys drifted".to_owned());
+        return Err("BODY-2 progress keys drifted".to_owned());
     }
     for (key, expected) in [
         ("bead_id", BODY_2_BEAD_ID),
-        ("captured_date_utc", "2026-08-05"),
+        ("captured_date_utc", "2026-08-11"),
         ("base_revision", BODY_2_BASE_REVISION),
-        ("progress_state", "STATIC_SOURCE_PROGRESS"),
-        ("execution_state", "NOT_RUN_STATIC_ONLY"),
+        ("progress_state", "IMPLEMENTED"),
+        ("execution_state", "FOCUSED_REMOTE_GREEN"),
     ] {
         if map_text(progress, key)? != expected {
             return Err(format!(
@@ -1262,7 +1270,12 @@ fn validate_body_2_static_progress(inventory: &Value) -> Result<(), String> {
 
     if value_string_set(progress_value, "modified_paths")?
         != string_set(&[
+            "fuzz/fuzz_targets/h1_body_stream.rs",
+            "src/http/h1/codec.rs",
+            "src/http/h1/mod.rs",
+            "src/http/h1/server.rs",
             "src/http/h1/stream.rs",
+            "src/web/request_region.rs",
             "artifacts/server_incoming_body_contract_v1.json",
             "docs/server_incoming_body_contract.md",
             "tests/server_incoming_body_contract.rs",
@@ -1291,34 +1304,16 @@ fn validate_body_2_static_progress(inventory: &Value) -> Result<(), String> {
     if actual_semantic_keys != expected_semantic_keys {
         return Err("BODY-2 implemented semantics keys drifted".to_owned());
     }
-    for key in [
-        "premature_disconnect_is_error",
-        "explicit_completion_is_eof",
-        "incoming_total_accounting_checked_before_mutation",
-        "incoming_trailer_accounting_checked_before_mutation",
-        "incoming_buffer_accounting_checked_before_extension",
-        "fixed_length_size_hint_decreases_on_delivery",
-    ] {
+    for key in expected_semantic_keys
+        .iter()
+        .filter(|key| key.as_str() != "producer_error_reason_mirroring")
+    {
         if !map_bool(semantics, key)? {
             return Err(format!("body_2 implemented_semantics.{key} must be true"));
         }
     }
-    for key in [
-        "live_h1_dispatch_streaming",
-        "queue_byte_budget_enforced",
-        "consumer_drop_signal_present",
-        "drain_or_close_policy_present",
-        "incoming_body_error_type_present",
-        "already_terminal_repoll_error_present",
-    ] {
-        if map_bool(semantics, key)? {
-            return Err(format!(
-                "body_2 implemented_semantics.{key} must remain false"
-            ));
-        }
-    }
     if map_text(semantics, "producer_error_reason_mirroring")?
-        != "WRITER_GENERATED_HTTP_ERROR_SUBSET_AFTER_QUEUED_FRAMES"
+        != "EXACT_TYPED_TERMINAL_REASON_AFTER_QUEUED_FRAMES"
     {
         return Err("BODY-2 producer error-reason scope drifted".to_owned());
     }
@@ -1330,14 +1325,24 @@ fn validate_body_2_static_progress(inventory: &Value) -> Result<(), String> {
             "incoming_body_completed_chunked_without_trailers_ends_cleanly",
             "incoming_body_chunked_finish_incomplete_errors",
             "incoming_body_limit_refuses_whole_crossing_frame_and_surfaces_error",
+            "incoming_body_repoll_after_eof_fails_closed",
+            "incoming_body_cancellation_preserves_exact_kind",
+            "incoming_body_queue_bytes_backpressure_independently_of_frame_slots",
+            "incoming_body_consumer_drop_drains_and_preserves_pipeline_remainder",
+            "streaming_server_publishes_head_before_reading_body",
+            "streaming_server_drains_unread_body_before_pipeline_reuse",
+            "streaming_server_closes_when_unread_body_exceeds_drain_limit",
+            "streaming_server_preserves_chunked_frames_and_trailers",
+            "streaming_server_refuses_actual_chunked_bytes_over_limit",
+            "streaming_server_reports_truncated_content_length_and_closes",
         ])
     {
         return Err("BODY-2 authored inline-test inventory drifted".to_owned());
     }
 
     let gaps = array(progress_value, "remaining_gaps")?;
-    if gaps.len() != 4 {
-        return Err("BODY-2 remaining-gap inventory must contain four entries".to_owned());
+    if gaps.len() != 3 {
+        return Err("BODY-2 remaining-gap inventory must contain three entries".to_owned());
     }
     let joined_gaps = gaps
         .iter()
@@ -1348,13 +1353,11 @@ fn validate_body_2_static_progress(inventory: &Value) -> Result<(), String> {
         .collect::<Result<Vec<_>, _>>()?
         .join("\n");
     for required in [
-        "buffer the complete request",
-        "queued-byte permit budget",
-        "consumer-drop notification",
-        "IncomingBodyError",
-        "already-terminal error",
-        "drain-or-close",
-        "terminal telemetry",
+        "Http1Server listener and web handler path remain buffered",
+        "BODY-3",
+        "H2 DATA and trailer production remain buffered",
+        "body obligation",
+        "http.incoming_body.terminal telemetry",
     ] {
         if !joined_gaps.contains(required) {
             return Err(format!("BODY-2 remaining gaps must mention {required}"));
@@ -1363,11 +1366,13 @@ fn validate_body_2_static_progress(inventory: &Value) -> Result<(), String> {
 
     let no_claim = map_text(progress, "no_claim_boundary")?;
     for required in [
-        "static source receipt",
-        "does not prove compilation",
-        "live streaming dispatch",
-        "connection reuse",
-        "completion of BODY-2",
+        "Focused remote BODY-2 tests",
+        "H1 streaming entrypoint",
+        "drain-or-close reuse",
+        "do not prove H2",
+        "buffered web-handler migration",
+        "terminal telemetry",
+        "broad workspace health",
     ] {
         if !no_claim.contains(required) {
             return Err(format!("BODY-2 no-claim boundary must mention {required}"));
@@ -1455,7 +1460,7 @@ fn validate_docs_and_boundaries(inventory: &Value) -> Result<(), String> {
     }
     for required in [
         "## Current architecture",
-        "## BODY-2 static H1 scaffold progress",
+        "## BODY-2 H1 streaming ingress",
         "## Public ownership contract",
         "## Terminal-state contract",
         "## Frame, queue, and total budgets",
@@ -1476,8 +1481,10 @@ fn validate_docs_and_boundaries(inventory: &Value) -> Result<(), String> {
         "nine mapping identifiers",
         "Null is distinct from zero",
         BODY_2_BASE_REVISION,
-        "Those cases have not been compiled or run",
-        "The bead must remain open",
+        "FOCUSED_REMOTE_GREEN",
+        "Http1StreamingServer",
+        "legacy buffered",
+        "BODY-2 is complete",
     ] {
         if !doc.contains(required) {
             return Err(format!("documentation must contain {required}"));
@@ -1493,12 +1500,14 @@ fn validate_docs_and_boundaries(inventory: &Value) -> Result<(), String> {
         .collect::<Vec<_>>()
         .join("\n");
     for required in [
-        "handlers receive a streaming request body",
+        "buffered Http1Server or web handlers receive a streaming request body",
         "reduced memory use or improved performance",
         "protocol, cancellation, or runtime correctness",
         "broad server-stack or workspace health",
+        "live H1 or H2 interoperability evidence",
         "response streaming or incremental multipart parsing",
         "allocate an ASUP error code",
+        "body-obligation or http.incoming_body.terminal telemetry",
         "tracker closure",
     ] {
         if !joined.contains(required) {
@@ -1515,7 +1524,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     validate_state_and_budgets(inventory)?;
     validate_semantics_and_telemetry(inventory)?;
     validate_cleanup_errors_and_evidence(inventory)?;
-    validate_body_2_static_progress(inventory)?;
+    validate_body_2_progress(inventory)?;
     validate_source_pins(inventory)?;
     validate_docs_and_boundaries(inventory)
 }
@@ -1548,17 +1557,17 @@ fn server_incoming_body_contract_fails_closed_on_material_drift() {
     mutations.push(("lowered JSON default", lowered_json));
 
     let mut false_integration = base.clone();
-    false_integration["authority"]["handler_streaming_present"] = Value::Bool(true);
-    mutations.push(("false integration claim", false_integration));
+    false_integration["authority"]["handler_streaming_present"] = Value::Bool(false);
+    mutations.push(("missing streaming integration claim", false_integration));
 
     let mut false_body_2_integration = base.clone();
     false_body_2_integration["body_2_h1_scaffold_progress"]["implemented_semantics"]["live_h1_dispatch_streaming"] =
-        Value::Bool(true);
-    mutations.push(("false BODY-2 integration claim", false_body_2_integration));
+        Value::Bool(false);
+    mutations.push(("missing BODY-2 integration claim", false_body_2_integration));
 
     let mut false_body_2_execution = base.clone();
     false_body_2_execution["body_2_h1_scaffold_progress"]["execution_state"] =
-        Value::String("EXECUTED".to_owned());
+        Value::String("NOT_RUN_STATIC_ONLY".to_owned());
     mutations.push(("false BODY-2 execution claim", false_body_2_execution));
 
     let mut disconnect_eof = base.clone();
