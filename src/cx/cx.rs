@@ -5453,6 +5453,15 @@ mod tests {
         cx.set_cancel_requested(false);
         assert_published(&cx, false);
 
+        // All non-Cx producers use this paired lock-state/Release-publication
+        // method, so exercise its true and clear transitions against the
+        // lock-free public query too.
+        let cx = test_cx();
+        cx.inner.write().set_cancel_requested(true);
+        assert_published(&cx, true);
+        cx.inner.write().set_cancel_requested(false);
+        assert_published(&cx, false);
+
         let cx = test_cx();
         cx.set_cancel_internal(true);
         assert_published(&cx, true);

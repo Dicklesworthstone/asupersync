@@ -2452,6 +2452,7 @@ mod tests {
             Budget::INFINITE,
         )));
         t.set_cx_inner(inner.clone());
+        let cx = crate::cx::Cx::from_inner(Arc::clone(&inner));
 
         let cancel_requested = inner.read().cancel_requested;
         crate::assert_with_log!(
@@ -2476,6 +2477,12 @@ mod tests {
             "cancel_requested true",
             true,
             cancel_requested
+        );
+        crate::assert_with_log!(
+            cx.is_cancel_requested(),
+            "TaskRecord cancellation publishes through the linked Cx envelope",
+            true,
+            cx.is_cancel_requested()
         );
         let cancel_reason = inner.read().cancel_reason.clone();
         crate::assert_with_log!(

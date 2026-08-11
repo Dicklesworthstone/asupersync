@@ -1651,6 +1651,33 @@ mod tests {
     }
 
     #[test]
+    fn actor_handle_abort_publishes_to_child_cx() {
+        init_test("actor_handle_abort_publishes_to_child_cx");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let parent_cx: Cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
+        let (handle, _stored) = scope
+            .spawn_actor(&mut state, &parent_cx, Counter::new(), 1)
+            .expect("spawn actor");
+        let actor_cx = Cx::from_inner(
+            handle
+                .inner
+                .upgrade()
+                .expect("actor handle must retain its live CxInner"),
+        );
+
+        handle.abort();
+
+        assert!(
+            actor_cx.is_cancel_requested(),
+            "ActorHandle cancellation must publish through the actor Cx envelope"
+        );
+        crate::test_complete!("actor_handle_abort_publishes_to_child_cx");
+    }
+
+    #[test]
     fn spawn_actor_inherits_child_cx_capabilities() {
         init_test("spawn_actor_inherits_child_cx_capabilities");
 
@@ -2027,6 +2054,12 @@ mod tests {
             ActorState::Running,
             "actor should be running before join drop requests abort"
         );
+        let actor_cx = Cx::from_inner(
+            handle
+                .inner
+                .upgrade()
+                .expect("actor handle must retain its live CxInner"),
+        );
 
         drop(handle.join(&cx));
 
@@ -2034,6 +2067,10 @@ mod tests {
             handle.state.load(),
             ActorState::Stopping,
             "dropping join future should mirror ActorHandle::abort state transition"
+        );
+        assert!(
+            actor_cx.is_cancel_requested(),
+            "ActorJoinFuture cancellation must publish through the actor Cx envelope"
         );
         assert!(
             matches!(handle.try_send(1), Err(SendError::Disconnected(1))),

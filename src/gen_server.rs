@@ -3158,7 +3158,17 @@ mod tests {
             .spawn_gen_server(&mut state, &cx, Counter { count: 0 }, 8)
             .expect("spawn gen_server");
         let server_ref = handle.server_ref();
+        let server_cx = Cx::from_inner(
+            handle
+                .inner
+                .upgrade()
+                .expect("server handle must retain its live CxInner"),
+        );
         handle.abort();
+        assert!(
+            server_cx.is_cancel_requested(),
+            "GenServerHandle cancellation must publish through the server Cx envelope"
+        );
 
         let wake_count = Arc::new(AtomicUsize::new(0));
         let waker = terminal_state_waker(Arc::clone(&handle.state), Arc::clone(&wake_count));
@@ -3529,6 +3539,12 @@ mod tests {
             ActorState::Running,
             "server should be running before join drop requests abort"
         );
+        let server_cx = Cx::from_inner(
+            handle
+                .inner
+                .upgrade()
+                .expect("server handle must retain its live CxInner"),
+        );
 
         drop(handle.join(&cx));
 
@@ -3536,6 +3552,10 @@ mod tests {
             handle.state.load(),
             ActorState::Stopping,
             "dropping join future should mirror GenServerHandle::abort state transition"
+        );
+        assert!(
+            server_cx.is_cancel_requested(),
+            "GenServerJoinFuture cancellation must publish through the server Cx envelope"
         );
 
         runtime.run_until_idle();

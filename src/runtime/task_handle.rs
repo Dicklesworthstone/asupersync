@@ -992,6 +992,12 @@ mod tests {
 
         let mut handle = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
         handle.abort_with_reason(CancelReason::timeout());
+        crate::assert_with_log!(
+            cx.is_cancel_requested(),
+            "TaskHandle abort publishes through its live Cx envelope",
+            true,
+            cx.is_cancel_requested()
+        );
         drop(tx);
 
         let result = block_on(handle.join(&cx));
