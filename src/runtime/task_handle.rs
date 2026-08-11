@@ -167,9 +167,7 @@ fn strengthen_cancelled_result<T>(
 
 fn strengthen_cancel_reason_locked(lock: &mut CxInner, reason: &CancelReason) {
     let newly_requested = !lock.cancel_requested;
-    lock.cancel_requested = true;
-    lock.fast_cancel
-        .store(true, std::sync::atomic::Ordering::Release);
+    lock.set_cancel_requested(true);
     let reason_changed = if let Some(existing) = &mut lock.cancel_reason {
         existing.strengthen(reason)
     } else {
@@ -795,9 +793,7 @@ mod tests {
 
         {
             let mut lock = cx.inner.write();
-            lock.cancel_requested = true;
-            lock.fast_cancel
-                .store(true, std::sync::atomic::Ordering::Release);
+            lock.set_cancel_requested(true);
             lock.cancel_reason = Some(CancelReason::timeout());
         }
 

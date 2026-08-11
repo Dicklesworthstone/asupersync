@@ -2059,10 +2059,7 @@ impl LabRuntime {
 
                     // Enforce poll quota
                     if guard.budget.consume_poll().is_none() {
-                        guard.cancel_requested = true;
-                        guard
-                            .fast_cancel
-                            .store(true, std::sync::atomic::Ordering::Release);
+                        guard.set_cancel_requested(true);
                         if let Some(existing) = &mut guard.cancel_reason {
                             existing.strengthen(&crate::types::CancelReason::poll_quota());
                         } else {

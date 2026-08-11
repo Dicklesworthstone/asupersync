@@ -1188,10 +1188,7 @@ impl<S: GenServer> GenServerHandle<S> {
         if let Some(inner) = self.inner.upgrade() {
             let cancel_wakers = {
                 let mut guard = inner.write();
-                guard.cancel_requested = true;
-                guard
-                    .fast_cancel
-                    .store(true, std::sync::atomic::Ordering::Release);
+                guard.set_cancel_requested(true);
                 if guard.cancel_reason.is_none() {
                     guard.cancel_reason = Some(crate::types::CancelReason::user("server aborted"));
                 }
@@ -1246,10 +1243,7 @@ impl<S: GenServer> GenServerJoinFuture<'_, S> {
         if let Some(inner) = self.cx_inner.upgrade() {
             let cancel_wakers = {
                 let mut guard = inner.write();
-                guard.cancel_requested = true;
-                guard
-                    .fast_cancel
-                    .store(true, std::sync::atomic::Ordering::Release);
+                guard.set_cancel_requested(true);
                 if guard.cancel_reason.is_none() {
                     guard.cancel_reason = Some(crate::types::CancelReason::user("server aborted"));
                 }

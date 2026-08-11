@@ -2643,8 +2643,7 @@ mod tests {
             .expect("admission retains a live Cx");
         {
             let mut guard = inner.write();
-            guard.cancel_requested = true;
-            guard.fast_cancel.store(true, Ordering::Release);
+            guard.set_cancel_requested(true);
             guard.cancel_reason = None;
         }
 

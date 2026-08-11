@@ -815,6 +815,38 @@ impl RunnablePublication {
     }
 }
 
+/// Stable cancellation publication state shared by one capability context.
+///
+/// The flag is intentionally private: every publisher must go through
+/// [`Self::publish`] so that an `Acquire` query can rely on the matching
+/// `Release` store. `CxInner` exposes handles to this envelope only inside the
+/// crate, and public task-record mutation cannot replace it.
+#[derive(Debug)]
+pub(crate) struct CxCancellationState {
+    requested: std::sync::atomic::AtomicBool,
+}
+
+impl CxCancellationState {
+    #[must_use]
+    pub(crate) fn new() -> Self {
+        Self {
+            requested: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub(crate) fn is_requested(&self) -> bool {
+        self.requested.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    #[inline]
+    pub(crate) fn publish(&self, value: bool) {
+        self.requested
+            .store(value, std::sync::atomic::Ordering::Release);
+    }
+}
+
 /// Internal state for a capability context.
 ///
 /// This struct is shared between the user-facing `Cx` and the runtime's
@@ -835,7 +867,7 @@ pub struct CxInner {
     /// Explicit capability/resource envelope carried by this context.
     pub capability_budget: CapabilityBudget,
     /// Whether cancellation has been requested.
-    pub cancel_requested: bool,
+    pub(crate) cancel_requested: bool,
     /// The reason for cancellation, if requested.
     pub cancel_reason: Option<CancelReason>,
     /// Whether cancellation has been acknowledged at a checkpoint.
@@ -877,8 +909,9 @@ pub struct CxInner {
     pub mask_depth: u32,
     /// Progress checkpoint state.
     pub checkpoint_state: CheckpointState,
-    /// Fast atomic flag for cancellation (avoids RwLock on wake hot path).
-    pub fast_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Stable fast cancellation envelope shared with every `Cx` clone and
+    /// runtime-owned cancellation producer for this context.
+    cancellation: std::sync::Arc<CxCancellationState>,
     /// Fast-path checkpoint count: incremented when [`Cx::checkpoint`] takes
     /// the no-cancellation fast path (br-asupersync-is2xg0). Drained into
     /// [`CheckpointState::checkpoint_count`] on the next slow-path call or
@@ -918,10 +951,39 @@ impl CxInner {
             cancel_waker_registry_closed: false,
             mask_depth: 0,
             checkpoint_state: CheckpointState::new(),
-            fast_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cancellation: std::sync::Arc::new(CxCancellationState::new()),
             fast_path_count: std::sync::atomic::AtomicU64::new(0),
             fast_path_last_checkpoint_ns: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Returns the stable cancellation envelope for contexts constructed from
+    /// this exact inner lock.
+    #[must_use]
+    pub(crate) fn cancellation_state(&self) -> std::sync::Arc<CxCancellationState> {
+        std::sync::Arc::clone(&self.cancellation)
+    }
+
+    /// Returns the published cancellation state without acquiring this
+    /// context's `RwLock` again.
+    #[inline]
+    #[must_use]
+    pub(crate) fn is_cancel_requested(&self) -> bool {
+        self.cancellation.is_requested()
+    }
+
+    /// Changes lock-backed cancellation state and publishes the matching
+    /// Release-ordered fast-path value as one operation.
+    #[inline]
+    pub(crate) fn set_cancel_requested(&mut self, value: bool) {
+        self.cancel_requested = value;
+        self.publish_cancel_requested(value);
+    }
+
+    /// Publishes cancellation through the one Release-ordered producer path.
+    #[inline]
+    pub(crate) fn publish_cancel_requested(&self, value: bool) {
+        self.cancellation.publish(value);
     }
 
     /// Snapshot every distinct cancellation wake target using only safe `Arc`

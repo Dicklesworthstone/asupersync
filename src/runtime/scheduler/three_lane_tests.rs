@@ -11,6 +11,7 @@ use crate::record::task::TaskWakeState;
 use crate::runtime::scheduler::invariant_monitor;
 use crate::runtime::scheduler::{InvariantCategory, SchedulerInvariant};
 use crate::time::{TimerDriverHandle, VirtualClock};
+use crate::types::task_context::CxCancellationState;
 use crate::types::{Budget, CancelKind, CancelReason, CxInner, RegionId, TaskId};
 use parking_lot::RwLock;
 use serde::Deserialize;
@@ -1301,10 +1302,7 @@ fn cancel_waker_injects_cancel_lane() {
     )));
     {
         let mut guard = cx_inner.write();
-        guard.cancel_requested = true;
-        guard
-            .fast_cancel
-            .store(true, std::sync::atomic::Ordering::Release);
+        guard.set_cancel_requested(true);
         guard.cancel_reason = Some(CancelReason::timeout());
     }
 
@@ -1329,7 +1327,7 @@ fn cancel_waker_injects_cancel_lane() {
 }
 
 #[test]
-fn ordinary_waker_observes_fast_cancel_and_injects_cancel_lane() {
+fn ordinary_waker_observes_published_cancellation_and_injects_cancel_lane() {
     let task_id = TaskId::new_for_test(1, 7);
     let cx_inner = Arc::new(RwLock::new(CxInner::new(
         RegionId::new_for_test(1, 0),
@@ -1338,10 +1336,7 @@ fn ordinary_waker_observes_fast_cancel_and_injects_cancel_lane() {
     )));
     {
         let mut guard = cx_inner.write();
-        guard.cancel_requested = true;
-        guard
-            .fast_cancel
-            .store(true, std::sync::atomic::Ordering::Release);
+        guard.set_cancel_requested(true);
         guard.cancel_reason = Some(CancelReason::timeout());
     }
 
@@ -1355,7 +1350,7 @@ fn ordinary_waker_observes_fast_cancel_and_injects_cancel_lane() {
         global: Arc::clone(&global),
         coordinator,
         priority: Budget::INFINITE.priority,
-        fast_cancel: Arc::clone(&cx_inner.read().fast_cancel),
+        cancellation: cx_inner.read().cancellation_state(),
         cx_inner: Arc::downgrade(&cx_inner),
         scheduler_evidence: None,
     }));
@@ -2174,10 +2169,7 @@ fn test_local_cancel_removes_from_local_ready() {
     )));
     {
         let mut guard = cx_inner.write();
-        guard.cancel_requested = true;
-        guard
-            .fast_cancel
-            .store(true, std::sync::atomic::Ordering::Release);
+        guard.set_cancel_requested(true);
         guard.cancel_reason = Some(CancelReason::new(CancelKind::User));
     }
 
@@ -2296,10 +2288,7 @@ fn ordinary_local_waker_promotes_cancelled_task_out_of_local_ready() {
     )));
     {
         let mut guard = cx_inner.write();
-        guard.cancel_requested = true;
-        guard
-            .fast_cancel
-            .store(true, std::sync::atomic::Ordering::Release);
+        guard.set_cancel_requested(true);
         guard.cancel_reason = Some(CancelReason::new(CancelKind::User));
     }
 
@@ -2310,7 +2299,7 @@ fn ordinary_local_waker_promotes_cancelled_task_out_of_local_ready() {
         local: Arc::clone(&local),
         local_ready: Arc::clone(&local_ready),
         parker: Parker::new(),
-        fast_cancel: Arc::clone(&cx_inner.read().fast_cancel),
+        cancellation: cx_inner.read().cancellation_state(),
         cx_inner: Arc::downgrade(&cx_inner),
         scheduler_evidence: None,
     };
@@ -2519,7 +2508,7 @@ fn test_multiple_wakes_single_schedule() {
                 global: Arc::clone(&global),
                 coordinator: Arc::clone(&coordinator),
                 priority: 0,
-                fast_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                cancellation: Arc::new(CxCancellationState::new()),
                 cx_inner: Weak::new(),
                 scheduler_evidence: None,
             }))
@@ -5885,7 +5874,7 @@ fn fast_queue_waker_uses_local_ready_on_same_thread() {
         local: Arc::clone(&priority_sched),
         local_ready: Arc::clone(&local_ready),
         parker,
-        fast_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        cancellation: Arc::new(CxCancellationState::new()),
         cx_inner: Weak::new(),
         scheduler_evidence: None,
     }));
@@ -5927,7 +5916,7 @@ fn fast_queue_waker_falls_back_to_local_ready_cross_thread() {
         local: Arc::clone(&priority_sched),
         local_ready: Arc::clone(&local_ready),
         parker,
-        fast_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        cancellation: Arc::new(CxCancellationState::new()),
         cx_inner: Weak::new(),
         scheduler_evidence: None,
     }));
@@ -8003,14 +7992,14 @@ fn task_table_backed_consume_cancel_ack() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _ = tt.update_task(task_id, |record| {
-            record.cx_inner = Some(cx_inner.clone());
+            record.set_cx_inner(cx_inner.clone());
             assert!(record.start_running());
         });
     }
     // Set cancel_acknowledged.
     {
         let mut guard = cx_inner.write();
-        guard.cancel_requested = true;
+        guard.set_cancel_requested(true);
         guard.cancel_reason = Some(crate::types::CancelReason::shutdown());
         guard.cancel_acknowledged = true;
     }

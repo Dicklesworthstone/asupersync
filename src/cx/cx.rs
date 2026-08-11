@@ -87,7 +87,9 @@ use crate::time::{TimerDriverHandle, timeout};
 use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
 use crate::trace::{TraceBufferHandle, TraceEvent};
 use crate::tracing_compat::{debug, error, info, trace, warn};
-use crate::types::task_context::{CancelWaker, CancelWakerRegistration};
+use crate::types::task_context::{
+    CancelWaker, CancelWakerRegistration, CxCancellationState,
+};
 use crate::types::{
     Budget, CancelKind, CancelReason, CapabilityBudget, CapabilityBudgetRefusal,
     CapabilityBudgetRequirements, CxInner, RegionId, SystemPressure, TaskId, Time,
@@ -234,13 +236,13 @@ pub(crate) struct CancelWakerToken {
 #[derive(Debug)]
 pub struct Cx<Caps = cap::All> {
     pub(crate) inner: Arc<parking_lot::RwLock<CxInner>>,
-    /// Shared cancellation publication flag from [`CxInner`].
+    /// Shared cancellation publication envelope from [`CxInner`].
     ///
-    /// This `Arc` is cloned from `CxInner::fast_cancel` at construction and
-    /// never replaced, so cancellation queries can pair their `Acquire` load
-    /// with the `Release` store made by every cancellation publisher without
-    /// acquiring `inner`'s `RwLock`.
-    fast_cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// This `Arc` is cloned from the inner's private, stable envelope at
+    /// construction. Public task mutation cannot replace that envelope, and
+    /// every publisher uses its Release-ordered method without acquiring
+    /// `inner`'s `RwLock` for this query.
+    cancellation: Arc<CxCancellationState>,
     observability: Arc<parking_lot::RwLock<ObservabilityState>>,
     handles: Arc<CxHandles>,
     /// br-asupersync-5ckssb: runtime capability mask. Mirrors the
@@ -263,13 +265,14 @@ pub struct Cx<Caps = cap::All> {
 }
 
 // Manual Clone impl to avoid requiring `Caps: Clone` (Caps is just a phantom marker type).
-// Only 4 Arc increments instead of ~15.
+// Four Arc increments: inner, stable cancellation envelope, observability, and handles
+// (rather than ~15 before handle aggregation).
 impl<Caps> Clone for Cx<Caps> {
     #[inline]
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
-            fast_cancel: Arc::clone(&self.fast_cancel),
+            cancellation: Arc::clone(&self.cancellation),
             observability: Arc::clone(&self.observability),
             handles: Arc::clone(&self.handles),
             runtime_mask: self.runtime_mask,
@@ -911,13 +914,13 @@ impl<Caps> Cx<Caps> {
     /// Creates a new capability context from shared state (internal use).
     #[allow(dead_code)] // Internal construction path for runtime integration
     pub(crate) fn from_inner(inner: Arc<parking_lot::RwLock<CxInner>>) -> Self {
-        let (region, task, fast_cancel) = {
+        let (region, task, cancellation) = {
             let guard = inner.read();
-            (guard.region, guard.task, Arc::clone(&guard.fast_cancel))
+            (guard.region, guard.task, guard.cancellation_state())
         };
         Self {
             inner,
-            fast_cancel,
+            cancellation,
             observability: Arc::new(parking_lot::RwLock::new(ObservabilityState::new(
                 region, task,
             ))),
@@ -1005,7 +1008,7 @@ impl<Caps> Cx<Caps> {
         entropy: Option<Arc<dyn EntropySource>>,
     ) -> Self {
         let inner = Arc::new(parking_lot::RwLock::new(CxInner::new(region, task, budget)));
-        let fast_cancel = Arc::clone(&inner.read().fast_cancel);
+        let cancellation = inner.read().cancellation_state();
         let observability_state =
             observability.unwrap_or_else(|| ObservabilityState::new(region, task));
         let observability = Arc::new(parking_lot::RwLock::new(observability_state));
@@ -1024,7 +1027,7 @@ impl<Caps> Cx<Caps> {
 
         Self {
             inner,
-            fast_cancel,
+            cancellation,
             observability,
             handles: Arc::new(CxHandles {
                 io_driver,
@@ -1096,7 +1099,7 @@ impl<Caps> Cx<Caps> {
     pub(crate) fn retype<NewCaps>(&self) -> Cx<NewCaps> {
         Cx {
             inner: self.inner.clone(),
-            fast_cancel: self.fast_cancel.clone(),
+            cancellation: self.cancellation.clone(),
             observability: self.observability.clone(),
             handles: self.handles.clone(),
             // br-asupersync-5ckssb: preserve the runtime mask across
@@ -2136,7 +2139,7 @@ impl<Caps> Cx<Caps> {
     #[inline]
     #[must_use]
     pub fn is_cancel_requested(&self) -> bool {
-        self.fast_cancel.load(std::sync::atomic::Ordering::Acquire)
+        self.cancellation.is_requested()
     }
 
     /// Checks for cancellation and returns an error if cancelled.
@@ -2186,21 +2189,22 @@ impl<Caps> Cx<Caps> {
         // ── Fast path (br-asupersync-is2xg0) ──────────────────────────────
         // The vast majority of checkpoint() calls fire on healthy tasks
         // with no cancellation pending and no budget exhaustion. Take a
-        // read lock, atomically check `fast_cancel`, snapshot the (Copy)
-        // budget to detect deadline / poll / cost exhaustion inline, and
+        // read lock, query the stable cancellation envelope, snapshot the
+        // (Copy) budget to detect deadline / poll / cost exhaustion inline, and
         // record progress via two atomic ops — without acquiring the
         // write lock or cloning `cancel_reason`.
         //
-        // Correctness: `fast_cancel` is set with `Release` ordering by
-        // every cancellation source (TaskHandle::cancel, deadline_monitor,
-        // and the slow path below when it newly observes exhaustion). An
-        // `Acquire` load here therefore observes any prior cancellation.
+        // Correctness: the stable cancellation envelope publishes with
+        // `Release` ordering from every source (TaskHandle::cancel,
+        // deadline_monitor, and the slow path below when it newly observes
+        // exhaustion). Its `Acquire` query therefore observes any prior
+        // cancellation.
         // Budget exhaustion is checked inline so unit-test invariants
         // ("checkpoint detects deadline / poll-quota / cost-budget
         // exhaustion") are preserved without going through deadline_monitor.
         {
             let guard = self.inner.read();
-            let cancelled = guard.fast_cancel.load(std::sync::atomic::Ordering::Acquire);
+            let cancelled = guard.is_cancel_requested();
             let exhausted = !cancelled
                 && Self::checkpoint_budget_exhaustion(
                     guard.region,
@@ -2252,10 +2256,7 @@ impl<Caps> Cx<Caps> {
                 checkpoint_time,
             );
             if let Some((reason, _, _)) = &budget_exhaustion {
-                inner.cancel_requested = true;
-                inner
-                    .fast_cancel
-                    .store(true, std::sync::atomic::Ordering::Release);
+                inner.set_cancel_requested(true);
                 let changed = if let Some(existing) = &mut inner.cancel_reason {
                     existing.strengthen(reason)
                 } else {
@@ -2378,10 +2379,7 @@ impl<Caps> Cx<Caps> {
                 checkpoint_time,
             );
             if let Some((reason, _, _)) = &budget_exhaustion {
-                inner.cancel_requested = true;
-                inner
-                    .fast_cancel
-                    .store(true, std::sync::atomic::Ordering::Release);
+                inner.set_cancel_requested(true);
                 let changed = if let Some(existing) = &mut inner.cancel_reason {
                     existing.strengthen(reason)
                 } else {
@@ -3087,10 +3085,7 @@ impl<Caps> Cx<Caps> {
     #[allow(dead_code)]
     pub(crate) fn set_cancel_internal(&self, value: bool) {
         let mut inner = self.inner.write();
-        inner.cancel_requested = value;
-        inner
-            .fast_cancel
-            .store(value, std::sync::atomic::Ordering::Release);
+        inner.set_cancel_requested(value);
         if !value {
             inner.cancel_reason = None;
             inner.cancel_wakers_pending = false;
@@ -3124,10 +3119,7 @@ impl<Caps> Cx<Caps> {
     pub fn set_cancel_requested(&self, value: bool) {
         let wakers = {
             let mut inner = self.inner.write();
-            inner.cancel_requested = value;
-            inner
-                .fast_cancel
-                .store(value, std::sync::atomic::Ordering::Release);
+            inner.set_cancel_requested(value);
             if !value {
                 inner.cancel_reason = None;
                 inner.cancel_wakers_pending = false;
@@ -3321,10 +3313,7 @@ impl<Caps> Cx<Caps> {
                 reason = reason.with_message(msg);
             }
 
-            inner.cancel_requested = true;
-            inner
-                .fast_cancel
-                .store(true, std::sync::atomic::Ordering::Release);
+            inner.set_cancel_requested(true);
             if let Some(existing) = inner.cancel_reason.as_mut() {
                 existing.strengthen(&reason);
             } else {
@@ -3381,10 +3370,7 @@ impl<Caps> Cx<Caps> {
             // Minimal attribution: just kind and region
             let reason = CancelReason::new(kind).with_region(region);
 
-            inner.cancel_requested = true;
-            inner
-                .fast_cancel
-                .store(true, std::sync::atomic::Ordering::Release);
+            inner.set_cancel_requested(true);
             if let Some(existing) = inner.cancel_reason.as_mut() {
                 existing.strengthen(&reason);
             } else {
@@ -3584,10 +3570,7 @@ impl<Caps> Cx<Caps> {
     pub fn set_cancel_reason(&self, reason: CancelReason) {
         let wakers = {
             let mut inner = self.inner.write();
-            inner.cancel_requested = true;
-            inner
-                .fast_cancel
-                .store(true, std::sync::atomic::Ordering::Release);
+            inner.set_cancel_requested(true);
             inner.cancel_reason = Some(reason);
             let wakers = inner.cancel_waker_snapshot();
             inner.cancel_wakers_pending = false;
@@ -5428,6 +5411,10 @@ mod tests {
         let from_inner: Cx<cap::All> = Cx::from_inner(Arc::clone(&cx.inner));
         let restricted: Cx<cap::None> = cx.restrict();
 
+        assert!(Arc::ptr_eq(&cx.cancellation, &clone.cancellation));
+        assert!(Arc::ptr_eq(&cx.cancellation, &from_inner.cancellation));
+        assert!(Arc::ptr_eq(&cx.cancellation, &restricted.cancellation));
+
         assert!(!cx.is_cancel_requested());
         assert!(!clone.is_cancel_requested());
         assert!(!from_inner.is_cancel_requested());
@@ -5451,6 +5438,50 @@ mod tests {
         assert!(clone.is_cancel_requested());
         assert!(from_inner.is_cancel_requested());
         assert!(restricted.is_cancel_requested());
+    }
+
+    #[test]
+    fn cancellation_producer_matrix_publishes_through_stable_envelope() {
+        let assert_published = |cx: &Cx<cap::All>, expected| {
+            assert_eq!(cx.is_cancel_requested(), expected);
+            assert_eq!(cx.inner.read().is_cancel_requested(), expected);
+        };
+
+        let cx = test_cx();
+        cx.set_cancel_requested(true);
+        assert_published(&cx, true);
+        cx.set_cancel_requested(false);
+        assert_published(&cx, false);
+
+        let cx = test_cx();
+        cx.set_cancel_internal(true);
+        assert_published(&cx, true);
+        cx.set_cancel_internal(false);
+        assert_published(&cx, false);
+
+        let cx = test_cx();
+        cx.cancel_with(CancelKind::User, Some("matrix"));
+        assert_published(&cx, true);
+
+        let cx = test_cx();
+        cx.cancel_fast(CancelKind::RaceLost);
+        assert_published(&cx, true);
+
+        let cx = test_cx();
+        cx.set_cancel_reason(CancelReason::shutdown());
+        assert_published(&cx, true);
+
+        let cx = Cx::for_testing_with_budget(Budget::new().with_deadline(Time::ZERO));
+        assert!(cx.checkpoint().is_err());
+        assert_published(&cx, true);
+
+        let cx = Cx::for_testing_with_budget(Budget::new().with_poll_quota(0));
+        assert!(cx.checkpoint().is_err());
+        assert_published(&cx, true);
+
+        let cx = Cx::for_testing_with_budget(Budget::new().with_cost_quota(0));
+        assert!(cx.checkpoint_with("matrix").is_err());
+        assert_published(&cx, true);
     }
 
     #[test]

@@ -1941,6 +1941,66 @@ fn cx_trace_emits_user_trace_event() {
 }
 
 #[test]
+fn runtime_task_mut_rejects_live_cx_rebinding() {
+    let mut state = RuntimeState::new();
+    let root = state.create_root_region(Budget::INFINITE);
+    let (task_id, _handle) = state
+        .create_task(root, Budget::INFINITE, async {})
+        .expect("create task");
+    let cx = state
+        .task(task_id)
+        .and_then(|record| record.cx.clone())
+        .expect("runtime task must retain its live Cx");
+    let original_inner = Arc::clone(&cx.inner);
+
+    let replacement = Arc::new(parking_lot::RwLock::new(CxInner::new(
+        root,
+        task_id,
+        Budget::INFINITE,
+    )));
+    let replace_inner = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        state
+            .task_mut(task_id)
+            .expect("task record")
+            .set_cx_inner(Arc::clone(&replacement));
+    }));
+    assert!(
+        replace_inner.is_err(),
+        "a RuntimeState task_mut caller must not replace a live CxInner"
+    );
+
+    let replace_cx = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        state
+            .task_mut(task_id)
+            .expect("task record")
+            .set_cx(crate::cx::Cx::new(root, task_id, Budget::INFINITE));
+    }));
+    assert!(
+        replace_cx.is_err(),
+        "a RuntimeState task_mut caller must not install a Cx with another CxInner"
+    );
+
+    let record = state.task(task_id).expect("task survives rejected rebinding");
+    let linked_inner = record.cx_inner.as_ref().expect("linked CxInner");
+    assert!(
+        Arc::ptr_eq(linked_inner, &original_inner),
+        "rejected rebindings must leave the original CxInner installed"
+    );
+    let linked_cx = record.cx.as_ref().expect("linked Cx");
+    assert!(
+        Arc::ptr_eq(&linked_cx.inner, &original_inner),
+        "the stored Cx must retain the original CxInner identity"
+    );
+
+    cx.set_cancel_requested(true);
+    assert!(cx.is_cancel_requested());
+    assert!(
+        linked_cx.is_cancel_requested(),
+        "the runtime-owned Cx observes publication through the retained envelope"
+    );
+}
+
+#[test]
 fn cx_log_attaches_collector_and_timestamp() {
     init_test("cx_log_attaches_collector_and_timestamp");
     let mut state = RuntimeState::new();

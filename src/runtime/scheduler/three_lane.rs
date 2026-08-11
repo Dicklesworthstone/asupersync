@@ -145,6 +145,7 @@ use crate::runtime::{RuntimeState, TaskTable};
 use crate::sync::ContendedMutex;
 use crate::time::TimerDriverHandle;
 use crate::tracing_compat::{error, trace};
+use crate::types::task_context::CxCancellationState;
 use crate::types::{CxInner, TaskId, Time};
 use crate::util::{CachePadded, DetHashMap, DetHasher, DetRng};
 use parking_lot::Mutex;
@@ -7264,7 +7265,7 @@ impl ThreeLaneWorker {
             w
         } else {
             let inner = cx_inner.as_ref().expect("cx_inner missing");
-            let fast_cancel = Arc::clone(&inner.read().fast_cancel);
+            let cancellation = inner.read().cancellation_state();
             let weak_inner = Arc::downgrade(inner);
             if is_local {
                 Waker::from(Arc::new(ThreeLaneLocalWaker {
@@ -7274,7 +7275,7 @@ impl ThreeLaneWorker {
                     local: Arc::clone(&self.local),
                     local_ready: Arc::clone(&self.local_ready),
                     parker: self.parker.clone(),
-                    fast_cancel,
+                    cancellation,
                     cx_inner: weak_inner,
                     scheduler_evidence: self.scheduler_evidence.clone(),
                 }))
@@ -7285,7 +7286,7 @@ impl ThreeLaneWorker {
                     global: Arc::clone(&self.global),
                     coordinator: Arc::clone(&self.coordinator),
                     priority,
-                    fast_cancel,
+                    cancellation,
                     cx_inner: weak_inner,
                     scheduler_evidence: self.scheduler_evidence.clone(),
                 }))
@@ -7940,7 +7941,7 @@ struct ThreeLaneWaker {
     /// Cached priority to avoid `Weak::upgrade` + `RwLock::read` on every wake.
     /// Safe because `budget.priority` is immutable after task creation.
     priority: u8,
-    fast_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    cancellation: Arc<CxCancellationState>,
     cx_inner: Weak<RwLock<CxInner>>,
     scheduler_evidence: Option<Arc<Mutex<SchedulerEvidenceCollector>>>,
 }
@@ -7952,9 +7953,10 @@ impl ThreeLaneWaker {
             // Check for cancellation to route to correct lane (cancel > ready).
             // This ensures "Losers are drained" with high priority even during I/O wakeups.
             let mut priority = self.priority;
-            // Pair with the Release store in `CxInner::fast_cancel` so a wake
-            // that observes cancellation also observes the published reason.
-            let is_cancelling = self.fast_cancel.load(Ordering::Acquire);
+            // The stable envelope pairs this query with every cancellation
+            // publisher's Release store, so an observed request also carries
+            // its published reason.
+            let is_cancelling = self.cancellation.is_requested();
 
             if is_cancelling {
                 if let Some(inner) = self.cx_inner.upgrade() {
@@ -8002,7 +8004,7 @@ struct ThreeLaneLocalWaker {
     local: Arc<Mutex<PriorityScheduler>>,
     local_ready: Arc<LocalReadyQueue>,
     parker: Parker,
-    fast_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    cancellation: Arc<CxCancellationState>,
     cx_inner: Weak<RwLock<CxInner>>,
     scheduler_evidence: Option<Arc<Mutex<SchedulerEvidenceCollector>>>,
 }
@@ -8011,9 +8013,9 @@ impl ThreeLaneLocalWaker {
     #[inline]
     fn schedule(&self) {
         if self.wake_state.notify() {
-            // Pair with the Release store in `CxInner::fast_cancel` so the
-            // local wake path sees cancellation publication before routing.
-            let is_cancelling = self.fast_cancel.load(Ordering::Acquire);
+            // The stable envelope pairs this query with every cancellation
+            // publisher's Release store before local wake routing.
+            let is_cancelling = self.cancellation.is_requested();
 
             if is_cancelling {
                 let mut priority = self.priority;

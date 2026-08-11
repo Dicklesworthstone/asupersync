@@ -28,7 +28,7 @@
 //!
 //! - cancellation requested on the task (or its region) is observed by
 //!   every child at its next [`CpuCx::checkpoint`] — the same
-//!   `fast_cancel` fast path every checkpoint uses;
+//!   stable cancellation-envelope fast path every checkpoint uses;
 //! - budget exhaustion (deadline, poll quota, cost) surfaces through
 //!   the same checkpoint;
 //! - the region cannot close under the workers because the calling

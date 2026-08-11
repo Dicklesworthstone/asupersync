@@ -375,13 +375,23 @@ pub struct TaskRecord {
     ///
     /// This is shared with the `Cx` held by the user code.
     /// It is `None` only during initial construction or testing if not provided.
+    /// Runtime code may link it exactly once to a live `Cx`; it must never
+    /// replace that lock with another context's state.
+    ///
+    /// ```compile_fail
+    /// use asupersync::record::TaskRecord;
+    ///
+    /// fn rebind_context(record: &mut TaskRecord) {
+    ///     record.cx_inner = None;
+    /// }
+    /// ```
     #[cfg_attr(feature = "test-internals", serde(skip))]
-    pub cx_inner: Option<Arc<RwLock<CxInner>>>,
+    pub(crate) cx_inner: Option<Arc<RwLock<CxInner>>>,
     /// Full capability context for this task.
     ///
     /// This allows the runtime to set a current task context while polling.
     #[cfg_attr(feature = "test-internals", serde(skip))]
-    pub cx: Option<Cx>,
+    pub(crate) cx: Option<Cx>,
     /// Logical time when the task was created.
     pub created_at: Time,
     /// The task's current deadline (cached from cx_inner).
@@ -501,13 +511,25 @@ impl TaskRecord {
 
     /// Sets the shared CxInner.
     #[inline]
-    pub fn set_cx_inner(&mut self, inner: Arc<RwLock<CxInner>>) {
+    pub(crate) fn set_cx_inner(&mut self, inner: Arc<RwLock<CxInner>>) {
+        if let Some(cx) = &self.cx {
+            assert!(
+                Arc::ptr_eq(&cx.inner, &inner),
+                "TaskRecord cannot replace the CxInner linked to a live Cx"
+            );
+        }
         self.deadline = inner.read().budget.deadline;
         self.cx_inner = Some(inner);
     }
 
     /// Sets the full Cx for this task.
-    pub fn set_cx(&mut self, cx: Cx) {
+    pub(crate) fn set_cx(&mut self, cx: Cx) {
+        if let Some(inner) = &self.cx_inner {
+            assert!(
+                Arc::ptr_eq(&cx.inner, inner),
+                "TaskRecord Cx must use its linked CxInner"
+            );
+        }
         self.cx = Some(cx);
     }
 
@@ -606,13 +628,10 @@ impl TaskRecord {
                     cleanup_budget = cleanup_budget.combine_untraced(cx_reason.cleanup_budget());
                 }
             }
-            guard.cancel_requested = true;
+            guard.set_cancel_requested(true);
             if newly_requested {
                 guard.cancel_wakers_pending = true;
             }
-            guard
-                .fast_cancel
-                .store(true, std::sync::atomic::Ordering::Release);
             // Budget update is deferred to acknowledge_cancel to prevent
             // pre-empting the cancellation check with a budget exhaustion error.
         }
