@@ -167,8 +167,7 @@ fn repro_race_leak() {
         // We need to peek into the stored task or the runtime state.
 
         let task_record = state.task(loser_task_id).expect("task record");
-        let inner = task_record.cx_inner.as_ref().expect("cx inner missing");
-        let is_cancelled = inner.read().cancel_requested;
+        let is_cancelled = task_record.is_cancel_requested().expect("cx inner missing");
 
         tracing::debug!(is_cancelled, "loser cancelled");
 

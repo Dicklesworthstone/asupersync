@@ -50,15 +50,9 @@ fn test_race_empty_wakes_on_cancel() {
 
     {
         let task = state
-            .task(handle.task_id())
+            .task_mut(handle.task_id())
             .expect("spawned task should have a record");
-        let inner = task
-            .cx_inner
-            .as_ref()
-            .expect("spawned task should have a cancellation context");
-        inner.write().cancel_waker = Some(Arc::new(
-            asupersync::types::task_context::CancelWaker::new(waker.clone()),
-        ));
+        assert!(task.install_cancel_waker(waker.clone()));
     }
 
     {

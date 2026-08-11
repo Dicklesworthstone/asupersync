@@ -1149,11 +1149,7 @@ fn run_plan(runtime: &mut LabRuntime, plan: &PlanDag) -> NodeValue {
         let mut sched = runtime.scheduler.lock();
         for (_, record) in runtime.state.tasks_iter() {
             if record.is_runnable() {
-                let prio = record
-                    .cx_inner
-                    .as_ref()
-                    .map_or(0, |inner| inner.read().budget.priority);
-                sched.schedule(record.id, prio);
+                sched.schedule(record.id, record.priority());
             }
         }
         drop(sched);
@@ -1354,8 +1350,7 @@ where
         .tasks
         .iter()
         .find(|(_, record)| record.id == task_id)
-        .and_then(|(_, record)| record.cx_inner.as_ref())
-        .map_or(0, |inner| inner.read().budget.priority);
+        .map_or(0, |(_, record)| record.priority());
     runtime.scheduler.lock().schedule(task_id, priority);
     SharedHandle::new(handle)
 }

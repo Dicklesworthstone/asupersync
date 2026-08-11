@@ -8,7 +8,7 @@ use crate::tracing_compat::trace;
 #[cfg(feature = "tracing-integration")]
 use crate::types::task_context::PendingTaskCancelTrace;
 use crate::types::task_context::{
-    CancelTaskTraceKind, CancelWakeEffects, CancellationEffects, RunnablePublication,
+    CancelTaskTraceKind, CancelWakeEffects, CancelWaker, CancellationEffects, RunnablePublication,
 };
 use crate::types::{
     Budget, CancelPhase, CancelReason, CancelWitness, CxInner, Outcome, RegionId, TaskId, Time,
@@ -507,6 +507,46 @@ impl TaskRecord {
     #[must_use]
     pub const fn created_at(&self) -> Time {
         self.created_at
+    }
+
+    /// Returns the current scheduling priority of this task's linked context.
+    #[inline]
+    #[must_use]
+    pub fn priority(&self) -> u8 {
+        self.cx_inner
+            .as_ref()
+            .map_or(0, |inner| inner.read().budget.priority)
+    }
+
+    /// Returns whether this task's linked context has a published cancellation request.
+    ///
+    /// A record without a linked context has no cancellation state to observe.
+    #[inline]
+    #[must_use]
+    pub fn is_cancel_requested(&self) -> Option<bool> {
+        self.cx_inner
+            .as_ref()
+            .map(|inner| inner.read().is_cancel_requested())
+    }
+
+    /// Installs the primary cancellation Waker without exposing the linked context.
+    ///
+    /// Returns `false` when no context is linked or its Waker registry is closed.
+    /// The retired Waker is dropped only after releasing the context lock.
+    pub fn install_cancel_waker(&mut self, waker: Waker) -> bool {
+        let Some(inner) = &self.cx_inner else {
+            return false;
+        };
+        let incoming = Arc::new(CancelWaker::new(waker));
+        let retired = {
+            let mut inner = inner.write();
+            if inner.cancel_waker_registry_closed {
+                return false;
+            }
+            std::mem::replace(&mut inner.cancel_waker, Some(incoming))
+        };
+        drop(retired);
+        true
     }
 
     /// Sets the shared CxInner.

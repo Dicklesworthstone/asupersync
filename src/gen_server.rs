@@ -3158,7 +3158,7 @@ mod tests {
             .spawn_gen_server(&mut state, &cx, Counter { count: 0 }, 8)
             .expect("spawn gen_server");
         let server_ref = handle.server_ref();
-        let server_cx = Cx::from_inner(
+        let server_cx: Cx = Cx::from_inner(
             handle
                 .inner
                 .upgrade()
@@ -3539,7 +3539,7 @@ mod tests {
             ActorState::Running,
             "server should be running before join drop requests abort"
         );
-        let server_cx = Cx::from_inner(
+        let server_cx: Cx = Cx::from_inner(
             handle
                 .inner
                 .upgrade()
