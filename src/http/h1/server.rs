@@ -1343,13 +1343,13 @@ where
             let input = std::mem::take(read_buffer);
             if writer.consumer_dropped() {
                 let progress = writer.discard_bytes(input.as_ref())?;
-                validate_unread_drain(progress, config)?;
+                validate_unread_drain_limits(progress, config)?;
             } else if let Err(error) = writer.push_bytes(cx, input.as_ref()).await {
                 if error != IncomingBodyError::ConsumerDropped {
                     return Err(error);
                 }
                 let progress = writer.discard_bytes(&[])?;
-                validate_unread_drain(progress, config)?;
+                validate_unread_drain_limits(progress, config)?;
             }
             continue;
         }
@@ -1429,6 +1429,17 @@ fn validate_unread_drain(
     progress: IncomingBodyDrainProgress,
     config: &Http1StreamingConfig,
 ) -> Result<(), IncomingBodyError> {
+    validate_unread_drain_limits(progress, config)?;
+    if !progress.synchronized_eof {
+        return Err(IncomingBodyError::DrainTimeout);
+    }
+    Ok(())
+}
+
+fn validate_unread_drain_limits(
+    progress: IncomingBodyDrainProgress,
+    config: &Http1StreamingConfig,
+) -> Result<(), IncomingBodyError> {
     if progress.frames > config.unread_body_drain_frames
         || progress.bytes > config.unread_body_drain_bytes
     {
@@ -1438,9 +1449,6 @@ fn validate_unread_drain(
             frame_limit: config.unread_body_drain_frames,
             byte_limit: config.unread_body_drain_bytes,
         });
-    }
-    if !progress.synchronized_eof {
-        return Err(IncomingBodyError::DrainTimeout);
     }
     Ok(())
 }
@@ -1891,11 +1899,21 @@ mod tests {
     struct TestIo {
         read_data: Vec<u8>,
         written: Arc<Mutex<Vec<u8>>>,
+        read_limit: usize,
     }
 
     impl TestIo {
         fn new(read_data: Vec<u8>, written: Arc<Mutex<Vec<u8>>>) -> Self {
-            Self { read_data, written }
+            Self {
+                read_data,
+                written,
+                read_limit: usize::MAX,
+            }
+        }
+
+        fn with_read_limit(mut self, read_limit: usize) -> Self {
+            self.read_limit = read_limit.max(1);
+            self
         }
     }
 
@@ -1908,7 +1926,10 @@ mod tests {
             if self.read_data.is_empty() {
                 return Poll::Ready(Ok(()));
             }
-            let n = std::cmp::min(buf.remaining(), self.read_data.len());
+            let n = buf
+                .remaining()
+                .min(self.read_data.len())
+                .min(self.read_limit);
             buf.put_slice(&self.read_data[..n]);
             self.read_data.drain(..n);
             Poll::Ready(Ok(()))
@@ -2648,6 +2669,80 @@ mod tests {
                 server.serve(&cx, io).await
             })
             .expect("serve pipelined streaming requests");
+
+        assert_eq!(state.requests_served, 2);
+        assert_eq!(&*seen.lock().unwrap(), &["/first", "/second"]);
+        let written = String::from_utf8_lossy(&written.lock().unwrap()).into_owned();
+        assert_eq!(written.matches("HTTP/1.1 200 OK").count(), 2);
+    }
+
+    #[test]
+    fn streaming_server_drains_segmented_unread_body_before_pipeline_reuse() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"POST /first HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhelloGET /second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        )
+        .with_read_limit(1);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_by_handler = Arc::clone(&seen);
+        let server = Http1StreamingServer::with_config(
+            move |_cx, request| {
+                seen_by_handler
+                    .lock()
+                    .unwrap()
+                    .push(request.head.uri.clone());
+                async move { Response::new(200, "OK", request.head.uri.into_bytes()) }
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let state = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve(&cx, io).await
+            })
+            .expect("serve segmented pipelined streaming requests");
+
+        assert_eq!(state.requests_served, 2);
+        assert_eq!(&*seen.lock().unwrap(), &["/first", "/second"]);
+        let written = String::from_utf8_lossy(&written.lock().unwrap()).into_owned();
+        assert_eq!(written.matches("HTTP/1.1 200 OK").count(), 2);
+    }
+
+    #[test]
+    fn streaming_server_drains_segmented_chunked_unread_body_before_pipeline_reuse() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"POST /first HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nX-Checksum: yes\r\n\r\nGET /second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        )
+        .with_read_limit(1);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_by_handler = Arc::clone(&seen);
+        let server = Http1StreamingServer::with_config(
+            move |_cx, request| {
+                seen_by_handler
+                    .lock()
+                    .unwrap()
+                    .push(request.head.uri.clone());
+                async move { Response::new(200, "OK", request.head.uri.into_bytes()) }
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let state = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve(&cx, io).await
+            })
+            .expect("serve segmented chunked pipelined streaming requests");
 
         assert_eq!(state.requests_served, 2);
         assert_eq!(&*seen.lock().unwrap(), &["/first", "/second"]);

@@ -1356,6 +1356,8 @@ fn validate_body_2_progress(inventory: &Value) -> Result<(), String> {
             "streaming_server_publishes_head_before_reading_body",
             "incoming_body_driver_observes_supplied_request_context_cancellation",
             "streaming_server_drains_unread_body_before_pipeline_reuse",
+            "streaming_server_drains_segmented_unread_body_before_pipeline_reuse",
+            "streaming_server_drains_segmented_chunked_unread_body_before_pipeline_reuse",
             "streaming_server_closes_when_unread_body_exceeds_drain_limit",
             "streaming_server_preserves_chunked_frames_and_trailers",
             "streaming_server_refuses_actual_chunked_bytes_over_limit",
