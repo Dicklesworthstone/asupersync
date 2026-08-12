@@ -18,7 +18,7 @@ use std::path::PathBuf;
 const ARTIFACT_PATH: &str = "artifacts/kafka_broker_fixture_provenance_matrix_v1.json";
 const DOC_PATH: &str = "docs/kafka_broker_fixture_provenance_matrix.md";
 const K0_3_PATH: &str = "artifacts/kafka_downstream_user_journey_inventory_v1.json";
-const ARTIFACT_SHA256: &str = "3d42235acbc677b78802be43639b27d2a8fd5b817f73be0dc8ea59596707d7fe";
+const ARTIFACT_SHA256: &str = "153f1ae6b0d1ebbe3b5ee594472bdf08dad8da71063ba1fa08696768505fc325";
 const DOC_SHA256: &str = "021cdcdc7a8e163e60934cd1e3af57b4026a51071a11a13db26b36917e7d9610";
 const ARTIFACT_ID: &str = "kafka-broker-fixture-provenance-matrix-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
@@ -184,7 +184,7 @@ const DIRECT_FIXTURE_PINS: &[(&str, &str, u64, u64, &str)] = &[
     ),
     (
         "tests/kafka_incumbent_semantics_matrix_contract.rs",
-        "4d69c59b5e1e04e63f63aa0008d73a6c42341305a45a1ce6b34ce3124b78dafe",
+        "17fbb659734388f9b4355cb2afb1043e945dc548e6c33d67020ad4a56f8a3a17",
         69_501,
         1_696,
         "UTF8_LINES",
