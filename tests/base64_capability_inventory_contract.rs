@@ -37,7 +37,7 @@ const SOURCE_PIN_PATHS_SHA256: &str =
 const RECORDED_OPERATION_SEMANTICS_SHA256: &str =
     "50e92552029c51f5d9c7d7d5fd7853dbfb050fb30d434d78a3091b939ca8feb0";
 const CLAIMS_PROJECTION_SHA256: &str =
-    "79acb7a3254dd516aa1ff616af288f7471c98dfb863285b3f92c7cfef079e59a";
+    "1aeab183f0cc3da530d6bf9125d92b3887aead5034f1cf3fa67c2ebbdac3ab91";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -353,9 +353,9 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         || resolution["excluded_fuzz_workspace"]["local_snapshot"]["resolved_version"].as_str()
             != Some("0.22.1")
         || resolution["excluded_wasm_scaffold"]["manifest_path_requirement"].as_str()
-            != Some("asupersync ^0.4.3")
+            != Some(concat!("asupersync ^", env!("CARGO_PKG_VERSION")))
         || resolution["excluded_wasm_scaffold"]["current_path_package_version"].as_str()
-            != Some("0.4.3")
+            != Some(env!("CARGO_PKG_VERSION"))
         || resolution["excluded_wasm_scaffold"]["repository_lock_state"].as_str()
             != Some("ABSENT_IGNORED")
         || resolution["excluded_wasm_scaffold"]["local_snapshot"]["state"].as_str()
@@ -1928,9 +1928,11 @@ fn dependency_governance_sources_remain_blocking_and_version_skew_is_explicit() 
     assert!(read_repo_file(RAPTORQ_MANIFEST_PATH).contains("base64 = \"0.22\""));
     let excluded_wasm_manifest = read_repo_file("asupersync-wasm/Cargo.toml");
     assert!(
-        excluded_wasm_manifest.contains(
-            "asupersync = { version = \"0.4.3\", path = \"..\", default-features = false }"
-        )
+        excluded_wasm_manifest.contains(concat!(
+            "asupersync = { version = \"",
+            env!("CARGO_PKG_VERSION"),
+            "\", path = \"..\", default-features = false }"
+        ))
     );
     assert!(
         read_repo_file("asupersync-wasm/src/lib.rs")
