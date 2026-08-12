@@ -364,6 +364,8 @@ franken_kernel/false/
 **/.beads/recovery/
 **/.beads/repair-backups/
 **/.beads/.write.lock
+**/.beads/.sync.lock
+**/.beads/.br-*-write-*.lock
 **/.beads/daemon-error
 
 # Remote compilation helper workspaces
