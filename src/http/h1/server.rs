@@ -1170,6 +1170,7 @@ where
             let region =
                 ServerRequestRegion::mint_from_connection("h1", request_budget, request_now, cx);
             let request_cx = region.cx().clone();
+            let body_cx = request_cx.clone();
             let (writer, body) = IncomingRequestBody::channel_with_limits(
                 &request_cx,
                 body_kind,
@@ -1193,7 +1194,7 @@ where
                 ),
             );
             let body_driver = drive_incoming_body(
-                cx,
+                &body_cx,
                 &mut io,
                 &mut read_buffer,
                 writer.max_body_size(u64::try_from(self.config.max_body_size).unwrap_or(u64::MAX)),
