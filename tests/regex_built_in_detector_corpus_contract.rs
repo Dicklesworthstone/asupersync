@@ -40,6 +40,8 @@ const BASELINE_PREVIOUS_SHA256: &str =
     "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8";
 const BASELINE_CURRENT_SHA256: &str =
     "7d73dc99cf9be276ce6adcd66b631a1e60bfe0e44a419d574e5a2414c967befc";
+const LIVE_BASELINE_SHA256: &str =
+    "d75f0b6cb7c976b788f2e2b5258d240ae5874762c052a8af3e211331dfa648d5";
 const REGEX_CAPABILITY_ROW_SHA256: &str =
     "5053806ac9a546ea240a6efc0190969da549f31ed03cf17e4b7b40f45adedc5b";
 const LAB_CAPABILITY_ROW_SHA256: &str =
@@ -47,7 +49,7 @@ const LAB_CAPABILITY_ROW_SHA256: &str =
 const SOURCE_PIN_PATHS_SHA256: &str =
     "b5ba6ff6a6eb152e0c3bb263205e8a7d9f9a58fbbb27ec13fd276eb909d9552a";
 const CLAIMS_PROJECTION_SHA256: &str =
-    "5332c1f6c5a2e0d88901fce07f9c9a46dafa3e987dacbea0e17a6f53bae4ba1a";
+    "e88604734eb2220d6ae6f2de49d8d9de54ddf14480850cccccaef68ae484082c";
 const DOC_BEGIN: &str = "<!-- BEGIN REGEX BUILT-IN DETECTOR CORPUS -->";
 const DOC_END: &str = "<!-- END REGEX BUILT-IN DETECTOR CORPUS -->";
 
@@ -348,10 +350,13 @@ fn validate_post_capture_provenance_refresh(corpus: &Value) -> Result<(), String
         .iter()
         .find(|pin| pin.get("path").and_then(Value::as_str) == Some(BASELINE_PATH))
         .ok_or_else(|| "current baseline source pin is missing".to_owned())?;
-    if text(baseline_pin, "sha256") != text(current, "sha256")
+    if text(baseline_pin, "sha256") != LIVE_BASELINE_SHA256
         || number(baseline_pin, "line_count") != number(current, "line_count")
     {
-        return Err("refresh receipt and current baseline source pin disagree".to_owned());
+        return Err("live baseline source pin drifted".to_owned());
+    }
+    if text(baseline_pin, "sha256") == text(current, "sha256") {
+        return Err("dated refresh receipt must remain distinct from the live source pin".to_owned());
     }
 
     let classification = &refresh["change_classification"];
