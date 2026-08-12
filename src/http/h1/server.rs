@@ -2589,6 +2589,37 @@ mod tests {
     }
 
     #[test]
+    fn incoming_body_driver_observes_supplied_request_context_cancellation() {
+        let request_cx = Cx::for_testing();
+        request_cx.cancel_fast(crate::types::CancelKind::PollQuota);
+        let (writer, _body) =
+            IncomingRequestBody::channel_with_limits(&request_cx, BodyKind::ContentLength(1), 1, 1);
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let mut io = TestIo::new(Vec::new(), written);
+        let mut read_buffer = BytesMut::from(&b"x"[..]);
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let error = runtime
+            .block_on(drive_incoming_body(
+                &request_cx,
+                &mut io,
+                &mut read_buffer,
+                writer,
+                &Http1StreamingConfig::default(),
+            ))
+            .expect_err("request cancellation must stop body publication");
+
+        assert_eq!(
+            error,
+            IncomingBodyError::Cancelled {
+                kind: crate::types::CancelKind::PollQuota,
+            }
+        );
+    }
+
+    #[test]
     fn streaming_server_drains_unread_body_before_pipeline_reuse() {
         let written = Arc::new(Mutex::new(Vec::new()));
         let io = TestIo::new(
