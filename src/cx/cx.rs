@@ -87,9 +87,7 @@ use crate::time::{TimerDriverHandle, timeout};
 use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
 use crate::trace::{TraceBufferHandle, TraceEvent};
 use crate::tracing_compat::{debug, error, info, trace, warn};
-use crate::types::task_context::{
-    CancelWaker, CancelWakerRegistration, CxCancellationState,
-};
+use crate::types::task_context::{CancelWaker, CancelWakerRegistration, CxCancellationState};
 use crate::types::{
     Budget, CancelKind, CancelReason, CapabilityBudget, CapabilityBudgetRefusal,
     CapabilityBudgetRequirements, CxInner, RegionId, SystemPressure, TaskId, Time,
@@ -239,9 +237,11 @@ pub struct Cx<Caps = cap::All> {
     /// Shared cancellation publication envelope from [`CxInner`].
     ///
     /// This `Arc` is cloned from the inner's private, stable envelope at
-    /// construction. Public task mutation cannot replace that envelope, and
-    /// every publisher uses its Release-ordered method without acquiring
-    /// `inner`'s `RwLock` for this query.
+    /// construction. Public compatibility fields cannot replace the runtime's
+    /// envelope, and scheduler-owned publishers use its Release-ordered method.
+    /// Public queries additionally inspect the 0.4.3 lock-backed flag so
+    /// direct legacy field mutation remains observable with its original
+    /// semantics.
     cancellation: Arc<CxCancellationState>,
     observability: Arc<parking_lot::RwLock<ObservabilityState>>,
     handles: Arc<CxHandles>,
@@ -2139,7 +2139,7 @@ impl<Caps> Cx<Caps> {
     #[inline]
     #[must_use]
     pub fn is_cancel_requested(&self) -> bool {
-        self.cancellation.is_requested()
+        self.inner.read().cancel_requested
     }
 
     /// Checks for cancellation and returns an error if cancelled.
@@ -3221,6 +3221,7 @@ impl<Caps> Cx<Caps> {
     /// This compatibility slot never increments a refcount on repoll. Callers
     /// that own a future across polls should use [`Self::refresh_cancel_waker`]
     /// and retain its token instead.
+    #[cfg(test)]
     pub(crate) fn register_cancel_waker(&self, waker: &Waker) {
         {
             let inner = self.inner.read();
@@ -5455,7 +5456,7 @@ mod tests {
 
         // All non-Cx producers use this paired lock-state/Release-publication
         // method, so exercise its true and clear transitions against the
-        // lock-free public query too.
+        // compatibility-aware public query too.
         let cx = test_cx();
         cx.inner.write().set_cancel_requested(true);
         assert_published(&cx, true);
@@ -5491,6 +5492,38 @@ mod tests {
         let cx = Cx::for_testing_with_budget(Budget::new().with_cost_quota(0));
         assert!(cx.checkpoint_with("matrix").is_err());
         assert_published(&cx, true);
+    }
+
+    #[test]
+    fn v0_4_3_compatibility_public_cancellation_fields_remain_observable() {
+        let cx = test_cx();
+        {
+            let mut inner = cx.inner.write();
+            inner.cancel_requested = true;
+        }
+        assert!(
+            cx.is_cancel_requested(),
+            "direct 0.4.3 cancel_requested mutation must remain observable"
+        );
+
+        cx.set_cancel_requested(false);
+        let original_fast_cancel = Arc::clone(&cx.inner.read().fast_cancel);
+        cx.set_cancel_requested(true);
+        assert!(original_fast_cancel.load(std::sync::atomic::Ordering::Acquire));
+        cx.set_cancel_requested(false);
+        let replacement = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        {
+            let mut inner = cx.inner.write();
+            inner.fast_cancel = Arc::clone(&replacement);
+        }
+        assert!(
+            !cx.is_cancel_requested(),
+            "the 0.4.3 query contract reads cancel_requested, not fast_cancel"
+        );
+
+        cx.set_cancel_requested(false);
+        assert!(!replacement.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!cx.is_cancel_requested());
     }
 
     #[test]

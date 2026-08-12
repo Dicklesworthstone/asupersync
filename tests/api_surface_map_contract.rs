@@ -2,6 +2,21 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use asupersync::Cx;
+use asupersync::bytes::BytesCursor;
+use asupersync::http::body::Body;
+use asupersync::http::h1::server::HostPolicy;
+use asupersync::http::h1::{
+    BodyKind, Http1Config, Http1StreamingConfig, HttpError, IncomingBody, IncomingBodyWriter,
+    IncomingRequestBody, IncomingRequestBodyWriter, RequestHead, StreamingRequest,
+    StreamingServerRequest,
+};
+use asupersync::record::TaskRecord;
+use asupersync::types::CxInner;
+use parking_lot::RwLock;
 
 const ARTIFACT: &str = "artifacts/api_surface_map_v1.json";
 const SOURCE: &str = "src/lib.rs";
@@ -220,4 +235,61 @@ fn api_surface_map_is_discoverable_from_docs() {
         agents.contains(ARTIFACT),
         "AGENTS.md must link the API surface map artifact"
     );
+}
+
+#[test]
+fn v0_4_3_source_compatibility_shapes_remain_available() {
+    let config = Http1Config {
+        max_headers_size: 64 * 1024,
+        max_body_size: 16 * 1024 * 1024,
+        keep_alive: true,
+        max_requests_per_connection: Some(1000),
+        idle_timeout: Some(Duration::from_secs(60)),
+        allowed_hosts: HostPolicy::RejectUnknown,
+        request_timeout: None,
+        request_timeout_header_cap: None,
+        request_drain_grace: Duration::from_millis(500),
+    };
+    assert!(config.keep_alive);
+
+    fn assert_legacy_body<B: Body<Data = BytesCursor, Error = HttpError>>() {}
+    assert_legacy_body::<IncomingBody>();
+
+    fn typecheck_legacy_http(cx: &Cx, head: RequestHead) -> (IncomingBodyWriter, StreamingRequest) {
+        let (writer, body) = IncomingBody::channel(cx, head.body_kind());
+        (writer, StreamingRequest { head, body })
+    }
+    let _ = typecheck_legacy_http as fn(&Cx, RequestHead) -> (IncomingBodyWriter, StreamingRequest);
+
+    fn typecheck_legacy_task_context(record: &mut TaskRecord, inner: Arc<RwLock<CxInner>>, cx: Cx) {
+        record.cx_inner = Some(Arc::clone(&inner));
+        record.cx = Some(cx.clone());
+        record.set_cx_inner(inner);
+        record.set_cx(cx);
+
+        let linked = record.cx_inner.as_ref().expect("legacy public CxInner");
+        let mut linked = linked.write();
+        linked.cancel_requested = true;
+        linked.fast_cancel = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    }
+    let _ = typecheck_legacy_task_context as fn(&mut TaskRecord, Arc<RwLock<CxInner>>, Cx);
+}
+
+#[test]
+fn hardened_http_streaming_api_is_additive() {
+    let config = Http1StreamingConfig::from(Http1Config::default())
+        .incoming_body_queue(4, 64 * 1024)
+        .unread_body_drain(4, 64 * 1024, Duration::from_millis(250));
+    assert_eq!(config.incoming_body_frame_capacity, 4);
+
+    fn typecheck_typed_http(
+        cx: &Cx,
+        head: RequestHead,
+    ) -> (IncomingRequestBodyWriter, StreamingServerRequest) {
+        let (writer, body) =
+            IncomingRequestBody::channel_with_limits(cx, BodyKind::ContentLength(0), 4, 64 * 1024);
+        (writer, StreamingServerRequest::new(head, body))
+    }
+    let _ = typecheck_typed_http
+        as fn(&Cx, RequestHead) -> (IncomingRequestBodyWriter, StreamingServerRequest);
 }

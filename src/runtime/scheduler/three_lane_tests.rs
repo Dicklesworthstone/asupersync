@@ -2508,7 +2508,7 @@ fn test_multiple_wakes_single_schedule() {
                 global: Arc::clone(&global),
                 coordinator: Arc::clone(&coordinator),
                 priority: 0,
-                cancellation: Arc::new(CxCancellationState::new()),
+                cancellation: Arc::new(CxCancellationState::new(false)),
                 cx_inner: Weak::new(),
                 scheduler_evidence: None,
             }))
@@ -5874,7 +5874,7 @@ fn fast_queue_waker_uses_local_ready_on_same_thread() {
         local: Arc::clone(&priority_sched),
         local_ready: Arc::clone(&local_ready),
         parker,
-        cancellation: Arc::new(CxCancellationState::new()),
+        cancellation: Arc::new(CxCancellationState::new(false)),
         cx_inner: Weak::new(),
         scheduler_evidence: None,
     }));
@@ -5916,7 +5916,7 @@ fn fast_queue_waker_falls_back_to_local_ready_cross_thread() {
         local: Arc::clone(&priority_sched),
         local_ready: Arc::clone(&local_ready),
         parker,
-        cancellation: Arc::new(CxCancellationState::new()),
+        cancellation: Arc::new(CxCancellationState::new(false)),
         cx_inner: Weak::new(),
         scheduler_evidence: None,
     }));

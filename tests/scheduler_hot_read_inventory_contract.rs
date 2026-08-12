@@ -185,14 +185,18 @@ fn ownership_read_writer_wake_and_lifetime_sets_are_explicit() {
             "HOTREAD-READ-PHASE-AGGREGATE",
             "HOTREAD-READ-RICH-TASK",
             "HOTREAD-READ-CX-QUERY",
-            "HOTREAD-READ-FAST-CANCEL",
+            "HOTREAD-READ-CANCELLATION-PUBLICATION",
             "HOTREAD-READ-REASON-WAKERS",
             "HOTREAD-READ-OBSERVABILITY",
             "HOTREAD-READ-LEGACY-WORKER",
         ])
     );
     assert_eq!(
-        row_id_set(&artifact, "fast_cancel_writer_sites", "writer_id"),
+        row_id_set(
+            &artifact,
+            "cancellation_publication_writer_sites",
+            "writer_id",
+        ),
         expected_set(&[
             "HOTREAD-CANCEL-WRITER-TASK-RECORD",
             "HOTREAD-CANCEL-WRITER-TASK-HANDLE",
@@ -230,7 +234,7 @@ fn ownership_read_writer_wake_and_lifetime_sets_are_explicit() {
         expected_set(&[
             "HOTREAD-ACCURACY-BENCH-SHAPE",
             "HOTREAD-ACCURACY-LYAPUNOV-O1",
-            "HOTREAD-ACCURACY-FAST-CANCEL-REASON",
+            "HOTREAD-ACCURACY-CANCELLATION-REASON",
             "HOTREAD-ACCURACY-SHARDED-POOL",
             "HOTREAD-ACCURACY-OBSERVABILITY-BACKING",
         ])
@@ -260,7 +264,7 @@ fn ownership_read_writer_wake_and_lifetime_sets_are_explicit() {
             text(surface, field);
         }
     }
-    for writer in array(&artifact, "fast_cancel_writer_sites") {
+    for writer in array(&artifact, "cancellation_publication_writer_sites") {
         text(writer, "owner");
         assert!(text(writer, "ordering").contains("write guard"));
     }
@@ -346,7 +350,7 @@ fn replacement_matrix_identity_and_migration_are_fail_closed() {
             "current_production",
             "locked_rich_task_state",
             "existing_task_phase_cell",
-            "existing_wake_fast_cancel",
+            "existing_wake_cancellation_state",
         ])
     );
     let operations = string_set(&comparator, "operation_ids");

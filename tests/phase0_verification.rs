@@ -1347,10 +1347,8 @@ where
         .expect("create task");
     let priority = runtime
         .state
-        .tasks
-        .iter()
-        .find(|(_, record)| record.id == task_id)
-        .map_or(0, |(_, record)| record.priority());
+        .task(task_id)
+        .map_or(0, asupersync::record::TaskRecord::priority);
     runtime.scheduler.lock().schedule(task_id, priority);
     SharedHandle::new(handle)
 }

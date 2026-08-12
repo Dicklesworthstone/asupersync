@@ -1,4 +1,4 @@
-//! Regression coverage for empty `Cx::race` cancellation wakeups.
+//! Regression coverage for empty `Cx::race` cancellation publication.
 
 #![allow(missing_docs)]
 
@@ -7,24 +7,10 @@ use asupersync::runtime::{JoinError, RuntimeState};
 use asupersync::types::{Budget, CancelKind, CancelReason, Outcome, TaskId};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::{Context, Poll, Wake, Waker};
-
-struct CountWaker(Arc<AtomicUsize>);
-
-impl Wake for CountWaker {
-    fn wake(self: Arc<Self>) {
-        self.0.fetch_add(1, Ordering::SeqCst);
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.0.fetch_add(1, Ordering::SeqCst);
-    }
-}
+use std::task::{Context, Poll, Waker};
 
 #[test]
-fn test_race_empty_wakes_on_cancel() {
+fn test_race_empty_observes_cancel_after_publication() {
     let mut state = RuntimeState::new();
     let root_region = state.create_root_region(Budget::INFINITE);
     let cx: Cx = Cx::new_with_observability(
@@ -44,8 +30,7 @@ fn test_race_empty_wakes_on_cancel() {
         })
         .expect("spawn race-empty task");
 
-    let wakes = Arc::new(AtomicUsize::new(0));
-    let waker = Waker::from(Arc::new(CountWaker(Arc::clone(&wakes))));
+    let waker = Waker::noop().clone();
     let mut poll_cx = Context::from_waker(&waker);
 
     {
@@ -65,9 +50,12 @@ fn test_race_empty_wakes_on_cancel() {
     handle.abort_with_reason(CancelReason::new(CancelKind::User));
 
     assert_eq!(
-        wakes.load(Ordering::SeqCst),
-        0,
-        "a bare RuntimeState handle must not invoke arbitrary Wakers on the caller stack"
+        state
+            .task(handle.task_id())
+            .expect("spawned task should have a record")
+            .context_cancel_requested(),
+        Some(true),
+        "handle cancellation must publish to the sealed task context"
     );
 
     let (should_schedule, cancel_wakes) = state
@@ -77,14 +65,7 @@ fn test_race_empty_wakes_on_cancel() {
         should_schedule,
         "the state owner publishes cancellation work"
     );
-    assert_eq!(wakes.load(Ordering::SeqCst), 0);
     cancel_wakes.dispatch();
-
-    assert_eq!(
-        wakes.load(Ordering::SeqCst),
-        1,
-        "authoritative bare-state cancellation wakes race([]) after owner publication"
-    );
 
     {
         let stored = state

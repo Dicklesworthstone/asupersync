@@ -124,8 +124,8 @@ fn read(rel: &str) -> String {
 }
 
 #[test]
-fn cx_inner_fast_cancel_field_is_arc_atomic_bool_for_cross_thread_sharing() {
-    // Pin (link 1): fast_cancel is Arc<AtomicBool>, shared
+fn cx_inner_cancellation_envelope_is_stable_arc_for_cross_thread_sharing() {
+    // Pin (link 1): cancellation is a private stable Arc envelope, shared
     // between worker-B (writer via request_cancel_with_budget)
     // and worker-A (reader via cx.checkpoint). The Arc is the
     // sharing mechanism; AtomicBool is the synchronization
@@ -133,62 +133,46 @@ fn cx_inner_fast_cancel_field_is_arc_atomic_bool_for_cross_thread_sharing() {
     // src/types/task_context.rs (re-exported via cx).
     let source = read("src/types/task_context.rs");
 
-    let suspect_non_shared = [
-        "pub fast_cancel: bool,",
-        "pub fast_cancel: AtomicBool,",
-        "pub fast_cancel: std::sync::atomic::AtomicBool,",
-        "pub fast_cancel: Cell<bool>,",
-    ];
-    for pat in &suspect_non_shared {
-        assert!(
-            !source.contains(pat),
-            "REGRESSION: CxInner.fast_cancel is no longer \
-             Arc<AtomicBool> (now `{pat}`). Without Arc \
-             sharing, cross-thread cancel propagation requires \
-             a per-thread poll — unbounded latency. Restore \
-             the Arc<AtomicBool> shared-state pattern.",
-        );
-    }
-
-    // Must contain the Arc<AtomicBool> form (the actual
-    // declaration uses fully-qualified std paths).
     assert!(
-        source.contains("pub fast_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,"),
-        "REGRESSION: CxInner.fast_cancel is no longer declared \
-         as `pub fast_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>`. \
-         Cross-thread propagation requires shared-state \
-         synchronization via Arc<AtomicBool>.",
+        source.contains("pub(crate) struct CxCancellationState {")
+            && source.contains("requested: std::sync::atomic::AtomicBool,")
+            && source.contains("cancellation: std::sync::Arc<CxCancellationState>,")
+            && source.contains("pub(crate) fn cancellation_state(&self)")
+            && source.contains("std::sync::Arc::clone(&self.cancellation)"),
+        "REGRESSION: CxInner cancellation is no longer a private stable Arc envelope. \
+         Cross-thread propagation requires shared-state synchronization.",
     );
 }
 
 #[test]
-fn request_cancel_with_budget_publishes_fast_cancel_with_release() {
+fn request_cancel_with_budget_publishes_stable_envelope_with_release() {
     // Pin (link 1): the writer side of the Release-Acquire
     // pair lives in task.rs request_cancel_with_budget. A
     // regression to Relaxed would break cross-thread
     // visibility — the worker-A reader could load stale
     // values indefinitely.
     let source = read("src/record/task.rs");
+    let task_context = read("src/types/task_context.rs");
 
     assert!(
-        source.contains(
-            "fast_cancel\n                .store(true, std::sync::atomic::Ordering::Release);"
-        ) || source.contains(".store(true, std::sync::atomic::Ordering::Release);"),
+        source.contains("guard.set_cancel_requested(true);")
+            && task_context.contains("self.publish_cancel_requested(value);")
+            && task_context.contains(".store(value, std::sync::atomic::Ordering::Release);"),
         "REGRESSION: task.rs request_cancel_with_budget no \
-         longer publishes fast_cancel with Release ordering. \
+         longer publishes stable cancellation with Release ordering. \
          Without it, a task on worker-A may never observe a \
          cancel set by worker-B.",
     );
 
     // Forbid Relaxed publication.
     let suspect_relaxed = [
-        "fast_cancel.store(true, std::sync::atomic::Ordering::Relaxed)",
-        "fast_cancel.store(true, Ordering::Relaxed)",
+        ".store(value, std::sync::atomic::Ordering::Relaxed)",
+        ".store(value, Ordering::Relaxed)",
     ];
     for pat in &suspect_relaxed {
         assert!(
-            !source.contains(pat),
-            "REGRESSION: task.rs publishes fast_cancel with \
+            !task_context.contains(pat),
+            "REGRESSION: task context publishes cancellation with \
              Relaxed ordering (`{pat}`). Cross-thread \
              visibility is not guaranteed under Relaxed — use \
              Release.",
@@ -197,16 +181,18 @@ fn request_cancel_with_budget_publishes_fast_cancel_with_release() {
 }
 
 #[test]
-fn cx_checkpoint_observes_fast_cancel_with_acquire_load() {
+fn cx_checkpoint_observes_stable_envelope_with_acquire_load() {
     // Pin (link 2): the reader side of the Release-Acquire
     // pair lives in cx.checkpoint. A regression to Relaxed
     // would let a task on worker-A miss a cancel set by
     // worker-B.
     let source = read("src/cx/cx.rs");
+    let task_context = read("src/types/task_context.rs");
 
     assert!(
-        source.contains("guard.fast_cancel.load(std::sync::atomic::Ordering::Acquire)"),
-        "REGRESSION: cx.checkpoint() no longer reads fast_cancel \
+        source.contains("let cancelled = guard.is_cancel_requested();")
+            && task_context.contains("self.requested.load(std::sync::atomic::Ordering::Acquire)"),
+        "REGRESSION: cx.checkpoint() no longer reads stable cancellation \
          with Acquire ordering. Without it, the Release-Acquire \
          pair is broken — cross-thread cancel propagation has \
          unbounded latency.",
@@ -533,7 +519,7 @@ fn cancel_lane_dispatched_first_in_default_suggestion() {
 #[test]
 fn three_lane_local_waker_routes_cancelled_local_task_to_cancel_lane() {
     // Pin (link 3-prime): ThreeLaneLocalWaker.schedule reads
-    // fast_cancel with Acquire and, if cancelling, promotes
+    // the stable cancellation envelope and, if cancelling, promotes
     // the local task to the cancel lane via
     // move_to_cancel_lane + parker.unpark. This is what
     // unifies the wake-from-park path with the cross-thread
@@ -550,9 +536,9 @@ fn three_lane_local_waker_routes_cancelled_local_task_to_cancel_lane() {
     let body = &source[start..next_impl];
 
     assert!(
-        body.contains("self.fast_cancel.load(Ordering::Acquire)"),
+        body.contains("let is_cancelling = self.cancellation.is_requested();"),
         "REGRESSION: ThreeLaneLocalWaker.schedule no longer \
-         reads fast_cancel with Acquire. A local task being \
+         reads stable cancellation state. A local task being \
          woken (e.g. from Sleep) would not re-route to the \
          cancel lane on a concurrently-arrived cancel — \
          breaking propagation for parked local tasks.",

@@ -171,14 +171,15 @@ fn yield_now_future_output_is_unit_not_result() {
 }
 
 #[test]
-fn yield_now_does_not_reference_fast_cancel_or_cx() {
+fn yield_now_does_not_reference_cancellation_state_or_cx() {
     // Pin (link 3): the yield_now module has ZERO references
-    // to fast_cancel, cancel_requested, or Cx. The primitive
+    // to cancellation state or Cx. The primitive
     // is structurally cancel-ignorant.
     let source = read("src/runtime/yield_now.rs");
 
     let suspect_cancel_refs = [
-        "fast_cancel",
+        "cancellation",
+        "is_cancel_requested",
         "cancel_requested",
         "Cx::current",
         "cx.checkpoint",
@@ -274,10 +275,11 @@ fn yield_now_poll_body_is_pure_two_poll_yield_no_cancel_check() {
 fn cx_checkpoint_is_the_documented_cancel_observation_site() {
     // Pin (link 3 cross-reference): Cx::checkpoint is the
     // documented cancel-observation primitive — its
-    // signature returns Result, its body checks fast_cancel.
+    // signature returns Result, its body queries stable cancellation state.
     // This is the API yield_now is INTENTIONALLY
     // complementing.
     let source = read("src/cx/cx.rs");
+    let task_context = read("src/types/task_context.rs");
 
     assert!(
         source.contains("pub fn checkpoint(&self) -> Result<(), crate::error::Error> {"),
@@ -289,9 +291,10 @@ fn cx_checkpoint_is_the_documented_cancel_observation_site() {
     );
 
     assert!(
-        source.contains("guard.fast_cancel.load(std::sync::atomic::Ordering::Acquire)"),
+        source.contains("let cancelled = guard.is_cancel_requested();")
+            && task_context.contains("self.requested.load(std::sync::atomic::Ordering::Acquire)"),
         "REGRESSION: Cx::checkpoint no longer reads \
-         fast_cancel. The cancel-observation site is \
+         stable cancellation state. The cancel-observation site is \
          broken — yield_now's pure-yield design relies on \
          checkpoint being the cancel-aware primitive.",
     );

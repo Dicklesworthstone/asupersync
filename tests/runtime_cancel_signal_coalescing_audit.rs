@@ -175,29 +175,29 @@ fn request_cancel_with_budget_returns_ready_false_effect_when_task_already_termi
 }
 
 #[test]
-fn fast_cancel_store_is_idempotent_atomic_no_compare_swap() {
-    // Pin (link 2): fast_cancel uses .store(true, Release),
+fn stable_cancellation_store_is_idempotent_atomic_no_compare_swap() {
+    // Pin (link 2): the stable envelope uses .store(value, Release),
     // NOT compare_exchange. Idempotent — setting an
     // already-true value is naturally a no-op for readers.
     let source = read("src/record/task.rs");
+    let task_context = read("src/types/task_context.rs");
 
     assert!(
-        source.contains(".store(true, std::sync::atomic::Ordering::Release);"),
-        "REGRESSION: fast_cancel publish no longer uses \
+        source.contains("guard.set_cancel_requested(true);")
+            && task_context.contains("self.cancel_requested = value;")
+            && task_context.contains("self.publish_cancel_requested(value);")
+            && task_context.contains(".store(value, std::sync::atomic::Ordering::Release);")
+            && !task_context.contains("compare_exchange"),
+        "REGRESSION: stable cancellation publish no longer uses \
          .store. If it switched to compare_exchange, \
          coalesced cancels would 'fail' the CAS on the \
          second-and-later call — the bool return semantics \
          would conflate.",
     );
 
-    // The cancel_requested = true assignment is also
-    // idempotent.
-    assert!(
-        source.contains("guard.cancel_requested = true;"),
-        "REGRESSION: cancel_requested assignment is gone. \
-         Without it, the slow-path cancel observation in \
-         checkpoint() doesn't see the cancel.",
-    );
+    // The paired lock-backed assignment remains part of the single setter,
+    // so the slow path and the stable envelope cannot diverge.
+    assert!(task_context.contains("self.cancel_requested = value;"));
 }
 
 #[test]

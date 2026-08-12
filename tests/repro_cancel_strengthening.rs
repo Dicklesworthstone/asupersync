@@ -3,53 +3,53 @@
 #[macro_use]
 mod common;
 
-use asupersync::record::TaskRecord;
-use asupersync::types::{Budget, CancelReason, CxInner, RegionId, TaskId};
+use asupersync::runtime::RuntimeState;
+use asupersync::types::{Budget, CancelReason};
 use common::*;
-use parking_lot::RwLock;
-use std::sync::Arc;
 
 #[test]
 fn repro_cancel_strengthening_bug() {
     init_test_logging();
     test_phase!("repro_cancel_strengthening_bug");
     test_section!("setup");
-    let task_id = TaskId::new_for_test(0, 0);
-    let region_id = RegionId::new_for_test(0, 0);
     let initial_budget = Budget::INFINITE;
-
-    let mut task = TaskRecord::new(task_id, region_id, initial_budget);
-
-    let inner = Arc::new(RwLock::new(CxInner::new(
-        region_id,
-        task_id,
-        initial_budget,
-    )));
-    task.set_cx_inner(inner.clone());
+    let mut state = RuntimeState::new();
+    let region_id = state.create_root_region(initial_budget);
+    let (task_id, _handle) = state
+        .create_task(region_id, initial_budget, async {})
+        .expect("create linked task");
 
     test_section!("transition_to_running");
     // 1. Move to Running
-    task.start_running();
+    state
+        .task_mut(task_id)
+        .expect("task record")
+        .start_running();
 
     // 2. Request cancel (Timeout) with loose budget
     test_section!("request_loose_cancel");
     let loose_budget = Budget::new().with_poll_quota(1000);
-    let loose_cancel_effects =
-        task.request_cancel_with_budget(CancelReason::timeout(), loose_budget);
+    let loose_cancel_effects = state
+        .task_mut(task_id)
+        .expect("task record")
+        .request_cancel_with_budget(CancelReason::timeout(), loose_budget);
     let (_newly_cancelled, loose_cancel_wakes) = loose_cancel_effects.into_parts();
     loose_cancel_wakes.dispatch();
 
     // 3. Acknowledge cancel -> Cancelling state
-    task.acknowledge_cancel();
+    state
+        .task_mut(task_id)
+        .expect("task record")
+        .acknowledge_cancel();
 
     // Verify inner has loose budget
     test_section!("verify_loose_budget");
-    let loose_quota = {
-        let guard = inner.read();
-        let quota = guard.budget.poll_quota;
-        drop(guard);
-        quota
-    };
+    let loose_quota = state
+        .task(task_id)
+        .expect("task record")
+        .context_budget()
+        .expect("linked task context")
+        .poll_quota;
     assert_with_log!(
         loose_quota == 1000,
         "cx inner should start with loose budget",
@@ -60,14 +60,20 @@ fn repro_cancel_strengthening_bug() {
     // 4. Request stronger cancel (Shutdown) with tight budget
     test_section!("request_tight_cancel");
     let tight_budget = Budget::new().with_poll_quota(10);
-    let tight_cancel_effects =
-        task.request_cancel_with_budget(CancelReason::shutdown(), tight_budget);
+    let tight_cancel_effects = state
+        .task_mut(task_id)
+        .expect("task record")
+        .request_cancel_with_budget(CancelReason::shutdown(), tight_budget);
     let (_newly_cancelled, tight_cancel_wakes) = tight_cancel_effects.into_parts();
     tight_cancel_wakes.dispatch();
 
     // 5. Verify task state has tight budget
     test_section!("verify_task_budget");
-    let current_budget = task.cleanup_budget().expect("should be cancelling");
+    let current_budget = state
+        .task(task_id)
+        .expect("task record")
+        .cleanup_budget()
+        .expect("should be cancelling");
     assert_with_log!(
         current_budget.poll_quota == 10,
         "task record should have tight budget",
@@ -77,12 +83,12 @@ fn repro_cancel_strengthening_bug() {
 
     // 6. Verify inner has tight budget (The Bug)
     test_section!("verify_inner_budget");
-    let tight_quota = {
-        let guard = inner.read();
-        let quota = guard.budget.poll_quota;
-        drop(guard);
-        quota
-    };
+    let tight_quota = state
+        .task(task_id)
+        .expect("task record")
+        .context_budget()
+        .expect("linked task context")
+        .poll_quota;
     // This assertion fails if the bug exists
     assert_with_log!(
         tight_quota == 10,

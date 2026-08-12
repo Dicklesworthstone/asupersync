@@ -38,10 +38,11 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::Waker;
 use std::time::Duration;
 
 use crate::cx::scope::CatchUnwind;
-use crate::cx::{Cx, cap};
+use crate::cx::{CancelWakerToken, Cx, cap};
 use crate::error::Error;
 use crate::trace::event::TraceEvent;
 use crate::types::{Budget, CancelKind, Time};
@@ -720,6 +721,68 @@ pub struct ServerRequestRegion {
     consumed: AtomicBool,
 }
 
+#[derive(Debug)]
+struct ConnectionCancelWaker {
+    cx: Cx,
+    registered: Option<RegisteredConnectionCancelWaker>,
+}
+
+#[derive(Debug)]
+struct RegisteredConnectionCancelWaker {
+    waker: Waker,
+    token: CancelWakerToken,
+}
+
+impl ConnectionCancelWaker {
+    fn new(cx: Cx) -> Self {
+        Self {
+            cx,
+            registered: None,
+        }
+    }
+
+    fn is_cancel_requested(&self) -> bool {
+        self.cx.is_cancel_requested()
+    }
+
+    fn refresh(&mut self, waker: &Waker) {
+        let same_local_waker = self
+            .registered
+            .as_ref()
+            .is_some_and(|registered| registered.waker.will_wake(waker));
+        let incoming_waker = (!same_local_waker).then(|| waker.clone());
+        let previous_token = self.registered.as_ref().map(|registered| registered.token);
+        let token = self.cx.refresh_cancel_waker(previous_token, waker);
+        let retired_waker = if let Some(incoming_waker) = incoming_waker {
+            self.registered.replace(RegisteredConnectionCancelWaker {
+                waker: incoming_waker,
+                token,
+            })
+        } else {
+            self.registered
+                .as_mut()
+                .expect("same local Waker requires an existing registration")
+                .token = token;
+            None
+        };
+        drop(retired_waker);
+    }
+
+    fn clear(&mut self) {
+        let Some(registered) = self.registered.take() else {
+            return;
+        };
+        self.cx.clear_cancel_waker(registered.token);
+        drop(registered);
+    }
+}
+
+impl Drop for ConnectionCancelWaker {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
 impl ServerRequestRegion {
     /// Mints a request region through the runtime boundary.
     ///
@@ -981,6 +1044,7 @@ impl ServerRequestRegion {
             cx: self.cx.clone(),
             inner: CatchUnwind { inner: fut },
         });
+        let mut connection_cancel_waker = conn_cx.map(ConnectionCancelWaker::new);
 
         // Phase A: drive the handler, watching the connection cancel
         // signal on every poll (cancel wakes us via the registered waker).
@@ -988,11 +1052,11 @@ impl ServerRequestRegion {
             if let std::task::Poll::Ready(out) = fut.as_mut().poll(task_cx) {
                 return std::task::Poll::Ready(PhaseA::Done(out));
             }
-            if let Some(conn) = conn_cx.as_ref() {
+            if let Some(conn) = connection_cancel_waker.as_mut() {
                 if conn.is_cancel_requested() {
                     return std::task::Poll::Ready(PhaseA::ConnCancelled);
                 }
-                conn.register_cancel_waker(task_cx.waker());
+                conn.refresh(task_cx.waker());
                 // Re-check after registration to close the cancel/register
                 // race window.
                 if conn.is_cancel_requested() {
@@ -1006,6 +1070,9 @@ impl ServerRequestRegion {
             Some(deadline) => crate::time::timeout_at(deadline, primary).await,
             None => Ok(primary.await),
         };
+        if let Some(registration) = connection_cancel_waker.as_mut() {
+            registration.clear();
+        }
 
         match phase_a {
             Ok(PhaseA::Done(Ok(response))) => {

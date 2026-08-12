@@ -6,23 +6,26 @@
 //! # Overview
 //!
 //! - [`IncomingRequestBody`]: Streaming reader for request bodies
-//! - [`IncomingBodyWriter`]: Feeds bytes into an incoming body with backpressure
+//! - [`IncomingBody`]: Legacy-compatible streaming request body
+//! - [`IncomingRequestBody`]: Typed streaming request body with terminal diagnostics
+//! - [`IncomingRequestBodyWriter`]: Feeds bytes into a typed request body with backpressure
 //! - [`OutgoingBody`]: Streaming writer-facing body (consumer reads frames)
 //! - [`OutgoingBodySender`]: Sends body frames with backpressure + cancellation
 //! - [`ChunkedEncoder`]: Encoder for HTTP/1.1 chunked transfer encoding
 //! - [`BodyKind`]: Body length determination (fixed vs chunked)
 
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 use parking_lot::Mutex;
 
 use crate::bytes::{Buf, Bytes, BytesCursor, BytesMut};
 use crate::channel::mpsc;
 use crate::channel::mpsc::{RecvError, SendError};
-use crate::cx::Cx;
+use crate::cx::{CancelWakerToken, Cx};
 use crate::http::body::{Body, Frame, HeaderMap, HeaderName, HeaderValue, SizeHint};
 use crate::http::h1::codec::{
     HttpError, is_forbidden_trailer, parse_chunk_size_line, validate_header_field,
@@ -42,6 +45,7 @@ const DEFAULT_MAX_QUEUED_BODY_BYTES: usize = 512 * 1024;
 /// [`CancelKind`] instead of collapsing every request-budget outcome into a
 /// generic channel error.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IncomingBodyError {
     /// The declared Content-Length was invalid or did not match the wire body.
     BadContentLength,
@@ -56,6 +60,8 @@ pub enum IncomingBodyError {
     },
     /// Trailer fields exceeded the configured trailer limit.
     TrailersTooLarge,
+    /// A trailer line was malformed before field-name/value validation.
+    BadHeader,
     /// A trailer field name was invalid.
     InvalidHeaderName,
     /// A trailer field value was invalid.
@@ -105,6 +111,7 @@ impl std::fmt::Display for IncomingBodyError {
                 None => write!(f, "request body exceeds limit ({limit})"),
             },
             Self::TrailersTooLarge => write!(f, "request body trailers exceed limit"),
+            Self::BadHeader => write!(f, "malformed request trailer"),
             Self::InvalidHeaderName => write!(f, "invalid request trailer name"),
             Self::InvalidHeaderValue => write!(f, "invalid request trailer value"),
             Self::Cancelled { kind } => write!(f, "request body cancelled ({kind:?})"),
@@ -149,7 +156,8 @@ impl IncomingBodyError {
             },
             HttpError::HeadersTooLarge | HttpError::TooManyHeaders => Self::TrailersTooLarge,
             HttpError::InvalidHeaderName => Self::InvalidHeaderName,
-            HttpError::InvalidHeaderValue | HttpError::BadHeader => Self::InvalidHeaderValue,
+            HttpError::BadHeader => Self::BadHeader,
+            HttpError::InvalidHeaderValue => Self::InvalidHeaderValue,
             HttpError::BodyCancelled => Self::Cancelled {
                 kind: CancelKind::User,
             },
@@ -162,6 +170,25 @@ impl IncomingBodyError {
             kind: cx
                 .cancel_reason()
                 .map_or(CancelKind::User, |reason| reason.kind()),
+        }
+    }
+
+    fn into_http_error(self) -> HttpError {
+        match self {
+            Self::BadContentLength => HttpError::BadContentLength,
+            Self::BadChunkedEncoding => HttpError::BadChunkedEncoding,
+            Self::BodyTooLarge { .. } => HttpError::BodyTooLarge,
+            Self::TrailersTooLarge => HttpError::HeadersTooLarge,
+            Self::BadHeader => HttpError::BadHeader,
+            Self::InvalidHeaderName => HttpError::InvalidHeaderName,
+            Self::InvalidHeaderValue => HttpError::InvalidHeaderValue,
+            Self::Cancelled { .. } => HttpError::BodyCancelled,
+            Self::SourceDisconnected
+            | Self::ConsumerDropped
+            | Self::AlreadyTerminal
+            | Self::DrainLimitExceeded { .. }
+            | Self::DrainTimeout => HttpError::BodyChannelClosed,
+            Self::AccountingOverflow | Self::QueueFrameTooLarge { .. } => HttpError::BodyTooLarge,
         }
     }
 }
@@ -203,7 +230,14 @@ enum IncomingConsumerTerminal {
 #[derive(Debug)]
 struct QueuedByteState {
     queued: usize,
-    waiter: Option<std::task::Waker>,
+    next_waiter_id: u64,
+    waiter: Option<QueuedByteWaiter>,
+}
+
+#[derive(Debug)]
+struct QueuedByteWaiter {
+    id: u64,
+    waker: Waker,
 }
 
 #[derive(Debug)]
@@ -218,6 +252,7 @@ impl QueuedByteBudget {
             limit,
             state: Mutex::new(QueuedByteState {
                 queued: 0,
+                next_waiter_id: 0,
                 waiter: None,
             }),
         })
@@ -235,32 +270,14 @@ impl QueuedByteBudget {
             });
         }
 
-        std::future::poll_fn(|poll_cx| {
-            if cx.cancel_reason().is_some() {
-                return Poll::Ready(Err(IncomingBodyError::cancelled(cx)));
-            }
-
-            let mut state = self.state.lock();
-            let Some(next) = state.queued.checked_add(amount) else {
-                return Poll::Ready(Err(IncomingBodyError::AccountingOverflow));
-            };
-            if next <= self.limit {
-                state.queued = next;
-                state.waiter = None;
-                return Poll::Ready(Ok(QueuedBytePermit {
-                    budget: Arc::clone(self),
-                    amount,
-                }));
-            }
-            if !state
-                .waiter
-                .as_ref()
-                .is_some_and(|waker| waker.will_wake(poll_cx.waker()))
-            {
-                state.waiter = Some(poll_cx.waker().clone());
-            }
-            Poll::Pending
-        })
+        QueuedByteReserve {
+            budget: Arc::clone(self),
+            cx,
+            amount,
+            waiter_id: None,
+            cancel_waker: None,
+            completed: false,
+        }
         .await
     }
 
@@ -270,11 +287,211 @@ impl QueuedByteBudget {
             .queued
             .checked_sub(amount)
             .expect("queued request-body byte accounting underflow");
-        let waiter = state.waiter.take();
+        let waiter = state.waiter.take().map(|waiter| waiter.waker);
         drop(state);
         if let Some(waiter) = waiter {
             waiter.wake();
         }
+    }
+}
+
+#[derive(Debug)]
+struct QueuedByteCancelWaker {
+    waker: Waker,
+    token: CancelWakerToken,
+}
+
+struct QueuedByteReserve<'a> {
+    budget: Arc<QueuedByteBudget>,
+    cx: &'a Cx,
+    amount: usize,
+    waiter_id: Option<u64>,
+    cancel_waker: Option<QueuedByteCancelWaker>,
+    completed: bool,
+}
+
+impl QueuedByteReserve<'_> {
+    fn refresh_cancel_waker(&mut self, waker: &Waker) {
+        let same_local_waker = self
+            .cancel_waker
+            .as_ref()
+            .is_some_and(|registered| registered.waker.will_wake(waker));
+        let incoming_waker = (!same_local_waker).then(|| waker.clone());
+        let previous_token = self
+            .cancel_waker
+            .as_ref()
+            .map(|registered| registered.token);
+        let token = self.cx.refresh_cancel_waker(previous_token, waker);
+        let retired_waker = if let Some(incoming_waker) = incoming_waker {
+            self.cancel_waker.replace(QueuedByteCancelWaker {
+                waker: incoming_waker,
+                token,
+            })
+        } else {
+            self.cancel_waker
+                .as_mut()
+                .expect("same local Waker requires an existing registration")
+                .token = token;
+            None
+        };
+        drop(retired_waker);
+    }
+
+    fn clear_cancel_waker(&mut self) {
+        let Some(registered) = self.cancel_waker.take() else {
+            return;
+        };
+        self.cx.clear_cancel_waker(registered.token);
+        drop(registered);
+    }
+
+    fn clear_queue_waiter(&mut self) {
+        let Some(waiter_id) = self.waiter_id.take() else {
+            return;
+        };
+        let retired_waker = {
+            let mut state = self.budget.state.lock();
+            if state
+                .waiter
+                .as_ref()
+                .is_some_and(|waiter| waiter.id == waiter_id)
+            {
+                state.waiter.take().map(|waiter| waiter.waker)
+            } else {
+                None
+            }
+        };
+        drop(retired_waker);
+    }
+
+    fn finish_error(
+        &mut self,
+        error: IncomingBodyError,
+    ) -> Poll<Result<QueuedBytePermit, IncomingBodyError>> {
+        self.completed = true;
+        self.clear_queue_waiter();
+        self.clear_cancel_waker();
+        Poll::Ready(Err(error))
+    }
+}
+
+impl Future for QueuedByteReserve<'_> {
+    type Output = Result<QueuedBytePermit, IncomingBodyError>;
+
+    fn poll(mut self: Pin<&mut Self>, task_cx: &mut Context<'_>) -> Poll<Self::Output> {
+        assert!(
+            !self.completed,
+            "queued-byte reserve polled after completion"
+        );
+
+        if self.cx.checkpoint().is_err() {
+            let error = IncomingBodyError::cancelled(self.cx);
+            return self.finish_error(error);
+        }
+
+        self.refresh_cancel_waker(task_cx.waker());
+        if self.cx.checkpoint().is_err() {
+            let error = IncomingBodyError::cancelled(self.cx);
+            return self.finish_error(error);
+        }
+
+        // Prepare the replacement outside the budget mutex. Custom RawWaker
+        // clone/drop callbacks may re-enter this queue.
+        let mut incoming_waker = Some(task_cx.waker().clone());
+        let budget = Arc::clone(&self.budget);
+        let result = {
+            let mut state = budget.state.lock();
+            let Some(next) = state.queued.checked_add(self.amount) else {
+                drop(state);
+                drop(incoming_waker);
+                return self.finish_error(IncomingBodyError::AccountingOverflow);
+            };
+
+            if next <= budget.limit {
+                state.queued = next;
+                let retired_waker = if self.waiter_id.is_some_and(|waiter_id| {
+                    state
+                        .waiter
+                        .as_ref()
+                        .is_some_and(|waiter| waiter.id == waiter_id)
+                }) {
+                    state.waiter.take().map(|waiter| waiter.waker)
+                } else {
+                    None
+                };
+                self.waiter_id = None;
+                Ok((
+                    QueuedBytePermit {
+                        budget: Arc::clone(&budget),
+                        amount: self.amount,
+                    },
+                    retired_waker,
+                ))
+            } else {
+                let current_waiter = self.waiter_id.and_then(|waiter_id| {
+                    state
+                        .waiter
+                        .as_ref()
+                        .filter(|waiter| waiter.id == waiter_id)
+                });
+                let retired_waker = if current_waiter
+                    .is_some_and(|waiter| waiter.waker.will_wake(task_cx.waker()))
+                {
+                    None
+                } else if let Some(waiter_id) = self.waiter_id
+                    && state
+                        .waiter
+                        .as_ref()
+                        .is_some_and(|waiter| waiter.id == waiter_id)
+                {
+                    let replacement = incoming_waker
+                        .take()
+                        .expect("prepared queued-byte Waker must be available");
+                    state
+                        .waiter
+                        .as_mut()
+                        .map(|waiter| std::mem::replace(&mut waiter.waker, replacement))
+                } else {
+                    let Some(waiter_id) = state.next_waiter_id.checked_add(1) else {
+                        drop(state);
+                        drop(incoming_waker);
+                        return self.finish_error(IncomingBodyError::AccountingOverflow);
+                    };
+                    state.next_waiter_id = waiter_id;
+                    self.waiter_id = Some(waiter_id);
+                    let replacement = QueuedByteWaiter {
+                        id: waiter_id,
+                        waker: incoming_waker
+                            .take()
+                            .expect("prepared queued-byte Waker must be available"),
+                    };
+                    state.waiter.replace(replacement).map(|waiter| waiter.waker)
+                };
+                Err(retired_waker)
+            }
+        };
+
+        match result {
+            Ok((permit, retired_waker)) => {
+                self.completed = true;
+                drop(retired_waker);
+                drop(incoming_waker);
+                self.clear_cancel_waker();
+                Poll::Ready(Ok(permit))
+            }
+            Err(retired_waker) => {
+                drop(retired_waker);
+                drop(incoming_waker);
+                Poll::Pending
+            }
+        }
+    }
+}
+
+impl Drop for QueuedByteReserve<'_> {
+    fn drop(&mut self) {
+        self.clear_queue_waiter();
+        self.clear_cancel_waker();
     }
 }
 
@@ -302,8 +519,6 @@ struct IncomingBodyShared {
     consumer_terminal: AtomicU8,
     terminal_error: Mutex<Option<IncomingBodyError>>,
     queued_bytes: Arc<QueuedByteBudget>,
-    published_frames: AtomicU64,
-    published_bytes: AtomicU64,
     abandoned_frames: AtomicU64,
     abandoned_bytes: AtomicU64,
 }
@@ -402,7 +617,6 @@ pub struct IncomingRequestBody {
     done: bool,
     terminal_observed: bool,
     received: u64,
-    received_frames: u64,
     size_hint: SizeHint,
     kind: BodyKind,
 }
@@ -410,7 +624,7 @@ pub struct IncomingRequestBody {
 impl IncomingRequestBody {
     /// Creates a bounded incoming body channel.
     #[must_use]
-    pub fn channel(cx: &Cx, kind: BodyKind) -> (IncomingBodyWriter, Self) {
+    pub fn channel(cx: &Cx, kind: BodyKind) -> (IncomingRequestBodyWriter, Self) {
         Self::channel_with_limits(
             cx,
             kind,
@@ -425,7 +639,7 @@ impl IncomingRequestBody {
         cx: &Cx,
         kind: BodyKind,
         capacity: usize,
-    ) -> (IncomingBodyWriter, Self) {
+    ) -> (IncomingRequestBodyWriter, Self) {
         Self::channel_with_limits(cx, kind, capacity, DEFAULT_MAX_QUEUED_BODY_BYTES)
     }
 
@@ -436,7 +650,7 @@ impl IncomingRequestBody {
         kind: BodyKind,
         frame_capacity: usize,
         queued_byte_limit: usize,
-    ) -> (IncomingBodyWriter, Self) {
+    ) -> (IncomingRequestBodyWriter, Self) {
         let (tx, rx) = mpsc::channel(frame_capacity);
         let done = kind.is_empty();
         let shared = Arc::new(IncomingBodyShared {
@@ -448,8 +662,6 @@ impl IncomingRequestBody {
             consumer_terminal: AtomicU8::new(IncomingConsumerTerminal::Active as u8),
             terminal_error: Mutex::new(None),
             queued_bytes: QueuedByteBudget::new(queued_byte_limit),
-            published_frames: AtomicU64::new(0),
-            published_bytes: AtomicU64::new(0),
             abandoned_frames: AtomicU64::new(0),
             abandoned_bytes: AtomicU64::new(0),
         });
@@ -460,11 +672,10 @@ impl IncomingRequestBody {
             done,
             terminal_observed: false,
             received: 0,
-            received_frames: 0,
             size_hint: kind.size_hint(),
             kind,
         };
-        let writer = IncomingBodyWriter::new(tx, kind, shared);
+        let writer = IncomingRequestBodyWriter::new(tx, kind, shared);
         (writer, body)
     }
 
@@ -508,7 +719,6 @@ impl Body for IncomingRequestBody {
                     _byte_permit,
                 } = queued;
                 drop(_byte_permit);
-                self.received_frames = self.received_frames.saturating_add(1);
                 if frame.is_trailers() {
                     // Trailers mark the end of a chunked body.
                     self.done = true;
@@ -602,16 +812,25 @@ impl Body for IncomingRequestBody {
 impl Drop for IncomingRequestBody {
     fn drop(&mut self) {
         if !self.done {
-            let published_frames = self.shared.published_frames.load(Ordering::Acquire);
-            let published_bytes = self.shared.published_bytes.load(Ordering::Acquire);
-            self.shared.abandoned_frames.store(
-                published_frames.saturating_sub(self.received_frames),
-                Ordering::Release,
-            );
-            self.shared.abandoned_bytes.store(
-                published_bytes.saturating_sub(self.received),
-                Ordering::Release,
-            );
+            // Close before draining so no producer can commit another frame
+            // between the queue snapshot and the consumer-drop signal. A
+            // sender that already owns a channel permit gets its frame back as
+            // Disconnected and accounts it on the producer side instead.
+            self.receiver.close();
+            let mut abandoned_frames = 0_u64;
+            let mut abandoned_bytes = 0_u64;
+            while let Ok(queued) = self.receiver.try_recv() {
+                abandoned_frames = abandoned_frames.saturating_add(1);
+                let data_bytes = queued.frame.data_ref().map_or(0, Buf::remaining);
+                abandoned_bytes =
+                    abandoned_bytes.saturating_add(u64::try_from(data_bytes).unwrap_or(u64::MAX));
+            }
+            self.shared
+                .abandoned_frames
+                .store(abandoned_frames, Ordering::Release);
+            self.shared
+                .abandoned_bytes
+                .store(abandoned_bytes, Ordering::Release);
             self.shared
                 .consumer_terminal
                 .store(IncomingConsumerTerminal::Dropped as u8, Ordering::Release);
@@ -619,9 +838,9 @@ impl Drop for IncomingRequestBody {
     }
 }
 
-/// Writer for feeding bytes into an incoming body.
+/// Writer for feeding bytes into a typed incoming request body.
 #[derive(Debug)]
-pub struct IncomingBodyWriter {
+pub struct IncomingRequestBodyWriter {
     sender: Option<mpsc::Sender<QueuedIncomingFrame>>,
     shared: Arc<IncomingBodyShared>,
     buffer: BytesMut,
@@ -651,7 +870,7 @@ pub struct IncomingBodyDrainProgress {
     pub synchronized_eof: bool,
 }
 
-impl IncomingBodyWriter {
+impl IncomingRequestBodyWriter {
     fn new(
         sender: mpsc::Sender<QueuedIncomingFrame>,
         kind: BodyKind,
@@ -978,15 +1197,7 @@ impl IncomingBodyWriter {
             _byte_permit: byte_permit,
         };
         match sender.send(cx, queued).await {
-            Ok(()) => {
-                let data_bytes =
-                    u64::try_from(data_bytes).map_err(|_| IncomingBodyError::AccountingOverflow)?;
-                self.shared.published_frames.fetch_add(1, Ordering::AcqRel);
-                self.shared
-                    .published_bytes
-                    .fetch_add(data_bytes, Ordering::AcqRel);
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err(SendError::Disconnected(_) | SendError::Full(_)) => {
                 self.record_discard_counts(data_bytes)?;
                 Err(IncomingBodyError::ConsumerDropped)
@@ -1192,7 +1403,7 @@ impl IncomingBodyWriter {
     }
 }
 
-impl Drop for IncomingBodyWriter {
+impl Drop for IncomingRequestBodyWriter {
     fn drop(&mut self) {
         if self.sender.is_some() {
             *self.shared.terminal_error.lock() = Some(IncomingBodyError::SourceDisconnected);
@@ -1203,6 +1414,151 @@ impl Drop for IncomingBodyWriter {
                 Ordering::Acquire,
             );
         }
+    }
+}
+
+/// Backwards-compatible HTTP/1 request body from the 0.4.3 API.
+///
+/// New server code should prefer [`IncomingRequestBody`] when it needs typed
+/// cancellation causes and strict terminal-repoll diagnostics. This adapter
+/// deliberately preserves the legacy [`HttpError`] surface and the standard
+/// `Body` rule that every poll after terminal completion returns `None`.
+#[derive(Debug)]
+pub struct IncomingBody {
+    inner: IncomingRequestBody,
+    done: bool,
+}
+
+impl IncomingBody {
+    /// Creates a bounded incoming body channel.
+    #[must_use]
+    pub fn channel(cx: &Cx, kind: BodyKind) -> (IncomingBodyWriter, Self) {
+        Self::channel_with_capacity(cx, kind, DEFAULT_BODY_CHANNEL_CAPACITY)
+    }
+
+    /// Creates a bounded incoming body channel with custom frame capacity.
+    #[must_use]
+    pub fn channel_with_capacity(
+        cx: &Cx,
+        kind: BodyKind,
+        capacity: usize,
+    ) -> (IncomingBodyWriter, Self) {
+        // The 0.4.3 contract bounded queued *frames* only. Keep the typed
+        // implementation's byte accounting, but set its independent byte cap
+        // to the representable maximum so this adapter does not introduce the
+        // newer 512 KiB backpressure threshold into legacy callers.
+        let (writer, inner) =
+            IncomingRequestBody::channel_with_limits(cx, kind, capacity, usize::MAX);
+        let done = inner.is_end_stream();
+        (IncomingBodyWriter { inner: writer }, Self { inner, done })
+    }
+
+    /// Returns the body kind.
+    #[must_use]
+    pub fn kind(&self) -> BodyKind {
+        self.inner.kind()
+    }
+}
+
+impl Body for IncomingBody {
+    type Data = BytesCursor;
+    type Error = HttpError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        poll_cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        if self.done {
+            return Poll::Ready(None);
+        }
+
+        match Pin::new(&mut self.inner).poll_frame(poll_cx) {
+            Poll::Ready(Some(Ok(frame))) => {
+                self.done = self.inner.is_end_stream();
+                Poll::Ready(Some(Ok(frame)))
+            }
+            Poll::Ready(Some(Err(error))) => {
+                self.done = true;
+                Poll::Ready(Some(Err(error.into_http_error())))
+            }
+            Poll::Ready(None) => {
+                self.done = true;
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.done
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+/// Backwards-compatible producer for [`IncomingBody`].
+///
+/// The adapter retains the 0.4.3 method signatures while delegating framing,
+/// bounded buffering, and producer/consumer synchronization to the hardened
+/// typed implementation.
+#[derive(Debug)]
+pub struct IncomingBodyWriter {
+    inner: IncomingRequestBodyWriter,
+}
+
+impl IncomingBodyWriter {
+    /// Maximum default chunk size for yielded data.
+    pub const DEFAULT_MAX_CHUNK_SIZE: usize = IncomingRequestBodyWriter::DEFAULT_MAX_CHUNK_SIZE;
+
+    /// Sets the maximum chunk size for yielded frames.
+    #[must_use]
+    pub fn max_chunk_size(mut self, size: usize) -> Self {
+        self.inner = self.inner.max_chunk_size(size);
+        self
+    }
+
+    /// Sets the maximum total body size.
+    #[must_use]
+    pub fn max_body_size(mut self, size: u64) -> Self {
+        self.inner = self.inner.max_body_size(size);
+        self
+    }
+
+    /// Sets the maximum buffered bytes for partial parsing.
+    #[must_use]
+    pub fn max_buffered_bytes(mut self, size: usize) -> Self {
+        self.inner = self.inner.max_buffered_bytes(size);
+        self
+    }
+
+    /// Sets the maximum total trailer size.
+    #[must_use]
+    pub fn max_trailers_size(mut self, size: usize) -> Self {
+        self.inner = self.inner.max_trailers_size(size);
+        self
+    }
+
+    /// Returns true if the body has completed.
+    #[must_use]
+    pub fn is_done(&self) -> bool {
+        self.inner.is_done()
+    }
+
+    /// Pushes raw bytes into the body stream.
+    pub async fn push_bytes(&mut self, cx: &Cx, data: &[u8]) -> Result<(), HttpError> {
+        self.inner
+            .push_bytes(cx, data)
+            .await
+            .map_err(IncomingBodyError::into_http_error)
+    }
+
+    /// Signals EOF with no additional bytes.
+    pub fn finish(&mut self, cx: &Cx) -> Result<(), HttpError> {
+        self.inner
+            .finish(cx)
+            .map_err(IncomingBodyError::into_http_error)
     }
 }
 
@@ -1693,19 +2049,47 @@ impl ResponseHead {
     }
 }
 
-/// A streaming request with separate head and body.
+/// A backwards-compatible streaming request with separate head and body.
 #[derive(Debug)]
 pub struct StreamingRequest {
     /// Request head (method, URI, headers).
     pub head: RequestHead,
-    /// Remote peer address, when supplied by the listener.
-    pub peer_addr: Option<std::net::SocketAddr>,
     /// Request body.
-    pub body: IncomingRequestBody,
+    pub body: IncomingBody,
 }
 
 impl StreamingRequest {
     /// Creates a new streaming request.
+    #[must_use]
+    pub fn new(head: RequestHead, body: IncomingBody) -> Self {
+        Self { head, body }
+    }
+
+    /// Creates a streaming request with a channel-backed body.
+    #[must_use]
+    pub fn channel(head: RequestHead, cx: &Cx, capacity: usize) -> (IncomingBodyWriter, Self) {
+        let (writer, body) = IncomingBody::channel_with_capacity(cx, head.body_kind(), capacity);
+        (writer, Self { head, body })
+    }
+}
+
+/// Typed request published by [`crate::http::h1::Http1StreamingServer`].
+///
+/// This additive API carries listener metadata and the hardened request-body
+/// error surface without changing the 0.4.3 [`StreamingRequest`] layout.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct StreamingServerRequest {
+    /// Request head (method, URI, headers).
+    pub head: RequestHead,
+    /// Remote peer address, when supplied by the listener.
+    pub peer_addr: Option<std::net::SocketAddr>,
+    /// Typed request body.
+    pub body: IncomingRequestBody,
+}
+
+impl StreamingServerRequest {
+    /// Creates a typed streaming-server request without peer metadata.
     #[must_use]
     pub fn new(head: RequestHead, body: IncomingRequestBody) -> Self {
         Self {
@@ -1715,19 +2099,16 @@ impl StreamingRequest {
         }
     }
 
-    /// Creates a streaming request with a channel-backed body.
+    /// Creates a typed request with a channel-backed body.
     #[must_use]
-    pub fn channel(head: RequestHead, cx: &Cx, capacity: usize) -> (IncomingBodyWriter, Self) {
+    pub fn channel(
+        head: RequestHead,
+        cx: &Cx,
+        capacity: usize,
+    ) -> (IncomingRequestBodyWriter, Self) {
         let (writer, body) =
             IncomingRequestBody::channel_with_capacity(cx, head.body_kind(), capacity);
-        (
-            writer,
-            Self {
-                head,
-                peer_addr: None,
-                body,
-            },
-        )
+        (writer, Self::new(head, body))
     }
 }
 
@@ -2047,6 +2428,45 @@ mod tests {
     }
 
     #[test]
+    fn v0_4_3_compatibility_incoming_body_preserves_http_error_and_repeat_eof_contract() {
+        let cx = Cx::for_testing();
+        let (mut writer, mut body) = IncomingBody::channel(&cx, BodyKind::ContentLength(1));
+
+        block_on(writer.push_bytes(&cx, b"x")).expect("legacy one-byte body");
+        let frame = poll_body(&mut body)
+            .expect("legacy data frame")
+            .expect("valid legacy data frame");
+        assert_eq!(frame.into_data().expect("legacy data").chunk(), b"x");
+        assert!(poll_body(&mut body).is_none(), "legacy first terminal poll");
+        assert!(
+            poll_body(&mut body).is_none(),
+            "0.4.3 legacy bodies must keep returning EOF after termination"
+        );
+
+        let (writer, mut unfinished) = IncomingBody::channel(&cx, BodyKind::ContentLength(1));
+        drop(writer);
+        assert!(matches!(
+            poll_body(&mut unfinished),
+            Some(Err(HttpError::BodyChannelClosed))
+        ));
+        assert!(poll_body(&mut unfinished).is_none());
+
+        let (mut limited_writer, _limited_body) =
+            IncomingBody::channel(&cx, BodyKind::ContentLength(1));
+        limited_writer = limited_writer.max_body_size(0);
+        assert!(matches!(
+            block_on(limited_writer.push_bytes(&cx, b"x")),
+            Err(HttpError::BodyTooLarge)
+        ));
+
+        let (mut malformed_writer, _malformed_body) = IncomingBody::channel(&cx, BodyKind::Chunked);
+        assert!(matches!(
+            block_on(malformed_writer.push_bytes(&cx, b"0\r\nnot-a-field\r\n\r\n")),
+            Err(HttpError::BadHeader)
+        ));
+    }
+
+    #[test]
     fn incoming_body_cancellation_preserves_exact_kind() {
         let base_cx = Cx::for_testing();
         let (mut writer, mut body) =
@@ -2103,6 +2523,34 @@ mod tests {
     }
 
     #[test]
+    fn incoming_body_queue_byte_wait_is_woken_by_cancellation() {
+        let cx = Cx::for_testing();
+        let (writer, body) =
+            IncomingRequestBody::channel_with_limits(&cx, BodyKind::ContentLength(4), 8, 2);
+        let mut writer = writer.max_chunk_size(2);
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let reserve_waker = counting_waker(Arc::clone(&wake_count));
+        let mut task_cx = Context::from_waker(&reserve_waker);
+
+        let mut push = std::pin::pin!(writer.push_bytes(&cx, b"data"));
+        assert!(matches!(push.as_mut().poll(&mut task_cx), Poll::Pending));
+        assert_eq!(body.queued_bytes(), 2, "first frame holds the byte cap");
+
+        cx.cancel_fast(CancelKind::Deadline);
+        assert_eq!(
+            wake_count.load(Ordering::SeqCst),
+            1,
+            "context cancellation must wake the byte-budget waiter"
+        );
+        assert!(matches!(
+            push.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(IncomingBodyError::Cancelled {
+                kind: CancelKind::Deadline,
+            }))
+        ));
+    }
+
+    #[test]
     fn incoming_body_consumer_drop_drains_and_preserves_pipeline_remainder() {
         let cx = Cx::for_testing();
         let (mut writer, body) = IncomingRequestBody::channel(&cx, BodyKind::ContentLength(5));
@@ -2120,6 +2568,23 @@ mod tests {
         assert_eq!(progress.bytes, 5);
         assert!(progress.synchronized_eof);
         assert_eq!(writer.take_remainder().as_ref(), b"GET /next HTTP/1.1\r\n");
+    }
+
+    #[test]
+    fn incoming_body_consumer_drop_counts_exact_queued_frames() {
+        let cx = Cx::for_testing();
+        let (writer, body) =
+            IncomingRequestBody::channel_with_limits(&cx, BodyKind::ContentLength(4), 8, 8);
+        let mut writer = writer.max_chunk_size(2);
+
+        block_on(writer.push_bytes(&cx, b"data")).expect("queue complete body");
+        assert_eq!(body.queued_bytes(), 4);
+        drop(body);
+
+        let progress = writer.drain_progress();
+        assert_eq!(progress.frames, 2);
+        assert_eq!(progress.bytes, 4);
+        assert!(progress.synchronized_eof);
     }
 
     #[test]

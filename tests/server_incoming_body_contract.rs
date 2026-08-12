@@ -1097,6 +1097,8 @@ fn validate_cleanup_errors_and_evidence(inventory: &Value) -> Result<(), String>
             "HttpError::BodyTooLarge",
             "HttpError::BodyTooLargeDetailed",
             "LimitedError::LengthLimit",
+            "IncomingBodyError::BodyTooLarge",
+            "IncomingBodyError::QueueFrameTooLarge",
         ])
         || variants("BODY-FRAMING-INVALID")?
             != string_set(&[
@@ -1111,15 +1113,29 @@ fn validate_cleanup_errors_and_evidence(inventory: &Value) -> Result<(), String>
                 "HttpError::BadHeader",
                 "HttpError::InvalidHeaderName",
                 "HttpError::InvalidHeaderValue",
+                "IncomingBodyError::BadContentLength",
+                "IncomingBodyError::BadChunkedEncoding",
+                "IncomingBodyError::TrailersTooLarge",
+                "IncomingBodyError::BadHeader",
+                "IncomingBodyError::InvalidHeaderName",
+                "IncomingBodyError::InvalidHeaderValue",
             ])
         || variants("BODY-CANCELLED")?
-            != string_set(&["HttpError::BodyCancelled", "ServerHopOutcome::Cancelled"])
+            != string_set(&[
+                "HttpError::BodyCancelled",
+                "ServerHopOutcome::Cancelled",
+                "IncomingBodyError::Cancelled { kind }",
+            ])
         || variants("BODY-REQUEST-DEADLINE")? != string_set(&["ServerHopOutcome::DeadlineExceeded"])
-        || !variants("BODY-RESOURCE-EXHAUSTED")?.is_empty()
-        || !variants("BODY-SOURCE-DISCONNECTED")?.is_empty()
+        || variants("BODY-RESOURCE-EXHAUSTED")?
+            != string_set(&["IncomingBodyError::Cancelled { kind: CancelKind::PollQuota | CancelKind::CostBudget | CancelKind::ResourceUnavailable }"])
+        || variants("BODY-SOURCE-DISCONNECTED")?
+            != string_set(&["IncomingBodyError::SourceDisconnected"])
         || variants("BODY-CLIENT-ABORTED")? != string_set(&["ServerHopOutcome::ConnectionLost"])
-        || !variants("BODY-ACCOUNTING-OVERFLOW")?.is_empty()
-        || !variants("BODY-CONSUMER-DROPPED")?.is_empty()
+        || variants("BODY-ACCOUNTING-OVERFLOW")?
+            != string_set(&["IncomingBodyError::AccountingOverflow"])
+        || variants("BODY-CONSUMER-DROPPED")?
+            != string_set(&["IncomingBodyError::ConsumerDropped"])
     {
         return Err("current body error variant mapping drifted".to_owned());
     }
@@ -1174,8 +1190,10 @@ fn validate_cleanup_errors_and_evidence(inventory: &Value) -> Result<(), String>
         })
         .collect();
     let migration_order = migration_order?;
-    if map_text(compatibility, "policy")? != "DIRECT_CUTOVER_NO_COMPATIBILITY_SHIM"
-        || !map_text(compatibility, "request_change")?.contains("single IncomingRequestBody")
+    if map_text(compatibility, "policy")? != "ADDITIVE_LEGACY_ADAPTER_SINGLE_TYPED_AUTHORITY"
+        || !map_text(compatibility, "request_change")?.contains("0.4.3 IncomingBody")
+        || !map_text(compatibility, "request_change")?.contains("StreamingServerRequest")
+        || !map_text(compatibility, "request_change")?.contains("Http1StreamingConfig")
         || !map_text(compatibility, "buffered_extractors")?.contains("Limited")
         || !map_text(compatibility, "buffered_extractors")?.contains("checked accounting")
         || migration_order.iter().copied().ne([
@@ -1186,7 +1204,7 @@ fn validate_cleanup_errors_and_evidence(inventory: &Value) -> Result<(), String>
             "telemetry and stable diagnostics",
         ])
     {
-        return Err("direct-cutover compatibility contract drifted".to_owned());
+        return Err("additive compatibility contract drifted".to_owned());
     }
     for (key, expected) in [
         ("json_default_disposition", "KEEP_10_MIB"),
@@ -1295,7 +1313,10 @@ fn validate_body_2_progress(inventory: &Value) -> Result<(), String> {
         "producer_error_reason_mirroring",
         "live_h1_dispatch_streaming",
         "queue_byte_budget_enforced",
+        "queue_byte_wait_is_cancel_aware",
         "consumer_drop_signal_present",
+        "consumer_drop_exactly_accounts_abandoned_queue",
+        "connection_cancel_waker_is_owned_and_cleared",
         "drain_or_close_policy_present",
         "incoming_body_error_type_present",
         "already_terminal_repoll_error_present",
@@ -1328,7 +1349,9 @@ fn validate_body_2_progress(inventory: &Value) -> Result<(), String> {
             "incoming_body_repoll_after_eof_fails_closed",
             "incoming_body_cancellation_preserves_exact_kind",
             "incoming_body_queue_bytes_backpressure_independently_of_frame_slots",
+            "incoming_body_queue_byte_wait_is_woken_by_cancellation",
             "incoming_body_consumer_drop_drains_and_preserves_pipeline_remainder",
+            "incoming_body_consumer_drop_counts_exact_queued_frames",
             "streaming_server_publishes_head_before_reading_body",
             "streaming_server_drains_unread_body_before_pipeline_reuse",
             "streaming_server_closes_when_unread_body_exceeds_drain_limit",
@@ -1468,6 +1491,7 @@ fn validate_docs_and_boundaries(inventory: &Value) -> Result<(), String> {
         "## Stable error mapping",
         "## Evidence status and no-claim boundary",
         "IncomingRequestBody",
+        "IncomingBody",
         "IncomingBodyError",
         "is not cloneable",
         "Send + Unpin + 'static",
@@ -1620,10 +1644,10 @@ fn server_incoming_body_contract_fails_closed_on_material_drift() {
         Value::from(500_u64);
     mutations.push(("wrong consumer-drop status", wrong_consumer_status));
 
-    let mut compatibility_shim = base.clone();
-    compatibility_shim["compatibility_migration"]["policy"] =
-        Value::String("ADD_COMPATIBILITY_SHIM".to_owned());
-    mutations.push(("compatibility shim policy", compatibility_shim));
+    let mut direct_cutover = base.clone();
+    direct_cutover["compatibility_migration"]["policy"] =
+        Value::String("DIRECT_CUTOVER_NO_COMPATIBILITY_SHIM".to_owned());
+    mutations.push(("direct-cutover compatibility policy", direct_cutover));
 
     let mut missing_pin = base.clone();
     let _ = missing_pin["source_pins"]

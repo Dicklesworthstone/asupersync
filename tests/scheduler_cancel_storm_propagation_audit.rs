@@ -110,6 +110,7 @@ fn request_cancel_with_budget_avoids_global_task_or_region_scans() {
     // cancel_waker_snapshot deduplicates W registrations with
     // a linear search per target and may cost O(W^2).
     let source = read("src/record/task.rs");
+    let task_context = read("src/types/task_context.rs");
 
     let fn_marker = "pub(crate) fn request_cancel_with_budget_and_publication(";
     let start = source
@@ -121,10 +122,12 @@ fn request_cancel_with_budget_avoids_global_task_or_region_scans() {
     let body = &source[start..start + end];
 
     assert!(
-        body.contains(".store(true, std::sync::atomic::Ordering::Release);")
+        body.contains("guard.set_cancel_requested(true);")
+            && task_context.contains("self.publish_cancel_requested(value);")
+            && task_context.contains(".store(value, std::sync::atomic::Ordering::Release);")
             && body.contains("guard.cancel_waker_snapshot()"),
         "REGRESSION: request_cancel_with_budget no longer \
-         exposes the fast-cancel Release store and explicit \
+         exposes the stable cancellation Release publisher and explicit \
          Waker snapshot surface audited here.",
     );
 
@@ -208,16 +211,19 @@ fn cancel_request_returns_effects_for_single_post_lock_routing_pass() {
 }
 
 #[test]
-fn fast_cancel_is_arc_atomic_bool_for_single_release_publish() {
-    // Pin (link 6): fast_cancel is Arc<AtomicBool> on CxInner.
+fn cancellation_envelope_is_stable_arc_for_single_release_publish() {
+    // Pin (link 6): cancellation is a private stable Arc envelope on CxInner.
     // The flag itself has a single Release publication; this
     // says nothing about the rest of per-task cancellation.
     let source = read("src/types/task_context.rs");
 
     assert!(
-        source.contains("pub fast_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,"),
-        "REGRESSION: CxInner.fast_cancel is no longer \
-         Arc<AtomicBool>. A multi-set or broadcast protocol \
+        source.contains("pub(crate) struct CxCancellationState {")
+            && source.contains("requested: std::sync::atomic::AtomicBool,")
+            && source.contains("cancellation: std::sync::Arc<CxCancellationState>,")
+            && source.contains("std::sync::Arc::clone(&self.cancellation)"),
+        "REGRESSION: CxInner cancellation is no longer a private stable \
+         Arc envelope. A multi-set or broadcast protocol \
          would amplify per-task cost — cancel-storm bound \
          at risk.",
     );

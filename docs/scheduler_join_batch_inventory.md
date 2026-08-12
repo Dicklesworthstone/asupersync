@@ -40,6 +40,21 @@ registry row, measurement state, candidate, threshold, or disposition. The
 Rust contract was not executed, and the missing p50, p95, allocation,
 repetition, and admitted two-host observations still keep the bead open.
 
+### Current source reconciliation (2026-08-11)
+
+`SCHED-JOIN-BATCH-SOURCE-RECONCILIATION-2026-08-11` preserves the historical
+refresh above and separately reconciles the live pins and all 76 exact anchors
+against the current tree. Four pinned sources moved after the 2026-08-06
+capture: `src/runtime/task_handle.rs`, `src/cx/cx.rs`,
+`src/runtime/spawn_mailbox.rs`, and
+`src/runtime/scheduler/three_lane.rs`. Their cancellation-publication,
+mailbox-maintenance, and waker changes leave the recorded join terminal
+semantics and the batch-one/batch-sixteen fairness anchors intact.
+
+This current reconciliation changes no benchmark source or baseline row,
+records no measurement, and does not satisfy the p50, p95, allocation,
+repetition, or two-host evidence blocker.
+
 The two completion families are intentionally separate:
 
 - `RuntimeHandle::spawn` returns the legacy

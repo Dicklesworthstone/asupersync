@@ -12,7 +12,7 @@ Static contract: `tests/scheduler_hot_read_inventory_contract.rs`
 
 The live scheduler does not have the uniform locked read described by
 `benches/task_state_hot_reads.rs`. Its scalar phase snapshot, wake-dedup state,
-and ordinary-waker cancellation hint are already atomic. Rich `TaskState`,
+and ordinary-waker cancellation publication state are already atomic. Rich `TaskState`,
 cancellation reasons, cleanup priorities, stored futures, and record ownership
 remain behind the task-table or `CxInner` lock that makes their lifetime and
 payload coherent.
@@ -31,7 +31,7 @@ new operation ID.
 | Rich task lifecycle | `TaskRecord` while owned by `TaskTable` | A `TaskId` contains an arena slot and generation. `Arena::get` rejects a vacant or generation-mismatched slot. Removal advances the generation; generation exhaustion retires the slot. | `TaskState` is read and mutated while the owning task table or embedded runtime state is locked. It owns non-scalar outcome, reason, and cleanup-budget payloads. |
 | Phase snapshot | `TaskRecord::phase: TaskPhaseCell` | The cell is part of the record and does not independently retain the record. A caller still needs a generation-valid record reference. | `AtomicU8`, Acquire load and Release store. It is a scalar lifecycle projection, not ownership for `TaskState`. |
 | Wake dedup | `TaskRecord::wake_state: Arc<TaskWakeState>` | Wakers clone the `Arc` while the record is valid. Recycled records reset the cell in place only when uniquely owned; otherwise they receive a fresh `Arc`, so an old waker cannot notify a new generation. | `AtomicU8` state machine: `Idle`, `Polling`, `Notified`. Notify is Release; finish-poll failure is Acquire; begin-poll is under the record-owner lock. |
-| Fast cancellation hint | `CxInner::fast_cancel: Arc<AtomicBool>` | Wakers retain the `Arc` and only a `Weak<CxInner>` for rich state. The flag says cancellation may need routing; it does not own the reason. | Writers update cancellation under the `CxInner` write lock and store Release. `Cx::checkpoint` and ordinary wakers load Acquire. A waker that observes true reacquires the `CxInner` read lock before reading the reason. |
+| Cancellation publication state | `CxInner::fast_cancel: Arc<AtomicBool>` (named `CxCancellationState` inside the scheduler) | Wakers retain the original stable `Arc` and only a `Weak<CxInner>` for rich state. The bit says cancellation may need routing; it does not own the reason. Direct replacement of the public compatibility field cannot retarget already-created wakers. | Writers call `CxInner::set_cancel_requested` under the write lock, which updates the lock-backed bit and publishes Release to both the stable scheduler handle and any replacement compatibility handle. `Cx::checkpoint` and ordinary wakers query Acquire. A waker that observes true reacquires the `CxInner` read lock before reading the reason. |
 | Rich cancellation state | `CxInner::{cancel_requested,cancel_reason,cancel_wakers_pending}` | Lives with the `CxInner`; readers upgrade or retain the context before locking it. | `parking_lot::RwLock<CxInner>` keeps the flag, strongest reason, cleanup priority, publication gate, and waker registry coherent. |
 | Stored future and queue ownership | `TaskTable` plus scheduler queues | Future removal, record mutation, reinsertion, completion, removal, and recycling all validate the same generation-bearing `TaskId`. | The selected task-table backing is locked. Queue publication additionally follows `TaskWakeState` and the cancel-lane promotion rules. |
 
@@ -49,14 +49,14 @@ classes are summarized here.
 
 | Reader class | Exact live anchors | Expected frequency | Meaning |
 |---|---|---|---|
-| Phase accessor and bookkeeping | `TaskRecord::phase` at `src/record/task.rs:550`; `TaskTable::{count_in_phase,insert,remove,insert_task_with,insert_pooled_task_with,update_task,live_task_count}` at `src/runtime/task_table.rs:301,329,343,456,485,517,615` | lifecycle bookkeeping or whole-table telemetry; `update_task` brackets each mutation | Scalar phase only. Every in-tree caller already holds a valid record/table reference. |
-| Rich task state | `Worker::execute_task` at `src/runtime/scheduler/worker.rs:391,607,770`; `ThreeLaneWorker::{execute_task,complete_polled_record}` at `src/runtime/scheduler/three_lane.rs:7552,7885`; `TaskSnapshot::from_record` at `src/runtime/state.rs:8884` | poll completion/unwind or cold snapshot | Non-scalar lifecycle and outcome semantics under the record owner lock. |
-| Public cancellation query | `Cx::is_cancel_requested` at `src/cx/cx.rs:2126` | caller-selected | Locked `cancel_requested` read; it is not the ordinary-waker fast path. |
-| Checkpoint hint | `Cx::checkpoint` at `src/cx/cx.rs:2171` | cooperative progress checkpoint | Acquire-loads `fast_cancel` while holding a `CxInner` read guard; cancellation and budget handling then use the locked slow path. |
-| Ordinary global wake | `ThreeLaneWaker::schedule` at `src/runtime/scheduler/three_lane.rs:7950` | every ordinary global wake that wins dedup | `TaskWakeState::notify`, then Acquire `fast_cancel`; a true hint triggers a locked reason/priority read. |
-| Ordinary local wake | `ThreeLaneLocalWaker::schedule` at `src/runtime/scheduler/three_lane.rs:8012` | every ordinary local wake that wins dedup | Same atomic hint, followed by locked reason/priority lookup before local cancel-lane promotion. |
-| Reason-bearing global cancel wake | `CancelLaneWaker::schedule` at `src/runtime/scheduler/three_lane.rs:8073` | cancellation wake | Reads `cancel_requested` and reason-derived cleanup priority together under the `CxInner` read lock, then promotes unconditionally. |
-| Reason-bearing local cancel wake | `ThreeLaneLocalCancelWaker::schedule` at `src/runtime/scheduler/three_lane.rs:8132` | local cancellation wake | Same coherent locked payload read, then local cancel-lane promotion. |
+| Phase accessor and bookkeeping | `TaskRecord::phase` at `src/record/task.rs:596`; `TaskTable::{count_in_phase,insert,remove,insert_task_with,insert_pooled_task_with,update_task,live_task_count}` at `src/runtime/task_table.rs:301,329,343,456,485,517,615` | lifecycle bookkeeping or whole-table telemetry; `update_task` brackets each mutation | Scalar phase only. Every in-tree caller already holds a valid record/table reference. |
+| Rich task state | `Worker::execute_task` at `src/runtime/scheduler/worker.rs:391,607,770`; `ThreeLaneWorker::{execute_task,complete_polled_record}` at `src/runtime/scheduler/three_lane.rs:7553,7886`; `TaskSnapshot::from_record` at `src/runtime/state.rs:8884` | poll completion/unwind or cold snapshot | Non-scalar lifecycle and outcome semantics under the record owner lock. |
+| Public cancellation query | `Cx::is_cancel_requested` at `src/cx/cx.rs:2140` | caller-selected | Reads the restored 0.4.3 `cancel_requested` flag under the `CxInner` read lock with its original semantics; it does not clone the rich cancellation reason. Standard runtime publication still uses the stable envelope. |
+| Checkpoint publication query | `Cx::checkpoint` at `src/cx/cx.rs:2205` | cooperative progress checkpoint | Acquire-queries the stable cancellation envelope while holding a `CxInner` read guard; cancellation and budget handling then use the locked slow path. |
+| Ordinary global wake | `ThreeLaneWaker::schedule` at `src/runtime/scheduler/three_lane.rs:7951` | every ordinary global wake that wins dedup | `TaskWakeState::notify`, then Acquire-query the stable cancellation envelope; a true result triggers a locked reason/priority read. |
+| Ordinary local wake | `ThreeLaneLocalWaker::schedule` at `src/runtime/scheduler/three_lane.rs:8014` | every ordinary local wake that wins dedup | Same stable-envelope query, followed by locked reason/priority lookup before local cancel-lane promotion. |
+| Reason-bearing global cancel wake | `CancelLaneWaker::schedule` at `src/runtime/scheduler/three_lane.rs:8075` | cancellation wake | Reads `cancel_requested` and reason-derived cleanup priority together under the `CxInner` read lock, then promotes unconditionally. |
+| Reason-bearing local cancel wake | `ThreeLaneLocalCancelWaker::schedule` at `src/runtime/scheduler/three_lane.rs:8134` | local cancellation wake | Same coherent locked payload read, then local cancel-lane promotion. |
 
 `TaskPhaseCell` has nine direct in-tree production load positions: the accessor,
 the whole-table count, insert bookkeeping, remove bookkeeping, closure-based
@@ -73,7 +73,7 @@ poll-loop call equivalent to the benchmark's repeated
 and `finalize_done_with_witness`. Their rich-state mutation and Release phase
 store occur while a caller owns the record mutably.
 
-The direct `fast_cancel` writer set is pinned in the artifact. It includes
+The direct cancellation-publication writer set is pinned in the artifact. It includes
 task-record cancellation, task-handle cancellation, checkpoint budget
 exhaustion, the explicit `Cx` cancellation APIs, actor/server aborts, and the
 deterministic lab quota path. Each writer runs under the `CxInner` write lock.
@@ -82,7 +82,7 @@ The required interpretation is:
 1. lock `CxInner` for writing;
 2. set `cancel_requested` and any producer-specific fields ordered before the
    scalar hint;
-3. publish `fast_cancel` with Release as the scalar hint;
+3. call `set_cancel_requested`, which publishes the matching requested bit with Release;
 4. finish the reason, cleanup-budget, and pending-waker mutation under the same
    write guard (individual producers may have completed some of these fields
    before step 3);
@@ -123,7 +123,8 @@ the binary:
    task-table shard;
 2. takes the broad runtime-state lock for every read;
 3. reads rich `TaskState` through `state_name()` and `is_cancelling()` even
-   though ordinary production wakers use `TaskWakeState` plus `fast_cancel`;
+though ordinary production wakers use `TaskWakeState` plus the stable
+cancellation publication envelope;
 4. never runs queue publication, cancel-lane promotion, reason-priority lookup,
    stored-future ownership, generation mismatch, removal, or recycling;
 5. uses fresh records that never enter cancellation, so its asserted semantic

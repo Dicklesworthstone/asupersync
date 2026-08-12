@@ -61,8 +61,8 @@
     {
       "surface_id": "H1-STREAM-SCAFFOLD",
       "state": "LANDED",
-      "current_semantics": "IncomingRequestBody and IncomingBodyWriter use independently bounded frame and queued-byte storage with fixed-length or chunked parsing. The writer records an exact IncomingBodyError before closing, checks incoming buffer, data, and trailer arithmetic before mutation, preserves exact cancellation kinds, and signals consumer drop for protocol-owned cleanup.",
-      "anchors": ["src/http/h1/stream.rs::IncomingRequestBody", "src/http/h1/stream.rs::IncomingBodyWriter", "src/http/h1/stream.rs::StreamingRequest"],
+      "current_semantics": "IncomingRequestBody and IncomingRequestBodyWriter use independently bounded frame and queued-byte storage with fixed-length or chunked parsing. The writer records an exact IncomingBodyError before closing, checks incoming buffer, data, and trailer arithmetic before mutation, preserves exact cancellation kinds, and signals consumer drop for protocol-owned cleanup. IncomingBody and IncomingBodyWriter remain additive 0.4.3-compatible adapters.",
+      "anchors": ["src/http/h1/stream.rs::IncomingRequestBody", "src/http/h1/stream.rs::IncomingRequestBodyWriter", "src/http/h1/stream.rs::StreamingServerRequest", "src/http/h1/stream.rs::IncomingBody"],
       "gap": "Incoming-body terminal telemetry and body-obligation ledger integration remain follow-on work."
     },
     {
@@ -316,7 +316,7 @@
     {
       "mapping_id": "BODY-LIMIT-EXCEEDED",
       "lifecycle_applicability": ["PRE_BODY", "BODY_OPEN"],
-      "current_variants": ["HttpError::BodyTooLarge", "HttpError::BodyTooLargeDetailed", "LimitedError::LengthLimit"],
+      "current_variants": ["HttpError::BodyTooLarge", "HttpError::BodyTooLargeDetailed", "LimitedError::LengthLimit", "IncomingBodyError::BodyTooLarge", "IncomingBodyError::QueueFrameTooLarge"],
       "http_status_when_response_possible": 413,
       "telemetry_status": null,
       "protocol_action": "Send 413 when safely writable; H1 then drains within every bound and reuses only after synchronized EOF, otherwise closes; H2 cancels or resets unread input as protocol state permits.",
@@ -325,7 +325,7 @@
     {
       "mapping_id": "BODY-FRAMING-INVALID",
       "lifecycle_applicability": ["PRE_BODY", "BODY_OPEN"],
-      "current_variants": ["HttpError::BadContentLength", "HttpError::DuplicateContentLength", "HttpError::DuplicateTransferEncoding", "HttpError::BadTransferEncoding", "HttpError::BadChunkedEncoding", "HttpError::AmbiguousBodyLength", "HttpError::TrailersNotAllowed", "HttpError::HeadersTooLarge", "HttpError::BadHeader", "HttpError::InvalidHeaderName", "HttpError::InvalidHeaderValue"],
+      "current_variants": ["HttpError::BadContentLength", "HttpError::DuplicateContentLength", "HttpError::DuplicateTransferEncoding", "HttpError::BadTransferEncoding", "HttpError::BadChunkedEncoding", "HttpError::AmbiguousBodyLength", "HttpError::TrailersNotAllowed", "HttpError::HeadersTooLarge", "HttpError::BadHeader", "HttpError::InvalidHeaderName", "HttpError::InvalidHeaderValue", "IncomingBodyError::BadContentLength", "IncomingBodyError::BadChunkedEncoding", "IncomingBodyError::TrailersTooLarge", "IncomingBodyError::BadHeader", "IncomingBodyError::InvalidHeaderName", "IncomingBodyError::InvalidHeaderValue"],
       "http_status_when_response_possible": 400,
       "telemetry_status": null,
       "protocol_action": "Refuse request and do not reuse ambiguous H1 framing; apply the protocol-defined H2 stream action",
@@ -334,7 +334,7 @@
     {
       "mapping_id": "BODY-CANCELLED",
       "lifecycle_applicability": ["PRE_BODY", "BODY_OPEN"],
-      "current_variants": ["HttpError::BodyCancelled", "ServerHopOutcome::Cancelled"],
+      "current_variants": ["HttpError::BodyCancelled", "ServerHopOutcome::Cancelled", "IncomingBodyError::Cancelled { kind }"],
       "http_status_when_response_possible": null,
       "telemetry_status": 499,
       "protocol_action": "Record the existing web cancellation representation, stop request work, and transfer unresolved cleanup to the protocol driver",
@@ -352,7 +352,7 @@
     {
       "mapping_id": "BODY-RESOURCE-EXHAUSTED",
       "lifecycle_applicability": ["PRE_BODY", "BODY_OPEN"],
-      "current_variants": [],
+      "current_variants": ["IncomingBodyError::Cancelled { kind: CancelKind::PollQuota | CancelKind::CostBudget | CancelKind::ResourceUnavailable }"],
       "http_status_when_response_possible": 503,
       "telemetry_status": null,
       "protocol_action": "Retain PollQuota, CostBudget, or ResourceUnavailable as the exact CancelKind, stop request work, and enter the typed bounded cleanup policy; do not apply the generic 499 representation.",
@@ -361,8 +361,8 @@
     {
       "mapping_id": "BODY-SOURCE-DISCONNECTED",
       "lifecycle_applicability": ["BODY_OPEN"],
-      "current_variants": [],
-      "current_ambiguity": "HttpError::BodyChannelClosed conflates missing sender, full or disconnected producer send, and consumer loss; receiver-side producer disconnect currently becomes EOF.",
+      "current_variants": ["IncomingBodyError::SourceDisconnected"],
+      "current_ambiguity": "The retained 0.4.3 HttpError::BodyChannelClosed adapter intentionally conflates missing sender, disconnected producer send, and consumer loss; the typed IncomingRequestBody path does not convert premature producer disconnect to EOF.",
       "http_status_when_response_possible": 500,
       "telemetry_status": null,
       "protocol_action": "Treat as terminal internal source failure; never convert to EOF",
@@ -380,7 +380,7 @@
     {
       "mapping_id": "BODY-ACCOUNTING-OVERFLOW",
       "lifecycle_applicability": ["BODY_OPEN"],
-      "current_variants": [],
+      "current_variants": ["IncomingBodyError::AccountingOverflow"],
       "http_status_when_response_possible": 500,
       "telemetry_status": null,
       "protocol_action": "Fail before enqueue, close or reset the affected protocol scope, and retain the checked operands in telemetry",
@@ -389,8 +389,8 @@
     {
       "mapping_id": "BODY-CONSUMER-DROPPED",
       "lifecycle_applicability": ["BODY_OPEN"],
-      "current_variants": [],
-      "current_ambiguity": "HttpError::BodyChannelClosed is an ambiguous channel-closure variant, not a unique consumer-drop outcome; BODY-1 requires distinct typed source and consumer outcomes.",
+      "current_variants": ["IncomingBodyError::ConsumerDropped"],
+      "current_ambiguity": "The retained 0.4.3 HttpError::BodyChannelClosed adapter remains intentionally ambiguous; the typed writer observes IncomingBodyError::ConsumerDropped and transfers cleanup to the protocol driver.",
       "http_status_when_response_possible": null,
       "telemetry_status": null,
       "protocol_action": "Invoke bounded H1 drain-or-close or H2 stream reset policy",
@@ -463,8 +463,8 @@
     "current_status": "NO_INCOMING_BODY_TERMINAL_RECEIPT"
   },
   "compatibility_migration": {
-    "policy": "DIRECT_CUTOVER_NO_COMPATIBILITY_SHIM",
-    "request_change": "Replace buffered body ownership in protocol and web request types with the single IncomingRequestBody after protocol adapters are ready.",
+    "policy": "ADDITIVE_LEGACY_ADAPTER_SINGLE_TYPED_AUTHORITY",
+    "request_change": "Retain the 0.4.3 IncomingBody, IncomingBodyWriter, StreamingRequest, and Http1Config source shapes as delegated adapters while the streaming server uses IncomingRequestBody, IncomingRequestBodyWriter, StreamingServerRequest, and Http1StreamingConfig as additive typed APIs.",
     "buffered_extractors": "JSON, form, and raw extractors collect through Limited with checked accounting and preserve their existing default limits.",
     "multipart_policy": "Until BODY-5 lands, Multipart remains bounded whole-body collection under its retained 16 MiB aggregate limit; incremental parsing is not claimed.",
     "json_default_disposition": "KEEP_10_MIB",
@@ -502,7 +502,10 @@
       "producer_error_reason_mirroring": "EXACT_TYPED_TERMINAL_REASON_AFTER_QUEUED_FRAMES",
       "live_h1_dispatch_streaming": true,
       "queue_byte_budget_enforced": true,
+      "queue_byte_wait_is_cancel_aware": true,
       "consumer_drop_signal_present": true,
+      "consumer_drop_exactly_accounts_abandoned_queue": true,
+      "connection_cancel_waker_is_owned_and_cleared": true,
       "drain_or_close_policy_present": true,
       "incoming_body_error_type_present": true,
       "already_terminal_repoll_error_present": true
@@ -516,7 +519,9 @@
       "incoming_body_repoll_after_eof_fails_closed",
       "incoming_body_cancellation_preserves_exact_kind",
       "incoming_body_queue_bytes_backpressure_independently_of_frame_slots",
+      "incoming_body_queue_byte_wait_is_woken_by_cancellation",
       "incoming_body_consumer_drop_drains_and_preserves_pipeline_remainder",
+      "incoming_body_consumer_drop_counts_exact_queued_frames",
       "streaming_server_publishes_head_before_reading_body",
       "streaming_server_drains_unread_body_before_pipeline_reuse",
       "streaming_server_closes_when_unread_body_exceeds_drain_limit",
@@ -539,7 +544,7 @@
     {"path": "src/codec/framed.rs", "sha256": "5733d84397523e9659ea18e25fa152fa6d4ebe81766da96432f717a8d4f546d7", "line_count": 1372, "anchors": ["pub struct Framed<T, U>", "pub fn read_buffer", "impl<T, U> Stream for Framed"]},
     {"path": "src/codec/framed_read.rs", "sha256": "477bf58ca5ee956c841937e59cacda49927a31f2a99f75560223f6f43142d42d", "line_count": 1165, "anchors": ["pub const DEFAULT_MAX_BUFFER_LEN", "pub struct FramedRead<R, D>"]},
     {"path": "src/http/h1/mod.rs", "sha256": "dcb53231ae9339e04994e40d4a472b4a020d05cdb2ca051cee451864786032c5", "line_count": 53, "anchors": ["pub mod stream;", "pub use stream::{"]},
-    {"path": "src/http/h1/stream.rs", "sha256": "7a9217a92e88253451ada678d9f851e2a603dae8d182f61bd69d96b53d766f8f", "line_count": 2476, "anchors": ["pub enum IncomingBodyError {", "pub struct IncomingRequestBody {", "pub struct IncomingBodyWriter {", "pub fn channel_with_limits(", "pub fn discard_bytes(", "fn incoming_body_queue_bytes_backpressure_independently_of_frame_slots()"]},
+    {"path": "src/http/h1/stream.rs", "sha256": "cd3d2c4e47f73af6dcc40d4fab705f12c0173b8417b833b37daf6145462e4aa8", "line_count": 2706, "anchors": ["pub enum IncomingBodyError {", "pub struct IncomingRequestBody {", "pub struct IncomingRequestBodyWriter {", "pub struct IncomingBody {", "pub struct StreamingServerRequest {", "pub fn channel_with_limits(", "pub fn discard_bytes(", "fn incoming_body_queue_bytes_backpressure_independently_of_frame_slots()", "fn incoming_body_queue_byte_wait_is_woken_by_cancellation()", "fn incoming_body_consumer_drop_counts_exact_queued_frames()"]},
     {"path": "src/http/h1/codec.rs", "sha256": "5edf27b58e2a55a5b04588057809acecee81a63fae976412f5c5b63f7dcee2e1", "line_count": 2869, "anchors": ["pub enum HttpError {", "pub struct Http1Codec", "pub(super) fn decode_streaming_request_head(", "fn decode_head("]},
     {"path": "src/http/h1/types.rs", "sha256": "c996611abc2ef2d91e914d19e9110230ea90370de98c4a9bcda7bb0edf238692", "line_count": 2102, "anchors": ["pub struct Request {", "pub body: Vec<u8>"]},
     {"path": "src/http/h1/server.rs", "sha256": "89f474dc342c522edb1764191136f47564b454a709c249a9f2f6be353e3e85c3", "line_count": 3249, "anchors": ["pub struct Http1StreamingServer<F>", "pub async fn serve_with_peer_addr", "async fn drive_incoming_body", "fn validate_unread_drain"]},
@@ -553,7 +558,7 @@
     {"path": "src/web/middleware.rs", "sha256": "1a34c4d8dc70dc65b6a2af11f447e86b388594752e43821e971ad22086f25ea2", "line_count": 6027, "anchors": ["pub struct RetryMiddleware", "pub struct RequestBodyLimitMiddleware", "if req.body.len() > self.max_bytes"]},
     {"path": "src/web/multipart.rs", "sha256": "03ffb856485d1ec52878aa811fef324d0dcf63ad9fc5182430a050e648d72058", "line_count": 1753, "anchors": ["const DEFAULT_MAX_MULTIPART_SIZE", "const DEFAULT_MAX_PART_BODY_SIZE", "pub struct MultipartLimits {", "pub struct Multipart {"]},
     {"path": "src/web/response.rs", "sha256": "be4f49cbbbf5f71e85143e02df1f3a15765dfda51598428159daf7c977343222", "line_count": 1530, "anchors": ["pub struct Response {", "impl Response"]},
-    {"path": "src/web/request_region.rs", "sha256": "0044104a680c0bb2589a14dcf84c88c53276fa5cd1ef0fe86725b6b1277308ab", "line_count": 2697, "anchors": ["pub enum ServerHopOutcome<R>", "pub struct ServerRequestRegion", "pub fn mint_from_connection("]},
+    {"path": "src/web/request_region.rs", "sha256": "7ac9226d7c46f8244c63c4b9fab14cfefdcd8f5c392bfd41da68ee193eb134ad", "line_count": 2764, "anchors": ["pub enum ServerHopOutcome<R>", "pub struct ServerRequestRegion", "struct ConnectionCancelWaker", "pub fn mint_from_connection("]},
     {"path": "src/types/cancel.rs", "sha256": "5e4e0dc8a220da781afc0c8b316babed57e6561fae29984ba49a410745fded4f", "line_count": 2800, "anchors": ["pub enum CancelKind {", "LinkedExit,"]},
     {"path": "docs/error_codes/registry.json", "sha256": "1f7617bec4260cda0b281186c0f943ad0f63d63db1a5afb6ac0b8aa6dc93c1b1", "line_count": 963, "anchors": ["ASUP-E5xx", "net-http"]},
     {"path": "docs/error_codes/ASUP-E501.md", "sha256": "32ed651e5d68b7dc183e720ea88c7f3ea21a239d21f103146c77ec505ff59384", "line_count": 26, "anchors": ["# ASUP-E501 - HTTP Deadline Exhausted", "[ASUP-E501]", "effective deadline is the meet"]},

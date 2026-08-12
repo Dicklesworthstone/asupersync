@@ -208,8 +208,8 @@ fn cx_cancel_fast_exists_with_kind_only() {
 #[test]
 fn cancel_with_and_cancel_fast_use_same_underlying_mechanism() {
     // Pin: BOTH cancel_with and cancel_fast set the SAME
-    // three flags: cancel_requested = true, fast_cancel
-    // store(true, Release), cancel_reason = Some(...). If
+    // state through set_cancel_requested(true) and set/strengthen
+    // cancel_reason. The setter owns the Release publication. If
     // they ever diverge, the "two paths, same semantic"
     // promise is broken.
     let source = read("src/cx/cx.rs");
@@ -224,12 +224,7 @@ fn cancel_with_and_cancel_fast_use_same_underlying_mechanism() {
     let cw_body = &source[cw_pos..cw_pos + 1500];
     let cf_body = &source[cf_pos..cf_pos + 1500];
 
-    let common_ops = [
-        "inner.cancel_requested = true;",
-        ".fast_cancel",
-        ".store(true, std::sync::atomic::Ordering::Release);",
-        "inner.cancel_reason = Some",
-    ];
+    let common_ops = ["inner.set_cancel_requested(true);", "inner.cancel_reason"];
     for op in &common_ops {
         assert!(
             cw_body.contains(op),
@@ -244,6 +239,16 @@ fn cancel_with_and_cancel_fast_use_same_underlying_mechanism() {
              diverged.",
         );
     }
+
+    let task_context = read("src/types/task_context.rs");
+    assert!(
+        task_context.contains("pub(crate) fn set_cancel_requested(&mut self, value: bool)")
+            && task_context.contains("self.cancel_requested = value;")
+            && task_context.contains("self.publish_cancel_requested(value);")
+            && task_context.contains(".store(value, std::sync::atomic::Ordering::Release);"),
+        "REGRESSION: the unified cancellation setter no longer pairs lock-backed state with \
+         Release-ordered publication"
+    );
 }
 
 #[test]

@@ -175,6 +175,7 @@ fn task_handle_abort_with_reason_publishes_via_release_store() {
     // Release store is what makes the cancel signal
     // visible to the task's next Acquire load.
     let source = read("src/runtime/task_handle.rs");
+    let task_context = read("src/types/task_context.rs");
 
     let fn_marker = "pub fn abort_with_reason(&self, reason: CancelReason) {";
     let start = source.find(fn_marker).expect("abort_with_reason fn");
@@ -189,8 +190,9 @@ fn task_handle_abort_with_reason_publishes_via_release_store() {
             && source.contains("let mut cached = requested.write();")
             && source.contains(".filter(|task| task.is_published())")
             && source.contains("strengthen_cancel_reason_locked(&mut lock, &strongest_requested);")
-            && source.contains("lock.cancel_requested = true;")
-            && source.contains(".store(true, std::sync::atomic::Ordering::Release);"),
+            && source.contains("lock.set_cancel_requested(true);")
+            && task_context.contains("self.publish_cancel_requested(value);")
+            && task_context.contains(".store(value, std::sync::atomic::Ordering::Release);"),
         "REGRESSION: abort_with_reason no longer publishes \
          through the admission gate and cancel_requested + \
          fast_cancel.store(Release). \
@@ -386,18 +388,21 @@ fn join_future_completes_via_receiver_recv_uninterruptible_after_abort() {
 }
 
 #[test]
-fn fast_cancel_is_arc_atomic_bool_for_cross_thread_propagation() {
-    // Pin (link 1 cross-thread): fast_cancel is
-    // Arc<AtomicBool>. Without the Arc, abort from one
+fn stable_cancellation_envelope_is_shared_for_cross_thread_propagation() {
+    // Pin (link 1 cross-thread): cancellation is a private stable
+    // Arc envelope containing an AtomicBool. Without the Arc, abort from one
     // thread + checkpoint on another wouldn't share the
     // atomic — is_finished stuck false even after
     // checkpoint observation.
     let source = read("src/types/task_context.rs");
 
     assert!(
-        source.contains("pub fast_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,"),
-        "REGRESSION: CxInner.fast_cancel is no longer \
-         Arc<AtomicBool>. abort+checkpoint cross-thread \
+        source.contains("pub(crate) struct CxCancellationState {")
+            && source.contains("requested: std::sync::atomic::AtomicBool,")
+            && source.contains("cancellation: std::sync::Arc<CxCancellationState>,")
+            && source.contains("std::sync::Arc::clone(&self.cancellation)"),
+        "REGRESSION: CxInner cancellation is no longer a private \
+         stable Arc envelope. abort+checkpoint cross-thread \
          pair is broken.",
     );
 }
