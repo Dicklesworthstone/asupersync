@@ -717,6 +717,22 @@ fn malformed_manifest_fails_closed_and_can_exit_nonzero() {
 }
 
 #[test]
+fn malformed_fixture_is_excluded_from_root_workspace_discovery() {
+    let root_manifest: toml::Value =
+        toml::from_str(&repo_file_text("Cargo.toml")).expect("parse root Cargo.toml");
+    let excluded = root_manifest["workspace"]["exclude"]
+        .as_array()
+        .expect("workspace.exclude array");
+
+    assert!(
+        excluded.iter().any(|entry| {
+            entry.as_str() == Some("tests/fixtures/migration_readiness_planner/malformed")
+        }),
+        "the intentionally invalid fixture must remain outside Cargo workspace discovery so Git consumers can resolve asupersync",
+    );
+}
+
+#[test]
 fn workspace_fixture_records_feature_gated_and_transitive_rows() {
     let report = json_report("workspace");
 

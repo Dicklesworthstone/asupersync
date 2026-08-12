@@ -10,7 +10,13 @@ members = [
     "franken_decision",
     "frankenlab", "drop_unwrap_finder",
 ]
-exclude = ["fuzz", "asupersync-wasm"]
+exclude = [
+    "fuzz",
+    "asupersync-wasm",
+    # This fixture is intentionally not valid TOML. Keep Cargo from trying to
+    # discover it as a nested package when asupersync is consumed from Git.
+    "tests/fixtures/migration_readiness_planner/malformed",
+]
 
 [package]
 name = "asupersync"

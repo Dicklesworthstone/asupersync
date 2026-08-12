@@ -1,9 +1,8 @@
 [workspace]
 # Standalone subproject — not part of the asupersync workspace at /data/projects/asupersync
-# (the root workspace.exclude list excludes only "fuzz" and "asupersync-wasm"; this
-# subproject is implicitly excluded by being in tests/conformance/, but needs the
-# explicit empty [workspace] table so `cargo` doesn't try to inherit the parent
-# workspace settings.)
+# This subproject is implicitly excluded by being in tests/conformance/, but
+# needs the explicit empty [workspace] table so `cargo` doesn't try to inherit
+# the parent workspace settings.
 
 [package]
 name = "raptorq-differential"
