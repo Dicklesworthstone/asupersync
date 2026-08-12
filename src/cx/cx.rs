@@ -2189,16 +2189,16 @@ impl<Caps> Cx<Caps> {
         // ── Fast path (br-asupersync-is2xg0) ──────────────────────────────
         // The vast majority of checkpoint() calls fire on healthy tasks
         // with no cancellation pending and no budget exhaustion. Take a
-        // read lock, query the stable cancellation envelope, snapshot the
+        // read lock, query the compatibility-aware cancellation state, snapshot the
         // (Copy) budget to detect deadline / poll / cost exhaustion inline, and
         // record progress via two atomic ops — without acquiring the
         // write lock or cloning `cancel_reason`.
         //
-        // Correctness: the stable cancellation envelope publishes with
-        // `Release` ordering from every source (TaskHandle::cancel,
-        // deadline_monitor, and the slow path below when it newly observes
-        // exhaustion). Its `Acquire` query therefore observes any prior
-        // cancellation.
+        // Correctness: every runtime cancellation source calls
+        // `CxInner::set_cancel_requested` under the write lock, updating the
+        // lock-backed flag, public handle, and stable scheduler clone with
+        // `Release`. This locked query also observes direct downstream public
+        // handle mutation or replacement with `Acquire` ordering.
         // Budget exhaustion is checked inline so unit-test invariants
         // ("checkpoint detects deadline / poll-quota / cost-budget
         // exhaustion") are preserved without going through deadline_monitor.
@@ -2249,6 +2249,15 @@ impl<Caps> Cx<Caps> {
             let mut inner = self.inner.write();
             inner.drain_fast_path_checkpoint();
             inner.checkpoint_state.record_at(checkpoint_time);
+            // A 0.4.3 consumer can directly replace and publish through the
+            // public `fast_cancel` handle. The read-side fast path observes
+            // that handle, so materialize the same observation into the
+            // authoritative locked state before making the slow-path
+            // delivery decision. Without this step the fast path could route
+            // here for cancellation only for this block to return `Ok(())`.
+            if inner.is_cancel_requested() && !inner.cancel_requested {
+                inner.set_cancel_requested(true);
+            }
             let budget_exhaustion = Self::checkpoint_budget_exhaustion(
                 inner.region,
                 inner.task,
@@ -2372,6 +2381,13 @@ impl<Caps> Cx<Caps> {
             inner
                 .checkpoint_state
                 .record_with_message_at(msg, checkpoint_time);
+            // Keep the always-locked checkpoint variant consistent with
+            // `checkpoint`: direct publication through the restored public
+            // `fast_cancel` handle must be delivered, not merely observed by
+            // the lock-free preflight in the other variant.
+            if inner.is_cancel_requested() && !inner.cancel_requested {
+                inner.set_cancel_requested(true);
+            }
             let budget_exhaustion = Self::checkpoint_budget_exhaustion(
                 inner.region,
                 inner.task,
@@ -5519,6 +5535,22 @@ mod tests {
         assert!(
             !cx.is_cancel_requested(),
             "the 0.4.3 query contract reads cancel_requested, not fast_cancel"
+        );
+
+        assert!(
+            cx.checkpoint().is_err(),
+            "checkpoint must deliver cancellation published through a replaced fast_cancel handle"
+        );
+        assert!(
+            cx.is_cancel_requested(),
+            "checkpoint must materialize fast cancellation into the legacy locked field"
+        );
+
+        cx.set_cancel_requested(false);
+        replacement.store(true, std::sync::atomic::Ordering::Release);
+        assert!(
+            cx.checkpoint_with("compatibility fast cancellation").is_err(),
+            "checkpoint_with must deliver cancellation published through a replaced fast_cancel handle"
         );
 
         cx.set_cancel_requested(false);
