@@ -254,24 +254,58 @@ fn post_capture_provenance_refresh_is_exact_and_non_semantic() {
 
     for row in refreshed_paths {
         assert_ne!(text(row, "previous_sha256"), text(row, "current_sha256"));
-        let pin = array(&artifact, "source_pins")
-            .iter()
-            .find(|pin| text(pin, "path") == text(row, "path"))
-            .expect("refreshed source pin");
-        assert_eq!(text(pin, "sha256"), text(row, "current_sha256"));
-        assert_eq!(
-            unsigned(pin, "line_count"),
-            unsigned(row, "current_line_count")
-        );
     }
 
     assert!(
         text(&refresh_value, "no_claim_boundary")
             .contains("executes no Rust contract or benchmark")
     );
+
+    let current = object(&artifact, "current_source_reconciliation");
+    let current = Value::Object(current.clone());
+    assert_eq!(
+        text(&current, "reconciliation_id"),
+        "SCHED-JOIN-BATCH-SOURCE-RECONCILIATION-2026-08-11"
+    );
+    assert_eq!(
+        text(&current, "reference_commit"),
+        "fd3ea78325d3275c20d5d13d599886c28562306e"
+    );
+    assert_eq!(unsigned(&current, "source_pin_path_count"), 15);
+    assert_eq!(unsigned(&current, "reconciled_path_count"), 4);
+    assert_eq!(unsigned(&current, "exact_anchor_count"), 76);
+    assert!(boolean(&current, "all_exact_anchors_match"));
+    for key in [
+        "semantic_contract_changed",
+        "measurement_state_changed",
+        "benchmark_source_changed",
+        "baseline_registry_changed",
+    ] {
+        assert!(!boolean(&current, key), "current reconciliation {key}");
+    }
+    assert_eq!(
+        row_id_set(&current, "reconciled_paths", "path"),
+        expected_set(&[
+            "src/cx/cx.rs",
+            "src/runtime/scheduler/three_lane.rs",
+            "src/runtime/spawn_mailbox.rs",
+            "src/runtime/task_handle.rs",
+        ])
+    );
+    for row in array(&current, "reconciled_paths") {
+        let pin = array(&artifact, "source_pins")
+            .iter()
+            .find(|pin| text(pin, "path") == text(row, "path"))
+            .expect("current reconciled source pin");
+        assert_eq!(text(pin, "sha256"), text(row, "sha256"));
+        assert_eq!(unsigned(pin, "line_count"), unsigned(row, "line_count"));
+        text(row, "classification");
+    }
+    assert!(text(&current, "no_claim_boundary").contains("no benchmark measurement"));
+
     let authority = Value::Object(object(&artifact, "authority").clone());
     assert!(
-        text(&authority, "source_revision_authority").contains("post_capture_provenance_refresh")
+        text(&authority, "source_revision_authority").contains("current_source_reconciliation")
     );
 }
 
