@@ -12,9 +12,9 @@
 //!   The operator's framing contains a **category error**:
 //!   asupersync has NO "hard-kill bypass drop guards"
 //!   pathway. In stable Rust under
-//:   `#![deny(unsafe_code)]`, you cannot kill a thread or
+//!   `#![deny(unsafe_code)]`, you cannot kill a thread or
 //!   forcibly terminate a future — there is no syscall, no
-//:   library primitive, no language construct that does
+//!   library primitive, no language construct that does
 //!   this without UB.
 //!
 //!   Both `TaskHandle::abort()` and `Cx::cancel*()` are
@@ -46,7 +46,7 @@
 //!
 //!   2. **Reason kind**:
 //!      - `abort()` → `CancelReason::user("abort")` (=
-//:        CancelKind::User).
+//!        CancelKind::User).
 //!      - `abort_with_reason(r)` → user-supplied reason.
 //!      - `cancel_with(kind, msg)` → user-specified kind +
 //!        message.
@@ -54,7 +54,7 @@
 //!        region.
 //!
 //!   3. **Handle access**: `TaskHandle::abort` operates on
-//:      a `Weak<RwLock<CxInner>>` (parent's handle to the
+//!      a `Weak<RwLock<CxInner>>` (parent's handle to the
 //!      child); `Cx::cancel*` operates on the running task's
 //!      own `Arc<RwLock<CxInner>>`.
 //!
@@ -81,29 +81,35 @@
 //!   NO "bypass" — that would require unsafe-code thread
 //!   termination which asupersync forbids.
 //!
-//! Verdict: **SOUND BY DESIGN**. The operator's hard-kill
-//! framing is a category error — asupersync has no such
-//! path. abort and cancel are SEMANTIC SYNONYMS via the
-//: same fast_cancel mechanism, differentiated only by:
+//! Verdict on the original hard-kill question: abort and
+//! cancel are graceful-cancellation variants via the same
+//! fast_cancel mechanism, differentiated only by:
 //!   - WHO requests (parent holding handle vs self).
 //!   - WHAT reason kind (User by default for abort; varies
-//:     for cancel).
+//!     for cancel).
 //!   - HOW handle access works (Weak vs Arc).
 //!
 //! Drop guards run on BOTH paths. Cancel-handlers run on
-//: BOTH paths. There is no "abort doesn't trigger cancel-
+//! BOTH paths. There is no "abort doesn't trigger cancel-
 //! handlers" semantic — the cancel-handlers ARE the
-//: graceful-cancel mechanism, and BOTH apis trigger them.
+//! graceful-cancel mechanism, and BOTH APIs trigger them.
 //!
-//! No bead filed. The two APIs are both graceful-cancel
-//! variants serving different user contexts (parent vs
-//! self).
+//! The native behavioral expansion of this audit nevertheless
+//! exposed a serious implementation defect (asupersync-yqlhh7):
+//! a parked cancel-aware operation could return its typed
+//! cancellation value, only for its spawn wrapper to discard
+//! that value by publishing through the now-cancelled child Cx.
+//! The repair makes mailbox and scope spawn adapters classify completion before
+//! one non-cancellable terminal-publication boundary. The tests below prove the
+//! actual native parked state, exact nested result, pre-poll and structured
+//! task-level cancellation, and resource cleanup without changing cooperative
+//! cancellation or acknowledged-cleanup semantics.
 //!
 //! A regression that:
 //!   - introduced a true hard-kill bypass via unsafe code
 //!     (would violate #![deny(unsafe_code)] AND would be a
-//:     soundness hazard — destructors must run for
-//:     resource safety),
+//!     soundness hazard — destructors must run for
+//!     resource safety),
 //!   - added a separate "abort_force" path that bypasses
 //!     the cancel-waker (would skip cross-thread
 //!     observability — parked tasks would miss the abort),
@@ -117,13 +123,511 @@
 //!   - introduced std::process::abort or libc::pthread_cancel
 //!     in the abort path (UB pathway; thread terminates
 //!     without destructor unwinding),
-//!     would all be caught by the structural pins below.
+//!     would all be caught by the behavioral and structural pins below.
 
+use asupersync::channel::mpsc::{self, SendError};
+use asupersync::cx::Cx;
+use asupersync::runtime::{JoinError, RuntimeBuilder, yield_now};
+use asupersync::sync::{
+    AcquireError, LockError, Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore,
+};
+use asupersync::types::CancelKind;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 fn read(rel: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
     std::fs::read_to_string(&path).expect("read source file")
+}
+
+#[test]
+fn abort_repolls_a_mutex_parked_operation_to_graceful_cancellation() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx: Cx = Cx::current().expect("runtime task installs a current Cx");
+        let mutex = Arc::new(Mutex::new(()));
+        let holder = mutex
+            .try_lock_owned()
+            .expect("seed mutex must be available");
+        let waiter_mutex = Arc::clone(&mutex);
+        let mut waiter = cx
+            .spawn(move |waiter_cx| async move {
+                OwnedMutexGuard::lock(waiter_mutex, &waiter_cx)
+                    .await
+                    .map(drop)
+            })
+            .expect("runtime-backed Cx must admit waiter task");
+
+        for _ in 0..256 {
+            if mutex.waiters() == 1 {
+                break;
+            }
+            yield_now().await;
+        }
+        assert_eq!(
+            mutex.waiters(),
+            1,
+            "waiter must be genuinely parked before abort so this test cannot pass via an admission race",
+        );
+
+        waiter.abort();
+        let result = waiter.join(&cx).await;
+        assert!(
+            matches!(result, Ok(Err(LockError::Cancelled))),
+            "aborting a mutex-parked operation must repoll it to its graceful inner cancellation result; got {result:?}",
+        );
+
+        drop(holder);
+        assert_eq!(
+            mutex.waiters(),
+            0,
+            "graceful cancellation must unlink the parked mutex waiter",
+        );
+    }));
+}
+
+#[test]
+fn acknowledged_cancellation_can_finish_async_cleanup_before_join_completes() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx: Cx = Cx::current().expect("runtime task installs a current Cx");
+        let mutex = Arc::new(Mutex::new(()));
+        let holder = mutex
+            .try_lock_owned()
+            .expect("seed mutex must be available");
+        let cleanup_completed = Arc::new(AtomicBool::new(false));
+        let waiter_mutex = Arc::clone(&mutex);
+        let waiter_cleanup_completed = Arc::clone(&cleanup_completed);
+        let mut waiter = cx
+            .spawn(move |waiter_cx| async move {
+                let result = OwnedMutexGuard::lock(waiter_mutex, &waiter_cx)
+                    .await
+                    .map(drop);
+                if matches!(result, Err(LockError::Cancelled)) {
+                    // Deliberately cross another Pending after the primitive's
+                    // checkpoint acknowledged cancellation. The spawn/result
+                    // boundary must not mistake protocol cleanup for an
+                    // unresponsive cancellation-blind future.
+                    yield_now().await;
+                    waiter_cleanup_completed.store(true, Ordering::Release);
+                }
+                result
+            })
+            .expect("runtime-backed Cx must admit waiter task");
+
+        for _ in 0..256 {
+            if mutex.waiters() == 1 {
+                break;
+            }
+            yield_now().await;
+        }
+        assert_eq!(
+            mutex.waiters(),
+            1,
+            "waiter must be genuinely parked before abort",
+        );
+
+        waiter.abort();
+        let result = waiter.join(&cx).await;
+        assert!(
+            matches!(result, Ok(Err(LockError::Cancelled))),
+            "cleanup must preserve the operation-level cancellation result; got {result:?}",
+        );
+        assert!(
+            cleanup_completed.load(Ordering::Acquire),
+            "a task that acknowledged cancellation must finish asynchronous protocol cleanup",
+        );
+
+        drop(holder);
+        assert_eq!(mutex.waiters(), 0, "cleanup must unlink the mutex waiter");
+    }));
+}
+
+#[test]
+fn local_spawn_abort_preserves_mutex_cancellation_and_waiter_cleanup() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx: Cx = Cx::current().expect("runtime task installs a current Cx");
+        let mutex = Arc::new(Mutex::new(()));
+        let holder = mutex
+            .try_lock_owned()
+            .expect("seed mutex must be available");
+        let waiter_mutex = Arc::clone(&mutex);
+        let mut waiter = cx
+            .spawn_local(move |waiter_cx| async move {
+                OwnedMutexGuard::lock(waiter_mutex, &waiter_cx)
+                    .await
+                    .map(drop)
+            })
+            .expect("worker-owned Cx must admit local waiter task");
+
+        for _ in 0..256 {
+            if mutex.waiters() == 1 {
+                break;
+            }
+            yield_now().await;
+        }
+        assert_eq!(
+            mutex.waiters(),
+            1,
+            "local waiter must be genuinely parked before abort",
+        );
+
+        waiter.abort();
+        let result = waiter.join(&cx).await;
+        assert!(
+            matches!(result, Ok(Err(LockError::Cancelled))),
+            "local-spawn abort must preserve the mutex operation's typed cancellation; got {result:?}",
+        );
+
+        drop(holder);
+        assert_eq!(
+            mutex.waiters(),
+            0,
+            "local-spawn cancellation must unlink the parked mutex waiter",
+        );
+    }));
+}
+
+#[test]
+fn cross_worker_abort_preserves_mutex_cancellation_and_waiter_cleanup() {
+    let runtime = RuntimeBuilder::multi_thread()
+        .worker_threads(2)
+        .build()
+        .expect("build two-worker runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx: Cx = Cx::current().expect("runtime task installs a current Cx");
+        let mutex = Arc::new(Mutex::new(()));
+        let holder = mutex
+            .try_lock_owned()
+            .expect("seed mutex must be available");
+        let waiter_mutex = Arc::clone(&mutex);
+        let mut waiter = cx
+            .spawn(move |waiter_cx| async move {
+                OwnedMutexGuard::lock(waiter_mutex, &waiter_cx)
+                    .await
+                    .map(drop)
+            })
+            .expect("runtime-backed Cx must admit waiter task");
+
+        for _ in 0..512 {
+            if mutex.waiters() == 1 {
+                break;
+            }
+            yield_now().await;
+        }
+        assert_eq!(
+            mutex.waiters(),
+            1,
+            "cross-worker waiter must be genuinely parked before abort",
+        );
+
+        waiter.abort();
+        let result = waiter.join(&cx).await;
+        assert!(
+            matches!(result, Ok(Err(LockError::Cancelled))),
+            "cross-worker abort must preserve the mutex operation's typed cancellation; got {result:?}",
+        );
+
+        drop(holder);
+        assert_eq!(
+            mutex.waiters(),
+            0,
+            "cross-worker cancellation must unlink the parked mutex waiter",
+        );
+    }));
+}
+
+#[test]
+fn abort_before_first_poll_keeps_task_level_cancellation_attribution() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx: Cx = Cx::current().expect("runtime task installs a current Cx");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let child_polls = Arc::clone(&polls);
+        let mut child = cx
+            .spawn(move |child_cx| async move {
+                child_polls.fetch_add(1, Ordering::AcqRel);
+                assert!(
+                    child_cx.checkpoint().is_err(),
+                    "an abort requested before first poll must be visible to the child"
+                );
+                "cancelled-before-first-work"
+            })
+            .expect("runtime-backed Cx must admit child task");
+
+        // The current task retains the only worker until it awaits below, so
+        // this abort is deterministically published before the child's first
+        // poll rather than racing a second executor thread.
+        child.abort();
+        let result = child.join(&cx).await;
+        assert!(
+            matches!(
+                result,
+                Err(JoinError::Cancelled(ref reason)) if reason.kind == CancelKind::User
+            ),
+            "pre-poll abort must remain task-level cancellation even though user code receives one cleanup poll; got {result:?}",
+        );
+        assert_eq!(
+            polls.load(Ordering::Acquire),
+            1,
+            "the cancelled child must not be polled again after returning"
+        );
+    }));
+}
+
+#[test]
+fn cancellation_published_at_the_end_of_pending_repolls_user_code() {
+    struct CancelAtEndOfFirstPoll {
+        cx: Cx,
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl std::future::Future for CancelAtEndOfFirstPoll {
+        type Output = &'static str;
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _poll_cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            let poll = self.polls.fetch_add(1, Ordering::AcqRel);
+            if poll == 0 {
+                // Force the cancellation publication into the exact race
+                // window after user code has begun this poll but before the
+                // task returns its Pending result to the scheduler.
+                self.cx
+                    .cancel_with(CancelKind::User, Some("cancel at end of first poll"));
+                return std::task::Poll::Pending;
+            }
+
+            assert!(
+                self.cx.checkpoint().is_err(),
+                "the follow-up poll must deliver cancellation to user code",
+            );
+            std::task::Poll::Ready("observed-racing-cancellation")
+        }
+    }
+
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx: Cx = Cx::current().expect("runtime task installs a current Cx");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let child_polls = Arc::clone(&polls);
+        let mut child = cx
+            .spawn(move |child_cx| CancelAtEndOfFirstPoll {
+                cx: child_cx,
+                polls: child_polls,
+            })
+            .expect("runtime-backed Cx must admit child task");
+
+        assert_eq!(
+            child.join(&cx).await,
+            Ok("observed-racing-cancellation"),
+            "a cancellation racing with the end of a Pending poll must not skip user delivery",
+        );
+        assert_eq!(
+            polls.load(Ordering::Acquire),
+            2,
+            "cancellation publication must schedule exactly one follow-up poll before return",
+        );
+    }));
+}
+
+#[test]
+fn terminal_publication_boundary_preserves_panics_as_join_errors() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx: Cx = Cx::current().expect("runtime task installs a current Cx");
+        let mut child = cx
+            .spawn(|_child_cx| async move {
+                panic!("native-task-boundary-panic-sentinel");
+            })
+            .expect("runtime-backed Cx must admit child task");
+
+        match child.join(&cx).await {
+            Err(JoinError::Panicked(payload)) => assert!(
+                payload
+                    .message()
+                    .contains("native-task-boundary-panic-sentinel"),
+                "join must preserve the original panic payload"
+            ),
+            other => panic!("spawned panic must remain a JoinError::Panicked; got {other:?}"),
+        }
+    }));
+}
+
+#[test]
+fn abort_repolls_a_capacity_parked_send_to_graceful_cancellation() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx: Cx = Cx::current().expect("runtime task installs a current Cx");
+        let (sender, _receiver) = mpsc::channel(1);
+        sender.try_send(1_u8).expect("fill bounded channel");
+        let waiter_sender = sender.clone();
+        let mut waiter = cx
+            .spawn(move |waiter_cx| async move { waiter_sender.send(&waiter_cx, 2_u8).await })
+            .expect("runtime-backed Cx must admit sender task");
+
+        for _ in 0..256 {
+            if sender.telemetry_snapshot(7).send_waiter_count == 1 {
+                break;
+            }
+            yield_now().await;
+        }
+        assert_eq!(
+            sender.telemetry_snapshot(7).send_waiter_count,
+            1,
+            "sender must be queued on channel capacity before abort",
+        );
+
+        waiter.abort();
+        let result = waiter.join(&cx).await;
+        assert!(
+            matches!(result, Ok(Err(SendError::Cancelled(2)))),
+            "aborting a capacity-parked send must preserve its value-bearing inner cancellation result; got {result:?}",
+        );
+        assert_eq!(
+            sender.telemetry_snapshot(7).send_waiter_count,
+            0,
+            "cancelled sender must unlink its channel waiter",
+        );
+    }));
+}
+
+#[test]
+fn abort_repolls_a_semaphore_parked_acquire_to_graceful_cancellation() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx: Cx = Cx::current().expect("runtime task installs a current Cx");
+        let semaphore = Arc::new(Semaphore::new(0));
+        let waiter_semaphore = Arc::clone(&semaphore);
+        let mut waiter = cx
+            .spawn(move |waiter_cx| async move {
+                OwnedSemaphorePermit::acquire(waiter_semaphore, &waiter_cx, 1)
+                    .await
+                    .map(drop)
+            })
+            .expect("runtime-backed Cx must admit semaphore task");
+
+        for _ in 0..256 {
+            if semaphore.telemetry_snapshot(11).waiter_count == 1 {
+                break;
+            }
+            yield_now().await;
+        }
+        assert_eq!(
+            semaphore.telemetry_snapshot(11).waiter_count,
+            1,
+            "acquirer must be queued on the semaphore before abort",
+        );
+
+        waiter.abort();
+        let result = waiter.join(&cx).await;
+        assert!(
+            matches!(result, Ok(Err(AcquireError::Cancelled))),
+            "aborting a semaphore-parked acquire must preserve its inner cancellation result; got {result:?}",
+        );
+        let telemetry = semaphore.telemetry_snapshot(11);
+        assert_eq!(
+            telemetry.waiter_count, 0,
+            "cancelled acquirer must unlink its semaphore waiter",
+        );
+        assert_eq!(
+            telemetry.cancellation_count, 1,
+            "semaphore cancellation cleanup must remain observable",
+        );
+    }));
+}
+
+#[test]
+fn mailbox_and_scope_spawn_paths_classify_before_terminal_publication() {
+    let task_handle = read("src/runtime/task_handle.rs");
+    assert!(
+        task_handle.contains("pub(crate) fn publish_terminal_result<T>(")
+            && task_handle.contains("sender.send_blocking(result)"),
+        "the authoritative TaskHandle terminal-publication boundary must remain centralized",
+    );
+
+    for rel in ["src/cx/cx.rs", "src/cx/scope.rs"] {
+        let source = read(rel);
+        let active_lines: Vec<_> = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect();
+        assert!(
+            source.contains("publish_terminal_result("),
+            "{rel} must publish TaskHandle results through the authoritative boundary",
+        );
+        assert!(
+            !active_lines.iter().any(|line| {
+                line.contains("result_tx.send(")
+                    || line.contains("tx.send(&child")
+                    || line.contains("tx.send(&cx")
+            }),
+            "{rel} must not route terminal bookkeeping through a cancelled task Cx",
+        );
+    }
+
+    let cx = read("src/cx/cx.rs");
+    assert!(
+        cx.contains("PreserveReturnedValueAfterStart")
+            && cx.contains("CancellationDominant")
+            && cx.contains("cancelled_before_first_poll")
+            && cx.contains("classify_spawn_completion("),
+        "mailbox spawn must explicitly distinguish post-start typed results, structured task cancellation, and pre-poll cancellation",
+    );
+    let join_set = read("src/combinator/join_set.rs");
+    assert!(
+        join_set.contains("spawn_in_cancellation_dominant")
+            && join_set.contains("spawn_local_in_cancellation_dominant"),
+        "JoinSet must opt into task-level cancellation attribution for both send and local members",
+    );
+
+    // Keep the complete production constructor census explicit. A new
+    // TaskHandle producer must make this test fail until its terminal-
+    // publication behavior is added to the matrix above.
+    for (rel, constructor, expected) in [
+        ("src/cx/cx.rs", "TaskHandle::new_pending(", 2_usize),
+        ("src/cx/scope.rs", "TaskHandle::new(", 1),
+        ("src/runtime/state.rs", "TaskHandle::new(", 1),
+        ("src/runtime/builder.rs", "TaskHandle::new(", 0),
+    ] {
+        let active_count = read(rel)
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .filter(|line| line.contains(constructor))
+            .count();
+        assert_eq!(
+            active_count, expected,
+            "{rel} TaskHandle constructor census changed; extend the native cancellation matrix before accepting a new spawn adapter",
+        );
+    }
 }
 
 #[test]
@@ -418,7 +922,10 @@ fn cancel_handlers_run_on_both_abort_and_cancel_via_same_checkpoint_path() {
     // checkpoint queries the same stable envelope that abort/cancel publish.
     assert!(
         body.contains("let cancelled = guard.is_cancel_requested();")
-            && task_context.contains("self.requested.load(std::sync::atomic::Ordering::Acquire)"),
+            && task_context.contains(
+                "self.cancel_requested || self.fast_cancel.load(std::sync::atomic::Ordering::Acquire)",
+            )
+            && task_context.contains("self.publish_cancel_requested(value);"),
         "REGRESSION: checkpoint no longer reads stable cancellation publication \
          with Acquire. The single-observation-path contract \
          is broken — abort and cancel may now route through \

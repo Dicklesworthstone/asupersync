@@ -66,6 +66,7 @@
     "no-Tokio scoped audit graphs",
     "structured concurrency invariants",
     "cancellation/oracle suite",
+    "native parked-task cancellation contract",
     "scheduler fairness",
     "fuzz manifest",
     "conformance runners",
@@ -218,6 +219,31 @@
       ],
       "blocked_frontier": null,
       "notes": "The lib-test lane is broad frontier evidence; exact blocker rows are required if it stops outside the touched slice."
+    },
+    {
+      "claim_id": "native-parked-task-cancellation-contract",
+      "category": "native parked-task cancellation contract",
+      "status": "green",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "native parked-task cancellation contract"
+        ],
+        "AGENTS.md": [
+          "Native parked-task cancellation is a release-blocking contract"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "native-parked-task-cancellation"
+      ],
+      "manifest_lane_ids": [
+        "native-parked-task-cancellation"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_native_parked_task_cancellation CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test runtime_abort_vs_cancel_semantics_audit -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "This focused native behavioral lane is mandatory for cancellation/spawn changes. Structural audits and aggregate test counts cannot substitute for its parked-state, cancellation-after-Pending race, exact-result, and waiter-cleanup assertions; cancellation-blind hard-stop behavior is explicitly outside the claim."
     },
     {
       "claim_id": "scheduler-fairness",

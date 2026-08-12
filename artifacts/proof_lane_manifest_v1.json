@@ -493,6 +493,7 @@
     "feature-gated-native-surfaces",
     "fuzz-manifest-smoke",
     "lib-test-frontier",
+    "native-parked-task-cancellation",
     "db-feature-lib-test-frontier",
     "channel-mpsc-select-e2e-public-run",
     "all-target-compile-frontier",
@@ -841,6 +842,48 @@
         "allowed_claim_scopes": [
           "lib-test-frontier"
         ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "native-parked-task-cancellation",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_native_parked_task_cancellation CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test runtime_abort_vs_cancel_semantics_audit -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "native-parked-task-cancellation"
+      ],
+      "covers": "Native current-thread, owner-local, and cross-worker task abort after proven parking on a mutex, bounded-channel send, or semaphore; abort-before-first-poll delivery; cancellation arriving after a user future returned Pending; panic classification; exact TaskHandle task-level versus domain-level cancellation results; acknowledged asynchronous cleanup across an additional Pending; waiter unlinking; and use of the centralized non-cancellable terminal-publication boundary.",
+      "explicit_not_covered": "Broad workspace health, cancellation-blind futures, timers, every I/O/backend primitive, LabRuntime/model refinement, downstream fastmcp_rust compilation, performance, release readiness beyond this mandatory behavioral boundary, or proof from structural source assertions alone.",
+      "expected_signal": "all unfiltered runtime_abort_vs_cancel_semantics_audit tests run and pass with nonzero behavioral test evidence",
+      "source_paths": [
+        "src/cx/cx.rs",
+        "src/cx/scope.rs",
+        "src/runtime/builder.rs",
+        "src/runtime/state.rs",
+        "src/runtime/task_handle.rs",
+        "tests/runtime_abort_vs_cancel_semantics_audit.rs",
+        "TESTING_FOR_AGENTS.md",
+        "TESTING.md",
+        "README.md",
+        "AGENTS.md"
+      ],
+      "common_unrelated_blockers": [
+        "native runtime worker admission or compilation failure",
+        "unrelated compile drift in the integration-test dependency graph"
+      ],
+      "escalation_notes": "Any red, zero-test, filtered, skipped, or unrun result is release-blocking. Structural/source-shape checks are supplemental and cannot replace the native behavioral cases.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": false,
+        "allowed_claim_scopes": [],
         "required_match_field_set": "strict-rch-proof-reuse-v1",
         "requires_fresh_rerun_when_dirty_overlap": true,
         "non_citeable_claim_scopes": [
@@ -3237,6 +3280,13 @@
       "description": "Runtime crate lib-test frontier has a canonical rch command.",
       "lane_ids": [
         "lib-tests"
+      ]
+    },
+    {
+      "guarantee_id": "native-parked-task-cancellation",
+      "description": "Native cancel-aware parked tasks preserve domain-level cancellation through TaskHandle terminal publication and clean their registered waiters without changing cooperative cleanup semantics.",
+      "lane_ids": [
+        "native-parked-task-cancellation"
       ]
     },
     {

@@ -423,6 +423,7 @@
     "feature-gated-native-surfaces",
     "fuzz-manifest-smoke",
     "lib-test-frontier",
+    "native-parked-task-cancellation",
     "db-feature-lib-test-frontier",
     "channel-mpsc-select-e2e-public-run",
     "all-target-compile-frontier",
@@ -620,6 +621,30 @@
       "source_paths": [
         "src/lib.rs",
         "Cargo.toml"
+      ]
+    },
+    {
+      "lane_id": "native-parked-task-cancellation",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_native_parked_task_cancellation CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test runtime_abort_vs_cancel_semantics_audit -- --nocapture",
+      "guarantee_ids": [
+        "native-parked-task-cancellation"
+      ],
+      "feature_flags": [],
+      "expected_signal": "all unfiltered runtime_abort_vs_cancel_semantics_audit tests run and pass with nonzero behavioral test evidence",
+      "source_paths": [
+        "src/cx/cx.rs",
+        "src/cx/scope.rs",
+        "src/runtime/builder.rs",
+        "src/runtime/state.rs",
+        "src/runtime/task_handle.rs",
+        "tests/runtime_abort_vs_cancel_semantics_audit.rs",
+        "TESTING_FOR_AGENTS.md",
+        "TESTING.md",
+        "README.md",
+        "AGENTS.md"
       ]
     },
     {
@@ -1816,6 +1841,12 @@
       "guarantee_id": "lib-test-frontier",
       "lane_ids": [
         "lib-tests"
+      ]
+    },
+    {
+      "guarantee_id": "native-parked-task-cancellation",
+      "lane_ids": [
+        "native-parked-task-cancellation"
       ]
     },
     {

@@ -27,6 +27,38 @@ rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_
 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_virtualized_surface cargo test --test lab_live_virtualized_surface_matrix_contract --features test-internals -- --nocapture
 ```
 
+## Mandatory Native Parked-Task Cancellation Boundary
+
+Deterministic LabRuntime, cancellation models, E2E scenarios, structural
+scans, and broad aggregate test counts cannot prove the native boundary between
+a parked future, scheduler cancellation wakeup, a spawn wrapper, and
+`TaskHandle` terminal-result publication. Changes to `Cx`, `TaskHandle`,
+scheduler cancellation wakeup, spawn wrappers, or cancel-aware primitives must
+run this release-blocking contract in addition to narrower unit/Lab tests:
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_native_parked_task_cancellation" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test runtime_abort_vs_cancel_semantics_audit -- --nocapture
+```
+
+The native cases must prove they are actually parked before abort. They must
+then assert the exact distinction between a domain-level cancellation value
+returned by a cancel-aware operation and task-level `JoinError::Cancelled`, as
+well as waiter unlinking. The
+matrix must cover current-thread, owner-local, and cross-worker scheduling,
+abort-before-first-poll delivery, cancellation arriving after the user future
+returned `Pending` but before wrapper classification, and panic classification
+through the same terminal-publication boundary. It must additionally prove that a
+task which has acknowledged cancellation can cross another `Pending` while
+finishing asynchronous protocol cleanup. Do not invent a generic hard-stop for
+cancellation-blind futures or truncate acknowledged cleanup to make the lane
+pass.
+
+The lane is not green if it is red, unrun, skipped, filtered, or reports zero
+tests. A green build, Lab/model result, structural source assertion, or any
+number of unrelated passing tests cannot replace it. When the lane is added
+for an escaped defect, preserve evidence that the regression test failed on
+the old implementation and passed on the repair.
+
 ## Shared Validation Contract (asupersync-ay6qvw)
 
 This section is the canonical validation contract for the stub-resolution closeout

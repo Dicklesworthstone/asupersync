@@ -448,6 +448,35 @@ When adding or changing primitives, add tests that assert the core invariants:
 
 Prefer deterministic lab-runtime tests for concurrency-sensitive behavior.
 
+### Native parked-task cancellation is a release-blocking contract
+
+Cancellation changes to `Cx`, `TaskHandle`, scheduler wakeup, spawn wrappers,
+or cancel-aware primitives MUST run the focused native contract:
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_native_parked_task_cancellation" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test runtime_abort_vs_cancel_semantics_audit -- --nocapture
+```
+
+This lane must prove that the operation is actually parked before abort, that
+cancel-aware mutex/MPSC/semaphore operations publish their domain-level
+cancellation result through `TaskHandle`, and that waiter cleanup completes. It
+must cover current-thread, owner-local, and cross-worker cancellation, abort-
+before-first-poll delivery, cancellation arriving after a user future returned
+`Pending` but before the wrapper classified that poll, and panic classification
+through the same centralized terminal-publication boundary. It must also prove
+that a task which acknowledges cancellation can cross an additional `Pending`
+while finishing asynchronous protocol cleanup. The repair must not invent a
+generic hard-stop policy for cancellation-blind futures or truncate
+acknowledged cleanup. A red, zero-test, filtered, skipped, or unrun lane blocks
+release.
+
+Source-shape, grep, artifact, model, and structural audit tests are useful
+supplemental guardrails, but they are **never behavioral proof**. Neither a
+large aggregate test count nor a green LabRuntime/model lane can substitute for
+the exact native scheduler/primitive/`TaskHandle` boundary above. When a bug
+escaped because that boundary was missing, the regression test must first fail
+against the old implementation and then pass against the repair.
+
 Agents choosing a test strategy should start with `TESTING_FOR_AGENTS.md`; it is
 the compact decision tree for unit, lab, exploration, and scenario-YAML e2e
 recipes. `TESTING.md` remains the detailed contract.

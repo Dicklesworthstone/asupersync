@@ -13,7 +13,8 @@ the workstation and the RCH fleet.
 | Claim | Use | Anchor |
 | --- | --- | --- |
 | Pure function, parser, state transition, error mapping | Inline unit test | `src/*` module `#[cfg(test)]` |
-| Cancellation, task ownership, obligation, virtual time | Lab integration test | `src/lab/*`, `src/test_utils.rs` |
+| Cancellation protocol, task ownership, obligation, virtual time | Lab integration test | `src/lab/*`, `src/test_utils.rs` |
+| Native worker wakeup, parked primitive, `TaskHandle` result, spawn wrapper | Native parked-task integration contract | `tests/runtime_abort_vs_cancel_semantics_audit.rs` |
 | Same invariant across seed/config matrix | `#[asupersync::lab_test(seeds = A..B)]` | Fixed seeds, deterministic lab runtime, seed in failure output |
 | Schedule sensitivity, DPOR, seed search, replay equivalence | Exploration test | `src/lab/explorer.rs`, `src/lab/replay.rs` |
 | User-visible workflow across modules | Scenario YAML or e2e script | `examples/scenarios/*.yaml`, `scripts/run_all_e2e.sh` |
@@ -21,6 +22,28 @@ the workstation and the RCH fleet.
 If a bead changes production behavior, add the narrowest unit or lab proof first.
 Only then run broader gates. If a proof lane is already active or
 progress-stale, coordinate by Agent Mail before starting another RCH job.
+
+### Do not model away a native cancellation boundary
+
+Lab and model tests prove cancellation protocols, schedules, and invariants;
+they do not prove that a real worker wakes a genuinely parked future or that a
+spawn wrapper publishes the exact nested result through `TaskHandle`. Any
+change to `Cx`, `TaskHandle`, scheduler cancellation wakeup, spawn wrappers, or
+cancel-aware primitives must also run the unfiltered, remote-required
+`native-parked-task-cancellation` lane recorded in
+`artifacts/proof_lane_manifest_v1.json`.
+
+That lane must establish the parked state before abort, then assert the exact
+task-level versus domain-level result and resource cleanup for native mutex,
+bounded MPSC, and semaphore cases. It must retain current-thread,
+owner-local, cross-worker, abort-before-first-poll, cancellation-after-`Pending`
+race, and panic-classification coverage. A red, zero-test, filtered, skipped,
+or unrun result blocks release. It must also prove that acknowledged
+asynchronous cleanup can cross another `Pending`; fixing a stuck task by
+inventing a hard-stop or truncating protocol cleanup is not acceptable.
+Structural scans, model refinement, broad E2E counts, and tens of thousands of
+unrelated passing tests are not substitutes. For an escaped regression, record
+old-code failure and repaired-code success before closing the bead.
 
 ## Oracle Registry
 

@@ -243,6 +243,18 @@ Running → CancelRequested → Cancelling → Finalizing → Completed(Cancelle
 
 Some primitives and proof surfaces publish explicit cancellation responsiveness bounds, such as bounded commit sections, mask-depth limits, scheduler cancel-streak fairness, static plan analysis, and lab cancellation oracles. A blanket per-primitive responsiveness-bound registry is still a design requirement, not a universal runtime guarantee today; budgets are sufficient conditions only for paths with a concrete published bound.
 
+The native parked-task cancellation contract is a release-blocking behavioral
+boundary. It parks real current-thread, owner-local, and cross-worker tasks on
+a mutex, bounded-channel send, and semaphore before aborting them, then checks
+the exact nested `TaskHandle` result and waiter cleanup. It also pins abort-
+before-first-poll delivery, cancellation racing with the end of a `Pending`
+user-future poll, and panic classification through the same terminal-
+publication boundary, and proves that acknowledged asynchronous cleanup can
+cross another `Pending` without being truncated. Structural source audits and
+aggregate test counts cannot substitute for this native behavioral lane. Its
+canonical remote-required command is recorded as
+`native-parked-task-cancellation` in the proof-lane manifest.
+
 Cancellation progress is continuously observable through `ProgressCertificate`. It tracks potential descent, classifies the current drain regime (`warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`), and reports range-bounded Freedman and Azuma candidates plus a separate projected conditional calculation. Under the current range-only variation cap, raw Freedman is never tighter than Azuma, so the selected public envelope equals Azuma. At the current same-history horizon, telescoping makes both candidate tails algebraically `1`; they are not evidence of convergence. The `converging` flag is instead an empirical status over the complete accepted finite non-negative observation history represented by running statistics. It requires positive endpoint net progress, no detected stall, bounded rebound count and magnitude, no latest-step rebound, and no dropped invalid sample. Non-finite or materially negative telemetry is dropped; that suppresses the remaining-step estimate and reports `warmup` instead of an actionable terminal phase until reset. The realized delta variance remains diagnostic-only rather than being reused as predictable variation. This makes the evidence behind "is shutdown actually converging?" inspectable without treating one trace as proof of future drift, termination, or bounded drain time.
 
 ### 3. Two-Phase Effects Prevent Data Loss
