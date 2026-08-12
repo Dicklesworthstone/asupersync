@@ -766,10 +766,10 @@ fn native_cancellation_receipt_is_attributed_only_to_its_focused_claim() {
     assert!(
         string(native, "notes").contains("31 passed")
             && string(native, "notes").contains("literal spawned guard-holder")
-            && string(native, "notes").contains("29972867244359819")
+            && string(native, "notes").contains("29972867244359836")
             && string(native, "notes").contains("ovh-a")
-            && string(native, "notes").contains("96181 ms")
-            && string(native, "notes").contains("114283 ms total")
+            && string(native, "notes").contains("95850 ms")
+            && string(native, "notes").contains("101155 ms total")
             && string(native, "notes").contains("does not prove the broader"),
         "native cancellation row must retain the exact focused RCH receipt and no-claim boundary"
     );

@@ -79,9 +79,9 @@
       "authority_revision_state": "PRESENT_MATCHES_BASELINE",
       "inventory_state": "K0_3_LOCAL_STATIC_AND_CALL_SITE_CENSUS_FROZEN_EXTERNAL_UNKNOWN",
       "files": [
-        {"role":"ARTIFACT","path":"artifacts/kafka_downstream_user_journey_inventory_v1.json","byte_count":1171766,"record_count":17987,"sha256":"12c083fe469fb84364573e6e529c22de5d09440af1e21108bd41790969998918"},
+        {"role":"ARTIFACT","path":"artifacts/kafka_downstream_user_journey_inventory_v1.json","byte_count":1171766,"record_count":17987,"sha256":"ea7d9577e6a911a7618127b28316b3f229c7e4ae01735b2a5e65b4671cbcba69"},
         {"role":"DOCUMENT","path":"docs/kafka_downstream_user_journey_inventory.md","byte_count":40662,"record_count":612,"sha256":"3c2f0b4fa956bc45fc5b9738f5f2349024dafb577509195e998fa72ec0d9dbb1"},
-        {"role":"CONTRACT","path":"tests/kafka_downstream_user_journey_inventory_contract.rs","byte_count":216695,"record_count":5381,"sha256":"3893cb2ddba9461d0bda9fda658b1b71272f4afdbc615a9d02684db27cc33f71"}
+        {"role":"CONTRACT","path":"tests/kafka_downstream_user_journey_inventory_contract.rs","byte_count":216695,"record_count":5381,"sha256":"a15b8618ef4fcbcd66a52798190f728788a05984d372fe2cd9eb60bfbd2b5111"}
       ]
     },
     {
@@ -94,9 +94,9 @@
       "authority_revision_state": "ABSENT_BY_CHILD_SCHEMA",
       "inventory_state": "K0_4_STATIC_FIXTURE_AND_PROVENANCE_MATRIX_FROZEN_RUNTIME_UNKNOWN",
       "files": [
-        {"role":"ARTIFACT","path":"artifacts/kafka_broker_fixture_provenance_matrix_v1.json","byte_count":119250,"record_count":2187,"sha256":"1e0e49c4ebbf433adddc0cc451df4beebeb0a004c264087724934ce2fb1f26d6"},
+        {"role":"ARTIFACT","path":"artifacts/kafka_broker_fixture_provenance_matrix_v1.json","byte_count":119250,"record_count":2187,"sha256":"52b49f094f035fe2cf0982377c0d2344a57216e996af9869b6e139ffbdd4ebd0"},
         {"role":"DOCUMENT","path":"docs/kafka_broker_fixture_provenance_matrix.md","byte_count":25259,"record_count":346,"sha256":"80f76324a74a536d23552d3ded294bf2fbe4448de24adaa93d872bf203378f40"},
-        {"role":"CONTRACT","path":"tests/kafka_broker_fixture_provenance_matrix_contract.rs","byte_count":129665,"record_count":3462,"sha256":"0cb590f4e2343aca9066f8ee342e8cdfdb28a35be84c711edf0bc41eb5e3a57c"}
+        {"role":"CONTRACT","path":"tests/kafka_broker_fixture_provenance_matrix_contract.rs","byte_count":129665,"record_count":3462,"sha256":"b1725b4f8605c96b6c73754c2179256ad566af58ed0d40bb87c2a3c22252f81f"}
       ]
     }
   ],
@@ -116,7 +116,7 @@
     "source_pin_rollup": {
       "row_count": 266,
       "stage_counts": {"K0.1":13,"K0.2":8,"K0.3":225,"K0.4":20},
-      "canonical_json_sha256": "ed81d520b113d796a56898446d0333cd1ad3da6cedecc8fc2753678a8290401a",
+      "canonical_json_sha256": "493425e96afd4fcbb828567f48eb13bd441b1b1ca5f57feb427215b0f077663f",
       "unique_path_count": 247,
       "unique_path_set_sha256": "d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3",
       "overlap_group_count": 15,
@@ -213,7 +213,7 @@
     "canonicalization_rule": "Sort claims by claim_id, recursively sort each claim object's keys, emit one compact JSON object per claim, and append one LF per record.",
     "child_claim_record_count": 93,
     "child_claim_canonicalization_rule": "Wrap each child claim or no-claim row as an object with child, collection, id, and row fields; use the zero-based numeric array index as id for no-claim rows and the child's declared claim or evidence ID otherwise; sort by child, collection, and id; recursively sort object keys; emit compact JSON with one LF per record.",
-    "child_claim_projection_sha256": "4ab07928c2f255c4f6bbe8d69561d25c413391ee84d359dead80ebf8e3ec6477",
+    "child_claim_projection_sha256": "11f5ffc880c4e1dc1587733423149bae9d6dc6a0aa186a54e79c2073954ccb30",
     "child_claim_groups": {"K0.1_no_claim":6,"K0.2_no_claim":8,"K0.3_documentation_claim":31,"K0.3_evidence_claim":6,"K0.3_no_claim":14,"K0.4_evidence_claim":6,"K0.4_no_claim":22},
     "aggregate_claims": [
       {"claim_id":"KAFKA-K0-5-CLAIM-001","subject":"source reachability","state":"STATIC_SOURCE_PINNED","source_packets":["K0.1"],"limitation":"No semantic or runtime claim."},

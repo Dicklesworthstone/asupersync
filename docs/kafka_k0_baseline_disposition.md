@@ -79,7 +79,7 @@ The canonical machine projections are:
 
 | Projection | Count | SHA-256 |
 |---|---:|---|
-| Source-pin canonical JSON | 266 | `ed81d520b113d796a56898446d0333cd1ad3da6cedecc8fc2753678a8290401a` |
+| Source-pin canonical JSON | 266 | `493425e96afd4fcbb828567f48eb13bd441b1b1ca5f57feb427215b0f077663f` |
 | Unique source-pin paths | 247 | `d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3` |
 | Source-pin overlap paths | 15 | membership is bound by the 34-row projection below |
 | Source-pin rows on overlap paths | 34 | `a3282475b61dc733ee973b7743578c938f4e07514c16b30f7ca83a0fdccd965b` |
@@ -250,7 +250,7 @@ receipt for any later routed owner.
 
 The 93 projected child claim records preserve their source evidence classes.
 Their canonical JSON digest is
-`4ab07928c2f255c4f6bbe8d69561d25c413391ee84d359dead80ebf8e3ec6477`.
+`11f5ffc880c4e1dc1587733423149bae9d6dc6a0aa186a54e79c2073954ccb30`.
 Each child record is wrapped with `child`, `collection`, `id`, and `row`; no-claim
 rows use their zero-based array index as the ID, while claim/evidence rows retain
 their declared IDs. Records are ordered by child, collection, and ID before
