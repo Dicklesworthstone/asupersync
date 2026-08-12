@@ -87,9 +87,7 @@ use crate::time::{TimerDriverHandle, timeout};
 use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
 use crate::trace::{TraceBufferHandle, TraceEvent};
 use crate::tracing_compat::{debug, error, info, trace, warn};
-use crate::types::task_context::{
-    CancelWaker, CancelWakerRegistration, CxCancellationState,
-};
+use crate::types::task_context::{CancelWaker, CancelWakerRegistration, CxCancellationState};
 use crate::types::{
     Budget, CancelKind, CancelReason, CapabilityBudget, CapabilityBudgetRefusal,
     CapabilityBudgetRequirements, CxInner, RegionId, SystemPressure, TaskId, Time,
@@ -3221,6 +3219,7 @@ impl<Caps> Cx<Caps> {
     /// This compatibility slot never increments a refcount on repoll. Callers
     /// that own a future across polls should use [`Self::refresh_cancel_waker`]
     /// and retain its token instead.
+    #[cfg(test)]
     pub(crate) fn register_cancel_waker(&self, waker: &Waker) {
         {
             let inner = self.inner.read();

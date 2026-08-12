@@ -533,6 +533,30 @@ impl TaskRecord {
         self.cx = Some(cx);
     }
 
+    /// Returns a snapshot of the budget carried by the linked task context.
+    ///
+    /// A newly constructed record is not linked until runtime admission, so
+    /// callers must handle `None`. The snapshot deliberately exposes no
+    /// authority-bearing context handle and cannot be used to rebind the task.
+    #[inline]
+    #[must_use]
+    pub fn context_budget(&self) -> Option<Budget> {
+        self.cx_inner.as_ref().map(|inner| inner.read().budget)
+    }
+
+    /// Returns whether cancellation is published in the linked task context.
+    ///
+    /// Returns `None` before runtime admission links the record to a context.
+    /// This read-only snapshot preserves the sealed `CxInner` boundary while
+    /// supporting diagnostics and behavioral contract tests.
+    #[inline]
+    #[must_use]
+    pub fn context_cancel_requested(&self) -> Option<bool> {
+        self.cx_inner
+            .as_ref()
+            .map(|inner| inner.read().is_cancel_requested())
+    }
+
     /// Records that the task was polled on the given lab step.
     pub fn mark_polled(&mut self, step: u64) {
         self.last_polled_step = step;
@@ -2452,7 +2476,7 @@ mod tests {
             Budget::INFINITE,
         )));
         t.set_cx_inner(inner.clone());
-        let cx = crate::cx::Cx::from_inner(Arc::clone(&inner));
+        let cx: crate::cx::Cx = crate::cx::Cx::from_inner(Arc::clone(&inner));
 
         let cancel_requested = inner.read().cancel_requested;
         crate::assert_with_log!(

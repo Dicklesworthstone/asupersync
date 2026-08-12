@@ -1661,7 +1661,7 @@ mod tests {
         let (handle, _stored) = scope
             .spawn_actor(&mut state, &parent_cx, Counter::new(), 1)
             .expect("spawn actor");
-        let actor_cx = Cx::from_inner(
+        let actor_cx: Cx = Cx::from_inner(
             handle
                 .inner
                 .upgrade()
@@ -2054,7 +2054,7 @@ mod tests {
             ActorState::Running,
             "actor should be running before join drop requests abort"
         );
-        let actor_cx = Cx::from_inner(
+        let actor_cx: Cx = Cx::from_inner(
             handle
                 .inner
                 .upgrade()
