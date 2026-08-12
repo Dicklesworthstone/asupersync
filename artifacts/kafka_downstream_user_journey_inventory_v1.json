@@ -148,7 +148,7 @@
       "pin_id": "KAFKA-K0-3-PIN-K0-2-ARTIFACT",
       "path": "artifacts/kafka_incumbent_semantics_matrix_v1.json",
       "record_count": 2560,
-      "sha256": "dc30929c46d4d0a07ebe2a3d9d5c8a56a22e47157709759141f908070313d2c0",
+      "sha256": "15039992b1d17d6b9710bc0a6b11a39f38af1a44a736b12eba41b73f2aa1e6cf",
       "role": "K0.2 semantic authority"
     },
     {
