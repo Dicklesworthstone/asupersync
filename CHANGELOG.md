@@ -10,12 +10,15 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
-Scope window: current work through 2026-08-09, reconstructed from git history,
+Scope window: current work through 2026-08-12, reconstructed from git history,
 beads, benchmark ledgers, and live repo artifacts; the previous published
-GitHub Release/tag baseline is `v0.4.2`.
+GitHub Release/tag baseline is `v0.4.3`.
 
 ## Version Timeline
 
+- **v0.4.4 Release**: patch release restoring acknowledged native-task
+  cancellation, preserving the complete v0.4.3 public surface, and hardening
+  HTTP/1 streaming request-body cancellation and connection reuse.
 - **v0.4.3 Release**: patch release for panic containment across the owned
   future boundary and web error-handler middleware.
 - **v0.4.2 Release**: patch release for the owned safe blocking kernel and its
@@ -41,6 +44,63 @@ GitHub Release/tag baseline is `v0.4.2`.
 ## [Unreleased]
 
 _No changes yet._
+
+---
+
+## [v0.4.4] - 2026-08-12
+
+### Runtime correctness
+
+- **Native task abort now preserves an acknowledged cancellation result.** A
+  task parked on a cancel-aware primitive can observe cancellation, return its
+  public `Cancelled` value, and complete cleanup without a concurrent abort
+  erasing that value into a generic join cancellation. The terminal publisher
+  is non-cancellable, panic attribution remains explicit, and the legacy
+  state-threaded API retains its established cancellation-dominant contract.
+- **The downstream failure is now a permanent native-runtime release gate.**
+  The regression matrix uses the public spawn/abort/join sequence that failed
+  in FastMCP Rust, proves that the task reached its parked state before abort,
+  asserts the exact graceful cancellation result, and verifies terminal task,
+  region, and obligation cleanup. Model-only, LabRuntime-only, compile-only,
+  and filtered-zero-test results cannot satisfy this gate.
+
+### Compatibility
+
+- **No v0.4.3 public API break is accepted in this patch.** Public
+  cancellation fields and `TaskRecord` hooks remain source-compatible, while
+  the new internal cancellation publication envelope is kept behind those
+  established surfaces. Ordinary `Cx::spawn` continues to preserve a future's
+  value after it has acknowledged cancellation; cancellation-dominant
+  combinators retain their separately documented semantics.
+- **HTTP/1 streaming controls are additive.** `Http1Config` remains usable by
+  existing v0.4.3 struct literals. New body-queue and unread-body-drain limits
+  live in `Http1StreamingConfig`, and `IncomingBody` compatibility remains
+  available while the streaming server uses the richer request type.
+- **Breaking changes now have an explicit release policy.** Every 0.4.x
+  release must compare against v0.4.3, preserve deprecated entry points, add
+  compatible APIs in preference to replacement, and stop unless an exact
+  break has extraordinary correctness or security justification, migration
+  evidence, downstream compile proof, release-note coverage, and written user
+  approval at an intentional semver boundary.
+
+### HTTP/1 request-body safety
+
+- **Streaming bodies execute under the request-region capability context.**
+  Backpressure waits, cancellation, budgets, and body-channel limits now
+  observe the request lifetime rather than the enclosing connection lifetime.
+- **Connection reuse requires bounded framing-aware body synchronization.**
+  If a handler leaves a segmented request body unread, the server drains
+  decoded frames and chunk trailers within explicit frame, byte, and time
+  bounds. The connection is reused only after synchronized body EOF; malformed,
+  truncated, over-limit, or cancelled drains close it fail-closed.
+
+### Release evidence
+
+- **Compatibility and proof receipts were reconciled to the shipped bytes.**
+  Cancellation, HTTP/1, dependency, protocol, and artifact-governance packets
+  retain their scoped no-claim boundaries while pinning the final source and
+  contract graph. These receipts do not replace the terminal release gates or
+  the real downstream compatibility canary.
 
 ---
 
@@ -1811,7 +1871,8 @@ The initial tagged milestone establishing the core async runtime with structured
 
 ---
 
-[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.4...HEAD
+[v0.4.4]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.3...v0.4.4
 [v0.4.3]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.2...v0.4.3
 [v0.4.2]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.1...v0.4.2
 [v0.4.1]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.0...v0.4.1
