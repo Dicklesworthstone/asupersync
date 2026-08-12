@@ -141,14 +141,14 @@
       "pin_id": "KAFKA-K0-3-PIN-K0-1-ARTIFACT",
       "path": "artifacts/kafka_capability_inventory_v1.json",
       "record_count": 1015,
-      "sha256": "032f8fcf2c535f4a2a081203a58230505119d1dfaf99a4c5b82e1a7437277b13",
+      "sha256": "d8853e1ca17a5a1099f6b48bd28d61291b498bbe193f283bad42ddc2ee65d18c",
       "role": "K0.1 source and profile authority"
     },
     {
       "pin_id": "KAFKA-K0-3-PIN-K0-2-ARTIFACT",
       "path": "artifacts/kafka_incumbent_semantics_matrix_v1.json",
       "record_count": 2560,
-      "sha256": "2e27c15302548ee50be3a5f3e07a86497893220b03b04b6700481e3ed7dd36fd",
+      "sha256": "dc30929c46d4d0a07ebe2a3d9d5c8a56a22e47157709759141f908070313d2c0",
       "role": "K0.2 semantic authority"
     },
     {
