@@ -472,14 +472,17 @@ impl<P: Policy> Scope<'_, P> {
             .await;
             match result_result {
                 Ok(result) => {
-                    let _ = tx.send_blocking(Ok(result));
+                    crate::runtime::task_handle::publish_terminal_result(tx, Ok(result));
                     crate::types::Outcome::Ok(())
                 }
                 Err(payload) => {
                     let msg = payload_to_string(&payload);
                     drop(payload);
                     let panic_payload = PanicPayload::new(msg);
-                    let _ = tx.send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
+                    crate::runtime::task_handle::publish_terminal_result(
+                        tx,
+                        Err(JoinError::Panicked(panic_payload.clone())),
+                    );
                     crate::types::Outcome::Panicked(panic_payload)
                 }
             }

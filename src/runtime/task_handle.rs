@@ -32,6 +32,20 @@ impl std::fmt::Display for JoinError {
 
 impl std::error::Error for JoinError {}
 
+/// Publishes a task's terminal result without consulting task cancellation.
+///
+/// Terminal-result delivery is runtime bookkeeping performed after a spawn
+/// adapter has already classified the completion as a returned value, task
+/// cancellation, or panic. It must not itself be routed through the completed
+/// task's [`Cx`], because doing so can discard that classification merely
+/// because the task observed cancellation during its final user-code poll.
+pub(crate) fn publish_terminal_result<T>(
+    sender: oneshot::Sender<Result<T, JoinError>>,
+    result: Result<T, JoinError>,
+) {
+    let _ = sender.send_blocking(result);
+}
+
 /// A handle to a spawned task that can be used to await its result.
 ///
 /// `TaskHandle<T>` is returned by `Cx::spawn`, `Cx::spawn_in`,

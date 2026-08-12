@@ -138,7 +138,7 @@ where
         Fut: Future<Output = Result<T, E>> + Send + 'static,
     {
         let member_index = self.next_member_index;
-        let handle = cx.spawn_in(&self.scope, f)?;
+        let handle = cx.spawn_in_cancellation_dominant(&self.scope, f)?;
         self.handles.push(handle);
         self.next_member_index = self.next_member_index.saturating_add(1);
         self.trace_member_spawn(cx, member_index, "send");
@@ -160,7 +160,7 @@ where
         Fut: Future<Output = Result<T, E>> + 'static,
     {
         let member_index = self.next_member_index;
-        let handle = cx.spawn_local_in(&self.scope, f)?;
+        let handle = cx.spawn_local_in_cancellation_dominant(&self.scope, f)?;
         self.handles.push(handle);
         self.next_member_index = self.next_member_index.saturating_add(1);
         self.trace_member_spawn(cx, member_index, "local");

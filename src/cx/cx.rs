@@ -3984,6 +3984,56 @@ impl Cx<cap::None> {
     }
 }
 
+/// Claims the one-shot result sender without retaining the slot lock while
+/// terminal publication wakes the joiner.
+fn take_spawn_result_sender<T>(
+    slot: &Arc<
+        std::sync::Mutex<
+            Option<
+                crate::channel::oneshot::Sender<Result<T, crate::runtime::task_handle::JoinError>>,
+            >,
+        >,
+    >,
+) -> Option<crate::channel::oneshot::Sender<Result<T, crate::runtime::task_handle::JoinError>>> {
+    slot.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+}
+
+/// Decides whether a completed mailbox-spawn future keeps its returned value
+/// or is classified as task-level cancellation.
+///
+/// Ordinary `Cx::spawn*` calls preserve a value returned after user code has
+/// started polling. This is what lets a cancellation-aware operation report
+/// its typed cancellation result and finish protocol cleanup. Structured
+/// combinators such as `JoinSet` instead require cancellation-dominant member
+/// classification so loser attribution remains in the outer `JoinError`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpawnCompletionPolicy {
+    PreserveReturnedValueAfterStart,
+    CancellationDominant,
+}
+
+fn classify_spawn_completion<T, Caps>(
+    policy: SpawnCompletionPolicy,
+    cancelled_before_first_poll: bool,
+    completion_cx: &Cx<Caps>,
+    requested_cancel_reason: &crate::runtime::spawn_mailbox::PendingCancelReason,
+    value: T,
+) -> Result<T, crate::runtime::task_handle::JoinError> {
+    let cancellation_dominates = cancelled_before_first_poll
+        || matches!(policy, SpawnCompletionPolicy::CancellationDominant);
+    if cancellation_dominates {
+        let reason = completion_cx
+            .cancel_reason()
+            .or_else(|| requested_cancel_reason.read().clone());
+        if let Some(reason) = reason {
+            return Err(crate::runtime::task_handle::JoinError::Cancelled(reason));
+        }
+    }
+    Ok(value)
+}
+
 impl<Caps> Cx<Caps>
 where
     Caps: cap::HasSpawn + Send + Sync + 'static,
@@ -4036,6 +4086,7 @@ where
             self.capability_budget(),
             &gateway,
             &pending,
+            SpawnCompletionPolicy::PreserveReturnedValueAfterStart,
             f,
         )
     }
@@ -4109,6 +4160,47 @@ where
             scope.capability_budget(),
             &gateway,
             &pending,
+            SpawnCompletionPolicy::PreserveReturnedValueAfterStart,
+            f,
+        )
+    }
+
+    /// Internal structured-member variant of [`Self::spawn_in`].
+    ///
+    /// A member that observes cancellation may still return a value so it can
+    /// finish cleanup, but the owning structured combinator must retain the
+    /// cancellation reason as its outer outcome. Keeping this policy private
+    /// prevents an accidental public API fork while making that distinction
+    /// explicit at the producer boundary.
+    pub(crate) fn spawn_in_cancellation_dominant<F, Fut, P>(
+        &self,
+        scope: &crate::cx::Scope<'_, P>,
+        f: F,
+    ) -> Result<crate::runtime::TaskHandle<Fut::Output>, crate::runtime::state::SpawnError>
+    where
+        P: crate::types::Policy,
+        F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
+        Fut: Future + Send + 'static,
+        Fut::Output: Send + 'static,
+    {
+        let Some(gateway) = self.spawn_gateway_handle() else {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        };
+        let pending = scope.pending_spawn_counter_handle().or_else(|| {
+            (scope.region_id() == self.region_id())
+                .then(|| self.pending_spawn_counter_handle())
+                .flatten()
+        });
+        let Some(pending) = pending else {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        };
+        self.spawn_via_gateway(
+            scope.region_id(),
+            scope.budget(),
+            scope.capability_budget(),
+            &gateway,
+            &pending,
+            SpawnCompletionPolicy::CancellationDominant,
             f,
         )
     }
@@ -4282,6 +4374,7 @@ where
             self.capability_budget(),
             &gateway,
             &pending,
+            SpawnCompletionPolicy::PreserveReturnedValueAfterStart,
             f,
         )
     }
@@ -4326,6 +4419,42 @@ where
             scope.capability_budget(),
             &gateway,
             &pending,
+            SpawnCompletionPolicy::PreserveReturnedValueAfterStart,
+            f,
+        )
+    }
+
+    /// Owner-pinned counterpart of
+    /// [`Self::spawn_in_cancellation_dominant`].
+    pub(crate) fn spawn_local_in_cancellation_dominant<F, Fut, P>(
+        &self,
+        scope: &crate::cx::Scope<'_, P>,
+        f: F,
+    ) -> Result<crate::runtime::TaskHandle<Fut::Output>, crate::runtime::state::SpawnError>
+    where
+        P: crate::types::Policy,
+        F: FnOnce(Cx<Caps>) -> Fut + 'static,
+        Fut: Future + 'static,
+        Fut::Output: Send + 'static,
+    {
+        let Some(gateway) = self.spawn_gateway_handle() else {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        };
+        let pending = scope.pending_spawn_counter_handle().or_else(|| {
+            (scope.region_id() == self.region_id())
+                .then(|| self.pending_spawn_counter_handle())
+                .flatten()
+        });
+        let Some(pending) = pending else {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        };
+        self.spawn_local_via_lane(
+            scope.region_id(),
+            scope.budget(),
+            scope.capability_budget(),
+            &gateway,
+            &pending,
+            SpawnCompletionPolicy::CancellationDominant,
             f,
         )
     }
@@ -4343,6 +4472,7 @@ where
         capability_budget: crate::types::CapabilityBudget,
         gateway: &Arc<crate::runtime::spawn_mailbox::SpawnGateway>,
         pending: &Arc<crate::record::region::PendingSpawnCounter>,
+        completion_policy: SpawnCompletionPolicy,
         f: F,
     ) -> Result<crate::runtime::TaskHandle<Fut::Output>, crate::runtime::state::SpawnError>
     where
@@ -4370,14 +4500,12 @@ where
         let admitted_slot = Arc::new(AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(
             gateway,
         )));
+        let requested_cancel_reason = admitted_slot.pending_cancel_reason();
 
         let parent = self.clone();
         let factory_tx = Arc::clone(&shared_tx);
+        let factory_cancel_reason = Arc::clone(&requested_cancel_reason);
         let factory: LocalSpawnFactoryFn = Box::new(move |admission_cx: Cx| {
-            // Keep a context for terminal result delivery even if inheritance
-            // itself panics. Retyping only clones the admission-built handles;
-            // all user/reentrant hooks stay inside the caught future below.
-            let completion_cx = admission_cx.retype::<cap::All>();
             Box::pin(async move {
                 match (crate::cx::scope::CatchUnwind {
                     inner: async move {
@@ -4387,20 +4515,42 @@ where
                             task_id,
                             capability_budget,
                         );
-                        let child_all = child.retype::<cap::All>();
-                        let value = f(child).await;
-                        (value, child_all)
+                        let completion_cx = child.retype::<cap::All>();
+                        let mut future = Box::pin(f(child));
+                        let mut cancelled_before_first_poll = None;
+                        let value = std::future::poll_fn(|poll_cx| {
+                            if cancelled_before_first_poll.is_none() {
+                                cancelled_before_first_poll =
+                                    Some(completion_cx.is_cancel_requested());
+                            }
+                            future.as_mut().poll(poll_cx)
+                        })
+                        .await;
+                        (
+                            value,
+                            completion_cx,
+                            cancelled_before_first_poll.unwrap_or(false),
+                        )
                     },
                 })
                 .await
                 {
-                    Ok((value, child_all)) => {
-                        if let Some(tx) = factory_tx
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .take()
-                        {
-                            let _ = tx.send(&child_all, Ok(value));
+                    Ok((value, completion_cx, cancelled_before_first_poll)) => {
+                        if let Some(tx) = take_spawn_result_sender(&factory_tx) {
+                            // Terminal result publication is bookkeeping, not
+                            // cancellable task work. The user future may have
+                            // returned its operation-level cancellation after
+                            // observing this task's cancelled Cx; using that Cx
+                            // again here would discard the value and collapse
+                            // join into a misleading task-level cancellation.
+                            let result = classify_spawn_completion(
+                                completion_policy,
+                                cancelled_before_first_poll,
+                                &completion_cx,
+                                &factory_cancel_reason,
+                                value,
+                            );
+                            crate::runtime::task_handle::publish_terminal_result(tx, result);
                         }
                         crate::types::Outcome::Ok(())
                     }
@@ -4408,13 +4558,9 @@ where
                         let message = crate::cx::scope::payload_to_string(&payload);
                         drop(payload);
                         let panic_payload = crate::types::outcome::PanicPayload::new(message);
-                        if let Some(tx) = factory_tx
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .take()
-                        {
-                            let _ = tx.send(
-                                &completion_cx,
+                        if let Some(tx) = take_spawn_result_sender(&factory_tx) {
+                            crate::runtime::task_handle::publish_terminal_result(
+                                tx,
                                 Err(JoinError::Panicked(panic_payload.clone())),
                             );
                         }
@@ -4433,23 +4579,21 @@ where
             budget,
             factory,
             on_unadmitted_cancel: Some(Box::new(move |reason| {
-                if let Some(tx) = cancel_tx
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take()
-                {
-                    let _ = tx.send_blocking(Err(JoinError::Cancelled(reason)));
+                if let Some(tx) = take_spawn_result_sender(&cancel_tx) {
+                    crate::runtime::task_handle::publish_terminal_result(
+                        tx,
+                        Err(JoinError::Cancelled(reason)),
+                    );
                 }
             })),
             on_admission_error: Some(Box::new(move |error| {
-                if let Some(tx) = error_tx
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take()
-                {
+                if let Some(tx) = take_spawn_result_sender(&error_tx) {
                     let mut reason = crate::types::CancelReason::user("spawn admission failed");
                     reason.message = Some(error.to_string());
-                    let _ = tx.send_blocking(Err(JoinError::Cancelled(reason)));
+                    crate::runtime::task_handle::publish_terminal_result(
+                        tx,
+                        Err(JoinError::Cancelled(reason)),
+                    );
                 }
             })),
             pending_reservation: Some(pending.reserve()),
@@ -4479,6 +4623,7 @@ where
         capability_budget: crate::types::CapabilityBudget,
         gateway: &Arc<crate::runtime::spawn_mailbox::SpawnGateway>,
         pending: &Arc<crate::record::region::PendingSpawnCounter>,
+        completion_policy: SpawnCompletionPolicy,
         f: F,
     ) -> Result<crate::runtime::TaskHandle<Fut::Output>, crate::runtime::state::SpawnError>
     where
@@ -4502,15 +4647,13 @@ where
         let admitted_slot = Arc::new(AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(
             gateway,
         )));
+        let requested_cancel_reason = admitted_slot.pending_cancel_reason();
 
         // Parent snapshot for capability inheritance (cheap Arc clones).
         let parent = self.clone();
         let factory_tx = Arc::clone(&shared_tx);
+        let factory_cancel_reason = Arc::clone(&requested_cancel_reason);
         let factory: SpawnFactoryFn = Box::new(move |admission_cx: Cx| {
-            // Keep a context for terminal result delivery even if inheritance
-            // itself panics. Retyping only clones the admission-built handles;
-            // all user/reentrant hooks stay inside the caught future below.
-            let completion_cx = admission_cx.retype::<cap::All>();
             Box::pin(async move {
                 match (crate::cx::scope::CatchUnwind {
                     inner: async move {
@@ -4520,20 +4663,39 @@ where
                             task_id,
                             capability_budget,
                         );
-                        let child_all = child.retype::<cap::All>();
-                        let value = f(child).await;
-                        (value, child_all)
+                        let completion_cx = child.retype::<cap::All>();
+                        let mut future = Box::pin(f(child));
+                        let mut cancelled_before_first_poll = None;
+                        let value = std::future::poll_fn(|poll_cx| {
+                            if cancelled_before_first_poll.is_none() {
+                                cancelled_before_first_poll =
+                                    Some(completion_cx.is_cancel_requested());
+                            }
+                            future.as_mut().poll(poll_cx)
+                        })
+                        .await;
+                        (
+                            value,
+                            completion_cx,
+                            cancelled_before_first_poll.unwrap_or(false),
+                        )
                     },
                 })
                 .await
                 {
-                    Ok((value, child_all)) => {
-                        if let Some(tx) = factory_tx
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .take()
-                        {
-                            let _ = tx.send(&child_all, Ok(value));
+                    Ok((value, completion_cx, cancelled_before_first_poll)) => {
+                        if let Some(tx) = take_spawn_result_sender(&factory_tx) {
+                            // See the local-spawn mirror above: once the user
+                            // future returns, result publication must not be
+                            // cancelled by the same Cx it just observed.
+                            let result = classify_spawn_completion(
+                                completion_policy,
+                                cancelled_before_first_poll,
+                                &completion_cx,
+                                &factory_cancel_reason,
+                                value,
+                            );
+                            crate::runtime::task_handle::publish_terminal_result(tx, result);
                         }
                         crate::types::Outcome::Ok(())
                     }
@@ -4541,13 +4703,9 @@ where
                         let message = crate::cx::scope::payload_to_string(&payload);
                         drop(payload);
                         let panic_payload = crate::types::outcome::PanicPayload::new(message);
-                        if let Some(tx) = factory_tx
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .take()
-                        {
-                            let _ = tx.send(
-                                &completion_cx,
+                        if let Some(tx) = take_spawn_result_sender(&factory_tx) {
+                            crate::runtime::task_handle::publish_terminal_result(
+                                tx,
                                 Err(JoinError::Panicked(panic_payload.clone())),
                             );
                         }
@@ -4564,23 +4722,21 @@ where
             .with_admitted_slot(Arc::clone(&admitted_slot))
             .with_pending_reservation(pending.reserve())
             .with_unadmitted_cancel(Box::new(move |reason| {
-                if let Some(tx) = cancel_tx
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take()
-                {
-                    let _ = tx.send_blocking(Err(JoinError::Cancelled(reason)));
+                if let Some(tx) = take_spawn_result_sender(&cancel_tx) {
+                    crate::runtime::task_handle::publish_terminal_result(
+                        tx,
+                        Err(JoinError::Cancelled(reason)),
+                    );
                 }
             }))
             .with_admission_error_slot(Box::new(move |error| {
-                if let Some(tx) = error_tx
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take()
-                {
+                if let Some(tx) = take_spawn_result_sender(&error_tx) {
                     let mut reason = crate::types::CancelReason::user("spawn admission failed");
                     reason.message = Some(error.to_string());
-                    let _ = tx.send_blocking(Err(JoinError::Cancelled(reason)));
+                    crate::runtime::task_handle::publish_terminal_result(
+                        tx,
+                        Err(JoinError::Cancelled(reason)),
+                    );
                 }
             }));
 
@@ -5549,7 +5705,8 @@ mod tests {
         cx.set_cancel_requested(false);
         replacement.store(true, std::sync::atomic::Ordering::Release);
         assert!(
-            cx.checkpoint_with("compatibility fast cancellation").is_err(),
+            cx.checkpoint_with("compatibility fast cancellation")
+                .is_err(),
             "checkpoint_with must deliver cancellation published through a replaced fast_cancel handle"
         );
 
