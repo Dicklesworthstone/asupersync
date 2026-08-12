@@ -316,7 +316,7 @@
     {
       "mapping_id": "BODY-LIMIT-EXCEEDED",
       "lifecycle_applicability": ["PRE_BODY", "BODY_OPEN"],
-      "current_variants": ["HttpError::BodyTooLarge", "HttpError::BodyTooLargeDetailed", "LimitedError::LengthLimit"],
+      "current_variants": ["HttpError::BodyTooLarge", "HttpError::BodyTooLargeDetailed", "LimitedError::LengthLimit", "IncomingBodyError::BodyTooLarge", "IncomingBodyError::QueueFrameTooLarge"],
       "http_status_when_response_possible": 413,
       "telemetry_status": null,
       "protocol_action": "Send 413 when safely writable; H1 then drains within every bound and reuses only after synchronized EOF, otherwise closes; H2 cancels or resets unread input as protocol state permits.",
@@ -325,7 +325,7 @@
     {
       "mapping_id": "BODY-FRAMING-INVALID",
       "lifecycle_applicability": ["PRE_BODY", "BODY_OPEN"],
-      "current_variants": ["HttpError::BadContentLength", "HttpError::DuplicateContentLength", "HttpError::DuplicateTransferEncoding", "HttpError::BadTransferEncoding", "HttpError::BadChunkedEncoding", "HttpError::AmbiguousBodyLength", "HttpError::TrailersNotAllowed", "HttpError::HeadersTooLarge", "HttpError::BadHeader", "HttpError::InvalidHeaderName", "HttpError::InvalidHeaderValue"],
+      "current_variants": ["HttpError::BadContentLength", "HttpError::DuplicateContentLength", "HttpError::DuplicateTransferEncoding", "HttpError::BadTransferEncoding", "HttpError::BadChunkedEncoding", "HttpError::AmbiguousBodyLength", "HttpError::TrailersNotAllowed", "HttpError::HeadersTooLarge", "HttpError::BadHeader", "HttpError::InvalidHeaderName", "HttpError::InvalidHeaderValue", "IncomingBodyError::BadContentLength", "IncomingBodyError::BadChunkedEncoding", "IncomingBodyError::TrailersTooLarge", "IncomingBodyError::BadHeader", "IncomingBodyError::InvalidHeaderName", "IncomingBodyError::InvalidHeaderValue"],
       "http_status_when_response_possible": 400,
       "telemetry_status": null,
       "protocol_action": "Refuse request and do not reuse ambiguous H1 framing; apply the protocol-defined H2 stream action",
@@ -334,7 +334,7 @@
     {
       "mapping_id": "BODY-CANCELLED",
       "lifecycle_applicability": ["PRE_BODY", "BODY_OPEN"],
-      "current_variants": ["HttpError::BodyCancelled", "ServerHopOutcome::Cancelled"],
+      "current_variants": ["HttpError::BodyCancelled", "ServerHopOutcome::Cancelled", "IncomingBodyError::Cancelled { kind }"],
       "http_status_when_response_possible": null,
       "telemetry_status": 499,
       "protocol_action": "Record the existing web cancellation representation, stop request work, and transfer unresolved cleanup to the protocol driver",
@@ -352,7 +352,7 @@
     {
       "mapping_id": "BODY-RESOURCE-EXHAUSTED",
       "lifecycle_applicability": ["PRE_BODY", "BODY_OPEN"],
-      "current_variants": [],
+      "current_variants": ["IncomingBodyError::Cancelled { kind: CancelKind::PollQuota | CancelKind::CostBudget | CancelKind::ResourceUnavailable }"],
       "http_status_when_response_possible": 503,
       "telemetry_status": null,
       "protocol_action": "Retain PollQuota, CostBudget, or ResourceUnavailable as the exact CancelKind, stop request work, and enter the typed bounded cleanup policy; do not apply the generic 499 representation.",
@@ -361,8 +361,8 @@
     {
       "mapping_id": "BODY-SOURCE-DISCONNECTED",
       "lifecycle_applicability": ["BODY_OPEN"],
-      "current_variants": [],
-      "current_ambiguity": "HttpError::BodyChannelClosed conflates missing sender, full or disconnected producer send, and consumer loss; receiver-side producer disconnect currently becomes EOF.",
+      "current_variants": ["IncomingBodyError::SourceDisconnected"],
+      "current_ambiguity": "The retained 0.4.3 HttpError::BodyChannelClosed adapter intentionally conflates missing sender, disconnected producer send, and consumer loss; the typed IncomingRequestBody path does not convert premature producer disconnect to EOF.",
       "http_status_when_response_possible": 500,
       "telemetry_status": null,
       "protocol_action": "Treat as terminal internal source failure; never convert to EOF",
@@ -380,7 +380,7 @@
     {
       "mapping_id": "BODY-ACCOUNTING-OVERFLOW",
       "lifecycle_applicability": ["BODY_OPEN"],
-      "current_variants": [],
+      "current_variants": ["IncomingBodyError::AccountingOverflow"],
       "http_status_when_response_possible": 500,
       "telemetry_status": null,
       "protocol_action": "Fail before enqueue, close or reset the affected protocol scope, and retain the checked operands in telemetry",
@@ -389,8 +389,8 @@
     {
       "mapping_id": "BODY-CONSUMER-DROPPED",
       "lifecycle_applicability": ["BODY_OPEN"],
-      "current_variants": [],
-      "current_ambiguity": "HttpError::BodyChannelClosed is an ambiguous channel-closure variant, not a unique consumer-drop outcome; BODY-1 requires distinct typed source and consumer outcomes.",
+      "current_variants": ["IncomingBodyError::ConsumerDropped"],
+      "current_ambiguity": "The retained 0.4.3 HttpError::BodyChannelClosed adapter remains intentionally ambiguous; the typed writer observes IncomingBodyError::ConsumerDropped and transfers cleanup to the protocol driver.",
       "http_status_when_response_possible": null,
       "telemetry_status": null,
       "protocol_action": "Invoke bounded H1 drain-or-close or H2 stream reset policy",

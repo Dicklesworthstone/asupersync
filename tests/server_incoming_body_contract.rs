@@ -1097,6 +1097,8 @@ fn validate_cleanup_errors_and_evidence(inventory: &Value) -> Result<(), String>
             "HttpError::BodyTooLarge",
             "HttpError::BodyTooLargeDetailed",
             "LimitedError::LengthLimit",
+            "IncomingBodyError::BodyTooLarge",
+            "IncomingBodyError::QueueFrameTooLarge",
         ])
         || variants("BODY-FRAMING-INVALID")?
             != string_set(&[
@@ -1111,15 +1113,29 @@ fn validate_cleanup_errors_and_evidence(inventory: &Value) -> Result<(), String>
                 "HttpError::BadHeader",
                 "HttpError::InvalidHeaderName",
                 "HttpError::InvalidHeaderValue",
+                "IncomingBodyError::BadContentLength",
+                "IncomingBodyError::BadChunkedEncoding",
+                "IncomingBodyError::TrailersTooLarge",
+                "IncomingBodyError::BadHeader",
+                "IncomingBodyError::InvalidHeaderName",
+                "IncomingBodyError::InvalidHeaderValue",
             ])
         || variants("BODY-CANCELLED")?
-            != string_set(&["HttpError::BodyCancelled", "ServerHopOutcome::Cancelled"])
+            != string_set(&[
+                "HttpError::BodyCancelled",
+                "ServerHopOutcome::Cancelled",
+                "IncomingBodyError::Cancelled { kind }",
+            ])
         || variants("BODY-REQUEST-DEADLINE")? != string_set(&["ServerHopOutcome::DeadlineExceeded"])
-        || !variants("BODY-RESOURCE-EXHAUSTED")?.is_empty()
-        || !variants("BODY-SOURCE-DISCONNECTED")?.is_empty()
+        || variants("BODY-RESOURCE-EXHAUSTED")?
+            != string_set(&["IncomingBodyError::Cancelled { kind: CancelKind::PollQuota | CancelKind::CostBudget | CancelKind::ResourceUnavailable }"])
+        || variants("BODY-SOURCE-DISCONNECTED")?
+            != string_set(&["IncomingBodyError::SourceDisconnected"])
         || variants("BODY-CLIENT-ABORTED")? != string_set(&["ServerHopOutcome::ConnectionLost"])
-        || !variants("BODY-ACCOUNTING-OVERFLOW")?.is_empty()
-        || !variants("BODY-CONSUMER-DROPPED")?.is_empty()
+        || variants("BODY-ACCOUNTING-OVERFLOW")?
+            != string_set(&["IncomingBodyError::AccountingOverflow"])
+        || variants("BODY-CONSUMER-DROPPED")?
+            != string_set(&["IncomingBodyError::ConsumerDropped"])
     {
         return Err("current body error variant mapping drifted".to_owned());
     }

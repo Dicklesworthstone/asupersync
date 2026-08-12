@@ -122,11 +122,13 @@ implementation to wrap it. `Sync` is not required for a single consumer; BODY-3
 must remove any `Sync` bound from the final body-consuming extractor while retaining
 `Send`.
 
-`IncomingBodyError` is also concrete rather than an opaque placeholder. It carries
-typed framing detail and offset, observed/limit/source values for a limit refusal,
-the exact `CancelKind`, source-disconnect and transport detail, checked-accounting
-operands, and an already-terminal repoll variant. Consumer drop is a Drop-side
-obligation handoff; it is not a frame-poll error.
+`IncomingBodyError` is also concrete rather than an opaque placeholder. It
+distinguishes framing categories; carries actual/limit values for aggregate and
+queued-frame refusals, the exact `CancelKind`, checked drain totals and limits,
+source disconnect, checked-accounting overflow, and an already-terminal repoll
+variant. The future terminal telemetry schema's offset and limit-source fields
+are not claimed as fields of this live error type. Consumer drop is a Drop-side
+obligation handoff; it is not an error polled by the dropped consumer.
 
 Ownership is split as follows:
 

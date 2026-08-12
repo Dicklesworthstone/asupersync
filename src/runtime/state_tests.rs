@@ -1966,7 +1966,10 @@ fn v0_4_3_compatibility_task_record_setters_retain_independent_semantics() {
         Arc::ptr_eq(linked_inner, &replacement),
         "the legacy setter must install the requested CxInner"
     );
-    let retained_cx = record.cx.as_ref().expect("legacy full Cx remains installed");
+    let retained_cx = record
+        .cx
+        .as_ref()
+        .expect("legacy full Cx remains installed");
     assert!(Arc::ptr_eq(&retained_cx.inner, &cx.inner));
 
     let replacement_cx = crate::cx::Cx::new(root, task_id, Budget::INFINITE);
@@ -1983,7 +1986,10 @@ fn v0_4_3_compatibility_task_record_setters_retain_independent_semantics() {
         "set_cx must install the requested full context"
     );
     assert!(
-        Arc::ptr_eq(record.cx_inner.as_ref().expect("linked CxInner"), &replacement),
+        Arc::ptr_eq(
+            record.cx_inner.as_ref().expect("linked CxInner"),
+            &replacement
+        ),
         "the 0.4.3 set_cx contract leaves cx_inner unchanged"
     );
 

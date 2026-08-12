@@ -2459,8 +2459,7 @@ mod tests {
             Err(HttpError::BodyTooLarge)
         ));
 
-        let (mut malformed_writer, _malformed_body) =
-            IncomingBody::channel(&cx, BodyKind::Chunked);
+        let (mut malformed_writer, _malformed_body) = IncomingBody::channel(&cx, BodyKind::Chunked);
         assert!(matches!(
             block_on(malformed_writer.push_bytes(&cx, b"0\r\nnot-a-field\r\n\r\n")),
             Err(HttpError::BadHeader)
