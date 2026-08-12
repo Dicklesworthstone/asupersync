@@ -34,6 +34,13 @@ fn test_race_empty_observes_cancel_after_publication() {
     let mut poll_cx = Context::from_waker(&waker);
 
     {
+        let task = state
+            .task_mut(handle.task_id())
+            .expect("spawned task should have a record");
+        assert!(task.install_cancel_waker(waker.clone()));
+    }
+
+    {
         let stored = state
             .get_stored_future(handle.task_id())
             .expect("spawned task should have a stored future");

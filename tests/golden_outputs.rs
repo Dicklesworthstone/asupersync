@@ -974,8 +974,7 @@ fn run_plan(runtime: &mut LabRuntime, plan: &PlanDag, fixture_name: &str) -> Nod
         let mut sched = runtime.scheduler.lock();
         for (_, record) in runtime.state.tasks_iter() {
             if record.is_runnable() {
-                let prio = record.context_budget().map_or(0, |budget| budget.priority);
-                sched.schedule(record.id, prio);
+                sched.schedule(record.id, record.priority());
             }
         }
         drop(sched);
@@ -1125,8 +1124,7 @@ where
     let priority = runtime
         .state
         .task(task_id)
-        .and_then(asupersync::record::TaskRecord::context_budget)
-        .map_or(0, |budget| budget.priority);
+        .map_or(0, asupersync::record::TaskRecord::priority);
     runtime.scheduler.lock().schedule(task_id, priority);
     SharedHandle::new(handle)
 }

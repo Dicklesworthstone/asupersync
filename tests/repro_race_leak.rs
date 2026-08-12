@@ -164,10 +164,12 @@ fn repro_race_leak() {
 
         // Check whether the sealed task context observed the cancellation
         // request without reaching into its authority-bearing `CxInner`.
+        // `is_cancel_requested` is the sealed publication query; equivalent
+        // to context_cancel_requested on a linked record.
         let is_cancelled = state
             .task(loser_task_id)
             .expect("task record")
-            .context_cancel_requested()
+            .is_cancel_requested()
             .expect("task context should be linked after admission");
 
         tracing::debug!(is_cancelled, "loser cancelled");
