@@ -70,7 +70,7 @@
       "path": "src/types/task_context.rs",
       "sha256": "6ec847ae652bfebf9f82a433a770591c317bbd95865c4e23e0ad9bdae4073211",
       "line_count": 1948,
-      "role": "CxInner coherent cancellation state, stable publication envelope, publication gate, and waker registry"
+      "role": "CxInner coherent cancellation state, 0.4.3-compatible fast_cancel publication handle, stable scheduler clone, publication gate, and waker registry"
     },
     {
       "path": "src/cx/cx.rs",
@@ -217,7 +217,7 @@
     },
     {
       "ownership_id": "HOTREAD-OWN-CANCEL",
-      "owner": "RwLock<CxInner> plus Arc<CxCancellationState> stable publication envelope",
+      "owner": "RwLock<CxInner> plus the Arc<AtomicBool> fast_cancel handle named CxCancellationState inside the scheduler",
       "payload": "cancel_requested, strongest CancelReason, cleanup priority, publication gate, and cancel-waker registry",
       "synchronization": "writers hold CxInner write and publish Release through set_cancel_requested; ordinary readers query Acquire; reason-bearing readers also hold CxInner read",
       "lifetime": "wakers retain the stable envelope Arc and a Weak CxInner; rich reads require a successful upgrade",
@@ -321,16 +321,16 @@
     {
       "surface_id": "HOTREAD-READ-CX-QUERY",
       "category": "cancellation_query",
-      "owner": "Arc<CxCancellationState> for the requested bit; RwLock<CxInner> for rich reason and cause queries",
+      "owner": "RwLock<CxInner> for the 0.4.3 requested bit and rich reason/cause queries; the scheduler separately retains Arc<CxCancellationState>",
       "reader_set": ["Cx::is_cancel_requested", "cancel_reason", "cancel_chain", "root_cancel_cause", "cancelled_by", "any_cause_is"],
       "writer_set": ["all CxInner cancellation producers"],
-      "synchronization": "Cx::is_cancel_requested queries the stable envelope with Acquire; reason and cause queries hold the CxInner read lock",
-      "lifetime_and_generation": "Cx retains both the stable envelope and Arc<CxInner>; these queries do not retain TaskRecord",
+      "synchronization": "Cx::is_cancel_requested reads CxInner::cancel_requested under the read lock with 0.4.3 semantics; reason and cause queries hold the same CxInner read lock",
+      "lifetime_and_generation": "Cx retains both the scheduler's stable envelope and Arc<CxInner>; public queries use CxInner and do not retain TaskRecord",
       "expected_frequency": "caller-selected, with checkpoint handled separately",
-      "semantic_payload": "published requested bit or cloned reason/cause chain",
+      "semantic_payload": "lock-backed 0.4.3 requested bit or cloned reason/cause chain",
       "disposition": "KEEP_PUBLISHED_FLAG_AND_LOCKED_RICH_READS",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 2140, "fragment": "self.cancellation.is_requested()"},
+        {"path": "src/cx/cx.rs", "line": 2140, "fragment": "self.inner.read().cancel_requested"},
         {"path": "src/cx/cx.rs", "line": 3418, "fragment": "inner.cancel_reason.clone()"},
         {"path": "src/cx/cx.rs", "line": 3448, "fragment": "pub fn cancel_chain"},
         {"path": "src/cx/cx.rs", "line": 3482, "fragment": "pub fn root_cancel_cause"},
@@ -341,7 +341,7 @@
     {
       "surface_id": "HOTREAD-READ-CANCELLATION-PUBLICATION",
       "category": "ordinary_waker_and_checkpoint_publication",
-      "owner": "Arc<CxCancellationState> cloned from CxInner",
+      "owner": "Arc<AtomicBool> fast_cancel handle cloned from CxInner and named CxCancellationState inside the scheduler",
       "reader_set": ["Cx::checkpoint", "ThreeLaneWaker::schedule", "ThreeLaneLocalWaker::schedule"],
       "writer_set": ["cancellation_publication_writer_sites"],
       "synchronization": "Acquire query paired with Release publication through CxInner::set_cancel_requested; rich reason reads still require CxInner read",
@@ -350,9 +350,9 @@
       "semantic_payload": "one-bit cancellation publication only",
       "disposition": "KEEP_INCUMBENT_ALREADY_ATOMIC",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 2205, "fragment": "let cancelled = guard.is_cancel_requested()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7959, "fragment": "self.cancellation.is_requested()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8018, "fragment": "self.cancellation.is_requested()"}
+        {"path": "src/cx/cx.rs", "line": 2206, "fragment": "let cancelled = guard.is_cancel_requested()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7959, "fragment": "self.cancellation.load(Ordering::Acquire)"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8018, "fragment": "self.cancellation.load(Ordering::Acquire)"}
       ]
     },
     {
