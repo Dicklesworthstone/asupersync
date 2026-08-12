@@ -162,13 +162,13 @@ fn repro_race_leak() {
         // In our manual setup, stored_loser is held by us (simulating executor).
         // If cancellation happened, next poll of stored_loser should see cancellation.
 
-        // Check if cancellation request was sent to loser
-        // We can check if the loser task's context has cancellation requested.
-        // We need to peek into the stored task or the runtime state.
-
-        let task_record = state.task(loser_task_id).expect("task record");
-        let inner = task_record.cx_inner.as_ref().expect("cx inner missing");
-        let is_cancelled = inner.read().cancel_requested;
+        // Check whether the sealed task context observed the cancellation
+        // request without reaching into its authority-bearing `CxInner`.
+        let is_cancelled = state
+            .task(loser_task_id)
+            .expect("task record")
+            .context_cancel_requested()
+            .expect("task context should be linked after admission");
 
         tracing::debug!(is_cancelled, "loser cancelled");
 

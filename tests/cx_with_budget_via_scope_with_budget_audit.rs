@@ -217,19 +217,20 @@ fn checkpoint_detects_budget_exhaustion_with_three_kinds() {
 #[test]
 fn checkpoint_sets_cancel_state_on_exhaustion() {
     // Pin: when budget exhaustion is detected, checkpoint
-    // sets cancel_requested + fast_cancel + cancel_reason
+    // publishes cancel_requested through the stable envelope and sets cancel_reason
     // BEFORE returning Err. This is the unified-cancel
     // path the operator's Err(Exhausted) maps to.
     let source = read("src/cx/cx.rs");
+    let task_context = read("src/types/task_context.rs");
 
     let fn_marker = "pub fn checkpoint(&self) -> Result<(), crate::error::Error> {";
     let pos = source.find(fn_marker).expect("checkpoint fn");
     let body_window = &source[pos..pos + 6000];
 
     assert!(
-        body_window.contains("inner.cancel_requested = true;")
-            && body_window.contains(".fast_cancel")
-            && body_window.contains(".store(true, std::sync::atomic::Ordering::Release)"),
+        body_window.contains("inner.set_cancel_requested(true);")
+            && task_context.contains("self.publish_cancel_requested(value);")
+            && task_context.contains(".store(value, std::sync::atomic::Ordering::Release);"),
         "REGRESSION: checkpoint no longer sets cancel state \
          on budget exhaustion. Exhausted budgets won't \
          produce Err.",

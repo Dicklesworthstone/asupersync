@@ -215,10 +215,11 @@ fn checkpoint_budget_exhaustion_emits_correct_cancel_kinds() {
 #[test]
 fn checkpoint_slow_path_publishes_self_cancel_on_exhaustion() {
     // Pin (link 2): when budget_exhaustion is Some, the slow
-    // path sets cancel_requested=true + fast_cancel.store(
-    // Release) + cancel_reason. This is what makes
+    // path publishes cancel_requested through the stable
+    // Release-ordered cancellation envelope and sets cancel_reason. This makes
     // exhaustion equivalent to a structural cancel.
     let source = read("src/cx/cx.rs");
+    let task_context = read("src/types/task_context.rs");
 
     let fn_marker = "pub fn checkpoint(&self) -> Result<(), crate::error::Error> {";
     let start = source.find(fn_marker).expect("checkpoint fn");
@@ -226,8 +227,11 @@ fn checkpoint_slow_path_publishes_self_cancel_on_exhaustion() {
 
     assert!(
         body.contains("if let Some((reason, _, _)) = &budget_exhaustion {")
-            && body.contains("inner.cancel_requested = true;")
-            && body.contains(".store(true, std::sync::atomic::Ordering::Release);"),
+            && body.contains("inner.set_cancel_requested(true);")
+            && task_context.contains("pub(crate) fn set_cancel_requested(&mut self, value: bool)")
+            && task_context.contains("self.cancel_requested = value;")
+            && task_context.contains("self.publish_cancel_requested(value);")
+            && task_context.contains(".store(value, std::sync::atomic::Ordering::Release);"),
         "REGRESSION: checkpoint slow path no longer publishes \
          the self-cancel on budget exhaustion. The exhaustion \
          is detected once but not converted into a structural \

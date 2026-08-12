@@ -127,13 +127,14 @@ fn read(rel: &str) -> String {
 }
 
 #[test]
-fn task_handle_abort_publishes_via_same_fast_cancel_release_store_as_cancel() {
+fn task_handle_abort_publishes_via_same_stable_envelope_as_cancel() {
     // Pin (link 1): TaskHandle::abort_with_reason uses the
     // same fast_cancel.store(true, Release) + cancel_reason
     // mechanism as Cx::cancel_with. This is the structural
     // proof that abort is a graceful-cancel synonym, NOT
     // a hard-kill.
     let source = read("src/runtime/task_handle.rs");
+    let task_context = read("src/types/task_context.rs");
 
     let fn_marker = "pub fn abort_with_reason(&self, reason: CancelReason) {";
     let start = source.find(fn_marker).expect("abort_with_reason fn");
@@ -148,8 +149,9 @@ fn task_handle_abort_publishes_via_same_fast_cancel_release_store_as_cancel() {
             && source.contains("let mut cached = requested.write();")
             && source.contains(".filter(|task| task.is_published())")
             && source.contains("strengthen_cancel_reason_locked(&mut lock, &strongest_requested);")
-            && source.contains("lock.cancel_requested = true;")
-            && source.contains(".store(true, std::sync::atomic::Ordering::Release);"),
+            && source.contains("lock.set_cancel_requested(true);")
+            && task_context.contains("self.publish_cancel_requested(value);")
+            && task_context.contains(".store(value, std::sync::atomic::Ordering::Release);"),
         "REGRESSION: abort_with_reason no longer publishes \
          through the admission gate and cancel_requested + \
          fast_cancel.store(Release). \
@@ -275,12 +277,13 @@ fn task_handle_abort_default_reason_is_user_kind_not_force_kill() {
 }
 
 #[test]
-fn cx_cancel_with_publishes_via_same_fast_cancel_release_store_as_abort() {
+fn cx_cancel_with_publishes_via_same_stable_envelope_as_abort() {
     // Pin (link 1+2 symmetry): Cx::cancel_with uses the
     // SAME fast_cancel.store(true, Release) mechanism as
     // TaskHandle::abort. The ONLY differences are the
     // reason kind/message and the handle access pattern.
     let source = read("src/cx/cx.rs");
+    let task_context = read("src/types/task_context.rs");
 
     let fn_marker = "pub fn cancel_with(&self, kind: CancelKind, message: Option<&'static str>) {";
     let start = source.find(fn_marker).expect("cancel_with fn");
@@ -290,8 +293,9 @@ fn cx_cancel_with_publishes_via_same_fast_cancel_release_store_as_abort() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("inner.cancel_requested = true;")
-            && body.contains(".store(true, std::sync::atomic::Ordering::Release);"),
+        body.contains("inner.set_cancel_requested(true);")
+            && task_context.contains("self.publish_cancel_requested(value);")
+            && task_context.contains(".store(value, std::sync::atomic::Ordering::Release);"),
         "REGRESSION: Cx::cancel_with no longer publishes via \
          cancel_requested + fast_cancel.store(Release). The \
          self-cancel API diverges from abort — observable \
@@ -320,7 +324,7 @@ fn cx_cancel_fast_uses_same_publish_mechanism_minimal_attribution() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("inner.cancel_requested = true;"),
+        body.contains("inner.set_cancel_requested(true);"),
         "REGRESSION: Cx::cancel_fast no longer sets \
          cancel_requested. The fast-path self-cancel \
          diverged from the slow-path cancel_with.",
@@ -399,6 +403,7 @@ fn cancel_handlers_run_on_both_abort_and_cancel_via_same_checkpoint_path() {
     // checkpoint observes via the SAME path — there is no
     // separate handler routing for "abort vs cancel".
     let source = read("src/cx/cx.rs");
+    let task_context = read("src/types/task_context.rs");
 
     let fn_marker = "pub fn checkpoint(&self) -> Result<(), crate::error::Error> {";
     let start = source.find(fn_marker).expect("checkpoint fn");
@@ -410,11 +415,11 @@ fn cancel_handlers_run_on_both_abort_and_cancel_via_same_checkpoint_path() {
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
-    // checkpoint reads fast_cancel via Acquire — the same
-    // atomic that abort/cancel publish.
+    // checkpoint queries the same stable envelope that abort/cancel publish.
     assert!(
-        body.contains("guard.fast_cancel.load(std::sync::atomic::Ordering::Acquire)"),
-        "REGRESSION: checkpoint no longer reads fast_cancel \
+        body.contains("let cancelled = guard.is_cancel_requested();")
+            && task_context.contains("self.requested.load(std::sync::atomic::Ordering::Acquire)"),
+        "REGRESSION: checkpoint no longer reads stable cancellation publication \
          with Acquire. The single-observation-path contract \
          is broken — abort and cancel may now route through \
          different observation mechanisms.",

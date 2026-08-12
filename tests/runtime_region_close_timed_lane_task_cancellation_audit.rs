@@ -165,18 +165,21 @@ fn cancel_request_second_pass_calls_request_cancel_with_budget_per_task() {
 }
 
 #[test]
-fn request_cancel_with_budget_sets_fast_cancel_release() {
+fn request_cancel_with_budget_publishes_stable_envelope_release() {
     // Pin (link 3): request_cancel_with_budget sets
     // `inner.fast_cancel.store(true, Release)` so that the
     // task's checkpoint can observe the cancel via Acquire.
     // Without this Release-Acquire pair, the cancel signal may
     // not be visible cross-thread.
     let source = read("src/record/task.rs");
+    let task_context = read("src/types/task_context.rs");
 
     assert!(
-        source.contains(".store(true, std::sync::atomic::Ordering::Release);"),
+        source.contains("guard.set_cancel_requested(true);")
+            && task_context.contains("self.publish_cancel_requested(value);")
+            && task_context.contains(".store(value, std::sync::atomic::Ordering::Release);"),
         "REGRESSION: task.rs request_cancel_with_budget no \
-         longer publishes fast_cancel with Release ordering. \
+         longer publishes the stable cancellation envelope with Release ordering. \
          Without it, the worker thread executing a timed-lane \
          task may not observe the cancel flag — the task runs \
          to completion despite the close request.",
@@ -271,7 +274,7 @@ fn worker_execute_polls_future_inside_catch_unwind_no_preemption() {
 }
 
 #[test]
-fn cx_checkpoint_observes_fast_cancel_with_acquire() {
+fn cx_checkpoint_observes_stable_envelope_with_acquire() {
     // Pin (link 5): cx.checkpoint() reads
     // `guard.fast_cancel.load(Acquire)` to detect a
     // concurrently-set cancel flag. The Release-Acquire pair
@@ -279,11 +282,13 @@ fn cx_checkpoint_observes_fast_cancel_with_acquire() {
     // gives the cooperative cancel protocol its cross-thread
     // visibility.
     let source = read("src/cx/cx.rs");
+    let task_context = read("src/types/task_context.rs");
 
     assert!(
-        source.contains("guard.fast_cancel.load(std::sync::atomic::Ordering::Acquire)"),
+        source.contains("let cancelled = guard.is_cancel_requested();")
+            && task_context.contains("self.requested.load(std::sync::atomic::Ordering::Acquire)"),
         "REGRESSION: cx.checkpoint() no longer reads \
-         fast_cancel with Acquire ordering. Without it, the \
+         stable cancellation publication with Acquire ordering. Without it, the \
          Release-Acquire pair is broken — a task in the timed \
          lane may not observe the cancel flag set by region.\
          close().",

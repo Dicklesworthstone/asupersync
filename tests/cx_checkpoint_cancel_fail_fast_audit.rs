@@ -167,11 +167,12 @@ fn checkpoint_fast_path_early_return_gated_on_not_cancelled_and_not_exhausted() 
 #[test]
 fn checkpoint_fast_path_reads_cancel_via_acquire_load() {
     // Pin (link 1): the fast-path cancel observation uses
-    // Acquire ordering on fast_cancel. Without this, the
+    // the stable envelope's Acquire-ordered query. Without this, the
     // observation may miss a concurrent Release publish —
     // user proceeds past a cancel that has already been
     // signaled.
     let source = read("src/cx/cx.rs");
+    let task_context = read("src/types/task_context.rs");
 
     let fn_marker = "pub fn checkpoint(&self) -> Result<(), crate::error::Error> {";
     let start = source.find(fn_marker).expect("checkpoint fn");
@@ -184,7 +185,10 @@ fn checkpoint_fast_path_reads_cancel_via_acquire_load() {
     let body = &source[start..safe_end];
 
     assert!(
-        body.contains("guard.fast_cancel.load(std::sync::atomic::Ordering::Acquire)"),
+        body.contains("let cancelled = guard.is_cancel_requested();")
+            && task_context.contains("pub(crate) fn is_cancel_requested(&self) -> bool")
+            && task_context.contains("self.cancellation.is_requested()")
+            && task_context.contains("self.requested.load(std::sync::atomic::Ordering::Acquire)"),
         "REGRESSION: fast-path cancel check no longer uses \
          Acquire ordering. A concurrently-set cancel may \
          not be observed — fail-fast contract broken under \

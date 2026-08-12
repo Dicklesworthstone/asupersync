@@ -125,24 +125,29 @@ fn read(rel: &str) -> String {
 }
 
 #[test]
-fn checkpoint_fast_path_loads_fast_cancel_with_acquire_first() {
+fn checkpoint_fast_path_queries_stable_cancellation_envelope_first() {
     // Pin: the FIRST observable side effect of checkpoint()
-    // is the Acquire-load of fast_cancel. If this changes
+    // is the stable envelope query, whose implementation is an Acquire load. If this changes
     // (e.g., progress recording moves before the load), the
     // user contract that cancel is observed BEFORE work is
     // broken.
     let source = read("src/cx/cx.rs");
+    let task_context = read("src/types/task_context.rs");
 
     let fn_marker = "pub fn checkpoint(&self) -> Result<(), crate::error::Error> {";
     let pos = source.find(fn_marker).expect("checkpoint fn");
     let body_window = &source[pos..pos + 4000];
 
-    // The Acquire-load of fast_cancel must appear in the
+    // The cancellation query must appear in the
     // first read() block, before any fetch_add / store on
     // the fast-path counters.
     let load_pos = body_window
-        .find("fast_cancel.load(std::sync::atomic::Ordering::Acquire)")
-        .expect("fast_cancel.load(Acquire) in checkpoint body");
+        .find("let cancelled = guard.is_cancel_requested();")
+        .expect("stable cancellation query in checkpoint body");
+    assert!(
+        task_context.contains("self.requested.load(std::sync::atomic::Ordering::Acquire)"),
+        "REGRESSION: stable cancellation query no longer uses Acquire ordering"
+    );
 
     // The progress-recording stores must come AFTER the load.
     let store_ns_pos = body_window
@@ -156,7 +161,7 @@ fn checkpoint_fast_path_loads_fast_cancel_with_acquire_first() {
     assert!(
         load_pos < store_ns_pos,
         "REGRESSION: fast_path_last_checkpoint_ns.store now \
-         precedes fast_cancel.load(Acquire). Cancel-check is \
+         precedes the stable cancellation query. Cancel-check is \
          no longer the first observable effect — checkpoint() \
          records progress BEFORE checking cancel, violating \
          the cancel-correctness contract.",
@@ -165,7 +170,7 @@ fn checkpoint_fast_path_loads_fast_cancel_with_acquire_first() {
     assert!(
         load_pos < fetch_add_pos,
         "REGRESSION: fast_path_count.fetch_add now precedes \
-         fast_cancel.load(Acquire). Cancel-check is no longer \
+         the stable cancellation query. Cancel-check is no longer \
          the first observable effect.",
     );
 }
@@ -302,26 +307,26 @@ fn checkpoint_slow_path_record_at_is_internal_bookkeeping_not_user_work() {
 #[test]
 fn checkpoint_acquire_release_pairing_documented() {
     // Pin: the source must document the Acquire-Release
-    // pairing between fast_cancel.store(Release) by
-    // cancellers and fast_cancel.load(Acquire) here. If
+    // pairing between the stable cancellation publisher and
+    // query. If
     // this is removed and the orderings drift to Relaxed,
     // mid-checkpoint cancels are no longer guaranteed to
     // be observed.
     let source = read("src/cx/cx.rs");
+    let task_context = read("src/types/task_context.rs");
 
     assert!(
-        source.contains("`fast_cancel` is set with `Release` ordering")
-            || source.contains("fast_cancel` is set with `Release`"),
+        source.contains("stable cancellation envelope") && source.contains("`Release` ordering"),
         "REGRESSION: the Acquire-Release pairing for \
-         fast_cancel is no longer documented in checkpoint(). \
+         the stable cancellation envelope is no longer documented in checkpoint(). \
          Future maintainers may downgrade orderings to Relaxed \
          and break cross-thread visibility.",
     );
 
     assert!(
-        source.contains("Acquire") && source.contains("fast_cancel.load"),
+        task_context.contains("self.requested.load(std::sync::atomic::Ordering::Acquire)"),
         "REGRESSION: Acquire ordering is no longer used on \
-         fast_cancel.load. Cancel propagation across threads \
+         cancellation publication. Cancel propagation across threads \
          is no longer guaranteed.",
     );
 }

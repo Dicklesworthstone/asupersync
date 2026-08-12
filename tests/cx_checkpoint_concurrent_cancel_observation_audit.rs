@@ -165,13 +165,16 @@ fn checkpoint_fast_path_uses_acquire_load_for_cross_thread_visibility() {
     // Release store. Without Acquire, the Release-Acquire
     // pair is broken and observations may permanently miss.
     let source = read("src/cx/cx.rs");
+    let task_context = read("src/types/task_context.rs");
 
     let fn_marker = "pub fn checkpoint(&self) -> Result<(), crate::error::Error> {";
     let start = source.find(fn_marker).expect("checkpoint fn");
     let body = source_window(&source, start, 4000);
 
     assert!(
-        body.contains("guard.fast_cancel.load(std::sync::atomic::Ordering::Acquire)"),
+        body.contains("let cancelled = guard.is_cancel_requested();")
+            && task_context.contains("self.cancellation.is_requested()")
+            && task_context.contains("self.requested.load(std::sync::atomic::Ordering::Acquire)"),
         "REGRESSION: fast-path cancel check no longer uses \
          Acquire ordering. The Release-Acquire pair is \
          broken — concurrent cancels may be observed only \
@@ -183,30 +186,37 @@ fn checkpoint_fast_path_uses_acquire_load_for_cross_thread_visibility() {
 #[test]
 fn cancel_publisher_uses_release_store_for_cross_thread_visibility() {
     // Pin (link 2): request_cancel_with_budget publishes
-    // fast_cancel via Release store. Pairs with the
+    // through the stable envelope's Release store. Pairs with the
     // checkpoint reader's Acquire load.
     let source = read("src/record/task.rs");
+    let task_context = read("src/types/task_context.rs");
 
     assert!(
-        source.contains(".store(true, std::sync::atomic::Ordering::Release);"),
+        source.contains("guard.set_cancel_requested(true);")
+            && task_context.contains("self.publish_cancel_requested(value);")
+            && task_context.contains(".store(value, std::sync::atomic::Ordering::Release);"),
         "REGRESSION: request_cancel_with_budget no longer \
-         publishes fast_cancel with Release ordering. The \
+         publishes cancellation with Release ordering. The \
          Release-Acquire pair is broken — checkpoint readers \
          may never observe the cancel.",
     );
 }
 
 #[test]
-fn fast_cancel_is_arc_atomic_bool_for_cross_thread_sharing() {
-    // Pin (link 1): fast_cancel is Arc<AtomicBool>. The
-    // Arc lets multiple threads share the atomic; AtomicBool
-    // provides the lock-free synchronization primitive.
+fn cancellation_envelope_is_stable_arc_atomic_for_cross_thread_sharing() {
+    // Pin (link 1): CxInner privately owns an Arc to a stable
+    // envelope whose private AtomicBool provides the lock-free
+    // synchronization primitive without exposing replacement authority.
     let source = read("src/types/task_context.rs");
 
     assert!(
-        source.contains("pub fast_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,"),
-        "REGRESSION: CxInner.fast_cancel is no longer \
-         Arc<AtomicBool>. Without the Arc, publisher and \
+        source.contains("pub(crate) struct CxCancellationState {")
+            && source.contains("requested: std::sync::atomic::AtomicBool,")
+            && source.contains("cancellation: std::sync::Arc<CxCancellationState>,")
+            && source.contains("pub(crate) fn cancellation_state(&self)")
+            && source.contains("std::sync::Arc::clone(&self.cancellation)"),
+        "REGRESSION: CxInner cancellation is no longer a private \
+         stable Arc envelope. Without the Arc, publisher and \
          reader can't share the atomic — concurrent cancel \
          observation has no synchronization mechanism.",
     );

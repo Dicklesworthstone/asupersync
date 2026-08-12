@@ -362,11 +362,12 @@ fn budget_minimal_provides_finite_poll_quota_for_cleanup() {
 fn checkpoint_slow_path_publishes_cancel_via_release_on_exhaustion() {
     // Pin (link 2 + cross-thread): the slow path in
     // checkpoint() that observes budget exhaustion sets
-    // fast_cancel.store(true, Release). This is what makes
+    // stable cancellation publication with Release ordering. This makes
     // a tight checkpoint loop on a deadline-budgeted task
     // observe its OWN deadline and ALSO any cross-thread
     // cancel concurrently arriving.
     let source = read("src/cx/cx.rs");
+    let task_context = read("src/types/task_context.rs");
 
     let slow_path_marker = "// ── Slow path ─";
     let start = source.find(slow_path_marker).expect("slow path marker");
@@ -379,9 +380,11 @@ fn checkpoint_slow_path_publishes_cancel_via_release_on_exhaustion() {
     let body = &source[start..safe_end];
 
     assert!(
-        body.contains(".store(true, std::sync::atomic::Ordering::Release);"),
+        body.contains("inner.set_cancel_requested(true);")
+            && task_context.contains("self.publish_cancel_requested(value);")
+            && task_context.contains(".store(value, std::sync::atomic::Ordering::Release);"),
         "REGRESSION: checkpoint slow path no longer \
-         publishes fast_cancel with Release on budget \
+         publishes cancellation with Release on budget \
          exhaustion. Subsequent fast-path checks could \
          miss the exhaustion — tight-checkpoint-loop with \
          deadline-set task could continue spinning past \

@@ -251,21 +251,27 @@ fn checkpoint_fast_path_inline_checks_budget_exhaustion() {
 }
 
 #[test]
-fn checkpoint_slow_path_sets_fast_cancel_on_exhaustion() {
+fn checkpoint_slow_path_publishes_stable_cancel_on_exhaustion() {
     // Pin AUDIT-CRITICAL: when checkpoint detects exhaustion in
-    // the slow path, it MUST set fast_cancel=true (Release) so
+    // the slow path, it MUST publish cancellation with Release ordering so
     // subsequent fast-path checkpoints observe the latched
     // state. Without this, the fast path could miss the
     // exhaustion on the next call and let the task continue.
     let source = read_cx_source();
     let body = checkpoint_fn_body(&source);
+    let task_context = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/types/task_context.rs"),
+    )
+    .expect("read task context source");
 
     // Find the slow-path branch where exhaustion sets
     // fast_cancel.
     assert!(
-        body.contains(".store(true, std::sync::atomic::Ordering::Release);"),
+        body.contains("inner.set_cancel_requested(true);")
+            && task_context.contains("self.publish_cancel_requested(value);")
+            && task_context.contains(".store(value, std::sync::atomic::Ordering::Release);"),
         "REGRESSION: Cx::checkpoint no longer stores \
-         fast_cancel=true with Release ordering on exhaustion. \
+         cancellation with Release ordering on exhaustion. \
          Without this, the fast path won't observe the latched \
          exhaustion on subsequent calls and the task could \
          continue running past its budget.\n\nfn body:\n{body}",

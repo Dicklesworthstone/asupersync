@@ -262,11 +262,12 @@ fn checkpoint_fast_path_falls_through_when_exhausted_is_some() {
 fn checkpoint_slow_path_publishes_deadline_self_cancel_with_release() {
     // Pin (link 3): when the slow path observes
     // budget_exhaustion (which includes the past-deadline
-    // case), it sets cancel_requested=true and
-    // fast_cancel.store(true, Release). This makes the
+    // case), it publishes cancel_requested through the stable
+    // Release-ordered envelope. This makes the
     // deadline-exceeded state observable to subsequent
     // checkpoints.
     let source = read("src/cx/cx.rs");
+    let task_context = read("src/types/task_context.rs");
 
     let fn_marker = "pub fn checkpoint(&self) -> Result<(), crate::error::Error> {";
     let start = source.find(fn_marker).expect("checkpoint fn");
@@ -280,8 +281,9 @@ fn checkpoint_slow_path_publishes_deadline_self_cancel_with_release() {
 
     assert!(
         body.contains("if let Some((reason, _, _)) = &budget_exhaustion {")
-            && body.contains("inner.cancel_requested = true;")
-            && body.contains(".store(true, std::sync::atomic::Ordering::Release);"),
+            && body.contains("inner.set_cancel_requested(true);")
+            && task_context.contains("self.publish_cancel_requested(value);")
+            && task_context.contains(".store(value, std::sync::atomic::Ordering::Release);"),
         "REGRESSION: checkpoint slow path no longer publishes \
          the budget-exhaustion self-cancel. Past-deadline is \
          detected once but not converted to a structural \

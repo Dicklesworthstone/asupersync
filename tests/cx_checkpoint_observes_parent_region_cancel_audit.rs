@@ -127,18 +127,21 @@ fn region_cancel_propagation_sets_fast_cancel_release_on_each_task() {
 }
 
 #[test]
-fn cx_checkpoint_fast_path_reads_fast_cancel_with_acquire() {
+fn cx_checkpoint_fast_path_queries_stable_envelope_with_acquire() {
     // Pin (link 3): cx.checkpoint() fast path reads the
     // fast_cancel atomic with Acquire ordering. The
     // Release-on-store / Acquire-on-load pair from the
     // propagation site is what gives the observation cross-
     // thread visibility.
     let source = read("src/cx/cx.rs");
+    let task_context = read("src/types/task_context.rs");
 
     assert!(
-        source.contains("guard.fast_cancel.load(std::sync::atomic::Ordering::Acquire)"),
+        source.contains("let cancelled = guard.is_cancel_requested();")
+            && task_context.contains("self.cancellation.is_requested()")
+            && task_context.contains("self.requested.load(std::sync::atomic::Ordering::Acquire)"),
         "REGRESSION: cx.checkpoint() no longer reads \
-         fast_cancel with Acquire ordering. Without it, the \
+         the stable cancellation envelope with Acquire ordering. Without it, the \
          Release-Acquire pair is broken — a task's checkpoint \
          could observe stale state and miss a concurrently-\
          set cancel flag. See also \

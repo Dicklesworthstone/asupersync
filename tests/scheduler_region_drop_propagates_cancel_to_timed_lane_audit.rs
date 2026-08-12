@@ -313,7 +313,7 @@ fn dispatcher_pop_lazy_skips_stale_timed_lane_entries() {
 }
 
 #[test]
-fn cx_checkpoint_observes_cancel_via_fast_cancel_atomic() {
+fn cx_checkpoint_observes_cancel_via_stable_envelope() {
     // Pin (link 5): cx.checkpoint() observes the cancel
     // request via the fast_cancel atomic. The cancel
     // propagation in state.rs sets fast_cancel via
@@ -321,6 +321,7 @@ fn cx_checkpoint_observes_cancel_via_fast_cancel_atomic() {
     // path reads it with Acquire ordering, returning Err to
     // yield the task.
     let cx = read("src/cx/cx.rs");
+    let task_context = read("src/types/task_context.rs");
 
     let fn_marker = "pub fn checkpoint(&self) -> Result<(), crate::error::Error> {";
     let start = cx.find(fn_marker).expect("checkpoint fn");
@@ -333,9 +334,10 @@ fn cx_checkpoint_observes_cancel_via_fast_cancel_atomic() {
     let body = &cx[start..start + fn_marker.len() + next_fn_offset];
 
     assert!(
-        body.contains("guard.fast_cancel.load(std::sync::atomic::Ordering::Acquire)"),
+        body.contains("let cancelled = guard.is_cancel_requested();")
+            && task_context.contains("self.requested.load(std::sync::atomic::Ordering::Acquire)"),
         "REGRESSION: cx.checkpoint() no longer reads the \
-         fast_cancel atomic with Acquire ordering. This is \
+         stable cancellation envelope with Acquire ordering. This is \
          the path that observes the cancel request set by \
          the region-drop subtree walk. Without it, a task \
          in the timed lane never sees its parent region's \
@@ -344,7 +346,7 @@ fn cx_checkpoint_observes_cancel_via_fast_cancel_atomic() {
 }
 
 #[test]
-fn request_cancel_with_budget_sets_fast_cancel_release() {
+fn request_cancel_with_budget_publishes_stable_envelope_release() {
     // Pin (link 2 + link 5 bridge): request_cancel_with_budget
     // sets fast_cancel.store(true, Release) so the task's
     // next checkpoint observes the latched cancel. Without
@@ -352,6 +354,7 @@ fn request_cancel_with_budget_sets_fast_cancel_release() {
     // could miss the cancel even after request_cancel was
     // called.
     let task_record = read("src/record/task.rs");
+    let task_context = read("src/types/task_context.rs");
 
     let fn_marker = "pub(crate) fn request_cancel_with_budget_and_publication(";
     let pos = task_record.find(fn_marker);
@@ -366,10 +369,11 @@ fn request_cancel_with_budget_sets_fast_cancel_release() {
         let body = &task_record[start..safe_end];
 
         assert!(
-            body.contains(".store(true, ")
-                && (body.contains("Ordering::Release") || body.contains("Release")),
+            body.contains("guard.set_cancel_requested(true);")
+                && task_context.contains("self.publish_cancel_requested(value);")
+                && task_context.contains(".store(value, std::sync::atomic::Ordering::Release);"),
             "REGRESSION: request_cancel_with_budget no longer \
-             stores fast_cancel=true with Release ordering. \
+             publishes cancellation with Release ordering. \
              Without the release-acquire pair, the task's \
              next checkpoint may not observe the cancel and \
              continue running.\n\nfn body window:\n{body}",
