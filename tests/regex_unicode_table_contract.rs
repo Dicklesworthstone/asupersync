@@ -309,7 +309,7 @@ fn validate_contract(contract: &Value, inventory: &Value, terminal: &Value) -> R
     let expected_source_digests = BTreeMap::from([
         (
             "Cargo.toml",
-            "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239",
+            "028292074cbd078a457c13196d7ff426a165d8a826d3198e35d3b4ba7c106c4e",
         ),
         (
             "Cargo.lock",

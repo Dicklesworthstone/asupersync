@@ -1721,8 +1721,8 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         (
             "Cargo.toml",
             (
-                "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239",
-                1051_u64,
+                "028292074cbd078a457c13196d7ff426a165d8a826d3198e35d3b4ba7c106c4e",
+                1057_u64,
             ),
         ),
         (

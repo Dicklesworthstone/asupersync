@@ -65,7 +65,7 @@
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
       "byte_count": 29494,
       "record_count": 284,
-      "sha256": "a218c3886cb89b803168d4756972926acc541dd263c2cccc21ffd59cf268c9a1"
+      "sha256": "51648b00a0260ece5b523546e909f1d794b255c97eea275932d38f3df827f38a"
     },
     {
       "input_id": "K1-INPUT-K0-5-DOCUMENT",
@@ -73,7 +73,7 @@
       "path": "docs/kafka_k0_baseline_disposition.md",
       "byte_count": 21799,
       "record_count": 349,
-      "sha256": "8c093b22ddb9b93be780586cd21804380599355ef40665378933b26c37761f26"
+      "sha256": "42ea2503a14c347c7e1c3b551db931d9e8f09a1c7ce9d50b606367be43174bfc"
     },
     {
       "input_id": "K1-INPUT-K0-5-CONTRACT",
@@ -81,7 +81,7 @@
       "path": "tests/kafka_k0_baseline_disposition_contract.rs",
       "byte_count": 106003,
       "record_count": 2599,
-      "sha256": "0e4575304ab7060a048034e4ba81f7e86b40a2f672312c7878a8107f48fab046"
+      "sha256": "2714d3e896a25d1adea5c28e202577a633130fcc4492748075e588762c4fdcf4"
     },
     {
       "input_id": "K1-INPUT-ADR",
@@ -119,9 +119,9 @@
       "input_id": "K1-INPUT-MANIFEST",
       "role": "CURRENT_FEATURE_GRAPH_TRUTH",
       "path": "Cargo.toml",
-      "byte_count": 37394,
-      "record_count": 1051,
-      "sha256": "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239"
+      "byte_count": 37619,
+      "record_count": 1057,
+      "sha256": "028292074cbd078a457c13196d7ff426a165d8a826d3198e35d3b4ba7c106c4e"
     },
     {
       "input_id": "K1-INPUT-RECORD-BATCH-CODEC",
@@ -525,7 +525,7 @@
     "source_pin_rollup": {
       "row_count": 266,
       "stage_counts": {"K0.1": 13, "K0.2": 8, "K0.3": 225, "K0.4": 20},
-      "canonical_json_sha256": "493425e96afd4fcbb828567f48eb13bd441b1b1ca5f57feb427215b0f077663f",
+      "canonical_json_sha256": "5f1e12026f6cad1cf3d5786d038504fb4c9e321555b30f2276b3c39bdb1e353f",
       "unique_path_count": 247,
       "unique_path_set_sha256": "d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3",
       "overlap_group_count": 15,

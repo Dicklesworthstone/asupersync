@@ -81,10 +81,10 @@
   },
   "source_pins": [
     {"path":".gitignore","sha256":"398829f8d025a2d1f91208061bd3ee5dd4d6371ab44d76b8d223f989ebf0a342","line_count":579,"role":"ignored lock and tracked artifact policy"},
-    {"path":"Cargo.toml","sha256":"10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239","line_count":1051,"role":"root dependency selector"},
+    {"path":"Cargo.toml","sha256":"028292074cbd078a457c13196d7ff426a165d8a826d3198e35d3b4ba7c106c4e","line_count":1057,"role":"root dependency selector"},
     {"path":"Cargo.lock","sha256":"194f7d634555c129adb4d72a0a842275de47638f87c13c483361bfaaeec3c22f","line_count":4666,"role":"root dependency resolution"},
     {"path":"fuzz/Cargo.toml","sha256":"857925379ab7068f3faf94435e44b87adfc96c2d716f19b5c1cfdffbbfbd580d","line_count":6233,"role":"excluded fuzz dependency selector and target registry"},
-    {"path":"tests/conformance/raptorq_differential/Cargo.toml","sha256":"6e94b40563ab8643b59272655d91132221d65a22c11c8dde604d1728a952ef7c","line_count":33,"role":"standalone differential selector"},
+    {"path":"tests/conformance/raptorq_differential/Cargo.toml","sha256":"bd40fee112e5012f6799b1b391ba954db1b0e37b4d9008c46957d37d5bdd649e","line_count":32,"role":"standalone differential selector"},
     {"path":"artifacts/dependency_capability_registry_v1.json","sha256":"d255864fdd4f314d309e3f749c782a79f8ae4ac70bf63baa57edb14b14b6a6ea","line_count":6929,"role":"capability authority"},
     {"path":"artifacts/dependency_capability_baseline_v1.json","sha256":"192f32bbc86e82edd29d0b4b02c519f86df2fd547bc94572217c7ff8f5fae5c0","line_count":3210,"role":"baseline authority"},
     {"path":"artifacts/dependency_verification_matrix_v1.json","sha256":"0804e1015f56733313de0f2a025d4bd9c600a8f9a646eb62913c564f6b617b20","line_count":88541,"role":"verification authority"},

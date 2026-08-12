@@ -41,7 +41,7 @@
     "excludes": "the remaining call-site files are protected by exact lexical path and symbol census rather than full-file hashes"
   },
   "source_pins": [
-    {"path":"Cargo.toml","sha256":"10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239","line_count":1051},
+    {"path":"Cargo.toml","sha256":"028292074cbd078a457c13196d7ff426a165d8a826d3198e35d3b4ba7c106c4e","line_count":1057},
     {"path":"Cargo.lock","sha256":"194f7d634555c129adb4d72a0a842275de47638f87c13c483361bfaaeec3c22f","line_count":4666},
     {"path":"conformance/Cargo.toml","sha256":"0eb7f799632b162c740478bd25224a407ca083c1adf8cbe51f661b182985f8e9","line_count":213},
     {"path":"tests/conformance/raptorq_rfc6330/golden/Cargo.toml","sha256":"9df3b4755bc7d60b5ab8ae1910211f481d52305ee0a8f7f3f451b8098cb103ec","line_count":30},

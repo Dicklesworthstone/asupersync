@@ -91,8 +91,8 @@
     {
       "pin_id": "KAFKA-K0-3-PIN-ROOT-MANIFEST",
       "path": "Cargo.toml",
-      "record_count": 1051,
-      "sha256": "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239",
+      "record_count": 1057,
+      "sha256": "028292074cbd078a457c13196d7ff426a165d8a826d3198e35d3b4ba7c106c4e",
       "role": "feature, dev-dependency-cycle, and explicit real-broker target wiring"
     },
     {
@@ -956,7 +956,7 @@
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-017","path":"artifacts/appspec_v1_schema.json","record_count":604,"sha256":"765358ab3c86a808b169f854861dab05adfe0c3bff26b21f36e4022b76f154d1","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-018","path":"artifacts/browser_edition_readiness_matrix_v1.json","record_count":884,"sha256":"fd5318a3602cfb55d90a50bd6b6dbc14446eddd598377b3c64aa6cb70f73ec61","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-019","path":"artifacts/conformance_registry_contract_v1.json","record_count":390,"sha256":"f85683e7759b2596fb1cd82e574b73f1e8e0ff795e968e5b7bffe45aab1b9629","role":"exact baseline content pin for a documentation-claim candidate surface"},
-    {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-020","path":"artifacts/deflate_surface_inventory_v1.json","record_count":788,"sha256":"05cb82190f999801e5f8ac86f80211261ccf0a0ab6faeb9fe80b49aa37440851","role":"exact baseline content pin for a documentation-claim candidate surface"},
+    {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-020","path":"artifacts/deflate_surface_inventory_v1.json","record_count":788,"sha256":"fdf6fc06d6e0a9ef199a05a2c292bf1259b083bd14074482de85e6c18f2f5ebd","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-021","path":"artifacts/dependency_api_adr_phase3_signoff_v1.json","record_count":701,"sha256":"3fff9fa7429a9bde5a4b4bcb827e7400d426a42eab8e6ce5336dd904b5881904","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-023","path":"artifacts/dependency_budget_contract_v1.json","record_count":4354,"sha256":"fe7540712c246809b05496beeb482a93ecd3de4ea8dc96e05eea123ba4e1be57","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-024","path":"artifacts/dependency_capability_baseline_v1.json","record_count":3210,"sha256":"192f32bbc86e82edd29d0b4b02c519f86df2fd547bc94572217c7ff8f5fae5c0","role":"exact baseline content pin for a documentation-claim candidate surface"},
@@ -968,7 +968,7 @@
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-033","path":"artifacts/dependency_verification_final_signoff_v1.json","record_count":384,"sha256":"51ff169ba89c175b0c4a727caca6486c8cf8c0330de210fec607109330292fa7","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-036","path":"artifacts/formal_proof_posture_contract_v1.json","record_count":379,"sha256":"fda56c37ea5f3989e2fa15ad0a72902c55903055ad9033f409c484df6ace1451","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-037","path":"artifacts/formal_wave2_refinement_coverage_v1.json","record_count":530,"sha256":"5000e45b31e64d87650fc49bf76cf4a8792ec38f6c1aefadf18671520877c5e9","role":"exact baseline content pin for a documentation-claim candidate surface"},
-    {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-038","path":"artifacts/hex_capability_inventory_v1.json","record_count":975,"sha256":"a148ab4e79aa4d827b305d789cf5e3ab62e5a718038a3932e1e590b45ab5d438","role":"exact baseline content pin for a documentation-claim candidate surface"},
+    {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-038","path":"artifacts/hex_capability_inventory_v1.json","record_count":975,"sha256":"ef6ee7937426bc7407e37954a70788ba758d7bff68363be1a924d4d02d4d55b0","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-041","path":"artifacts/lz4_final_signoff_v1.json","record_count":397,"sha256":"349746f3801c6e555c9bbf5b8bbfd817fc1be0b84712603b7819e3184aef61fd","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-042","path":"artifacts/lz4_owned_codec_corpus_v1.json","record_count":291,"sha256":"e43d62bcfad745ce839e40fa04d9bdf2f5eaa88b920804efd817c4af1b341c9b","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-043","path":"artifacts/lz4_surface_artifact_inventory_v1.json","record_count":572,"sha256":"a3dba0be2c02e90b407e52d44fed97b80fa68e1949ce2742d2edcf4dd61414bb","role":"exact baseline content pin for a documentation-claim candidate surface"},
@@ -1039,7 +1039,7 @@
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-139","path":"skills/asupersync-mega-skill/references/DB-MESSAGING-FS-PROCESS.md","record_count":82,"sha256":"52a71d97c8ad84335fb65415aa79c303940f920b0f53b6ee7b96bdbe283d78f4","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-140","path":"skills/asupersync-mega-skill/references/SOURCE-MAP.md","record_count":222,"sha256":"b5124d0010e5d47cee25262636ee32dbf7d2ff8d689474368f1afd6c4a5fa553","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-141","path":"skills/asupersync-mega-skill/references/TOKIO-MAPPING.md","record_count":95,"sha256":"e41aa9ce287d73e73734b44d8fad025d235bcb6efa2ffd888793d74dafda6aed","role":"exact baseline content pin for a documentation-claim candidate surface"},
-    {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-142","path":"src/audit/snapshots/asupersync__audit__ambient__tests__ambient_authority_inventory_v1.snap","record_count":959,"sha256":"846a80b51ab63144b14665186d35c701ea0456d8f1b3ecdf89959e1bdb9debcb","role":"exact baseline content pin for a documentation-claim candidate surface"},
+    {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-142","path":"src/audit/snapshots/asupersync__audit__ambient__tests__ambient_authority_inventory_v1.snap","record_count":959,"sha256":"fca2c6cfc5e3db0fac8bcb5bc866e1d4a3fa352de9c62ce951c4f468a2a6ee0c","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-143","path":"src/observability/snapshots/asupersync__observability__otel__span_semantics__tests__span_export_format_scrubbed.snap","record_count":159,"sha256":"a90e6f4e99207d97731ea7f079e0cd487f6eb51def811f31f86b5e855d372a0c","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-144","path":"tests/fixtures/operator_proof_lane_dashboard/table_scrubbed_expected.md","record_count":77,"sha256":"6085521f10863a657eec1208afa00195791ee33683908ac52a57e7a2f3032625","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-145","path":"tests/fixtures/proof_lane_manifest/manifest_projection.json","record_count":2133,"sha256":"e6b70a985f9bb2cf01cc99abde29baf580bc279cd46c8235065452b998cee796","role":"exact baseline content pin for a documentation-claim candidate surface"},
