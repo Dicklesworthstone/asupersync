@@ -903,6 +903,20 @@ impl FullCx {
 }
 
 impl<Caps> Cx<Caps> {
+    /// Returns the runtime-owned cancellation publication bit without taking
+    /// the compatibility-state lock.
+    ///
+    /// This is intentionally crate-private: compatibility-sensitive
+    /// cancellation paths must also honor direct replacement of the v0.4.3
+    /// `fast_cancel` handle. Spawn completion observation uses this stable bit
+    /// only as a cheap preflight; it still takes the full lock on terminal
+    /// polls and whenever the bit is set, so compatibility mutations and exact
+    /// attribution are preserved.
+    #[inline]
+    pub(crate) fn has_published_cancellation(&self) -> bool {
+        self.cancellation.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Creates a new capability context (internal use).
     #[must_use]
     #[allow(dead_code)]
@@ -2115,22 +2129,21 @@ impl<Caps> Cx<Caps> {
 
     /// Returns true if cancellation has been requested.
     ///
-    /// This is a non-blocking check that queries whether a cancellation signal
-    /// has been sent to this task. Unlike `checkpoint()`, this method does not
-    /// return an error - it just reports the current state.
-    ///
-    /// Frameworks should check this periodically during long-running operations
-    /// to enable graceful shutdown.
+    /// This is a non-blocking, read-only check that queries whether a
+    /// cancellation signal has been sent to this task. Unlike
+    /// [`checkpoint`](Self::checkpoint), this method does not return an error;
+    /// it only reports the current state. It is suitable for choosing when to
+    /// enter an application-defined shutdown path. Use `checkpoint()` when the
+    /// caller wants the standard cancellation error and protocol
+    /// acknowledgement behavior.
     ///
     /// # Example
     ///
     /// ```ignore
     /// async fn process_items(cx: &Cx, items: Vec<Item>) -> Result<(), Error> {
     ///     for item in items {
-    ///         // Check for cancellation between items
-    ///         if cx.is_cancel_requested() {
-    ///             return Err(Error::Cancelled);
-    ///         }
+    ///         // A checkpoint both observes and acknowledges cancellation.
+    ///         cx.checkpoint().map_err(|_| Error::Cancelled)?;
     ///         process(item).await?;
     ///     }
     ///     Ok(())
@@ -3987,51 +4000,11 @@ impl Cx<cap::None> {
 /// Claims the one-shot result sender without retaining the slot lock while
 /// terminal publication wakes the joiner.
 fn take_spawn_result_sender<T>(
-    slot: &Arc<
-        std::sync::Mutex<
-            Option<
-                crate::channel::oneshot::Sender<Result<T, crate::runtime::task_handle::JoinError>>,
-            >,
-        >,
-    >,
-) -> Option<crate::channel::oneshot::Sender<Result<T, crate::runtime::task_handle::JoinError>>> {
+    slot: &Arc<std::sync::Mutex<Option<crate::runtime::task_handle::TaskResultSender<T>>>>,
+) -> Option<crate::runtime::task_handle::TaskResultSender<T>> {
     slot.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take()
-}
-
-/// Decides whether a completed mailbox-spawn future keeps its returned value
-/// or is classified as task-level cancellation.
-///
-/// Ordinary `Cx::spawn*` calls preserve a value returned after user code has
-/// started polling. This is what lets a cancellation-aware operation report
-/// its typed cancellation result and finish protocol cleanup. Structured
-/// combinators such as `JoinSet` instead require cancellation-dominant member
-/// classification so loser attribution remains in the outer `JoinError`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SpawnCompletionPolicy {
-    PreserveReturnedValueAfterStart,
-    CancellationDominant,
-}
-
-fn classify_spawn_completion<T, Caps>(
-    policy: SpawnCompletionPolicy,
-    cancelled_before_first_poll: bool,
-    completion_cx: &Cx<Caps>,
-    requested_cancel_reason: &crate::runtime::spawn_mailbox::PendingCancelReason,
-    value: T,
-) -> Result<T, crate::runtime::task_handle::JoinError> {
-    let cancellation_dominates = cancelled_before_first_poll
-        || matches!(policy, SpawnCompletionPolicy::CancellationDominant);
-    if cancellation_dominates {
-        let reason = completion_cx
-            .cancel_reason()
-            .or_else(|| requested_cancel_reason.read().clone());
-        if let Some(reason) = reason {
-            return Err(crate::runtime::task_handle::JoinError::Cancelled(reason));
-        }
-    }
-    Ok(value)
 }
 
 impl<Caps> Cx<Caps>
@@ -4057,6 +4030,20 @@ where
     /// child region that closes to quiescence before you proceed), create
     /// the region via a `Scope`. If you are unsure which you want, you want
     /// the `Scope`.
+    ///
+    /// # Cancellation result
+    ///
+    /// If cancellation is requested before the child future's first poll, the
+    /// handle resolves with task-level [`JoinError::Cancelled`](crate::runtime::JoinError::Cancelled).
+    /// Once user code has started polling, a value it returns after explicitly
+    /// acknowledging an attributed cancellation is preserved as the successful
+    /// outer join result. This lets cancellation-aware operations report their
+    /// typed cancellation result and finish protocol cleanup without changing
+    /// the v0.4.3 behavior of cancellation-blind or reasonless work. A late
+    /// value from work that never acknowledged cancellation, or from a legacy
+    /// reasonless `fast_cancel` request, remains task-level cancellation. APIs
+    /// that intentionally require cancellation-dominant attribution use a
+    /// separate internal policy.
     ///
     /// # Errors
     ///
@@ -4086,7 +4073,36 @@ where
             self.capability_budget(),
             &gateway,
             &pending,
-            SpawnCompletionPolicy::PreserveReturnedValueAfterStart,
+            crate::runtime::task_handle::SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult,
+            f,
+        )
+    }
+
+    /// Internal own-region variant for wrappers whose documented contract
+    /// discards a value produced after cancellation (for example,
+    /// [`Self::spawn_blocking`]).
+    fn spawn_cancellation_dominant<F, Fut>(
+        &self,
+        f: F,
+    ) -> Result<crate::runtime::TaskHandle<Fut::Output>, crate::runtime::state::SpawnError>
+    where
+        F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
+        Fut: Future + Send + 'static,
+        Fut::Output: Send + 'static,
+    {
+        let Some(gateway) = self.spawn_gateway_handle() else {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        };
+        let Some(pending) = self.pending_spawn_counter_handle() else {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        };
+        self.spawn_via_gateway(
+            self.region_id(),
+            self.budget(),
+            self.capability_budget(),
+            &gateway,
+            &pending,
+            crate::runtime::task_handle::SpawnCompletionPolicy::CancellationDominant,
             f,
         )
     }
@@ -4120,6 +4136,8 @@ where
     /// })?;
     /// let joined = handle.join(&cx).await;
     /// ```
+    ///
+    /// Cancellation-result classification is identical to [`Cx::spawn`].
     ///
     /// # Errors
     ///
@@ -4160,7 +4178,7 @@ where
             scope.capability_budget(),
             &gateway,
             &pending,
-            SpawnCompletionPolicy::PreserveReturnedValueAfterStart,
+            crate::runtime::task_handle::SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult,
             f,
         )
     }
@@ -4200,7 +4218,7 @@ where
             scope.capability_budget(),
             &gateway,
             &pending,
-            SpawnCompletionPolicy::CancellationDominant,
+            crate::runtime::task_handle::SpawnCompletionPolicy::CancellationDominant,
             f,
         )
     }
@@ -4221,6 +4239,7 @@ where
     /// does not need synchronous supervisor-boot failure observation.
     /// Synchronous boot paths that must observe child start failure inline
     /// still need the state-threaded path until that protocol is redesigned.
+    /// Cancellation-result classification is identical to [`Cx::spawn`].
     ///
     /// # Errors
     ///
@@ -4280,7 +4299,7 @@ where
         R: Send + 'static,
     {
         let pool = self.blocking_pool_handle();
-        self.spawn(move |child| async move {
+        self.spawn_cancellation_dominant(move |child| async move {
             match pool {
                 Some(pool) => {
                     crate::runtime::spawn_blocking::spawn_blocking_on_pool(pool, move || f(child))
@@ -4316,7 +4335,7 @@ where
         R: Send + 'static,
     {
         let pool = self.blocking_pool_handle();
-        self.spawn_in(scope, move |child| async move {
+        self.spawn_in_cancellation_dominant(scope, move |child| async move {
             match pool {
                 Some(pool) => {
                     crate::runtime::spawn_blocking::spawn_blocking_on_pool(pool, move || f(child))
@@ -4353,6 +4372,7 @@ where
     /// gateway or region counter. Admission-time denials (region closing,
     /// quota) resolve through the returned handle as
     /// `JoinError::Cancelled`.
+    /// Cancellation-result classification is identical to [`Cx::spawn`].
     pub fn spawn_local<F, Fut>(
         &self,
         f: F,
@@ -4374,7 +4394,7 @@ where
             self.capability_budget(),
             &gateway,
             &pending,
-            SpawnCompletionPolicy::PreserveReturnedValueAfterStart,
+            crate::runtime::task_handle::SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult,
             f,
         )
     }
@@ -4385,6 +4405,7 @@ where
     /// The scope-targeting sibling of [`Cx::spawn_local`]: region
     /// ownership, budget, and pending-spawn accounting come from `scope`
     /// exactly as in [`Cx::spawn_in`].
+    /// Cancellation-result classification is identical to [`Cx::spawn`].
     ///
     /// # Errors
     ///
@@ -4419,7 +4440,7 @@ where
             scope.capability_budget(),
             &gateway,
             &pending,
-            SpawnCompletionPolicy::PreserveReturnedValueAfterStart,
+            crate::runtime::task_handle::SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult,
             f,
         )
     }
@@ -4454,7 +4475,7 @@ where
             scope.capability_budget(),
             &gateway,
             &pending,
-            SpawnCompletionPolicy::CancellationDominant,
+            crate::runtime::task_handle::SpawnCompletionPolicy::CancellationDominant,
             f,
         )
     }
@@ -4472,7 +4493,7 @@ where
         capability_budget: crate::types::CapabilityBudget,
         gateway: &Arc<crate::runtime::spawn_mailbox::SpawnGateway>,
         pending: &Arc<crate::record::region::PendingSpawnCounter>,
-        completion_policy: SpawnCompletionPolicy,
+        completion_policy: crate::runtime::task_handle::SpawnCompletionPolicy,
         f: F,
     ) -> Result<crate::runtime::TaskHandle<Fut::Output>, crate::runtime::state::SpawnError>
     where
@@ -4492,19 +4513,19 @@ where
             return Err(crate::runtime::state::SpawnError::LocalSchedulerUnavailable);
         }
 
-        let (result_tx, result_rx) =
-            crate::channel::oneshot::channel::<Result<Fut::Output, JoinError>>();
-        // Take-once semantics across the mutually exclusive completion and
-        // denial paths, as in `spawn_via_gateway`.
-        let shared_tx = Arc::new(std::sync::Mutex::new(Some(result_tx)));
+        let provisional = gateway.mailbox().allocate_task_id();
         let admitted_slot = Arc::new(AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(
             gateway,
         )));
-        let requested_cancel_reason = admitted_slot.pending_cancel_reason();
+        let (result_tx, handle) = crate::runtime::task_handle::pending_task_handle_channel::<
+            Fut::Output,
+        >(provisional, Arc::clone(&admitted_slot));
+        // Take-once semantics across the mutually exclusive completion and
+        // denial paths, as in `spawn_via_gateway`.
+        let shared_tx = Arc::new(std::sync::Mutex::new(Some(result_tx)));
 
         let parent = self.clone();
         let factory_tx = Arc::clone(&shared_tx);
-        let factory_cancel_reason = Arc::clone(&requested_cancel_reason);
         let factory: LocalSpawnFactoryFn = Box::new(move |admission_cx: Cx| {
             Box::pin(async move {
                 match (crate::cx::scope::CatchUnwind {
@@ -4516,26 +4537,17 @@ where
                             capability_budget,
                         );
                         let completion_cx = child.retype::<cap::All>();
-                        let mut future = Box::pin(f(child));
-                        let mut cancelled_before_first_poll = None;
-                        let value = std::future::poll_fn(|poll_cx| {
-                            if cancelled_before_first_poll.is_none() {
-                                cancelled_before_first_poll =
-                                    Some(completion_cx.is_cancel_requested());
-                            }
-                            future.as_mut().poll(poll_cx)
-                        })
-                        .await;
-                        (
-                            value,
+                        crate::runtime::task_handle::observe_spawn_completion(
+                            f(child),
                             completion_cx,
-                            cancelled_before_first_poll.unwrap_or(false),
+                            completion_policy,
                         )
+                        .await
                     },
                 })
                 .await
                 {
-                    Ok((value, completion_cx, cancelled_before_first_poll)) => {
+                    Ok(observed) => {
                         if let Some(tx) = take_spawn_result_sender(&factory_tx) {
                             // Terminal result publication is bookkeeping, not
                             // cancellable task work. The user future may have
@@ -4543,13 +4555,7 @@ where
                             // observing this task's cancelled Cx; using that Cx
                             // again here would discard the value and collapse
                             // join into a misleading task-level cancellation.
-                            let result = classify_spawn_completion(
-                                completion_policy,
-                                cancelled_before_first_poll,
-                                &completion_cx,
-                                &factory_cancel_reason,
-                                value,
-                            );
+                            let result = observed.classify();
                             crate::runtime::task_handle::publish_terminal_result(tx, result);
                         }
                         crate::types::Outcome::Ok(())
@@ -4572,7 +4578,6 @@ where
 
         let cancel_tx = Arc::clone(&shared_tx);
         let error_tx = Arc::clone(&shared_tx);
-        let provisional = gateway.mailbox().allocate_task_id();
         let request = LocalSpawnRequest {
             task_id: provisional,
             region,
@@ -4605,7 +4610,6 @@ where
             trace
                 .record_event(|seq| TraceEvent::task_spawn_enqueued(seq, now, provisional, region));
         }
-        let handle = crate::runtime::TaskHandle::new_pending(provisional, result_rx, admitted_slot);
         crate::runtime::spawn_mailbox::enqueue_local_spawn(request);
         Ok(handle)
     }
@@ -4623,7 +4627,7 @@ where
         capability_budget: crate::types::CapabilityBudget,
         gateway: &Arc<crate::runtime::spawn_mailbox::SpawnGateway>,
         pending: &Arc<crate::record::region::PendingSpawnCounter>,
-        completion_policy: SpawnCompletionPolicy,
+        completion_policy: crate::runtime::task_handle::SpawnCompletionPolicy,
         f: F,
     ) -> Result<crate::runtime::TaskHandle<Fut::Output>, crate::runtime::state::SpawnError>
     where
@@ -4638,21 +4642,21 @@ where
             return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
         };
 
-        let (result_tx, result_rx) =
-            crate::channel::oneshot::channel::<Result<Fut::Output, JoinError>>();
+        let provisional = gateway.mailbox().allocate_task_id();
+        let admitted_slot = Arc::new(AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(
+            gateway,
+        )));
+        let (result_tx, handle) = crate::runtime::task_handle::pending_task_handle_channel::<
+            Fut::Output,
+        >(provisional, Arc::clone(&admitted_slot));
         // The sender is claimed by exactly one of: task completion (inside
         // the factory-built future) or a denial slot. `Mutex<Option<..>>`
         // gives take-once semantics across those mutually exclusive paths.
         let shared_tx = Arc::new(std::sync::Mutex::new(Some(result_tx)));
-        let admitted_slot = Arc::new(AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(
-            gateway,
-        )));
-        let requested_cancel_reason = admitted_slot.pending_cancel_reason();
 
         // Parent snapshot for capability inheritance (cheap Arc clones).
         let parent = self.clone();
         let factory_tx = Arc::clone(&shared_tx);
-        let factory_cancel_reason = Arc::clone(&requested_cancel_reason);
         let factory: SpawnFactoryFn = Box::new(move |admission_cx: Cx| {
             Box::pin(async move {
                 match (crate::cx::scope::CatchUnwind {
@@ -4664,37 +4668,22 @@ where
                             capability_budget,
                         );
                         let completion_cx = child.retype::<cap::All>();
-                        let mut future = Box::pin(f(child));
-                        let mut cancelled_before_first_poll = None;
-                        let value = std::future::poll_fn(|poll_cx| {
-                            if cancelled_before_first_poll.is_none() {
-                                cancelled_before_first_poll =
-                                    Some(completion_cx.is_cancel_requested());
-                            }
-                            future.as_mut().poll(poll_cx)
-                        })
-                        .await;
-                        (
-                            value,
+                        crate::runtime::task_handle::observe_spawn_completion(
+                            f(child),
                             completion_cx,
-                            cancelled_before_first_poll.unwrap_or(false),
+                            completion_policy,
                         )
+                        .await
                     },
                 })
                 .await
                 {
-                    Ok((value, completion_cx, cancelled_before_first_poll)) => {
+                    Ok(observed) => {
                         if let Some(tx) = take_spawn_result_sender(&factory_tx) {
                             // See the local-spawn mirror above: once the user
                             // future returns, result publication must not be
                             // cancelled by the same Cx it just observed.
-                            let result = classify_spawn_completion(
-                                completion_policy,
-                                cancelled_before_first_poll,
-                                &completion_cx,
-                                &factory_cancel_reason,
-                                value,
-                            );
+                            let result = observed.classify();
                             crate::runtime::task_handle::publish_terminal_result(tx, result);
                         }
                         crate::types::Outcome::Ok(())
@@ -4717,7 +4706,6 @@ where
 
         let cancel_tx = Arc::clone(&shared_tx);
         let error_tx = Arc::clone(&shared_tx);
-        let provisional = gateway.mailbox().allocate_task_id();
         let request = SpawnRequest::new_with_factory(provisional, region, budget, factory)
             .with_admitted_slot(Arc::clone(&admitted_slot))
             .with_pending_reservation(pending.reserve())
@@ -4740,7 +4728,6 @@ where
                 }
             }));
 
-        let handle = crate::runtime::TaskHandle::new_pending(provisional, result_rx, admitted_slot);
         gateway.enqueue_and_notify(request)?;
         Ok(handle)
     }

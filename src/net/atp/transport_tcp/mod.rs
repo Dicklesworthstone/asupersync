@@ -3316,13 +3316,16 @@ pub async fn receive_once(
 
 /// RAII backstop that reclaims a receive staging directory if the
 /// `receive_connection` future is dropped before reaching one of its
-/// cooperative cleanup paths — for example when [`serve`] aborts an in-flight
-/// receive task on cancellation (`abort` drops the task future without polling
-/// it to a `return`). The cooperative exits remove the directory asynchronously
-/// and then [`StagingDirGuard::disarm`] this guard, so the synchronous reclaim
-/// here only fires on a hard future-drop. That is a rare, bounded best-effort
-/// cleanup (one `remove_dir_all` on a small per-transfer scratch dir), not a hot
-/// path, so a blocking host-boundary call in `Drop` is acceptable here.
+/// cooperative cleanup paths — for example when an outer race/select drops the
+/// receive future directly or runtime teardown prevents another cooperative
+/// poll. [`TaskHandle::abort`](crate::runtime::TaskHandle::abort) is not such a
+/// hard drop: it requests cancellation and the scheduler repolls the task so it
+/// can acknowledge cancellation and finish cleanup. The cooperative exits
+/// remove the directory asynchronously and then [`StagingDirGuard::disarm`]
+/// this guard, so the synchronous reclaim here only fires on an actual hard
+/// future-drop. That is a rare, bounded best-effort cleanup (one
+/// `remove_dir_all` on a small per-transfer scratch dir), not a hot path, so a
+/// blocking host-boundary call in `Drop` is acceptable here.
 struct StagingDirGuard {
     dir: PathBuf,
     armed: bool,
@@ -3822,11 +3825,12 @@ pub async fn receive_connection(
     // O(chunk_size) regardless of transfer size.
     let mut staging_guard = create_owned_staging_dir(dest_dir, &manifest.transfer_id).await?;
     let staging_dir = staging_guard.path().to_owned();
-    // Reclaim the staging dir even if this future is dropped before reaching a
-    // cooperative cleanup path (e.g. `serve` aborting an in-flight receive task
-    // via `TaskHandle::abort`, which drops the future without polling it to a
-    // `return`). The cooperative exits below disarm this guard and remove the
-    // directory asynchronously; only a hard drop falls back to the guard.
+    // Reclaim the staging dir even if this future is hard-dropped before
+    // reaching a cooperative cleanup path. `TaskHandle::abort` ordinarily
+    // requests cancellation and repolls the task; it does not hard-drop the
+    // future. The cooperative exits below disarm this guard and remove the
+    // directory asynchronously; only a true drop without another poll falls
+    // back to the guard.
     let mut states: Vec<StagedEntryReceive> = manifest
         .entries
         .iter()
@@ -5546,7 +5550,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
 
         // An armed guard reclaims the staging dir when dropped without a
-        // cooperative cleanup (the `serve`-abort / hard-future-drop path).
+        // cooperative cleanup (the hard-future-drop backstop path).
         let armed = base.join("armed");
         std::fs::create_dir_all(&armed).expect("create armed staging dir");
         drop(StagingDirGuard::new(armed.clone()));

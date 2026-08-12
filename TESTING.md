@@ -37,27 +37,50 @@ scheduler cancellation wakeup, spawn wrappers, or cancel-aware primitives must
 run this release-blocking contract in addition to narrower unit/Lab tests:
 
 ```bash
-RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_native_parked_task_cancellation" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test runtime_abort_vs_cancel_semantics_audit -- --nocapture
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_native_parked_task_cancellation" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --locked --test runtime_abort_vs_cancel_semantics_audit -- --nocapture
 ```
+
+The maintained `scripts/run_proof_checks.sh` suite executes this lane as its
+first proof check, before its broader Rust and integration proofs, and
+`tests/proof_lane_manifest_contract.rs` fails if that wiring or the runner's
+remote-only policy disappears. This order is intentional: a later unrelated
+fail-fast must not prevent the cancellation contract from running.
+
+The GitHub workflow also runs this target directly on its native Linux runner.
+That is supplementary platform regression coverage, not remote RCH proof. The
+canonical release wrapper rejects both RCH local fallback and the repository's
+`rch_ci_fallback.sh` compatibility banner.
 
 The native cases must prove they are actually parked before abort. They must
 then assert the exact distinction between a domain-level cancellation value
 returned by a cancel-aware operation and task-level `JoinError::Cancelled`, as
 well as waiter unlinking. The
-matrix must cover current-thread, owner-local, and cross-worker scheduling,
+matrix must cover current-thread and owner-local scheduling plus cross-thread
+abort delivery on a multi-worker runtime,
 abort-before-first-poll delivery, cancellation arriving after the user future
 returned `Pending` but before wrapper classification, and panic classification
 through the same terminal-publication boundary. It must additionally prove that a
 task which has acknowledged cancellation can cross another `Pending` while
-finishing asynchronous protocol cleanup. Do not invent a generic hard-stop for
-cancellation-blind futures or truncate acknowledged cleanup to make the lane
-pass.
+finishing asynchronous protocol cleanup. Ordinary `Cx::spawn*` preserves a
+typed result returned after cancellation acknowledgement, but retains v0.4.3
+task-level cancellation for cancellation-blind late values and cancellation
+before the first user poll. Cancellation-dominant combinators, blocking
+wrappers, and low-level state tasks retain their separately asserted result
+policies. Do not invent a generic hard-stop or truncate acknowledged cleanup to
+make the lane pass.
 
-The lane is not green if it is red, unrun, skipped, filtered, or reports zero
-tests. A green build, Lab/model result, structural source assertion, or any
-number of unrelated passing tests cannot replace it. When the lane is added
-for an escaped defect, preserve evidence that the regression test failed on
-the old implementation and passed on the repair.
+The lane is not green if it is red, unrun, skipped, filtered, reports zero
+tests, or omits any named escaped-defect sentinel required by the proof runner.
+A green build, Lab/model result, structural source assertion, or any number of
+unrelated passing tests cannot replace it. When the lane is added for an
+escaped defect, preserve evidence that the regression test failed on the old
+implementation and passed on the repair.
+
+The runtime `TaskHandle` channel is capability-restricted: spawn adapters get a
+private terminal-result sender that can only be consumed by the authoritative
+Cx-independent publisher. The lane's source census must fail if a producer
+reintroduces a raw result sender, bypasses completion classification, or adds a
+new `TaskHandle` constructor without an explicit policy and behavioral case.
 
 ## Shared Validation Contract (asupersync-ay6qvw)
 

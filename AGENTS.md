@@ -348,10 +348,65 @@ behavior of `v0.4.3` is a **hard release gate**, not a preference.
 - Before release, compare the public surface against `v0.4.3` and compile
   representative downstream consumers. Any unexplained break keeps the release
   on hold.
+- Any behavioral regression reported by a downstream consumer must be reduced
+  to a permanent in-repository test that uses the same public API sequence and
+  observes the same externally visible result. If scheduler, cancellation,
+  wakeup, cleanup, or protocol semantics are involved, the reproducer must run
+  on the native runtime rather than only `LabRuntime`, must prove it reached the
+  formerly failing state before triggering the operation, and must assert the
+  exact result plus cleanup state. The regression's focused lane becomes a
+  permanent release blocker; removing or weakening it requires the user's
+  explicit written approval. Broad test totals, compilation, structural scans,
+  or model-only coverage cannot substitute for it. Preserve evidence that the
+  old code failed and the repaired code passed in the bead or release record.
+- When an opted-in critical consumer can be tested without exposing its private
+  code or credentials, run its compatibility canary against the release
+  candidate. A downstream canary failure is release-blocking until explained
+  and explicitly approved by the user; silently treating it as consumer-side
+  churn is forbidden.
 
 The user explicitly overrides any older repository text, plan, bead, or design
 document that claims Asupersync has no users or need not preserve backwards
 compatibility.
+
+### Escaped-defect protocol
+
+A serious defect reported by a downstream consumer is a release hold until the
+following evidence exists. Test quantity, line coverage, compilation, and a
+model-only reproduction do not waive any item:
+
+1. Reproduce the failure through the same public API sequence and on the same
+   execution class (native runtime, browser, network, filesystem, and so on) as
+   the consumer. A lower-level unit test is supplemental evidence only.
+2. Prove the test reached the formerly failing state before triggering the
+   operation. For concurrency defects this means an observable parked/queued/
+   owned state, not a sleep or a scheduling guess.
+3. Assert the exact externally visible result shape and every relevant cleanup
+   invariant. "Some cancellation", "returned an error", or "did not hang" is
+   insufficient when callers depend on nested result or attribution semantics.
+4. Preserve an old-code-red and repaired-code-green receipt in the bead or
+   release record. A test written only after the repair must still be executed
+   against the pre-repair implementation or an equivalent deliberately reverted
+   boundary before it counts as a regression proof.
+5. Audit the complete producer/consumer or adapter boundary involved, add an
+   explicit census that fails when an unclassified sibling is introduced, and
+   test the adjacent primitive/thread/race variants that could share the cause.
+6. Put the focused regression lane before broader fail-fast suites. Its wrapper
+   must reject zero tests, ignored tests, filtered tests, local fallback when
+   remote proof is required, output that lacks an exact terminal summary, and
+   output that does not show every named escaped-defect sentinel passing. A
+   nonzero total from unrelated siblings must never mask deletion or filtering
+   of the critical reproducer.
+7. Run an opted-in downstream compatibility canary against the release
+   candidate. The incident cannot be closed merely because the in-repository
+   reproducer is green.
+8. Document why the previous suite missed the defect and which structural guard
+   now prevents recurrence. "We added a test" without a gap analysis is not a
+   complete corrective action.
+
+Removing or weakening an escaped-defect reproducer, its state witness, its exact
+oracle, its census, or its release-lane wiring requires the user's explicit
+written approval.
 
 ---
 
@@ -454,21 +509,36 @@ Cancellation changes to `Cx`, `TaskHandle`, scheduler wakeup, spawn wrappers,
 or cancel-aware primitives MUST run the focused native contract:
 
 ```bash
-RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_native_parked_task_cancellation" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test runtime_abort_vs_cancel_semantics_audit -- --nocapture
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_native_parked_task_cancellation" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --locked --test runtime_abort_vs_cancel_semantics_audit -- --nocapture
 ```
+
+`scripts/run_proof_checks.sh` runs this as its first required proof, before the
+broader Rust and integration lanes. `tests/proof_lane_manifest_contract.rs`
+pins that runner wiring and its fail-closed `RCH_REQUIRE_REMOTE=1` policy.
+Removing, reordering behind broader fail-fast work, filtering, or making this
+check optional is a release-blocking regression.
+
+GitHub CI runs the same target directly on its native Linux runner as an
+additional regression signal. That local CI execution is deliberately not
+described as RCH proof and cannot replace the remote-required release lane;
+the release wrapper rejects both ordinary RCH fallback output and the
+repository's `rch_ci_fallback.sh` local-execution banner.
 
 This lane must prove that the operation is actually parked before abort, that
 cancel-aware mutex/MPSC/semaphore operations publish their domain-level
 cancellation result through `TaskHandle`, and that waiter cleanup completes. It
-must cover current-thread, owner-local, and cross-worker cancellation, abort-
+must cover current-thread and owner-local cancellation plus cross-thread abort
+delivery on a multi-worker runtime, abort-
 before-first-poll delivery, cancellation arriving after a user future returned
 `Pending` but before the wrapper classified that poll, and panic classification
 through the same centralized terminal-publication boundary. It must also prove
 that a task which acknowledges cancellation can cross an additional `Pending`
-while finishing asynchronous protocol cleanup. The repair must not invent a
-generic hard-stop policy for cancellation-blind futures or truncate
-acknowledged cleanup. A red, zero-test, filtered, skipped, or unrun lane blocks
-release.
+while finishing asynchronous protocol cleanup. Ordinary `Cx::spawn*` preserves
+a typed result returned after cancellation acknowledgement, but retains v0.4.3
+task-level cancellation for pre-first-poll cancellation and cancellation-blind
+late values. Cancellation-dominant combinators, blocking wrappers, and
+low-level state tasks retain their separately tested policies. A red, zero-test,
+filtered, skipped, or unrun lane blocks release.
 
 Source-shape, grep, artifact, model, and structural audit tests are useful
 supplemental guardrails, but they are **never behavioral proof**. Neither a
@@ -476,6 +546,17 @@ large aggregate test count nor a green LabRuntime/model lane can substitute for
 the exact native scheduler/primitive/`TaskHandle` boundary above. When a bug
 escaped because that boundary was missing, the regression test must first fail
 against the old implementation and then pass against the repair.
+
+Terminal result, panic, receipt, and other join bookkeeping performed after an
+operation has completed MUST NOT be sent through that operation's cancelled
+`Cx`. Classify the terminal outcome first and publish it through a
+Cx-independent boundary. Runtime `TaskHandle` producers must use the private
+capability-restricted `TaskResultSender`, which intentionally exposes no
+cancellation-aware send API; replacing it with a raw oneshot sender is a
+release-blocking regression. This rule also applies to `RemoteHandle`,
+actor/server handles, conformance registration receipts, and test/lab mirrors;
+otherwise cooperative cancellation can erase the exact result that user code
+returned.
 
 Agents choosing a test strategy should start with `TESTING_FOR_AGENTS.md`; it is
 the compact decision tree for unit, lab, exploration, and scenario-YAML e2e

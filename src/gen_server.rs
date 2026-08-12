@@ -2889,15 +2889,17 @@ mod tests {
                 spawn_effects.dispatch();
                 match (crate::cx::scope::CatchUnwind { inner: client_fut }).await {
                     Ok(value) => {
-                        let _ = result_tx.send_blocking(Ok(value));
+                        crate::runtime::task_handle::publish_terminal_result(result_tx, Ok(value));
                         Outcome::Ok(())
                     }
                     Err(payload) => {
                         let panic_payload = crate::types::outcome::PanicPayload::new(
                             crate::cx::scope::payload_to_string(&payload),
                         );
-                        let _ = result_tx
-                            .send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
+                        crate::runtime::task_handle::publish_terminal_result(
+                            result_tx,
+                            Err(JoinError::Panicked(panic_payload.clone())),
+                        );
                         Outcome::Panicked(panic_payload)
                     }
                 }
@@ -3057,15 +3059,17 @@ mod tests {
                 spawn_effects.dispatch();
                 match (crate::cx::scope::CatchUnwind { inner: client_fut }).await {
                     Ok(value) => {
-                        let _ = result_tx.send_blocking(Ok(value));
+                        crate::runtime::task_handle::publish_terminal_result(result_tx, Ok(value));
                         Outcome::Ok(())
                     }
                     Err(payload) => {
                         let panic_payload = crate::types::outcome::PanicPayload::new(
                             crate::cx::scope::payload_to_string(&payload),
                         );
-                        let _ = result_tx
-                            .send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
+                        crate::runtime::task_handle::publish_terminal_result(
+                            result_tx,
+                            Err(JoinError::Panicked(panic_payload.clone())),
+                        );
                         Outcome::Panicked(panic_payload)
                     }
                 }
@@ -5192,15 +5196,20 @@ mod tests {
                 c1_spawn_effects.dispatch();
                 match (crate::cx::scope::CatchUnwind { inner: c1_fut }).await {
                     Ok(value) => {
-                        let _ = c1_result_tx.send_blocking(Ok(value));
+                        crate::runtime::task_handle::publish_terminal_result(
+                            c1_result_tx,
+                            Ok(value),
+                        );
                         Outcome::Ok(())
                     }
                     Err(payload) => {
                         let panic_payload = crate::types::outcome::PanicPayload::new(
                             crate::cx::scope::payload_to_string(&payload),
                         );
-                        let _ = c1_result_tx
-                            .send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
+                        crate::runtime::task_handle::publish_terminal_result(
+                            c1_result_tx,
+                            Err(JoinError::Panicked(panic_payload.clone())),
+                        );
                         Outcome::Panicked(panic_payload)
                     }
                 }
@@ -5230,15 +5239,20 @@ mod tests {
                 c2_spawn_effects.dispatch();
                 match (crate::cx::scope::CatchUnwind { inner: c2_fut }).await {
                     Ok(value) => {
-                        let _ = c2_result_tx.send_blocking(Ok(value));
+                        crate::runtime::task_handle::publish_terminal_result(
+                            c2_result_tx,
+                            Ok(value),
+                        );
                         Outcome::Ok(())
                     }
                     Err(payload) => {
                         let panic_payload = crate::types::outcome::PanicPayload::new(
                             crate::cx::scope::payload_to_string(&payload),
                         );
-                        let _ = c2_result_tx
-                            .send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
+                        crate::runtime::task_handle::publish_terminal_result(
+                            c2_result_tx,
+                            Err(JoinError::Panicked(panic_payload.clone())),
+                        );
                         Outcome::Panicked(panic_payload)
                     }
                 }
@@ -5359,15 +5373,17 @@ mod tests {
                 spawn_effects.dispatch();
                 match (crate::cx::scope::CatchUnwind { inner: client_fut }).await {
                     Ok(value) => {
-                        let _ = result_tx.send_blocking(Ok(value));
+                        crate::runtime::task_handle::publish_terminal_result(result_tx, Ok(value));
                         Outcome::Ok(())
                     }
                     Err(payload) => {
                         let panic_payload = crate::types::outcome::PanicPayload::new(
                             crate::cx::scope::payload_to_string(&payload),
                         );
-                        let _ = result_tx
-                            .send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
+                        crate::runtime::task_handle::publish_terminal_result(
+                            result_tx,
+                            Err(JoinError::Panicked(panic_payload.clone())),
+                        );
                         Outcome::Panicked(panic_payload)
                     }
                 }
@@ -5465,15 +5481,20 @@ mod tests {
                         spawn_effects.dispatch();
                         match (crate::cx::scope::CatchUnwind { inner: client_fut }).await {
                             Ok(value) => {
-                                let _ = result_tx.send_blocking(Ok(value));
+                                crate::runtime::task_handle::publish_terminal_result(
+                                    result_tx,
+                                    Ok(value),
+                                );
                                 Outcome::Ok(())
                             }
                             Err(payload) => {
                                 let panic_payload = crate::types::outcome::PanicPayload::new(
                                     crate::cx::scope::payload_to_string(&payload),
                                 );
-                                let _ = result_tx
-                                    .send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
+                                crate::runtime::task_handle::publish_terminal_result(
+                                    result_tx,
+                                    Err(JoinError::Panicked(panic_payload.clone())),
+                                );
                                 Outcome::Panicked(panic_payload)
                             }
                         }

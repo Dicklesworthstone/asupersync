@@ -224,7 +224,7 @@
       "claim_id": "native-parked-task-cancellation-contract",
       "category": "native parked-task cancellation contract",
       "status": "green",
-      "proof_evidence_status": "rerun-required",
+      "proof_evidence_status": "fresh-rch-pass",
       "doc_claim_markers": {
         "README.md": [
           "native parked-task cancellation contract"
@@ -240,10 +240,10 @@
         "native-parked-task-cancellation"
       ],
       "proof_commands": [
-        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_native_parked_task_cancellation CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test runtime_abort_vs_cancel_semantics_audit -- --nocapture"
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_native_parked_task_cancellation CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --locked --test runtime_abort_vs_cancel_semantics_audit -- --nocapture"
       ],
       "blocked_frontier": null,
-      "notes": "This focused native behavioral lane is mandatory for cancellation/spawn changes. Structural audits and aggregate test counts cannot substitute for its parked-state, cancellation-after-Pending race, exact-result, and waiter-cleanup assertions; cancellation-blind hard-stop behavior is explicitly outside the claim."
+      "notes": "Fresh focused RCH pass for the final narrowed policy, complete structural census, and literal spawned guard-holder topology on 2026-08-12: base 9a2d5f72deb346fa6f920eb7e206b00099e0c465 plus the complete current cancellation implementation and behavioral-test worktree, RCH job 29972867244359819, worker ovh-a, remote exit 0 in 96181 ms (114283 ms total), 31 passed and 0 failed/ignored/measured/filtered. The lane proves the scoped parked-state, cancellation-after-Pending race, exact-result, waiter-cleanup, cross-thread delivery, cancellation-blind v0.4.3 compatibility, panic-precedence, Cx-independent publication-census, and downstream-shaped run_test assertions; it does not prove the broader cancellation/oracle suite, full workspace health, or release readiness."
     },
     {
       "claim_id": "scheduler-fairness",

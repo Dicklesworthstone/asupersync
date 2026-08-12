@@ -36,14 +36,25 @@ cancel-aware primitives must also run the unfiltered, remote-required
 That lane must establish the parked state before abort, then assert the exact
 task-level versus domain-level result and resource cleanup for native mutex,
 bounded MPSC, and semaphore cases. It must retain current-thread,
-owner-local, cross-worker, abort-before-first-poll, cancellation-after-`Pending`
+owner-local, cross-thread abort on a multi-worker runtime,
+abort-before-first-poll, cancellation-after-`Pending`
 race, and panic-classification coverage. A red, zero-test, filtered, skipped,
-or unrun result blocks release. It must also prove that acknowledged
-asynchronous cleanup can cross another `Pending`; fixing a stuck task by
+unrun, or missing-required-sentinel result blocks release. It must also prove
+that acknowledged asynchronous cleanup can cross another `Pending`; fixing a stuck task by
 inventing a hard-stop or truncating protocol cleanup is not acceptable.
+Ordinary `Cx::spawn*` preserves a typed result returned after cancellation
+acknowledgement, but retains v0.4.3 task-level cancellation for cancellation-
+blind late values and cancellation before the first poll. Cancellation-
+dominant combinators, blocking wrappers, and low-level state tasks keep their
+separately asserted policies.
 Structural scans, model refinement, broad E2E counts, and tens of thousands of
 unrelated passing tests are not substitutes. For an escaped regression, record
 old-code failure and repaired-code success before closing the bead.
+The lane also pins the private capability-restricted `TaskHandle` result sender;
+a raw result channel in a spawn adapter is a release-blocking regression even
+if broad tests happen to pass.
+GitHub's direct native-Linux run is supplementary; it is not the canonical
+remote proof and cannot replace the remote-required release wrapper.
 
 ## Oracle Registry
 

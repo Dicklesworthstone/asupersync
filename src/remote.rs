@@ -1074,7 +1074,12 @@ pub fn spawn_remote(
         RemoteTaskState::Pending
     } else {
         let fallback_error = cap.phase0_simulation().failure.to_remote_error(&node);
-        tx.send(cx, Err(fallback_error.clone()))
+        // This is an already-classified terminal result, not cancellable
+        // remote work. Publishing it through the caller's Cx would turn an
+        // already-cancelled caller into a send failure (and previously a
+        // panic), even though the fresh handle must deterministically expose
+        // the configured fallback error.
+        tx.send_blocking(Err(fallback_error.clone()))
             .expect("fresh remote receiver must accept fallback result");
         RemoteHandle::terminal_state_for_result(&Err(fallback_error))
     };
@@ -3404,6 +3409,29 @@ mod tests {
         let err = handle
             .try_join()
             .expect_err("phase-0 fallback should fail explicitly");
+        assert!(matches!(err, RemoteError::NodeUnreachable(_)));
+        assert_eq!(handle.state(), RemoteTaskState::Failed);
+    }
+
+    #[test]
+    fn phase0_fallback_publication_is_independent_of_caller_cancellation() {
+        let cx: Cx = Cx::for_testing_with_remote(fast_phase0_cap());
+        cx.cancel_with(
+            crate::types::CancelKind::User,
+            Some("cancel before remote fallback"),
+        );
+
+        let mut handle = spawn_remote(
+            &cx,
+            NodeId::new("n1"),
+            ComputationName::new("cancelled-caller-fallback"),
+            RemoteInput::empty(),
+        )
+        .expect("terminal fallback publication must not be cancelled by its caller Cx");
+
+        let err = handle
+            .try_join()
+            .expect_err("the configured phase-0 failure must remain observable");
         assert!(matches!(err, RemoteError::NodeUnreachable(_)));
         assert_eq!(handle.state(), RemoteTaskState::Failed);
     }

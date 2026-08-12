@@ -15,12 +15,12 @@
 //!
 //!   1. **`Scope::region(...)` (structured-concurrency)** —
 //!      Drop runs BEFORE the parent observes the outcome.
-//!      This is the operators "correct: structured cleanup"
+//!      This is the operator's "correct: structured cleanup"
 //!      contract.
 //!
 //!   2. **`Cx::spawn(...) + TaskHandle::join`
 //!      (lower-level primitive)** — the parent CAN observe
-//!      the outcome via JoinHandle BEFORE the spawned
+//!      the outcome via TaskHandle BEFORE the spawned
 //!      task's Drop runs. This is a documented async
 //!      window.
 //!
@@ -39,8 +39,8 @@
 //!     5. RegionCloseFuture awaits region quiescence.
 //!     6. Function returns `Ok(outcome)`.
 //!     7. Local variables drop in REVERSE declaration order
-//:        (Rust standard) — pinned_fut is dropped HERE.
-//:        CatchUnwind drops → inner user future drops → user
+//!        (Rust standard) — pinned_fut is dropped HERE.
+//!        CatchUnwind drops → inner user future drops → user
 //!        Drop impls run.
 //!     8. Caller's `.await` resumes with the Ok(outcome)
 //!        return.
@@ -50,11 +50,15 @@
 //!   Drop runs BEFORE the parent observes the outcome**.
 //!   The structured-concurrency contract is preserved.
 //!
-//!   For Cx::spawn + JoinHandle:
-//!     1. The wrapped future calls `result_tx.send(&cx,
-//:        outcome)` BEFORE returning Outcome::Ok(()).
-//!     2. result_tx.send wakes the parent's JoinHandle
-//!        awaiter — parent observable from this point.
+//!   For Cx::spawn + TaskHandle:
+//!     1. The wrapped future classifies the returned value, cancellation, or
+//!        panic, then consumes its capability-restricted result sender through
+//!        `publish_terminal_result` BEFORE returning `Outcome::Ok(())`.
+//!        Publication is deliberately independent of the completed task's Cx;
+//!        otherwise acknowledged cancellation could erase the classified
+//!        result.
+//!     2. Terminal publication wakes the parent's TaskHandle awaiter — parent
+//!        observable from this point.
 //!     3. The wrapped state machine returns Outcome::Ok(()).
 //!     4. Executor sees Poll::Ready, marks task Completed.
 //!     5. Eventually the StoredTask is dropped (inside
@@ -67,7 +71,7 @@
 //!   The two APIs serve different use cases:
 //!     - Use Scope::region for tight structured concurrency
 //!       (parent waits for child quiescence + Drop).
-//!     - Use spawn + JoinHandle for fire-and-forget or
+//!     - Use spawn + TaskHandle for fire-and-forget or
 //!       race-style patterns where the parent wants to
 //!       observe outcome promptly.
 //!
@@ -119,13 +123,14 @@
 //! await chain. The structured-cleanup contract is
 //! preserved by Rust's standard local-drop ordering.
 //!
-//! For Cx::spawn + JoinHandle, there IS a documented
-//! window. This is intentional — JoinHandle is the
-//: lower-level primitive that doesnt enforce structured
+//! For Cx::spawn + TaskHandle, there IS a documented
+//! window. This is intentional — TaskHandle is the
+//! lower-level primitive that doesn't enforce structured
 //! cleanup. Users who need strict ordering use Scope::region.
 //!
-//! No bead filed. The two APIs are differently tuned for
-//! different use cases.
+//! The cancellation-result escape and its native consumer-shaped regression
+//! coverage are tracked by `asupersync-yqlhh7`. The two APIs remain
+//! deliberately tuned for different use cases.
 //!
 //! A regression that:
 //!   - moved the user-future drop EARLIER (e.g., explicit
@@ -137,14 +142,14 @@
 //!   - moved the user-future drop LATER (e.g., put
 //!     pinned_fut into a leaked Box) — would break the
 //!     ordering and let parent observe outcome before
-//:     user Drop,
-//!   - changed result_tx.send to fire AFTER the wrapping
-//:     future drops its inner CatchUnwind in spawn — would
+//!     user Drop,
+//!   - changed terminal result publication to fire AFTER the wrapping
+//!     future drops its inner CatchUnwind in spawn — would
 //!     bring the spawn path closer to the structured
 //!     ordering, but at the cost of changing existing
 //!     spawn semantics,
 //!   - removed RegionCloseFuture.await from
-//:     region_with_budget — would let region() return
+//!     region_with_budget — would let region() return
 //!     before child quiescence, breaking the
 //!     structured-concurrency contract,
 //!
@@ -181,7 +186,7 @@ fn region_with_budget_runner_borrows_pinned_fut_for_await() {
     // Pin (link 2): RegionRunner takes pinned_fut by
     // mutable reference and drives it to Ready. After
     // runner.await, pinned_fut is STILL ALIVE — the user
-    // future hasnt been dropped yet.
+    // future hasn't been dropped yet.
     let source = read("src/cx/scope.rs");
 
     assert!(

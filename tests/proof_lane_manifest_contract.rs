@@ -7,11 +7,14 @@ use std::path::{Path, PathBuf};
 
 const AGENTS_PATH: &str = "AGENTS.md";
 const CARGO_PATH: &str = "Cargo.toml";
+const CI_WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
 const DURABLE_RECEIPT_CONTRACT_PATH: &str = "artifacts/durable_rch_proof_receipt_contract_v1.json";
 const MANIFEST_PATH: &str = "artifacts/proof_lane_manifest_v1.json";
 const MANIFEST_PROJECTION_GOLDEN_PATH: &str =
     "tests/fixtures/proof_lane_manifest/manifest_projection.json";
 const PROOF_REUSE_CONTRACT_PATH: &str = "artifacts/proof_reuse_cache_contract_v1.json";
+const PROOF_RUNNER_PATH: &str = "scripts/run_proof_checks.sh";
+const RUNTIME_ABORT_CONTRACT_PATH: &str = "tests/runtime_abort_vs_cancel_semantics_audit.rs";
 const RCH_STALE_PROGRESS_RECEIPT_CONTRACT_PATH: &str =
     "artifacts/rch_stale_progress_receipt_contract_v1.json";
 const README_PATH: &str = "README.md";
@@ -962,6 +965,7 @@ fn manifest_records_required_lanes_and_doc_sources() {
         "native-feature-smoke",
         "fuzz-manifest-smoke",
         "lib-tests",
+        "native-parked-task-cancellation",
         "all-targets-check",
         "clippy-all-targets",
         "rustdoc-api",
@@ -997,6 +1001,295 @@ fn manifest_records_required_lanes_and_doc_sources() {
     assert_eq!(
         source.get("contract_test").and_then(Value::as_str),
         Some("tests/proof_lane_manifest_contract.rs")
+    );
+}
+
+#[test]
+fn proof_runner_executes_native_cancellation_lane_fail_closed() {
+    let manifest = manifest();
+    let native_manifest_lane =
+        lane_by_id(array(&manifest, "lanes"), "native-parked-task-cancellation");
+    assert_eq!(
+        native_manifest_lane
+            .get("focused_behavioral_contract")
+            .and_then(Value::as_bool),
+        Some(true),
+        "the exact native cancellation matrix must be distinguished from a broad test frontier"
+    );
+    assert_eq!(
+        native_manifest_lane
+            .get("proof_reuse_policy")
+            .and_then(|policy| policy.get("cache_hits_allowed"))
+            .and_then(Value::as_bool),
+        Some(false),
+        "a focused behavioral contract may support a green claim only from a fresh uncached run"
+    );
+
+    let runner = read_repo_file(PROOF_RUNNER_PATH);
+    assert!(
+        runner.contains("validate_remote_rch_binary() {")
+            && runner.contains("command -v -- \"$RCH_BIN\"")
+            && runner.contains("basename -- \"$resolved_rch\"")
+            && runner.contains("!= \"rch\"")
+            && runner.contains("realpath -- \"$resolved_rch\"")
+            && runner.contains("realpath -- \"$PROJECT_DIR/scripts/rch_ci_fallback.sh\"")
+            && runner.contains("$resolved_rch == \"$resolved_fallback\"")
+            && runner.contains("is forbidden for remote proof"),
+        "proof runner must accept only the canonical rch executable and refuse the local compatibility wrapper before it can execute Cargo"
+    );
+    let wrapper_start = runner
+        .find("run_native_parked_task_cancellation() {")
+        .expect("proof runner must define the native cancellation wrapper");
+    let wrapper_end = runner[wrapper_start..]
+        .find("\n}\n")
+        .map(|offset| wrapper_start + offset + 3)
+        .expect("native cancellation wrapper must have a complete function body");
+    let native_wrapper = &runner[wrapper_start..wrapper_end];
+    assert_exact_escaped_defect_sentinel_sequence(native_wrapper, "proof runner");
+    assert!(
+        native_wrapper.contains("RCH_REQUIRE_REMOTE=1 \"$RCH_BIN\" exec"),
+        "proof runner must forbid local Cargo fallback"
+    );
+    assert!(
+        native_wrapper.contains("validate_remote_rch_binary || return $?"),
+        "native cancellation proof must validate the canonical remote executable before invoking it"
+    );
+    for required_env in [
+        "CARGO_INCREMENTAL=0",
+        "CARGO_PROFILE_TEST_DEBUG=0",
+        "RUSTFLAGS='-D warnings -C debuginfo=0'",
+    ] {
+        assert!(
+            native_wrapper.contains(required_env),
+            "proof runner must preserve canonical native cancellation environment `{required_env}`"
+        );
+    }
+    assert!(
+        native_wrapper.contains("proof used local fallback while RCH is required"),
+        "proof runner must reject an RCH local-fallback transcript explicitly"
+    );
+    assert!(
+        native_wrapper.contains(r"^\[rch-ci-fallback\] executing locally:"),
+        "proof runner must reject the repository's local CI compatibility wrapper as non-remote evidence"
+    );
+    assert!(
+        native_wrapper.contains(
+            "test result: ok\\. [1-9][0-9]* passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+        ),
+        "proof runner must reject zero-test, ignored-test, and filtered-test false greens"
+    );
+    assert!(
+        native_wrapper.contains("must run a nonzero, completely unfiltered test matrix"),
+        "proof runner must emit an actionable false-green diagnostic"
+    );
+    for sentinel in native_cancellation_sentinels() {
+        assert!(
+            native_wrapper.contains(sentinel),
+            "proof runner must require the escaped-defect sentinel `{sentinel}` instead of accepting a different nonzero subset"
+        );
+    }
+    assert!(
+        native_wrapper.contains("did not pass required sentinel"),
+        "proof runner must fail closed when a required behavioral sentinel is missing"
+    );
+
+    let native_lane = runner
+        .find("run_check \"Native parked-task cancellation boundary\"")
+        .expect("proof runner must invoke the native parked-task cancellation lane");
+    for later_target in [
+        "run_check \"Certificate verification\"",
+        "run_check \"Obligation formal checks\"",
+        "run_check \"Lease semantics and liveness\"",
+        "run_check \"Close quiescence regression\"",
+        "run_check \"Refinement conformance\"",
+    ] {
+        let later_lane = runner
+            .find(later_target)
+            .unwrap_or_else(|| panic!("proof runner must retain `{later_target}`"));
+        assert!(
+            native_lane < later_lane,
+            "native parked-task cancellation must run before `{later_target}` so a later broad-lane failure cannot hide it"
+        );
+    }
+}
+
+#[test]
+fn ci_executes_native_cancellation_regression_before_broader_proofs() {
+    let workflow = read_repo_file(CI_WORKFLOW_PATH);
+    let native_lane = workflow
+        .find("Native parked-task cancellation contract")
+        .expect("CI must execute the native parked-task cancellation lane");
+    let native_target = workflow[native_lane..]
+        .find("runtime_abort_vs_cancel_semantics_audit")
+        .map(|offset| native_lane + offset)
+        .expect("CI native cancellation step must execute the exact integration target");
+    let native_step = &workflow[native_lane..native_target];
+    assert!(
+        native_step.contains("output=$(env") && !native_step.contains("RCH_BIN"),
+        "GitHub CI must be an explicitly local native-Linux regression run instead of mislabeling its local RCH compatibility wrapper as remote proof"
+    );
+    let native_step_end = workflow[native_target..]
+        .find("- name: Certificate verification tests")
+        .map(|offset| native_target + offset)
+        .expect("CI must retain broader proof suites after the native lane");
+    let complete_native_step = &workflow[native_lane..native_step_end];
+    assert_exact_escaped_defect_sentinel_sequence(complete_native_step, "GitHub CI native step");
+    assert!(
+        complete_native_step.contains(
+            "test result: ok\\. [1-9][0-9]* passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+        ),
+        "CI native cancellation step must reject zero-test, ignored-test, and filtered-test false greens"
+    );
+    assert!(
+        complete_native_step.contains("must run a nonzero, completely unfiltered test matrix"),
+        "CI native cancellation step must retain an actionable false-green diagnostic"
+    );
+    for sentinel in native_cancellation_sentinels() {
+        assert!(
+            complete_native_step.contains(sentinel),
+            "CI must require the escaped-defect sentinel `{sentinel}` instead of accepting a different nonzero subset"
+        );
+    }
+    assert!(
+        complete_native_step.contains("did not pass required sentinel"),
+        "CI must fail closed when a required behavioral sentinel is missing"
+    );
+    let first_broad_proof = workflow
+        .find("Certificate verification tests")
+        .expect("CI must retain broader proof suites");
+
+    assert!(
+        native_target < first_broad_proof,
+        "CI native cancellation lane must run before broader proof suites so fail-fast cannot hide it"
+    );
+}
+
+fn native_cancellation_sentinels() -> [&'static str; 31] {
+    [
+        "run_test_preserves_typed_cancellation_from_a_parked_spawn",
+        "abort_repolls_a_mutex_parked_operation_to_graceful_cancellation",
+        "abort_repolls_a_capacity_parked_send_to_graceful_cancellation",
+        "abort_repolls_a_semaphore_parked_acquire_to_graceful_cancellation",
+        "local_spawn_abort_preserves_mutex_cancellation_and_waiter_cleanup",
+        "cross_thread_abort_on_multi_worker_runtime_preserves_mutex_cancellation_and_waiter_cleanup",
+        "abort_before_first_poll_keeps_task_level_cancellation_attribution",
+        "cancellation_published_at_the_end_of_pending_repolls_user_code",
+        "acknowledged_cancellation_can_finish_async_cleanup_before_join_completes",
+        "ordinary_spawn_keeps_cancellation_dominant_for_cancellation_blind_late_values",
+        "read_only_cancellation_observation_does_not_reclassify_a_late_value",
+        "spawn_blocking_discards_a_late_value_after_wrapper_cancellation",
+        "spawn_blocking_in_discards_a_late_value_after_wrapper_cancellation",
+        "legacy_state_task_panic_after_abort_remains_panicked",
+        "legacy_state_task_keeps_cancellation_dominant_result_attribution",
+        "terminal_publication_boundary_preserves_panics_as_join_errors",
+        "panic_during_cancel_cleanup_outranks_task_cancellation",
+        "mailbox_and_scope_spawn_paths_classify_before_terminal_publication",
+        "sibling_terminal_handle_publishers_are_cx_independent",
+        "task_handle_abort_publishes_via_same_stable_envelope_as_cancel",
+        "task_handle_abort_strengthens_existing_cancel_reason",
+        "task_handle_abort_defers_panic_isolated_wakers_to_runtime_publication",
+        "task_handle_abort_default_reason_is_user_kind_not_force_kill",
+        "cx_cancel_with_publishes_via_same_stable_envelope_as_abort",
+        "cx_cancel_fast_uses_same_publish_mechanism_minimal_attribution",
+        "no_unsafe_thread_termination_in_abort_or_cancel_paths",
+        "abort_path_uses_weak_handle_to_avoid_keeping_task_alive",
+        "cancel_handlers_run_on_both_abort_and_cancel_via_same_checkpoint_path",
+        "abort_does_not_have_separate_force_kill_method",
+        "abort_with_reason_does_not_call_drop_guard_bypass_machinery",
+        "cross_reference_to_prior_audits",
+    ]
+}
+
+fn escaped_defect_sentinels_from_wrapper(source: &str, context: &str) -> Vec<String> {
+    let marker = "for required_test in \\";
+    let start = source
+        .find(marker)
+        .unwrap_or_else(|| panic!("{context} must enumerate required escaped-defect sentinels"));
+    let mut sentinels = Vec::new();
+    let mut reached_do = false;
+    for line in source[start + marker.len()..].lines() {
+        let trimmed = line.trim();
+        if trimmed == "do" {
+            reached_do = true;
+            break;
+        }
+        let sentinel = trimmed.strip_suffix('\\').map_or(trimmed, str::trim);
+        if sentinel.is_empty() {
+            continue;
+        }
+        assert!(
+            sentinel
+                .chars()
+                .all(|ch| ch == '_' || ch.is_ascii_alphanumeric()),
+            "{context} contains malformed escaped-defect sentinel `{sentinel}`",
+        );
+        sentinels.push(sentinel.to_owned());
+    }
+    assert!(
+        reached_do,
+        "{context} escaped-defect sentinel loop must terminate with `do`",
+    );
+    sentinels
+}
+
+fn assert_exact_escaped_defect_sentinel_sequence(source: &str, context: &str) {
+    let required = native_cancellation_sentinels()
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let actual = escaped_defect_sentinels_from_wrapper(source, context);
+    assert_eq!(
+        actual, required,
+        "{context} must enumerate every escaped-defect sentinel exactly once and in reviewed order",
+    );
+}
+
+#[test]
+fn native_cancellation_sentinels_cover_every_test_in_the_target() {
+    let source = read_repo_file(RUNTIME_ABORT_CONTRACT_PATH);
+    let mut discovered = BTreeSet::new();
+    let test_attributes: Vec<_> = source.match_indices("#[test]").collect();
+    for (index, (attribute_offset, _)) in test_attributes.iter().enumerate() {
+        let declaration_start = attribute_offset + "#[test]".len();
+        let declaration_end = test_attributes
+            .get(index + 1)
+            .map_or(source.len(), |(next_offset, _)| *next_offset);
+        let declaration = &source[declaration_start..declaration_end];
+        let function_offset = declaration.find("fn ").unwrap_or_else(|| {
+            panic!(
+                "every #[test] in {RUNTIME_ABORT_CONTRACT_PATH} must lead to a named free function before the next #[test]"
+            )
+        });
+        let name = declaration[function_offset + "fn ".len()..]
+            .split_once('(')
+            .map(|(name, _)| name.trim())
+            .filter(|name| {
+                !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "every #[test] in {RUNTIME_ABORT_CONTRACT_PATH} must have a plain free-function name"
+                )
+            });
+        assert!(
+            discovered.insert(name.to_owned()),
+            "duplicate native cancellation test name `{name}`"
+        );
+    }
+    assert!(
+        !test_attributes.is_empty(),
+        "{RUNTIME_ABORT_CONTRACT_PATH} must retain a nonempty behavioral test matrix"
+    );
+    let required: BTreeSet<_> = native_cancellation_sentinels()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        required, discovered,
+        "the fail-closed sentinel list must equal the complete native cancellation target; adding, deleting, or renaming a test requires updating both release wrappers deliberately"
     );
 }
 

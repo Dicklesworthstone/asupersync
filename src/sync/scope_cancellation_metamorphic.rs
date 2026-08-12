@@ -75,21 +75,25 @@ fn drive_spawned_task(timing: CancelTiming) -> Outcome<(), ()> {
         task_cx: child_cx.clone(),
         yielded: false,
     };
-    // Result delivery uses `send_blocking` for state-threaded scope parity
-    // (br-asupersync-qg5th0): a task that observed cancellation must still
-    // be able to publish its cancellation-aware payload.
+    // Result delivery uses the capability-restricted terminal publisher for
+    // state-threaded scope parity (br-asupersync-qg5th0): a task that observed
+    // cancellation must still be able to publish its cancellation-aware
+    // payload.
     let wrapped = async move {
         spawn_effects.dispatch();
         match (crate::cx::scope::CatchUnwind { inner: fut }).await {
             Ok(v) => {
-                let _ = result_tx.send_blocking(Ok(v));
+                crate::runtime::task_handle::publish_terminal_result(result_tx, Ok(v));
                 Outcome::Ok(())
             }
             Err(payload) => {
                 let panic_payload = crate::types::outcome::PanicPayload::new(
                     crate::cx::scope::payload_to_string(&payload),
                 );
-                let _ = result_tx.send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
+                crate::runtime::task_handle::publish_terminal_result(
+                    result_tx,
+                    Err(JoinError::Panicked(panic_payload.clone())),
+                );
                 Outcome::Panicked(panic_payload)
             }
         }

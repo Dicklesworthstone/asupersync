@@ -637,7 +637,6 @@ impl LabRuntimeTarget {
         let task_id_for_op = Arc::clone(&task_id);
         let task_id_for_probe = Arc::clone(&task_id);
         let region_id = Arc::clone(&region.region_id);
-        let op_cx = cx.clone();
         let join_cx = cx.clone();
         let (registration_tx, mut registration_rx) = oneshot::channel();
 
@@ -658,7 +657,7 @@ impl LabRuntimeTarget {
                 .lock()
                 .schedule(runtime_task_id, budget.priority);
             *task_id_for_op.lock() = Some(runtime_task_id);
-            let _ = registration_tx.send(&op_cx, (handle, task_cx_inner));
+            let _ = registration_tx.send_blocking((handle, task_cx_inner));
         }));
 
         let id_probe: Arc<dyn Fn() -> Option<TaskId> + Send + Sync> =
@@ -782,7 +781,7 @@ impl ConformanceTarget for LabRuntimeTarget {
                 .spawn_in(&scope, move |_child_cx| f)
                 .expect("failed to enqueue runtime-backed conformance task");
             *runtime_handle_for_op.lock() = Some(handle);
-            let _ = registration_tx.send(&op_cx, ());
+            let _ = registration_tx.send_blocking(());
         }));
 
         let id_probe: Arc<dyn Fn() -> Option<TaskId> + Send + Sync> = Arc::new(move || {
@@ -837,7 +836,7 @@ impl ConformanceTarget for LabRuntimeTarget {
                 .close_notify
                 .clone();
             *region_id_for_op.lock() = Some(region_id_value);
-            let _ = registration_tx.send(&op_cx, close_notify);
+            let _ = registration_tx.send_blocking(close_notify);
         }));
 
         RegionHandle::pending(region_id, async move {

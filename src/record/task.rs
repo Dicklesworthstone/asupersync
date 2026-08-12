@@ -534,7 +534,7 @@ impl TaskRecord {
             if inner.cancel_waker_registry_closed {
                 return false;
             }
-            std::mem::replace(&mut inner.cancel_waker, Some(incoming))
+            inner.cancel_waker.replace(incoming)
         };
         drop(retired);
         true

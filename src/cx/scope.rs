@@ -96,7 +96,6 @@
 //! simulates multi-worker scheduling deterministically (same seed = same
 //! execution), regardless of whether tasks are actually migrated.
 
-use crate::channel::oneshot;
 use crate::combinator::{Either, Select};
 use crate::cx::{Cx, cap};
 use crate::record::AdmissionError;
@@ -420,16 +419,16 @@ impl<P: Policy> Scope<'_, P> {
         Fut: Future + Send + 'static,
         Fut::Output: Send + 'static,
     {
-        // Create oneshot channel for result delivery
-        let (tx, rx) = oneshot::channel::<Result<Fut::Output, JoinError>>();
-
         // Create task record
         let task_id = self.create_task_record(state)?;
 
         let (child_cx, child_cx_full) = self.build_child_task_cx(state, cx, task_id);
 
-        // Create the TaskHandle
-        let handle = TaskHandle::new(task_id, rx, Arc::downgrade(&child_cx.inner));
+        // Create the inseparable terminal-publication capability and handle.
+        let (tx, handle) = crate::runtime::task_handle::task_handle_channel::<Fut::Output>(
+            task_id,
+            Arc::downgrade(&child_cx.inner),
+        );
 
         // Set the shared inner state in the TaskRecord
         // This links the user-facing Cx to the runtime's TaskRecord
@@ -448,16 +447,15 @@ impl<P: Policy> Scope<'_, P> {
             spawned_at,
         );
 
-        // br-asupersync-qg5th0: result delivery through `tx.send_blocking`
-        // (no Cx) instead of `tx.send(&cx_for_send, ...)`. The wrapped
-        // future runs under the task's own Cx, which gets cancelled on
-        // `handle.abort()` or region cancel. Routing the deliver-result
-        // step through that same Cx caused `tx.send` to fail with
-        // `SendError::Cancelled` exactly when the task explicitly
-        // observed cancellation and tried to return its
-        // cancellation-aware payload (e.g. `"cancelled"`). Without the
-        // Cx-cancel check the post-completion delivery is unconditional,
-        // which is what consumers of `TaskHandle::join` expect.
+        // br-asupersync-qg5th0: result delivery goes through the shared
+        // Cx-independent terminal publisher instead of
+        // `tx.send(&cx_for_send, ...)`. The wrapped future runs under the
+        // task's own Cx, which gets cancelled on `handle.abort()` or region
+        // cancel. Routing terminal bookkeeping through that same Cx caused
+        // the send itself to fail with `SendError::Cancelled`, erasing both
+        // typed cancellation results and panic attribution. This legacy path's
+        // established policy lets every returned value win; only the transport
+        // of that decision needed correction.
 
         // Factory construction is intentionally inside the first poll. By then
         // `spawn_registered` has stored this future, and no caller-owned state
@@ -472,6 +470,10 @@ impl<P: Policy> Scope<'_, P> {
             .await;
             match result_result {
                 Ok(result) => {
+                    // The legacy Scope contract unconditionally preserves a
+                    // value returned by user code. It therefore needs no
+                    // per-poll cancellation observer; only Cx-independent
+                    // terminal publication is required here.
                     crate::runtime::task_handle::publish_terminal_result(tx, Ok(result));
                     crate::types::Outcome::Ok(())
                 }
@@ -513,6 +515,16 @@ impl<P: Policy> Scope<'_, P> {
     /// # Returns
     ///
     /// A `TaskHandle<T>` for awaiting the task's result.
+    ///
+    /// # Cancellation result
+    ///
+    /// This legacy API preserves its established behavior: any value actually
+    /// returned by user code wins over a cancellation request, including when
+    /// the first poll begins after cancellation or the future never calls a
+    /// cancellation checkpoint. New runtime-wired code should prefer
+    /// [`Cx::spawn_registered_in`], whose pre-first-poll cancellation remains
+    /// an outer task cancellation while preserving a returned value only after
+    /// user code acknowledges cancellation.
     ///
     /// # Example
     ///
@@ -2930,6 +2942,51 @@ mod tests {
             }
             other => panic!("cancelled task join failed: {other:?}"),
         }
+    }
+
+    #[test]
+    fn cancellation_blind_scope_completion_preserves_legacy_returned_value() {
+        struct PendingThenReady(bool);
+
+        impl Future for PendingThenReady {
+            type Output = &'static str;
+
+            fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+                if self.0 {
+                    Poll::Ready("late-success")
+                } else {
+                    self.0 = true;
+                    Poll::Pending
+                }
+            }
+        }
+
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+        let (mut handle, mut stored) = scope
+            .create_stored_task(&mut state, &cx, |_child_cx| PendingThenReady(false))
+            .expect("create state-threaded scope task");
+        let waker = std::task::Waker::noop();
+        let mut poll_cx = Context::from_waker(waker);
+
+        assert!(
+            stored.poll(&mut poll_cx).is_pending(),
+            "scope task must begin before abort",
+        );
+        handle.abort();
+        assert!(
+            stored.poll(&mut poll_cx).is_ready(),
+            "abort must repoll the cancellation-blind scope task",
+        );
+
+        let mut join_fut = std::pin::pin!(handle.join(&cx));
+        assert_eq!(
+            join_fut.as_mut().poll(&mut poll_cx),
+            Poll::Ready(Ok("late-success")),
+            "legacy Scope completion must preserve a returned value even without cancellation acknowledgement",
+        );
     }
 
     #[test]

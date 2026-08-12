@@ -20,6 +20,163 @@ pub enum JoinError {
     PolledAfterCompletion,
 }
 
+/// Decides how a spawned task's returned value interacts with cancellation.
+///
+/// Ordinary Cx spawn APIs preserve a value only after user code has explicitly
+/// acknowledged cancellation. Structured combinators, blocking wrappers, and
+/// low-level state tasks retain task-level cancellation attribution even if
+/// their inner work later returns. The legacy state-threaded
+/// [`Scope`](crate::cx::Scope) path needs no policy value because it preserves
+/// returned values unconditionally and bypasses cancellation observation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SpawnCompletionPolicy {
+    /// Preserve a returned value only when attributed cancellation arrived
+    /// after the first user-future poll and user code acknowledged it through
+    /// the cancellation protocol. This is the narrow corrective policy for
+    /// ordinary `Cx::spawn*` APIs: typed cancellation/cleanup results survive,
+    /// while cancellation-blind or reasonless late values retain v0.4.3
+    /// task-level attribution.
+    PreserveAcknowledgedCancellationResult,
+    CancellationDominant,
+}
+
+/// Classifies a successfully returned user value before terminal publication.
+///
+/// Keeping this decision beside [`publish_terminal_result`] prevents the
+/// different `TaskHandle` producers from silently acquiring different abort
+/// semantics. Panics are classified by the producer before calling this
+/// helper and therefore continue to outrank cancellation.
+pub(crate) fn classify_spawn_completion<T>(
+    policy: SpawnCompletionPolicy,
+    cancelled_before_first_poll: bool,
+    cancellation_acknowledged: bool,
+    cancellation_requested_at_completion: bool,
+    cancel_reason: Option<CancelReason>,
+    value: T,
+) -> Result<T, JoinError> {
+    if cancellation_requested_at_completion || cancel_reason.is_some() {
+        let cancellation_is_attributed = cancel_reason.is_some();
+        let cancellation_dominates = match policy {
+            SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult => {
+                cancelled_before_first_poll
+                    || !cancellation_acknowledged
+                    || !cancellation_is_attributed
+            }
+            SpawnCompletionPolicy::CancellationDominant => true,
+        };
+        if cancellation_dominates {
+            // v0.4.3 reported a closed result channel when its public
+            // compatibility `fast_cancel` handle carried a reasonless request
+            // that suppressed terminal publication. Preserve that externally
+            // visible fallback instead of inventing a new attributed reason or
+            // allowing a late value to escape.
+            let reason = cancel_reason.unwrap_or_else(|| CancelReason::user("join channel closed"));
+            return Err(JoinError::Cancelled(reason));
+        }
+    }
+    Ok(value)
+}
+
+/// A user future's returned value plus the cancellation facts observed at its
+/// polling boundary.
+///
+/// Cancellation state is always sampled at the terminal user-future poll. For
+/// the ordinary-spawn acknowledgement policy it is also sampled at the first
+/// poll and after cancellation-bearing pending polls. The first sample
+/// distinguishes cancellation-before-start from a request observed after
+/// ordinary user code began; the terminal sample establishes the
+/// classification boundary immediately after `Poll::Ready`, so an abort
+/// observed before that sample participates in classification while a later
+/// abort cannot rewrite it.
+pub(crate) struct ObservedSpawnCompletion<T> {
+    value: T,
+    policy: SpawnCompletionPolicy,
+    cancel_reason_at_completion: Option<CancelReason>,
+    cancelled_before_first_poll: bool,
+    cancellation_acknowledged: bool,
+    cancellation_requested_at_completion: bool,
+}
+
+impl<T> ObservedSpawnCompletion<T> {
+    /// Applies the producer's explicit cancellation policy to the observed
+    /// value. Cancellation is intentionally snapshotted immediately after the
+    /// user future's terminal poll. Once that snapshot is taken, a later abort
+    /// cannot overwrite the already-classified value.
+    pub(crate) fn classify(self) -> Result<T, JoinError> {
+        classify_spawn_completion(
+            self.policy,
+            self.cancelled_before_first_poll,
+            self.cancellation_acknowledged,
+            self.cancellation_requested_at_completion,
+            self.cancel_reason_at_completion,
+            self.value,
+        )
+    }
+}
+
+/// Polls one spawned user future while retaining its cancellation receipt.
+///
+/// This helper deliberately does not catch panics or publish a result. Each
+/// producer wraps it in its existing panic boundary, then applies its own
+/// [`SpawnCompletionPolicy`] before calling [`publish_terminal_result`]. The
+/// cancellation reason is sampled immediately after the terminal user poll so
+/// a later abort cannot rewrite an already-observed completion.
+pub(crate) async fn observe_spawn_completion<F, T>(
+    future: F,
+    completion_cx: Cx,
+    policy: SpawnCompletionPolicy,
+) -> ObservedSpawnCompletion<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    let track_cancellation_acknowledgement = matches!(
+        policy,
+        SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult
+    );
+    let mut future = std::pin::pin!(future);
+    let mut cancelled_before_first_poll = None;
+    let mut cancellation_acknowledged = false;
+    let mut cancellation_requested_at_completion = false;
+    let mut cancel_reason_at_completion = None;
+    let value = std::future::poll_fn(|poll_cx| {
+        if track_cancellation_acknowledgement && cancelled_before_first_poll.is_none() {
+            cancelled_before_first_poll = Some(completion_cx.inner.read().is_cancel_requested());
+        }
+        let poll = future.as_mut().poll(poll_cx);
+        // Healthy tasks pay one stable atomic load rather than acquiring the
+        // context lock after every Pending poll. A checkpoint that
+        // acknowledges cancellation also publishes this stable bit. Terminal
+        // polls always take the lock so direct v0.4.3 `fast_cancel` handle
+        // replacement remains observable even when user code never
+        // checkpointed.
+        if poll.is_ready()
+            || (track_cancellation_acknowledgement && completion_cx.has_published_cancellation())
+        {
+            // The scheduler consumes and clears the per-poll acknowledgement
+            // after `Poll::Pending`, so retain whether any user poll observed
+            // it before control returns to the scheduler.
+            let inner = completion_cx.inner.read();
+            if track_cancellation_acknowledgement {
+                cancellation_acknowledged |= inner.cancel_acknowledged;
+            }
+            if poll.is_ready() {
+                cancellation_requested_at_completion = inner.is_cancel_requested();
+                cancel_reason_at_completion.clone_from(&inner.cancel_reason);
+            }
+        }
+        poll
+    })
+    .await;
+    ObservedSpawnCompletion {
+        value,
+        policy,
+        cancel_reason_at_completion,
+        cancelled_before_first_poll: cancelled_before_first_poll.unwrap_or(false),
+        cancellation_acknowledged,
+        cancellation_requested_at_completion,
+    }
+}
+
 impl std::fmt::Display for JoinError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -32,6 +189,22 @@ impl std::fmt::Display for JoinError {
 
 impl std::error::Error for JoinError {}
 
+/// Capability-restricted sender for a [`TaskHandle`] terminal result.
+///
+/// Spawn adapters deliberately receive this wrapper instead of the raw
+/// [`oneshot::Sender`]. It exposes no cancellation-aware `send` operation, so
+/// routing terminal bookkeeping back through the completed task's cancelled
+/// [`Cx`] is not representable at those call sites.
+pub(crate) struct TaskResultSender<T> {
+    sender: oneshot::Sender<Result<T, JoinError>>,
+}
+
+/// Creates the result channel behind one [`TaskHandle`].
+fn task_result_channel<T>() -> (TaskResultSender<T>, oneshot::Receiver<Result<T, JoinError>>) {
+    let (sender, receiver) = oneshot::channel();
+    (TaskResultSender { sender }, receiver)
+}
+
 /// Publishes a task's terminal result without consulting task cancellation.
 ///
 /// Terminal-result delivery is runtime bookkeeping performed after a spawn
@@ -40,10 +213,10 @@ impl std::error::Error for JoinError {}
 /// task's [`Cx`], because doing so can discard that classification merely
 /// because the task observed cancellation during its final user-code poll.
 pub(crate) fn publish_terminal_result<T>(
-    sender: oneshot::Sender<Result<T, JoinError>>,
+    sender: TaskResultSender<T>,
     result: Result<T, JoinError>,
 ) {
-    let _ = sender.send_blocking(result);
+    let _ = sender.sender.send_blocking(result);
 }
 
 /// A handle to a spawned task that can be used to await its result.
@@ -91,6 +264,35 @@ pub struct TaskHandle<T> {
     requested_cancel_reason: Arc<RwLock<Option<CancelReason>>>,
     /// Whether this handle already consumed a terminal join result.
     terminal_consumed: bool,
+}
+
+/// Creates the inseparable result-publication capability and handle pair for
+/// one admitted runtime task.
+///
+/// Runtime spawn adapters must use this factory instead of pairing a raw
+/// [`oneshot::Sender`] with [`TaskHandle::new`]. Keeping the only sender they
+/// receive capability-restricted makes cancellation-aware terminal
+/// publication unrepresentable in those adapters while preserving the
+/// existing low-level public constructor for compatibility.
+pub(crate) fn task_handle_channel<T>(
+    task_id: TaskId,
+    inner: Weak<RwLock<CxInner>>,
+) -> (TaskResultSender<T>, TaskHandle<T>) {
+    let (sender, receiver) = task_result_channel();
+    (sender, TaskHandle::new(task_id, receiver, inner))
+}
+
+/// Creates the result-publication capability and pending handle pair for one
+/// mailbox-admitted runtime task.
+pub(crate) fn pending_task_handle_channel<T>(
+    provisional_task_id: TaskId,
+    admitted: Arc<crate::runtime::spawn_mailbox::AdmittedTaskSlot>,
+) -> (TaskResultSender<T>, TaskHandle<T>) {
+    let (sender, receiver) = task_result_channel();
+    (
+        sender,
+        TaskHandle::new_pending(provisional_task_id, receiver, admitted),
+    )
 }
 
 fn apply_or_defer_cancel_reason(
@@ -255,7 +457,12 @@ pub(crate) fn prepare_admitted_handle_cancel_state(
 }
 
 impl<T> TaskHandle<T> {
-    /// Creates a new TaskHandle (internal use).
+    /// Creates a low-level `TaskHandle` from an existing result receiver.
+    ///
+    /// This constructor remains public for compatibility with existing test
+    /// harnesses and custom runtimes. Asupersync's own runtime spawn adapters
+    /// use the capability-restricted `task_handle_channel` factory so their
+    /// terminal publisher cannot accidentally become cancellation-aware.
     #[inline]
     #[doc(hidden)]
     pub fn new(
@@ -523,8 +730,19 @@ impl<T> TaskHandle<T> {
 
     /// Aborts the task (requests cancellation).
     ///
-    /// This is a request - the task may not stop immediately. The task
-    /// will observe the cancellation at its next checkpoint.
+    /// This is cooperative cancellation, not forced future destruction: the
+    /// task may not stop immediately and observes the request at its next
+    /// cancellation-aware checkpoint or parked-operation repoll. For ordinary
+    /// [`Cx::spawn`](crate::cx::Cx::spawn) tasks that already started, a value
+    /// returned after user code acknowledges cancellation is preserved inside
+    /// the outer successful join result. This includes a typed operation-level
+    /// cancellation value returned after protocol cleanup. Cancellation
+    /// requested before the first user-future poll, or ignored by
+    /// cancellation-blind work, joins as [`JoinError::Cancelled`].
+    /// The legacy state-threaded [`Scope`](crate::cx::Scope) API intentionally
+    /// preserves any value its user future actually returns. Cancellation-
+    /// dominant combinators and blocking wrappers document their stricter
+    /// result policy on the spawning API.
     #[inline]
     pub fn abort(&self) {
         self.abort_with_reason(CancelReason::user("abort"));
@@ -534,6 +752,8 @@ impl<T> TaskHandle<T> {
     ///
     /// If a reason is already present, this request strengthens it using
     /// [`CancelReason::strengthen`], preserving deterministic attribution.
+    /// Result classification follows [`Self::abort`]; this method changes the
+    /// reason, not the cooperative cancellation protocol.
     /// Runtime-managed handles enqueue a callback-free command so cancel-lane
     /// publication and Waker dispatch occur on the runtime side. A manually
     /// constructed handle whose `CxInner` has no spawn gateway updates
@@ -728,6 +948,124 @@ mod tests {
         }
 
         scrubbed
+    }
+
+    #[test]
+    fn spawn_completion_policy_distinguishes_acknowledgement_and_dominance() {
+        let reason = CancelReason::user("abort");
+
+        assert_eq!(
+            classify_spawn_completion(
+                SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult,
+                false,
+                true,
+                true,
+                Some(reason.clone()),
+                7_u8,
+            ),
+            Ok(7),
+            "ordinary completion keeps the result of acknowledged cancellation",
+        );
+        assert!(matches!(
+            classify_spawn_completion(
+                SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult,
+                false,
+                false,
+                true,
+                Some(reason.clone()),
+                7_u8,
+            ),
+            Err(JoinError::Cancelled(_))
+        ));
+        assert!(matches!(
+            classify_spawn_completion(
+                SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult,
+                true,
+                true,
+                true,
+                Some(reason.clone()),
+                7_u8,
+            ),
+            Err(JoinError::Cancelled(_))
+        ));
+        assert!(matches!(
+            classify_spawn_completion(
+                SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult,
+                false,
+                true,
+                true,
+                None,
+                7_u8,
+            ),
+            Err(JoinError::Cancelled(_))
+        ));
+        assert!(matches!(
+            classify_spawn_completion(
+                SpawnCompletionPolicy::CancellationDominant,
+                false,
+                true,
+                true,
+                Some(reason),
+                7_u8,
+            ),
+            Err(JoinError::Cancelled(_))
+        ));
+        match classify_spawn_completion(
+            SpawnCompletionPolicy::CancellationDominant,
+            true,
+            true,
+            true,
+            None,
+            7_u8,
+        ) {
+            Err(JoinError::Cancelled(reason)) => {
+                assert_eq!(reason.message.as_deref(), Some("join channel closed"));
+            }
+            other => panic!("reasonless cancellation must retain its v0.4.3 fallback: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spawn_completion_preserves_reasonless_cancellation_compatibility() {
+        let cx = Cx::for_testing();
+        cx.inner.write().fast_cancel =
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let observed = block_on(observe_spawn_completion(
+            async { 7_u8 },
+            cx,
+            SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult,
+        ));
+
+        match observed.classify() {
+            Err(JoinError::Cancelled(reason)) => {
+                assert_eq!(reason.message.as_deref(), Some("join channel closed"));
+            }
+            other => panic!(
+                "v0.4.3 classified reasonless cancellation as an outer join cancellation: {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn completion_state_is_frozen_after_terminal_observation() {
+        for policy in [
+            SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult,
+            SpawnCompletionPolicy::CancellationDominant,
+        ] {
+            let cx = Cx::for_testing();
+            let observed = block_on(observe_spawn_completion(async { 7_u8 }, cx.clone(), policy));
+
+            cx.cancel_with(
+                crate::types::CancelKind::User,
+                Some("late abort after Poll::Ready"),
+            );
+
+            assert_eq!(
+                observed.classify(),
+                Ok(7),
+                "cancellation requested after terminal observation must not overwrite an already-classified value under {policy:?}",
+            );
+        }
     }
 
     #[test]

@@ -382,7 +382,7 @@ impl TransferActor {
         Ok(())
     }
 
-    async fn handle_message(&mut self, cx: &Cx, message: TransferMessage) -> Result<()> {
+    async fn handle_message(&mut self, _cx: &Cx, message: TransferMessage) -> Result<()> {
         match message {
             TransferMessage::StartSession {
                 object_id,
@@ -394,7 +394,7 @@ impl TransferActor {
                 let result = self
                     .start_session(object_id, region_id, task_id, trace_id)
                     .await;
-                if response_tx.send(cx, result).is_err() {
+                if response_tx.send_blocking(result).is_err() {
                     debug!("Failed to send start session response");
                 }
             }
@@ -405,7 +405,7 @@ impl TransferActor {
                 response_tx,
             } => {
                 let result = self.schedule_chunk(session_id, chunk).await;
-                let _ = response_tx.send(cx, result);
+                let _ = response_tx.send_blocking(result);
             }
 
             TransferMessage::CompleteChunk {
@@ -418,7 +418,7 @@ impl TransferActor {
                 let result = self
                     .complete_chunk(session_id, chunk_id, success, bytes_transferred)
                     .await;
-                let _ = response_tx.send(cx, result);
+                let _ = response_tx.send_blocking(result);
             }
 
             TransferMessage::UpdatePressure { pressure } => {
@@ -430,7 +430,7 @@ impl TransferActor {
                 response_tx,
             } => {
                 let result = self.pause_session(session_id).await;
-                let _ = response_tx.send(cx, result);
+                let _ = response_tx.send_blocking(result);
             }
 
             TransferMessage::ResumeSession {
@@ -438,7 +438,7 @@ impl TransferActor {
                 response_tx,
             } => {
                 let result = self.resume_session(session_id).await;
-                let _ = response_tx.send(cx, result);
+                let _ = response_tx.send_blocking(result);
             }
 
             TransferMessage::CancelSession {
@@ -446,7 +446,7 @@ impl TransferActor {
                 response_tx,
             } => {
                 let result = self.cancel_session(session_id).await;
-                let _ = response_tx.send(cx, result);
+                let _ = response_tx.send_blocking(result);
             }
 
             TransferMessage::GetSessionStatus {
@@ -454,12 +454,12 @@ impl TransferActor {
                 response_tx,
             } => {
                 let result = self.get_session_status(session_id).await;
-                let _ = response_tx.send(cx, result);
+                let _ = response_tx.send_blocking(result);
             }
 
             TransferMessage::GetAllSessions { response_tx } => {
                 let result = self.get_all_sessions().await;
-                let _ = response_tx.send(cx, result);
+                let _ = response_tx.send_blocking(result);
             }
 
             TransferMessage::Shutdown => {
@@ -1181,6 +1181,26 @@ mod tests {
 
         assert_eq!(actor.session_counter, 0);
         assert!(actor.sessions.is_empty());
+    }
+
+    #[test]
+    fn completed_response_survives_actor_context_cancellation() {
+        let (mut actor, _handle) = TransferActor::new(TransferActorConfig::default());
+        let cx: Cx = Cx::for_testing();
+        cx.cancel_with(
+            crate::types::CancelKind::User,
+            Some("cancel before terminal response publication"),
+        );
+        let (response_tx, mut response_rx) = oneshot::channel();
+
+        poll_ready(actor.handle_message(&cx, TransferMessage::GetAllSessions { response_tx }))
+            .expect("message handling itself must complete");
+
+        let sessions = response_rx
+            .try_recv()
+            .expect("the completed response must be published independently of actor cancellation")
+            .expect("an empty actor must return a valid session list");
+        assert!(sessions.is_empty());
     }
 
     #[test]

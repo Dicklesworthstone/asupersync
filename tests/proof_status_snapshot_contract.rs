@@ -515,12 +515,30 @@ fn validate_status_support(entry: &Value, lanes: &BTreeMap<String, Value>) -> Re
                 "format_frontier",
                 "documentation_frontier",
             ];
-            if lane_kinds
+            let unsupported_frontier_lanes = lane_ids
                 .iter()
-                .any(|kind| frontier_only_kinds.contains(&kind.as_str()))
-            {
+                .filter_map(|lane_id| {
+                    let lane = lanes.get(lane_id)?;
+                    let kind = string(lane, "kind");
+                    if !frontier_only_kinds.contains(&kind) {
+                        return None;
+                    }
+                    let is_focused_behavioral_contract = kind == "test_frontier"
+                        && lane
+                            .get("focused_behavioral_contract")
+                            .and_then(Value::as_bool)
+                            == Some(true)
+                        && lane
+                            .get("proof_reuse_policy")
+                            .and_then(|policy| policy.get("cache_hits_allowed"))
+                            .and_then(Value::as_bool)
+                            == Some(false);
+                    (!is_focused_behavioral_contract).then_some(lane_id.as_str())
+                })
+                .collect::<BTreeSet<_>>();
+            if !unsupported_frontier_lanes.is_empty() {
                 return Err(format!(
-                    "{claim_id}: frontier lane kinds cannot be represented as green: {lane_kinds:?}"
+                    "{claim_id}: frontier lane kinds cannot be represented as green: {lane_kinds:?}; unsupported lanes: {unsupported_frontier_lanes:?}"
                 ));
             }
         }
@@ -729,6 +747,38 @@ fn statuses_are_known_and_include_live_green_and_frontier_rows() {
             string(entry, "claim_id")
         );
     }
+}
+
+#[test]
+fn native_cancellation_receipt_is_attributed_only_to_its_focused_claim() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let rows = array(&snapshot, "claim_categories");
+    let by_claim = rows
+        .iter()
+        .map(|row| (string(row, "claim_id"), row))
+        .collect::<BTreeMap<_, _>>();
+
+    let native = by_claim
+        .get("native-parked-task-cancellation-contract")
+        .expect("native cancellation claim row");
+    assert_eq!(string(native, "status"), "green");
+    assert_eq!(string(native, "proof_evidence_status"), "fresh-rch-pass");
+    assert!(
+        string(native, "notes").contains("31 passed")
+            && string(native, "notes").contains("literal spawned guard-holder")
+            && string(native, "notes").contains("29972867244359819")
+            && string(native, "notes").contains("ovh-a")
+            && string(native, "notes").contains("96181 ms")
+            && string(native, "notes").contains("114283 ms total")
+            && string(native, "notes").contains("does not prove the broader"),
+        "native cancellation row must retain the exact focused RCH receipt and no-claim boundary"
+    );
+
+    let broad = by_claim
+        .get("cancellation-oracle-suite")
+        .expect("broad cancellation/oracle claim row");
+    assert_eq!(string(broad, "status"), "yellow_frontier");
+    assert_eq!(string(broad, "proof_evidence_status"), "rerun-required");
 }
 
 #[test]

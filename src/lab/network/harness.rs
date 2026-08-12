@@ -39,7 +39,6 @@
 
 use super::network::MAX_DUPLICATE_PACKET_DELAY;
 use crate::bytes::Bytes;
-use crate::cx::Cx;
 use crate::lab::network::{DeterministicNetwork, Fault, HostId, NetworkConfig};
 use crate::remote::{
     CancelRequest, IdempotencyKey, IdempotencyRequestFingerprint, IdempotencyStore, LeaseRenewal,
@@ -48,7 +47,7 @@ use crate::remote::{
     SpawnRequest,
 };
 use crate::trace::distributed::{CausalTracker, LogicalTime, VectorClock};
-use crate::types::{Budget, RegionId, TaskId, Time};
+use crate::types::{RegionId, TaskId, Time};
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
@@ -63,15 +62,6 @@ struct PendingResultEntry {
 
 type PendingResultsMap = BTreeMap<RemoteTaskId, PendingResultEntry>;
 type SharedPendingResults = Arc<Mutex<PendingResultsMap>>;
-
-#[inline]
-fn harness_cx() -> Cx {
-    Cx::new(
-        RegionId::from_arena(crate::util::ArenaIndex::new(0, 1)),
-        TaskId::testing_default(),
-        Budget::INFINITE,
-    )
-}
 
 #[inline]
 const fn harness_origin_region() -> RegionId {
@@ -438,8 +428,9 @@ impl SimNode {
         };
 
         if let Some((tx, reason)) = rejected {
-            let cx = harness_cx();
-            let _ = tx.send(&cx, Err(RemoteError::SpawnRejected(reason)));
+            // Result delivery is terminal harness bookkeeping, not
+            // cancellable simulated task work.
+            let _ = tx.send_blocking(Err(RemoteError::SpawnRejected(reason)));
         }
     }
 
@@ -477,8 +468,7 @@ impl SimNode {
         };
 
         if let Some(tx) = tx {
-            let cx = harness_cx();
-            if tx.send(&cx, Ok(outcome)).is_err() {
+            if tx.send_blocking(Ok(outcome)).is_err() {
                 self.pending_results.lock().remove(&remote_task_id);
             }
         }
@@ -844,11 +834,8 @@ impl DistributedHarness {
                     None
                 };
                 if let Some(tx) = tx {
-                    let cx = harness_cx();
-                    let _ = tx.send(
-                        &cx,
-                        Err(RemoteError::NodeUnreachable(to.as_str().to_owned())),
-                    );
+                    let _ =
+                        tx.send_blocking(Err(RemoteError::NodeUnreachable(to.as_str().to_owned())));
                 }
             }
             return;
@@ -1192,6 +1179,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use crate::cx::Cx;
 
     fn register_pending_result(
         node: &mut SimNode,

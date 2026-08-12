@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Run formal proof verification checks locally (bd-2rhiq).
+# shellcheck disable=SC2317 # run_check invokes named function callbacks indirectly.
+# Run formal proof verification checks through required remote Cargo lanes
+# (bd-2rhiq). Non-Cargo model/proof tools still run on the invoking host.
 # Mirrors and extends the proof-checks CI job in .github/workflows/ci.yml.
 #
 # Usage:
@@ -44,13 +46,36 @@ PASSED=0
 RESULTS=()
 START_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
+validate_remote_rch_binary() {
+    local resolved_rch=""
+    local resolved_fallback=""
+
+    resolved_rch=$(command -v -- "$RCH_BIN") || {
+        printf '%s\n' "FATAL: canonical rch executable not found: $RCH_BIN" >&2
+        return 86
+    }
+    if [[ $(basename -- "$resolved_rch") != "rch" ]]; then
+        printf '%s\n' \
+            "FATAL: RCH_BIN must resolve to an executable named rch for remote proof: $resolved_rch" >&2
+        return 86
+    fi
+    resolved_rch=$(realpath -- "$resolved_rch") || return 86
+    resolved_fallback=$(realpath -- "$PROJECT_DIR/scripts/rch_ci_fallback.sh") || return 86
+    if [[ $resolved_rch == "$resolved_fallback" ]]; then
+        printf '%s\n' \
+            "FATAL: scripts/rch_ci_fallback.sh can execute Cargo locally and is forbidden for remote proof" >&2
+        return 86
+    fi
+}
+
 run_check() {
     local name="$1"
     local category="$2"
     shift 2
     TOTAL=$((TOTAL + 1))
 
-    local logfile="$ARTIFACTS_DIR/$(echo "$name" | tr ' ' '_' | tr '[:upper:]' '[:lower:]').log"
+    local logfile
+    logfile="$ARTIFACTS_DIR/$(echo "$name" | tr ' ' '_' | tr '[:upper:]' '[:lower:]').log"
     local status="pass"
     local start_s=$SECONDS
 
@@ -78,7 +103,8 @@ run_check_optional() {
     shift 2
     TOTAL=$((TOTAL + 1))
 
-    local logfile="$ARTIFACTS_DIR/$(echo "$name" | tr ' ' '_' | tr '[:upper:]' '[:lower:]').log"
+    local logfile
+    logfile="$ARTIFACTS_DIR/$(echo "$name" | tr ' ' '_' | tr '[:upper:]' '[:lower:]').log"
     local status="skip"
     local start_s=$SECONDS
 
@@ -102,22 +128,102 @@ run_cargo() {
     local output=""
     local status=0
 
+    validate_remote_rch_binary || return $?
+
     set +e
-    output=$("$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_CARGO_TARGET_DIR" cargo "$@" 2>&1)
+    output=$(RCH_REQUIRE_REMOTE=1 "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_CARGO_TARGET_DIR" cargo "$@" 2>&1)
     status=$?
     set -e
 
     printf '%s\n' "$output"
-    if printf '%s\n' "$output" | grep -Eq '^\[RCH\] local \(|falling back to local'; then
+    if grep -Eq '^\[RCH\] local \(|falling back to local|^\[rch-ci-fallback\] executing locally:' <<<"$output"; then
         printf '%s\n' "FATAL: rch local fallback detected; refusing local cargo execution" >&2
         return 86
     fi
     return "$status"
 }
 
+run_native_parked_task_cancellation() {
+    local output=""
+    local status=0
+
+    validate_remote_rch_binary || return $?
+
+    set +e
+    output=$(RCH_REQUIRE_REMOTE=1 "$RCH_BIN" exec -- env \
+        CARGO_TARGET_DIR="$RCH_CARGO_TARGET_DIR" \
+        CARGO_INCREMENTAL=0 \
+        CARGO_PROFILE_TEST_DEBUG=0 \
+        RUSTFLAGS='-D warnings -C debuginfo=0' \
+        cargo test -p asupersync --locked --test runtime_abort_vs_cancel_semantics_audit -- --nocapture 2>&1)
+    status=$?
+    set -e
+
+    printf '%s\n' "$output"
+    if [[ $status -ne 0 ]]; then
+        return "$status"
+    fi
+    if grep -Eq '^\[RCH\] local \(|falling back to local|^\[rch-ci-fallback\] executing locally:' <<<"$output"; then
+        printf '%s\n' \
+            "FATAL: native parked-task cancellation proof used local fallback while RCH is required" >&2
+        return 86
+    fi
+    if ! grep -Eq \
+        'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' \
+        <<<"$output"; then
+        printf '%s\n' \
+            "FATAL: native parked-task cancellation proof must run a nonzero, completely unfiltered test matrix" >&2
+        return 87
+    fi
+    for required_test in \
+        run_test_preserves_typed_cancellation_from_a_parked_spawn \
+        abort_repolls_a_mutex_parked_operation_to_graceful_cancellation \
+        abort_repolls_a_capacity_parked_send_to_graceful_cancellation \
+        abort_repolls_a_semaphore_parked_acquire_to_graceful_cancellation \
+        local_spawn_abort_preserves_mutex_cancellation_and_waiter_cleanup \
+        cross_thread_abort_on_multi_worker_runtime_preserves_mutex_cancellation_and_waiter_cleanup \
+        abort_before_first_poll_keeps_task_level_cancellation_attribution \
+        cancellation_published_at_the_end_of_pending_repolls_user_code \
+        acknowledged_cancellation_can_finish_async_cleanup_before_join_completes \
+        ordinary_spawn_keeps_cancellation_dominant_for_cancellation_blind_late_values \
+        read_only_cancellation_observation_does_not_reclassify_a_late_value \
+        spawn_blocking_discards_a_late_value_after_wrapper_cancellation \
+        spawn_blocking_in_discards_a_late_value_after_wrapper_cancellation \
+        legacy_state_task_panic_after_abort_remains_panicked \
+        legacy_state_task_keeps_cancellation_dominant_result_attribution \
+        terminal_publication_boundary_preserves_panics_as_join_errors \
+        panic_during_cancel_cleanup_outranks_task_cancellation \
+        mailbox_and_scope_spawn_paths_classify_before_terminal_publication \
+        sibling_terminal_handle_publishers_are_cx_independent \
+        task_handle_abort_publishes_via_same_stable_envelope_as_cancel \
+        task_handle_abort_strengthens_existing_cancel_reason \
+        task_handle_abort_defers_panic_isolated_wakers_to_runtime_publication \
+        task_handle_abort_default_reason_is_user_kind_not_force_kill \
+        cx_cancel_with_publishes_via_same_stable_envelope_as_abort \
+        cx_cancel_fast_uses_same_publish_mechanism_minimal_attribution \
+        no_unsafe_thread_termination_in_abort_or_cancel_paths \
+        abort_path_uses_weak_handle_to_avoid_keeping_task_alive \
+        cancel_handlers_run_on_both_abort_and_cancel_via_same_checkpoint_path \
+        abort_does_not_have_separate_force_kill_method \
+        abort_with_reason_does_not_call_drop_guard_bypass_machinery \
+        cross_reference_to_prior_audits
+    do
+        if ! grep -Fq "test ${required_test} ... ok" <<<"$output"; then
+            printf '%s\n' \
+                "FATAL: native parked-task cancellation proof did not pass required sentinel ${required_test}" >&2
+            return 88
+        fi
+    done
+}
+
 echo "=== Asupersync Proof Verification Suite (bd-2rhiq) ==="
 echo "Artifacts: $ARTIFACTS_DIR"
 echo ""
+
+# ---- Category: Escaped-Defect Release Blockers ----
+
+run_check "Native parked-task cancellation boundary" "integration-proofs" \
+    run_native_parked_task_cancellation
 
 # ---- Category: Rust Proof Tests ----
 

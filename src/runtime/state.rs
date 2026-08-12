@@ -76,6 +76,50 @@ fn nanos_saturating_u64(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
 
+/// Runs a legacy state-threaded task future and publishes its classified
+/// `TaskHandle` result through the shared non-cancellable terminal boundary.
+///
+/// The state-threaded API retains its established cancellation-dominant result
+/// semantics. The Cx-independent publisher fixes lost panic attribution and
+/// bookkeeping without broadening this low-level public API's cancellation
+/// contract to match `Cx::spawn`.
+async fn run_state_task_to_terminal<F, T>(
+    future: F,
+    completion_cx: crate::cx::Cx,
+    result_tx: crate::runtime::task_handle::TaskResultSender<T>,
+) -> Outcome<(), ()>
+where
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let result_result = CatchUnwind {
+        inner: crate::runtime::task_handle::observe_spawn_completion(
+            future,
+            completion_cx,
+            crate::runtime::task_handle::SpawnCompletionPolicy::CancellationDominant,
+        ),
+    }
+    .await;
+
+    match result_result {
+        Ok(observed) => {
+            let result = observed.classify();
+            crate::runtime::task_handle::publish_terminal_result(result_tx, result);
+            Outcome::Ok(())
+        }
+        Err(payload) => {
+            let message = payload_to_string(&payload);
+            std::mem::forget(payload);
+            let panic_payload = crate::types::outcome::PanicPayload::new(message);
+            crate::runtime::task_handle::publish_terminal_result(
+                result_tx,
+                Err(JoinError::Panicked(panic_payload.clone())),
+            );
+            Outcome::Panicked(panic_payload)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 /// Observability counters for the cached draining-region snapshot path.
 pub struct ReadBiasedRegionSnapshotStats {
@@ -3543,7 +3587,7 @@ impl RuntimeState {
             TaskId,
             crate::runtime::TaskHandle<T>,
             crate::cx::Cx,
-            crate::channel::oneshot::Sender<Result<T, crate::runtime::task_handle::JoinError>>,
+            crate::runtime::task_handle::TaskResultSender<T>,
             TaskSpawnEffects,
         ),
         SpawnError,
@@ -3587,7 +3631,7 @@ impl RuntimeState {
             TaskId,
             crate::runtime::TaskHandle<T>,
             crate::cx::Cx,
-            crate::channel::oneshot::Sender<Result<T, crate::runtime::task_handle::JoinError>>,
+            crate::runtime::task_handle::TaskResultSender<T>,
             TaskSpawnEffects,
         ),
         SpawnError,
@@ -3596,12 +3640,6 @@ impl RuntimeState {
         T: Send + 'static,
     {
         let _ = caller_cx;
-
-        use crate::channel::oneshot;
-
-        // Create oneshot channel for the result
-        let (result_tx, result_rx) =
-            oneshot::channel::<Result<T, crate::runtime::task_handle::JoinError>>();
 
         // Create the TaskRecord
         let now = self.current_runtime_time();
@@ -3750,8 +3788,9 @@ impl RuntimeState {
             logical_time,
         );
 
-        // Create the TaskHandle
-        let handle = crate::runtime::TaskHandle::new(task_id, result_rx, cx_weak);
+        // Create the inseparable terminal-publication capability and handle.
+        let (result_tx, handle) =
+            crate::runtime::task_handle::task_handle_channel::<T>(task_id, cx_weak);
 
         Ok((task_id, handle, cx, result_tx, spawn_effects))
     }
@@ -3792,8 +3831,6 @@ impl RuntimeState {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        use crate::runtime::task_handle::JoinError;
-
         // Use system Cx for legacy compatibility - no authorization check
         let system_cx = self.create_system_cx();
         let (task_id, handle, cx, result_tx, spawn_effects) =
@@ -3807,22 +3844,7 @@ impl RuntimeState {
             // First poll proves the stored task was published and runs outside
             // the caller's runtime-state lock.
             spawn_effects.dispatch();
-            match (CatchUnwind { inner: future }).await {
-                Ok(result) => {
-                    let _ = result_tx.send(&cx, Ok::<_, JoinError>(result));
-                    crate::types::Outcome::Ok(())
-                }
-                Err(payload) => {
-                    let message = payload_to_string(&payload);
-                    std::mem::forget(payload);
-                    let panic_payload = crate::types::outcome::PanicPayload::new(message);
-                    let _ = result_tx.send(
-                        &cx,
-                        Err::<T, JoinError>(JoinError::Panicked(panic_payload.clone())),
-                    );
-                    crate::types::Outcome::Panicked(panic_payload)
-                }
-            }
+            run_state_task_to_terminal(future, cx, result_tx).await
         };
 
         // Store the wrapped future with task_id for poll tracing
@@ -3878,29 +3900,10 @@ impl RuntimeState {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        use crate::runtime::task_handle::JoinError;
-
         let system_cx = self.create_system_cx();
         let (task_id, handle, cx, result_tx, spawn_effects) =
             self.create_task_infrastructure_in(&system_cx, region, budget, false, tasks, regions)?;
-        let wrapped_future = async move {
-            match (CatchUnwind { inner: future }).await {
-                Ok(result) => {
-                    let _ = result_tx.send(&cx, Ok::<_, JoinError>(result));
-                    crate::types::Outcome::Ok(())
-                }
-                Err(payload) => {
-                    let message = payload_to_string(&payload);
-                    std::mem::forget(payload);
-                    let panic_payload = crate::types::outcome::PanicPayload::new(message);
-                    let _ = result_tx.send(
-                        &cx,
-                        Err::<T, JoinError>(JoinError::Panicked(panic_payload.clone())),
-                    );
-                    crate::types::Outcome::Panicked(panic_payload)
-                }
-            }
-        };
+        let wrapped_future = run_state_task_to_terminal(future, cx, result_tx);
 
         tasks
             .resolve(&mut self.tasks)
@@ -4328,7 +4331,7 @@ impl RuntimeState {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        use crate::runtime::{StoredTask, task_handle::JoinError};
+        use crate::runtime::StoredTask;
 
         self.verify_spawn_authorization(caller_cx, region)?;
 
@@ -4340,22 +4343,7 @@ impl RuntimeState {
         // channel and looking like cancellation to the join handle.
         let wrapped_future = async move {
             spawn_effects.dispatch();
-            match (CatchUnwind { inner: future }).await {
-                Ok(result) => {
-                    let _ = result_tx.send(&cx, Ok::<_, JoinError>(result));
-                    crate::types::Outcome::Ok(())
-                }
-                Err(payload) => {
-                    let message = payload_to_string(&payload);
-                    std::mem::forget(payload);
-                    let panic_payload = crate::types::outcome::PanicPayload::new(message);
-                    let _ = result_tx.send(
-                        &cx,
-                        Err::<T, JoinError>(JoinError::Panicked(panic_payload.clone())),
-                    );
-                    crate::types::Outcome::Panicked(panic_payload)
-                }
-            }
+            run_state_task_to_terminal(future, cx, result_tx).await
         };
 
         // Store the wrapped future with task_id for poll tracing
@@ -7232,16 +7220,16 @@ impl RuntimeState {
         let wrapped_future = async move {
             match (CatchUnwind { inner: masked }).await {
                 Ok(()) => {
-                    let _ = result_tx.send(&cx, Ok::<_, JoinError>(()));
+                    crate::runtime::task_handle::publish_terminal_result(result_tx, Ok(()));
                     Outcome::Ok(())
                 }
                 Err(payload) => {
                     let message = payload_to_string(&payload);
                     std::mem::forget(payload);
                     let panic_payload = crate::types::outcome::PanicPayload::new(message);
-                    let _ = result_tx.send(
-                        &cx,
-                        Err::<(), JoinError>(JoinError::Panicked(panic_payload.clone())),
+                    crate::runtime::task_handle::publish_terminal_result(
+                        result_tx,
+                        Err(JoinError::Panicked(panic_payload.clone())),
                     );
                     Outcome::Panicked(panic_payload)
                 }
