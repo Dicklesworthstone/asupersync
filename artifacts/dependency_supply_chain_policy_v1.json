@@ -42,9 +42,9 @@
   "root_workspace": {
     "manifest_path": "Cargo.toml",
     "lockfile_path": "Cargo.lock",
-    "manifest_sha256": "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239",
-    "lockfile_sha256": "194f7d634555c129adb4d72a0a842275de47638f87c13c483361bfaaeec3c22f",
-    "manifest_line_count": 1051,
+    "manifest_sha256": "fee2c185ab94fd33867a800f7faa8857b8d6204dba7e16eefe510a31fc691c04",
+    "lockfile_sha256": "620579cbaad5dd73da0e70aa21d3a3bf928126ac2920077802e7a3058c522821",
+    "manifest_line_count": 1057,
     "lockfile_line_count": 4666,
     "coverage": [
       "normal",

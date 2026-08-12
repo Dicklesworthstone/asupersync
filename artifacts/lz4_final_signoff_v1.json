@@ -104,12 +104,12 @@
   "source_contracts": [
     {
       "path": "Cargo.toml",
-      "sha256": "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239",
+      "sha256": "fee2c185ab94fd33867a800f7faa8857b8d6204dba7e16eefe510a31fc691c04",
       "role": "retained root normal feature edge and development oracle edge"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "194f7d634555c129adb4d72a0a842275de47638f87c13c483361bfaaeec3c22f",
+      "sha256": "620579cbaad5dd73da0e70aa21d3a3bf928126ac2920077802e7a3058c522821",
       "role": "locked lz4_flex 0.14.0 package and checksum"
     },
     {

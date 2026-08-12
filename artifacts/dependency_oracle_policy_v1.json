@@ -30,37 +30,37 @@
     "source_pins": [
       {
         "path": "Cargo.toml",
-        "sha256": "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239",
-        "line_count": 1051,
+        "sha256": "fee2c185ab94fd33867a800f7faa8857b8d6204dba7e16eefe510a31fc691c04",
+        "line_count": 1057,
         "scope": "root-package-and-workspace"
       },
       {
         "path": "Cargo.lock",
-        "sha256": "194f7d634555c129adb4d72a0a842275de47638f87c13c483361bfaaeec3c22f",
+        "sha256": "620579cbaad5dd73da0e70aa21d3a3bf928126ac2920077802e7a3058c522821",
         "line_count": 4666,
         "scope": "resolved-package-version-source-and-checksum"
       },
       {
         "path": "asupersync-macros/Cargo.toml",
-        "sha256": "7f1161ae6dfa704f6b7cf6f9fceab7703351a9a596840e03bba6660d1c5229fb",
+        "sha256": "7655ff764d5b654d38db64815b841ba1f8fd42bd94701af102bfa7a490ea125a",
         "line_count": 36,
         "scope": "workspace-member"
       },
       {
         "path": "asupersync-browser-core/Cargo.toml",
-        "sha256": "e168753ddb73f5dbd41fb5dd0b0f2608658f1610969c22f992a44e617c1ec666",
+        "sha256": "37df2c5395338078b291cd476b33fed079b86ce61d7c2ccd8e2e9e9576e4f350",
         "line_count": 76,
         "scope": "workspace-member"
       },
       {
         "path": "asupersync-tokio-compat/Cargo.toml",
-        "sha256": "b4b8b0763a0ecd19ecf20494a4e2510636c1b621fd0071c01d26c99937b12017",
+        "sha256": "58db91bbb5a83d59ec84c856f26bbb3aff9dae76f345d8db8c858b639b1cc803",
         "line_count": 68,
         "scope": "workspace-member"
       },
       {
         "path": "conformance/Cargo.toml",
-        "sha256": "0eb7f799632b162c740478bd25224a407ca083c1adf8cbe51f661b182985f8e9",
+        "sha256": "46436b9ec65ddb31c175434ad7a10344cb2f25ceeee87b1ff3706ad7cf96addf",
         "line_count": 213,
         "scope": "workspace-conformance-member"
       },
@@ -108,7 +108,7 @@
       },
       {
         "path": "asupersync-wasm/Cargo.toml",
-        "sha256": "f9f5ed5a4c65bb931d4187902f493c17c0ed9a05f20757d643609ad063543012",
+        "sha256": "968a804931e136be4c0a8f943cb9c85c5b03d586733cb72be6e1543701170b19",
         "line_count": 60,
         "scope": "explicitly-excluded-wasm-project"
       },

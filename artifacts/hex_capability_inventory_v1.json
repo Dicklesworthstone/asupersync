@@ -41,9 +41,9 @@
     "excludes": "the remaining call-site files are protected by exact lexical path and symbol census rather than full-file hashes"
   },
   "source_pins": [
-    {"path":"Cargo.toml","sha256":"028292074cbd078a457c13196d7ff426a165d8a826d3198e35d3b4ba7c106c4e","line_count":1057},
-    {"path":"Cargo.lock","sha256":"194f7d634555c129adb4d72a0a842275de47638f87c13c483361bfaaeec3c22f","line_count":4666},
-    {"path":"conformance/Cargo.toml","sha256":"0eb7f799632b162c740478bd25224a407ca083c1adf8cbe51f661b182985f8e9","line_count":213},
+    {"path":"Cargo.toml","sha256":"fee2c185ab94fd33867a800f7faa8857b8d6204dba7e16eefe510a31fc691c04","line_count":1057},
+    {"path":"Cargo.lock","sha256":"620579cbaad5dd73da0e70aa21d3a3bf928126ac2920077802e7a3058c522821","line_count":4666},
+    {"path":"conformance/Cargo.toml","sha256":"46436b9ec65ddb31c175434ad7a10344cb2f25ceeee87b1ff3706ad7cf96addf","line_count":213},
     {"path":"tests/conformance/raptorq_rfc6330/golden/Cargo.toml","sha256":"9df3b4755bc7d60b5ab8ae1910211f481d52305ee0a8f7f3f451b8098cb103ec","line_count":30},
     {"path":"tests/conformance/raptorq_rfc6330/golden/src/lib.rs","sha256":"4ccc6fc3ac9090bcd3f4c2b2f16aaf69ea18e089ffb9dda8b73a8a434eeb6e98","line_count":497},
     {"path":"tests/conformance/raptorq_rfc6330/golden/src/mod.rs","sha256":"3f341616116b85c479abd1afd4f00a23c7a0aa4d891aade4d5906ac99cf7178a","line_count":16},
@@ -116,7 +116,7 @@
     {"path":"examples/demo_benchmark.rs","sha256":"8525af694bd4d75f2a224200991e3d63d70e611bff435c441b778b439397a2ef","line_count":679},
     {"path":"benches/golden_output.rs","sha256":"a6dd8fee91a182d24168a45edd47aff95270e59de2747bf885309826b0ff5ed9","line_count":1041},
     {"path":"artifacts/dependency_capability_registry_v1.json","sha256":"d255864fdd4f314d309e3f749c782a79f8ae4ac70bf63baa57edb14b14b6a6ea","line_count":6929},
-    {"path":"artifacts/dependency_capability_baseline_v1.json","sha256":"192f32bbc86e82edd29d0b4b02c519f86df2fd547bc94572217c7ff8f5fae5c0","line_count":3210},
+    {"path":"artifacts/dependency_capability_baseline_v1.json","sha256":"581386c2990d695598014c8b0d138b9e4997dfd9e57d68f7e225d1fde0a4dc73","line_count":3210},
     {"path":"artifacts/dependency_verification_matrix_v1.json","sha256":"0804e1015f56733313de0f2a025d4bd9c600a8f9a646eb62913c564f6b617b20","line_count":88541},
     {"path":"artifacts/dependency_marginal_ledger_v1.json","sha256":"4e36ca29d7187e3237cfd9f422b2661009a608e93bb5761c7d511d412d66a047","line_count":188447},
     {"path":"artifacts/api_surface_map_v1.json","sha256":"7dfbb239422630e1ef9c875e7542c4cee440211233dc7b734611fa8481d54178","line_count":4824},

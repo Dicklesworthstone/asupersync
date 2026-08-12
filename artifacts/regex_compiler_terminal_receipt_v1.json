@@ -38,25 +38,25 @@
     {
       "bead_id": "asupersync-5z2scg.8.3.2.4",
       "path": "artifacts/regex_semantic_terminal_receipt_v1.json",
-      "sha256": "9b608ef203e2689c35905a5d915e44257b98fcf71458e2baccc3ebb63030f551",
+      "sha256": "cc60e6a66eb2c58c10a30f8697446f20d386642b31a8cadec596e8049fc06589",
       "disposition": "KEEP_INCUMBENT_DEFER"
     },
     {
       "bead_id": "asupersync-5z2scg.8.3.3.1",
       "path": "artifacts/regex_ir_schema_contract_v1.json",
-      "sha256": "ca078e24cb0b8c36a6ba6ae61cea67e64fe0e42694541a53f74a4ff3cd9bd9f7",
+      "sha256": "051a8de9d27c8e08d97d43cfd6b12ba87af7e50bc0248fe1a6b01469ae35583b",
       "disposition": "STAGED_BOUNDED_IR_SCHEMA"
     },
     {
       "bead_id": "asupersync-5z2scg.8.3.3.2",
       "path": "artifacts/regex_ir_lowering_contract_v1.json",
-      "sha256": "f5ebcad747bded26079a2debd1d850b7f17d3ea42d6b0d70eda6ea384c13333a",
+      "sha256": "6b765f9f905901aa914625cd6f828bedb9400020eec78bc6e129927a4563489f",
       "disposition": "STAGED_CHECKED_STRUCTURAL_LOWERING"
     },
     {
       "bead_id": "asupersync-5z2scg.8.3.3.3",
       "path": "artifacts/regex_priority_capture_lowering_contract_v1.json",
-      "sha256": "5579cc8d773de0ff7e7996aed6452834fed2bf89fbf9dab8f9eb42b777f9453d",
+      "sha256": "5019fb43dd1ed6aaf4ff8c4ea4ef97bcc59716b3524fead9302721bb64d18212",
       "disposition": "STAGED_PRIORITY_CAPTURE_LOWERING"
     }
   ],
@@ -93,8 +93,8 @@
     }
   ],
   "source_revisions": {
-    "cargo_toml_sha256": "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239",
-    "cargo_lock_sha256": "194f7d634555c129adb4d72a0a842275de47638f87c13c483361bfaaeec3c22f",
+    "cargo_toml_sha256": "fee2c185ab94fd33867a800f7faa8857b8d6204dba7e16eefe510a31fc691c04",
+    "cargo_lock_sha256": "620579cbaad5dd73da0e70aa21d3a3bf928126ac2920077802e7a3058c522821",
     "rust_toolchain_sha256": "7be955420e9a82164d4c4307e141035b29cd395ba6f621af32f3fddfb4013f63",
     "package": "asupersync",
     "package_version": "0.4.3",

@@ -92,21 +92,21 @@
       "pin_id": "KAFKA-K0-3-PIN-ROOT-MANIFEST",
       "path": "Cargo.toml",
       "record_count": 1057,
-      "sha256": "028292074cbd078a457c13196d7ff426a165d8a826d3198e35d3b4ba7c106c4e",
+      "sha256": "fee2c185ab94fd33867a800f7faa8857b8d6204dba7e16eefe510a31fc691c04",
       "role": "feature, dev-dependency-cycle, and explicit real-broker target wiring"
     },
     {
       "pin_id": "KAFKA-K0-3-PIN-ROOT-LOCK",
       "path": "Cargo.lock",
       "record_count": 4666,
-      "sha256": "194f7d634555c129adb4d72a0a842275de47638f87c13c483361bfaaeec3c22f",
+      "sha256": "620579cbaad5dd73da0e70aa21d3a3bf928126ac2920077802e7a3058c522821",
       "role": "resolved rdkafka and rdkafka-sys dependency identity"
     },
     {
       "pin_id": "KAFKA-K0-3-PIN-CONFORMANCE-MANIFEST",
       "path": "conformance/Cargo.toml",
       "record_count": 213,
-      "sha256": "0eb7f799632b162c740478bd25224a407ca083c1adf8cbe51f661b182985f8e9",
+      "sha256": "46436b9ec65ddb31c175434ad7a10344cb2f25ceeee87b1ff3706ad7cf96addf",
       "role": "test-internals feature unification provenance"
     },
     {
@@ -337,7 +337,7 @@
       "pin_id": "KAFKA-K0-3-PIN-README",
       "path": "README.md",
       "record_count": 2132,
-      "sha256": "d178ebcceeee22c256a46684872ca611be8c1f7a4612d498295b74548e6317ce",
+      "sha256": "dcf0576c723ebc821176144c3cc61711cc8dc31e66577a3e10f27c452ac0a8ac",
       "role": "public feature and API documentation"
     },
     {
@@ -949,7 +949,7 @@
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-005","path":".claude/skills/asupersync-mega-skill/references/DB-MESSAGING-FS-PROCESS.md","record_count":75,"sha256":"9c625d542818655b5c7c56ff76017aa2611377e87e867d07bae201eac1609dd6","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-006","path":".claude/skills/asupersync-mega-skill/references/TOKIO-MAPPING.md","record_count":90,"sha256":"6515172cf8cefabe38c62318ef22ab2f037eda4fdad3c78a4f916b7ff63b6114","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-008","path":".github/wasm_optimization_policy.json","record_count":129,"sha256":"17d523da009cf70359e2a53d8049ce5f48431abb5ae81b196d743d813bc954d5","role":"exact baseline content pin for a documentation-claim candidate surface"},
-    {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-011","path":"CHANGELOG.md","record_count":1835,"sha256":"d6b5253a1c01509b17639965eb7cfc2ea5da44e6ac191709d0db7f43d0cde624","role":"exact baseline content pin for a documentation-claim candidate surface"},
+    {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-011","path":"CHANGELOG.md","record_count":1896,"sha256":"a8408633c7c3a4ec59a0d3001d9c1fcb19d30f3eb568281c91acc2b3822c423a","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-012","path":"COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md","record_count":332,"sha256":"401b39c99f4909a7e805e0992327d2408fe54aed65610783830031b66083b7b0","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-014","path":"TESTING.md","record_count":1365,"sha256":"ebb0dc4d9ecad9e12467dcb43ae941468a57987aeb2268f4a79591964571427b","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-015","path":"UPGRADE_LOG.md","record_count":342,"sha256":"829caa113d8d20037f9eaf19f053df468be9cbb841a11e2ccf99d5c493ec595e","role":"exact baseline content pin for a documentation-claim candidate surface"},

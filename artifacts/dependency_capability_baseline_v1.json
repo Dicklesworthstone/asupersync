@@ -1375,13 +1375,13 @@
     "source_pins": [
       {
         "path": "Cargo.toml",
-        "sha256": "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239",
-        "line_count": 1051,
+        "sha256": "fee2c185ab94fd33867a800f7faa8857b8d6204dba7e16eefe510a31fc691c04",
+        "line_count": 1057,
         "role": "unconditional normal hashbrown dependency declaration and feature profiles"
       },
       {
         "path": "Cargo.lock",
-        "sha256": "194f7d634555c129adb4d72a0a842275de47638f87c13c483361bfaaeec3c22f",
+        "sha256": "620579cbaad5dd73da0e70aa21d3a3bf928126ac2920077802e7a3058c522821",
         "line_count": 4666,
         "role": "direct hashbrown 0.17.1 resolution plus transitive 0.16.1 and 0.17.1 graph context"
       },
@@ -1753,13 +1753,13 @@
     "source_pins": [
       {
         "path": "Cargo.toml",
-        "sha256": "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239",
-        "line_count": 1051,
+        "sha256": "fee2c185ab94fd33867a800f7faa8857b8d6204dba7e16eefe510a31fc691c04",
+        "line_count": 1057,
         "role": "default and benchmark-adapters feature boundary plus optional dependency declarations"
       },
       {
         "path": "Cargo.lock",
-        "sha256": "194f7d634555c129adb4d72a0a842275de47638f87c13c483361bfaaeec3c22f",
+        "sha256": "620579cbaad5dd73da0e70aa21d3a3bf928126ac2920077802e7a3058c522821",
         "line_count": 4666,
         "role": "locked num_cpus, whoami, and sysinfo package identities"
       },
@@ -2051,19 +2051,19 @@
     "source_pins": [
       {
         "path": "Cargo.toml",
-        "sha256": "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239",
-        "line_count": 1051,
+        "sha256": "fee2c185ab94fd33867a800f7faa8857b8d6204dba7e16eefe510a31fc691c04",
+        "line_count": 1057,
         "role": "default, proc-macros, and test-internals feature edges plus optional dependency declarations"
       },
       {
         "path": "Cargo.lock",
-        "sha256": "194f7d634555c129adb4d72a0a842275de47638f87c13c483361bfaaeec3c22f",
+        "sha256": "620579cbaad5dd73da0e70aa21d3a3bf928126ac2920077802e7a3058c522821",
         "line_count": 4666,
         "role": "root dependency edge and visibility 0.1.1 transitive package identity"
       },
       {
         "path": "asupersync-macros/Cargo.toml",
-        "sha256": "7f1161ae6dfa704f6b7cf6f9fceab7703351a9a596840e03bba6660d1c5229fb",
+        "sha256": "7655ff764d5b654d38db64815b841ba1f8fd42bd94701af102bfa7a490ea125a",
         "line_count": 36,
         "role": "owned proc-macro crate dependencies, trybuild harness, and root dev-dependency topology"
       },
@@ -2461,13 +2461,13 @@
     "source_pins": [
       {
         "path": "Cargo.toml",
-        "sha256": "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239",
-        "line_count": 1051,
+        "sha256": "fee2c185ab94fd33867a800f7faa8857b8d6204dba7e16eefe510a31fc691c04",
+        "line_count": 1057,
         "role": "unconditional direct slab dependency declaration and default feature boundary"
       },
       {
         "path": "Cargo.lock",
-        "sha256": "194f7d634555c129adb4d72a0a842275de47638f87c13c483361bfaaeec3c22f",
+        "sha256": "620579cbaad5dd73da0e70aa21d3a3bf928126ac2920077802e7a3058c522821",
         "line_count": 4666,
         "role": "root direct edge and slab 0.4.12 package identity"
       },
