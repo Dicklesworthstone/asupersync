@@ -269,7 +269,7 @@ fn post_capture_provenance_refresh_is_exact_and_non_semantic() {
     );
     assert_eq!(
         text(&current, "reference_commit"),
-        "fd3ea78325d3275c20d5d13d599886c28562306e"
+        "f4c40a298e15ac0a8b173c72d4e9a64227c87858"
     );
     assert_eq!(unsigned(&current, "source_pin_path_count"), 15);
     assert_eq!(unsigned(&current, "reconciled_path_count"), 4);

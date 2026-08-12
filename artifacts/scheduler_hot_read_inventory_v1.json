@@ -20,7 +20,7 @@
   "authority": {
     "inventory_scope": "in-tree production task-state, cancellation, wake-read, record-lifetime, and incumbent benchmark surfaces",
     "read_site_definition": "a direct synchronized or atomic read of TaskState, TaskPhaseCell, TaskWakeState, the stable cancellation publication state, cancel_requested, or cancel_reason, plus its in-tree authority-switching consumer",
-    "source_revision_authority": "source_pins plus exact line anchors at base_commit",
+    "source_revision_authority": "historical base_commit plus source_pins and exact line anchors maintained against the current tree",
     "production_behavior_changed": false,
     "production_conversion_authorized": false,
     "performance_claim_made": false,
@@ -44,8 +44,8 @@
     },
     {
       "path": "src/record/task.rs",
-      "sha256": "bcbc9f3aae89ff4ab368378a965ba051011581e57ae1f0fad6be4875ff2078a8",
-      "line_count": 3185,
+      "sha256": "4b2dc741e4da892376c72c59a1c8a434b4b92f4f4236327db880fecbf4d66a49",
+      "line_count": 3164,
       "role": "TaskState authority, TaskPhaseCell, TaskWakeState, transition writers, and recycle reset"
     },
     {
@@ -68,14 +68,14 @@
     },
     {
       "path": "src/types/task_context.rs",
-      "sha256": "6ec847ae652bfebf9f82a433a770591c317bbd95865c4e23e0ad9bdae4073211",
-      "line_count": 1948,
+      "sha256": "e9d7f05248bc2495445de5db2eb5ce8f0838da150f95cfa360d9a78cd8afef2e",
+      "line_count": 1936,
       "role": "CxInner coherent cancellation state, 0.4.3-compatible fast_cancel publication handle, stable scheduler clone, publication gate, and waker registry"
     },
     {
       "path": "src/cx/cx.rs",
-      "sha256": "068385d2916685e111a0fdbd532f3294bc92e9a67f355b9ade8e3c1eb3b6768e",
-      "line_count": 7551,
+      "sha256": "366a56e41bf25eaaad517cece6844ca232e18391727d2604cdbe9ba37848d85d",
+      "line_count": 7617,
       "role": "checkpoint, cancellation queries, writers, and cancel-waker registrations"
     },
     {
@@ -86,7 +86,7 @@
     },
     {
       "path": "src/runtime/scheduler/three_lane.rs",
-      "sha256": "991f480592e5654e36064320cf6cb7a22b6101c5d6f7a2e6f951424cbc1a28bf",
+      "sha256": "448838a8ac0d096b122b11747734becba80a0bf6dc8b1ab66a10ce3e29e381be",
       "line_count": 8192,
       "role": "production scheduler table selection, poll cycle, publication, ordinary wakers, and reason-bearing cancel wakers"
     },
@@ -250,7 +250,7 @@
         {"path": "src/record/task.rs", "line": 207, "fragment": "pub struct TaskPhaseCell"},
         {"path": "src/record/task.rs", "line": 224, "fragment": "pub fn load(&self)"},
         {"path": "src/record/task.rs", "line": 236, "fragment": "pub fn store(&self"},
-        {"path": "src/record/task.rs", "line": 597, "fragment": "self.phase.load()"},
+        {"path": "src/record/task.rs", "line": 576, "fragment": "self.phase.load()"},
         {"path": "src/runtime/task_table.rs", "line": 306, "fragment": "record.phase.load()"},
         {"path": "src/runtime/task_table.rs", "line": 330, "fragment": "record.phase.load()"},
         {"path": "src/runtime/task_table.rs", "line": 349, "fragment": "record.phase.load()"},
@@ -300,12 +300,12 @@
       "semantic_payload": "rich lifecycle, outcome, reason, and cleanup budget",
       "disposition": "KEEP_OWNER_LOCK_PENDING_SITE_PROFILE",
       "anchors": [
-        {"path": "src/record/task.rs", "line": 575, "fragment": "pub fn is_runnable"},
-        {"path": "src/record/task.rs", "line": 582, "fragment": "pub fn state_name"},
-        {"path": "src/record/task.rs", "line": 632, "fragment": "fn request_cancel_with_budget_and_publication"},
-        {"path": "src/record/task.rs", "line": 982, "fragment": "pub fn cancel_witness"},
-        {"path": "src/record/task.rs", "line": 1177, "fragment": "pub fn complete"},
-        {"path": "src/record/task.rs", "line": 1382, "fragment": "pub fn cancel_reason"},
+        {"path": "src/record/task.rs", "line": 554, "fragment": "pub fn is_runnable"},
+        {"path": "src/record/task.rs", "line": 561, "fragment": "pub fn state_name"},
+        {"path": "src/record/task.rs", "line": 611, "fragment": "fn request_cancel_with_budget_and_publication"},
+        {"path": "src/record/task.rs", "line": 961, "fragment": "pub fn cancel_witness"},
+        {"path": "src/record/task.rs", "line": 1156, "fragment": "pub fn complete"},
+        {"path": "src/record/task.rs", "line": 1361, "fragment": "pub fn cancel_reason"},
         {"path": "src/runtime/scheduler/three_lane.rs", "line": 7553, "fragment": "record.state.is_terminal()"},
         {"path": "src/runtime/scheduler/three_lane.rs", "line": 7886, "fragment": "fn complete_polled_record"},
         {"path": "src/runtime/scheduler/worker.rs", "line": 391, "fragment": "record.state.is_terminal()"},
@@ -330,27 +330,27 @@
       "semantic_payload": "lock-backed 0.4.3 requested bit or cloned reason/cause chain",
       "disposition": "KEEP_PUBLISHED_FLAG_AND_LOCKED_RICH_READS",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 2140, "fragment": "self.inner.read().cancel_requested"},
-        {"path": "src/cx/cx.rs", "line": 3418, "fragment": "inner.cancel_reason.clone()"},
-        {"path": "src/cx/cx.rs", "line": 3448, "fragment": "pub fn cancel_chain"},
-        {"path": "src/cx/cx.rs", "line": 3482, "fragment": "pub fn root_cancel_cause"},
-        {"path": "src/cx/cx.rs", "line": 3508, "fragment": "pub fn cancelled_by"},
-        {"path": "src/cx/cx.rs", "line": 3539, "fragment": "pub fn any_cause_is"}
+        {"path": "src/cx/cx.rs", "line": 2142, "fragment": "self.inner.read().cancel_requested"},
+        {"path": "src/cx/cx.rs", "line": 3436, "fragment": "inner.cancel_reason.clone()"},
+        {"path": "src/cx/cx.rs", "line": 3466, "fragment": "pub fn cancel_chain"},
+        {"path": "src/cx/cx.rs", "line": 3500, "fragment": "pub fn root_cancel_cause"},
+        {"path": "src/cx/cx.rs", "line": 3526, "fragment": "pub fn cancelled_by"},
+        {"path": "src/cx/cx.rs", "line": 3557, "fragment": "pub fn any_cause_is"}
       ]
     },
     {
       "surface_id": "HOTREAD-READ-CANCELLATION-PUBLICATION",
       "category": "ordinary_waker_and_checkpoint_publication",
-      "owner": "Arc<AtomicBool> fast_cancel handle cloned from CxInner and named CxCancellationState inside the scheduler",
+      "owner": "the public Arc<AtomicBool> fast_cancel handle for checkpoint compatibility plus the original stable clone named CxCancellationState inside the scheduler",
       "reader_set": ["Cx::checkpoint", "ThreeLaneWaker::schedule", "ThreeLaneLocalWaker::schedule"],
       "writer_set": ["cancellation_publication_writer_sites"],
-      "synchronization": "Acquire query paired with Release publication through CxInner::set_cancel_requested; rich reason reads still require CxInner read",
-      "lifetime_and_generation": "wakers own the stable envelope Arc and weak context; checkpoint owns a Cx",
+      "synchronization": "checkpoint reads the lock-backed flag or current public handle; ordinary wakers read the stable clone; both atomic reads use Acquire paired with Release publication through CxInner::set_cancel_requested; rich reason reads still require CxInner read",
+      "lifetime_and_generation": "wakers own the stable clone and weak context; checkpoint owns a Cx and observes the current public compatibility handle",
       "expected_frequency": "every ordinary wake that wins wake dedup and every explicit checkpoint",
       "semantic_payload": "one-bit cancellation publication only",
       "disposition": "KEEP_INCUMBENT_ALREADY_ATOMIC",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 2206, "fragment": "let cancelled = guard.is_cancel_requested()"},
+        {"path": "src/cx/cx.rs", "line": 2207, "fragment": "let cancelled = guard.is_cancel_requested()"},
         {"path": "src/runtime/scheduler/three_lane.rs", "line": 7959, "fragment": "self.cancellation.load(Ordering::Acquire)"},
         {"path": "src/runtime/scheduler/three_lane.rs", "line": 8018, "fragment": "self.cancellation.load(Ordering::Acquire)"}
       ]
@@ -420,7 +420,7 @@
     {
       "writer_id": "HOTREAD-CANCEL-WRITER-TASK-RECORD",
       "owner": "TaskRecord::request_cancel_with_budget_and_publication",
-      "anchor": {"path": "src/record/task.rs", "line": 655, "fragment": "guard.set_cancel_requested(true)"},
+      "anchor": {"path": "src/record/task.rs", "line": 634, "fragment": "guard.set_cancel_requested(true)"},
       "ordering": "CxInner write guard; set_cancel_requested updates the lock-backed bit and publishes it with Release; rich TaskState and strongest reason finish under the same guard"
     },
     {
@@ -431,10 +431,12 @@
     },
     {
       "writer_id": "HOTREAD-CANCEL-WRITER-CHECKPOINT",
-      "owner": "Cx::checkpoint and Cx::checkpoint_with budget exhaustion",
+      "owner": "Cx::checkpoint and Cx::checkpoint_with compatibility-handle materialization and budget exhaustion",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 2257, "fragment": "inner.set_cancel_requested(true)"},
-        {"path": "src/cx/cx.rs", "line": 2380, "fragment": "inner.set_cancel_requested(true)"}
+        {"path": "src/cx/cx.rs", "line": 2259, "fragment": "inner.set_cancel_requested(true)"},
+        {"path": "src/cx/cx.rs", "line": 2268, "fragment": "inner.set_cancel_requested(true)"},
+        {"path": "src/cx/cx.rs", "line": 2389, "fragment": "inner.set_cancel_requested(true)"},
+        {"path": "src/cx/cx.rs", "line": 2398, "fragment": "inner.set_cancel_requested(true)"}
       ],
       "ordering": "CxInner write guard; budget-derived reason and pending waker state remain under the guard"
     },
@@ -442,11 +444,11 @@
       "writer_id": "HOTREAD-CANCEL-WRITER-CX-APIS",
       "owner": "Cx internal, explicit, low-allocation, and reason-setting cancellation APIs",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 3086, "fragment": "inner.set_cancel_requested(value)"},
-        {"path": "src/cx/cx.rs", "line": 3120, "fragment": "inner.set_cancel_requested(value)"},
-        {"path": "src/cx/cx.rs", "line": 3315, "fragment": "inner.set_cancel_requested(true)"},
-        {"path": "src/cx/cx.rs", "line": 3372, "fragment": "inner.set_cancel_requested(true)"},
-        {"path": "src/cx/cx.rs", "line": 3572, "fragment": "inner.set_cancel_requested(true)"}
+        {"path": "src/cx/cx.rs", "line": 3104, "fragment": "inner.set_cancel_requested(value)"},
+        {"path": "src/cx/cx.rs", "line": 3138, "fragment": "inner.set_cancel_requested(value)"},
+        {"path": "src/cx/cx.rs", "line": 3333, "fragment": "inner.set_cancel_requested(true)"},
+        {"path": "src/cx/cx.rs", "line": 3390, "fragment": "inner.set_cancel_requested(true)"},
+        {"path": "src/cx/cx.rs", "line": 3590, "fragment": "inner.set_cancel_requested(true)"}
       ],
       "ordering": "CxInner write guard; rich reason and waker snapshots are coherent at unlock"
     },
@@ -519,7 +521,7 @@
       "expected_frequency": "pre-admission or deferred handle cancellation",
       "semantic_payload": "strongest reason priority, wake snapshots, and first-lane publication",
       "anchors": [
-        {"path": "src/record/task.rs", "line": 877, "fragment": "self.wake_state.notify()"},
+        {"path": "src/record/task.rs", "line": 856, "fragment": "self.wake_state.notify()"},
         {"path": "src/runtime/scheduler/three_lane.rs", "line": 5148, "fragment": "record.wake_state.notify()"}
       ]
     },
@@ -594,9 +596,9 @@
       "expected_frequency": "primary registration normally once per task; auxiliary refresh per cancel-aware future poll; dispatch on cancellation",
       "semantic_payload": "deduplicated wake ownership, not an immutable cancellation reason",
       "anchors": [
-        {"path": "src/types/task_context.rs", "line": 991, "fragment": "pub(crate) fn cancel_waker_snapshot"},
-        {"path": "src/types/task_context.rs", "line": 1016, "fragment": "pub(crate) fn take_cancel_wakers"},
-        {"path": "src/cx/cx.rs", "line": 3141, "fragment": "fn refresh_cancel_waker"},
+        {"path": "src/types/task_context.rs", "line": 979, "fragment": "pub(crate) fn cancel_waker_snapshot"},
+        {"path": "src/types/task_context.rs", "line": 1004, "fragment": "pub(crate) fn take_cancel_wakers"},
+        {"path": "src/cx/cx.rs", "line": 3159, "fragment": "fn refresh_cancel_waker"},
         {"path": "src/channel/oneshot.rs", "line": 865, "fragment": "fn refresh_cancel_waker"},
         {"path": "src/sync/barrier.rs", "line": 489, "fragment": "Clear the Cx registration first"},
         {"path": "src/sync/once_cell.rs", "line": 884, "fragment": "refresh_cancel_waker"}
@@ -628,10 +630,10 @@
       "owner": "TaskRecord Recyclable implementation",
       "rule": "reset replaces phase and clears rich state; wake state is reset in place only with unique Arc ownership, otherwise replaced",
       "anchors": [
-        {"path": "src/record/task.rs", "line": 1503, "fragment": "fn reset(&mut self)"},
-        {"path": "src/record/task.rs", "line": 1508, "fragment": "TaskPhaseCell::new"},
-        {"path": "src/record/task.rs", "line": 1552, "fragment": "Arc::get_mut"},
-        {"path": "src/record/task.rs", "line": 1555, "fragment": "Arc::new(TaskWakeState::new())"}
+        {"path": "src/record/task.rs", "line": 1482, "fragment": "fn reset(&mut self)"},
+        {"path": "src/record/task.rs", "line": 1487, "fragment": "TaskPhaseCell::new"},
+        {"path": "src/record/task.rs", "line": 1531, "fragment": "Arc::get_mut"},
+        {"path": "src/record/task.rs", "line": 1534, "fragment": "Arc::new(TaskWakeState::new())"}
       ]
     },
     {

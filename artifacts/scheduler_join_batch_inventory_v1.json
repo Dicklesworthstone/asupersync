@@ -67,7 +67,7 @@
   "current_source_reconciliation": {
     "reconciliation_id": "SCHED-JOIN-BATCH-SOURCE-RECONCILIATION-2026-08-11",
     "captured_date_utc": "2026-08-11",
-    "reference_commit": "fd3ea78325d3275c20d5d13d599886c28562306e",
+    "reference_commit": "f4c40a298e15ac0a8b173c72d4e9a64227c87858",
     "reconciliation_state": "CURRENT_TREE_SOURCE_PIN_MAINTENANCE",
     "source_pin_path_count": 15,
     "reconciled_path_count": 4,
@@ -86,8 +86,8 @@
       },
       {
         "path": "src/cx/cx.rs",
-        "sha256": "068385d2916685e111a0fdbd532f3294bc92e9a67f355b9ade8e3c1eb3b6768e",
-        "line_count": 7551,
+        "sha256": "366a56e41bf25eaaad517cece6844ca232e18391727d2604cdbe9ba37848d85d",
+        "line_count": 7617,
         "classification": "CANCELLATION_PUBLICATION_HARDENING_WITH_JOIN_ANCHORS_PRESERVED"
       },
       {
@@ -98,7 +98,7 @@
       },
       {
         "path": "src/runtime/scheduler/three_lane.rs",
-        "sha256": "991f480592e5654e36064320cf6cb7a22b6101c5d6f7a2e6f951424cbc1a28bf",
+        "sha256": "448838a8ac0d096b122b11747734becba80a0bf6dc8b1ab66a10ce3e29e381be",
         "line_count": 8192,
         "classification": "CANCELLATION_WAKER_HARDENING_WITH_BATCH_FAIRNESS_ANCHORS_PRESERVED"
       }
@@ -146,8 +146,8 @@
     },
     {
       "path": "src/cx/cx.rs",
-      "sha256": "068385d2916685e111a0fdbd532f3294bc92e9a67f355b9ade8e3c1eb3b6768e",
-      "line_count": 7551,
+      "sha256": "366a56e41bf25eaaad517cece6844ca232e18391727d2604cdbe9ba37848d85d",
+      "line_count": 7617,
       "role": "public structured spawn producer and take-once completion sender"
     },
     {
@@ -170,7 +170,7 @@
     },
     {
       "path": "src/runtime/scheduler/three_lane.rs",
-      "sha256": "991f480592e5654e36064320cf6cb7a22b6101c5d6f7a2e6f951424cbc1a28bf",
+      "sha256": "448838a8ac0d096b122b11747734becba80a0bf6dc8b1ab66a10ce3e29e381be",
       "line_count": 8192,
       "role": "global batch-one and owner-local batch-sixteen consumer policies"
     },
@@ -250,7 +250,7 @@
         {"path": "src/channel/oneshot.rs", "line": 159, "fragment": "struct OneShotInner<T>"},
         {"path": "src/channel/oneshot.rs", "line": 391, "fragment": "pub struct Sender<T>"},
         {"path": "src/channel/oneshot.rs", "line": 1099, "fragment": "pub struct Receiver<T>"},
-        {"path": "src/cx/cx.rs", "line": 4483, "fragment": "let shared_tx = Arc::new(std::sync::Mutex::new(Some(result_tx)))"}
+        {"path": "src/cx/cx.rs", "line": 4501, "fragment": "let shared_tx = Arc::new(std::sync::Mutex::new(Some(result_tx)))"}
       ]
     }
   ],
@@ -349,8 +349,8 @@
       "incumbent_contract": "Cx::spawn and Cx::spawn_in return SpawnError::RuntimeUnavailable and never panic",
       "must_preserve": "no handle is returned for a request that was never published",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 4000, "fragment": "pub fn spawn<F, Fut>("},
-        {"path": "src/cx/cx.rs", "line": 4063, "fragment": "pub fn spawn_in<F, Fut, P>("}
+        {"path": "src/cx/cx.rs", "line": 4018, "fragment": "pub fn spawn<F, Fut>("},
+        {"path": "src/cx/cx.rs", "line": 4081, "fragment": "pub fn spawn_in<F, Fut, P>("}
       ]
     },
     {
@@ -383,7 +383,7 @@
       "must_preserve": "panic stays typed for this family",
       "anchors": [
         {"path": "src/runtime/task_handle.rs", "line": 14, "fragment": "pub enum JoinError"},
-        {"path": "src/cx/cx.rs", "line": 4457, "fragment": "fn spawn_via_gateway<F, Fut>("}
+        {"path": "src/cx/cx.rs", "line": 4475, "fragment": "fn spawn_via_gateway<F, Fut>("}
       ]
     },
     {
@@ -393,7 +393,7 @@
       "incumbent_contract": "the completion slot or closed-channel mapping yields JoinError::Cancelled with the strongest available reason",
       "must_preserve": "every accepted request terminates its handle and preserves cancellation attribution",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 4545, "fragment": "let request = SpawnRequest::new_with_factory"},
+        {"path": "src/cx/cx.rs", "line": 4563, "fragment": "let request = SpawnRequest::new_with_factory"},
         {"path": "src/runtime/task_handle.rs", "line": 597, "fragment": "impl<T> std::future::Future for JoinFuture"}
       ]
     },
@@ -464,7 +464,7 @@
         {"path": "src/runtime/spawn_mailbox.rs", "line": 901, "fragment": "pub struct SpawnRequest"},
         {"path": "src/runtime/spawn_mailbox.rs", "line": 1247, "fragment": "pub fn enqueue(&self, request: SpawnRequest, now: Time)"},
         {"path": "src/runtime/spawn_mailbox.rs", "line": 1412, "fragment": "pub fn enqueue_and_notify(&self, request: SpawnRequest)"},
-        {"path": "src/cx/cx.rs", "line": 4570, "fragment": "gateway.enqueue_and_notify(request)?"}
+        {"path": "src/cx/cx.rs", "line": 4588, "fragment": "gateway.enqueue_and_notify(request)?"}
       ]
     },
     "consumer_now": {

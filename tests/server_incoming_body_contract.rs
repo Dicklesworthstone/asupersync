@@ -1128,14 +1128,15 @@ fn validate_cleanup_errors_and_evidence(inventory: &Value) -> Result<(), String>
             ])
         || variants("BODY-REQUEST-DEADLINE")? != string_set(&["ServerHopOutcome::DeadlineExceeded"])
         || variants("BODY-RESOURCE-EXHAUSTED")?
-            != string_set(&["IncomingBodyError::Cancelled { kind: CancelKind::PollQuota | CancelKind::CostBudget | CancelKind::ResourceUnavailable }"])
+            != string_set(&[
+                "IncomingBodyError::Cancelled { kind: CancelKind::PollQuota | CancelKind::CostBudget | CancelKind::ResourceUnavailable }",
+            ])
         || variants("BODY-SOURCE-DISCONNECTED")?
             != string_set(&["IncomingBodyError::SourceDisconnected"])
         || variants("BODY-CLIENT-ABORTED")? != string_set(&["ServerHopOutcome::ConnectionLost"])
         || variants("BODY-ACCOUNTING-OVERFLOW")?
             != string_set(&["IncomingBodyError::AccountingOverflow"])
-        || variants("BODY-CONSUMER-DROPPED")?
-            != string_set(&["IncomingBodyError::ConsumerDropped"])
+        || variants("BODY-CONSUMER-DROPPED")? != string_set(&["IncomingBodyError::ConsumerDropped"])
     {
         return Err("current body error variant mapping drifted".to_owned());
     }
@@ -1353,6 +1354,7 @@ fn validate_body_2_progress(inventory: &Value) -> Result<(), String> {
             "incoming_body_consumer_drop_drains_and_preserves_pipeline_remainder",
             "incoming_body_consumer_drop_counts_exact_queued_frames",
             "streaming_server_publishes_head_before_reading_body",
+            "incoming_body_driver_observes_supplied_request_context_cancellation",
             "streaming_server_drains_unread_body_before_pipeline_reuse",
             "streaming_server_closes_when_unread_body_exceeds_drain_limit",
             "streaming_server_preserves_chunked_frames_and_trailers",

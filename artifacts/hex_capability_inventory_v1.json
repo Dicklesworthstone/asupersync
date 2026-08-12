@@ -116,7 +116,7 @@
     {"path":"examples/demo_benchmark.rs","sha256":"8525af694bd4d75f2a224200991e3d63d70e611bff435c441b778b439397a2ef","line_count":679},
     {"path":"benches/golden_output.rs","sha256":"a6dd8fee91a182d24168a45edd47aff95270e59de2747bf885309826b0ff5ed9","line_count":1041},
     {"path":"artifacts/dependency_capability_registry_v1.json","sha256":"d255864fdd4f314d309e3f749c782a79f8ae4ac70bf63baa57edb14b14b6a6ea","line_count":6929},
-    {"path":"artifacts/dependency_capability_baseline_v1.json","sha256":"d75f0b6cb7c976b788f2e2b5258d240ae5874762c052a8af3e211331dfa648d5","line_count":3210},
+    {"path":"artifacts/dependency_capability_baseline_v1.json","sha256":"192f32bbc86e82edd29d0b4b02c519f86df2fd547bc94572217c7ff8f5fae5c0","line_count":3210},
     {"path":"artifacts/dependency_verification_matrix_v1.json","sha256":"0804e1015f56733313de0f2a025d4bd9c600a8f9a646eb62913c564f6b617b20","line_count":88541},
     {"path":"artifacts/dependency_marginal_ledger_v1.json","sha256":"4e36ca29d7187e3237cfd9f422b2661009a608e93bb5761c7d511d412d66a047","line_count":188447},
     {"path":"artifacts/api_surface_map_v1.json","sha256":"7dfbb239422630e1ef9c875e7542c4cee440211233dc7b734611fa8481d54178","line_count":4824},

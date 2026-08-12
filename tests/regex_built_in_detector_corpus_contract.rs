@@ -41,7 +41,7 @@ const BASELINE_PREVIOUS_SHA256: &str =
 const BASELINE_CURRENT_SHA256: &str =
     "7d73dc99cf9be276ce6adcd66b631a1e60bfe0e44a419d574e5a2414c967befc";
 const LIVE_BASELINE_SHA256: &str =
-    "d75f0b6cb7c976b788f2e2b5258d240ae5874762c052a8af3e211331dfa648d5";
+    "f18891582d04f6d919b44d8c352147644dfcec924efb9bebfe1e240abb803e72";
 const REGEX_CAPABILITY_ROW_SHA256: &str =
     "5053806ac9a546ea240a6efc0190969da549f31ed03cf17e4b7b40f45adedc5b";
 const LAB_CAPABILITY_ROW_SHA256: &str =
@@ -356,7 +356,9 @@ fn validate_post_capture_provenance_refresh(corpus: &Value) -> Result<(), String
         return Err("live baseline source pin drifted".to_owned());
     }
     if text(baseline_pin, "sha256") == text(current, "sha256") {
-        return Err("dated refresh receipt must remain distinct from the live source pin".to_owned());
+        return Err(
+            "dated refresh receipt must remain distinct from the live source pin".to_owned(),
+        );
     }
 
     let classification = &refresh["change_classification"];

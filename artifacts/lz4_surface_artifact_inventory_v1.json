@@ -96,7 +96,7 @@
     },
     {
       "path": "src/trace/file.rs",
-      "sha256": "67d22662b847644524e088edf08d05eeeb59aa670c99be725d016ed825d456d9",
+      "sha256": "57c7c5602420154601095e7a00f639732bcdb209cf09cb7d72cb446067068827",
       "role": "CAP-TRACE-LZ4 production format, writer, readers, migration, errors, and limits"
     },
     {
@@ -121,7 +121,7 @@
     },
     {
       "path": "fuzz/Cargo.toml",
-      "sha256": "1a90bcc6869fcca866b6572f6c571b42dcdbcea43960211901ed21bdad83f21f",
+      "sha256": "857925379ab7068f3faf94435e44b87adfc96c2d716f19b5c1cfdffbbfbd580d",
       "role": "excluded fuzz dependency declaration"
     },
     {
@@ -141,7 +141,7 @@
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "d75f0b6cb7c976b788f2e2b5258d240ae5874762c052a8af3e211331dfa648d5",
+      "sha256": "192f32bbc86e82edd29d0b4b02c519f86df2fd547bc94572217c7ff8f5fae5c0",
       "role": "baseline evidence authority"
     },
     {

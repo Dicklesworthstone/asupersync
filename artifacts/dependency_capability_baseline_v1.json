@@ -2087,8 +2087,8 @@
       },
       {
         "path": "src/cx/cx.rs",
-        "sha256": "068385d2916685e111a0fdbd532f3294bc92e9a67f355b9ade8e3c1eb3b6768e",
-        "line_count": 7551,
+        "sha256": "366a56e41bf25eaaad517cece6844ca232e18391727d2604cdbe9ba37848d85d",
+        "line_count": 7617,
         "role": "one already-public struct, four constructors, and one receiver method guarded by the incumbent attribute"
       },
       {

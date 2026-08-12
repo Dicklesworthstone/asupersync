@@ -22,6 +22,9 @@ const A1_RECONCILIATION_PATHS: [&str; 3] = [
     "docs/x509_validation_ownership_inventory.md",
     "tests/x509_validation_ownership_inventory_contract.rs",
 ];
+const A1_DERIVED_A2_PATH: &str = "artifacts/x509_standard_verifier_delegation_v1.json";
+const REVIEWED_A2_SHA256: &str =
+    "f7f3b9773f2f1af7b1a0640c627cd3d7f02d3dcf46c9b3f498f4cb251c06074c";
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -165,6 +168,17 @@ fn normative_projection(value: &Value) -> Result<Value, String> {
         {
             source.remove("sha256");
             source.remove("line_count");
+        } else if source["path"].as_str() == Some(A1_DERIVED_A2_PATH) {
+            // The live A2 packet embeds the mutable A1 content pin. Normalize
+            // only that transitive whole-file identity back to the exact A2
+            // bytes reviewed for this A3 specification. This keeps routine
+            // A1 reconciliation from falsely changing the independently
+            // reviewed normative policy while the live source-contract row
+            // still fails closed against current repository bytes.
+            source.insert(
+                "sha256".to_owned(),
+                Value::String(REVIEWED_A2_SHA256.to_owned()),
+            );
         }
     }
     Ok(projection)
@@ -203,6 +217,12 @@ fn validate_structure(value: &Value) -> Result<(), String> {
                 ],
                 "fields": ["sha256", "line_count"],
                 "reason": "A1 records approval only after independent review; excluding only these mutable pins avoids a review-hash cycle while retaining each path and role."
+            },
+            "normalized_a1_derived_fields": {
+                "path": A1_DERIVED_A2_PATH,
+                "field": "sha256",
+                "reviewed_value": REVIEWED_A2_SHA256,
+                "reason": "The live A2 whole-file identity changes when its excluded A1 content pin is reconciled; the A3 normative projection retains the exact A2 identity independently reviewed for this specification."
             }
         })
     {

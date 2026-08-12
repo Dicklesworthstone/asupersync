@@ -162,7 +162,7 @@ fn source_pins_and_exact_anchors_match_the_captured_tree() {
         text(pin, "role");
     }
 
-    assert_eq!(check_anchor_objects(&artifact), 133);
+    assert_eq!(check_anchor_objects(&artifact), 135);
 }
 
 #[test]

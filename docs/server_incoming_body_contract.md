@@ -98,11 +98,12 @@ byte, and time allowances. Pipelined bytes are restored only after synchronized
 body EOF. Over-limit, truncated, disconnected, cancelled, or ambiguous bodies
 close the connection without committing the handler response.
 
-Focused cases cover head-before-body publication, unread-body drain followed by
-pipelined reuse, drain-limit close, chunked frames and trailers, actual chunked-byte
-overrun, and truncated Content-Length. The remaining gaps are the legacy buffered
-listener/web cutover, H2 streaming, and the terminal telemetry/obligation receipt;
-none is claimed by BODY-2.
+Focused cases cover head-before-body publication, request-context cancellation
+of body publication, unread-body drain followed by pipelined reuse, drain-limit
+close, chunked frames and trailers, actual chunked-byte overrun, and truncated
+Content-Length. The remaining gaps are the legacy buffered listener/web cutover,
+H2 streaming, and the terminal telemetry/obligation receipt; none is claimed by
+BODY-2.
 
 ## Public ownership contract
 
