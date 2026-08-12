@@ -322,11 +322,36 @@ New files are reserved for **genuinely new functionality** that makes zero sense
 
 ## Backwards Compatibility
 
-We do not care about backwards compatibility—we're in early development with no users. We want to do things the **RIGHT** way with **NO TECH DEBT**.
+Asupersync is a critical dependency in more than a dozen production projects.
+For every `0.4.x` release, compatibility with the public API and documented
+behavior of `v0.4.3` is a **hard release gate**, not a preference.
 
-- Never create "compatibility shims"
-- Never create wrapper functions for deprecated APIs
-- Just fix the code directly
+- Do not remove or rename a public item, reduce its visibility, change a public
+  signature, add a required field to an exhaustively constructible public
+  struct, change an associated type, or change documented observable behavior
+  unless the user gives explicit written approval for that exact break.
+- A breaking change requires an extraordinarily compelling correctness or
+  security justification, a written analysis of compatible alternatives, an
+  explicit migration plan, downstream compile evidence, release-note coverage,
+  and an intentional semver boundary. Performance wins, internal cleanup, API
+  aesthetics, or implementation convenience are not sufficient reasons.
+- Prefer additive APIs and private implementation changes. When a safer or more
+  expressive surface is needed, keep the established surface working and add a
+  separately named API whose semantics are explicit.
+- Compatibility code is not automatically technical debt. A narrow adapter or
+  preserved legacy entry point is correct engineering when it protects shipped
+  contracts; keep it tested and route both old and new surfaces through one
+  authoritative implementation where practical.
+- Deprecation is not removal permission. Deprecations must remain functional
+  throughout `0.4.x`, and removal still requires the explicit approval and
+  semver process above.
+- Before release, compare the public surface against `v0.4.3` and compile
+  representative downstream consumers. Any unexplained break keeps the release
+  on hold.
+
+The user explicitly overrides any older repository text, plan, bead, or design
+document that claims Asupersync has no users or need not preserve backwards
+compatibility.
 
 ---
 
