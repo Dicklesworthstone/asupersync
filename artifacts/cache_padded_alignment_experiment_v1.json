@@ -597,8 +597,8 @@
   "source_pins": [
     {
       "path": ".gitignore",
-      "sha256": "398829f8d025a2d1f91208061bd3ee5dd4d6371ab44d76b8d223f989ebf0a342",
-      "line_count": 579
+      "sha256": "b6e282deaef63c69bdc6dd053ef46743117c5c761e8f29b5641434c8838366c7",
+      "line_count": 581
     },
     {
       "path": "benches/lab_iocap_contention.rs",
