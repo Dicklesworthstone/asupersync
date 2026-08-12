@@ -7956,7 +7956,7 @@ impl ThreeLaneWaker {
             // The stable envelope pairs this query with every cancellation
             // publisher's Release store, so an observed request also carries
             // its published reason.
-            let is_cancelling = self.cancellation.is_requested();
+            let is_cancelling = self.cancellation.load(Ordering::Acquire);
 
             if is_cancelling {
                 if let Some(inner) = self.cx_inner.upgrade() {
@@ -8015,7 +8015,7 @@ impl ThreeLaneLocalWaker {
         if self.wake_state.notify() {
             // The stable envelope pairs this query with every cancellation
             // publisher's Release store before local wake routing.
-            let is_cancelling = self.cancellation.is_requested();
+            let is_cancelling = self.cancellation.load(Ordering::Acquire);
 
             if is_cancelling {
                 let mut priority = self.priority;

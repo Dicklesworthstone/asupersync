@@ -375,23 +375,14 @@ pub struct TaskRecord {
     ///
     /// This is shared with the `Cx` held by the user code.
     /// It is `None` only during initial construction or testing if not provided.
-    /// Runtime code may link it exactly once to a live `Cx`; it must never
-    /// replace that lock with another context's state.
-    ///
-    /// ```compile_fail
-    /// use asupersync::record::TaskRecord;
-    ///
-    /// fn rebind_context(record: &mut TaskRecord) {
-    ///     record.cx_inner = None;
-    /// }
-    /// ```
+    /// This remains public for 0.4.3 source compatibility.
     #[cfg_attr(feature = "test-internals", serde(skip))]
-    pub(crate) cx_inner: Option<Arc<RwLock<CxInner>>>,
+    pub cx_inner: Option<Arc<RwLock<CxInner>>>,
     /// Full capability context for this task.
     ///
     /// This allows the runtime to set a current task context while polling.
     #[cfg_attr(feature = "test-internals", serde(skip))]
-    pub(crate) cx: Option<Cx>,
+    pub cx: Option<Cx>,
     /// Logical time when the task was created.
     pub created_at: Time,
     /// The task's current deadline (cached from cx_inner).
@@ -511,25 +502,13 @@ impl TaskRecord {
 
     /// Sets the shared CxInner.
     #[inline]
-    pub(crate) fn set_cx_inner(&mut self, inner: Arc<RwLock<CxInner>>) {
-        if let Some(cx) = &self.cx {
-            assert!(
-                Arc::ptr_eq(&cx.inner, &inner),
-                "TaskRecord cannot replace the CxInner linked to a live Cx"
-            );
-        }
+    pub fn set_cx_inner(&mut self, inner: Arc<RwLock<CxInner>>) {
         self.deadline = inner.read().budget.deadline;
         self.cx_inner = Some(inner);
     }
 
     /// Sets the full Cx for this task.
-    pub(crate) fn set_cx(&mut self, cx: Cx) {
-        if let Some(inner) = &self.cx_inner {
-            assert!(
-                Arc::ptr_eq(&cx.inner, inner),
-                "TaskRecord Cx must use its linked CxInner"
-            );
-        }
+    pub fn set_cx(&mut self, cx: Cx) {
         self.cx = Some(cx);
     }
 

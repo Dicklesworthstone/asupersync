@@ -1941,7 +1941,7 @@ fn cx_trace_emits_user_trace_event() {
 }
 
 #[test]
-fn runtime_task_mut_rejects_live_cx_rebinding() {
+fn v0_4_3_compatibility_task_record_setters_retain_independent_semantics() {
     let mut state = RuntimeState::new();
     let root = state.create_root_region(Budget::INFINITE);
     let (task_id, _handle) = state
@@ -1951,52 +1951,51 @@ fn runtime_task_mut_rejects_live_cx_rebinding() {
         .task(task_id)
         .and_then(|record| record.cx.clone())
         .expect("runtime task must retain its live Cx");
-    let original_inner = Arc::clone(&cx.inner);
-
     let replacement = Arc::new(parking_lot::RwLock::new(CxInner::new(
         root,
         task_id,
         Budget::INFINITE,
     )));
-    let replace_inner = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        state
-            .task_mut(task_id)
-            .expect("task record")
-            .set_cx_inner(Arc::clone(&replacement));
-    }));
-    assert!(
-        replace_inner.is_err(),
-        "a RuntimeState task_mut caller must not replace a live CxInner"
-    );
-
-    let replace_cx = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        state
-            .task_mut(task_id)
-            .expect("task record")
-            .set_cx(crate::cx::Cx::new(root, task_id, Budget::INFINITE));
-    }));
-    assert!(
-        replace_cx.is_err(),
-        "a RuntimeState task_mut caller must not install a Cx with another CxInner"
-    );
-
-    let record = state.task(task_id).expect("task survives rejected rebinding");
+    state
+        .task_mut(task_id)
+        .expect("task record")
+        .set_cx_inner(Arc::clone(&replacement));
+    let record = state.task(task_id).expect("task survives inner rebinding");
     let linked_inner = record.cx_inner.as_ref().expect("linked CxInner");
     assert!(
-        Arc::ptr_eq(linked_inner, &original_inner),
-        "rejected rebindings must leave the original CxInner installed"
+        Arc::ptr_eq(linked_inner, &replacement),
+        "the legacy setter must install the requested CxInner"
     );
+    let retained_cx = record.cx.as_ref().expect("legacy full Cx remains installed");
+    assert!(Arc::ptr_eq(&retained_cx.inner, &cx.inner));
+
+    let replacement_cx = crate::cx::Cx::new(root, task_id, Budget::INFINITE);
+    state
+        .task_mut(task_id)
+        .expect("task record")
+        .set_cx(replacement_cx.clone());
+    let record = state
+        .task(task_id)
+        .expect("task survives full Cx rebinding");
     let linked_cx = record.cx.as_ref().expect("linked Cx");
     assert!(
-        Arc::ptr_eq(&linked_cx.inner, &original_inner),
-        "the stored Cx must retain the original CxInner identity"
+        Arc::ptr_eq(&linked_cx.inner, &replacement_cx.inner),
+        "set_cx must install the requested full context"
+    );
+    assert!(
+        Arc::ptr_eq(record.cx_inner.as_ref().expect("linked CxInner"), &replacement),
+        "the 0.4.3 set_cx contract leaves cx_inner unchanged"
     );
 
-    cx.set_cancel_requested(true);
-    assert!(cx.is_cancel_requested());
+    replacement_cx.set_cancel_requested(true);
+    assert!(replacement_cx.is_cancel_requested());
     assert!(
         linked_cx.is_cancel_requested(),
-        "the runtime-owned Cx observes publication through the retained envelope"
+        "the runtime-owned Cx observes publication through the replacement context"
+    );
+    assert!(
+        !cx.is_cancel_requested(),
+        "the retired context must remain independent after a compatibility rebind"
     );
 }
 
