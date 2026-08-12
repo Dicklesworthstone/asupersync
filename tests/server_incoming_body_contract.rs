@@ -1174,8 +1174,10 @@ fn validate_cleanup_errors_and_evidence(inventory: &Value) -> Result<(), String>
         })
         .collect();
     let migration_order = migration_order?;
-    if map_text(compatibility, "policy")? != "DIRECT_CUTOVER_NO_COMPATIBILITY_SHIM"
-        || !map_text(compatibility, "request_change")?.contains("single IncomingRequestBody")
+    if map_text(compatibility, "policy")? != "ADDITIVE_LEGACY_ADAPTER_SINGLE_TYPED_AUTHORITY"
+        || !map_text(compatibility, "request_change")?.contains("0.4.3 IncomingBody")
+        || !map_text(compatibility, "request_change")?.contains("StreamingServerRequest")
+        || !map_text(compatibility, "request_change")?.contains("Http1StreamingConfig")
         || !map_text(compatibility, "buffered_extractors")?.contains("Limited")
         || !map_text(compatibility, "buffered_extractors")?.contains("checked accounting")
         || migration_order.iter().copied().ne([
@@ -1186,7 +1188,7 @@ fn validate_cleanup_errors_and_evidence(inventory: &Value) -> Result<(), String>
             "telemetry and stable diagnostics",
         ])
     {
-        return Err("direct-cutover compatibility contract drifted".to_owned());
+        return Err("additive compatibility contract drifted".to_owned());
     }
     for (key, expected) in [
         ("json_default_disposition", "KEEP_10_MIB"),
@@ -1473,6 +1475,7 @@ fn validate_docs_and_boundaries(inventory: &Value) -> Result<(), String> {
         "## Stable error mapping",
         "## Evidence status and no-claim boundary",
         "IncomingRequestBody",
+        "IncomingBody",
         "IncomingBodyError",
         "is not cloneable",
         "Send + Unpin + 'static",
@@ -1625,10 +1628,10 @@ fn server_incoming_body_contract_fails_closed_on_material_drift() {
         Value::from(500_u64);
     mutations.push(("wrong consumer-drop status", wrong_consumer_status));
 
-    let mut compatibility_shim = base.clone();
-    compatibility_shim["compatibility_migration"]["policy"] =
-        Value::String("ADD_COMPATIBILITY_SHIM".to_owned());
-    mutations.push(("compatibility shim policy", compatibility_shim));
+    let mut direct_cutover = base.clone();
+    direct_cutover["compatibility_migration"]["policy"] =
+        Value::String("DIRECT_CUTOVER_NO_COMPATIBILITY_SHIM".to_owned());
+    mutations.push(("direct-cutover compatibility policy", direct_cutover));
 
     let mut missing_pin = base.clone();
     let _ = missing_pin["source_pins"]

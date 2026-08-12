@@ -61,8 +61,8 @@
     {
       "surface_id": "H1-STREAM-SCAFFOLD",
       "state": "LANDED",
-      "current_semantics": "IncomingRequestBody and IncomingBodyWriter use independently bounded frame and queued-byte storage with fixed-length or chunked parsing. The writer records an exact IncomingBodyError before closing, checks incoming buffer, data, and trailer arithmetic before mutation, preserves exact cancellation kinds, and signals consumer drop for protocol-owned cleanup.",
-      "anchors": ["src/http/h1/stream.rs::IncomingRequestBody", "src/http/h1/stream.rs::IncomingBodyWriter", "src/http/h1/stream.rs::StreamingRequest"],
+      "current_semantics": "IncomingRequestBody and IncomingRequestBodyWriter use independently bounded frame and queued-byte storage with fixed-length or chunked parsing. The writer records an exact IncomingBodyError before closing, checks incoming buffer, data, and trailer arithmetic before mutation, preserves exact cancellation kinds, and signals consumer drop for protocol-owned cleanup. IncomingBody and IncomingBodyWriter remain additive 0.4.3-compatible adapters.",
+      "anchors": ["src/http/h1/stream.rs::IncomingRequestBody", "src/http/h1/stream.rs::IncomingRequestBodyWriter", "src/http/h1/stream.rs::StreamingServerRequest", "src/http/h1/stream.rs::IncomingBody"],
       "gap": "Incoming-body terminal telemetry and body-obligation ledger integration remain follow-on work."
     },
     {
@@ -463,8 +463,8 @@
     "current_status": "NO_INCOMING_BODY_TERMINAL_RECEIPT"
   },
   "compatibility_migration": {
-    "policy": "DIRECT_CUTOVER_NO_COMPATIBILITY_SHIM",
-    "request_change": "Replace buffered body ownership in protocol and web request types with the single IncomingRequestBody after protocol adapters are ready.",
+    "policy": "ADDITIVE_LEGACY_ADAPTER_SINGLE_TYPED_AUTHORITY",
+    "request_change": "Retain the 0.4.3 IncomingBody, IncomingBodyWriter, StreamingRequest, and Http1Config source shapes as delegated adapters while the streaming server uses IncomingRequestBody, IncomingRequestBodyWriter, StreamingServerRequest, and Http1StreamingConfig as additive typed APIs.",
     "buffered_extractors": "JSON, form, and raw extractors collect through Limited with checked accounting and preserve their existing default limits.",
     "multipart_policy": "Until BODY-5 lands, Multipart remains bounded whole-body collection under its retained 16 MiB aggregate limit; incremental parsing is not claimed.",
     "json_default_disposition": "KEEP_10_MIB",
@@ -544,7 +544,7 @@
     {"path": "src/codec/framed.rs", "sha256": "5733d84397523e9659ea18e25fa152fa6d4ebe81766da96432f717a8d4f546d7", "line_count": 1372, "anchors": ["pub struct Framed<T, U>", "pub fn read_buffer", "impl<T, U> Stream for Framed"]},
     {"path": "src/codec/framed_read.rs", "sha256": "477bf58ca5ee956c841937e59cacda49927a31f2a99f75560223f6f43142d42d", "line_count": 1165, "anchors": ["pub const DEFAULT_MAX_BUFFER_LEN", "pub struct FramedRead<R, D>"]},
     {"path": "src/http/h1/mod.rs", "sha256": "dcb53231ae9339e04994e40d4a472b4a020d05cdb2ca051cee451864786032c5", "line_count": 53, "anchors": ["pub mod stream;", "pub use stream::{"]},
-    {"path": "src/http/h1/stream.rs", "sha256": "cd3d2c4e47f73af6dcc40d4fab705f12c0173b8417b833b37daf6145462e4aa8", "line_count": 2706, "anchors": ["pub enum IncomingBodyError {", "pub struct IncomingRequestBody {", "pub struct IncomingBodyWriter {", "pub fn channel_with_limits(", "pub fn discard_bytes(", "fn incoming_body_queue_bytes_backpressure_independently_of_frame_slots()", "fn incoming_body_queue_byte_wait_is_woken_by_cancellation()", "fn incoming_body_consumer_drop_counts_exact_queued_frames()"]},
+    {"path": "src/http/h1/stream.rs", "sha256": "cd3d2c4e47f73af6dcc40d4fab705f12c0173b8417b833b37daf6145462e4aa8", "line_count": 2706, "anchors": ["pub enum IncomingBodyError {", "pub struct IncomingRequestBody {", "pub struct IncomingRequestBodyWriter {", "pub struct IncomingBody {", "pub struct StreamingServerRequest {", "pub fn channel_with_limits(", "pub fn discard_bytes(", "fn incoming_body_queue_bytes_backpressure_independently_of_frame_slots()", "fn incoming_body_queue_byte_wait_is_woken_by_cancellation()", "fn incoming_body_consumer_drop_counts_exact_queued_frames()"]},
     {"path": "src/http/h1/codec.rs", "sha256": "5edf27b58e2a55a5b04588057809acecee81a63fae976412f5c5b63f7dcee2e1", "line_count": 2869, "anchors": ["pub enum HttpError {", "pub struct Http1Codec", "pub(super) fn decode_streaming_request_head(", "fn decode_head("]},
     {"path": "src/http/h1/types.rs", "sha256": "c996611abc2ef2d91e914d19e9110230ea90370de98c4a9bcda7bb0edf238692", "line_count": 2102, "anchors": ["pub struct Request {", "pub body: Vec<u8>"]},
     {"path": "src/http/h1/server.rs", "sha256": "89f474dc342c522edb1764191136f47564b454a709c249a9f2f6be353e3e85c3", "line_count": 3249, "anchors": ["pub struct Http1StreamingServer<F>", "pub async fn serve_with_peer_addr", "async fn drive_incoming_body", "fn validate_unread_drain"]},

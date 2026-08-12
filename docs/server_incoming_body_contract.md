@@ -40,8 +40,8 @@ The reusable abstractions and the live server path are currently separate.
 | Generic body | `Body`, `Frame`, `SizeHint` | Poll-based data/trailer frames | Not owned by live request dispatch |
 | Stream adapter | `StreamBody<S>` | Converts a frame stream into `Body` | Not the incoming request type |
 | Size adapter | `Limited<B>` | Decrements a data-byte allowance | Not wrapped around one shared incoming body |
-| H1 streaming scaffold | `IncomingRequestBody` plus `IncomingBodyWriter` | Fixed-length and chunked parsing feed a single consumer through independent frame-count and queued-byte bounds; typed terminal reasons, exact cancellation kinds, consumer drop, checked actual-byte accounting, and fail-closed repoll are explicit | The terminal telemetry and obligation ledger described below are not yet emitted |
-| H1 live paths | `Http1StreamingServer` to `StreamingRequest`; legacy `Http1Server` to `h1::types::Request` | The streaming entry point publishes a validated head before body reads, drives the handler and body concurrently, and reuses a connection only after synchronized EOF within drain bounds. The legacy buffered entry point remains available for existing web callers | BODY-3 owns the buffered web/listener cutover; this slice does not claim that existing `Http1Server` handlers changed type |
+| H1 streaming scaffold | `IncomingRequestBody` plus `IncomingRequestBodyWriter` | Fixed-length and chunked parsing feed a single consumer through independent frame-count and queued-byte bounds; typed terminal reasons, exact cancellation kinds, consumer drop, checked actual-byte accounting, and fail-closed repoll are explicit | The terminal telemetry and obligation ledger described below are not yet emitted |
+| H1 live paths | `Http1StreamingServer` to `StreamingServerRequest`; legacy `Http1Server` to `h1::types::Request` | The streaming entry point publishes a validated head before body reads, drives the handler and body concurrently, and reuses a connection only after synchronized EOF within drain bounds. The legacy buffered entry point remains available for existing web callers | BODY-3 owns the buffered web/listener cutover; this slice does not claim that existing `Http1Server` handlers changed type |
 | H2 live path | pending headers plus `Vec<u8>` per stream | Preserves a separate validated trailer block on the shared request, uses saturating prospective addition against a configured per-stream cap (16 MiB by default), resets an over-cap stream with `ENHANCE_YOUR_CALM`, and otherwise dispatches after `END_STREAM` | No incremental handler consumption or connection-wide aggregate body budget |
 | Web request | `web::extract::Request` | Owns cloneable `Bytes` | Conflicts with sole-consumer ownership |
 | Handler/router | `Handler::call(&Cx, Request)` | Moves a complete request into the handler | No head/body split |
@@ -58,10 +58,11 @@ point is executable; it does not silently reclassify the legacy buffered path.
 
 ## BODY-2 H1 streaming ingress
 
-The follow-on bead `asupersync-server-stack-hardening-eeexl1.6.2` replaces the
-coexisting scaffold name with the one public `IncomingRequestBody` authority.
-`IncomingBodyWriter` stores an exact `IncomingBodyError` before releasing its
-final sender. The consumer therefore distinguishes explicit framing completion,
+The follow-on bead `asupersync-server-stack-hardening-eeexl1.6.2` established
+`IncomingRequestBody` as the typed streaming-server authority while 0.4.4
+retains `IncomingBody` and `IncomingBodyWriter` as additive 0.4.3-compatible
+adapters. `IncomingRequestBodyWriter` stores an exact `IncomingBodyError`
+before releasing its final sender. The typed consumer therefore distinguishes explicit framing completion,
 malformed or truncated framing, actual-byte limit refusal, source disconnect,
 consumer drop, and cancellation with the exact `CancelKind`, even after already
 queued frames are delivered.
@@ -105,14 +106,17 @@ none is claimed by BODY-2.
 
 ## Public ownership contract
 
-The public value is `IncomingRequestBody`, implementing
+The typed streaming-server value is `IncomingRequestBody`, implementing
 `crate::http::body::Body<Data = BytesCursor, Error = IncomingBodyError>`.
+The 0.4.3-compatible `IncomingBody` adapter delegates to that same owner while
+preserving `Body<Error = HttpError>` and repeat-EOF behavior; it is not a
+second producer, queue, terminal-state machine, or protocol authority.
 
 `StreamBody` remains a useful generic adapter, but its underlying `None` is ordinary
 EOF and it does not own producer completion, consumer-drop notification, or the
 body obligation. The public incoming type therefore does not have to wrap it. The
-former H1 `IncomingBody` name has been replaced by this one public incoming type;
-a second coexisting public incoming-body authority remains forbidden.
+legacy adapter and typed value therefore share one implementation authority;
+an independently implemented second incoming-body pipeline remains forbidden.
 The concrete type is `Send + Unpin + 'static`, allowing the existing `Limited<B>`
 implementation to wrap it. `Sync` is not required for a single consumer; BODY-3
 must remove any `Sync` bound from the final body-consuming extractor while retaining

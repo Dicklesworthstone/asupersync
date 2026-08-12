@@ -6,7 +6,9 @@
 //! # Overview
 //!
 //! - [`IncomingRequestBody`]: Streaming reader for request bodies
-//! - [`IncomingBodyWriter`]: Feeds bytes into an incoming body with backpressure
+//! - [`IncomingBody`]: Legacy-compatible streaming request body
+//! - [`IncomingRequestBody`]: Typed streaming request body with terminal diagnostics
+//! - [`IncomingRequestBodyWriter`]: Feeds bytes into a typed request body with backpressure
 //! - [`OutgoingBody`]: Streaming writer-facing body (consumer reads frames)
 //! - [`OutgoingBodySender`]: Sends body frames with backpressure + cancellation
 //! - [`ChunkedEncoder`]: Encoder for HTTP/1.1 chunked transfer encoding
@@ -43,6 +45,7 @@ const DEFAULT_MAX_QUEUED_BODY_BYTES: usize = 512 * 1024;
 /// [`CancelKind`] instead of collapsing every request-budget outcome into a
 /// generic channel error.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IncomingBodyError {
     /// The declared Content-Length was invalid or did not match the wire body.
     BadContentLength,
@@ -57,6 +60,8 @@ pub enum IncomingBodyError {
     },
     /// Trailer fields exceeded the configured trailer limit.
     TrailersTooLarge,
+    /// A trailer line was malformed before field-name/value validation.
+    BadHeader,
     /// A trailer field name was invalid.
     InvalidHeaderName,
     /// A trailer field value was invalid.
@@ -106,6 +111,7 @@ impl std::fmt::Display for IncomingBodyError {
                 None => write!(f, "request body exceeds limit ({limit})"),
             },
             Self::TrailersTooLarge => write!(f, "request body trailers exceed limit"),
+            Self::BadHeader => write!(f, "malformed request trailer"),
             Self::InvalidHeaderName => write!(f, "invalid request trailer name"),
             Self::InvalidHeaderValue => write!(f, "invalid request trailer value"),
             Self::Cancelled { kind } => write!(f, "request body cancelled ({kind:?})"),
@@ -150,7 +156,8 @@ impl IncomingBodyError {
             },
             HttpError::HeadersTooLarge | HttpError::TooManyHeaders => Self::TrailersTooLarge,
             HttpError::InvalidHeaderName => Self::InvalidHeaderName,
-            HttpError::InvalidHeaderValue | HttpError::BadHeader => Self::InvalidHeaderValue,
+            HttpError::BadHeader => Self::BadHeader,
+            HttpError::InvalidHeaderValue => Self::InvalidHeaderValue,
             HttpError::BodyCancelled => Self::Cancelled {
                 kind: CancelKind::User,
             },
@@ -163,6 +170,25 @@ impl IncomingBodyError {
             kind: cx
                 .cancel_reason()
                 .map_or(CancelKind::User, |reason| reason.kind()),
+        }
+    }
+
+    fn into_http_error(self) -> HttpError {
+        match self {
+            Self::BadContentLength => HttpError::BadContentLength,
+            Self::BadChunkedEncoding => HttpError::BadChunkedEncoding,
+            Self::BodyTooLarge { .. } => HttpError::BodyTooLarge,
+            Self::TrailersTooLarge => HttpError::HeadersTooLarge,
+            Self::BadHeader => HttpError::BadHeader,
+            Self::InvalidHeaderName => HttpError::InvalidHeaderName,
+            Self::InvalidHeaderValue => HttpError::InvalidHeaderValue,
+            Self::Cancelled { .. } => HttpError::BodyCancelled,
+            Self::SourceDisconnected
+            | Self::ConsumerDropped
+            | Self::AlreadyTerminal
+            | Self::DrainLimitExceeded { .. }
+            | Self::DrainTimeout => HttpError::BodyChannelClosed,
+            Self::AccountingOverflow | Self::QueueFrameTooLarge { .. } => HttpError::BodyTooLarge,
         }
     }
 }
@@ -598,7 +624,7 @@ pub struct IncomingRequestBody {
 impl IncomingRequestBody {
     /// Creates a bounded incoming body channel.
     #[must_use]
-    pub fn channel(cx: &Cx, kind: BodyKind) -> (IncomingBodyWriter, Self) {
+    pub fn channel(cx: &Cx, kind: BodyKind) -> (IncomingRequestBodyWriter, Self) {
         Self::channel_with_limits(
             cx,
             kind,
@@ -613,7 +639,7 @@ impl IncomingRequestBody {
         cx: &Cx,
         kind: BodyKind,
         capacity: usize,
-    ) -> (IncomingBodyWriter, Self) {
+    ) -> (IncomingRequestBodyWriter, Self) {
         Self::channel_with_limits(cx, kind, capacity, DEFAULT_MAX_QUEUED_BODY_BYTES)
     }
 
@@ -624,7 +650,7 @@ impl IncomingRequestBody {
         kind: BodyKind,
         frame_capacity: usize,
         queued_byte_limit: usize,
-    ) -> (IncomingBodyWriter, Self) {
+    ) -> (IncomingRequestBodyWriter, Self) {
         let (tx, rx) = mpsc::channel(frame_capacity);
         let done = kind.is_empty();
         let shared = Arc::new(IncomingBodyShared {
@@ -649,7 +675,7 @@ impl IncomingRequestBody {
             size_hint: kind.size_hint(),
             kind,
         };
-        let writer = IncomingBodyWriter::new(tx, kind, shared);
+        let writer = IncomingRequestBodyWriter::new(tx, kind, shared);
         (writer, body)
     }
 
@@ -812,9 +838,9 @@ impl Drop for IncomingRequestBody {
     }
 }
 
-/// Writer for feeding bytes into an incoming body.
+/// Writer for feeding bytes into a typed incoming request body.
 #[derive(Debug)]
-pub struct IncomingBodyWriter {
+pub struct IncomingRequestBodyWriter {
     sender: Option<mpsc::Sender<QueuedIncomingFrame>>,
     shared: Arc<IncomingBodyShared>,
     buffer: BytesMut,
@@ -844,7 +870,7 @@ pub struct IncomingBodyDrainProgress {
     pub synchronized_eof: bool,
 }
 
-impl IncomingBodyWriter {
+impl IncomingRequestBodyWriter {
     fn new(
         sender: mpsc::Sender<QueuedIncomingFrame>,
         kind: BodyKind,
@@ -1377,7 +1403,7 @@ impl IncomingBodyWriter {
     }
 }
 
-impl Drop for IncomingBodyWriter {
+impl Drop for IncomingRequestBodyWriter {
     fn drop(&mut self) {
         if self.sender.is_some() {
             *self.shared.terminal_error.lock() = Some(IncomingBodyError::SourceDisconnected);
@@ -1388,6 +1414,151 @@ impl Drop for IncomingBodyWriter {
                 Ordering::Acquire,
             );
         }
+    }
+}
+
+/// Backwards-compatible HTTP/1 request body from the 0.4.3 API.
+///
+/// New server code should prefer [`IncomingRequestBody`] when it needs typed
+/// cancellation causes and strict terminal-repoll diagnostics. This adapter
+/// deliberately preserves the legacy [`HttpError`] surface and the standard
+/// `Body` rule that every poll after terminal completion returns `None`.
+#[derive(Debug)]
+pub struct IncomingBody {
+    inner: IncomingRequestBody,
+    done: bool,
+}
+
+impl IncomingBody {
+    /// Creates a bounded incoming body channel.
+    #[must_use]
+    pub fn channel(cx: &Cx, kind: BodyKind) -> (IncomingBodyWriter, Self) {
+        Self::channel_with_capacity(cx, kind, DEFAULT_BODY_CHANNEL_CAPACITY)
+    }
+
+    /// Creates a bounded incoming body channel with custom frame capacity.
+    #[must_use]
+    pub fn channel_with_capacity(
+        cx: &Cx,
+        kind: BodyKind,
+        capacity: usize,
+    ) -> (IncomingBodyWriter, Self) {
+        // The 0.4.3 contract bounded queued *frames* only. Keep the typed
+        // implementation's byte accounting, but set its independent byte cap
+        // to the representable maximum so this adapter does not introduce the
+        // newer 512 KiB backpressure threshold into legacy callers.
+        let (writer, inner) =
+            IncomingRequestBody::channel_with_limits(cx, kind, capacity, usize::MAX);
+        let done = inner.is_end_stream();
+        (IncomingBodyWriter { inner: writer }, Self { inner, done })
+    }
+
+    /// Returns the body kind.
+    #[must_use]
+    pub fn kind(&self) -> BodyKind {
+        self.inner.kind()
+    }
+}
+
+impl Body for IncomingBody {
+    type Data = BytesCursor;
+    type Error = HttpError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        poll_cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        if self.done {
+            return Poll::Ready(None);
+        }
+
+        match Pin::new(&mut self.inner).poll_frame(poll_cx) {
+            Poll::Ready(Some(Ok(frame))) => {
+                self.done = self.inner.is_end_stream();
+                Poll::Ready(Some(Ok(frame)))
+            }
+            Poll::Ready(Some(Err(error))) => {
+                self.done = true;
+                Poll::Ready(Some(Err(error.into_http_error())))
+            }
+            Poll::Ready(None) => {
+                self.done = true;
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.done
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+/// Backwards-compatible producer for [`IncomingBody`].
+///
+/// The adapter retains the 0.4.3 method signatures while delegating framing,
+/// bounded buffering, and producer/consumer synchronization to the hardened
+/// typed implementation.
+#[derive(Debug)]
+pub struct IncomingBodyWriter {
+    inner: IncomingRequestBodyWriter,
+}
+
+impl IncomingBodyWriter {
+    /// Maximum default chunk size for yielded data.
+    pub const DEFAULT_MAX_CHUNK_SIZE: usize = IncomingRequestBodyWriter::DEFAULT_MAX_CHUNK_SIZE;
+
+    /// Sets the maximum chunk size for yielded frames.
+    #[must_use]
+    pub fn max_chunk_size(mut self, size: usize) -> Self {
+        self.inner = self.inner.max_chunk_size(size);
+        self
+    }
+
+    /// Sets the maximum total body size.
+    #[must_use]
+    pub fn max_body_size(mut self, size: u64) -> Self {
+        self.inner = self.inner.max_body_size(size);
+        self
+    }
+
+    /// Sets the maximum buffered bytes for partial parsing.
+    #[must_use]
+    pub fn max_buffered_bytes(mut self, size: usize) -> Self {
+        self.inner = self.inner.max_buffered_bytes(size);
+        self
+    }
+
+    /// Sets the maximum total trailer size.
+    #[must_use]
+    pub fn max_trailers_size(mut self, size: usize) -> Self {
+        self.inner = self.inner.max_trailers_size(size);
+        self
+    }
+
+    /// Returns true if the body has completed.
+    #[must_use]
+    pub fn is_done(&self) -> bool {
+        self.inner.is_done()
+    }
+
+    /// Pushes raw bytes into the body stream.
+    pub async fn push_bytes(&mut self, cx: &Cx, data: &[u8]) -> Result<(), HttpError> {
+        self.inner
+            .push_bytes(cx, data)
+            .await
+            .map_err(IncomingBodyError::into_http_error)
+    }
+
+    /// Signals EOF with no additional bytes.
+    pub fn finish(&mut self, cx: &Cx) -> Result<(), HttpError> {
+        self.inner
+            .finish(cx)
+            .map_err(IncomingBodyError::into_http_error)
     }
 }
 
@@ -1878,19 +2049,47 @@ impl ResponseHead {
     }
 }
 
-/// A streaming request with separate head and body.
+/// A backwards-compatible streaming request with separate head and body.
 #[derive(Debug)]
 pub struct StreamingRequest {
     /// Request head (method, URI, headers).
     pub head: RequestHead,
-    /// Remote peer address, when supplied by the listener.
-    pub peer_addr: Option<std::net::SocketAddr>,
     /// Request body.
-    pub body: IncomingRequestBody,
+    pub body: IncomingBody,
 }
 
 impl StreamingRequest {
     /// Creates a new streaming request.
+    #[must_use]
+    pub fn new(head: RequestHead, body: IncomingBody) -> Self {
+        Self { head, body }
+    }
+
+    /// Creates a streaming request with a channel-backed body.
+    #[must_use]
+    pub fn channel(head: RequestHead, cx: &Cx, capacity: usize) -> (IncomingBodyWriter, Self) {
+        let (writer, body) = IncomingBody::channel_with_capacity(cx, head.body_kind(), capacity);
+        (writer, Self { head, body })
+    }
+}
+
+/// Typed request published by [`crate::http::h1::Http1StreamingServer`].
+///
+/// This additive API carries listener metadata and the hardened request-body
+/// error surface without changing the 0.4.3 [`StreamingRequest`] layout.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct StreamingServerRequest {
+    /// Request head (method, URI, headers).
+    pub head: RequestHead,
+    /// Remote peer address, when supplied by the listener.
+    pub peer_addr: Option<std::net::SocketAddr>,
+    /// Typed request body.
+    pub body: IncomingRequestBody,
+}
+
+impl StreamingServerRequest {
+    /// Creates a typed streaming-server request without peer metadata.
     #[must_use]
     pub fn new(head: RequestHead, body: IncomingRequestBody) -> Self {
         Self {
@@ -1900,19 +2099,16 @@ impl StreamingRequest {
         }
     }
 
-    /// Creates a streaming request with a channel-backed body.
+    /// Creates a typed request with a channel-backed body.
     #[must_use]
-    pub fn channel(head: RequestHead, cx: &Cx, capacity: usize) -> (IncomingBodyWriter, Self) {
+    pub fn channel(
+        head: RequestHead,
+        cx: &Cx,
+        capacity: usize,
+    ) -> (IncomingRequestBodyWriter, Self) {
         let (writer, body) =
             IncomingRequestBody::channel_with_capacity(cx, head.body_kind(), capacity);
-        (
-            writer,
-            Self {
-                head,
-                peer_addr: None,
-                body,
-            },
-        )
+        (writer, Self::new(head, body))
     }
 }
 
@@ -2228,6 +2424,46 @@ mod tests {
         assert!(matches!(
             poll_body(&mut body),
             Some(Err(IncomingBodyError::AlreadyTerminal))
+        ));
+    }
+
+    #[test]
+    fn v0_4_3_compatibility_incoming_body_preserves_http_error_and_repeat_eof_contract() {
+        let cx = Cx::for_testing();
+        let (mut writer, mut body) = IncomingBody::channel(&cx, BodyKind::ContentLength(1));
+
+        block_on(writer.push_bytes(&cx, b"x")).expect("legacy one-byte body");
+        let frame = poll_body(&mut body)
+            .expect("legacy data frame")
+            .expect("valid legacy data frame");
+        assert_eq!(frame.into_data().expect("legacy data").chunk(), b"x");
+        assert!(poll_body(&mut body).is_none(), "legacy first terminal poll");
+        assert!(
+            poll_body(&mut body).is_none(),
+            "0.4.3 legacy bodies must keep returning EOF after termination"
+        );
+
+        let (writer, mut unfinished) = IncomingBody::channel(&cx, BodyKind::ContentLength(1));
+        drop(writer);
+        assert!(matches!(
+            poll_body(&mut unfinished),
+            Some(Err(HttpError::BodyChannelClosed))
+        ));
+        assert!(poll_body(&mut unfinished).is_none());
+
+        let (mut limited_writer, _limited_body) =
+            IncomingBody::channel(&cx, BodyKind::ContentLength(1));
+        limited_writer = limited_writer.max_body_size(0);
+        assert!(matches!(
+            block_on(limited_writer.push_bytes(&cx, b"x")),
+            Err(HttpError::BodyTooLarge)
+        ));
+
+        let (mut malformed_writer, _malformed_body) =
+            IncomingBody::channel(&cx, BodyKind::Chunked);
+        assert!(matches!(
+            block_on(malformed_writer.push_bytes(&cx, b"0\r\nnot-a-field\r\n\r\n")),
+            Err(HttpError::BadHeader)
         ));
     }
 

@@ -12,8 +12,8 @@ use crate::http::h1::codec::{
     Http1Codec, HttpError, decode_streaming_request_head, preview_request_head,
 };
 use crate::http::h1::stream::{
-    BodyKind, IncomingBodyDrainProgress, IncomingBodyError, IncomingBodyWriter,
-    IncomingRequestBody, RequestHead, StreamingRequest,
+    BodyKind, IncomingBodyDrainProgress, IncomingBodyError, IncomingRequestBody,
+    IncomingRequestBodyWriter, RequestHead, StreamingServerRequest,
 };
 use crate::http::h1::types::{Method, Request, Response, Version, default_reason};
 use crate::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -102,16 +102,6 @@ pub struct Http1Config {
     /// connection cancel: the handler gets this long to observe the
     /// cancel and finish cleanly before the drop backstop.
     pub request_drain_grace: Duration,
-    /// Maximum number of decoded request-body frames queued for a handler.
-    pub incoming_body_frame_capacity: usize,
-    /// Maximum request-body bytes queued independently of frame capacity.
-    pub incoming_body_queued_bytes: usize,
-    /// Maximum unread decoded frames discarded after a handler returns.
-    pub unread_body_drain_frames: u64,
-    /// Maximum unread body bytes discarded after a handler returns.
-    pub unread_body_drain_bytes: u64,
-    /// Maximum time spent synchronizing unread request-body EOF.
-    pub unread_body_drain_timeout: Duration,
 }
 
 impl Default for Http1Config {
@@ -126,11 +116,6 @@ impl Default for Http1Config {
             request_timeout: None,
             request_timeout_header_cap: None,
             request_drain_grace: Duration::from_millis(500),
-            incoming_body_frame_capacity: 8,
-            incoming_body_queued_bytes: 512 * 1024,
-            unread_body_drain_frames: 8,
-            unread_body_drain_bytes: 512 * 1024,
-            unread_body_drain_timeout: Duration::from_millis(500),
         }
     }
 }
@@ -217,8 +202,67 @@ impl Http1Config {
         self.request_drain_grace = grace;
         self
     }
+}
 
-    /// Set independent request-body frame and queued-byte backpressure caps.
+/// Additive configuration for [`Http1StreamingServer`].
+///
+/// Connection-wide settings remain in the backwards-compatible
+/// [`Http1Config`]. Streaming-only queue and unread-body drain controls live
+/// here so adding them does not make 0.4.3 `Http1Config` struct literals fail
+/// to compile.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct Http1StreamingConfig {
+    /// Backwards-compatible connection configuration.
+    pub connection: Http1Config,
+    /// Maximum number of decoded request-body frames queued for a handler.
+    pub incoming_body_frame_capacity: usize,
+    /// Maximum request-body bytes queued independently of frame capacity.
+    pub incoming_body_queued_bytes: usize,
+    /// Maximum unread decoded frames discarded after a handler returns.
+    pub unread_body_drain_frames: u64,
+    /// Maximum unread body bytes discarded after a handler returns.
+    pub unread_body_drain_bytes: u64,
+    /// Maximum time spent synchronizing unread request-body EOF.
+    pub unread_body_drain_timeout: Duration,
+}
+
+impl Default for Http1StreamingConfig {
+    fn default() -> Self {
+        Self::from(Http1Config::default())
+    }
+}
+
+impl From<Http1Config> for Http1StreamingConfig {
+    fn from(connection: Http1Config) -> Self {
+        Self {
+            connection,
+            incoming_body_frame_capacity: 8,
+            incoming_body_queued_bytes: 512 * 1024,
+            unread_body_drain_frames: 8,
+            unread_body_drain_bytes: 512 * 1024,
+            unread_body_drain_timeout: Duration::from_millis(500),
+        }
+    }
+}
+
+impl std::ops::Deref for Http1StreamingConfig {
+    type Target = Http1Config;
+
+    fn deref(&self) -> &Self::Target {
+        &self.connection
+    }
+}
+
+impl Http1StreamingConfig {
+    /// Replaces the connection-wide HTTP/1 configuration.
+    #[must_use]
+    pub fn connection(mut self, connection: Http1Config) -> Self {
+        self.connection = connection;
+        self
+    }
+
+    /// Sets independent request-body frame and queued-byte backpressure caps.
     #[must_use]
     pub fn incoming_body_queue(mut self, frame_capacity: usize, queued_bytes: usize) -> Self {
         self.incoming_body_frame_capacity = frame_capacity.max(1);
@@ -226,7 +270,7 @@ impl Http1Config {
         self
     }
 
-    /// Set bounded unread-body drain frame, byte, and time limits.
+    /// Sets bounded unread-body drain frame, byte, and time limits.
     #[must_use]
     pub fn unread_body_drain(mut self, frames: u64, bytes: u64, timeout: Duration) -> Self {
         self.unread_body_drain_frames = frames;
@@ -981,26 +1025,26 @@ where
 /// is reusable only after synchronized body EOF.
 pub struct Http1StreamingServer<F> {
     handler: F,
-    config: Http1Config,
+    config: Http1StreamingConfig,
     shutdown_signal: Option<ShutdownSignal>,
     in_flight_requests: Option<Arc<AtomicUsize>>,
 }
 
 impl<F, Fut> Http1StreamingServer<F>
 where
-    F: Fn(Cx, StreamingRequest) -> Fut + Send + Sync,
+    F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync,
     Fut: Future<Output = Response> + Send,
 {
     /// Creates a streaming HTTP/1 server with default connection limits.
     pub fn new(handler: F) -> Self {
-        Self::with_config(handler, Http1Config::default())
+        Self::with_config(handler, Http1StreamingConfig::default())
     }
 
     /// Creates a streaming HTTP/1 server with explicit connection limits.
-    pub fn with_config(handler: F, config: Http1Config) -> Self {
+    pub fn with_config(handler: F, config: impl Into<Http1StreamingConfig>) -> Self {
         Self {
             handler,
-            config,
+            config: config.into(),
             shutdown_signal: None,
             in_flight_requests: None,
         }
@@ -1132,7 +1176,7 @@ where
                 self.config.incoming_body_frame_capacity,
                 self.config.incoming_body_queued_bytes,
             );
-            let request = StreamingRequest {
+            let request = StreamingServerRequest {
                 head,
                 peer_addr,
                 body,
@@ -1279,9 +1323,9 @@ async fn drive_incoming_body<T>(
     cx: &Cx,
     io: &mut T,
     read_buffer: &mut BytesMut,
-    mut writer: IncomingBodyWriter,
-    config: &Http1Config,
-) -> Result<IncomingBodyWriter, IncomingBodyError>
+    mut writer: IncomingRequestBodyWriter,
+    config: &Http1StreamingConfig,
+) -> Result<IncomingRequestBodyWriter, IncomingBodyError>
 where
     T: AsyncRead + Unpin,
 {
@@ -1326,11 +1370,11 @@ async fn join_streaming_handler_and_body<H, B>(
     cx: &Cx,
     handler: H,
     body: B,
-    config: &Http1Config,
-) -> Option<(ServerHopOutcome<Response>, IncomingBodyWriter)>
+    config: &Http1StreamingConfig,
+) -> Option<(ServerHopOutcome<Response>, IncomingRequestBodyWriter)>
 where
     H: Future<Output = Option<ServerHopOutcome<Response>>>,
-    B: Future<Output = Result<IncomingBodyWriter, IncomingBodyError>>,
+    B: Future<Output = Result<IncomingRequestBodyWriter, IncomingBodyError>>,
 {
     let mut handler = Some(Box::pin(handler));
     let mut body = Some(Box::pin(body));
@@ -1377,12 +1421,12 @@ where
 
 enum StreamingJoinFirst {
     Handler(Option<ServerHopOutcome<Response>>),
-    Body(Result<IncomingBodyWriter, IncomingBodyError>),
+    Body(Result<IncomingRequestBodyWriter, IncomingBodyError>),
 }
 
 fn validate_unread_drain(
     progress: IncomingBodyDrainProgress,
-    config: &Http1Config,
+    config: &Http1StreamingConfig,
 ) -> Result<(), IncomingBodyError> {
     if progress.frames > config.unread_body_drain_frames
         || progress.bytes > config.unread_body_drain_bytes
@@ -2586,7 +2630,11 @@ mod tests {
             b"POST /first HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\n0123456789GET /second HTTP/1.1\r\nHost: localhost\r\n\r\n".to_vec(),
             Arc::clone(&written),
         );
-        let config = localhost_server_config().unread_body_drain(8, 4, Duration::from_secs(1));
+        let config = Http1StreamingConfig::from(localhost_server_config()).unread_body_drain(
+            8,
+            4,
+            Duration::from_secs(1),
+        );
         let server = Http1StreamingServer::with_config(
             |_cx, _request| async move { Response::new(200, "OK", b"must not commit") },
             config,
