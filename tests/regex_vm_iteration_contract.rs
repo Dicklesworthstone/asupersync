@@ -43,7 +43,7 @@ const DOC_PATH: &str = "docs/regex_vm_iteration_contract.md";
 const PREDECESSOR_PATH: &str = "artifacts/regex_vm_captures_contract_v1.json";
 const TERMINAL_PATH: &str = "artifacts/regex_compiler_terminal_receipt_v1.json";
 const VM_SOURCE_PATH: &str = "src/observability/regex_vm.rs";
-const TERMINAL_SHA256: &str = "c680c7574d511d9c56f0807e5269d284d90be213f81dbd472295150205299fcd";
+const TERMINAL_SHA256: &str = "ef1c121f4d08b1cd4ed2711eac2a038ab473078590bc4cc8cfa4303953310077";
 const FROZEN_R3_4_3_VM_SHA256: &str =
     "d0d2b841cb3533bc0dbfdcbd6c237e594391015e649477b408ff047ea75ffe2c";
 

@@ -55,7 +55,7 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "d255864fdd4f314d309e3f749c782a79f8ae4ac70bf63baa57edb14b14b6a6ea",
+      "sha256": "834c0bb0f30adf65ad27256fbae9f903fe9945e37a7d010f90d38971802c74ea",
       "line_count": 6929
     },
     {
@@ -75,7 +75,7 @@
     },
     {
       "path": "src/messaging/nats.rs",
-      "sha256": "f3328827942abbb04b904275744a30847062e9f01715cb65a1bf93cef3a5f5c0",
+      "sha256": "3cd0a5ca3c96c64c626066bd6813c089f7bfe663f81a80cf0339bddf534552dc",
       "line_count": 5539
     },
     {
@@ -85,7 +85,7 @@
     },
     {
       "path": "src/runtime/config.rs",
-      "sha256": "1e351b452f35c348cff7dbb586263531afaeaab05ce8eba71830b0144f82504a",
+      "sha256": "911526ec1fbbf1b6d08dcc8a1f62b820ae755dbf35c5d30685690921eacf040c",
       "line_count": 10769
     },
     {

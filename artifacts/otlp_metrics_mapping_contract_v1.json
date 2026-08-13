@@ -865,7 +865,7 @@
   "source_pins": [
     {
       "path": "src/observability/metrics.rs",
-      "sha256": "1a5d3a65f5b7b91cba70666da93aa844df9715ce424a08334b1ed4d19367b9c0",
+      "sha256": "1a4e897627a7d264fbf982719c678678d338711728d6dc2509a10d64926cc388",
       "line_count": 2907,
       "anchors": ["pub struct Histogram", "pub struct Summary", "pub const DEFAULT_METRIC_CARDINALITY_CAP", "fn record_panic"]
     },
@@ -883,7 +883,7 @@
     },
     {
       "path": "src/observability/mod.rs",
-      "sha256": "2b92ccd15d9ad7c731b0f04e8acba64b593fc09922267a4acf2be853446fc269",
+      "sha256": "75927f5785fff839df41d3b46c9acb76cd07cda854b6b978d1ac79d1d5a9921b",
       "line_count": 1172,
       "anchors": ["private, native-only owned OTLP message staging", "Signal adapters, transport wiring", "pub(crate) mod otlp_proto"]
     },
@@ -895,7 +895,7 @@
     },
     {
       "path": "src/grpc/protobuf.rs",
-      "sha256": "0360e2f9a2ce86855922f9d523d50f7d4446d5e950276d1181540a22b7e92ad6",
+      "sha256": "fdaf6684ca76bdfb9d560ad5c13213ff18f835cf86a33053e17c8fda2f6b1e99",
       "line_count": 2611,
       "anchors": ["fn encode_to_bytes", "limits: ProtobufWireLimits"]
     },
@@ -907,8 +907,8 @@
     },
     {
       "path": "src/runtime/metrics.rs",
-      "sha256": "4f2aacbccb5f3a3b5a0d915b379d86d34a8b99d45ffd5c589f10debe30a37dd9",
-      "line_count": 354,
+      "sha256": "cadc63c9ec6e22155b8c214134b45d31f719ae2d7f7abde8d719afb3e74c54a4",
+      "line_count": 357,
       "anchors": ["pub struct Metrics", "pub fn reset()", "timer_threads_spawned"]
     },
     {
@@ -967,7 +967,7 @@
     },
     {
       "path": "tests/protobuf_owned_otlp_schema_contract.rs",
-      "sha256": "fd35d3f9c911057a6f6f4f1284c549fdeb0a753d8d360105a283f6423e2f53ef",
+      "sha256": "a9fc55fe4f9b3d6e9b8e1d60bf66b9b50b86230502a04e748ebf7c04f2a25bbb",
       "line_count": 2200,
       "anchors": ["The JSON-shaped fixture is not protobuf wire evidence", "Generated request builders are test/fuzz gated"]
     },
@@ -979,13 +979,13 @@
     },
     {
       "path": "artifacts/otlp_capability_inventory_v1.json",
-      "sha256": "37d84663667236be5afac6deb9fe2052277f84dfc9d9c6a05879688eff34f743",
+      "sha256": "f2dcc546eead3b8467f0216a9e9b1e108dbf54699ee097908cc5189e70e7ce2b",
       "line_count": 985,
       "anchors": ["SHIPPED_VIA_DEPENDENCY", "OTLP-GAP-01", "asupersync-5z2scg.2.3"]
     },
     {
       "path": "artifacts/protobuf_owned_otlp_schema_v1.json",
-      "sha256": "6f3e09c9240722d2eb7796b2ba3eced23038541b4eaacf76ab062bf993aab441",
+      "sha256": "c32a01ede8dfadf6cbc617bbaf9058887d127423221f468a36c8ef65a76f4f0e",
       "line_count": 1126,
       "anchors": ["NEW_A3_SCHEMA_POLICY_NOT_INCUMBENT_PARITY", "data_points_per_metric", "signal_construction_separation"]
     },

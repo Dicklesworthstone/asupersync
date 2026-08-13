@@ -66,8 +66,8 @@
       },
       {
         "path": "conformance/Cargo.toml",
-        "sha256": "005a58f272f823601c4bc66f6e3c43a86894477348bf26123460090f6235df7b",
-        "line_count": 213
+        "sha256": "c08888393c4325550cc6714f39df24acab91e261e2548859e83ff7c5ff0beafb",
+        "line_count": 214
       },
       {
         "path": "conformance/src/lib.rs",
@@ -206,12 +206,12 @@
       },
       {
         "path": "artifacts/dependency_capability_registry_v1.json",
-        "sha256": "d255864fdd4f314d309e3f749c782a79f8ae4ac70bf63baa57edb14b14b6a6ea",
+        "sha256": "834c0bb0f30adf65ad27256fbae9f903fe9945e37a7d010f90d38971802c74ea",
         "line_count": 6929
       },
       {
         "path": "artifacts/dependency_capability_baseline_v1.json",
-        "sha256": "1b51f8fa7d091201f48eb24196cbfc84f868f39fb42a89d153995750f61da0a6",
+        "sha256": "0a0b2e9a736b803adb720154464f4f180b41d360f207418776361bf5d920009e",
         "line_count": 3210
       },
       {

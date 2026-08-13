@@ -74,7 +74,7 @@
     },
     {
       "path": "src/tls/connector.rs",
-      "sha256": "bd2ed80fdc244592e92985654fb9acb2cf00f0fa2dca68734f4dbd9e4a7da393",
+      "sha256": "c5927184510d211b654224872833f349516afdba4e2012842b280501ff7d6b1a",
       "line_count": 2049
     },
     {
@@ -99,22 +99,22 @@
     },
     {
       "path": "src/net/quic_native/connection.rs",
-      "sha256": "e80ab59e4653d5b511229a61fd58c1a08c4b297d0df258406242c5de02dd237b",
+      "sha256": "eda77f83448a4dcf8d3762b391dc5122a36c3f3ed821a5a9ae813dd57e2f5e05",
       "line_count": 4299
     },
     {
       "path": "src/bin/atp.rs",
-      "sha256": "898b6c4e15cf95d4382c617ce0ded5a856b2f6f238df7fa7f86b4e999f1a2d86",
+      "sha256": "57404e8d8d57a8ac3c5c6b3e949c78cc49c670b2bc3bcf3f1bb4287743b6e5ba",
       "line_count": 11912
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "d255864fdd4f314d309e3f749c782a79f8ae4ac70bf63baa57edb14b14b6a6ea",
+      "sha256": "834c0bb0f30adf65ad27256fbae9f903fe9945e37a7d010f90d38971802c74ea",
       "line_count": 6929
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "1b51f8fa7d091201f48eb24196cbfc84f868f39fb42a89d153995750f61da0a6",
+      "sha256": "0a0b2e9a736b803adb720154464f4f180b41d360f207418776361bf5d920009e",
       "line_count": 3210
     },
     {

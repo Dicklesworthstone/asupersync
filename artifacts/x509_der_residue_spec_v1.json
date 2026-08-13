@@ -98,7 +98,7 @@
     },
     {
       "path": "src/tls/connector.rs",
-      "sha256": "bd2ed80fdc244592e92985654fb9acb2cf00f0fa2dca68734f4dbd9e4a7da393",
+      "sha256": "c5927184510d211b654224872833f349516afdba4e2012842b280501ff7d6b1a",
       "line_count": 2049,
       "role": "X509-R2 root CA admission incumbent"
     },
@@ -116,7 +116,7 @@
     },
     {
       "path": "artifacts/x509_validation_ownership_inventory_v1.json",
-      "sha256": "9d4dfbf937b52ba6bc6b4cd7b214ab6dd014156ec73229e41febcbe9518c6246",
+      "sha256": "9044f363435ca91b4398e8d454b1ebf91077cc3cdbc685db72ac3db90d76de6a",
       "line_count": 1073,
       "role": "A1 call-site, owner, residue, and routed-gap authority"
     },
@@ -134,7 +134,7 @@
     },
     {
       "path": "artifacts/x509_standard_verifier_delegation_v1.json",
-      "sha256": "379d2663731ad43206ec007ccac4b8335561e504c928507d40aae038c9fc681a",
+      "sha256": "c5d00530c92baa8be24a256b73af704ee03863b03795b05a1ed0d0fda0f74a31",
       "line_count": 345,
       "role": "A2 standard-first delegation and retained-policy authority"
     },

@@ -10,7 +10,7 @@
   "compiler_terminal": {
     "bead_id": "asupersync-5z2scg.8.3.3.4",
     "path": "artifacts/regex_compiler_terminal_receipt_v1.json",
-    "sha256": "c680c7574d511d9c56f0807e5269d284d90be213f81dbd472295150205299fcd",
+    "sha256": "ef1c121f4d08b1cd4ed2711eac2a038ab473078590bc4cc8cfa4303953310077",
     "disposition": "KEEP_INCUMBENT_DEFER",
     "vm_experimentation_authorized": true,
     "production_cutover_eligible": false
@@ -118,8 +118,8 @@
     },
     {
       "path": "src/observability/mod.rs",
-      "sha256": "2b92ccd15d9ad7c731b0f04e8acba64b593fc09922267a4acf2be853446fc269",
-      "bytes": 43947,
+      "sha256": "75927f5785fff839df41d3b46c9acb76cd07cda854b6b978d1ac79d1d5a9921b",
+      "bytes": 43945,
       "revision": "asupersync-5z2scg.8.3.4.1"
     }
   ],

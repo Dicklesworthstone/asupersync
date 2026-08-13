@@ -526,7 +526,7 @@
       },
       {
         "path": "src/web/negotiate.rs",
-        "sha256": "1de762df22252cfb483d36e0628b9093b431c7f18de0fd68cb34c4a2819eabd1",
+        "sha256": "a7182fe3982141f6e6ff39b38aa641b6d8b8f69ba265f2bf2996aee5befa1680",
         "line_count": 916
       }
     ],
@@ -729,7 +729,7 @@
       {
         "path": "artifacts/dependency_capability_registry_v1.json",
         "baseline_sha256": "4d91239e2f2e83069414ca36eafc4aaba283cd3f89576fbb5e75f3374bd41b11",
-        "current_sha256": "d255864fdd4f314d309e3f749c782a79f8ae4ac70bf63baa57edb14b14b6a6ea",
+        "current_sha256": "834c0bb0f30adf65ad27256fbae9f903fe9945e37a7d010f90d38971802c74ea",
         "current_line_count": 6929,
         "classification": "CAPABILITY_PROJECTION_UNCHANGED",
         "projection": "canonical CAP-FUTURES-STREAMS row",
@@ -1623,7 +1623,7 @@
     },
     {
       "path": "src/web/negotiate.rs",
-      "sha256": "1de762df22252cfb483d36e0628b9093b431c7f18de0fd68cb34c4a2819eabd1",
+      "sha256": "a7182fe3982141f6e6ff39b38aa641b6d8b8f69ba265f2bf2996aee5befa1680",
       "line_count": 916
     },
     {
@@ -1648,7 +1648,7 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "d255864fdd4f314d309e3f749c782a79f8ae4ac70bf63baa57edb14b14b6a6ea",
+      "sha256": "834c0bb0f30adf65ad27256fbae9f903fe9945e37a7d010f90d38971802c74ea",
       "line_count": 6929
     },
     {

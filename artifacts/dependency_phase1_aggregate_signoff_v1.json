@@ -27,14 +27,14 @@
       "bead_id": "asupersync-dep-p1-foundations-upksjk.5.4",
       "role": "CAPABILITY_REGISTRY_AND_GRAPH_SIGNOFF",
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "d255864fdd4f314d309e3f749c782a79f8ae4ac70bf63baa57edb14b14b6a6ea",
+      "sha256": "834c0bb0f30adf65ad27256fbae9f903fe9945e37a7d010f90d38971802c74ea",
       "repin_note": "Re-pinned 2026-07-25 under br-asupersync-dvgpji: 17 source_owners rows corrected, CAP-NKEY-AUTH dependency_owners de-invented (base32/crc16 do not exist), the 'tls' feature removed from CAP-DATABASE-WIRE dependency_owners, the encoding::/decoding:: selectors re-pointed away from CAP-SERDE-GENERIC, and two structural checks added so the class cannot recur. Corrections only; no capability, disposition, evidence state or cutover state changed."
     },
     {
       "bead_id": "asupersync-dep-p1-foundations-upksjk.5.2",
       "role": "CAPABILITY_BASELINE",
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "1b51f8fa7d091201f48eb24196cbfc84f868f39fb42a89d153995750f61da0a6"
+      "sha256": "0a0b2e9a736b803adb720154464f4f180b41d360f207418776361bf5d920009e"
     },
     {
       "bead_id": "asupersync-dep-p1-foundations-upksjk.5.3",

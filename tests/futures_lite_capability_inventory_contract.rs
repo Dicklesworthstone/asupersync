@@ -558,7 +558,7 @@ fn validate_a5_receipt(inventory: &Value) -> Result<(), String> {
         (
             "src/web/negotiate.rs",
             (
-                "1de762df22252cfb483d36e0628b9093b431c7f18de0fd68cb34c4a2819eabd1",
+                "a7182fe3982141f6e6ff39b38aa641b6d8b8f69ba265f2bf2996aee5befa1680",
                 916_u64,
             ),
         ),

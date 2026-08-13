@@ -1728,14 +1728,14 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         (
             "artifacts/dependency_capability_baseline_v1.json",
             (
-                "1b51f8fa7d091201f48eb24196cbfc84f868f39fb42a89d153995750f61da0a6",
+                "0a0b2e9a736b803adb720154464f4f180b41d360f207418776361bf5d920009e",
                 3210_u64,
             ),
         ),
         (
             "artifacts/dependency_capability_registry_v1.json",
             (
-                "d255864fdd4f314d309e3f749c782a79f8ae4ac70bf63baa57edb14b14b6a6ea",
+                "834c0bb0f30adf65ad27256fbae9f903fe9945e37a7d010f90d38971802c74ea",
                 6929_u64,
             ),
         ),
@@ -1784,14 +1784,14 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         (
             "src/net/atp/transport_quic/mod.rs",
             (
-                "01282192055de1910eab74c3c78b77493c9f2254848027152a50194c8e1d3796",
+                "6e4295c5f192016d0b087c1cd8909f599c038735b58f1fe4f908fecb17db1e5c",
                 17_212_u64,
             ),
         ),
         (
             "src/net/atp/transport_rq/mod.rs",
             (
-                "2d3f3123d15124a972b9172be3bcd5a9e8010cfde176e723fb2abb215e28ee86",
+                "fb2b22bf47db0c6a7dc81d3aa4d8aaee067c26dba5fcbefe725d7b6cef95ff8a",
                 15_242_u64,
             ),
         ),
@@ -3215,7 +3215,7 @@ fn phase2_terminal_readiness_frontier_is_exact_and_fail_closed() {
         (
             REGISTRY_PATH,
             (
-                "d255864fdd4f314d309e3f749c782a79f8ae4ac70bf63baa57edb14b14b6a6ea",
+                "834c0bb0f30adf65ad27256fbae9f903fe9945e37a7d010f90d38971802c74ea",
                 6929_u64,
             ),
         ),

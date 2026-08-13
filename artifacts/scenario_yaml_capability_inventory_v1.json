@@ -76,8 +76,8 @@
     },
     {
       "path": "src/lab/scenario_runner.rs",
-      "sha256": "380e494f7d5b6864065fbfd0af9fbc5e6acfeb3a4ce29d0383ab572f3d32ef34",
-      "line_count": 1777
+      "sha256": "f0e2701e758bd5da9d3f215bd3ff4bf460a207aa38f7ed257d9dcb0686ce315f",
+      "line_count": 1776
     },
     {
       "path": "src/lab/oracle/registry.rs",
@@ -206,12 +206,12 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "d255864fdd4f314d309e3f749c782a79f8ae4ac70bf63baa57edb14b14b6a6ea",
+      "sha256": "834c0bb0f30adf65ad27256fbae9f903fe9945e37a7d010f90d38971802c74ea",
       "line_count": 6929
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "1b51f8fa7d091201f48eb24196cbfc84f868f39fb42a89d153995750f61da0a6",
+      "sha256": "0a0b2e9a736b803adb720154464f4f180b41d360f207418776361bf5d920009e",
       "line_count": 3210
     },
     {

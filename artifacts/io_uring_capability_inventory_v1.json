@@ -139,7 +139,7 @@
     },
     {
       "path": "src/runtime/state.rs",
-      "sha256": "029541ac95825d834fcab1bb86337f3bef492eed41d15b2fdd49fafd0c163aeb",
+      "sha256": "97029bd90cae9a35396bc2c157a955ba30ba456fcbedaf947facdf783449f14e",
       "line_count": 10190,
       "role": "driver-independent immutable reactor capability receipt storage"
     },

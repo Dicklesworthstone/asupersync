@@ -81,12 +81,12 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "d255864fdd4f314d309e3f749c782a79f8ae4ac70bf63baa57edb14b14b6a6ea",
+      "sha256": "834c0bb0f30adf65ad27256fbae9f903fe9945e37a7d010f90d38971802c74ea",
       "line_count": 6929
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "1b51f8fa7d091201f48eb24196cbfc84f868f39fb42a89d153995750f61da0a6",
+      "sha256": "0a0b2e9a736b803adb720154464f4f180b41d360f207418776361bf5d920009e",
       "line_count": 3210
     },
     {
@@ -186,12 +186,12 @@
     },
     {
       "path": "src/net/atp/transport_rq/mod.rs",
-      "sha256": "2d3f3123d15124a972b9172be3bcd5a9e8010cfde176e723fb2abb215e28ee86",
+      "sha256": "fb2b22bf47db0c6a7dc81d3aa4d8aaee067c26dba5fcbefe725d7b6cef95ff8a",
       "line_count": 15242
     },
     {
       "path": "src/messaging/nats.rs",
-      "sha256": "f3328827942abbb04b904275744a30847062e9f01715cb65a1bf93cef3a5f5c0",
+      "sha256": "3cd0a5ca3c96c64c626066bd6813c089f7bfe663f81a80cf0339bddf534552dc",
       "line_count": 5539
     },
     {

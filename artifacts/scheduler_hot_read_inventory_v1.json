@@ -68,8 +68,8 @@
     },
     {
       "path": "src/types/task_context.rs",
-      "sha256": "e9d7f05248bc2495445de5db2eb5ce8f0838da150f95cfa360d9a78cd8afef2e",
-      "line_count": 1936,
+      "sha256": "0a5a798cfbc5c7e2d5edbc3673015caa02ca83d3b34bbfdb5d11b863dff926df",
+      "line_count": 1938,
       "role": "CxInner coherent cancellation state, 0.4.3-compatible fast_cancel publication handle, stable scheduler clone, publication gate, and waker registry"
     },
     {
@@ -86,7 +86,7 @@
     },
     {
       "path": "src/runtime/scheduler/three_lane.rs",
-      "sha256": "448838a8ac0d096b122b11747734becba80a0bf6dc8b1ab66a10ce3e29e381be",
+      "sha256": "637290a7eca79c8a464763b3788703f52fbd731d65f049615d21a5bcc7a08cb1",
       "line_count": 8192,
       "role": "production scheduler table selection, poll cycle, publication, ordinary wakers, and reason-bearing cancel wakers"
     },
@@ -98,7 +98,7 @@
     },
     {
       "path": "src/runtime/state.rs",
-      "sha256": "029541ac95825d834fcab1bb86337f3bef492eed41d15b2fdd49fafd0c163aeb",
+      "sha256": "97029bd90cae9a35396bc2c157a955ba30ba456fcbedaf947facdf783449f14e",
       "line_count": 10190,
       "role": "embedded task owner, cancellation propagation, completion, finalizer publication, and snapshots"
     },
@@ -110,7 +110,7 @@
     },
     {
       "path": "src/runtime/config.rs",
-      "sha256": "1e351b452f35c348cff7dbb586263531afaeaab05ce8eba71830b0144f82504a",
+      "sha256": "911526ec1fbbf1b6d08dcc8a1f62b820ae755dbf35c5d30685690921eacf040c",
       "line_count": 10769,
       "role": "default adaptive and optional governor sampling intervals"
     },
@@ -122,8 +122,8 @@
     },
     {
       "path": "src/gen_server.rs",
-      "sha256": "154382747227c9d77ed9869d72ac61799676ed177f678a73f1c5f56c3d98e453",
-      "line_count": 7489,
+      "sha256": "c072f2eac339cf116f3c4fbfc5829c00080dd939ed0ceb6049b4597519b0cbb5",
+      "line_count": 7491,
       "role": "server and server-join abort writers"
     },
     {

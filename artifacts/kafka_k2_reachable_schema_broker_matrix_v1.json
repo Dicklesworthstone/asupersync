@@ -43,9 +43,9 @@
       "input_id": "KAFKA-K2-1-INPUT-PRODUCER-SOURCE",
       "authority_class": "INCUMBENT_REACHABILITY",
       "path": "src/messaging/kafka.rs",
-      "byte_count": 149142,
+      "byte_count": 149141,
       "record_count": 4335,
-      "sha256": "5fe763229f2940793bf79739718afc20002ac40b614c35ff0ea475d45fb5aaf1"
+      "sha256": "1329d49653935c9dc9a1c18cff136d9f8bfb21f204f908f562d6c3da62cc7de7"
     },
     {
       "input_id": "KAFKA-K2-1-INPUT-CONSUMER-SOURCE",
@@ -59,9 +59,9 @@
       "input_id": "KAFKA-K2-1-INPUT-K1-2",
       "authority_class": "GOVERNING_POLICY",
       "path": "artifacts/kafka_k1_protocol_security_support_policy_v1.json",
-      "byte_count": 82168,
+    "byte_count": 82164,
       "record_count": 1399,
-    "sha256": "ea65b068f9b88e2ca150014395afbff4b4bed28169ee77ec09d7f3a2be4e71d1"
+    "sha256": "942a98918d6864f05022c6045019b3a31b8a8caa23069416c0ae24a14f687f9a"
     },
     {
       "input_id": "KAFKA-K2-1-INPUT-K1-5",
@@ -69,7 +69,7 @@
       "path": "artifacts/kafka_k1_aggregate_evidence_gate_v1.json",
       "byte_count": 111404,
       "record_count": 2122,
-    "sha256": "47c0171e5070fdf71122e80e3aa9506a61d739ad29f28f5c2f9572955965d61a"
+    "sha256": "5f68bd08f90312ac4394f106d573ae2f50341ef873573524113fda2aa91d2b51"
     },
     {
       "input_id": "KAFKA-K2-1-INPUT-K0-4",
@@ -77,15 +77,15 @@
       "path": "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
       "byte_count": 119250,
       "record_count": 2187,
-    "sha256": "c9b56c0426d9e8371ecc66ce71befbc814ec8bca826bf0d133d1eeb77e0ce3ad"
+    "sha256": "b199ca91c857c1e053b58deefad4b9b8f838bdc231fe337881b93a7b2f9b1a71"
     },
     {
       "input_id": "KAFKA-K2-1-INPUT-K1-3",
       "authority_class": "PUBLIC_SURFACE_POLICY",
       "path": "artifacts/kafka_k1_public_api_contract_v1.json",
-      "byte_count": 37852,
+    "byte_count": 37850,
       "record_count": 753,
-    "sha256": "920c82ebdac741cf6ca3956c18cbf62060541f1fc6f9e6d49dd9eded62317ec9"
+    "sha256": "dbcbda6e1a8e6992f4f595e4b6e633be43187d67b8854fcebc909f1d88189f2e"
     }
   ],
   "external_authorities": [

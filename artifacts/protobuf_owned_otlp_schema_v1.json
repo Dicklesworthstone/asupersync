@@ -142,7 +142,7 @@
       },
       {
         "path": "src/grpc/protobuf.rs",
-        "sha256": "0360e2f9a2ce86855922f9d523d50f7d4446d5e950276d1181540a22b7e92ad6",
+        "sha256": "fdaf6684ca76bdfb9d560ad5c13213ff18f835cf86a33053e17c8fda2f6b1e99",
         "role": "owned ProtoMessage and UnknownFields authority"
       },
       {
@@ -152,7 +152,7 @@
       },
       {
         "path": "src/observability/mod.rs",
-        "sha256": "2b92ccd15d9ad7c731b0f04e8acba64b593fc09922267a4acf2be853446fc269",
+        "sha256": "75927f5785fff839df41d3b46c9acb76cd07cda854b6b978d1ac79d1d5a9921b",
         "role": "private native metrics module gate"
       },
       {

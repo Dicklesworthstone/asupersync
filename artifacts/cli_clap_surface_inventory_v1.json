@@ -37,7 +37,7 @@
     },
     {
       "path": "src/bin/atp.rs",
-      "sha256": "898b6c4e15cf95d4382c617ce0ded5a856b2f6f238df7fa7f86b4e999f1a2d86",
+      "sha256": "57404e8d8d57a8ac3c5c6b3e949c78cc49c670b2bc3bcf3f1bb4287743b6e5ba",
       "line_count": 11912,
       "role": "reachable standalone ATP parser and dispatch"
     },

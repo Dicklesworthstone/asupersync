@@ -56,7 +56,7 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "d255864fdd4f314d309e3f749c782a79f8ae4ac70bf63baa57edb14b14b6a6ea",
+      "sha256": "834c0bb0f30adf65ad27256fbae9f903fe9945e37a7d010f90d38971802c74ea",
       "line_count": 6929
     },
     {
@@ -116,7 +116,7 @@
     },
     {
       "path": "src/process.rs",
-      "sha256": "18567a0d05843002a13ebd0e25507d91bd585fccf869fb0e5043e306c409f31a",
+      "sha256": "853a9c853849ae89b65e1fd017816103ae39587ce478e3e9b7140d7802bc4a92",
       "line_count": 5274
     },
     {

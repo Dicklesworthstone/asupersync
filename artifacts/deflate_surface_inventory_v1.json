@@ -690,7 +690,7 @@
     },
     {
       "path": "src/observability/metrics.rs",
-      "sha256": "1a5d3a65f5b7b91cba70666da93aa844df9715ce424a08334b1ed4d19367b9c0",
+      "sha256": "1a4e897627a7d264fbf982719c678678d338711728d6dc2509a10d64926cc388",
       "line_count": 2907
     },
     {
@@ -725,7 +725,7 @@
     },
     {
       "path": "src/messaging/kafka.rs",
-      "sha256": "5fe763229f2940793bf79739718afc20002ac40b614c35ff0ea475d45fb5aaf1",
+      "sha256": "1329d49653935c9dc9a1c18cff136d9f8bfb21f204f908f562d6c3da62cc7de7",
       "line_count": 4335
     },
     {
@@ -745,12 +745,12 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "d255864fdd4f314d309e3f749c782a79f8ae4ac70bf63baa57edb14b14b6a6ea",
+      "sha256": "834c0bb0f30adf65ad27256fbae9f903fe9945e37a7d010f90d38971802c74ea",
       "line_count": 6929
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "1b51f8fa7d091201f48eb24196cbfc84f868f39fb42a89d153995750f61da0a6",
+      "sha256": "0a0b2e9a736b803adb720154464f4f180b41d360f207418776361bf5d920009e",
       "line_count": 3210
     },
     {

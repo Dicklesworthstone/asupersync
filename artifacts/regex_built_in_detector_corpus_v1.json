@@ -71,13 +71,13 @@
     },
     {
       "path": "src/observability/mod.rs",
-      "sha256": "2b92ccd15d9ad7c731b0f04e8acba64b593fc09922267a4acf2be853446fc269",
+      "sha256": "75927f5785fff839df41d3b46c9acb76cd07cda854b6b978d1ac79d1d5a9921b",
       "line_count": 1172,
       "role": "observability compilation and feature gate"
     },
     {
       "path": "artifacts/regex_privacy_capability_inventory_v1.json",
-      "sha256": "895054f798983c6c8675865bd2d7e20cee14a74bbb270d18e4f48ad817884fbe",
+      "sha256": "b83182886b02c6a2d8077b2906749f95949520553f9e9b3e485c56bfd3633438",
       "line_count": 1014,
       "role": "R1 capability and historical detector baseline"
     },
@@ -89,13 +89,13 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "d255864fdd4f314d309e3f749c782a79f8ae4ac70bf63baa57edb14b14b6a6ea",
+      "sha256": "834c0bb0f30adf65ad27256fbae9f903fe9945e37a7d010f90d38971802c74ea",
       "line_count": 6929,
       "role": "CAP-REGEX-PRIVACY authority"
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "1b51f8fa7d091201f48eb24196cbfc84f868f39fb42a89d153995750f61da0a6",
+      "sha256": "0a0b2e9a736b803adb720154464f4f180b41d360f207418776361bf5d920009e",
       "line_count": 3210,
       "role": "executable-partial blocking baseline authority"
     }

@@ -92,13 +92,13 @@
       },
       {
         "path": "src/runtime/spawn_mailbox.rs",
-        "sha256": "f99ae57ef66ab4abd1ad083c950ff60b9e9567e3590617ff36080cf9e3f56e95",
-        "line_count": 4961,
+        "sha256": "35fda3aa30a5823295c97d1ca5579353625e1c871b275f76d61560b7485f32ee",
+        "line_count": 4963,
         "classification": "MAILBOX_MAINTENANCE_WITH_JOIN_DENIAL_ANCHOR_PRESERVED"
       },
       {
         "path": "src/runtime/scheduler/three_lane.rs",
-        "sha256": "448838a8ac0d096b122b11747734becba80a0bf6dc8b1ab66a10ce3e29e381be",
+        "sha256": "637290a7eca79c8a464763b3788703f52fbd731d65f049615d21a5bcc7a08cb1",
         "line_count": 8192,
         "classification": "CANCELLATION_WAKER_HARDENING_WITH_BATCH_FAIRNESS_ANCHORS_PRESERVED"
       }
@@ -164,31 +164,31 @@
     },
     {
       "path": "src/runtime/spawn_mailbox.rs",
-      "sha256": "f99ae57ef66ab4abd1ad083c950ff60b9e9567e3590617ff36080cf9e3f56e95",
-      "line_count": 4961,
+      "sha256": "35fda3aa30a5823295c97d1ca5579353625e1c871b275f76d61560b7485f32ee",
+      "line_count": 4963,
       "role": "per-request producer publication, pending credit, FIFO queue, trace, and denial resolution"
     },
     {
       "path": "src/runtime/scheduler/three_lane.rs",
-      "sha256": "448838a8ac0d096b122b11747734becba80a0bf6dc8b1ab66a10ce3e29e381be",
+      "sha256": "637290a7eca79c8a464763b3788703f52fbd731d65f049615d21a5bcc7a08cb1",
       "line_count": 8192,
       "role": "global batch-one and owner-local batch-sixteen consumer policies"
     },
     {
       "path": "src/runtime/state.rs",
-      "sha256": "029541ac95825d834fcab1bb86337f3bef492eed41d15b2fdd49fafd0c163aeb",
+      "sha256": "97029bd90cae9a35396bc2c157a955ba30ba456fcbedaf947facdf783449f14e",
       "line_count": 10190,
       "role": "admission result taxonomy, canonical identity, quota rollback, and successor publication"
     },
     {
       "path": "src/runtime/config.rs",
-      "sha256": "1e351b452f35c348cff7dbb586263531afaeaab05ce8eba71830b0144f82504a",
+      "sha256": "911526ec1fbbf1b6d08dcc8a1f62b820ae755dbf35c5d30685690921eacf040c",
       "line_count": 10769,
       "role": "direct-versus-mailbox admission mode and current direct default"
     },
     {
       "path": "src/record/region.rs",
-      "sha256": "a7489db8fdfc317afa049e0bfbed41ed471f882e645cbbc5b9a6bf506c0a62c7",
+      "sha256": "8031f1245cb7a22bf176da6014c82ff92c9fe8a617d3380a204503c7c1f0b589",
       "line_count": 3595,
       "role": "one pending-spawn reservation per request and quiescence accounting"
     },

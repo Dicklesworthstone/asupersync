@@ -23,7 +23,7 @@
   },
   "authority": {
     "semantic_terminal_path": "artifacts/regex_semantic_terminal_receipt_v1.json",
-    "semantic_terminal_sha256": "cc60e6a66eb2c58c10a30f8697446f20d386642b31a8cadec596e8049fc06589",
+    "semantic_terminal_sha256": "ce97bb3734187d5057938028175d7cbf7b5ed99e6f1fedbd48cbd9076d289a62",
     "semantic_terminal_disposition": "KEEP_INCUMBENT_DEFER",
     "ir_schema_source_path": "src/observability/regex_ir.rs",
     "ir_schema_source_sha256": "de4906beb838fda2c57bccfdb16316e8de661e564940a47e7b9b87f065311cb3",
