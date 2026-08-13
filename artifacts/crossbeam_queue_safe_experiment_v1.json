@@ -273,8 +273,8 @@
     },
     {
       "path": "src/channel/mpsc.rs",
-      "sha256": "4cf8cb372493f93d8ec82b72edf565a23ba17a3c65a7a06e5c534a476c48fef7",
-      "line_count": 6353
+      "sha256": "fbf7913778316a4bb8e92402d4429fc820f979c6385f788989d74a41d21c0966",
+      "line_count": 6476
     },
     {
       "path": "src/runtime/scheduler/global_queue.rs",

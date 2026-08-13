@@ -28,10 +28,10 @@
 //!   The chain:
 //!
 //!   1. **Fast-path early return is gated on !cancelled**
-//!      (cx/cx.rs:1673):
+//!      (`src/cx/cx.rs`, `Cx::checkpoint` fast path):
 //!      ```ignore
 //!      let guard = self.inner.read();
-//!      let cancelled = guard.fast_cancel.load(Acquire);
+//!      let cancelled = guard.is_cancel_requested();
 //!      let exhausted = !cancelled && checkpoint_budget_exhaustion(...).is_some();
 //!      let has_message = guard.checkpoint_state.last_message.is_some();
 //!      let is_first_checkpoint = guard.checkpoint_state.checkpoint_count == 0
@@ -48,26 +48,29 @@
 //!      guards preserve checkpoint-history accounting and do
 //!      not weaken fail-fast cancellation.
 //!
-//!   2. **Slow path runs same-call** (cx.rs:1684+): when
+//!      `CxInner::is_cancel_requested` observes the lock-backed compatibility
+//!      field or performs an Acquire load of `fast_cancel`; runtime publishers
+//!      store that flag with Release ordering.
+//!
+//!   2. **Slow path runs same-call**: when
 //!      the fast-path predicate is false, control falls
 //!      directly into the slow path. The user's stack
 //!      frame is the same — no scheduler yield, no future
 //!      Pending, no second poll required.
 //!
-//!   3. **Slow path acknowledges cancel** (cx.rs:1718):
+//!   3. **Slow path acknowledges cancel**:
 //!      `if inner.cancel_requested && inner.mask_depth ==
 //!      0 { inner.cancel_acknowledged = true; }`. The
 //!      acknowledgment is a one-time state transition that
 //!      bridges "cancel observed" to "cleanup begins".
 //!
-//!   4. **Slow path emits cancel evidence** (cx.rs:1747-
-//!      1759): `emit_cancel_evidence` records the cancel
+//!   4. **Slow path emits cancel evidence**:
+//!      `emit_cancel_evidence` records the cancel
 //!      decision for observability. Without this, operators
 //!      can't see when cancels are observed at checkpoint
 //!      vs propagated from elsewhere.
 //!
-//!   5. **`check_cancel_from_values` returns Err**
-//!      (cx.rs:2068-2098): when cancel_requested && mask_depth
+//!   5. **`check_cancel_from_values` returns Err**: when cancel_requested && mask_depth
 //!      == 0, returns `Err(Cancelled)`. When mask_depth > 0,
 //!      returns `Ok(())` (mask-deferred). Same-call Err in
 //!      the unmasked case.
@@ -166,9 +169,9 @@ fn checkpoint_fast_path_early_return_gated_on_not_cancelled_and_not_exhausted() 
 
 #[test]
 fn checkpoint_fast_path_reads_cancel_via_acquire_load() {
-    // Pin (link 1): the fast-path cancel observation uses
-    // the stable envelope's Acquire-ordered query. Without this, the
-    // observation may miss a concurrent Release publish —
+    // Pin (link 1): the fast-path cancel observation uses the
+    // compatibility-visible fast flag's Acquire-ordered query. Without this,
+    // the observation may miss a concurrent Release publish —
     // user proceeds past a cancel that has already been
     // signaled.
     let source = read("src/cx/cx.rs");
@@ -183,12 +186,22 @@ fn checkpoint_fast_path_reads_cancel_via_acquire_load() {
         .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
+    let set_marker = "pub(crate) fn set_cancel_requested(&mut self, value: bool) {";
+    let set_start = task_context
+        .find(set_marker)
+        .expect("set_cancel_requested fn");
+    let set_window_end = (set_start + 800).min(task_context.len());
+    let set_body = &task_context[set_start..set_window_end];
 
     assert!(
         body.contains("let cancelled = guard.is_cancel_requested();")
             && task_context.contains("pub(crate) fn is_cancel_requested(&self) -> bool")
-            && task_context.contains("self.cancellation.is_requested()")
-            && task_context.contains("self.requested.load(std::sync::atomic::Ordering::Acquire)"),
+            && task_context.contains(
+                "self.cancel_requested || self.fast_cancel.load(std::sync::atomic::Ordering::Acquire)"
+            )
+            && set_body.contains(
+                "self.fast_cancel\n            .store(value, std::sync::atomic::Ordering::Release);"
+            ),
         "REGRESSION: fast-path cancel check no longer uses \
          Acquire ordering. A concurrently-set cancel may \
          not be observed — fail-fast contract broken under \

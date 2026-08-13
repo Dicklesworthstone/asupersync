@@ -4358,9 +4358,11 @@ mod tests {
 ///
 /// # Testing Strategy
 ///
-/// Each metamorphic relation is implemented as a property-based test using `proptest`,
-/// with LabRuntime for deterministic execution and comprehensive scenario coverage
-/// including concurrent senders, varying load patterns, and cancellation timing.
+/// Each metamorphic relation is implemented as a property-based test using `proptest`.
+/// Scheduler-sensitive relations use LabRuntime; the drain/interleaving relation uses
+/// native producer threads plus an explicit deterministic schedule so assertion panics
+/// remain visible to the outer test harness. Together they cover concurrent senders,
+/// varying load patterns, and cancellation timing.
 #[cfg(test)]
 pub mod backpressure_metamorphic {
     use super::*;
@@ -4370,11 +4372,18 @@ pub mod backpressure_metamorphic {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Helper to assert that LabRunReport indicates successful execution.
+    /// Assert that a lab-backed property completed successfully.
     ///
-    /// Metamorphic tests must verify that the lab runtime detected no oracle
-    /// failures or invariant violations during execution.
-    fn assert_lab_report_success(report: crate::lab::runtime::LabRunReport) {
+    /// Checking only [`LabRunReport`](crate::lab::runtime::LabRunReport) is not
+    /// sufficient: an assertion panic is captured as the task's terminal
+    /// outcome, while the runtime can still reach quiescence with clean oracle
+    /// and invariant reports. Always consume the root task handle as part of
+    /// the outer Rust test so task panics, cancellation, and missing completion
+    /// remain release-blocking failures.
+    fn assert_lab_task_success<T>(
+        report: crate::lab::runtime::LabRunReport,
+        mut task_handle: crate::runtime::TaskHandle<T>,
+    ) {
         assert!(
             report.oracle_report.all_passed(),
             "Oracle failures detected: {:?}",
@@ -4384,6 +4393,52 @@ pub mod backpressure_metamorphic {
             report.invariant_violations.is_empty(),
             "Invariant violations detected: {:?}",
             report.invariant_violations
+        );
+        match task_handle.try_join() {
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("lab property root task did not complete"),
+            Err(error) => panic!("lab property root task failed: {error}"),
+        }
+    }
+
+    fn assert_metamorphic_result_success(result: Result<(), proptest::test_runner::TestCaseError>) {
+        result.expect("metamorphic property assertion failed");
+    }
+
+    #[test]
+    fn lab_task_success_rejects_panicking_root_task() {
+        let result = std::panic::catch_unwind(|| {
+            crate::lab::runtime::test(0x51a1_10ed, |lab| {
+                let root = lab.state.create_root_region(Budget::INFINITE);
+                let (task_id, task_handle) = lab
+                    .state
+                    .create_task(root, Budget::INFINITE, async {
+                        panic!("intentional lab property panic");
+                    })
+                    .expect("create panic probe task");
+                lab.scheduler.lock().schedule(task_id, 0);
+                let report = lab.run_until_quiescent_with_report();
+                assert_lab_task_success(report, task_handle);
+            });
+        });
+
+        assert!(
+            result.is_err(),
+            "a panicking lab property task must fail its outer Rust test"
+        );
+    }
+
+    #[test]
+    fn metamorphic_result_success_rejects_property_failure() {
+        let result = std::panic::catch_unwind(|| {
+            assert_metamorphic_result_success(Err(proptest::test_runner::TestCaseError::fail(
+                "intentional metamorphic property failure",
+            )));
+        });
+
+        assert!(
+            result.is_err(),
+            "a proptest assertion failure must fail its outer Rust test"
         );
     }
 
@@ -4843,9 +4898,11 @@ pub mod backpressure_metamorphic {
             .run(&backpressure_config_strategy(), |config| {
                 crate::lab::runtime::test(config.seed, |lab| {
                     let root = lab.state.create_root_region(Budget::INFINITE);
-                    let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
-                        let _cx = crate::cx::Cx::for_testing();
-                        let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
+                    let (test_task, test_handle) = lab
+                        .state
+                        .create_task(root, Budget::INFINITE, async move {
+                            let _cx = crate::cx::Cx::for_testing();
+                            let test_res: Result<(), proptest::test_runner::TestCaseError> = async {
                         let (sender, mut receiver) = channel::<u32>(config.capacity);
 
                         // Baseline: empty channel should conserve capacity
@@ -4897,10 +4954,12 @@ pub mod backpressure_metamorphic {
 
                         Ok(())
                         }.await;
-                    }).unwrap();
+                            assert_metamorphic_result_success(test_res);
+                        })
+                        .unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
                     let report = lab.run_until_quiescent_with_report();
-                    assert_lab_report_success(report);
+                    assert_lab_task_success(report, test_handle);
                 });
                 Ok(())
             })
@@ -4920,9 +4979,11 @@ pub mod backpressure_metamorphic {
             .run(&backpressure_config_strategy(), |config| {
                 crate::lab::runtime::test(config.seed, |lab| {
                     let root = lab.state.create_root_region(Budget::INFINITE);
-                    let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
-                        let cx = crate::cx::Cx::for_testing();
-                        let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
+                    let (test_task, test_handle) = lab
+                        .state
+                        .create_task(root, Budget::INFINITE, async move {
+                            let cx = crate::cx::Cx::for_testing();
+                            let test_res: Result<(), proptest::test_runner::TestCaseError> = async {
             let (sender, mut receiver) = channel::<u32>(config.capacity);
             let sent_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
             let received_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -4979,10 +5040,12 @@ pub mod backpressure_metamorphic {
 
             Ok(())
                         }.await;
-                    }).unwrap();
+                            assert_metamorphic_result_success(test_res);
+                        })
+                        .unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
                     let report = lab.run_until_quiescent_with_report();
-                    assert_lab_report_success(report);
+                    assert_lab_task_success(report, test_handle);
                 });
                 Ok(())
             })
@@ -5002,9 +5065,11 @@ pub mod backpressure_metamorphic {
             .run(&backpressure_config_strategy(), |config| {
                 crate::lab::runtime::test(config.seed, |lab| {
                     let root = lab.state.create_root_region(Budget::INFINITE);
-                    let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
-                        let cx = crate::cx::Cx::for_testing();
-                        let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
+                    let (test_task, test_handle) = lab
+                        .state
+                        .create_task(root, Budget::INFINITE, async move {
+                            let cx = crate::cx::Cx::for_testing();
+                            let test_res: Result<(), proptest::test_runner::TestCaseError> = async {
                             let sender_count = config.sender_count;
                             let rotation = if sender_count <= 1 {
                                 0
@@ -5077,10 +5142,12 @@ pub mod backpressure_metamorphic {
                             Ok(())
                         }
                         .await;
-                    }).unwrap();
+                            assert_metamorphic_result_success(test_res);
+                        })
+                        .unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
                     let report = lab.run_until_quiescent_with_report();
-                    assert_lab_report_success(report);
+                    assert_lab_task_success(report, test_handle);
                 });
                 Ok(())
             })
@@ -5101,53 +5168,51 @@ pub mod backpressure_metamorphic {
             .run(&backpressure_config_strategy(), |config| {
                 crate::lab::runtime::test(config.seed, |lab| {
                     let root = lab.state.create_root_region(Budget::INFINITE);
-                    let (test_task, _) = lab
+                    let (test_task, test_handle) = lab
                         .state
                         .create_task(root, Budget::INFINITE, async move {
                             let cx = crate::cx::Cx::for_testing();
-                            let _test_res: Result<(), proptest::test_runner::TestCaseError> =
-                                async {
-                                    let capacity = config.capacity.max(1);
-                                    let queued_messages = capacity;
+                            let test_res: Result<(), proptest::test_runner::TestCaseError> = {
+                                let capacity = config.capacity.max(1);
+                                let queued_messages = capacity;
 
-                                    let receiver_closed = run_close_drain_transcript(
-                                        &cx,
-                                        capacity,
-                                        queued_messages,
-                                        false,
-                                    );
-                                    let sender_closed = run_close_drain_transcript(
-                                        &cx,
-                                        capacity,
-                                        queued_messages,
-                                        true,
-                                    );
+                                let receiver_closed = run_close_drain_transcript(
+                                    &cx,
+                                    capacity,
+                                    queued_messages,
+                                    false,
+                                );
+                                let sender_closed = run_close_drain_transcript(
+                                    &cx,
+                                    capacity,
+                                    queued_messages,
+                                    true,
+                                );
 
-                                    let expected_drained: Vec<u32> = (0..queued_messages)
-                                        .map(|ordinal| ordinal as u32)
-                                        .collect();
+                                let expected_drained: Vec<u32> =
+                                    (0..queued_messages).map(|ordinal| ordinal as u32).collect();
 
-                                    assert_eq!(
-                                        receiver_closed.drained, expected_drained,
-                                        "receiver-side close changed queued drain prefix"
-                                    );
-                                    assert_eq!(
-                                        sender_closed.drained, expected_drained,
-                                        "sender-side close changed queued drain prefix"
-                                    );
-                                    assert_eq!(
-                                        receiver_closed, sender_closed,
-                                        "close path changed disconnect/drain transcript"
-                                    );
+                                assert_eq!(
+                                    receiver_closed.drained, expected_drained,
+                                    "receiver-side close changed queued drain prefix"
+                                );
+                                assert_eq!(
+                                    sender_closed.drained, expected_drained,
+                                    "sender-side close changed queued drain prefix"
+                                );
+                                assert_eq!(
+                                    receiver_closed, sender_closed,
+                                    "close path changed disconnect/drain transcript"
+                                );
 
-                                    Ok(())
-                                }
-                                .await;
+                                Ok(())
+                            };
+                            assert_metamorphic_result_success(test_res);
                         })
                         .unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
                     let report = lab.run_until_quiescent_with_report();
-                    assert_lab_report_success(report);
+                    assert_lab_task_success(report, test_handle);
                 });
                 Ok(())
             })
@@ -5172,9 +5237,9 @@ pub mod backpressure_metamorphic {
             .run(&strategy, |(messages, split_index, seed)| {
                 crate::lab::runtime::test(seed, |lab| {
                     let root = lab.state.create_root_region(Budget::INFINITE);
-                    let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
+                    let (test_task, test_handle) = lab.state.create_task(root, Budget::INFINITE, async move {
                         let cx = crate::cx::Cx::for_testing();
-                        let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
+                        let test_res: Result<(), proptest::test_runner::TestCaseError> = async {
                             let messages: Vec<u32> = messages.into_iter().map(u32::from).collect();
 
                             let batched = run_single_sender_drain_boundary_case(
@@ -5224,10 +5289,11 @@ pub mod backpressure_metamorphic {
                             Ok(())
                         }
                         .await;
+                        assert_metamorphic_result_success(test_res);
                     }).unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
                     let report = lab.run_until_quiescent_with_report();
-                    assert_lab_report_success(report);
+                    assert_lab_task_success(report, test_handle);
                 });
                 Ok(())
             })
@@ -5251,58 +5317,54 @@ pub mod backpressure_metamorphic {
             .run(&strategy, |(messages, seed)| {
                 crate::lab::runtime::test(seed, |lab| {
                     let root = lab.state.create_root_region(Budget::INFINITE);
-                    let (test_task, _) = lab
+                    let (test_task, test_handle) = lab
                         .state
                         .create_task(root, Budget::INFINITE, async move {
                             let cx = crate::cx::Cx::for_testing();
-                            let _test_res: Result<(), proptest::test_runner::TestCaseError> =
-                                async {
-                                    let messages: Vec<u32> =
-                                        messages.into_iter().map(u32::from).collect();
+                            let test_res: Result<(), proptest::test_runner::TestCaseError> = {
+                                let messages: Vec<u32> =
+                                    messages.into_iter().map(u32::from).collect();
 
-                                    let baseline =
-                                        run_unbounded_pending_recv_drop_case(&cx, &messages, false);
-                                    let transformed =
-                                        run_unbounded_pending_recv_drop_case(&cx, &messages, true);
+                                let baseline =
+                                    run_unbounded_pending_recv_drop_case(&cx, &messages, false);
+                                let transformed =
+                                    run_unbounded_pending_recv_drop_case(&cx, &messages, true);
 
-                                    assert_eq!(
-                                        baseline.0, messages,
-                                        "baseline unbounded drain transcript drifted"
-                                    );
-                                    assert_eq!(
-                                        transformed.0, messages,
-                                        "pending recv drop changed unbounded drain transcript"
-                                    );
-                                    assert_eq!(
-                                        transformed.0, baseline.0,
-                                        "pending recv drop lost or reordered messages"
-                                    );
-                                    assert_eq!(
-                                        baseline.1,
-                                        (0, 0, 0, false),
-                                        "baseline leaked queue/reservation/waker state"
-                                    );
-                                    assert_eq!(
-                                        transformed.1, baseline.1,
-                                        "pending recv drop left stale channel state"
-                                    );
-                                    assert_eq!(
-                                        baseline.2, 0,
-                                        "baseline left live unbounded senders"
-                                    );
-                                    assert_eq!(
-                                        transformed.2, baseline.2,
-                                        "pending recv drop changed sender teardown"
-                                    );
+                                assert_eq!(
+                                    baseline.0, messages,
+                                    "baseline unbounded drain transcript drifted"
+                                );
+                                assert_eq!(
+                                    transformed.0, messages,
+                                    "pending recv drop changed unbounded drain transcript"
+                                );
+                                assert_eq!(
+                                    transformed.0, baseline.0,
+                                    "pending recv drop lost or reordered messages"
+                                );
+                                assert_eq!(
+                                    baseline.1,
+                                    (0, 0, 0, false),
+                                    "baseline leaked queue/reservation/waker state"
+                                );
+                                assert_eq!(
+                                    transformed.1, baseline.1,
+                                    "pending recv drop left stale channel state"
+                                );
+                                assert_eq!(baseline.2, 0, "baseline left live unbounded senders");
+                                assert_eq!(
+                                    transformed.2, baseline.2,
+                                    "pending recv drop changed sender teardown"
+                                );
 
-                                    Ok(())
-                                }
-                                .await;
+                                Ok(())
+                            };
+                            assert_metamorphic_result_success(test_res);
                         })
                         .unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
                     let report = lab.run_until_quiescent_with_report();
-                    assert_lab_report_success(report);
+                    assert_lab_task_success(report, test_handle);
                 });
                 Ok(())
             })
@@ -5322,9 +5384,11 @@ pub mod backpressure_metamorphic {
             .run(&backpressure_config_strategy(), |config| {
                 crate::lab::runtime::test(config.seed, |lab| {
                     let root = lab.state.create_root_region(Budget::INFINITE);
-                    let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
-                        let cx = crate::cx::Cx::for_testing();
-                        let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
+                    let (test_task, test_handle) = lab
+                        .state
+                        .create_task(root, Budget::INFINITE, async move {
+                            let cx = crate::cx::Cx::for_testing();
+                            let test_res: Result<(), proptest::test_runner::TestCaseError> = async {
                         // Path 1: reserve then send
                         let (sender1, mut receiver1) = channel::<u32>(config.capacity);
                         let received1 = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -5385,10 +5449,12 @@ pub mod backpressure_metamorphic {
 
                         Ok(())
                         }.await;
-                    }).unwrap();
+                            assert_metamorphic_result_success(test_res);
+                        })
+                        .unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
                     let report = lab.run_until_quiescent_with_report();
-                    assert_lab_report_success(report);
+                    assert_lab_task_success(report, test_handle);
                 });
                 Ok(())
             })
@@ -5408,9 +5474,9 @@ pub mod backpressure_metamorphic {
             .run(&backpressure_config_strategy(), |config| {
                 crate::lab::runtime::test(config.seed, |lab| {
                     let root = lab.state.create_root_region(Budget::INFINITE);
-                    let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
+                    let (test_task, test_handle) = lab.state.create_task(root, Budget::INFINITE, async move {
                         let cx = crate::cx::Cx::for_testing();
-                        let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
+                        let test_res: Result<(), proptest::test_runner::TestCaseError> = async {
                             let step_count = config.messages_per_sender.clamp(1, 12);
 
                             let (base_transcript, base_states, base_abort_count, base_final_state) =
@@ -5489,10 +5555,11 @@ pub mod backpressure_metamorphic {
                             Ok(())
                         }
                         .await;
+                        assert_metamorphic_result_success(test_res);
                     }).unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
                     let report = lab.run_until_quiescent_with_report();
-                    assert_lab_report_success(report);
+                    assert_lab_task_success(report, test_handle);
                 });
                 Ok(())
             })
@@ -5594,9 +5661,11 @@ pub mod backpressure_metamorphic {
 
                 crate::lab::runtime::test(config.seed, |lab| {
                     let root = lab.state.create_root_region(Budget::INFINITE);
-                    let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
-                        let _cx = crate::cx::Cx::for_testing();
-                        let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
+                    let (test_task, test_handle) = lab
+                        .state
+                        .create_task(root, Budget::INFINITE, async move {
+                            let _cx = crate::cx::Cx::for_testing();
+                            let test_res: Result<(), proptest::test_runner::TestCaseError> = async {
                         let (sender, mut receiver) = channel::<u32>(config.capacity);
 
                         // Fill channel completely
@@ -5636,10 +5705,12 @@ pub mod backpressure_metamorphic {
 
                         Ok(())
                         }.await;
-                    }).unwrap();
+                            assert_metamorphic_result_success(test_res);
+                        })
+                        .unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
                     let report = lab.run_until_quiescent_with_report();
-                    assert_lab_report_success(report);
+                    assert_lab_task_success(report, test_handle);
                 });
                 Ok(())
             })
@@ -5658,79 +5729,78 @@ pub mod backpressure_metamorphic {
             .run(&backpressure_config_strategy(), |config| {
                 crate::lab::runtime::test(config.seed, |lab| {
                     let root = lab.state.create_root_region(Budget::INFINITE);
-                    let (test_task, _) = lab
+                    let (test_task, test_handle) = lab
                         .state
                         .create_task(root, Budget::INFINITE, async move {
                             let cx = crate::cx::Cx::for_testing();
-                            let _test_res: Result<(), proptest::test_runner::TestCaseError> =
-                                async {
-                                    let (sender, receiver) = channel::<u32>(config.capacity);
+                            let test_res: Result<(), proptest::test_runner::TestCaseError> = {
+                                let (sender, receiver) = channel::<u32>(config.capacity);
 
-                                    // Fill channel
-                                    for i in 0..config.capacity {
-                                        sender.try_send(i as u32).expect("Fill channel");
-                                    }
-
-                                    // Start multiple blocking reserves
-                                    let disconnected_count = Arc::new(AtomicUsize::new(0));
-                                    let mut reserve_handles = Vec::new();
-
-                                    for _i in 0..config.sender_count {
-                                        let sender_clone = sender.clone();
-                                        let counter_clone = Arc::clone(&disconnected_count);
-                                        let reserve_cx = cx.clone();
-                                        let handle = std::thread::spawn(move || {
-                                            futures_lite::future::block_on(async move {
-                                                match sender_clone.reserve(&reserve_cx).await {
-                                                    Err(SendError::Disconnected(_)) => {
-                                                        counter_clone
-                                                            .fetch_add(1, Ordering::SeqCst);
-                                                    }
-                                                    _ => {}
-                                                }
-                                            })
-                                        });
-                                        reserve_handles.push(handle);
-                                    }
-
-                                    // Let reserves queue up
-                                    crate::runtime::yield_now().await;
-
-                                    // Verify reserves are queued
-                                    let queued_before = observe_channel_state(&sender).3;
-                                    assert!(queued_before > 0, "No reserves queued");
-
-                                    // Drop receiver - should unblock all pending reserves
-                                    drop(receiver);
-
-                                    // Wait for all reserves to complete
-                                    for handle in reserve_handles {
-                                        handle.join().unwrap();
-                                    }
-
-                                    // All queued senders should have been disconnected
-                                    let disconnected = disconnected_count.load(Ordering::SeqCst);
-                                    assert!(
-                                        disconnected > 0,
-                                        "No senders received Disconnected after receiver drop"
-                                    );
-
-                                    // No waiters should remain
-                                    let queued_after = observe_channel_state(&sender).3;
-                                    assert_eq!(
-                                        queued_after, 0,
-                                        "Waiters remain queued after receiver drop: {}",
-                                        queued_after
-                                    );
-
-                                    Ok(())
+                                // Fill channel
+                                for i in 0..config.capacity {
+                                    sender.try_send(i as u32).expect("Fill channel");
                                 }
-                                .await;
+
+                                // Poll each reserve once so the test proves every waiter is
+                                // registered before receiver teardown. Native worker threads
+                                // plus a single LabRuntime yield do not provide that ordering.
+                                let reserve_senders: Vec<_> =
+                                    (0..config.sender_count).map(|_| sender.clone()).collect();
+                                let mut reserve_futures: Vec<_> = reserve_senders
+                                    .iter()
+                                    .map(|reserve_sender| Box::pin(reserve_sender.reserve(&cx)))
+                                    .collect();
+                                let waker = metamorphic_noop_waker();
+                                let mut poll_cx = Context::from_waker(&waker);
+
+                                for reserve_future in &mut reserve_futures {
+                                    assert!(
+                                        matches!(
+                                            reserve_future.as_mut().poll(&mut poll_cx),
+                                            Poll::Pending
+                                        ),
+                                        "reserve should block while the channel is full"
+                                    );
+                                }
+
+                                // Verify all reserves are queued before receiver teardown.
+                                let queued_before = observe_channel_state(&sender).3;
+                                assert_eq!(
+                                    queued_before, config.sender_count,
+                                    "every pending reserve should own exactly one waiter"
+                                );
+
+                                // Drop receiver - should unblock all pending reserves
+                                drop(receiver);
+
+                                // Every previously-pending reserve must now complete with
+                                // Disconnected on its next poll.
+                                for reserve_future in &mut reserve_futures {
+                                    assert!(
+                                        matches!(
+                                            reserve_future.as_mut().poll(&mut poll_cx),
+                                            Poll::Ready(Err(SendError::Disconnected(())))
+                                        ),
+                                        "receiver drop must disconnect every pending reserve"
+                                    );
+                                }
+
+                                // No waiters should remain
+                                let queued_after = observe_channel_state(&sender).3;
+                                assert_eq!(
+                                    queued_after, 0,
+                                    "Waiters remain queued after receiver drop: {}",
+                                    queued_after
+                                );
+
+                                Ok(())
+                            };
+                            assert_metamorphic_result_success(test_res);
                         })
                         .unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
                     let report = lab.run_until_quiescent_with_report();
-                    assert_lab_report_success(report);
+                    assert_lab_task_success(report, test_handle);
                 });
                 Ok(())
             })
@@ -5739,10 +5809,11 @@ pub mod backpressure_metamorphic {
 
     /// MR-MPSC-D1: Producer Interleaving Independence with Conservation and FIFO
     ///
-    /// Metamorphic property: With N concurrent producers, after all senders close + receiver drains:
+    /// Metamorphic property: With N producer threads following different legal schedules, after
+    /// all senders close + receiver drains:
     /// 1. Conservation: multiset of received values must equal multiset of sent values
     /// 2. FIFO: per-producer ordering must be preserved (within each producer)
-    /// 3. Order independence: different producer spawn orders yield same multiset
+    /// 3. Order independence: different producer interleavings yield the same multiset
     #[test]
     fn metamorphic_drain_conservation_and_fifo() {
         use proptest::test_runner::TestRunner;
@@ -5785,72 +5856,61 @@ pub mod backpressure_metamorphic {
                     .await;
 
                     // Conservation property: verify total message count conservation
-                    let expected_total_messages =
-                        config.sender_count * config.messages_per_sender;
-                                    assert_eq!(
-                                        sequential_result.received_messages.len(),
-                                        expected_total_messages,
-                                        "Sequential: message count mismatch"
-                                    );
-                                    assert_eq!(
-                                        interleaved_result.received_messages.len(),
-                                        expected_total_messages,
-                                        "Interleaved: message count mismatch"
-                                    );
-                                    assert_eq!(
-                                        round_robin_result.received_messages.len(),
-                                        expected_total_messages,
-                                        "RoundRobin: message count mismatch"
-                                    );
+                    let expected_total_messages = config.sender_count * config.messages_per_sender;
+                    assert_eq!(
+                        sequential_result.received_messages.len(),
+                        expected_total_messages,
+                        "Sequential: message count mismatch"
+                    );
+                    assert_eq!(
+                        interleaved_result.received_messages.len(),
+                        expected_total_messages,
+                        "Interleaved: message count mismatch"
+                    );
+                    assert_eq!(
+                        round_robin_result.received_messages.len(),
+                        expected_total_messages,
+                        "RoundRobin: message count mismatch"
+                    );
 
                     // Order independence: same multiset across orderings
-                    let seq_multiset =
-                        multiset_from_messages(&sequential_result.received_messages);
-                                    let interleaved_multiset = multiset_from_messages(
-                                        &interleaved_result.received_messages,
-                                    );
-                                    let rr_multiset = multiset_from_messages(
-                                        &round_robin_result.received_messages,
-                                    );
+                    let seq_multiset = multiset_from_messages(&sequential_result.received_messages);
+                    let interleaved_multiset =
+                        multiset_from_messages(&interleaved_result.received_messages);
+                    let rr_multiset = multiset_from_messages(&round_robin_result.received_messages);
 
-                                    assert_eq!(
-                                        seq_multiset, interleaved_multiset,
-                                        "Sequential vs Interleaved multiset mismatch"
-                                    );
-                                    assert_eq!(
-                                        seq_multiset, rr_multiset,
-                                        "Sequential vs RoundRobin multiset mismatch"
-                                    );
+                    assert_eq!(
+                        seq_multiset, interleaved_multiset,
+                        "Sequential vs Interleaved multiset mismatch"
+                    );
+                    assert_eq!(
+                        seq_multiset, rr_multiset,
+                        "Sequential vs RoundRobin multiset mismatch"
+                    );
 
                     // FIFO property: verify per-producer ordering
                     verify_fifo_per_producer(
-                                        &sequential_result.received_messages,
-                                        config.sender_count,
-                                    );
-                                    verify_fifo_per_producer(
-                                        &interleaved_result.received_messages,
-                                        config.sender_count,
-                                    );
-                                    verify_fifo_per_producer(
-                                        &round_robin_result.received_messages,
-                                        config.sender_count,
-                                    );
-
-                    // Verify expected sent vs received multisets
-                    let expected_multiset = compute_expected_multiset(
-                                        config.sender_count,
-                                        config.messages_per_sender,
-                                    );
-                    assert_eq!(
-                                        seq_multiset, expected_multiset,
-                                        "Received multiset doesn't match expected sent multiset"
+                        &sequential_result.received_messages,
+                        config.sender_count,
+                    );
+                    verify_fifo_per_producer(
+                        &interleaved_result.received_messages,
+                        config.sender_count,
+                    );
+                    verify_fifo_per_producer(
+                        &round_robin_result.received_messages,
+                        config.sender_count,
                     );
 
-                    for result in [
-                        &sequential_result,
-                        &interleaved_result,
-                        &round_robin_result,
-                    ] {
+                    // Verify expected sent vs received multisets
+                    let expected_multiset =
+                        compute_expected_multiset(config.sender_count, config.messages_per_sender);
+                    assert_eq!(
+                        seq_multiset, expected_multiset,
+                        "Received multiset doesn't match expected sent multiset"
+                    );
+
+                    for result in [&sequential_result, &interleaved_result, &round_robin_result] {
                         assert_eq!(
                             result.final_channel_state,
                             (0, 0, config.capacity, 0),
@@ -5877,11 +5937,11 @@ pub mod backpressure_metamorphic {
             .run(&backpressure_config_strategy(), |config| {
                 crate::lab::runtime::test(config.seed, |lab| {
                     let root = lab.state.create_root_region(Budget::INFINITE);
-                    let (test_task, _) = lab
+                    let (test_task, test_handle) = lab
                         .state
                         .create_task(root, Budget::INFINITE, async move {
                             let cx = crate::cx::Cx::for_testing();
-                            let _test_res: Result<(), proptest::test_runner::TestCaseError> =
+                            let test_res: Result<(), proptest::test_runner::TestCaseError> =
                                 async {
                                     let (sender, receiver) = channel::<u32>(config.capacity);
 
@@ -5974,11 +6034,12 @@ pub mod backpressure_metamorphic {
                                     Ok(())
                                 }
                                 .await;
+                            assert_metamorphic_result_success(test_res);
                         })
                         .unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
                     let report = lab.run_until_quiescent_with_report();
-                    assert_lab_report_success(report);
+                    assert_lab_task_success(report, test_handle);
                 });
                 Ok(())
             })
@@ -6096,12 +6157,10 @@ pub mod backpressure_metamorphic {
         });
 
         // Generate producer send sequences based on ordering
-        let send_sequence = Arc::new(generate_send_sequence(
-            producer_count,
-            messages_per_producer,
-            ordering,
-            seed,
-        ));
+        let send_sequence =
+            generate_send_sequence(producer_count, messages_per_producer, ordering, seed);
+        verify_producer_schedule(&send_sequence, producer_count, messages_per_producer);
+        let send_sequence = Arc::new(send_sequence);
         let next_turn = Arc::new(AtomicUsize::new(0));
 
         // Execute the send sequence
@@ -6184,8 +6243,7 @@ pub mod backpressure_metamorphic {
         match ordering {
             ProducerOrdering::Sequential => (0..producer_count)
                 .flat_map(|producer_id| {
-                    (0..messages_per_producer)
-                        .map(move |msg_ordinal| (producer_id, msg_ordinal))
+                    (0..messages_per_producer).map(move |msg_ordinal| (producer_id, msg_ordinal))
                 })
                 .collect(),
             ProducerOrdering::RoundRobin => (0..messages_per_producer)
@@ -6214,6 +6272,36 @@ pub mod backpressure_metamorphic {
                 sequence
             }
         }
+    }
+
+    fn verify_producer_schedule(
+        schedule: &[(usize, usize)],
+        producer_count: usize,
+        messages_per_producer: usize,
+    ) {
+        assert_eq!(
+            schedule.len(),
+            producer_count * messages_per_producer,
+            "producer schedule has the wrong number of sends"
+        );
+        let mut next_ordinals = vec![0; producer_count];
+        for &(producer_id, ordinal) in schedule {
+            assert!(
+                producer_id < producer_count,
+                "producer schedule names an unknown producer {producer_id}"
+            );
+            assert_eq!(
+                ordinal, next_ordinals[producer_id],
+                "producer schedule reordered producer {producer_id}'s local sends"
+            );
+            next_ordinals[producer_id] += 1;
+        }
+        assert!(
+            next_ordinals
+                .iter()
+                .all(|&ordinal| ordinal == messages_per_producer),
+            "producer schedule omitted one or more local sends"
+        );
     }
 
     fn multiset_from_messages(messages: &[u32]) -> std::collections::BTreeMap<u32, usize> {
@@ -6276,9 +6364,11 @@ pub mod backpressure_metamorphic {
             .run(&backpressure_config_strategy(), |config| {
                 crate::lab::runtime::test(config.seed, |lab| {
                     let root = lab.state.create_root_region(Budget::INFINITE);
-                    let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
-                        let cx = crate::cx::Cx::for_testing();
-                        let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
+                    let (test_task, test_handle) = lab
+                        .state
+                        .create_task(root, Budget::INFINITE, async move {
+                            let cx = crate::cx::Cx::for_testing();
+                            let test_res: Result<(), proptest::test_runner::TestCaseError> = async {
                         let (sender, mut receiver) = channel::<u32>(config.capacity);
                         let received_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
                         let sent_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -6363,10 +6453,12 @@ pub mod backpressure_metamorphic {
 
                         Ok(())
                         }.await;
-                    }).unwrap();
+                            assert_metamorphic_result_success(test_res);
+                        })
+                        .unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
                     let report = lab.run_until_quiescent_with_report();
-                    assert_lab_report_success(report);
+                    assert_lab_task_success(report, test_handle);
                 });
                 Ok(())
             })

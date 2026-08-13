@@ -542,7 +542,7 @@
   "source_pins": [
     {"path": "src/http/mod.rs", "sha256": "2a0ca68136d8d4946db692601f25fdb727fb153e8a78529defbc0eb8d913e5ed", "line_count": 85, "anchors": ["pub mod body;", "pub use body::{Body, Empty, Frame, Full, HeaderMap, HeaderName, HeaderValue, SizeHint};"]},
     {"path": "src/http/body.rs", "sha256": "69e63ff5856457bedd8ea9eaf0a45d5ca120c2ffe8f1db65207e747278ba9753", "line_count": 1918, "anchors": ["pub trait Body {", "pub struct StreamBody<S>", "pub struct Limited<B>"]},
-    {"path": "src/channel/mpsc.rs", "sha256": "4cf8cb372493f93d8ec82b72edf565a23ba17a3c65a7a06e5c534a476c48fef7", "line_count": 6353, "anchors": ["pub fn channel<T>(capacity: usize)", "pub struct SendPermit<'a, T>", "pub struct Receiver<T>"]},
+    {"path": "src/channel/mpsc.rs", "sha256": "fbf7913778316a4bb8e92402d4429fc820f979c6385f788989d74a41d21c0966", "line_count": 6476, "anchors": ["pub fn channel<T>(capacity: usize)", "pub struct SendPermit<'a, T>", "pub struct Receiver<T>"]},
     {"path": "src/stream/stream.rs", "sha256": "49d3dd8c7cbc3504c476cb08498cf9300b9bfca84f37fc1781ccf497ab8e68db", "line_count": 304, "anchors": ["pub trait Stream", "fn poll_next"]},
     {"path": "src/codec/framed.rs", "sha256": "5733d84397523e9659ea18e25fa152fa6d4ebe81766da96432f717a8d4f546d7", "line_count": 1372, "anchors": ["pub struct Framed<T, U>", "pub fn read_buffer", "impl<T, U> Stream for Framed"]},
     {"path": "src/codec/framed_read.rs", "sha256": "477bf58ca5ee956c841937e59cacda49927a31f2a99f75560223f6f43142d42d", "line_count": 1165, "anchors": ["pub const DEFAULT_MAX_BUFFER_LEN", "pub struct FramedRead<R, D>"]},
