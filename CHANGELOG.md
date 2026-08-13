@@ -10,7 +10,7 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
-Scope window: current work through 2026-08-12, reconstructed from git history,
+Scope window: current work through 2026-08-13, reconstructed from git history,
 beads, benchmark ledgers, and live repo artifacts; the previous published
 GitHub Release/tag baseline is `v0.4.3`.
 
@@ -47,7 +47,7 @@ _No changes yet._
 
 ---
 
-## [v0.4.4] - 2026-08-12
+## [v0.4.4] - 2026-08-13
 
 ### Runtime correctness
 
