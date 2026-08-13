@@ -35,7 +35,19 @@ fn run_script(args: &[&str]) -> (std::process::ExitStatus, String, String) {
 }
 
 fn run_planner(fixture: &str, extra_args: &[&str]) -> (std::process::ExitStatus, String, String) {
-    let project_root = repo_path(&format!("{FIXTURE_ROOT}/{fixture}"));
+    let malformed_fixture = (fixture == "malformed")
+        .then(|| tempfile::tempdir().expect("create malformed manifest fixture"));
+    let project_root = if let Some(malformed_fixture) = &malformed_fixture {
+        let fixture_root = malformed_fixture.path();
+        std::fs::write(
+            fixture_root.join("Cargo.toml"),
+            "[package\nname = \"broken\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write malformed manifest fixture");
+        fixture_root.to_path_buf()
+    } else {
+        repo_path(&format!("{FIXTURE_ROOT}/{fixture}"))
+    };
     let project_root_arg = project_root.to_string_lossy().to_string();
     let mut args = vec!["--project-root", project_root_arg.as_str()];
     args.extend_from_slice(extra_args);
@@ -717,7 +729,7 @@ fn malformed_manifest_fails_closed_and_can_exit_nonzero() {
 }
 
 #[test]
-fn malformed_fixture_is_excluded_from_root_workspace_discovery() {
+fn malformed_fixture_carrier_is_valid_and_excluded_from_root_workspace_discovery() {
     let root_manifest: toml::Value =
         toml::from_str(&repo_file_text("Cargo.toml")).expect("parse root Cargo.toml");
     let excluded = root_manifest["workspace"]["exclude"]
@@ -729,6 +741,21 @@ fn malformed_fixture_is_excluded_from_root_workspace_discovery() {
             entry.as_str() == Some("tests/fixtures/migration_readiness_planner/malformed")
         }),
         "the intentionally invalid fixture must remain outside Cargo workspace discovery so Git consumers can resolve asupersync",
+    );
+
+    let carrier_path = format!("{FIXTURE_ROOT}/malformed/Cargo.toml");
+    let carrier: toml::Value = toml::from_str(&repo_file_text(&carrier_path))
+        .expect("every tracked Cargo.toml must remain valid for Git-source consumers");
+    assert_eq!(
+        carrier["workspace"]["members"].as_array().map(Vec::len),
+        Some(0),
+        "the tracked carrier must be a valid empty virtual workspace, not a discoverable package",
+    );
+    assert_eq!(
+        carrier["workspace"]["metadata"]["asupersync-test-fixture"]["purpose"].as_str(),
+        Some(
+            "The contract test generates the intentionally malformed Cargo.toml in a temporary directory so Git consumers never encounter invalid tracked manifests."
+        )
     );
 }
 

@@ -1,3 +1,6 @@
-[package
-name = "broken"
-version = "0.1.0"
+[workspace]
+members = []
+resolver = "3"
+
+[workspace.metadata.asupersync-test-fixture]
+purpose = "The contract test generates the intentionally malformed Cargo.toml in a temporary directory so Git consumers never encounter invalid tracked manifests."

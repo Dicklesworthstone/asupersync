@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -1957,7 +1958,16 @@ def e2e_result_for_scenario(
         )
         return result
 
-    report = build_report(fixture_root)
+    if scenario["scenario_id"] == "malformed-workspace":
+        with tempfile.TemporaryDirectory(prefix="asupersync-malformed-manifest-") as temp_root:
+            malformed_root = Path(temp_root)
+            (malformed_root / "Cargo.toml").write_text(
+                '[package\nname = "broken"\nversion = "0.1.0"\n',
+                encoding="utf-8",
+            )
+            report = build_report(malformed_root)
+    else:
+        report = build_report(fixture_root)
     paths: dict[str, str] = {}
     if output_root is not None:
         paths = write_outputs(report, output_root / scenario["scenario_id"])
