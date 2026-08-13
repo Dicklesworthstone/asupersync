@@ -246,11 +246,11 @@
       "selected_for_safe_experiment": false,
       "anchors": [
         {"path": "src/runtime/task_handle.rs", "line": 14, "fragment": "pub enum JoinError"},
-        {"path": "src/runtime/task_handle.rs", "line": 63, "fragment": "pub struct TaskHandle<T>"},
+        {"path": "src/runtime/task_handle.rs", "line": 250, "fragment": "pub struct TaskHandle<T>"},
         {"path": "src/channel/oneshot.rs", "line": 159, "fragment": "struct OneShotInner<T>"},
         {"path": "src/channel/oneshot.rs", "line": 391, "fragment": "pub struct Sender<T>"},
         {"path": "src/channel/oneshot.rs", "line": 1099, "fragment": "pub struct Receiver<T>"},
-        {"path": "src/cx/cx.rs", "line": 4501, "fragment": "let shared_tx = Arc::new(std::sync::Mutex::new(Some(result_tx)))"}
+        {"path": "src/cx/cx.rs", "line": 4655, "fragment": "let shared_tx = Arc::new(std::sync::Mutex::new(Some(result_tx)))"}
       ]
     }
   ],
@@ -349,8 +349,8 @@
       "incumbent_contract": "Cx::spawn and Cx::spawn_in return SpawnError::RuntimeUnavailable and never panic",
       "must_preserve": "no handle is returned for a request that was never published",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 4018, "fragment": "pub fn spawn<F, Fut>("},
-        {"path": "src/cx/cx.rs", "line": 4081, "fragment": "pub fn spawn_in<F, Fut, P>("}
+        {"path": "src/cx/cx.rs", "line": 4055, "fragment": "pub fn spawn<F, Fut>("},
+        {"path": "src/cx/cx.rs", "line": 4150, "fragment": "pub fn spawn_in<F, Fut, P>("}
       ]
     },
     {
@@ -360,8 +360,8 @@
       "incumbent_contract": "the completion sender commits Ok(value); join, try_join, or poll_join consumes one terminal result",
       "must_preserve": "the value is delivered once with no ambient cancellation check on the join receive",
       "anchors": [
-        {"path": "src/cx/scope.rs", "line": 475, "fragment": "let _ = tx.send_blocking(Ok(result))"},
-        {"path": "src/runtime/task_handle.rs", "line": 419, "fragment": "pub fn try_join(&mut self)"}
+        {"path": "src/cx/scope.rs", "line": 477, "fragment": "publish_terminal_result(tx, Ok(result))"},
+        {"path": "src/runtime/task_handle.rs", "line": 640, "fragment": "pub fn try_join(&mut self)"}
       ]
     },
     {
@@ -372,7 +372,7 @@
       "must_preserve": "pending JoinSet scans retain at least one live wake registration",
       "anchors": [
         {"path": "src/channel/oneshot.rs", "line": 718, "fragment": "fn poll_recv_uninterruptible_with_waiter<T>"},
-        {"path": "src/runtime/task_handle.rs", "line": 473, "fragment": "pub fn poll_join("}
+        {"path": "src/runtime/task_handle.rs", "line": 694, "fragment": "pub fn poll_join("}
       ]
     },
     {
@@ -383,7 +383,7 @@
       "must_preserve": "panic stays typed for this family",
       "anchors": [
         {"path": "src/runtime/task_handle.rs", "line": 14, "fragment": "pub enum JoinError"},
-        {"path": "src/cx/cx.rs", "line": 4475, "fragment": "fn spawn_via_gateway<F, Fut>("}
+        {"path": "src/cx/cx.rs", "line": 4623, "fragment": "fn spawn_via_gateway<F, Fut>("}
       ]
     },
     {
@@ -393,8 +393,8 @@
       "incumbent_contract": "the completion slot or closed-channel mapping yields JoinError::Cancelled with the strongest available reason",
       "must_preserve": "every accepted request terminates its handle and preserves cancellation attribution",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 4563, "fragment": "let request = SpawnRequest::new_with_factory"},
-        {"path": "src/runtime/task_handle.rs", "line": 597, "fragment": "impl<T> std::future::Future for JoinFuture"}
+        {"path": "src/cx/cx.rs", "line": 4709, "fragment": "let request = SpawnRequest::new_with_factory"},
+        {"path": "src/runtime/task_handle.rs", "line": 831, "fragment": "impl<T> std::future::Future for JoinFuture"}
       ]
     },
     {
@@ -404,7 +404,7 @@
       "incumbent_contract": "cancellation is requested and strongest reason is cached or published; immediate task termination is not promised",
       "must_preserve": "abort remains reason-strengthening and admission-race safe",
       "anchors": [
-        {"path": "src/runtime/task_handle.rs", "line": 530, "fragment": "pub fn abort_with_reason"}
+        {"path": "src/runtime/task_handle.rs", "line": 764, "fragment": "pub fn abort_with_reason"}
       ]
     },
     {
@@ -414,8 +414,8 @@
       "incumbent_contract": "drop requests abort unless defused or the receiver is already terminal",
       "must_preserve": "stop-waiting implies stop-task only for JoinFuture, not for TaskHandle itself",
       "anchors": [
-        {"path": "src/runtime/task_handle.rs", "line": 553, "fragment": "pub struct JoinFuture<'a, T>"},
-        {"path": "src/runtime/task_handle.rs", "line": 638, "fragment": "impl<T> Drop for JoinFuture<'_, T>"}
+        {"path": "src/runtime/task_handle.rs", "line": 787, "fragment": "pub struct JoinFuture<'a, T>"},
+        {"path": "src/runtime/task_handle.rs", "line": 872, "fragment": "impl<T> Drop for JoinFuture<'_, T>"}
       ]
     },
     {
@@ -485,7 +485,7 @@
       "anchors": [
         {"path": "src/record/region.rs", "line": 363, "fragment": "pub struct PendingSpawnCounter"},
         {"path": "src/record/region.rs", "line": 391, "fragment": "pub fn reserve(self: &Arc<Self>)"},
-        {"path": "src/runtime/state.rs", "line": 3970, "fragment": "pub(crate) fn admit_spawn_request_in"},
+        {"path": "src/runtime/state.rs", "line": 3973, "fragment": "pub(crate) fn admit_spawn_request_in"},
         {"path": "src/runtime/state.rs", "line": 4129, "fragment": "fn finish_send_spawn_admission_in"},
         {"path": "src/runtime/state.rs", "line": 4187, "fragment": "drop(pending_reservation)"}
       ]

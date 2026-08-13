@@ -121,7 +121,7 @@
     },
     {
       "path": "fuzz/Cargo.toml",
-      "sha256": "857925379ab7068f3faf94435e44b87adfc96c2d716f19b5c1cfdffbbfbd580d",
+      "sha256": "1a90bcc6869fcca866b6572f6c571b42dcdbcea43960211901ed21bdad83f21f",
       "role": "excluded fuzz dependency declaration"
     },
     {
