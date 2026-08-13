@@ -79,7 +79,7 @@ The canonical machine projections are:
 
 | Projection | Count | SHA-256 |
 |---|---:|---|
-| Source-pin canonical JSON | 266 | `1f5df179805518d75f970b16835ea776b8b936493716d14b048224817254f8cb` |
+| Source-pin canonical JSON | 266 | `abf3d76303f414193e7e9654992e789e138e559ce1e323e3cbc1bcd99018e233` |
 | Unique source-pin paths | 247 | `d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3` |
 | Source-pin overlap paths | 15 | membership is bound by the 34-row projection below |
 | Source-pin rows on overlap paths | 34 | `46e53bb712de7009b20250a371df23961f4e15580b6887768b6c9e95ce15b1f2` |
@@ -143,7 +143,7 @@ The mapping tuple is
 `left_child<TAB>left_collection<TAB>id<TAB>K0.3<TAB>right_collection<TAB>id`,
 bytewise-sorted with one LF per row.
 The lexical-exclusion mapping digest is
-`c1808f3d8ce85fc70642af0424653f0bb287a71998774c9206b80172f8e175db`.
+`fb807404dc9d731d11906ca8b96f09d5eae2997e7b4b098ab0f2937b821b415d`.
 For each `EXCLUDED_NAME_COLLISION` atomic site, it recursively key-sorts and
 compactly serializes an object containing the parent `group_id`, parent `path`,
 and complete site object, bytewise-sorts the 232 records, and appends one LF

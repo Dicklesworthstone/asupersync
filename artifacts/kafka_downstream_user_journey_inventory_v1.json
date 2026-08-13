@@ -7440,7 +7440,7 @@
         "UNRESOLVED_STALE_SURFACE": 8
       }
     },
-    "call_site_id_set_sha256": "2a38cf43140345fbf24feab21a53c3179d7c91dc70e9cb17d6daf470a6baeca0",
+    "call_site_id_set_sha256": "f955f1ec5c3e8f186e8b29422a714619316addedc34eec776246566b095aec89",
     "call_site_path_set_sha256": "612152c18e6daff98c7d0c3c7d907df8aa7100a8bab45e88a701d08588718d9c",
     "digest_algorithm": "SHA-256 of UTF-8 lexicographically sorted values joined by LF with one trailing LF"
   },
@@ -9594,9 +9594,9 @@
       "resolution_reason": "EXCLUDED_NAME_COLLISION",
       "atomic_sites": [
         {
-          "site_id": "KAFKA-K0-3-CS-018-AC-B68597-E68617",
+          "site_id": "KAFKA-K0-3-CS-018-AC-B68610-E68630",
           "site_kind": "ASSOCIATED_CALL",
-          "source_locator": "bytes 68597..68617; line 2005:62-2005:82",
+          "source_locator": "bytes 68610..68630; line 2005:62-2005:82",
           "source_literal": "Compression::default()",
           "k0_1_symbol_id": null,
           "k0_2_semantic_ids": [],
@@ -17933,7 +17933,7 @@
     "k0_2_ids_without_resolved_call_sites_count": 22,
     "legacy_local_row_only_unknown_k0_1_usage_count": 13,
     "legacy_local_row_only_unknown_k0_2_usage_count": 52,
-    "call_site_id_set_sha256": "2a38cf43140345fbf24feab21a53c3179d7c91dc70e9cb17d6daf470a6baeca0",
+    "call_site_id_set_sha256": "f955f1ec5c3e8f186e8b29422a714619316addedc34eec776246566b095aec89",
     "call_site_path_set_sha256": "612152c18e6daff98c7d0c3c7d907df8aa7100a8bab45e88a701d08588718d9c",
     "policy_or_context_retained_path_count": 162,
     "external_searches_not_run_count": 7,
