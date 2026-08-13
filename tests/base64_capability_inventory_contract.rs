@@ -1927,13 +1927,11 @@ fn dependency_governance_sources_remain_blocking_and_version_skew_is_explicit() 
     assert!(read_repo_file(FUZZ_MANIFEST_PATH).contains("base64 = \"0.22\""));
     assert!(read_repo_file(RAPTORQ_MANIFEST_PATH).contains("base64 = \"0.22\""));
     let excluded_wasm_manifest = read_repo_file("asupersync-wasm/Cargo.toml");
-    assert!(
-        excluded_wasm_manifest.contains(concat!(
-            "asupersync = { version = \"",
-            env!("CARGO_PKG_VERSION"),
-            "\", path = \"..\", default-features = false }"
-        ))
-    );
+    assert!(excluded_wasm_manifest.contains(concat!(
+        "asupersync = { version = \"",
+        env!("CARGO_PKG_VERSION"),
+        "\", path = \"..\", default-features = false }"
+    )));
     assert!(
         read_repo_file("asupersync-wasm/src/lib.rs")
             .contains("Non-canonical Browser Edition binding scaffold.")

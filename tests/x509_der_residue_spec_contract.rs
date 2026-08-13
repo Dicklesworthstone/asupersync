@@ -23,8 +23,7 @@ const A1_RECONCILIATION_PATHS: [&str; 3] = [
     "tests/x509_validation_ownership_inventory_contract.rs",
 ];
 const A1_DERIVED_A2_PATH: &str = "artifacts/x509_standard_verifier_delegation_v1.json";
-const REVIEWED_A2_SHA256: &str =
-    "f7f3b9773f2f1af7b1a0640c627cd3d7f02d3dcf46c9b3f498f4cb251c06074c";
+const REVIEWED_A2_SHA256: &str = "f7f3b9773f2f1af7b1a0640c627cd3d7f02d3dcf46c9b3f498f4cb251c06074c";
 const ROOT_MANIFEST_PATH: &str = "Cargo.toml";
 const REVIEWED_ROOT_MANIFEST_SHA256: &str =
     "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239";
