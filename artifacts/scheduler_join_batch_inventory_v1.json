@@ -425,7 +425,7 @@
       "incumbent_contract": "there is no TaskHandle Drop implementation; the region remains the task owner and quiescence backstop",
       "must_preserve": "handle drop alone does not request cancellation",
       "anchors": [
-        {"path": "src/runtime/task_handle.rs", "line": 63, "fragment": "pub struct TaskHandle<T>"}
+        {"path": "src/runtime/task_handle.rs", "line": 250, "fragment": "pub struct TaskHandle<T>"}
       ]
     },
     {
@@ -435,8 +435,8 @@
       "incumbent_contract": "is_finished observes ready, closed, or terminal_consumed; later consumption returns JoinError::PolledAfterCompletion",
       "must_preserve": "repoll remains typed and is_finished remains non-consuming",
       "anchors": [
-        {"path": "src/runtime/task_handle.rs", "line": 322, "fragment": "pub fn is_finished(&self) -> bool"},
-        {"path": "src/runtime/task_handle.rs", "line": 419, "fragment": "pub fn try_join(&mut self)"}
+        {"path": "src/runtime/task_handle.rs", "line": 543, "fragment": "pub fn is_finished(&self) -> bool"},
+        {"path": "src/runtime/task_handle.rs", "line": 640, "fragment": "pub fn try_join(&mut self)"}
       ]
     },
     {
@@ -446,7 +446,7 @@
       "incumbent_contract": "Scope::join_all and JoinSet::join_all return input or spawn order; JoinSet::join_next returns completion order with earliest-spawned ready tie-break",
       "must_preserve": "a batch producer cannot change collection ordering",
       "anchors": [
-        {"path": "src/cx/scope.rs", "line": 1265, "fragment": "pub async fn join_all<T>("},
+        {"path": "src/cx/scope.rs", "line": 1280, "fragment": "pub async fn join_all<T>("},
         {"path": "src/combinator/join_set.rs", "line": 209, "fragment": "pub async fn join_all"},
         {"path": "src/combinator/join_set.rs", "line": 227, "fragment": "pub async fn join_next"}
       ]
@@ -464,7 +464,7 @@
         {"path": "src/runtime/spawn_mailbox.rs", "line": 901, "fragment": "pub struct SpawnRequest"},
         {"path": "src/runtime/spawn_mailbox.rs", "line": 1247, "fragment": "pub fn enqueue(&self, request: SpawnRequest, now: Time)"},
         {"path": "src/runtime/spawn_mailbox.rs", "line": 1412, "fragment": "pub fn enqueue_and_notify(&self, request: SpawnRequest)"},
-        {"path": "src/cx/cx.rs", "line": 4588, "fragment": "gateway.enqueue_and_notify(request)?"}
+        {"path": "src/cx/cx.rs", "line": 4731, "fragment": "gateway.enqueue_and_notify(request)?"}
       ]
     },
     "consumer_now": {
@@ -486,8 +486,8 @@
         {"path": "src/record/region.rs", "line": 363, "fragment": "pub struct PendingSpawnCounter"},
         {"path": "src/record/region.rs", "line": 391, "fragment": "pub fn reserve(self: &Arc<Self>)"},
         {"path": "src/runtime/state.rs", "line": 3973, "fragment": "pub(crate) fn admit_spawn_request_in"},
-        {"path": "src/runtime/state.rs", "line": 4129, "fragment": "fn finish_send_spawn_admission_in"},
-        {"path": "src/runtime/state.rs", "line": 4187, "fragment": "drop(pending_reservation)"}
+        {"path": "src/runtime/state.rs", "line": 4132, "fragment": "fn finish_send_spawn_admission_in"},
+        {"path": "src/runtime/state.rs", "line": 4190, "fragment": "drop(pending_reservation)"}
       ]
     },
     "join_set_now": {

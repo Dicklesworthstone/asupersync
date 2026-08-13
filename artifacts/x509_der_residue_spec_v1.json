@@ -52,6 +52,16 @@
         "field": "sha256",
         "reviewed_value": "f7f3b9773f2f1af7b1a0640c627cd3d7f02d3dcf46c9b3f498f4cb251c06074c",
         "reason": "The live A2 whole-file identity changes when its excluded A1 content pin is reconciled; the A3 normative projection retains the exact A2 identity independently reviewed for this specification."
+      },
+      "normalized_release_manifest_fields": {
+        "path": "Cargo.toml",
+        "fields": [
+          "sha256",
+          "line_count"
+        ],
+        "reviewed_sha256": "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239",
+        "reviewed_line_count": 1051,
+        "reason": "Package-version and evidence-pin reconciliation changes the live root manifest identity without changing this independently reviewed DER policy."
       }
     },
     "approval_scope": "The complete normative projection: threat model, fact-only API profiles, exact limits and accounting, DER canonicality, duplicate and critical-extension policy, error shape and taxonomy, tests, rollback triggers, and no-claim boundaries.",

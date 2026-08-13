@@ -25,6 +25,10 @@ const A1_RECONCILIATION_PATHS: [&str; 3] = [
 const A1_DERIVED_A2_PATH: &str = "artifacts/x509_standard_verifier_delegation_v1.json";
 const REVIEWED_A2_SHA256: &str =
     "f7f3b9773f2f1af7b1a0640c627cd3d7f02d3dcf46c9b3f498f4cb251c06074c";
+const ROOT_MANIFEST_PATH: &str = "Cargo.toml";
+const REVIEWED_ROOT_MANIFEST_SHA256: &str =
+    "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239";
+const REVIEWED_ROOT_MANIFEST_LINE_COUNT: u64 = 1_051;
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -179,6 +183,19 @@ fn normative_projection(value: &Value) -> Result<Value, String> {
                 "sha256".to_owned(),
                 Value::String(REVIEWED_A2_SHA256.to_owned()),
             );
+        } else if source["path"].as_str() == Some(ROOT_MANIFEST_PATH) {
+            // Package-version and evidence-pin reconciliation changes the root
+            // manifest identity without changing this reviewed DER policy.
+            // Preserve the reviewed manifest identity in the normative
+            // projection while the live source-contract row remains exact.
+            source.insert(
+                "sha256".to_owned(),
+                Value::String(REVIEWED_ROOT_MANIFEST_SHA256.to_owned()),
+            );
+            source.insert(
+                "line_count".to_owned(),
+                Value::from(REVIEWED_ROOT_MANIFEST_LINE_COUNT),
+            );
         }
     }
     Ok(projection)
@@ -223,6 +240,13 @@ fn validate_structure(value: &Value) -> Result<(), String> {
                 "field": "sha256",
                 "reviewed_value": REVIEWED_A2_SHA256,
                 "reason": "The live A2 whole-file identity changes when its excluded A1 content pin is reconciled; the A3 normative projection retains the exact A2 identity independently reviewed for this specification."
+            },
+            "normalized_release_manifest_fields": {
+                "path": ROOT_MANIFEST_PATH,
+                "fields": ["sha256", "line_count"],
+                "reviewed_sha256": REVIEWED_ROOT_MANIFEST_SHA256,
+                "reviewed_line_count": REVIEWED_ROOT_MANIFEST_LINE_COUNT,
+                "reason": "Package-version and evidence-pin reconciliation changes the live root manifest identity without changing this independently reviewed DER policy."
             }
         })
     {
