@@ -79,7 +79,7 @@ The canonical machine projections are:
 
 | Projection | Count | SHA-256 |
 |---|---:|---|
-| Source-pin canonical JSON | 266 | `c6a9a8901eba557287920b76b968bb0a361fd49c778da4e745d0556ee5d1c8a2` |
+| Source-pin canonical JSON | 266 | `7b14c2b95a36360aa9c9c30eb2c0b3c5d2e2270207d8b4785adc026ce70ba7d8` |
 | Unique source-pin paths | 247 | `d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3` |
 | Source-pin overlap paths | 15 | membership is bound by the 34-row projection below |
 | Source-pin rows on overlap paths | 34 | `3a47f8208fe52aeae08491eebcecb5f8491bfd7e2cb9aba37ba4afda697432e3` |

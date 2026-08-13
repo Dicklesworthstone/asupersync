@@ -14,7 +14,7 @@
     "registry_cutover_state": "KEEP_INCUMBENT",
     "gate_decision": "DEFER",
     "gate_state": "TERMINAL",
-    "decision_basis": "The incumbent is spread across 244 Rust files and 555 exact source lines, owns production Condvar and visible guard semantics, and saves four package versions in 48 of 52 canonical graph cells. A safe std-backed replacement remains plausible, but the required 1/8/32/64-core Linux and Apple throughput, p50/p95/p99/p999, fairness, starvation, cancellation-adjacent, allocation, RSS, compile-time, binary-size, and stable-lane comparison receipts do not exist. Missing parity evidence cannot authorize implementation or cutover.",
+    "decision_basis": "The incumbent is spread across 245 Rust files and 557 exact source lines, owns production Condvar and visible guard semantics, and saves four package versions in 48 of 52 canonical graph cells. A safe std-backed replacement remains plausible, but the required 1/8/32/64-core Linux and Apple throughput, p50/p95/p99/p999, fairness, starvation, cancellation-adjacent, allocation, RSS, compile-time, binary-size, and stable-lane comparison receipts do not exist. Missing parity evidence cannot authorize implementation or cutover.",
     "dependency_exit_allowed": false,
     "implementation_children_authorized": false,
     "owner_review_required_to_change": true
@@ -55,8 +55,8 @@
     },
     {
       "path": "README.md",
-      "sha256": "186a9be866dbc48bfed6c8e0416a4d64ea282810fb7bad4cbcd2930ed197093f",
-      "line_count": 2113
+      "sha256": "dcf0576c723ebc821176144c3cc61711cc8dc31e66577a3e10f27c452ac0a8ac",
+      "line_count": 2132
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
@@ -85,8 +85,8 @@
     },
     {
       "path": "src/runtime/state.rs",
-      "sha256": "df558f0d733eb583ed26a6b61c025e8cd671027c8aeea526546c783a48a92f92",
-      "line_count": 10202
+      "sha256": "029541ac95825d834fcab1bb86337f3bef492eed41d15b2fdd49fafd0c163aeb",
+      "line_count": 10190
     },
     {
       "path": "src/service/steer.rs",
@@ -116,9 +116,9 @@
     "excluded_paths": [
       "tests/oslock_inventory_gate_contract.rs"
     ],
-    "matching_file_count": 244,
-    "matching_line_count": 555,
-    "sha256": "eb9eec53b23cf3266272112d4cffb220054378c0d5e41006b5aa62e787c09b89",
+    "matching_file_count": 245,
+    "matching_line_count": 557,
+    "sha256": "f223dd15776d59bd0baf288838c471ccaa6999e4674c743d525f5bd405f39b33",
     "scope_counts": [
       {
         "scope": "benches",
@@ -137,8 +137,8 @@
       },
       {
         "scope": "src",
-        "file_count": 178,
-        "occurrence_count": 427
+        "file_count": 179,
+        "occurrence_count": 429
       },
       {
         "scope": "tests",
@@ -204,8 +204,8 @@
       },
       {
         "workload": "protocol_and_server",
-        "file_count": 8,
-        "occurrence_count": 30
+        "file_count": 9,
+        "occurrence_count": 31
       },
       {
         "workload": "raptorq",
@@ -215,7 +215,7 @@
       {
         "workload": "runtime_scheduler_reactors",
         "file_count": 34,
-        "occurrence_count": 62
+        "occurrence_count": 63
       },
       {
         "workload": "services",
@@ -245,11 +245,11 @@
     ]
   },
   "import_inventory": {
-    "direct_use_statement_count": 179,
+    "direct_use_statement_count": 180,
     "forms": [
       {
         "form": "Mutex",
-        "count": 128
+        "count": 129
       },
       {
         "form": "RwLock",
@@ -473,7 +473,7 @@
     {
       "semantic_id": "OSLOCK-SEM-LOCK-ORDER",
       "state": "PARTIAL",
-      "finding": "Some local orders are documented, including watch send_lock before value, but there is no complete 244-file order graph.",
+      "finding": "Some local orders are documented, including watch send_lock before value, but there is no complete 245-file order graph.",
       "route": "complete lock-order audit"
     },
     {
@@ -661,7 +661,7 @@
     {
       "gap_id": "OSLOCK-A1-GAP-04",
       "state": "ROUTED",
-      "finding": "There is no complete lock-order and recursive-acquisition audit across the 244-file surface.",
+      "finding": "There is no complete lock-order and recursive-acquisition audit across the 245-file surface.",
       "owner": "incumbent lock-order audit",
       "replacement_required": false
     },
@@ -740,7 +740,7 @@
   },
   "no_claim_boundaries": [
     "This inventory does not prove release readiness, broad workspace health, or performance equivalence.",
-    "The focused sync test receipt covers incumbent sync unit tests only; it does not cover all 244 files, all targets, all features, or a candidate replacement.",
+    "The focused sync test receipt covers incumbent sync unit tests only; it does not cover all 245 files, all targets, all features, or a candidate replacement.",
     "The source census proves exact dependency-token coverage at one revision; it does not prove that every lock is correctly ordered or cancellation-safe.",
     "The marginal ledger proves package-graph deltas only and does not prove native-code presence, runtime benefit, or acceptable engineering cost.",
     "DEFER is terminal success for this gate. This artifact does not authorize implementing a wrapper, migrating call sites, removing parking_lot, editing Cargo manifests, or unblocking implementation children.",
