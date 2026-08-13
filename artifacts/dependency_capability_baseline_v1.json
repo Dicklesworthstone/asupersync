@@ -2087,14 +2087,14 @@
       },
       {
         "path": "src/cx/cx.rs",
-        "sha256": "366a56e41bf25eaaad517cece6844ca232e18391727d2604cdbe9ba37848d85d",
-        "line_count": 7617,
+        "sha256": "86cbf99a2487544f94879742829113138d1da1da78040f4c14142f778b346323",
+        "line_count": 7761,
         "role": "one already-public struct, four constructors, and one receiver method guarded by the incumbent attribute"
       },
       {
         "path": "src/cx/scope.rs",
-        "sha256": "176b4340b144f88a40304f55d8afb40f9aa354e92590e6874ccf27636f5a9a57",
-        "line_count": 3529,
+        "sha256": "2455754abf6c51c4fa6a475a4ba5427cb844fc8fda1e5b6d3b3d9f52dc14b11d",
+        "line_count": 3589,
         "role": "three pub(crate) functions in a generic inherent impl guarded by the incumbent attribute"
       },
       {

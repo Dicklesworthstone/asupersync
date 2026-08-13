@@ -44,8 +44,8 @@
     },
     {
       "path": "src/record/task.rs",
-      "sha256": "4b2dc741e4da892376c72c59a1c8a434b4b92f4f4236327db880fecbf4d66a49",
-      "line_count": 3164,
+      "sha256": "1e1b3ecbb182d0ee8c063eae24235ff62442a1473c5d8e9655b438b7dcdf1ed4",
+      "line_count": 3204,
       "role": "TaskState authority, TaskPhaseCell, TaskWakeState, transition writers, and recycle reset"
     },
     {
@@ -74,14 +74,14 @@
     },
     {
       "path": "src/cx/cx.rs",
-      "sha256": "366a56e41bf25eaaad517cece6844ca232e18391727d2604cdbe9ba37848d85d",
-      "line_count": 7617,
+      "sha256": "86cbf99a2487544f94879742829113138d1da1da78040f4c14142f778b346323",
+      "line_count": 7761,
       "role": "checkpoint, cancellation queries, writers, and cancel-waker registrations"
     },
     {
       "path": "src/runtime/task_handle.rs",
-      "sha256": "97aa63d35d0f62daa1ad249e4c292d090467392f68e4e37b8be0e6b61ca9d0e9",
-      "line_count": 1744,
+      "sha256": "4bef44973e925eb925ad59c99c0adbe9a2b0875cb6fc28a86393ed148c83da84",
+      "line_count": 2096,
       "role": "task-handle cancellation publication"
     },
     {
@@ -98,8 +98,8 @@
     },
     {
       "path": "src/runtime/state.rs",
-      "sha256": "df558f0d733eb583ed26a6b61c025e8cd671027c8aeea526546c783a48a92f92",
-      "line_count": 10202,
+      "sha256": "029541ac95825d834fcab1bb86337f3bef492eed41d15b2fdd49fafd0c163aeb",
+      "line_count": 10190,
       "role": "embedded task owner, cancellation propagation, completion, finalizer publication, and snapshots"
     },
     {
@@ -122,8 +122,8 @@
     },
     {
       "path": "src/gen_server.rs",
-      "sha256": "f698c5667301ad826026ba1ce4365935453119c52a42c2f8be93262e4b066e7f",
-      "line_count": 7468,
+      "sha256": "154382747227c9d77ed9869d72ac61799676ed177f678a73f1c5f56c3d98e453",
+      "line_count": 7489,
       "role": "server and server-join abort writers"
     },
     {

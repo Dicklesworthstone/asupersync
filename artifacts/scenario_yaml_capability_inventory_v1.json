@@ -96,7 +96,7 @@
     },
     {
       "path": "frankenlab/Cargo.toml",
-      "sha256": "cee658e83c30d2c54cf9da9d506f40706d057c103529475de196742572b1d11e",
+      "sha256": "7a43a49efd3d1ceeeb992c06aec7e3033c38f4b375c4629d1141059862ec112a",
       "line_count": 33
     },
     {
@@ -126,8 +126,8 @@
     },
     {
       "path": "TESTING_FOR_AGENTS.md",
-      "sha256": "f29e7b43c6baed9b8713ef9d7a237e86434c8184086e92249b2727c3dc9bb070",
-      "line_count": 353
+      "sha256": "1d9bd9cb99dc7176d581e7e8f0ab7a0a30523ac122f58222732db82d326d1a72",
+      "line_count": 387
     },
     {
       "path": "docs/adoption/getting_started.md",
@@ -161,8 +161,8 @@
     },
     {
       "path": "src/conformance/mod.rs",
-      "sha256": "b0097f8efc3f9ac6b1c4c852eb3a0d8e5578256ec05319f3cff4a28e47f27d13",
-      "line_count": 1361
+      "sha256": "8d2bb01c8b038ab65ea3d50f1046a849988f1be70c2b4fae7035cba301d8d2b7",
+      "line_count": 1360
     },
     {
       "path": "src/http/h1/codec.rs",
@@ -211,7 +211,7 @@
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "581386c2990d695598014c8b0d138b9e4997dfd9e57d68f7e225d1fde0a4dc73",
+      "sha256": "2ae8de68673a014fe4ee20d53799d579a437bf6ade6618f01754a380b5c57356",
       "line_count": 3210
     },
     {

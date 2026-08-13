@@ -80,14 +80,14 @@
     "reconciled_paths": [
       {
         "path": "src/runtime/task_handle.rs",
-        "sha256": "97aa63d35d0f62daa1ad249e4c292d090467392f68e4e37b8be0e6b61ca9d0e9",
-        "line_count": 1744,
+        "sha256": "4bef44973e925eb925ad59c99c0adbe9a2b0875cb6fc28a86393ed148c83da84",
+        "line_count": 2096,
         "classification": "CANCELLATION_PUBLICATION_HARDENING_OUTSIDE_JOIN_TERMINAL_SEMANTICS"
       },
       {
         "path": "src/cx/cx.rs",
-        "sha256": "366a56e41bf25eaaad517cece6844ca232e18391727d2604cdbe9ba37848d85d",
-        "line_count": 7617,
+        "sha256": "86cbf99a2487544f94879742829113138d1da1da78040f4c14142f778b346323",
+        "line_count": 7761,
         "classification": "CANCELLATION_PUBLICATION_HARDENING_WITH_JOIN_ANCHORS_PRESERVED"
       },
       {
@@ -134,8 +134,8 @@
     },
     {
       "path": "src/runtime/task_handle.rs",
-      "sha256": "97aa63d35d0f62daa1ad249e4c292d090467392f68e4e37b8be0e6b61ca9d0e9",
-      "line_count": 1744,
+      "sha256": "4bef44973e925eb925ad59c99c0adbe9a2b0875cb6fc28a86393ed148c83da84",
+      "line_count": 2096,
       "role": "canonical TaskHandle and JoinFuture cancellation and terminal semantics"
     },
     {
@@ -146,19 +146,19 @@
     },
     {
       "path": "src/cx/cx.rs",
-      "sha256": "366a56e41bf25eaaad517cece6844ca232e18391727d2604cdbe9ba37848d85d",
-      "line_count": 7617,
+      "sha256": "86cbf99a2487544f94879742829113138d1da1da78040f4c14142f778b346323",
+      "line_count": 7761,
       "role": "public structured spawn producer and take-once completion sender"
     },
     {
       "path": "src/cx/scope.rs",
-      "sha256": "176b4340b144f88a40304f55d8afb40f9aa354e92590e6874ccf27636f5a9a57",
-      "line_count": 3529,
+      "sha256": "2455754abf6c51c4fa6a475a4ba5427cb844fc8fda1e5b6d3b3d9f52dc14b11d",
+      "line_count": 3589,
       "role": "state-threaded structured spawn and input-order join_all"
     },
     {
       "path": "src/combinator/join_set.rs",
-      "sha256": "5bdf899842da239f70a9c0391fb2b072301cf44ea5a493fc6f2bb767f5ddf2f6",
+      "sha256": "caa48c3464136a5b8c268ca9bc1e389169eb4ce6a46074bd2db8c01ff90a023a",
       "line_count": 988,
       "role": "dynamic structured fan-out ordering, cancellation, and drop behavior"
     },
@@ -176,8 +176,8 @@
     },
     {
       "path": "src/runtime/state.rs",
-      "sha256": "df558f0d733eb583ed26a6b61c025e8cd671027c8aeea526546c783a48a92f92",
-      "line_count": 10202,
+      "sha256": "029541ac95825d834fcab1bb86337f3bef492eed41d15b2fdd49fafd0c163aeb",
+      "line_count": 10190,
       "role": "admission result taxonomy, canonical identity, quota rollback, and successor publication"
     },
     {
