@@ -21,7 +21,7 @@
       "bead_id": "asupersync-dep-p1-foundations-upksjk.3",
       "role": "ORACLE_POLICY",
       "path": "artifacts/dependency_oracle_policy_v1.json",
-      "sha256": "2d1bc9710e9894a5b81897f5ab8179621de826744350cb7c263a99930a1d30de"
+      "sha256": "dcdd3136c52d6280cb56fe9ed312612a033e49dec045e1df707ddde9bb2557a0"
     },
     {
       "bead_id": "asupersync-dep-p1-foundations-upksjk.5.4",

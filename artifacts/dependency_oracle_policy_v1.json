@@ -60,31 +60,31 @@
       },
       {
         "path": "conformance/Cargo.toml",
-        "sha256": "46436b9ec65ddb31c175434ad7a10344cb2f25ceeee87b1ff3706ad7cf96addf",
+        "sha256": "005a58f272f823601c4bc66f6e3c43a86894477348bf26123460090f6235df7b",
         "line_count": 213,
         "scope": "workspace-conformance-member"
       },
       {
         "path": "franken_kernel/Cargo.toml",
-        "sha256": "17f784f5ba6d3657f086a00502f429a3fe257fc9779a58048c0194de5fe74c34",
+        "sha256": "d7d3263d5293e63b9df95fdf42538b2d842d12ef76e01cf62af2eb221b8fb626",
         "line_count": 29,
         "scope": "workspace-member"
       },
       {
         "path": "franken_evidence/Cargo.toml",
-        "sha256": "908952759ece7a58025553bb81930bc989e212a9b87914d35e7e28ba59b5edb8",
+        "sha256": "d956cfa4619bab4301f360e970c94513cb9474ea11849e1be837d734a6a21f59",
         "line_count": 31,
         "scope": "workspace-member"
       },
       {
         "path": "franken_decision/Cargo.toml",
-        "sha256": "31a8d32b28dd3c8688f54e90e84591b63043e140af3d52dd882ce7e473d767fd",
+        "sha256": "22b30f5acd126e5875092b0ce1428b3ff1cd30e38757ee4b92b89a5ad2869cbe",
         "line_count": 32,
         "scope": "workspace-member"
       },
       {
         "path": "frankenlab/Cargo.toml",
-        "sha256": "cee658e83c30d2c54cf9da9d506f40706d057c103529475de196742572b1d11e",
+        "sha256": "7a43a49efd3d1ceeeb992c06aec7e3033c38f4b375c4629d1141059862ec112a",
         "line_count": 33,
         "scope": "workspace-member"
       },
@@ -120,8 +120,8 @@
       },
       {
         "path": "tests/conformance/raptorq_differential/Cargo.toml",
-        "sha256": "6e94b40563ab8643b59272655d91132221d65a22c11c8dde604d1728a952ef7c",
-        "line_count": 33,
+        "sha256": "bd40fee112e5012f6799b1b391ba954db1b0e37b4d9008c46957d37d5bdd649e",
+        "line_count": 32,
         "scope": "standalone-conformance-project"
       },
       {
