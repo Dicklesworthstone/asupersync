@@ -13,25 +13,13 @@ expression: json
     "canonical_prefix_layers": 4,
     "canonical_prefix_events": 16
   },
-  "fingerprint": 5286518520354602670,
-  "event_count": 7,
+  "fingerprint": 13207219323233824515,
+  "event_count": 5,
   "canonical_prefix": [
     [
       {
         "kind": 10,
         "primary": 0,
-        "secondary": 0,
-        "tertiary": 0
-      },
-      {
-        "kind": 29,
-        "primary": 17841621336708427690,
-        "secondary": 0,
-        "tertiary": 0
-      },
-      {
-        "kind": 29,
-        "primary": 17841621336708427690,
         "secondary": 0,
         "tertiary": 0
       }

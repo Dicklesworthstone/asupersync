@@ -346,6 +346,12 @@ fn golden_lab_runtime_deterministic_scheduling() {
     assert_golden("lab_runtime_deterministic", trace1, 0xA198_598F_C7DC_D58B);
 }
 
+// Terminal TaskHandle publication is runtime bookkeeping, not a user-authored
+// trace annotation. Before the non-cancellable terminal publisher, each of the
+// two completed tasks leaked an internal `oneshot::reserve creating permit`
+// annotation into this fixture as `UserTrace`. The cancellation repair routes
+// that publication through the Cx-independent sender, so the canonical trace
+// now contains only region creation, task publication, and task completion.
 const GOLDEN_TRACE_FIXTURE_LAB: &str = r#"{
   "schema_version": 1,
   "config": {
@@ -357,25 +363,13 @@ const GOLDEN_TRACE_FIXTURE_LAB: &str = r#"{
     "canonical_prefix_layers": 4,
     "canonical_prefix_events": 16
   },
-  "fingerprint": 5286518520354602670,
-  "event_count": 7,
+  "fingerprint": 13207219323233824515,
+  "event_count": 5,
   "canonical_prefix": [
     [
       {
         "kind": 10,
         "primary": 0,
-        "secondary": 0,
-        "tertiary": 0
-      },
-      {
-        "kind": 29,
-        "primary": 17841621336708427690,
-        "secondary": 0,
-        "tertiary": 0
-      },
-      {
-        "kind": 29,
-        "primary": 17841621336708427690,
         "secondary": 0,
         "tertiary": 0
       }
