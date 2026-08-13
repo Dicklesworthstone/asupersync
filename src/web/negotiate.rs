@@ -1,6 +1,6 @@
 //! Content negotiation and error handler layer.
 //!
-//! Provides [`ContentNegotiation`] for parsing and negotiating `Accept` headers,
+//! Provides content-negotiation helpers for parsing and negotiating `Accept` headers,
 //! and [`ErrorHandlerMiddleware`] for converting unhandled errors and panics
 //! into appropriate response formats based on content negotiation.
 //!

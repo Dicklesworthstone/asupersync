@@ -113,7 +113,7 @@ pub struct ShutdownStats {
     ///
     /// `None` for connection-level-only drains (no request supervision was
     /// attached). The report carries the in-flight request trajectory and the
-    /// [`ProgressCertificate`](crate::cancel::progress_certificate::ProgressCertificate)
+    /// [`ProgressCertificate`]
     /// verdict for the drain.
     pub drain_report: Option<GracefulDrainReport>,
 }
@@ -223,7 +223,7 @@ impl std::fmt::Display for GracefulDrainReport {
 /// This type is intentionally transport-agnostic: the HTTP/server layers
 /// (D2.2+) supply the in-flight count (e.g. `RegionRecord::child_count`) and
 /// the clock; the certificate math lives entirely in
-/// [`ProgressCertificate`](crate::cancel::ProgressCertificate).
+/// [`ProgressCertificate`].
 #[derive(Debug)]
 pub struct GracefulDrainTracker {
     certificate: ProgressCertificate,

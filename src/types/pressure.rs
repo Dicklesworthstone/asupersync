@@ -42,7 +42,7 @@ impl SystemPressure {
     /// Create with an explicit initial headroom value.
     ///
     /// Headroom is clamped to `[0.0, 1.0]`. NaN inputs are treated as
-    /// `0.0` (fully degraded — fail-safe), see [`sanitise_headroom`].
+    /// `0.0` (fully degraded — fail-safe), see `sanitise_headroom`.
     #[must_use]
     #[inline]
     pub fn with_headroom(headroom: f32) -> Self {
@@ -65,7 +65,7 @@ impl SystemPressure {
     /// Update the headroom value.
     ///
     /// Headroom is clamped to `[0.0, 1.0]`. NaN inputs are treated as
-    /// `0.0` (fully degraded — fail-safe), see [`sanitise_headroom`].
+    /// `0.0` (fully degraded — fail-safe), see `sanitise_headroom`.
     #[inline]
     pub fn set_headroom(&self, headroom: f32) {
         let clamped = sanitise_headroom(headroom);

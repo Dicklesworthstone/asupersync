@@ -1,6 +1,6 @@
 //! Opt-in plan capture with **real futures** plus a direct interpreter.
 //!
-//! The structural [`PlanDag`](super::PlanDag) in [`super`] describes combinator
+//! The structural [`PlanDag`] in [`super`] describes combinator
 //! shapes for the e-graph rewrite engine, but its leaves are labels — it cannot
 //! be *executed*. This module adds the missing half: a [`PlanCapture`] builder
 //! whose leaves carry type-erased [`BoxFut`] slots, and an interpreter
@@ -11,7 +11,7 @@
 //! # Design invariants
 //!
 //! * **Reuse, never reimplement.** Race nesting reuses the same
-//!   [`SelectAll`](crate::combinator::SelectAll) future that `Cx::race` drives;
+//!   [`SelectAll`] future that `Cx::race` drives;
 //!   timeouts reuse [`crate::time::timeout`]; joins mirror the `join!` macro's
 //!   concurrent `poll_fn` loop verbatim. A second scheduling engine would be a
 //!   correctness disaster, so there is none — only the existing internals.
@@ -37,7 +37,7 @@
 //!   interior node (the `Box::pin`'d recursive `eval` future);
 //! * one extra `poll_fn`/`Future` indirection layer per interior node (each
 //!   wake re-polls through the boxed `eval` future);
-//! * the one-time arena→tree conversion ([`ExecPlan::into_owned`]) at the start
+//! * the one-time arena→tree conversion (`ExecPlan::into_owned`) at the start
 //!   of [`ExecPlan::execute`], which is `O(nodes)` and allocates the owned tree.
 //!
 //! There is no per-poll allocation and no scheduler involvement beyond what the
@@ -49,7 +49,7 @@
 //!
 //! `race`, `join`, `timeout`, `first_ok`, and `quorum`. The first three map
 //! 1:1 onto [`super::PlanNode`] and can be re-emitted as a structural
-//! [`PlanDag`](super::PlanDag) via [`ExecPlan::try_structure`] for the rewrite
+//! [`PlanDag`] via [`ExecPlan::try_structure`] for the rewrite
 //! engine to consume (tjrmwz.2). `first_ok`/`quorum` execute here but have no
 //! structural IR node yet; `try_structure` reports that honestly.
 
@@ -190,7 +190,7 @@ pub enum PlanExecError {
     /// aggregate value (its success cannot be classified leaf-wise).
     UnexpectedShape,
     /// A `first_ok`/`quorum` node is present, so the plan has no structural
-    /// [`PlanDag`](super::PlanDag) representation yet (tjrmwz.2 IR gap).
+    /// [`PlanDag`] representation yet (tjrmwz.2 IR gap).
     NotRepresentable {
         /// The node with no structural counterpart.
         node: NodeId,
@@ -540,7 +540,7 @@ impl<'a, T> ExecPlan<'a, T> {
         self.nodes.len()
     }
 
-    /// Re-emits the structural [`PlanDag`](super::PlanDag) for the rewrite engine.
+    /// Re-emits the structural [`PlanDag`] for the rewrite engine.
     ///
     /// `leaf`/`join`/`race`/`timeout` map 1:1 onto [`super::PlanNode`].
     /// `first_ok`/`quorum` have no structural node yet, so this returns

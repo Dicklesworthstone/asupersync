@@ -591,9 +591,9 @@ pub trait GenServer: Send + 'static {
 ///
 /// This is a **linear obligation token**: it **must** be consumed by calling
 /// [`send()`](Self::send) or [`abort()`](Self::abort). Dropping without
-/// consuming triggers a panic via [`ObligationToken<SendPermit>`].
+/// consuming triggers a panic via `ObligationToken<SendPermit>`.
 ///
-/// Backed by [`TrackedOneshotPermit`](session::TrackedOneshotPermit) from
+/// Backed by [`TrackedOneshotPermit`] from
 /// `channel::session`,
 /// making "silent reply drop" structurally impossible.
 pub struct Reply<R> {
@@ -1890,10 +1890,11 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
     }
 
     /// Spawns a named GenServer in this scope, registering it in the given
-    /// [`NameRegistry`].
+    /// [`NameRegistry`](crate::cx::NameRegistry).
     ///
     /// This combines [`spawn_gen_server`](Self::spawn_gen_server) with
-    /// [`NameRegistry::register`] into a single atomic operation: the name is
+    /// [`NameRegistry::register`](crate::cx::NameRegistry::register) into a
+    /// single atomic operation: the name is
     /// acquired *after* the server task is created but *before* it starts
     /// processing messages.
     ///
@@ -1964,7 +1965,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
 // Named GenServer handle
 // ============================================================================
 
-/// Error from [`Scope::spawn_named_gen_server`].
+/// Error from [`Scope::spawn_named_gen_server`](crate::cx::Scope::spawn_named_gen_server).
 #[derive(Debug)]
 pub enum NamedSpawnError {
     /// The underlying task spawn failed.
@@ -2006,7 +2007,8 @@ impl std::error::Error for ReleaseNameError {}
 
 /// Handle to a running **named** GenServer.
 ///
-/// Wraps a [`GenServerHandle`] together with a [`NameLease`] from the
+/// Wraps a [`GenServerHandle`] together with a
+/// [`NameLease`](crate::cx::NameLease) from the
 /// registry. The lease is an obligation (drop bomb): callers must resolve it
 /// by calling [`release_name`](Self::release_name) or
 /// [`abort_lease`](Self::abort_lease) before dropping.

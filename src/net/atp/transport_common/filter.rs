@@ -202,7 +202,7 @@ impl FilterSet {
     /// directories, is excluded.
     ///
     /// Use this to filter a file-only source walk (where directories are not
-    /// separate entries) — it yields the same result as walking with [`select`]
+    /// separate entries) — it yields the same result as walking with [`Self::select`]
     /// without needing directory entries. Rescuing a file under an excluded tree
     /// still requires including its ancestor directories first (rsync semantics).
     #[must_use]

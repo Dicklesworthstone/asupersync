@@ -1337,7 +1337,7 @@ impl RegionRecord {
 
     /// Resolves a `RRef` using a pre-validated access witness.
     ///
-    /// The witness must have been obtained from this region via [`access_witness`].
+    /// The witness must have been obtained from this region via [`Self::access_witness`].
     /// Returns an error if the witness region doesn't match.
     pub fn rref_get_with<T: Clone + 'static>(
         &self,

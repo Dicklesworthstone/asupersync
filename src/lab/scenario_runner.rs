@@ -1,7 +1,6 @@
 //! Scenario runner for FrankenLab deterministic testing (bd-1hu19.2).
 //!
-//! Bridges [`Scenario`](super::scenario::Scenario) YAML specifications to
-//! [`LabRuntime`](super::runtime::LabRuntime) execution, providing:
+//! Bridges [`Scenario`] YAML specifications to [`LabRuntime`] execution, providing:
 //!
 //! - Timed fault injection based on scenario fault events
 //! - Oracle filtering (only check oracles listed in the scenario)

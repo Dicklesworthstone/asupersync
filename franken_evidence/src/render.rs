@@ -391,7 +391,7 @@ fn render_calibration_gauge(out: &mut String, score: f64) {
 
 /// Sliding window for tracking previous entries per component.
 ///
-/// Used by [`level3`] to compute diffs between successive decisions
+/// Used by [`DiffContext::level3`] to compute diffs between successive decisions
 /// from the same component.
 #[derive(Default)]
 pub struct DiffContext {

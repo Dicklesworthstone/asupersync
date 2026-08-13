@@ -17,7 +17,7 @@
 //!
 //! This provides:
 //! - **Zero allocations** after initial Vec capacity is established
-//! - **Better cache locality** for heap traversal (compact Vec<TaskId>)
+//! - **Better cache locality** for heap traversal (compact `Vec<TaskId>`)
 //! - **O(1) removal** by task ID (via stored heap_index)
 //! - **O(log n) push/pop** with fewer cache misses than AoS
 //!

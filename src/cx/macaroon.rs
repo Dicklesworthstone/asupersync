@@ -55,7 +55,8 @@
 //!
 //! # Evidence Logging
 //!
-//! Capability verification events are logged to an [`EvidenceSink`]
+//! Capability verification events are logged to an
+//! [`EvidenceSink`](crate::evidence_sink::EvidenceSink)
 //! with `component="cx_macaroon"`.
 //!
 //! # Reference
@@ -556,7 +557,7 @@ impl fmt::Debug for MacaroonSignature {
 ///
 /// [`verify`](Self::verify) compares the candidate against the active slot
 /// first via constant-time equality (inherited from
-/// [`MacaroonSignature::PartialEq`]); if that fails and a retired signature
+/// [`PartialEq`]); if that fails and a retired signature
 /// is present, it compares against the retired slot. The active-first
 /// ordering keeps the steady-state cost at one comparison.
 #[derive(Clone, Debug)]

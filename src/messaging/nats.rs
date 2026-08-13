@@ -2475,7 +2475,7 @@ impl NatsClient {
 
     /// Publish a message with NATS v1 headers and a reply-to subject.
     ///
-    /// Wire format (per https://docs.nats.io/reference/reference-protocols/nats-protocol#hpub):
+    /// Wire format (per <https://docs.nats.io/reference/reference-protocols/nats-protocol#hpub>):
     ///
     /// ```text
     /// HPUB <subject> [reply-to] <header-bytes> <total-bytes>\r\n

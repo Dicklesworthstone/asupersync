@@ -3,9 +3,9 @@
 //! Today every spawn must hold the global `RuntimeState` lock while
 //! `create_task` runs. The spawn mailbox is the first half of the fix
 //! (br-asupersync-dx-core-api-v2-u1z5hn.1): callers pre-allocate a
-//! *provisional* [`TaskId`] from a sharded allocator, package the erased
-//! future plus its spawn parameters into a [`SpawnRequest`], and enqueue it
-//! onto the [`SpawnMailbox`] **without touching `RuntimeState`**. The
+//! *provisional* `TaskId` from a sharded allocator, package the erased
+//! future plus its spawn parameters into a `SpawnRequest`, and enqueue it
+//! onto the `SpawnMailbox` **without touching `RuntimeState`**. The
 //! scheduler performs admission (region liveness check, task-record
 //! insertion, obligation hookup) at dispatch time under the state lock it
 //! already holds; that half lands separately
@@ -17,7 +17,7 @@
 //! Arena-allocated `TaskId`s carry small generations: fresh slots start at
 //! generation 0 and the generation increments once per slot reuse. The
 //! mailbox mints ids in a disjoint namespace by setting the generation MSB
-//! ([`SPAWN_ID_GENERATION_TAG`]): an arena id would need 2^31 reuses of a
+//! (`SPAWN_ID_GENERATION_TAG`): an arena id would need 2^31 reuses of a
 //! single slot to collide, which is unreachable in practice. Layout:
 //!
 //! ```text
@@ -35,13 +35,13 @@
 //!
 //! # Capacity and backpressure
 //!
-//! The mailbox is **unbounded** ([`GlobalFifoQueue`] wraps a lock-free
+//! The mailbox is **unbounded** (`GlobalFifoQueue` wraps a lock-free
 //! `SegQueue` on native targets, a mutexed `VecDeque` on wasm). `enqueue`
 //! never blocks and never drops a request — silent drop is forbidden by the
 //! spawn-mailbox contract. Backpressure is an *admission-side* concern:
 //! region quotas reject spawn requests with an explicit `SpawnError` when
 //! they are admitted, and region close resolves every pending request through
-//! [`SpawnRequest::resolve_cancelled`] so the completion slot always learns
+//! `SpawnRequest::resolve_cancelled` so the completion slot always learns
 //! the outcome. The task-handle cancellation-command lane is also unbounded.
 //! Producers coalesce identical or weaker reasons per handle and consumers
 //! coalesce each drained batch, but neither lane has a hard in-memory backlog
@@ -50,7 +50,8 @@
 //!
 //! # Trace ordering
 //!
-//! [`SpawnMailbox::enqueue`] emits [`TraceEventKind::TaskSpawnEnqueued`]
+//! `SpawnMailbox::enqueue` emits
+//! [`TraceEventKind::TaskSpawnEnqueued`](crate::trace::event::TraceEventKind::TaskSpawnEnqueued)
 //! *before* the request is published to the queue. The trace buffer
 //! serializes sequence allocation with insertion, so the enqueue event's
 //! sequence number is always ordered before any admission-side event for the
@@ -200,7 +201,7 @@ pub type SpawnBoxFuture = Pin<Box<dyn Future<Output = Outcome<(), ()>> + Send>>;
 pub type SpawnFactoryFn = Box<dyn FnOnce(crate::cx::Cx) -> SpawnBoxFuture + Send>;
 
 /// Identity of an admitted task, published to producers via
-/// [`SpawnRequest::with_admitted_slot`].
+/// `SpawnRequest::with_admitted_slot`.
 #[derive(Debug)]
 pub struct AdmittedTask {
     /// Canonical arena task id (replaces the provisional mailbox id).
@@ -255,8 +256,8 @@ impl AdmittedTask {
 /// One-shot slot for publishing an admitted task's canonical identity.
 ///
 /// Admission reserves the slot before mutating `RuntimeState`. Keeping the
-/// underlying [`OnceLock`] private prevents a second request from racing an
-/// external `set` between that preflight and identity publication.
+/// underlying [`std::sync::OnceLock`] private prevents a second request from
+/// racing an external `set` between that preflight and identity publication.
 pub struct AdmittedTaskSlot {
     admitted: OnceLock<AdmittedTask>,
     reserved: AtomicBool,
@@ -1239,7 +1240,8 @@ impl SpawnMailbox {
     ///
     /// Never blocks and never drops (the queue is unbounded; see the module
     /// docs for the backpressure contract). Emits
-    /// [`TraceEventKind::TaskSpawnEnqueued`] *before* publishing the request
+    /// [`TraceEventKind::TaskSpawnEnqueued`](crate::trace::event::TraceEventKind::TaskSpawnEnqueued)
+    /// *before* publishing the request
     /// so the enqueue event is sequenced ahead of any admission-side event.
     ///
     /// `now` is the caller's current time (explicit, per the runtime-wide

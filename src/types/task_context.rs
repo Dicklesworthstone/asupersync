@@ -1,9 +1,10 @@
-//! Internal task context state shared between TaskRecord and Cx.
+//! Internal task context state shared between [`crate::record::TaskRecord`] and
+//! [`crate::cx::Cx`].
 //!
 //! This module provides core types for managing task execution context,
 //! including cancellation masking, progress tracking, and capability budgets.
-//! The types here bridge the runtime's internal [`TaskRecord`] bookkeeping
-//! with the user-facing [`Cx`] API.
+//! The types here bridge the runtime's internal [`crate::record::TaskRecord`]
+//! bookkeeping with the user-facing [`crate::cx::Cx`] API.
 //!
 //! # Key Components
 //!
@@ -698,7 +699,7 @@ impl CheckpointState {
     /// `crate::time::wall_now()` directly, which is ambient authority
     /// (escapes capability-scoped time and breaks deterministic replay
     /// under [`crate::lab::LabRuntime`]). Production callers MUST use
-    /// [`Self::record_at(cx.now())`] instead, threading time through the
+    /// [`Self::record_at`] with `cx.now()` instead, threading time through the
     /// `Cx` they already hold. This shim is gated to test/test-internals
     /// to keep ergonomics for inline tests while preventing production
     /// regressions.
@@ -892,8 +893,9 @@ pub struct CxInner {
     /// Stable fast cancellation envelope shared with every `Cx` clone and
     /// runtime-owned cancellation producer for this context.
     cancellation: std::sync::Arc<CxCancellationState>,
-    /// Fast-path checkpoint count: incremented when [`Cx::checkpoint`] takes
-    /// the no-cancellation fast path (br-asupersync-is2xg0). Drained into
+    /// Fast-path checkpoint count: incremented when
+    /// [`crate::cx::Cx::checkpoint`] takes the no-cancellation fast path
+    /// (br-asupersync-is2xg0). Drained into
     /// [`CheckpointState::checkpoint_count`] on the next slow-path call or
     /// when the materialised view is requested.
     pub fast_path_count: std::sync::atomic::AtomicU64,

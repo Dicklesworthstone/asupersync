@@ -2085,7 +2085,7 @@ fn validate_bond_expected_donors(expected: u32) -> Result<(), String> {
 ///
 /// Explicit `--advertise` wins (and must be a real routable ip:port). Without
 /// it, the `--listen` IP is reused only when it is routable (never
-/// 0.0.0.0/[::]); the port comes from the actually-bound listener so
+/// `0.0.0.0`/`[::]`); the port comes from the actually-bound listener so
 /// `--listen` port 0 still advertises the real port. Inference from the SSH
 /// connection is deliberately not offered — see the `--advertise` help.
 fn bond_pull_control_advertise(

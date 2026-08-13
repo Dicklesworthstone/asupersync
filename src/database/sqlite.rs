@@ -1465,7 +1465,7 @@ impl SqliteConnectionInner {
 ///
 /// [`Cx`]: crate::cx::Cx
 pub struct SqliteConnection {
-    /// Inner connection state (behind Arc<Mutex> for sharing).
+    /// Inner connection state (behind `Arc<Mutex<_>>` for sharing).
     inner: Arc<Mutex<SqliteConnectionInner>>,
     /// Handle to the blocking pool.
     pool: BlockingPoolHandle,

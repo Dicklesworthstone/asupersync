@@ -104,8 +104,8 @@ pub enum ProtobufError {
 
 /// A codec for encoding and decoding Protocol Buffer messages using prost.
 ///
-/// This codec implements the [`Codec`] trait and can be used with [`FramedCodec`]
-/// for gRPC communication.
+/// This codec implements the [`Codec`] trait and can be used with
+/// [`crate::grpc::FramedCodec`] for gRPC communication.
 ///
 /// # Type Parameters
 ///
@@ -438,7 +438,7 @@ pub trait ProtoMessage: Default + Send + Sized + 'static {
 
 /// A generated Protocol Buffers `oneof` value.
 ///
-/// Implement this trait with [`asupersync::ProtoOneof`] rather than by hand.
+/// Implement this trait with `#[derive(asupersync::ProtoOneof)]` rather than by hand.
 /// The derive validates every variant tag at compile time and generates the
 /// field dispatch used by a containing [`ProtoMessage`] derive.
 ///

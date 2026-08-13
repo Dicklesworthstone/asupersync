@@ -168,7 +168,7 @@ impl Http1Config {
     }
 
     /// Legacy method for backwards compatibility (br-asupersync-scxixg).
-    /// Converts Option<Vec<String>> to HostPolicy: None becomes AllowAll,
+    /// Converts `Option<Vec<String>>` to `HostPolicy`: `None` becomes `AllowAll`,
     /// Some(hosts) becomes AllowList.
     #[must_use]
     pub fn allowed_hosts(mut self, hosts: Option<Vec<String>>) -> Self {

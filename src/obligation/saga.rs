@@ -22,7 +22,7 @@
 //!      all preceding outputs to be settled before execution.
 //!
 //! 3. [`MonotoneSagaExecutor`] runs batches, merges lattice state, and
-//!    logs execution to the [`EvidenceLedger`].
+//!    logs execution to the [`franken_evidence::EvidenceLedger`].
 //!
 //! # Lattice Trait
 //!

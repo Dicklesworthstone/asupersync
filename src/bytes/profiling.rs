@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Global allocation counters for profiling.
 pub struct AllocationMetrics {
-    /// Total Bytes allocations (Arc<Vec<u8>>)
+    /// Total Bytes allocations (`Arc<Vec<u8>>`)
     pub bytes_allocations: AtomicU64,
     /// Total BytesMut allocations
     pub bytes_mut_allocations: AtomicU64,

@@ -1,12 +1,12 @@
 //! Channel Waker Deduplication Verifier
 //!
-//! This oracle verifies that the Arc<AtomicBool> waker deduplication pattern
+//! This oracle verifies that the `Arc<AtomicBool>` waker deduplication pattern
 //! in channels correctly prevents spurious wakeups while ensuring no lost wakeups.
 //! Incorrect implementation can cause deadlocks where tasks aren't properly woken.
 //!
 //! # Core Patterns Verified
 //!
-//! 1. **Queued State Consistency**: Arc<AtomicBool> accurately reflects queued state
+//! 1. **Queued State Consistency**: `Arc<AtomicBool>` accurately reflects queued state
 //! 2. **No Lost Wakeups**: Tasks that should be woken are actually woken
 //! 3. **No Spurious Wakeups**: Tasks aren't woken unnecessarily
 //! 4. **Race-Free Registration**: Waker registration doesn't race with wakeup

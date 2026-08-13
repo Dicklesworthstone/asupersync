@@ -494,7 +494,7 @@ impl std::error::Error for LoserDrainViolation {}
 /// terminal `Outcome` consistent with L-LOSER-DRAINED.
 ///
 /// Constructed only via [`verify_losers_drained`] (the explicit check) or
-/// [`assert_losers_drained`] (the panicking variant used inside the result
+/// `assert_losers_drained` (the panicking variant used inside the result
 /// constructors).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use = "construct a LosersDrainedWitness only as part of an actual drain check"]

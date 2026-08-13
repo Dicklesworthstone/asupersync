@@ -8,7 +8,7 @@
 //! | Type | Direction | Use Case |
 //! |------|-----------|----------|
 //! | [`IntoHttpBody<B>`] | asupersync→hyper | Expose asupersync body as `http_body::Body` |
-//! | [`FromHttpBody<B>`] | hyper→asupersync | Consume `http_body::Body` as asupersync bytes |
+//! | `FromHttpBody<B>` | hyper→asupersync | Consume `http_body::Body` as asupersync bytes |
 //!
 //! # Invariants
 //!

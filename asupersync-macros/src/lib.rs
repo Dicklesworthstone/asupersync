@@ -118,12 +118,12 @@ pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Creates a structured concurrency scope.
 ///
-/// The `scope!` macro creates a [`Scope`](asupersync::Scope) binding for the
+/// The `scope!` macro creates an `asupersync::Scope` binding for the
 /// current `Cx` region and makes it available as `scope` inside the body.
 ///
 /// Today this is an ergonomic binding helper, not a fresh child-region
 /// boundary. For actual child-region ownership and quiescence, call
-/// [`Scope::region`](asupersync::Scope::region) explicitly.
+/// `asupersync::Scope::region` explicitly.
 ///
 /// # Syntax
 ///
@@ -162,7 +162,7 @@ pub fn scope(input: TokenStream) -> TokenStream {
 
 /// Spawns a task within the current scope.
 ///
-/// The `spawn!` macro expands to [`Scope::spawn_registered`], so it requires
+/// The `spawn!` macro expands to `asupersync::Scope::spawn_registered`, so it requires
 /// ambient `__state` and `__cx` bindings in addition to the target `Scope`.
 ///
 /// The easiest supported path is to use it inside `scope!(..., state: ..., { ... })`.
@@ -267,9 +267,9 @@ pub fn join_all(input: TokenStream) -> TokenStream {
 /// drained**.
 ///
 /// The `race!` macro expands to the drain-correct
-/// [`Cx::race_drained*`](asupersync::Cx::race_drained) family: each branch is
+/// `asupersync::Cx::race_drained*` family: each branch is
 /// spawned as a region task and resolved through
-/// [`Scope::race_all`](asupersync::Scope::race_all), so every losing branch is
+/// `asupersync::Scope::race_all`, so every losing branch is
 /// protocol-cancelled **and drained** (awaited to termination) before the macro
 /// returns. This is the drain guarantee that differentiates `race!` from a
 /// plain drop-the-losers select.
@@ -277,7 +277,7 @@ pub fn join_all(input: TokenStream) -> TokenStream {
 /// Because branches run as spawned tasks, each branch and its output must be
 /// `Send + 'static`, and `cx` must be a runtime-wired context carrying spawn
 /// authority. For a lower-level drop-on-cancel select over non-`'static`
-/// inline futures, call [`Cx::race`](asupersync::Cx::race) directly.
+/// inline futures, call `asupersync::Cx::race` directly.
 ///
 /// # Syntax
 ///
@@ -297,7 +297,7 @@ pub fn join_all(input: TokenStream) -> TokenStream {
 /// return until each loser task has terminated, so obligations and finalizers
 /// held by a loser are resolved rather than abandoned. (On the `timeout:` path,
 /// an elapsed deadline abandons the whole race by drop, matching
-/// [`Cx::race_drained_timeout`](asupersync::Cx::race_drained_timeout).)
+/// `asupersync::Cx::race_drained_timeout`.)
 ///
 /// # Example
 ///
@@ -327,7 +327,7 @@ pub fn race(input: TokenStream) -> TokenStream {
 /// **Blocking, drain-correct** (no `else` arm): each branch is rewritten into
 /// `async move { let <pat> = <future>.await; <handler> }`, and the homogeneous
 /// per-branch list routes through
-/// [`Cx::race_drained`](asupersync::Cx::race_drained). The first branch to win
+/// `asupersync::Cx::race_drained`. The first branch to win
 /// resolves the `select!`; every loser is protocol-cancelled **and drained**
 /// (awaited to termination) before the macro returns. Resolves to
 /// `Result<R, JoinError>`. Branch futures and `R` must be `Send + 'static`, and
@@ -343,7 +343,7 @@ pub fn race(input: TokenStream) -> TokenStream {
 ///
 /// Every `select!` is replay-deterministic: the same seed always produces the
 /// same winner. The blocking form resolves through the runtime drain engine
-/// ([`Scope::race_all`](asupersync::Scope::race_all)), which breaks ties among
+/// (`asupersync::Scope::race_all`), which breaks ties among
 /// same-turn-ready branches with the lab's **seeded** scheduler RNG — fixed by
 /// the seed, not by source position. The `else` form polls in strict **source
 /// order** and takes the first ready branch. The `biased` keyword is accepted
@@ -450,7 +450,7 @@ pub fn lab_test(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Runs a deterministic lab-runtime body across a seed sweep.
 ///
 /// The body is invoked once per seed with a fresh
-/// [`LabRuntime`](asupersync::lab::LabRuntime). The generated test drains each
+/// `asupersync::lab::LabRuntime`. The generated test drains each
 /// run to quiescence, aggregates trace equivalence-class coverage, and reports
 /// failing seeds with replay-friendly reproducer commands.
 ///

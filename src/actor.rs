@@ -551,7 +551,7 @@ pub enum SupervisorMessage {
 /// - Self-termination controls
 /// - Parent reference for escalation
 ///
-/// All [`Cx`] methods are available through [`Deref`].
+/// All [`Cx`] methods are available through [`std::ops::Deref`].
 ///
 /// # Example
 ///

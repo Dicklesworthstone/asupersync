@@ -457,7 +457,7 @@ pub fn test_lab_from_context(ctx: &TestContext) -> LabRuntime {
 ///
 /// This is the escape hatch for tests that need direct control over a [`LabRuntime`].
 /// Callers can configure the runtime, drive it with
-/// [`crate::conformance::LabRuntimeTarget::block_on`], or step it manually.
+/// [`crate::conformance::ConformanceTarget::block_on`], or step it manually.
 pub fn lab_with_config<F, R>(f: F) -> R
 where
     F: FnOnce(&mut LabRuntime) -> R,

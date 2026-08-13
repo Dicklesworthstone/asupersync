@@ -445,8 +445,8 @@ impl Stealer {
 
     /// Returns a bounded hint for how many tasks are currently stealable.
     ///
-    /// This scans only the same front prefix that [`steal`] and
-    /// [`steal_batch`] inspect, so victim selection does not over-rank queues
+    /// This scans only the same front prefix that [`Self::steal`] and
+    /// [`Self::steal_batch`] inspect, so victim selection does not over-rank queues
     /// whose visible backlog is entirely local-only work.
     #[inline]
     #[must_use]

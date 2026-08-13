@@ -1035,7 +1035,7 @@ impl<T> ResponseStream<T> {
     /// next `push` is guaranteed a free slot. A server-streaming handler that
     /// gates each `push` behind `poll_reserve` is flow-controlled: it cannot
     /// outrun a slow consumer, and the buffer never exceeds
-    /// [`MAX_STREAM_BUFFERED`](crate::grpc::MAX_STREAM_BUFFERED).
+    /// [`MAX_STREAM_BUFFERED`].
     ///
     /// Returns:
     /// - `Poll::Ready(Ok(()))` when at least one slot is free,

@@ -786,7 +786,7 @@ impl Drop for ConnectionCancelWaker {
 impl ServerRequestRegion {
     /// Mints a request region through the runtime boundary.
     ///
-    /// Uses [`Runtime::current_request_cx_with_budget`] so the request Cx
+    /// Uses `Runtime::current_request_cx_with_budget` so the request Cx
     /// inherits the runtime's drivers and capability mask (non-escalating;
     /// see br-asupersync-ovztin). Returns `None` when no runtime is
     /// installed on the current thread — callers must preserve their

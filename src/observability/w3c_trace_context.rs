@@ -1,6 +1,6 @@
 //! W3C Trace Context propagation for cross-runtime boundaries.
 //!
-//! Implements W3C Trace Context specification (https://w3c.github.io/trace-context/)
+//! Implements the W3C Trace Context specification (<https://w3c.github.io/trace-context/>)
 //! for span-context propagation between HTTP servers and gRPC clients.
 //!
 //! # Key Features

@@ -1150,7 +1150,7 @@ impl PgRow {
 /// Streaming query result iterator for bounded-memory row processing.
 ///
 /// DEFECT FIX: This provides streaming iteration over query results to address
-/// the memory usage issue where all rows are collected into Vec<PgRow> before
+/// the memory usage issue where all rows are collected into `Vec<PgRow>` before
 /// returning (lines 3524, 5436). With this API, memory usage is O(1) per row
 /// instead of O(result_set_size).
 ///
@@ -2764,7 +2764,7 @@ struct PreparedStatementCache {
     stats: PreparedCacheStats,
 }
 
-/// Snapshot of [`PreparedStatementCache`] effectiveness counters
+/// Snapshot of `PreparedStatementCache` effectiveness counters
 /// (br-asupersync-server-stack-hardening-eeexl1.5).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PreparedCacheStats {
@@ -8394,10 +8394,12 @@ mod hex {
     }
 }
 
-/// Reference [`AsyncConnectionManager`] implementation for [`PgConnection`].
+/// Reference [`crate::database::pool::AsyncConnectionManager`] implementation
+/// for [`PgConnection`].
 ///
 /// Wraps a [`PgConnectOptions`] used to mint new connections; the pool calls
-/// [`Self::connect`] to add a connection and [`Self::release_check`] on every
+/// [`crate::database::pool::AsyncConnectionManager::connect`] to add a connection and
+/// [`crate::database::pool::AsyncConnectionManager::release_check`] on every
 /// return-to-pool to decide whether the connection is safe to reuse.
 ///
 /// br-asupersync-a1x452 + br-asupersync-t4wfzb: pre-fix, no
@@ -8419,10 +8421,11 @@ mod hex {
 ///     potentially returning stale results from cached statement
 ///     handles.
 ///
-/// This manager's [`Self::release_check`] returns `false` if EITHER
-/// flag is set, signalling the pool to drop rather than reuse the
+/// This manager's [`crate::database::pool::AsyncConnectionManager::release_check`]
+/// returns `false` if EITHER flag is set, signalling the pool to drop rather than reuse the
 /// connection. The pool then closes the connection (via
-/// [`Self::disconnect`]) and constructs a fresh one on next demand —
+/// [`crate::database::pool::AsyncConnectionManager::disconnect`]) and
+/// constructs a fresh one on next demand —
 /// the structurally-correct shape per the documented contract at
 /// `pool.rs::ConnectionManager::release_check` and the asupersync
 /// "no obligation leaks" invariant.
@@ -8494,7 +8497,8 @@ impl crate::database::pool::AsyncConnectionManager for PgConnectionManager {
     ///   * inner stream already closed — defensive check.
     ///
     /// Returning `false` signals the pool to drop the connection via
-    /// [`Self::disconnect`] rather than enqueue it for reuse.
+    /// [`crate::database::pool::AsyncConnectionManager::disconnect`] rather
+    /// than enqueue it for reuse.
     fn release_check(&self, conn: &mut Self::Connection) -> bool {
         if conn.inner.closed {
             return false;

@@ -1,7 +1,7 @@
 #![allow(clippy::cast_possible_wrap)]
 //! Session-typed two-phase channels with obligation tracking.
 //!
-//! This module wraps the existing [`mpsc`](super::mpsc) and [`oneshot`](super::oneshot)
+//! This module wraps the existing [`mpsc`] and [`oneshot`]
 //! channels with obligation-tracked senders that enforce the reserve/commit protocol
 //! at the type level. Dropping a [`TrackedPermit`] or [`TrackedOneshotPermit`] without
 //! calling `send()` or `abort()` triggers a drop-bomb panic via

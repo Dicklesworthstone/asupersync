@@ -2158,8 +2158,8 @@ impl RuntimeConfig {
     ///
     /// Production callers that want host-scaled parallelism opt in EXPLICITLY
     /// by passing [`ambient_default_worker_threads`] to
-    /// [`RuntimeBuilder::worker_threads`], making the wall-CPU dependency
-    /// visible at the call site.
+    /// [`crate::runtime::RuntimeBuilder::worker_threads`], making the wall-CPU
+    /// dependency visible at the call site.
     pub const DEFAULT_WORKER_THREADS: usize = 4;
 
     pub(crate) const fn default_worker_threads() -> usize {

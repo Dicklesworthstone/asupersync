@@ -872,7 +872,7 @@ impl FabricConsumerCursor {
     ///
     /// The `not_after_tick` from the ticket's expiry is stored alongside the
     /// handle so that stale revocations can be pruned once the ticket clock
-    /// advances past them (see [`prune_expired_revocations`]).
+    /// advances past them (see [`Self::prune_expired_revocations`]).
     pub fn revoke_read_ticket(
         &mut self,
         handle: ReadDelegationRevocationHandle,
@@ -884,7 +884,7 @@ impl FabricConsumerCursor {
     /// Remove revocation entries whose tickets have already expired.
     ///
     /// After the ticket clock advances past a ticket's `not_after_tick`, the
-    /// ticket is already rejected by the expiry check in [`validate_ticket`],
+    /// ticket is already rejected by the expiry check in `ReadDelegationTicket::validate`,
     /// so the revocation entry is redundant and can be safely pruned.
     pub fn prune_expired_revocations(&mut self) {
         let clock = self.ticket_clock;

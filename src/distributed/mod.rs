@@ -12,7 +12,7 @@
 //!
 //! # Modules
 //!
-//! - [`snapshot`]: Serializable region state snapshots
+//! - `snapshot`: Serializable region state snapshots
 //! - [`encoding`]: RaptorQ encoding pipeline for snapshots
 //! - [`assignment`]: Symbol-to-replica assignment strategies
 //! - [`consistent_hash`]: Deterministic consistent hash ring

@@ -1,20 +1,20 @@
 //! WebSocket HTTP upgrade handler for the web framework.
 //!
-//! Provides [`WebSocketUpgrade`] as an extractor that validates WebSocket
-//! upgrade requests and produces the 101 Switching Protocols response.
-//! After the upgrade, the connection transitions into a [`WebSocket`]
+//! Provides [`crate::web::websocket::WebSocketUpgrade`] as an extractor that
+//! validates WebSocket upgrade requests and produces the 101 Switching Protocols response.
+//! After the upgrade, the connection transitions into a `ServerWebSocket`
 //! for bidirectional message exchange.
 //!
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::web::websocket::{WebSocketUpgrade, WebSocket, Message};
+//! use asupersync::web::websocket::{Message, ServerWebSocket, WebSocketUpgrade};
 //!
 //! async fn ws_handler(upgrade: WebSocketUpgrade) -> Response {
 //!     upgrade.protocols(["chat"]).into_response()
 //! }
 //!
-//! // After upgrade, use the WebSocket:
+//! // After upgrade, use the ServerWebSocket:
 //! // while let Some(msg) = ws.recv(&cx).await? { ... }
 //! ```
 //!
@@ -23,12 +23,11 @@
 //! The upgrade flow follows RFC 6455:
 //!
 //! 1. Client sends `GET` with `Upgrade: websocket` and `Sec-WebSocket-Key`
-//! 2. [`WebSocketUpgrade::from_request`] validates the headers
-//! 3. Handler calls [`WebSocketUpgrade::into_response`] to produce 101
+//! 2. [`FromRequest::from_request`] validates the headers
+//! 3. Handler calls [`IntoResponse::into_response`] to produce 101
 //! 4. After 101 is written, the transport switches to WebSocket framing
 //!
-//! The actual bidirectional communication uses [`WebSocket`], which wraps
-//! the existing `net::websocket::ServerWebSocket` with an ergonomic API.
+//! The actual bidirectional communication uses `ServerWebSocket`.
 
 use crate::net::websocket::{WebSocketAcceptor, compute_accept_key};
 

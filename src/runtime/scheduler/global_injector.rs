@@ -500,8 +500,8 @@ impl GlobalInjector {
     /// Returns `true` if at least one entry was removed. Used when a task is
     /// promoted from timed to a runnable lane: a stale timed entry left behind
     /// would be a duplicate-dispatch hazard because the global timed heap,
-    /// unlike the per-worker [`super::priority::PriorityScheduler`], has no
-    /// `scheduled`-set tombstoning to lazily skip it on pop. The heap has no
+    /// unlike the per-worker [`crate::runtime::scheduler::PriorityScheduler`],
+    /// has no `scheduled`-set tombstoning to lazily skip it on pop. The heap has no
     /// key-based removal, so a matching removal filters and rebuilds it.
     pub fn remove_timed(&self, task: TaskId) -> bool {
         if self.timed_count.load(Ordering::Relaxed) == 0 {

@@ -5,7 +5,7 @@
 //!
 //! 1. **Supermartingale Property**: E[E_n | E_{n-1}] ≤ E_{n-1} under H0
 //! 2. **Ville's Inequality**: P(∃t: E_t ≥ 1/α | H0) ≤ α
-//! 3. **Likelihood Ratio Validity**: E[LR] ≤ 1 under exponential null
+//! 3. **Likelihood Ratio Validity**: `E[LR] ≤ 1` under exponential null
 //! 4. **Alert Threshold**: False positive rate bounds
 //! 5. **Numerical Stability**: No overflow/underflow in realistic scenarios
 
@@ -273,7 +273,7 @@ fn deterministic_exponential_null_sample(
     sample as u64
 }
 
-/// MART-001: Verify likelihood ratio normalization maintains E[LR] ≤ 1.
+/// MART-001: Verify likelihood ratio normalization maintains `E[LR] ≤ 1`.
 fn test_likelihood_ratio_expectation() -> ConformanceResult {
     // Mathematical requirement: For exponential(μ) observations under H0,
     // the likelihood ratio E[max(1, X/μ) / (1 + 1/e)] ≤ 1.

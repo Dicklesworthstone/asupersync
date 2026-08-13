@@ -30,7 +30,8 @@ fn fallback_pending<T>(cx: &Context<'_>) -> Poll<io::Result<T>> {
 ///
 /// This half does not participate in reactor registration - it busy-loops on
 /// `WouldBlock` by waking immediately. For proper async I/O with reactor
-/// integration, use the owned split via [`UnixStream::into_split`].
+/// integration, use the owned split via
+/// [`UnixStream::into_split`](crate::net::unix::UnixStream::into_split).
 #[derive(Debug)]
 pub struct ReadHalf<'a> {
     inner: &'a net::UnixStream,
@@ -87,7 +88,8 @@ impl AsyncReadVectored for ReadHalf<'_> {
 ///
 /// This half does not participate in reactor registration - it busy-loops on
 /// `WouldBlock` by waking immediately. For proper async I/O with reactor
-/// integration, use the owned split via [`UnixStream::into_split`].
+/// integration, use the owned split via
+/// [`UnixStream::into_split`](crate::net::unix::UnixStream::into_split).
 #[derive(Debug)]
 pub struct WriteHalf<'a> {
     inner: &'a net::UnixStream,

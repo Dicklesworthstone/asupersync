@@ -1273,14 +1273,12 @@ impl HttpClient {
     /// (br-asupersync-server-stack-hardening-eeexl1.1.3).
     ///
     /// The effective deadline is the **meet** of the remaining ambient
-    /// budget, the client's configured [`request_timeout`]
-    /// (`HttpClientConfig::request_timeout`), and `timeout` — the
+    /// budget, the client's configured [`HttpClientConfig::request_timeout`],
+    /// and `timeout` — the
     /// tightest bound wins, so a per-call override can never extend past
     /// the caller's budget deadline. On expiry the in-flight exchange is
     /// dropped (the pooled connection is discarded, not reused) and
     /// [`ClientError::DeadlineExceeded`] is returned.
-    ///
-    /// [`request_timeout`]: Self::request_timeout
     pub async fn request_with_timeout(
         &self,
         cx: &Cx,

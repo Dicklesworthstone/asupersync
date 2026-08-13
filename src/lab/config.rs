@@ -211,7 +211,7 @@ impl LabConfig {
     /// flaky in CI. The asupersync core invariant 'lab replay is
     /// byte-identical given the same seed' is silently violated.
     ///
-    /// Prefer [`LabConfig::new(seed)`] with an explicit seed for
+    /// Prefer [`LabConfig::new`] with an explicit `seed` for
     /// every scenario where replay determinism matters (which is
     /// almost every CI test, every snapshot test, every crashpack
     /// reproduction). The constructor is retained ONLY for
@@ -234,8 +234,8 @@ impl LabConfig {
     /// br-asupersync-eij5e4: wall-clock-derived LabConfig with a
     /// deliberately conspicuous name. Use this only when the test or
     /// experiment genuinely cannot be replayed (e.g., a one-off
-    /// soak run), and prefer [`LabConfig::new(seed)`] anywhere
-    /// determinism matters.
+    /// soak run), and prefer [`LabConfig::new`] with an explicit `seed`
+    /// anywhere determinism matters.
     ///
     /// The `_unstable` suffix follows the asupersync convention for
     /// APIs whose behaviour is intentionally non-deterministic, so

@@ -1058,7 +1058,7 @@ impl fmt::Debug for SecureSaslPassword {
 /// with a constant-time comparison, and keep authentication on `SASL_SSL`
 /// instead of introducing a plaintext SASL transport.
 ///
-/// **SECURITY**: Password is stored using [`SecureSaslPassword`] which implements
+/// **SECURITY**: Password is stored using `SecureSaslPassword`, which implements
 /// [`ZeroizeOnDrop`] to securely clear sensitive data from memory when dropped.
 #[derive(Clone, PartialEq, Eq)]
 pub struct KafkaSaslConfig {

@@ -468,7 +468,7 @@ impl DynamicTableIndex {
 /// Uses `VecDeque` so that front insertion (`push_front`) is O(1) amortized
 /// rather than the O(n) of `Vec::insert(0, ...)`.
 ///
-/// br-asupersync-d04pmz: stores `DynamicTableEntry` (Arc<str>) internally
+/// br-asupersync-d04pmz: stores `DynamicTableEntry` (`Arc<str>`) internally
 /// rather than `Header` (String) so post-insert clones cost atomic
 /// refcount bumps instead of full String allocs.
 ///
@@ -568,9 +568,9 @@ impl DynamicTable {
     /// Get an entry by index (1-indexed, after static table).
     ///
     /// br-asupersync-d04pmz: returns an owned Header (allocating fresh
-    /// Strings from the internal Arc<str>). Callers that want to avoid
+    /// Strings from the internal `Arc<str>`). Callers that want to avoid
     /// this allocation should be migrated to use the index-only path
-    /// or a future Arc<str>-aware accessor.
+    /// or a future `Arc<str>`-aware accessor.
     #[must_use]
     pub fn get(&self, index: usize) -> Option<Header> {
         if index == 0 || index > self.entries.len() {

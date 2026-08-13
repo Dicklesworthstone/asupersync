@@ -299,8 +299,8 @@ struct LinkRecord {
 ///
 /// Three indexes are maintained for efficient lookup:
 /// - `records`: LinkRef → LinkRecord (primary storage)
-/// - `task_index`: TaskId → Vec<LinkRef> (find all links involving a task)
-/// - `region_index`: RegionId → Vec<LinkRef> (region-close cleanup)
+/// - `task_index`: `TaskId` → `Vec<LinkRef>` (find all links involving a task)
+/// - `region_index`: `RegionId` → `Vec<LinkRef>` (region-close cleanup)
 ///
 /// Since links are bidirectional, each link appears in `task_index` for both
 /// task_a and task_b, and in `region_index` for both region_a and region_b

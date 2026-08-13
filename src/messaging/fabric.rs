@@ -2271,7 +2271,7 @@ impl Fabric {
     ///
     /// For [`DeliveryClass::EphemeralInteractive`] the permit is
     /// lightweight.  For durable classes, pass an [`ObligationLedger`] to
-    /// [`reserve_publish_durable`] instead, which allocates an obligation
+    /// [`Self::reserve_publish_durable`] instead, which allocates an obligation
     /// token that participates in region drain.
     #[allow(clippy::unused_async)]
     pub async fn reserve_publish(

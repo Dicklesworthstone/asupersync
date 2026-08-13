@@ -1310,7 +1310,7 @@ impl<Caps> Cx<Caps> {
     /// Attaches a Macaroon capability token to this context.
     ///
     /// The token is stored in an `Arc` for cheap cloning. Child contexts
-    /// created via [`restrict`](Self::restrict) or [`retype`](Self::retype)
+    /// created via [`restrict`](Self::restrict) or `retype`
     /// inherit the macaroon.
     #[must_use]
     pub fn with_macaroon(mut self, token: MacaroonToken) -> Self {
@@ -1446,7 +1446,7 @@ impl<Caps> Cx<Caps> {
     /// Attenuate with a time limit: the token expires at `deadline_ms`.
     ///
     /// Convenience wrapper around [`attenuate`](Self::attenuate) with
-    /// [`CaveatPredicate::TimeBefore`].
+    /// [`CaveatPredicate::TimeBefore`](crate::cx::CaveatPredicate::TimeBefore).
     ///
     /// Returns `None` if no macaroon is attached.
     #[must_use]
@@ -2548,7 +2548,7 @@ impl<Caps> Cx<Caps> {
     /// Returns the current time from the configured timer driver, falling back
     /// to wall-clock when no driver is installed.
     ///
-    /// Unlike [`now`], this method does not require the `HasTime` capability.
+    /// Unlike `now`, this method does not require the `HasTime` capability.
     /// It is intended for observability/diagnostic code that wants replayable
     /// timestamps in lab mode without threading a `HasTime`-capable `Cx`
     /// through. Production behavior is identical to `now`.
@@ -4034,7 +4034,7 @@ where
     /// # Cancellation result
     ///
     /// If cancellation is requested before the child future's first poll, the
-    /// handle resolves with task-level [`JoinError::Cancelled`](crate::runtime::JoinError::Cancelled).
+    /// handle resolves with task-level [`JoinError::Cancelled`].
     /// Once user code has started polling, a value it returns after explicitly
     /// acknowledging an attributed cancellation is preserved as the successful
     /// outer join result. This lets cancellation-aware operations report their
@@ -4047,7 +4047,8 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`SpawnError::RuntimeUnavailable`] when this Cx carries no
+    /// Returns [`SpawnError::RuntimeUnavailable`](crate::runtime::SpawnError::RuntimeUnavailable)
+    /// when this Cx carries no
     /// spawn gateway or region counter (e.g. built by a harness without
     /// runtime wiring). Admission-time denials (region closing, quota)
     /// resolve through the returned handle as `JoinError::Cancelled`.
@@ -4141,7 +4142,8 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`SpawnError::RuntimeUnavailable`] when this Cx carries no
+    /// Returns [`SpawnError::RuntimeUnavailable`](crate::runtime::SpawnError::RuntimeUnavailable)
+    /// when this Cx carries no
     /// spawn gateway, or when `scope` carries no pending-spawn counter for
     /// its region (e.g. a scope built without runtime wiring whose region
     /// differs from this context's). Admission-time denials (region
@@ -4243,11 +4245,12 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`SpawnError::RuntimeUnavailable`] when this Cx carries no
+    /// Returns [`SpawnError::RuntimeUnavailable`](crate::runtime::SpawnError::RuntimeUnavailable)
+    /// when this Cx carries no
     /// spawn gateway, or when `scope` carries no pending-spawn counter for
     /// its region (see [`Cx::spawn_in`]). Admission-time denials resolve
     /// through the returned handle as
-    /// [`JoinError::Cancelled`](crate::runtime::JoinError::Cancelled).
+    /// [`JoinError::Cancelled`].
     pub fn spawn_registered_in<F, Fut, P>(
         &self,
         scope: &crate::cx::Scope<'_, P>,
@@ -4286,7 +4289,8 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`SpawnError::RuntimeUnavailable`] when this Cx carries no
+    /// Returns [`SpawnError::RuntimeUnavailable`](crate::runtime::SpawnError::RuntimeUnavailable)
+    /// when this Cx carries no
     /// spawn gateway or region counter. Admission-time denials (region
     /// closing, quota) resolve through the returned handle as
     /// `JoinError::Cancelled`. Never panics.
@@ -4320,7 +4324,8 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`SpawnError::RuntimeUnavailable`] when this Cx carries no
+    /// Returns [`SpawnError::RuntimeUnavailable`](crate::runtime::SpawnError::RuntimeUnavailable)
+    /// when this Cx carries no
     /// spawn gateway, or when `scope` carries no pending-spawn counter for
     /// its region (see [`Cx::spawn_in`]). Admission-time denials resolve
     /// through the returned handle as `JoinError::Cancelled`. Never panics.
@@ -4364,11 +4369,14 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`SpawnError::LocalSchedulerUnavailable`] when the calling
+    /// Returns
+    /// [`SpawnError::LocalSchedulerUnavailable`](crate::runtime::SpawnError::LocalSchedulerUnavailable)
+    /// when the calling
     /// thread is not a runtime worker (local spawns require an owner
     /// worker; this includes the lab runtime and blocking-pool threads —
     /// unlike the legacy path this never panics). Returns
-    /// [`SpawnError::RuntimeUnavailable`] when this Cx carries no spawn
+    /// [`SpawnError::RuntimeUnavailable`](crate::runtime::SpawnError::RuntimeUnavailable)
+    /// when this Cx carries no spawn
     /// gateway or region counter. Admission-time denials (region closing,
     /// quota) resolve through the returned handle as
     /// `JoinError::Cancelled`.
@@ -4410,7 +4418,8 @@ where
     /// # Errors
     ///
     /// As [`Cx::spawn_local`], plus
-    /// [`SpawnError::RuntimeUnavailable`] when `scope` carries no
+    /// [`SpawnError::RuntimeUnavailable`](crate::runtime::SpawnError::RuntimeUnavailable)
+    /// when `scope` carries no
     /// pending-spawn counter for its region (see [`Cx::spawn_in`]).
     pub fn spawn_local_in<F, Fut, P>(
         &self,

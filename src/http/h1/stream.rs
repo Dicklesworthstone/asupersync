@@ -1578,7 +1578,7 @@ impl ChunkedEncoder {
     /// Encodes a data chunk into the chunked format.
     ///
     /// Empty data is a no-op — the zero-length chunk is reserved as the
-    /// stream terminator and must only be emitted by [`encode_final`].
+    /// stream terminator and must only be emitted by [`Self::encode_final`].
     #[must_use]
     pub fn encode_chunk(data: &[u8]) -> BytesMut {
         let mut buf = BytesMut::with_capacity(data.len() + 32);

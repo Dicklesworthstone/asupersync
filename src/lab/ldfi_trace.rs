@@ -20,7 +20,8 @@
 //! 2. **Per-resource correlation** — events that share a resource handle (I/O
 //!    token, obligation id, timer id, monitor/link ref) are linked: the request
 //!    or grant happens-before the later delivery on the same handle.
-//! 3. **Logical clocks** — when events carry a [`LogicalTime`], every strictly
+//! 3. **Logical clocks** — when events carry a
+//!    [`LogicalTime`](crate::trace::distributed::LogicalTime), every strictly
 //!    `Before` pair becomes an edge. Vector clocks can establish this relation;
 //!    scalar Lamport and hybrid timestamps cannot prove causality by themselves.
 //!    This is the cross-task happens-before machinery shared with

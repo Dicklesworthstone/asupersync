@@ -30,7 +30,7 @@ pub trait TimeSource: Send + Sync {
 /// Wall clock time source for production use.
 ///
 /// Uses `std::time::Instant` internally, converting to our `Time` type.
-/// The epoch is the shared process epoch (see [`super::sleep::process_epoch`]),
+/// The epoch is the shared process epoch (see `sleep::process_epoch`),
 /// NOT a fresh `Instant::now()` per instance, so that `WallClock::now()` and
 /// `wall_now()`'s fallback path return the same `Time` for the same wall
 /// moment. This keeps deadlines computed via `wall_now()` (e.g. request
@@ -48,7 +48,7 @@ impl WallClock {
     /// All `WallClock` instances share one epoch (the first wall-clock time
     /// source or `wall_now()` fallback to run claims it). This guarantees the
     /// production timer driver and `wall_now()` agree, preventing skewed
-    /// deadline evaluation. See [`super::sleep::process_epoch`].
+    /// deadline evaluation. See `sleep::process_epoch`.
     #[must_use]
     pub fn new() -> Self {
         Self {

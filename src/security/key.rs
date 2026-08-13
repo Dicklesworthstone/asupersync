@@ -215,7 +215,7 @@ impl AuthKey {
     ///
     /// For known-strong byte sources (e.g. HMAC outputs in the
     /// macaroon caveat chain — by construction uniformly random),
-    /// use [`Self::from_hmac_derived`] for HMAC-derived sources.
+    /// use `Self::from_hmac_derived` for HMAC-derived sources.
     /// That constructor is `pub(crate)` to prevent external code from
     /// accidentally importing the bypass path.
     #[inline]

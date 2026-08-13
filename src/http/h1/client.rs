@@ -36,7 +36,7 @@ const MAX_INFORMATIONAL_RESPONSES: usize = 8;
 ///
 /// This is the mirror of [`Http1Codec`](super::Http1Codec) which decodes
 /// requests and encodes responses. The client codec is used with
-/// [`Framed`] for client-side connections.
+/// [`Framed`](crate::codec::Framed) for client-side connections.
 ///
 /// # Limits
 ///

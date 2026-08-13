@@ -23,7 +23,8 @@
 //! # Browser Integration
 //!
 //! On `wasm32` targets, the coordinator and endpoint integrate with the
-//! [`BrowserReactor`] through its `register_message_port()` API, delivering
+//! [`BrowserReactor`](crate::runtime::reactor::BrowserReactor) through its
+//! `register_message_port()` API, delivering
 //! events via the reactor's token-based readiness model.
 
 use std::collections::VecDeque;

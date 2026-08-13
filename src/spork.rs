@@ -1738,7 +1738,7 @@ pub mod prelude {
 ///
 /// # Severity
 ///
-/// All variants carry a [`SporkSeverity`] classification that is monotone:
+/// All variants carry an [`error::SporkSeverity`] classification that is monotone:
 /// a failure that was classified as `Permanent` by its origin domain will
 /// never be downgraded by wrapping it in `SporkError`.
 ///

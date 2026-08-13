@@ -150,8 +150,8 @@ impl AuthenticationTag {
     /// all-zero sentinel that [`Self::zero`] produces. Consumer code
     /// that needs to fail-closed against unauthenticated symbols
     /// (or call out the zero-sentinel shape in diagnostics) checks
-    /// this before treating an [`AuthenticatedSymbol`] as actually
-    /// authenticated.
+    /// this before treating an [`crate::security::AuthenticatedSymbol`] as
+    /// actually authenticated.
     #[inline]
     #[must_use]
     pub const fn is_zero(&self) -> bool {

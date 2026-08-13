@@ -162,7 +162,8 @@ impl HashRing {
     /// per node and an explicit hash salt.
     ///
     /// br-asupersync-rnybb1: `seed` SHOULD be unique per deployment
-    /// (e.g., sourced from [`crate::util::OsEntropy::next_u64`] at
+    /// (e.g., sourced from [`crate::util::EntropySource::next_u64`] on
+    /// [`crate::util::OsEntropy`] at
     /// startup) so that an attacker cannot pre-compute keys that
     /// collide on a known seed. Tests, lab runs, and any caller that
     /// requires byte-for-byte ring reproducibility should pass a

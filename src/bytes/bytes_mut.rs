@@ -192,7 +192,7 @@ impl BytesMut {
     /// shared backing storage for `BytesMut` (mirroring `Bytes`), this
     /// method may need to clone in the shared case to preserve the
     /// `Vec<u8>` exclusive-ownership contract — but the API contract
-    /// remains "consume self, return owned Vec<u8>".
+    /// remains "consume self, return owned `Vec<u8>`".
     #[inline]
     #[must_use]
     pub fn into_vec(mut self) -> Vec<u8> {

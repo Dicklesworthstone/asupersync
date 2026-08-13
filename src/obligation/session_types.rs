@@ -428,7 +428,8 @@ impl<R, T, S> Chan<R, Send<T, S>> {
     /// Send a value (pure typestate mode, no transport).
     ///
     /// In pure typestate mode, the value is discarded and only the state
-    /// transition is tracked. Use [`send_async`] for transport-backed channels.
+    /// transition is tracked. Use [`Chan::send_async`] for transport-backed
+    /// channels.
     pub fn send(self, _value: T) -> Chan<R, S> {
         self.transition()
     }
@@ -498,7 +499,7 @@ impl<R, T, S> Chan<R, Recv<T, S>> {
     /// Receive a value (pure typestate mode, no transport).
     ///
     /// In pure typestate mode, the caller provides the value. Use
-    /// [`recv_async`] for transport-backed channels.
+    /// [`Chan::recv_async`] for transport-backed channels.
     pub fn recv(self, value: T) -> (T, Chan<R, S>) {
         (value, self.transition())
     }

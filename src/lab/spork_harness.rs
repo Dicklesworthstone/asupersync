@@ -69,7 +69,8 @@ impl SporkAppHarness {
     /// Create a new harness by compiling and starting the given [`AppSpec`].
     ///
     /// The app is immediately started under the lab runtime. Use
-    /// [`run_until_idle`], [`run_until_quiescent`], or [`run_to_report`]
+    /// [`Self::run_until_idle`], [`Self::run_until_quiescent`], or
+    /// [`Self::run_to_report`]
     /// to drive execution.
     pub fn new(config: LabConfig, app: AppSpec) -> Result<Self, HarnessError> {
         let mut runtime = LabRuntime::new(config);

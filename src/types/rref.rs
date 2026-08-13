@@ -238,7 +238,7 @@ impl std::error::Error for RRefError {}
 
 /// Capability witness proving access rights to a specific region's heap.
 ///
-/// Constructed exclusively by [`RegionRecord::access_witness`] when the region
+/// Constructed exclusively by [`crate::record::RegionRecord::access_witness`] when the region
 /// is in a non-terminal state. External code cannot forge a witness because
 /// the constructor is `pub(crate)`.
 ///

@@ -568,7 +568,7 @@ impl NativeQuicConnection {
     /// Configure the maximum number of remotely-initiated streams (per
     /// direction) this connection will accept from the wire (RFC 9000 §4.6
     /// `MAX_STREAMS`). Bounds memory against a peer that opens unbounded
-    /// streams; defaults to [`DEFAULT_MAX_REMOTE_STREAMS`] per direction.
+    /// streams; defaults to `DEFAULT_MAX_REMOTE_STREAMS` per direction.
     pub fn set_remote_stream_limits(&mut self, max_remote_bidi: u64, max_remote_uni: u64) {
         let max_remote_bidi = max_remote_bidi.min(VARINT_MAX);
         let max_remote_uni = max_remote_uni.min(VARINT_MAX);

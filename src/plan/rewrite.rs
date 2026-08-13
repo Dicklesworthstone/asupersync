@@ -254,9 +254,9 @@ pub struct RewriteRuleSchema {
 /// Rewrite rules available for plan DAGs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RewriteRule {
-    /// Associativity for joins: Join[Join[a,b], c] -> Join[a,b,c].
+    /// Associativity for joins: `Join[Join[a,b], c] -> Join[a,b,c]`.
     JoinAssoc,
-    /// Associativity for races: Race[Race[a,b], c] -> Race[a,b,c].
+    /// Associativity for races: `Race[Race[a,b], c] -> Race[a,b,c]`.
     RaceAssoc,
     /// Commutativity for joins (deterministic canonical order).
     JoinCommute,

@@ -1,7 +1,7 @@
 //! Operator SLO policy bundle schema and fail-closed validation.
 //!
 //! SLO policy bundles are deterministic operator inputs. They describe service
-//! objectives that later compiler beads can map into [`Budget`](crate::types::Budget),
+//! objectives that later compiler beads can map into [`Budget`],
 //! admission thresholds, brownout tiers, and no-win fallback receipts.
 
 use super::budget::Budget;

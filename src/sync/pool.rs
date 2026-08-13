@@ -529,7 +529,7 @@ impl<R> PooledResource<R> {
     /// stored-procedure left an open transaction, etc.) but still needs
     /// to use the wrapper through the rest of an error-handling scope.
     /// The subsequent `Drop` (e.g. via `?`-propagation) routes through
-    /// [`discard_inner`] instead of [`return_inner`], so the broken
+    /// `discard_inner` instead of `return_inner`, so the broken
     /// resource never re-enters the idle pool.
     ///
     /// Idempotent — calling twice is a no-op. (br-asupersync-ob62ki)

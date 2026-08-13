@@ -471,7 +471,7 @@ impl TlsConnectorBuilder {
     /// close. Set as a side effect of
     /// [`Self::enable_env_cert_loading`]. Production callers SHOULD
     /// set this explicitly. Use
-    /// [`Self::insecure_add_root_certificate`] for the rare cases
+    /// the test-only `Self::insecure_add_root_certificate` for the rare cases
     /// where you intentionally want a non-CA cert in the trust
     /// store (e.g., pinning a self-signed test cert in a sandbox).
     #[must_use]
@@ -725,7 +725,7 @@ impl TlsConnectorBuilder {
     /// silent-trust-bypass vector where a misconfigured operator
     /// adds their own server's leaf cert to the trust store.
     ///
-    /// Use [`Self::insecure_add_root_certificate`] to bypass the
+    /// Use the test-only `Self::insecure_add_root_certificate` to bypass the
     /// gate when you intentionally want a non-CA cert in the trust
     /// store (rare; only legitimate for pinning a self-signed test
     /// cert in a sandbox).

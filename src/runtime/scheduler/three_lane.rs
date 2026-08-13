@@ -1832,7 +1832,7 @@ impl ThreeLaneScheduler {
     ///
     /// The caller MUST call
     /// [`install_pending_cancel_dispatch_coordinator`](Self::install_pending_cancel_dispatch_coordinator)
-    /// (or otherwise install this scheduler's [`WorkerCoordinator`] into the
+    /// (or otherwise install this scheduler's `WorkerCoordinator` into the
     /// state that mints deferred cancellation batches) **before worker
     /// threads start parking**. Without the coordinator, a deferred cancel
     /// batch enqueued while every worker is parked would set the readiness
@@ -2097,7 +2097,7 @@ impl ThreeLaneScheduler {
         ))
     }
 
-    /// Installs this scheduler's [`WorkerCoordinator`] as the parked-worker
+    /// Installs this scheduler's `WorkerCoordinator` as the parked-worker
     /// notifier for deferred cancellation batches minted by `state`
     /// (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2, row T02).
     ///

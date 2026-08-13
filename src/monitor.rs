@@ -212,8 +212,8 @@ struct MonitorRecord {
 ///
 /// Three indexes are maintained for efficient lookup:
 /// - `by_ref`: MonitorRef → MonitorRecord (primary)
-/// - `by_monitored`: TaskId → Vec<MonitorRef> (find watchers of a terminated task)
-/// - `by_watcher_region`: RegionId → Vec<MonitorRef> (region-close cleanup)
+/// - `by_monitored`: `TaskId` → `Vec<MonitorRef>` (find watchers of a terminated task)
+/// - `by_watcher_region`: `RegionId` → `Vec<MonitorRef>` (region-close cleanup)
 #[derive(Debug)]
 #[allow(clippy::struct_field_names)]
 pub struct MonitorSet {

@@ -1027,7 +1027,7 @@ impl Drop for TaskSpawnEffects {
     }
 }
 
-/// Outcome of [`RuntimeState::admit_spawn_request`].
+/// Outcome of `RuntimeState::admit_spawn_request`.
 ///
 /// Not `Debug`: the denied arm carries the request parts, whose erased
 /// future and completion slots are opaque.
@@ -1341,7 +1341,7 @@ pub(crate) enum RegionLifecycleEffect {
     },
 }
 
-/// Outcome of [`RuntimeState::admit_local_spawn_request_in`]
+/// Outcome of `RuntimeState::admit_local_spawn_request_in`
 /// (br-asupersync-i9y5wb / A2.2a).
 ///
 /// Mirrors [`SpawnAdmission`] for the owner-pinned local lane; the

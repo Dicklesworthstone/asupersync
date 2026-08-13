@@ -653,7 +653,7 @@ impl MySqlRow {
 /// Streaming query result iterator for bounded-memory row processing.
 ///
 /// DEFECT FIX: This provides streaming iteration over MySQL query results to address
-/// the memory usage issue where all rows are collected into Vec<MySqlRow> before
+/// the memory usage issue where all rows are collected into `Vec<MySqlRow>` before
 /// returning (lines 2244, 2310, 2434). With this API, memory usage is O(1) per row
 /// instead of O(result_set_size).
 ///

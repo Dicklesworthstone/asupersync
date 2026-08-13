@@ -13,8 +13,8 @@
 //! - `wake()` acts as a pure wakeup signal and never invents readiness
 //! - `poll()` drains pending events in bounded batches
 //! - repeated host readiness notifications are coalesced when configured
-//! - [`BrowserReactor::register_message_port`] and
-//!   [`BrowserReactor::register_broadcast_channel`] attach real
+//! - `BrowserReactor::register_message_port` and
+//!   `BrowserReactor::register_broadcast_channel` attach real
 //!   `wasm_bindgen` closure listeners that deliver events via
 //!   [`BrowserReactor::notify_ready`]
 //! - deregistration detaches host listeners and cleans up closures

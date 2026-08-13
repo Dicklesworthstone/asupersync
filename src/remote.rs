@@ -2324,7 +2324,7 @@ pub struct ResultDelivery {
 
 /// Terminal outcome of a remote task execution.
 ///
-/// This mirrors the local [`Outcome`](crate::types::Outcome) lattice but
+/// This mirrors the local [`Outcome`] lattice but
 /// carries serialized data instead of typed values.
 #[derive(Clone, Debug)]
 pub enum RemoteOutcome {

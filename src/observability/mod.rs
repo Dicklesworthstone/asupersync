@@ -360,7 +360,7 @@ impl std::fmt::Display for GlobalObservabilityClockInstallError {
 impl std::error::Error for GlobalObservabilityClockInstallError {}
 
 /// Installs the process-global observability clock used by
-/// [`replayable_system_time`] when no `Cx` is in scope (br-asupersync-z5ge0x).
+/// `replayable_system_time` when no `Cx` is in scope (br-asupersync-z5ge0x).
 ///
 /// Returns `Ok(())` on the first installation and
 /// [`GlobalObservabilityClockInstallError::AlreadyInstalled`] on every

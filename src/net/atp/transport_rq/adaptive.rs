@@ -902,7 +902,7 @@ impl AdaptiveController {
 
     /// Feed back a measured block outcome: updates the EXP3 weight of the arm
     /// that was played using an importance-weighted loss (wall-seconds per
-    /// useful byte, normalized to [0,1]).
+    /// useful byte, normalized to `[0, 1]`).
     pub fn observe(&mut self, _sent: u64, _received: u64, wall_s: f64, useful_bytes: u64) {
         let Some(arm) = self.last_arm else {
             return;

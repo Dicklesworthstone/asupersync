@@ -8,7 +8,7 @@
 //!
 //! # Integration with Discovery
 //!
-//! Load balancers can be paired with a [`Discover`](super::Discover) instance
+//! Load balancers can be paired with a [`Discover`] instance
 //! to dynamically add and remove backends as the topology changes.
 
 use crate::types::Time;

@@ -1,6 +1,6 @@
 //! ATP Path Graph lab harness for deterministic NAT/path validation.
 //!
-//! Implements concrete lab harnesses that execute [`AtpLabScenario`] plans,
+//! Implements concrete lab harnesses that execute [`crate::lab::AtpLabScenario`] plans,
 //! providing deterministic NAT traversal, path racing, and migration testing.
 //!
 //! # Quick Start

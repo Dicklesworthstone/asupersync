@@ -113,7 +113,7 @@ pub trait AsupersyncServiceExt<Request>: AsupersyncService<Request> {
     ///
     /// # Errors
     ///
-    /// Calls will fail with [`ProviderAdapterError::NoCx`] if no Cx is available.
+    /// Calls will fail with `ProviderAdapterError::NoCx` if no Cx is available.
     ///
     /// # Example
     ///
@@ -573,13 +573,13 @@ impl<E: std::fmt::Display + std::fmt::Debug> std::error::Error for ProviderAdapt
 /// Adapter that wraps an [`AsupersyncService`] for use with Tower middleware.
 ///
 /// Unlike [`TowerAdapter`], which requires `(Cx, Request)` tuples, this adapter
-/// uses a [`CxProvider`] to obtain the Cx automatically. This allows seamless
+/// uses a `CxProvider` to obtain the Cx automatically. This allows seamless
 /// integration with Tower middleware that expects `Service<Request>`.
 ///
 /// # Cx Resolution
 ///
-/// The adapter obtains a Cx by calling [`CxProvider::current_cx()`] on each
-/// request. The default provider ([`ThreadLocalCxProvider`]) retrieves the Cx
+/// The adapter obtains a Cx by calling `CxProvider::current_cx()` on each
+/// request. The default provider (`ThreadLocalCxProvider`) retrieves the Cx
 /// from thread-local storage, which is set by the runtime while polling tasks.
 ///
 /// # Example
@@ -641,7 +641,7 @@ impl<S> TowerAdapterWithProvider<S, ThreadLocalCxProvider> {
     ///
     /// # Errors
     ///
-    /// Calls will fail with [`ProviderAdapterError::NoCx`] if no Cx is
+    /// Calls will fail with `ProviderAdapterError::NoCx` if no Cx is
     /// available in thread-local storage (e.g., called outside the runtime).
     #[must_use]
     pub fn new(service: S) -> Self {

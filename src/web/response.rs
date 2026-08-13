@@ -207,7 +207,7 @@ impl Response {
     /// Each call adds a separate `Set-Cookie:` line on the wire, so
     /// composed middleware (session, CSRF, remember-me, flash) can each
     /// ship their own cookie without clobbering the others. The value
-    /// is sanitized through [`sanitize_header_value`] for parity with
+    /// is sanitized through `sanitize_header_value` for parity with
     /// `set_header`, so CR/LF/NUL/control bytes can never split the
     /// header.
     pub fn append_set_cookie(&mut self, value: impl Into<String>) {

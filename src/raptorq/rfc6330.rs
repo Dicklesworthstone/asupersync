@@ -255,8 +255,8 @@ pub fn deg(v: u32) -> usize {
 /// - `(d1, a1, b1)` for PI-side symbol selection over `P` / `P1`
 ///
 /// `Default::default()` produces a sentinel all-zero tuple. Used by
-/// the fail-closed [`tuple`] path: invalid FEC-OTI inputs produce
-/// a zeroed tuple which `tuple_indices` then rejects via its zero-
+/// the fail-closed [`crate::raptorq::rfc6330::tuple`] path: invalid FEC-OTI
+/// inputs produce a zeroed tuple which `tuple_indices` then rejects via its zero-
 /// degree validity gate, returning an empty Vec — propagating an
 /// "invalid encoding" error to the public boundary instead of a
 /// panic. (br-asupersync-pphjvo)
@@ -361,7 +361,8 @@ pub fn tuple(
     .unwrap_or_default()
 }
 
-/// Fallible variant of [`tuple`] for malformed RFC 6330 inputs.
+/// Fallible variant of [`crate::raptorq::rfc6330::tuple`] for malformed RFC
+/// 6330 inputs.
 ///
 /// br-asupersync-pphjvo: returns `None` when the RFC 6330 validity
 /// gate fails (W <= 2, P == 0, P1 != smallest_prime_ge(P), or

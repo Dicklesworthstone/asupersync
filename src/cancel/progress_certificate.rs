@@ -54,7 +54,8 @@
 //! # Integration Points
 //!
 //! - [`LyapunovGovernor`](crate::obligation::lyapunov::LyapunovGovernor) —
-//!   provides `V(Σₜ)` potential values via [`PotentialRecord`].
+//!   provides `V(Σₜ)` potential values via
+//!   [`PotentialRecord`](crate::obligation::lyapunov::PotentialRecord).
 //! - [`EProcess`](crate::lab::oracle::eprocess::EProcess) — sister
 //!   martingale monitoring framework for invariant checking.
 //! - [`SymbolCancelToken`](super::symbol_cancel::SymbolCancelToken) —

@@ -75,7 +75,8 @@ impl TestHarnessClient<'_> {
 
 /// Integrated test harness for deterministic HTTP testing.
 ///
-/// Combines a [`LabRuntime`], [`VirtualServer`], and [`VirtualClient`] with
+/// Combines a [`LabRuntime`], [`VirtualServer`], and
+/// [`VirtualClient`](crate::lab::http::VirtualClient) with
 /// request tracing and virtual time control.
 ///
 /// # Example

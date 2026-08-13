@@ -2536,7 +2536,7 @@ impl Child {
     /// Uses cooperative yielding instead of thread sleeps while waiting for
     /// process exit and pipe drain progress. Takes the parent task's [`Cx`]
     /// so cancellation propagates to the child via the SIGTERM-then-SIGKILL
-    /// drain escalation in [`wait_async`]. (br-asupersync-nhk8ur)
+    /// drain escalation in [`Self::wait_async`]. (br-asupersync-nhk8ur)
     pub async fn wait_with_output_async(self, cx: &Cx) -> Result<Output, ProcessError> {
         #[cfg(windows)]
         {

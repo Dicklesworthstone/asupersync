@@ -138,7 +138,7 @@ pub const DEFAULT_SYMBOL_SIZE: u16 = 1400;
 /// under the RFC 6330 K=56403 cap) and lets a single entry span up to 256
 /// blocks (SBN is a `u8`), i.e. up to ~2 GiB per encoded object at this default
 /// block size. Larger logical files are split into ordered RaptorQ objects by
-/// [`split_large_entries`] so each object's K stays bounded (E-12).
+/// `split_large_entries` so each object's K stays bounded (E-12).
 pub const DEFAULT_MAX_BLOCK_SIZE: usize = 8 * 1024 * 1024;
 
 /// Target source-symbol count for the effective transfer block size.

@@ -832,7 +832,8 @@ impl NameRegistry {
     ///
     /// The name is reserved but NOT yet visible to [`whereis`](Self::whereis).
     /// The permit must be committed via [`commit_permit`](Self::commit_permit)
-    /// to make the name visible, or aborted via [`NamePermit::abort`].
+    /// to make the name visible, or aborted via
+    /// [`NameRegistry::abort_permit`].
     ///
     /// # Errors
     ///

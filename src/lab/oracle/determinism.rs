@@ -644,7 +644,7 @@ where
 
 /// Verifies determinism across a set of fixed seeds.
 ///
-/// Each seed is run twice with [`LabConfig::new(seed)`]. The helper panics on
+/// Each seed is run twice with [`LabConfig::new`]. The helper panics on
 /// the first divergent seed and includes the seed plus the first-divergence
 /// report in the panic text.
 ///

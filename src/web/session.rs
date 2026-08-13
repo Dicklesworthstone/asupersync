@@ -461,7 +461,7 @@ pub struct SessionConfig {
     pub idle_ttl_seconds: Option<u64>,
     /// Whether to require a CSRF token on state-changing requests
     /// (POST / PUT / PATCH / DELETE). The token is bound to the session,
-    /// stored under [`CSRF_TOKEN_KEY`] inside `SessionData`, and must be
+    /// stored under `CSRF_TOKEN_KEY` inside `SessionData`, and must be
     /// supplied by the client as the `X-CSRF-Token` request header.
     /// **Default: `true`.** (br-asupersync-7udumi)
     pub csrf_protection: bool,

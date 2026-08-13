@@ -2593,7 +2593,7 @@ pub fn normalize_for_replay(events: &[TraceEvent]) -> NormalizationResult {
 
 /// Normalize a trace with custom configuration.
 ///
-/// See [`GeodesicConfig`] for available options:
+/// See [`crate::trace::GeodesicConfig`] for available options:
 /// - `beam_threshold`: Trace size above which beam search is used
 /// - `beam_width`: Width of beam search
 /// - `step_budget`: Maximum search steps

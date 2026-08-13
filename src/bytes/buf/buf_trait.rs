@@ -77,7 +77,7 @@ pub trait Buf {
         }
     }
 
-    /// Copy the next `len` bytes into a freshly returned [`Bytes`], advancing
+    /// Copy the next `len` bytes into a freshly returned [`crate::bytes::Bytes`], advancing
     /// the cursor.
     ///
     /// The default implementation copies. Implementations backed by shared

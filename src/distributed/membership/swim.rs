@@ -393,7 +393,7 @@ pub struct SwimConfig {
     ///
     /// SWIM has no source authentication on its UDP transport, so a peer (or a
     /// spoofed source) can gossip `Alive` rumors naming arbitrarily many
-    /// fabricated node ids. Without a bound, [`adopt`](SwimState::adopt) would
+    /// fabricated node ids. Without a bound, `adopt` would
     /// grow the members map (and re-flood each fabricated rumor) without limit.
     /// New members learned past this cap are rejected and not re-disseminated,
     /// which bounds both memory and gossip amplification. Updates to members

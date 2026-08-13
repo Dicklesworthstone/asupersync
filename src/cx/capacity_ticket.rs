@@ -23,7 +23,7 @@ use core::num::NonZeroU64;
 /// depth, so they minted byte-identical ids. A receipt consumer matching
 /// releases by `ticket_id` would then mis-close one sibling and stamp the leak
 /// as closed, silently masking the other ticket's unreleased-obligation leak.
-/// `nonce` is a deterministic path-fold ([`fold_child_nonce`]) of the parent
+/// `nonce` is a deterministic path-fold (`fold_child_nonce`) of the parent
 /// nonce and a per-parent monotonic child sequence, so every descendant in a
 /// ticket tree (direct siblings *and* cousins at the same depth) gets a
 /// distinct id, while two identical split sequences still reproduce the same

@@ -545,7 +545,7 @@ impl Metrics {
     /// counters map reaches `cap` distinct names, a request for a new
     /// counter name returns the shared overflow bucket
     /// (`asupersync_metric_cardinality_overflow`) and the rejection is
-    /// recorded in [`Self::overflow_rejections_counter`].
+    /// recorded in the counters returned by [`Self::overflow_rejections`].
     #[must_use]
     pub fn with_cardinality_cap(cap: usize) -> Self {
         Self {
@@ -722,8 +722,8 @@ impl Metrics {
     /// Exports metrics in a simple text format (Prometheus-like).
     ///
     /// br-asupersync-aog3fz: every metric name is sanitized through
-    /// [`sanitize_prometheus_metric_name`] and every label value through
-    /// [`escape_prometheus_label_value`] before being written to the
+    /// `sanitize_prometheus_metric_name` and every label value through
+    /// `escape_prometheus_label_value` before being written to the
     /// exposition output. A name that does not match the
     /// `[a-zA-Z_:][a-zA-Z0-9_:]*` Prometheus regex would otherwise let
     /// any caller of `Metrics::counter("foo\nbad_metric{job=\"x\"} 999")`

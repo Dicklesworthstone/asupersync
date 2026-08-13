@@ -2506,7 +2506,7 @@ impl Default for StormMonitorConfig {
 ///
 /// Monitors restart intensity and accumulates log-evidence against the null
 /// hypothesis ("restarts occur at the expected rate"). When the e-value
-/// exceeds 1/α, [`is_storm`](Self::is_storm) reports a storm.
+/// exceeds 1/α, [`Self::is_alert`] reports a storm.
 ///
 /// # Guarantee scope (honest boundary)
 ///

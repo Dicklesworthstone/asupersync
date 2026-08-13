@@ -476,7 +476,7 @@ pub struct QuicConfig {
     pub enable_delta: bool,
     /// Shared strict authentication context for receiver-challenged delta control.
     ///
-    /// This is deliberately separate from [`Self::symbol_auth_context`]. Native
+    /// This is deliberately separate from `Self::symbol_auth_context`. Native
     /// QUIC keeps source symbols on its reliable transport-authenticated stream,
     /// while this context proves possession of the shared key before receiver
     /// filesystem state is inspected or disclosed.
@@ -6264,7 +6264,7 @@ const CONTROL_READ_CHUNK: usize = 64 * 1024;
 /// ATP frame transport over one QUIC bidirectional control stream.
 ///
 /// This is the reliable control-plane half B2/B3 need: canonical ATP
-/// [`Frame`](crate::net::atp::protocol::frames::Frame) wire bytes are queued
+/// [`Frame`] wire bytes are queued
 /// through the A6 control-stream API, and inbound bytes are incrementally
 /// decoded with the same [`AtpFrameCodec`] TCP uses. It is deliberately
 /// non-blocking: `try_recv` returns `Ok(None)` when the stream has only a

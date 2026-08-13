@@ -214,9 +214,9 @@ impl SymbolSpan {
     /// sensitive bytes through every downstream span consumer
     /// (crashpacks, distributed bridges, OTEL collectors).
     ///
-    /// The fix routes the value through [`sanitize_span_value`] (caps
+    /// The fix routes the value through `sanitize_span_value` (caps
     /// to [`MAX_SPAN_ATTRIBUTE_VALUE_LEN`] = 1024 bytes; replaces
-    /// values whose key matches the [`SENSITIVE_KEY_DENYLIST`] with
+    /// values whose key matches the `SENSITIVE_KEY_DENYLIST` with
     /// `"<redacted>"` regardless of length; scrubs control bytes to
     /// `_`) and gates the insert on
     /// [`MAX_SPAN_ATTRIBUTES_PER_SPAN`] = 64 — overflow inserts land

@@ -516,7 +516,7 @@ pub fn pump_app_data(
 /// Repeatedly [`pump_app_data`] from `from` to `to` until `from` has no further
 /// pending application frames, returning the total number of frames moved.
 ///
-/// Bounded by [`PUMP_ITERATION_CAP`] so a stuck queue can never spin forever.
+/// Bounded by `PUMP_ITERATION_CAP` so a stuck queue can never spin forever.
 ///
 /// # Errors
 /// Returns a [`NativeQuicConnectionError`] on the first failing pump round, or

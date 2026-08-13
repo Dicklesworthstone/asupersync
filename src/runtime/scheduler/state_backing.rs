@@ -12,10 +12,10 @@
 //! ask "give me a task record, given an id" without committing the
 //! caller to a particular backing-store implementation.
 //!
-//! This module defines [`RuntimeStateBacking`], the minimal surface the
+//! This module defines `RuntimeStateBacking`, the minimal surface the
 //! scheduler hot path actually needs. Callers interact with the trait;
 //! concrete implementations route to `RuntimeState` or, in a follow-up
-//! bead, `ShardedState` via [`ShardGuard`].
+//! bead, `ShardedState` via [`crate::runtime::ShardGuard`].
 //!
 //! # Surface (audited 2026-05-07)
 //!
@@ -33,7 +33,7 @@
 //!
 //! Plus one field access: `state.now: Time` at
 //! `three_lane.rs::ThreeLaneScheduler::current_scheduler_time`. That is
-//! exposed as [`RuntimeStateBacking::current_time`].
+//! exposed as `RuntimeStateBacking::current_time`.
 //!
 //! `tasks_iter` is intentionally NOT in the trait — it returns
 //! `impl Iterator<Item = (ArenaIndex, &TaskRecord)>` which cannot be

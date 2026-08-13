@@ -2,7 +2,7 @@
 //! to the runtime's default client.
 //!
 //! [`Client`] is the ergonomic, public name for the pooled
-//! [`HttpClient`](super::h1::HttpClient): a cheap-clone handle (every field is
+//! `HttpClient`: a cheap-clone handle (every field is
 //! an [`Arc`](std::sync::Arc)) over a shared connection pool, idle-connection
 //! map, and cookie jar. Cloning a `Client` is a refcount bump and shares the
 //! same pool, so the idiomatic pattern is *obtain once, clone freely*.
@@ -19,7 +19,7 @@
 //!
 //! Asupersync therefore provides **no** free `Client::get()` and **no** global
 //! `Client` singleton. The only way to obtain the default client is
-//! [`Client::default_for_runtime`], which **demands a [`Cx`] whose capability
+//! [`Client::default_for_runtime`], which **demands a [`Cx`](crate::Cx) whose capability
 //! set carries I/O authority** (`Caps: HasIo`). The capability flows through
 //! the `Cx` parameter and is checked by the compiler at the call site — a
 //! context that cannot prove I/O authority cannot even name the accessor.
@@ -68,7 +68,7 @@ use crate::cx::cap::HasIo;
 /// Cheap-clone handle over a shared HTTP connection pool.
 ///
 /// `Client` is the public, ergonomic alias for
-/// [`HttpClient`](super::h1::HttpClient). See the [module docs](self) for the
+/// `HttpClient`. See the [module docs](self) for the
 /// no-ambient-global philosophy and the capability-gated
 /// [`Client::default_for_runtime`] accessor.
 pub use super::h1::HttpClient as Client;

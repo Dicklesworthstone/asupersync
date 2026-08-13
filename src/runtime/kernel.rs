@@ -1,8 +1,9 @@
 //! Proof-carrying decision-plane kernel for runtime controllers.
 //!
-//! This module defines the canonical [`RuntimeKernelSnapshot`] that controllers
-//! observe, the [`ControllerRegistration`] contract they must satisfy, and the
-//! [`ControllerRegistry`] that validates and manages controller participation.
+//! This module defines the canonical [`crate::runtime::kernel::RuntimeKernelSnapshot`]
+//! that controllers observe, the [`crate::runtime::kernel::ControllerRegistration`]
+//! contract they must satisfy, and the [`crate::runtime::kernel::ControllerRegistry`]
+//! that validates and manages controller participation.
 //!
 //! # Design Principles
 //!
@@ -17,7 +18,8 @@
 //!
 //! # Versioning
 //!
-//! Snapshots carry a [`SnapshotVersion`] that controllers declare support for.
+//! Snapshots carry a [`crate::runtime::kernel::SnapshotVersion`] that controllers
+//! declare support for.
 //! The registry rejects controllers whose expected version range does not overlap
 //! with the current snapshot version. Controllers consuming a reduced snapshot
 //! (fewer fields than the full version) remain in shadow mode until they upgrade.
@@ -182,7 +184,7 @@ pub struct ControllerDecision {
     pub label: String,
     /// Structured decision payload (controller-specific).
     pub payload: serde_json::Value,
-    /// Confidence score in [0.0, 1.0] for the decision.
+    /// Confidence score in `[0.0, 1.0]` for the decision.
     pub confidence: f64,
     /// Fallback: if this decision is rejected, what should happen.
     pub fallback_label: String,
@@ -352,7 +354,7 @@ const KNOWN_FIELDS: &[&str] = &[
 /// Policy governing controller promotion through the lifecycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromotionPolicy {
-    /// Minimum calibration score in [0.0, 1.0] required for promotion.
+    /// Minimum calibration score in `[0.0, 1.0]` required for promotion.
     pub min_calibration_score: f64,
     /// Minimum epochs a controller must spend in Shadow before promoting to Canary.
     pub min_shadow_epochs: u64,

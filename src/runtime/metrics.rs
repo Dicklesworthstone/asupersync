@@ -13,34 +13,37 @@
 //! Every counter and every `record_*` helper is gated behind the
 //! `runtime-metrics` Cargo feature. When the feature is **off** (the default,
 //! and what ships in release builds), each `record_*` call inlines to an empty
-//! body and [`snapshot`] returns an all-zero [`Metrics`]. There is no static,
+//! body and [`crate::runtime::metrics::snapshot`] returns an all-zero
+//! [`crate::runtime::metrics::Metrics`]. There is no static,
 //! no atomic, and no instruction emitted on the hot path. The benchmark harness
 //! (`asupersync-runtime-cpu-overhaul-5vt09v.2`) and the unit/e2e tests turn the
 //! feature on to read and assert the counters.
 //!
 //! # Ordering
 //!
-//! The atomics use [`Ordering::Relaxed`]. These counters are diagnostics, not
-//! synchronization primitives: a reader only needs an eventually-consistent
-//! tally, never a happens-before edge to the work being counted. Relaxed keeps
-//! the instrumentation as close to free as an atomic increment can be.
+//! The atomics use [`core::sync::atomic::Ordering::Relaxed`]. These counters
+//! are diagnostics, not synchronization primitives: a reader only needs an
+//! eventually-consistent tally, never a happens-before edge to the work being
+//! counted. Relaxed keeps the instrumentation as close to free as an atomic
+//! increment can be.
 //!
 //! # Reading the counters
 //!
 //! Counters are process-global and monotonic (except the derived
-//! [`Metrics::active_timers`] gauge). Tests and the bench should read a
-//! [`snapshot`] before driving work and another after, then assert on the
-//! *delta*. That pattern is robust to other tests incrementing the same global
-//! counters in parallel; relying on absolute values is not.
+//! `Metrics::active_timers` gauge). Tests and the bench should read a
+//! [`crate::runtime::metrics::snapshot`] before driving work and another after,
+//! then assert on the *delta*. That pattern is robust to other tests incrementing
+//! the same global counters in parallel; relying on absolute values is not.
 
 #[cfg(feature = "runtime-metrics")]
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// A point-in-time copy of the runtime instrumentation counters.
 ///
-/// Obtain one with [`snapshot`]. All fields are cumulative since process start
-/// except [`active_timers`](Self::active_timers), which is a derived gauge of
-/// timers that have been registered but not yet fired or cancelled.
+/// Obtain one with [`crate::runtime::metrics::snapshot`]. All fields are
+/// cumulative since process start except [`active_timers`](Self::active_timers),
+/// which is a derived gauge of timers that have been registered but not yet
+/// fired or cancelled.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Metrics {
     /// OS threads spawned solely to drive a `Sleep`/timer future to completion.

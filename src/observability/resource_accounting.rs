@@ -2,8 +2,9 @@
 //!
 //! Provides deterministic, monotone counters for tracking resource usage across
 //! the obligation lifecycle, budget consumption, and region admission control.
-//! Integrates with the existing [`MetricsProvider`] trait for zero-cost when
-//! disabled and with the [`EvidenceLedger`] for decision auditing.
+//! Integrates with the existing [`crate::observability::metrics::MetricsProvider`]
+//! trait for zero-cost when disabled and with the
+//! [`franken_evidence::EvidenceLedger`] for decision auditing.
 //!
 //! # Design Principles
 //!

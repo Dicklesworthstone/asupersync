@@ -6,7 +6,7 @@
 //!
 //! # Cross-interceptor state: `AuthContext`
 //!
-//! When an authentication interceptor (e.g. [`AuthInterceptor`] or a
+//! When an authentication interceptor (e.g. [`BearerAuthInterceptor`] or a
 //! custom one) parses a bearer token, it MUST share the resulting
 //! identity with downstream interceptors (rate-limit per-tenant,
 //! authorization, audit logging) and the eventual handler. Two patterns
@@ -656,7 +656,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 ///
 /// * [`BearerAuthValidator::with_token`] — **safe by default.** The
 ///   expected token is held inside the validator and compared against
-///   the supplied token via [`constant_time_eq`], which never
+///   the supplied token via `constant_time_eq`, which never
 ///   short-circuits on the first byte difference. Use this whenever the
 ///   accept-set is a fixed set of tokens.
 ///
@@ -668,7 +668,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 ///   O(256^N) to O(256·N) for an ASCII secret of length N). The
 ///   library cannot fix this from outside the closure. **Callers MUST
 ///   either** (a) use `with_token`, or (b) implement the closure with
-///   [`constant_time_eq`] / `subtle::ConstantTimeEq`.
+///   `constant_time_eq` / `subtle::ConstantTimeEq`.
 #[derive(Debug)]
 pub struct BearerAuthValidator<F> {
     validator: F,
@@ -694,7 +694,7 @@ impl BearerAuthValidator<Box<dyn Fn(&str) -> bool + Send + Sync>> {
     /// `expected_token`, comparing in constant time.
     ///
     /// The token is moved into the closure and held for the lifetime of
-    /// the validator. The comparison runs through [`constant_time_eq`],
+    /// the validator. The comparison runs through `constant_time_eq`,
     /// so an attacker cannot recover the token via response-latency
     /// timing.
     #[must_use]

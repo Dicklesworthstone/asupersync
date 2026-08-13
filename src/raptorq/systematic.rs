@@ -905,8 +905,9 @@ pub struct EmittedSymbol {
 /// emission cursor stays in ESI space while [`SystematicParams::rfc_repair_equation`]
 /// applies the required `K' - K` translation.
 ///
-/// Use [`emit_systematic`] for source-only, [`emit_repair`] for repair-only,
-/// or [`emit_all`] for a combined stream.
+/// Use [`SystematicEncoder::emit_systematic`] for source-only,
+/// [`SystematicEncoder::emit_repair`] for repair-only, or
+/// [`SystematicEncoder::emit_all`] for a combined stream.
 #[derive(Debug)]
 pub struct SystematicEncoder {
     params: SystematicParams,
