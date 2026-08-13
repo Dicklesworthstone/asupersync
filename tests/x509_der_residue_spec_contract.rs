@@ -29,6 +29,10 @@ const ROOT_MANIFEST_PATH: &str = "Cargo.toml";
 const REVIEWED_ROOT_MANIFEST_SHA256: &str =
     "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239";
 const REVIEWED_ROOT_MANIFEST_LINE_COUNT: u64 = 1_051;
+const ROOT_LOCKFILE_PATH: &str = "Cargo.lock";
+const REVIEWED_ROOT_LOCKFILE_SHA256: &str =
+    "194f7d634555c129adb4d72a0a842275de47638f87c13c483361bfaaeec3c22f";
+const REVIEWED_ROOT_LOCKFILE_LINE_COUNT: u64 = 4_666;
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -196,6 +200,15 @@ fn normative_projection(value: &Value) -> Result<Value, String> {
                 "line_count".to_owned(),
                 Value::from(REVIEWED_ROOT_MANIFEST_LINE_COUNT),
             );
+        } else if source["path"].as_str() == Some(ROOT_LOCKFILE_PATH) {
+            source.insert(
+                "sha256".to_owned(),
+                Value::String(REVIEWED_ROOT_LOCKFILE_SHA256.to_owned()),
+            );
+            source.insert(
+                "line_count".to_owned(),
+                Value::from(REVIEWED_ROOT_LOCKFILE_LINE_COUNT),
+            );
         }
     }
     Ok(projection)
@@ -247,6 +260,13 @@ fn validate_structure(value: &Value) -> Result<(), String> {
                 "reviewed_sha256": REVIEWED_ROOT_MANIFEST_SHA256,
                 "reviewed_line_count": REVIEWED_ROOT_MANIFEST_LINE_COUNT,
                 "reason": "Package-version and evidence-pin reconciliation changes the live root manifest identity without changing this independently reviewed DER policy."
+            },
+            "normalized_release_lockfile_fields": {
+                "path": ROOT_LOCKFILE_PATH,
+                "fields": ["sha256", "line_count"],
+                "reviewed_sha256": REVIEWED_ROOT_LOCKFILE_SHA256,
+                "reviewed_line_count": REVIEWED_ROOT_LOCKFILE_LINE_COUNT,
+                "reason": "Package-version reconciliation changes the live resolved graph identity without changing this independently reviewed DER policy."
             }
         })
     {

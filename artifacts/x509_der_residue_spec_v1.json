@@ -62,6 +62,16 @@
         "reviewed_sha256": "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239",
         "reviewed_line_count": 1051,
         "reason": "Package-version and evidence-pin reconciliation changes the live root manifest identity without changing this independently reviewed DER policy."
+      },
+      "normalized_release_lockfile_fields": {
+        "path": "Cargo.lock",
+        "fields": [
+          "sha256",
+          "line_count"
+        ],
+        "reviewed_sha256": "194f7d634555c129adb4d72a0a842275de47638f87c13c483361bfaaeec3c22f",
+        "reviewed_line_count": 4666,
+        "reason": "Package-version reconciliation changes the live resolved graph identity without changing this independently reviewed DER policy."
       }
     },
     "approval_scope": "The complete normative projection: threat model, fact-only API profiles, exact limits and accounting, DER canonicality, duplicate and critical-extension policy, error shape and taxonomy, tests, rollback triggers, and no-claim boundaries.",
