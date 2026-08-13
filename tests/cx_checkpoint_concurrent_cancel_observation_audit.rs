@@ -40,9 +40,10 @@
 //!
 //!   The chain:
 //!
-//!   1. **`fast_cancel: Arc<AtomicBool>`** is the cross-
-//!      thread cancel signal (types/task_context.rs:115).
-//!      The Arc lets multiple threads share the atomic.
+//!   1. **`fast_cancel: Arc<AtomicBool>`** is the v0.4.3-compatible
+//!      cross-thread cancel signal. `CxInner` also keeps a private Arc to
+//!      the same allocation for runtime-owned publication, so downstream
+//!      handle replacement cannot remove the scheduler's stable signal.
 //!
 //!   2. **Cancel publisher (request_cancel_with_budget)**:
 //!      ```ignore
@@ -52,16 +53,15 @@
 //!      Acquire load on the same atomic. ALL prior writes
 //!      become visible to the reader.
 //!
-//!   3. **Cancel reader (checkpoint fast path)** (cx/cx.rs:
-//!      1664):
+//!   3. **Cancel reader (`Cx::checkpoint` fast path)**:
 //!      ```ignore
 //!      let guard = self.inner.read();
-//!      let cancelled = guard.fast_cancel.load(Acquire);
+//!      let cancelled = guard.is_cancel_requested();
 //!      ```
-//!      The Acquire load synchronizes with any prior
-//!      Release store. If the cancel was published BEFORE
-//!      this load (in the happens-before sense), `cancelled`
-//!      is true.
+//!      `CxInner::is_cancel_requested` combines the lock-backed v0.4.3 flag
+//!      with an Acquire load from `fast_cancel`. The Acquire load synchronizes
+//!      with any prior Release store. If the cancel was published BEFORE this
+//!      load (in the happens-before sense), `cancelled` is true.
 //!
 //!   4. **Bounded race window**: between the Acquire load
 //!      and the early Ok return, the fast path does only:
@@ -173,8 +173,10 @@ fn checkpoint_fast_path_uses_acquire_load_for_cross_thread_visibility() {
 
     assert!(
         body.contains("let cancelled = guard.is_cancel_requested();")
-            && task_context.contains("self.cancellation.is_requested()")
-            && task_context.contains("self.requested.load(std::sync::atomic::Ordering::Acquire)"),
+            && task_context.contains("pub(crate) fn is_cancel_requested(&self) -> bool")
+            && task_context.contains(
+                "self.cancel_requested || self.fast_cancel.load(std::sync::atomic::Ordering::Acquire)"
+            ),
         "REGRESSION: fast-path cancel check no longer uses \
          Acquire ordering. The Release-Acquire pair is \
          broken — concurrent cancels may be observed only \
@@ -204,15 +206,17 @@ fn cancel_publisher_uses_release_store_for_cross_thread_visibility() {
 
 #[test]
 fn cancellation_envelope_is_stable_arc_atomic_for_cross_thread_sharing() {
-    // Pin (link 1): CxInner privately owns an Arc to a stable
-    // envelope whose private AtomicBool provides the lock-free
-    // synchronization primitive without exposing replacement authority.
+    // Pin (link 1): CxInner privately owns an Arc to the stable AtomicBool
+    // allocation while retaining the public v0.4.3 fast_cancel handle. Both
+    // begin on the same allocation, and runtime publishers retain the private
+    // Arc even if downstream compatibility code replaces the public handle.
     let source = read("src/types/task_context.rs");
 
     assert!(
-        source.contains("pub(crate) struct CxCancellationState {")
-            && source.contains("requested: std::sync::atomic::AtomicBool,")
+        source.contains("pub(crate) type CxCancellationState = std::sync::atomic::AtomicBool;")
+            && source.contains("pub fast_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,")
             && source.contains("cancellation: std::sync::Arc<CxCancellationState>,")
+            && source.contains("let fast_cancel = std::sync::Arc::clone(&cancellation);")
             && source.contains("pub(crate) fn cancellation_state(&self)")
             && source.contains("std::sync::Arc::clone(&self.cancellation)"),
         "REGRESSION: CxInner cancellation is no longer a private \
