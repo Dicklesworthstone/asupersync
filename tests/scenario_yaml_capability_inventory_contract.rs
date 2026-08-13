@@ -2961,7 +2961,12 @@ fn authority_profiles_and_live_loader_routes_are_truthful() {
     assert!(scenario_model.contains("pub fn from_json("));
     assert!(scenario_model.contains("pub fn to_json("));
 
-    assert_eq!(OracleRegistry::reported_names().len(), 24);
+    let expected_oracle_count = if cfg!(feature = "messaging-fabric") {
+        28
+    } else {
+        24
+    };
+    assert_eq!(OracleRegistry::reported_names().len(), expected_oracle_count);
     assert!(OracleRegistry::reported_names().contains(&"quiescence"));
     assert!(OracleRegistry::reported_names().contains(&"obligation_leak"));
 }
