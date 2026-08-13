@@ -74,8 +74,8 @@
     },
     {
       "path": "src/cx/cx.rs",
-      "sha256": "86cbf99a2487544f94879742829113138d1da1da78040f4c14142f778b346323",
-      "line_count": 7761,
+      "sha256": "28f07128761f9892a6e2fc6e62b2fc1e2c4c0706639406f5cf7e682d8969f5fa",
+      "line_count": 7770,
       "role": "checkpoint, cancellation queries, writers, and cancel-waker registrations"
     },
     {
@@ -116,7 +116,7 @@
     },
     {
       "path": "src/actor.rs",
-      "sha256": "484f070fa2917ecc908e5a8f72dc03599255bc6150ad80d92f015508cb675204",
+      "sha256": "107f77d83150bf3132d016a77b12dd03ebf891435b00be0da01ee69f0baf737c",
       "line_count": 3645,
       "role": "actor and actor-join abort writers"
     },

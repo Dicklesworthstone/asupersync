@@ -2069,7 +2069,7 @@
       },
       {
         "path": "asupersync-macros/src/lib.rs",
-        "sha256": "4f59758bbc8ab29bebd067bace65ffb60a49210f6ae640e01f8d053c0f7131da",
+        "sha256": "cb81e315be0c852e098ba61e2f4ad5a49912dc9e9ec2ba6d83cb56d0ece6b95e",
         "line_count": 703,
         "role": "owned proc-macro publication surface with no visibility replacement attribute"
       },
@@ -2087,8 +2087,8 @@
       },
       {
         "path": "src/cx/cx.rs",
-        "sha256": "86cbf99a2487544f94879742829113138d1da1da78040f4c14142f778b346323",
-        "line_count": 7761,
+        "sha256": "28f07128761f9892a6e2fc6e62b2fc1e2c4c0706639406f5cf7e682d8969f5fa",
+        "line_count": 7770,
         "role": "one already-public struct, four constructors, and one receiver method guarded by the incumbent attribute"
       },
       {

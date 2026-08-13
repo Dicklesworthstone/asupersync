@@ -211,7 +211,7 @@
       },
       {
         "path": "artifacts/dependency_capability_baseline_v1.json",
-        "sha256": "2ae8de68673a014fe4ee20d53799d579a437bf6ade6618f01754a380b5c57356",
+        "sha256": "1b51f8fa7d091201f48eb24196cbfc84f868f39fb42a89d153995750f61da0a6",
         "line_count": 3210
       },
       {
@@ -316,8 +316,8 @@
       },
       {
         "path": "src/database/postgres.rs",
-        "sha256": "c4050dea66a46e0719ec53925beb64db42997a7612ea9de0cc9e9e775513e32d",
-        "line_count": 19779
+        "sha256": "823ea8927596950fc8a2b366ccfd5a3a973ab8d7499b74463d35575200c0a5d3",
+        "line_count": 19783
       },
       {
         "path": "src/messaging/redis.rs",

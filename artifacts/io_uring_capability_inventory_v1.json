@@ -205,7 +205,7 @@
     },
     {
       "path": "src/bytes/bytes_mut.rs",
-      "sha256": "58cf22ae601b8ff3ee82a7dfc8496dbeaf24699b7a751105d459ad0dd85afd1b",
+      "sha256": "a940c56c5f9c3db65d0b80a7507ab18b5b8674f3718eb8a3a580311360d77d42",
       "line_count": 1301,
       "role": "exclusive Vec-backed mutable byte ownership without kernel lease state"
     },

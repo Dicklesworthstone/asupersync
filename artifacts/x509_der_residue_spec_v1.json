@@ -116,7 +116,7 @@
     },
     {
       "path": "artifacts/x509_validation_ownership_inventory_v1.json",
-      "sha256": "8d6a5624ee0fdfd8ed407828c90ffab9d9fe8d59c36d00fa92ad0ec16be49868",
+      "sha256": "9d4dfbf937b52ba6bc6b4cd7b214ab6dd014156ec73229e41febcbe9518c6246",
       "line_count": 1073,
       "role": "A1 call-site, owner, residue, and routed-gap authority"
     },
@@ -134,7 +134,7 @@
     },
     {
       "path": "artifacts/x509_standard_verifier_delegation_v1.json",
-      "sha256": "ca1478d93d8990e2bc261b87303d0d74466e43712dbeaca81e8a5e140b933cc8",
+      "sha256": "379d2663731ad43206ec007ccac4b8335561e504c928507d40aae038c9fc681a",
       "line_count": 345,
       "role": "A2 standard-first delegation and retained-policy authority"
     },

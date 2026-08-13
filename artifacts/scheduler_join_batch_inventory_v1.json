@@ -86,8 +86,8 @@
       },
       {
         "path": "src/cx/cx.rs",
-        "sha256": "86cbf99a2487544f94879742829113138d1da1da78040f4c14142f778b346323",
-        "line_count": 7761,
+        "sha256": "28f07128761f9892a6e2fc6e62b2fc1e2c4c0706639406f5cf7e682d8969f5fa",
+        "line_count": 7770,
         "classification": "CANCELLATION_PUBLICATION_HARDENING_WITH_JOIN_ANCHORS_PRESERVED"
       },
       {
@@ -146,8 +146,8 @@
     },
     {
       "path": "src/cx/cx.rs",
-      "sha256": "86cbf99a2487544f94879742829113138d1da1da78040f4c14142f778b346323",
-      "line_count": 7761,
+      "sha256": "28f07128761f9892a6e2fc6e62b2fc1e2c4c0706639406f5cf7e682d8969f5fa",
+      "line_count": 7770,
       "role": "public structured spawn producer and take-once completion sender"
     },
     {

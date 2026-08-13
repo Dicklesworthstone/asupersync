@@ -1728,7 +1728,7 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         (
             "artifacts/dependency_capability_baseline_v1.json",
             (
-                "2ae8de68673a014fe4ee20d53799d579a437bf6ade6618f01754a380b5c57356",
+                "1b51f8fa7d091201f48eb24196cbfc84f868f39fb42a89d153995750f61da0a6",
                 3210_u64,
             ),
         ),
