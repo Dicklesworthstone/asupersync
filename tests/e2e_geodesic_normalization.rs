@@ -21,7 +21,7 @@ use asupersync::trace::event_structure::{OwnerKey, TracePoset};
 use asupersync::trace::{GeodesicAlgorithm, GeodesicConfig, TraceEvent, geodesic_normalize};
 use asupersync::types::{Budget, CancelReason, Time};
 use serde::{Deserialize, Serialize};
-use std::hash::{DefaultHasher, Hash, Hasher};
+use sha2::{Digest, Sha256};
 
 // ============================================================================
 // Report structure
@@ -113,19 +113,15 @@ fn oracle_violation_tag(v: &OracleViolation) -> String {
     }
 }
 
-/// Compute a stable checksum from scenario report fields.
+/// Compute a compiler-independent checksum from the complete scenario reports.
 fn report_checksum(scenarios: &[ScenarioReport]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    for s in scenarios {
-        s.name.hash(&mut hasher);
-        s.seed.hash(&mut hasher);
-        s.event_count.hash(&mut hasher);
-        s.original_switches.hash(&mut hasher);
-        s.normalized_switches.hash(&mut hasher);
-        s.algorithm.hash(&mut hasher);
-        s.foata_switches.hash(&mut hasher);
-    }
-    hasher.finish()
+    let encoded = serde_json::to_vec(scenarios).expect("serialize normalization scenarios");
+    let digest = Sha256::digest(encoded);
+    u64::from_be_bytes(
+        digest[..8]
+            .try_into()
+            .expect("SHA-256 prefix is exactly eight bytes"),
+    )
 }
 
 // ============================================================================
@@ -517,7 +513,7 @@ fn e2e_normalization_golden_checksum() {
     // Update this value only after reviewing what changed.
     let golden = report.golden_checksum;
     assert_eq!(
-        golden, 0xd51b_54d3_df64_e516,
+        golden, 0xb1d2_4508_21ed_a8ad,
         "golden checksum changed — normalization behavior diverged. \
          Review the report above and update if intentional."
     );
