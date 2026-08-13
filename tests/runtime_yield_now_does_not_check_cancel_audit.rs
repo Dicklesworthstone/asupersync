@@ -292,7 +292,7 @@ fn cx_checkpoint_is_the_documented_cancel_observation_site() {
 
     assert!(
         source.contains("let cancelled = guard.is_cancel_requested();")
-            && task_context.contains("self.requested.load(std::sync::atomic::Ordering::Acquire)"),
+            && task_context.contains("self.fast_cancel.load(std::sync::atomic::Ordering::Acquire)"),
         "REGRESSION: Cx::checkpoint no longer reads \
          stable cancellation state. The cancel-observation site is \
          broken — yield_now's pure-yield design relies on \

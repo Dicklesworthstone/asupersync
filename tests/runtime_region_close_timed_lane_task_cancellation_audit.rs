@@ -286,7 +286,7 @@ fn cx_checkpoint_observes_stable_envelope_with_acquire() {
 
     assert!(
         source.contains("let cancelled = guard.is_cancel_requested();")
-            && task_context.contains("self.requested.load(std::sync::atomic::Ordering::Acquire)"),
+            && task_context.contains("self.fast_cancel.load(std::sync::atomic::Ordering::Acquire)"),
         "REGRESSION: cx.checkpoint() no longer reads \
          stable cancellation publication with Acquire ordering. Without it, the \
          Release-Acquire pair is broken — a task in the timed \

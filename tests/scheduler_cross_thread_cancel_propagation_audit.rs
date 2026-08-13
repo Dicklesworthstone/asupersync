@@ -134,9 +134,10 @@ fn cx_inner_cancellation_envelope_is_stable_arc_for_cross_thread_sharing() {
     let source = read("src/types/task_context.rs");
 
     assert!(
-        source.contains("pub(crate) struct CxCancellationState {")
-            && source.contains("requested: std::sync::atomic::AtomicBool,")
+        source.contains("pub(crate) type CxCancellationState = std::sync::atomic::AtomicBool;",)
+            && source.contains("pub fast_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>",)
             && source.contains("cancellation: std::sync::Arc<CxCancellationState>,")
+            && source.contains("let fast_cancel = std::sync::Arc::clone(&cancellation);")
             && source.contains("pub(crate) fn cancellation_state(&self)")
             && source.contains("std::sync::Arc::clone(&self.cancellation)"),
         "REGRESSION: CxInner cancellation is no longer a private stable Arc envelope. \
@@ -191,7 +192,7 @@ fn cx_checkpoint_observes_stable_envelope_with_acquire_load() {
 
     assert!(
         source.contains("let cancelled = guard.is_cancel_requested();")
-            && task_context.contains("self.requested.load(std::sync::atomic::Ordering::Acquire)"),
+            && task_context.contains("self.fast_cancel.load(std::sync::atomic::Ordering::Acquire)"),
         "REGRESSION: cx.checkpoint() no longer reads stable cancellation \
          with Acquire ordering. Without it, the Release-Acquire \
          pair is broken — cross-thread cancel propagation has \
@@ -536,7 +537,7 @@ fn three_lane_local_waker_routes_cancelled_local_task_to_cancel_lane() {
     let body = &source[start..next_impl];
 
     assert!(
-        body.contains("let is_cancelling = self.cancellation.is_requested();"),
+        body.contains("let is_cancelling = self.cancellation.load(Ordering::Acquire);"),
         "REGRESSION: ThreeLaneLocalWaker.schedule no longer \
          reads stable cancellation state. A local task being \
          woken (e.g. from Sleep) would not re-route to the \

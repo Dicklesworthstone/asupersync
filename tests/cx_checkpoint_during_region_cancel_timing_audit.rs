@@ -145,8 +145,8 @@ fn checkpoint_fast_path_queries_stable_cancellation_envelope_first() {
         .find("let cancelled = guard.is_cancel_requested();")
         .expect("stable cancellation query in checkpoint body");
     assert!(
-        task_context.contains("self.requested.load(std::sync::atomic::Ordering::Acquire)"),
-        "REGRESSION: stable cancellation query no longer uses Acquire ordering"
+        task_context.contains("self.fast_cancel.load(std::sync::atomic::Ordering::Acquire)"),
+        "REGRESSION: compatibility-aware cancellation query no longer uses Acquire ordering"
     );
 
     // The progress-recording stores must come AFTER the load.
@@ -316,18 +316,22 @@ fn checkpoint_acquire_release_pairing_documented() {
     let task_context = read("src/types/task_context.rs");
 
     assert!(
-        source.contains("stable cancellation envelope") && source.contains("`Release` ordering"),
+        source.contains("stable cancellation envelope")
+            && source.contains("`Release`")
+            && source.contains("`Acquire` ordering")
+            && task_context.contains("one Release/Acquire publication point"),
         "REGRESSION: the Acquire-Release pairing for \
-         the stable cancellation envelope is no longer documented in checkpoint(). \
+         the stable cancellation envelope is no longer documented. \
          Future maintainers may downgrade orderings to Relaxed \
          and break cross-thread visibility.",
     );
 
     assert!(
-        task_context.contains("self.requested.load(std::sync::atomic::Ordering::Acquire)"),
-        "REGRESSION: Acquire ordering is no longer used on \
-         cancellation publication. Cancel propagation across threads \
-         is no longer guaranteed.",
+        task_context.contains("self.fast_cancel.load(std::sync::atomic::Ordering::Acquire)")
+            && task_context.contains(".store(value, std::sync::atomic::Ordering::Release)"),
+        "REGRESSION: the compatibility-aware cancellation query/publisher \
+         no longer uses an Acquire/Release pair. Cancel propagation across \
+         threads is no longer guaranteed.",
     );
 }
 

@@ -335,7 +335,7 @@ fn cx_checkpoint_observes_cancel_via_stable_envelope() {
 
     assert!(
         body.contains("let cancelled = guard.is_cancel_requested();")
-            && task_context.contains("self.requested.load(std::sync::atomic::Ordering::Acquire)"),
+            && task_context.contains("self.fast_cancel.load(std::sync::atomic::Ordering::Acquire)"),
         "REGRESSION: cx.checkpoint() no longer reads the \
          stable cancellation envelope with Acquire ordering. This is \
          the path that observes the cancel request set by \
