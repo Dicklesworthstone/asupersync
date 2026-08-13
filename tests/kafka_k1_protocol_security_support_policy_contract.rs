@@ -22,7 +22,7 @@ const MANIFEST_PATH: &str = "Cargo.toml";
 const ADR_PATH: &str = "docs/adr/dep_plan_adr_009_kafka_client.md";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
 
-const ARTIFACT_SHA256: &str = "52520e2f40ccea72dc23654c4be05871dc1de1ab49eb0b380fb0d13bf924fa32";
+const ARTIFACT_SHA256: &str = "9a17c0b0b10d4af306f21e62b602a7280a31eff6c0f0448f8fc94972dc07741a";
 const DOC_SHA256: &str = "c9142b9d00a0b07187a50d224534e9268e5226829dfc5e0bbd04de80bf2a4949";
 
 const ARTIFACT_ID: &str = "kafka-k1-protocol-security-support-policy-v1";

@@ -526,7 +526,7 @@
       "pin_id": "KAFKA-K0-3-PIN-VERIFICATION-MATRIX",
       "path": "artifacts/dependency_verification_matrix_v1.json",
       "record_count": 88541,
-      "sha256": "0804e1015f56733313de0f2a025d4bd9c600a8f9a646eb62913c564f6b617b20",
+      "sha256": "3370620a1bec9e38e37a7ea681e18e22251ac0745f52507c12b6261754d2447e",
       "role": "planned verification and generic downstream fixture mapping"
     },
     {
@@ -964,11 +964,11 @@
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-027","path":"artifacts/dependency_failure_injection_matrix_v1.json","record_count":718,"sha256":"40f6dfe62edd624f6e3ea7775c0ecd887e57b47488fd70ebdfc02a95d6df052b","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-029","path":"artifacts/dependency_marginal_ledger_v1.json","record_count":188447,"sha256":"4e36ca29d7187e3237cfd9f422b2661009a608e93bb5761c7d511d412d66a047","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-030","path":"artifacts/dependency_oracle_policy_v1.json","record_count":2472,"sha256":"0cf8ea87af34a65ef952d6de5a6c304ffb583056a3a64f99cfae13832f8ddf98","role":"exact baseline content pin for a documentation-claim candidate surface"},
-    {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-031","path":"artifacts/dependency_phase1_aggregate_signoff_v1.json","record_count":327,"sha256":"c927e391eee3e5eabdd58b237d102ffe290922bcd75a659f47a8195c31607df9","role":"exact baseline content pin for a documentation-claim candidate surface"},
+    {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-031","path":"artifacts/dependency_phase1_aggregate_signoff_v1.json","record_count":327,"sha256":"6a306b99da5ce02df487196a6309937b7eef70bc5e65e1e66bd8f422d5dcf44f","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-033","path":"artifacts/dependency_verification_final_signoff_v1.json","record_count":384,"sha256":"51ff169ba89c175b0c4a727caca6486c8cf8c0330de210fec607109330292fa7","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-036","path":"artifacts/formal_proof_posture_contract_v1.json","record_count":379,"sha256":"fda56c37ea5f3989e2fa15ad0a72902c55903055ad9033f409c484df6ace1451","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-037","path":"artifacts/formal_wave2_refinement_coverage_v1.json","record_count":530,"sha256":"5000e45b31e64d87650fc49bf76cf4a8792ec38f6c1aefadf18671520877c5e9","role":"exact baseline content pin for a documentation-claim candidate surface"},
-    {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-038","path":"artifacts/hex_capability_inventory_v1.json","record_count":975,"sha256":"c56cc92d2f6d8b81fe5319481694f19717ae94a22dd67b0f9b62c21f86623b52","role":"exact baseline content pin for a documentation-claim candidate surface"},
+    {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-038","path":"artifacts/hex_capability_inventory_v1.json","record_count":975,"sha256":"e97a3997fcd0be58b15a62792f2bdcd1ac392aa3cc0b926b316234695c513648","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-041","path":"artifacts/lz4_final_signoff_v1.json","record_count":397,"sha256":"98634c4cac86708c8a337c0a60b52fa81ffa176a59216012861784a1fd2cc814","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-042","path":"artifacts/lz4_owned_codec_corpus_v1.json","record_count":291,"sha256":"e43d62bcfad745ce839e40fa04d9bdf2f5eaa88b920804efd817c4af1b341c9b","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-043","path":"artifacts/lz4_surface_artifact_inventory_v1.json","record_count":572,"sha256":"932d4f1fc81cc0081317f627feee08cee960892137f3cce62e8c23ff310600eb","role":"exact baseline content pin for a documentation-claim candidate surface"},

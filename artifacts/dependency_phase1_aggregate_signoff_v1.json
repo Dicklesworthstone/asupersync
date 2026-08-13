@@ -46,7 +46,7 @@
       "bead_id": "asupersync-dep-p1-foundations-upksjk.6.1",
       "role": "INVARIANT_TO_EVIDENCE_MATRIX",
       "path": "artifacts/dependency_verification_matrix_v1.json",
-      "sha256": "0804e1015f56733313de0f2a025d4bd9c600a8f9a646eb62913c564f6b617b20"
+      "sha256": "3370620a1bec9e38e37a7ea681e18e22251ac0745f52507c12b6261754d2447e"
     },
     {
       "bead_id": "asupersync-dep-p1-foundations-upksjk.6.6",
