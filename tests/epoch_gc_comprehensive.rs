@@ -214,36 +214,56 @@ fn test_end_to_end_cleanup_latency() {
     let counter = Arc::new(EpochCounter::new(Duration::from_millis(5)));
     let local = LocalEpoch::new();
 
-    // Measure enqueue latency
-    let start = Instant::now();
-    let work = CleanupWork::Obligation {
-        id: 1,
-        metadata: vec![0u8; 100],
-    };
+    // A single wall-clock sample is not a valid hot-path measurement: the
+    // test process may be descheduled, and first-use allocation is not part of
+    // `enqueue`. Exercise several exact round trips and use the best observed
+    // sample to bound the intrinsic uncontended cost. Tail latency belongs in
+    // the dedicated benchmark lane, where host load is controlled.
+    const SAMPLE_COUNT: u64 = 32;
+    let mut best_enqueue_latency = Duration::MAX;
+    let mut best_cleanup_latency = Duration::MAX;
 
-    let current_epoch = counter.current();
-    let _ = queue.enqueue(work, current_epoch);
-    let enqueue_latency = start.elapsed();
+    for id in 0..SAMPLE_COUNT {
+        let work = CleanupWork::Obligation {
+            id,
+            metadata: vec![0u8; 100],
+        };
+        let current_epoch = counter.current();
 
-    // Enqueue should be fast (< 1ms for small work)
+        let start = Instant::now();
+        queue
+            .enqueue(work, current_epoch)
+            .expect("the default cleanup queue has capacity for one work item");
+        best_enqueue_latency = best_enqueue_latency.min(start.elapsed());
+
+        counter.force_advance();
+        local.sync_to_global(counter.current());
+
+        let start = Instant::now();
+        let cleaned_work = queue.collect_expired(current_epoch);
+        best_cleanup_latency = best_cleanup_latency.min(start.elapsed());
+
+        assert_eq!(cleaned_work.len(), 1);
+        match &cleaned_work[0] {
+            CleanupWork::Obligation {
+                id: cleaned_id,
+                metadata,
+            } => {
+                assert_eq!(*cleaned_id, id);
+                assert_eq!(metadata, &[0u8; 100]);
+            }
+            other => panic!("unexpected cleanup work: {other:?}"),
+        }
+        assert!(queue.is_empty());
+    }
+
     assert!(
-        enqueue_latency < Duration::from_millis(1),
-        "Enqueue latency too high: {enqueue_latency:?}"
+        best_enqueue_latency < Duration::from_millis(1),
+        "Best uncontended enqueue latency too high: {best_enqueue_latency:?}"
     );
-
-    // Advance epoch to make work available
-    counter.force_advance();
-    local.sync_to_global(counter.current());
-
-    // Measure cleanup latency
-    let start = Instant::now();
-    let cleaned_work = queue.collect_expired(current_epoch);
-    let cleanup_latency = start.elapsed();
-
-    assert_eq!(cleaned_work.len(), 1);
     assert!(
-        cleanup_latency < Duration::from_millis(1),
-        "Cleanup collection latency too high: {cleanup_latency:?}"
+        best_cleanup_latency < Duration::from_millis(1),
+        "Best uncontended cleanup latency too high: {best_cleanup_latency:?}"
     );
 }
 
@@ -443,56 +463,61 @@ fn test_random_cancellation_patterns() {
     let counter = Arc::new(EpochCounter::new(Duration::from_millis(1)));
     let work_count = Arc::new(AtomicUsize::new(0));
 
-    // Create chaos pattern with random timing
-    for _ in 0..100 {
-        let queue = queue.clone();
-        let counter = counter.clone();
-        let work_count = work_count.clone();
+    // Create chaos pattern with random timing. Keep every join handle: letting
+    // these 100 OS threads escape the test would contaminate unrelated tests
+    // in the same process and turn their wall-clock observations into races.
+    let handles: Vec<_> = (0..100)
+        .map(|_| {
+            let queue = queue.clone();
+            let counter = counter.clone();
+            let work_count = work_count.clone();
 
-        thread::spawn(move || {
-            let local = LocalEpoch::new();
+            thread::spawn(move || {
+                let local = LocalEpoch::new();
 
-            // Random delay
-            let delay = fastrand::u64(1..=10);
-            thread::sleep(Duration::from_millis(delay));
+                // Random delay
+                let delay = fastrand::u64(1..=10);
+                thread::sleep(Duration::from_millis(delay));
 
-            // Enqueue random amount of work
-            let work_items = fastrand::usize(1..=50);
-            for i in 0..work_items {
-                let work = CleanupWork::Obligation {
-                    id: i as u64,
-                    metadata: vec![0u8; fastrand::usize(10..=100)],
-                };
+                // Enqueue random amount of work
+                let work_items = fastrand::usize(1..=50);
+                for i in 0..work_items {
+                    let work = CleanupWork::Obligation {
+                        id: i as u64,
+                        metadata: vec![0u8; fastrand::usize(10..=100)],
+                    };
 
-                local.sync_to_global(counter.current());
-                let _ = queue.enqueue(work, local.current());
-                work_count.fetch_add(1, Ordering::Relaxed);
+                    local.sync_to_global(counter.current());
+                    queue
+                        .enqueue(work, local.current())
+                        .expect("chaos workload remains below the default queue capacity");
+                    work_count.fetch_add(1, Ordering::Relaxed);
 
-                // Random micro-delay
-                if fastrand::bool() {
-                    thread::sleep(Duration::from_micros(fastrand::u64(1..=100)));
+                    // Random micro-delay
+                    if fastrand::bool() {
+                        thread::sleep(Duration::from_micros(fastrand::u64(1..=100)));
+                    }
                 }
-            }
-        });
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle.join().expect("chaos producer must not panic");
     }
 
-    // Let chaos run
-    thread::sleep(Duration::from_millis(200));
-
-    // Cleanup all remaining work
-    let mut total_collected = 0;
-    for epoch in 1..=counter.current() {
-        let collected = queue.collect_expired(epoch);
-        total_collected += collected.len();
-    }
+    // Once every producer has terminated, one epoch advance makes the entire
+    // workload eligible and exact accounting is deterministic.
+    let safe_epoch = counter.force_advance().saturating_sub(1);
+    let total_collected = queue.collect_expired(safe_epoch).len();
 
     let total_work = work_count.load(Ordering::Relaxed);
 
-    // Should collect most of the work (allowing for some still in-flight)
-    assert!(
-        total_collected >= total_work * 90 / 100,
-        "Chaos test lost too much work: generated={total_work}, collected={total_collected}"
+    assert_eq!(
+        total_collected, total_work,
+        "Chaos test lost work: generated={total_work}, collected={total_collected}"
     );
+    assert!(queue.is_empty());
 }
 
 // ============================================================================
