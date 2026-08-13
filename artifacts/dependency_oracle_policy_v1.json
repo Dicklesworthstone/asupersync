@@ -42,8 +42,8 @@
       },
       {
         "path": "asupersync-macros/Cargo.toml",
-        "sha256": "7655ff764d5b654d38db64815b841ba1f8fd42bd94701af102bfa7a490ea125a",
-        "line_count": 36,
+        "sha256": "75e991cf690fe2f64db0e7f931e584f7348fdb4c926b68bd417b18ddc2fc7bdb",
+        "line_count": 37,
         "scope": "workspace-member"
       },
       {
@@ -60,8 +60,8 @@
       },
       {
         "path": "conformance/Cargo.toml",
-        "sha256": "005a58f272f823601c4bc66f6e3c43a86894477348bf26123460090f6235df7b",
-        "line_count": 213,
+        "sha256": "c08888393c4325550cc6714f39df24acab91e261e2548859e83ff7c5ff0beafb",
+        "line_count": 214,
         "scope": "workspace-conformance-member"
       },
       {

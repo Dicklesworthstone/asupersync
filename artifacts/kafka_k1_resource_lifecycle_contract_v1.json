@@ -39,7 +39,7 @@
       "path": "artifacts/kafka_k1_obligation_index_v1.json",
       "byte_count": 42758,
       "record_count": 738,
-      "sha256": "a01aa534e83ebc92992cadb385da93a51c740118a07c70b045d44a31aa797fb8"
+      "sha256": "b382fdf7f82af1e1b73d2ad9915e0c2e940677b46c4f757898b91648ff8d3de2"
     },
     {
       "input_id": "K1-4-INPUT-K1-1-DOCUMENT",
@@ -55,7 +55,7 @@
       "path": "tests/kafka_k1_client_contract.rs",
       "byte_count": 95396,
       "record_count": 2585,
-      "sha256": "b3055e1893686a17f05283ecaf0de850c4b9e0e168fb9de5bf26f5fed8b5adba"
+      "sha256": "c53dd1a5a1a3442371c923b040efc7b0936ce085f85c7f37f7ebc271fc45956b"
     },
     {
       "input_id": "K1-4-INPUT-K1-2",
@@ -63,7 +63,7 @@
       "path": "artifacts/kafka_k1_protocol_security_support_policy_v1.json",
       "byte_count": 82164,
       "record_count": 1399,
-      "sha256": "a42ba0599a807700765a085d6609d747bbf705fc860296906499bdccd4e6491a"
+      "sha256": "52520e2f40ccea72dc23654c4be05871dc1de1ab49eb0b380fb0d13bf924fa32"
     },
     {
       "input_id": "K1-4-INPUT-K1-3",
@@ -71,7 +71,7 @@
       "path": "artifacts/kafka_k1_public_api_contract_v1.json",
       "byte_count": 37850,
       "record_count": 753,
-      "sha256": "d1923022382abf98b9cf07d96d5c13558329fd94aec6d077d77405a2b48d228f"
+      "sha256": "55f53f3b44382a985b2aab4e5dcb62aca1d621e417403fcec15464fb3d9bd051"
     },
     {
       "input_id": "K1-4-INPUT-K0-5",
@@ -79,7 +79,7 @@
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
       "byte_count": 29494,
       "record_count": 284,
-      "sha256": "c63093145d67d50d51e915a8fb3a82d5b2550e5ccc9227bb380abb9665567757"
+      "sha256": "54d34d3f410aecdc17e42fa2d91e9660db9a173eafd732374b31f4e5844f776b"
     },
     {
       "input_id": "K1-4-INPUT-K0-2",
@@ -95,7 +95,7 @@
       "path": "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
       "byte_count": 119250,
       "record_count": 2187,
-      "sha256": "543903729c1186348047c39772dd78baa483a603e91e11e3e818c7ffdecb0ad4"
+      "sha256": "954db9c4e6de982d354ea5eac13216cce081a8f68d01537c47e2247f8e0bbd4a"
     },
     {
       "input_id": "K1-4-INPUT-ADR",
@@ -1854,7 +1854,7 @@
     "source_authority_reference_sha256": "634bb51f85fe7d54015ccc24a83b52590d23b77c11c9aa522dc89d9af88357e7",
     "no_claim_boundary_sha256": "bc5703ea9ef717f0796db249350ceafac85544acc31ef47f2da2b6ac33be9ce3",
     "authority_contract_sha256": "6a51fa1221869f3125a3ec478dc5e729eac868efc200a4779fdcaff35599cbf7",
-    "authority_input_contract_sha256": "047feed9cf552ff268c6f676e43437b658af0d8ad67e37ed77092465a12164fd",
+    "authority_input_contract_sha256": "4b8f2b9eac6eacaa0f1d42e7b1b0812269fdd6dff95a283a080deab22ab666f7",
     "authority_views_contract_sha256": "b7c9cb4e15efb45cdca0c64316e4869b9cd93302205a52e4cf12ad88a19cb6b7",
     "policy_contract_sha256": "ec236faf14c33462c00c5c365e188b1a7089a3215329dd856699633ca4c2b396",
     "semantic_coverage_contract_sha256": "b86d984aa4061fe4770c4aeb7f639750193540deb4226522e48e1dfd6a441b27",
