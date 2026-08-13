@@ -201,7 +201,7 @@ expression: golden
           "fingerprint": "fp-0",
           "is_new_class": false,
           "violation_count": 0,
-          "certificate_hash": "cert-1"
+          "certificate_hash": "cert-2"
         },
         {
           "seed": "seed-3",
