@@ -336,14 +336,14 @@ Io	database/mysql.rs	1997	TcpStream::	match TcpStream::connect(addr).await {
 Io	database/postgres.rs	3548	TcpStream::	let mut stream = crate::net::TcpStream::connect_timeout(addr, target.connect_timeout)
 Io	database/postgres.rs	3762	TcpStream::	TcpStream::connect_timeout(addr, timeout).await
 Io	database/postgres.rs	3764	TcpStream::	TcpStream::connect(addr).await
-Io	database/postgres.rs	8525	std::net::TcpStream	fn fuzz_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
-Io	database/postgres.rs	8526	std::net::TcpListener	let listener = match std::net::TcpListener::bind() {
-Io	database/postgres.rs	8534	std::net::TcpStream	let std_stream = match std::net::TcpStream::connect(addr) {
-Io	database/postgres.rs	8542	TcpStream::	let stream = match crate::net::TcpStream::from_std(std_stream) {
+Io	database/postgres.rs	8529	std::net::TcpStream	fn fuzz_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
+Io	database/postgres.rs	8530	std::net::TcpListener	let listener = match std::net::TcpListener::bind() {
+Io	database/postgres.rs	8538	std::net::TcpStream	let std_stream = match std::net::TcpStream::connect(addr) {
+Io	database/postgres.rs	8546	TcpStream::	let stream = match crate::net::TcpStream::from_std(std_stream) {
 Io	grpc/server.rs	1969	std::net::TcpListener	let listener = std::net::TcpListener::bind(addr).map_err(|error| {
-Io	http/h1/http_client.rs	2019	TcpStream::	TcpStream::connect_socket_addr(socket_addr)
-Io	http/h1/http_client.rs	2024	TcpStream::	TcpStream::connect(addr)
-Io	http/h1/http_client.rs	2532	TcpStream::	let mut stream = TcpStream::connect(addr)
+Io	http/h1/http_client.rs	2017	TcpStream::	TcpStream::connect_socket_addr(socket_addr)
+Io	http/h1/http_client.rs	2022	TcpStream::	TcpStream::connect(addr)
+Io	http/h1/http_client.rs	2530	TcpStream::	let mut stream = TcpStream::connect(addr)
 Io	http/h1/listener.rs	373	TcpListener::	let tcp_listener = TcpListener::bind(addr).await?;
 Io	http/h2/listener.rs	2029	TcpListener::	let tcp_listener = TcpListener::bind(addr).await?;
 Io	messaging/nats.rs	1623	TcpStream::	let stream = TcpStream::connect(addr).await?;
