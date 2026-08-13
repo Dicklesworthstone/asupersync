@@ -8742,9 +8742,9 @@
       "resolution_reason": "EXCLUDED_NAME_COLLISION",
       "atomic_sites": [
         {
-          "site_id": "KAFKA-K0-3-CS-008-AC-B158355-E158389",
+          "site_id": "KAFKA-K0-3-CS-008-AC-B158357-E158391",
           "site_kind": "ASSOCIATED_CALL",
-          "source_locator": "bytes 158355..158389; line 4095:15-4095:49",
+          "source_locator": "bytes 158357..158391; line 4095:15-4095:49",
           "source_literal": "IsolationLevel::from_server_string()",
           "k0_1_symbol_id": null,
           "k0_2_semantic_ids": [],
