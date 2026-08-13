@@ -206,11 +206,19 @@ async fn flush_write_buf<IO: AsyncWrite + Unpin>(
 }
 
 fn write_path_cancelled(op_cx: Option<&Cx>, is_open: bool) -> bool {
-    is_open
-        && match op_cx {
-            Some(cx) => cx.checkpoint().is_err(),
-            None => crate::cx::Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false),
+    match op_cx {
+        // An explicitly supplied operation context remains authoritative even
+        // after a Close frame changes the handshake state to `CloseSent`.
+        // Otherwise a close write parked in the underlying transport can no
+        // longer observe an abort and the task can remain stuck forever.
+        Some(cx) => cx.checkpoint().is_err(),
+        // Legacy callers without an explicit context retain the established
+        // behavior: ambient cancellation is observed only while the
+        // connection is open, not while an already-started close is flushed.
+        None => {
+            is_open && crate::cx::Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false)
         }
+    }
 }
 
 async fn flush_write_buf_with_cx<IO: AsyncWrite + Unpin>(

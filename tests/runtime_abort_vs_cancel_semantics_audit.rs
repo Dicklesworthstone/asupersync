@@ -133,15 +133,20 @@
 use asupersync::channel::mpsc::{self, SendError};
 use asupersync::channel::oneshot;
 use asupersync::cx::Cx;
+use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
+use asupersync::net::websocket::{CloseReason, Message, WebSocket, WebSocketConfig, WsError};
 use asupersync::runtime::{JoinError, RuntimeBuilder, RuntimeState, yield_now};
 use asupersync::sync::{
     AcquireError, LockError, Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore,
 };
 use asupersync::types::{Budget, CancelKind};
 use std::collections::BTreeMap;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::{Context, Poll};
 
 fn read(rel: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
@@ -207,6 +212,46 @@ fn task_handle_constructor_census() -> BTreeMap<String, usize> {
 #[derive(Debug, PartialEq, Eq)]
 enum DownstreamTransportError {
     Cancelled,
+}
+
+struct PendingWebSocketWrite {
+    write_polls: Arc<AtomicUsize>,
+    dropped: Arc<AtomicBool>,
+}
+
+impl AsyncRead for PendingWebSocketWrite {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Poll::Pending
+    }
+}
+
+impl AsyncWrite for PendingWebSocketWrite {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.write_polls.fetch_add(1, Ordering::AcqRel);
+        Poll::Pending
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl Drop for PendingWebSocketWrite {
+    fn drop(&mut self) {
+        self.dropped.store(true, Ordering::Release);
+    }
 }
 
 #[test]
@@ -333,6 +378,70 @@ fn run_test_preserves_typed_cancellation_from_a_parked_spawn() {
             "the spawned guard holder must complete cleanly after the waiter is cancelled",
         );
     });
+}
+
+#[test]
+fn abort_repolls_an_explicit_cx_websocket_close_write_to_typed_cancellation() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx = Cx::current().expect("runtime task installs a current Cx");
+        let write_polls = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let websocket = WebSocket::from_upgraded(
+            PendingWebSocketWrite {
+                write_polls: Arc::clone(&write_polls),
+                dropped: Arc::clone(&dropped),
+            },
+            WebSocketConfig::default(),
+        );
+        let (read, mut write) = websocket.split();
+        let mut close = cx
+            .spawn(move |close_cx| async move {
+                write
+                    .send(&close_cx, Message::Close(Some(CloseReason::normal())))
+                    .await
+            })
+            .expect("runtime-backed Cx must admit the split WebSocket close");
+
+        for _ in 0..512 {
+            if write_polls.load(Ordering::Acquire) != 0 {
+                break;
+            }
+            yield_now().await;
+        }
+        assert_eq!(
+            write_polls.load(Ordering::Acquire),
+            1,
+            "the close frame must be genuinely parked in the transport write before abort",
+        );
+
+        close.abort();
+        let result = close.join(&cx).await;
+        match result {
+            Ok(Err(WsError::Io(error))) => assert_eq!(
+                error.kind(),
+                io::ErrorKind::Interrupted,
+                "the explicit close context must surface typed I/O cancellation",
+            ),
+            other => panic!(
+                "aborting a transport-parked close must preserve its operation-level cancellation result; got {other:?}",
+            ),
+        }
+        assert_eq!(
+            write_polls.load(Ordering::Acquire),
+            1,
+            "the abort repoll must observe the explicit context before polling the transport again",
+        );
+
+        drop(read);
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "joining the cancelled close and dropping the peer half must release the transport",
+        );
+    }));
 }
 
 #[test]

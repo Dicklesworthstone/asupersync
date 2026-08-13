@@ -8,6 +8,7 @@ repository = "https://github.com/Dicklesworthstone/asupersync"
 readme = "README.md"
 keywords = ["async", "structured", "concurrency", "macros", "proc-macro"]
 categories = ["asynchronous", "concurrency"]
+exclude = [".beads/**"]
 
 [lib]
 proc-macro = true

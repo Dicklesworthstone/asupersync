@@ -43,7 +43,7 @@
   "source_pins": [
     {"path":"Cargo.toml","sha256":"fee2c185ab94fd33867a800f7faa8857b8d6204dba7e16eefe510a31fc691c04","line_count":1057},
     {"path":"Cargo.lock","sha256":"620579cbaad5dd73da0e70aa21d3a3bf928126ac2920077802e7a3058c522821","line_count":4666},
-    {"path":"conformance/Cargo.toml","sha256":"005a58f272f823601c4bc66f6e3c43a86894477348bf26123460090f6235df7b","line_count":213},
+    {"path":"conformance/Cargo.toml","sha256":"c08888393c4325550cc6714f39df24acab91e261e2548859e83ff7c5ff0beafb","line_count":214},
     {"path":"tests/conformance/raptorq_rfc6330/golden/Cargo.toml","sha256":"9df3b4755bc7d60b5ab8ae1910211f481d52305ee0a8f7f3f451b8098cb103ec","line_count":30},
     {"path":"tests/conformance/raptorq_rfc6330/golden/src/lib.rs","sha256":"4ccc6fc3ac9090bcd3f4c2b2f16aaf69ea18e089ffb9dda8b73a8a434eeb6e98","line_count":497},
     {"path":"tests/conformance/raptorq_rfc6330/golden/src/mod.rs","sha256":"3f341616116b85c479abd1afd4f00a23c7a0aa4d891aade4d5906ac99cf7178a","line_count":16},

@@ -19,15 +19,15 @@ and each package version is owned by the package's `Cargo.toml`.
 
 | Order | Package | Manifest | Current version | Role | Dry-run coverage today |
 |---:|---|---|---|---|---|
-| 1 | `franken-kernel` | `franken_kernel/Cargo.toml` | `0.4.3` | FrankenSuite support | independent dry-run before publish |
-| 2 | `franken-evidence` | `franken_evidence/Cargo.toml` | `0.4.3` | FrankenSuite support | independent dry-run before publish |
-| 3 | `franken-decision` | `franken_decision/Cargo.toml` | `0.4.3` | FrankenSuite support | dry-run inside `publish_if_needed` |
-| 4 | `asupersync-macros` | `asupersync-macros/Cargo.toml` | `0.4.3` | proc macro | independent dry-run before publish |
-| 5 | `asupersync` | `Cargo.toml` | `0.4.3` | runtime core | dry-run inside `publish_if_needed` |
-| 6 | `asupersync-conformance` | `conformance/Cargo.toml` | `0.4.3` | conformance | dry-run inside `publish_if_needed` |
-| 7 | `frankenlab` | `frankenlab/Cargo.toml` | `0.4.3` | deterministic testing harness | dry-run inside `publish_if_needed` |
-| 8 | `asupersync-browser-core` | `asupersync-browser-core/Cargo.toml` | `0.4.3` | browser boundary | dry-run inside `publish_if_needed` |
-| 9 | `asupersync-tokio-compat` | `asupersync-tokio-compat/Cargo.toml` | `0.4.3` | compat satellite | dry-run inside `publish_if_needed` |
+| 1 | `franken-kernel` | `franken_kernel/Cargo.toml` | `0.4.4` | FrankenSuite support | independent dry-run before publish |
+| 2 | `franken-evidence` | `franken_evidence/Cargo.toml` | `0.4.4` | FrankenSuite support | independent dry-run before publish |
+| 3 | `franken-decision` | `franken_decision/Cargo.toml` | `0.4.4` | FrankenSuite support | dry-run inside `publish_if_needed` |
+| 4 | `asupersync-macros` | `asupersync-macros/Cargo.toml` | `0.4.4` | proc macro | independent dry-run before publish |
+| 5 | `asupersync` | `Cargo.toml` | `0.4.4` | runtime core | dry-run inside `publish_if_needed` |
+| 6 | `asupersync-conformance` | `conformance/Cargo.toml` | `0.4.4` | conformance | dry-run inside `publish_if_needed` |
+| 7 | `frankenlab` | `frankenlab/Cargo.toml` | `0.4.4` | deterministic testing harness | dry-run inside `publish_if_needed` |
+| 8 | `asupersync-browser-core` | `asupersync-browser-core/Cargo.toml` | `0.4.4` | browser boundary | dry-run inside `publish_if_needed` |
+| 9 | `asupersync-tokio-compat` | `asupersync-tokio-compat/Cargo.toml` | `0.4.4` | compat satellite | dry-run inside `publish_if_needed` |
 
 `drop_unwrap_finder/Cargo.toml` is a workspace helper package visible to Cargo
 metadata, but it is not a crates.io publish target in the current workflow.

@@ -57,6 +57,11 @@ _No changes yet._
   erasing that value into a generic join cancellation. The terminal publisher
   is non-cancellable, panic attribution remains explicit, and the legacy
   state-threaded API retains its established cancellation-dominant contract.
+- **Pending WebSocket close writes honor their explicit caller context.** Once
+  a Close frame entered `CloseSent`, the split write path previously suppressed
+  cancellation and could strand an aborted task forever on a pending transport
+  write. Explicit-`Cx` close operations now return typed interruption while the
+  connection owner can fail the partially written close deterministically.
 - **The downstream failure is now a permanent native-runtime release gate.**
   The regression matrix uses the public spawn/abort/join sequence that failed
   in FastMCP Rust, proves that the task reached its parked state before abort,

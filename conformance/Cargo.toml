@@ -13,6 +13,7 @@ repository = "https://github.com/Dicklesworthstone/asupersync"
 readme = "README.md"
 keywords = ["async", "conformance", "runtime", "testing"]
 categories = ["asynchronous", "development-tools::testing"]
+exclude = [".beads/**"]
 
 [[bin]]
 name = "conformance_reference_registry_guard"
