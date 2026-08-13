@@ -232,6 +232,7 @@ manifest = {
     "required_log_fields": contract["required_log_fields"],
     "selected_scenarios": selected,
 }
+manifest_path.parent.mkdir(parents=True, exist_ok=True)
 manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 print(json.dumps(manifest, indent=2, sort_keys=True))
 PY
@@ -378,6 +379,7 @@ report = {
     "validation_passed": first_failure == "",
     "first_failure": first_failure,
 }
+run_report.parent.mkdir(parents=True, exist_ok=True)
 run_report.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
 if first_failure:
     raise SystemExit(1)
