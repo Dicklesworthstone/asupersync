@@ -18,11 +18,11 @@ expression: golden
       "oracle_failed": 0
     },
     "trace": {
-      "len": 10,
-      "fingerprint": 1678856424573481139,
+      "len": 7,
+      "fingerprint": 106498709395912584,
       "certificate": {
-        "event_hash": 3321498192921007439,
-        "event_count": 10,
+        "event_hash": 1648491988830469479,
+        "event_count": 7,
         "schedule_hash": 10025681510532821793
       },
       "canonical_depth": 3,
@@ -31,24 +31,6 @@ expression: golden
           {
             "kind": 10,
             "primary": 0,
-            "secondary": 0,
-            "tertiary": 0
-          },
-          {
-            "kind": 29,
-            "primary": 17841621336708427690,
-            "secondary": 0,
-            "tertiary": 0
-          },
-          {
-            "kind": 29,
-            "primary": 17841621336708427690,
-            "secondary": 0,
-            "tertiary": 0
-          },
-          {
-            "kind": 29,
-            "primary": 17841621336708427690,
             "secondary": 0,
             "tertiary": 0
           }
@@ -111,11 +93,11 @@ expression: golden
       "oracle_failed": 0
     },
     "trace": {
-      "len": 13,
-      "fingerprint": 15406494897016089422,
+      "len": 9,
+      "fingerprint": 17576891184187974516,
       "certificate": {
-        "event_hash": 11759208335282007061,
-        "event_count": 13,
+        "event_hash": 1933429187640554442,
+        "event_count": 9,
         "schedule_hash": 4266418979062626092
       },
       "canonical_depth": 3,
@@ -124,30 +106,6 @@ expression: golden
           {
             "kind": 10,
             "primary": 0,
-            "secondary": 0,
-            "tertiary": 0
-          },
-          {
-            "kind": 29,
-            "primary": 17841621336708427690,
-            "secondary": 0,
-            "tertiary": 0
-          },
-          {
-            "kind": 29,
-            "primary": 17841621336708427690,
-            "secondary": 0,
-            "tertiary": 0
-          },
-          {
-            "kind": 29,
-            "primary": 17841621336708427690,
-            "secondary": 0,
-            "tertiary": 0
-          },
-          {
-            "kind": 29,
-            "primary": 17841621336708427690,
             "secondary": 0,
             "tertiary": 0
           }
@@ -222,11 +180,11 @@ expression: golden
       "oracle_failed": 0
     },
     "trace": {
-      "len": 11,
-      "fingerprint": 9286869527578958911,
+      "len": 8,
+      "fingerprint": 14071155972764954226,
       "certificate": {
-        "event_hash": 2031298199334779543,
-        "event_count": 11,
+        "event_hash": 11206236439601511873,
+        "event_count": 8,
         "schedule_hash": 14350528043032498298
       },
       "canonical_depth": 4,
@@ -235,24 +193,6 @@ expression: golden
           {
             "kind": 10,
             "primary": 0,
-            "secondary": 0,
-            "tertiary": 0
-          },
-          {
-            "kind": 29,
-            "primary": 17841621336708427690,
-            "secondary": 0,
-            "tertiary": 0
-          },
-          {
-            "kind": 29,
-            "primary": 17841621336708427690,
-            "secondary": 0,
-            "tertiary": 0
-          },
-          {
-            "kind": 29,
-            "primary": 17841621336708427690,
             "secondary": 0,
             "tertiary": 0
           }
