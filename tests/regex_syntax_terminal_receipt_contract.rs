@@ -487,7 +487,8 @@ fn operator_doc_and_candidate_source_preserve_receipt_markers() {
         "directly_nested_repetition_matches_incumbent_syntax_and_stays_bounded",
         "class_set_operators_preserve_incumbent_empty_operands",
         "quarantined_incumbent_and_candidate_compile_states_match_adversarial_corpus",
-        "minimized_semantic_divergences_remain_explicit_cutover_blockers",
+        "extended_mode_elides_only_grammar_ignored_text_and_preserves_spans",
+        "duplicate_capture_names_fail_with_a_stable_secret_safe_code",
         "frozen_invalid_goldens_match_diagnostic_category_and_span",
     ] {
         assert!(
