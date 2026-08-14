@@ -42,6 +42,8 @@ Deterministic and seed-bound. Pre-poll and post-poll injection points:
 
 Presets: `with_light_chaos()`, `with_heavy_chaos()`, `with_chaos(...)` for focused campaigns.
 
+Targeted await-point cancellation injection (`CancellationInjector`, `AwaitPoint`) lives in `src/lab/injection.rs`.
+
 ### Snapshots
 
 Source: `src/lab/snapshot_restore.rs`
@@ -68,10 +70,14 @@ Source: `src/lab/oracle/`
 - **Obligation leak oracle**: verifies all obligations resolved
 - **Loser drain oracle**: verifies race losers fully drained
 - **Cancellation protocol oracle**: verifies request -> drain -> finalize sequence
+- **Task leak / region leak oracles**: entry names `task_leak`, `region_leak`
+
+The registry carries further specialized oracles (determinism, waker dedup,
+priority inversion, ...); see `src/lab/oracle/mod.rs` for entry names.
 
 ### E-Process Monitoring
 
-Source: `src/lab/oracle/eprocess.rs`
+Source: `src/lab/oracle/eprocess.rs` (runtime-side: `src/obligation/eprocess.rs`)
 
 Anytime-valid monitoring using supermartingale-based testing. Can peek after every scheduling step with controlled type-I error (Ville's inequality).
 
@@ -95,12 +101,16 @@ Deterministic virtual time with explicit tie-breaking. Sleeps complete instantly
 
 ## DPOR Schedule Explorer
 
-Source: `src/lab/explorer.rs`
+Source: `src/lab/explorer.rs` (public types: `ExplorerConfig`, `ScheduleExplorer`, `DporExplorer`)
 
 DPOR-style schedule exploration treating executions as Mazurkiewicz traces:
-- Track coverage by equivalence class fingerprints
-- Prioritize exploration based on trace topology
+- Track coverage by equivalence class fingerprints (Foata normal form)
+- Seed-sweep plus race-guided derivation of new deterministic seeds
 - Deterministic, replayable concurrency debugging with coverage semantics
+
+This is race-guided seed exploration, not certified-optimal DPOR: there is no
+exact-prefix backtracking, so equivalence-class counts are campaign metrics,
+not a completeness guarantee.
 
 ## Trace Infrastructure
 
@@ -120,7 +130,7 @@ Constructs valid linear extensions minimizing owner switches via A* solver. Smal
 
 Source: `src/trace/dpor.rs`, `src/trace/independence.rs`
 
-Vector clocks per task plus resource-footprint conflicts. Backtracking point extraction for systematic interleaving exploration.
+Vector clocks per task plus resource-footprint conflicts. Detected races yield backtrack points that feed the explorer's race-guided seed derivation (no exact-prefix backtracking is replayed).
 
 ### Persistent Homology
 
@@ -159,7 +169,7 @@ Reusable scenario YAML for: heavy chaos, partitions, host crash/restart, clock s
 
 ## Test Artifact Outputs
 
-When `ASUPERSYNC_TEST_ARTIFACTS_DIR` is set:
+When `ASUPERSYNC_TEST_ARTIFACTS_DIR` is set (written under `<scenario_id>/`):
 - `event_log.txt`
 - `failed_assertions.json`
 - `repro_manifest.json`
@@ -186,6 +196,11 @@ fn test_cancel_safety() {
 test_utils::run_test(|| async { /* simple async test */ });
 test_utils::run_test_with_cx(|cx| async move { /* test with Cx */ });
 ```
+
+Attribute macros: `#[asupersync::test]` (production runtime), `#[lab_test]`
+(deterministic lab runtime; `#[asupersync::lab_test(seeds = A..B)]` runs a
+seed matrix). `run_async_under_lab_with_config(LabConfig, ...)` accepts a full
+`LabConfig` when the default seed-only entry point is not enough.
 
 ### Determinism Rules
 

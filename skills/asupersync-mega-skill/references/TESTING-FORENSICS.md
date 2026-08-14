@@ -2,6 +2,9 @@
 
 This is one of Asupersync's strongest differentiators. Build it into the development loop, not just the incident-response loop.
 
+Start with `TESTING_FOR_AGENTS.md` (repo root): it is the decision-tree entry
+point for choosing a test shape. `TESTING.md` holds the full contracts.
+
 ## Test Ladder
 
 Use the lightest tool that still proves the invariant:
@@ -29,6 +32,11 @@ For day-to-day replacement of `#[tokio::test]` style bootstraps:
 - `test_utils::run_test(...)`
 - `test_utils::run_test_with_cx(...)`
 
+Attribute macros also exist (`asupersync-macros`): `#[asupersync::test]` runs on
+the production runtime; `#[lab_test]` (including
+`#[asupersync::lab_test(seeds = A..B)]` for seed matrices) runs on the
+deterministic lab runtime.
+
 These should be your default unless the test needs stronger scheduling control.
 
 ## Reach For `LabRuntime` Early
@@ -51,7 +59,7 @@ let lab = LabRuntime::new(
         .panic_on_leak(true)
         .futurelock_max_idle_steps(10_000)
         .panic_on_futurelock(true)
-        .capture_trace(true),
+        .trace_capacity(16_384),
 );
 ```
 
@@ -81,8 +89,9 @@ At minimum, care about:
 Use report-based oracle checks. For lab runs, inspect `LabRunReport`:
 `report.lab_test_passed()`, `report.oracle_report.all_passed()`, and
 `report.oracle_report.entry("quiescence")` /
-`entry("obligation_leak")` when a specific invariant matters. The broader
-lab/oracle suite also tracks loser-drain and cancellation-protocol invariants.
+`entry("obligation_leak")` when a specific invariant matters. Other registered
+entry names include `task_leak`, `region_leak`, `loser_drain`, and
+`cancellation_protocol` (see `src/lab/oracle/` for the full registry).
 Use those as regression guards, not just informational reports.
 
 If the migrated slice is supposed to be strict, make the test prove it instead
@@ -93,6 +102,19 @@ Relevant sources:
 - `src/lab/oracle/`
 - `src/lab/runtime.rs`
 - `tests/e2e/combinator/cancel_correctness/`
+
+## Native Cancellation Boundaries Are A Release Gate
+
+Lab and model tests do not prove that a real worker wakes a genuinely parked
+future, or that a spawn wrapper publishes the exact nested result through
+`TaskHandle`. Since v0.4.4, the native parked-task cancellation lane
+(`tests/runtime_abort_vs_cancel_semantics_audit.rs`, manifest lane
+`native-parked-task-cancellation`, run first by `scripts/run_proof_checks.sh`)
+is a release-blocking behavioral contract. Any change to `Cx`, `TaskHandle`,
+scheduler cancellation wakeup, spawn wrappers, or cancel-aware primitives must
+run that lane; a red, zero-test, filtered, or skipped result blocks release.
+See "Do not model away a native cancellation boundary" in
+`TESTING_FOR_AGENTS.md`.
 
 ## Chaos Presets Matter
 
@@ -215,6 +237,16 @@ When a concurrency bug is suspected:
 3. inspect oracle failures and drain/quiescence behavior,
 4. preserve crashpack/replay artifacts if the issue is nontrivial,
 5. only then widen the test campaign or add heavier chaos.
+
+## Escaped Defects Need Receipts
+
+For a defect that escaped to users, AGENTS.md's escaped-defect protocol applies:
+reproduce at the consumer-visible boundary, prove the test reached the failing
+state (an observable parked/queued/owned state, not a sleep), assert the exact
+result shape and cleanup invariants, and preserve an old-code-red plus
+repaired-code-green receipt before closing. Removing or weakening such a
+reproducer, its state witness, or its exact oracle requires explicit written
+user approval.
 
 ## Practical Migration Rule
 
