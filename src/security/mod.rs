@@ -80,6 +80,11 @@ pub use authenticated::{AuthenticatedSymbol, AuthenticatedSymbolState};
 pub use context::{AuthMode, SecurityContext};
 pub use error::{AuthError, AuthErrorKind, AuthResult};
 pub use key::{AUTH_KEY_SIZE, AuthKey, KeyRing};
-pub use keys::{IdentityKeyStore, KeyFingerprint, KeyStoreError, PublicIdentityKey};
+pub use keys::{
+    IdentityKeyStore, KeyFingerprint, KeyStoreError, NKEY_ED25519_PRIVATE_BYTES, NKEY_KEY_BYTES,
+    NkeyCurvePublicKey, NkeyCurveSecretKey, NkeyEd25519Kind, NkeyEd25519PrivateKey,
+    NkeyEd25519PublicKey, NkeyEd25519Seed, NkeyEd25519SigningMaterial, NkeyOwnedKeyError,
+    NkeyOwnedKeyForm, NkeySecretDisposition, NkeySecretExport, PublicIdentityKey,
+};
 pub use secret::SecretString;
 pub use tag::AuthenticationTag;

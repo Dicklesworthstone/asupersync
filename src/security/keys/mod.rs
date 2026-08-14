@@ -18,6 +18,8 @@ use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use zeroize::Zeroize;
 
 const KEY_STORE_SCHEMA_VERSION: u32 = 1;
 const FINGERPRINT_DOMAIN: &[u8] = b"ATP-IDENTITY-KEY-FINGERPRINT-V1\0";
@@ -102,6 +104,596 @@ impl fmt::Debug for KeyFingerprint {
 impl fmt::Display for KeyFingerprint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.to_hex())
+    }
+}
+
+/// Raw byte width of an NKey Ed25519 public key, Ed25519 seed, or X25519 key.
+pub const NKEY_KEY_BYTES: usize = 32;
+/// Raw byte width of an expanded Ed25519 private key.
+pub const NKEY_ED25519_PRIVATE_BYTES: usize = 64;
+
+/// The role carried by a typed Ed25519 NKey.
+///
+/// Curve/X25519 keys deliberately have a separate owned type and therefore
+/// cannot be represented by this enum. Parsing is exact and never falls back
+/// to another role for an unknown name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum NkeyEd25519Kind {
+    /// Account identity or explicitly authorized Account signing key.
+    Account,
+    /// Cluster identity; no NATS JWT hierarchy authority.
+    Cluster,
+    /// Rust Module extension; no NATS JWT hierarchy authority.
+    Module,
+    /// Server identity; no Operator/Account/User JWT hierarchy authority.
+    Server,
+    /// Operator identity or explicitly authorized Operator signing key.
+    Operator,
+    /// User identity used for server-nonce authentication, never JWT issuance.
+    User,
+    /// Rust Service extension; no NATS JWT hierarchy authority.
+    Service,
+}
+
+impl NkeyEd25519Kind {
+    /// Return the canonical one-letter public-key symbol.
+    #[must_use]
+    pub const fn symbol(self) -> char {
+        match self {
+            Self::Account => 'A',
+            Self::Cluster => 'C',
+            Self::Module => 'M',
+            Self::Server => 'N',
+            Self::Operator => 'O',
+            Self::User => 'U',
+            Self::Service => 'V',
+        }
+    }
+
+    /// Return the canonical NKey public-prefix byte.
+    #[must_use]
+    pub const fn prefix_byte(self) -> u8 {
+        match self {
+            Self::Account => 0,
+            Self::Cluster => 16,
+            Self::Module => 96,
+            Self::Server => 104,
+            Self::Operator => 112,
+            Self::User => 160,
+            Self::Service => 168,
+        }
+    }
+}
+
+impl fmt::Display for NkeyEd25519Kind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Account => "Account",
+            Self::Cluster => "Cluster",
+            Self::Module => "Module",
+            Self::Server => "Server",
+            Self::Operator => "Operator",
+            Self::User => "User",
+            Self::Service => "Service",
+        })
+    }
+}
+
+impl FromStr for NkeyEd25519Kind {
+    type Err = NkeyOwnedKeyError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match input {
+            "A" | "Account" => Ok(Self::Account),
+            "C" | "Cluster" => Ok(Self::Cluster),
+            "M" | "Module" => Ok(Self::Module),
+            "N" | "Server" => Ok(Self::Server),
+            "O" | "Operator" => Ok(Self::Operator),
+            "U" | "User" => Ok(Self::User),
+            "V" | "Service" => Ok(Self::Service),
+            _ => Err(NkeyOwnedKeyError::UnknownEd25519Kind {
+                actual_len: input.len(),
+            }),
+        }
+    }
+}
+
+/// Stable owned-key form used in diagnostics without exposing key material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NkeyOwnedKeyForm {
+    /// Typed Ed25519 public material.
+    Ed25519Public,
+    /// Typed Ed25519 seed material.
+    Ed25519Seed,
+    /// Typed expanded Ed25519 private material.
+    Ed25519Private,
+    /// Curve/X25519 public material.
+    CurvePublic,
+    /// Curve/X25519 secret material.
+    CurveSecret,
+}
+
+impl fmt::Display for NkeyOwnedKeyForm {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Ed25519Public => "ed25519-public",
+            Self::Ed25519Seed => "ed25519-seed",
+            Self::Ed25519Private => "ed25519-private",
+            Self::CurvePublic => "curve-public",
+            Self::CurveSecret => "curve-secret",
+        })
+    }
+}
+
+/// Explicit purpose required before copying secret bytes out of an owned key.
+///
+/// This enum is an intent marker, not an authorization capability. It makes
+/// plaintext export, serialization, and persistence visible at the call site.
+/// The returned export guard zeroizes its own copy on drop, but cannot erase
+/// caller-created copies, allocator remnants, compiler temporaries, registers,
+/// swap, crash dumps, or storage written by the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NkeySecretDisposition {
+    /// Secret remains inside the owned key for a cryptographic operation.
+    InProcessOperation,
+    /// Caller explicitly requests a transient plaintext copy.
+    PlaintextExport,
+    /// Caller explicitly requests bytes for plaintext serialization.
+    PlaintextSerialization,
+    /// Caller explicitly requests bytes for plaintext persistence.
+    PlaintextPersistence,
+}
+
+impl NkeySecretDisposition {
+    const fn permits_export(self) -> bool {
+        !matches!(self, Self::InProcessOperation)
+    }
+}
+
+/// Safe, non-secret diagnostic failures for owned NKey construction/use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NkeyOwnedKeyError {
+    /// Raw material had the wrong byte length for the selected owned form.
+    Length {
+        /// Form whose constructor rejected the input.
+        form: NkeyOwnedKeyForm,
+        /// Observed byte length.
+        actual: usize,
+        /// Exact required byte length.
+        expected: usize,
+    },
+    /// A textual Ed25519 role was not one of the exact supported names/symbols.
+    UnknownEd25519Kind {
+        /// Input length only; the untrusted text is deliberately omitted.
+        actual_len: usize,
+    },
+    /// The requested disposition does not permit a plaintext secret copy.
+    SecretDisposition {
+        /// Rejected disposition intent.
+        disposition: NkeySecretDisposition,
+    },
+}
+
+impl fmt::Display for NkeyOwnedKeyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Length {
+                form,
+                actual,
+                expected,
+            } => write!(
+                formatter,
+                "{form} key material has {actual} bytes; expected {expected}"
+            ),
+            Self::UnknownEd25519Kind { actual_len } => write!(
+                formatter,
+                "unknown Ed25519 NKey kind with {actual_len} input bytes"
+            ),
+            Self::SecretDisposition { disposition } => write!(
+                formatter,
+                "secret export is not permitted for disposition {disposition:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for NkeyOwnedKeyError {}
+
+struct NkeySecretBytes<const N: usize>([u8; N]);
+
+impl<const N: usize> NkeySecretBytes<N> {
+    const fn new(bytes: [u8; N]) -> Self {
+        Self(bytes)
+    }
+
+    fn export(
+        &self,
+        disposition: NkeySecretDisposition,
+    ) -> Result<NkeySecretExport<N>, NkeyOwnedKeyError> {
+        if !disposition.permits_export() {
+            return Err(NkeyOwnedKeyError::SecretDisposition { disposition });
+        }
+        Ok(NkeySecretExport {
+            bytes: self.0,
+            disposition,
+        })
+    }
+}
+
+impl<const N: usize> Zeroize for NkeySecretBytes<N> {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl<const N: usize> Drop for NkeySecretBytes<N> {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+/// Explicit transient plaintext copy of secret NKey material.
+///
+/// This guard is neither `Copy` nor `Clone`, redacts formatting, and zeroizes
+/// its own byte array on drop. [`NkeySecretExport::as_bytes`] is intentionally
+/// explicit because any caller-created copy is outside this guard's erasure
+/// guarantee.
+pub struct NkeySecretExport<const N: usize> {
+    bytes: [u8; N],
+    disposition: NkeySecretDisposition,
+}
+
+impl<const N: usize> NkeySecretExport<N> {
+    /// Return the explicit disposition that authorized this transient copy.
+    #[must_use]
+    pub const fn disposition(&self) -> NkeySecretDisposition {
+        self.disposition
+    }
+
+    /// Borrow the exported plaintext bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; N] {
+        &self.bytes
+    }
+}
+
+impl<const N: usize> Zeroize for NkeySecretExport<N> {
+    fn zeroize(&mut self) {
+        self.bytes.zeroize();
+    }
+}
+
+impl<const N: usize> Drop for NkeySecretExport<N> {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl<const N: usize> fmt::Debug for NkeySecretExport<N> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NkeySecretExport")
+            .field("bytes", &"<redacted>")
+            .field("length", &N)
+            .field("disposition", &self.disposition)
+            .finish()
+    }
+}
+
+impl<const N: usize> fmt::Display for NkeySecretExport<N> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "<redacted NKey secret: {N} bytes>")
+    }
+}
+
+fn exact_array<const N: usize>(
+    form: NkeyOwnedKeyForm,
+    bytes: &[u8],
+) -> Result<[u8; N], NkeyOwnedKeyError> {
+    bytes.try_into().map_err(|_| NkeyOwnedKeyError::Length {
+        form,
+        actual: bytes.len(),
+        expected: N,
+    })
+}
+
+/// Owned, typed Ed25519 public verification key.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NkeyEd25519PublicKey {
+    kind: NkeyEd25519Kind,
+    bytes: [u8; NKEY_KEY_BYTES],
+}
+
+impl NkeyEd25519PublicKey {
+    /// Construct from exact raw public bytes and an explicit role.
+    #[must_use]
+    pub const fn from_bytes(kind: NkeyEd25519Kind, bytes: [u8; NKEY_KEY_BYTES]) -> Self {
+        Self { kind, bytes }
+    }
+
+    /// Construct from a byte slice, rejecting every non-exact length.
+    pub fn try_from_slice(kind: NkeyEd25519Kind, bytes: &[u8]) -> Result<Self, NkeyOwnedKeyError> {
+        Ok(Self::from_bytes(
+            kind,
+            exact_array(NkeyOwnedKeyForm::Ed25519Public, bytes)?,
+        ))
+    }
+
+    /// Return the explicit Ed25519 role.
+    #[must_use]
+    pub const fn kind(self) -> NkeyEd25519Kind {
+        self.kind
+    }
+
+    /// Borrow the public bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; NKEY_KEY_BYTES] {
+        &self.bytes
+    }
+
+    /// Consume the public key and return its non-secret bytes.
+    #[must_use]
+    pub const fn into_bytes(self) -> [u8; NKEY_KEY_BYTES] {
+        self.bytes
+    }
+}
+
+impl fmt::Debug for NkeyEd25519PublicKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NkeyEd25519PublicKey")
+            .field("kind", &self.kind)
+            .field("bytes", &self.bytes)
+            .finish()
+    }
+}
+
+/// Owned, typed Ed25519 seed material.
+///
+/// The type deliberately does not implement `Copy`, `Clone`, equality, or
+/// `serde::Serialize`. Plaintext extraction requires an explicit
+/// [`NkeySecretDisposition`].
+///
+/// ```compile_fail
+/// use asupersync::security::{NkeyEd25519Kind, NkeyEd25519Seed};
+/// let seed = NkeyEd25519Seed::from_bytes(NkeyEd25519Kind::User, [7; 32]);
+/// let duplicate = seed.clone();
+/// # let _ = duplicate;
+/// ```
+///
+/// ```compile_fail
+/// use asupersync::security::NkeyEd25519Seed;
+/// fn requires_serialize<T: serde::Serialize>() {}
+/// requires_serialize::<NkeyEd25519Seed>();
+/// ```
+pub struct NkeyEd25519Seed {
+    kind: NkeyEd25519Kind,
+    secret: NkeySecretBytes<NKEY_KEY_BYTES>,
+}
+
+impl NkeyEd25519Seed {
+    /// Construct from exact seed bytes and an explicit Ed25519 role.
+    #[must_use]
+    pub const fn from_bytes(kind: NkeyEd25519Kind, bytes: [u8; NKEY_KEY_BYTES]) -> Self {
+        Self {
+            kind,
+            secret: NkeySecretBytes::new(bytes),
+        }
+    }
+
+    /// Construct from a byte slice, rejecting every non-exact length.
+    pub fn try_from_slice(kind: NkeyEd25519Kind, bytes: &[u8]) -> Result<Self, NkeyOwnedKeyError> {
+        Ok(Self::from_bytes(
+            kind,
+            exact_array(NkeyOwnedKeyForm::Ed25519Seed, bytes)?,
+        ))
+    }
+
+    /// Return the explicit Ed25519 role without exposing secret bytes.
+    #[must_use]
+    pub const fn kind(&self) -> NkeyEd25519Kind {
+        self.kind
+    }
+
+    /// Create a zeroizing transient plaintext copy for an explicit purpose.
+    pub fn export_secret(
+        &self,
+        disposition: NkeySecretDisposition,
+    ) -> Result<NkeySecretExport<NKEY_KEY_BYTES>, NkeyOwnedKeyError> {
+        self.secret.export(disposition)
+    }
+}
+
+impl fmt::Debug for NkeyEd25519Seed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NkeyEd25519Seed")
+            .field("kind", &self.kind)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
+}
+
+impl fmt::Display for NkeyEd25519Seed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "<redacted {} Ed25519 NKey seed>", self.kind)
+    }
+}
+
+/// Owned, explicitly typed 64-byte expanded Ed25519 private material.
+pub struct NkeyEd25519PrivateKey {
+    kind: NkeyEd25519Kind,
+    secret: NkeySecretBytes<NKEY_ED25519_PRIVATE_BYTES>,
+}
+
+impl NkeyEd25519PrivateKey {
+    /// Import expanded private material only with an explicit Ed25519 role.
+    #[must_use]
+    pub const fn from_bytes(
+        kind: NkeyEd25519Kind,
+        bytes: [u8; NKEY_ED25519_PRIVATE_BYTES],
+    ) -> Self {
+        Self {
+            kind,
+            secret: NkeySecretBytes::new(bytes),
+        }
+    }
+
+    /// Import a byte slice, rejecting every non-exact length.
+    pub fn try_from_slice(kind: NkeyEd25519Kind, bytes: &[u8]) -> Result<Self, NkeyOwnedKeyError> {
+        Ok(Self::from_bytes(
+            kind,
+            exact_array(NkeyOwnedKeyForm::Ed25519Private, bytes)?,
+        ))
+    }
+
+    /// Return the explicit Ed25519 role without exposing secret bytes.
+    #[must_use]
+    pub const fn kind(&self) -> NkeyEd25519Kind {
+        self.kind
+    }
+
+    /// Create a zeroizing transient plaintext copy for an explicit purpose.
+    pub fn export_secret(
+        &self,
+        disposition: NkeySecretDisposition,
+    ) -> Result<NkeySecretExport<NKEY_ED25519_PRIVATE_BYTES>, NkeyOwnedKeyError> {
+        self.secret.export(disposition)
+    }
+}
+
+impl fmt::Debug for NkeyEd25519PrivateKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NkeyEd25519PrivateKey")
+            .field("kind", &self.kind)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
+}
+
+impl fmt::Display for NkeyEd25519PrivateKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "<redacted {} Ed25519 private key>", self.kind)
+    }
+}
+
+/// Owned Curve/X25519 public key.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NkeyCurvePublicKey([u8; NKEY_KEY_BYTES]);
+
+impl NkeyCurvePublicKey {
+    /// Construct from exact raw X25519 public bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; NKEY_KEY_BYTES]) -> Self {
+        Self(bytes)
+    }
+
+    /// Construct from a byte slice, rejecting every non-exact length.
+    pub fn try_from_slice(bytes: &[u8]) -> Result<Self, NkeyOwnedKeyError> {
+        Ok(Self::from_bytes(exact_array(
+            NkeyOwnedKeyForm::CurvePublic,
+            bytes,
+        )?))
+    }
+
+    /// Borrow the non-secret public bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; NKEY_KEY_BYTES] {
+        &self.0
+    }
+
+    /// Consume the public key and return its non-secret bytes.
+    #[must_use]
+    pub const fn into_bytes(self) -> [u8; NKEY_KEY_BYTES] {
+        self.0
+    }
+}
+
+impl fmt::Debug for NkeyCurvePublicKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("NkeyCurvePublicKey")
+            .field(&self.0)
+            .finish()
+    }
+}
+
+/// Owned Curve/X25519 secret material.
+///
+/// This type is separate from every Ed25519 signing form and cannot satisfy
+/// [`NkeyEd25519SigningMaterial`].
+///
+/// ```compile_fail
+/// use asupersync::security::{NkeyCurveSecretKey, NkeyEd25519SigningMaterial};
+/// fn requires_ed25519<T: NkeyEd25519SigningMaterial>(_: &T) {}
+/// let curve = NkeyCurveSecretKey::from_bytes([9; 32]);
+/// requires_ed25519(&curve);
+/// ```
+pub struct NkeyCurveSecretKey(NkeySecretBytes<NKEY_KEY_BYTES>);
+
+impl NkeyCurveSecretKey {
+    /// Construct from exact raw X25519 secret bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; NKEY_KEY_BYTES]) -> Self {
+        Self(NkeySecretBytes::new(bytes))
+    }
+
+    /// Construct from a byte slice, rejecting every non-exact length.
+    pub fn try_from_slice(bytes: &[u8]) -> Result<Self, NkeyOwnedKeyError> {
+        Ok(Self::from_bytes(exact_array(
+            NkeyOwnedKeyForm::CurveSecret,
+            bytes,
+        )?))
+    }
+
+    /// Create a zeroizing transient plaintext copy for an explicit purpose.
+    pub fn export_secret(
+        &self,
+        disposition: NkeySecretDisposition,
+    ) -> Result<NkeySecretExport<NKEY_KEY_BYTES>, NkeyOwnedKeyError> {
+        self.0.export(disposition)
+    }
+}
+
+impl fmt::Debug for NkeyCurveSecretKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("NkeyCurveSecretKey(<redacted>)")
+    }
+}
+
+impl fmt::Display for NkeyCurveSecretKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<redacted Curve/X25519 secret key>")
+    }
+}
+
+mod nkey_owned_type_sealed {
+    pub trait Sealed {}
+}
+
+/// Marker implemented only by owned Ed25519 secret signing material.
+///
+/// It intentionally has no signing operation yet: N5 owns the audited
+/// Ed25519 operation boundary. N3 uses this sealed marker to make Curve keys
+/// statically ineligible for future signing APIs.
+#[allow(private_bounds)]
+pub trait NkeyEd25519SigningMaterial: nkey_owned_type_sealed::Sealed {
+    /// Return the explicit signing role without exposing secret bytes.
+    fn kind(&self) -> NkeyEd25519Kind;
+}
+
+impl nkey_owned_type_sealed::Sealed for NkeyEd25519Seed {}
+impl NkeyEd25519SigningMaterial for NkeyEd25519Seed {
+    fn kind(&self) -> NkeyEd25519Kind {
+        self.kind
+    }
+}
+
+impl nkey_owned_type_sealed::Sealed for NkeyEd25519PrivateKey {}
+impl NkeyEd25519SigningMaterial for NkeyEd25519PrivateKey {
+    fn kind(&self) -> NkeyEd25519Kind {
+        self.kind
     }
 }
 
@@ -654,6 +1246,7 @@ fn sync_parent_dir(parent: Option<&Path>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::mem;
     use tempfile::tempdir;
 
     fn strong_seed(tag: u8) -> [u8; 32] {
@@ -661,6 +1254,196 @@ mod tests {
         hasher.update(b"asupersync::security::keys::tests");
         hasher.update([tag]);
         hasher.finalize().into()
+    }
+
+    #[test]
+    fn owned_nkey_kinds_are_exact_and_never_fallback() {
+        for (name, symbol, kind, prefix) in [
+            ("Account", "A", NkeyEd25519Kind::Account, 0),
+            ("Cluster", "C", NkeyEd25519Kind::Cluster, 16),
+            ("Module", "M", NkeyEd25519Kind::Module, 96),
+            ("Server", "N", NkeyEd25519Kind::Server, 104),
+            ("Operator", "O", NkeyEd25519Kind::Operator, 112),
+            ("User", "U", NkeyEd25519Kind::User, 160),
+            ("Service", "V", NkeyEd25519Kind::Service, 168),
+        ] {
+            assert_eq!(name.parse(), Ok(kind));
+            assert_eq!(symbol.parse(), Ok(kind));
+            assert_eq!(kind.to_string(), name);
+            assert_eq!(kind.symbol().to_string(), symbol);
+            assert_eq!(kind.prefix_byte(), prefix);
+        }
+
+        for unknown in ["", "Curve", "X", "Unknown", "user", " User"] {
+            assert_eq!(
+                unknown.parse::<NkeyEd25519Kind>(),
+                Err(NkeyOwnedKeyError::UnknownEd25519Kind {
+                    actual_len: unknown.len(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn owned_public_forms_are_copyable_comparable_and_type_separated() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        fn assert_copy<T: Copy>() {}
+
+        assert_send_sync::<NkeyEd25519PublicKey>();
+        assert_send_sync::<NkeyCurvePublicKey>();
+        assert_copy::<NkeyEd25519PublicKey>();
+        assert_copy::<NkeyCurvePublicKey>();
+
+        let user = NkeyEd25519PublicKey::from_bytes(NkeyEd25519Kind::User, [0x11; 32]);
+        let account = NkeyEd25519PublicKey::from_bytes(NkeyEd25519Kind::Account, [0x11; 32]);
+        let curve = NkeyCurvePublicKey::from_bytes([0x11; 32]);
+        assert_ne!(user, account, "the Ed25519 role is part of identity");
+        assert_eq!(user.kind(), NkeyEd25519Kind::User);
+        assert_eq!(user.into_bytes(), [0x11; 32]);
+        assert_eq!(curve.into_bytes(), [0x11; 32]);
+        assert_eq!(
+            NkeyEd25519PublicKey::try_from_slice(NkeyEd25519Kind::User, &[1; 32]),
+            Ok(user)
+        );
+        assert_eq!(NkeyCurvePublicKey::try_from_slice(&[0x11; 32]), Ok(curve));
+    }
+
+    #[test]
+    fn owned_secret_forms_require_explicit_disposition_and_zeroize_exports() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        fn assert_signer<T: NkeyEd25519SigningMaterial>(value: &T, expected: NkeyEd25519Kind) {
+            assert_eq!(value.kind(), expected);
+        }
+
+        assert_send_sync::<NkeyEd25519Seed>();
+        assert_send_sync::<NkeyEd25519PrivateKey>();
+        assert_send_sync::<NkeyCurveSecretKey>();
+        assert!(mem::needs_drop::<NkeyEd25519Seed>());
+        assert!(mem::needs_drop::<NkeyEd25519PrivateKey>());
+        assert!(mem::needs_drop::<NkeyCurveSecretKey>());
+        assert!(mem::needs_drop::<NkeySecretExport<32>>());
+
+        let seed = NkeyEd25519Seed::from_bytes(NkeyEd25519Kind::User, [0x21; 32]);
+        let private = NkeyEd25519PrivateKey::from_bytes(NkeyEd25519Kind::Operator, [0x42; 64]);
+        let curve = NkeyCurveSecretKey::from_bytes([0x63; 32]);
+        assert_signer(&seed, NkeyEd25519Kind::User);
+        assert_signer(&private, NkeyEd25519Kind::Operator);
+
+        assert!(matches!(
+            seed.export_secret(NkeySecretDisposition::InProcessOperation),
+            Err(NkeyOwnedKeyError::SecretDisposition {
+                disposition: NkeySecretDisposition::InProcessOperation
+            })
+        ));
+
+        let mut seed_export = seed
+            .export_secret(NkeySecretDisposition::PlaintextSerialization)
+            .expect("serialization requires an explicit export guard");
+        assert_eq!(
+            seed_export.disposition(),
+            NkeySecretDisposition::PlaintextSerialization
+        );
+        assert_eq!(seed_export.as_bytes(), &[0x21; 32]);
+        seed_export.zeroize();
+        assert_eq!(seed_export.as_bytes(), &[0; 32]);
+
+        let private_export = private
+            .export_secret(NkeySecretDisposition::PlaintextPersistence)
+            .expect("persistence requires an explicit export guard");
+        assert_eq!(private_export.as_bytes(), &[0x42; 64]);
+
+        let curve_export = curve
+            .export_secret(NkeySecretDisposition::PlaintextExport)
+            .expect("Curve secret export is explicit and zeroizing");
+        assert_eq!(curve_export.as_bytes(), &[0x63; 32]);
+    }
+
+    #[test]
+    fn owned_key_constructors_reject_every_wrong_length_without_echoing_bytes() {
+        for actual in [0, 1, 31, 33, 63, 65] {
+            let bytes = vec![0xa5; actual];
+            let seed_error = NkeyEd25519Seed::try_from_slice(NkeyEd25519Kind::User, &bytes)
+                .expect_err("all non-32-byte seed lengths fail");
+            assert_eq!(
+                seed_error,
+                NkeyOwnedKeyError::Length {
+                    form: NkeyOwnedKeyForm::Ed25519Seed,
+                    actual,
+                    expected: 32,
+                }
+            );
+            assert!(!seed_error.to_string().contains("a5"));
+        }
+
+        for actual in [0, 1, 32, 63, 65] {
+            let bytes = vec![0x5a; actual];
+            assert_eq!(
+                NkeyEd25519PrivateKey::try_from_slice(NkeyEd25519Kind::Account, &bytes)
+                    .expect_err("all non-64-byte private lengths fail"),
+                NkeyOwnedKeyError::Length {
+                    form: NkeyOwnedKeyForm::Ed25519Private,
+                    actual,
+                    expected: 64,
+                }
+            );
+        }
+
+        assert_eq!(
+            NkeyCurvePublicKey::try_from_slice(&[0; 31]),
+            Err(NkeyOwnedKeyError::Length {
+                form: NkeyOwnedKeyForm::CurvePublic,
+                actual: 31,
+                expected: 32,
+            })
+        );
+        assert!(matches!(
+            NkeyCurveSecretKey::try_from_slice(&[0; 33]),
+            Err(NkeyOwnedKeyError::Length {
+                form: NkeyOwnedKeyForm::CurveSecret,
+                actual: 33,
+                expected: 32,
+            })
+        ));
+    }
+
+    #[test]
+    fn owned_secret_canary_is_redacted_from_formatting_errors_and_panics() {
+        const CANARY: &[u8; 32] = b"NKEY-SECRET-CANARY-0123456789ABC";
+        let canary_text = std::str::from_utf8(CANARY).expect("ASCII canary");
+        let seed = NkeyEd25519Seed::from_bytes(NkeyEd25519Kind::User, *CANARY);
+        let curve = NkeyCurveSecretKey::from_bytes(*CANARY);
+        let export = seed
+            .export_secret(NkeySecretDisposition::PlaintextExport)
+            .expect("explicit canary export");
+
+        for rendered in [
+            format!("{seed:?}"),
+            seed.to_string(),
+            format!("{curve:?}"),
+            curve.to_string(),
+            format!("{export:?}"),
+            export.to_string(),
+            NkeyOwnedKeyError::SecretDisposition {
+                disposition: NkeySecretDisposition::InProcessOperation,
+            }
+            .to_string(),
+        ] {
+            assert!(!rendered.contains(canary_text));
+            assert!(
+                rendered.to_ascii_lowercase().contains("redacted")
+                    || rendered.contains("not permitted")
+            );
+        }
+
+        let panic = std::panic::catch_unwind(|| panic!("{seed:?}"))
+            .expect_err("redacted debug panic is captured");
+        let panic_text = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .expect("panic text");
+        assert!(!panic_text.contains(canary_text));
+        assert!(panic_text.contains("<redacted>"));
     }
 
     #[test]
