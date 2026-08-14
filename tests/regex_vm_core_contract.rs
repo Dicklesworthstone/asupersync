@@ -2,6 +2,7 @@
 mod regex_boundaries;
 #[path = "../src/observability/regex_ir.rs"]
 mod regex_ir;
+#[allow(dead_code)]
 #[path = "../src/observability/regex_lowering.rs"]
 mod regex_lowering;
 #[path = "../src/observability/regex_semantics.rs"]
@@ -43,7 +44,7 @@ const TERMINAL_PATH: &str = "artifacts/regex_compiler_terminal_receipt_v1.json";
 const VM_SOURCE_PATH: &str = "src/observability/regex_vm.rs";
 const MOD_SOURCE_PATH: &str = "src/observability/mod.rs";
 const FROZEN_TERMINAL_SHA256: &str =
-    "ef1c121f4d08b1cd4ed2711eac2a038ab473078590bc4cc8cfa4303953310077";
+    "14e895e467f6265988b93b487c320ba1035067784b46ba54457d6df57609711e";
 const FROZEN_VM_SOURCE_SHA256: &str =
     "8952e787fe20b6bd0b4896b90e00fe25ed93d44154279c4c4c4deab1565d0e30";
 const FROZEN_MOD_SOURCE_SHA256: &str =

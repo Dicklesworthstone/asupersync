@@ -12,12 +12,12 @@
     "grammar_contract": "4074a2746",
     "lexer": "582da577c",
     "parser": "9056ef793",
-    "terminal_repairs": "69e796eeb727f9772bdadfe6869d9c3d14a10db3"
+    "terminal_repairs": "432be7270481c5439db00f79910465a269512266"
   },
   "source_digests": [
     {
       "path": "src/observability/regex_syntax.rs",
-      "sha256": "2fbeae8fc1346d51cf5535930b750d0d69055d8923b3c6e8fcb3bf8ce25315b0"
+      "sha256": "25ba1e6b24ce2741c39b831c580dda716a6c0d4113470c159382fb2a842cc98e"
     },
     {
       "path": "artifacts/regex_syntax_grammar_contract_v1.json",
@@ -45,15 +45,15 @@
     "terminal_receipt_complete": true,
     "syntax_disposition": "KEEP_INCUMBENT_DEFER",
     "incumbent_state": "KEEP_INCUMBENT",
-    "candidate_state": "BOUNDED_PARSER_WITH_EXPLICIT_GAPS",
+    "candidate_state": "BOUNDED_PARSER_WITH_ACCEPTED_SYNTAX_COMPLETE",
     "cutover_eligible": false,
     "dependency_removal_authorized": false,
-    "same_rows": 30,
+    "same_rows": 31,
     "better_rows": 0,
-    "defer_rows": 1,
+    "defer_rows": 0,
     "unknown_rows": 0,
     "unresolved_high_findings": 0,
-    "resolved_by_fail_closed_disposition": 3,
+    "resolved_by_fail_closed_disposition": 1,
     "on_missing_row_or_new_divergence": "KEEP_INCUMBENT_DEFER"
   },
   "limits": [
@@ -104,7 +104,7 @@
     "property_cases_per_lane": 256,
     "property_lanes": 4,
     "generated_property_cases": 1024,
-    "focused_tests": 35,
+    "focused_tests": 36,
     "panic_observed": false,
     "unbounded_ast_expansion_observed": false,
     "source_text_in_diagnostics_observed": false
@@ -152,8 +152,8 @@
     },
     {
       "case_id": "RGX-SYN-011",
-      "parity": "DEFER",
-      "blocker_id": "RGX-GAP-X-WHITESPACE"
+      "parity": "SAME",
+      "resolution_id": "RGX-R351-X-GRAMMAR-AWARE-ELISION"
     },
     {
       "case_id": "RGX-SYN-012",
@@ -310,8 +310,8 @@
     {
       "blocker_id": "RGX-GAP-X-WHITESPACE",
       "classification": "R3_1_SYNTAX_AND_AST_SEMANTICS",
-      "severity": "HIGH_CUTOVER_BLOCKER",
-      "disposition": "DEFER_KEEP_INCUMBENT",
+      "severity": "RESOLVED",
+      "disposition": "SAME_R3_5_1",
       "mapped_rows": ["RGX-SYN-011"],
       "minimized_inputs": [
         "(?x)a b",
@@ -323,20 +323,20 @@
         "(?x)\\p { Greek }",
         "(?x)( ?P<foo> a )"
       ],
-      "candidate_observation": "ordinary whitespace and comments remain AST atoms in accepted forms, and whitespace inside counted repetition and escape/group syntax is rejected",
+      "candidate_observation": "grammar-aware x-mode elision removes ordinary whitespace and comments while preserving escaped whitespace and admitting whitespace at counted-repetition, escape, property, class, and group-prefix boundaries",
       "incumbent_observation": "x mode erases unescaped Unicode whitespace/comments and admits whitespace at grammar-specific boundaries",
-      "owner_bead": "asupersync-5z2scg.8.3.5"
+      "owner_bead": "asupersync-5z2scg.8.3.5.1"
     },
     {
       "blocker_id": "RGX-GAP-DUPLICATE-CAPTURE-NAME",
       "classification": "R3_1_TYPED_DIAGNOSTICS",
-      "severity": "HIGH_CUTOVER_BLOCKER",
-      "disposition": "DEFER_KEEP_INCUMBENT",
+      "severity": "RESOLVED",
+      "disposition": "SAME_R3_5_1",
       "mapped_rows": [],
       "minimized_inputs": ["(?P<name>a)|(?P<name>b)"],
-      "candidate_observation": "accepted with duplicate named captures",
+      "candidate_observation": "rejected with RGX-PARSE-E013 and RGX-DIAG-DUPLICATE-CAPTURE-NAME without rendering source text",
       "incumbent_observation": "rejected as a duplicate capture name",
-      "owner_bead": "asupersync-5z2scg.8.3.5"
+      "owner_bead": "asupersync-5z2scg.8.3.5.1"
     },
     {
       "blocker_id": "RGX-GAP-UNICODE-PROPERTY-VALIDATION",

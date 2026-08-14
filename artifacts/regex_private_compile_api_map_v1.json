@@ -6,32 +6,30 @@
   "capability_id": "CAP-REGEX-PRIVACY",
   "boundary_id": "ASUP-REGEX-PRIVATE-COMPILE-V1",
   "document_path": "docs/regex_private_compile_api_map.md",
-  "captured_at_utc": "2026-08-05T06:18:26Z",
-  "claim_revision": "612a82a546634ba1de2d06fe6e429bf85516a475",
-  "completion_state": "PARTIAL_STATIC_BOUNDARY_FROZEN",
+  "captured_at_utc": "2026-08-14T12:46:05Z",
+  "claim_revision": "432be7270481c5439db00f79910465a269512266",
+  "completion_state": "R3_5_1_PRIVATE_COMPILE_BOUNDARY_IMPLEMENTED",
   "decision": {
-    "disposition": "KEEP_INCUMBENT_DEFER_NO_PRIVATE_COMPILE_FACADE",
+    "disposition": "KEEP_INCUMBENT_DEFER_PRIVATE_COMPILE_FACADE_READY",
     "incumbent_state": "RETAIN_REGEX_AND_REGEX_SYNTAX",
     "machine_api_map_complete": true,
     "inherited_terminal_rows_accounted": true,
     "aggregate_limits_accounted": true,
     "stage_diagnostics_source_pinned": true,
-    "private_compile_facade_implemented": false,
-    "aggregate_error_type_implemented": false,
-    "extended_mode_complete": false,
-    "duplicate_capture_name_rejection_complete": false,
-    "focused_compiler_proof_executed_for_r3_5_1": false,
+    "private_compile_facade_implemented": true,
+    "aggregate_error_type_implemented": true,
+    "extended_mode_complete": true,
+    "duplicate_capture_name_rejection_complete": true,
+    "focused_compiler_proof_executed_for_r3_5_1": true,
     "public_reexport_authorized": false,
     "privacy_config_integration_authorized": false,
     "compatibility_shim_authorized": false,
     "production_wiring_authorized": false,
     "dependency_removal_authorized": false,
     "reason_codes": [
-      "PRIVATE_STAGES_EXIST_WITHOUT_ONE_COMPILE_FACADE",
-      "EXTENDED_MODE_WHITESPACE_AND_COMMENT_SEMANTICS_KEEP_DEFER",
-      "DUPLICATE_CAPTURE_NAMES_LACK_A_TYPED_REJECTION",
       "NULLABLE_LOOP_ZERO_COUNT_CAPTURE_AND_DOTTED_AGE_ROWS_KEEP_DEFER",
-      "R3_5_1_FOCUSED_COMPILER_PROOF_NOT_EXECUTED"
+      "PRIVATE_FACADE_NOT_PUBLICLY_WIRED",
+      "R3_5_2_MATCH_FACADE_AND_DOWNSTREAM_EVIDENCE_REMAIN_REQUIRED"
     ],
     "on_unknown_conflict_pin_drift_or_missing_proof": "KEEP_INCUMBENT_DEFER"
   },
@@ -51,15 +49,15 @@
   "predecessor_receipts": [
     {
       "path": "artifacts/regex_syntax_terminal_receipt_v1.json",
-      "sha256": "e563f3d0981896c0afa9b7e567b372b347bee6d6e3ebb6fc6336eb9c37ff2be7",
+      "sha256": "e0c85503e10f8fa6acd58f1124582806d2bc127f0eeea4b783788c58a1e850d2",
       "line_count": 391,
       "revision": "7de0e9d84a178868355a766278cc717fd60f8065",
       "decision": "KEEP_INCUMBENT_DEFER",
-      "mapped_surface": "31 syntax rows, syntax diagnostics, syntax limits, extended-mode and duplicate-name blockers"
+      "mapped_surface": "31 syntax rows, syntax diagnostics and limits, resolved extended-mode and duplicate-name cases"
     },
     {
       "path": "artifacts/regex_semantic_terminal_receipt_v1.json",
-      "sha256": "ce97bb3734187d5057938028175d7cbf7b5ed99e6f1fedbd48cbd9076d289a62",
+      "sha256": "e946b0b7b8ae9de2b504fd5907e346b316dfe4afa3de1719929b3f03f70a6e9a",
       "line_count": 433,
       "revision": "697105a0c038dbc24277a74cc528e143ac904607",
       "decision": "KEEP_INCUMBENT_DEFER",
@@ -67,7 +65,7 @@
     },
     {
       "path": "artifacts/regex_compiler_terminal_receipt_v1.json",
-      "sha256": "ef1c121f4d08b1cd4ed2711eac2a038ab473078590bc4cc8cfa4303953310077",
+      "sha256": "14e895e467f6265988b93b487c320ba1035067784b46ba54457d6df57609711e",
       "line_count": 252,
       "revision": "f3c906c89c7b2fed787c038107e3700bc72316d4",
       "decision": "KEEP_INCUMBENT_DEFER",
@@ -75,7 +73,7 @@
     },
     {
       "path": "artifacts/regex_vm_terminal_receipt_v1.json",
-      "sha256": "f03fff7c5ce2fda5249fa4dcf7ae8e2920b59775044fbf5f2f9c529c23e564a1",
+      "sha256": "e929f3c99b85cbd17f596ea35ad27596ca3e140e88f2185788e8b0d223ef869a",
       "line_count": 337,
       "revision": "181203e5d8dafe7f33b70d2652ff05ce688c8a6f",
       "decision": "KEEP_INCUMBENT_DEFER",
@@ -85,15 +83,15 @@
   "source_pins": [
     {
       "path": "src/observability/regex_syntax.rs",
-      "sha256": "2fbeae8fc1346d51cf5535930b750d0d69055d8923b3c6e8fcb3bf8ce25315b0",
-      "line_count": 3327,
-      "revision": "4022e575808c9a314159b3fe37b9c40d929c1ada"
+      "sha256": "25ba1e6b24ce2741c39b831c580dda716a6c0d4113470c159382fb2a842cc98e",
+      "line_count": 3514,
+      "revision": "432be7270481c5439db00f79910465a269512266"
     },
     {
       "path": "src/observability/regex_semantics.rs",
-      "sha256": "bd762181da7620330a580152688af7684da371a9a32c144ef09ac5b5d0c2221a",
-      "line_count": 1185,
-      "revision": "c5c23b591e794c01db668785fdf29fc136009d2a"
+      "sha256": "00b1f03c2c823c74cae289750a2c1498b78452da635f55570ef37ffc53cde0f8",
+      "line_count": 1256,
+      "revision": "432be7270481c5439db00f79910465a269512266"
     },
     {
       "path": "src/observability/regex_boundaries.rs",
@@ -109,11 +107,23 @@
     },
     {
       "path": "src/observability/regex_lowering.rs",
-      "sha256": "664753b2198fa53a4e80845639a21e24c6f3871d240f59f75f7b522cc8a66a54",
-      "line_count": 1632,
-      "revision": "dd553f63c2ec3ef8263dfeeb093af5f12dbcd2ca"
+      "sha256": "c7e1765ee2499829a63711d10a8de591f8d59a78897f53e7e13de5599021ed64",
+      "line_count": 1981,
+      "revision": "432be7270481c5439db00f79910465a269512266"
     }
   ],
+  "private_compile_facade": {
+    "source": "src/observability/regex_lowering.rs",
+    "entrypoint": "compile_private",
+    "limits_type": "PrivateCompileLimits",
+    "success_type": "Program",
+    "error_type": "PrivateCompileError",
+    "visibility": "pub within a pub(crate) module",
+    "explicit_ir_revalidation": true,
+    "source_text_owned_by_error": false,
+    "public_reexported": false,
+    "production_wired": false
+  },
   "private_compile_stages": [
     {
       "order": 1,
@@ -134,9 +144,9 @@
       ],
       "error_code_namespaces": [
         "RGX-LEX-E001..RGX-LEX-E010",
-        "RGX-PARSE-E001..RGX-PARSE-E012"
+        "RGX-PARSE-E001..RGX-PARSE-E013"
       ],
-      "disposition": "SAME_WITH_EXPLICIT_KEEP_DEFER"
+      "disposition": "SAME_ACCEPTED_SYNTAX_COMPLETE"
     },
     {
       "order": 2,
@@ -183,13 +193,15 @@
       "stage_id": "RGX-PRIVATE-STAGE-LOWERING",
       "source": "src/observability/regex_lowering.rs",
       "entrypoints": [
-        "lower"
+        "lower",
+        "compile_private"
       ],
       "success_types": [
         "Program"
       ],
       "error_types": [
-        "LowerError"
+        "LowerError",
+        "PrivateCompileError"
       ],
       "error_code_namespaces": [
         "inherited analysis and RGX-IR codes",
@@ -258,11 +270,9 @@
         "RGX-SYN-030",
         "RGX-SYN-031"
       ],
-      "same_count": 30,
-      "keep_defer_count": 1,
-      "keep_defer_rows": [
-        "RGX-SYN-011"
-      ]
+      "same_count": 31,
+      "keep_defer_count": 0,
+      "keep_defer_rows": []
     },
     {
       "family_id": "RGX-R351-INHERITED-SEMANTICS",
@@ -418,63 +428,63 @@
       "case_class": "unescaped-whitespace",
       "pattern": "(?x)a b",
       "incumbent_outcome": "ACCEPT_ELIDE_SPACE",
-      "candidate_current_outcome": "ACCEPT_SPACE_AS_LITERAL",
+      "candidate_current_outcome": "ACCEPT_ELIDE_SPACE",
       "required_outcome": "ACCEPT_ELIDE_SPACE",
-      "disposition": "KEEP_DEFER"
+      "disposition": "SAME"
     },
     {
       "case_id": "RGX-R351-X-004",
       "case_class": "line-comment",
       "pattern": "(?x)a # comment\n b",
       "incumbent_outcome": "ACCEPT_ELIDE_COMMENT",
-      "candidate_current_outcome": "ACCEPT_COMMENT_AS_LITERALS",
+      "candidate_current_outcome": "ACCEPT_ELIDE_COMMENT",
       "required_outcome": "ACCEPT_ELIDE_COMMENT",
-      "disposition": "KEEP_DEFER"
+      "disposition": "SAME"
     },
     {
       "case_id": "RGX-R351-X-005",
       "case_class": "class-whitespace-boundary",
       "pattern": "(?x)[ a-z ]",
       "incumbent_outcome": "ACCEPT_CLASS_WITHOUT_SPACE",
-      "candidate_current_outcome": "ACCEPT_CLASS_WITH_SPACE",
+      "candidate_current_outcome": "ACCEPT_CLASS_WITHOUT_SPACE",
       "required_outcome": "ACCEPT_CLASS_WITHOUT_SPACE",
-      "disposition": "KEEP_DEFER"
+      "disposition": "SAME"
     },
     {
       "case_id": "RGX-R351-X-006",
       "case_class": "counted-repetition-whitespace",
       "pattern": "(?x)a{ 2 , 3 }",
       "incumbent_outcome": "ACCEPT_BOUNDED_REPETITION",
-      "candidate_current_outcome": "REJECT",
+      "candidate_current_outcome": "ACCEPT_BOUNDED_REPETITION",
       "required_outcome": "ACCEPT_BOUNDED_REPETITION",
-      "disposition": "KEEP_DEFER"
+      "disposition": "SAME"
     },
     {
       "case_id": "RGX-R351-X-007",
       "case_class": "escape-whitespace-boundary",
       "pattern": "(?x)\\x { 53 }",
       "incumbent_outcome": "ACCEPT_HEX_ESCAPE",
-      "candidate_current_outcome": "REJECT",
+      "candidate_current_outcome": "ACCEPT_HEX_ESCAPE",
       "required_outcome": "ACCEPT_HEX_ESCAPE",
-      "disposition": "KEEP_DEFER"
+      "disposition": "SAME"
     },
     {
       "case_id": "RGX-R351-X-008",
       "case_class": "property-whitespace-boundary",
       "pattern": "(?x)\\p { Greek }",
       "incumbent_outcome": "ACCEPT_PROPERTY",
-      "candidate_current_outcome": "REJECT",
+      "candidate_current_outcome": "ACCEPT_PROPERTY",
       "required_outcome": "ACCEPT_PROPERTY",
-      "disposition": "KEEP_DEFER"
+      "disposition": "SAME"
     },
     {
       "case_id": "RGX-R351-X-009",
       "case_class": "spaced-group-prefix",
       "pattern": "(?x)( ?P<name> a )",
       "incumbent_outcome": "ACCEPT_NAMED_CAPTURE",
-      "candidate_current_outcome": "ACCEPT_WITHOUT_NAMED_CAPTURE",
+      "candidate_current_outcome": "ACCEPT_NAMED_CAPTURE",
       "required_outcome": "ACCEPT_NAMED_CAPTURE",
-      "disposition": "KEEP_DEFER"
+      "disposition": "SAME"
     },
     {
       "case_id": "RGX-R351-X-010",
@@ -499,20 +509,22 @@
       "case_class": "duplicate-python-style",
       "pattern": "(?P<name>a)|(?P<name>b)",
       "incumbent_outcome": "REJECT_DUPLICATE_CAPTURE_NAME",
-      "candidate_current_outcome": "ACCEPT",
+      "candidate_current_outcome": "RGX-PARSE-E013",
       "required_outcome": "TYPED_DUPLICATE_CAPTURE_NAME_ERROR",
-      "required_error_code": "UNASSIGNED",
-      "disposition": "KEEP_DEFER"
+      "required_error_code": "RGX-PARSE-E013",
+      "required_diagnostic_category": "RGX-DIAG-DUPLICATE-CAPTURE-NAME",
+      "disposition": "SAME"
     },
     {
       "case_id": "RGX-R351-DUP-003",
       "case_class": "duplicate-cross-style",
       "pattern": "(?P<name>a)|(?<name>b)",
       "incumbent_outcome": "REJECT_DUPLICATE_CAPTURE_NAME",
-      "candidate_current_outcome": "ACCEPT",
+      "candidate_current_outcome": "RGX-PARSE-E013",
       "required_outcome": "TYPED_DUPLICATE_CAPTURE_NAME_ERROR",
-      "required_error_code": "UNASSIGNED",
-      "disposition": "KEEP_DEFER"
+      "required_error_code": "RGX-PARSE-E013",
+      "required_diagnostic_category": "RGX-DIAG-DUPLICATE-CAPTURE-NAME",
+      "disposition": "SAME"
     },
     {
       "case_id": "RGX-R351-DUP-004",
@@ -525,18 +537,6 @@
     }
   ],
   "typed_keep_defer_rows": [
-    {
-      "row_id": "RGX-SYN-011",
-      "surface": "extended-mode whitespace and comments",
-      "current_outcome": "KEEP_DEFER",
-      "owner": "asupersync-5z2scg.8.3.5.1"
-    },
-    {
-      "row_id": "RGX-GAP-DUPLICATE-CAPTURE-NAME",
-      "surface": "duplicate named capture metadata",
-      "current_outcome": "KEEP_DEFER",
-      "owner": "asupersync-5z2scg.8.3.5.1"
-    },
     {
       "row_id": "RGX-COMP-Q-009",
       "surface": "nullable unbounded repetition",
@@ -720,9 +720,10 @@
       "SemanticError",
       "FoldBoundaryError",
       "LowerError",
-      "CompileError"
+      "CompileError",
+      "PrivateCompileError"
     ],
-    "aggregate_private_compile_error_type": "ABSENT",
+    "aggregate_private_compile_error_type": "PrivateCompileError",
     "stable_rendered_fields": [
       "stable code",
       "stable category where defined",
@@ -742,8 +743,8 @@
       "private-source-canary",
       "r3-5-private-pattern-canary"
     ],
-    "canary_execution_state_for_this_slice": "NOT_EXECUTED",
-    "required_on_future_implementation": "Display and Debug must expose only the stable rendered fields; any canary occurrence fails closed"
+    "canary_execution_state_for_this_slice": "PASS_SOURCE_TEXT_ABSENT",
+    "required_on_future_implementation": "Display and Debug must continue to expose only the stable rendered fields; any canary occurrence fails closed"
   },
   "implementation_gate": {
     "required_before_rust_commit": [
@@ -760,7 +761,19 @@
       "R3.5 downstream compile and configuration evidence passes",
       "terminal parity owner records SAME or an explicit retained-incumbent decision"
     ],
-    "this_slice_satisfies_implementation_gate": false
+    "this_slice_satisfies_implementation_gate": true
+  },
+  "focused_compiler_proof": {
+    "job_id": 29975513699188766,
+    "worker": "vmi1227854",
+    "project": "asupersync-42452dd6::clean-overlay::15bec926d63bc6fb",
+    "command": "cargo test -j4 -p asupersync --locked --features metrics --lib observability::regex_ -- --nocapture",
+    "exit_code": 0,
+    "started_at_utc": "2026-08-14T09:12:27.137674473Z",
+    "completed_at_utc": "2026-08-14T09:26:20.613969864Z",
+    "duration_ms": 833476,
+    "remote_required": true,
+    "local_fallback_used": false
   },
   "static_validation": {
     "json_parse_required": true,
@@ -768,21 +781,18 @@
     "predecessor_hash_and_line_count_recheck_required": true,
     "row_count_and_identifier_reconciliation_required": true,
     "required_doc_markers": [
-      "KEEP_INCUMBENT_DEFER_NO_PRIVATE_COMPILE_FACADE",
+      "KEEP_INCUMBENT_DEFER_PRIVATE_COMPILE_FACADE_READY",
       "Complete inherited row join",
       "Aggregate limits",
       "Implementation gate",
       "No-claim boundary"
     ],
     "git_diff_check_required": true,
-    "compiler_or_runtime_claim_permitted": false
+    "compiler_or_runtime_claim_permitted": true
   },
   "no_claims": [
-    "no R3.5.1 completion or tracker closure",
-    "no new Rust implementation or compiled private facade",
-    "no compiler, test, lint, formatter, or runtime proof",
-    "no accepted-syntax expansion",
-    "no duplicate-capture-name rejection implementation",
+    "no R3.5.2 private match facade evidence",
+    "no R3.5 downstream compile and configuration evidence",
     "no public API or PrivacyConfig integration",
     "no compatibility shim",
     "no production privacy wiring",

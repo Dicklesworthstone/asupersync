@@ -30,7 +30,7 @@
   "authority": {
     "syntax_contract": "ASUP-REGEX-SYNTAX-V1",
     "syntax_source": "src/observability/regex_syntax.rs",
-    "syntax_source_sha256": "2fbeae8fc1346d51cf5535930b750d0d69055d8923b3c6e8fcb3bf8ce25315b0",
+    "syntax_source_sha256": "25ba1e6b24ce2741c39b831c580dda716a6c0d4113470c159382fb2a842cc98e",
     "unicode_contract": "artifacts/regex_unicode_table_contract_v1.json",
     "unicode_contract_decision": "KEEP_INCUMBENT_DEFER",
     "unicode_version": "16.0.0",
@@ -41,7 +41,7 @@
   },
   "source": {
     "path": "src/observability/regex_semantics.rs",
-    "sha256": "bd762181da7620330a580152688af7684da371a9a32c144ef09ac5b5d0c2221a",
+    "sha256": "00b1f03c2c823c74cae289750a2c1498b78452da635f55570ef37ffc53cde0f8",
     "module_wiring": "src/observability/mod.rs",
     "visibility": "pub(crate)",
     "feature": "metrics",

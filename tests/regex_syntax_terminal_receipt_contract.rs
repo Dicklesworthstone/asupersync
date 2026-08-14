@@ -159,15 +159,15 @@ fn validate_receipt(receipt: &Value, grammar: &Value, inventory: &Value) -> Resu
     if !boolean(&decision, "terminal_receipt_complete")?
         || text(&decision, "syntax_disposition")? != "KEEP_INCUMBENT_DEFER"
         || text(&decision, "incumbent_state")? != "KEEP_INCUMBENT"
-        || text(&decision, "candidate_state")? != "BOUNDED_PARSER_WITH_EXPLICIT_GAPS"
+        || text(&decision, "candidate_state")? != "BOUNDED_PARSER_WITH_ACCEPTED_SYNTAX_COMPLETE"
         || boolean(&decision, "cutover_eligible")?
         || boolean(&decision, "dependency_removal_authorized")?
-        || number(&decision, "same_rows")? != 30
+        || number(&decision, "same_rows")? != 31
         || number(&decision, "better_rows")? != 0
-        || number(&decision, "defer_rows")? != 1
+        || number(&decision, "defer_rows")? != 0
         || number(&decision, "unknown_rows")? != 0
         || number(&decision, "unresolved_high_findings")? != 0
-        || number(&decision, "resolved_by_fail_closed_disposition")? != 3
+        || number(&decision, "resolved_by_fail_closed_disposition")? != 1
         || text(&decision, "on_missing_row_or_new_divergence")? != "KEEP_INCUMBENT_DEFER"
     {
         return Err("fail-closed terminal decision drifted".to_owned());
@@ -193,7 +193,7 @@ fn validate_receipt(receipt: &Value, grammar: &Value, inventory: &Value) -> Resu
         .iter()
         .filter(|row| text(row, "parity").is_ok_and(|parity| parity == "SAME"))
         .count();
-    if deferred != exact_set(&["RGX-SYN-011"]) || same != 30 {
+    if !deferred.is_empty() || same != 31 {
         return Err("row-level SAME/DEFER disposition drifted".to_owned());
     }
     for row in receipt_rows {
@@ -201,9 +201,9 @@ fn validate_receipt(receipt: &Value, grammar: &Value, inventory: &Value) -> Resu
             return Err("row contains UNKNOWN or unsupported parity value".to_owned());
         }
         if text(row, "case_id")? == "RGX-SYN-011"
-            && text(row, "blocker_id")? != "RGX-GAP-X-WHITESPACE"
+            && text(row, "resolution_id")? != "RGX-R351-X-GRAMMAR-AWARE-ELISION"
         {
-            return Err("verbose-mode row lost its fail-closed blocker".to_owned());
+            return Err("verbose-mode row lost its R3.5.1 resolution receipt".to_owned());
         }
     }
 
@@ -287,7 +287,7 @@ fn validate_receipt(receipt: &Value, grammar: &Value, inventory: &Value) -> Resu
         ("property_cases_per_lane", 256),
         ("property_lanes", 4),
         ("generated_property_cases", 1024),
-        ("focused_tests", 35),
+        ("focused_tests", 36),
     ] {
         if number(&evidence, key)? != expected {
             return Err(format!("evidence count {key} drifted"));
@@ -331,14 +331,24 @@ fn validate_receipt(receipt: &Value, grammar: &Value, inventory: &Value) -> Resu
         return Err("divergence register drifted".to_owned());
     }
     for row in divergences {
-        if text(row, "severity")? != "HIGH_CUTOVER_BLOCKER"
-            || text(row, "disposition")? != "DEFER_KEEP_INCUMBENT"
+        let blocker_id = text(row, "blocker_id")?;
+        let disposition_is_exact = match blocker_id {
+            "RGX-GAP-X-WHITESPACE" | "RGX-GAP-DUPLICATE-CAPTURE-NAME" => {
+                text(row, "severity")? == "RESOLVED" && text(row, "disposition")? == "SAME_R3_5_1"
+            }
+            "RGX-GAP-UNICODE-PROPERTY-VALIDATION" => {
+                text(row, "severity")? == "HIGH_CUTOVER_BLOCKER"
+                    && text(row, "disposition")? == "DEFER_KEEP_INCUMBENT"
+            }
+            _ => false,
+        };
+        if !disposition_is_exact
             || array(row, "minimized_inputs")?.is_empty()
             || text(row, "owner_bead")?.is_empty()
             || text(row, "candidate_observation")?.is_empty()
             || text(row, "incumbent_observation")?.is_empty()
         {
-            return Err("divergence lost fail-closed fields".to_owned());
+            return Err("divergence or resolved-gap receipt lost required fields".to_owned());
         }
     }
 

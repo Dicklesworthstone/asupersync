@@ -11,12 +11,13 @@ This is the operator-readable companion to
 
 The terminal R3.1 disposition is `KEEP_INCUMBENT_DEFER`.
 
-The bounded candidate lexer/parser is useful staging code, but it is not
-cutover eligible. Thirty of the 31 frozen R1 syntax rows are `SAME`. The
-verbose-mode row `RGX-SYN-011` is `DEFER` because `x` mode does not yet erase
-unescaped whitespace/comments or admit whitespace at every incumbent grammar
-boundary. Two additional syntax/diagnostic and Unicode/byte gaps also keep the
-incumbent in place.
+The bounded candidate lexer/parser now matches all 31 frozen R1 syntax rows,
+including grammar-aware extended-mode whitespace/comment elision for
+`RGX-SYN-011`. Duplicate capture names are rejected with the stable,
+source-free `RGX-PARSE-E013` diagnostic. The terminal disposition remains
+`KEEP_INCUMBENT_DEFER` because Unicode property and byte-mode validation are
+still downstream cutover blockers; accepted-syntax completion alone does not
+authorize incumbent replacement.
 
 This is a successful fail-closed terminal receipt, not a failed implementation
 disguised as parity. Missing rows, new divergences, changed source digests, or
@@ -42,7 +43,7 @@ resolution, language version, or any pinned source digest changes.
 
 ## Evidence and repairs
 
-The source lane contains 35 focused tests:
+The source lane contains 36 focused syntax tests:
 
 - all 31 R1 syntax rows and all 20 grammar goldens;
 - exact category and byte-span parity for the eight rejected goldens;
@@ -66,18 +67,18 @@ Repetition remains arena-bounded: nested operators wrap node IDs and update a
 checked finite/unbounded/overflow estimate; they never clone or expand the
 subtree.
 
-## Explicit blockers
+## Resolved gaps and retained blocker
 
 | Blocker | Minimized evidence | Owner | Disposition |
 | --- | --- | --- | --- |
-| `RGX-GAP-X-WHITESPACE` | `(?x)a b`, `(?x)a{ 2 , 3 }`, `(?x)[ a-z ]`, spaced escapes/groups | `asupersync-5z2scg.8.3.5` | `DEFER_KEEP_INCUMBENT` |
-| `RGX-GAP-DUPLICATE-CAPTURE-NAME` | `(?P<name>a)\|(?P<name>b)` | `asupersync-5z2scg.8.3.5` | `DEFER_KEEP_INCUMBENT` |
+| `RGX-GAP-X-WHITESPACE` | `(?x)a b`, `(?x)a{ 2 , 3 }`, `(?x)[ a-z ]`, spaced escapes/groups | `asupersync-5z2scg.8.3.5.1` | `SAME_R3_5_1` |
+| `RGX-GAP-DUPLICATE-CAPTURE-NAME` | `(?P<name>a)\|(?P<name>b)` | `asupersync-5z2scg.8.3.5.1` | `SAME_R3_5_1` (`RGX-PARSE-E013`) |
 | `RGX-GAP-UNICODE-PROPERTY-VALIDATION` | `\p{DefinitelyNotAProperty}`, `(?-u:\pL)`, `(?-u:\xFF)` | `asupersync-5z2scg.8.3.2.2` | `DEFER_KEEP_INCUMBENT` |
 
-These are resolved terminal findings because the receipt assigns an exact
-owner and preserves the incumbent. They are not silently green, waived, or
-claimed as low severity. Any future repair must update the minimized corpus,
-row disposition, source digest, and terminal receipt together.
+The first two rows are resolved by R3.5.1 and remain recorded so the minimized
+corpus cannot silently regress. The Unicode/property row remains a fail-closed
+cutover blocker owned downstream. Any future repair must update the minimized
+corpus, row disposition, source digest, and terminal receipt together.
 
 ## Limits and privacy
 

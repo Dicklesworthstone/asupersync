@@ -108,15 +108,15 @@ fn terminal_validate(value: &Value) -> Result<(), String> {
     let expected_predecessors = [
         (
             "artifacts/regex_unicode_table_contract_v1.json",
-            "33c22c50c464629c3338c71c4e3c046d9563c0c59b653315a9bab5299a21db14",
+            "b4f5507b5cf984e381ccddce1ff3c3afef855ececa527de0c1fae6f2b4f67b61",
         ),
         (
             "artifacts/regex_character_semantics_contract_v1.json",
-            "06c4c42c32e1f875fc0219be202744653af9e7f81227a1f65fc782fb7f680d6d",
+            "15bc8d9e1f1b2f89338dd401979d0645a401062f1a774932cda69b522ef4f444",
         ),
         (
             "artifacts/regex_folding_boundary_contract_v1.json",
-            "666cdd5b66254f4fa638e5e41f5ddb98c90b1131f52236d09b40e65fe059df62",
+            "c28dfa48d5cb1b04226ca5637b2394b6ee51efb4c691eca78b93f0da5590cbb8",
         ),
     ];
     if predecessors.len() != expected_predecessors.len() {
@@ -228,13 +228,13 @@ fn identity_predecessors_sources_and_decision_are_fail_closed() {
     let expected_sources = [
         (
             SYNTAX_PATH,
-            "2fbeae8fc1346d51cf5535930b750d0d69055d8923b3c6e8fcb3bf8ce25315b0",
-            112_380,
+            "25ba1e6b24ce2741c39b831c580dda716a6c0d4113470c159382fb2a842cc98e",
+            119_085,
         ),
         (
             SEMANTICS_PATH,
-            "bd762181da7620330a580152688af7684da371a9a32c144ef09ac5b5d0c2221a",
-            41_269,
+            "00b1f03c2c823c74cae289750a2c1498b78452da635f55570ef37ffc53cde0f8",
+            44_015,
         ),
         (
             BOUNDARIES_PATH,
@@ -659,7 +659,7 @@ fn size_targets_oracle_docs_and_proof_boundaries_are_explicit() {
     let size = Value::Object(object(&value, "size_audit").expect("size audit").clone());
     assert_eq!(
         number(&size, "candidate_source_bytes").expect("candidate bytes"),
-        203_143
+        212_640
     );
     assert_eq!(
         number(&size, "retained_module_plus_table_bytes").expect("retained bytes"),

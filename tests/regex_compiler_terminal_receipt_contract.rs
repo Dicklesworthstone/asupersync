@@ -4,6 +4,7 @@
 mod regex_boundaries;
 #[path = "../src/observability/regex_ir.rs"]
 mod regex_ir;
+#[allow(dead_code)]
 #[path = "../src/observability/regex_lowering.rs"]
 mod regex_lowering;
 #[path = "../src/observability/regex_semantics.rs"]
@@ -146,19 +147,19 @@ fn terminal_validate(value: &Value) -> Result<(), String> {
     let expected_predecessors = [
         (
             "artifacts/regex_semantic_terminal_receipt_v1.json",
-            "ce97bb3734187d5057938028175d7cbf7b5ed99e6f1fedbd48cbd9076d289a62",
+            "e946b0b7b8ae9de2b504fd5907e346b316dfe4afa3de1719929b3f03f70a6e9a",
         ),
         (
             "artifacts/regex_ir_schema_contract_v1.json",
-            "15ec27fc0ac05749337fdcbb0e6b12cbb728ff237b305bc22796fe7daa405f4f",
+            "d7a71c6a8ec75b3ec4833bd34341be898314031d6c04270b06ea97dafd73b8b9",
         ),
         (
             "artifacts/regex_ir_lowering_contract_v1.json",
-            "11f1e4ff8843ddf0a6725de1397df12ecef2d95d8dfc8965e1e37619ca029096",
+            "1636856755f82c9392bc1ae5277dd7dcce60528d3948f20a70199657261c0b78",
         ),
         (
             "artifacts/regex_priority_capture_lowering_contract_v1.json",
-            "0c0543d853a63da9e5d858adbe062c572336312d60c2d7df63ccf443871cc92b",
+            "1b492bcdf6f056e917ec1f91b80a1167e1f3e7466abc39caa7efdcb4cdee6397",
         ),
     ];
     if predecessors.len() != expected_predecessors.len() {

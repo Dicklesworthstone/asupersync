@@ -26,7 +26,7 @@
   },
   "authority": {
     "semantic_terminal_path": "artifacts/regex_semantic_terminal_receipt_v1.json",
-    "semantic_terminal_sha256": "ce97bb3734187d5057938028175d7cbf7b5ed99e6f1fedbd48cbd9076d289a62",
+    "semantic_terminal_sha256": "e946b0b7b8ae9de2b504fd5907e346b316dfe4afa3de1719929b3f03f70a6e9a",
     "semantic_terminal_disposition": "KEEP_INCUMBENT_DEFER",
     "ir_schema_source_path": "src/observability/regex_ir.rs",
     "ir_schema_source_sha256": "de4906beb838fda2c57bccfdb16316e8de661e564940a47e7b9b87f065311cb3",
@@ -39,8 +39,8 @@
   "sources": [
     {
       "path": "src/observability/regex_lowering.rs",
-      "sha256": "664753b2198fa53a4e80845639a21e24c6f3871d240f59f75f7b522cc8a66a54",
-      "bytes": 56882,
+      "sha256": "c7e1765ee2499829a63711d10a8de591f8d59a78897f53e7e13de5599021ed64",
+      "bytes": 68943,
       "role": "bounded priority, capture, repetition and scoped-flag lowering"
     },
     {
@@ -51,14 +51,14 @@
     },
     {
       "path": "src/observability/regex_syntax.rs",
-      "sha256": "2fbeae8fc1346d51cf5535930b750d0d69055d8923b3c6e8fcb3bf8ce25315b0",
-      "bytes": 112380,
+      "sha256": "25ba1e6b24ce2741c39b831c580dda716a6c0d4113470c159382fb2a842cc98e",
+      "bytes": 119085,
       "role": "frozen capture numbering, quantifier, greediness, flag and span authority"
     },
     {
       "path": "src/observability/regex_semantics.rs",
-      "sha256": "bd762181da7620330a580152688af7684da371a9a32c144ef09ac5b5d0c2221a",
-      "bytes": 41269,
+      "sha256": "00b1f03c2c823c74cae289750a2c1498b78452da635f55570ef37ffc53cde0f8",
+      "bytes": 44015,
       "role": "frozen scoped character-class semantics authority"
     },
     {

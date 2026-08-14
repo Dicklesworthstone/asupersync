@@ -8,9 +8,10 @@ This is the operator companion to
 
 ## Result
 
-The R3.5.1 boundary is now statically mapped, but it is not implemented or
-complete. The exact disposition is
-`KEEP_INCUMBENT_DEFER_NO_PRIVATE_COMPILE_FACADE`.
+The R3.5.1 private compile boundary is implemented and source-pinned. The exact
+disposition is `KEEP_INCUMBENT_DEFER_PRIVATE_COMPILE_FACADE_READY`: the private
+facade is ready, while public wiring and incumbent replacement remain
+explicitly unauthorized.
 
 The candidate already has five checked private stages under the `metrics`
 feature:
@@ -21,13 +22,16 @@ feature:
 4. Thompson lowering; and
 5. checked IR validation.
 
-Those stages remain `pub(crate)` and are not one compile API. There is no
-aggregate private compile error type. The current direct path is
-`regex_lowering::lower`, which returns a validated `Program` or a stage-level
-`LowerError`; callers can independently call `Program::validate`.
+Those stages remain `pub(crate)`. `regex_lowering::compile_private` now joins
+them behind `PrivateCompileLimits`, returns a fully revalidated `Program`, and
+reports a source-text-free `PrivateCompileError` with a stable stage, code,
+span, and bounded numeric detail. The established `regex_lowering::lower`
+entrypoint remains intact.
 
-No Rust source changed in this slice. In particular, this map does not create a
-facade, change accepted syntax, wire a matcher, or expose anything publicly.
+The implementation also completes grammar-aware extended-mode elision and
+rejects duplicate capture names with `RGX-PARSE-E013` /
+`RGX-DIAG-DUPLICATE-CAPTURE-NAME`. It does not wire a matcher or expose the
+candidate publicly.
 
 ## Pinned authority
 
@@ -54,26 +58,24 @@ an aggregate status:
 
 | Family | Rows | Accepted/checked | `KEEP_DEFER` |
 | --- | ---: | ---: | ---: |
-| syntax terminal | 31 | 30 | 1 |
+| syntax terminal | 31 | 31 | 0 |
 | semantic terminal | 20 | 19 | 1 |
 | compiler AST | 23 | 23 | 0 |
 | compiler quantifiers | 10 | 8 | 2 |
 | IR validator diagnostics | 28 | 28 typed failures | 0 |
 
-The exact row identifiers live in the machine artifact. The five explicit
+The exact row identifiers live in the machine artifact. The three explicit
 retained rows are:
 
 | Row | Surface | Current outcome |
 | --- | --- | --- |
-| `RGX-SYN-011` | extended-mode whitespace and comments | `KEEP_DEFER` |
-| `RGX-GAP-DUPLICATE-CAPTURE-NAME` | duplicate named captures | `KEEP_DEFER` |
 | `RGX-COMP-Q-009` | nullable unbounded repetition | `RGX-LOWER-E009` |
 | `RGX-COMP-Q-010` | capture erased by zero repetition | `RGX-LOWER-E010` |
 | `RGX-R324-U001` | dotted Unicode Age value | `RGX-LEX-E004` |
 
-These rows are explicit and fail closed. The inherited compiler and semantic
-rows are typed; duplicate capture names still lack the required typed
-rejection. None is silently accepted as parity, and the joined families have
+These rows are explicit and fail closed. Extended mode and duplicate capture
+names are now exact, typed R3.5.1 rows rather than retained gaps. None of the
+remaining rows is silently accepted as parity, and the joined families have
 zero unknown rows.
 
 ## R3.5-owned syntax cases
@@ -81,7 +83,7 @@ zero unknown rows.
 The machine map separates current behavior from the required R3.5.1 behavior.
 It includes positive, boundary, and malformed rows for both owned gaps.
 
-Extended-mode coverage includes:
+Extended-mode proof includes:
 
 - a pattern with no whitespace to elide;
 - escaped whitespace, which remains a literal;
@@ -92,9 +94,10 @@ Extended-mode coverage includes:
 - an unclosed scoped flag group with its typed category.
 
 Duplicate-name coverage includes distinct names, same-style duplicates,
-cross-style duplicates, and a malformed empty name. The duplicate rows remain
-`KEEP_DEFER`; a future implementation must allocate a stable error code rather
-than borrowing incumbent wording or rendering the source pattern.
+cross-style duplicates, and a malformed empty name. Duplicate names now return
+the stable `RGX-PARSE-E013` code and
+`RGX-DIAG-DUPLICATE-CAPTURE-NAME` category without borrowing incumbent wording
+or rendering the source pattern.
 
 ## Aggregate limits
 
@@ -115,10 +118,10 @@ capture dispositions.
 
 ## Diagnostic boundary
 
-The existing stage errors are `LexError`, `ParseError`, `SyntaxError`,
-`SemanticError`, `FoldBoundaryError`, `LowerError`, and `CompileError`.
-Their stable output is limited to codes, categories, spans, numeric limits, and
-numeric IR indices where applicable.
+The stage errors are `LexError`, `ParseError`, `SyntaxError`, `SemanticError`,
+`FoldBoundaryError`, `LowerError`, and `CompileError`; the facade owns the
+aggregate `PrivateCompileError`. Stable output is limited to codes, stages,
+categories, spans, numeric limits, and numeric IR indices where applicable.
 
 The following must never be rendered by `Display` or `Debug`:
 
@@ -127,13 +130,13 @@ The following must never be rendered by `Display` or `Debug`:
 - haystack text; or
 - captured text.
 
-There is not yet one aggregate private compile error. Any future facade must
-preserve the stage code, span, and numeric detail without retaining or
-rendering source text.
+`PrivateCompileError` preserves the stage code, span, and numeric detail
+without retaining or rendering source text. Its `Display` and `Debug` forms
+were exercised with redaction canaries in the focused source lane.
 
 ## Implementation gate
 
-Before a Rust implementation can be committed for R3.5.1, it must:
+The R3.5.1 implementation gate required:
 
 1. implement grammar-aware extended-mode elision;
 2. reject duplicate names with a stable typed code;
@@ -141,25 +144,25 @@ Before a Rust implementation can be committed for R3.5.1, it must:
 4. replay every row identifier named by the map; and
 5. pass the focused compiler proof against the exact pinned source.
 
-This static slice intentionally does not satisfy that gate. It records what the
-gate is so later source work cannot narrow the accepted language, omit an
-inherited limit, or mistake a terminal `KEEP_DEFER` row for parity.
+The exact source at revision `432be7270481c5439db00f79910465a269512266`
+satisfies that gate. RCH job `29975513699188766` ran the focused private regex
+source lane remotely on `vmi1227854` and exited 0. Public wiring still requires
+the separately owned R3.5.2 match facade and downstream compile/configuration
+evidence.
 
 ## Static validation boundary
 
-Validation for this slice is limited to JSON parsing, source and predecessor
-hash/line-count reconciliation, exact row-count and identifier reconciliation,
-and `git diff --check`.
-
-No Cargo, RCH, compiler, test, lint, formatter, runtime, benchmark, service, or
-remote proof lane is represented by this artifact.
+Validation includes JSON parsing, source and predecessor hash/line-count
+reconciliation, exact row-count and identifier reconciliation, `git diff
+--check`, and the focused remote compiler proof above. It is not a broad
+workspace, benchmark, service, or release gate.
 
 ## No-claim boundary
 
-This is partial R3.5.1 progress, not completion. It makes no claim of a compiled
-private facade, accepted-syntax expansion, duplicate-name enforcement, public
-API or `PrivacyConfig` integration, production wiring, dependency removal,
-performance, broad workspace health, or release readiness. The incumbent stays
-in place.
+This completes the private R3.5.1 compile boundary only. It makes no claim of
+an R3.5.2 private match facade, downstream compile/configuration evidence,
+public API or `PrivacyConfig` integration, production wiring, dependency
+removal, performance, broad workspace health, or release readiness. The
+incumbent stays in place.
 
 <!-- END PRIVATE REGEX COMPILE API MAP -->

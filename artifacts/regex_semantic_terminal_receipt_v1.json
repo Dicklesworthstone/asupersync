@@ -31,32 +31,32 @@
     {
       "bead_id": "asupersync-5z2scg.8.3.2.1",
       "path": "artifacts/regex_unicode_table_contract_v1.json",
-      "sha256": "33c22c50c464629c3338c71c4e3c046d9563c0c59b653315a9bab5299a21db14",
+      "sha256": "b4f5507b5cf984e381ccddce1ff3c3afef855ececa527de0c1fae6f2b4f67b61",
       "decision": "KEEP_INCUMBENT_DEFER"
     },
     {
       "bead_id": "asupersync-5z2scg.8.3.2.2",
       "path": "artifacts/regex_character_semantics_contract_v1.json",
-      "sha256": "06c4c42c32e1f875fc0219be202744653af9e7f81227a1f65fc782fb7f680d6d",
+      "sha256": "15bc8d9e1f1b2f89338dd401979d0645a401062f1a774932cda69b522ef4f444",
       "decision": "STAGED_RETAINED_TABLE_BACKEND"
     },
     {
       "bead_id": "asupersync-5z2scg.8.3.2.3",
       "path": "artifacts/regex_folding_boundary_contract_v1.json",
-      "sha256": "666cdd5b66254f4fa638e5e41f5ddb98c90b1131f52236d09b40e65fe059df62",
+      "sha256": "c28dfa48d5cb1b04226ca5637b2394b6ee51efb4c691eca78b93f0da5590cbb8",
       "decision": "STAGED_SIMPLE_FOLD_AND_BOUNDARY_SEMANTICS"
     }
   ],
   "candidate_sources": [
     {
       "path": "src/observability/regex_syntax.rs",
-      "sha256": "2fbeae8fc1346d51cf5535930b750d0d69055d8923b3c6e8fcb3bf8ce25315b0",
-      "bytes": 112380
+      "sha256": "25ba1e6b24ce2741c39b831c580dda716a6c0d4113470c159382fb2a842cc98e",
+      "bytes": 119085
     },
     {
       "path": "src/observability/regex_semantics.rs",
-      "sha256": "bd762181da7620330a580152688af7684da371a9a32c144ef09ac5b5d0c2221a",
-      "bytes": 41269
+      "sha256": "00b1f03c2c823c74cae289750a2c1498b78452da635f55570ef37ffc53cde0f8",
+      "bytes": 44015
     },
     {
       "path": "src/observability/regex_boundaries.rs",
@@ -305,11 +305,11 @@
     ]
   },
   "size_audit": {
-    "candidate_source_bytes": 203143,
-    "predecessor_packet_and_source_bytes": 253666,
+    "candidate_source_bytes": 212640,
+    "predecessor_packet_and_source_bytes": 263163,
     "retained_generated_table_bytes": 787066,
     "retained_module_plus_table_bytes": 788324,
-    "candidate_source_percent_of_retained_module_plus_table": 25.76,
+    "candidate_source_percent_of_retained_module_plus_table": 26.97,
     "incumbent_regex_stack_crate_archive_bytes": 1327744,
     "candidate_is_table_replacement": false,
     "source_reduction_claim_authorized": false,

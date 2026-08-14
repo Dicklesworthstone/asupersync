@@ -321,7 +321,7 @@ fn validate_contract(contract: &Value, inventory: &Value, terminal: &Value) -> R
         ),
         (
             TERMINAL_RECEIPT_PATH,
-            "e563f3d0981896c0afa9b7e567b372b347bee6d6e3ebb6fc6336eb9c37ff2be7",
+            "e0c85503e10f8fa6acd58f1124582806d2bc127f0eeea4b783788c58a1e850d2",
         ),
     ]);
     let digest_rows = array(contract, "source_digests")?;

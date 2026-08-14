@@ -25,9 +25,9 @@ const SYNTAX_SOURCE_PATH: &str = "src/observability/regex_syntax.rs";
 const SEMANTICS_SOURCE_PATH: &str = "src/observability/regex_semantics.rs";
 const CARGO_PATH: &str = "Cargo.toml";
 const FROZEN_SYNTAX_SHA256: &str =
-    "2fbeae8fc1346d51cf5535930b750d0d69055d8923b3c6e8fcb3bf8ce25315b0";
+    "25ba1e6b24ce2741c39b831c580dda716a6c0d4113470c159382fb2a842cc98e";
 const FROZEN_SEMANTICS_SHA256: &str =
-    "bd762181da7620330a580152688af7684da371a9a32c144ef09ac5b5d0c2221a";
+    "00b1f03c2c823c74cae289750a2c1498b78452da635f55570ef37ffc53cde0f8";
 
 fn load_contract() -> Value {
     let text = fs::read_to_string(ARTIFACT_PATH).expect("fold/boundary artifact must be readable");

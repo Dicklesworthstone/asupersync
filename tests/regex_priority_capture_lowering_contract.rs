@@ -2,6 +2,7 @@
 mod regex_boundaries;
 #[path = "../src/observability/regex_ir.rs"]
 mod regex_ir;
+#[allow(dead_code)]
 #[path = "../src/observability/regex_lowering.rs"]
 mod regex_lowering;
 #[path = "../src/observability/regex_semantics.rs"]
@@ -33,11 +34,11 @@ const SOURCE_PATH: &str = "src/observability/regex_lowering.rs";
 const IR_SOURCE_PATH: &str = "src/observability/regex_ir.rs";
 const SEMANTIC_TERMINAL_PATH: &str = "artifacts/regex_semantic_terminal_receipt_v1.json";
 const FROZEN_SOURCE_SHA256: &str =
-    "664753b2198fa53a4e80845639a21e24c6f3871d240f59f75f7b522cc8a66a54";
+    "c7e1765ee2499829a63711d10a8de591f8d59a78897f53e7e13de5599021ed64";
 const FROZEN_IR_SOURCE_SHA256: &str =
     "de4906beb838fda2c57bccfdb16316e8de661e564940a47e7b9b87f065311cb3";
 const FROZEN_TERMINAL_SHA256: &str =
-    "ce97bb3734187d5057938028175d7cbf7b5ed99e6f1fedbd48cbd9076d289a62";
+    "e946b0b7b8ae9de2b504fd5907e346b316dfe4afa3de1719929b3f03f70a6e9a";
 
 fn read(path: &str) -> String {
     fs::read_to_string(path).unwrap_or_else(|error| panic!("read {path}: {error}"))

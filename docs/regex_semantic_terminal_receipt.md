@@ -38,7 +38,7 @@ invalid UTF-8 offsets fail closed. The diagnostic redaction canary
 
 ## Size and target interpretation
 
-The three staged sources total 203,143 bytes. That is 25.76% of the incumbent
+The three staged sources total 212,640 bytes. That is 26.97% of the incumbent
 module-plus-enabled-table source budget of 788,324 bytes, but it is not a source
 reduction: the staged implementation imports those retained tables. The pinned
 regex stack archives total 1,327,744 bytes. One cold same-worker release probe
