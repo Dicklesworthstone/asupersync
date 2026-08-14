@@ -1645,10 +1645,493 @@ impl RedisProtocolLimits {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum RespScanContainerKind {
+    Fixed {
+        remaining: usize,
+    },
+    Streamed {
+        is_map: bool,
+        children: usize,
+        max_children: usize,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RespScanContainer {
+    kind: RespScanContainerKind,
+    counts_as_parent_value: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RespScanPending {
+    Type,
+    Line {
+        tag: u8,
+        start: usize,
+        search_from: usize,
+    },
+    FixedPayload {
+        end_data: usize,
+        end_crlf: usize,
+    },
+    StreamedBlobChunkLine {
+        total_len: usize,
+        start: usize,
+        search_from: usize,
+    },
+    StreamedBlobChunkPayload {
+        total_len: usize,
+        end_data: usize,
+        end_crlf: usize,
+    },
+}
+
+#[derive(Debug)]
+struct RespFrameScanner {
+    cursor: usize,
+    stack: Vec<RespScanContainer>,
+    pending: RespScanPending,
+    complete_len: Option<usize>,
+    #[cfg(test)]
+    work_units: usize,
+}
+
+impl RespFrameScanner {
+    fn new() -> Self {
+        Self {
+            cursor: 0,
+            stack: Vec::new(),
+            pending: RespScanPending::Type,
+            complete_len: None,
+            #[cfg(test)]
+            work_units: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    fn find_crlf_incremental(&mut self, buf: &[u8], mut i: usize) -> Option<usize> {
+        while i + 1 < buf.len() {
+            #[cfg(test)]
+            {
+                self.work_units = self.work_units.saturating_add(1);
+            }
+            if buf[i] == b'\r' && buf[i + 1] == b'\n' {
+                return Some(i);
+            }
+            i += 1;
+        }
+        None
+    }
+
+    fn finish_container(&mut self, counts_as_parent_value: bool) -> Result<(), RedisError> {
+        if counts_as_parent_value {
+            self.finish_value()
+        } else {
+            Ok(())
+        }
+    }
+
+    fn finish_value(&mut self) -> Result<(), RedisError> {
+        loop {
+            let Some(container) = self.stack.last_mut() else {
+                self.complete_len = Some(self.cursor);
+                return Ok(());
+            };
+
+            match &mut container.kind {
+                RespScanContainerKind::Fixed { remaining } => {
+                    *remaining = remaining.checked_sub(1).ok_or_else(|| {
+                        RedisError::Protocol(
+                            "incremental RESP scanner exhausted aggregate children".to_string(),
+                        )
+                    })?;
+                    if *remaining != 0 {
+                        return Ok(());
+                    }
+                }
+                RespScanContainerKind::Streamed {
+                    children,
+                    max_children,
+                    ..
+                } => {
+                    *children = children.checked_add(1).ok_or_else(|| {
+                        RedisError::Protocol("streamed aggregate length overflow".to_string())
+                    })?;
+                    if *children > *max_children {
+                        return Err(RedisError::Protocol(
+                            "streamed aggregate length exceeds configured maximum".to_string(),
+                        ));
+                    }
+                    return Ok(());
+                }
+            }
+
+            let Some(completed) = self.stack.pop() else {
+                return Err(RedisError::Protocol(
+                    "incremental RESP scanner lost aggregate frame".to_string(),
+                ));
+            };
+            if !completed.counts_as_parent_value {
+                return Ok(());
+            }
+        }
+    }
+
+    fn open_fixed_container(
+        &mut self,
+        remaining: usize,
+        counts_as_parent_value: bool,
+    ) -> Result<(), RedisError> {
+        if remaining == 0 {
+            return self.finish_container(counts_as_parent_value);
+        }
+        self.stack.push(RespScanContainer {
+            kind: RespScanContainerKind::Fixed { remaining },
+            counts_as_parent_value,
+        });
+        Ok(())
+    }
+
+    fn close_streamed_container(&mut self) -> Result<(), RedisError> {
+        let Some(container) = self.stack.pop() else {
+            return Err(RedisError::Protocol(
+                "RESP3 streamed terminator without aggregate".to_string(),
+            ));
+        };
+        let RespScanContainerKind::Streamed {
+            is_map, children, ..
+        } = container.kind
+        else {
+            return Err(RedisError::Protocol(
+                "RESP3 streamed terminator inside fixed aggregate".to_string(),
+            ));
+        };
+        if is_map && children % 2 != 0 {
+            return Err(RedisError::Protocol(
+                "RESP3 streamed map ended after an odd number of values".to_string(),
+            ));
+        }
+        self.finish_container(container.counts_as_parent_value)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn scan(
+        &mut self,
+        buf: &[u8],
+        limits: &RedisProtocolLimits,
+    ) -> Result<Option<usize>, RedisError> {
+        loop {
+            if let Some(complete_len) = self.complete_len {
+                return Ok(Some(complete_len));
+            }
+
+            match self.pending {
+                RespScanPending::Type => {
+                    if self.cursor >= buf.len() {
+                        return Ok(None);
+                    }
+                    if self.stack.len() > limits.max_nesting_depth {
+                        return Err(RedisError::Protocol(format!(
+                            "RESP nesting depth exceeds maximum ({})",
+                            limits.max_nesting_depth
+                        )));
+                    }
+
+                    if let Some(RespScanContainer {
+                        kind:
+                            RespScanContainerKind::Streamed {
+                                is_map: _,
+                                children,
+                                max_children,
+                            },
+                        ..
+                    }) = self.stack.last()
+                    {
+                        if buf[self.cursor] == b'.' {
+                            if buf.len() < self.cursor + 3 {
+                                return Ok(None);
+                            }
+                            #[cfg(test)]
+                            {
+                                self.work_units = self.work_units.saturating_add(3);
+                            }
+                            if &buf[self.cursor..self.cursor + 3] != b".\r\n" {
+                                return Err(RedisError::Protocol(
+                                    "invalid RESP3 streamed aggregate terminator".to_string(),
+                                ));
+                            }
+                            self.cursor += 3;
+                            self.close_streamed_container()?;
+                            continue;
+                        }
+                        if children >= max_children {
+                            return Err(RedisError::Protocol(format!(
+                                "streamed aggregate length exceeds maximum {}",
+                                limits.max_array_len
+                            )));
+                        }
+                    }
+
+                    let tag = buf[self.cursor];
+                    #[cfg(test)]
+                    {
+                        self.work_units = self.work_units.saturating_add(1);
+                    }
+                    if !matches!(
+                        tag,
+                        b'+' | b'-'
+                            | b':'
+                            | b','
+                            | b'('
+                            | b'_'
+                            | b'#'
+                            | b'$'
+                            | b'='
+                            | b'!'
+                            | b'*'
+                            | b'~'
+                            | b'>'
+                            | b'%'
+                            | b'|'
+                    ) {
+                        return Err(RedisError::Protocol(format!(
+                            "unknown RESP type byte: 0x{tag:02x}"
+                        )));
+                    }
+                    self.pending = RespScanPending::Line {
+                        tag,
+                        start: self.cursor,
+                        search_from: self.cursor + 1,
+                    };
+                }
+                RespScanPending::Line {
+                    tag,
+                    start,
+                    search_from,
+                } => {
+                    let Some(end) = self.find_crlf_incremental(buf, search_from) else {
+                        self.pending = RespScanPending::Line {
+                            tag,
+                            start,
+                            search_from: buf.len().saturating_sub(1).max(start + 1),
+                        };
+                        return Ok(None);
+                    };
+                    let payload = &buf[start + 1..end];
+                    self.cursor = end + 2;
+                    self.pending = RespScanPending::Type;
+
+                    match tag {
+                        b'+' | b'-' | b':' | b',' | b'(' | b'_' | b'#' => {
+                            self.finish_value()?;
+                        }
+                        b'$' | b'=' | b'!' => {
+                            if tag == b'$' && payload == b"?" {
+                                self.pending = RespScanPending::StreamedBlobChunkLine {
+                                    total_len: 0,
+                                    start: self.cursor,
+                                    search_from: self.cursor + 1,
+                                };
+                                continue;
+                            }
+                            let len = parse_i64_ascii(payload)?;
+                            if len == -1 && tag == b'$' {
+                                self.finish_value()?;
+                                continue;
+                            }
+                            if len < 0 {
+                                return Err(RedisError::Protocol(format!(
+                                    "invalid {} length for byte 0x{tag:02x}: {len}",
+                                    match tag {
+                                        b'$' => "bulk string",
+                                        b'=' => "verbatim string",
+                                        b'!' => "blob error",
+                                        _ => "bulk-shape",
+                                    }
+                                )));
+                            }
+                            let len = usize::try_from(len).map_err(|_| {
+                                RedisError::Protocol(format!("invalid bulk-shape length: {len}"))
+                            })?;
+                            if len > limits.max_bulk_string_len {
+                                return Err(RedisError::Protocol(format!(
+                                    "bulk-shape length {len} exceeds maximum {}",
+                                    limits.max_bulk_string_len
+                                )));
+                            }
+                            let end_data = self.cursor.saturating_add(len);
+                            self.pending = RespScanPending::FixedPayload {
+                                end_data,
+                                end_crlf: end_data.saturating_add(2),
+                            };
+                        }
+                        b'*' | b'~' | b'>' | b'%' | b'|' => {
+                            if payload == b"?" {
+                                if !matches!(tag, b'*' | b'~' | b'%') {
+                                    return Err(RedisError::Protocol(format!(
+                                        "RESP3 streamed aggregate not supported for type byte 0x{tag:02x}"
+                                    )));
+                                }
+                                let counts_as_parent_value = tag != b'|' || self.stack.is_empty();
+                                self.stack.push(RespScanContainer {
+                                    kind: RespScanContainerKind::Streamed {
+                                        is_map: tag == b'%',
+                                        children: 0,
+                                        max_children: if tag == b'%' {
+                                            limits.max_array_len.saturating_mul(2)
+                                        } else {
+                                            limits.max_array_len
+                                        },
+                                    },
+                                    counts_as_parent_value,
+                                });
+                                continue;
+                            }
+                            let n = parse_i64_ascii(payload)?;
+                            if n == -1 && tag == b'*' {
+                                self.finish_value()?;
+                                continue;
+                            }
+                            if n < 0 {
+                                return Err(RedisError::Protocol(format!(
+                                    "invalid aggregate length: {n}"
+                                )));
+                            }
+                            let n = usize::try_from(n).map_err(|_| {
+                                RedisError::Protocol(format!("invalid aggregate length: {n}"))
+                            })?;
+                            if n > limits.max_array_len {
+                                return Err(RedisError::Protocol(format!(
+                                    "aggregate length {n} exceeds maximum {}",
+                                    limits.max_array_len
+                                )));
+                            }
+                            let children = if matches!(tag, b'%' | b'|') {
+                                n.checked_mul(2).ok_or_else(|| {
+                                    RedisError::Protocol("aggregate length overflow".to_string())
+                                })?
+                            } else {
+                                n
+                            };
+                            let counts_as_parent_value = tag != b'|' || self.stack.is_empty();
+                            self.open_fixed_container(children, counts_as_parent_value)?;
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                RespScanPending::FixedPayload { end_data, end_crlf } => {
+                    #[cfg(test)]
+                    {
+                        self.work_units = self.work_units.saturating_add(1);
+                    }
+                    if buf.len() < end_crlf {
+                        return Ok(None);
+                    }
+                    if buf.get(end_data) != Some(&b'\r') || buf.get(end_data + 1) != Some(&b'\n') {
+                        return Err(RedisError::Protocol(
+                            "bulk-shape payload missing trailing CRLF".to_string(),
+                        ));
+                    }
+                    self.cursor = end_crlf;
+                    self.pending = RespScanPending::Type;
+                    self.finish_value()?;
+                }
+                RespScanPending::StreamedBlobChunkLine {
+                    total_len,
+                    start,
+                    search_from,
+                } => {
+                    if start >= buf.len() {
+                        return Ok(None);
+                    }
+                    if buf[start] != b';' {
+                        return Err(RedisError::Protocol(format!(
+                            "RESP3 streamed blob chunk must start with ';', got 0x{:02x}",
+                            buf[start]
+                        )));
+                    }
+                    let Some(end) = self.find_crlf_incremental(buf, search_from) else {
+                        self.pending = RespScanPending::StreamedBlobChunkLine {
+                            total_len,
+                            start,
+                            search_from: buf.len().saturating_sub(1).max(start + 1),
+                        };
+                        return Ok(None);
+                    };
+                    let len = parse_i64_ascii(&buf[start + 1..end])?;
+                    if len < 0 {
+                        return Err(RedisError::Protocol(format!(
+                            "invalid streamed blob chunk length: {len}"
+                        )));
+                    }
+                    let len = usize::try_from(len).map_err(|_| {
+                        RedisError::Protocol(format!("invalid streamed blob chunk length: {len}"))
+                    })?;
+                    self.cursor = end + 2;
+                    if len == 0 {
+                        self.pending = RespScanPending::Type;
+                        self.finish_value()?;
+                        continue;
+                    }
+                    let total_len = total_len.checked_add(len).ok_or_else(|| {
+                        RedisError::Protocol("streamed blob length overflow".to_string())
+                    })?;
+                    if total_len > limits.max_bulk_string_len {
+                        return Err(RedisError::Protocol(format!(
+                            "streamed blob length {total_len} exceeds maximum {}",
+                            limits.max_bulk_string_len
+                        )));
+                    }
+                    let end_data = self.cursor.saturating_add(len);
+                    self.pending = RespScanPending::StreamedBlobChunkPayload {
+                        total_len,
+                        end_data,
+                        end_crlf: end_data.saturating_add(2),
+                    };
+                }
+                RespScanPending::StreamedBlobChunkPayload {
+                    total_len,
+                    end_data,
+                    end_crlf,
+                } => {
+                    #[cfg(test)]
+                    {
+                        self.work_units = self.work_units.saturating_add(1);
+                    }
+                    if buf.len() < end_crlf {
+                        return Ok(None);
+                    }
+                    if buf.get(end_data) != Some(&b'\r') || buf.get(end_data + 1) != Some(&b'\n') {
+                        return Err(RedisError::Protocol(
+                            "streamed blob chunk missing trailing CRLF".to_string(),
+                        ));
+                    }
+                    self.cursor = end_crlf;
+                    self.pending = RespScanPending::StreamedBlobChunkLine {
+                        total_len,
+                        start: self.cursor,
+                        search_from: self.cursor + 1,
+                    };
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn work_units(&self) -> usize {
+        self.work_units
+    }
+}
+
 #[derive(Debug)]
 struct RespReadBuffer {
     buf: Vec<u8>,
     pos: usize,
+    frame_scanner: RespFrameScanner,
 }
 
 impl RespReadBuffer {
@@ -1656,6 +2139,7 @@ impl RespReadBuffer {
         Self {
             buf: Vec::new(),
             pos: 0,
+            frame_scanner: RespFrameScanner::new(),
         }
     }
 
@@ -1671,8 +2155,17 @@ impl RespReadBuffer {
         self.buf.extend_from_slice(bytes);
     }
 
+    fn response_frame_len(
+        &mut self,
+        limits: &RedisProtocolLimits,
+    ) -> Result<Option<usize>, RedisError> {
+        let available = &self.buf[self.pos..];
+        self.frame_scanner.scan(available, limits)
+    }
+
     fn consume(&mut self, n: usize) {
         self.pos = self.pos.saturating_add(n);
+        self.frame_scanner.reset();
         if self.pos > 0 && (self.pos > 4096 && self.pos > (self.buf.len() / 2)) {
             self.buf.drain(..self.pos);
             self.pos = 0;
@@ -2210,10 +2703,29 @@ impl RedisConnection {
         loop {
             cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
 
-            if let Some((value, consumed)) = RespValue::try_decode_response_with_limits(
-                self.read_buf.available(),
-                &self.config.protocol_limits,
-            )? {
+            let protocol_limits = self.config.protocol_limits;
+            let frame_limit = protocol_limits.max_frame_size;
+            if let Some(frame_len) = self.read_buf.response_frame_len(&protocol_limits)? {
+                if frame_len > frame_limit {
+                    return Err(RedisError::Protocol(format!(
+                        "RESP frame exceeds limit ({frame_limit} bytes)"
+                    )));
+                }
+                let Some((value, consumed)) = RespValue::try_decode_response_with_limits(
+                    self.read_buf.available(),
+                    &protocol_limits,
+                )?
+                else {
+                    return Err(RedisError::Protocol(
+                        "incremental RESP scanner completed before authoritative decoder"
+                            .to_string(),
+                    ));
+                };
+                if consumed != frame_len {
+                    return Err(RedisError::Protocol(format!(
+                        "incremental RESP scanner boundary {frame_len} disagrees with decoded boundary {consumed}"
+                    )));
+                }
                 self.read_buf.consume(consumed);
                 match value {
                     RespValue::Attribute(_) => {
@@ -2245,7 +2757,6 @@ impl RedisConnection {
                 }
             }
 
-            let frame_limit = self.config.protocol_limits.max_frame_size;
             if self.read_buf.len() > frame_limit {
                 return Err(RedisError::Protocol(format!(
                     "RESP frame exceeds limit ({frame_limit} bytes)"
@@ -8091,6 +8602,14 @@ mod tests {
         pipelined.extend_from_slice(b"+NEXT\r\n");
 
         let limits = RedisProtocolLimits::default();
+        let mut read_buf = RespReadBuffer::new();
+        read_buf.extend(&pipelined);
+        let frame_len = read_buf
+            .response_frame_len(&limits)
+            .expect("nested RESP3 attributes must scan")
+            .expect("the first pipelined reply boundary is complete");
+        assert_eq!(frame_len, first_reply.len());
+
         let (decoded, consumed) = RespValue::try_decode_response_with_limits(&pipelined, &limits)
             .expect("nested RESP3 attributes must parse")
             .expect("the first pipelined reply is complete");
@@ -8107,12 +8626,55 @@ mod tests {
         );
         assert_eq!(consumed, first_reply.len());
 
+        read_buf.consume(consumed);
+        let next_frame_len = read_buf
+            .response_frame_len(&limits)
+            .expect("the following reply must scan")
+            .expect("the following reply boundary is complete");
+        assert_eq!(next_frame_len, b"+NEXT\r\n".len());
         let (next, next_consumed) =
-            RespValue::try_decode_response_with_limits(&pipelined[consumed..], &limits)
+            RespValue::try_decode_response_with_limits(read_buf.available(), &limits)
                 .expect("the following reply must remain aligned")
                 .expect("the following reply is complete");
         assert_eq!(next, RespValue::SimpleString("NEXT".to_string()));
         assert_eq!(next_consumed, b"+NEXT\r\n".len());
+    }
+
+    #[test]
+    fn fragmented_large_resp_frame_scans_in_linear_work() {
+        const ELEMENTS: usize = 4096;
+        let mut wire = format!("*{ELEMENTS}\r\n").into_bytes();
+        for value in 0..ELEMENTS {
+            wire.extend_from_slice(format!(":{value}\r\n").as_bytes());
+        }
+
+        let limits = RedisProtocolLimits::default().max_frame_size(wire.len() + 1);
+        let mut read_buf = RespReadBuffer::new();
+        let mut frame_len = None;
+        for (index, chunk) in wire.chunks(17).enumerate() {
+            read_buf.extend(chunk);
+            frame_len = read_buf
+                .response_frame_len(&limits)
+                .expect("fragmented frame scan must remain valid");
+            if index + 1 != wire.len().div_ceil(17) {
+                assert!(frame_len.is_none(), "frame completed before final fragment");
+            }
+        }
+
+        assert_eq!(frame_len, Some(wire.len()));
+        assert!(
+            read_buf.frame_scanner.work_units() <= wire.len().saturating_mul(2),
+            "incremental scan work must stay linear: work={} bytes={}",
+            read_buf.frame_scanner.work_units(),
+            wire.len()
+        );
+
+        let (decoded, consumed) =
+            RespValue::try_decode_response_with_limits(read_buf.available(), &limits)
+                .expect("complete large frame must decode")
+                .expect("complete large frame must be present");
+        assert_eq!(consumed, wire.len());
+        assert!(matches!(decoded, RespValue::Array(Some(values)) if values.len() == ELEMENTS));
     }
 
     #[test]
