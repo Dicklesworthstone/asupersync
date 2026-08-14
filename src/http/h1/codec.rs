@@ -292,7 +292,25 @@ fn is_valid_request_target_byte(b: u8) -> bool {
     (0x21..=0x7E).contains(&b)
 }
 
-fn parse_request_line_ref(line: &[u8]) -> Result<(Method, &str, Version), HttpError> {
+fn parse_method_ref(src: &[u8]) -> Option<BorrowedMethod<'_>> {
+    match src {
+        b"GET" => Some(BorrowedMethod::Get),
+        b"HEAD" => Some(BorrowedMethod::Head),
+        b"POST" => Some(BorrowedMethod::Post),
+        b"PUT" => Some(BorrowedMethod::Put),
+        b"DELETE" => Some(BorrowedMethod::Delete),
+        b"CONNECT" => Some(BorrowedMethod::Connect),
+        b"OPTIONS" => Some(BorrowedMethod::Options),
+        b"TRACE" => Some(BorrowedMethod::Trace),
+        b"PATCH" => Some(BorrowedMethod::Patch),
+        other => std::str::from_utf8(other)
+            .ok()
+            .filter(|_| is_valid_header_name_bytes(other))
+            .map(BorrowedMethod::Extension),
+    }
+}
+
+fn parse_request_line_ref(line: &[u8]) -> Result<(BorrowedMethod<'_>, &str, Version), HttpError> {
     // Reject bare CR embedded in the request line — only the terminating
     // CRLF may contain \r, and that has already been stripped. A bare \r
     // in the middle is a framing error / smuggling vector.
@@ -313,8 +331,7 @@ fn parse_request_line_ref(line: &[u8]) -> Result<(Method, &str, Version), HttpEr
                     if !version_bytes.is_empty()
                         && !version_bytes.iter().any(u8::is_ascii_whitespace)
                     {
-                        let method =
-                            Method::from_bytes(method_bytes).ok_or(HttpError::BadMethod)?;
+                        let method = parse_method_ref(method_bytes).ok_or(HttpError::BadMethod)?;
                         if !uri_bytes.iter().copied().all(is_valid_request_target_byte) {
                             return Err(HttpError::BadRequestLine);
                         }
@@ -323,7 +340,7 @@ fn parse_request_line_ref(line: &[u8]) -> Result<(Method, &str, Version), HttpEr
                         let uri = std::str::from_utf8(uri_bytes)
                             .map_err(|_| HttpError::BadRequestLine)?;
 
-                        validate_request_target(&method, uri)?;
+                        validate_request_target_ref(method, uri)?;
 
                         return Ok((method, uri, version));
                     }
@@ -335,7 +352,9 @@ fn parse_request_line_ref(line: &[u8]) -> Result<(Method, &str, Version), HttpEr
     parse_request_line_ref_slow(line)
 }
 
-fn parse_request_line_ref_slow(line: &[u8]) -> Result<(Method, &str, Version), HttpError> {
+fn parse_request_line_ref_slow(
+    line: &[u8],
+) -> Result<(BorrowedMethod<'_>, &str, Version), HttpError> {
     fn next_token_bounds(bytes: &[u8], cursor: &mut usize) -> Option<(usize, usize)> {
         let start = *cursor;
         while *cursor < bytes.len() && bytes[*cursor] != b' ' {
@@ -366,7 +385,7 @@ fn parse_request_line_ref_slow(line: &[u8]) -> Result<(Method, &str, Version), H
     }
 
     let method =
-        Method::from_bytes(&line[method_bounds.0..method_bounds.1]).ok_or(HttpError::BadMethod)?;
+        parse_method_ref(&line[method_bounds.0..method_bounds.1]).ok_or(HttpError::BadMethod)?;
     let uri_bytes = &line[uri_bounds.0..uri_bounds.1];
     if !uri_bytes.iter().copied().all(is_valid_request_target_byte) {
         return Err(HttpError::BadRequestLine);
@@ -375,31 +394,35 @@ fn parse_request_line_ref_slow(line: &[u8]) -> Result<(Method, &str, Version), H
         .ok_or(HttpError::UnsupportedVersion)?;
     let uri = std::str::from_utf8(uri_bytes).map_err(|_| HttpError::BadRequestLine)?;
 
-    validate_request_target(&method, uri)?;
+    validate_request_target_ref(method, uri)?;
 
     Ok((method, uri, version))
 }
 
 fn parse_request_line_bytes(line: &[u8]) -> Result<(Method, String, Version), HttpError> {
     let (method, uri, version) = parse_request_line_ref(line)?;
-    Ok((method, uri.to_owned(), version))
+    Ok((method.into_owned(), uri.to_owned(), version))
 }
 
-fn validate_request_target(method: &Method, uri: &str) -> Result<(), HttpError> {
+fn validate_request_target_ref(method: BorrowedMethod<'_>, uri: &str) -> Result<(), HttpError> {
+    validate_request_target_name(method.as_str(), uri)
+}
+
+fn validate_request_target_name(method: &str, uri: &str) -> Result<(), HttpError> {
     if uri.is_empty() {
         return Err(HttpError::BadRequestLine);
     }
 
     // asterisk-form (RFC 9112 §3.2.4)
     if uri == "*" {
-        if *method != Method::Options {
+        if method != "OPTIONS" {
             return Err(HttpError::BadRequestLine);
         }
         return Ok(());
     }
 
     // authority-form (RFC 9112 §3.2.3)
-    if *method == Method::Connect {
+    if method == "CONNECT" {
         return validate_connect_authority(uri);
     }
 
@@ -659,15 +682,6 @@ pub fn fuzz_parse_request_line_bytes(line: &[u8]) -> Result<(Method, String, Ver
     parse_request_line_bytes(line)
 }
 
-/// Look up a header value (case-insensitive name match).
-#[cfg(test)]
-fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    headers
-        .iter()
-        .find(|(n, _)| n.eq_ignore_ascii_case(name))
-        .map(|(_, v)| v.as_str())
-}
-
 /// Look up a header value, rejecting duplicates for security-sensitive headers.
 pub(super) fn unique_header_value<'a>(
     headers: &'a [(String, String)],
@@ -842,6 +856,70 @@ fn is_content_length_name(name: &str) -> bool {
     name.as_bytes().eq_ignore_ascii_case(HEADER_CONTENT_LENGTH)
 }
 
+/// HTTP request method borrowed from the request line.
+///
+/// Standard methods carry no payload. Extension methods borrow their token,
+/// avoiding the `String` allocation required by [`Method::Extension`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BorrowedMethod<'a> {
+    /// GET
+    Get,
+    /// HEAD
+    Head,
+    /// POST
+    Post,
+    /// PUT
+    Put,
+    /// DELETE
+    Delete,
+    /// CONNECT
+    Connect,
+    /// OPTIONS
+    Options,
+    /// TRACE
+    Trace,
+    /// PATCH
+    Patch,
+    /// Extension method not covered by the standard set.
+    Extension(&'a str),
+}
+
+impl<'a> BorrowedMethod<'a> {
+    /// Return the method token.
+    #[must_use]
+    pub const fn as_str(self) -> &'a str {
+        match self {
+            Self::Get => "GET",
+            Self::Head => "HEAD",
+            Self::Post => "POST",
+            Self::Put => "PUT",
+            Self::Delete => "DELETE",
+            Self::Connect => "CONNECT",
+            Self::Options => "OPTIONS",
+            Self::Trace => "TRACE",
+            Self::Patch => "PATCH",
+            Self::Extension(method) => method,
+        }
+    }
+
+    /// Materialize the legacy owned method representation.
+    #[must_use]
+    pub fn into_owned(self) -> Method {
+        match self {
+            Self::Get => Method::Get,
+            Self::Head => Method::Head,
+            Self::Post => Method::Post,
+            Self::Put => Method::Put,
+            Self::Delete => Method::Delete,
+            Self::Connect => Method::Connect,
+            Self::Options => Method::Options,
+            Self::Trace => Method::Trace,
+            Self::Patch => Method::Patch,
+            Self::Extension(method) => Method::Extension(method.to_owned()),
+        }
+    }
+}
+
 /// One validated HTTP/1 header borrowed directly from the caller's input.
 ///
 /// This is the allocation-free counterpart to the legacy owned
@@ -917,7 +995,7 @@ impl ExactSizeIterator for BorrowedHeaders<'_> {}
 #[derive(Debug, Clone, Copy)]
 pub struct BorrowedRequestHead<'a> {
     /// HTTP method.
-    pub method: Method,
+    pub method: BorrowedMethod<'a>,
     /// Request target borrowed from the request line.
     pub uri: &'a str,
     /// HTTP version.
@@ -956,7 +1034,9 @@ impl<'a> BorrowedRequestHead<'a> {
     pub fn body_kind(&self) -> StreamingBodyKind {
         match self.body_kind {
             BodyKind::ContentLength(0) => StreamingBodyKind::Empty,
-            BodyKind::ContentLength(len) => StreamingBodyKind::ContentLength(len as u64),
+            BodyKind::ContentLength(len) => {
+                StreamingBodyKind::ContentLength(u64::try_from(len).unwrap_or(u64::MAX))
+            }
             BodyKind::Chunked => StreamingBodyKind::Chunked,
         }
     }
@@ -968,7 +1048,7 @@ impl<'a> BorrowedRequestHead<'a> {
                 .map(|header| (header.name.to_owned(), header.value_to_owned())),
         );
         (
-            self.method,
+            self.method.into_owned(),
             self.uri.to_owned(),
             self.version,
             headers,
@@ -1195,10 +1275,10 @@ pub(super) fn parse_chunk_size_line(line: &[u8]) -> Result<usize, HttpError> {
 
 /// Validate a request line and header block without allocating or consuming
 /// the caller's input. Returns `None` until the final empty line arrives.
-fn inspect_request_head_parts<'a>(
-    src: &'a [u8],
+fn inspect_request_head_parts(
+    src: &[u8],
     max_headers_size: usize,
-) -> Result<Option<BorrowedRequestHead<'a>>, HttpError> {
+) -> Result<Option<BorrowedRequestHead<'_>>, HttpError> {
     // Reject bare CRs in the buffered head: HTTP/1.x line terminators MUST be
     // CRLF (RFC 9112 §2.2). A `\r` followed by anything other than `\n` is a
     // framing violation (request-smuggling vector), so fail fast instead of
@@ -2077,7 +2157,7 @@ mod tests {
             .unwrap()
             .expect("complete request head");
 
-        assert_eq!(head.method, Method::Post);
+        assert_eq!(head.method, BorrowedMethod::Post);
         assert_eq!(head.uri, "/upload?q=1");
         assert_eq!(head.version, Version::Http11);
         assert_eq!(head.header_count(), 3);
@@ -2100,7 +2180,7 @@ mod tests {
             .collect();
         let mut owned_codec = Http1Codec::new();
         let owned = decode_one(&mut owned_codec, raw).unwrap().unwrap();
-        assert_eq!(owned.method, head.method);
+        assert_eq!(owned.method, head.method.into_owned());
         assert_eq!(owned.uri, head.uri);
         assert_eq!(owned.version, head.version);
         assert_eq!(owned.headers, expected_headers);
@@ -2143,6 +2223,24 @@ mod tests {
             limited.inspect_request_head(raw),
             Err(HttpError::HeadersTooLarge)
         ));
+    }
+
+    #[test]
+    fn borrowed_extension_method_stays_in_the_input_buffer() {
+        let raw = b"PURGE /cache HTTP/1.1\r\n\r\n";
+        let head = Http1Codec::new()
+            .inspect_request_head(raw)
+            .unwrap()
+            .expect("complete request head");
+        let BorrowedMethod::Extension(method) = head.method else {
+            panic!("expected borrowed extension method, got {:?}", head.method);
+        };
+        assert_eq!(method, "PURGE");
+        assert!(raw.as_ptr_range().contains(&method.as_ptr()));
+
+        let mut owned_codec = Http1Codec::new();
+        let owned = decode_one(&mut owned_codec, raw).unwrap().unwrap();
+        assert_eq!(owned.method, Method::Extension("PURGE".to_owned()));
     }
 
     #[test]
