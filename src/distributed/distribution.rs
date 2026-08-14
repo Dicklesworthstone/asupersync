@@ -236,7 +236,21 @@ impl SymbolDistributor {
             .map_or_else(crate::time::wall_now, |d| d.now());
         let duration = Duration::from_nanos(end.duration_since(start));
 
-        self.evaluate_outcomes_with_sent(encoded, replicas, outcomes, symbols_sent_total, duration)
+        // Authorization and empty-assignment filtering happen before transport
+        // attempts. Quorum must therefore be computed over the replicas that
+        // were actually eligible and contacted, not the original untrusted
+        // input slice. Otherwise filtered replicas make a reachable quorum look
+        // impossible. Keep zero eligible non-Local distributions fail-closed:
+        // `All` over an empty eligible set must not report successful delivery.
+        let attempted_replica_count = outcomes.len();
+        let required =
+            if attempted_replica_count == 0 && self.config.consistency != ConsistencyLevel::Local {
+                1
+            } else {
+                Self::required_acks(self.config.consistency, attempted_replica_count)
+            };
+
+        self.evaluate_outcomes_with_sent(encoded, required, outcomes, symbols_sent_total, duration)
     }
 
     /// Computes the required acknowledgement count for the given consistency
@@ -312,19 +326,18 @@ impl SymbolDistributor {
             .into_iter()
             .map(|assignment| assignment.symbol_indices.len() as u64)
             .sum();
-        self.evaluate_outcomes_with_sent(encoded, replicas, outcomes, symbols_sent_total, duration)
+        let required = Self::required_acks(self.config.consistency, replicas.len());
+        self.evaluate_outcomes_with_sent(encoded, required, outcomes, symbols_sent_total, duration)
     }
 
     fn evaluate_outcomes_with_sent(
         &mut self,
         encoded: &EncodedState,
-        replicas: &[ReplicaInfo],
+        required: usize,
         outcomes: Vec<Outcome<ReplicaAck, ReplicaFailure>>,
         symbols_sent_total: u64,
         duration: Duration,
     ) -> DistributionResult {
-        let required = Self::required_acks(self.config.consistency, replicas.len());
-
         let quorum_result: QuorumResult<ReplicaAck, ReplicaFailure> =
             quorum_outcomes(required, outcomes);
 
@@ -654,7 +667,7 @@ mod tests {
 
         distributor.evaluate_outcomes_with_sent(
             &encoded,
-            &replicas,
+            SymbolDistributor::required_acks(distributor.config.consistency, replicas.len()),
             outcomes,
             symbols_sent_total,
             Duration::from_millis(50),
@@ -703,6 +716,61 @@ mod tests {
             result.symbols_distributed,
             u32::try_from(expected_symbols_sent).unwrap_or(u32::MAX)
         );
+    }
+
+    #[test]
+    fn asupersync_8mp6md_distribution_quorum_uses_eligible_attempts() {
+        let config = DistributionConfig {
+            consistency: ConsistencyLevel::Quorum,
+            ..Default::default()
+        };
+        let mut distributor = SymbolDistributor::new(config);
+        let replicas = create_test_replicas(5);
+        let encoded = create_test_encoded_state();
+        let security = SecurityContext::new(AuthKey::from_seed(0x8A11_0C));
+        for replica in &replicas[..2] {
+            security
+                .authorize_replica(&replica.id, None)
+                .expect("eligible replica must authorize");
+        }
+
+        let cx = Cx::for_testing();
+        let result = futures_lite::future::block_on(distributor.distribute(
+            &cx,
+            &encoded,
+            &replicas,
+            &MockSuccessTransport,
+            &security,
+        ));
+
+        assert!(result.quorum_achieved);
+        assert_eq!(result.acks.len(), 2);
+        assert!(result.failures.is_empty());
+    }
+
+    #[test]
+    fn asupersync_8mp6md_distribution_zero_eligible_fails_closed() {
+        let config = DistributionConfig {
+            consistency: ConsistencyLevel::All,
+            ..Default::default()
+        };
+        let mut distributor = SymbolDistributor::new(config);
+        let replicas = create_test_replicas(3);
+        let encoded = create_test_encoded_state();
+        let security = SecurityContext::new(AuthKey::from_seed(0x8A11_0C));
+
+        let cx = Cx::for_testing();
+        let result = futures_lite::future::block_on(distributor.distribute(
+            &cx,
+            &encoded,
+            &replicas,
+            &MockSuccessTransport,
+            &security,
+        ));
+
+        assert!(!result.quorum_achieved);
+        assert!(result.acks.is_empty());
+        assert_eq!(result.symbols_distributed, 0);
     }
 
     /// br-asupersync-307rnt: distribute() reads its start/end
