@@ -79,9 +79,9 @@
       "authority_revision_state": "PRESENT_MATCHES_BASELINE",
       "inventory_state": "K0_3_LOCAL_STATIC_AND_CALL_SITE_CENSUS_FROZEN_EXTERNAL_UNKNOWN",
       "files": [
-        {"role":"ARTIFACT","path":"artifacts/kafka_downstream_user_journey_inventory_v1.json","byte_count":1171766,"record_count":17987,"sha256":"c5fc4c9afb12a158bbf57d2c33b9d929bd3c93760beabea68476e88df6f267cc"},
+        {"role":"ARTIFACT","path":"artifacts/kafka_downstream_user_journey_inventory_v1.json","byte_count":1171766,"record_count":17987,"sha256":"5dc3f07c53b71226368c79c03e68efea71ebd035a95d6e1507212aea09bab282"},
         {"role":"DOCUMENT","path":"docs/kafka_downstream_user_journey_inventory.md","byte_count":40662,"record_count":612,"sha256":"3c2f0b4fa956bc45fc5b9738f5f2349024dafb577509195e998fa72ec0d9dbb1"},
-        {"role":"CONTRACT","path":"tests/kafka_downstream_user_journey_inventory_contract.rs","byte_count":216695,"record_count":5381,"sha256":"fb22cb1165ba9f11b56c4cf99ab6a4d53208876ea0a35fb977eaab53e39e1bcf"}
+        {"role":"CONTRACT","path":"tests/kafka_downstream_user_journey_inventory_contract.rs","byte_count":216695,"record_count":5381,"sha256":"9e91835ee76b4c3d7c820d06bb4261a126333a39aba947f4bc95cdaa85c37cfd"}
       ]
     },
     {
@@ -94,9 +94,9 @@
       "authority_revision_state": "ABSENT_BY_CHILD_SCHEMA",
       "inventory_state": "K0_4_STATIC_FIXTURE_AND_PROVENANCE_MATRIX_FROZEN_RUNTIME_UNKNOWN",
       "files": [
-        {"role":"ARTIFACT","path":"artifacts/kafka_broker_fixture_provenance_matrix_v1.json","byte_count":119250,"record_count":2187,"sha256":"0c8ef68197c89516679bf6b00fc544aea87b3e19866eb57d209be5166100abf8"},
+        {"role":"ARTIFACT","path":"artifacts/kafka_broker_fixture_provenance_matrix_v1.json","byte_count":119250,"record_count":2187,"sha256":"8ade0122943a976b526291de6f3ee26bed976dff06d7efd538a00d67f1be8e3d"},
         {"role":"DOCUMENT","path":"docs/kafka_broker_fixture_provenance_matrix.md","byte_count":25259,"record_count":346,"sha256":"bdb34a083b16a79a1b123258614cfc7ce3f4322ae5335924ad2e8d06c570baa3"},
-        {"role":"CONTRACT","path":"tests/kafka_broker_fixture_provenance_matrix_contract.rs","byte_count":129665,"record_count":3462,"sha256":"8fd9b279d0f71a1dbf89e013b703a7adf86347ed2f549f84f00b87da4bcf5b26"}
+        {"role":"CONTRACT","path":"tests/kafka_broker_fixture_provenance_matrix_contract.rs","byte_count":129665,"record_count":3462,"sha256":"ae23437570a4bee042a10fac7a8b2284e10fc28180fd46e976da9d46243068f2"}
       ]
     }
   ],
@@ -116,7 +116,7 @@
     "source_pin_rollup": {
       "row_count": 266,
       "stage_counts": {"K0.1":13,"K0.2":8,"K0.3":225,"K0.4":20},
-      "canonical_json_sha256": "14c838ab2273ebd6ff2a376c94f04aebbe90ac989f57f93b925c1e9e1d250922",
+      "canonical_json_sha256": "ff9572776f7f63b88c083086af33d340afab121dfe0396f59c973d4c22f12006",
       "unique_path_count": 247,
       "unique_path_set_sha256": "d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3",
       "overlap_group_count": 15,
