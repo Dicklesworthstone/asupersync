@@ -115,7 +115,7 @@ fn validate_receipt(receipt: &Value, grammar: &Value, inventory: &Value) -> Resu
         ("parser", "9056ef793"),
         (
             "terminal_repairs",
-            "69e796eeb727f9772bdadfe6869d9c3d14a10db3",
+            "432be7270481c5439db00f79910465a269512266",
         ),
     ];
     for (key, expected) in expected_revisions {
