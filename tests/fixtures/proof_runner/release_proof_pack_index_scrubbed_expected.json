@@ -54,9 +54,9 @@
         "mode": "proof-console-report"
       },
       "summary": {
-        "claim_count": 35,
-        "lane_count": 60,
-        "green_claim_count": 13,
+        "claim_count": 36,
+        "lane_count": 61,
+        "green_claim_count": 14,
         "yellow_claim_count": 22,
         "red_claim_count": 0,
         "stale_blocker_count": 0,
@@ -445,6 +445,14 @@
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_native_feature_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --no-default-features --features tls,sqlite,postgres,mysql,quic,http3,compression,tracing-integration"
     },
     {
+      "lane_id": "native-parked-task-cancellation",
+      "expected_signal": "all unfiltered runtime_abort_vs_cancel_semantics_audit tests and every proof-runner named escaped-defect sentinel run and pass with nonzero behavioral test evidence",
+      "guarantee_ids": [
+        "native-parked-task-cancellation"
+      ],
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_native_parked_task_cancellation CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --locked --test runtime_abort_vs_cancel_semantics_audit -- --nocapture"
+    },
+    {
       "lane_id": "proof-lane-manifest-contract",
       "expected_signal": "proof_lane_manifest_contract tests pass",
       "guarantee_ids": [
@@ -551,9 +559,9 @@
   ],
   "summaries": {
     "proof_console": {
-      "claim_count": 35,
-      "lane_count": 60,
-      "green_claim_count": 13,
+      "claim_count": 36,
+      "lane_count": 61,
+      "green_claim_count": 14,
       "yellow_claim_count": 22,
       "red_claim_count": 0,
       "stale_blocker_count": 0,
@@ -601,8 +609,8 @@
   "summary": {
     "source_artifact_count": 6,
     "missing_source_artifact_count": 0,
-    "proof_lane_count": 60,
-    "proof_command_count": 60,
+    "proof_lane_count": 61,
+    "proof_command_count": 61,
     "rch_outcome_count": 0,
     "rch_log_count": 0,
     "rch_outcome_provenance_failure_count": 0

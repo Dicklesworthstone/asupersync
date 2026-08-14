@@ -198,6 +198,21 @@
       "current_rch_behavior": "mapped_not_rerun_in_vf1"
     },
     {
+      "lane_id": "native-parked-task-cancellation",
+      "source": "proof_lane_manifest_v1",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_native_parked_task_cancellation CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --locked --test runtime_abort_vs_cancel_semantics_audit -- --nocapture",
+      "intended_guarantee": "Native parked-task cancellation preserves typed domain results and waiter cleanup through public task abort.",
+      "package_or_surface": "asupersync",
+      "target_kind": "test_frontier",
+      "features": [],
+      "cfg_test_enabled": "yes",
+      "dev_dependency_edges": "dev_graph_expected",
+      "conformance_expected": "not_expected",
+      "normal_edge_tokio_expectation": "unknown_needs_vf2",
+      "resource_envelope_class": "test-frontier-heavy",
+      "current_rch_behavior": "mapped_not_rerun_in_vf1"
+    },
+    {
       "lane_id": "channel-mpsc-select-e2e-public-run",
       "source": "proof_lane_manifest_v1",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_channel_mpsc_select_public_run CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run -p asupersync --bin channel_mpsc_select_e2e --features channel-mpsc-select-e2e",

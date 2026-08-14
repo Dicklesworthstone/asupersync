@@ -1164,10 +1164,11 @@ fn ci_executes_native_cancellation_regression_before_broader_proofs() {
     );
 }
 
-fn native_cancellation_sentinels() -> [&'static str; 31] {
+fn native_cancellation_sentinels() -> [&'static str; 32] {
     [
         "run_test_preserves_typed_cancellation_from_a_parked_spawn",
         "abort_repolls_a_mutex_parked_operation_to_graceful_cancellation",
+        "abort_repolls_an_explicit_cx_websocket_close_write_to_typed_cancellation",
         "abort_repolls_a_capacity_parked_send_to_graceful_cancellation",
         "abort_repolls_a_semaphore_parked_acquire_to_graceful_cancellation",
         "local_spawn_abort_preserves_mutex_cancellation_and_waiter_cleanup",

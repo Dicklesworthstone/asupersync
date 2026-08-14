@@ -8,6 +8,7 @@
     "native-feature-smoke",
     "fuzz-manifest-smoke",
     "lib-tests",
+    "native-parked-task-cancellation",
     "db-feature-lib-tests",
     "channel-mpsc-select-e2e-public-run",
     "all-targets-check",
