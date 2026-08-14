@@ -5,17 +5,17 @@
   "entries": [
     {
       "path": "docs/wasm_browser_sbom_v1.json",
-      "sha256": "f0698a869aa8119b6be028948a3424e0fd8f0675eed9b630bca7189c7825db1b",
+      "sha256": "12fd0364a8137c0ceb3f9ee849e2acbee55931916f4ad21c903aac514b245351",
       "kind": "sbom"
     },
     {
       "path": "docs/wasm_browser_provenance_attestation_v1.json",
-      "sha256": "6fa17f5ca198427b58e0794d64a9b5c1fbf9280a0ff8211b0b40874e5e35c63f",
+      "sha256": "2eb0828a527d2fce3bd1e4d142c4b378cc0fa53f19828af58f0d8f85b5cbd9a1",
       "kind": "provenance"
     },
     {
       "path": "packages/browser-core/package.json",
-      "sha256": "e00edb9be25145ccbd979a79062b2d148d3888f5c64270c310ff4810ff2eeb0a",
+      "sha256": "eb4725d9879d1165e80d1ac86fabeca0f4d48e099a2f55e911967751a8b525cd",
       "kind": "manifest"
     },
     {
@@ -65,17 +65,17 @@
     },
     {
       "path": "packages/browser/package.json",
-      "sha256": "7dad0283df05d6d66bfee8de0e05de7f6a9b5f29fb61c327f783942e0133013b",
+      "sha256": "aea2a25f52e96572f6503d7c2d746737e88660c403627467f6dd0cfcfc875c5e",
       "kind": "manifest"
     },
     {
       "path": "packages/react/package.json",
-      "sha256": "88121ea143c5bd1e07ced5ccfc06d2c625b71ce2462754d4f3bfa510ef55f377",
+      "sha256": "f965c3127ce948c04040ebe3b427e715b06f6f3f7d409a6c15d2cc27e6120c5b",
       "kind": "manifest"
     },
     {
       "path": "packages/next/package.json",
-      "sha256": "8f02449eb1693344b01f4c6c42404ace252fa5a1fa0cd2dceaf6d96e155fc642",
+      "sha256": "6fbb739456c976d60882156d9710f973a0c9c159f3f475b11a24418d2f22e1f0",
       "kind": "manifest"
     }
   ]
