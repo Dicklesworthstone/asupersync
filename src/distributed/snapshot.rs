@@ -36,12 +36,6 @@ pub struct ContentHash([u8; 32]);
 /// bound before reconstructing `RegionId` or `TaskId` handles.
 const SNAPSHOT_ARENA_ID_MAX_INDEX: u32 = 1_000_000;
 
-/// Maximum arena generation admitted by the v2 snapshot wire format.
-///
-/// See [`SNAPSHOT_ARENA_ID_MAX_INDEX`] for why this is a deterministic
-/// admission contract rather than an arena-liveness proof.
-const SNAPSHOT_ARENA_ID_MAX_GENERATION: u32 = 10_000;
-
 impl ContentHash {
     /// Returns the raw 32-byte hash value.
     #[must_use]
@@ -638,15 +632,12 @@ impl RegionSnapshot {
             .saturating_add(auth_tag)
     }
 
-    /// Computes a deterministic hash for deduplication.
-    ///
-    /// Uses FNV-1a on the serialized bytes.
-    #[must_use]
     /// Computes a cryptographic SHA-256 hash of the snapshot content.
     ///
     /// This prevents collision attacks where malicious snapshots could be
     /// crafted to have the same hash as legitimate snapshots, bypassing
     /// deduplication and allowing injection of forged region state.
+    #[must_use]
     pub fn content_hash(&self) -> ContentHash {
         let bytes = self.to_bytes();
         let mut hasher = Sha256::new();
@@ -1169,8 +1160,14 @@ impl<'a> Cursor<'a> {
 }
 
 #[inline]
-const fn snapshot_arena_id_is_admissible(index: u32, generation: u32) -> bool {
-    index <= SNAPSHOT_ARENA_ID_MAX_INDEX && generation <= SNAPSHOT_ARENA_ID_MAX_GENERATION
+const fn snapshot_arena_id_is_admissible(index: u32, _generation: u32) -> bool {
+    // Generation is a freshness counter, not an allocation size. Legitimate
+    // long-lived arenas can advance through the complete u32 domain, and the
+    // serializer is infallible, so an artificial generation cap made locally
+    // produced snapshots permanently unreadable after enough slot reuse. The
+    // index bound remains the resource-admission guard; later arena lookup still
+    // validates the exact (index, generation) tuple against live state.
+    index <= SNAPSHOT_ARENA_ID_MAX_INDEX
 }
 
 // ---------------------------------------------------------------------------
@@ -1192,13 +1189,10 @@ mod arena_id_validation_tests {
     fn snapshot_arena_id_contract_accepts_boundary_values() {
         assert!(snapshot_arena_id_is_admissible(
             SNAPSHOT_ARENA_ID_MAX_INDEX,
-            SNAPSHOT_ARENA_ID_MAX_GENERATION
+            u32::MAX
         ));
 
-        let bytes = arena_id_bytes(
-            SNAPSHOT_ARENA_ID_MAX_INDEX,
-            SNAPSHOT_ARENA_ID_MAX_GENERATION,
-        );
+        let bytes = arena_id_bytes(SNAPSHOT_ARENA_ID_MAX_INDEX, u32::MAX);
         let region_id = Cursor::new(&bytes)
             .read_region_id()
             .expect("boundary RegionId must decode");
@@ -1207,33 +1201,15 @@ mod arena_id_validation_tests {
             .expect("boundary TaskId must decode");
 
         assert_eq!(region_id.arena_index().index(), SNAPSHOT_ARENA_ID_MAX_INDEX);
-        assert_eq!(
-            region_id.arena_index().generation(),
-            SNAPSHOT_ARENA_ID_MAX_GENERATION
-        );
+        assert_eq!(region_id.arena_index().generation(), u32::MAX);
         assert_eq!(task_id.arena_index().index(), SNAPSHOT_ARENA_ID_MAX_INDEX);
-        assert_eq!(
-            task_id.arena_index().generation(),
-            SNAPSHOT_ARENA_ID_MAX_GENERATION
-        );
+        assert_eq!(task_id.arena_index().generation(), u32::MAX);
     }
 
     #[test]
     fn read_region_id_rejects_index_above_wire_contract() {
         let index = SNAPSHOT_ARENA_ID_MAX_INDEX + 1;
         let generation = 0;
-        let bytes = arena_id_bytes(index, generation);
-
-        assert_eq!(
-            Cursor::new(&bytes).read_region_id().unwrap_err(),
-            SnapshotError::InvalidRegionId { index, generation }
-        );
-    }
-
-    #[test]
-    fn read_region_id_rejects_generation_above_wire_contract() {
-        let index = 0;
-        let generation = SNAPSHOT_ARENA_ID_MAX_GENERATION + 1;
         let bytes = arena_id_bytes(index, generation);
 
         assert_eq!(
@@ -1255,15 +1231,24 @@ mod arena_id_validation_tests {
     }
 
     #[test]
-    fn read_task_id_rejects_generation_above_wire_contract() {
-        let index = 0;
-        let generation = SNAPSHOT_ARENA_ID_MAX_GENERATION + 1;
-        let bytes = arena_id_bytes(index, generation);
+    fn asupersync_8mp6md_snapshot_generation_past_legacy_cap_roundtrips() {
+        let region_id = RegionId::new_for_test(7, 10_001);
+        let task_id = TaskId::new_for_test(9, u32::MAX);
+        let child_id = RegionId::new_for_test(11, 50_000);
+        let mut snapshot = RegionSnapshot::empty(region_id);
+        snapshot.tasks.push(TaskSnapshot {
+            task_id,
+            state: TaskState::Running,
+            priority: 3,
+        });
+        snapshot.children.push(child_id);
 
-        assert_eq!(
-            Cursor::new(&bytes).read_task_id().unwrap_err(),
-            SnapshotError::InvalidTaskId { index, generation }
-        );
+        let restored = RegionSnapshot::from_bytes(&snapshot.to_bytes())
+            .expect("the reader must accept every generation emitted by the writer");
+
+        assert_eq!(restored.region_id, region_id);
+        assert_eq!(restored.tasks[0].task_id, task_id);
+        assert_eq!(restored.children, vec![child_id]);
     }
 
     #[test]
