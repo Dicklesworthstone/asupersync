@@ -412,8 +412,8 @@ fn source_accuracy_ledger_and_existing_evidence_gaps_are_explicit() {
         total_stale += stale;
     }
     assert_eq!(total_locators, 47);
-    assert_eq!(total_exact, 27);
-    assert_eq!(total_stale, 20);
+    assert_eq!(total_exact, 47);
+    assert_eq!(total_stale, 0);
 
     let expected_evidence = expected_set(&[
         "URING-EVIDENCE-FILESYSTEM-E2E",

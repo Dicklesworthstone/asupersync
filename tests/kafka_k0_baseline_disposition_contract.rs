@@ -83,7 +83,7 @@ const ROUTE_OWNER_ID_SHA256: &str =
 const REDUCED_UNKNOWN_SELECTOR_SHA256: &str =
     "5c7fb727bc79d4f8be1c979fadda8bcfd261da0953e972a32a89bef27a28b18c";
 const SOURCE_PIN_FULL_ROW_SHA256: &str =
-    "7bf99bf0d6d170876bafd719b1c7b7f8b6bb933f6932c9dfb96adc74020ba6fd";
+    "18a9734b9103ebfde882e4379a7ec8e991ec32664084f44715fd2bc40b8300ca";
 const SOURCE_PIN_PATH_SHA256: &str =
     "d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3";
 const SOURCE_PIN_OVERLAP_SHA256: &str =
@@ -211,8 +211,8 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.3",
         role: "artifact_file",
         path: "artifacts/kafka_downstream_user_journey_inventory_v1.json",
-        sha256: "ef188c23c918b24e4f0fe4f8f2b7dd97026fed4e52a744de4d72a38b0893ef93",
-        byte_count: 1_171_766,
+        sha256: "fffb3a70e2fb3da4505a74d91f5f7a3996094ffb6292f6948404070154e795fa",
+        byte_count: 1_171_768,
         record_count: 17_987,
     },
     ChildFilePin {
@@ -227,7 +227,7 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.3",
         role: "contract_file",
         path: "tests/kafka_downstream_user_journey_inventory_contract.rs",
-        sha256: "a47afaf98aaeec8948d84400a557b21270e27d938bc6970958e0243e5501138e",
+        sha256: "cb91bf75f9dc83b08967c8eeffd4272b365d6d246f2f00979af004a47a285c1f",
         byte_count: 216_695,
         record_count: 5_381,
     },
@@ -235,7 +235,7 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.4",
         role: "artifact_file",
         path: "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
-        sha256: "7dbc5008b3f74a0de83de8e74c82223c6d022f15c642833e2497e8161c4e1125",
+        sha256: "e69a06f898bd4993f071d9e97b04b19d73cf65338aeaa5f268db035a2f62f216",
         byte_count: 119_250,
         record_count: 2_187,
     },
@@ -251,7 +251,7 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.4",
         role: "contract_file",
         path: "tests/kafka_broker_fixture_provenance_matrix_contract.rs",
-        sha256: "b1487bf6a3f4cd3000dd918f69e09d5bf31aff63dc3ec4fee1588cc499935da7",
+        sha256: "12a0469b86ce80771f9d4f0ff47f302f7db78b8cce80ed25b38d63c20dfea3b0",
         byte_count: 129_665,
         record_count: 3_462,
     },
