@@ -110,6 +110,16 @@ fn bench_http1_parsing(c: &mut Criterion) {
             BatchSize::SmallInput,
         )
     });
+    group.bench_function("simple_get_borrowed", |b: &mut criterion::Bencher| {
+        let codec = Http1Codec::new();
+        b.iter(|| {
+            black_box(
+                codec
+                    .inspect_request_head(black_box(SIMPLE_GET_REQUEST))
+                    .expect("borrowed inspection succeeds"),
+            )
+        })
+    });
 
     // POST request with body
     group.throughput(Throughput::Bytes(POST_REQUEST_WITH_BODY.len() as u64));
@@ -126,6 +136,16 @@ fn bench_http1_parsing(c: &mut Criterion) {
             },
             BatchSize::SmallInput,
         )
+    });
+    group.bench_function("post_with_body_borrowed", |b: &mut criterion::Bencher| {
+        let codec = Http1Codec::new();
+        b.iter(|| {
+            black_box(
+                codec
+                    .inspect_request_head(black_box(POST_REQUEST_WITH_BODY))
+                    .expect("borrowed inspection succeeds"),
+            )
+        })
     });
 
     // Requests with varying header counts
@@ -148,6 +168,20 @@ fn bench_http1_parsing(c: &mut Criterion) {
                     },
                     BatchSize::SmallInput,
                 )
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("headers_borrowed", header_count),
+            &request,
+            |b, request| {
+                let codec = Http1Codec::new();
+                b.iter(|| {
+                    black_box(
+                        codec
+                            .inspect_request_head(black_box(request.as_slice()))
+                            .expect("borrowed inspection succeeds"),
+                    )
+                })
             },
         );
     }
@@ -176,6 +210,28 @@ fn bench_http1_parsing(c: &mut Criterion) {
                     },
                     BatchSize::SmallInput,
                 )
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("keepalive_pipeline_borrowed", request_count),
+            &stream,
+            |b, stream| {
+                let codec = Http1Codec::new();
+                b.iter(|| {
+                    let mut remaining = stream.as_slice();
+                    let mut decoded = 0usize;
+                    while !remaining.is_empty() {
+                        let head = codec
+                            .inspect_request_head(remaining)
+                            .expect("borrowed inspection succeeds")
+                            .expect("complete pipelined head");
+                        let consumed = head.consumed_len();
+                        black_box(head);
+                        remaining = &remaining[consumed..];
+                        decoded += 1;
+                    }
+                    black_box(decoded)
+                })
             },
         );
     }

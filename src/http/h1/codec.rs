@@ -722,7 +722,11 @@ fn trim_header_value_bytes(value: &[u8]) -> &[u8] {
 
 fn for_each_header_value_token(value: &[u8], mut visit: impl FnMut(&[u8])) {
     if let Ok(value) = std::str::from_utf8(value) {
-        for token in value.split(',').map(str::trim).filter(|token| !token.is_empty()) {
+        for token in value
+            .split(',')
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+        {
             visit(token.as_bytes());
         }
         return;
@@ -1311,8 +1315,8 @@ fn inspect_request_head_parts<'a>(
             if content_length.is_empty() || !content_length.iter().all(u8::is_ascii_digit) {
                 return Err(HttpError::BadContentLength);
             }
-            let content_length = std::str::from_utf8(content_length)
-                .map_err(|_| HttpError::BadContentLength)?;
+            let content_length =
+                std::str::from_utf8(content_length).map_err(|_| HttpError::BadContentLength)?;
             let len: usize = content_length
                 .parse()
                 .map_err(|_| HttpError::BadContentLength)?;
@@ -2062,6 +2066,83 @@ mod tests {
                 .map(|(_, value)| value),
             Some(b"5".as_slice())
         );
+    }
+
+    #[test]
+    fn borrowed_request_head_is_zero_copy_and_owned_decode_equivalent() {
+        let raw = b"POST /upload?q=1 HTTP/1.1\r\nHost: example.test\r\nX-Obs: \xFFok\r\nContent-Length: 4\r\n\r\ndata";
+        let codec = Http1Codec::new();
+        let head = codec
+            .inspect_request_head(raw)
+            .unwrap()
+            .expect("complete request head");
+
+        assert_eq!(head.method, Method::Post);
+        assert_eq!(head.uri, "/upload?q=1");
+        assert_eq!(head.version, Version::Http11);
+        assert_eq!(head.header_count(), 3);
+        assert_eq!(head.body_kind(), StreamingBodyKind::ContentLength(4));
+        assert_eq!(&raw[head.consumed_len()..], b"data");
+
+        let input = raw.as_ptr_range();
+        assert!(input.contains(&head.uri.as_ptr()));
+        let borrowed_headers: Vec<_> = head.headers().collect();
+        for header in &borrowed_headers {
+            assert!(input.contains(&header.name.as_ptr()));
+            assert!(input.contains(&header.value.as_ptr()));
+        }
+        assert_eq!(borrowed_headers[1].value, b"\xFFok");
+        assert!(borrowed_headers[1].value_str().is_err());
+
+        let expected_headers: Vec<_> = head
+            .headers()
+            .map(|header| (header.name.to_owned(), header.value_to_owned()))
+            .collect();
+        let mut owned_codec = Http1Codec::new();
+        let owned = decode_one(&mut owned_codec, raw).unwrap().unwrap();
+        assert_eq!(owned.method, head.method);
+        assert_eq!(owned.uri, head.uri);
+        assert_eq!(owned.version, head.version);
+        assert_eq!(owned.headers, expected_headers);
+        assert_eq!(owned.body, b"data");
+    }
+
+    #[test]
+    fn borrowed_request_head_preserves_legacy_unicode_and_latin1_trimming() {
+        for content_length in [
+            "\u{2003}5\u{2003}".as_bytes().to_vec(),
+            vec![0xA0, b'5', 0xA0],
+        ] {
+            let mut raw = b"POST / HTTP/1.1\r\nContent-Length: ".to_vec();
+            raw.extend_from_slice(&content_length);
+            raw.extend_from_slice(b"\r\n\r\nhello");
+
+            let codec = Http1Codec::new();
+            let head = codec
+                .inspect_request_head(&raw)
+                .unwrap()
+                .expect("complete request head");
+            assert_eq!(head.body_kind(), StreamingBodyKind::ContentLength(5));
+
+            let mut owned_codec = Http1Codec::new();
+            let owned = decode_one(&mut owned_codec, &raw).unwrap().unwrap();
+            assert_eq!(owned.body, b"hello");
+        }
+    }
+
+    #[test]
+    fn borrowed_request_head_is_non_consuming_and_honors_codec_limit() {
+        let raw = b"GET / HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        let codec = Http1Codec::new();
+        let before = raw.as_slice();
+        assert!(codec.inspect_request_head(before).unwrap().is_some());
+        assert_eq!(before, raw);
+
+        let limited = Http1Codec::new().max_headers_size(raw.len() - 1);
+        assert!(matches!(
+            limited.inspect_request_head(raw),
+            Err(HttpError::HeadersTooLarge)
+        ));
     }
 
     #[test]

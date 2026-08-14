@@ -27,7 +27,7 @@ mod obs_text_test;
 mod request_line_tests;
 
 pub use client::{ClientIncomingBody, ClientStreamingResponse, Http1Client, Http1ClientCodec};
-pub use codec::{Http1Codec, HttpError};
+pub use codec::{BorrowedHeader, BorrowedHeaders, BorrowedRequestHead, Http1Codec, HttpError};
 
 // Export for conformance testing
 #[cfg(test)]

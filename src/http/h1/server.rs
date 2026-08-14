@@ -1579,8 +1579,8 @@ where
         }
     }?;
 
-    let action = classify_expectation_from_parts(preview.version, &preview.headers);
-    if action == ExpectationAction::None || !request_expects_body_headers(&preview.headers) {
+    let action = classify_expectation_from_pairs(preview.version, preview.headers());
+    if action == ExpectationAction::None || !request_expects_body_header_pairs(preview.headers()) {
         return None;
     }
 
@@ -1620,6 +1620,18 @@ fn classify_expectation_from_parts(
     version: Version,
     headers: &[(String, String)],
 ) -> ExpectationAction {
+    classify_expectation_from_pairs(
+        version,
+        headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_bytes())),
+    )
+}
+
+fn classify_expectation_from_pairs<'a>(
+    version: Version,
+    headers: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+) -> ExpectationAction {
     let mut saw_expect = false;
     let mut saw_continue = false;
     let mut saw_unsupported = false;
@@ -1629,17 +1641,13 @@ fn classify_expectation_from_parts(
             continue;
         }
         saw_expect = true;
-        for token in value
-            .split(',')
-            .map(str::trim)
-            .filter(|token| !token.is_empty())
-        {
-            if token.eq_ignore_ascii_case("100-continue") {
+        for_each_wire_header_token(value, |token| {
+            if token.eq_ignore_ascii_case(b"100-continue") {
                 saw_continue = true;
             } else {
                 saw_unsupported = true;
             }
-        }
+        });
     }
 
     if !saw_expect {
@@ -1663,23 +1671,76 @@ fn request_expects_body(req: &Request) -> bool {
 }
 
 fn request_expects_body_headers(headers: &[(String, String)]) -> bool {
+    request_expects_body_header_pairs(
+        headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_bytes())),
+    )
+}
+
+fn request_expects_body_header_pairs<'a>(
+    headers: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+) -> bool {
     for (name, value) in headers {
         if name.eq_ignore_ascii_case("content-length") {
-            if let Ok(len) = value.trim().parse::<usize>() {
-                if len > 0 {
-                    return true;
-                }
+            let value = trim_wire_header_value(value);
+            if !value.is_empty()
+                && value.iter().all(u8::is_ascii_digit)
+                && std::str::from_utf8(value)
+                    .ok()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .is_some_and(|len| len > 0)
+            {
+                return true;
             }
             continue;
         }
         if name.eq_ignore_ascii_case("transfer-encoding") {
-            return value
-                .split(',')
-                .map(str::trim)
-                .any(|token| token.eq_ignore_ascii_case("chunked"));
+            let mut chunked = false;
+            for_each_wire_header_token(value, |token| {
+                chunked |= token.eq_ignore_ascii_case(b"chunked");
+            });
+            return chunked;
         }
     }
     false
+}
+
+fn trim_wire_header_value(value: &[u8]) -> &[u8] {
+    if let Ok(value) = std::str::from_utf8(value) {
+        return value.trim().as_bytes();
+    }
+
+    let mut start = 0usize;
+    while start < value.len() && char::from(value[start]).is_whitespace() {
+        start += 1;
+    }
+    let mut end = value.len();
+    while end > start && char::from(value[end - 1]).is_whitespace() {
+        end -= 1;
+    }
+    &value[start..end]
+}
+
+fn for_each_wire_header_token(value: &[u8], mut visit: impl FnMut(&[u8])) {
+    if let Ok(value) = std::str::from_utf8(value) {
+        for token in value
+            .split(',')
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+        {
+            visit(token.as_bytes());
+        }
+        return;
+    }
+
+    for token in value
+        .split(|&byte| byte == b',')
+        .map(trim_wire_header_value)
+        .filter(|token| !token.is_empty())
+    {
+        visit(token);
+    }
 }
 
 fn expectation_response(version: Version, action: ExpectationAction) -> Option<Response> {
