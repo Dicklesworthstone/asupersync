@@ -155,7 +155,7 @@
       "path": "artifacts/kafka_k1_resource_lifecycle_contract_v1.json",
       "byte_count": 196050,
       "record_count": 1901,
-      "sha256": "8fb48b7a36018630f029831af80618b8c33391ddebdbde50a1b20fa1a9ebf85a"
+      "sha256": "12c67ae010b9b9d84bb0eb66658796319a24cb092d450630d9ea11470653d9a3"
     },
     {
       "input_id": "K1-5-INPUT-K1-4-DOCUMENT",
@@ -173,7 +173,7 @@
       "path": "tests/kafka_k1_resource_lifecycle_contract.rs",
       "byte_count": 75469,
       "record_count": 2082,
-      "sha256": "863b1532515414620cce49161b9e10b0abb9f894f4ca62427f2415c35464d16d"
+      "sha256": "1f9991d0d20f16819ccc5e60a44a3a7e6f5eb08c9f5a1f8072578f23caa37890"
     }
   ],
   "child_packet_receipts": [
@@ -2048,13 +2048,13 @@
       "approval_projection_sha256": {"pointer": "/approval_gates", "rule": "ROW_SET_V1"},
       "no_claim_boundary_sha256": {"pointer": "/no_claim_boundaries", "rule": "STRING_SET_V1"}
     },
-    "authority_input_projection_sha256": "0cc9245506f2f2cd84ca81cc9d14c2100b9aef468aa574d0bd3e26accdb8cc4b",
+    "authority_input_projection_sha256": "0954bfa6d7e436fe7f24b220d8c3748887d72d7394b0b74946960b43fe0484bc",
     "child_receipt_projection_sha256": "64626f739641a6821591cfc0efd08b7556e759d4c3f70f7d8496b682ca880938",
     "lineage_conflict_projection_sha256": "9548fc723b4803575fd901618b66f45931e657c116ef00a287cfd5b75d733acc",
     "obligation_partition_projection_sha256": "960794c3f3e4a66dc614147e083772c38bdec23bc0fa5b8b75f1864659c5ccbe",
     "semantic_resource_lifecycle_join_projection_sha256": "6ceee2a4539f5570a66f3a5346c65bbfa751dcbb4c133e50d7984dcde3d97be3",
     "semantic_binding_adjudication_projection_sha256": "d272517d070a5da6b107cd5739d521a8ed2a1c39abd287acaf36f1f50d741f1b",
-    "capability_evidence_contract_projection_sha256": "6b499554e7a93eb4b1fbc93617ead976e2b0ff52b98e91d3e12f0edd7ab144e0",
+    "capability_evidence_contract_projection_sha256": "b261140ec05ce027b16418fff473d802aad653ec5e2de526b9792c03792275cb",
     "capability_route_projection_sha256": "68ec5cf270f773130e1de1c294f4d314d1b65b81cd0d470fc2a9a4ece8c7f9f3",
     "feature_coexistence_mode_projection_sha256": "d7907da645683a56469b9dc387bd8d4f29738d88f368ab3421be8979f4632dac",
     "feature_profile_projection_sha256": "0fc0221918113296ff7645368113990a0694240623473b01b408ca914af5934d",
