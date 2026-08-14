@@ -494,11 +494,26 @@ impl RespValue {
     /// Decode one RESP value from the provided buffer using the given protocol limits.
     ///
     /// Returns `Ok(None)` if more bytes are required.
-    #[allow(clippy::too_many_lines)]
-    #[allow(clippy::use_self)]
     pub fn try_decode_with_limits(
         buf: &[u8],
         limits: &RedisProtocolLimits,
+    ) -> Result<Option<(Self, usize)>, RedisError> {
+        Self::try_decode_with_limits_and_attribute_policy(buf, limits, false)
+    }
+
+    fn try_decode_response_with_limits(
+        buf: &[u8],
+        limits: &RedisProtocolLimits,
+    ) -> Result<Option<(Self, usize)>, RedisError> {
+        Self::try_decode_with_limits_and_attribute_policy(buf, limits, true)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::use_self)]
+    fn try_decode_with_limits_and_attribute_policy(
+        buf: &[u8],
+        limits: &RedisProtocolLimits,
+        skip_nested_attributes: bool,
     ) -> Result<Option<(Self, usize)>, RedisError> {
         enum Decoded {
             NeedMore,
@@ -603,9 +618,14 @@ impl RespValue {
             mut i: usize,
             depth: usize,
             limits: &RedisProtocolLimits,
+            skip_nested_attributes: bool,
         ) -> Result<Option<usize>, RedisError> {
+            if !skip_nested_attributes {
+                return check_complete(buf, i, depth, limits, false);
+            }
+
             loop {
-                let Some(next) = check_complete(buf, i, depth, limits)? else {
+                let Some(next) = check_complete(buf, i, depth, limits, true)? else {
                     return Ok(None);
                 };
                 if buf.get(i) != Some(&b'|') {
@@ -627,6 +647,7 @@ impl RespValue {
             mut i: usize,
             depth: usize,
             limits: &RedisProtocolLimits,
+            skip_nested_attributes: bool,
         ) -> Result<Option<usize>, RedisError> {
             if depth > limits.max_nesting_depth {
                 return Err(RedisError::Protocol(format!(
@@ -744,7 +765,13 @@ impl RespValue {
                                     limits.max_array_len
                                 )));
                             }
-                            match check_value_complete(buf, i, depth + 1, limits)? {
+                            match check_value_complete(
+                                buf,
+                                i,
+                                depth + 1,
+                                limits,
+                                skip_nested_attributes,
+                            )? {
                                 None => return Ok(None),
                                 Some(next) => {
                                     i = next;
@@ -782,7 +809,13 @@ impl RespValue {
                     };
                     i = end + 2;
                     for _ in 0..children {
-                        match check_value_complete(buf, i, depth + 1, limits)? {
+                        match check_value_complete(
+                            buf,
+                            i,
+                            depth + 1,
+                            limits,
+                            skip_nested_attributes,
+                        )? {
                             None => return Ok(None),
                             Some(next) => i = next,
                         }
@@ -796,7 +829,7 @@ impl RespValue {
         }
 
         // Only proceed with full allocation if the structure is completely buffered.
-        if check_complete(buf, 0, 0, limits)?.is_none() {
+        if check_complete(buf, 0, 0, limits, skip_nested_attributes)?.is_none() {
             return Ok(None);
         }
 
@@ -805,9 +838,14 @@ impl RespValue {
             mut i: usize,
             depth: usize,
             limits: &RedisProtocolLimits,
+            skip_nested_attributes: bool,
         ) -> Result<Decoded, RedisError> {
+            if !skip_nested_attributes {
+                return decode_at(buf, i, depth, limits, false);
+            }
+
             loop {
-                match decode_at(buf, i, depth, limits)? {
+                match decode_at(buf, i, depth, limits, true)? {
                     Decoded::NeedMore => return Ok(Decoded::NeedMore),
                     Decoded::Ok {
                         value: RespValue::Attribute(_),
@@ -824,6 +862,7 @@ impl RespValue {
             i: usize,
             depth: usize,
             limits: &RedisProtocolLimits,
+            skip_nested_attributes: bool,
         ) -> Result<Decoded, RedisError> {
             if depth > limits.max_nesting_depth {
                 return Err(RedisError::Protocol(format!(
@@ -1000,7 +1039,13 @@ impl RespValue {
                                     limits.max_array_len
                                 )));
                             }
-                            match decode_value_at(buf, pos, depth + 1, limits)? {
+                            match decode_value_at(
+                                buf,
+                                pos,
+                                depth + 1,
+                                limits,
+                                skip_nested_attributes,
+                            )? {
                                 Decoded::NeedMore => return Ok(Decoded::NeedMore),
                                 Decoded::Ok { value, next } => {
                                     items.push(value);
@@ -1033,7 +1078,8 @@ impl RespValue {
                     let mut items = Vec::with_capacity(n.min(1024));
                     let mut pos = end + 2;
                     for _ in 0..n {
-                        match decode_value_at(buf, pos, depth + 1, limits)? {
+                        match decode_value_at(buf, pos, depth + 1, limits, skip_nested_attributes)?
+                        {
                             Decoded::NeedMore => return Ok(Decoded::NeedMore),
                             Decoded::Ok { value, next } => {
                                 items.push(value);
@@ -1084,7 +1130,13 @@ impl RespValue {
                                     limits.max_array_len
                                 )));
                             }
-                            let key = match decode_value_at(buf, pos, depth + 1, limits)? {
+                            let key = match decode_value_at(
+                                buf,
+                                pos,
+                                depth + 1,
+                                limits,
+                                skip_nested_attributes,
+                            )? {
                                 Decoded::NeedMore => return Ok(Decoded::NeedMore),
                                 Decoded::Ok { value, next } => {
                                     pos = next;
@@ -1101,7 +1153,13 @@ impl RespValue {
                                 }
                                 Some(false) => {}
                             }
-                            let val = match decode_value_at(buf, pos, depth + 1, limits)? {
+                            let val = match decode_value_at(
+                                buf,
+                                pos,
+                                depth + 1,
+                                limits,
+                                skip_nested_attributes,
+                            )? {
                                 Decoded::NeedMore => return Ok(Decoded::NeedMore),
                                 Decoded::Ok { value, next } => {
                                     pos = next;
@@ -1127,14 +1185,26 @@ impl RespValue {
                     let mut pairs = Vec::with_capacity(n.min(1024));
                     let mut pos = end + 2;
                     for _ in 0..n {
-                        let key = match decode_value_at(buf, pos, depth + 1, limits)? {
+                        let key = match decode_value_at(
+                            buf,
+                            pos,
+                            depth + 1,
+                            limits,
+                            skip_nested_attributes,
+                        )? {
                             Decoded::NeedMore => return Ok(Decoded::NeedMore),
                             Decoded::Ok { value, next } => {
                                 pos = next;
                                 value
                             }
                         };
-                        let val = match decode_value_at(buf, pos, depth + 1, limits)? {
+                        let val = match decode_value_at(
+                            buf,
+                            pos,
+                            depth + 1,
+                            limits,
+                            skip_nested_attributes,
+                        )? {
                             Decoded::NeedMore => return Ok(Decoded::NeedMore),
                             Decoded::Ok { value, next } => {
                                 pos = next;
@@ -1304,7 +1374,7 @@ impl RespValue {
             }
         }
 
-        match decode_at(buf, 0, 0, limits)? {
+        match decode_at(buf, 0, 0, limits, skip_nested_attributes)? {
             Decoded::NeedMore => Ok(None),
             Decoded::Ok { value, next } => Ok(Some((value, next))),
         }
@@ -2140,7 +2210,7 @@ impl RedisConnection {
         loop {
             cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
 
-            if let Some((value, consumed)) = RespValue::try_decode_with_limits(
+            if let Some((value, consumed)) = RespValue::try_decode_response_with_limits(
                 self.read_buf.available(),
                 &self.config.protocol_limits,
             )? {
@@ -8020,7 +8090,8 @@ mod tests {
         let mut pipelined = first_reply.as_bytes().to_vec();
         pipelined.extend_from_slice(b"+NEXT\r\n");
 
-        let (decoded, consumed) = RespValue::try_decode(&pipelined)
+        let limits = RedisProtocolLimits::default();
+        let (decoded, consumed) = RespValue::try_decode_response_with_limits(&pipelined, &limits)
             .expect("nested RESP3 attributes must parse")
             .expect("the first pipelined reply is complete");
 
@@ -8036,9 +8107,10 @@ mod tests {
         );
         assert_eq!(consumed, first_reply.len());
 
-        let (next, next_consumed) = RespValue::try_decode(&pipelined[consumed..])
-            .expect("the following reply must remain aligned")
-            .expect("the following reply is complete");
+        let (next, next_consumed) =
+            RespValue::try_decode_response_with_limits(&pipelined[consumed..], &limits)
+                .expect("the following reply must remain aligned")
+                .expect("the following reply is complete");
         assert_eq!(next, RespValue::SimpleString("NEXT".to_string()));
         assert_eq!(next_consumed, b"+NEXT\r\n".len());
     }
